@@ -7,7 +7,7 @@
 // upstream spec/core.openapi.json). Do not edit them by hand. To refresh:
 //
 //	curl -fsSL https://us.console.entire.io/api/v1/openapi.json \
-//	    -o internal/coreapi/spec/core.openapi.json
+//	    | jq . > internal/coreapi/spec/core.openapi.json
 //	go generate ./internal/coreapi/...
 //
 // The hand-written authenticated constructor and error helpers live in

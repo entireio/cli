@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -109,7 +110,7 @@ func TestGetCheckpointRemote_JSONRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	entireDir := filepath.Join(tmpDir, ".entire")
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755))
+	testutil.InitRepo(t, tmpDir)
 
 	settingsJSON := `{
 		"enabled": true,
@@ -170,4 +171,22 @@ func TestCheckpointRemoteConfig_Owner(t *testing.T) {
 			assert.Equal(t, tt.want, c.Owner())
 		})
 	}
+}
+
+func TestHasCheckpointRemoteKey(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, (&EntireSettings{}).HasCheckpointRemoteKey(), "nil strategy options")
+	assert.False(t, (&EntireSettings{StrategyOptions: map[string]any{}}).HasCheckpointRemoteKey(), "empty strategy options")
+	assert.True(t, (&EntireSettings{StrategyOptions: map[string]any{
+		"checkpoint_remote": map[string]any{"provider": "github", "repo": "org/repo"},
+	}}).HasCheckpointRemoteKey(), "well-formed entry")
+	// The reason this method exists: a malformed entry still counts as
+	// present even though GetCheckpointRemote rejects it.
+	assert.True(t, (&EntireSettings{StrategyOptions: map[string]any{
+		"checkpoint_remote": map[string]any{"provider": "github"},
+	}}).HasCheckpointRemoteKey(), "malformed entry still counts as present")
+	assert.True(t, (&EntireSettings{StrategyOptions: map[string]any{
+		"checkpoint_remote": nil,
+	}}).HasCheckpointRemoteKey(), "null entry still counts as present")
 }

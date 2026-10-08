@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"testing"
 
@@ -16,7 +17,6 @@ type mockBaseAgent struct{}
 func (m *mockBaseAgent) Name() types.AgentName                        { return "mock" }
 func (m *mockBaseAgent) Type() types.AgentType                        { return "Mock" }
 func (m *mockBaseAgent) Description() string                          { return "mock agent" }
-func (m *mockBaseAgent) IsPreview() bool                              { return false }
 func (m *mockBaseAgent) DetectPresence(context.Context) (bool, error) { return false, nil }
 func (m *mockBaseAgent) ProtectedDirs() []string                      { return nil }
 func (m *mockBaseAgent) ReadTranscript(string) ([]byte, error)        { return nil, nil }
@@ -40,11 +40,11 @@ func (m *mockBuiltinHookAgent) HookNames() []string { return nil }
 func (m *mockBuiltinHookAgent) ParseHookEvent(context.Context, string, io.Reader) (*Event, error) {
 	return nil, nil //nolint:nilnil // test mock
 }
-func (m *mockBuiltinHookAgent) InstallHooks(context.Context, bool, bool) (int, error) {
+func (m *mockBuiltinHookAgent) InstallHooks(context.Context, bool) (int, error) {
 	return 0, nil
 }
-func (m *mockBuiltinHookAgent) UninstallHooks(context.Context) error   { return nil }
-func (m *mockBuiltinHookAgent) AreHooksInstalled(context.Context) bool { return false }
+func (m *mockBuiltinHookAgent) UninstallHooks(context.Context) error            { return nil }
+func (m *mockBuiltinHookAgent) AreHooksInstalled(context.Context) (bool, error) { return false, nil }
 
 // mockFullAgent implements all optional interfaces AND CapabilityDeclarer.
 type mockFullAgent struct {
@@ -60,13 +60,13 @@ func (m *mockFullAgent) HookNames() []string { return nil }
 func (m *mockFullAgent) ParseHookEvent(context.Context, string, io.Reader) (*Event, error) {
 	return nil, nil //nolint:nilnil // test mock
 }
-func (m *mockFullAgent) InstallHooks(context.Context, bool, bool) (int, error) { return 0, nil }
-func (m *mockFullAgent) UninstallHooks(context.Context) error                  { return nil }
-func (m *mockFullAgent) AreHooksInstalled(context.Context) bool                { return false }
+func (m *mockFullAgent) InstallHooks(context.Context, bool) (int, error) { return 0, nil }
+func (m *mockFullAgent) UninstallHooks(context.Context) error            { return nil }
+func (m *mockFullAgent) AreHooksInstalled(context.Context) (bool, error) { return false, nil }
 
 // TranscriptAnalyzer
 func (m *mockFullAgent) GetTranscriptPosition(string) (int, error) { return 0, nil }
-func (m *mockFullAgent) ExtractModifiedFilesFromOffset(string, int) ([]string, int, error) {
+func (m *mockFullAgent) ExtractModifiedFilesFromOffset(context.Context, string, int) ([]string, int, error) {
 	return nil, 0, nil
 }
 func (m *mockFullAgent) ExtractPrompts(string, int) ([]string, error) { return nil, nil }
@@ -78,11 +78,30 @@ func (m *mockFullAgent) PrepareTranscript(context.Context, string) error { retur
 // TokenCalculator
 func (m *mockFullAgent) CalculateTokenUsage([]byte, int) (*TokenUsage, error) { return nil, nil } //nolint:nilnil // test mock
 
+// InventoryAwareExtractor is built-in only and deliberately has no DeclaredCaps bit.
+func (m *mockFullAgent) ExtractWithSubagentInventory(context.Context, []byte, int, []SubagentReference) (InventoryExtraction, error) {
+	return InventoryExtraction{}, nil
+}
+
 // ModelExtractor
 func (m *mockFullAgent) ExtractModel([]byte) (string, error) { return "mock-model", nil }
 
 // TextGenerator
 func (m *mockFullAgent) GenerateText(context.Context, string, string) (string, error) {
+	return "", nil
+}
+
+// OutOfBandTokenSource (mockFullAgent is a CapabilityDeclarer, so AsOutOfBandTokenSource
+// must still exclude it — verifies the built-in-only gate).
+func (m *mockFullAgent) SnapshotTokenBaseline(context.Context, string) (json.RawMessage, error) {
+	return nil, nil
+}
+func (m *mockFullAgent) CalculateTokenUsageSince(context.Context, string, json.RawMessage) (*TokenUsage, error) {
+	return nil, nil //nolint:nilnil // test mock
+}
+
+// StreamingTextGenerator
+func (m *mockFullAgent) GenerateTextStreaming(context.Context, string, string, ProgressFn) (string, error) {
 	return "", nil
 }
 
@@ -102,6 +121,15 @@ func (m *mockFullAgent) CalculateTotalTokenUsage([]byte, int, string) (*TokenUsa
 	return nil, nil //nolint:nilnil // test mock
 }
 
+// mockBuiltinStreamingAgent is a built-in agent that implements StreamingTextGenerator but NOT CapabilityDeclarer.
+type mockBuiltinStreamingAgent struct {
+	mockBaseAgent
+}
+
+func (m *mockBuiltinStreamingAgent) GenerateTextStreaming(context.Context, string, string, ProgressFn) (string, error) {
+	return "", nil
+}
+
 // mockBuiltinPromptAgent is a built-in agent that implements PromptExtractor but NOT CapabilityDeclarer.
 type mockBuiltinPromptAgent struct {
 	mockBaseAgent
@@ -109,6 +137,19 @@ type mockBuiltinPromptAgent struct {
 
 func (m *mockBuiltinPromptAgent) ExtractPrompts(string, int) ([]string, error) {
 	return []string{"test prompt"}, nil
+}
+
+// mockBuiltinOOBAgent is a built-in agent that implements OutOfBandTokenSource
+// but NOT CapabilityDeclarer.
+type mockBuiltinOOBAgent struct {
+	mockBaseAgent
+}
+
+func (m *mockBuiltinOOBAgent) SnapshotTokenBaseline(context.Context, string) (json.RawMessage, error) {
+	return nil, nil
+}
+func (m *mockBuiltinOOBAgent) CalculateTokenUsageSince(context.Context, string, json.RawMessage) (*TokenUsage, error) {
+	return nil, nil //nolint:nilnil // test mock
 }
 
 // --- Tests ---
@@ -239,6 +280,26 @@ func TestAsTokenCalculator(t *testing.T) {
 		_, ok := AsTokenCalculator(ag)
 		if ok {
 			t.Error("expected false")
+		}
+	})
+}
+
+func TestAsInventoryAwareExtractor(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsInventoryAwareExtractor(&mockBaseAgent{})
+		if ok {
+			t.Error("expected false")
+		}
+	})
+
+	t.Run("implemented without declared capability", func(t *testing.T) {
+		t.Parallel()
+		extractor, ok := AsInventoryAwareExtractor(&mockFullAgent{})
+		if !ok || extractor == nil {
+			t.Error("expected built-in-only type assertion to succeed")
 		}
 	})
 }
@@ -393,6 +454,44 @@ func TestAsSubagentAwareExtractor(t *testing.T) {
 	})
 }
 
+func TestAsOutOfBandTokenSource(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil agent", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsOutOfBandTokenSource(nil)
+		if ok {
+			t.Error("expected false for nil agent")
+		}
+	})
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsOutOfBandTokenSource(&mockBaseAgent{})
+		if ok {
+			t.Error("expected false for agent not implementing OutOfBandTokenSource")
+		}
+	})
+
+	t.Run("builtin agent", func(t *testing.T) {
+		t.Parallel()
+		src, ok := AsOutOfBandTokenSource(&mockBuiltinOOBAgent{})
+		if !ok || src == nil {
+			t.Error("expected true for built-in agent implementing OutOfBandTokenSource")
+		}
+	})
+
+	t.Run("capability declarer excluded", func(t *testing.T) {
+		t.Parallel()
+		// mockFullAgent implements the interface but is a CapabilityDeclarer
+		// (external agent), so it must be excluded.
+		_, ok := AsOutOfBandTokenSource(&mockFullAgent{})
+		if ok {
+			t.Error("expected false for CapabilityDeclarer agent")
+		}
+	})
+}
+
 func TestAsPromptExtractor(t *testing.T) {
 	t.Parallel()
 
@@ -436,6 +535,46 @@ func TestAsPromptExtractor(t *testing.T) {
 		_, ok := AsPromptExtractor(nil)
 		if ok {
 			t.Error("expected false for nil agent")
+		}
+	})
+}
+
+func TestAsStreamingTextGenerator(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockBaseAgent{}
+		_, ok := AsStreamingTextGenerator(ag)
+		if ok {
+			t.Error("expected false for agent not implementing StreamingTextGenerator")
+		}
+	})
+
+	t.Run("builtin agent", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockBuiltinStreamingAgent{}
+		stg, ok := AsStreamingTextGenerator(ag)
+		if !ok || stg == nil {
+			t.Error("expected true for built-in agent implementing StreamingTextGenerator")
+		}
+	})
+
+	t.Run("declared true", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockFullAgent{caps: DeclaredCaps{StreamingTextGenerator: true}}
+		stg, ok := AsStreamingTextGenerator(ag)
+		if !ok || stg == nil {
+			t.Error("expected true when capability declared true")
+		}
+	})
+
+	t.Run("declared false", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockFullAgent{caps: DeclaredCaps{StreamingTextGenerator: false}}
+		_, ok := AsStreamingTextGenerator(ag)
+		if ok {
+			t.Error("expected false when capability declared false")
 		}
 	})
 }

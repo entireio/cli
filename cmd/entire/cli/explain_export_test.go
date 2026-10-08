@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -60,7 +61,7 @@ func setupExportRepo(t *testing.T) *git.Repository {
 	return repo
 }
 
-func writeCheckpointForExport(t *testing.T, repo *git.Repository, cpID id.CheckpointID, opts checkpoint.WriteCommittedOptions) {
+func writeCheckpointForExport(t *testing.T, repo *git.Repository, cpID id.CheckpointID, opts checkpoint.WriteOptions) {
 	t.Helper()
 	if opts.CheckpointID.IsEmpty() {
 		opts.CheckpointID = cpID
@@ -75,14 +76,14 @@ func writeCheckpointForExport(t *testing.T, repo *git.Repository, cpID id.Checkp
 		opts.AuthorEmail = exportTestAuthorEmail
 	}
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	require.NoError(t, store.WriteCommitted(context.Background(), opts))
+	require.NoError(t, store.Write(context.Background(), checkpoint.Session(opts)))
 }
 
 func TestRunExplainExport_JSONSingleCheckpoint(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("aaaa11112222")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-json",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 	})
@@ -127,7 +128,7 @@ func TestRunExplainExport_JSONFetchesRemoteV1Metadata(t *testing.T) {
 	runGit(t, tmpDir, "clone", "--branch", "main", bareDir, localDir)
 
 	targetID := id.MustCheckpointID("aaaa99998888")
-	writeCheckpointForExport(t, producerRepo, targetID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, producerRepo, targetID, checkpoint.WriteOptions{
 		SessionID:  "remote-v1-session",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"remote"}]}}` + "\n")),
 	})
@@ -166,7 +167,7 @@ func TestRunExplainExport_JSONUsesMetadataOnlyReader(t *testing.T) {
 
 	cpID := id.MustCheckpointID("777711112222")
 	v1 := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	require.NoError(t, v1.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	require.NoError(t, v1.Write(context.Background(), checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "session-v1-only",
 		Strategy:     "manual-commit",
@@ -191,11 +192,155 @@ func TestRunExplainExport_JSONUsesMetadataOnlyReader(t *testing.T) {
 	require.Empty(t, envelope.Sessions[0].Error, "well-formed v1 read must not surface a per-session error")
 }
 
+// TestRunExplainExport_CommitWithoutTrailerSurfacesTrailerError (issue #1814):
+// a positional target that resolves to a real commit without an
+// Entire-Checkpoint trailer must surface that fact — not be masked as
+// `checkpoint not found: <sha>`, which reads as a typo and hides that the
+// commit was found. Same conflation class PR #1812 fixes for the prose path.
+func TestRunExplainExport_CommitWithoutTrailerSurfacesTrailerError(t *testing.T) {
+	repo := setupExportRepo(t)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       head.Hash().String(),
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "has no Entire-Checkpoint trailer",
+		"a trailer-less commit target must surface the trailer failure")
+	require.NotContains(t, err.Error(), "checkpoint not found",
+		"a resolved commit must not be masked as an unknown checkpoint")
+}
+
+// TestRunExplainExport_TrailerCheckpointUnavailableFailsWithCause: when a
+// commit's Entire-Checkpoint trailer references a checkpoint that is neither
+// local nor fetchable, the export path must fail naming the commit, the
+// checkpoint, and availability as the cause — not succeed and let a
+// downstream read die with a bare "checkpoint not found" that misdirects the
+// user toward the checkpoint ID instead of connectivity.
+func TestRunExplainExport_TrailerCheckpointUnavailableFailsWithCause(t *testing.T) {
+	repo := setupExportRepo(t)
+
+	cpID := id.MustCheckpointID("deadbeefcafe")
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "feature.txt"), []byte("feature"), 0o644))
+	_, err = wt.Add("feature.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit(trailers.AppendCheckpointTrailer("Implement feature", cpID.String()), &git.CommitOptions{
+		Author: &object.Signature{Name: exportTestAuthorName, Email: exportTestAuthorEmail, When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		commitRef:    commitHash.String(),
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "not available locally",
+		"the failure must name availability as the cause")
+	require.ErrorContains(t, err, cpID.String())
+	require.ErrorContains(t, err, commitHash.String()[:7],
+		"the failure must name the commit the user typed")
+}
+
+// TestRunExplainExport_AmbiguousCommitPrefixNamesCandidates: an ambiguous
+// positional prefix must be reported as ambiguity — with the candidate
+// commits, so the user can disambiguate without rerunning git log — and must
+// not be masked as "checkpoint not found" (the pre-#1814 behavior).
+func TestRunExplainExport_AmbiguousCommitPrefixNamesCandidates(t *testing.T) {
+	repo := setupExportRepo(t)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	prefix := collidingShaPrefix(t, repo, cwd)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       prefix,
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, errAmbiguousCommitPrefix)
+	require.ErrorContains(t, err, "ambiguous commit ref")
+	require.ErrorContains(t, err, "matches commits",
+		"the error must list the candidate commits")
+	require.NotContains(t, err.Error(), "checkpoint not found",
+		"ambiguity must not be masked as an unknown checkpoint")
+}
+
+// TestRunExplainExport_CommitFlagNotFoundMessage pins the --commit flag
+// path's user-visible message: the errExportTargetNotCommit sentinel's text
+// is part of the rendered error, so renaming it would silently change every
+// --commit failure message.
+func TestRunExplainExport_CommitFlagNotFoundMessage(t *testing.T) {
+	setupExportRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		commitRef:    "nosuchref",
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "commit not found: nosuchref")
+}
+
+// TestRunExplainExport_CheckpointFlagNeverFallsBackToCommit pins the
+// deliberate asymmetry: an explicit --checkpoint selector is never
+// reinterpreted as a commit ref, even when it would resolve as one.
+func TestRunExplainExport_CheckpointFlagNeverFallsBackToCommit(t *testing.T) {
+	repo := setupExportRepo(t)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	err = runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		checkpointFlag: head.Hash().String(),
+		json:           true,
+		sessionIndex:   -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
+	require.NotContains(t, err.Error(), "trailer",
+		"--checkpoint must not be reinterpreted as a commit ref")
+}
+
+// TestRunExplainExport_UnknownTargetStillReportsNotFound pins the genuine-miss
+// contract around the #1814 fix: a target that is neither a checkpoint prefix
+// nor a commit keeps the plain not-found report.
+func TestRunExplainExport_UnknownTargetStillReportsNotFound(t *testing.T) {
+	setupExportRepo(t)
+
+	var stdout, stderr bytes.Buffer
+	err := runExplainExport(context.Background(), &stdout, &stderr, explainExportOptions{
+		target:       "abababababab",
+		json:         true,
+		sessionIndex: -1,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
+	require.ErrorContains(t, err, "checkpoint not found: abababababab")
+}
+
 func TestRunExplainExport_JSONNeverEmbedsTranscript(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("bbbb11112222")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-no-leak",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"SECRET-RAW"}]}}` + "\n")),
 	})
@@ -217,7 +362,7 @@ func TestRunExplainExport_TranscriptStreamsStoredBytes(t *testing.T) {
 
 	cpID := id.MustCheckpointID("cccc11112222")
 	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"stored line"}]}}` + "\n")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-stored",
 		Transcript: redact.AlreadyRedacted(raw),
 	})
@@ -237,7 +382,7 @@ func TestRunExplainExport_RawTranscriptStreamsRawBytes(t *testing.T) {
 
 	cpID := id.MustCheckpointID("dddd11112222")
 	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello raw"}]}}` + "\n")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-raw",
 		Transcript: redact.AlreadyRedacted(raw),
 	})
@@ -262,7 +407,7 @@ func TestExplainCmd_RawTranscriptWithSessionIndexRoutesToExportPath(t *testing.T
 
 	cpID := id.MustCheckpointID("ffff11112222")
 	raw0 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello session 0"}]}}` + "\n")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-zero",
 		Transcript: redact.AlreadyRedacted(raw0),
 	})
@@ -290,12 +435,12 @@ func TestExplainCmd_RawTranscriptMultiSessionDistinctContent(t *testing.T) {
 	rawSession0 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"SESSION-ZERO-MARKER"}]}}` + "\n")
 	rawSession1 := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"SESSION-ONE-DIFFERENT-MARKER"}]}}` + "\n")
 
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-zero",
 		Transcript: redact.AlreadyRedacted(rawSession0),
 	})
 	// Second fixture write with the same checkpoint ID appends session 1.
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-one",
 		Transcript: redact.AlreadyRedacted(rawSession1),
 	})
@@ -337,7 +482,7 @@ func TestRunExplainExport_TranscriptOutOfRangeSessionIndex(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("eeee11112222")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-only",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 	})
@@ -424,7 +569,7 @@ func TestRunExplainExport_PositionalCommitSHAFallback(t *testing.T) {
 	repo := setupExportRepo(t)
 
 	cpID := id.MustCheckpointID("aaaabbbb1234")
-	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteCommittedOptions{
+	writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
 		SessionID:  "session-via-commit",
 		Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")),
 	})
@@ -489,17 +634,47 @@ func TestRunExplainExport_NoModeFlagFailsLoudly(t *testing.T) {
 	require.Empty(t, stdout.String(), "must not emit JSON when no mode is set")
 }
 
-// stubCommittedReader is a minimal CommittedReader that returns canned
+// stubCommittedReader is a minimal PersistentReader that returns canned
 // metadata or errors per session index. Used to exercise the partial-failure
 // path in buildCheckpointJSONEnvelope without corrupting a real git tree.
 type stubCommittedReader struct {
 	summary  *checkpoint.CheckpointSummary
 	contents map[int]*checkpoint.SessionContent // idx -> content (nil ⇒ return error)
 	err      error                              // err returned for indexes not in contents
+	tasks    []checkpoint.TaskEntry             // ListTasks result
+	tasksErr error                              // ListTasks error
 }
 
-func (s *stubCommittedReader) ReadCommitted(_ context.Context, _ id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+func (s *stubCommittedReader) ListTasks(context.Context, id.CheckpointID) ([]checkpoint.TaskEntry, error) {
+	return s.tasks, s.tasksErr
+}
+
+func (s *stubCommittedReader) ReadTaskTranscript(context.Context, id.CheckpointID, string) ([]byte, error) {
+	return nil, checkpoint.ErrTaskNotFound
+}
+
+//nolint:unparam // test stub; signature matches CheckpointReader.Read.
+func (s *stubCommittedReader) Read(_ context.Context, _ id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
 	return s.summary, nil
+}
+
+func (s *stubCommittedReader) ReadSessionMetadata(_ context.Context, _ id.CheckpointID, idx int) (*checkpoint.Metadata, error) {
+	if c, ok := s.contents[idx]; ok && c != nil {
+		m := c.Metadata
+		return &m, nil
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return nil, errors.New("stub: session not configured")
+}
+
+func (s *stubCommittedReader) ReadSessionPrompts(_ context.Context, _ id.CheckpointID, _ int) (string, error) {
+	return "", errors.New("stub: ReadSessionPrompts not configured")
+}
+
+func (s *stubCommittedReader) ReadSessionMetadataAndPrompts(_ context.Context, _ id.CheckpointID, _ int) (*checkpoint.Metadata, string, error) {
+	return nil, "", errors.New("stub: ReadSessionMetadataAndPrompts not configured")
 }
 
 func (s *stubCommittedReader) ReadSessionContent(_ context.Context, _ id.CheckpointID, idx int) (*checkpoint.SessionContent, error) {
@@ -532,7 +707,7 @@ func TestBuildCheckpointJSONEnvelope_PartialFailureFromMockReader(t *testing.T) 
 	reader := &stubCommittedReader{
 		summary: summary,
 		contents: map[int]*checkpoint.SessionContent{
-			0: {Metadata: checkpoint.CommittedMetadata{
+			0: {Metadata: checkpoint.Metadata{
 				SessionID: "good-session",
 				Agent:     "Claude Code",
 			}},
@@ -603,17 +778,17 @@ func TestCheckpointExportJSON_PartialContract(t *testing.T) {
 func TestCheckpointMatchesSessionFilter(t *testing.T) {
 	t.Parallel()
 
-	multi := strategy.RewindPoint{
+	multi := strategy.PendingCheckpoint{
 		SessionID:  "9f44f514-b012", // latest
 		SessionIDs: []string{"older-session-aaaa", "9f44f514-b012"},
 	}
-	single := strategy.RewindPoint{
+	single := strategy.PendingCheckpoint{
 		SessionID: "lone-session-bbbb",
 	}
 
 	tests := []struct {
 		name   string
-		point  strategy.RewindPoint
+		point  strategy.PendingCheckpoint
 		filter string
 		want   bool
 	}{
@@ -699,12 +874,12 @@ func TestExplainExport_PerSessionInvestigateFields(t *testing.T) {
 }
 
 // TestSessionMetadataToJSON_CopiesInvestigateFields pins that
-// sessionMetadataToJSON copies the investigate fields from CommittedMetadata
+// sessionMetadataToJSON copies the investigate fields from Metadata
 // into the per-session JSON struct.
 func TestSessionMetadataToJSON_CopiesInvestigateFields(t *testing.T) {
 	t.Parallel()
 
-	meta := &checkpoint.CommittedMetadata{
+	meta := &checkpoint.Metadata{
 		SessionID:        "investigate-session",
 		Kind:             "agent_investigate",
 		InvestigateRunID: "0123456789ab",
@@ -714,6 +889,84 @@ func TestSessionMetadataToJSON_CopiesInvestigateFields(t *testing.T) {
 	got := sessionMetadataToJSON(0, meta)
 	require.Equal(t, "0123456789ab", got.InvestigateRunID)
 	require.Equal(t, "topic from metadata.json", got.InvestigateTopic)
+}
+
+// TestSessionMetadataToJSON_FullSummary pins that the export carries the whole
+// persisted summary — friction, open_items, and categorized learnings — not
+// just intent/outcome. The prose view already renders these; --json previously
+// dropped them, so scripts/dashboards couldn't see them.
+func TestSessionMetadataToJSON_FullSummary(t *testing.T) {
+	t.Parallel()
+
+	meta := &checkpoint.Metadata{
+		SessionID: "rich-summary",
+		Summary: &checkpoint.Summary{
+			Intent:    "add the thing",
+			Outcome:   "added the thing",
+			Friction:  []string{"flaky test", "slow build"},
+			OpenItems: []string{"document it"},
+			Learnings: checkpoint.LearningsSummary{
+				Repo:     []string{"settings go through the settings package"},
+				Workflow: []string{"run mise run check before commit"},
+				Code: []checkpoint.CodeLearning{
+					{Path: "explain_export.go", Line: 343, Finding: "summary struct lives here"},
+				},
+			},
+		},
+	}
+
+	got := sessionMetadataToJSON(0, meta)
+	require.NotNil(t, got.Summary)
+	require.Equal(t, "add the thing", got.Summary.Intent)
+	require.Equal(t, "added the thing", got.Summary.Outcome)
+	require.Equal(t, []string{"flaky test", "slow build"}, got.Summary.Friction)
+	require.Equal(t, []string{"document it"}, got.Summary.OpenItems)
+	require.NotNil(t, got.Summary.Learnings)
+	require.Equal(t, []string{"settings go through the settings package"}, got.Summary.Learnings.Repo)
+	require.Equal(t, []string{"run mise run check before commit"}, got.Summary.Learnings.Workflow)
+	require.Len(t, got.Summary.Learnings.Code, 1)
+	require.Equal(t, "explain_export.go", got.Summary.Learnings.Code[0].Path)
+
+	// Round-trip the wire format and assert the new keys serialize.
+	raw, err := json.Marshal(got.Summary)
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	require.Contains(t, decoded, "friction")
+	require.Contains(t, decoded, "open_items")
+	require.Contains(t, decoded, "learnings")
+	learnings, ok := decoded["learnings"].(map[string]any)
+	require.True(t, ok)
+	require.Contains(t, learnings, "repo")
+	require.Contains(t, learnings, "workflow")
+	require.Contains(t, learnings, "code")
+}
+
+// TestSessionMetadataToJSON_EmptySummaryStaysClean pins that a summary with no
+// friction/open_items/learnings omits those keys (omitempty), so empty
+// summaries don't bloat the export with empty arrays or a stub learnings
+// object.
+func TestSessionMetadataToJSON_EmptySummaryStaysClean(t *testing.T) {
+	t.Parallel()
+
+	meta := &checkpoint.Metadata{
+		SessionID: "thin-summary",
+		Summary: &checkpoint.Summary{
+			Intent:  "just intent",
+			Outcome: "just outcome",
+		},
+	}
+
+	got := sessionMetadataToJSON(0, meta)
+	require.NotNil(t, got.Summary)
+	require.Nil(t, got.Summary.Learnings, "empty learnings must not allocate a nested object")
+
+	raw, err := json.Marshal(got.Summary)
+	require.NoError(t, err)
+	s := string(raw)
+	require.NotContains(t, s, "friction")
+	require.NotContains(t, s, "open_items")
+	require.NotContains(t, s, "learnings")
 }
 
 // TestBuildCheckpointJSONEnvelope_PropagatesHasInvestigation verifies the
@@ -734,7 +987,7 @@ func TestBuildCheckpointJSONEnvelope_PropagatesHasInvestigation(t *testing.T) {
 	reader := &stubCommittedReader{
 		summary: summary,
 		contents: map[int]*checkpoint.SessionContent{
-			0: {Metadata: checkpoint.CommittedMetadata{
+			0: {Metadata: checkpoint.Metadata{
 				SessionID:        "investigate-session",
 				Kind:             "agent_investigate",
 				InvestigateRunID: "0123456789ab",

@@ -5,19 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
-
-	"github.com/entireio/cli/cmd/entire/cli/auth"
-	"github.com/entireio/cli/internal/entireclient/discovery"
+	"github.com/entireio/cli/internal/coreapi"
+	"github.com/google/uuid"
 )
 
 // gitHubHTTPSRe / gitHubSSHRe / gitHubBareRe parse the GitHub URL shapes
-// `mirror create`/`remove` accept, mirroring the standalone entiredb CLI:
+// `mirror add`/`remove` accept, mirroring the standalone entiredb CLI:
 //
 //	https://github.com/<owner>/<repo>(.git)
 //	git@github.com:<owner>/<repo>(.git)
@@ -28,38 +26,69 @@ import (
 //
 // The owner/repo capture groups are restricted to GitHub's real identifier
 // charset rather than a permissive "anything but slash". owner/repo flow
-// unescaped into the STS audience (auth.RepoScopedToken) and the smart-HTTP
-// probe URL (waitForMirrorClone); a loose pattern would admit ?, #, %, .. and
-// control chars, letting a name like `repo?bypass=1` smuggle a query string
-// or `repo#x` truncate the path. GitHub owners are [A-Za-z0-9-] and repos are
-// [A-Za-z0-9._-], so matching upstream reality closes those vectors at the
-// boundary instead of relying on whatever the server does with weird strings.
+// unescaped into the STS audience (entireclient/repocreds) and the clone URL;
+// a loose pattern would admit ?, #, %, .. and control chars, letting a name
+// like `repo?bypass=1` smuggle a query string or `repo#x` truncate the path.
+// GitHub owners are [A-Za-z0-9-] and repos are [A-Za-z0-9._-], so matching
+// upstream reality closes those vectors at the boundary instead of relying on
+// whatever the server does with weird strings.
 const (
 	gitHubOwnerPat = `([A-Za-z0-9-]+)`
 	gitHubRepoPat  = `([A-Za-z0-9._-]+?)`
+	// gitHubOwnerRepoPat is the pair every GitHub shape ends in. One spelling,
+	// so the charset boundary above has one place to change: `.git` handling
+	// moved CLI-wide once while these patterns' own `(?:\.git)?` groups stayed
+	// put, which is the kind of miss five copies invite.
+	gitHubOwnerRepoPat = gitHubOwnerPat + `/` + gitHubRepoPat
 )
 
 var (
-	gitHubHTTPSRe = regexp.MustCompile(`^https?://github\.com/` + gitHubOwnerPat + `/` + gitHubRepoPat + `(?:\.git)?$`)
-	gitHubSSHRe   = regexp.MustCompile(`^git@github\.com:` + gitHubOwnerPat + `/` + gitHubRepoPat + `(?:\.git)?$`)
-	gitHubBareRe  = regexp.MustCompile(`^(?:github\.com/)?` + gitHubOwnerPat + `/` + gitHubRepoPat + `(?:\.git)?$`)
+	gitHubHTTPSRe = regexp.MustCompile(`^https?://github\.com/` + gitHubOwnerRepoPat + `(?:\.git)?$`)
+	gitHubSSHRe   = regexp.MustCompile(`^git@github\.com:` + gitHubOwnerRepoPat + `(?:\.git)?$`)
+	gitHubBareRe  = regexp.MustCompile(`^(?:github\.com/)?` + gitHubOwnerRepoPat + `(?:\.git)?$`)
 
-	// gitHubDotOnlyRe matches repo segments that are entirely dots
+	// gitHubHostedBareRe is gitHubBareRe with the host REQUIRED. The optional
+	// `github.com/` in gitHubBareRe is what keeps it out of
+	// parseHostedGitHubURL: it also matches a bare `owner/repo`, which names no
+	// forge at all. Anchoring the host makes the shape unambiguous, so a caller
+	// that must not guess a forge can still recognise `github.com/owner/repo`.
+	gitHubHostedBareRe = regexp.MustCompile(`^github\.com/` + gitHubOwnerRepoPat + `(?:\.git)?$`)
+
+	// dotOnlyRe matches repo segments that are entirely dots
 	// (".", "..", ...). The tightened owner charset already excludes
 	// dots, but gitHubRepoPat allows ".", and a dot-only repo name would
 	// embed a literal ".." in both /gh/<owner>/<repo> and the
 	// token-exchange audience. Reject at the boundary.
-	gitHubDotOnlyRe = regexp.MustCompile(`^\.+$`)
+	//
+	// Not forge-specific, despite living beside the GitHub patterns: dropping
+	// `.git` can MANUFACTURE a dot-only name out of one that was not (`..git`
+	// → `.`, `...git` → `..`), so every grammar that trims the suffix has to
+	// re-check afterwards, native ones included.
+	dotOnlyRe = regexp.MustCompile(`^\.+$`)
 )
 
 func parseGitHubURL(rawURL string) (owner, repo string, err error) {
-	for _, re := range []*regexp.Regexp{gitHubHTTPSRe, gitHubSSHRe, gitHubBareRe} {
+	return matchGitHubURL(rawURL, gitHubHTTPSRe, gitHubSSHRe, gitHubBareRe)
+}
+
+// parseHostedGitHubURL accepts the shapes that name github.com explicitly —
+// https, ssh, and the host-qualified bare form — but never an unqualified
+// `owner/repo`, which names no forge and so cannot be attributed to one. Its
+// caller uses that to point a GitHub URL at the `/gh/` ref it should have been;
+// guessing a forge for a bare pair is exactly what `repo clone`'s grammar
+// refuses to do. Same dot-only guard as parseGitHubURL.
+func parseHostedGitHubURL(rawURL string) (owner, repo string, err error) {
+	return matchGitHubURL(rawURL, gitHubHTTPSRe, gitHubSSHRe, gitHubHostedBareRe)
+}
+
+func matchGitHubURL(rawURL string, res ...*regexp.Regexp) (owner, repo string, err error) {
+	for _, re := range res {
 		m := re.FindStringSubmatch(rawURL)
 		if m == nil {
 			continue
 		}
 		owner, repo = strings.ToLower(m[1]), strings.ToLower(m[2])
-		if gitHubDotOnlyRe.MatchString(repo) {
+		if dotOnlyRe.MatchString(repo) {
 			return "", "", fmt.Errorf("invalid GitHub URL: repo cannot be dot-only: %s", rawURL)
 		}
 		return owner, repo, nil
@@ -67,256 +96,226 @@ func parseGitHubURL(rawURL string) (owner, repo string, err error) {
 	return "", "", fmt.Errorf("not a recognized GitHub URL: %s", rawURL)
 }
 
-// probeInterval is the cadence between info/refs probes during the
-// clone wait. minReauthInterval floors how often we'll re-mint a
-// repo-scoped token after a 401: STS rate-limits or auth flapping
-// during a long wait shouldn't be amplified by the 2s probe cadence.
-const (
-	probeInterval     = 2 * time.Second
-	minReauthInterval = 30 * time.Second
+// mirrorPollInterval is the cadence for placement and clone-status polls.
+var mirrorPollInterval = 2 * time.Second
+
+// maxConsecutivePollErrors keeps both poll phases bounded. In the clone phase,
+// 15 attempts at the two-second cadence preserve the accepted ~30s tolerance
+// for a newly placed mirror to become visible.
+const maxConsecutivePollErrors = 15
+
+var (
+	// errMirrorCloneFailed reports the mirror's initial clone reached the
+	// terminal "failed" status — the server gave up cloning the upstream.
+	errMirrorCloneFailed = errors.New("initial clone failed")
+	// errMirrorSuspended reports the placement is suspended: registered, but the
+	// cluster won't serve it. Recovery is operator-side (explainSuspendedMirror).
+	errMirrorSuspended = errors.New("mirror is suspended")
 )
 
-// maxProbeBytes bounds the smart-HTTP info/refs body read so a
-// pathological or misbehaving server can't make us allocate without
-// limit. Real ref advertisements for the largest repos sit well under
-// this; the cap is sized for headroom, not snugness.
-const maxProbeBytes = 8 << 20 // 8 MiB
-
-// probeClient is the HTTP client used for the clone-readiness loop. It is
-// purpose-built (own Transport, explicit timeouts, no redirect surprises)
-// instead of http.DefaultClient: DefaultClient is process-global and can
-// be poisoned by other code, and its zero-Timeout default would let a
-// stuck connection consume one ticker slot indefinitely. Each probe is
-// already context-bound by the loop's deadline, but Timeout is a belt to
-// the context's braces for the connection/TLS phase.
-var probeClient = &http.Client{
-	Timeout: 15 * time.Second,
-	Transport: &http.Transport{
-		// One mirror, repeated probes — a tiny idle pool is enough to
-		// reuse the TLS session between ticks without leaking conns.
-		MaxIdleConns:        2,
-		MaxIdleConnsPerHost: 2,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-	},
-	// The cluster front door 307-redirects info/refs to the node holding the
-	// mirror (e.g. bishop.<cluster-host>); git follows these to clone, so the
-	// probe must too. Refusing them (the old http.ErrUseLastResponse) made
-	// mirrorAdvertisesHead read the 307 as "not 200, not ready" and spin the
-	// cloning-dots forever even after the clone had landed.
-	CheckRedirect: checkProbeRedirect,
+// mirrorStatusGetter is the slice of *coreapi.Client that awaitMirrorReady
+// needs, declared as an interface so the poll is unit-testable with a fake.
+type mirrorStatusGetter interface {
+	GetMirror(ctx context.Context, params coreapi.GetMirrorParams) (*coreapi.Mirror, error)
 }
 
-// maxProbeRedirects bounds redirect-following during the clone probe.
-// One front-door→node hop is expected; the cap is headroom against a
-// misconfigured loop, not snugness.
-const maxProbeRedirects = 5
+type mirrorRequestGetter interface {
+	GetMirrorRequest(ctx context.Context, params coreapi.GetMirrorRequestParams) (*coreapi.MirrorRequest, error)
+}
 
-// checkProbeRedirect confines the clone probe's redirect-following to the
-// cluster trust domain, over https. The 307 the front door issues carries the
-// pull token in the Location userinfo; following it out of the cluster would
-// hand that token to whoever the redirect named. discovery.HostInCluster is
-// the same boundary the entire:// transport enforces on its own redirects.
-func checkProbeRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= maxProbeRedirects {
-		return fmt.Errorf("stopped after %d redirects", maxProbeRedirects)
+func awaitMirrorPlacement(ctx context.Context, c mirrorRequestGetter, initial coreapi.MirrorRequest, location string, onStatus func(coreapi.MirrorRequestStatus)) (*coreapi.MirrorRequestResult, error) {
+	serverURL, requestID, err := mirrorRequestPollTarget(location)
+	if err != nil {
+		return nil, err
 	}
-	if req.URL.Scheme != schemeHTTPS {
-		return fmt.Errorf("refusing non-https redirect to %s", req.URL.Redacted())
+	if serverURL != nil {
+		ctx = coreapi.WithServerURL(ctx, serverURL)
 	}
-	if !discovery.HostInCluster(req.URL.Hostname(), via[0].URL.Hostname()) {
-		return fmt.Errorf("refusing cross-host redirect to %s", req.URL.Redacted())
+	if initial.RequestId != requestID {
+		return nil, fmt.Errorf("mirror request Location identifies %s but response identifies %s", requestID, initial.RequestId)
 	}
-	return nil
-}
 
-// explainSuspendedMirror translates a clone-probe failure into a clear,
-// actionable message when the cluster reports no servable mirror
-// (auth.ErrRepoTargetUnknown) for a placement create just confirmed exists.
-// That pairing — "Mirror already exists" from create, then a refused token
-// exchange — is the signature of a suspended placement: create is idempotent
-// on (repo, cluster) and ignores suspended_at, while the auth gate hides
-// suspended mirrors behind invalid_target. Recovery is operator-side, so we
-// name the exact resume command rather than leaking the raw OAuth error.
-//
-// freshCreate gates the diagnosis: a mirror created moments ago cannot be
-// suspended (suspension only happens after upstream access is lost), so an
-// invalid_target on a fresh create is propagation lag, not suspension.
-// Diagnosing that as "suspended" would misdirect the user to a resume command
-// that does nothing, so we decline (handled=false) and let the raw error surface.
-//
-// Returns handled=false for any other error so the caller surfaces it
-// verbatim. When handled, the message is already written to w and the
-// returned error is a SilentError so main.go won't reprint it.
-func explainSuspendedMirror(w io.Writer, mirrorID string, freshCreate bool, err error) (bool, error) {
-	if freshCreate || !errors.Is(err, auth.ErrRepoTargetUnknown) {
-		return false, nil
+	ticker := time.NewTicker(mirrorPollInterval)
+	defer ticker.Stop()
+
+	request := &initial
+	var consecutiveErrs int
+	for {
+		if onStatus != nil {
+			onStatus(request.Status)
+		}
+		switch request.Status {
+		case coreapi.MirrorRequestStatusSucceeded:
+			result, ok := request.Result.Get()
+			if !ok || result.MirrorId == "" || result.MirrorUrl == "" {
+				return nil, errors.New("mirror request succeeded without a mirror id and URL")
+			}
+			return &result, nil
+		case coreapi.MirrorRequestStatusFailed:
+			return nil, mirrorRequestFailureError(*request)
+		case coreapi.MirrorRequestStatusPending, coreapi.MirrorRequestStatusProcessing:
+		default:
+			return nil, fmt.Errorf("mirror request returned unknown status %q", request.Status)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, classifyWaitContextErr(ctx.Err(), "waiting for mirror placement")
+		case <-ticker.C:
+		}
+
+		next, err := c.GetMirrorRequest(ctx, coreapi.GetMirrorRequestParams{RequestId: requestID})
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, classifyWaitContextErr(ctx.Err(), "waiting for mirror placement")
+			}
+			consecutiveErrs++
+			if consecutiveErrs >= maxConsecutivePollErrors {
+				return nil, fmt.Errorf("poll mirror request: %w", err)
+			}
+			continue
+		}
+		consecutiveErrs = 0
+		if next.RequestId != requestID {
+			return nil, fmt.Errorf("mirror request poll returned id %s, want %s", next.RequestId, requestID)
+		}
+		request = next
 	}
-	fmt.Fprintf(w,
-		"\nMirror %s is registered but the cluster won't issue clone tokens for it.\n"+
-			"This usually means the placement is suspended after upstream GitHub access\n"+
-			"was lost (App uninstalled, the repo went private, or a transient API error).\n"+
-			"An operator can re-enable it once access is restored:\n"+
-			"  entire-core admin mirrors resume %s\n",
-		mirrorID, mirrorID)
-	return true, NewSilentError(fmt.Errorf("mirror %s is suspended", mirrorID))
 }
 
-// repoTokenSource is the subset of auth.RepoTokenSource the clone probe
-// uses; an interface so tests can substitute a fake.
-type repoTokenSource interface {
-	Token(ctx context.Context, repoSlug, action string) (string, error)
-	Invalidate(repoSlug, action string)
+func mirrorRequestPollTarget(location string) (*url.URL, uuid.UUID, error) {
+	if strings.TrimSpace(location) == "" {
+		return nil, uuid.Nil, errors.New("mirror request response is missing Location")
+	}
+	locationURL, err := url.Parse(location)
+	if err != nil || locationURL.User != nil || locationURL.RawQuery != "" || locationURL.Fragment != "" {
+		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
+	}
+	const prefix = "/api/v1/mirror-requests/"
+	requestIDText, ok := strings.CutPrefix(locationURL.Path, prefix)
+	if !ok || requestIDText == "" || strings.Contains(requestIDText, "/") {
+		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
+	}
+	requestID, err := uuid.Parse(requestIDText)
+	if err != nil {
+		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q: %w", location, err)
+	}
+	if locationURL.IsAbs() {
+		if locationURL.Scheme != "https" && locationURL.Scheme != "http" {
+			return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
+		}
+		return &url.URL{Scheme: locationURL.Scheme, Host: locationURL.Host, Path: "/api/v1"}, requestID, nil
+	}
+	if locationURL.Host != "" {
+		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
+	}
+	return nil, requestID, nil
 }
 
-// newRepoTokenSource builds the clone probe's token source. Package var so
-// tests can substitute a slow or failing auth path.
-var newRepoTokenSource = func(ctx context.Context, clusterHost string) (repoTokenSource, error) {
-	return auth.NewRepoTokenSource(ctx, clusterHost)
+func mirrorRequestFailureError(request coreapi.MirrorRequest) error {
+	failure, ok := request.Failure.Get()
+	if !ok {
+		return errors.New("mirror placement failed without failure details")
+	}
+
+	known := false
+	switch failure.Code {
+	case "repo_inaccessible", "github_link_required", "source_too_large", "github_unavailable",
+		"mirror_url_conflict", "mirror_conflict", "placement_deleted", "mirror_name_conflict",
+		"invalid_request", "internal":
+		known = true
+	}
+	var message string
+	if known {
+		message = fmt.Sprintf("mirror placement failed (%s): %s", failure.Code, failure.Message)
+	} else {
+		message = fmt.Sprintf("mirror placement failed with unknown failure code %q: %s", failure.Code, failure.Message)
+	}
+	if failure.Retryable {
+		message += "; retry this command"
+	}
+	return errors.New(message)
 }
 
-// waitForMirrorClone blocks until the mirror at /gh/<owner>/<repo> on
-// clusterHost advertises a resolvable HEAD (the initial GitHub→EntireDB
-// clone has landed) or the deadline expires. It probes the data plane's
-// smart-HTTP info/refs endpoint every 2s, printing a heartbeat so a long
-// clone doesn't look hung.
+// awaitMirrorReady polls the control plane for a mirror's clone lifecycle until
+// it reaches a terminal status or the deadline/cancellation fires. It returns
+// the last observed status plus:
 //
-// Repo-scoped pull tokens are short-lived (minutes) while the default wait
-// is 30m, so a single token can't cover the whole wait. The loop re-mints
-// from the (long-lived) login token whenever a probe comes back 401, rather
-// than minting once up front. Cluster discovery and context selection run
-// once, when the source is built — a discovery hiccup mid-wait can't abort
-// a wait that already authorized. Re-mints are floored at minReauthInterval
-// so a flapping STS can't be amplified into a re-mint every probeInterval
-// ticks.
+//   - nil                     when ready (the repo is clonable)
+//   - errMirrorCloneFailed    when the initial clone failed
+//   - errMirrorSuspended      when the placement is suspended
+//   - a timeout/transport err when the wait deadline passed, or polls kept
+//     erroring past maxConsecutivePollErrors (transient glitches are retried)
 //
-// The deadline is applied before the source is built: authorization spans
-// cluster discovery and a possible login refresh, so it must consume the
-// user's wait budget, not run before it.
-func waitForMirrorClone(ctx context.Context, out io.Writer, clusterHost, owner, repo string, timeout time.Duration) error {
+// "processing" keeps the loop running. This replaces the old smart-HTTP
+// info/refs probe: the control plane now reports clone readiness directly via
+// Mirror.status, so a single authenticated control-plane call per tick suffices
+// — no repo-scoped token exchange or data-plane round trip.
+func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string, timeout time.Duration) (coreapi.MirrorStatus, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-
-	repoSlug := "/gh/" + owner + "/" + repo
-	checkURL := fmt.Sprintf("https://%s%s/info/refs?service=git-upload-pack", clusterHost, repoSlug)
-
-	src, err := newRepoTokenSource(ctx, clusterHost)
-	if err != nil {
-		return fmt.Errorf("authorize clone probe: %w", err)
-	}
-	token, err := src.Token(ctx, repoSlug, "pull")
-	if err != nil {
-		return fmt.Errorf("authorize clone probe: %w", err)
-	}
-	lastMint := time.Now()
-
-	ticker := time.NewTicker(probeInterval)
+	ticker := time.NewTicker(mirrorPollInterval)
 	defer ticker.Stop()
 
-	cloning := false
+	var last coreapi.MirrorStatus
+	var consecutiveErrs int
 	for {
-		ready, status := mirrorAdvertisesHead(ctx, probeClient, checkURL, token)
+		m, err := c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: mirrorID})
 		switch {
-		case ready:
-			if cloning {
-				fmt.Fprintln(out, " ready")
-			} else {
-				fmt.Fprintln(out, "  ready to use")
+		case err != nil:
+			if ctx.Err() != nil {
+				return last, classifyWaitContextErr(ctx.Err(), "waiting for initial clone")
 			}
-			return nil
-		case status == http.StatusUnauthorized:
-			// The repo-scoped token expired mid-wait; mint a fresh one from
-			// the login token (no dot, since this is a token refresh, not
-			// clone progress). Skip the re-mint if we just refreshed —
-			// otherwise an STS hiccup that 401s every probe would mint on
-			// every probeInterval tick.
-			if since := time.Since(lastMint); since < minReauthInterval {
-				break
+			// Tolerate transient glitches: the clone may still be progressing,
+			// so retry on the next tick. Only give up once errors persist.
+			consecutiveErrs++
+			if consecutiveErrs >= maxConsecutivePollErrors {
+				return last, fmt.Errorf("poll mirror status: %w", err)
 			}
-			// Drop the cached token first: the cluster rejected it ahead of
-			// its recorded expiry, so a plain Token call could replay it.
-			src.Invalidate(repoSlug, "pull")
-			newToken, mintErr := src.Token(ctx, repoSlug, "pull")
-			if mintErr != nil {
-				if cloning {
-					fmt.Fprintln(out)
-				}
-				return fmt.Errorf("re-authorize clone probe: %w", mintErr)
-			}
-			token = newToken
-			lastMint = time.Now()
 		default:
-			if !cloning {
-				fmt.Fprint(out, "  cloning")
-				cloning = true
+			consecutiveErrs = 0
+			if s, ok := m.Status.Get(); ok {
+				last = s
+				switch s {
+				case coreapi.MirrorStatusReady:
+					return s, nil
+				case coreapi.MirrorStatusFailed:
+					return s, errMirrorCloneFailed
+				case coreapi.MirrorStatusSuspended:
+					return s, errMirrorSuspended
+				case coreapi.MirrorStatusProcessing:
+					// keep waiting
+				}
 			}
-			fmt.Fprint(out, ".")
 		}
 		select {
 		case <-ctx.Done():
-			fmt.Fprintln(out)
-			// User cancellation (Ctrl+C) should exit quietly, not print a
-			// "timed out…: context canceled" line. NewSilentError signals
-			// main.go to skip printing; a real deadline still reports.
-			if errors.Is(ctx.Err(), context.Canceled) {
-				return NewSilentError(ctx.Err())
-			}
-			return fmt.Errorf("timed out waiting for initial clone: %w", ctx.Err())
+			return last, classifyWaitContextErr(ctx.Err(), "waiting for initial clone")
 		case <-ticker.C:
 		}
 	}
 }
 
-// mirrorAdvertisesHead fetches the smart-HTTP ref advertisement and reports
-// whether HEAD resolves to a real commit, plus the HTTP status so the
-// caller can distinguish an expired token (401, re-mint) from a
-// still-cloning mirror (200 with no resolvable HEAD, or 404/503). status is
-// 0 for transport/build/decode failures, treated as "not ready, keep
-// waiting". Auth is the repo-scoped token as HTTP basic-auth password, the
-// same shape git presents over the entire:// transport.
-func mirrorAdvertisesHead(ctx context.Context, client *http.Client, checkURL, token string) (ready bool, status int) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checkURL, nil)
-	if err != nil {
-		return false, 0
+func classifyWaitContextErr(err error, what string) error {
+	if errors.Is(err, context.Canceled) {
+		return NewSilentError(err)
 	}
-	req.SetBasicAuth("entire-cli", token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, 0
-	}
-	// Drain before close so the transport can return the connection to the
-	// idle pool and reuse the TLS session on the next tick. Go only recycles
-	// a conn whose body was read to EOF before Close, and the Decode error
-	// returns below leave the body partially read. Drain to EOF, uncapped:
-	// the maxProbeBytes cap on the read below bounds the Decode *allocation*,
-	// but draining to io.Discard is O(1) memory, and a LimitReader cap
-	// shorter than the body would stop before EOF and silently defeat reuse.
-	// The client Timeout still bounds how long the drain can run.
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain to enable conn reuse; copy errors are irrelevant
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode != http.StatusOK {
-		return false, resp.StatusCode
-	}
-	// Cap the body to prevent unbounded reads; ogen's api/client.go does
-	// the same for JSON. Smart-HTTP wraps the advertisement in a "#
-	// service=..." pkt-line header + flush; AdvRefs.Decode expects to
-	// start at the first ref line, so strip the wrapper first.
-	body := io.LimitReader(resp.Body, maxProbeBytes)
-	var sr packp.SmartReply
-	if err := sr.Decode(body); err != nil {
-		return false, 0
-	}
-	var adv packp.AdvRefs
-	if err := adv.Decode(body); err != nil {
-		return false, 0
-	}
-	if _, err := adv.ResolvedHead(); err != nil {
-		return false, http.StatusOK // reachable, clone still in progress
-	}
-	return true, http.StatusOK
+	return fmt.Errorf("timed out %s: %w", what, err)
+}
+
+// explainSuspendedMirror tells the user a suspended placement can't be served
+// and to contact support. Suspension usually follows a loss of upstream GitHub
+// access (App uninstalled, repo went private, or a transient API error); the
+// fix is operator-side, so we point at support rather than leaking an internal
+// admin command.
+func explainSuspendedMirror(w io.Writer, mirrorID string) {
+	fmt.Fprintf(w,
+		"\nMirror %s is registered but suspended, so it can't be cloned yet.\n"+
+			"This usually means upstream GitHub access was lost (App uninstalled,\n"+
+			"the repo went private, or a transient API error). Contact support to\n"+
+			"restore it.\n",
+		mirrorID)
 }

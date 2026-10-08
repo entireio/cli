@@ -7,21 +7,22 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/perf"
 
 	"github.com/go-git/go-git/v6"
 )
 
-// SaveStep saves a checkpoint to the shadow branch.
-// Uses checkpoint.GitStore.WriteTemporary for git operations.
+// SaveStep records a turn-end step in session state: it merges the step's
+// files into FilesTouched, records their content hashes (TouchedFileHashes),
+// and accumulates token usage. Nothing is written to git — the transcript and
+// files are read from disk again when a commit condenses the session.
 func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) error {
 	_, openRepoSpan := perf.Start(ctx, "open_repository")
 	repo, err := OpenRepository(ctx)
@@ -43,66 +44,44 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		return err
 	}
 
+	// Hash the step's files before taking the session lock: it is a git
+	// subprocess, and the lock serializes every hook of this session.
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get worktree root: %w", err)
+	}
+	changedFiles := make([]string, 0, len(step.ModifiedFiles)+len(step.NewFiles))
+	changedFiles = append(changedFiles, step.ModifiedFiles...)
+	changedFiles = append(changedFiles, step.NewFiles...)
+	_, hashSpan := perf.Start(ctx, "hash_touched_files")
+	stepFileHashes := hashTouchedFiles(ctx, worktreeRoot, changedFiles)
+	hashSpan.End()
+	// Untracked files the agent created in an earlier turn and has since
+	// removed: git status reports no deletion for them (see
+	// untrackedDeletionCandidates). Resolved outside the lock like hashing.
+	untrackedGone := s.untrackedDeletionCandidates(ctx, worktreeRoot, sessionID, changedFiles, step.DeletedFiles)
+	// A staged-then-removed file (git status "AD") arrives as a deletion, but
+	// the next commit adds its staged blob; see stagedOnlyDeletions.
+	recordedDeletions := withoutPaths(step.DeletedFiles, stagedOnlyDeletions(ctx, worktreeRoot, step.DeletedFiles))
+
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		_, migrateSpan := perf.Start(ctx, "migrate_shadow_branch")
-		if _, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
-			migrateSpan.RecordError(err)
-			migrateSpan.End()
-			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
-		}
-		migrateSpan.End()
-
-		store := s.getCheckpointStore(ctx, repo)
-
-		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
-
-		var promptAttr PromptAttribution
-		if state.PendingPromptAttribution != nil {
-			promptAttr = *state.PendingPromptAttribution
-			state.PendingPromptAttribution = nil
-		} else {
-			promptAttr = PromptAttribution{CheckpointNumber: state.StepCount + 1}
+		invalidateStaleSubagentSnapshot(&step, state)
+		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
+			return err
 		}
 
-		attrLogCtx := logging.WithComponent(ctx, "attribution")
-		logging.Debug(attrLogCtx, "prompt attribution at checkpoint save",
-			slog.Int("checkpoint_number", promptAttr.CheckpointNumber),
-			slog.Int("user_added", promptAttr.UserLinesAdded),
-			slog.Int("user_removed", promptAttr.UserLinesRemoved),
-			slog.Int("agent_added", promptAttr.AgentLinesAdded),
-			slog.Int("agent_removed", promptAttr.AgentLinesRemoved),
-			slog.String("session_id", sessionID))
-
-		_, writeCheckpointSpan := perf.Start(ctx, "write_temporary_checkpoint")
-		isFirstCheckpointOfSession := state.StepCount == 0
-		result, err := store.WriteTemporary(ctx, checkpoint.WriteTemporaryOptions{
-			SessionID:         sessionID,
-			BaseCommit:        state.BaseCommit,
-			WorktreeID:        state.WorktreeID,
-			ModifiedFiles:     step.ModifiedFiles,
-			NewFiles:          step.NewFiles,
-			DeletedFiles:      step.DeletedFiles,
-			MetadataDir:       step.MetadataDir,
-			MetadataDirAbs:    step.MetadataDirAbs,
-			CommitMessage:     step.CommitMessage,
-			AuthorName:        step.AuthorName,
-			AuthorEmail:       step.AuthorEmail,
-			IsFirstCheckpoint: isFirstCheckpointOfSession,
-		})
-		writeCheckpointSpan.RecordError(err)
-		writeCheckpointSpan.End()
-		if err != nil {
-			return fmt.Errorf("failed to write temporary checkpoint: %w", err)
-		}
-
-		if result.Skipped {
-			logCtx := logging.WithComponent(ctx, "checkpoint")
-			logging.Info(logCtx, "checkpoint skipped (no changes)",
+		// A step whose every changed path is a phantom (named by the transcript
+		// but absent from the worktree) and that deletes nothing records no
+		// work. Counting it would leave StepCount > 0 with nothing a commit can
+		// match, so the session would stay pending (HasPendingWork) until doctor
+		// or the stale sweep. Skip it like an empty step, before anything is
+		// counted.
+		if !stepHasWork(worktreeRoot, changedFiles, step.DeletedFiles) {
+			logging.Info(logging.WithComponent(ctx, "checkpoint"), "checkpoint skipped (no changes)",
 				slog.String("strategy", "manual-commit"),
 				slog.String("checkpoint_type", "session"),
 				slog.Int("checkpoint_count", state.StepCount),
-				slog.String("shadow_branch", shadowBranchName),
+				slog.Int("phantom_files", len(changedFiles)),
 			)
 			return ErrMutationSkip
 		}
@@ -111,21 +90,58 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		// condensation and used by handleAmendCommitMsg to restore checkpoint
 		// trailers on amend operations.
 		state.StepCount++
-		state.PromptAttributions = append(state.PromptAttributions, promptAttr)
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
+		applyTouchedFileHashes(state, changedFiles, stepFileHashes, recordedDeletions)
+		recordUntrackedDeletions(worktreeRoot, state, untrackedGone)
+		dropPhantomFilesTouched(worktreeRoot, state, changedFiles)
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
 		if step.TokenUsage != nil {
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
-		}
-
-		if !branchExisted {
-			logging.Info(logging.WithComponent(ctx, "checkpoint"), "created shadow branch and committed changes",
-				slog.String("shadow_branch", shadowBranchName))
-		} else {
-			logging.Info(logging.WithComponent(ctx, "checkpoint"), "committed changes to shadow branch",
-				slog.String("shadow_branch", shadowBranchName))
+			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
+			// step.TokenUsage.SubagentTokens is a cumulative-since-session-start
+			// snapshot (agent IDs are discovered from the full transcript and each
+			// subagent's own transcript is re-read from its start on every call —
+			// see CalculateTotalTokenUsage in the claudecode/factoryaidroid
+			// packages), not a per-step delta like the rest of TokenUsage.
+			// accumulateTokenUsage already replaces (rather than adds) the
+			// SubagentTokens field for that reason, so state.TokenUsage ends up
+			// correctly holding the latest cumulative total. CheckpointTokenUsage
+			// additionally needs rescoping to "since last condensation" by
+			// subtracting the baseline captured at the last reset, otherwise the
+			// full cumulative subagent total would be reported again at every
+			// checkpoint instead of just this checkpoint's share.
+			//
+			// Derive the checkpoint delta FRESH each call from the session-wide
+			// cumulative (state.TokenUsage.SubagentTokens) minus the baseline —
+			// do NOT mutate CheckpointTokenUsage.SubagentTokens in place. A later
+			// step in the same window can carry step.TokenUsage != nil but
+			// SubagentTokens == nil (the subagent transcript was cleaned up, so
+			// CalculateTotalTokenUsage returned APICallCount==0 and left it nil);
+			// accumulateTokenUsage then leaves CheckpointTokenUsage.SubagentTokens
+			// at its already-rescoped value, and re-subtracting the baseline from
+			// that would double-subtract and (via clampSubtract) shrink or zero a
+			// real subagent total. Recomputing from the session-wide cumulative
+			// is idempotent regardless of whether this step carried a snapshot.
+			if state.CheckpointTokenUsage != nil && state.TokenUsage != nil {
+				complete := state.TokenUsage.SubagentTokensComplete
+				switch {
+				case complete != nil && !*complete:
+					state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
+				case state.SubagentTokensBaselineComplete != nil && !*state.SubagentTokensBaselineComplete:
+					// A known-incomplete baseline cannot yield an exact delta, even
+					// when the current inventory has become complete again.
+					state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
+				default:
+					state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
+						state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+					if complete != nil {
+						value := *complete
+						state.CheckpointTokenUsage.SubagentTokensComplete = &value
+					}
+				}
+			}
 		}
 
 		logCtx := logging.WithComponent(ctx, "checkpoint")
@@ -136,8 +152,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			slog.Int("modified_files", len(step.ModifiedFiles)),
 			slog.Int("new_files", len(step.NewFiles)),
 			slog.Int("deleted_files", len(step.DeletedFiles)),
-			slog.String("shadow_branch", shadowBranchName),
-			slog.Bool("branch_created", !branchExisted),
+			slog.Int("files_touched", len(state.FilesTouched)),
 		)
 		return nil
 	})
@@ -145,6 +160,16 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		return nil
 	}
 	return mutErr
+}
+
+func invalidateStaleSubagentSnapshot(step *StepContext, state *SessionState) {
+	if step.SubagentLedgerVersion == nil || step.TokenUsage == nil ||
+		state.SubagentLedgerVersion == *step.SubagentLedgerVersion {
+		return
+	}
+	// Keep valid main-agent deltas but never persist a child aggregate
+	// computed against an older authoritative inventory.
+	step.TokenUsage = types.WithClearedSubagentTokens(step.TokenUsage, false)
 }
 
 // ensureSessionInitialized creates the session state file if it doesn't yet
@@ -162,119 +187,6 @@ func (s *ManualCommitStrategy) ensureSessionInitialized(ctx context.Context, rep
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 	return nil
-}
-
-// SaveTaskStep saves a task step checkpoint to the shadow branch.
-// Uses checkpoint.GitStore.WriteTemporaryTask for git operations.
-func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepContext) error {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	if err := s.ensureSessionInitialized(ctx, repo, step.SessionID, step.AgentType); err != nil {
-		return err
-	}
-
-	mutErr := MutateSessionState(ctx, step.SessionID, func(state *SessionState) error {
-		if _, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
-			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
-		}
-
-		store := s.getCheckpointStore(ctx, repo)
-
-		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
-
-		sessionMetadataDir := paths.SessionMetadataDirFromSessionID(step.SessionID)
-		taskMetadataDir := TaskMetadataDir(sessionMetadataDir, step.ToolUseID)
-
-		shortToolUseID := step.ToolUseID
-		if len(shortToolUseID) > id.ShortIDLength {
-			shortToolUseID = shortToolUseID[:id.ShortIDLength]
-		}
-
-		var messageSubject string
-		if step.IsIncremental {
-			messageSubject = FormatIncrementalSubject(
-				step.IncrementalType,
-				step.SubagentType,
-				step.TaskDescription,
-				step.TodoContent,
-				step.IncrementalSequence,
-				shortToolUseID,
-			)
-		} else {
-			messageSubject = FormatSubagentEndMessage(step.SubagentType, step.TaskDescription, shortToolUseID)
-		}
-		commitMsg := trailers.FormatShadowTaskCommit(
-			messageSubject,
-			taskMetadataDir,
-			step.SessionID,
-		)
-
-		if _, err := store.WriteTemporaryTask(ctx, checkpoint.WriteTemporaryTaskOptions{
-			SessionID:              step.SessionID,
-			BaseCommit:             state.BaseCommit,
-			WorktreeID:             state.WorktreeID,
-			ToolUseID:              step.ToolUseID,
-			AgentID:                step.AgentID,
-			ModifiedFiles:          step.ModifiedFiles,
-			NewFiles:               step.NewFiles,
-			DeletedFiles:           step.DeletedFiles,
-			TranscriptPath:         step.TranscriptPath,
-			SubagentTranscriptPath: step.SubagentTranscriptPath,
-			CheckpointUUID:         step.CheckpointUUID,
-			CommitMessage:          commitMsg,
-			AuthorName:             step.AuthorName,
-			AuthorEmail:            step.AuthorEmail,
-			IsIncremental:          step.IsIncremental,
-			IncrementalSequence:    step.IncrementalSequence,
-			IncrementalType:        step.IncrementalType,
-			IncrementalData:        step.IncrementalData,
-		}); err != nil {
-			return fmt.Errorf("failed to write task checkpoint: %w", err)
-		}
-
-		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
-
-		if !branchExisted {
-			logging.Info(logging.WithComponent(ctx, "checkpoint"), "created shadow branch and committed task checkpoint",
-				slog.String("shadow_branch", shadowBranchName))
-		} else {
-			logging.Info(logging.WithComponent(ctx, "checkpoint"), "committed task checkpoint to shadow branch",
-				slog.String("shadow_branch", shadowBranchName))
-		}
-
-		logCtx := logging.WithComponent(ctx, "checkpoint")
-		attrs := []any{
-			slog.String("strategy", "manual-commit"),
-			slog.String("checkpoint_type", "task"),
-			slog.String("checkpoint_uuid", step.CheckpointUUID),
-			slog.String("tool_use_id", step.ToolUseID),
-			slog.String("subagent_type", step.SubagentType),
-			slog.Int("modified_files", len(step.ModifiedFiles)),
-			slog.Int("new_files", len(step.NewFiles)),
-			slog.Int("deleted_files", len(step.DeletedFiles)),
-			slog.String("shadow_branch", shadowBranchName),
-			slog.Bool("branch_created", !branchExisted),
-		}
-		if step.IsIncremental {
-			attrs = append(attrs,
-				slog.Bool("is_incremental", true),
-				slog.String("incremental_type", step.IncrementalType),
-				slog.Int("incremental_sequence", step.IncrementalSequence),
-			)
-		}
-		logging.Info(logCtx, "task checkpoint saved", attrs...)
-
-		return nil
-	})
-	if errors.Is(mutErr, ErrStateNotFound) {
-		return nil
-	}
-	return mutErr
 }
 
 // mergeFilesTouched merges multiple file lists into existing touched files, deduplicating.
@@ -301,15 +213,130 @@ func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 	return result
 }
 
+// EnsureSessionExists creates sessionID's state when missing, for producers
+// that record subagent task records before the parent session has a turn.
+func (s *ManualCommitStrategy) EnsureSessionExists(ctx context.Context, sessionID string, agentType types.AgentType) error {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open git repository: %w", err)
+	}
+	defer repo.Close()
+	return s.ensureSessionInitialized(ctx, repo, sessionID, agentType)
+}
+
+// launchStubTaskRecord returns the launch-shaped subset of rec — exactly the
+// fields recordInFlightTaskLaunch would have stubbed — for producers that
+// create the record at completion time (foreground tasks, Droid Workers).
+func launchStubTaskRecord(rec session.TaskRecord) session.TaskRecord {
+	return session.TaskRecord{
+		ToolUseID:             rec.ToolUseID,
+		AgentID:               rec.AgentID,
+		StartedAt:             rec.StartedAt,
+		SubagentType:          rec.SubagentType,
+		TaskDescription:       rec.TaskDescription,
+		TranscriptUnavailable: rec.TranscriptUnavailable,
+	}
+}
+
+// applyTaskRecordCompletion attaches a completed task's results to its record
+// and to the session: files merge into FilesTouched (invariant: carry-forward
+// and PostCommit gating must see task files). They carry no recorded hash, so
+// commit decisions match them by name. The record itself is what condensation triggers key on
+// (State.HasTaskContent), so a zero-file read-only completion needs no
+// separate counter.
+// Callers must pre-merge rec.Files with any existing record's files — this
+// overwrites live.Files rather than merging.
+func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) error {
+	live := state.FindTaskRecord(rec.ToolUseID)
+	if live == nil {
+		return fmt.Errorf("no task record for tool use %s", rec.ToolUseID)
+	}
+	live.Files = mergeFilesTouched(nil, rec.Files)
+	// A completion with no path (e.g. a later Worker turn whose transcript ref
+	// is empty) must not erase an earlier turn's declared path.
+	if rec.DeclaredTranscriptPath != "" {
+		live.DeclaredTranscriptPath = rec.DeclaredTranscriptPath
+	}
+	if rec.TranscriptUnavailable {
+		live.TranscriptUnavailable = true
+	}
+	if rec.TokenUsage != nil {
+		live.TokenUsage = rec.TokenUsage
+	}
+	if rec.TokenUsageFromTranscript {
+		live.TokenUsageFromTranscript = true
+	}
+	if live.AgentID == "" {
+		live.AgentID = rec.AgentID
+	}
+	MergeUnhashedFilesTouched(state, rec.Files)
+	return nil
+}
+
+// CompleteTaskRecord marks the record for rec.ToolUseID completed exactly once
+// and attaches the capture's results (files, declared transcript path, tokens)
+// in the same MutateSessionState closure, per session.State.CompleteTaskRecord's
+// contract. When no launch stub exists the record is created first: foreground
+// tasks have no launch hook, so completion is the only event that can produce
+// their record. Returns false without error when a racing Final event already
+// completed the record, or when no session state exists.
+func CompleteTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord) (bool, error) {
+	completed := false
+	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if state.FindTaskRecord(rec.ToolUseID) == nil {
+			state.AddTaskRecord(launchStubTaskRecord(rec))
+		}
+		if !state.CompleteTaskRecord(rec.ToolUseID, time.Now()) {
+			return ErrMutationSkip
+		}
+		if err := applyTaskRecordCompletion(state, rec); err != nil {
+			return err
+		}
+		completed = true
+		return nil
+	})
+	if errors.Is(mutErr, ErrStateNotFound) {
+		return false, nil
+	}
+	return completed, mutErr
+}
+
+// UpsertCompletedTaskRecord writes a COMPLETED task record, merging files into
+// any existing record for the same ToolUseID — the multi-turn producer shape
+// (Factory Droid Workers reach turn-end once per Worker turn, all attributed
+// to one parent tool use), unlike CompleteTaskRecord's exactly-once claim.
+func UpsertCompletedTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord) error {
+	return MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if existing := state.FindTaskRecord(rec.ToolUseID); existing != nil {
+			rec.Files = mergeFilesTouched(existing.Files, rec.Files)
+		} else {
+			state.AddTaskRecord(launchStubTaskRecord(rec))
+		}
+		state.CompleteTaskRecord(rec.ToolUseID, time.Now())
+		return applyTaskRecordCompletion(state, rec)
+	})
+}
+
 // accumulateTokenUsage adds new token usage to existing accumulated usage.
 // If existing is nil, returns a copy of incoming. If incoming is nil, returns existing unchanged.
+//
+// SubagentTokens is handled differently from the other fields: main-agent
+// usage (InputTokens, OutputTokens, ...) arrives per step as a delta scoped to
+// that step's transcript slice, so it is correct to sum deltas across steps.
+// Subagent usage arrives as a cumulative-since-session-start snapshot instead
+// — CalculateTotalTokenUsage discovers agent IDs from the full transcript
+// (so a subagent spawned before the current checkpoint window is still
+// found) and re-reads each subagent transcript from its start on every call.
+// Summing that snapshot across steps would re-add a subagent's full usage on
+// every subsequent step after it was first discovered, so SubagentTokens is
+// replaced with the latest snapshot rather than added.
 func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsage {
 	if incoming == nil {
 		return existing
 	}
 	if existing == nil {
 		// Return a copy to avoid sharing the pointer
-		return &agent.TokenUsage{
+		result := &agent.TokenUsage{
 			InputTokens:         incoming.InputTokens,
 			CacheCreationTokens: incoming.CacheCreationTokens,
 			CacheReadTokens:     incoming.CacheReadTokens,
@@ -317,6 +344,14 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 			APICallCount:        incoming.APICallCount,
 			SubagentTokens:      incoming.SubagentTokens,
 		}
+		if incoming.SubagentTokensComplete != nil {
+			complete := *incoming.SubagentTokensComplete
+			result.SubagentTokensComplete = &complete
+			if !complete {
+				result.SubagentTokens = nil
+			}
+		}
+		return result
 	}
 
 	// Accumulate values
@@ -326,26 +361,64 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	existing.OutputTokens += incoming.OutputTokens
 	existing.APICallCount += incoming.APICallCount
 
-	// Accumulate subagent tokens if present
-	if incoming.SubagentTokens != nil {
-		existing.SubagentTokens = accumulateTokenUsage(existing.SubagentTokens, incoming.SubagentTokens)
+	// Replace (not add) subagent tokens: incoming.SubagentTokens is already
+	// the cumulative total as of this step, so the latest snapshot supersedes
+	// whatever was recorded before rather than stacking on top of it.
+	if incoming.SubagentTokensComplete != nil {
+		complete := *incoming.SubagentTokensComplete
+		existing.SubagentTokensComplete = &complete
+		// An explicit inventory result is authoritative, including exact empty
+		// (complete with nil) and unavailable (incomplete with nil).
+		existing.SubagentTokens = incoming.SubagentTokens
+	} else if incoming.SubagentTokens != nil {
+		existing.SubagentTokens = incoming.SubagentTokens
 	}
 
 	return existing
 }
 
-// deleteShadowBranch deletes a shadow branch by name.
-// Returns nil if the branch doesn't exist (idempotent).
-// Uses git CLI instead of go-git's RemoveReference because go-git v5
-// doesn't properly persist deletions with packed refs or worktrees.
-func deleteShadowBranch(ctx context.Context, _ *git.Repository, branchName string) error {
-	err := DeleteBranchCLI(ctx, branchName)
-	if err != nil {
-		// If the branch doesn't exist, treat as idempotent - not an error condition.
-		if errors.Is(err, ErrBranchNotFound) {
-			return nil
+// resetCheckpointWindow resets the per-checkpoint accumulation window after a
+// condensation reset. It zeroes the step count, clears the checkpoint-scoped
+// token usage, and snapshots the cumulative subagent total into
+// SubagentTokensBaseline so the next window's CheckpointTokenUsage.SubagentTokens
+// can be rescoped to "since this condensation" rather than re-reporting the full
+// cumulative subagent total (see accumulateTokenUsage and the SaveStep rescoping
+// in this file, plus SessionState.SubagentTokensBaseline). Shared by all three
+// condensation reset sites (CondenseSessionByID, CondenseAndMarkFullyCondensed,
+// condenseAndUpdateState) so the baseline capture cannot drift between them.
+//
+// It is also the single post-write mutation site for the task-record
+// lifecycle (#2058): every one of the three callers only reaches here after a
+// successful (non-skipped) CondenseSession write, so this is exactly the
+// point at which materializeTaskRecords' payloads have just been durably
+// stored — see removeCompletedTaskRecords.
+func resetCheckpointWindow(state *SessionState) {
+	state.StepCount = 0
+	state.CheckpointTokenUsage = nil
+	state.ClearCondensationAttempt()
+	state.RebaselineSubagentTokens()
+	removeCompletedTaskRecords(state)
+}
+
+// removeCompletedTaskRecords drops every completed task record (CompletedAt
+// non-zero) from state after a successful condensation write: the record's
+// payload — a transcript or, when unavailable, the reason it wasn't — is now
+// durably stored under this checkpoint's tasks/<tool-use-id>/ subtree, so the
+// pointer no longer needs to live in session state (RemoveTaskRecord's
+// contract). In-flight records (CompletedAt zero) are left alone; the next
+// condensation re-materializes their transcript-so-far.
+//
+// Collects the IDs to remove before calling RemoveTaskRecord: that method
+// mutates state.TaskRecords in place (shifting the backing array), so
+// removing while ranging over the live slice would skip elements.
+func removeCompletedTaskRecords(state *SessionState) {
+	var completedIDs []string
+	for _, record := range state.TaskRecords {
+		if !record.CompletedAt.IsZero() {
+			completedIDs = append(completedIDs, record.ToolUseID)
 		}
-		return err
 	}
-	return nil
+	for _, toolUseID := range completedIDs {
+		state.RemoveTaskRecord(toolUseID)
+	}
 }

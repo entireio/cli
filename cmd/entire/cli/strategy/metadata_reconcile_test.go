@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -242,69 +243,6 @@ func TestReconcileDisconnected_Disconnected(t *testing.T) {
 	// Original commit message should be preserved (git adds trailing newline)
 	if tipCommit.Message != "Checkpoint: abcdef012345\n" {
 		t.Errorf("commit message not preserved: got %q", tipCommit.Message)
-	}
-}
-
-// Not parallel: uses t.Chdir().
-func TestReconcileDisconnected_MirrorsV1CustomRefAfterRepair(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(t *testing.T, dir string, run func(args ...string))
-	}{
-		{
-			name: "empty orphan reset",
-			setup: func(t *testing.T, _ string, run func(args ...string)) {
-				t.Helper()
-				run("checkout", "--orphan", "temp-orphan")
-				run("rm", "-rf", ".")
-				run("commit", "--allow-empty", "-m", "empty orphan init")
-				run("branch", "-f", paths.MetadataBranchName, "temp-orphan")
-				run("checkout", "main")
-			},
-		},
-		{
-			name: "local checkpoint replay",
-			setup: func(t *testing.T, dir string, run func(args ...string)) {
-				t.Helper()
-				run("checkout", "--orphan", "temp-orphan")
-				run("rm", "-rf", ".")
-				localDir := filepath.Join(dir, "ab", "cdef012345")
-				require.NoError(t, os.MkdirAll(localDir, 0o755))
-				require.NoError(t, os.WriteFile(
-					filepath.Join(localDir, "metadata.json"),
-					[]byte(`{"checkpoint_id":"abcdef012345"}`),
-					0o644,
-				))
-				run("add", ".")
-				run("commit", "-m", "Checkpoint: abcdef012345")
-				run("branch", "-f", paths.MetadataBranchName, "temp-orphan")
-				run("checkout", "main")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			bareDir := initBareWithMetadataBranch(t)
-			cloneDir, run := cloneWithConfig(t, bareDir)
-			tt.setup(t, cloneDir, run)
-
-			enableV1CustomRefMirror(t, cloneDir)
-			t.Chdir(cloneDir)
-
-			repo, err := git.PlainOpen(cloneDir)
-			require.NoError(t, err)
-			_, ok := v1CustomRefHash(t, repo)
-			require.False(t, ok, "custom ref should not exist before reconciliation")
-
-			require.NoError(t, ReconcileDisconnectedMetadataRef(t.Context(), repo, metadataLocalRef(), metadataOriginRemoteRef(), io.Discard))
-
-			localRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-			require.NoError(t, err)
-			got, ok := v1CustomRefHash(t, repo)
-			require.True(t, ok, "expected %s to exist", paths.MetadataRefName)
-			assert.Equal(t, localRef.Hash(), got)
-		})
 	}
 }
 
@@ -695,6 +633,64 @@ func TestReconcileDisconnected_ModifiedEntries(t *testing.T) {
 	if !strings.Contains(content, `"session_count":2`) {
 		t.Errorf("metadata.json should have session_count:2 (modified value), got: %s", content)
 	}
+}
+
+// Not parallel: uses process-global OPF config.
+func TestReconcileDisconnected_PreservesOPFAppliedCommit(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	repo, opfOriginalTip := setupV1Repo(t)
+
+	opfTip, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	require.NoError(t, err)
+	require.NotEqual(t, opfOriginalTip, opfTip, "OPF rewrite should replace the local v1 tip")
+
+	opfCommit, err := repo.CommitObject(opfTip)
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(opfCommit.Message), "rewritten commit must carry OPF trailer before recovery")
+	assertNoOPFSentinel(t, opfCommit)
+
+	remoteTip := makeOrphanCommit(t, repo, emptyTreeHash(t, repo), nil, "remote metadata\n")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(metadataOriginRemoteRef(), remoteTip)))
+
+	err = ReconcileDisconnectedMetadataRef(context.Background(), repo, metadataLocalRef(), metadataOriginRemoteRef(), io.Discard)
+	require.NoError(t, err)
+
+	localRef, err := repo.Reference(metadataLocalRef(), true)
+	require.NoError(t, err)
+	require.NotEqual(t, opfTip, localRef.Hash(), "recovery should create a re-parented cherry-pick commit")
+
+	recoveredCommit, err := repo.CommitObject(localRef.Hash())
+	require.NoError(t, err)
+	require.Len(t, recoveredCommit.ParentHashes, 1)
+	require.Equal(t, remoteTip, recoveredCommit.ParentHashes[0])
+	require.True(t, trailers.HasOPFApplied(recoveredCommit.Message), "recovery must preserve OPF trailer")
+	assertNoOPFSentinel(t, recoveredCommit)
+}
+
+func assertNoOPFSentinel(t *testing.T, commit *object.Commit) {
+	t.Helper()
+
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	redactedFiles := 0
+	require.NoError(t, tree.Files().ForEach(func(f *object.File) error {
+		if !strings.HasSuffix(f.Name, ".jsonl") && !strings.HasSuffix(f.Name, ".txt") {
+			return nil
+		}
+		content, err := f.Contents()
+		if err != nil {
+			return err
+		}
+		if strings.Contains(content, "PERSONABC") {
+			t.Errorf("%s still contains OPF sentinel after recovery", f.Name)
+		}
+		if strings.Contains(content, "[REDACTED_PERSON]") {
+			redactedFiles++
+		}
+		return nil
+	}))
+	require.Positive(t, redactedFiles, "expected at least one OPF-redacted metadata blob")
 }
 
 // TestCollectCommitChain_DepthLimit verifies that collectCommitChain returns an error

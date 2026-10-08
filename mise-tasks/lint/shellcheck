@@ -1,4 +1,4 @@
 #!/bin/sh
 #MISE description="Lint shell scripts with shellcheck"
 
-find mise-tasks -type f -exec sh -c 'head -1 "$1" | grep -q "^#!/bin/sh\|^#!/bin/bash"' _ {} \; -print0 | xargs -0 shellcheck
+find mise-tasks scripts -type f -exec sh -c 'head -1 "$1" | grep -qE "^#!(/usr/bin/env +)?(/bin/)?(sh|bash)\\b"' _ {} \; -print0 | xargs -0 shellcheck

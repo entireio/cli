@@ -2,7 +2,24 @@
 
 ## Overview
 
-The CLI uses Go's `log/slog` package for structured JSON logging. All logs are written to a single file `.entire/logs/entire.log` and help debug hook execution and CLI behavior. When a session ID is known, the `session_id` attribute on each log line allows filtering by session.
+The CLI uses Go's `log/slog` package for structured JSON logging. All logs are written to a single file `.entire/logs/entire.log` and help debug hook execution and CLI behavior. Lines logged once a session has been resolved carry a `session_id` attribute, which is how you filter the file down to one session.
+
+## Lifecycle
+
+One `*logging.Logger` per process, carried in the context — the package holds no global state, so nothing has to trust that something upstream initialized it.
+
+| Step | Where |
+|------|-------|
+| Build it | The root `PersistentPreRun` (`config.go`'s `ensureLogger`), gated on `settings.IsSetUpAny`. `enable` builds one itself only when that gate declined, which is the fresh-repo case it exists for. |
+| Pass it | `logging.WithLogger(ctx, l)`, read back with `logging.LoggerFromContext(ctx)`. |
+| Close it | The root `PersistentPostRun`, plus `main.go` for the two paths cobra returns on before reaching it (a `RunE` error, and required-flag validation). |
+
+Two consequences worth knowing:
+
+- **A context with no logger falls back to `slog.Default()`**, i.e. the user's terminal. `logging.Debug/Info/Warn/Error` resolve the logger from the context first, so a call site using `context.Background()` writes to stderr no matter what the configured level is — `slog.Default()` is fixed at INFO and ignores `ENTIRE_LOG_LEVEL`.
+- **The log file is created on the first line actually written**, not when the logger is built, so a command that logs nothing leaves no empty `entire.log` behind. The flip side is that a `.entire/logs` that cannot be created reports nothing on its own: the failing write drops the line and returns no error. `entire doctor` calls `Logger.EnsureOpen` to name that case.
+
+Packages that cannot take a context — `redact` holds an injected `*slog.Logger` and calls it without one — get theirs from `logging.SessionLoggerFromContext(ctx)`, which stamps the session but deliberately not the component, since those packages tag their own lines and slog does not dedupe attributes.
 
 ## Log Levels
 
@@ -31,7 +48,7 @@ Logs use a hierarchical tracing model inspired by OpenTelemetry concepts:
 
 | Field | Scope | Description |
 |-------|-------|-------------|
-| `session_id` | Root trace | Entire session ID, auto-added to all log entries |
+| `session_id` | Root trace | Entire session ID. Added to lines logged through a context stamped with `logging.WithSessionID` — the hook paths do this once they have resolved a session, so it is not on every line in the file. A call site that passes `session_id` itself wins, and the context's copy is dropped rather than emitted twice. |
 | `tool_use_id` | Span | Unique ID for a subagent task lifecycle |
 | `agent_id` | Span metadata | The subagent's ID (returned by Claude Code) |
 
@@ -41,8 +58,6 @@ Logs use a hierarchical tracing model inspired by OpenTelemetry concepts:
 session_id: 2025-12-31-abc123           ← root trace (all logs)
 ├── user-prompt-submit                   ← agent-level (no tool_use_id)
 ├── pre-task (tool_use_id: X)           ← span X starts
-│   ├── post-todo (tool_use_id: X)      ← within span X
-│   └── post-todo (tool_use_id: X)
 ├── post-task (tool_use_id: X)          ← span X ends
 ├── pre-task (tool_use_id: Y)           ← span Y starts
 ├── post-task (tool_use_id: Y)          ← span Y ends
@@ -83,7 +98,7 @@ Future consideration: Generate a `prompt_id` at `user-prompt-submit` and persist
 
 ### Tool Use Logging
 
-Currently only Task and TodoWrite tool uses are hooked. Other tool uses (Edit, Write, Bash) are not logged. This is intentional for checkpoint purposes but limits observability.
+Entire hooks subagent dispatch (pre-task and post-task for the Claude Code Agent tool, and the equivalent events of other agents). Agents with per-tool hooks also report the files a tool use touched, which is recorded into the session's `FilesTouched`; the tool calls themselves (Edit, Write, Bash) are not logged. This is enough for checkpoints but limits observability.
 
 ## Privacy: No User Data in Logs
 
@@ -107,8 +122,7 @@ Currently only Task and TodoWrite tool uses are hooked. Other tool uses (Edit, W
 - Timing (duration_ms)
 - Success/failure status
 - Strategy name
-- File counts (modified_files, new_files, deleted_files)
-- Branch names (shadow_branch)
+- File counts (modified_files, new_files, deleted_files, files_touched)
 
 ### Example
 
@@ -135,6 +149,12 @@ Logs are tagged with a `component` field indicating the logging source:
 |-----------|-------------|
 | `hooks` | Hook execution (agent hooks, git hooks) |
 | `checkpoint` | Checkpoint operations (saves, condensation, branch cleanup) |
+| `lifecycle` | Session phase transitions |
+| `session` | Session state reads and writes |
+| `redaction` | Rule loading, regex compile failures, pack sample mismatches, and the load-time `redaction configured` summary — the lines to grep when a custom rule is not matching |
+| `migration` | Checkpoint-format migration |
+
+The list is not closed — `grep -rn 'WithComponent(' cmd/ internal/` is the source of truth. Smaller ones in use today: `state`, `resume`, `manual-commit`, `attach`, `cleanup`, `summarize`, `condense-by-id`, `filter-uncommitted`, `trail-refresh`.
 
 ## Implementation Details
 
@@ -142,8 +162,10 @@ Logs are tagged with a `component` field indicating the logging source:
 
 | File | Purpose |
 |------|---------|
-| `cmd/entire/cli/logging/logger.go` | Core logging infrastructure |
-| `cmd/entire/cli/logging/context.go` | Context helpers (WithComponent, WithSession) |
+| `cmd/entire/cli/logging/logger.go` | `Logger` (one log file), `New`, `Close`, `EnsureOpen`, and the `Debug/Info/Warn/Error` entry points |
+| `cmd/entire/cli/logging/context.go` | Context carriers: `WithLogger`/`LoggerFromContext`, `SessionLoggerFromContext` for packages that hold a bare `*slog.Logger`, and the attribute decorators `WithSessionID`, `WithComponent`, `WithAgent` |
+| `cmd/entire/cli/config.go` | `ensureLogger`/`newLogger` — the only place a logger is installed, and where the level is resolved |
+| `cmd/entire/cli/root.go` | Builds the logger in `PersistentPreRun`, flushes it in `PersistentPostRun` |
 | `cmd/entire/cli/hooks_git_cmd.go` | Git hook logging (uses gitHookContext helper) |
 | `cmd/entire/cli/hooks_claudecode_handlers.go` | Claude Code hook logging |
 | `cmd/entire/cli/hook_registry.go` | Hook wrapper logging |
@@ -182,31 +204,12 @@ Logs are tagged with a `component` field indicating the logging source:
   "modified_files": 2,
   "new_files": 1,
   "deleted_files": 0,
-  "shadow_branch": "entire/a1b2c3d",
-  "branch_created": false
-}
-```
-
-**Task checkpoint log example:**
-```json
-{
-  "time": "2025-12-31T12:28:30.789012+11:00",
-  "level": "INFO",
-  "msg": "task checkpoint saved",
-  "session_id": "2025-12-31-abc123",
-  "component": "checkpoint",
-  "strategy": "manual-commit",
-  "checkpoint_type": "task",
-  "tool_use_id": "toolu_xyz789",
-  "subagent_type": "general-purpose",
-  "modified_files": 5,
-  "new_files": 2,
-  "deleted_files": 0,
-  "shadow_branch": "entire/a1b2c3d",
-  "branch_created": false
+  "files_touched": 3
 }
 ```
 
 ### Buffered I/O
 
-Logs use an 8KB buffer (`bufio.Writer`) to batch writes and reduce syscall overhead. The buffer is flushed on `logging.Close()`.
+Logs use an 8KB buffer (`bufio.Writer`) to batch writes and reduce syscall overhead. The buffer is flushed by `Logger.Close`, which the root `PersistentPostRun` calls (and `main.go` for the paths cobra returns on before reaching it). Writes after `Close` are dropped rather than reopening the file.
+
+Because the flush happens at command exit, a long-running command holds up to 8KB of lines invisible for its lifetime — `tail -f` shows nothing until it ends, and a process killed outright loses the buffer.

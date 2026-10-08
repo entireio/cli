@@ -26,13 +26,16 @@ type copilotEvent struct {
 	ID        string          `json:"id"`
 	Timestamp string          `json:"timestamp"`
 	ParentID  string          `json:"parentId"`
+	AgentID   string          `json:"agentId"`
 }
 
 const (
-	eventTypeUserMessage  = "user.message"
-	eventTypeAssistantMsg = "assistant.message"
-	eventTypeToolExecDone = "tool.execution_complete"
-	eventTypeModelChange  = "session.model_change"
+	eventTypeUserMessage     = "user.message"
+	eventTypeAssistantMsg    = "assistant.message"
+	eventTypeToolExecDone    = "tool.execution_complete"
+	eventTypeModelChange     = "session.model_change"
+	eventTypeSubagentStarted = "subagent.started"
+	eventTypeSubagentDone    = "subagent.completed"
 )
 
 // userMessageData is the data payload for user.message events.
@@ -52,14 +55,16 @@ type modelChangeData struct {
 }
 
 type toolExecCompleteData struct {
-	ToolCallID    string        `json:"toolCallId"`
-	Model         string        `json:"model"`
-	ToolTelemetry toolTelemetry `json:"toolTelemetry"`
+	ToolCallID       string        `json:"toolCallId"`
+	ParentToolCallID string        `json:"parentToolCallId"`
+	Model            string        `json:"model"`
+	ToolTelemetry    toolTelemetry `json:"toolTelemetry"`
 }
 
 type toolTelemetry struct {
-	Metrics    toolMetrics    `json:"metrics"`
-	Properties toolProperties `json:"properties"`
+	Metrics              toolMetrics    `json:"metrics"`
+	Properties           toolProperties `json:"properties"`
+	RestrictedProperties toolProperties `json:"restrictedProperties"`
 }
 
 type toolMetrics struct {
@@ -115,6 +120,10 @@ func parseEventsFromOffset(data []byte, startOffset int) ([]copilotEvent, error)
 // extractModifiedFilesFromEvents collects file paths from tool.execution_complete
 // events and returns a deduplicated list.
 func extractModifiedFilesFromEvents(events []copilotEvent) []string {
+	return extractModifiedFilesMatching(events, func(copilotEvent, toolExecCompleteData) bool { return true })
+}
+
+func extractModifiedFilesMatching(events []copilotEvent, include func(copilotEvent, toolExecCompleteData) bool) []string {
 	seen := make(map[string]bool)
 	var files []string
 
@@ -127,13 +136,20 @@ func extractModifiedFilesFromEvents(events []copilotEvent) []string {
 		if err := json.Unmarshal(events[i].Data, &data); err != nil {
 			continue
 		}
+		if !include(events[i], data) {
+			continue
+		}
 
 		// filePaths is a JSON-encoded string array in properties, e.g. "[\"path/to/file\"]"
-		if data.ToolTelemetry.Properties.FilePaths == "" {
+		filePaths := data.ToolTelemetry.Properties.FilePaths
+		if filePaths == "" {
+			filePaths = data.ToolTelemetry.RestrictedProperties.FilePaths
+		}
+		if filePaths == "" {
 			continue
 		}
 		var paths []string
-		if err := json.Unmarshal([]byte(data.ToolTelemetry.Properties.FilePaths), &paths); err != nil {
+		if err := json.Unmarshal([]byte(filePaths), &paths); err != nil {
 			continue
 		}
 		for _, fp := range paths {
@@ -145,6 +161,85 @@ func extractModifiedFilesFromEvents(events []copilotEvent) []string {
 	}
 
 	return files
+}
+
+type subagentStartedData struct {
+	ToolCallID       string `json:"toolCallId"`
+	AgentType        string `json:"agentType"`
+	AgentName        string `json:"agentName"`
+	AgentDescription string `json:"agentDescription"`
+}
+
+type subagentEvidence struct {
+	AgentID         string
+	ToolUseID       string
+	SubagentType    string
+	TaskDescription string
+	Files           []string
+}
+
+// extractSubagentEvidence joins current Copilot transcripts on child UUID. For
+// older stops without an ID, it accepts only one incomplete start with the same
+// agent name. Ambiguous or incomplete identity fails closed.
+func extractSubagentEvidence(events []copilotEvent, agentID, agentName string) (subagentEvidence, bool) {
+	if agentID == "" && agentName == "" {
+		return subagentEvidence{}, false
+	}
+
+	completed := make(map[string]bool)
+	if agentID == "" {
+		for i := range events {
+			if events[i].Type != eventTypeSubagentDone {
+				continue
+			}
+			var data subagentStartedData
+			if json.Unmarshal(events[i].Data, &data) == nil {
+				completed[events[i].AgentID+"\x00"+data.ToolCallID] = true
+			}
+		}
+	}
+
+	matchedAgentID, toolUseID := "", ""
+	var started subagentStartedData
+	for i := range events {
+		if events[i].Type != eventTypeSubagentStarted {
+			continue
+		}
+		var data subagentStartedData
+		if json.Unmarshal(events[i].Data, &data) != nil || data.ToolCallID == "" {
+			continue
+		}
+		if agentID != "" && events[i].AgentID != agentID {
+			continue
+		}
+		if agentID == "" && (data.AgentName != agentName || completed[events[i].AgentID+"\x00"+data.ToolCallID]) {
+			continue
+		}
+		if toolUseID != "" && (toolUseID != data.ToolCallID || matchedAgentID != events[i].AgentID) {
+			return subagentEvidence{}, false
+		}
+		matchedAgentID = events[i].AgentID
+		toolUseID = data.ToolCallID
+		started = data
+	}
+	if matchedAgentID == "" || toolUseID == "" {
+		return subagentEvidence{}, false
+	}
+
+	files := extractModifiedFilesMatching(events, func(ev copilotEvent, data toolExecCompleteData) bool {
+		return ev.AgentID == matchedAgentID && data.ParentToolCallID == toolUseID
+	})
+	subagentType := started.AgentType
+	if subagentType == "" {
+		subagentType = started.AgentName
+	}
+	return subagentEvidence{
+		AgentID:         matchedAgentID,
+		ToolUseID:       toolUseID,
+		SubagentType:    subagentType,
+		TaskDescription: started.AgentDescription,
+		Files:           files,
+	}, true
 }
 
 // extractPromptsFromEvents collects content from user.message events.
@@ -169,63 +264,44 @@ func extractPromptsFromEvents(events []copilotEvent) []string {
 	return prompts
 }
 
-// extractSummaryFromEvents returns the content of the last assistant.message event.
-func extractSummaryFromEvents(events []copilotEvent) string {
+// lastEventField scans events newest-first for entries of eventType,
+// returning the first non-empty value extract produces (skipping entries
+// whose data doesn't unmarshal).
+func lastEventField[T any](events []copilotEvent, eventType string, extract func(T) string) string {
 	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type != eventTypeAssistantMsg {
+		if events[i].Type != eventType {
 			continue
 		}
 
-		var data assistantMessageData
+		var data T
 		if err := json.Unmarshal(events[i].Data, &data); err != nil {
 			continue
 		}
 
-		if data.Content != "" {
-			return data.Content
+		if v := extract(data); v != "" {
+			return v
 		}
 	}
 
 	return ""
 }
 
+// extractSummaryFromEvents returns the content of the last assistant.message event.
+func extractSummaryFromEvents(events []copilotEvent) string {
+	return lastEventField(events, eventTypeAssistantMsg,
+		func(d assistantMessageData) string { return d.Content })
+}
+
 // extractModelFromEvents returns the model from transcript events.
 // First checks session.model_change events, then falls back to the model field
 // in tool.execution_complete events (Copilot CLI includes model per tool call).
 func extractModelFromEvents(events []copilotEvent) string {
-	// Primary: session.model_change (explicit model declaration)
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type != eventTypeModelChange {
-			continue
-		}
-
-		var data modelChangeData
-		if err := json.Unmarshal(events[i].Data, &data); err != nil {
-			continue
-		}
-
-		if data.NewModel != "" {
-			return data.NewModel
-		}
+	if model := lastEventField(events, eventTypeModelChange,
+		func(d modelChangeData) string { return d.NewModel }); model != "" {
+		return model
 	}
-
-	// Fallback: tool.execution_complete events include a model field
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type != eventTypeToolExecDone {
-			continue
-		}
-
-		var data toolExecCompleteData
-		if err := json.Unmarshal(events[i].Data, &data); err != nil {
-			continue
-		}
-
-		if data.Model != "" {
-			return data.Model
-		}
-	}
-
-	return ""
+	return lastEventField(events, eventTypeToolExecDone,
+		func(d toolExecCompleteData) string { return d.Model })
 }
 
 // sessionShutdownData is the data payload for session.shutdown events.
@@ -410,7 +486,7 @@ func (c *CopilotCLIAgent) GetTranscriptPosition(path string) (int, error) {
 //   - files: list of file paths modified by Copilot (from tool.execution_complete events)
 //   - currentPosition: total number of lines in the file
 //   - error: any error encountered during reading
-func (c *CopilotCLIAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+func (c *CopilotCLIAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}

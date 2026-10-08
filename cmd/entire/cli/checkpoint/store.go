@@ -1,29 +1,53 @@
 package checkpoint
 
 import (
-	"fmt"
+	"context"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// Compile-time check that GitStore implements the Store interface.
-var _ Store = (*GitStore)(nil)
+var (
+	_ PersistentStore = (*GitStore)(nil)
+	_ AuthorReader    = (*GitStore)(nil)
+	_ Writer          = (*GitStore)(nil)
+)
 
-// GitStore provides operations for both temporary and committed checkpoint
-// storage. Writes target refs.Primary; committed reads resolve against
-// refs.Read. The store does not advance refs.Mirror.
+// treeWriter holds the repo-only machinery for building a single checkpoint's
+// subtree from write requests: entry builders, transcript/session writers, and
+// the per-request appliers (applySessionWrite / applyTranscriptBackfill /
+// applySummaryBackfill). It is independent of where
+// the resulting subtree is committed, so both the git-branch store (which nests
+// the subtree under <shard>/<id>/ on the v1 branch) and the git-refs store
+// (which keeps it at the root of a per-checkpoint ref) embed it and share this
+// code.
+type treeWriter struct {
+	repo *git.Repository
+}
+
+// GitStore is the committed (persistent) checkpoint store. Writes target
+// refs.Primary; committed reads resolve against refs.Read. It embeds
+// *treeWriter for the shared subtree-building machinery.
 type GitStore struct {
-	repo        *git.Repository
-	refs        CommittedRefs
-	blobFetcher BlobFetchFunc
+	*treeWriter
+
+	refs                  PersistentRefs
+	blobFetcher           BlobFetchFunc
+	metadataBranchFetcher MetadataBranchFetchFunc
+	// metadataBranchFetchTried latches the one recovery attempt per store; see
+	// tryFetchMetadataBranch.
+	metadataBranchFetchTried bool
+	// readRemotes is the ordered checkpoint read-candidate chain consulted by
+	// committed reads after the local tree; see OpenOptions.ReadRemotes. nil
+	// means the legacy origin-only fallback.
+	readRemotes []string
 }
 
 // NewGitStore creates a checkpoint store backed by the given git repository
 // and committed-metadata topology. Pass DefaultV1Refs() for the v1-only default
-// or ResolveCommittedRefs(ctx) in code paths that honor settings.
-func NewGitStore(repo *git.Repository, refs CommittedRefs) *GitStore {
-	return &GitStore{repo: repo, refs: refs}
+// or ResolveRefs(ctx) in code paths that honor settings.
+func NewGitStore(repo *git.Repository, refs PersistentRefs) *GitStore {
+	return &GitStore{treeWriter: &treeWriter{repo: repo}, refs: refs}
 }
 
 // SetBlobFetcher configures the store to automatically fetch missing blobs
@@ -32,24 +56,45 @@ func (s *GitStore) SetBlobFetcher(f BlobFetchFunc) {
 	s.blobFetcher = f
 }
 
+// SetReadRemotes configures the ordered checkpoint read-candidate remotes
+// (elected sync remote first, then the legacy origin tier) whose tracking
+// refs committed reads consult after the local tree. Selection happens by
+// requested checkpoint, so an existing but incomplete tree does not mask a
+// later candidate. This is a pure read — the chain never seeds or advances
+// local refs. nil keeps the legacy origin-only fallback.
+func (s *GitStore) SetReadRemotes(remotes []string) {
+	s.readRemotes = remotes
+}
+
+// SetMetadataBranchFetcher configures the store to fetch the metadata branch
+// from the checkpoint remote when it is missing both locally and on origin.
+// See MetadataBranchFetchFunc for when it is appropriate to wire this.
+func (s *GitStore) SetMetadataBranchFetcher(f MetadataBranchFetchFunc) {
+	s.metadataBranchFetcher = f
+}
+
 // Repository returns the underlying git repository.
 func (s *GitStore) Repository() *git.Repository {
 	return s.repo
 }
 
 // Refs returns the committed-metadata topology the store was constructed with.
-func (s *GitStore) Refs() CommittedRefs {
+func (s *GitStore) Refs() PersistentRefs {
 	return s.refs
 }
 
-// CommittedReadRef returns the ref that committed-checkpoint reads resolve against.
-func (s *GitStore) CommittedReadRef() plumbing.ReferenceName {
+// PersistentReadRef returns the ref that committed-checkpoint reads resolve against.
+func (s *GitStore) PersistentReadRef() plumbing.ReferenceName {
 	return s.refs.Read
 }
 
-func (s *GitStore) setPrimaryRef(hash plumbing.Hash) error {
-	if err := s.repo.Storer.SetReference(plumbing.NewHashReference(s.refs.Primary, hash)); err != nil {
-		return fmt.Errorf("set primary metadata ref %s to %s: %w", s.refs.Primary, hash, err)
-	}
-	return nil
+func (s *GitStore) updatePrimaryRef(ctx context.Context, build func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error)) error {
+	return updatePersistentRef(ctx, s.repo, s.refs.Primary, func() (plumbing.Hash, plumbing.Hash, error) {
+		parentHash, rootTreeHash, err := s.getSessionsBranchRef()
+		if err != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, err
+		}
+		newHash, buildErr := build(parentHash, rootTreeHash)
+		return newHash, parentHash, buildErr
+	})
 }

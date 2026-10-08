@@ -133,9 +133,10 @@ func TestParseLoginServer(t *testing.T) {
 	cases := []struct {
 		name, in, want string // want=="" means error expected
 	}{
-		{"default form", "https://us.auth.entire.io", "https://us.auth.entire.io"},
+		{"default form", "https://auth.entire.io", "https://auth.entire.io"},
+		{"regional form", "https://us.auth.entire.io", "https://us.auth.entire.io"},
 		{"trailing slash normalised", "https://eu.auth.entire.io/", "https://eu.auth.entire.io"},
-		{"case and default port normalised", "HTTPS://US.AUTH.ENTIRE.IO:443", "https://us.auth.entire.io"},
+		{"case and default port normalised", "HTTPS://AUTH.ENTIRE.IO:443", "https://auth.entire.io"},
 		{"loopback http kept", "http://127.0.0.1:8787", "http://127.0.0.1:8787"},
 		{"empty", "", ""},
 		{"whitespace only", "   ", ""},

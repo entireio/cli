@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -71,10 +73,6 @@ func (e *Agent) Type() types.AgentType {
 
 func (e *Agent) Description() string {
 	return e.info.Description
-}
-
-func (e *Agent) IsPreview() bool {
-	return e.info.IsPreview
 }
 
 func (e *Agent) DetectPresence(ctx context.Context) (bool, error) {
@@ -160,7 +158,11 @@ func (e *Agent) GetSessionID(input *agent.HookInput) string {
 }
 
 func (e *Agent) GetSessionDir(repoPath string) (string, error) {
-	stdout, err := e.run(context.Background(), nil, "get-session-dir", "--repo-path", repoPath)
+	return e.getSessionDir(context.Background(), repoPath)
+}
+
+func (e *Agent) getSessionDir(ctx context.Context, repoPath string) (string, error) {
+	stdout, err := e.run(ctx, nil, "get-session-dir", "--repo-path", repoPath)
 	if err != nil {
 		return "", fmt.Errorf("get-session-dir: %w", err)
 	}
@@ -201,6 +203,30 @@ func (e *Agent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error)
 }
 
 func (e *Agent) WriteSession(ctx context.Context, session *agent.AgentSession) error {
+	// Preflight before marshalling: a ref that is going to be refused should not
+	// first be serialized into the payload it will never be sent in.
+	needsStoreCheck, err := agent.ValidateExternalSessionRef(session.SessionRef)
+	if err != nil {
+		return fmt.Errorf("write-session: validate session reference: %w", err)
+	}
+	if needsStoreCheck && session.RepoPath != "" {
+		// Fails closed: a filesystem-shaped reference cannot be checked for
+		// containment without the directory it is supposed to be inside, and
+		// this is the preflight's whole job. A plugin that cannot report its
+		// session directory is told which subprocess failed.
+		sessionDir, dirErr := e.getSessionDir(ctx, session.RepoPath)
+		if dirErr != nil {
+			return fmt.Errorf("write-session: get-session-dir: %w", dirErr)
+		}
+		store, storeErr := agent.OpenSessionStoreAt(e, sessionDir)
+		if storeErr != nil {
+			return fmt.Errorf("write-session: open session store: %w", storeErr)
+		}
+		if err := store.ValidateExternalWriteRef(session.SessionRef); err != nil {
+			return fmt.Errorf("write-session: validate session reference: %w", err)
+		}
+	}
+
 	data, err := marshalAgentSession(session)
 	if err != nil {
 		return fmt.Errorf("write-session: marshal: %w", err)
@@ -232,11 +258,16 @@ func (e *Agent) HookNames() []string {
 
 func (e *Agent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	const maxParseHookBytes = 10 * 1024 * 1024 // 10 MB
-	data, err := io.ReadAll(io.LimitReader(stdin, maxParseHookBytes))
+	// Stream a single (size-bounded) JSON value rather than io.ReadAll, so the
+	// hook never blocks waiting for stdin EOF that some agents don't send on
+	// Windows/Git Bash (issue #1398). The external "parse-hook" contract receives
+	// the host's hook payload — which is JSON — and we forward its raw bytes
+	// verbatim to the subprocess, so a plain byte copy is preserved.
+	raw, err := agent.ReadHookInputRawLimited(stdin, maxParseHookBytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse-hook: read stdin: %w", err)
 	}
-	stdout, err := e.run(ctx, data, "parse-hook", "--hook", hookName)
+	stdout, err := e.run(ctx, raw, "parse-hook", "--hook", hookName)
 	if err != nil {
 		return nil, fmt.Errorf("parse-hook: %w", err)
 	}
@@ -251,11 +282,14 @@ func (e *Agent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Re
 	return event.toEvent()
 }
 
-func (e *Agent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+// InstallHooks invokes the external agent's install-hooks subcommand.
+//
+// The protocol's optional --local-dev flag is never sent: it asked the agent to
+// point hooks at a build inside the working tree, which is exactly the shape
+// that let repository content run from installed hooks. External agents may
+// still accept the flag, but nothing here requests it.
+func (e *Agent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	args := []string{"install-hooks"}
-	if localDev {
-		args = append(args, "--local-dev")
-	}
 	if force {
 		args = append(args, "--force")
 	}
@@ -271,23 +305,27 @@ func (e *Agent) InstallHooks(ctx context.Context, localDev bool, force bool) (in
 }
 
 func (e *Agent) UninstallHooks(ctx context.Context) error {
+	// Returned unwrapped for the same reason as probeHooksInstalled below: run
+	// already prefixes the subcommand, and uninstall reports this to the user.
 	_, err := e.run(ctx, nil, "uninstall-hooks")
-	if err != nil {
-		return fmt.Errorf("uninstall-hooks: %w", err)
-	}
-	return nil
+	return err
 }
 
-func (e *Agent) AreHooksInstalled(ctx context.Context) bool {
+// AreHooksInstalled asks the plugin. A plugin that crashes, times out, or prints
+// junk is not a plugin with no hooks, so that is reported as an error rather
+// than collapsed into false — the caller decides what an unknown state means.
+func (e *Agent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	stdout, err := e.run(ctx, nil, "are-hooks-installed")
 	if err != nil {
-		return false
+		// run already names the subcommand and carries the plugin's stderr; this
+		// error reaches the user verbatim, so do not prefix it again.
+		return false, err
 	}
 	var resp AreHooksInstalledResponse
 	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return false
+		return false, fmt.Errorf("are-hooks-installed: invalid JSON: %w", err)
 	}
-	return resp.Installed
+	return resp.Installed, nil
 }
 
 // --- TranscriptAnalyzer methods ---
@@ -304,7 +342,7 @@ func (e *Agent) GetTranscriptPosition(path string) (int, error) {
 	return resp.Position, nil
 }
 
-func (e *Agent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
+func (e *Agent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) ([]string, int, error) {
 	stdout, err := e.run(context.Background(), nil, "extract-modified-files",
 		"--path", path, "--offset", strconv.Itoa(startOffset))
 	if err != nil {
@@ -369,8 +407,19 @@ func (e *Agent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*age
 
 // --- TextGenerator methods ---
 
+// GenerateText runs generate-text outside the repository. Its stdin is a
+// summary prompt carrying untrusted transcript content, so the plugin gets
+// what the built-in generators get (agent.RunIsolatedTextGeneratorCLI): a
+// fresh empty working directory, no ENTIRE_REPO_ROOT, and no GIT_* variables.
+// Whatever tools the plugin's own model has, the repository is not where it
+// starts.
 func (e *Agent) GenerateText(ctx context.Context, prompt string, model string) (string, error) {
-	stdout, err := e.run(ctx, []byte(prompt), "generate-text", "--model", model)
+	dir, cleanup, err := agent.NewTextGenerationDir()
+	if err != nil {
+		return "", fmt.Errorf("generate-text: %w", err)
+	}
+	defer cleanup()
+	stdout, err := e.runIn(ctx, dir, []byte(prompt), "generate-text", "--model", model)
 	if err != nil {
 		return "", fmt.Errorf("generate-text: %w", err)
 	}
@@ -423,6 +472,40 @@ func (e *Agent) CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, 
 // If stdin is non-nil it is piped to the process. On non-zero exit, stderr is
 // included in the returned error.
 func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+	return e.runIn(ctx, "", stdin, args...)
+}
+
+// runIn is run with a choice of working directory. An empty isolatedDir runs
+// from the repository root with ENTIRE_REPO_ROOT set, as the protocol
+// documents for every subcommand. A non-empty one runs there instead, with
+// ENTIRE_REPO_ROOT, GIT_*, and the caller's PWD removed from the environment
+// (agent.TextGenerationEnv): the repository is neither the working directory
+// nor named to the plugin.
+func (e *Agent) runIn(ctx context.Context, isolatedDir string, stdin []byte, args ...string) ([]byte, error) {
+	// Every error below labels its message with the subcommand, args[0], so an
+	// empty slice panics on the way to reporting the real failure rather than
+	// returning it. run is variadic and New is exported, so the callers are not
+	// only this package's own.
+	if len(args) == 0 {
+		return nil, fmt.Errorf("refusing to run external agent binary %q: no subcommand given", e.binaryPath)
+	}
+
+	// binaryPath must be absolute, and the check belongs here rather than at
+	// the caller. run sets cmd.Dir to the worktree root below, and os/exec
+	// resolves a relative Path against Dir — so the file registerExternalAgent
+	// statted (relative to ITS working directory) is not necessarily the file
+	// that executes. Anchoring on an absolute path makes validation and
+	// execution name the same file.
+	//
+	// Go refuses only part of this on its own: exec.Command re-checks a
+	// separator-free name through LookPath and reports ErrDot, but a relative
+	// path WITH a separator ("./x", "sub/x") gets no such treatment. New is
+	// exported, so this is also the only guarantee a caller outside the
+	// scanner has.
+	if !filepath.IsAbs(e.binaryPath) {
+		return nil, fmt.Errorf("%s: refusing to run external agent binary %q: path is not absolute", args[0], e.binaryPath)
+	}
+
 	// Apply a default timeout when the caller hasn't set a deadline, so a hung
 	// external binary can't block the CLI (or git hooks) indefinitely.
 	if _, ok := ctx.Deadline(); !ok {
@@ -439,8 +522,15 @@ func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, 
 		"ENTIRE_PROTOCOL_VERSION="+strconv.Itoa(ProtocolVersion),
 		"ENTIRE_CLI_VERSION="+versioninfo.Version,
 	)
-	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
-		cmd.Env = append(cmd.Env, "ENTIRE_REPO_ROOT="+repoRoot)
+	if isolatedDir != "" {
+		cmd.Dir = isolatedDir
+		// EqualFold: Windows environment names are case-insensitive.
+		cmd.Env = slices.DeleteFunc(agent.TextGenerationEnv(isolatedDir, cmd.Env), func(kv string) bool {
+			name, _, _ := strings.Cut(kv, "=")
+			return strings.EqualFold(name, repoRootEnvVar)
+		})
+	} else if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
+		cmd.Env = append(cmd.Env, repoRootEnvVar+"="+repoRoot)
 		cmd.Dir = repoRoot
 	}
 
@@ -470,6 +560,9 @@ func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, 
 
 	return stdoutBuf.Bytes(), nil
 }
+
+// repoRootEnvVar names the repository root to a plugin subcommand.
+const repoRootEnvVar = "ENTIRE_REPO_ROOT"
 
 // --- Helpers ---
 

@@ -80,9 +80,7 @@ func TestDiscoverAPI(t *testing.T) {
 
 	t.Run("transport error → ErrDiscoveryUnavailable", func(t *testing.T) {
 		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-		client := hostPinningClient(t, srv)
-		srv.Close()
+		client := deadPinningClient(t)
 
 		_, err := DiscoverAPI(t.Context(), "partial.to", client, t.Logf)
 		assert.ErrorIs(t, err, ErrDiscoveryUnavailable)
@@ -115,7 +113,7 @@ func TestDiscoverAPI(t *testing.T) {
 		// schemeRewriteClient rewrites the hard-coded https:// to http:// but
 		// leaves the host alone, so the redirect actually reaches `target`
 		// rather than being pinned back to `redirector`.
-		client := &http.Client{Transport: schemeRewriteTransport{base: http.DefaultTransport}}
+		client := &http.Client{Transport: schemeRewriteTransport{base: newTestTransport(t)}}
 		host := strings.TrimPrefix(redirector.URL, "http://")
 
 		doc, err := DiscoverAPI(t.Context(), host, client, t.Logf)
@@ -170,10 +168,11 @@ func TestResolveContextForAPI(t *testing.T) {
 		assert.Equal(t, "me@us-partial", c.Name)
 	})
 
-	// The cross-core case the slice exists to fix: the active context is a prod
-	// login, but the only context eligible for the partial.to API is the
-	// staging one — pick it without any operator-side configuration.
-	t.Run("sole eligible context used despite unrelated active", func(t *testing.T) {
+	// The `ENTIRE_API_BASE_URL=https://partial.to entire activity` case: the
+	// active login is on a core this host doesn't trust. The one saved login
+	// that would work is named, never used unasked — the data API never
+	// auto-selects.
+	t.Run("unrelated active context names the eligible login instead of using it", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(apiHandler(t, "https://us.auth.partial.to", "https://eu.auth.partial.to"))
 		defer srv.Close()
@@ -187,12 +186,14 @@ func TestResolveContextForAPI(t *testing.T) {
 			},
 		}))
 
-		c, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
-		require.NoError(t, err)
-		assert.Equal(t, "me@staging", c.Name)
+		_, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `API host partial.to does not accept your active login "me@prod"`)
+		assert.Contains(t, err.Error(), "These saved logins can authenticate it: me@staging")
+		assert.Contains(t, err.Error(), "entire auth switch")
 	})
 
-	t.Run("no eligible context → login hint naming the API host", func(t *testing.T) {
+	t.Run("no eligible context → login hint naming the API host's servers", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(apiHandler(t, "https://us.auth.partial.to"))
 		defer srv.Close()
@@ -206,10 +207,15 @@ func TestResolveContextForAPI(t *testing.T) {
 		_, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
 		require.Error(t, err)
 		require.NotErrorIs(t, err, ErrDiscoveryUnavailable, "a reachable-but-unmatched API is a real login error, not a fallback case")
-		assert.Contains(t, err.Error(), "no auth context for API host partial.to")
+		assert.Contains(t, err.Error(), "API host partial.to does not accept your active login")
+		assert.Contains(t, err.Error(), "no other saved login does either")
+		assert.Contains(t, err.Error(), "https://us.auth.partial.to", "name the server that would work")
+		assert.Contains(t, err.Error(), "entire login --server")
 	})
 
-	t.Run("ambiguous eligible contexts → explicit-choice error", func(t *testing.T) {
+	// Two eligible contexts leave nothing to auto-select: the resolver refuses to
+	// guess which account acts, and names both, sorted.
+	t.Run("several eligible contexts are ambiguous", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(apiHandler(t, "https://us.auth.partial.to"))
 		defer srv.Close()
@@ -219,15 +225,15 @@ func TestResolveContextForAPI(t *testing.T) {
 			CurrentContext: "me@prod",
 			Contexts: []*contexts.Context{
 				{Name: "me@prod", CoreURL: "https://us.auth.entire.io", Handle: "me", KeychainService: "kc:prod"},
-				{Name: "alice@partial", CoreURL: "https://us.auth.partial.to", Handle: "alice", KeychainService: "kc:a"},
 				{Name: "bob@partial", CoreURL: "https://us.auth.partial.to", Handle: "bob", KeychainService: "kc:b"},
+				{Name: "alice@partial", CoreURL: "https://us.auth.partial.to", Handle: "alice", KeychainService: "kc:a"},
 			},
 		}))
 
 		_, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "multiple login contexts")
-		assert.Contains(t, err.Error(), "API host partial.to")
+		assert.Contains(t, err.Error(), "multiple login contexts can authenticate against API host partial.to")
+		assert.Contains(t, err.Error(), "alice@partial, bob@partial", "sorted, not in stored order")
 	})
 
 	t.Run("unadvertised → ErrDiscoveryUnavailable for fallback", func(t *testing.T) {
@@ -294,10 +300,10 @@ func TestResolveContextForAPI_CachedAcrossCalls(t *testing.T) {
 	// The trusted issuers are persisted (in the cores cache, separate file).
 	cache, err := discovery.LoadAPICores(cacheDir)
 	require.NoError(t, err)
-	urls, fresh, ok := cache.Get("partial.to")
+	entry, fresh, ok := cache.GetEntry("partial.to")
 	require.True(t, ok)
 	assert.True(t, fresh)
-	assert.Equal(t, []string{"https://us.auth.partial.to"}, urls)
+	assert.Equal(t, []string{"https://us.auth.partial.to"}, entry.CoreURLs)
 }
 
 // TestResolveContextForAPI_StaleFallbackOnFetchFailure: a present-but-stale

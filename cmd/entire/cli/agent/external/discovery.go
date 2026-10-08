@@ -2,8 +2,11 @@ package external
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -11,6 +14,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -23,17 +28,52 @@ const (
 // discoveryTimeout caps the total time spent scanning $PATH for external agents.
 const discoveryTimeout = 10 * time.Second
 
+var (
+	statExternalAgent     = os.Stat       //nolint:gochecknoglobals // narrow test seam for stat failures
+	lookPathExternalAgent = exec.LookPath //nolint:gochecknoglobals // narrow test seam for lookup failures
+)
+
 // DiscoverAndRegister scans $PATH for executables matching "entire-agent-<name>",
 // calls their "info" subcommand, and registers them in the agent registry.
 // Binaries whose name conflicts with an already-registered agent are skipped.
 // Errors during discovery are logged but do not prevent other agents from loading.
 // Discovery is skipped when the external_agents setting is not enabled.
 func DiscoverAndRegister(ctx context.Context) {
-	if !settings.IsExternalAgentsEnabled(ctx) {
+	// settings.Load directly rather than settings.IsExternalAgentsEnabled: the
+	// disabled path needs the same object again to report a refused grant, and
+	// Load is uncached and already runs several times per hook.
+	s, err := settings.Load(ctx)
+	if err != nil {
+		logging.Debug(ctx, "external agent discovery skipped (settings unreadable)",
+			slog.String("error", err.Error()))
+		return
+	}
+	if !s.ExternalAgents {
+		reportExternalAgentsRejection(ctx, s)
 		logging.Debug(ctx, "external agent discovery disabled (external_agents not enabled in settings)")
 		return
 	}
 	discoverAndRegister(ctx)
+}
+
+// reportExternalAgentsRejection tells the user when discovery is off because
+// the loader refused an external_agents grant rather than because they never
+// set one. The two look identical from here — no agent appears — and the fix
+// (move the setting into an untracked .entire/settings.local.json) is not
+// guessable from the symptom. The loader records rather than logs, so this is
+// the first place that can say anything.
+func reportExternalAgentsRejection(ctx context.Context, s *settings.EntireSettings) {
+	reason, rejected := s.ExternalAgentsRejection()
+	if !rejected {
+		return
+	}
+	logging.Warn(ctx, "ignoring external_agents",
+		slog.String("reason", reason),
+		slog.String("remediation", "set external_agents in "+settings.EntireSettingsLocalFile+", untracked"))
+	if interactive.IsTerminalWriter(os.Stderr) {
+		fmt.Fprintf(os.Stderr, "[entire] ignoring external_agents (%s); move it to %s and keep that file out of version control\n",
+			reason, settings.EntireSettingsLocalFile)
+	}
 }
 
 // DiscoverAndRegisterAlways is like DiscoverAndRegister but bypasses the
@@ -43,13 +83,110 @@ func DiscoverAndRegisterAlways(ctx context.Context) {
 	discoverAndRegister(ctx)
 }
 
+// DiscoverAndRegisterNamedAlways discovers and registers only the external
+// agent binary matching name. It bypasses the external_agents setting for
+// explicit, one-invocation selections without executing unrelated plugins.
+func DiscoverAndRegisterNamedAlways(ctx context.Context, name types.AgentName) error {
+	return discoverAndRegisterNamed(ctx, name, discoveryTimeout)
+}
+
+// BinaryOnPath reports whether an entire-agent-<name> executable is on $PATH,
+// without executing it. For callers that must defer to a plugin that could
+// claim name but are not allowed to run plugins to find out (doctor). A lookup
+// that fails for any reason other than "not found" counts as present, so the
+// caller errs on the side of leaving the plugin's state alone.
+func BinaryOnPath(name types.AgentName) bool {
+	if name == "" || strings.ContainsAny(string(name), `/\`) {
+		return false
+	}
+	_, err := lookPathExternalAgent(binaryPrefix + string(name))
+	return !errors.Is(err, exec.ErrNotFound)
+}
+
+// discoveryCanceled reports whether either the caller's context or the derived
+// discovery-timeout context has been cancelled.
+//
+// Both must be consulted. A context closes its own Done channel *before* cancelling
+// its children, so a goroutine that has just observed the caller's cancellation can
+// run while the derived context still reports no error — and when the caller is not a
+// standard context, propagation happens in a watcher goroutine, widening the window
+// further. Checking only the derived context therefore lets a caller whose deadline
+// expired mid-operation look like it is still live.
+func discoveryCanceled(caller, derived context.Context) bool {
+	return caller.Err() != nil || derived.Err() != nil
+}
+
+// discoveryCtxErr wraps whichever of the two contexts has been cancelled, preferring
+// the caller's, and returns nil when neither has. op names the stage for the message.
+// See discoveryCanceled for why the caller's context must be consulted too: missing it
+// lets a caller whose deadline expired mid-lookup receive a nil error and a silently
+// skipped agent instead of its context error.
+func discoveryCtxErr(caller, derived context.Context, op string) error {
+	err := caller.Err()
+	if err == nil {
+		err = derived.Err()
+	}
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
+func discoverAndRegisterNamed(ctx context.Context, name types.AgentName, timeout time.Duration) error {
+	if name == "" {
+		return nil
+	}
+	if strings.ContainsAny(string(name), `/\`) {
+		return fmt.Errorf("invalid external agent name %q: contains path separators", name)
+	}
+	if _, err := agent.Get(name); err == nil {
+		return nil
+	}
+
+	// `ctx` deliberately stays the CALLER's context; the derived timeout gets its own
+	// name. Shadowing `ctx` with the derived context is what caused the bug this
+	// function is guarding against, and it left the trap in place for the next edit.
+	discoveryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := discoveryCtxErr(ctx, discoveryCtx, fmt.Sprintf("discovering external agent %q", name)); err != nil {
+		return err
+	}
+
+	binName := binaryPrefix + string(name)
+	binPath, err := lookPathExternalAgent(binName)
+	if ctxErr := discoveryCtxErr(ctx, discoveryCtx, fmt.Sprintf("looking up external agent %q binary %q", name, binName)); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("looking up external agent %q binary %q: %w", name, binName, err)
+	}
+	registered, err := registerExternalAgent(discoveryCtx, binPath, name)
+	if err != nil {
+		return err
+	}
+	if !registered {
+		return fmt.Errorf("external agent %q binary %q was found but could not be registered", name, binPath)
+	}
+	return nil
+}
+
 // discoverAndRegister contains the shared scanning logic for external agent discovery.
 func discoverAndRegister(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
+	// As above: `ctx` remains the caller's, the derived timeout is named.
+	discoveryCtx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
 
-	pathEnv := os.Getenv("PATH")
-	if pathEnv == "" {
+	// execx.PathScanDirs, not a bare $PATH split: this scanner resolves by
+	// filepath.Glob, so a match never passes through exec.LookPath (no ErrDot)
+	// and arrives with separators in it (so exec.Command's own re-check does
+	// not apply either). Dropping non-absolute entries at the source is the
+	// only thing standing between a file committed to the user's repository
+	// and a binary this function executes to ask for its info.
+	scanDirs := execx.PathScanDirs()
+	if len(scanDirs) == 0 {
 		return
 	}
 
@@ -60,8 +197,8 @@ func discoverAndRegister(ctx context.Context) {
 	}
 
 	seen := make(map[string]bool) // deduplicate binaries across PATH dirs
-	for _, dir := range filepath.SplitList(pathEnv) {
-		if ctx.Err() != nil {
+	for _, dir := range scanDirs {
+		if discoveryCanceled(ctx, discoveryCtx) {
 			logging.Debug(ctx, "external agent discovery timed out")
 			return
 		}
@@ -71,7 +208,7 @@ func discoverAndRegister(ctx context.Context) {
 			continue // skip unreadable directories
 		}
 		for _, binPath := range matches {
-			if ctx.Err() != nil {
+			if discoveryCanceled(ctx, discoveryCtx) {
 				logging.Debug(ctx, "external agent discovery timed out")
 				return
 			}
@@ -93,42 +230,59 @@ func discoverAndRegister(ctx context.Context) {
 				continue
 			}
 
-			finfo, err := os.Stat(binPath) //nolint:gosec // PATH entries are trusted
-			if err != nil || finfo.IsDir() {
-				continue
-			}
-			// Check executable bit (on Unix; Windows doesn't set execute bits)
-			if runtime.GOOS != osWindows && finfo.Mode()&0o111 == 0 {
-				continue
-			}
-
-			ea, err := New(ctx, binPath)
+			registeredAgent, err := registerExternalAgent(discoveryCtx, binPath, agentName)
 			if err != nil {
-				logging.Debug(ctx, "skipping external agent (info failed)",
+				logging.Debug(ctx, "skipping external agent (registration failed)",
 					slog.String("binary", binPath),
+					slog.String("agent", string(agentName)),
 					slog.String("error", err.Error()))
 				continue
 			}
-
-			// Wrap with capability interfaces and register
-			wrapped, err := Wrap(ea)
-			if err != nil {
-				logging.Debug(ctx, "skipping external agent (wrap failed)",
-					slog.String("binary", binPath),
-					slog.String("error", err.Error()))
-				continue
+			if registeredAgent {
+				registered[agentName] = true
 			}
-			agent.Register(agentName, func() agent.Agent {
-				return wrapped
-			})
-			registered[agentName] = true
-
-			logging.Debug(ctx, "registered external agent",
-				slog.String("name", string(agentName)),
-				slog.String("type", string(ea.Type())),
-				slog.String("binary", binPath))
 		}
 	}
+}
+
+func registerExternalAgent(ctx context.Context, binPath string, name types.AgentName) (bool, error) {
+	finfo, err := statExternalAgent(binPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspecting external agent %q binary %q: %w", name, binPath, err)
+	}
+	if finfo.IsDir() {
+		return false, nil
+	}
+	// Check executable bit (on Unix; Windows doesn't set execute bits).
+	if runtime.GOOS != osWindows && finfo.Mode()&0o111 == 0 {
+		return false, nil
+	}
+
+	ea, err := New(ctx, binPath)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, fmt.Errorf("loading info for external agent %q from binary %q: %w: %w", name, binPath, ctxErr, err)
+		}
+		return false, fmt.Errorf("loading info for external agent %q from binary %q: %w", name, binPath, err)
+	}
+
+	wrapped, err := Wrap(ea)
+	if err != nil {
+		return false, fmt.Errorf("wrapping external agent %q from binary %q: %w", name, binPath, err)
+	}
+	agent.Register(name, func() agent.Agent {
+		return wrapped
+	})
+	recordCallerEnvVars(ea.info.CallerEnvVars, string(ea.Type()))
+
+	logging.Debug(ctx, "registered external agent",
+		slog.String("name", string(name)),
+		slog.String("type", string(ea.Type())),
+		slog.String("binary", binPath))
+	return true, nil
 }
 
 // StripExeExt removes Windows executable extensions (.exe, .bat, .cmd, .com)

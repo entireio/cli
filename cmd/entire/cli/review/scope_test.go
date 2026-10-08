@@ -2,12 +2,12 @@ package review
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // defaultBranchName is the normalised default branch name used by initRepoOnMain.
@@ -39,12 +39,7 @@ func initRepoOnMain(t *testing.T, dir string) {
 	t.Helper()
 	testutil.InitRepo(t, dir)
 	// Rename whatever go-git created (master) to "main". Works before any commits.
-	//nolint:noctx // test helper
-	cmd := exec.Command("git", "symbolic-ref", "HEAD", "refs/heads/main")
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("set HEAD to main: %v\n%s", err, out)
-	}
+	testutil.RunGit(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
 }
 
 // TestFormatScopeBanner_Pluralisation verifies plural/singular forms.
@@ -132,9 +127,9 @@ func TestDetectScopeBaseRef_BranchOffMain(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepo(t, dir)
 
-	baseRef, err := detectScopeBaseRef(ctx, repo)
+	baseRef, err := fallbackScopeRef(repo)
 	if err != nil {
-		t.Fatalf("detectScopeBaseRef: %v", err)
+		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 	if baseRef != defaultBranchName {
 		t.Errorf("baseRef = %q, want %q", baseRef, defaultBranchName)
@@ -181,21 +176,11 @@ func TestCountFilesChanged_ThreeDotIgnoresUpstreamOnlyChanges(t *testing.T) {
 
 	// Switch back to main and add a commit AFTER the branch point. This is
 	// the upstream-only change that two-dot diff would mis-count.
-	//nolint:noctx // test helper
-	checkout := exec.Command("git", "checkout", defaultBranchName)
-	checkout.Dir = dir
-	if out, err := checkout.CombinedOutput(); err != nil {
-		t.Fatalf("checkout main: %v\n%s", err, out)
-	}
+	testutil.RunGit(t, dir, "checkout", defaultBranchName)
 	commitFile(t, dir, "main-only.go", "package main", "post-branch main change")
 
 	// Return to feat/x — this is the branch the user would be reviewing.
-	//nolint:noctx // test helper
-	checkout = exec.Command("git", "checkout", "feat/x")
-	checkout.Dir = dir
-	if out, err := checkout.CombinedOutput(); err != nil {
-		t.Fatalf("checkout feat/x: %v\n%s", err, out)
-	}
+	testutil.RunGit(t, dir, "checkout", "feat/x")
 
 	ctx := context.Background()
 	got, err := countFilesChanged(ctx, dir, defaultBranchName)
@@ -236,12 +221,11 @@ func TestDetectScopeBaseRef_PrefersMainOverAncestorBranches(t *testing.T) {
 	commitFile(t, dir, "child1.go", "package main", "child commit 1")
 	commitFile(t, dir, "child2.go", "package main", "child commit 2")
 
-	ctx := context.Background()
 	repo := openTestRepo(t, dir)
 
-	baseRef, err := detectScopeBaseRef(ctx, repo)
+	baseRef, err := fallbackScopeRef(repo)
 	if err != nil {
-		t.Fatalf("detectScopeBaseRef: %v", err)
+		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 	// Mainline must win even though feat/parent's tip is newer.
 	if baseRef != defaultBranchName {
@@ -261,19 +245,13 @@ func TestDetectScopeBaseRef_DetachedHEAD(t *testing.T) {
 	headSHA := testutil.GetHeadHash(t, dir)
 
 	// Detach HEAD by checking out the SHA directly.
-	//nolint:noctx // test helper
-	cmd := exec.Command("git", "checkout", "--detach", headSHA)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("detach HEAD: %v\n%s", err, out)
-	}
+	testutil.RunGit(t, dir, "checkout", "--detach", headSHA)
 
-	ctx := context.Background()
 	repo := openTestRepo(t, dir)
 
-	baseRef, err := detectScopeBaseRef(ctx, repo)
+	baseRef, err := fallbackScopeRef(repo)
 	if err != nil {
-		t.Fatalf("detectScopeBaseRef: %v", err)
+		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 	// With no ancestor branches (detached HEAD, no origin), falls back to "main".
 	if baseRef != defaultBranchName {
@@ -307,9 +285,9 @@ func TestDetectScopeBaseRef_CleanDefaultBranch(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepo(t, dir)
 
-	baseRef, err := detectScopeBaseRef(ctx, repo)
+	baseRef, err := fallbackScopeRef(repo)
 	if err != nil {
-		t.Fatalf("detectScopeBaseRef: %v", err)
+		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 
 	commits, err := countCommits(ctx, dir, baseRef)
@@ -374,28 +352,16 @@ func TestDetectScopeBaseRef_NoSuitableAncestor(t *testing.T) {
 	commitFile(t, dir, "file.go", "package main", "init")
 
 	// Determine which default branch was created.
-	//nolint:noctx // test helper
-	branchOut, err := exec.Command("git", "-C", dir, "branch", "--show-current").Output()
-	if err != nil {
-		t.Fatalf("get current branch: %v", err)
-	}
-	defaultBranch := strings.TrimSpace(string(branchOut))
+	defaultBranch := strings.TrimSpace(testutil.RunGit(t, dir, "branch", "--show-current"))
 
-	// Rename default branch to a non-fallback name so detectScopeBaseRef
+	// Rename default branch to a non-fallback name so fallbackScopeRef
 	// cannot resolve any fallback.
-	//nolint:noctx // test helper
-	cmd := exec.Command("git", "branch", "-m", defaultBranch, "custom-branch")
-	cmd.Dir = dir
-	if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
-		t.Fatalf("rename branch: %v\n%s", cmdErr, out)
-	}
-
-	ctx := context.Background()
+	testutil.RunGit(t, dir, "branch", "-m", defaultBranch, "custom-branch")
 
 	// Re-open repo after rename.
 	repo := openTestRepo(t, dir)
 
-	_, detectErr := detectScopeBaseRef(ctx, repo)
+	_, detectErr := fallbackScopeRef(repo)
 	if detectErr == nil {
 		t.Error("expected error when no suitable ancestor branch exists, got nil")
 	}

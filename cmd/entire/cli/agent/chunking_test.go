@@ -4,8 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
 func TestChunkJSONL_SmallContent(t *testing.T) {
@@ -116,6 +114,16 @@ func TestParseChunkIndex(t *testing.T) {
 		{"full.jsonl.100", "full.jsonl", 100},
 		{"other.txt", "full.jsonl", -1},
 		{"full.jsonl.abc", "full.jsonl", -1},
+		// jsonutil.CreateTempIn residue: a suffix that merely STARTS with
+		// digits is not a chunk index. "%03d" via fmt.Sscanf accepted these.
+		{"full.jsonl.123abcdef0123456.tmp", "full.jsonl", -1},
+		{"full.jsonl.9f0e1d2c3b4a5968.tmp", "full.jsonl", -1},
+		{"full.jsonl.0a1b2c3d4e5f6071.tmp", "full.jsonl", -1},
+		{"full.jsonl.001.tmp", "full.jsonl", -1},
+		{"full.jsonl.", "full.jsonl", -1},
+		// More than 999 chunks still parses: the format string pads to three
+		// digits but does not truncate above them.
+		{"full.jsonl.1000", "full.jsonl", 1000},
 	}
 
 	for _, tt := range tests {
@@ -218,44 +226,22 @@ func TestChunkJSONL_OversizedLineInMiddle(t *testing.T) {
 	}
 }
 
-func TestDetectAgentTypeFromContent(t *testing.T) {
+// Gemini CLI is no longer registered, but its chunked transcripts in stored
+// checkpoints are JSON documents: JSONL reassembly would join them into
+// invalid JSON.
+func TestReassembleTranscript_HistoricalGeminiChunks(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name     string
-		content  []byte
-		expected types.AgentType
-	}{
-		{
-			name:     "Gemini JSON",
-			content:  []byte(`{"messages":[{"type":"user","content":"hi"}]}`),
-			expected: AgentTypeGemini,
-		},
-		{
-			name:     "JSONL",
-			content:  []byte(`{"type":"human","message":"hi"}`),
-			expected: "",
-		},
-		{
-			name:     "Empty messages array",
-			content:  []byte(`{"messages":[]}`),
-			expected: "", // Empty messages should not be detected as Gemini
-		},
-		{
-			name:     "Invalid JSON",
-			content:  []byte(`not json`),
-			expected: "",
-		},
+	chunks := [][]byte{
+		[]byte(`{"messages":[{"type":"user","content":"hello"}]}`),
+		[]byte(`{"messages":[{"type":"gemini","content":"hi"}]}`),
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			result := DetectAgentTypeFromContent(tt.content)
-			if result != tt.expected {
-				t.Errorf("DetectAgentTypeFromContent() = %q, want %q", result, tt.expected)
-			}
-		})
+	result, err := ReassembleTranscript(chunks, AgentTypeGemini)
+	if err != nil {
+		t.Fatalf("ReassembleTranscript error: %v", err)
+	}
+	want := `{"messages":[{"type":"user","content":"hello"},{"type":"gemini","content":"hi"}]}`
+	if string(result) != want {
+		t.Errorf("ReassembleTranscript = %s, want %s", result, want)
 	}
 }

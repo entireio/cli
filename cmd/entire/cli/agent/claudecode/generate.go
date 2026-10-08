@@ -3,14 +3,161 @@ package claudecode
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
+
+// flagOutputFormat selects the CLI's response encoding; modelHaiku is the
+// default model for Entire's own generation calls (fast and cheap).
+const (
+	flagOutputFormat   = "--output-format"
+	flagSettingSources = "--setting-sources"
+	flagStrictMCP      = "--strict-mcp-config"
+	modelHaiku         = "haiku"
+)
+
+// buildGenerateArgs assembles the claude CLI argv for a --print text-generation
+// call.
+//
+// The subprocess must stay isolated from the user's project/local AND user
+// settings: loading them would fire user-level hooks and, worse, honor
+// user-level tool permissions (e.g. permissions.defaultMode=bypassPermissions),
+// which would let prompt-injection in the untrusted dispatch data drive tool
+// execution. So we pass --setting-sources "" (load nothing).
+//
+// Settings isolation alone still leaves every built-in tool available, and in
+// the default permission mode Read and read-only Bash run without approval
+// inside the working directory, so an injected "read this file" instruction
+// could copy a file's contents into the summary. --tools "" removes the tools
+// entirely; summary generation needs none, because the transcript is already
+// in the prompt.
+//
+// --tools "" covers the built-in set only: MCP servers from the user's
+// ~/.claude.json keep their tools under it (verified: a user-scope server
+// stayed connected with its 76 tools). --setting-sources "" also drops them on
+// Claude Code 2.1.285, but that is not documented behavior of the flag, so
+// --strict-mcp-config (with no --mcp-config) states it explicitly.
+//
+// The one thing we genuinely need from the user settings is auth. Users on API
+// billing configure it with `apiKeyHelper` (a command that prints the key),
+// which lives in user settings and is therefore dropped by --setting-sources "".
+// Rather than load the whole settings file back (and re-inherit hooks and
+// permissions), we extract only apiKeyHelper and re-inject it via a --settings
+// file (settingsPath), so auth works while nothing else from the user's settings
+// is loaded.
+//
+// The injected settings are passed as a file path, not an inline JSON string:
+// apiKeyHelper can embed a literal key, and an inline value would land in the
+// process argv (visible via ps / /proc/<pid>/cmdline / EDR tooling). The file is
+// written 0600 (see writeAuthSettingsFile), matching settings.json's protection.
+//
+// Auth methods that do not live in user settings — an exported ANTHROPIC_API_KEY
+// (survives StripGitEnv) and keychain/subscription credentials — keep working
+// without any injection (settingsPath == "").
+func buildGenerateArgs(model, settingsPath string) []string {
+	args := []string{
+		"--print", flagOutputFormat, "json",
+		"--model", model,
+		flagSettingSources, "",
+		"--tools", "",
+		flagStrictMCP,
+	}
+	if settingsPath != "" {
+		args = append(args, "--settings", settingsPath)
+	}
+	return args
+}
+
+// buildStreamingGenerateArgs is buildGenerateArgs for the stream-json path,
+// with the same isolation and auth-injection contract (see buildGenerateArgs).
+// --include-partial-messages enables the per-token stream_event envelopes
+// that PhaseFirstToken and PhaseGenerating are dispatched from, and
+// --verbose is required by the claude CLI for stream-json output.
+func buildStreamingGenerateArgs(model, settingsPath string) []string {
+	args := []string{
+		"--print",
+		flagOutputFormat, "stream-json",
+		"--include-partial-messages",
+		"--verbose",
+		"--model", model,
+		flagSettingSources, "",
+		"--tools", "",
+		flagStrictMCP,
+	}
+	if settingsPath != "" {
+		args = append(args, "--settings", settingsPath)
+	}
+	return args
+}
+
+// writeAuthSettingsFile writes a minimal claude settings file containing only
+// the given apiKeyHelper and returns its path plus a cleanup func. The file is
+// created 0600 so the (possibly key-bearing) helper is no more exposed than the
+// user's own settings.json. Returns ("", nil, nil) when apiKeyHelper is empty.
+func writeAuthSettingsFile(apiKeyHelper string) (string, func(), error) {
+	if strings.TrimSpace(apiKeyHelper) == "" {
+		return "", nil, nil
+	}
+	data, err := json.Marshal(map[string]string{"apiKeyHelper": apiKeyHelper})
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal auth settings: %w", err)
+	}
+	f, err := os.CreateTemp("", "entire-claude-auth-*.json") // 0600 by default
+	if err != nil {
+		return "", nil, fmt.Errorf("create auth settings file: %w", err)
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("write auth settings file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close auth settings file: %w", err)
+	}
+	return path, cleanup, nil
+}
+
+// userClaudeSettingsPath resolves the user's claude settings.json the same way
+// the claude CLI does: $CLAUDE_CONFIG_DIR/settings.json when set, otherwise
+// ~/.claude/settings.json.
+func userClaudeSettingsPath() (string, error) {
+	configDir, err := resolveClaudeConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "settings.json"), nil
+}
+
+// readUserAPIKeyHelper returns the apiKeyHelper field from the user's claude
+// settings, or "" if absent. Best-effort: a missing file or malformed JSON
+// yields "" so we fall back to env/keychain auth rather than failing.
+func readUserAPIKeyHelper() string {
+	path, err := userClaudeSettingsPath()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is the user's own claude config, not attacker-controlled
+	if err != nil {
+		return ""
+	}
+	var settings struct {
+		APIKeyHelper string `json:"apiKeyHelper"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(settings.APIKeyHelper)
+}
 
 // GenerateText sends a prompt to the Claude CLI and returns the raw text response.
 // Implements the agent.TextGenerator interface.
@@ -27,7 +174,7 @@ import (
 func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model string) (string, error) {
 	claudePath := "claude"
 	if model == "" {
-		model = "haiku"
+		model = modelHaiku
 	}
 
 	commandRunner := c.CommandRunner
@@ -35,14 +182,32 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 		commandRunner = exec.CommandContext
 	}
 
-	cmd := commandRunner(ctx, claudePath,
-		"--print", "--output-format", "json",
-		"--model", model, "--setting-sources", "")
+	// Run isolated from all setting sources (see buildGenerateArgs), re-injecting
+	// only the user's apiKeyHelper (via a 0600 file, never argv) so API-billing
+	// auth keeps working without re-inheriting user hooks or tool permissions.
+	// Best-effort: if extracting/writing the helper fails, fall back to running
+	// without it (env/keychain auth still work) rather than failing the call.
+	settingsPath, cleanup, err := writeAuthSettingsFile(readUserAPIKeyHelper())
+	if err != nil {
+		settingsPath = ""
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	workDir, cleanupDir, err := agent.NewTextGenerationDir()
+	if err != nil {
+		return "", err //nolint:wrapcheck // NewTextGenerationDir already names what failed
+	}
+	defer cleanupDir()
+
+	cmd := commandRunner(ctx, claudePath, buildGenerateArgs(model, settingsPath)...)
 
 	// Isolate from the user's git repo to prevent recursive hook triggers
-	// and index pollution (matches agent.RunIsolatedTextGeneratorCLI behavior).
-	cmd.Dir = os.TempDir()
-	cmd.Env = agent.StripGitEnv(os.Environ())
+	// and index pollution, in an empty directory rather than the shared temp
+	// dir (matches agent.RunIsolatedTextGeneratorCLI behavior).
+	cmd.Dir = workDir
+	cmd.Env = agent.TextGenerationEnv(workDir, os.Environ())
 	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr bytes.Buffer
@@ -68,12 +233,21 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 			return "", classifyEnvelopeError(result, env.APIErrorStatus, exitCode)
 		}
 		// No structured signal on stdout — ctx cancellation is next most
-		// informative, since the rest is a guess.
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", context.DeadlineExceeded
-		}
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return "", context.Canceled
+		// informative, since the rest is a guess. Wrap the sentinel in a
+		// *agent.TextGenerationError (like the streaming path and every other
+		// provider) so the explain timeout diagnostic still gets captured
+		// stderr and the stdout byte count when this path is reached via the
+		// old-CLI streaming fallback.
+		if ctxErr := ctx.Err(); ctxErr != nil && (errors.Is(ctxErr, context.DeadlineExceeded) || errors.Is(ctxErr, context.Canceled)) {
+			sentinel := context.Canceled
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
+				sentinel = context.DeadlineExceeded
+			}
+			return "", &agent.TextGenerationError{
+				Err:         sentinel,
+				Stderr:      strings.TrimSpace(stderr.String()),
+				StdoutBytes: stdout.Len(),
+			}
 		}
 		if isExecNotFound(err) {
 			return "", &ClaudeError{Kind: ClaudeErrorCLIMissing, Cause: err}

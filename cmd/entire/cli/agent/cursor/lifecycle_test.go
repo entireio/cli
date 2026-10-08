@@ -183,6 +183,79 @@ func TestParseHookEvent_TurnEnd(t *testing.T) {
 	}
 }
 
+// TestParseHookEvent_TurnEnd_PopulatesTokenUsage verifies that Cursor's stop
+// hook payload — which carries token usage fields not present in the JSONL
+// transcript — is converted into event.TokenUsage. The framework treats this
+// as the canonical token-usage signal for Cursor sessions because the JSONL
+// transcript has no usage data.
+//
+// Cursor reports input_tokens as the total (cache + fresh), so the derived
+// input must subtract cache_read_tokens and cache_write_tokens to avoid
+// double-counting.
+func TestParseHookEvent_TurnEnd_PopulatesTokenUsage(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	input := `{
+		"conversation_id": "tok-1",
+		"transcript_path": "/tmp/stop.jsonl",
+		"input_tokens": 5000,
+		"output_tokens": 200,
+		"cache_read_tokens": 4000,
+		"cache_write_tokens": 800
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.NotNil(t, event.TokenUsage, "stop hook with token fields must populate event.TokenUsage")
+
+	require.Equal(t, 200, event.TokenUsage.InputTokens, "InputTokens = total_input - cache_read - cache_write = 5000-4000-800")
+	require.Equal(t, 4000, event.TokenUsage.CacheReadTokens)
+	require.Equal(t, 800, event.TokenUsage.CacheCreationTokens)
+	require.Equal(t, 200, event.TokenUsage.OutputTokens)
+	require.Equal(t, 1, event.TokenUsage.APICallCount)
+}
+
+// TestParseHookEvent_TurnEnd_OmittedTokensYieldNil verifies that older Cursor
+// versions / hook variants without token fields produce a nil TokenUsage so
+// downstream code can distinguish "no data" from "all zeros".
+func TestParseHookEvent_TurnEnd_OmittedTokensYieldNil(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	input := `{"conversation_id": "no-tok", "transcript_path": "/tmp/stop.jsonl"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Nil(t, event.TokenUsage, "TokenUsage must be nil when the hook payload reports no token fields")
+}
+
+// TestParseHookEvent_TurnEnd_CacheLargerThanInputClampsToZero is a defensive
+// check: if cache_read + cache_write exceeds input_tokens (likely a Cursor
+// reporting bug), the derived fresh input is clamped to zero rather than
+// going negative, since negative tokens are nonsensical for billing displays.
+func TestParseHookEvent_TurnEnd_CacheLargerThanInputClampsToZero(t *testing.T) {
+	t.Parallel()
+
+	ag := &CursorAgent{}
+	input := `{
+		"conversation_id": "clamp",
+		"transcript_path": "/tmp/stop.jsonl",
+		"input_tokens": 100,
+		"output_tokens": 50,
+		"cache_read_tokens": 80,
+		"cache_write_tokens": 80
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.NotNil(t, event.TokenUsage)
+	require.Equal(t, 0, event.TokenUsage.InputTokens, "negative fresh-input must clamp to zero")
+}
+
 func TestParseHookEvent_SessionEnd(t *testing.T) {
 	t.Parallel()
 
@@ -736,5 +809,39 @@ func TestPrepareTranscript_ContextCanceled(t *testing.T) {
 	err := ag.PrepareTranscript(ctx, path)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+}
+
+// TestParseSubagentStop_ForwardsAgentTranscriptPath guards a field that was parsed
+// and then dropped. Cursor names the subagent's transcript in the payload; without
+// forwarding it the framework fell back to guessing Claude Code's layout, which does
+// not exist under Cursor's session directory, so the task checkpoint stored no
+// subagent transcript and file extraction read the main one instead.
+func TestParseSubagentStop_ForwardsAgentTranscriptPath(t *testing.T) {
+	t.Parallel()
+
+	stdin := strings.NewReader(`{
+		"hook_event_name": "subagentStop",
+		"conversation_id": "conv-1",
+		"transcript_path": "/cursor/conv-1.jsonl",
+		"subagent_id": "sub-7",
+		"subagent_type": "generalPurpose",
+		"task": "write docs",
+		"agent_transcript_path": "/cursor/subagents/sub-7.jsonl",
+		"modified_files": ["docs/red.md"]
+	}`)
+
+	ev, err := (&CursorAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, stdin)
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	if ev == nil {
+		t.Fatal("expected a SubagentEnd event")
+	}
+	if ev.SubagentTranscriptPath != "/cursor/subagents/sub-7.jsonl" {
+		t.Errorf("SubagentTranscriptPath = %q, want the payload's agent_transcript_path", ev.SubagentTranscriptPath)
+	}
+	if ev.SessionRef != "/cursor/conv-1.jsonl" {
+		t.Errorf("SessionRef = %q, want the main transcript", ev.SessionRef)
 	}
 }

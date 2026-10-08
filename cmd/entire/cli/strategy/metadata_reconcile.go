@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -25,49 +27,127 @@ import (
 // disconnectedOnce ensures the disconnection warning runs at most once per process.
 var disconnectedOnce sync.Once //nolint:gochecknoglobals // intentional per-process gate
 
-// IsMetadataDisconnected checks whether the local primary metadata ref and
-// the provided fetched or remote-tracking ref exist but share no common
-// ancestor.
-func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRefName plumbing.ReferenceName) (bool, error) {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+// MetadataRelation classifies how the local primary metadata ref stands relative
+// to a remote-tracking ref. Derived from a single `git merge-base`, so the
+// disconnected, fast-forward and diverged verdicts can never disagree — they used
+// to be computed by two functions that each shelled out for the same pair.
+type MetadataRelation int
+
+const (
+	// MetadataRelationAbsent: one of the two refs does not exist, so there is
+	// nothing to relate.
+	MetadataRelationAbsent MetadataRelation = iota
+	// MetadataRelationAligned: identical tips.
+	MetadataRelationAligned
+	// MetadataRelationLocalAhead: the remote tip is an ancestor of local.
+	MetadataRelationLocalAhead
+	// MetadataRelationRemoteAhead: local is an ancestor of the remote tip, so a
+	// fetch fast-forwards.
+	MetadataRelationRemoteAhead
+	// MetadataRelationDiverged: both sides advanced past their merge base, so a
+	// fetch from the elected remote replays the local commits onto the remote tip.
+	MetadataRelationDiverged
+	// MetadataRelationDisconnected: no merge base at all (the "empty-orphan bug").
+	MetadataRelationDisconnected
+)
+
+// MetadataComparison is a MetadataRelation together with the tips it was derived
+// from. Local and Remote are zero when Relation is MetadataRelationAbsent.
+type MetadataComparison struct {
+	Relation MetadataRelation
+	Local    plumbing.Hash
+	Remote   plumbing.Hash
+}
+
+// CompareMetadataWithRemote classifies the local primary metadata ref against
+// remoteRefName. Pure read — it never writes a ref, and it runs exactly one
+// merge-base subprocess.
+func CompareMetadataWithRemote(ctx context.Context, repo *git.Repository, remoteRefName plumbing.ReferenceName) (MetadataComparison, error) {
+	var c MetadataComparison
+
+	refs := checkpoint.ResolveRefs(ctx)
 	localRef, err := repo.Reference(refs.Primary, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return false, nil
+		return c, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("failed to check local primary metadata ref: %w", err)
+		return c, fmt.Errorf("failed to check local primary metadata ref: %w", err)
 	}
-
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return false, nil
+		return c, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("failed to check remote metadata ref: %w", err)
+		return c, fmt.Errorf("failed to check remote metadata ref: %w", err)
 	}
 
-	if localRef.Hash() == remoteRef.Hash() {
-		return false, nil
+	c.Local, c.Remote = localRef.Hash(), remoteRef.Hash()
+	if c.Local == c.Remote {
+		c.Relation = MetadataRelationAligned
+		return c, nil
 	}
 
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
+		return c, err
+	}
+	mergeBase, err := getMergeBase(ctx, repoPath, c.Local.String(), c.Remote.String())
+	switch {
+	case errors.Is(err, errNoMergeBase):
+		c.Relation = MetadataRelationDisconnected
+	case err != nil:
+		return c, fmt.Errorf("failed to find merge base for %s: %w", refs.Primary, err)
+	case mergeBase == c.Local:
+		c.Relation = MetadataRelationRemoteAhead
+	case mergeBase == c.Remote:
+		c.Relation = MetadataRelationLocalAhead
+	default:
+		c.Relation = MetadataRelationDiverged
+	}
+	return c, nil
+}
+
+// IsMetadataDisconnected reports whether the local primary metadata ref and the
+// provided fetched or remote-tracking ref exist but share no common ancestor.
+func IsMetadataDisconnected(ctx context.Context, repo *git.Repository, remoteRefName plumbing.ReferenceName) (bool, error) {
+	c, err := CompareMetadataWithRemote(ctx, repo, remoteRefName)
+	if err != nil {
 		return false, err
 	}
+	return c.Relation == MetadataRelationDisconnected, nil
+}
 
-	return isDisconnected(ctx, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
+// FirstReadCandidateTrackingRef returns the remote name and remote-tracking
+// ref of the first checkpoint read candidate (elected sync remote first, then
+// the legacy origin tier) whose tracking ref for primary exists locally.
+// Pure read; ok is false when no candidate has a tracking ref (or the chain
+// is empty).
+func FirstReadCandidateTrackingRef(ctx context.Context, repo *git.Repository, primary plumbing.ReferenceName) (string, plumbing.ReferenceName, bool) {
+	for _, remoteName := range CheckpointReadRemotes(ctx) {
+		refName := plumbing.NewRemoteReferenceName(remoteName, primary.Short())
+		if _, err := repo.Reference(refName, true); err == nil {
+			return remoteName, refName, true
+		}
+	}
+	return "", "", false
 }
 
 // WarnIfMetadataDisconnected checks (once per process) whether the metadata
-// branch is disconnected and prints a warning to stderr if so.
+// branch is disconnected and prints a warning to stderr if so. The check runs
+// against the first checkpoint read candidate whose remote-tracking ref
+// exists (pure read across both tiers).
 // It does NOT fix the problem — users are directed to 'entire doctor'.
+//
+// Takes the caller's context rather than context.Background(): the probe below
+// reads git, so a detached context ignored both interrupt cancellation and the
+// invocation-scoped remote-read cache, re-shelling out for answers the caller
+// already had.
 //
 // Uses sync.Once, so a transient failure on the first call permanently suppresses
 // the warning. This is acceptable because the check is advisory only and
 // 'entire doctor' is the authoritative repair path.
-func WarnIfMetadataDisconnected() {
+func WarnIfMetadataDisconnected(ctx context.Context) {
 	disconnectedOnce.Do(func() {
-		ctx := context.Background()
 		repo, err := OpenRepository(ctx)
 		if err != nil {
 			logging.Debug(ctx, "metadata disconnection check: could not open repository",
@@ -75,11 +155,15 @@ func WarnIfMetadataDisconnected() {
 			return
 		}
 		defer repo.Close()
-		refs := checkpoint.ResolveCommittedRefs(ctx)
-		if !refs.PrimaryFetchableFromOrigin() {
-			return // origin doesn't track Primary; nothing to disconnect from
+		refs := checkpoint.ResolveRefs(ctx)
+		if !refs.PrimaryFetchableFromRemote() {
+			return // no remote tracks Primary; nothing to disconnect from
 		}
-		disconnected, err := IsMetadataDisconnected(ctx, repo, plumbing.NewRemoteReferenceName("origin", refs.Primary.Short()))
+		_, remoteRefName, ok := FirstReadCandidateTrackingRef(ctx, repo, refs.Primary)
+		if !ok {
+			return // no candidate has a tracking ref; nothing to disconnect from
+		}
+		disconnected, err := IsMetadataDisconnected(ctx, repo, remoteRefName)
 		if err != nil {
 			logging.Debug(ctx, "metadata disconnection check failed",
 				slog.String("error", err.Error()))
@@ -112,9 +196,8 @@ func ReconcileDisconnectedMetadataRef(
 	remoteRefName plumbing.ReferenceName,
 	w io.Writer,
 ) error {
-	refs := checkpoint.ResolveCommittedRefs(ctx)
 	advance := func(hash plumbing.Hash) error {
-		return AdvanceLocalRef(ctx, repo, refs, localRefName, hash)
+		return setRefHash(repo, localRefName, hash)
 	}
 
 	// Check local ref
@@ -287,8 +370,15 @@ func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]
 	if !filepath.IsAbs(gitDir) {
 		gitDir = filepath.Join(repoPath, gitDir)
 	}
-	// Path is constructed from git's own --git-common-dir output, not user input.
-	data, err := os.ReadFile(filepath.Join(gitDir, "shallow")) //nolint:gosec // see comment above
+	// Through the common dir's root like every other read there. "shallow" is a
+	// fixed name and gitDir came from git's own --git-common-dir, so nothing here
+	// can traverse today; the root is what keeps that true without depending on
+	// it, and it shares the one handle per clone.
+	root, err := gitdir.OpenAt(gitDir)
+	if err != nil {
+		return nil, fmt.Errorf("open git common dir: %w", err)
+	}
+	data, err := osroot.ReadFileNoFollow(root, "shallow")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return map[plumbing.Hash]bool{}, nil

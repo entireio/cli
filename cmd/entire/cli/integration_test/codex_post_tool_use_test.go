@@ -67,7 +67,10 @@ func TestCodexPostToolUse_PopulatesFilesTouched(t *testing.T) {
 
 	got := make([]string, 0, len(rawFiles))
 	for _, v := range rawFiles {
-		s, _ := v.(string)
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("files_touched entry should be a string; got %T", v)
+		}
 		got = append(got, s)
 	}
 	assert.ElementsMatch(t,

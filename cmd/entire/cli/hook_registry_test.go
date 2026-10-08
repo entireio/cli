@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -82,9 +83,12 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	// Enable debug logging
 	t.Setenv(logging.LogLevelEnvVar, "DEBUG")
 
-	// Initialize logging (normally done by PersistentPreRunE)
-	cleanup := initHookLogging(context.Background())
-	defer cleanup()
+	// Open the log sink (normally done by the root PersistentPreRun)
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(tmpDir), Dir: logging.LogsName, Level: resolveLogLevel(context.Background())})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	defer func() { _ = l.Close() }()
 
 	// Create a transcript file for the hook input
 	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
@@ -107,14 +111,18 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
+	// Executing the verb directly skips the root PersistentPreRun, so inject the
+	// logger it would have put in the context. Nothing resolves through package
+	// state any more: a hook logs where its context says, or nowhere.
+	cmd.SetContext(logging.WithLogger(context.Background(), l))
+
 	// Execute the command
-	err := cmd.Execute()
-	if err != nil {
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("command execution failed: %v", err)
 	}
 
 	// Close logging to flush
-	cleanup()
+	_ = l.Close()
 
 	// Verify log file was created and contains expected content
 	logFile := filepath.Join(logsDir, "entire.log")
@@ -170,61 +178,220 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeHooksCmd_HasLoggingHooks(t *testing.T) {
-	// This test verifies that the claude-code hooks command has PersistentPreRunE
-	// and PersistentPostRunE for logging initialization and cleanup
+// TestExecuteAgentHookShortCircuitsWhenDisabled is a regression test for #524:
+// a hook must not perform any dispatch/strategy work when Entire is
+// disabled. Asserted via a "session was never claimed" signal rather than a
+// timing assertion.
+func TestExecuteAgentHookShortCircuitsWhenDisabled(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
 
-	// Get the actual hooks command which contains the claude-code subcommand
-	hooksCmd := newHooksCmd()
+	entireDir := filepath.Join(repoRoot, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{"enabled":false}`), 0o600))
 
-	// Find the claude-code subcommand
-	var claudeCodeCmd *cobra.Command
-	for _, sub := range hooksCmd.Commands() {
-		if sub.Use == testAgentName {
-			claudeCodeCmd = sub
-			break
-		}
-	}
+	sessionID := "disabled-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
+	})
+	require.NoError(t, err)
 
-	require.NotNil(t, claudeCodeCmd, "expected to find claude-code subcommand under hooks")
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
 
-	// Verify PersistentPreRunE is set
-	if claudeCodeCmd.PersistentPreRunE == nil {
-		t.Error("expected PersistentPreRunE to be set for logging initialization")
-	}
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
 
-	// Verify PersistentPostRunE is set
-	if claudeCodeCmd.PersistentPostRunE == nil {
-		t.Error("expected PersistentPostRunE to be set for logging cleanup")
-	}
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	_, statErr := os.Stat(hintPath)
+	require.True(t, os.IsNotExist(statErr), "disabled hook must not dispatch or claim the session")
 }
 
-func TestGeminiCLIHooksCmd_HasLoggingHooks(t *testing.T) {
-	// This test verifies that the gemini hooks command has PersistentPreRunE
-	// and PersistentPostRunE for logging initialization and cleanup
+// TestExecuteAgentHookShortCircuitsWhenSettingsMissing is a regression test
+// for #524: a repo that was never `entire enable`d (no .entire/settings.json)
+// must short-circuit rather than falling through to full lifecycle dispatch.
+func TestExecuteAgentHookShortCircuitsWhenSettingsMissing(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+	// Deliberately do NOT create .entire/settings.json.
 
-	// Get the actual hooks command which contains the gemini subcommand
+	sessionID := "missing-settings-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	_, statErr := os.Stat(hintPath)
+	require.True(t, os.IsNotExist(statErr), "hook must not dispatch when Entire was never enabled in this repo")
+}
+
+// TestExecuteAgentHookShortCircuitsWhenSettingsCorrupted is a regression test
+// for #524. Before this fix, IsEnabled() failed OPEN on a settings.Load()
+// error (the caller's `err == nil && !enabled` check only short-circuited
+// when the read succeeded), so a corrupted settings file made every hook
+// invocation pay the full dispatch cost — including, for Stop hooks, a
+// multi-second wait on the transcript-flush sentinel (see
+// ClaudeCodeAgent.ParseHookEvent) — instead of exiting fast. The gate must
+// fail closed on any settings read error.
+func TestExecuteAgentHookShortCircuitsWhenSettingsCorrupted(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{ enabled: false, not valid json`), 0o600))
+
+	sessionID := "corrupted-settings-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	_, statErr := os.Stat(hintPath)
+	require.True(t, os.IsNotExist(statErr), "hook must fail closed (not dispatch) when settings are unreadable")
+}
+
+// TestExecuteAgentHookStopReturnsFastWhenSettingsCorrupted directly
+// regression-tests the reported symptom: `entire hooks claude-code stop`
+// against a corrupted settings file must return in well under the
+// multi-second transcript-flush-sentinel timeout it used to hit, not just
+// skip dispatch. The bound is intentionally generous (this repo has no
+// other timing-based tests to match precedent against) — it only needs to
+// distinguish "short-circuited" from "waited on the sentinel timeout".
+func TestExecuteAgentHookStopReturnsFastWhenSettingsCorrupted(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{ enabled: false, not valid json`), 0o600))
+
+	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"content":"hi"}}`+"\n"), 0o600))
+
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      "corrupted-settings-stop",
+		"transcript_path": transcriptPath,
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	start := time.Now()
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameStop, false))
+	elapsed := time.Since(start)
+
+	require.Lessf(t, elapsed, 1*time.Second,
+		"stop hook took %s against a corrupted settings file; want a fast short-circuit, not the transcript-flush-sentinel timeout path", elapsed)
+}
+
+// TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly guards against a
+// regression in the #524 fix: `entire enable --local` writes only
+// .entire/settings.local.json and never creates the base .entire/settings.json
+// (see determineSettingsTarget in setup.go). The disabled-hook gate must
+// recognize that local-only enablement — gating on the base file alone
+// (settings.IsSetUp) would silently no-op every agent hook for that repo and
+// drop all checkpoint capture. Asserted via the same "session was claimed"
+// signal (the .agent hint StoreAgentTypeHint writes during SessionStart
+// dispatch) the short-circuit tests above assert the *absence* of.
+func TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly(t *testing.T) {
+	setupStopTestRepo(t)
+	repoRoot := mustGetwd(t)
+
+	entireDir := filepath.Join(repoRoot, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	// Local-only enablement: settings.local.json present, base settings.json absent.
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(`{"enabled":true}`), 0o600))
+	require.NoFileExists(t, filepath.Join(entireDir, "settings.json"))
+
+	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"content":"hi"}}`+"\n"), 0o600))
+
+	sessionID := "local-only-session-start"
+	payload, err := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	})
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	cmd.SetIn(bytes.NewReader(payload))
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
+
+	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
+	require.FileExists(t, hintPath, "SessionStart must dispatch and claim the session when Entire is enabled via settings.local.json only")
+}
+
+// TestAgentHooksCmd_AttachesHookSessionContext pins where each agent hook tree
+// gets its context and where flushing happens. PersistentPreRun attaches the
+// hook session context; PersistentPostRun/E must stay unset, because the log
+// sink is opened by the root PersistentPreRun and closed by main.go, which is
+// the only close site.
+//
+// Both variants are asserted because cobra picks PersistentPreRunE over
+// PersistentPreRun when both are set, so a stray E would silently shadow this
+// one.
+func TestAgentHooksCmd_AttachesHookSessionContext(t *testing.T) {
 	hooksCmd := newHooksCmd()
 
-	// Find the gemini subcommand
-	var geminiCmd *cobra.Command
-	for _, sub := range hooksCmd.Commands() {
-		if sub.Use == "gemini" {
-			geminiCmd = sub
-			break
-		}
-	}
+	for _, agentSubcommand := range []string{testAgentName, string(agent.AgentNameCodex)} {
+		t.Run(agentSubcommand, func(t *testing.T) {
+			var agentCmd *cobra.Command
+			for _, sub := range hooksCmd.Commands() {
+				if sub.Use == agentSubcommand {
+					agentCmd = sub
+					break
+				}
+			}
+			require.NotNil(t, agentCmd, "expected to find %s subcommand under hooks", agentSubcommand)
 
-	require.NotNil(t, geminiCmd, "expected to find gemini subcommand under hooks")
+			// The shared agent command must stay clear. cobra.EnableTraverseRunHooks
+			// runs every ancestor's PersistentPreRun, so anything attached to this
+			// command that is not a lifecycle verb — Antigravity's title-tee, which
+			// agy fires on every state change — would inherit the session scan and
+			// redactor construction with no way to opt out.
+			require.Nil(t, agentCmd.PersistentPreRun,
+				"the shared agent command must not define a PersistentPreRun; it is set per verb")
 
-	// Verify PersistentPreRunE is set
-	if geminiCmd.PersistentPreRunE == nil {
-		t.Error("expected PersistentPreRunE to be set for logging initialization")
-	}
-
-	// Verify PersistentPostRunE is set
-	if geminiCmd.PersistentPostRunE == nil {
-		t.Error("expected PersistentPostRunE to be set for logging cleanup")
+			verbs := agentCmd.Commands()
+			require.NotEmpty(t, verbs, "expected hook verbs under %s", agentSubcommand)
+			for _, verb := range verbs {
+				require.NotNil(t, verb.PersistentPreRun,
+					"%s: PersistentPreRun must attach the hook session context", verb.Name())
+				require.Nil(t, verb.PersistentPreRunE,
+					"%s: PersistentPreRunE must stay unset: cobra would run it instead of PersistentPreRun", verb.Name())
+				require.Nil(t, verb.PersistentPostRun,
+					"%s: PersistentPostRun must stay unset: main.go flushes the log sink", verb.Name())
+				require.Nil(t, verb.PersistentPostRunE,
+					"%s: PersistentPostRunE must stay unset: main.go flushes the log sink", verb.Name())
+			}
+		})
 	}
 }
 

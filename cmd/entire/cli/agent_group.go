@@ -16,7 +16,7 @@ import (
 // newAgentGroupCmd builds `entire agent`. Replaces `entire configure`.
 func newAgentGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "agent",
+		Use:   cmdAgent,
 		Short: "Manage agent integrations (add, remove, list)",
 		Long: `Manage agent integrations in this repository.
 
@@ -57,7 +57,7 @@ func runAgentMenu(ctx context.Context, w io.Writer) error {
 
 func newAgentListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List installed and available agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAgentList(cmd.Context(), cmd.OutOrStdout())
@@ -89,8 +89,9 @@ func runAgentList(ctx context.Context, w io.Writer) error {
 }
 
 func newAgentAddCmd() *cobra.Command {
-	var localDev bool
 	var forceHooks bool
+	var searchSkill bool
+	var agentHelpSkill bool
 
 	cmd := &cobra.Command{
 		Use:   "add <agent-name>",
@@ -99,7 +100,7 @@ func newAgentAddCmd() *cobra.Command {
 
 Examples:
   entire agent add claude-code
-  entire agent add gemini`,
+  entire agent add codex`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
@@ -109,16 +110,18 @@ Examples:
 				return NewSilentError(errors.New("wrong agent name"))
 			}
 			opts := EnableOptions{
-				LocalDev:   localDev,
-				ForceHooks: forceHooks,
-				Telemetry:  true,
+				ForceHooks:     forceHooks,
+				SearchSkill:    searchSkill,
+				AgentHelpSkill: agentHelpSkill,
+				Telemetry:      true,
 			}
 			return setupAgentHooksNonInteractive(cmd.Context(), cmd.OutOrStdout(), ag, opts)
 		},
 	}
 
-	cmd.Flags().BoolVar(&localDev, "local-dev", false, "Install hooks in local-dev mode")
 	cmd.Flags().BoolVar(&forceHooks, "force", false, "Reinstall hooks even if already present")
+	cmd.Flags().BoolVar(&searchSkill, flagSearchSkill, false, "Install the optional Entire search skill")
+	cmd.Flags().BoolVar(&agentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`)")
 	return cmd
 }
 

@@ -18,12 +18,12 @@ import (
 // writes one "<value> <name>" line per ref followed by a blank-line
 // terminator. HEAD is emitted as "@<target> HEAD" when the symref
 // capability resolves; detached HEAD falls back to "<sha> HEAD".
-func handleList(ctx context.Context, t Transport, forPush bool, stdout io.Writer) error {
+func handleList(ctx context.Context, t Transport, adv *refAdvCache, forPush bool, stdout io.Writer) error {
 	service := serviceUploadPack
 	if forPush {
 		service = serviceReceivePack
 	}
-	refs, err := t.InfoRefs(ctx, service)
+	refs, err := adv.infoRefs(ctx, t, service)
 	if err != nil {
 		return fmt.Errorf("list %s info/refs: %w", service, err)
 	}

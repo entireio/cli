@@ -70,13 +70,21 @@ func (c *CursorAgent) resolveTranscriptRef(ctx context.Context, conversationID, 
 		return ""
 	}
 
-	sessionDir, err := c.GetSessionDir(repoRoot)
+	// Through the store, not c.ResolveSessionFile directly: conversationID is the
+	// raw hook payload's and SessionFile is where it is validated and the result
+	// confirmed to be inside the store. See agent.Agent.ResolveSessionFile.
+	store, err := agent.OpenSessionStore(c, repoRoot)
 	if err != nil {
 		logging.Warn(ctx, "cursor: failed to get session dir for transcript resolution", "err", err)
 		return ""
 	}
 
-	return c.ResolveSessionFile(sessionDir, conversationID)
+	_, absPath, err := store.SessionFile(conversationID)
+	if err != nil {
+		logging.Warn(ctx, "cursor: refusing unsafe transcript path", "conversationID", conversationID, "err", err)
+		return ""
+	}
+	return absPath
 }
 
 func (c *CursorAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {
@@ -113,14 +121,43 @@ func (c *CursorAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent
 	if err != nil {
 		return nil, err
 	}
-	return &agent.Event{
+	event := &agent.Event{
 		Type:       agent.TurnEnd,
 		SessionID:  raw.ConversationID,
 		SessionRef: c.resolveTranscriptRef(ctx, raw.ConversationID, raw.TranscriptPath),
 		Model:      raw.Model,
 		TurnCount:  int(intFromJSON(raw.LoopCount)),
 		Timestamp:  time.Now(),
-	}, nil
+	}
+	event.TokenUsage = tokenUsageFromStop(raw)
+	return event, nil
+}
+
+// tokenUsageFromStop converts the per-turn token fields in Cursor's stop hook
+// payload into the framework-wide TokenUsage struct. Cursor reports
+// input_tokens as the *total* input (cache_read + cache_write + fresh), so we
+// derive the fresh-input portion here. Returns nil when no usable token fields
+// are present (some Cursor versions / hook variants omit them entirely),
+// signaling "no data" rather than "all zeros".
+func tokenUsageFromStop(raw *stopHookInputRaw) *agent.TokenUsage {
+	totalInput := int(intFromJSON(raw.InputTokens))
+	output := int(intFromJSON(raw.OutputTokens))
+	if totalInput == 0 && output == 0 {
+		return nil
+	}
+	cacheRead := int(intFromJSON(raw.CacheReadTokens))
+	cacheWrite := int(intFromJSON(raw.CacheWriteTokens))
+	freshInput := totalInput - cacheRead - cacheWrite
+	if freshInput < 0 {
+		freshInput = 0
+	}
+	return &agent.TokenUsage{
+		InputTokens:         freshInput,
+		CacheCreationTokens: cacheWrite,
+		CacheReadTokens:     cacheRead,
+		OutputTokens:        output,
+		APICallCount:        1,
+	}
 }
 
 func (c *CursorAgent) parseSessionEnd(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
@@ -191,6 +228,11 @@ func (c *CursorAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		Timestamp:       time.Now(),
 		SubagentID:      raw.SubagentID,
 		ModifiedFiles:   raw.ModifiedFiles,
+		// Cursor names the subagent's transcript in the payload. This field was
+		// parsed but never forwarded, so the framework fell back to guessing Claude
+		// Code's layout — which does not exist under Cursor's session dir, so the
+		// task checkpoint stored no subagent transcript at all.
+		SubagentTranscriptPath: raw.AgentTranscriptPath,
 	}
 	return event, nil
 }

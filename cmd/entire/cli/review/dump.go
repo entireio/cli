@@ -5,10 +5,10 @@
 // AgentEvent is a no-op; events are read from RunSummary.AgentRuns[].Buffer
 // in RunFinished.
 //
-// Output format: each agent's block is composed as markdown (`# claude-code
-// review`, with failure context in blockquotes/bold) and rendered through
-// mdrender for terminal writers. Non-TTY writers receive raw markdown so
-// pipelines can grep / pipe / save without ANSI escape codes.
+// Each agent's block is plain markdown written as-is — NOT glamour-rendered.
+// Worker narratives are raw material (the final report is styled, and drill-in
+// shows the buffer); styling multi-MB output here wedged the finalize phase on
+// glamour's super-linear cost.
 package review
 
 import (
@@ -17,7 +17,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
@@ -41,10 +40,7 @@ func (s DumpSink) RunFinished(summary reviewtypes.RunSummary) {
 	s.dumpCounts(summary)
 }
 
-// dumpAgent composes one agent's section as markdown and writes it through
-// mdrender. The counts line at the end of the run is intentionally NOT
-// rendered through markdown — it's a terse status summary that benefits
-// from staying on a single uncolored line for grep-ability.
+// dumpAgent writes one agent's section as plain markdown directly to W.
 //
 // Markdown structure per agent:
 //
@@ -89,14 +85,7 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 		}
 	}
 
-	// RenderForWriter is TTY-aware: returns raw markdown for non-TTY writers,
-	// glamour-styled output otherwise. Errors are best-effort — fall back to
-	// raw markdown so the user always gets the content.
-	rendered, err := mdrender.RenderForWriter(s.W, b.String())
-	if err != nil {
-		rendered = b.String()
-	}
-	fmt.Fprint(s.W, rendered)
+	fmt.Fprint(s.W, b.String())
 }
 
 func writeFailureHeader(b *strings.Builder, runErr error) {

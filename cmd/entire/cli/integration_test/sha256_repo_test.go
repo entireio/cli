@@ -29,11 +29,14 @@ func TestSHA256Repository_EnableAndFirstCheckpoint(t *testing.T) {
 	gitOutput(t, env.RepoDir, "add", "README.md")
 	gitOutput(t, env.RepoDir, "commit", "-m", "Initial SHA-256 commit")
 
+	// Pin the git-branch backend: this test asserts the v1-branch condensation
+	// flow in a SHA-256 repo, and first-run enable now defaults new setups to
+	// git-refs.
 	output := env.RunCLI(
 		"enable",
-		"--no-github",
-		"--agent", "claude-code",
+		"--agent", agentClaudeCode,
 		"--telemetry=false",
+		"--checkpoint-backend", "branch",
 	)
 	if !strings.Contains(output, paths.MetadataBranchName) {
 		t.Fatalf("expected enable to create %s branch, got output:\n%s", paths.MetadataBranchName, output)
@@ -44,9 +47,9 @@ func TestSHA256Repository_EnableAndFirstCheckpoint(t *testing.T) {
 	}
 
 	initialHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD")
-	requireHexLen(t, "initial HEAD", initialHead, 64)
+	requireHexLen(t, "initial HEAD", initialHead)
 	initialMetadataHead := gitOutput(t, env.RepoDir, "rev-parse", paths.MetadataBranchName)
-	requireHexLen(t, "initial metadata branch HEAD", initialMetadataHead, 64)
+	requireHexLen(t, "initial metadata branch HEAD", initialMetadataHead)
 
 	sess := env.NewSession()
 	prompt := "Create a file in the SHA-256 repo"
@@ -69,19 +72,19 @@ func TestSHA256Repository_EnableAndFirstCheckpoint(t *testing.T) {
 		t.Fatalf("session StepCount after first checkpoint = %#v, want 1", state)
 	}
 
-	shadowBranch := env.GetShadowBranchNameForCommit(initialHead)
-	shadowHead := gitOutput(t, env.RepoDir, "rev-parse", shadowBranch)
-	requireHexLen(t, "shadow checkpoint commit", shadowHead, 64)
+	// The recorded turn-end content hash is in the repository's object format.
+	recorded := env.AssertTurnEndRecorded(sess.ID, "main.go")
+	requireHexLen(t, "recorded file hash", recorded.TouchedFileHashes["main.go"])
 
-	env.GitCommitWithShadowHooks("Add SHA-256 main", "main.go")
+	env.GitCommitWithHooks("Add SHA-256 main", "main.go")
 	userHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD")
-	requireHexLen(t, "user commit", userHead, 64)
+	requireHexLen(t, "user commit", userHead)
 	if userHead == initialHead {
 		t.Fatal("expected user commit to advance HEAD")
 	}
 
 	metadataHead := gitOutput(t, env.RepoDir, "rev-parse", paths.MetadataBranchName)
-	requireHexLen(t, "checkpoint metadata commit", metadataHead, 64)
+	requireHexLen(t, "checkpoint metadata commit", metadataHead)
 	if metadataHead == initialMetadataHead {
 		t.Fatal("expected metadata branch to advance after condensing the first checkpoint")
 	}
@@ -119,23 +122,16 @@ func requireGitSHA256Support(t *testing.T) {
 func gitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 
-	cmd := exec.Command("git", args...) //nolint:noctx // test helper
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
-	}
-	return strings.TrimSpace(string(output))
+	return strings.TrimSpace(testutil.RunGit(t, dir, args...))
 }
 
-func requireHexLen(t *testing.T, label, value string, want int) {
+const sha256HexLen = 64
+
+func requireHexLen(t *testing.T, label, value string) {
 	t.Helper()
 
-	if len(value) != want {
-		t.Fatalf("%s length = %d, want %d: %q", label, len(value), want, value)
+	if len(value) != sha256HexLen {
+		t.Fatalf("%s length = %d, want %d: %q", label, len(value), sha256HexLen, value)
 	}
 	for _, r := range value {
 		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {

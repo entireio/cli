@@ -34,7 +34,7 @@ func resolveTranscriptPath(state *SessionState) (string, error) {
 	}
 
 	// Fast path: file exists at the stored location.
-	if _, err := os.Stat(state.TranscriptPath); err == nil {
+	if _, err := agent.StatTranscriptFile(state.TranscriptPath); err == nil {
 		return state.TranscriptPath, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		// Non-ENOENT error (permission denied, etc.) — return as-is.
@@ -53,14 +53,24 @@ func resolveTranscriptPath(state *SessionState) (string, error) {
 	base := filepath.Base(state.TranscriptPath)
 	agentSessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	resolved := ag.ResolveSessionFile(sessionDir, agentSessionID)
+	// The stored directory is treated as the agent's session store, so the ID
+	// recovered from the path is re-resolved as a name inside it rather than
+	// re-joined onto it.
+	store, storeErr := agent.OpenSessionStoreAt(ag, sessionDir)
+	if storeErr != nil {
+		return "", fmt.Errorf("transcript not found at %s: %w", state.TranscriptPath, os.ErrNotExist)
+	}
+	name, resolved, resolveErr := store.SessionFile(agentSessionID)
+	if resolveErr != nil {
+		return "", fmt.Errorf("transcript not found at %s: %w", state.TranscriptPath, os.ErrNotExist)
+	}
 	if resolved == state.TranscriptPath {
 		// Agent resolved to the same path — file genuinely doesn't exist.
 		return "", fmt.Errorf("transcript not found at %s: %w", state.TranscriptPath, os.ErrNotExist)
 	}
 
 	// Check if the re-resolved path exists.
-	if _, err := os.Stat(resolved); err != nil {
+	if !store.Exists(name) {
 		return "", fmt.Errorf("transcript not found at %s (also tried %s): %w", state.TranscriptPath, resolved, os.ErrNotExist)
 	}
 

@@ -13,9 +13,12 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // Managed plugin storage. The kubectl-style dispatcher in plugin.go resolves
@@ -61,20 +64,17 @@ const (
 // degenerate environment with $LOCALAPPDATA or $XDG_DATA_HOME but no home
 // still returns a usable path.
 func pluginParentDir() (string, error) {
-	// ENTIRE_PLUGIN_DIR must be absolute. A relative value would resolve
-	// against the user's CWD at startup — typically inside their repo —
-	// which is the wrong place for managed plugin storage. Reject loudly
-	// rather than silently falling through to the platform default, since
-	// a misconfigured override is almost certainly a user error worth
-	// surfacing.
 	if v := os.Getenv(pluginEnvPluginDir); v != "" {
-		if !filepath.IsAbs(v) {
-			return "", fmt.Errorf("%s must be an absolute path, got %q", pluginEnvPluginDir, v)
+		if err := userdirs.RequireAbsoluteOverride(pluginEnvPluginDir, v); err != nil {
+			return "", err //nolint:wrapcheck // the error already names the override and its value
 		}
 		return v, nil
 	}
 	if runtime.GOOS == windowsGOOS {
 		if appData := os.Getenv("LOCALAPPDATA"); appData != "" {
+			if err := userdirs.RequireAbsoluteOverride("LOCALAPPDATA", appData); err != nil {
+				return "", err //nolint:wrapcheck // the error already names the override and its value
+			}
 			return filepath.Join(appData, pluginManagedTopDir, pluginManagedSubDir), nil
 		}
 		home, err := os.UserHomeDir()
@@ -84,6 +84,9 @@ func pluginParentDir() (string, error) {
 		return filepath.Join(home, "AppData", "Local", pluginManagedTopDir, pluginManagedSubDir), nil
 	}
 	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+		if err := userdirs.RequireAbsoluteOverride("XDG_DATA_HOME", v); err != nil {
+			return "", err //nolint:wrapcheck // the error already names the override and its value
+		}
 		return filepath.Join(v, pluginManagedTopDir, pluginManagedSubDir), nil
 	}
 	home, err := os.UserHomeDir()
@@ -123,6 +126,26 @@ func PluginDataDir(name string) (string, error) {
 	return filepath.Join(parent, pluginManagedDataSubdir, name), nil
 }
 
+// hasTerminalControlChars reports whether s holds a character a terminal acts
+// on rather than displays.
+//
+// Index entries are attacker-influenced by this package's own threat model, and
+// they are printed straight to the terminal by search, info, and the browse
+// picker. An escape sequence in a name, description, or repo URL could clear
+// the line, reposition the cursor, or repaint a row — spoofing the "[official]"
+// marker, or the repository name in the very confirmation whose job is to say
+// where the binary comes from. Bidi controls are included because they do the
+// same thing by reordering rather than escaping.
+//
+// Rejected, not stripped: a sanitized value would no longer be the value that
+// gets used, and the gap between the two is its own bug. Bad rows are dropped
+// at index load, which is what the catalog already does with invalid entries.
+func hasTerminalControlChars(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r)
+	})
+}
+
 // validatePluginName mirrors the dispatcher's isPluginCandidate rules and
 // returns a descriptive error for invalid names. Used by every entry point
 // that takes a plugin name from outside the dispatcher (data dir resolution,
@@ -130,6 +153,9 @@ func PluginDataDir(name string) (string, error) {
 func validatePluginName(name string) error {
 	if name == "" {
 		return errors.New("plugin name is empty")
+	}
+	if hasTerminalControlChars(name) {
+		return fmt.Errorf("plugin name %q must not contain control characters", name)
 	}
 	if strings.HasPrefix(name, "-") {
 		return fmt.Errorf("plugin name %q must not start with '-'", name)
@@ -146,13 +172,46 @@ func validatePluginName(name string) error {
 	return nil
 }
 
+// pluginRoot returns the shared *os.Root over the managed plugin directory —
+// the parent of bin/, pkg/, and data/ — creating it when create is set.
+//
+// Every read, write, rename, symlink and removal Entire performs inside the
+// managed tree resolves as a name in this root. Plugin names are validated by
+// validatePluginName before they reach a path today, and PluginDataDir carries a
+// comment saying that validation is what "guarantees ENTIRE_PLUGIN_DATA_DIR
+// always points inside the managed data subtree". The root is what keeps that
+// guarantee when the validation changes, or when a name arrives by a route that
+// does not go through it: this tree is populated from a remote index and remote
+// archives, so it is the last place a name should be trusted on its shape alone.
+func pluginRoot(create bool) (*os.Root, error) {
+	parent, err := pluginParentDir()
+	if err != nil {
+		return nil, err
+	}
+	if create {
+		if err := os.MkdirAll(parent, 0o750); err != nil {
+			return nil, fmt.Errorf("create plugin dir: %w", err)
+		}
+	}
+	return osroot.Shared(parent) //nolint:wrapcheck // Shared names the directory and returns a missing one unwrapped
+}
+
+// pluginBinName renders a managed binary as a name inside pluginRoot.
+func pluginBinName(binaryName string) string {
+	return pluginManagedBinSubdir + "/" + binaryName
+}
+
 // EnsurePluginBinDir creates the managed install dir if it doesn't exist.
 func EnsurePluginBinDir() (string, error) {
 	dir, err := PluginBinDir()
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	root, err := pluginRoot(true)
+	if err != nil {
+		return "", err
+	}
+	if err := osroot.MkdirAllNoSymlink(root, pluginManagedBinSubdir, 0o750); err != nil {
 		return "", fmt.Errorf("create plugin bin dir: %w", err)
 	}
 	return dir, nil
@@ -243,7 +302,14 @@ func ListInstalledPlugins() ([]*InstalledPlugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
+	root, err := pluginRoot(false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	entries, err := osroot.ReadDirNoSymlinks(root, pluginManagedBinSubdir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -261,15 +327,17 @@ func ListInstalledPlugins() ([]*InstalledPlugin, error) {
 		if bare == "" {
 			continue
 		}
-		path := filepath.Join(dir, full)
-		info, err := os.Lstat(path)
+		name := pluginBinName(full)
+		info, err := osroot.LstatNoSymlinks(root, name)
 		if err != nil {
 			continue
 		}
-		ip := &InstalledPlugin{Name: bare, Path: path}
+		// Path stays absolute: it is printed, and it is what the dispatcher
+		// execs. The reads around it go through the root.
+		ip := &InstalledPlugin{Name: bare, Path: filepath.Join(dir, full)}
 		if info.Mode()&os.ModeSymlink != 0 {
 			ip.Symlink = true
-			if target, err := os.Readlink(path); err == nil {
+			if target, err := root.Readlink(name); err == nil {
 				ip.LinkTarget = target
 			}
 		}
@@ -304,15 +372,16 @@ type InstallPluginOptions struct {
 	Force bool
 }
 
-// InstallPluginFromPath symlinks SourcePath into the managed bin dir. The
-// caller is responsible for built-in conflict checks (resolvePlugin already
-// gates dispatch on rootCmd.Find — installing a name that shadows a built-in
-// is allowed but the built-in still wins at runtime).
+// InstallPluginFromPath links or copies SourcePath into the managed bin dir
+// (materializeManagedEntry). The caller is responsible for built-in conflict
+// checks (resolvePlugin already gates dispatch on rootCmd.Find — installing a
+// name that shadows a built-in is allowed but the built-in still wins at
+// runtime).
 //
 // Refuses names the dispatcher will never invoke (agent-protocol prefix,
 // flag-shaped, "."/"..", slashes), and refuses self-install when the source
 // is the same file as the would-be managed entry. The replace step is
-// atomic: a new symlink is created at <dest>.tmp and renamed onto <dest>,
+// atomic: the new entry is created under a temp name and renamed onto <dest>,
 // so a failed --force never leaves the previous install missing.
 func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) {
 	src, err := filepath.Abs(opts.SourcePath)
@@ -342,7 +411,15 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 	if err != nil {
 		return nil, err
 	}
+	root, err := pluginRoot(true)
+	if err != nil {
+		return nil, err
+	}
+	// dest stays absolute for the messages and the self-install check below;
+	// destName is the same entry addressed inside the managed tree's root,
+	// which is what every write goes through.
 	dest := filepath.Join(binDir, base)
+	destName := pluginBinName(base)
 
 	// Reject self-install: the source path already equals the managed
 	// destination path. Without this guard, `--force` would atomically
@@ -377,7 +454,7 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 		if filepath.Clean(c.Path) == filepath.Clean(dest) {
 			continue
 		}
-		if err := os.Remove(c.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := root.Remove(pluginBinName(filepath.Base(c.Path))); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("remove existing variant %s: %w", c.Path, err)
 		}
 	}
@@ -394,15 +471,15 @@ func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) 
 	//   2. ListInstalledPlugins filters by `entire-` prefix, so a tmp that
 	//      starts with `.install-` will not appear in `entire plugin list`
 	//      while the install is in progress.
-	tmpDest, err := makeInstallTmpPath(binDir)
+	tmpName, err := makeInstallTmpName()
 	if err != nil {
 		return nil, err
 	}
-	if err := materializeManagedEntry(src, tmpDest, srcInfo); err != nil {
+	if err := materializeManagedEntry(root, src, tmpName, srcInfo); err != nil {
 		return nil, fmt.Errorf("install plugin: %w", err)
 	}
-	if err := os.Rename(tmpDest, dest); err != nil {
-		_ = os.Remove(tmpDest) // best-effort cleanup; previous install is intact
+	if err := root.Rename(tmpName, destName); err != nil {
+		_ = root.Remove(tmpName) //nolint:errcheck // best-effort cleanup; previous install is intact
 		return nil, fmt.Errorf("install plugin: %w", err)
 	}
 	return FindInstalledPlugin(bare)
@@ -430,39 +507,48 @@ func installedVariantsByBareName(name string) ([]*InstalledPlugin, error) {
 // pluginBinaryPrefix so ListInstalledPlugins ignores it; a 16-char hex
 // suffix from crypto/rand makes collisions vanishingly unlikely and keeps
 // concurrent installs safe from each other.
-func makeInstallTmpPath(binDir string) (string, error) {
+func makeInstallTmpName() (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("generate install tmp suffix: %w", err)
 	}
-	return filepath.Join(binDir, ".install-"+hex.EncodeToString(b[:])), nil
+	return pluginBinName(".install-" + hex.EncodeToString(b[:])), nil
 }
 
-// materializeManagedEntry creates dest as a reference to src, falling back
-// through symlink → hardlink → copy in that order.
-//
-// Symlink-first preserves the dev-loop property that rebuilding the source
-// is immediately reflected in the managed entry. The fallbacks exist for
-// Windows: os.Symlink there requires Developer Mode or admin, and silently
-// breaks `entire plugin install` for typical users without either. Mirrors
-// the pattern in setup_test.go's copyExecutable.
-//
-// On a successful copy the file mode of the source is preserved so the
-// executable bit survives.
-func materializeManagedEntry(src, dest string, srcInfo os.FileInfo) error {
-	if err := os.Symlink(src, dest); err == nil {
+// materializeManagedEntry creates destName (a name inside root) as a reference
+// to src (an absolute path): symlink where the platform supports it
+// (symlinkManagedEntry), then hardlink when src is inside the managed tree,
+// then copy. os.Root.Link takes root-relative names, which is why the hardlink
+// needs managedTreeName and only applies to in-tree sources (every remote
+// install); a local-dev source outside the tree is copied.
+func materializeManagedEntry(root *os.Root, src, destName string, srcInfo os.FileInfo) error {
+	if symlinkManagedEntry(root, src, destName) {
 		return nil
 	}
-	if err := os.Link(src, dest); err == nil {
-		return nil
+	if srcName, ok := managedTreeName(root, src); ok {
+		if err := root.Link(srcName, destName); err == nil {
+			return nil
+		}
 	}
-	return copyFileStreaming(src, dest, srcInfo)
+	return copyFileStreaming(root, src, destName, srcInfo)
+}
+
+// managedTreeName returns src as a slash-separated name inside root, or false
+// when src is outside the tree (or is the tree itself).
+func managedTreeName(root *os.Root, src string) (string, bool) {
+	rel, err := filepath.Rel(root.Name(), src)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
 }
 
 // copyFileStreaming copies src to dest in fixed-size buffers, preserving the
 // source's executable mode. Plugin binaries can be tens of megabytes; using
 // io.Copy avoids the heap spike of reading the whole file into memory.
-func copyFileStreaming(src, dest string, srcInfo os.FileInfo) error {
+// destName is a name inside root; src is the user's own file outside the managed
+// tree, so it is read by path.
+func copyFileStreaming(root *os.Root, src, destName string, srcInfo os.FileInfo) error {
 	mode := srcInfo.Mode().Perm()
 	if mode == 0 {
 		mode = 0o755
@@ -473,20 +559,17 @@ func copyFileStreaming(src, dest string, srcInfo os.FileInfo) error {
 	}
 	defer in.Close()
 
-	// G304: dest is always inside the managed bin dir. The basename comes
-	// from a validated plugin name (validatePluginName ran upstream), and
-	// the parent dir comes from EnsurePluginBinDir.
-	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode) //nolint:gosec // dest is constrained to the managed bin dir
+	out, err := root.OpenFile(destName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return fmt.Errorf("open destination for copy fallback: %w", err)
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
-		_ = os.Remove(dest)
+		_ = root.Remove(destName) //nolint:errcheck // best-effort cleanup of a partial copy
 		return fmt.Errorf("copy fallback: %w", err)
 	}
 	if err := out.Close(); err != nil {
-		_ = os.Remove(dest)
+		_ = root.Remove(destName) //nolint:errcheck // best-effort cleanup of a partial copy
 		return fmt.Errorf("close destination after copy fallback: %w", err)
 	}
 	return nil
@@ -507,8 +590,15 @@ func RemoveInstalledPlugin(name string) error {
 	if len(variants) == 0 {
 		return fmt.Errorf("plugin %q is not installed in the managed directory", name)
 	}
+	root, err := pluginRoot(false)
+	if err != nil {
+		return err
+	}
 	for _, p := range variants {
-		if err := os.Remove(p.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Remove by name inside the managed tree, not by the absolute path
+		// listing handed back: the whole point is that an entry name can never
+		// address a file outside the tree, however it was produced.
+		if err := root.Remove(pluginBinName(filepath.Base(p.Path))); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove plugin entry %s: %w", p.Path, err)
 		}
 	}

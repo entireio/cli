@@ -3,7 +3,6 @@ package pi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,7 +12,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -44,7 +45,7 @@ func (a *PiAgent) HookNames() []string {
 //   - session_start       → SessionStart
 //   - before_agent_start  → TurnStart
 //   - agent_end           → TurnEnd
-//   - session_shutdown    → (cleanup-only, no lifecycle event — see ParseHookEvent)
+//   - session_shutdown    → (no lifecycle event — see ParseHookEvent)
 func (a *PiAgent) GetSupportedHooks() []agent.HookType {
 	return []agent.HookType{
 		agent.HookSessionStart,
@@ -146,18 +147,13 @@ func piSkillEvents(in []piSkillEventInput) []agent.SkillEvent {
 // ParseHookEvent translates a Pi hook invocation into a normalised lifecycle
 // event. Implements agent.HookSupport.
 func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
-	data, err := io.ReadAll(stdin)
+	// Stream one JSON value rather than io.ReadAll so the hook never blocks
+	// waiting for stdin EOF that some agents don't send on Windows (issue #1398).
+	parsed, err := agent.ReadAndParseHookInput[piHookPayload](stdin)
 	if err != nil {
-		return nil, fmt.Errorf("read pi hook input: %w", err)
+		return nil, err
 	}
-	if len(data) == 0 {
-		return nil, errors.New("empty pi hook input")
-	}
-
-	var payload piHookPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil, fmt.Errorf("parse pi hook payload: %w", err)
-	}
+	payload := *parsed
 
 	sessionID := payload.SessionID
 	if sessionID == "" {
@@ -166,9 +162,22 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 
 	now := time.Now()
 
+	// A sessionless payload names no session we can track. It must not borrow a
+	// repo-global session identity — see docs/architecture/agent-guide.md for how
+	// a nested `pi --no-session` subagent thereby claimed its parent's session.
+	//
+	// session_shutdown is exempt: the extension sends it with no session identity at
+	// all, and the no-op handler below preserves the contract that it is not a
+	// SessionEnd event. Same shape as Copilot CLI's subordinate-session guard
+	// (copilotcli/lifecycle.go).
+	if hookName != HookNameSessionShutdown && sessionID == "" {
+		logging.Debug(ctx, "pi: skipping lifecycle event for sessionless (nested) Pi invocation",
+			slog.String("hook", hookName))
+		return nil, nil //nolint:nilnil // Sessionless/nested Pi — no session to track.
+	}
+
 	switch hookName {
 	case HookNameSessionStart:
-		cacheSessionID(ctx, sessionID)
 		return &agent.Event{
 			Type:      agent.SessionStart,
 			SessionID: sessionID,
@@ -176,16 +185,9 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		}, nil
 
 	case HookNameBeforeAgentStart:
-		// Pi emits before_agent_start with a fully-populated session ID, but
-		// we cache it anyway to support the agent_end fallback below.
-		if sessionID == "" {
-			sessionID = readCachedSessionID(ctx)
-		} else {
-			cacheSessionID(ctx, sessionID)
-		}
 		// Provide the live Pi session file as SessionRef so state.TranscriptPath
 		// is populated before any mid-turn commits. Without this, the
-		// post-commit hook cannot condense when no shadow branch exists yet.
+		// post-commit hook cannot condense before the first turn end.
 		return &agent.Event{
 			Type:        agent.TurnStart,
 			SessionID:   sessionID,
@@ -196,9 +198,6 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		}, nil
 
 	case HookNameAgentEnd:
-		if sessionID == "" {
-			sessionID = readCachedSessionID(ctx)
-		}
 		// Capture the Pi JSONL into <repo>/.entire/tmp/pi/<id>.json so the
 		// strategy has a stable transcript reference even if the user later
 		// deletes Pi sessions. The pi/ subdir avoids colliding with paths
@@ -208,13 +207,11 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 			Type:       agent.TurnEnd,
 			SessionID:  sessionID,
 			SessionRef: sessionRef,
+			Model:      extractModelFromPiSessionFile(sessionRef),
 			Timestamp:  now,
 		}, nil
 
 	case HookNameSessionShutdown:
-		// Cleanup-only: clear the cached session ID. We intentionally do NOT
-		// emit SessionEnd here.
-		//
 		// Pi fires session_shutdown and agent_end on session teardown, and the
 		// TypeScript extension dispatches both via separate `entire hooks pi …`
 		// child processes (execFile is non-blocking). Child-process startup
@@ -228,8 +225,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		// effectively "session over" for any single-turn `pi -p` invocation).
 		// SessionEnd is left for the framework to derive from idle timeout or
 		// the next SessionStart's stale-state cleanup.
-		clearCachedSessionID(ctx)
-		return nil, nil //nolint:nilnil // intentional: cleanup-only, no lifecycle event
+		return nil, nil //nolint:nilnil // intentional: session_shutdown is not a lifecycle event
 
 	default:
 		// Unknown / future hooks have no lifecycle significance.
@@ -237,25 +233,14 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 	}
 }
 
-// --- session ID cache ---
-//
-// Pi's `before_agent_start` event sometimes fires before `session_start` has
-// completed cacheing the session ID (race during early extension load), and
-// `agent_end` may fire after Pi has torn down its session manager. We cache
-// the active session ID at session_start time so subsequent hooks can recover
-// it.
-
-const activeSessionFile = "pi-active-session"
-
 // piHookCacheSubdir is the subdirectory under .entire/tmp/ where hook
-// flow caches the active-session ID file and the agent_end transcript
-// snapshot. Agent-specific (not just .entire/tmp/) so other agents'
+// flow caches the agent_end transcript snapshot. Agent-specific (not just
+// .entire/tmp/) so other agents'
 // integration tests and tooling don't shadow each other under the cache
 // root.
 const piHookCacheSubdir = "pi"
 
 // resolveSessionDir returns the per-repo hook cache directory used by
-// cacheSessionID / readCachedSessionID / clearCachedSessionID and
 // captureTranscript.
 //
 // This is intentionally distinct from PiAgent.GetSessionDir, which
@@ -265,47 +250,35 @@ const piHookCacheSubdir = "pi"
 // firing; the framework records the cached path as SessionRef in
 // checkpoint metadata, so subsequent operations on hooked sessions go
 // through the recorded path rather than re-resolving via GetSessionDir.
-func resolveSessionDir(ctx context.Context) string {
+func resolveSessionDir(ctx context.Context) (worktreeRoot string, ok bool) {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		//nolint:forbidigo // fallback when no git repo (tests run outside repos)
 		wd, wdErr := os.Getwd()
 		if wdErr != nil {
-			return filepath.Join(paths.EntireTmpDir, piHookCacheSubdir)
+			return "", false
 		}
 		root = wd
 	}
-	return filepath.Join(root, paths.EntireTmpDir, piHookCacheSubdir)
+	return root, true
 }
 
-func cacheSessionID(ctx context.Context, id string) {
-	if id == "" {
-		return
-	}
-	dir := resolveSessionDir(ctx)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		logging.Debug(ctx, "pi: cache session id mkdir", slog.String("err", err.Error()))
-		return
-	}
+// sessionCacheDir is .entire/tmp/pi relative to the .entire root.
+var sessionCacheDir = entiredir.MustName(paths.EntireTmpDir) + "/" + piHookCacheSubdir
 
-	if err := os.WriteFile(filepath.Join(dir, activeSessionFile), []byte(id), 0o600); err != nil {
-		logging.Debug(ctx, "pi: cache session id write", slog.String("err", err.Error()))
+func extractModelFromPiSessionFile(path string) string {
+	if path == "" {
+		return ""
 	}
-}
-
-func readCachedSessionID(ctx context.Context) string {
-	dir := resolveSessionDir(ctx)
-	//nolint:gosec // path constructed from validated repo root
-	data, err := os.ReadFile(filepath.Join(dir, activeSessionFile))
+	data, err := agent.ReadTranscriptFile(path)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
-}
-
-func clearCachedSessionID(ctx context.Context) {
-	dir := resolveSessionDir(ctx)
-	_ = os.Remove(filepath.Join(dir, activeSessionFile))
+	model, err := (&PiAgent{}).ExtractModel(data)
+	if err != nil {
+		return ""
+	}
+	return model
 }
 
 // captureTranscript copies the Pi JSONL session file to
@@ -317,22 +290,28 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 	if sessionID == "" || piSessionFile == "" {
 		return ""
 	}
-	// sessionID comes from the hook payload (or the locally cached active
-	// session) and is used to build dst below, before the lifecycle dispatcher
-	// validates it. Validate here at the choke point so an unsafe ID cannot
-	// write the transcript outside the cache directory; "" signals no capture.
+	// sessionID comes from the hook payload and is used to build dst below,
+	// before the lifecycle dispatcher validates it. Validate here at the choke
+	// point so an unsafe ID cannot write the transcript outside the cache
+	// directory; "" signals no capture.
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		logging.Warn(ctx, "pi: refusing to capture transcript for unsafe session ID",
 			slog.String("session_id", sessionID), slog.String("err", err.Error()))
 		return ""
 	}
-	dir := resolveSessionDir(ctx)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		logging.Warn(ctx, "pi: capture transcript mkdir failed",
-			slog.String("dir", dir), slog.String("err", err.Error()))
+	worktreeRoot, ok := resolveSessionDir(ctx)
+	if !ok {
 		return ""
 	}
-	dst := filepath.Join(dir, sessionID+".json")
+	root, err := entiredir.OpenAt(worktreeRoot)
+	if err != nil {
+		return ""
+	}
+	if err := osroot.MkdirAllNoSymlink(root, sessionCacheDir, 0o750); err != nil {
+		logging.Debug(ctx, "pi: session cache mkdir", slog.String("err", err.Error()))
+		return ""
+	}
+	name := sessionCacheDir + "/" + sessionID + ".json"
 	//nolint:gosec // G703: piSessionFile from trusted Pi extension stdin payload
 	data, err := os.ReadFile(piSessionFile)
 	if err != nil {
@@ -340,13 +319,15 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 			slog.String("src", piSessionFile), slog.String("err", err.Error()))
 		return ""
 	}
-	//nolint:gosec // G703: dst is sessionID (validated above) under .entire/tmp/pi
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
+	if err := entiredir.WriteFile(root, name, data, 0o600); err != nil {
 		logging.Warn(ctx, "pi: capture transcript write failed",
-			slog.String("dst", dst), slog.String("err", err.Error()))
+			slog.String("dst", name), slog.String("err", err.Error()))
 		return ""
 	}
-	return dst
+	// Absolute on purpose: the framework records this as the session's
+	// SessionRef, which travels into checkpoint metadata and back out to
+	// callers that resolve it from anywhere in the repo.
+	return filepath.Join(worktreeRoot, paths.EntireDir, filepath.FromSlash(name))
 }
 
 // extractSessionIDFromPath extracts the UUID from a Pi session filename.

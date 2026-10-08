@@ -1,94 +1,16 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"strconv"
 
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
-
-// TaskHookInput represents the JSON input from PreToolUse[Task] hook
-type TaskHookInput struct {
-	SessionID      string          `json:"session_id"`
-	TranscriptPath string          `json:"transcript_path"`
-	ToolUseID      string          `json:"tool_use_id"`
-	ToolInput      json.RawMessage `json:"tool_input"`
-}
-
-// postTaskHookInputRaw is the raw JSON structure from PostToolUse[Task] hook
-type postTaskHookInputRaw struct {
-	SessionID      string          `json:"session_id"`
-	TranscriptPath string          `json:"transcript_path"`
-	ToolUseID      string          `json:"tool_use_id"`
-	ToolInput      json.RawMessage `json:"tool_input"`
-	ToolResponse   struct {
-		AgentID string `json:"agentId"`
-	} `json:"tool_response"`
-}
-
-// PostTaskHookInput represents the parsed input from PostToolUse[Task] hook
-type PostTaskHookInput struct {
-	TaskHookInput
-
-	AgentID   string          // Extracted from tool_response.agentId
-	ToolInput json.RawMessage // Raw tool input for reference
-}
-
-// parseTaskHookInput parses PreToolUse[Task] hook input from reader
-func parseTaskHookInput(r io.Reader) (*TaskHookInput, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("empty input")
-	}
-
-	var input TaskHookInput
-	if err := json.Unmarshal(data, &input); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	return &input, nil
-}
-
-// parsePostTaskHookInput parses PostToolUse[Task] hook input from reader
-func parsePostTaskHookInput(r io.Reader) (*PostTaskHookInput, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("empty input")
-	}
-
-	var raw postTaskHookInputRaw
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	return &PostTaskHookInput{
-		TaskHookInput: TaskHookInput{
-			SessionID:      raw.SessionID,
-			TranscriptPath: raw.TranscriptPath,
-			ToolUseID:      raw.ToolUseID,
-		},
-		AgentID:   raw.ToolResponse.AgentID,
-		ToolInput: raw.ToolInput,
-	}, nil
-}
-
-// logPreTaskHookContext logs the PreToolUse[Task] hook context to the writer
-func logPreTaskHookContext(w io.Writer, input *TaskHookInput) {
-	_, _ = fmt.Fprintln(w, "[entire] PreToolUse[Task] hook invoked")
-	_, _ = fmt.Fprintf(w, "  Session ID: %s\n", input.SessionID)
-	_, _ = fmt.Fprintf(w, "  Tool Use ID: %s\n", input.ToolUseID)
-	_, _ = fmt.Fprintf(w, "  Transcript: %s\n", input.TranscriptPath)
-}
 
 // SubagentCheckpointHookInput represents the JSON input from PostToolUse hooks for
 // subagent checkpoint creation (TodoWrite, Edit, Write)
@@ -101,23 +23,12 @@ type SubagentCheckpointHookInput struct {
 	ToolResponse   json.RawMessage `json:"tool_response"`
 }
 
-// parseSubagentCheckpointHookInput parses PostToolUse hook input for subagent checkpoints
+// parseSubagentCheckpointHookInput parses PostToolUse hook input for subagent
+// checkpoints. It streams a single JSON value rather than reading to EOF so the
+// claude-code post-todo hook never blocks waiting for a stdin close that some
+// agents don't send on Windows (issue #1398).
 func parseSubagentCheckpointHookInput(r io.Reader) (*SubagentCheckpointHookInput, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("empty input")
-	}
-
-	var input SubagentCheckpointHookInput
-	if err := json.Unmarshal(data, &input); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	return &input, nil
+	return agent.ReadAndParseHookInput[SubagentCheckpointHookInput](r)
 }
 
 // taskToolInput represents the tool_input structure for the Task tool.
@@ -142,91 +53,53 @@ func ParseSubagentTypeAndDescription(toolInput json.RawMessage) (agentType, desc
 	return input.SubagentType, input.Description
 }
 
-// todoWriteToolInput represents the tool_input structure for the TodoWrite tool.
-// Used to extract the todos array which is then passed to strategy.ExtractInProgressTodo.
-type todoWriteToolInput struct {
-	Todos json.RawMessage `json:"todos"`
+// backgroundTaskToolInput represents the tool_input structure for the Task
+// tool, used to detect a background subagent launch. RunInBackground stays
+// raw because models send it as a JSON boolean or as a string ("true").
+type backgroundTaskToolInput struct {
+	RunInBackground json.RawMessage `json:"run_in_background"`
 }
 
-// ExtractTodoContentFromToolInput extracts the content of the in-progress todo item from TodoWrite tool_input.
-// Falls back to the first pending item if no in-progress item is found.
-// Returns empty string if no suitable item is found or JSON is invalid.
-//
-// This function unwraps the outer tool_input object to extract the todos array,
-// then delegates to strategy.ExtractInProgressTodo for the actual parsing logic.
-func ExtractTodoContentFromToolInput(toolInput json.RawMessage) string {
-	if len(toolInput) == 0 {
-		return ""
+// isBackgroundLaunch reports whether a launch-time SubagentEnd event is a
+// background launch. A launch mode the agent reported wins; otherwise it
+// falls back to tool_input.run_in_background, accepting a boolean or a
+// boolean string. Returns false (foreground) when neither says background.
+func isBackgroundLaunch(ctx context.Context, event *agent.Event) bool {
+	switch event.SubagentLaunch {
+	case agent.SubagentLaunchBackground:
+		return true
+	case agent.SubagentLaunchForeground:
+		return false
+	case agent.SubagentLaunchUnknown:
 	}
 
-	// First extract the todos array from tool_input
-	var input todoWriteToolInput
-	if err := json.Unmarshal(toolInput, &input); err != nil {
-		return ""
+	if len(event.ToolInput) == 0 {
+		return false
 	}
-
-	// Delegate to strategy package for the actual extraction logic
-	return strategy.ExtractInProgressTodo(input.Todos)
-}
-
-// ExtractLastCompletedTodoFromToolInput extracts the content of the last completed todo item.
-// In PostToolUse[TodoWrite], the tool_input contains the NEW todo list where the
-// just-finished work is marked as "completed". The last completed item represents
-// the work that was just done.
-//
-// Returns empty string if no completed items exist or JSON is invalid.
-func ExtractLastCompletedTodoFromToolInput(toolInput json.RawMessage) string {
-	if len(toolInput) == 0 {
-		return ""
+	var input backgroundTaskToolInput
+	if err := json.Unmarshal(event.ToolInput, &input); err != nil {
+		logging.Debug(ctx, "failed to parse tool_input for background-launch detection; treating as foreground",
+			slog.String("error", err.Error()))
+		return false
 	}
-
-	// First extract the todos array from tool_input
-	var input todoWriteToolInput
-	if err := json.Unmarshal(toolInput, &input); err != nil {
-		return ""
+	if len(input.RunInBackground) == 0 {
+		return false
 	}
-
-	// Delegate to strategy package for the actual extraction logic
-	return strategy.ExtractLastCompletedTodo(input.Todos)
-}
-
-// CountTodosFromToolInput returns the number of todo items in the TodoWrite tool_input.
-// Returns 0 if the JSON is invalid or empty.
-//
-// This function unwraps the outer tool_input object to extract the todos array,
-// then delegates to strategy.CountTodos for the actual count.
-func CountTodosFromToolInput(toolInput json.RawMessage) int {
-	if len(toolInput) == 0 {
-		return 0
+	var flag bool
+	if err := json.Unmarshal(input.RunInBackground, &flag); err == nil {
+		return flag
 	}
-
-	// First extract the todos array from tool_input
-	var input todoWriteToolInput
-	if err := json.Unmarshal(toolInput, &input); err != nil {
-		return 0
+	var text string
+	if err := json.Unmarshal(input.RunInBackground, &text); err == nil {
+		if flag, err := strconv.ParseBool(text); err == nil {
+			return flag
+		}
 	}
-
-	// Delegate to strategy package for the actual count
-	return strategy.CountTodos(input.Todos)
-}
-
-// logPostTaskHookContext logs the PostToolUse[Task] hook context to the writer
-func logPostTaskHookContext(w io.Writer, input *PostTaskHookInput, subagentTranscriptPath string) {
-	_, _ = fmt.Fprintln(w, "[entire] PostToolUse[Task] hook invoked")
-	_, _ = fmt.Fprintf(w, "  Session ID: %s\n", input.SessionID)
-	_, _ = fmt.Fprintf(w, "  Tool Use ID: %s\n", input.ToolUseID)
-
-	if input.AgentID != "" {
-		_, _ = fmt.Fprintf(w, "  Agent ID: %s\n", input.AgentID)
-	} else {
-		_, _ = fmt.Fprintln(w, "  Agent ID: (none)")
-	}
-
-	_, _ = fmt.Fprintf(w, "  Transcript: %s\n", input.TranscriptPath)
-
-	if subagentTranscriptPath != "" {
-		_, _ = fmt.Fprintf(w, "  Subagent Transcript: %s\n", subagentTranscriptPath)
-	} else {
-		_, _ = fmt.Fprintln(w, "  Subagent Transcript: (none)")
-	}
+	// Log only the decoded value's type: the value is model-provided and may
+	// hold anything.
+	var value any
+	_ = json.Unmarshal(input.RunInBackground, &value) //nolint:errcheck // already valid JSON; a nil value still logs a type
+	logging.Warn(ctx, "unrecognized run_in_background value; treating as foreground",
+		slog.String("type", fmt.Sprintf("%T", value)))
+	return false
 }

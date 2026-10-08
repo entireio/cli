@@ -31,10 +31,7 @@ func TestDefaultBranch_WorksOnMain(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	points := env.GetRewindPoints()
-	if len(points) != 1 {
-		t.Errorf("expected 1 rewind point on main branch, got %d", len(points))
-	}
+	env.AssertTurnEndRecorded(session.ID, "file.txt")
 }
 
 // TestDefaultBranch_WorksOnFeatureBranch tests that Entire tracking works on feature branches.
@@ -61,10 +58,7 @@ func TestDefaultBranch_WorksOnFeatureBranch(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	points := env.GetRewindPoints()
-	if len(points) != 1 {
-		t.Errorf("expected 1 rewind point on feature branch, got %d", len(points))
-	}
+	env.AssertTurnEndRecorded(session.ID, "feature.txt")
 }
 
 // TestDefaultBranch_PostTaskWorksOnMain tests that task checkpoints work on main.
@@ -113,8 +107,12 @@ func TestDefaultBranch_PostTaskWorksOnMain(t *testing.T) {
 		t.Fatalf("SimulatePostTask failed: %v", err)
 	}
 
-	points := env.GetRewindPoints()
-	if len(points) != 1 {
-		t.Errorf("expected 1 rewind point (completed checkpoint) on main, got %d", len(points))
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	rec := state.FindTaskRecord(taskID)
+	if rec == nil || rec.CompletedAt.IsZero() || !containsFile(rec.Files, "task.txt") {
+		t.Errorf("expected a completed task record carrying task.txt on main, got %+v", rec)
 	}
 }

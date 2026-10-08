@@ -12,7 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
@@ -175,6 +175,38 @@ func TestRecordFilesTouched_MergesIncrementally(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	require.ElementsMatch(t, []string{"existing.txt", "updated.txt", "new.txt", "removed.txt"}, loaded.FilesTouched)
+}
+
+// Per-tool hooks merge paths without hashing them, so a hash recorded for the
+// same path by an earlier turn-end step must be dropped (name matching), never
+// kept to judge the newer content against.
+func TestRecordFilesTouched_DropsStaleTouchedFileHashes(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	state := &SessionState{
+		SessionID:    "ft-stale-hash",
+		BaseCommit:   "deadbeef",
+		StartedAt:    time.Now(),
+		FilesTouched: []string{"kept.txt", "rewritten.txt"},
+		TouchedFileHashes: map[string]string{
+			"kept.txt":      "1111111111111111111111111111111111111111",
+			"rewritten.txt": "2222222222222222222222222222222222222222",
+		},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	// The path is already in FilesTouched, so only the hash changes; the write
+	// must still happen.
+	require.NoError(t, RecordFilesTouched(context.Background(), "ft-stale-hash",
+		[]string{"rewritten.txt"}, nil, nil))
+
+	loaded, err := LoadSessionState(context.Background(), "ft-stale-hash")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.ElementsMatch(t, []string{"kept.txt", "rewritten.txt"}, loaded.FilesTouched)
+	require.Equal(t, map[string]string{"kept.txt": "1111111111111111111111111111111111111111"}, loaded.TouchedFileHashes)
 }
 
 func TestRecordFilesTouched_NoStateIsNoop(t *testing.T) {
@@ -445,96 +477,6 @@ func TestManualCommitStrategy_SessionState_UsesPackageFunctions(t *testing.T) {
 	}
 }
 
-// TestFindMostRecentSession_FiltersByWorktree tests that FindMostRecentSession
-// returns sessions from the current worktree, not from other worktrees.
-func TestFindMostRecentSession_FiltersByWorktree(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	// Get the resolved worktree path (git resolves symlinks, e.g. /var → /private/var on macOS)
-	resolvedDir, err := paths.WorktreeRoot(context.Background())
-	if err != nil {
-		t.Fatalf("paths.WorktreeRoot() error = %v", err)
-	}
-
-	older := time.Now().Add(-1 * time.Hour)
-	newer := time.Now()
-
-	// Session from a different worktree (more recent)
-	otherWorktree := &SessionState{
-		SessionID:           "other-worktree-session",
-		BaseCommit:          "abc1234",
-		WorktreePath:        "/some/other/worktree",
-		StartedAt:           newer,
-		LastInteractionTime: &newer,
-		Phase:               "idle",
-	}
-
-	// Session from current worktree (older)
-	currentWorktree := &SessionState{
-		SessionID:           "current-worktree-session",
-		BaseCommit:          "xyz7890",
-		WorktreePath:        resolvedDir, // matches current worktree
-		StartedAt:           older,
-		LastInteractionTime: &older,
-		Phase:               "idle",
-	}
-
-	if err := SaveSessionState(context.Background(), otherWorktree); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-	if err := SaveSessionState(context.Background(), currentWorktree); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	// FindMostRecentSession should return the current worktree's session,
-	// not the other worktree's session (even though it's more recent).
-	result := FindMostRecentSession(context.Background())
-	if result != "current-worktree-session" {
-		t.Errorf("FindMostRecentSession(context.Background()) = %q, want %q (should prefer current worktree)",
-			result, "current-worktree-session")
-	}
-}
-
-// TestFindMostRecentSession_FallsBackWhenNoWorktreeMatch tests that
-// FindMostRecentSession falls back to all sessions when none match the current worktree.
-func TestFindMostRecentSession_FallsBackWhenNoWorktreeMatch(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	newer := time.Now()
-
-	// Session from a different worktree only (no sessions for current worktree)
-	otherWorktree := &SessionState{
-		SessionID:           "only-session",
-		BaseCommit:          "abc1234",
-		WorktreePath:        "/some/other/worktree",
-		StartedAt:           newer,
-		LastInteractionTime: &newer,
-		Phase:               "idle",
-	}
-
-	if err := SaveSessionState(context.Background(), otherWorktree); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	// Should fall back to the only available session since none match current worktree
-	result := FindMostRecentSession(context.Background())
-	if result != "only-session" {
-		t.Errorf("FindMostRecentSession(context.Background()) = %q, want %q (should fall back when no worktree match)",
-			result, "only-session")
-	}
-
-	// Cleanup
-	if err := os.Remove(dir + "/.git/entire-sessions/only-session.json"); err != nil && !os.IsNotExist(err) {
-		t.Logf("cleanup warning: %v", err)
-	}
-}
-
 // errorActionHandler returns an error from HandleCondense to test
 // that TransitionAndLog propagates handler errors while still applying the phase transition.
 type errorActionHandler struct {
@@ -592,10 +534,11 @@ func TestLoadSessionState_DeletesStaleSession(t *testing.T) {
 	}
 
 	// Verify file exists before load
-	stateFile, err := sessionStateFile(context.Background(), "stale-load-test")
+	stateDir, err := getSessionStateDir(context.Background())
 	if err != nil {
-		t.Fatalf("sessionStateFile() error = %v", err)
+		t.Fatalf("getSessionStateDir() error = %v", err)
 	}
+	stateFile := filepath.Join(stateDir, "stale-load-test.json")
 	if _, err := os.Stat(stateFile); err != nil {
 		t.Fatalf("state file should exist before load: %v", err)
 	}
@@ -936,4 +879,192 @@ func TestClearSessionState_RemovesOrphanedHintFile(t *testing.T) {
 	if len(matches) != 0 {
 		t.Errorf("expected no files for session after clear, found: %v", matches)
 	}
+}
+
+// TestMutateSessionState_BoundedLockWait_DegradesUnderContention proves the
+// TurnStart fix for the pathological hook latency: when a concurrent process
+// holds the per-session flock (e.g. the previous turn's still-running
+// condensation), a caller that opted into WithSessionLockWait returns promptly
+// with a lock-acquire error instead of blocking for the full duration of the
+// lock holder. Without the bound the acquisition is an unbounded LOCK_EX and
+// TurnStart stalls the user's prompt for as long as the holder runs (~30s in
+// production).
+func TestMutateSessionState_BoundedLockWait_DegradesUnderContention(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	const sessionID = "lock-wait-session"
+
+	// Hold the raw per-session flock from a separate open descriptor, exactly
+	// as a concurrent condensation process would. flock contends across
+	// independent descriptors even within one process.
+	lockPath, err := stateLockPath(ctx, sessionID)
+	require.NoError(t, err)
+	release, err := flock.Acquire(lockPath)
+	require.NoError(t, err)
+	heldReleased := false
+	defer func() {
+		if !heldReleased {
+			release()
+		}
+	}()
+
+	// A bounded caller must give up quickly, not block behind the holder.
+	const lockWait = 150 * time.Millisecond
+	boundedCtx := WithSessionLockWait(ctx, lockWait)
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- MutateSessionState(boundedCtx, sessionID, func(*SessionState) error {
+			t.Error("mutation ran even though the lock was held")
+			return nil
+		})
+	}()
+
+	select {
+	case mutErr := <-done:
+		elapsed := time.Since(start)
+		require.Error(t, mutErr, "expected a lock-acquire timeout error while lock is held")
+		// It must not be treated as "no state" — it's a genuine acquisition timeout.
+		require.NotErrorIs(t, mutErr, ErrStateNotFound,
+			"timeout should surface as an acquire error, not ErrStateNotFound")
+		assert.Less(t, elapsed, 2*time.Second,
+			"bounded MutateSessionState should return shortly after lockWait, not block on the holder")
+	case <-time.After(3 * time.Second):
+		t.Fatal("bounded MutateSessionState blocked on the held lock instead of timing out")
+	}
+
+	// Once the holder releases, a bounded caller acquires normally. State was
+	// never created, so the mutation reaches "not found" AFTER successfully
+	// acquiring the lock — proving contention, not the bound, was the only
+	// thing stopping it before.
+	release()
+	heldReleased = true
+
+	ran := false
+	err = MutateSessionState(WithSessionLockWait(ctx, time.Second), sessionID, func(state *SessionState) error {
+		ran = true
+		state.StepCount = 7
+		return nil
+	})
+	require.ErrorIs(t, err, ErrStateNotFound)
+	assert.False(t, ran, "mutation body only runs when state exists")
+}
+
+// TestMutateSessionState_UnboundedByDefault verifies the default path is
+// unchanged: with no WithSessionLockWait the acquisition still blocks until the
+// lock frees (turn-end/condensation must never drop work). We assert this by
+// releasing the lock from a goroutine after a short delay and confirming the
+// mutation only proceeds afterward.
+func TestMutateSessionState_UnboundedByDefault(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	const sessionID = "unbounded-session"
+
+	// Seed state so the mutation body can run once the lock is free.
+	require.NoError(t, SaveSessionState(ctx, &SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}))
+
+	lockPath, err := stateLockPath(ctx, sessionID)
+	require.NoError(t, err)
+	release, err := flock.Acquire(lockPath)
+	require.NoError(t, err)
+
+	const holdFor = 400 * time.Millisecond
+	// start is captured BEFORE the holder goroutine launches, so it is always
+	// at or before the moment the sleep begins. Capturing it after the `go`
+	// statement made the assertion below depend on this goroutine reaching
+	// time.Now() before the new one reaches time.Sleep -- an ordering nothing
+	// guarantees. When it lost, the measured elapsed fell just under holdFor
+	// and the test failed with no real defect (seen on CI at 398.881573ms
+	// against a 400ms bound).
+	start := time.Now()
+	go func() {
+		time.Sleep(holdFor)
+		release()
+	}()
+
+	ran := false
+	// No WithSessionLockWait: must wait for the holder rather than time out.
+	err = MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		ran = true
+		state.StepCount = 3
+		return nil
+	})
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.True(t, ran, "unbounded mutation must eventually run")
+	assert.GreaterOrEqual(t, elapsed, holdFor,
+		"unbounded acquire should block until the holder releases, not time out")
+}
+
+// TestClearSessionState_PackageLevel_SerializesAgainstConcurrentMutation
+// covers the implementation `entire doctor` actually reaches
+// (doctor.go's discardSession -> strategy.ClearSessionState), which is a
+// different function from (*ManualCommitStrategy).clearSessionState and was
+// left ungated when that one was hardened -- so the race stayed open on the
+// command most likely to run while other sessions are live. Same shape as
+// the strategy-method test: a writer holds the real gate mid-mutation, and
+// the clear must block until it releases.
+func TestClearSessionState_PackageLevel_SerializesAgainstConcurrentMutation(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	const sessionID = "pkg-clear-race-session"
+	if err := SaveSessionState(ctx, &SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	writerStarted := make(chan struct{})
+	writerMayFinish := make(chan struct{})
+	writerFinished := make(chan struct{})
+	go func() {
+		defer close(writerFinished)
+		if err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			close(writerStarted)
+			<-writerMayFinish
+			state.StepCount = 1
+			return nil
+		}); err != nil {
+			t.Errorf("MutateSessionState: %v", err)
+		}
+	}()
+	<-writerStarted // writer holds the gate now, mid-mutation
+
+	clearStarted := make(chan struct{})
+	clearReturned := make(chan struct{})
+	go func() {
+		defer close(clearReturned)
+		close(clearStarted)
+		if err := ClearSessionState(ctx, sessionID); err != nil {
+			t.Errorf("ClearSessionState: %v", err)
+		}
+	}()
+	<-clearStarted
+
+	select {
+	case <-clearReturned:
+		t.Fatal("package-level ClearSessionState returned while a concurrent MutateSessionState was still mid-mutation -- not serialized (this is doctor's path)")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: still blocked on the gate.
+	}
+
+	close(writerMayFinish)
+	<-writerFinished
+	<-clearReturned
 }

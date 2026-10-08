@@ -4,87 +4,6 @@ import (
 	"testing"
 )
 
-func TestGenerateID(t *testing.T) {
-	t.Parallel()
-
-	id, err := GenerateID()
-	if err != nil {
-		t.Fatalf("GenerateID() error = %v", err)
-	}
-	if len(id) != 12 {
-		t.Errorf("expected 12-char ID, got %d: %q", len(id), id)
-	}
-	if err := ValidateID(id.String()); err != nil {
-		t.Errorf("generated ID failed validation: %v", err)
-	}
-}
-
-func TestGenerateID_Unique(t *testing.T) {
-	t.Parallel()
-
-	seen := make(map[ID]bool)
-	for range 100 {
-		id, err := GenerateID()
-		if err != nil {
-			t.Fatalf("GenerateID() error = %v", err)
-		}
-		if seen[id] {
-			t.Errorf("duplicate ID generated: %s", id)
-		}
-		seen[id] = true
-	}
-}
-
-func TestValidateID(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		id      string
-		wantErr bool
-	}{
-		{"valid", "abcdef123456", false},
-		{"valid_all_hex", "0123456789ab", false},
-		{"too_short", "abcdef", true},
-		{"too_long", "abcdef1234567", true},
-		{"uppercase", "ABCDEF123456", true},
-		{"non_hex", "ghijkl123456", true},
-		{"empty", "", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := ValidateID(tt.id)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ValidateID(%q) error = %v, wantErr %v", tt.id, err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestID_Path(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		id   ID
-		want string
-	}{
-		{"abcdef123456", "ab/cdef123456"},
-		{"0123456789ab", "01/23456789ab"},
-		{"ab", "ab"},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.id), func(t *testing.T) {
-			t.Parallel()
-			if got := tt.id.Path(); got != tt.want {
-				t.Errorf("ID(%q).Path() = %q, want %q", tt.id, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestID_IsEmpty(t *testing.T) {
 	t.Parallel()
 
@@ -169,5 +88,50 @@ func TestHumanizeBranchName(t *testing.T) {
 				t.Errorf("HumanizeBranchName(%q) = %q, want %q", tt.branch, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestType_IsValid(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		typ   Type
+		valid bool
+	}{
+		{TypeBug, true}, {TypeFeature, true}, {TypeTask, true},
+		{"", false}, {"epic", false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.typ), func(t *testing.T) {
+			t.Parallel()
+			if got := tt.typ.IsValid(); got != tt.valid {
+				t.Errorf("Type(%q).IsValid() = %v, want %v", tt.typ, got, tt.valid)
+			}
+		})
+	}
+	if len(ValidTypes()) != 3 {
+		t.Errorf("ValidTypes() len = %d, want 3", len(ValidTypes()))
+	}
+}
+
+func TestPriority_IsValid(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		p     Priority
+		valid bool
+	}{
+		{PriorityUrgent, true}, {PriorityHigh, true}, {PriorityMedium, true},
+		{PriorityLow, true}, {PriorityNone, true},
+		{"", false}, {"critical", false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.p), func(t *testing.T) {
+			t.Parallel()
+			if got := tt.p.IsValid(); got != tt.valid {
+				t.Errorf("Priority(%q).IsValid() = %v, want %v", tt.p, got, tt.valid)
+			}
+		})
+	}
+	if len(ValidPriorities()) != 5 {
+		t.Errorf("ValidPriorities() len = %d, want 5", len(ValidPriorities()))
 	}
 }

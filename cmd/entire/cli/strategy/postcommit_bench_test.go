@@ -20,7 +20,7 @@ import (
 // BenchmarkPostCommit measures the full PostCommit hook execution time.
 // This is the baseline before introducing a postCommitCache.
 //
-// Setup: 1 active session with a shadow branch checkpoint, then a commit
+// Setup: 1 active session with a turn-end step, then a commit
 // with the Entire-Checkpoint trailer. PostCommit reads HEAD, finds the session,
 // runs condensation (filesOverlapWithContent, CondenseSession, carry-forward).
 func BenchmarkPostCommit(b *testing.B) {
@@ -64,7 +64,7 @@ func benchPostCommitMultipleSessions(sessionCount int) func(*testing.B) {
 	}
 }
 
-// benchSetupPostCommitRepo creates a git repo with N sessions that have shadow branch
+// benchSetupPostCommitRepo creates a git repo with N sessions that have turn-end
 // checkpoints, then creates a commit with the Entire-Checkpoint trailer.
 // Returns the repo directory path, ready for PostCommit() to run.
 func benchSetupPostCommitRepo(b *testing.B, phase session.Phase, sessionCount int) string {
@@ -128,7 +128,7 @@ func benchSetupPostCommitRepo(b *testing.B, phase session.Phase, sessionCount in
 	b.Chdir(dir)
 	paths.ClearWorktreeRootCache()
 
-	// Set up each session with a shadow branch checkpoint
+	// Set up each session with a turn-end step
 	modifiedFiles := []string{"src/file_0.go", "src/file_1.go"}
 	for i := range sessionCount {
 		sessionID := fmt.Sprintf("bench-session-%d", i)
@@ -158,15 +158,14 @@ func benchSetupPostCommitRepo(b *testing.B, phase session.Phase, sessionCount in
 		paths.ClearWorktreeRootCache()
 
 		if err := s.SaveStep(context.Background(), StepContext{
-			SessionID:      sessionID,
-			ModifiedFiles:  modifiedFiles,
-			NewFiles:       []string{},
-			DeletedFiles:   []string{},
-			MetadataDir:    metadataDir,
-			MetadataDirAbs: metadataDirAbs,
-			CommitMessage:  "Checkpoint 1",
-			AuthorName:     "Bench",
-			AuthorEmail:    "bench@test.com",
+			SessionID:     sessionID,
+			ModifiedFiles: modifiedFiles,
+			NewFiles:      []string{},
+			DeletedFiles:  []string{},
+			MetadataDir:   metadataDir,
+			CommitMessage: "Checkpoint 1",
+			AuthorName:    "Bench",
+			AuthorEmail:   "bench@test.com",
 		}); err != nil {
 			b.Fatalf("SaveStep: %v", err)
 		}

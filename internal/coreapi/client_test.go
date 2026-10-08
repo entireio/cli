@@ -2,6 +2,7 @@ package coreapi
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,63 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
+
+// CoreOrigin reports the scheme://host the client dials, with the apiBasePath
+// (and any trailing slash) stripped — the single source of truth display sites
+// use so the named core can't diverge from where requests go.
+func TestClient_CoreOrigin(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		coreURL string
+		want    string
+	}{
+		{name: "bare origin", coreURL: "https://eu.auth.entire.io", want: "https://eu.auth.entire.io"},
+		{name: "trailing slash", coreURL: "https://eu.auth.entire.io/", want: "https://eu.auth.entire.io"},
+		{name: "with port", coreURL: "https://localhost:8443", want: "https://localhost:8443"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, err := NewWithBearer(tt.coreURL, "tok")
+			if err != nil {
+				t.Fatalf("NewWithBearer: %v", err)
+			}
+			if got := c.CoreOrigin(); got != tt.want {
+				t.Fatalf("CoreOrigin() = %q, want %q (apiBasePath and trailing slash must be stripped)", got, tt.want)
+			}
+		})
+	}
+}
+
+// The whole point of the getter: a client built through the ENTIRE_TOKEN bypass
+// reports the token's aud, so a display site asking the client "which core?"
+// names the core the request actually dials — not a stale active context that a
+// separate ResolveControlPlaneTarget would return.
+//
+// Not parallel: sets ENTIRE_TOKEN (process-global).
+func TestNew_CoreOrigin_HonoursEnvToken(t *testing.T) {
+	const core = "https://core.us.entire.io"
+	t.Setenv(auth.EnvTokenVar, makeAudJWT(core))
+	c, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := c.CoreOrigin(); got != core {
+		t.Fatalf("CoreOrigin() = %q, want the env token's aud %q", got, core)
+	}
+}
+
+// makeAudJWT builds a JWT carrying only an aud claim. CoreURLFromEnvToken reads
+// aud without verifying the signature, so the "sig" is a placeholder — but the
+// header must name a real alg (alg:none is refused), matching how login JWTs
+// look on the wire.
+func makeAudJWT(aud string) string {
+	enc := base64.RawURLEncoding
+	header := enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload := enc.EncodeToString([]byte(`{"aud":"` + aud + `"}`))
+	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
+}
 
 func TestAPIError(t *testing.T) {
 	t.Parallel()
@@ -188,5 +246,325 @@ func TestBearerOnlySource_NoCookieOnTheWire(t *testing.T) {
 	cookieHeader := <-cookieCh
 	if cookieHeader != "" {
 		t.Errorf("outbound Cookie header = %q, want empty (bearer-only contract)", cookieHeader)
+	}
+}
+
+// TestListProjectRepos_UnknownEnumValuesPassThrough locks in the forward-compat
+// contract for the display-only read-model enums loosened in
+// spec/normalize.go's loosenReadModelEnums: Repo.state, Repo.visibility, and
+// Repo.objectFormat are plain strings on the client, so a value the server adds
+// later (a new lifecycle state, a new visibility) must decode and pass through
+// verbatim rather than fail the whole `repo list` request in ogen's Validate().
+// Before loosening, these were strict enums whose Validate() aborted the entire
+// response on the first unknown value.
+func TestListProjectRepos_UnknownEnumValuesPassThrough(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Values the current spec's enums did NOT allow, and no
+		// "capabilities": a required-but-unread field must not be needed.
+		if _, err := w.Write([]byte(`{"repos":[{"id":"01H000000000000000000000A1","owningProjectId":"01H000000000000000000000P1","name":"demo","state":"archiving","visibility":"internal","objectFormat":"sha512","provider":"gitlab"}]}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListProjectRepos(context.Background(), ListProjectReposParams{ProjectId: "01H000000000000000000000P1"})
+	if err != nil {
+		t.Fatalf("ListProjectRepos with unknown enum values must not fail (forward-compat), got: %v", err)
+	}
+	if len(out.Repos) != 1 {
+		t.Fatalf("Repos len = %d, want 1", len(out.Repos))
+	}
+	repo := out.Repos[0]
+	if got := repo.State.Or(""); got != "archiving" {
+		t.Errorf("State = %q, want the unknown value %q passed through verbatim", got, "archiving")
+	}
+	if got := repo.Visibility.Or(""); got != "internal" {
+		t.Errorf("Visibility = %q, want the unknown value %q passed through verbatim", got, "internal")
+	}
+	if got := repo.ObjectFormat.Or(""); got != "sha512" {
+		t.Errorf("ObjectFormat = %q, want the unknown value %q passed through verbatim", got, "sha512")
+	}
+}
+
+// TestListRepos_UnsentRequiredReadFieldsDecode locks in the backward-compat
+// contract for spec/normalize.go's loosenReadModelRequired on RepoIndexEntry:
+// `org` and `provider` ship as "required" upstream, but the CLI reads neither,
+// so a core that predates them — or a mixed-version roll mid-deploy — must not
+// fail the response. ogen's decoder rejects a missing required field outright,
+// which would take out the whole index read rather than one field.
+//
+// RepoIndexEntry gets its own test because ListRepos is the widest consumer of
+// the loosening: the consolidated repos index is what resolveRepoCellTarget
+// routes repo-scoped requests with, and what `search`, `repo mirror` and the
+// dispatch wizard page through. A decode failure here is not one command
+// erroring, it is cell routing and search going dark at once — a materially
+// different blast radius from TestListProjectRepos_UnknownEnumValuesPassThrough,
+// which covers the sibling loosening on Repo.
+//
+// The unknown `permission` value pins the matching loosenReadModelEnums entry
+// in the same request: it was a closed enum upstream, and a value added later
+// must pass through rather than abort the read.
+func TestListRepos_UnsentRequiredReadFieldsDecode(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// No "org", no "provider", no "candidatesIncomplete" — all required
+		// upstream, none read here. "permission" carries a value the current
+		// spec's enum did NOT allow.
+		if _, err := w.Write([]byte(`{"repos":[{` +
+			`"id":"01H000000000000000000000R1","name":"web","full_name":"gh/acme/web",` +
+			`"jurisdiction":"us","cell":"aws-us-east-2","clusterSlug":"us","visibility":"private",` +
+			`"permission":"triage",` +
+			`"placements":[{"id":"01H000000000000000000000R1","jurisdiction":"us","cell":"aws-us-east-2","clusterSlug":"us","mirror":false,"status":"ready"}]` +
+			`}],"truncated":false}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListRepos(context.Background(), ListReposParams{})
+	if err != nil {
+		t.Fatalf("ListRepos without org/provider must not fail (backward-compat), got: %v", err)
+	}
+	if len(out.Repos) != 1 {
+		t.Fatalf("Repos len = %d, want 1", len(out.Repos))
+	}
+	entry := out.Repos[0]
+	if entry.Org.IsSet() {
+		t.Errorf("Org.IsSet() = true, want false: an absent field must decode as unset, not fail the read")
+	}
+	if entry.Provider.IsSet() {
+		t.Errorf("Provider.IsSet() = true, want false: an absent field must decode as unset, not fail the read")
+	}
+	if got := entry.Permission.Or(""); got != "triage" {
+		t.Errorf("Permission = %q, want the unknown value %q passed through verbatim", got, "triage")
+	}
+	if got := entry.FullName; got != "gh/acme/web" {
+		t.Errorf("FullName = %q, want the entry to decode intact alongside the absent fields", got)
+	}
+}
+
+// TestListOrgsAndProjects_UnsentCapabilitiesDecode is the same contract for the
+// other two schemas that gained a required `capabilities` the CLI never reads.
+// Cheaper to lose than the repo index, but the loosening is only real if a
+// response without the field actually decodes.
+func TestListOrgsAndProjects_UnsentCapabilitiesDecode(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		body string
+		call func(*Client) (int, error)
+	}{
+		{
+			name: "orgs",
+			body: `{"orgs":[{"id":"01H000000000000000000000O1","name":"acme","region":"us","createdAt":"2026-01-01T00:00:00Z"}]}`,
+			call: func(c *Client) (int, error) {
+				out, err := c.ListOrgs(context.Background(), ListOrgsParams{})
+				if err != nil {
+					return 0, err
+				}
+				return len(out.Response.Orgs), nil
+			},
+		},
+		{
+			name: "projects",
+			body: `{"projects":[{"id":"01H000000000000000000000P1","name":"core","ownerType":"org","ownerId":"01H000000000000000000000O1","region":"us","createdAt":"2026-01-01T00:00:00Z"}]}`,
+			call: func(c *Client) (int, error) {
+				out, err := c.ListProjects(context.Background(), ListProjectsParams{})
+				if err != nil {
+					return 0, err
+				}
+				return len(out.Projects), nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("writing test response: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := NewClient(srv.URL, bearerOnlySource{})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			n, err := tc.call(c)
+			if err != nil {
+				t.Fatalf("list without capabilities must not fail (backward-compat), got: %v", err)
+			}
+			if n != 1 {
+				t.Fatalf("decoded %d item(s), want 1", n)
+			}
+		})
+	}
+}
+
+// TestListOrgInvitations_UnknownEnumValuesPassThrough locks in the
+// forward-compat contract for spec/normalize.go's loosenReadModelEnums on
+// Invitation: future consumers must be able to display `role` and `status`,
+// so a lifecycle state or role the server adds later must decode rather than
+// fail the whole listing in ogen's Validate().
+func TestListOrgInvitations_UnknownEnumValuesPassThrough(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"invitations":[{"id":"01H0000000000000000000000I","email":"dev@example.com","role":"auditor","status":"bounced","invitedBy":"01H0000000000000000000000A","createdAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-08T00:00:00Z"}]}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListOrgInvitations(context.Background(), ListOrgInvitationsParams{OrgId: "01H000000000000000000000O1"})
+	if err != nil {
+		t.Fatalf("ListOrgInvitations with unknown enum values must not fail (forward-compat), got: %v", err)
+	}
+	if len(out.Invitations) != 1 {
+		t.Fatalf("Invitations len = %d, want 1", len(out.Invitations))
+	}
+	inv := out.Invitations[0]
+	if inv.Role != "auditor" {
+		t.Errorf("Role = %q, want the unknown value %q passed through verbatim", inv.Role, "auditor")
+	}
+	if inv.Status != "bounced" {
+		t.Errorf("Status = %q, want the unknown value %q passed through verbatim", inv.Status, "bounced")
+	}
+}
+
+// rawJSONClient is a client whose server answers every request with body.
+func rawJSONClient(t *testing.T, body string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return c
+}
+
+// TestDetachRepo_UnknownEnumValuesPassThrough: the detach result's precondition
+// slugs, access source/subject type, and status are documented as growing sets
+// that `entire repo mirror detach` prints, so a new value must decode.
+func TestDetachRepo_UnknownEnumValuesPassThrough(t *testing.T) {
+	t.Parallel()
+
+	c := rawJSONClient(t, `{"dryRun":false,"eligible":true,"requestedBy":"01H0000000000000000000000A","targetProject":"01H000000000000000000000P1","name":"web","preconditions":[{"precondition":"no-open-trails","passed":true}],"access":[{"subjectType":"bot","subjectId":"x","role":"reader","source":"plugin","coveredByTargetProject":true}],"status":"queued"}`)
+
+	out, err := c.DetachRepo(context.Background(), &DetachRepoBody{TargetProject: "01H000000000000000000000P1"}, DetachRepoParams{RepoId: "01H0000000000000000000000R"})
+	if err != nil {
+		t.Fatalf("DetachRepo with unknown enum values must not fail (forward-compat), got: %v", err)
+	}
+	if got := out.Preconditions[0].Precondition; got != "no-open-trails" {
+		t.Errorf("Precondition = %q, want the unknown value passed through", got)
+	}
+	if got := out.Access[0]; got.SubjectType != "bot" || got.Source != "plugin" {
+		t.Errorf("Access = %+v, want the unknown values passed through", got)
+	}
+	if got := out.Status.Or(""); got != "queued" {
+		t.Errorf("Status = %q, want the unknown value passed through", got)
+	}
+}
+
+// TestGetRepoDetach_UnknownStatusPassesThrough is the same contract for the
+// state the detach wait polls.
+func TestGetRepoDetach_UnknownStatusPassesThrough(t *testing.T) {
+	t.Parallel()
+
+	c := rawJSONClient(t, `{"status":"rolling_back","releasedAddresses":[],"resumable":false,"frozen":true}`)
+	out, err := c.GetRepoDetach(context.Background(), GetRepoDetachParams{RepoId: "01H0000000000000000000000R"})
+	if err != nil {
+		t.Fatalf("GetRepoDetach with an unknown status must not fail (forward-compat), got: %v", err)
+	}
+	if out.Status != "rolling_back" {
+		t.Errorf("Status = %q, want the unknown value passed through", out.Status)
+	}
+}
+
+// TestListRepoPeople_NullDirectGrantDecodes pins the shape production sends for
+// a mirror's GitHub collaborators: no direct grant is JSON null.
+func TestListRepoPeople_NullDirectGrantDecodes(t *testing.T) {
+	t.Parallel()
+
+	c := rawJSONClient(t, `{"items":[{"accountId":"01H0000000000000000000000A","handle":"github:alice","provider":"github","displayName":"Alice","role":"mirror_source_admin","directGrant":null,"sources":[{"source":"github","role":"mirror_source_admin"}]}],"totalCount":1}`)
+	out, err := c.ListRepoPeople(context.Background(), ListRepoPeopleParams{RepoId: "01H0000000000000000000000R"})
+	if err != nil {
+		t.Fatalf("ListRepoPeople with a null directGrant must decode, got: %v", err)
+	}
+	if len(out.Items) != 1 || out.Items[0].Handle.Or("") != "github:alice" {
+		t.Fatalf("Items = %+v, want github:alice", out.Items)
+	}
+	if !out.Items[0].DirectGrant.IsNull() {
+		t.Errorf("DirectGrant = %+v, want null", out.Items[0].DirectGrant)
+	}
+}
+
+// TestListOrgMembers_UnknownEnumValuesPassThrough is the same contract for
+// Membership, which `entire org grant list` prints the same way.
+func TestListOrgMembers_UnknownEnumValuesPassThrough(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"members":[{"id":"01H0000000000000000000000M","orgId":"01H000000000000000000000O1","accountId":"01H0000000000000000000000A","role":"auditor","status":"suspended","createdAt":"2026-01-01T00:00:00Z"}]}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListOrgMembers(context.Background(), ListOrgMembersParams{OrgId: "01H000000000000000000000O1"})
+	if err != nil {
+		t.Fatalf("ListOrgMembers with unknown enum values must not fail (forward-compat), got: %v", err)
+	}
+	if len(out.Members) != 1 {
+		t.Fatalf("Members len = %d, want 1", len(out.Members))
+	}
+	member := out.Members[0]
+	if member.Role != "auditor" {
+		t.Errorf("Role = %q, want the unknown value %q passed through verbatim", member.Role, "auditor")
+	}
+	if member.Status != "suspended" {
+		t.Errorf("Status = %q, want the unknown value %q passed through verbatim", member.Status, "suspended")
 	}
 }

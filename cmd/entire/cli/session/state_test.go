@@ -9,10 +9,94 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Regression: a test missing repo isolation once wrote fixture session states
+// (sessC and friends) into the developer's real .git/entire-sessions via the
+// CWD-resolved store, and a leaked fixture then hijacked commit-to-session
+// linking, producing a dangling Entire-Checkpoint trailer. Under `go test`,
+// a CWD-resolved store outside the temp root must refuse to open.
+func TestNewStateStore_RefusesRealRepoUnderGoTest(t *testing.T) {
+	// Deliberately NO t.Chdir: the test process's cwd is the package source
+	// dir inside the real repository — exactly the leak shape.
+	_, err := NewStateStore(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "isolation", "the error must tell the test author what to fix")
+}
+
+// Not parallel: uses t.Chdir()
+func TestNewStateStore_AllowsTempRepoUnderGoTest(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	ClearGitCommonDirCache()
+	t.Cleanup(ClearGitCommonDirCache)
+
+	store, err := NewStateStore(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, store)
+}
+
+// NewStateStoreForWorktree scopes the store to the repo being operated on,
+// for callers (like agent import) that take a target repo as an argument and
+// must not write session state wherever the process happens to be running.
+func TestNewStateStoreForWorktree_ScopesToGivenRepo(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+
+	store, err := NewStateStoreForWorktree(context.Background(), dir)
+	require.NoError(t, err)
+
+	state := &State{SessionID: "scoped-store-test", Kind: KindImported}
+	require.NoError(t, store.Save(context.Background(), state))
+	if _, statErr := os.Stat(filepath.Join(dir, ".git", SessionStateDirName, "scoped-store-test.json")); statErr != nil {
+		t.Fatalf("session state must land in the given repo's git dir: %v", statErr)
+	}
+}
+
+// The explicit-root constructor is guarded too: a test that computes its
+// "explicit" root from the process CWD is just as accidental as the CWD
+// itself, and would recreate the fixture leak through the new front door.
+// An empty root must also refuse rather than silently degrading to CWD.
+func TestNewStateStoreForWorktree_RefusesUnisolatedAndEmptyRoots(t *testing.T) {
+	t.Parallel()
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	_, err = NewStateStoreForWorktree(context.Background(), cwd)
+	require.Error(t, err, "the real repo the tests run from must be refused under go test")
+
+	_, err = NewStateStoreForWorktree(context.Background(), "")
+	require.Error(t, err, "an empty root silently resolves from CWD — the exact leak shape")
+}
+
+func TestState_CondensationAttemptLifecycle(t *testing.T) {
+	t.Parallel()
+
+	state := &State{}
+	checkpointID := id.MustCheckpointID("111111111111")
+
+	require.True(t, state.PendingCondensationID().IsEmpty())
+	require.False(t, state.NeedsCondensationRecovery())
+
+	state.BeginCondensationAttempt(checkpointID)
+	require.Equal(t, checkpointID, state.PendingCondensationID())
+	require.False(t, state.NeedsCondensationRecovery())
+
+	state.RequireCondensationRecovery()
+	require.True(t, state.NeedsCondensationRecovery())
+
+	state.ClearCondensationAttempt()
+	require.True(t, state.PendingCondensationID().IsEmpty())
+	require.False(t, state.NeedsCondensationRecovery())
+}
 
 func TestState_NormalizeAfterLoad(t *testing.T) {
 	t.Parallel()
@@ -78,63 +162,27 @@ func TestState_NormalizeAfterLoad(t *testing.T) {
 		assert.Equal(t, 200, state.CheckpointTranscriptStart)
 		assert.Equal(t, 0, state.TranscriptLinesAtStart)
 	})
-
-	t.Run("heals_stale_divergence_flag_when_attribution_aligned", func(t *testing.T) {
-		t.Parallel()
-		// DivergenceNoticeShown is only meaningful while attribution is diverged.
-		// A state file carrying notice=true with base==attribution must self-heal on load —
-		// otherwise a legitimate future divergence would be suppressed by the stale flag.
-		state := &State{
-			BaseCommit:            "aaaaaaa",
-			AttributionBaseCommit: "aaaaaaa",
-			DivergenceNoticeShown: true,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.False(t, state.DivergenceNoticeShown,
-			"DivergenceNoticeShown must be cleared when AttributionBaseCommit == BaseCommit")
-	})
-
-	t.Run("heals_stale_divergence_flag_when_attribution_empty", func(t *testing.T) {
-		t.Parallel()
-		// Empty AttributionBaseCommit gets backfilled to BaseCommit below; once aligned,
-		// the flag is meaningless and must clear.
-		state := &State{
-			BaseCommit:            "bbbbbbb",
-			AttributionBaseCommit: "",
-			DivergenceNoticeShown: true,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.False(t, state.DivergenceNoticeShown,
-			"DivergenceNoticeShown must be cleared when AttributionBaseCommit is empty/backfilled")
-	})
-
-	t.Run("preserves_divergence_flag_when_actually_diverged", func(t *testing.T) {
-		t.Parallel()
-		state := &State{
-			BaseCommit:            "cccccc1",
-			AttributionBaseCommit: "cccccc0",
-			DivergenceNoticeShown: true,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.True(t, state.DivergenceNoticeShown,
-			"DivergenceNoticeShown must be preserved when attribution is genuinely diverged")
-	})
 }
 
-func TestState_RealignAttributionBase_ClearsDivergenceFlag(t *testing.T) {
+// TestState_LegacyAttributionKeysIgnored pins that state files written before
+// line attribution was removed still load, and that saving drops the keys.
+func TestState_LegacyAttributionKeysIgnored(t *testing.T) {
 	t.Parallel()
 
-	state := &State{
-		BaseCommit:            "ccccccc",
-		AttributionBaseCommit: "aaaaaaa",
-		DivergenceNoticeShown: true,
-	}
-	state.RealignAttributionBase("ccccccc")
+	legacy := `{"session_id":"s1","base_commit":"aaaaaaa","checkpoint_count":2,` +
+		`"attribution_base_commit":"bbbbbbb","divergence_notice_shown":true,` +
+		`"prompt_attributions":[{"checkpoint_number":1,"user_lines_added":3}],` +
+		`"pending_prompt_attribution":{"checkpoint_number":2},"last_checkpoint_commit_hash":"ccccccc"}`
+	var state State
+	require.NoError(t, json.Unmarshal([]byte(legacy), &state))
+	assert.Equal(t, "aaaaaaa", state.BaseCommit)
+	assert.Equal(t, 2, state.StepCount)
 
-	assert.Equal(t, "ccccccc", state.AttributionBaseCommit,
-		"AttributionBaseCommit must be updated to the new base")
-	assert.False(t, state.DivergenceNoticeShown,
-		"DivergenceNoticeShown must be cleared whenever attribution is realigned")
+	out, err := json.Marshal(&state)
+	require.NoError(t, err)
+	for _, key := range []string{"attribution_base_commit", "divergence_notice_shown", "prompt_attributions", "pending_prompt_attribution", "last_checkpoint_commit_hash"} {
+		assert.NotContains(t, string(out), key)
+	}
 }
 
 func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
@@ -233,6 +281,20 @@ func TestState_IsStale(t *testing.T) {
 			LastInteractionTime: nil,
 		}
 		assert.False(t, state.IsStale())
+	})
+
+	t.Run("imported_is_never_stale", func(t *testing.T) {
+		t.Parallel()
+		// Imported sessions carry historical timestamps (always old) but must
+		// never be auto-purged, or they'd vanish from `session list` on read.
+		old := time.Now().Add(-30 * 24 * time.Hour)
+		imported := &State{Kind: KindImported, StartedAt: old, LastInteractionTime: &old}
+		assert.False(t, imported.IsStale(), "imported session should never be stale")
+
+		// Control: a non-imported session of the same age IS stale (guards
+		// against an over-broad exemption).
+		normal := &State{StartedAt: old, LastInteractionTime: &old}
+		assert.True(t, normal.IsStale())
 	})
 }
 
@@ -400,6 +462,43 @@ func TestStateStore_List_DeletesStaleSession(t *testing.T) {
 	assert.NoError(t, err, "active session file should still exist")
 }
 
+// ListReadOnly is the passive read: `entire status` must be able to report
+// what exists without observation changing it. List keeps its cleanup
+// contract — doctor and the sweeper still rely on it.
+func TestStateStore_ListReadOnly_ReturnsStaleWithoutDeleting(t *testing.T) {
+	t.Parallel()
+
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	ctx := context.Background()
+
+	staleInteracted := time.Now().Add(-2 * 7 * 24 * time.Hour)
+	stale := &State{
+		SessionID:           "stale-session",
+		BaseCommit:          "def456",
+		StartedAt:           time.Now().Add(-3 * 7 * 24 * time.Hour),
+		LastInteractionTime: &staleInteracted,
+	}
+	require.NoError(t, store.Save(ctx, stale))
+	stalePath := filepath.Join(stateDir, "stale-session.json")
+
+	states, err := store.ListReadOnly(ctx)
+	require.NoError(t, err)
+	require.Len(t, states, 1, "ListReadOnly must report the stale session")
+	assert.Equal(t, "stale-session", states[0].SessionID)
+
+	_, err = os.Stat(stalePath)
+	require.NoError(t, err, "ListReadOnly must not delete the stale session file")
+
+	// The mutating read still cleans up, so doctor/sweeper are unaffected.
+	states, err = store.List(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, states)
+	_, err = os.Stat(stalePath)
+	assert.True(t, os.IsNotExist(err), "List must still delete stale sessions")
+}
+
 func TestStateStore_Load_TraversalResistant(t *testing.T) {
 	t.Parallel()
 
@@ -460,43 +559,66 @@ func TestStateStore_Clear_NonexistentDir(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestStateStore_SaveLoadClear_SymlinkedDir(t *testing.T) {
+// macOS resolves /tmp through a symlink to /private/tmp, so a t.TempDir() path
+// has a symlinked ANCESTOR. That must keep working: the state directory is a
+// name inside a root opened on its parent, and os.OpenRoot resolves the path it
+// is handed normally — the refusal below applies to components inside the root,
+// not to the path used to open it.
+func TestStateStore_SaveLoadClear_SymlinkedAncestor(t *testing.T) {
 	t.Parallel()
 
-	// Simulate macOS-style symlinked temp paths: create the real dir,
-	// then point a symlink at it, and use the symlink path as stateDir.
-	realDir := filepath.Join(t.TempDir(), "real-sessions")
-	require.NoError(t, os.MkdirAll(realDir, 0o750))
+	realParent := filepath.Join(t.TempDir(), "real-parent")
+	require.NoError(t, os.MkdirAll(realParent, 0o750))
 
-	linkParent := t.TempDir()
-	symlinkedDir := filepath.Join(linkParent, "linked-sessions")
-	require.NoError(t, os.Symlink(realDir, symlinkedDir))
+	linkedParent := filepath.Join(t.TempDir(), "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
 
-	store := NewStateStoreWithDir(symlinkedDir)
+	store := NewStateStoreWithDir(filepath.Join(linkedParent, SessionStateDirName))
 	ctx := context.Background()
 
-	// Save through the symlinked path
-	state := &State{
-		SessionID:  "symlink-test",
-		BaseCommit: "abc123",
-		StartedAt:  time.Now(),
-	}
+	state := &State{SessionID: "symlink-test", BaseCommit: "abc123", StartedAt: time.Now()}
 	require.NoError(t, store.Save(ctx, state))
 
-	// Load should work through the symlink
 	loaded, err := store.Load(ctx, "symlink-test")
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	assert.Equal(t, "symlink-test", loaded.SessionID)
 
-	// File should exist in the real directory
-	_, err = os.Stat(filepath.Join(realDir, "symlink-test.json"))
-	assert.NoError(t, err, "file should exist in the real directory behind the symlink")
+	_, err = os.Stat(filepath.Join(realParent, SessionStateDirName, "symlink-test.json"))
+	assert.NoError(t, err, "file should exist behind the symlinked ancestor")
 
-	// Clear should work through the symlink
 	require.NoError(t, store.Clear(ctx, "symlink-test"))
-	_, err = os.Stat(filepath.Join(realDir, "symlink-test.json"))
+	_, err = os.Stat(filepath.Join(realParent, SessionStateDirName, "symlink-test.json"))
 	assert.True(t, os.IsNotExist(err), "file should be removed after Clear")
+}
+
+// The state directory ITSELF being a symlink is refused, not followed. Entire
+// creates this directory; one that is a link is a directory it did not create
+// and cannot vouch for, and following it would put session state — which commit
+// linking depends on — somewhere outside the clone without anyone being told.
+// `entire doctor` reports it by name.
+func TestStateStore_Save_RefusesSymlinkedStateDir(t *testing.T) {
+	t.Parallel()
+
+	realDir := filepath.Join(t.TempDir(), "real-sessions")
+	require.NoError(t, os.MkdirAll(realDir, 0o750))
+
+	parent := t.TempDir()
+	if err := os.Symlink(realDir, filepath.Join(parent, SessionStateDirName)); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	store := NewStateStoreWithDir(filepath.Join(parent, SessionStateDirName))
+	err := store.Save(context.Background(), &State{
+		SessionID: "symlink-test", BaseCommit: "abc123", StartedAt: time.Now(),
+	})
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+
+	entries, readErr := os.ReadDir(realDir)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "nothing may be written through the link")
 }
 
 func TestStateStore_List_EmptyDir(t *testing.T) {
@@ -529,13 +651,14 @@ func initTestRepo(t *testing.T) string {
 func TestGetGitCommonDir_ReturnsValidPath(t *testing.T) {
 	dir := initTestRepo(t)
 
-	commonDir, err := getGitCommonDir(context.Background())
+	commonDir, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
-	// getGitCommonDir returns a relative path from cwd; resolve it to absolute for comparison
-	absCommonDir, err := filepath.Abs(commonDir)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir, ".git"), absCommonDir)
+	// Absolute by contract: `git rev-parse --git-common-dir` answers relative to
+	// cwd, and every path built on the result would otherwise stop being valid
+	// as soon as anything changed directory.
+	assert.True(t, filepath.IsAbs(commonDir), "common dir must be absolute, got %q", commonDir)
+	assert.Equal(t, filepath.Join(dir, ".git"), commonDir)
 
 	// The path should actually exist
 	info, err := os.Stat(commonDir)
@@ -547,11 +670,11 @@ func TestGetGitCommonDir_CachesResult(t *testing.T) {
 	initTestRepo(t)
 
 	// First call populates cache
-	first, err := getGitCommonDir(context.Background())
+	first, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
 	// Second call should return the same result (from cache)
-	second, err := getGitCommonDir(context.Background())
+	second, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
 	assert.Equal(t, first, second)
@@ -560,22 +683,13 @@ func TestGetGitCommonDir_CachesResult(t *testing.T) {
 func TestGetGitCommonDir_ClearCache(t *testing.T) {
 	initTestRepo(t)
 
-	// Populate cache
-	_, err := getGitCommonDir(context.Background())
+	first, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
-	// Verify cache is populated
-	gitCommonDirMu.RLock()
-	assert.NotEmpty(t, gitCommonDirCache)
-	gitCommonDirMu.RUnlock()
-
-	// Clear and verify
 	ClearGitCommonDirCache()
-
-	gitCommonDirMu.RLock()
-	assert.Empty(t, gitCommonDirCache)
-	assert.Empty(t, gitCommonDirCacheDir)
-	gitCommonDirMu.RUnlock()
+	second, err := GetGitCommonDir(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
 }
 
 func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
@@ -596,7 +710,7 @@ func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
 
 	// Populate cache from dir1
 	t.Chdir(dir1)
-	first, err := getGitCommonDir(context.Background())
+	first, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 	absFirst, err := filepath.Abs(first)
 	require.NoError(t, err)
@@ -604,7 +718,7 @@ func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
 
 	// Change to dir2 — cache should miss and resolve to dir2's .git
 	t.Chdir(dir2)
-	second, err := getGitCommonDir(context.Background())
+	second, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 	absSecond, err := filepath.Abs(second)
 	require.NoError(t, err)
@@ -618,7 +732,7 @@ func TestGetGitCommonDir_ErrorOutsideRepo(t *testing.T) {
 	t.Chdir(dir)
 	ClearGitCommonDirCache()
 
-	_, err := getGitCommonDir(context.Background())
+	_, err := GetGitCommonDir(context.Background())
 	assert.Error(t, err)
 }
 
@@ -735,5 +849,471 @@ func TestState_InvestigateRoundTrip(t *testing.T) {
 		if strings.Contains(zs, `"`+key+`"`) {
 			t.Errorf("expected zero-value State to omit %q, got %s", key, zs)
 		}
+	}
+}
+
+// TestState_TaskRecords_RoundTrip pins the JSON wire format for the durable
+// task record ledger, including the fields added for #2058's pointer model
+// (DeclaredTranscriptPath, Files, TokenUsage, CompletedAt) and the renamed
+// "task_records" json key. Regression this guards: without a persisted record
+// of a dispatched subagent, the launch-time post-task hook (which fires at
+// the launch stub, seconds before any real work happens) has no way to defer
+// capture to SubagentStop — the record is the only memory that background
+// work is still outstanding, and it must also survive completion (unlike the
+// prior claim-and-remove model) so a later condensation can materialize it.
+func TestState_TaskRecords_RoundTrip(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC().Truncate(time.Second)
+	completedAt := now.Add(time.Minute)
+	s := State{
+		SessionID:  "2026-04-20-uuid",
+		BaseCommit: "abc",
+		StartedAt:  now,
+		TaskRecords: []TaskRecord{
+			{
+				ToolUseID:              "toolu_01X",
+				AgentID:                "a123",
+				StartedAt:              now,
+				SubagentType:           "code-reviewer",
+				TaskDescription:        "Review the diff",
+				DeclaredTranscriptPath: "/tmp/agent-a123.jsonl",
+				TranscriptUnavailable:  true,
+				Files:                  []string{"foo.go", "bar.go"},
+				TokenUsage:             &agent.TokenUsage{InputTokens: 100, OutputTokens: 50},
+				CompletedAt:            completedAt,
+			},
+		},
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"task_records"`) {
+		t.Fatalf("expected json to use the task_records key, got %s", data)
+	}
+	if strings.Contains(string(data), `"in_flight_tasks"`) {
+		t.Fatalf("expected the legacy in_flight_tasks key to be gone, got %s", data)
+	}
+
+	var got State
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	require.Len(t, got.TaskRecords, 1)
+	record := got.TaskRecords[0]
+	assert.Equal(t, "toolu_01X", record.ToolUseID)
+	assert.Equal(t, "a123", record.AgentID)
+	assert.True(t, now.Equal(record.StartedAt))
+	assert.Equal(t, "code-reviewer", record.SubagentType)
+	assert.Equal(t, "Review the diff", record.TaskDescription)
+	assert.Equal(t, "/tmp/agent-a123.jsonl", record.DeclaredTranscriptPath)
+	assert.True(t, record.TranscriptUnavailable)
+	assert.Equal(t, []string{"foo.go", "bar.go"}, record.Files)
+	require.NotNil(t, record.TokenUsage)
+	assert.Equal(t, 100, record.TokenUsage.InputTokens)
+	assert.Equal(t, 50, record.TokenUsage.OutputTokens)
+	assert.True(t, completedAt.Equal(record.CompletedAt))
+
+	// Zero-value: an empty task record list must be omitted entirely, not
+	// serialized as "task_records":[] or ":null".
+	zero := State{SessionID: "x", BaseCommit: "y", StartedAt: now}
+	zb, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(zb), `"task_records"`) {
+		t.Errorf("expected zero-value State to omit task_records, got %s", zb)
+	}
+}
+
+// TestState_AddTaskRecord_DedupByToolUseID pins that a duplicate launch event
+// for the same Task tool invocation replaces the existing record instead of
+// accumulating a second one. Regression this guards: without dedup, a
+// retried/duplicate PostToolUse for the same tool_use_id would leave two
+// records, and RemoveTaskRecord (which removes only the first match) would
+// leak a stale entry behind.
+func TestState_AddTaskRecord_DedupByToolUseID(t *testing.T) {
+	t.Parallel()
+	s := &State{}
+	first := time.Now().UTC()
+	s.AddTaskRecord(TaskRecord{ToolUseID: "toolu_1", AgentID: "a1", StartedAt: first})
+	require.Len(t, s.TaskRecords, 1)
+
+	second := first.Add(time.Minute)
+	s.AddTaskRecord(TaskRecord{ToolUseID: "toolu_1", AgentID: "a1-retry", StartedAt: second})
+	require.Len(t, s.TaskRecords, 1, "duplicate ToolUseID must replace, not append")
+	assert.Equal(t, "a1-retry", s.TaskRecords[0].AgentID)
+	assert.True(t, second.Equal(s.TaskRecords[0].StartedAt))
+
+	// A different ToolUseID does get appended.
+	s.AddTaskRecord(TaskRecord{ToolUseID: "toolu_2", StartedAt: second})
+	require.Len(t, s.TaskRecords, 2)
+}
+
+// TestState_TaskRecordAccessors pins Remove/Find record semantics: Remove
+// clears only the matching record; Find returns the record by reference (the
+// Final-path handler reads its launch-recorded label without copying). Both
+// treat an unknown ToolUseID safely — no-op / nil, not a panic — the
+// foreground-task / double-fire "no record" case the Final-path dedup relies
+// on. RemoveTaskRecord itself is no longer on the ordinary completion path
+// (CompleteTaskRecord keeps the record for the materializer instead) but
+// stays covered since callers can still use it to discard a record outright.
+func TestState_TaskRecordAccessors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("find", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1", SubagentType: "reviewer"}, {ToolUseID: "toolu_2", SubagentType: "dev"}}}
+
+		got := s.FindTaskRecord("toolu_2")
+		require.NotNil(t, got)
+		assert.Equal(t, "dev", got.SubagentType)
+
+		// Nil (not a panic) on a ToolUseID with no record.
+		assert.Nil(t, s.FindTaskRecord("does-not-exist"))
+	})
+
+	// Claude Code's SubagentStop payload carries agent_id but no tool_use_id,
+	// so the stop handler can only find the launch record by its AgentID.
+	t.Run("find by agent id", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{
+			{ToolUseID: "toolu_1", SubagentType: "reviewer"},
+			{ToolUseID: "toolu_2", AgentID: "a2", SubagentType: "dev"},
+		}}
+
+		got := s.FindTaskRecordByAgentID("a2")
+		require.NotNil(t, got)
+		assert.Equal(t, "toolu_2", got.ToolUseID)
+
+		assert.Nil(t, s.FindTaskRecordByAgentID("does-not-exist"))
+		// An empty AgentID must not match a record that never learned one.
+		assert.Nil(t, s.FindTaskRecordByAgentID(""))
+	})
+
+	// Should two records share an agent ID before condensation, the stop must
+	// find the live one, not the completed one.
+	t.Run("find by agent id prefers the live record", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{
+			{ToolUseID: "toolu_first", AgentID: "a1", CompletedAt: time.Now()},
+			{ToolUseID: "toolu_second", AgentID: "a1"},
+		}}
+
+		got := s.FindTaskRecordByAgentID("a1")
+		require.NotNil(t, got)
+		assert.Equal(t, "toolu_second", got.ToolUseID)
+
+		// With no live record left, a redelivered stop still finds the
+		// completed one, so the exactly-once guard can skip it.
+		s.TaskRecords[1].CompletedAt = time.Now()
+		got = s.FindTaskRecordByAgentID("a1")
+		require.NotNil(t, got)
+		assert.Equal(t, "toolu_first", got.ToolUseID)
+	})
+
+	t.Run("remove", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}, {ToolUseID: "toolu_2"}}}
+
+		s.RemoveTaskRecord("toolu_1")
+		require.Len(t, s.TaskRecords, 1)
+		assert.Equal(t, "toolu_2", s.TaskRecords[0].ToolUseID)
+
+		// No-op when the ToolUseID has no record.
+		s.RemoveTaskRecord("does-not-exist")
+		require.Len(t, s.TaskRecords, 1)
+
+		s.RemoveTaskRecord("toolu_2")
+		assert.Empty(t, s.TaskRecords)
+	})
+}
+
+// TestState_CompleteTaskRecord_ExactlyOnce pins CompleteTaskRecord's
+// exactly-once completion guard — the replacement for the old
+// claim-and-remove semantics, now that a completed record must persist for
+// the future condensation materializer rather than being deleted.
+// Regression this guards: two racing Final-path captures for the same
+// ToolUseID (a late SubagentStop arriving just as SessionEnd sweeps, or a
+// duplicate SubagentStop delivery) must capture exactly once. Note:
+// CompleteTaskRecord only sets CompletedAt — DeclaredTranscriptPath/Files/
+// TokenUsage are populated separately by the producer, via direct field
+// mutation on the claimed record within the same MutateSessionState closure
+// (see the type doc comment), so this test does not exercise those fields.
+func TestState_CompleteTaskRecord_ExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent_record_is_a_noop", func(t *testing.T) {
+		t.Parallel()
+		s := &State{}
+		ok := s.CompleteTaskRecord("does-not-exist", time.Now())
+		assert.False(t, ok)
+	})
+
+	t.Run("first_completion_succeeds", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now()}}}
+		completedAt := time.Now().UTC().Truncate(time.Second)
+		ok := s.CompleteTaskRecord("toolu_1", completedAt)
+		require.True(t, ok)
+		require.Len(t, s.TaskRecords, 1, "completing a record must not remove it — it must persist for the materializer")
+		assert.True(t, completedAt.Equal(s.TaskRecords[0].CompletedAt))
+	})
+
+	t.Run("second_completion_is_rejected", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now()}}}
+		firstCompletedAt := time.Now().UTC().Truncate(time.Second)
+		require.True(t, s.CompleteTaskRecord("toolu_1", firstCompletedAt))
+
+		// A second completion attempt (the racing duplicate) must be rejected
+		// and must not move CompletedAt.
+		second := s.CompleteTaskRecord("toolu_1", firstCompletedAt.Add(time.Hour))
+		assert.False(t, second)
+		assert.True(t, firstCompletedAt.Equal(s.TaskRecords[0].CompletedAt), "a rejected second completion must not move CompletedAt")
+	})
+}
+
+// TestState_LiveTaskRecords pins that LiveTaskRecords filters to records with
+// a zero CompletedAt. Regression this guards: since CompleteTaskRecord no
+// longer removes a record, code that used to treat "any InFlightTasks
+// present" as "any task still running" must filter for liveness explicitly,
+// or a completed-but-not-yet-materialized record would look like live
+// in-flight work forever.
+func TestState_LiveTaskRecords(t *testing.T) {
+	t.Parallel()
+	s := &State{
+		TaskRecords: []TaskRecord{
+			{ToolUseID: "toolu_live", StartedAt: time.Now()},
+			{ToolUseID: "toolu_done", StartedAt: time.Now(), CompletedAt: time.Now()},
+		},
+	}
+	live := s.LiveTaskRecords()
+	require.Len(t, live, 1)
+	assert.Equal(t, "toolu_live", live[0].ToolUseID)
+
+	assert.Empty(t, (&State{}).LiveTaskRecords())
+}
+
+func TestState_SubagentInventoryLedger(t *testing.T) {
+	t.Parallel()
+
+	stopFirst := &State{}
+	if !stopFirst.RecordSubagentStop("child-stop-first", "turn-stop-first") {
+		t.Fatal("stop-before-start observation must be recorded")
+	}
+	record := stopFirst.FindTaskRecord("child-stop-first")
+	require.NotNil(t, record, "a stop-before-start observation must preserve pending task content")
+	assert.Equal(t, "child-stop-first", record.AgentID)
+	assert.True(t, stopFirst.HasTaskContent())
+	startedAt := time.Now().UTC()
+	assert.False(t, stopFirst.EnsureTaskRecord(TaskRecord{
+		ToolUseID:       "child-stop-first",
+		AgentID:         "child-stop-first",
+		StartedAt:       startedAt,
+		SubagentType:    "default",
+		TaskDescription: "late start metadata",
+	}), "the late start must enrich, not replace, the pending record")
+	assert.Equal(t, startedAt, record.StartedAt)
+	assert.Equal(t, "default", record.SubagentType)
+	assert.Equal(t, "late start metadata", record.TaskDescription)
+
+	complete := true
+	state := &State{
+		TokenUsage:           &agent.TokenUsage{InputTokens: 5, SubagentTokens: &agent.TokenUsage{InputTokens: 3}, SubagentTokensComplete: &complete},
+		CheckpointTokenUsage: &agent.TokenUsage{OutputTokens: 2, SubagentTokens: &agent.TokenUsage{OutputTokens: 1}, SubagentTokensComplete: &complete},
+	}
+	if !state.RegisterSubagent("child-1", "turn-1") {
+		t.Fatal("first child observation must be recorded")
+	}
+	assert.Equal(t, uint64(1), state.SubagentLedgerVersion)
+	assertIncompleteSubagentUsage(t, state)
+
+	// A later exact extraction may have refreshed both aggregates. Duplicate
+	// observations and path-only enrichment must preserve that fresh coverage.
+	refreshedComplete := true
+	state.TokenUsage.SubagentTokens = &agent.TokenUsage{InputTokens: 21}
+	state.TokenUsage.SubagentTokensComplete = &refreshedComplete
+	state.CheckpointTokenUsage.SubagentTokens = &agent.TokenUsage{OutputTokens: 13}
+	state.CheckpointTokenUsage.SubagentTokensComplete = &refreshedComplete
+	versionBeforeDuplicate := state.SubagentLedgerVersion
+	if state.RegisterSubagent("child-1", "turn-1") {
+		t.Fatal("duplicate agent/turn observation must be a true no-op")
+	}
+	assert.Equal(t, versionBeforeDuplicate, state.SubagentLedgerVersion)
+	assertCompleteSubagentUsage(t, state, 21, 13)
+	versionBeforePathEnrichment := state.SubagentLedgerVersion
+	assert.True(t, state.UpdateSubagentTranscriptPaths("child-1", "/tmp/declared.jsonl", "/tmp/resolved.jsonl"))
+	assert.Equal(t, versionBeforePathEnrichment, state.SubagentLedgerVersion, "path enrichment must not churn the ledger generation")
+	assertCompleteSubagentUsage(t, state, 21, 13)
+
+	if !state.RecordSubagentStop("child-1", "turn-2") {
+		t.Fatal("stop-first new turn must be recorded")
+	}
+	assert.Equal(t, uint64(2), state.SubagentLedgerVersion)
+	assertIncompleteSubagentUsage(t, state)
+	entry := state.FindSubagentInventory("child-1")
+	require.NotNil(t, entry)
+	require.Contains(t, entry.ObservedTurnIDs, "turn-2")
+	require.NotContains(t, entry.FinalizedTurnIDs, "turn-2")
+
+	// A stop retry must leave already-calculated token coverage intact.
+	stopRefreshComplete := true
+	state.TokenUsage.SubagentTokens = &agent.TokenUsage{InputTokens: 34}
+	state.TokenUsage.SubagentTokensComplete = &stopRefreshComplete
+	state.CheckpointTokenUsage.SubagentTokens = &agent.TokenUsage{OutputTokens: 21}
+	state.CheckpointTokenUsage.SubagentTokensComplete = &stopRefreshComplete
+	versionBeforeStopRefresh := state.SubagentLedgerVersion
+	assert.False(t, state.RecordSubagentStop("child-1", "turn-2"), "duplicate stop must be a no-op")
+	assert.Equal(t, versionBeforeStopRefresh, state.SubagentLedgerVersion)
+	assertCompleteSubagentUsage(t, state, 34, 21)
+
+	state.RecordSubagentStop("child-1", "turn-3")
+	require.Contains(t, entry.ObservedTurnIDs, "turn-3", "several pending turns must coexist")
+	if !state.FinalizeSubagentTurn("child-1", "turn-2") {
+		t.Fatal("pending turn must finalize")
+	}
+	assert.Contains(t, entry.FinalizedTurnIDs, "turn-2")
+	if state.FinalizeSubagentTurn("child-1", "turn-2") {
+		t.Fatal("finalized turn must be exactly once")
+	}
+}
+
+func assertIncompleteSubagentUsage(t *testing.T, state *State) {
+	t.Helper()
+	for _, usage := range []*agent.TokenUsage{state.TokenUsage, state.CheckpointTokenUsage} {
+		require.NotNil(t, usage)
+		assert.Nil(t, usage.SubagentTokens)
+		require.NotNil(t, usage.SubagentTokensComplete)
+		assert.False(t, *usage.SubagentTokensComplete)
+	}
+}
+
+func assertCompleteSubagentUsage(t *testing.T, state *State, sessionInput, checkpointOutput int) {
+	t.Helper()
+	assert.Equal(t, &agent.TokenUsage{InputTokens: sessionInput}, state.TokenUsage.SubagentTokens)
+	assert.Equal(t, &agent.TokenUsage{OutputTokens: checkpointOutput}, state.CheckpointTokenUsage.SubagentTokens)
+	assert.True(t, *state.TokenUsage.SubagentTokensComplete)
+	assert.True(t, *state.CheckpointTokenUsage.SubagentTokensComplete)
+}
+
+func TestState_SubagentInventoryRoundTripAndTaskRecordRecovery(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC().Truncate(time.Second)
+	complete := true
+	state := State{
+		AgentType:                      agent.AgentTypeCodex,
+		SubagentInventoryComplete:      &complete,
+		SubagentTokensBaselineComplete: &complete,
+		SubagentLedgerVersion:          7,
+		SubagentInventory: []SubagentInventoryEntry{{
+			AgentID:                "child-1",
+			DeclaredTranscriptPath: "/tmp/child.jsonl",
+			ResolvedTranscriptPath: "/tmp/resolved.jsonl",
+			ObservedTurnIDs:        []string{"turn-1"},
+			FinalizedTurnIDs:       []string{"turn-0"},
+		}},
+	}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	var got State
+	require.NoError(t, json.Unmarshal(data, &got))
+	require.NotNil(t, got.SubagentInventoryComplete)
+	assert.True(t, *got.SubagentInventoryComplete)
+	require.NotNil(t, got.SubagentTokensBaselineComplete)
+	assert.True(t, *got.SubagentTokensBaselineComplete)
+	assert.Equal(t, uint64(7), got.SubagentLedgerVersion)
+	assert.Equal(t, state.SubagentInventory, got.SubagentInventory)
+
+	materialized := TaskRecord{ToolUseID: "child-1", AgentID: "child-1", StartedAt: now, CompletedAt: now}
+	got.AddTaskRecord(materialized)
+	assert.False(t, got.EnsureTaskRecord(TaskRecord{ToolUseID: "child-1", AgentID: "child-1", StartedAt: now.Add(time.Minute)}), "unmaterialized record must not be replaced")
+	assert.True(t, got.TaskRecords[0].CompletedAt.Equal(now))
+	got.RemoveTaskRecord("child-1")
+	assert.True(t, got.EnsureTaskRecord(TaskRecord{ToolUseID: "child-1", AgentID: "child-1", StartedAt: now.Add(time.Minute)}), "follow-up must recreate a materialized record")
+}
+
+func TestState_NormalizeAfterLoad_CodexInventoryMigration(t *testing.T) {
+	t.Parallel()
+	legacy := &State{
+		AgentType:            agent.AgentTypeCodex,
+		TokenUsage:           &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 4}},
+		CheckpointTokenUsage: &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 2}},
+		TaskRecords:          []TaskRecord{{AgentID: "child-1"}},
+	}
+	legacy.NormalizeAfterLoad(context.Background())
+	require.NotNil(t, legacy.SubagentInventoryComplete)
+	assert.False(t, *legacy.SubagentInventoryComplete)
+	require.NotNil(t, legacy.SubagentTokensBaselineComplete)
+	assert.False(t, *legacy.SubagentTokensBaselineComplete)
+	assertIncompleteSubagentUsage(t, legacy)
+	require.Len(t, legacy.SubagentInventory, 1)
+	assert.Equal(t, "child-1", legacy.SubagentInventory[0].AgentID)
+
+	nonCodex := &State{AgentType: agent.AgentTypeClaudeCode}
+	nonCodex.NormalizeAfterLoad(context.Background())
+	assert.Nil(t, nonCodex.SubagentInventoryComplete)
+	assert.Nil(t, nonCodex.SubagentTokensBaselineComplete)
+
+	explicitComplete := true
+	explicit := &State{AgentType: agent.AgentTypeCodex, SubagentInventoryComplete: &explicitComplete, SubagentTokensBaselineComplete: &explicitComplete, TokenUsage: &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 9}}}
+	explicit.NormalizeAfterLoad(context.Background())
+	assert.True(t, *explicit.SubagentInventoryComplete)
+	assert.NotNil(t, explicit.TokenUsage.SubagentTokens, "an explicit state must not be migrated again")
+}
+
+func TestState_RebaselineSubagentTokensPreservesTriState(t *testing.T) {
+	t.Parallel()
+	complete := true
+	incomplete := false
+
+	exactEmpty := &State{TokenUsage: &agent.TokenUsage{SubagentTokensComplete: &complete}}
+	exactEmpty.RebaselineSubagentTokens()
+	require.NotNil(t, exactEmpty.SubagentTokensBaselineComplete)
+	assert.True(t, *exactEmpty.SubagentTokensBaselineComplete)
+	assert.Nil(t, exactEmpty.SubagentTokensBaseline)
+
+	unknown := &State{TokenUsage: &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 9}, SubagentTokensComplete: &incomplete}}
+	unknown.RebaselineSubagentTokens()
+	require.NotNil(t, unknown.SubagentTokensBaselineComplete)
+	assert.False(t, *unknown.SubagentTokensBaselineComplete)
+	assert.Nil(t, unknown.SubagentTokensBaseline)
+}
+
+func TestState_RebaselineSubagentTokensPreservesLegacyNilUsage(t *testing.T) {
+	t.Parallel()
+	for _, agentType := range []types.AgentType{agent.AgentTypeClaudeCode, agent.AgentTypeFactoryAIDroid} {
+		t.Run(string(agentType), func(t *testing.T) {
+			t.Parallel()
+			state := &State{AgentType: agentType, SubagentTokensBaseline: &agent.TokenUsage{InputTokens: 7}}
+			state.RebaselineSubagentTokens()
+			require.Equal(t, &agent.TokenUsage{InputTokens: 7}, state.SubagentTokensBaseline)
+			require.Nil(t, state.SubagentTokensBaselineComplete)
+		})
+	}
+}
+
+func TestState_HasPendingWork(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state State
+		want  bool
+	}{
+		{name: "empty", state: State{}, want: false},
+		{name: "turn-end step", state: State{StepCount: 1}, want: true},
+		{name: "files awaiting a commit", state: State{FilesTouched: []string{"a.go"}}, want: true},
+		{name: "task record", state: State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}}}, want: true},
+		// FullyCondensed is the caller's concern (see HasPendingWork's doc).
+		{name: "fully condensed with nothing left", state: State{FullyCondensed: true}, want: false},
+		{name: "fully condensed with an in-flight record", state: State{FullyCondensed: true, TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}}}, want: true},
+		{name: "condensed checkpoint id alone", state: State{LastCheckpointID: id.MustCheckpointID("abc123def456")}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.state.HasPendingWork())
+		})
 	}
 }

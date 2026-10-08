@@ -1,0 +1,830 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
+
+	"charm.land/lipgloss/v2"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/internal/coreapi"
+)
+
+// expertsTestRepoULID is the processing placement id the fake control plane
+// resolves "acme/widget" to, so path assertions can reference the retargeted
+// /api/v1/repos/{id}/experts route.
+const expertsTestRepoULID = "0123456789ABCDEFGHJKMNPQRS"
+
+const (
+	expertsTestClusterSlug = "cell1"
+	expertsTestClusterHost = "us.entire.io"
+	expertsTestCellAPIURL  = "https://cell.example.test"
+)
+
+func expertsTestCluster() coreapi.Cluster {
+	return coreapi.Cluster{
+		Slug:         expertsTestClusterSlug,
+		Jurisdiction: "us",
+		PublicUrl:    "https://" + expertsTestClusterHost,
+		ApiUrl:       coreapi.NewOptString(expertsTestCellAPIURL),
+	}
+}
+
+// withExpertsFakeCellCore wires the control-plane resolution both --repo forms
+// need: resolveRepoCellPlacement for owner/repo ("acme/widget" -> placement id
+// expertsTestRepoULID on expertsTestClusterSlug), and resolveRepoCellTarget for
+// a bare ULID (GetRepo -> expertsTestClusterHost).
+func withExpertsFakeCellCore(t *testing.T) *fakeCellCore {
+	t.Helper()
+	f := &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", expertsTestRepoULID,
+			placementFixture{id: expertsTestRepoULID, slug: expertsTestClusterSlug})),
+		clusters: []coreapi.Cluster{expertsTestCluster()},
+		repo:     &coreapi.Repo{ID: expertsTestRepoULID, ClusterHost: coreapi.NewOptString(expertsTestClusterHost)},
+	}
+	withFakeCellCore(t, f)
+	return f
+}
+
+type fakeExpertsClient struct {
+	status int
+	body   string
+
+	gotPath   string
+	gotBody   any
+	gotTarget *auth.CellTarget
+}
+
+func (f *fakeExpertsClient) Post(_ context.Context, path string, body any) (*http.Response, error) {
+	f.gotPath = path
+	f.gotBody = body
+	status := f.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(f.body)),
+	}, nil
+}
+
+// withExpertsFakeClient wires the entire-api cell client seam to fake, and the
+// control plane so both --repo forms (owner/repo, ULID) resolve successfully.
+func withExpertsFakeClient(t *testing.T, fake *fakeExpertsClient) {
+	t.Helper()
+	withExpertsFakeCellCore(t)
+	restore := setExpertsClientFactoryForTest(t, func(_ context.Context, _ bool, target *auth.CellTarget) (expertsAPIClient, error) {
+		fake.gotTarget = target
+		return fake, nil
+	})
+	t.Cleanup(restore)
+}
+
+func expertsSuccessBody() string {
+	return `{
+  "repo_full_name": "acme/widget",
+  "scopes": ["cmd/entire/cli/experts.go"],
+  "query": null,
+  "branch": "main",
+  "source": "db",
+  "profiles": [{
+    "agent_id": "codex",
+    "agent_label": "Codex",
+    "raw_agents": ["codex"],
+    "models": ["gpt-5.4"],
+    "labels": [{"name": "feature_build", "count": 2}],
+    "skills": [{"name": "go-cli", "count": 2}],
+    "tool_mix": [{"name": "shell", "count": 4}, {"name": "search", "count": 3}],
+    "mcp_servers": [{"name": "github", "count": 1}],
+    "transcript_tokens": 12000,
+    "files_changed": 5,
+    "last_activity_at": "2026-04-29T11:00:00.000Z",
+    "session_count": 1,
+    "checkpoint_count": 2,
+    "step_count": 9,
+    "attribution_agent_lines": 120,
+    "attribution_total_committed": 140,
+    "matched_files": ["cmd/entire/cli/experts.go"],
+    "exact_file_matches": 1,
+    "prefix_file_matches": 0,
+    "sessions": [{
+      "session_id": "sess-a",
+      "display_name": "feat: experts provenance",
+      "agent": "codex",
+      "model": "gpt-5.4",
+      "first_commit_author_username": "peyton",
+      "last_activity_at": "2026-04-29T11:00:00.000Z",
+      "checkpoint_count": 2,
+      "step_count": 9,
+      "attribution_agent_lines": 120,
+      "attribution_total_committed": 140,
+      "matched_files": ["cmd/entire/cli/experts.go"],
+      "exact_file_matches": 1,
+      "prefix_file_matches": 0,
+      "checkpoint_ids": ["cp-1", "cp-2"]
+    }]
+  }]
+}`
+}
+
+func TestExpertsCommandIsExperimentalAndListedInLabs(t *testing.T) {
+	root := NewRootCmd()
+	cmd, _, err := root.Find([]string{"experts"})
+	if err != nil {
+		t.Fatalf("find experts: %v", err)
+	}
+	if cmd.Name() != "experts" {
+		t.Fatalf("found command %q, want experts", cmd.Name())
+	}
+	// Gated as experimental: visible and grouped in developer builds
+	// (the default test build), hidden in shipped releases.
+	if cmd.GroupID != experimental.GroupID {
+		t.Fatalf("experts GroupID = %q, want %q (experimental)", cmd.GroupID, experimental.GroupID)
+	}
+	if !strings.Contains(labsOverview(), "entire experts") {
+		t.Fatalf("labs overview missing experts:\n%s", labsOverview())
+	}
+}
+
+func TestExpertsCommandSendsQueryAndPrintsJSON(t *testing.T) {
+	fake := &fakeExpertsClient{body: expertsSuccessBody()}
+	cellFake := withExpertsFakeCellCore(t)
+	restore := setExpertsClientFactoryForTest(t, func(_ context.Context, _ bool, target *auth.CellTarget) (expertsAPIClient, error) {
+		fake.gotTarget = target
+		return fake, nil
+	})
+	defer restore()
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "stripe webhook retry logic", "--repo", "acme/widget", "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts: %v", err)
+	}
+	if fake.gotPath != expertsAPIReposPath+"/"+expertsTestRepoULID+"/experts" {
+		t.Fatalf("path = %q", fake.gotPath)
+	}
+	if cellFake.lastListReposParams.Filter.Or("") != "acme/widget" {
+		t.Fatalf("control-plane repo lookup Filter = %q, want acme/widget", cellFake.lastListReposParams.Filter.Or(""))
+	}
+	if fake.gotTarget == nil || fake.gotTarget.BaseURL != expertsTestCellAPIURL {
+		t.Fatalf("cell target = %#v", fake.gotTarget)
+	}
+
+	body, ok := fake.gotBody.(expertsRequest)
+	if !ok {
+		t.Fatalf("body type = %T", fake.gotBody)
+	}
+	if body.Query == nil || *body.Query != "stripe webhook retry logic" {
+		t.Fatalf("query body = %#v", body)
+	}
+	if body.Scopes != nil {
+		t.Fatalf("expected nil scopes for query body, got %#v", body.Scopes)
+	}
+
+	var decoded expertsResponse
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out.String())
+	}
+	if decoded.Profiles[0].AgentID != recapTestAgentCodex {
+		t.Fatalf("agent id = %q", decoded.Profiles[0].AgentID)
+	}
+	if strings.Contains(out.String(), "first_commit_author_username") || strings.Contains(out.String(), "peyton") {
+		t.Fatalf("JSON output should not expose human identity fields:\n%s", out.String())
+	}
+}
+
+func TestExpertsCommandPrintsAgentCenteredEvidence(t *testing.T) {
+	fake := &fakeExpertsClient{body: expertsSuccessBody()}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "stripe webhook retry logic", "--repo", "acme/widget"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{"Codex", "go-cli", "shell", "feat: experts provenance"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("human output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Peyton is an expert") {
+		t.Fatalf("output should not frame humans as the headline:\n%s", text)
+	}
+}
+
+func TestRenderExpertsWithStylesUsesEntirePalette(t *testing.T) {
+	var resp expertsResponse
+	if err := json.Unmarshal([]byte(expertsSuccessBody()), &resp); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+
+	styles := expertsStyles{
+		colorEnabled: true,
+		title:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true),
+		agent:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true),
+		label:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Info)),
+		facet:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Blue)),
+		muted:        lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)),
+		file:         lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Info)),
+		bullet:       lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)),
+	}
+
+	var out bytes.Buffer
+	renderExpertsWithStyles(&out, resp, styles)
+	text := out.String()
+
+	for _, want := range []string{
+		styles.title.Render("Agent provenance"),
+		styles.agent.Render("Codex"),
+		styles.label.Render("skills"),
+		styles.facet.Render("go-cli") + styles.muted.Render(" (2)"),
+		styles.file.Render("cmd/entire/cli/experts.go"),
+		styles.bullet.Render("-"),
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("styled output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestExpertsCommandUsesStagedFilesAsScopes(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	path := filepath.Join(dir, "billing", "webhooks", "sender.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("package webhooks\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runExpertsGit(t, dir, "add", "billing/webhooks/sender.go")
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["billing/webhooks/sender.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "--staged", "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts --staged: %v", err)
+	}
+	body, ok := fake.gotBody.(expertsRequest)
+	if !ok {
+		t.Fatalf("body type = %T", fake.gotBody)
+	}
+	if len(body.Scopes) != 1 || body.Scopes[0] != "billing/webhooks/sender.go" {
+		t.Fatalf("scopes = %#v", body.Scopes)
+	}
+}
+
+func TestExpertsCommandUsesStagedDeletionsAsScopes(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	path := filepath.Join(dir, "billing", "webhooks", "sender.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("package webhooks\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runExpertsGit(t, dir, "add", "billing/webhooks/sender.go")
+	runExpertsGit(t, dir, "-c", "user.email=test@example.com", "-c", "user.name=Test User", "commit", "-m", "initial")
+	runExpertsGit(t, dir, "rm", "billing/webhooks/sender.go")
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["billing/webhooks/sender.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "--staged", "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts --staged: %v", err)
+	}
+	body, ok := fake.gotBody.(expertsRequest)
+	if !ok {
+		t.Fatalf("body type = %T", fake.gotBody)
+	}
+	if len(body.Scopes) != 1 || body.Scopes[0] != "billing/webhooks/sender.go" {
+		t.Fatalf("scopes = %#v", body.Scopes)
+	}
+}
+
+func TestExpertsCommandResolvesRepoRootPathFromSubdirectory(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	file := filepath.Join(dir, "cmd", "entire", "cli", "experts.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("package cli\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(dir, "cmd")
+	t.Chdir(subdir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["cmd/entire/cli/experts.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "cmd/entire/cli/experts.go", "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts path from subdir: %v", err)
+	}
+	body, ok := fake.gotBody.(expertsRequest)
+	if !ok {
+		t.Fatalf("body type = %T", fake.gotBody)
+	}
+	if len(body.Scopes) != 1 || body.Scopes[0] != "cmd/entire/cli/experts.go" {
+		t.Fatalf("scopes = %#v", body.Scopes)
+	}
+	if body.Query != nil {
+		t.Fatalf("expected path scope, got query %q", *body.Query)
+	}
+}
+
+func TestExpertsCommandResolvesCWDRelativePathFromSubdirectory(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	file := filepath.Join(dir, "cmd", "entire", "cli", "experts.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("package cli\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(filepath.Join(dir, "cmd"))
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["cmd/entire/cli/experts.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "entire/cli/experts.go", "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts cwd-relative path from subdir: %v", err)
+	}
+	body, ok := fake.gotBody.(expertsRequest)
+	if !ok {
+		t.Fatalf("body type = %T", fake.gotBody)
+	}
+	if len(body.Scopes) != 1 || body.Scopes[0] != "cmd/entire/cli/experts.go" {
+		t.Fatalf("scopes = %#v", body.Scopes)
+	}
+}
+
+func TestExpertsCommandTreatsPathLikeRepoOverrideArgAsScope(t *testing.T) {
+	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["api/deleted.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "api/deleted.go", "--repo", "acme/widget", "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts deleted path: %v", err)
+	}
+	body, ok := fake.gotBody.(expertsRequest)
+	if !ok {
+		t.Fatalf("body type = %T", fake.gotBody)
+	}
+	if len(body.Scopes) != 1 || body.Scopes[0] != "api/deleted.go" {
+		t.Fatalf("scopes = %#v", body.Scopes)
+	}
+}
+
+func TestExpertsCommandRelativizesAbsoluteDeletedPathScope(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	absDeleted := filepath.Join(dir, "api", "deleted.go")
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["api/deleted.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", absDeleted, "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts absolute deleted path: %v", err)
+	}
+	body, ok := fake.gotBody.(expertsRequest)
+	if !ok {
+		t.Fatalf("body type = %T", fake.gotBody)
+	}
+	if len(body.Scopes) != 1 || body.Scopes[0] != "api/deleted.go" {
+		t.Fatalf("scopes = %#v", body.Scopes)
+	}
+}
+
+func TestExpertsCommandRelativizesDeletedPathScopeFromSubdirectory(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	path := filepath.Join(dir, "cmd", "entire", "cli", "deleted.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("package cli\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runExpertsGit(t, dir, "add", "cmd/entire/cli/deleted.go")
+	runExpertsGit(t, dir, "-c", "user.email=test@example.com", "-c", "user.name=Test User", "commit", "-m", "initial")
+	runExpertsGit(t, dir, "rm", "cmd/entire/cli/deleted.go")
+	subdir := filepath.Join(dir, "cmd")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(subdir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["cmd/entire/cli/deleted.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "entire/cli/deleted.go", "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts deleted path from subdir: %v", err)
+	}
+	body, ok := fake.gotBody.(expertsRequest)
+	if !ok {
+		t.Fatalf("body type = %T", fake.gotBody)
+	}
+	if len(body.Scopes) != 1 || body.Scopes[0] != "cmd/entire/cli/deleted.go" {
+		t.Fatalf("scopes = %#v", body.Scopes)
+	}
+}
+
+func TestExpertsCommandAcceptsCaseInsensitiveRepoOverrideForLocalScope(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	file := filepath.Join(dir, "cmd", "entire", "cli", "experts.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("package cli\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["cmd/"],"query":null,"branch":"main","source":"db","profiles":[]}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	// "cmd" is a local directory scope (not the --repo+path shortcut), so the
+	// origin vs --repo cross-check runs — GitHub names are case-insensitive.
+	root.SetArgs([]string{"experts", "cmd", "--repo", "Acme/Widget", "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts with case-different --repo: %v\n%s", err, out.String())
+	}
+	body, ok := fake.gotBody.(expertsRequest)
+	if !ok {
+		t.Fatalf("body type = %T", fake.gotBody)
+	}
+	if len(body.Scopes) != 1 || body.Scopes[0] != "cmd/" {
+		t.Fatalf("scopes = %#v", body.Scopes)
+	}
+}
+
+func TestExpertsCommandRejectsMismatchedRepoOverrideForLocalScope(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "https://github.com/acme/widget.git")
+	file := filepath.Join(dir, "cmd", "entire", "cli", "experts.go")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("package cli\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	// The mismatch is caught before cell resolution runs, so no control-plane
+	// or entire-api client seam is needed here.
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "cmd", "--repo", "other/repo"})
+
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "local path belongs to acme/widget, not --repo other/repo") {
+		t.Fatalf("error = %v\nout = %s", err, out.String())
+	}
+}
+
+func TestExpertsCommandDoesNotRewritePathScope503AsCodeSearch(t *testing.T) {
+	fake := &fakeExpertsClient{status: http.StatusServiceUnavailable, body: `{"error":"Database unavailable"}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "api/file.go", "--repo", "acme/widget"})
+
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "Database unavailable") {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(out.String(), "Code search is not available") {
+		t.Fatalf("path-scope 503 should not be rewritten as code search unavailable:\n%s", out.String())
+	}
+}
+
+// TestExpertsCommandQuery503ShowsCodeSearchMessage covers the real backend
+// behaviour observed live: a natural-language query hits a cell without code
+// search and gets a bare 503, which must surface as a clean code-search message
+// (not the raw "fetch experts: API error" wrap).
+func TestExpertsCommandQuery503ShowsCodeSearchMessage(t *testing.T) {
+	fake := &fakeExpertsClient{status: http.StatusServiceUnavailable, body: `{"error":"Service Unavailable"}`}
+	withExpertsFakeClient(t, fake)
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "some natural language topic", "--repo", "acme/widget"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected a non-nil (silent) error for a 503 query")
+	}
+	if !strings.Contains(out.String(), "Code search is not available") {
+		t.Fatalf("query 503 should show the code-search message:\n%s", out.String())
+	}
+}
+
+func TestExpertsCommandRejectsRepoWithStaged(t *testing.T) {
+	root := NewRootCmd()
+	root.SetArgs([]string{"experts", "--staged", "--repo", "acme/widget"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--staged cannot be used with --repo") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestParseGitStagedScopeLinesNormalizesCRLF(t *testing.T) {
+	t.Parallel()
+	got := parseGitStagedScopeLines("billing/foo.go\r\nbilling/bar.go\r\n")
+	want := []string{"billing/foo.go", "billing/bar.go"}
+	if len(got) != len(want) {
+		t.Fatalf("scopes = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("scopes[%d] = %q, want %q (full: %#v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestExpertsCommandAcceptsRepoULIDWithoutRepoIndexLookup(t *testing.T) {
+	fake := &fakeExpertsClient{body: `{"repo_full_name":"acme/widget","scopes":["api/x.go"],"query":null,"branch":"main","source":"db","profiles":[]}`}
+	cellFake := withExpertsFakeCellCore(t)
+	restore := setExpertsClientFactoryForTest(t, func(_ context.Context, _ bool, target *auth.CellTarget) (expertsAPIClient, error) {
+		fake.gotTarget = target
+		return fake, nil
+	})
+	defer restore()
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "api/x.go", "--repo", expertsTestRepoULID, "--json"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute experts with ULID repo: %v", err)
+	}
+	// A ULID --repo addresses the data API directly — no control-plane
+	// repo-index lookup (that's the owner/repo-only path).
+	if cellFake.lastListReposParams.Filter.Or("") != "" {
+		t.Fatalf("a ULID --repo should skip the repo-index lookup, but Filter=%q was set", cellFake.lastListReposParams.Filter.Or(""))
+	}
+	if fake.gotPath != expertsAPIReposPath+"/"+expertsTestRepoULID+"/experts" {
+		t.Fatalf("path = %q, want %s/%s/experts", fake.gotPath, expertsAPIReposPath, expertsTestRepoULID)
+	}
+	if fake.gotTarget == nil || fake.gotTarget.BaseURL != expertsTestCellAPIURL {
+		t.Fatalf("cell target = %#v, want BaseURL %s", fake.gotTarget, expertsTestCellAPIURL)
+	}
+}
+
+// TestExpertsCommandRepoNotOnboarded covers the not-onboarded shape of
+// cell-placement resolution failure surfacing through renderRepoNotOnboarded
+// rather than a raw/double-wrapped error.
+func TestExpertsCommandRepoNotOnboarded(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(), // zero rows: not onboarded
+	})
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "api/x.go", "--repo", "acme/widget"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error for a not-onboarded repo")
+	}
+	if !strings.Contains(out.String(), "not onboarded to Entire") {
+		t.Fatalf("expected the not-onboarded message, got:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "resolve experts cell") {
+		t.Fatalf("not-onboarded should render its own message, not the raw wrap:\n%s", out.String())
+	}
+}
+
+// TestExpertsCommandFailedPlacement covers the failed/suspended-placement
+// shape of cell-placement resolution failure, distinct from not-onboarded.
+func TestExpertsCommandFailedPlacement(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", expertsTestRepoULID,
+			placementFixture{id: expertsTestRepoULID, slug: expertsTestClusterSlug, status: coreapi.RepoPlacementStatusFailed})),
+		clusters: []coreapi.Cluster{expertsTestCluster()},
+	})
+
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"experts", "api/x.go", "--repo", "acme/widget"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error for a failed placement")
+	}
+	if !strings.Contains(err.Error(), "processing placement is failed") {
+		t.Fatalf("expected the failed-placement message, got: %v\nout:\n%s", err, out.String())
+	}
+	if strings.Contains(out.String(), "not onboarded to Entire") {
+		t.Fatalf("a failed placement is not the not-onboarded case:\n%s", out.String())
+	}
+}
+
+// TestParseExpertsRepo pins the --repo grammar and its `.git` handling: the
+// suffix is never part of a name, so both spellings the flag accepts drop it —
+// which is what keeps --repo agreeing with the pair resolveExpertsRepo derives
+// from origin; see TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag.
+func TestParseExpertsRepo(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "bare pair passes through", in: "acme/widget", want: "acme/widget"},
+		{name: "bare pair drops the decoration", in: "audit1/foo.git", want: "audit1/foo"},
+		{name: "gh triple drops the forge", in: "gh/acme/widget", want: "acme/widget"},
+		{name: "gh triple drops the decoration", in: "gh/acme/widget.git", want: "acme/widget"},
+		{name: "surrounding slashes are ignored", in: "/gh/acme/widget.git/", want: "acme/widget"},
+		{name: "a gh name that is only the suffix is refused", in: "gh/acme/.git", wantErr: true},
+		{name: "a bare name that is only the suffix is refused", in: "acme/.git", wantErr: true},
+		// The trim can MANUFACTURE a dot-only name out of one that was not, and
+		// the result reaches placement resolution. Refused on both spellings.
+		{name: "a name the trim turns dot-only is refused", in: "acme/..git", wantErr: true},
+		{name: "a gh name the trim turns dot-only is refused", in: "gh/acme/..git", wantErr: true},
+		{name: "a name the trim turns double-dot is refused", in: "acme/...git", wantErr: true},
+		{name: "a dot-only name as typed is refused", in: "acme/..", wantErr: true},
+		// --repo has to agree with the pair resolveExpertsRepo derives from
+		// origin, and an origin URL is where an uppercase suffix actually
+		// comes from. A case-sensitive drop made the two spellings of the
+		// same repository disagree.
+		{name: "bare pair drops an uppercase suffix", in: "audit1/foo.GIT", want: "audit1/foo"},
+		{name: "gh triple drops a mixed-case suffix", in: "gh/acme/widget.Git", want: "acme/widget"},
+		{name: "a longer dotted extension survives", in: "acme/widget.gitignore", want: "acme/widget.gitignore"},
+		{name: "an uppercase suffix alone is refused", in: "acme/.GIT", wantErr: true},
+		{name: "an uppercase suffix the trim turns dot-only is refused", in: "acme/..GIT", wantErr: true},
+		{name: "a non-gh triple is not a pair", in: "et/audit1/foo", wantErr: true},
+		{name: "one segment is not a pair", in: "widget", wantErr: true},
+		{name: "empty is refused", in: "", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseExpertsRepo(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseExpertsRepo(%q) = %q, want an error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseExpertsRepo(%q): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("parseExpertsRepo(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag states the
+// guarantee the two trims have to agree on: the pair `entire experts` derives
+// from a native origin must survive being passed back as --repo. The origin
+// here spells the `.git` alias, so the two paths only agree if both drop it —
+// one keeping it would make the same command name two repositories.
+//
+// Not parallel: t.Chdir points ResolveRemoteRepo at the fixture repo.
+func TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "entire://cell1.entire.io/et/audit1/foo.git")
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	fromOrigin, err := resolveExpertsRepo(context.Background(), "")
+	if err != nil {
+		t.Fatalf("resolveExpertsRepo from origin: %v", err)
+	}
+	if fromOrigin != "audit1/foo" {
+		t.Fatalf("origin resolved to %q, want %q", fromOrigin, "audit1/foo")
+	}
+
+	fromFlag, err := resolveExpertsRepo(context.Background(), fromOrigin)
+	if err != nil {
+		t.Fatalf("resolveExpertsRepo from --repo %q: %v", fromOrigin, err)
+	}
+	if fromFlag != fromOrigin {
+		t.Errorf("--repo %q resolved to %q; the flag and the origin must name one repo", fromOrigin, fromFlag)
+	}
+}
+
+func runExpertsGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmdArgs := append([]string{"-c", "commit.gpgsign=false"}, args...)
+	cmd := exec.CommandContext(context.Background(), "git", cmdArgs...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}

@@ -116,6 +116,12 @@ func (p *Pi) RunPrompt(ctx context.Context, dir string, prompt string, opts ...O
 		o(cfg)
 	}
 
+	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	if err != nil {
+		return Output{}, err
+	}
+	defer cancel()
+
 	bin, err := exec.LookPath(p.Binary())
 	if err != nil {
 		return Output{}, fmt.Errorf("%s not in PATH: %w", p.Binary(), err)

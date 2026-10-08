@@ -29,6 +29,120 @@ code untouched. This is the one transform that is a deliberate
 ergonomics choice rather than a pure bug workaround; a shared `default`
 upstream retires it.
 
+## 2. Display-only read enums hard-fail on unknown values
+
+**Symptom:** read-model string fields the CLI only displays (`Repo.state`,
+`Repo.visibility`, `Repo.objectFormat`) are declared as `enum`. ogen turns
+each into a named type with a strict `Validate()` that the response decoder
+calls unconditionally, so the day the server adds a new value (a new repo
+lifecycle state, say) the whole `repo list` / `repo view` request fails to
+decode — even though the client never branches on the value.
+
+**Fix upstream:** model client-display fields that may grow new values as
+plain strings (drop `enum`), or have ogen treat them as open enums. Enums
+the *client sends* (request bodies like `SetRepoVisibilityInputBody`) should
+stay strict.
+
+`Membership.role`/`status` and `Invitation.role`/`status` are the same shape:
+`entire org grant list` displays memberships. `entire org invite list`
+displays invitations, and the generated `ListOrgInvitations` client decodes
+them. A new role or lifecycle state must display rather than fail either
+listing.
+
+**Workaround:** `spec/normalize.go` (`loosenReadModelEnums`, allowlist
+`readModelEnumFields`) deletes the `enum` constraint from those response
+read-model fields, so ogen emits plain strings with no `Validate()` and
+unknown values pass through for display. Only response read models are
+loosened; request-body enums stay strict — `CreateOrgInvitationInputBody.role`
+keeps its enum for outgoing requests. Locked in
+by `TestListProjectRepos_UnknownEnumValuesPassThrough`,
+`TestListOrgInvitations_UnknownEnumValuesPassThrough` and
+`TestListOrgMembers_UnknownEnumValuesPassThrough` in `client_test.go`.
+
+The detach result is the same shape: `entire repo mirror detach` displays each
+`DetachPrecondition.precondition` slug, each `DetachAccessEntry`'s `source` and
+`subjectType`, and `DetachRepoResult.status` and `RepoDetachState.status`, and the server documents both the
+precondition list and the status set as growing. Locked in by
+`TestDetachRepo_UnknownEnumValuesPassThrough` and
+`TestGetRepoDetach_UnknownStatusPassesThrough`.
+Retire the allowlist entries as upstream loosens the corresponding fields.
+
+## 2b. New read-model fields ship as `required`
+
+**Symptom:** `capabilities` on `Org`, `Project` and `Repo`, `Repo.provider`,
+`org`/`provider` on `RepoIndexEntry`, and `ListReposOutputBody.candidatesIncomplete`
+were added as `required`. ogen's
+decoder then fails the whole response when a field is absent, so a core that
+predates the field, or a mixed-version roll, breaks every list, get and
+repo-routing call in a client that does not depend on any of them.
+
+The create responses (`CreatedOrg`, `CreatedProject`, `CreatedRepo`) repeat the
+shape of their read models and so repeat the problem.
+
+**Fix upstream:** add read-model fields as optional until every deployment
+sends them, then tighten.
+
+**Workaround:** `spec/normalize.go` (`loosenReadModelRequired`, allowlist
+`readModelOptionalFields`) drops the listed fields from `required`. The new
+`provider` and `RepoIndexEntry.permission` enums are also in
+`readModelEnumFields`, since the CLI displays them or tests for the values it
+knows and treats everything else as unknown (`repo protection list` tests
+`Repo.provider` for `"github"` and `"entire"` separately, with a third
+rendering for anything else — an absent or unrecognized provider must not
+fall into either known value's branch). Remove an entry when the CLI needs
+the field to be *present* to be correct — reading it through its `Opt`
+accessor with a safe default is not that.
+
+Locked in by `TestListRepos_UnsentRequiredReadFieldsDecode` and
+`TestListOrgsAndProjects_UnsentCapabilitiesDecode` in `client_test.go`.
+`RepoIndexEntry` gets the dedicated test because `ListRepos` is the widest
+consumer: the consolidated index is what `resolveRepoCellTarget` routes with
+and what `search`, `repo mirror` and the dispatch wizard page through, so a
+decode failure there takes out cell routing and search together rather than
+one command.
+
+## 2c. Nullable objects are typed as the object alone
+
+**Symptom:** `ResourcePerson.directGrant` is a `$ref` to
+`ResourcePersonDirectGrant`, but the server sends `"directGrant": null` for
+everyone without a direct grant, which is every GitHub-synced collaborator.
+ogen's decoder then rejects the whole `GET /repos/{repoId}/people` (and
+`/projects/{projectId}/people`) response.
+
+**Fix upstream:** declare the field nullable (`anyOf: [$ref, {type: null}]`),
+or omit it instead of sending null.
+
+**Workaround:** `spec/normalize.go` (`allowReadModelNulls`, allowlist
+`readModelNullableFields`) rewrites the listed `$ref` fields into that
+`anyOf`, so ogen generates a `Nil…` wrapper. Locked in by
+`TestListRepoPeople_NullDirectGrantDecodes`.
+
+## 3. Every operation advertises the interactive login schemes
+
+**Symptom:** the spec lists four security alternatives on every operation
+(`oauth2`, `oidc`, `bearerAuth`, `sessionAuth`). `oauth2` and `oidc`
+describe how a browser or device obtains a token; a client that already
+holds a bearer never drives them. ogen has no generator for `openIdConnect`
+and aborts on it, so the spec cannot be consumed as published.
+
+**Fix upstream:** advertise `oauth2`/`oidc` in `components.securitySchemes`
+for documentation, but list only `bearerAuth` and `sessionAuth` as the
+per-operation requirements, since those are what a request actually carries.
+
+**Workaround:** `spec/normalize.go` (`dropInteractiveSecurity`,
+`interactiveSecuritySchemes`) removes the two schemes from the components
+and from every security list, so the generated `SecuritySource` keeps the
+`BearerAuth` and `SessionAuth` methods the client implements.
+
+The transform refuses to *empty* a security list that had entries. An empty
+operation-level `security` means "no authentication required" in OpenAPI, so
+filtering an oauth2-only operation down to nothing would silently generate a
+client that stops sending the bearer to it. Nothing in today's spec has that
+shape; a device-code or authorize endpoint added upstream would, and it is
+the only failure mode here that would not announce itself (a requirement
+mixing `oauth2` with `bearerAuth` survives whole and makes ogen abort at
+generate time on the now-dangling scheme).
+
 <!-- Resolved upstream and removed:
   - Nullable arrays (`"type": ["array","null"]`) — entiredb now emits
     non-nullable arrays (`"type": "array"`, absent ⇒ `[]`), so the
@@ -37,4 +151,3 @@ upstream retires it.
     two-call lookup→delete with a single delete-by-coords route
     (`DELETE /mirrors?provider&owner&repo&clusterHost`); `mirror remove`
     now calls it directly and surfaces the new 404/403/503 contract. -->
-

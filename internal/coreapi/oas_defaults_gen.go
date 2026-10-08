@@ -16,6 +16,14 @@ func (s *AddOrgMemberInputBody) setDefaults() {
 }
 
 // setDefaults set default value of fields.
+func (s *CreateOrgInvitationInputBody) setDefaults() {
+	{
+		val := CreateOrgInvitationInputBodyRole("member")
+		s.Role = val
+	}
+}
+
+// setDefaults set default value of fields.
 func (s *ErrorModel) setDefaults() {
 	{
 		val, _ := json.DecodeURI(jx.DecodeStr("\"about:blank\""))
@@ -24,17 +32,9 @@ func (s *ErrorModel) setDefaults() {
 }
 
 // setDefaults set default value of fields.
-func (s *GrantProjectAccessInputBody) setDefaults() {
+func (s *GrantAccessBody) setDefaults() {
 	{
-		val := GrantProjectAccessInputBodyGranteeType("account")
-		s.GranteeType.SetTo(val)
-	}
-}
-
-// setDefaults set default value of fields.
-func (s *GrantRepoAccessInputBody) setDefaults() {
-	{
-		val := GrantRepoAccessInputBodyGranteeType("account")
+		val := GrantAccessBodyGranteeType("account")
 		s.GranteeType.SetTo(val)
 	}
 }

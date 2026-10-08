@@ -25,9 +25,9 @@ import (
 
 // writePluginScript writes a shell script that records argv and exits
 // with exitCode. Skips the calling test on Windows.
-func writePluginScript(t *testing.T, dir, binaryName, argFile string, exitCode int) string {
+func writePluginScript(t *testing.T, dir, binaryName, argFile string, exitCode int) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	path := filepath.Join(dir, binaryName)
@@ -38,10 +38,9 @@ func writePluginScript(t *testing.T, dir, binaryName, argFile string, exitCode i
 			"exit %d\n",
 		argFile, exitCode,
 	)
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin %s: %v", path, err)
 	}
-	return path
 }
 
 // pathWith returns os.Environ with dir prepended to PATH. Returning a
@@ -184,13 +183,13 @@ func TestExternalCommand_FlagAfterPluginNameNotEatenByCobra(t *testing.T) {
 
 func TestExternalCommand_StdinPassthrough(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.txt")
 	body := fmt.Sprintf("#!/bin/sh\ncat > %q\nexit 0\n", outFile)
-	if err := os.WriteFile(filepath.Join(dir, "entire-stdincat"), []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(dir, "entire-stdincat"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 
@@ -214,7 +213,7 @@ func TestExternalCommand_StdinPassthrough(t *testing.T) {
 
 func TestExternalCommand_EnvVarsForwarded(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	// Spawn the parent CLI from inside a real git repo so it can resolve
@@ -237,7 +236,7 @@ func TestExternalCommand_EnvVarsForwarded(t *testing.T) {
 			"} > %q\nexit 0\n",
 		envFile,
 	)
-	if err := os.WriteFile(filepath.Join(pluginDir, "entire-envcheck"), []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(pluginDir, "entire-envcheck"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 
@@ -279,7 +278,7 @@ func writeEnvDumpPlugin(t *testing.T) (pluginDir, envFile string) {
 	pluginDir = t.TempDir()
 	envFile = filepath.Join(pluginDir, "env.txt")
 	body := fmt.Sprintf("#!/bin/sh\nenv > %q\nexit 0\n", envFile)
-	if err := os.WriteFile(filepath.Join(pluginDir, "entire-envfilter"), []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(pluginDir, "entire-envfilter"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 	return pluginDir, envFile
@@ -290,7 +289,7 @@ func writeEnvDumpPlugin(t *testing.T) (pluginDir, envFile string) {
 // the plugin, while allowlisted OS-plumbing variables do.
 func TestExternalCommand_EnvFiltered_CredentialsDropped(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	pluginDir, envFile := writeEnvDumpPlugin(t)
@@ -327,7 +326,7 @@ func TestExternalCommand_EnvFiltered_CredentialsDropped(t *testing.T) {
 // disable filtering for everything else.
 func TestExternalCommand_EnvFiltered_OverrideWildcard(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	pluginDir, envFile := writeEnvDumpPlugin(t)
@@ -378,14 +377,14 @@ func parseEnvLines(t *testing.T, contents string) map[string]string {
 
 func TestExternalCommand_NonExecutableReportsLaunchError(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == windowsGOOS {
 		t.Skip("executable bit semantics tested on Unix only")
 	}
 	dir := t.TempDir()
 	// Mode 0o644 — file exists on PATH but cannot be exec'd. The dispatcher
 	// must report a launch failure rather than silently falling through to
 	// Cobra's generic unknown-command path.
-	if err := os.WriteFile(filepath.Join(dir, "entire-noexec"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(dir, "entire-noexec"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 
@@ -426,5 +425,87 @@ func TestExternalCommand_AgentProtocolBinarySkipped(t *testing.T) {
 	if !strings.Contains(stderr.String(), "unknown command") &&
 		!strings.Contains(stderr.String(), "Invalid usage") {
 		t.Errorf("expected Cobra unknown-command error, got stderr: %s", stderr.String())
+	}
+}
+
+// `entire agent-help <plugin>` delegates to `entire-<plugin> agent-help`
+// through the real binary: the plugin's stdout is agent-help's stdout, and the
+// child gets the same filtered environment as a dispatched plugin, not ours.
+func TestExternalCommand_AgentHelpDelegatesToPlugin(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("plugin shell-script harness only runs on Unix")
+	}
+	dir := t.TempDir()
+	argFile := filepath.Join(dir, "argv.txt")
+	envFile := filepath.Join(dir, "env.txt")
+	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nenv > %q\necho \"pgr agent help\"\nexit 0\n", argFile, envFile)
+	if err := os.WriteFile(filepath.Join(dir, "entire-pgr"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+
+	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "agent-help", "pgr", "sync", "--json")
+	cmd.Env = append(pathWith(dir), "GITHUB_TOKEN=must-not-leak")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("entire agent-help pgr failed: %v\nstderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "pgr agent help" {
+		t.Errorf("stdout = %q, want the plugin's own output", got)
+	}
+	argv, err := os.ReadFile(argFile)
+	if err != nil {
+		t.Fatalf("read argv file: %v", err)
+	}
+	if got := strings.TrimSpace(string(argv)); got != "agent-help\nsync\n--json" {
+		t.Errorf("plugin argv = %q, want %q", got, "agent-help\nsync\n--json")
+	}
+	envDump, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if _, ok := parseEnvLines(t, string(envDump))["GITHUB_TOKEN"]; ok {
+		t.Error("GITHUB_TOKEN must be filtered out of the delegated plugin's env")
+	}
+}
+
+// main prepends the managed bin dir only around the dispatcher and restores
+// PATH before Cobra runs, so this runs through the real binary: a plugin that
+// exists only in the managed dir must still answer agent-help.
+func TestExternalCommand_AgentHelpDelegatesToManagedPlugin(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("plugin shell-script harness only runs on Unix")
+	}
+	pluginRoot := t.TempDir()
+	binDir := filepath.Join(pluginRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argFile := filepath.Join(t.TempDir(), "argv.txt")
+	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\necho \"managed agent help\"\nexit 0\n", argFile)
+	if err := os.WriteFile(filepath.Join(binDir, "entire-pgr"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+
+	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "agent-help", "pgr")
+	cmd.Env = append(os.Environ(), "ENTIRE_PLUGIN_DIR="+pluginRoot)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("entire agent-help pgr failed: %v\nstderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "managed agent help" {
+		t.Errorf("stdout = %q, want the managed plugin's output", got)
+	}
+	argv, err := os.ReadFile(argFile)
+	if err != nil {
+		t.Fatalf("read argv file: %v", err)
+	}
+	if got := strings.TrimSpace(string(argv)); got != "agent-help" {
+		t.Errorf("plugin argv = %q, want %q", got, "agent-help")
 	}
 }

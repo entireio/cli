@@ -1,0 +1,432 @@
+{
+ "cross": [
+  {
+   "a": "cmd:activity",
+   "b": "cmd:recap",
+   "n": 2
+  },
+  {
+   "a": "cmd:agent-help-mcp",
+   "b": "cmd:search",
+   "n": 2
+  },
+  {
+   "a": "cmd:checkpoint",
+   "b": "cmd:session",
+   "n": 2
+  },
+  {
+   "a": "cmd:control-plane",
+   "b": "cmd:enable-disable-configure",
+   "n": 2
+  },
+  {
+   "a": "capture:cell-routing",
+   "b": "cmd:blame-why",
+   "n": 1
+  },
+  {
+   "a": "capture:cell-routing",
+   "b": "cmd:recap",
+   "n": 1
+  },
+  {
+   "a": "cmd:blame-why",
+   "b": "cmd:runner",
+   "n": 1
+  },
+  {
+   "a": "cmd:control-plane",
+   "b": "cmd:runner",
+   "n": 1
+  },
+  {
+   "a": "cmd:control-plane",
+   "b": "cmd:recap",
+   "n": 1
+  }
+ ],
+ "largest": [
+  {
+   "file": "cmd/entire/cli/strategy/cleanup.go",
+   "line": 537,
+   "other": "cmd/entire/cli/strategy/cleanup.go",
+   "other_line": 510,
+   "span": 52
+  },
+  {
+   "file": "cmd/entire/cli/strategy/cleanup.go",
+   "line": 510,
+   "other": "cmd/entire/cli/strategy/cleanup.go",
+   "other_line": 537,
+   "span": 52
+  },
+  {
+   "file": "cmd/entire/cli/org.go",
+   "line": 85,
+   "other": "cmd/entire/cli/project.go",
+   "other_line": 163,
+   "span": 37
+  },
+  {
+   "file": "cmd/entire/cli/project.go",
+   "line": 163,
+   "other": "cmd/entire/cli/org.go",
+   "other_line": 85,
+   "span": 37
+  },
+  {
+   "file": "cmd/entire/cli/setup_search_skill.go",
+   "line": 129,
+   "other": "cmd/entire/cli/setup_search_skill.go",
+   "other_line": 100,
+   "span": 31
+  },
+  {
+   "file": "cmd/entire/cli/agent/geminicli/gemini.go",
+   "line": 280,
+   "other": "cmd/entire/cli/agent/geminicli/transcript.go",
+   "other_line": 119,
+   "span": 29
+  },
+  {
+   "file": "cmd/entire/cli/agent/geminicli/transcript.go",
+   "line": 119,
+   "other": "cmd/entire/cli/agent/geminicli/gemini.go",
+   "other_line": 280,
+   "span": 29
+  },
+  {
+   "file": "cmd/entire/cli/grant.go",
+   "line": 152,
+   "other": "cmd/entire/cli/grant.go",
+   "other_line": 265,
+   "span": 28
+  },
+  {
+   "file": "cmd/entire/cli/grant.go",
+   "line": 265,
+   "other": "cmd/entire/cli/grant.go",
+   "other_line": 152,
+   "span": 28
+  },
+  {
+   "file": "cmd/entire/cli/setup_search_skill.go",
+   "line": 100,
+   "other": "cmd/entire/cli/setup_search_skill.go",
+   "other_line": 129,
+   "span": 28
+  },
+  {
+   "file": "cmd/entire/cli/strategy/cleanup.go",
+   "line": 564,
+   "other": "cmd/entire/cli/strategy/cleanup.go",
+   "other_line": 510,
+   "span": 25
+  },
+  {
+   "file": "cmd/entire/cli/trail_approval_cmd.go",
+   "line": 112,
+   "other": "cmd/entire/cli/trail_approval_cmd.go",
+   "other_line": 89,
+   "span": 22
+  },
+  {
+   "file": "cmd/entire/cli/trail_approval_cmd.go",
+   "line": 89,
+   "other": "cmd/entire/cli/trail_approval_cmd.go",
+   "other_line": 112,
+   "span": 22
+  },
+  {
+   "file": "cmd/entire/cli/resume.go",
+   "line": 454,
+   "other": "cmd/entire/cli/resume.go",
+   "other_line": 478,
+   "span": 21
+  },
+  {
+   "file": "cmd/entire/cli/resume.go",
+   "line": 478,
+   "other": "cmd/entire/cli/resume.go",
+   "other_line": 518,
+   "span": 21
+  },
+  {
+   "file": "cmd/entire/cli/resume.go",
+   "line": 518,
+   "other": "cmd/entire/cli/resume.go",
+   "other_line": 454,
+   "span": 21
+  },
+  {
+   "file": "cmd/entire/cli/resume.go",
+   "line": 819,
+   "other": "cmd/entire/cli/resume.go",
+   "other_line": 780,
+   "span": 19
+  },
+  {
+   "file": "cmd/entire/cli/resume.go",
+   "line": 780,
+   "other": "cmd/entire/cli/resume.go",
+   "other_line": 819,
+   "span": 19
+  },
+  {
+   "file": "cmd/entire/cli/setup_github.go",
+   "line": 412,
+   "other": "cmd/entire/cli/setup_github.go",
+   "other_line": 386,
+   "span": 17
+  },
+  {
+   "file": "cmd/entire/cli/trail_resume_cmd.go",
+   "line": 319,
+   "other": "cmd/entire/cli/trail_resume_cmd.go",
+   "other_line": 337,
+   "span": 17
+  },
+  {
+   "file": "cmd/entire/cli/trail_resume_cmd.go",
+   "line": 337,
+   "other": "cmd/entire/cli/trail_resume_cmd.go",
+   "other_line": 319,
+   "span": 17
+  },
+  {
+   "file": "cmd/entire/cli/setup_search_skill.go",
+   "line": 39,
+   "other": "cmd/entire/cli/setup_agent_help_skill.go",
+   "other_line": 42,
+   "span": 17
+  },
+  {
+   "file": "cmd/entire/cli/setup_github.go",
+   "line": 386,
+   "other": "cmd/entire/cli/setup_github.go",
+   "other_line": 412,
+   "span": 17
+  },
+  {
+   "file": "cmd/entire/cli/grant.go",
+   "line": 474,
+   "other": "cmd/entire/cli/grant.go",
+   "other_line": 319,
+   "span": 17
+  },
+  {
+   "file": "cmd/entire/cli/grant.go",
+   "line": 319,
+   "other": "cmd/entire/cli/grant.go",
+   "other_line": 474,
+   "span": 17
+  },
+  {
+   "file": "cmd/entire/cli/setup_agent_help_skill.go",
+   "line": 42,
+   "other": "cmd/entire/cli/setup_search_skill.go",
+   "other_line": 39,
+   "span": 17
+  },
+  {
+   "file": "cmd/entire/cli/repo_mirror_create_wizard.go",
+   "line": 435,
+   "other": "cmd/entire/cli/repo_mirror_create_wizard.go",
+   "other_line": 475,
+   "span": 16
+  },
+  {
+   "file": "cmd/entire/cli/checkpoint/persistent_write.go",
+   "line": 12,
+   "other": "cmd/entire/cli/checkpoint/refs_store.go",
+   "other_line": 115,
+   "span": 16
+  },
+  {
+   "file": "cmd/entire/cli/checkpoint/refs_store.go",
+   "line": 115,
+   "other": "cmd/entire/cli/checkpoint/persistent_write.go",
+   "other_line": 12,
+   "span": 16
+  },
+  {
+   "file": "cmd/entire/cli/repo_mirror_create_wizard.go",
+   "line": 475,
+   "other": "cmd/entire/cli/setup.go",
+   "other_line": 1738,
+   "span": 16
+  },
+  {
+   "file": "cmd/entire/cli/setup.go",
+   "line": 1738,
+   "other": "cmd/entire/cli/repo_mirror_create_wizard.go",
+   "other_line": 435,
+   "span": 16
+  },
+  {
+   "file": "cmd/entire/cli/telemetry/detached.go",
+   "line": 415,
+   "other": "cmd/entire/cli/telemetry/search_outcome.go",
+   "other_line": 107,
+   "span": 14
+  },
+  {
+   "file": "cmd/entire/cli/resume.go",
+   "line": 456,
+   "other": "cmd/entire/cli/resume.go",
+   "other_line": 480,
+   "span": 14
+  },
+  {
+   "file": "cmd/entire/cli/setup.go",
+   "line": 2543,
+   "other": "cmd/entire/cli/setup.go",
+   "other_line": 2578,
+   "span": 14
+  },
+  {
+   "file": "cmd/entire/cli/setup.go",
+   "line": 2578,
+   "other": "cmd/entire/cli/setup.go",
+   "other_line": 2543,
+   "span": 14
+  },
+  {
+   "file": "cmd/entire/cli/resume.go",
+   "line": 520,
+   "other": "cmd/entire/cli/resume.go",
+   "other_line": 456,
+   "span": 14
+  },
+  {
+   "file": "cmd/entire/cli/resume.go",
+   "line": 502,
+   "other": "cmd/entire/cli/resume.go",
+   "other_line": 520,
+   "span": 14
+  },
+  {
+   "file": "cmd/entire/cli/resume.go",
+   "line": 480,
+   "other": "cmd/entire/cli/resume.go",
+   "other_line": 502,
+   "span": 14
+  },
+  {
+   "file": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+   "line": 735,
+   "other": "cmd/entire/cli/strategy/manual_commit_hooks.go",
+   "other_line": 765,
+   "span": 14
+  },
+  {
+   "file": "cmd/entire/cli/hooks.go",
+   "line": 92,
+   "other": "cmd/entire/cli/hooks.go",
+   "other_line": 112,
+   "span": 14
+  }
+ ],
+ "lines_by_feature": {
+  "agent:framework": 49,
+  "agent:geminicli": 58,
+  "capture:cell-routing": 6,
+  "capture:checkpoint-store": 104,
+  "capture:hooks-lifecycle": 28,
+  "capture:strategy": 219,
+  "capture:transcript": 18,
+  "cmd:activity": 13,
+  "cmd:agent-help-mcp": 17,
+  "cmd:blame-why": 6,
+  "cmd:checkpoint": 10,
+  "cmd:control-plane": 281,
+  "cmd:doctor": 12,
+  "cmd:enable-disable-configure": 78,
+  "cmd:explain": 27,
+  "cmd:import": 28,
+  "cmd:recap": 13,
+  "cmd:runner": 6,
+  "cmd:search": 110,
+  "cmd:session": 185,
+  "cmd:status": 12,
+  "cmd:trail": 134,
+  "infra:observability": 42,
+  "infra:settings": 12
+ },
+ "norank_by_feature": {
+  "test-infra": 6
+ },
+ "prod_by_feature": {
+  "agent:framework": 5,
+  "agent:geminicli": 2,
+  "capture:cell-routing": 1,
+  "capture:checkpoint-store": 12,
+  "capture:hooks-lifecycle": 2,
+  "capture:strategy": 11,
+  "capture:transcript": 2,
+  "cmd:activity": 3,
+  "cmd:agent-help-mcp": 1,
+  "cmd:blame-why": 1,
+  "cmd:checkpoint": 1,
+  "cmd:control-plane": 16,
+  "cmd:doctor": 2,
+  "cmd:enable-disable-configure": 5,
+  "cmd:explain": 3,
+  "cmd:import": 4,
+  "cmd:recap": 2,
+  "cmd:runner": 1,
+  "cmd:search": 8,
+  "cmd:session": 12,
+  "cmd:status": 2,
+  "cmd:trail": 10,
+  "infra:observability": 3,
+  "infra:settings": 2
+ },
+ "test_by_feature": {
+  "agent:claudecode": 19,
+  "agent:codex": 9,
+  "agent:copilotcli": 15,
+  "agent:cursor": 16,
+  "agent:factoryaidroid": 16,
+  "agent:framework": 33,
+  "agent:geminicli": 16,
+  "agent:opencode": 11,
+  "agent:pi": 6,
+  "capture:cell-routing": 9,
+  "capture:checkpoint-store": 35,
+  "capture:hooks-lifecycle": 22,
+  "capture:redaction": 22,
+  "capture:session-state": 8,
+  "capture:strategy": 96,
+  "capture:transcript": 48,
+  "cmd:activity": 4,
+  "cmd:auth-login": 38,
+  "cmd:blame-why": 8,
+  "cmd:checkpoint": 2,
+  "cmd:control-plane": 35,
+  "cmd:dispatch": 13,
+  "cmd:doctor": 4,
+  "cmd:enable-disable-configure": 23,
+  "cmd:experts": 1,
+  "cmd:explain": 44,
+  "cmd:import": 15,
+  "cmd:investigate": 5,
+  "cmd:labs-version-shell": 3,
+  "cmd:plugin": 9,
+  "cmd:recap": 5,
+  "cmd:review": 29,
+  "cmd:search": 19,
+  "cmd:session": 34,
+  "cmd:status": 16,
+  "cmd:trail": 28,
+  "infra:git-layer": 9,
+  "infra:observability": 8,
+  "infra:settings": 6,
+  "infra:ui-utils": 6,
+  "platform:coreapi-handwritten": 8,
+  "platform:git-remote-entire": 23,
+  "test-infra": 9
+ },
+ "total": 902
+}

@@ -3,14 +3,45 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/spf13/cobra"
 )
+
+// writeExecutableScript writes a script that a test is about to execute, with
+// no window in which a concurrent fork can make it unexecutable.
+//
+// A plain os.WriteFile here is an ETXTBSY trap (golang/go#22315). Between its
+// open-for-write and its close, any of this package's parallel tests can
+// fork; the child inherits the write descriptor, and until that child reaches
+// execve the kernel refuses to exec the file — "text file busy". O_CLOEXEC
+// does not help: it closes the descriptor AT exec, and the fork-to-exec gap is
+// exactly the window. Nothing retries, either — os/exec surfaces ETXTBSY as a
+// plain start error — so the flake reaches the test as whatever the failed
+// launch looked like. For TestRunPlugin_ReportsTheChildsOwnSignal that was
+// "exit code=1, want ExitPluginSignalled", which reads like a signal that went
+// missing and points nowhere near the cause.
+//
+// Holding off forks for the duration of the write closes the window rather
+// than narrowing it: a descriptor that never exists across a fork can never be
+// inherited. Where a stand-in can be a link to a real binary instead, prefer
+// that — a link is not a write target at all (see strategy's linkExecutable) —
+// but these scripts have behaviour no installed binary has.
+func writeExecutableScript(t *testing.T, path, content string) {
+	t.Helper()
+	resume := pauseForks()
+	err := os.WriteFile(path, []byte(content), 0o755)
+	resume()
+	if err != nil {
+		t.Fatalf("write executable %s: %v", path, err)
+	}
+}
 
 // writePluginBinary writes a shell script that records argv to argFile.
 // Skips the calling test on Windows.
@@ -20,10 +51,7 @@ func writePluginBinary(t *testing.T, dir, name, argFile string, exitCode int) st
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	path := filepath.Join(dir, name)
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nexit %d\n", argFile, exitCode)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write plugin %s: %v", path, err)
-	}
+	writeExecutableScript(t, path, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nexit %d\n", argFile, exitCode))
 	return path
 }
 
@@ -173,14 +201,63 @@ func TestResolvePlugin_PathTraversal(t *testing.T) {
 	}
 }
 
+// TestMaybeRunPlugin_RelativePathEntry_ErrDotNotBypassed reproduces the
+// concrete RCE precondition: $PATH contains a relative entry (a common shape
+// from direnv PATH_add, project-local bin/ wrappers, node_modules/.bin-style
+// patterns, or a literal "."), and the current directory contains a
+// repo-planted entire-<name> binary reachable through that relative entry.
+//
+// exec.LookPath deliberately refuses to resolve a binary found via a
+// relative PATH entry (returns exec.ErrDot) -- that refusal is Go's fix for
+// the classic "dot in PATH" RCE class. Before the fix, resolvePlugin's
+// fallback (findInaccessiblePlugin) re-walked the same PATH entries with a
+// plain os.Stat, blind to *why* LookPath failed, re-found the very file
+// LookPath just refused, and runPlugin executed it -- because the resolved
+// path contains a separator, Go's exec.Command does not re-apply the ErrDot
+// check for it. Net effect: a planted binary in an untrusted working
+// directory ran silently with the user's full privileges.
+func TestMaybeRunPlugin_RelativePathEntry_ErrDotNotBypassed(t *testing.T) { //nolint:paralleltest // mutates PATH and CWD via t.Setenv/t.Chdir
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("PATH separator / ErrDot semantics are POSIX-specific")
+	}
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	// A real, executable, shebang'd binary -- not a mock -- planted under a
+	// RELATIVE subdirectory of what will become the current directory.
+	argFile := filepath.Join(root, "args.txt")
+	writePluginBinary(t, binDir, "entire-errdotcheck", argFile, 0)
+
+	origPath := os.Getenv("PATH")
+	t.Chdir(root)
+	// "bin" is relative: exactly the direnv PATH_add / project-local-bin
+	// shape the finding describes. This is a real os.Setenv the real
+	// exec.LookPath call inside resolvePlugin will observe.
+	t.Setenv("PATH", "bin"+string(os.PathListSeparator)+origPath)
+
+	handled, _, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"errdotcheck"})
+	if handled {
+		t.Fatal("a plugin reachable only via a RELATIVE PATH entry must not resolve/execute " +
+			"(this is the exec.ErrDot bypass / RCE the fix prevents)")
+	}
+	if _, err := os.Stat(argFile); err == nil {
+		t.Fatal("planted binary via relative PATH entry WAS EXECUTED -- RCE bypass of exec.ErrDot reproduced")
+	}
+}
+
 func TestRunPlugin_ExitCodePropagation(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	binPath := writePluginBinary(t, dir, "entire-exit42", filepath.Join(dir, "args.txt"), 42)
 
-	code := runPlugin(context.Background(), "exit42", binPath, []string{"a", "b"})
+	code, killedBy := runPlugin(context.Background(), "exit42", binPath, []string{"a", "b"})
 	if code != 42 {
 		t.Errorf("exit code: got %d, want 42", code)
+	}
+	if killedBy != nil {
+		t.Errorf("ordinary exit reported signal %v", killedBy)
 	}
 	contents, err := os.ReadFile(filepath.Join(dir, "args.txt"))
 	if err != nil {
@@ -188,6 +265,65 @@ func TestRunPlugin_ExitCodePropagation(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(contents)); got != "a\nb" {
 		t.Errorf("argv: got %q, want %q", got, "a\nb")
+	}
+}
+
+// interceptVersionCheck swaps the post-plugin version-check seam for a
+// counter and restores it on cleanup.
+func interceptVersionCheck(t *testing.T) *int {
+	t.Helper()
+	calls := 0
+	orig := postPluginVersionCheck
+	postPluginVersionCheck = func(context.Context, io.Writer, string) { calls++ }
+	t.Cleanup(func() { postPluginVersionCheck = orig })
+	return &calls
+}
+
+func TestMaybeRunPlugin_VersionCheckAfterSuccess(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+	dir := t.TempDir()
+	writePluginBinary(t, dir, "entire-pgr", filepath.Join(dir, "args.txt"), 0)
+	withPathDir(t, dir)
+	calls := interceptVersionCheck(t)
+
+	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
+	if !handled || code != 0 {
+		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
+	}
+	if *calls != 1 {
+		t.Errorf("version check calls: got %d, want 1", *calls)
+	}
+}
+
+// After `entire upgrade` replaces the binary on disk, this process still
+// carries the pre-upgrade compiled-in version — a post-run version check
+// would see itself as outdated and prompt to redo the finished upgrade.
+func TestMaybeRunPlugin_NoVersionCheckAfterSelfUpdate(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+	dir := t.TempDir()
+	writePluginBinary(t, dir, "entire-upgrade", filepath.Join(dir, "args.txt"), 0)
+	withPathDir(t, dir)
+	calls := interceptVersionCheck(t)
+
+	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"upgrade", "--nightly"})
+	if !handled || code != 0 {
+		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
+	}
+	if *calls != 0 {
+		t.Errorf("version check calls: got %d, want 0", *calls)
+	}
+}
+
+func TestMaybeRunPlugin_NoVersionCheckAfterFailure(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+	dir := t.TempDir()
+	writePluginBinary(t, dir, "entire-pgr", filepath.Join(dir, "args.txt"), 3)
+	withPathDir(t, dir)
+	calls := interceptVersionCheck(t)
+
+	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
+	if !handled || code != 3 {
+		t.Fatalf("handled=%v code=%d, want handled=true code=3", handled, code)
+	}
+	if *calls != 0 {
+		t.Errorf("version check calls: got %d, want 0", *calls)
 	}
 }
 
@@ -201,4 +337,80 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestFindInaccessiblePlugin_SkipsRelativePATHEntry pins that the fallback
+// scan honours the same absolute-only rule as every other $PATH scanner: a
+// file in a repository the user happens to be standing in is not a plugin.
+func TestFindInaccessiblePlugin_SkipsRelativePATHEntry(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	relDir := "planted"
+	if err := os.MkdirAll(filepath.Join(dir, relDir), 0o755); err != nil {
+		t.Fatalf("create planted dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, relDir, "entire-planted"), []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("write planted file: %v", err)
+	}
+	t.Setenv("PATH", relDir)
+
+	if got, found := findInaccessiblePlugin("entire-planted"); found {
+		t.Errorf("findInaccessiblePlugin found %q via a relative $PATH entry, want no match", got)
+	}
+}
+
+// A signal that reaches only the plugin still has to propagate. Ctrl-C hits
+// the whole foreground process group, so the parent sees it too — but a
+// `kill -TERM` aimed at the plugin and a SIGPIPE from a closed pipe do not,
+// and reporting those as a plain exit-1 loses the signal that kubectl-style
+// dispatch exists to pass through.
+func TestRunPlugin_ReportsTheChildsOwnSignal(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("no signals to propagate on Windows")
+	}
+	for _, tc := range []struct {
+		name   string
+		script string
+		want   syscall.Signal
+	}{
+		{name: "self-terminated", script: "kill -TERM $$", want: syscall.SIGTERM},
+		{name: "self-interrupted", script: "kill -INT $$", want: syscall.SIGINT},
+		{name: "broken pipe", script: "kill -PIPE $$", want: syscall.SIGPIPE},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			binPath := filepath.Join(dir, "entire-signaller")
+			writeExecutableScript(t, binPath, "#!/bin/sh\ntrap - TERM INT PIPE\n"+tc.script+"\n")
+			code, killedBy := runPlugin(t.Context(), "signaller", binPath, nil)
+			if code != ExitPluginSignalled {
+				t.Fatalf("exit code=%d, want ExitPluginSignalled", code)
+			}
+			if killedBy != tc.want {
+				t.Errorf("killedBy=%v, want %v — the signal reached only the child, so it has to come off the wait status", killedBy, tc.want)
+			}
+		})
+	}
+}
+
+// The signal has to survive the trip out of the dispatcher too: MaybeRunPlugin
+// is what main.go sees, and it is main.go that re-raises.
+func TestMaybeRunPlugin_PropagatesTheChildsSignal(t *testing.T) { //nolint:paralleltest // mutates PATH
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("no signals to propagate on Windows")
+	}
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "entire-signaller")
+	writeExecutableScript(t, binPath, "#!/bin/sh\ntrap - TERM\nkill -TERM $$\n")
+	t.Setenv("PATH", dir)
+	interceptVersionCheck(t)
+
+	handled, code, killedBy := MaybeRunPlugin(t.Context(), newTestRoot(), []string{"signaller"})
+	if !handled || code != ExitPluginSignalled {
+		t.Fatalf("handled=%v code=%d, want true, ExitPluginSignalled", handled, code)
+	}
+	if killedBy != syscall.SIGTERM {
+		t.Errorf("killedBy=%v, want SIGTERM; main.go re-raises this, so losing it here exits 1 instead of 143", killedBy)
+	}
 }

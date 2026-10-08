@@ -406,9 +406,29 @@ func normalizeGitTreePath(path string) (string, error) {
 		if part == "." || part == ".." {
 			return "", fmt.Errorf("path contains invalid segment %q", part)
 		}
+		if isDotGitComponent(part) {
+			return "", fmt.Errorf("path contains reserved segment %q", part)
+		}
 	}
 
 	return path, nil
+}
+
+// isDotGitComponent reports whether a single path component refers to a
+// repository's own `.git` metadata, matching go-git's IsDotGitName: the
+// literal ".git" and its case-insensitive forms, plus the NTFS 8.3
+// short-name alias "git~1". Git forbids these as tree path components
+// (fsck_tree), and go-git's Tree.Encode rejects them outright, so a file
+// whose path carries such a component must be skipped rather than allowed
+// to fail the whole checkpoint. This is a pre-filter, not the authority.
+// go-git's encoder remains the backstop for exotic HFS+/NTFS disguises we
+// deliberately do not reimplement here.
+func isDotGitComponent(part string) bool {
+	switch strings.ToLower(part) {
+	case ".git", "git~1":
+		return true
+	}
+	return false
 }
 
 func isAbsoluteGitTreePath(path string) bool {

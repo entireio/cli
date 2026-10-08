@@ -6,16 +6,16 @@ import "charm.land/bubbles/v2/key"
 // truth so help text and matching logic stay aligned, and so the strings "esc",
 // "ctrl+c", etc. live in exactly one place.
 type keyMap struct {
-	Quit     key.Binding
-	Back     key.Binding
-	Search   key.Binding
-	Confirm  key.Binding
-	Up       key.Binding
-	Down     key.Binding
-	NextPage key.Binding
-	PrevPage key.Binding
-	Home     key.Binding
-	End      key.Binding
+	Quit    key.Binding
+	Back    key.Binding
+	Search  key.Binding
+	Confirm key.Binding
+	Up      key.Binding
+	Down    key.Binding
+	NextTab key.Binding
+	PrevTab key.Binding
+	Home    key.Binding
+	End     key.Binding
 }
 
 var keys = keyMap{
@@ -43,13 +43,13 @@ var keys = keyMap{
 		key.WithKeys("down", "j"),
 		key.WithHelp("↓/j", "down"),
 	),
-	NextPage: key.NewBinding(
-		key.WithKeys("n", "right"),
-		key.WithHelp("n/→", "next page"),
+	NextTab: key.NewBinding(
+		key.WithKeys("right", "tab"),
+		key.WithHelp("→", "next type"),
 	),
-	PrevPage: key.NewBinding(
-		key.WithKeys("p", "left"),
-		key.WithHelp("p/←", "prev page"),
+	PrevTab: key.NewBinding(
+		key.WithKeys("left", "shift+tab"),
+		key.WithHelp("←", "prev type"),
 	),
 	Home: key.NewBinding(
 		key.WithKeys("home", "g"),

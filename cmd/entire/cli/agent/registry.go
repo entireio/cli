@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 var (
@@ -90,17 +92,6 @@ func DetectAll(ctx context.Context) []Agent {
 	return detected
 }
 
-// Detect attempts to auto-detect which agent is being used.
-// Iterates registered agents in sorted name order for deterministic results.
-// Returns the first agent whose DetectPresence reports true.
-func Detect(ctx context.Context) (Agent, error) {
-	detected := DetectAll(ctx)
-	if len(detected) == 0 {
-		return nil, fmt.Errorf("no agent detected (available: %v)", List())
-	}
-	return detected[0], nil
-}
-
 // AgentForTranscriptPath returns the registered agent whose session directory
 // for repoPath contains the given transcript path. Used to disambiguate which
 // agent owns a session when multiple agents' hooks fire for the same session
@@ -127,7 +118,15 @@ func AgentForTranscriptPath(transcriptPath, repoPath string) (Agent, bool) {
 			continue
 		}
 		dir, err := ag.GetSessionDir(repoPath)
-		if err != nil || dir == "" {
+		if err != nil {
+			// A refused relocation variable lands here on every hook, so say
+			// so: without this line the agent silently stops owning any
+			// transcript path and the only symptom is a misattributed session.
+			logging.Debug(context.Background(), "agent session dir unresolved; skipping it for transcript ownership",
+				slog.String("agent", string(name)), slog.String("error", err.Error()))
+			continue
+		}
+		if dir == "" {
 			continue
 		}
 		dirAbs, err := filepath.Abs(dir)
@@ -165,27 +164,32 @@ func pathHasDirPrefix(path, dir string) bool {
 
 // Agent name constants (registry keys)
 const (
+	AgentNameAntigravity    types.AgentName = "antigravity"
 	AgentNameClaudeCode     types.AgentName = "claude-code"
 	AgentNameCodex          types.AgentName = "codex"
 	AgentNameCopilotCLI     types.AgentName = "copilot-cli"
 	AgentNameCursor         types.AgentName = "cursor"
 	AgentNameFactoryAIDroid types.AgentName = "factoryai-droid"
-	AgentNameGemini         types.AgentName = "gemini"
 	AgentNameOpenCode       types.AgentName = "opencode"
 	AgentNamePi             types.AgentName = "pi"
 )
 
 // Agent type constants (type identifiers stored in metadata/trailers)
 const (
+	AgentTypeAntigravity    types.AgentType = "Antigravity"
 	AgentTypeClaudeCode     types.AgentType = "Claude Code"
 	AgentTypeCodex          types.AgentType = "Codex"
 	AgentTypeCopilotCLI     types.AgentType = "Copilot CLI"
 	AgentTypeCursor         types.AgentType = "Cursor"
 	AgentTypeFactoryAIDroid types.AgentType = "Factory AI Droid"
-	AgentTypeGemini         types.AgentType = "Gemini CLI"
 	AgentTypeOpenCode       types.AgentType = "OpenCode"
 	AgentTypePi             types.AgentType = "Pi"
 	AgentTypeUnknown        types.AgentType = "Unknown"
+
+	// AgentTypeGemini tags checkpoints recorded before Gemini CLI support was
+	// removed. No agent registers it; it survives so those checkpoints still
+	// read correctly (see transcript/geminilegacy).
+	AgentTypeGemini types.AgentType = "Gemini CLI"
 )
 
 // DefaultAgentName is the registry key for the default agent.
@@ -197,7 +201,7 @@ const DefaultAgentName types.AgentName = AgentNameClaudeCode
 // This is acceptable because:
 //   - Agent count is small (~2-20 agents)
 //   - Agent factories are lightweight (empty struct allocation)
-//   - Called infrequently (commit hooks, rewind, debug commands - not hot paths)
+//   - Called infrequently (commit hooks, resume, debug commands - not hot paths)
 //   - Cost is ~400ns worst case vs milliseconds for I/O operations
 //
 // Only optimize if agent count exceeds 100 or profiling shows this as a bottleneck.
@@ -237,6 +241,38 @@ func AllProtectedDirs() []string {
 	}
 	slices.Sort(dirs)
 	return dirs
+}
+
+// AllHookConfigRelPaths returns the worktree-relative path of every registered
+// agent's hook-configuration file, for the agents that declare one
+// (HookConfigLocator). Sorted and deduplicated.
+func AllHookConfigRelPaths() []string {
+	registryMu.RLock()
+	factories := make([]Factory, 0, len(registry))
+	for _, f := range registry {
+		factories = append(factories, f)
+	}
+	registryMu.RUnlock()
+
+	seen := make(map[string]struct{})
+	var out []string
+	for _, factory := range factories {
+		locator, ok := factory().(HookConfigLocator)
+		if !ok {
+			continue
+		}
+		p := locator.HookConfigRelPath()
+		if p == "" {
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // AllProtectedFiles returns the union of ProtectedFiles from all registered agents.

@@ -17,7 +17,15 @@ const (
 
 	// DefaultAuthBaseURL is the production Entire login server — the
 	// default for `entire login --server`.
-	DefaultAuthBaseURL = "https://us.auth.entire.io"
+	//
+	// This apex host is a dispatcher, not a token issuer: it redirects
+	// /authorize and /device_authorization to the caller's regional login
+	// server (e.g. https://us.auth.entire.io) and serves no token endpoint,
+	// no discovery document, and no JWKS. Tokens are always minted by a
+	// region, with iss and aud set to that region's host — which is what
+	// gets persisted as a context's CoreURL and is the target of every
+	// later refresh and RFC 8693 exchange.
+	DefaultAuthBaseURL = "https://auth.entire.io"
 
 	// BaseURLEnvVar overrides the Entire API origin for local development.
 	BaseURLEnvVar = "ENTIRE_API_BASE_URL"
@@ -45,16 +53,23 @@ func RejectRemovedAuthEnv() error {
 // BaseURL returns the effective Entire API base URL.
 // ENTIRE_API_BASE_URL takes precedence over the production default.
 func BaseURL() string {
-	if raw := strings.TrimSpace(os.Getenv(BaseURLEnvVar)); raw != "" {
-		return normalizeBaseURL(raw)
+	if raw, ok := BaseURLOverride(); ok {
+		return raw
 	}
 
 	return DefaultBaseURL
 }
 
-// ResolveURL joins an API-relative path against the effective base URL.
-func ResolveURL(path string) (string, error) {
-	return ResolveURLFromBase(BaseURL(), path)
+// BaseURLOverride returns the normalized ENTIRE_API_BASE_URL and true when the
+// user pointed the CLI at an explicit data host, or ("", false) when BaseURL()
+// would fall back to the production default. See auth.resolveCellClientSubject
+// for a caller that must tell the two apart.
+func BaseURLOverride() (string, bool) {
+	raw := strings.TrimSpace(os.Getenv(BaseURLEnvVar))
+	if raw == "" {
+		return "", false
+	}
+	return normalizeBaseURL(raw), true
 }
 
 // ResolveURLFromBase joins an API-relative path against an explicit base URL.
@@ -135,7 +150,7 @@ func NormalizeOriginURL(raw string) string {
 }
 
 // OriginOnly is a backwards-compatible alias for NormalizeOriginURL.
-// Callers reading raw URLs (e.g. ENTIRE_SEARCH_URL) and feeding them into
+// Callers reading raw URLs (e.g. ENTIRE_API_BASE_URL) and feeding them into
 // tokenmanager.TokenRequest.Resource use this to strip path/query/fragment
 // before the lib's stricter origin-only validator runs.
 func OriginOnly(raw string) string {

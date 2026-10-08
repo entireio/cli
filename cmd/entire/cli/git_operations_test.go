@@ -2,13 +2,17 @@ package cli
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
@@ -17,6 +21,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const testCheckpointRefZN = "refs/entire/checkpoints/ZN/01KVBJCWYA4YW6J5M9GP655HZN"
+
+func TestFetchCheckpointRef_ElectionFailureCannotCertifyAbsence(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "gone")
+	t.Chdir(dir)
+
+	err := FetchCheckpointRef(context.Background(), plumbing.ReferenceName(testCheckpointRefZN))
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"fail-open origin cannot prove absence when checkpoint remote election failed")
+}
 
 // gitCheckout uses git CLI instead of go-git to work around go-git v5 bug
 // where Checkout deletes untracked files (see https://github.com/go-git/go-git/issues/970).
@@ -35,6 +61,12 @@ func initOpenedTestRepo(t *testing.T, dir string) *git.Repository {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 	return repo
+}
+
+func TestValidateBranchNameRejectsLeadingDash(t *testing.T) {
+	err := ValidateBranchName(context.Background(), "--all")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid branch name")
 }
 
 func TestGetCurrentBranch(t *testing.T) {
@@ -123,111 +155,6 @@ func TestGetCurrentBranchDetachedHead(t *testing.T) {
 	_, err = GetCurrentBranch(context.Background())
 	if err == nil {
 		t.Error("GetCurrentBranch(context.Background()) expected error for detached HEAD, got nil")
-	}
-}
-
-func TestGetMergeBase(t *testing.T) {
-	// Create temp directory for test repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize repo
-	repo := initOpenedTestRepo(t, tmpDir)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("Failed to get worktree: %v", err)
-	}
-
-	// Create initial commit on main
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("Failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("Failed to add test file: %v", err)
-	}
-	baseCommit, err := w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create initial commit: %v", err)
-	}
-
-	// Create main branch reference
-	mainRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), baseCommit)
-	if err := repo.Storer.SetReference(mainRef); err != nil {
-		t.Fatalf("Failed to create main branch: %v", err)
-	}
-
-	// Create feature branch from base
-	featureRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("feature"), baseCommit)
-	if err := repo.Storer.SetReference(featureRef); err != nil {
-		t.Fatalf("Failed to create feature branch: %v", err)
-	}
-
-	// Checkout feature and make a commit
-	gitCheckout(t, tmpDir, "feature")
-	if err := os.WriteFile(testFile, []byte("feature change"), 0o644); err != nil {
-		t.Fatalf("Failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("Failed to add test file: %v", err)
-	}
-	if _, err := w.Commit("feature commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	}); err != nil {
-		t.Fatalf("Failed to commit: %v", err)
-	}
-
-	// Test getting merge base
-	mergeBase, err := GetMergeBase(context.Background(), "feature", "main")
-	if err != nil {
-		t.Fatalf("GetMergeBase(context.Background(),) error = %v", err)
-	}
-	if mergeBase.String() != baseCommit.String() {
-		t.Errorf("GetMergeBase(context.Background(),) = %v, want %v", mergeBase, baseCommit)
-	}
-}
-
-func TestGetMergeBaseNonExistentBranch(t *testing.T) {
-	// Create temp directory for test repo
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize repo with commit
-	repo := initOpenedTestRepo(t, tmpDir)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("Failed to get worktree: %v", err)
-	}
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
-		t.Fatalf("Failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("Failed to add test file: %v", err)
-	}
-	if _, err := w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test",
-			Email: "test@example.com",
-		},
-	}); err != nil {
-		t.Fatalf("Failed to commit: %v", err)
-	}
-
-	// Test with non-existent branch
-	_, err = GetMergeBase(context.Background(), "feature", "nonexistent")
-	if err == nil {
-		t.Error("GetMergeBase(context.Background(),) expected error for nonexistent branch, got nil")
 	}
 }
 
@@ -356,100 +283,6 @@ func TestHasUncommittedChanges(t *testing.T) {
 	}
 	if hasChanges {
 		t.Error("HasUncommittedChanges(context.Background()) = true, want false for globally gitignored file (core.excludesfile)")
-	}
-}
-
-func TestFindNewUntrackedFiles(t *testing.T) {
-	tests := []struct {
-		name        string
-		current     []string
-		preExisting []string
-		expected    []string
-	}{
-		{
-			name:        "finds new files not in pre-existing list",
-			current:     []string{"file1.go", "file2.go", "file3.go"},
-			preExisting: []string{"file1.go"},
-			expected:    []string{"file2.go", "file3.go"},
-		},
-		{
-			name:        "returns empty when all files pre-exist",
-			current:     []string{"file1.go", "file2.go"},
-			preExisting: []string{"file1.go", "file2.go"},
-			expected:    nil,
-		},
-		{
-			name:        "returns all files when pre-existing is empty",
-			current:     []string{"file1.go", "file2.go"},
-			preExisting: []string{},
-			expected:    []string{"file1.go", "file2.go"},
-		},
-		{
-			name:        "returns nil when current is empty",
-			current:     []string{},
-			preExisting: []string{"file1.go"},
-			expected:    nil,
-		},
-		{
-			name:        "handles nil current slice",
-			current:     nil,
-			preExisting: []string{"file1.go"},
-			expected:    nil,
-		},
-		{
-			name:        "handles nil pre-existing slice",
-			current:     []string{"file1.go", "file2.go"},
-			preExisting: nil,
-			expected:    []string{"file1.go", "file2.go"},
-		},
-		{
-			name:        "handles both nil slices",
-			current:     nil,
-			preExisting: nil,
-			expected:    nil,
-		},
-		{
-			name:        "handles files with paths",
-			current:     []string{"src/main.go", "src/utils.go", "test/main_test.go"},
-			preExisting: []string{"src/main.go"},
-			expected:    []string{"src/utils.go", "test/main_test.go"},
-		},
-		{
-			name:        "handles duplicate files in pre-existing",
-			current:     []string{"file1.go", "file2.go"},
-			preExisting: []string{"file1.go", "file1.go"},
-			expected:    []string{"file2.go"},
-		},
-		{
-			name:        "is case-sensitive",
-			current:     []string{"File.go", "file.go"},
-			preExisting: []string{"file.go"},
-			expected:    []string{"File.go"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := findNewUntrackedFiles(tt.current, tt.preExisting)
-
-			if len(result) != len(tt.expected) {
-				t.Errorf("findNewUntrackedFiles() returned %d files, want %d", len(result), len(tt.expected))
-				t.Errorf("got: %v, want: %v", result, tt.expected)
-				return
-			}
-
-			// Create a map for easy lookup
-			expectedMap := make(map[string]bool)
-			for _, f := range tt.expected {
-				expectedMap[f] = true
-			}
-
-			for _, f := range result {
-				if !expectedMap[f] {
-					t.Errorf("findNewUntrackedFiles() returned unexpected file %q", f)
-				}
-			}
-		})
 	}
 }
 
@@ -638,10 +471,7 @@ func TestResolveCheckpointFetchTarget_NoCheckpointRemote(t *testing.T) {
 	testutil.GitCommit(t, localDir, "init")
 
 	// Add origin remote
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:org/main-repo.git")
-	cmd.Dir = localDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	testutil.RunGit(t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
 
 	// Settings with no checkpoint_remote
 	entireDir := filepath.Join(localDir, ".entire")
@@ -667,10 +497,7 @@ func TestResolveCheckpointFetchTarget_WithCheckpointRemote(t *testing.T) {
 	testutil.GitCommit(t, localDir, "init")
 
 	// Add SSH origin remote — checkpoint URL derives protocol from origin
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:org/main-repo.git")
-	cmd.Dir = localDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	testutil.RunGit(t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
 
 	// Settings with checkpoint_remote configured
 	entireDir := filepath.Join(localDir, ".entire")
@@ -713,48 +540,6 @@ func TestResolveCheckpointFetchTarget_FallsBackOnError(t *testing.T) {
 	assert.Equal(t, "origin", target)
 }
 
-// Not parallel: uses t.Chdir().
-func TestFetchMetadataBranch_MirrorsV11Ref(t *testing.T) {
-	ctx := context.Background()
-
-	remoteDir := t.TempDir()
-	testutil.InitRepo(t, remoteDir)
-	testutil.WriteFile(t, remoteDir, "f.txt", "init")
-	testutil.GitAdd(t, remoteDir, "f.txt")
-	testutil.GitCommit(t, remoteDir, "init")
-	defaultBranch := gitDefaultBranch(t, remoteDir)
-
-	gitRun(t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
-	gitRun(t, remoteDir, "rm", "-rf", ".")
-	testutil.WriteFile(t, remoteDir, "metadata.json", `{"version": 1}`)
-	testutil.GitAdd(t, remoteDir, "metadata.json")
-	gitRun(t, remoteDir, "-c", "commit.gpgsign=false", "commit", "-m", "checkpoint metadata")
-	gitRun(t, remoteDir, "checkout", defaultBranch)
-
-	localDir := t.TempDir()
-	testutil.InitRepo(t, localDir)
-	testutil.WriteFile(t, localDir, "f.txt", "init")
-	testutil.GitAdd(t, localDir, "f.txt")
-	testutil.GitCommit(t, localDir, "init")
-	gitRun(t, localDir, "remote", "add", "origin", remoteDir)
-
-	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(localDir, ".entire", paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
-
-	t.Chdir(localDir)
-	paths.ClearWorktreeRootCache()
-
-	require.NoError(t, FetchMetadataBranch(ctx))
-
-	v1Hash := gitOutput(t, localDir, "rev-parse", paths.MetadataBranchName)
-	mirrorHash := gitOutput(t, localDir, "rev-parse", paths.MetadataRefName)
-	assert.Equal(t, v1Hash, mirrorHash)
-}
-
 // setupRepoWithBlobOnMetadataBranch creates a repo with a blob committed on
 // entire/checkpoints/v1, checks out the default branch, and returns
 // (repoDir, blobHash) for tests that need a reachable blob on the metadata branch.
@@ -781,9 +566,8 @@ func setupRepoWithBlobOnMetadataBranch(t *testing.T) (string, plumbing.Hash) {
 }
 
 // Not parallel: uses t.Chdir()
-// Tests basic FetchBlobsByHash mechanics: when the resolved fetch target has
-// the blob, the function brings it into the local object store.
-// Target selection is tested separately in TestResolveCheckpointFetchTarget_*.
+// Tests blob hydration from the normal target and from the legacy tier after a
+// slow elected target exhausts only its own budget.
 func TestFetchBlobsByHash_FetchesMissingBlob(t *testing.T) {
 	ctx := context.Background()
 
@@ -812,6 +596,34 @@ func TestFetchBlobsByHash_FetchesMissingBlob(t *testing.T) {
 	freshRepo, err := git.PlainOpen(localDir)
 	require.NoError(t, err)
 	require.NoError(t, freshRepo.Storer.HasEncodedObject(blobHash), "blob should exist locally after fetch")
+
+	upstreamDir := t.TempDir()
+	testutil.InitRepo(t, upstreamDir)
+	originDir := t.TempDir()
+	testutil.InitRepo(t, originDir)
+
+	fallbackDir := t.TempDir()
+	testutil.InitRepo(t, fallbackDir)
+	testutil.WriteFile(t, fallbackDir, "f.txt", "init")
+	testutil.GitAdd(t, fallbackDir, "f.txt")
+	testutil.GitCommit(t, fallbackDir, "init")
+	gitRun(t, fallbackDir, "remote", "add", "upstream", upstreamDir)
+	gitRun(t, fallbackDir, "remote", "add", "origin", originDir)
+	testutil.WriteCheckpointPushRemoteSetting(t, fallbackDir, "upstream")
+	t.Chdir(fallbackDir)
+	require.Equal(t, []string{upstreamDir, originDir}, checkpointBlobFetchTargets(ctx))
+
+	var attempted []string
+	fetch := func(candidateCtx context.Context, target string, _ []string) error {
+		attempted = append(attempted, target)
+		if target == upstreamDir {
+			<-candidateCtx.Done()
+			return candidateCtx.Err()
+		}
+		return candidateCtx.Err()
+	}
+	require.NoError(t, fetchBlobsByHash(ctx, []plumbing.Hash{blobHash}, 10*time.Millisecond, time.Second, fetch))
+	require.Equal(t, []string{upstreamDir, originDir}, attempted)
 }
 
 // Not parallel: uses t.Chdir()
@@ -847,27 +659,328 @@ func TestFetchBlobsByHash_FailsWhenBlobUnreachable(t *testing.T) {
 // gitRun runs a git command in dir and fails the test on error.
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s failed: %v\nOutput: %s", args[0], err, output)
-	}
+	testutil.RunGit(t, dir, args...)
 }
 
 // gitOutput runs a git command and returns trimmed stdout.
 func gitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(testutil.RunGit(t, dir, args...))
 }
 
 // gitDefaultBranch returns the current branch name in a repo.
 func gitDefaultBranch(t *testing.T, dir string) string {
 	t.Helper()
 	return gitOutput(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
+}
+
+// TestParseCheckpointRefNames verifies the ls-remote parser keeps only
+// checkpoint refs and ignores unrelated advertisement lines (HEAD, branches,
+// peeled tags) and blanks.
+func TestParseCheckpointRefNames(t *testing.T) {
+	t.Parallel()
+	const sha = "e9ed0bd3ad3b2071aefab6e6ad20527dc910957b"
+	output := []byte(strings.Join([]string{
+		sha + "\tHEAD",
+		sha + "\trefs/heads/main",
+		sha + "\t" + testCheckpointRefZN,
+		sha + "\trefs/entire/checkpoints/f6/a1b2c3d4e5f6",
+		sha + "\trefs/tags/v1.0.0",
+		sha + "\trefs/tags/v1.0.0^{}",
+		"",
+	}, "\n"))
+
+	names := parseCheckpointRefNames(output)
+	got := make([]string, len(names))
+	for i, n := range names {
+		got[i] = n.String()
+	}
+	assert.ElementsMatch(t, []string{
+		testCheckpointRefZN,
+		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
+	}, got)
+}
+
+// TestParseCheckpointRefNames_RealLsRemote exercises the parser against genuine
+// `git ls-remote 'refs/entire/checkpoints/*'` output from a local bare remote,
+// confirming the glob matches the nested <shard>/<id> refs and nothing else.
+func TestParseCheckpointRefNames_RealLsRemote(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "f.txt", "init")
+	testutil.GitAdd(t, workDir, "f.txt")
+	testutil.GitCommit(t, workDir, "init")
+	head := gitOutput(t, workDir, "rev-parse", "HEAD")
+	gitRun(t, workDir, "update-ref", testCheckpointRefZN, head)
+	gitRun(t, workDir, "update-ref", "refs/entire/checkpoints/f6/a1b2c3d4e5f6", head)
+	gitRun(t, workDir, "remote", "add", "origin", bareDir)
+	gitRun(t, workDir, "push", "-q", "origin", "refs/entire/checkpoints/*:refs/entire/checkpoints/*")
+
+	out, err := remote.LsRemoteInDir(ctx, workDir, bareDir, checkpoint.CheckpointRefPrefix+"*")
+	require.NoError(t, err)
+
+	names := parseCheckpointRefNames(out)
+	got := make([]string, len(names))
+	for i, n := range names {
+		got[i] = n.String()
+	}
+	assert.ElementsMatch(t, []string{
+		testCheckpointRefZN,
+		"refs/entire/checkpoints/f6/a1b2c3d4e5f6",
+	}, got)
+}
+
+// TestListCheckpointRefsOnRemote_NotConfigured: with no checkpoint_remote and
+// no git remotes at all (empty read-candidate chain), enumeration is a no-op
+// (nil, no error, no network) so List stays local-only.
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_NotConfigured(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, names, "a remoteless repo must leave List local-only (no remote enumeration)")
+
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	ref := testCheckpointRefZN
+	gitRun(t, dir, "remote", "add", "origin", bareDir)
+	gitRun(t, dir, "push", "-q", "origin", head+":"+ref)
+	testutil.WriteFile(t, dir, ".entire/settings.json",
+		`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github"}}}`)
+
+	names, err = ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, names, "a malformed checkpoint_remote must not activate candidate discovery")
+}
+
+// TestListCheckpointRefsOnRemote_MergesReadCandidateListings: without a
+// dedicated checkpoint_remote, discovery ls-remotes every read candidate and
+// merges the listings — a union deduped by ref name. Refs are seeded
+// DISJOINTLY (one on the elected upstream, one on legacy origin, one on both)
+// to pin that merging, not first-non-empty, is the semantics.
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_MergesReadCandidateListings(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	upstreamBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+	gitRun(t, upstreamBare, "init", "--bare", "-q", upstreamBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	gitRun(t, dir, "remote", "add", "upstream", upstreamBare)
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	upstreamRef := testCheckpointRefZN
+	originRef := "refs/entire/checkpoints/f6/a1b2c3d4e5f6"
+	sharedRef := "refs/entire/checkpoints/Z9/01KVBJCWYA4YW6J5M9GP655HZ9"
+	gitRun(t, dir, "push", "-q", "upstream", head+":"+upstreamRef, head+":"+sharedRef)
+	gitRun(t, dir, "push", "-q", "origin", head+":"+originRef, head+":"+sharedRef)
+	t.Chdir(dir)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	got := make([]string, len(names))
+	for i, n := range names {
+		got[i] = n.String()
+	}
+	assert.ElementsMatch(t, []string{upstreamRef, originRef, sharedRef}, got,
+		"discovery must union the candidates' listings and dedupe by ref name")
+}
+
+// TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers: discovery
+// is best-effort — an unreachable elected remote logs and continues, so the
+// legacy origin tier's refs are still discovered. When EVERY candidate fails,
+// an error restores the store's local-only warning.
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_CandidateFailureDoesNotBlockOthers(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	originBare := t.TempDir()
+	gitRun(t, originBare, "init", "--bare", "-q", originBare)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	gitRun(t, dir, "remote", "add", "origin", originBare)
+	gitRun(t, dir, "remote", "add", "upstream", filepath.Join(dir, "nonexistent-remote"))
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
+
+	originRef := "refs/entire/checkpoints/f6/a1b2c3d4e5f6"
+	gitRun(t, dir, "push", "-q", "origin", head+":"+originRef)
+	t.Chdir(dir)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err, "one candidate failing must not fail discovery")
+	require.Len(t, names, 1)
+	assert.Equal(t, originRef, names[0].String())
+
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	gitRun(t, dir, "remote", "set-url", "upstream", server.URL+"/repo.git")
+
+	names, err = listCheckpointRefsOnRemote(context.Background(), time.Second)
+	require.NoError(t, err, "a slow candidate must not consume origin's discovery budget")
+	require.Len(t, names, 1)
+	assert.Equal(t, originRef, names[0].String())
+
+	gitRun(t, dir, "remote", "set-url", "upstream", filepath.Join(dir, "nonexistent-remote"))
+	gitRun(t, dir, "remote", "set-url", "origin", filepath.Join(dir, "also-nonexistent"))
+	names, err = ListCheckpointRefsOnRemote(context.Background())
+	require.Error(t, err, "all candidates failing must trigger the store's local-only warning")
+	assert.Nil(t, names)
+}
+
+// TestListCheckpointRefsOnRemote_ResolvesFromSubdir proves worktree pinning for
+// the configured path: settings + ls-remote run from the worktree root even when
+// process cwd is a subdirectory. Uses a local bare remote and an unknown
+// checkpoint_remote provider so FetchURL falls back to origin (offline).
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_ResolvesFromSubdir(t *testing.T) {
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	ref := testCheckpointRefZN
+	gitRun(t, dir, "update-ref", ref, head)
+	gitRun(t, dir, "remote", "add", "origin", bareDir)
+	gitRun(t, dir, "push", "-q", "origin", ref+":"+ref)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	// provider "local" is unknown to providerHost → FetchURL falls back to origin
+	// (the bare path) after file:// derivation fails — keeps this offline.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"local","repo":"org/checkpoints"}}}`),
+		0o644,
+	))
+
+	sub := filepath.Join(dir, "nested", "deep")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	t.Chdir(sub)
+
+	names, err := ListCheckpointRefsOnRemote(context.Background())
+	require.NoError(t, err)
+	require.Len(t, names, 1)
+	assert.Equal(t, ref, names[0].String())
+}
+
+// TestListCheckpointRefsOnRemote_HonorsCanceledContext proves the discovery
+// timeout context reaches the git subprocess: an already-canceled ctx with a
+// configured checkpoint_remote must error (not hang / not silently succeed).
+// Not parallel: uses t.Chdir.
+func TestListCheckpointRefsOnRemote_HonorsCanceledContext(t *testing.T) {
+	bareDir := t.TempDir()
+	gitRun(t, bareDir, "init", "--bare", "-q", bareDir)
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	gitRun(t, dir, "remote", "add", "origin", bareDir)
+
+	entireDir := filepath.Join(dir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"local","repo":"org/checkpoints"}}}`),
+		0o644,
+	))
+	t.Chdir(dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ListCheckpointRefsOnRemote(ctx)
+	require.Error(t, err, "canceled context must reach ls-remote (regression: deleting WithTimeout would still pass a constant-only test)")
+}
+
+// TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation pins the ceiling that
+// per-target budgets alone do not give. Before the read-candidate chain this
+// function was wrapped in one 2-minute budget covering its fallbacks; per-target
+// budgets replaced it, so worst-case latency scaled with the target count and the
+// fallback metadata chain ran on the caller's uncapped context on top of that.
+//
+// Every target here stalls until its context expires, so without the ceiling the
+// elapsed time would be at least perTarget × len(targets).
+func TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir modifies process-global state.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, dir, "fork", "https://example.com/fork.git")
+	// Elect a non-origin remote so the read chain is genuinely two tiers
+	// (elected, then the legacy origin tier). With origin elected the chain
+	// collapses to one candidate and the loop's worst case is a single window —
+	// nothing for a ceiling to bind against.
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "fork")
+	t.Chdir(dir)
+
+	// Production-shaped ratio, scaled down: the ceiling sits BELOW the loop's own
+	// worst case (targets x perTarget), which is the whole point — sized at or
+	// above it the ceiling cannot bind and buys nothing. That was the original
+	// defect here, and the first version of this test hid it by inverting the
+	// relationship (perTarget far larger than the ceiling), which proves only that
+	// some ceiling can bind, not that this one does.
+	const perTarget = 400 * time.Millisecond
+	const chainBudget = 500 * time.Millisecond // < 2 targets x perTarget
+
+	var attempts int
+	stall := func(ctx context.Context, _ string, _ []string) error {
+		attempts++
+		<-ctx.Done() // hang until this attempt's budget expires
+		return ctx.Err()
+	}
+
+	start := time.Now()
+	err := fetchBlobsByHash(t.Context(), []plumbing.Hash{plumbing.NewHash(
+		"1111111111111111111111111111111111111111")}, perTarget, chainBudget, stall)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "every target stalled, so hydration cannot succeed")
+	assert.GreaterOrEqual(t, attempts, 1, "at least one target must be attempted")
+
+	// The ceiling, not targets x perTarget, decides how long the user waits. The
+	// bound has to be below the loop's own worst case or it proves nothing;
+	// slack on top absorbs a loaded CI box.
+	targetCount := len(checkpointBlobFetchTargets(t.Context()))
+	require.GreaterOrEqual(t, targetCount, 2,
+		"setup: the ceiling can only be shown to bind against a multi-candidate chain")
+	loopWorstCase := time.Duration(targetCount) * perTarget
+	assert.Less(t, elapsed, chainBudget+300*time.Millisecond,
+		"the chain ceiling must bound the whole operation including fallbacks (elapsed %s)", elapsed)
+	assert.Less(t, elapsed, loopWorstCase,
+		"a ceiling at or above the loop's worst case (%s) cannot bind — that was the original defect", loopWorstCase)
 }

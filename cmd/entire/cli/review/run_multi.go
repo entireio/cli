@@ -33,28 +33,20 @@ import (
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
-// perAgentState tracks the mutable accumulation for one agent during a
-// multi-agent run.
+// perAgentState tracks the accumulation for one agent during a multi-agent run.
 //
-// Write paths (no mutex; the close-after-wait protocol below provides
-// happens-before for both):
-//   - waitErr and finishedAt are written by the per-agent forwarding
-//     goroutine after its proc.Events range loop exits. That goroutine may
-//     still send final derived events (synthetic RunError, enriched Tokens)
-//     before wg.Done.
-//   - All other mutable fields (events buffer, tokens, finishedSeen,
-//     finishedOk, sawRunError) are written from the single dispatch loop
-//     reading the fan-in channel.
-//
-// Read path: the main RunMulti goroutine reads every field only after
-// `for ev := range fanIn` returns, which is sequenced after wg.Wait →
-// close(fanIn) by the close goroutine. That sequencing is the
-// happens-before for both write paths.
-//
-// DO NOT add new writers from goroutines outside this protocol — adding
-// a third write path would require a mutex (or a redesign).
+// Concurrency: perAgentState has a single writer after initialization. The
+// immutable fields (name/agentName/model/startedAt) are set before launch; all
+// terminal state (startErr/waitErr/finishedAt/timedOut) and event-derived state
+// are written by the dispatch loop as events and terminal markers arrive over
+// fanIn. The per-agent forwarding goroutines NEVER touch perAgentState; they
+// only send on fanIn. So there is no cross-goroutine field sharing, and the
+// post-loop accounting reads are safe by construction (the dispatch loop has
+// already returned).
 type perAgentState struct {
 	name         string
+	agentName    string
+	model        string
 	proc         reviewtypes.Process
 	startErr     error
 	startedAt    time.Time
@@ -64,13 +56,28 @@ type perAgentState struct {
 	finishedSeen bool
 	finishedOk   bool
 	sawRunError  bool
+	timedOut     bool
 	waitErr      error
 }
 
-// taggedEvent associates a fan-in event with its originating agent index.
+// taggedEvent associates a fan-in item with its originating agent index. It is
+// either an agent event (ev set) or the agent's terminal marker (terminal set),
+// the latter carrying end-of-run fields so the dispatch loop stays the sole
+// writer of perAgentState.
 type taggedEvent struct {
 	agentIdx int
 	ev       reviewtypes.Event
+	terminal *agentTerminal
+}
+
+// agentTerminal carries an agent's end-of-run results to the dispatch loop,
+// which writes them into perAgentState. Forwarding goroutines send this after
+// Wait; the setup loop queues the same marker shape for Start failures.
+type agentTerminal struct {
+	startErr   error
+	waitErr    error
+	finishedAt time.Time
+	timedOut   bool
 }
 
 // RunMulti executes a multi-agent review. Each reviewer runs concurrently;
@@ -106,54 +113,93 @@ func RunMulti(
 		return summary, nil
 	}
 
+	plannedRuns := plannedAgentRunsForReviewers(reviewers, cfg)
 	states := make([]*perAgentState, len(reviewers))
-	for i, r := range reviewers {
+	for i, run := range plannedRuns {
 		states[i] = &perAgentState{
-			name:      r.Name(),
+			name:      run.Name,
+			agentName: run.AgentName,
+			model:     run.Model,
 			startedAt: time.Now(),
 		}
 	}
 
 	// fanIn carries tagged events from N agent goroutines into the single
-	// dispatch loop. Buffer of len(reviewers)*16 amortises goroutine
-	// scheduling jitter without holding an unbounded queue.
-	fanIn := make(chan taggedEvent, len(reviewers)*16)
+	// dispatch loop. Reserve event-burst slack plus one terminal-marker slot per
+	// reviewer, so the worst case of every reviewer failing Start fits entirely in
+	// the terminal reservation without consuming event slack.
+	const eventBurstSlotsPerReviewer = 16
+	reviewerCount := len(reviewers)
+	terminalSlots := reviewerCount
+	fanInCapacity := reviewerCount*eventBurstSlotsPerReviewer + terminalSlots
+	fanIn := make(chan taggedEvent, fanInCapacity)
 
+	// Each reviewer runs under its own deadline (unless reviewerTimeout returns
+	// 0, meaning disabled) so a stuck agent is cancelled without hanging the run;
+	// siblings and the judge proceed.
+	timeout := reviewerTimeout(cfg)
 	var wg sync.WaitGroup
+	startTerminals := make([]taggedEvent, 0)
 	for i, r := range reviewers {
-		proc, err := r.Start(ctx, cfg)
+		agentCtx := ctx
+		var cancelAgent context.CancelFunc = func() {}
+		if timeout > 0 {
+			agentCtx, cancelAgent = withReviewerTimeout(ctx, timeout)
+		}
+		proc, err := r.Start(agentCtx, cfg)
 		if err != nil {
-			states[i].startErr = err
-			states[i].finishedAt = time.Now()
+			// No Process exists, so there is no Events/Wait lifecycle to preserve.
+			// Build the terminal marker before cancelAgent so a Start call that blocked
+			// until the per-reviewer deadline keeps the reviewer-timeout cause visible.
+			// Then cancel immediately to release the per-agent timeout timer while
+			// siblings continue running.
+			startTerminals = append(startTerminals, startFailureTerminal(ctx, agentCtx, i, err))
+			cancelAgent()
 			continue
 		}
 		states[i].proc = proc
 		wg.Add(1)
-		go func(idx int, p reviewtypes.Process) {
+		go func(idx int, p reviewtypes.Process, runCtx context.Context, cancel context.CancelFunc) {
 			defer wg.Done()
+			defer cancel()
 			for ev := range p.Events() {
 				fanIn <- taggedEvent{agentIdx: idx, ev: ev}
 			}
 			waitErr := p.Wait()
 			finishedAt := time.Now()
-			states[idx].waitErr = waitErr
-			states[idx].finishedAt = finishedAt
-			if shouldEmitSyntheticRunError(ctx, waitErr) {
+			if shouldEmitSyntheticRunError(runCtx, waitErr) {
 				fanIn <- taggedEvent{agentIdx: idx, ev: reviewtypes.RunError{Err: waitErr}}
 			}
 			emitEnrichedAgentTokens(ctx, cfg, fanIn, idx, reviewtypes.AgentRun{
 				Name:      states[idx].name,
+				AgentName: states[idx].agentName,
+				Model:     states[idx].model,
 				StartedAt: states[idx].startedAt,
 				Duration:  finishedAt.Sub(states[idx].startedAt),
 				Err:       waitErr,
 			})
-		}(i, proc)
+			// Hand the terminal result to the dispatch loop so perAgentState has a
+			// single writer. Classify the timeout from waitErr (the cause the
+			// Process captured at Wait). If an implementation formats ctx.Err()
+			// without preserving the sentinel, fall back to the per-agent context only
+			// when Wait returned an error; nil Wait still means natural completion.
+			fanIn <- taggedEvent{agentIdx: idx, terminal: &agentTerminal{
+				waitErr:    waitErr,
+				finishedAt: finishedAt,
+				timedOut:   reviewerDeadlineFired(ctx, runCtx, waitErr),
+			}}
+		}(i, proc, agentCtx, cancelAgent)
 	}
 
-	// Close fanIn after all forwarding goroutines finish. This goroutine
-	// must be launched AFTER all wg.Add calls above so the WaitGroup
-	// counter is correct before Wait is called.
+	// Close fanIn after queued Start-failure markers are delivered and all
+	// forwarding goroutines finish. This goroutine must be launched AFTER all
+	// wg.Add calls above so the WaitGroup counter is correct before Wait is
+	// called. Sending startTerminals here (instead of from the setup loop) avoids
+	// blocking setup if an early-started agent fills fanIn before dispatch begins.
 	go func() {
+		for _, tagged := range startTerminals {
+			fanIn <- tagged
+		}
 		wg.Wait()
 		close(fanIn)
 	}()
@@ -164,6 +210,15 @@ func RunMulti(
 	// even though N agent goroutines emit concurrently.
 	for tagged := range fanIn {
 		st := states[tagged.agentIdx]
+		if tagged.terminal != nil {
+			// End-of-run marker (internal): record terminal fields, don't forward
+			// to sinks.
+			st.startErr = tagged.terminal.startErr
+			st.waitErr = tagged.terminal.waitErr
+			st.finishedAt = tagged.terminal.finishedAt
+			st.timedOut = tagged.terminal.timedOut
+			continue
+		}
 		st.buffer = append(st.buffer, tagged.ev)
 		switch e := tagged.ev.(type) {
 		case reviewtypes.Tokens:
@@ -181,7 +236,9 @@ func RunMulti(
 		}
 	}
 
-	// All goroutines have exited; all waitErr fields are set.
+	// The dispatch loop above is the sole writer of perAgentState and has
+	// returned (fanIn closed after wg.Wait()), so reading the per-agent fields
+	// below is safe.
 	finished := time.Now()
 	cancelled := ctx.Err() != nil
 
@@ -202,8 +259,14 @@ func RunMulti(
 		if agentErr == nil {
 			agentErr = st.waitErr
 		}
+		if st.timedOut {
+			status = reviewtypes.AgentStatusFailed
+			agentErr = timedOutError(st.name, timeout)
+		}
 		agentRuns[i] = reviewtypes.AgentRun{
 			Name:      st.name,
+			AgentName: st.agentName,
+			Model:     st.model,
 			Status:    status,
 			Tokens:    st.tokens,
 			Buffer:    st.buffer,
@@ -228,6 +291,33 @@ func RunMulti(
 	}
 
 	return summary, firstErr
+}
+
+func plannedAgentRunsForReviewers(reviewers []reviewtypes.AgentReviewer, cfg reviewtypes.RunConfig) []reviewtypes.AgentRun {
+	planned := make([]reviewtypes.AgentRun, len(reviewers))
+	for i, r := range reviewers {
+		// Mirror Run's fallback: when a reviewer carries no model metadata, use
+		// the run config's model so session-to-manifest matching still sees the
+		// model that was actually requested.
+		model := reviewerModelName(r)
+		if model == "" {
+			model = cfg.Model
+		}
+		planned[i] = reviewtypes.AgentRun{
+			Name:      r.Name(),
+			AgentName: reviewerActualAgentName(r),
+			Model:     model,
+		}
+	}
+	return planned
+}
+
+func startFailureTerminal(parentCtx, agentCtx context.Context, agentIdx int, startErr error) taggedEvent {
+	return taggedEvent{agentIdx: agentIdx, terminal: &agentTerminal{
+		startErr:   startErr,
+		finishedAt: time.Now(),
+		timedOut:   reviewerDeadlineFired(parentCtx, agentCtx, startErr),
+	}}
 }
 
 func emitEnrichedAgentTokens(

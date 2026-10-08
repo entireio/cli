@@ -38,7 +38,6 @@ func (v *Agent) Type() types.AgentType { return AgentTypeVogon }
 func (v *Agent) Description() string {
 	return "Vogon Agent - deterministic E2E canary (no API calls)"
 }
-func (v *Agent) IsPreview() bool         { return false }
 func (v *Agent) ProtectedDirs() []string { return []string{".vogon"} }
 
 // DetectPresence returns false — vogon agent is never auto-detected.
@@ -119,10 +118,8 @@ func (v *Agent) WriteSession(_ context.Context, session *agent.AgentSession) err
 	if session.SessionRef == "" {
 		return errors.New("session reference is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(session.SessionRef), 0o750); err != nil {
-		return fmt.Errorf("create session dir: %w", err)
-	}
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
+	// WriteSessionFile creates the parent directory as part of the write.
+	if err := agent.WriteSessionFile(v, session, session.NativeData, 0o600); err != nil {
 		return fmt.Errorf("write session: %w", err)
 	}
 	return nil

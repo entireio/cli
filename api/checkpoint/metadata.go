@@ -1,0 +1,653 @@
+package checkpoint
+
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/redact"
+
+	"github.com/go-git/go-git/v6/plumbing"
+)
+
+// TranscriptAsset is a binary blob (e.g. an image) lifted out of a transcript
+// and stored raw in the checkpoint, referenced by a placeholder in the log.
+type TranscriptAsset struct {
+	Name      string // stable asset filename / id, also used in the placeholder
+	MediaType string
+	Data      []byte
+}
+
+// TaskPayload materializes one subagent task record's transcript and metadata
+// into a session checkpoint's tasks/<tool-use-id>/ subtree. Produced by
+// condensation from session.TaskRecords (see
+// docs/superpowers/plans/2026-08-19-subagent-durable-records.md) and consumed
+// by the write path via WriteOptions.Tasks — the replacement for the old
+// unreachable IsTask/ToolUseID per-write route (#2058): no producer ever set
+// that route's fields, so every subagent transcript died at condensation
+// until this payload existed.
+type TaskPayload struct {
+	// ToolUseID is the Task tool invocation's tool_use_id — also the
+	// directory name under tasks/.
+	ToolUseID string
+
+	// AgentID is the subagent identifier, used to name agent-<id>.jsonl.
+	AgentID string
+
+	// SubagentType and TaskDescription label the task in task.json.
+	// TaskDescription is free text from the agent and is redacted by the
+	// writer; callers pass it as recorded.
+	SubagentType    string
+	TaskDescription string
+
+	// Transcript is the subagent's transcript content, already run through
+	// the sanitize -> externalize -> redact pipeline (the same one the
+	// session transcript gets — see redact.RedactedBytes for why callers
+	// must not hand this field raw bytes). Empty (Len() == 0) means the
+	// transcript was unavailable — see TranscriptUnavailableReason, which is
+	// non-empty exactly when this is empty — and no agent-<id>.jsonl is
+	// written. This mirrors how WriteOptions.Transcript itself expresses
+	// "no content": a value type, not a pointer, with emptiness read via Len().
+	Transcript redact.RedactedBytes
+
+	// Files is the set of files touched by this subagent.
+	Files []string
+
+	// TokenUsage is this subagent's token usage, when known. nil when
+	// unavailable.
+	TokenUsage *types.TokenUsage
+
+	// StartedAt is when the subagent launch was observed.
+	StartedAt time.Time
+
+	// CompletedAt is when the task record was completed. Zero means the task
+	// was still in flight when this checkpoint was materialized — its
+	// transcript (if any) is a transcript-so-far snapshot, not the final one.
+	CompletedAt time.Time
+
+	// TranscriptUnavailableReason explains why Transcript is empty. A stable
+	// category string (e.g. "transcript unreadable", "transcript path
+	// unresolvable", "transcript empty") — never the underlying error detail,
+	// which may embed an absolute local path and must not enter a pushed
+	// task.json; log that detail via logging.Warn instead. Empty exactly when
+	// Transcript is non-empty.
+	TranscriptUnavailableReason string
+}
+
+// TaskRecord is the persisted task.json of one materialized subagent task
+// record: tasks/<tool_use_id>/task.json at the checkpoint root. The writer
+// builds it from a TaskPayload (see its fields for semantics); readers get it
+// back through TaskReader.ListTasks.
+type TaskRecord struct {
+	ToolUseID       string            `json:"tool_use_id"`
+	AgentID         string            `json:"agent_id,omitempty"`
+	SubagentType    string            `json:"subagent_type,omitempty"`
+	TaskDescription string            `json:"task_description,omitempty"`
+	Files           []string          `json:"files,omitempty"`
+	TokenUsage      *types.TokenUsage `json:"token_usage,omitempty"`
+	// StartedAt/CompletedAt use omitzero (not omitempty, which classic
+	// encoding/json never treats a struct as "empty" for): CompletedAt's
+	// absence from the JSON is exactly what marks the task in flight when
+	// this checkpoint was materialized, so a zero time.Time must actually be
+	// omitted, not serialized as "0001-01-01T00:00:00Z".
+	StartedAt                   time.Time `json:"started_at,omitzero"`
+	CompletedAt                 time.Time `json:"completed_at,omitzero"`
+	TranscriptUnavailableReason string    `json:"transcript_unavailable_reason,omitempty"`
+}
+
+// TaskEntry is one tasks/<tool_use_id>/ directory of a committed checkpoint,
+// as TaskReader.ListTasks reports it.
+type TaskEntry struct {
+	// ToolUseID is the directory name. It is set even when Err is, so a
+	// caller can name the record it could not read.
+	ToolUseID string
+
+	// Record is the parsed task.json. Zero when Err is non-nil.
+	Record TaskRecord
+
+	// TranscriptStored reports whether the record's agent-<agent_id>.jsonl
+	// transcript is present in the checkpoint. It is derived from the stored
+	// tree, not from task.json.
+	TranscriptStored bool
+
+	// Err is set when this record could not be read or failed validation.
+	// The rest of the list is still returned.
+	Err error
+}
+
+// WriteOptions contains options for writing a persistent checkpoint.
+type WriteOptions struct {
+	// CheckpointID is the stable 12-hex-char identifier
+	CheckpointID id.CheckpointID
+
+	// SessionID is the session identifier
+	SessionID string
+
+	// CreatedAt is when the checkpoint was originally created.
+	// When zero, writers use the current time.
+	CreatedAt time.Time
+
+	// Strategy is the name of the strategy that created this checkpoint
+	Strategy string
+
+	// Branch is the branch name where the checkpoint was created (empty if detached HEAD)
+	Branch string
+
+	// CommitSHA links this checkpoint to an existing commit without a trailer.
+	// It is an anchor — "imported at this point in time" — not attribution.
+	// Set only on the import path — the `entire import` command and `entire
+	// enable`'s optional history import: imported history has no
+	// Entire-Checkpoint trailer (we never rewrite existing commits), so import
+	// stamps the resolved anchor commit here. Per turn that is the commit the
+	// transcript recorded when one resolves and is reachable (see
+	// turnAnchorResolver), otherwise the resolved head fallback (see
+	// resolveImportLinkCommitSHA for the order). An import that can resolve no
+	// anchor at all is refused before it writes, so an import written by a
+	// current CLI always carries one; imports predating that enforcement may
+	// not, so readers must still handle empty.
+	// Empty for all other writers, which is why the field is omitempty. This
+	// comment is the canonical description; Metadata.CommitSHA and
+	// CheckpointSummary.CommitSHA point back here.
+	CommitSHA string
+
+	// Transcript is the session transcript content (full.jsonl).
+	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
+	Transcript redact.RedactedBytes
+
+	// Assets are binary blobs (e.g. images) lifted out of Transcript and
+	// referenced by path-bearing placeholders. Stored raw under the session's
+	// assets/ folder. Empty for agents/transcripts with no externalized images.
+	Assets []TranscriptAsset
+
+	// Prompts contains the raw user prompts from the session. Run through
+	// redactedJoinedPrompts before persisting — the writer does this
+	// inside writeSessionToSubdirectory.
+	Prompts []string
+
+	// FilesTouched are files modified during the session
+	FilesTouched []string
+
+	// CheckpointsCount is the displayed "steps" count for this session: the number
+	// of user prompts attributed to this checkpoint (floored at 1). Despite the
+	// historical name/JSON tag, it is no longer a count of checkpoints.
+	CheckpointsCount int
+
+	// SaveStepCount is the number of SaveStep-recorded turn-end steps for this
+	// session. Distinct from CheckpointsCount (the displayed prompt count): this
+	// is the honest "did real checkpoint work happen" signal. 0 means a
+	// commit-only / fallback session.
+	SaveStepCount int
+
+	// AuthorName is the name to use for commits
+	AuthorName string
+
+	// AuthorEmail is the email to use for commits
+	AuthorEmail string
+
+	// MetadataDir is a directory containing additional metadata files to copy
+	// If set, all files in this directory will be copied to the checkpoint path
+	// This is useful for copying task metadata files, subagent transcripts, etc.
+	MetadataDir string
+
+	// TranscriptPath is a path to the session transcript file, used as a
+	// fallback source when Transcript is empty (e.g. a caller that wants the
+	// store to read and redact the file itself rather than doing so in memory).
+	TranscriptPath string
+
+	// Tasks materializes subagent task records dispatched by this session into
+	// this checkpoint's tasks/<tool-use-id>/ subtree — see TaskPayload. Empty
+	// for sessions with no subagent work (the vast majority) and for backends
+	// or write paths that predate subagent-work durability (#2058); the writer
+	// treats an empty slice as a no-op.
+	Tasks []TaskPayload
+
+	// Commit message fields
+	CommitSubject string // Subject line for the metadata commit (overrides default)
+
+	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
+	Agent types.AgentType
+
+	// Model is the LLM model used during the session (e.g., "claude-sonnet-4-20250514")
+	Model string
+
+	// TurnID correlates checkpoints from the same agent turn.
+	TurnID string
+
+	// Transcript position at checkpoint start - tracks what was added during this checkpoint
+	TranscriptIdentifierAtStart string // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
+	CheckpointTranscriptStart   int    // Transcript line offset at start of this checkpoint's data
+
+	// CheckpointTranscriptStart is written to both Metadata.CheckpointTranscriptStart
+	// and the deprecated Metadata.TranscriptLinesAtStart for backward compatibility.
+
+	// TokenUsage contains the token usage for this checkpoint
+	TokenUsage *types.TokenUsage
+
+	// SkillEvents records explicit native skill signals observed in this session.
+	SkillEvents []types.SkillEvent
+
+	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage)
+	SessionMetrics *SessionMetrics
+
+	// Summary is an optional AI-generated summary for this checkpoint.
+	// This field may be nil when:
+	//   - summarization is disabled in settings
+	//   - summary generation failed (non-blocking, logged as warning)
+	//   - the transcript was empty or too short to summarize
+	//   - the checkpoint predates the summarization feature
+	Summary *Summary
+
+	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
+	Kind string
+
+	// ReviewSkills is the snapshot of skills used (only meaningful when Kind is a review kind).
+	// May be empty when a review is attached post-hoc without declared skills.
+	ReviewSkills []string
+
+	// ReviewPrompt is the actual text of the review request (composed prompt
+	// for spawn, first user prompt for attach). Only meaningful when Kind is
+	// a review kind.
+	ReviewPrompt string
+
+	// HasReview is set by the caller when this session should mark its
+	// checkpoint as reviewed. The caller computes this (e.g. via
+	// session.Kind.IsReview) because checkpoint can't import session
+	// — the session package imports checkpoint, creating a cycle.
+	HasReview bool
+
+	// InvestigateRunID is the 12-hex-char ID of the parent investigation
+	// run (only meaningful when Kind is an investigate kind).
+	InvestigateRunID string
+
+	// InvestigateTopic is the human-readable topic the investigation was
+	// asked to investigate (only meaningful when Kind is an investigate
+	// kind).
+	InvestigateTopic string
+
+	// HasInvestigation is set by the caller when this session should mark
+	// its checkpoint as part of an investigation. The caller computes this
+	// (e.g. via session.Kind.IsInvestigate) because checkpoint can't import
+	// session — the session package imports checkpoint, creating a cycle.
+	HasInvestigation bool
+}
+
+// UpdateOptions contains options for updating an existing persistent checkpoint.
+// Uses replace semantics: the transcript and prompts are fully replaced,
+// not appended. At stop time we have the complete session transcript and want every
+// checkpoint to contain it identically.
+type UpdateOptions struct {
+	// CheckpointID identifies the checkpoint to update
+	CheckpointID id.CheckpointID
+
+	// SessionID identifies which session slot to update within the checkpoint
+	SessionID string
+
+	// Transcript is the full session transcript (replaces existing).
+	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
+	Transcript redact.RedactedBytes
+
+	// Assets are the externalized image blobs matching Transcript's placeholders
+	// (see WriteOptions.Assets). Set together with Transcript so the backfill keeps
+	// the stored assets/ folder consistent with the transcript; empty clears any
+	// previously-stored assets when Transcript is replaced.
+	Assets []TranscriptAsset
+
+	// PreserveAssetsWhenEmpty keeps already-stored assets instead of clearing them
+	// when Assets is empty. Set on the finalize path for agents whose assets come
+	// from a best-effort sidecar capture (e.g. Cursor's sqlite3 store read): a
+	// transient capture miss at finalize must not wipe images a prior condensation
+	// successfully stored. Left false for codec agents, where an empty set means
+	// "the transcript has no images" and stale asset blobs should be cleared.
+	PreserveAssetsWhenEmpty bool
+
+	// Prompts contains the raw user prompts (replaces existing).
+	// See WriteOptions.Prompts.
+	Prompts []string
+
+	// Agent identifies the agent type (needed for transcript chunking)
+	Agent types.AgentType
+
+	// SkillEvents replaces the session metadata skill_events when non-empty.
+	SkillEvents []types.SkillEvent
+
+	// PrecomputedBlobs, if non-nil, provides chunk blob hashes and the
+	// content-hash blob hash computed once for this transcript. When set,
+	// transcript backfill skips the per-call ChunkTranscript + zlib work and
+	// reuses these hashes. Used by finalizeAllTurnCheckpoints to avoid
+	// re-compressing identical content N times.
+	PrecomputedBlobs *PrecomputedTranscriptBlobs
+}
+
+// PrecomputedTranscriptBlobs holds blob hashes for a transcript that was
+// chunked and written to the object store once, for reuse across multiple
+// transcript-backfill writes sharing the same transcript content.
+// Callers should avoid constructing this for empty transcripts; agent.ChunkTranscript
+// would otherwise produce a single zero-length chunk and a hash for an empty
+// blob, which downstream stores would never reference.
+type PrecomputedTranscriptBlobs struct {
+	// ChunkHashes are the blob hashes for each transcript chunk, in order.
+	// Always non-empty when built via PrecomputeTranscriptBlobs (a non-empty
+	// transcript chunks to at least one entry; callers should skip precompute
+	// for empty transcripts).
+	ChunkHashes []plumbing.Hash
+
+	// ContentHashBlob is the blob hash of the "sha256:<hex>" content-hash
+	// string for the transcript.
+	ContentHashBlob plumbing.Hash
+
+	// ContentHash is the "sha256:<hex>" string itself, so the short-circuit
+	// path can compare without re-reading the blob.
+	ContentHash string
+}
+
+// IsUsable reports whether the precomputed blobs satisfy the invariants that
+// consumers depend on: a non-zero content-hash blob and at least one chunk
+// hash. Callers should fall back to the fresh-write path when this is false.
+func (p *PrecomputedTranscriptBlobs) IsUsable() bool {
+	return p != nil && !p.ContentHashBlob.IsZero() && len(p.ChunkHashes) > 0
+}
+
+// CheckpointInfo contains summary information about a persisted checkpoint.
+//
+//nolint:revive // Named CheckpointInfo to avoid conflict with the generic Info type; the checkpoint.CheckpointInfo stutter is accepted (matches CheckpointSummary).
+type CheckpointInfo struct {
+	// CheckpointID is the stable 12-hex-char identifier
+	CheckpointID id.CheckpointID
+
+	// SessionID is the session identifier (most recent session for multi-session checkpoints)
+	SessionID string
+
+	// CreatedAt is when the checkpoint was created
+	CreatedAt time.Time
+
+	// CheckpointsCount is the aggregate displayed "steps" count across sessions:
+	// the sum of per-session prompt-window counts. Despite the historical name,
+	// it is not a count of checkpoint records.
+	CheckpointsCount int
+
+	// FilesTouched are files modified during all sessions
+	FilesTouched []string
+
+	// Agent identifies the agent that created this checkpoint
+	Agent types.AgentType
+
+	// IsTask indicates if this is a task checkpoint
+	IsTask bool
+
+	// ToolUseID is the tool use ID for task checkpoints
+	ToolUseID string
+
+	// Multi-session support
+	SessionCount int      // Number of sessions (1 if single session)
+	SessionIDs   []string // All session IDs that contributed
+
+	// Imported is true when this checkpoint was imported from pre-existing
+	// agent history (Kind == "imported"): read-only and commit-less.
+	Imported bool
+
+	// ListedStub is true for names-only remote-discovery List entries that still
+	// need hydration (or have not yet failed a hydration attempt). It is cleared
+	// after a successful hydrate and also after a failed attempt (fail-once), so
+	// callers do not re-fetch forever. A local ref whose root metadata was
+	// unreadable has the same zero SessionID/SessionCount shape but ListedStub
+	// false — do not treat field zero-ness alone as stub-ness.
+	ListedStub bool `json:"-"`
+}
+
+// SessionContent contains the actual content for a session.
+// This is used when reading full session data (transcript, prompts, context)
+// as opposed to just the metadata/summary.
+type SessionContent struct {
+	// Metadata contains the session-specific metadata
+	Metadata Metadata
+
+	// Transcript is the session transcript content
+	Transcript []byte
+
+	// TranscriptBlobHashes are the stored raw transcript blob hashes in chunk
+	// order. Callers that rewrite the same transcript under a different path can
+	// reuse these content-addressed blobs instead of storing duplicate blobs.
+	TranscriptBlobHashes []plumbing.Hash
+
+	// Prompts contains user prompts from this session
+	Prompts string
+}
+
+// Metadata contains the metadata stored in metadata.json for each checkpoint.
+type Metadata struct {
+	CLIVersion   string          `json:"cli_version,omitempty"`
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	SessionID    string          `json:"session_id"`
+	Strategy     string          `json:"strategy"`
+	CreatedAt    time.Time       `json:"created_at"`
+	Branch       string          `json:"branch,omitempty"` // Branch where checkpoint was created (empty if detached HEAD)
+	// CommitSHA anchors an imported checkpoint to an existing commit; empty for
+	// non-imported checkpoints, which link via the Entire-Checkpoint trailer.
+	// See WriteOptions.CommitSHA for the full semantics.
+	CommitSHA        string `json:"commit_sha,omitempty"`
+	CheckpointsCount int    `json:"checkpoints_count"`
+	// SaveStepCount is the number of SaveStep-recorded steps for this session.
+	// Honest "real checkpoint work happened" signal (0 = commit-only/fallback
+	// session), kept separate from the displayed CheckpointsCount prompt count.
+	// Added after CheckpointsCount stopped being a reliable did-SaveStep-run signal.
+	SaveStepCount int      `json:"save_step_count,omitempty"`
+	FilesTouched  []string `json:"files_touched"`
+
+	// Agent identifies the agent that created this checkpoint (e.g., "Claude Code", "Cursor")
+	Agent types.AgentType `json:"agent,omitempty"`
+
+	// Model is the LLM model used during the session (e.g., "claude-sonnet-4-20250514").
+	// Always written to metadata (empty string when unknown) so consumers can rely on the field's presence.
+	Model string `json:"model"`
+
+	// TurnID correlates checkpoints from the same agent turn.
+	// When a turn's work spans multiple commits, each gets its own checkpoint
+	// but they share the same TurnID for future aggregation/deduplication.
+	TurnID string `json:"turn_id,omitempty"`
+
+	// Task checkpoint fields (only populated for task checkpoints)
+	IsTask    bool   `json:"is_task,omitempty"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
+
+	// Transcript position at checkpoint start - tracks what was added during this checkpoint
+	TranscriptIdentifierAtStart string `json:"transcript_identifier_at_start,omitempty"` // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
+	CheckpointTranscriptStart   int    `json:"checkpoint_transcript_start,omitempty"`    // Raw transcript (full.jsonl) line offset at start of this checkpoint's data
+
+	// Deprecated: Use CheckpointTranscriptStart instead. Written for backward compatibility with older CLI versions.
+	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`
+
+	// CompactTranscriptStart is the line offset in the compact transcript.jsonl
+	// at which this checkpoint's data begins. transcript.jsonl stores the full
+	// compacted session (each checkpoint is self-contained), so readers segment
+	// this checkpoint's slice as compactLines[CompactTranscriptStart:]. The slice
+	// never drops this checkpoint's content, but its first line may repeat up to
+	// one compact line that began in the previous checkpoint (when a streaming
+	// message straddles the boundary and compaction merges it into one line), so
+	// segmenters must tolerate a bounded head overlap.
+	//
+	// A nil pointer marks a legacy checkpoint whose transcript.jsonl holds only
+	// this checkpoint's delta (CLI versions before the full-compact-transcript
+	// change), which is read as-is from line 0. A pointer is used so that "absent"
+	// (legacy delta file) is distinguishable from 0 (full file, first checkpoint).
+	CompactTranscriptStart *int `json:"compact_transcript_start,omitempty"`
+
+	// Token usage for this checkpoint
+	TokenUsage *types.TokenUsage `json:"token_usage,omitempty"`
+
+	// SkillEvents records explicit native skill signals observed in this session.
+	// Consumers use these anchors to collapse skill-related raw transcript events.
+	SkillEventsVersion int                `json:"skill_events_version,omitempty"`
+	SkillEvents        []types.SkillEvent `json:"skill_events,omitempty"`
+
+	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage).
+	// Populated for agents that provide these metrics via hooks (e.g., Cursor).
+	SessionMetrics *SessionMetrics `json:"session_metrics,omitempty"`
+
+	// AI-generated summary of the checkpoint
+	Summary *Summary `json:"summary,omitempty"`
+
+	// LegacyInitialAttribution and LegacyPromptAttributions carry the line
+	// attribution older CLIs wrote (initial_attribution, prompt_attributions)
+	// through a rewrite of an existing checkpoint, byte for byte. The CLI no
+	// longer computes, reads or sets them: they are opaque, and absent on
+	// checkpoints this version creates. Without them, decoding and re-encoding
+	// an old checkpoint (a summary backfill, a transcript finalize, an attached
+	// session) would strip data entire.io still reads.
+	LegacyInitialAttribution json.RawMessage `json:"initial_attribution,omitempty"`
+	LegacyPromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
+
+	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
+	Kind string `json:"kind,omitempty"`
+
+	// ReviewSkills lists the review skills that were run (only set when Kind is a review kind).
+	// May be empty when a review was attached post-hoc without declared skills.
+	ReviewSkills []string `json:"review_skills,omitempty"`
+
+	// ReviewPrompt is the actual text of the review request (composed prompt
+	// for spawn, first user prompt for attach). Only set when Kind is a
+	// review kind.
+	ReviewPrompt string `json:"review_prompt,omitempty"`
+
+	// InvestigateRunID is the 12-hex-char ID of the parent investigation
+	// run. Only set when Kind is an investigate kind.
+	InvestigateRunID string `json:"investigate_run_id,omitempty"`
+
+	// InvestigateTopic is the human-readable topic the investigation was
+	// asked to investigate. Only set when Kind is an investigate kind.
+	InvestigateTopic string `json:"investigate_topic,omitempty"`
+}
+
+// GetTranscriptStart returns the transcript line offset at which this checkpoint's data begins.
+// Returns 0 for new checkpoints (start from beginning). For data written by older CLI versions,
+// falls back to the deprecated TranscriptLinesAtStart field.
+func (m Metadata) GetTranscriptStart() int {
+	if m.CheckpointTranscriptStart > 0 {
+		return m.CheckpointTranscriptStart
+	}
+	return m.TranscriptLinesAtStart
+}
+
+// GetCompactTranscriptStart returns the line offset in transcript.jsonl at which
+// this checkpoint's data begins, and whether the offset was recorded. ok=false
+// means a legacy checkpoint whose transcript.jsonl holds only this checkpoint's
+// delta (read it from line 0); ok=true with offset 0 means the full-compact file
+// whose first checkpoint starts at the beginning.
+func (m Metadata) GetCompactTranscriptStart() (offset int, ok bool) {
+	if m.CompactTranscriptStart == nil {
+		return 0, false
+	}
+	return *m.CompactTranscriptStart, true
+}
+
+// SessionFilePaths contains the absolute paths to session files from the git tree root.
+// Paths include the full checkpoint path prefix (e.g., "/a1/b2c3d4e5f6/1/metadata.json").
+// Used in CheckpointSummary.Sessions to map session IDs to their file locations.
+type SessionFilePaths struct {
+	Metadata string `json:"metadata"`
+	// Transcript points at the raw full.jsonl, which CLI read paths
+	// (resume/explain) resolve by filename.
+	Transcript string `json:"transcript,omitempty"`
+	// CompactTranscript points at the compact transcript.jsonl when one was
+	// generated alongside full.jsonl. Omitted otherwise (non-compactable,
+	// empty, or oversized transcripts, and older CLI versions). transcript.jsonl
+	// holds the full compacted session; this checkpoint's slice begins at the
+	// session metadata's compact_transcript_start (see Metadata.CompactTranscriptStart).
+	CompactTranscript string `json:"compact_transcript,omitempty"`
+	ContentHash       string `json:"content_hash,omitempty"`
+	Prompt            string `json:"prompt"`
+	// AssetsManifest points at assets/manifest.json when images were externalized
+	// out of the transcript into the session's assets/ folder. Omitted otherwise.
+	AssetsManifest string `json:"assets_manifest,omitempty"`
+}
+
+// CheckpointSummary is the root-level metadata.json for a checkpoint.
+// It contains aggregated statistics from all sessions and a map of session IDs
+// to their file paths. Session-specific data is stored in the session's
+// subdirectory metadata.json.
+//
+// Structure on entire/checkpoints/v1 branch:
+//
+//	<checkpoint-id[:2]>/<checkpoint-id[2:]>/
+//	├── metadata.json         # This CheckpointSummary
+//	├── 1/                    # First session
+//	│   ├── metadata.json     # Session-specific Metadata
+//	│   ├── full.jsonl        # Raw agent transcript
+//	│   ├── transcript.jsonl  # Full compacted session (slice at compact_transcript_start)
+//	│   ├── prompt.txt
+//	│   └── content_hash.txt
+//	├── 2/                    # Second session
+//	└── 3/                    # Third session...
+//
+//nolint:revive // Named CheckpointSummary to avoid conflict with existing Summary struct
+type CheckpointSummary struct {
+	CLIVersion   string          `json:"cli_version,omitempty"`
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+	Strategy     string          `json:"strategy"`
+	Branch       string          `json:"branch,omitempty"`
+	// CommitSHA: import-only anchor; see WriteOptions.CommitSHA.
+	CommitSHA        string             `json:"commit_sha,omitempty"`
+	CheckpointsCount int                `json:"checkpoints_count"`
+	FilesTouched     []string           `json:"files_touched"`
+	Sessions         []SessionFilePaths `json:"sessions"`
+	TokenUsage       *types.TokenUsage  `json:"token_usage,omitempty"`
+
+	// LegacyCombinedAttribution carries the combined_attribution older CLIs
+	// wrote into the root summary through rewrites, byte for byte; see
+	// Metadata.LegacyInitialAttribution. Never computed, read or set here.
+	LegacyCombinedAttribution json.RawMessage `json:"combined_attribution,omitempty"`
+
+	// HasReview is the umbrella "any review happened" flag: true when at least
+	// one session in this checkpoint has a review-kind Kind (currently
+	// "agent_review"). When new review kinds are introduced they should also
+	// cause this flag to be set so callers can keep asking "was this reviewed
+	// in any way?" without caring about the variant.
+	HasReview bool `json:"has_review,omitempty"`
+
+	// HasInvestigation is the umbrella "any investigation happened" flag:
+	// true when at least one session in this checkpoint has an
+	// investigate-kind Kind (currently "agent_investigate"). When new
+	// investigate kinds are introduced they should also cause this flag to
+	// be set so callers can keep asking "was this investigated in any way?"
+	// without caring about the variant.
+	HasInvestigation bool `json:"has_investigation,omitempty"`
+
+	// Imported is true when this checkpoint was imported from pre-existing
+	// agent history (a session with Kind == "imported"): read-only and
+	// commit-less.
+	Imported bool `json:"imported,omitempty"`
+}
+
+// SessionMetrics contains hook-provided session metrics from agents that report
+// them via lifecycle hooks (e.g., Cursor). These supplement transcript-derived
+// metrics for agents whose transcripts lack usage/timing data.
+type SessionMetrics struct {
+	DurationMs        int64 `json:"duration_ms,omitempty"`
+	TurnCount         int   `json:"turn_count,omitempty"`
+	ContextTokens     int   `json:"context_tokens,omitempty"`
+	ContextWindowSize int   `json:"context_window_size,omitempty"`
+}
+
+// Summary contains AI-generated summary of a checkpoint.
+type Summary struct {
+	Intent    string           `json:"intent"`     // What user wanted to accomplish
+	Outcome   string           `json:"outcome"`    // What was achieved
+	Learnings LearningsSummary `json:"learnings"`  // Categorized learnings
+	Friction  []string         `json:"friction"`   // Problems/annoyances encountered
+	OpenItems []string         `json:"open_items"` // Tech debt, unfinished work
+}
+
+// LearningsSummary contains learnings grouped by scope.
+type LearningsSummary struct {
+	Repo     []string       `json:"repo"`     // Codebase-specific patterns/conventions
+	Code     []CodeLearning `json:"code"`     // File/module specific findings
+	Workflow []string       `json:"workflow"` // General dev practices
+}
+
+// CodeLearning captures a learning tied to a specific code location.
+type CodeLearning struct {
+	Path    string `json:"path"`               // File path
+	Line    int    `json:"line,omitempty"`     // Start line number
+	EndLine int    `json:"end_line,omitempty"` // End line for ranges (optional)
+	Finding string `json:"finding"`            // What was learned
+}

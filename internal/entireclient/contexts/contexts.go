@@ -24,14 +24,18 @@ import (
 	"slices"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/gofrs/flock"
+
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // Context is a single kubectl-style entry: which core to talk to, as
 // whom, and where the credentials are stored.
 type Context struct {
-	// Name is the user-facing identifier. Defaults to the issuer host on
-	// auto-creation; overridable via login --name.
+	// Name is the user-facing identifier: the issuer host, qualified
+	// with the handle when another identity already holds that host.
 	Name string `json:"name"`
 	// CoreURL is the JWT issuer URL — what STS exchanges hit. Set from
 	// the access token's signed iss claim, not the typed login URL.
@@ -41,6 +45,10 @@ type Context struct {
 	// KeychainService is the OS-keyring slot where the access token is
 	// filed; the refresh token lives at KeychainService+":refresh".
 	KeychainService string `json:"keychain_service"`
+	// JurisdictionAudiences lists the audiences this context has a jurisdiction
+	// (data-plane) access token filed for, trailing-slash-trimmed; each lives at
+	// tokenstore.JurisdictionService(audience), also keyed by Handle.
+	JurisdictionAudiences []string `json:"jurisdiction_audiences,omitempty"`
 }
 
 // File is the on-disk shape of contexts.json.
@@ -54,13 +62,30 @@ type File struct {
 	Contexts []*Context `json:"contexts,omitempty"`
 }
 
+// contextsFileName is the contexts file's name inside the config directory.
+// It is the only name configRoot ever resolves.
+const contextsFileName = "contexts.json"
+
 // FilePath returns $configDir/contexts.json after ensuring the directory
-// exists with 0700 perms.
+// exists and is private to its owner — 0700, or stricter if the user already
+// made it so; see userdirs.EnsurePrivateDir.
+//
+// The path is for messages and for the flock, which takes one. Reads and writes
+// go through configRoot.
 func FilePath(configDir string) (string, error) {
-	if err := os.MkdirAll(configDir, 0700); err != nil {
+	// Before EnsurePrivateDir, not after. configRoot refuses a relative
+	// directory, but it runs at the READ, several steps past this one: by then
+	// EnsurePrivateDir has created ./<value> relative to the working directory
+	// and lockFile has put a .lock inside it. Creating that directory is the
+	// exact mistake the check exists to prevent, so it cannot happen on the way
+	// to reporting it.
+	if err := userdirs.RequireAbsoluteOverride("config dir", configDir); err != nil {
+		return "", err //nolint:wrapcheck // the error already names the directory and its value
+	}
+	if err := userdirs.EnsurePrivateDir(configDir); err != nil {
 		return "", fmt.Errorf("create config dir: %w", err)
 	}
-	return filepath.Join(configDir, "contexts.json"), nil
+	return filepath.Join(configDir, contextsFileName), nil
 }
 
 // Load reads contexts.json under configDir, returning an empty *File
@@ -76,7 +101,7 @@ func Load(configDir string) (*File, error) {
 		return nil, err
 	}
 	defer unlock()
-	return readNoLock(path)
+	return readNoLock(configDir)
 }
 
 // Save writes f to contexts.json atomically (temp+rename) under an
@@ -91,7 +116,7 @@ func Save(configDir string, f *File) error {
 		return err
 	}
 	defer unlock()
-	return writeNoLock(path, f)
+	return writeNoLock(configDir, f)
 }
 
 // ContextsForIssuer returns every context whose CoreURL matches issuer
@@ -106,7 +131,7 @@ func (f *File) ContextsForIssuer(issuer string) []*Context {
 	want := trimURL(issuer)
 	var out []*Context
 	for _, c := range f.Contexts {
-		if trimURL(c.CoreURL) == want {
+		if c != nil && trimURL(c.CoreURL) == want {
 			out = append(out, c)
 		}
 	}
@@ -126,7 +151,7 @@ func (f *File) Find(name string) *Context {
 		return nil
 	}
 	for _, c := range f.Contexts {
-		if c.Name == name {
+		if c != nil && c.Name == name {
 			return c
 		}
 	}
@@ -140,7 +165,7 @@ func (f *File) Upsert(c *Context) {
 		return
 	}
 	for i, existing := range f.Contexts {
-		if existing.Name == c.Name {
+		if existing != nil && existing.Name == c.Name {
 			f.Contexts[i] = c
 			if f.CurrentContext == "" {
 				f.CurrentContext = c.Name
@@ -162,7 +187,7 @@ func (f *File) Delete(name string) {
 	if f == nil || name == "" {
 		return
 	}
-	idx := slices.IndexFunc(f.Contexts, func(c *Context) bool { return c.Name == name })
+	idx := slices.IndexFunc(f.Contexts, func(c *Context) bool { return c != nil && c.Name == name })
 	if idx >= 0 {
 		f.Contexts = slices.Delete(f.Contexts, idx, idx+1)
 	}
@@ -191,7 +216,7 @@ func Modify(configDir string, fn func(*File) (changed bool, err error)) error {
 	}
 	defer unlock()
 
-	f, err := readNoLock(path)
+	f, err := readNoLock(configDir)
 	if err != nil {
 		return err
 	}
@@ -202,7 +227,7 @@ func Modify(configDir string, fn func(*File) (changed bool, err error)) error {
 	if !changed {
 		return nil
 	}
-	return writeNoLock(path, f)
+	return writeNoLock(configDir, f)
 }
 
 func lockFile(path string) (func(), error) {
@@ -224,10 +249,37 @@ func lockFile(path string) (func(), error) {
 	}, nil
 }
 
-func readNoLock(path string) (*File, error) {
-	// #nosec G304 -- path comes from ENTIRE_CONFIG_DIR or the user's home,
-	// the same trust boundary credentials.go runs under.
-	data, err := os.ReadFile(path)
+// configRoot returns the root over configDir and the contexts file's name
+// inside it.
+//
+// It takes the DIRECTORY, not the file. Anchoring on filepath.Dir of the target
+// looks equivalent — the paths are the same string — but it is not: it puts
+// every component the caller resolved above the root, so the root contains
+// exactly one fixed name and enforces nothing. The directory is what the caller
+// actually chose (userdirs.Config(), or $ENTIRE_CONFIG_DIR), so that is the base.
+//
+// A relative configDir is refused rather than absolutized. It arrives from
+// $ENTIRE_CONFIG_DIR (see userdirs.RequireAbsoluteOverride), and resolving it
+// against the working directory would put the login tokens in a different place
+// in every process — usually inside whatever repository the command was run
+// from. filepath.Abs used to launder exactly that into a plausible-looking path.
+func configRoot(configDir string) (*os.Root, string, error) {
+	if err := userdirs.RequireAbsoluteOverride("config dir", configDir); err != nil {
+		return nil, "", err //nolint:wrapcheck // the error already names the directory and its value
+	}
+	root, err := osroot.Shared(configDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open config dir: %w", err)
+	}
+	return root, contextsFileName, nil
+}
+
+func readNoLock(configDir string) (*File, error) {
+	root, name, err := configRoot(configDir)
+	if err != nil {
+		return nil, err
+	}
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &File{}, nil
@@ -241,23 +293,41 @@ func readNoLock(path string) (*File, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse contexts file: %w", err)
 	}
+	f.dropUnaddressable()
 	return &f, nil
 }
 
-func writeNoLock(path string, f *File) error {
+// dropUnaddressable removes nil and nameless entries.
+//
+// Entire never writes either (Upsert refuses an empty name), so they come
+// from a hand edit or a truncated file. Every operation addresses a context
+// by name, so such an entry can never be selected, removed, or logged out
+// of: it would sit in the file forever, counted as a login. Dropping it on
+// load means the next write persists the clean list. current_context is
+// left alone: Active already treats a name with no entry as unset.
+func (f *File) dropUnaddressable() {
+	f.Contexts = slices.DeleteFunc(f.Contexts, func(c *Context) bool {
+		return c == nil || c.Name == ""
+	})
+}
+
+func writeNoLock(configDir string, f *File) error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal contexts: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".contexts.json.tmp.*")
+	root, name, err := configRoot(configDir)
+	if err != nil {
+		return err
+	}
+	tmp, tmpName, err := jsonutil.CreateTempIn(root, name)
 	if err != nil {
 		return fmt.Errorf("create temp contexts file: %w", err)
 	}
-	tmpPath := tmp.Name()
 	cleanup := func() {
 		if tmp != nil {
 			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
+			_ = root.Remove(tmpName) //nolint:errcheck // best-effort cleanup; a successful rename already consumed it
 		}
 	}
 	defer cleanup()
@@ -270,10 +340,10 @@ func writeNoLock(path string, f *File) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp contexts file: %w", err)
 	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+	if err := root.Chmod(tmpName, 0600); err != nil {
 		return fmt.Errorf("chmod temp contexts file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := root.Rename(tmpName, name); err != nil {
 		return fmt.Errorf("rename temp contexts file: %w", err)
 	}
 	tmp = nil

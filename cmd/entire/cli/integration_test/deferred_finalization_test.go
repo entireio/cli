@@ -17,7 +17,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// TestShadow_DeferredTranscriptFinalization tests that HandleTurnEnd updates
+// TestManualCommit_DeferredTranscriptFinalization tests that HandleTurnEnd updates
 // the provisional transcript (written at commit time) with the full transcript
 // (available at turn end).
 //
@@ -30,7 +30,7 @@ import (
 //
 // This verifies that the final transcript on entire/checkpoints/v1 includes
 // work done AFTER the commit.
-func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
+func TestManualCommit_DeferredTranscriptFinalization(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -57,7 +57,10 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 	})
 
 	// Debug: verify session state before commit
-	preCommitState, _ := env.GetSessionState(sess.ID)
+	preCommitState, err := env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
 	if preCommitState == nil {
 		t.Fatal("Session state should exist before commit")
 	}
@@ -66,45 +69,7 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 
 	// User commits while agent is still ACTIVE
 	// This triggers condensation with the provisional transcript
-	// Using custom commit with verbose output for debugging
-	{
-		env.GitAdd("feature.go")
-		msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
-		if err := os.WriteFile(msgFile, []byte("Add feature"), 0o644); err != nil {
-			t.Fatalf("failed to write commit message: %v", err)
-		}
-
-		// Run prepare-commit-msg
-		prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
-		prepCmd.Dir = env.RepoDir
-		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
-		prepOutput, prepErr := prepCmd.CombinedOutput()
-		t.Logf("prepare-commit-msg output: %s (err: %v)", prepOutput, prepErr)
-
-		// Read modified message
-		modifiedMsg, _ := os.ReadFile(msgFile)
-		t.Logf("Commit message after prepare-commit-msg: %s", modifiedMsg)
-
-		// Create commit
-		repo, _ := git.PlainOpen(env.RepoDir)
-		worktree, _ := repo.Worktree()
-		_, err := worktree.Commit(string(modifiedMsg), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-				When:  time.Now(),
-			},
-		})
-		if err != nil {
-			t.Fatalf("failed to commit: %v", err)
-		}
-
-		// Run post-commit
-		postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
-		postCmd.Dir = env.RepoDir
-		postOutput, postErr := postCmd.CombinedOutput()
-		t.Logf("post-commit output: %s (err: %v)", postOutput, postErr)
-	}
+	commitDrivingGitHooksVerbosely(t, env, "feature.go", "Add feature")
 	commitHash := env.GetHeadHash()
 
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
@@ -114,7 +79,10 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 	t.Logf("Checkpoint ID after mid-session commit: %s", checkpointID)
 
 	// Debug: verify session state after commit
-	postCommitState, _ := env.GetSessionState(sess.ID)
+	postCommitState, postCommitErr := env.GetSessionState(sess.ID)
+	if postCommitErr != nil {
+		t.Logf("GetSessionState failed: %v", postCommitErr)
+	}
 	if postCommitState != nil {
 		t.Logf("Post-commit session state: phase=%s, baseCommit=%s, turnCheckpointIDs=%v",
 			postCommitState.Phase, postCommitState.BaseCommit[:7], postCommitState.TurnCheckpointIDs)
@@ -228,16 +196,16 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 	t.Log("DeferredTranscriptFinalization test completed successfully")
 }
 
-// TestShadow_CarryForward_ActiveSession tests that when a user commits only
+// TestManualCommit_CarryForward_ActiveSession tests that when a user commits only
 // some of the files touched by an ACTIVE session, the remaining files are
-// carried forward to a new shadow branch.
+// carried forward as the session's pending work.
 //
 // Flow:
 // 1. Agent touches files A, B, C while ACTIVE
 // 2. User commits only file A → checkpoint #1
 // 3. Session remains ACTIVE with files B, C pending
 // 4. User commits file B → checkpoint #2 (new checkpoint ID)
-func TestShadow_CarryForward_ActiveSession(t *testing.T) {
+func TestManualCommit_CarryForward_ActiveSession(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -250,14 +218,14 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 	}
 
 	// Create multiple files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 
 	// Create transcript with all files
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
@@ -271,7 +239,7 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 	}
 
 	// First commit: only file A
-	env.GitCommitWithShadowHooks("Add file A", "fileA.go")
+	env.GitCommitWithHooks("Add file A", "fileA.go")
 	firstCommitHash := env.GetHeadHash()
 	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	if firstCheckpointID == "" {
@@ -290,15 +258,11 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 	t.Logf("After first commit: FilesTouched=%v, CheckpointTranscriptStart=%d, BaseCommit=%s, TurnCheckpointIDs=%v",
 		state.FilesTouched, state.CheckpointTranscriptStart, state.BaseCommit[:7], state.TurnCheckpointIDs)
 
-	// List branches to see if shadow branch was created
-	branches := env.ListBranchesWithPrefix("entire/")
-	t.Logf("Entire branches after first commit: %v", branches)
-
 	// Stage file B to see what the commit would include
 	env.GitAdd("fileB.go")
 
 	// Second commit: file B (should get a NEW checkpoint ID)
-	env.GitCommitWithShadowHooks("Add file B", "fileB.go")
+	env.GitCommitWithHooks("Add file B", "fileB.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 	if secondCheckpointID == "" {
@@ -337,7 +301,7 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 
 	// Third commit: file C (last remaining carry-forward file)
 	env.GitAdd("fileC.go")
-	env.GitCommitWithShadowHooks("Add file C", "fileC.go")
+	env.GitCommitWithHooks("Add file C", "fileC.go")
 	thirdCommitHash := env.GetHeadHash()
 	thirdCheckpointID := env.GetCheckpointIDFromCommitMessage(thirdCommitHash)
 	if thirdCheckpointID == "" {
@@ -361,16 +325,8 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 		t.Errorf("FilesTouched should be empty after all files committed, got %v", state.FilesTouched)
 	}
 
-	// CRITICAL: No shadow branches should remain after all files are committed.
-	// Only entire/checkpoints/v1 should exist. Extra shadow branches (entire/<hash>-<hash>)
-	// indicate a regression in carry-forward cleanup.
-	branchesAfterAll := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfterAll {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
-		}
-	}
-	t.Logf("Entire branches after all commits: %v", branchesAfterAll)
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 
 	// Validate third checkpoint (file C)
 	env.ValidateCheckpoint(CheckpointValidation{
@@ -386,7 +342,7 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 	t.Log("CarryForward_ActiveSession test completed successfully")
 }
 
-// TestShadow_CarryForward_IdleSession tests that when a user commits only
+// TestManualCommit_CarryForward_IdleSession tests that when a user commits only
 // some of the files touched during an IDLE session, subsequent commits
 // for remaining files can still get checkpoint trailers.
 //
@@ -396,7 +352,7 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 //  3. Session is IDLE, but still has file B pending
 //  4. User commits file B → checkpoint #2 (if carry-forward for IDLE is implemented)
 //     or no trailer (if IDLE sessions don't carry forward)
-func TestShadow_CarryForward_IdleSession(t *testing.T) {
+func TestManualCommit_CarryForward_IdleSession(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -409,12 +365,12 @@ func TestShadow_CarryForward_IdleSession(t *testing.T) {
 	}
 
 	// Create multiple files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	sess.CreateTranscript("Create files A and B", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 	})
 
 	// Stop session (becomes IDLE)
@@ -431,7 +387,7 @@ func TestShadow_CarryForward_IdleSession(t *testing.T) {
 	}
 
 	// First commit: only file A
-	env.GitCommitWithShadowHooks("Add file A", "fileA.go")
+	env.GitCommitWithHooks("Add file A", "fileA.go")
 	firstCommitHash := env.GetHeadHash()
 	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	if firstCheckpointID == "" {
@@ -442,7 +398,7 @@ func TestShadow_CarryForward_IdleSession(t *testing.T) {
 	// Second commit: file B
 	// In the 1:1 model, this should also get a checkpoint if IDLE sessions
 	// carry forward, or no trailer if they don't.
-	env.GitCommitWithShadowHooks("Add file B", "fileB.go")
+	env.GitCommitWithHooks("Add file B", "fileB.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 
@@ -460,7 +416,7 @@ func TestShadow_CarryForward_IdleSession(t *testing.T) {
 	t.Log("CarryForward_IdleSession test completed successfully")
 }
 
-// TestShadow_AgentCommitsMidTurn_UserCommitsRemainder tests the scenario where:
+// TestManualCommit_AgentCommitsMidTurn_UserCommitsRemainder tests the scenario where:
 //  1. Agent creates files A, B, C during a turn
 //  2. Agent commits B and C mid-turn (each getting its own checkpoint)
 //  3. Turn ends (session becomes IDLE)
@@ -471,7 +427,7 @@ func TestShadow_CarryForward_IdleSession(t *testing.T) {
 // This reproduces a real-world bug where the user's commit gets a trailer added
 // by prepare-commit-msg, but post-commit fails to condense the checkpoint to
 // entire/checkpoints/v1 — leaving a "phantom" trailer pointing to nothing.
-func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
+func TestManualCommit_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -484,19 +440,19 @@ func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 	}
 
 	// Create all three files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 
 	// Create transcript reflecting agent creating all files
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
 	// Agent commits B mid-turn (no TTY — agent subprocess)
-	env.GitCommitWithShadowHooksAsAgent("Add file B", "fileB.go")
+	env.GitCommitWithHooksAsAgent("Add file B", "fileB.go")
 	firstCommitHash := env.GetHeadHash()
 	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	if firstCheckpointID == "" {
@@ -505,7 +461,7 @@ func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 	t.Logf("Agent commit 1 (B): checkpoint=%s", firstCheckpointID)
 
 	// Agent commits C mid-turn
-	env.GitCommitWithShadowHooksAsAgent("Add file C", "fileC.go")
+	env.GitCommitWithHooksAsAgent("Add file C", "fileC.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 	if secondCheckpointID == "" {
@@ -529,12 +485,8 @@ func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 	t.Logf("After stop: phase=%s, FilesTouched=%v, CheckpointTranscriptStart=%d",
 		state.Phase, state.FilesTouched, state.CheckpointTranscriptStart)
 
-	// Log branches before user commit
-	branchesBefore := env.ListBranchesWithPrefix("entire/")
-	t.Logf("Branches before user commit: %v", branchesBefore)
-
 	// User commits remaining file A
-	env.GitCommitWithShadowHooks("Add file A", "fileA.go")
+	env.GitCommitWithHooks("Add file A", "fileA.go")
 	userCommitHash := env.GetHeadHash()
 	userCheckpointID := env.GetCheckpointIDFromCommitMessage(userCommitHash)
 
@@ -574,17 +526,11 @@ func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 		FilesTouched: []string{"fileC.go"},
 	})
 
-	// No shadow branches should remain after all files are committed
-	branchesAfter := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
-		}
-	}
-	t.Logf("Branches after all commits: %v", branchesAfter)
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 }
 
-// TestShadow_MultipleCommits_SameActiveTurn tests that multiple commits
+// TestManualCommit_MultipleCommits_SameActiveTurn tests that multiple commits
 // during a single ACTIVE turn each get unique checkpoint IDs, and all
 // are finalized when the turn ends.
 //
@@ -594,7 +540,7 @@ func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 // 3. User commits file B → checkpoint #2 (provisional)
 // 4. User commits file C → checkpoint #3 (provisional)
 // 5. Agent finishes (SimulateStop) → all 3 checkpoints finalized
-func TestShadow_MultipleCommits_SameActiveTurn(t *testing.T) {
+func TestManualCommit_MultipleCommits_SameActiveTurn(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -607,32 +553,32 @@ func TestShadow_MultipleCommits_SameActiveTurn(t *testing.T) {
 	}
 
 	// Create multiple files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
 	// Commit each file separately while ACTIVE
 	checkpointIDs := make([]string, 3)
 
-	env.GitCommitWithShadowHooks("Add file A", "fileA.go")
+	env.GitCommitWithHooks("Add file A", "fileA.go")
 	checkpointIDs[0] = env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if checkpointIDs[0] == "" {
 		t.Fatal("First commit should have checkpoint trailer")
 	}
 
-	env.GitCommitWithShadowHooks("Add file B", "fileB.go")
+	env.GitCommitWithHooks("Add file B", "fileB.go")
 	checkpointIDs[1] = env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if checkpointIDs[1] == "" {
 		t.Fatal("Second commit should have checkpoint trailer")
 	}
 
-	env.GitCommitWithShadowHooks("Add file C", "fileC.go")
+	env.GitCommitWithHooks("Add file C", "fileC.go")
 	checkpointIDs[2] = env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if checkpointIDs[2] == "" {
 		t.Fatal("Third commit should have checkpoint trailer")
@@ -708,7 +654,7 @@ func TestShadow_MultipleCommits_SameActiveTurn(t *testing.T) {
 	t.Log("MultipleCommits_SameActiveTurn test completed successfully")
 }
 
-// TestShadow_OverlapCheck_UnrelatedCommit tests that commits for files NOT
+// TestManualCommit_OverlapCheck_UnrelatedCommit tests that commits for files NOT
 // touched by the session don't get checkpoint trailers (when session is not ACTIVE).
 //
 // Flow:
@@ -717,7 +663,7 @@ func TestShadow_MultipleCommits_SameActiveTurn(t *testing.T) {
 // 3. Session BaseCommit updated, FilesTouched cleared
 // 4. User creates file B manually (not through session)
 // 5. User commits file B → NO checkpoint (no overlap with session)
-func TestShadow_OverlapCheck_UnrelatedCommit(t *testing.T) {
+func TestManualCommit_OverlapCheck_UnrelatedCommit(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -730,9 +676,9 @@ func TestShadow_OverlapCheck_UnrelatedCommit(t *testing.T) {
 	}
 
 	// Create file A through session
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
 	sess.CreateTranscript("Create file A", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
 	})
 
 	// Stop session (becomes IDLE)
@@ -741,7 +687,7 @@ func TestShadow_OverlapCheck_UnrelatedCommit(t *testing.T) {
 	}
 
 	// Commit file A - should get checkpoint (overlaps with session)
-	env.GitCommitWithShadowHooks("Add file A", "fileA.go")
+	env.GitCommitWithHooks("Add file A", "fileA.go")
 	firstCommitHash := env.GetHeadHash()
 	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	if firstCheckpointID == "" {
@@ -750,10 +696,10 @@ func TestShadow_OverlapCheck_UnrelatedCommit(t *testing.T) {
 	t.Logf("First checkpoint ID: %s", firstCheckpointID)
 
 	// Create file B manually (not through session)
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	// Commit file B - should NOT get checkpoint (no overlap with session files)
-	env.GitCommitWithShadowHooks("Add file B (manual)", "fileB.go")
+	env.GitCommitWithHooks("Add file B (manual)", "fileB.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 
@@ -767,14 +713,14 @@ func TestShadow_OverlapCheck_UnrelatedCommit(t *testing.T) {
 	t.Log("OverlapCheck_UnrelatedCommit test completed successfully")
 }
 
-// TestShadow_OverlapCheck_PartialOverlap tests that commits with SOME files
+// TestManualCommit_OverlapCheck_PartialOverlap tests that commits with SOME files
 // from the session get checkpoint trailers, even if they include other files.
 //
 // Flow:
 // 1. Agent touches file A, then stops (IDLE)
 // 2. User creates file B manually
 // 3. User commits both A and B → checkpoint (partial overlap is enough)
-func TestShadow_OverlapCheck_PartialOverlap(t *testing.T) {
+func TestManualCommit_OverlapCheck_PartialOverlap(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -787,9 +733,9 @@ func TestShadow_OverlapCheck_PartialOverlap(t *testing.T) {
 	}
 
 	// Create file A through session
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
 	sess.CreateTranscript("Create file A", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
 	})
 
 	// Stop session (becomes IDLE)
@@ -798,10 +744,10 @@ func TestShadow_OverlapCheck_PartialOverlap(t *testing.T) {
 	}
 
 	// Create file B manually (not through session)
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	// Commit both files together - should get checkpoint (partial overlap is enough)
-	env.GitCommitWithShadowHooks("Add files A and B", "fileA.go", "fileB.go")
+	env.GitCommitWithHooks("Add files A and B", "fileA.go", "fileB.go")
 	commitHash := env.GetHeadHash()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
 
@@ -814,7 +760,7 @@ func TestShadow_OverlapCheck_PartialOverlap(t *testing.T) {
 	t.Log("OverlapCheck_PartialOverlap test completed successfully")
 }
 
-// TestShadow_SessionDepleted_ManualEditNoCheckpoint tests that once all session
+// TestManualCommit_SessionDepleted_ManualEditNoCheckpoint tests that once all session
 // files are committed, subsequent manual edits (even to previously committed files)
 // do NOT get checkpoint trailers.
 //
@@ -824,7 +770,7 @@ func TestShadow_OverlapCheck_PartialOverlap(t *testing.T) {
 // 3. User commits file C → checkpoint #2 (carry-forward if implemented, or just C)
 // 4. Session is now "depleted" (all FilesTouched committed)
 // 5. User manually edits file A and commits → NO checkpoint (session exhausted)
-func TestShadow_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
+func TestManualCommit_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -837,12 +783,12 @@ func TestShadow_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 	}
 
 	// Create 3 files through session
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
@@ -852,7 +798,7 @@ func TestShadow_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 	}
 
 	// First commit: files A and B
-	env.GitCommitWithShadowHooks("Add files A and B", "fileA.go", "fileB.go")
+	env.GitCommitWithHooks("Add files A and B", "fileA.go", "fileB.go")
 	firstCommitHash := env.GetHeadHash()
 	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	if firstCheckpointID == "" {
@@ -861,7 +807,7 @@ func TestShadow_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 	t.Logf("First checkpoint ID: %s", firstCheckpointID)
 
 	// Second commit: file C
-	env.GitCommitWithShadowHooks("Add file C", "fileC.go")
+	env.GitCommitWithHooks("Add file C", "fileC.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 	// Note: Whether this gets a checkpoint depends on carry-forward implementation
@@ -886,7 +832,7 @@ func TestShadow_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 	env.WriteFile("fileA.go", "package main\n\n// Manual edit by user\nfunc A() { return }\n")
 
 	// Commit the manual edit - should NOT get checkpoint
-	env.GitCommitWithShadowHooks("Manual edit to file A", "fileA.go")
+	env.GitCommitWithHooks("Manual edit to file A", "fileA.go")
 	thirdCommitHash := env.GetHeadHash()
 	thirdCheckpointID := env.GetCheckpointIDFromCommitMessage(thirdCommitHash)
 
@@ -900,21 +846,22 @@ func TestShadow_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 	t.Log("SessionDepleted_ManualEditNoCheckpoint test completed successfully")
 }
 
-// TestShadow_RevertedFiles_ManualEditNoCheckpoint tests that after reverting
-// uncommitted session files, manual edits with completely different content
-// do NOT get checkpoint trailers.
+// TestManualCommit_RevertedFiles_ManualRewriteStillLinks tests that a new file
+// the session created still links the session when the user deletes it and
+// commits a rewrite at the same path.
 //
-// The overlap check is content-aware: it compares file hashes between the
-// committed content and the shadow branch content. If they don't match,
-// the file is not considered session-related.
+// Linking is by name, not content: a user editing an agent-created file before
+// committing it is far more common than one replacing it wholesale, and the
+// two cannot be told apart from content alone. The recorded hash only decides
+// carry-forward (what work is left), not linking.
 //
 // Flow:
 // 1. Agent creates files A, B, C, then stops (IDLE)
 // 2. User commits files A and B → checkpoint #1
 // 3. User reverts file C (deletes it)
 // 4. User manually creates file C with different content
-// 5. User commits file C → NO checkpoint (content doesn't match shadow branch)
-func TestShadow_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
+// 5. User commits file C → checkpoint #2 (fileC.go is in FilesTouched)
+func TestManualCommit_RevertedFiles_ManualRewriteStillLinks(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -927,12 +874,12 @@ func TestShadow_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 	}
 
 	// Create 3 files through session
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
@@ -942,7 +889,7 @@ func TestShadow_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 	}
 
 	// First commit: files A and B
-	env.GitCommitWithShadowHooks("Add files A and B", "fileA.go", "fileB.go")
+	env.GitCommitWithHooks("Add files A and B", "fileA.go", "fileB.go")
 	firstCommitHash := env.GetHeadHash()
 	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	if firstCheckpointID == "" {
@@ -965,33 +912,29 @@ func TestShadow_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 	// User manually creates file C with DIFFERENT content (not what agent wrote)
 	env.WriteFile("fileC.go", "package main\n\n// Completely different implementation\nfunc C() { panic(\"manual\") }\n")
 
-	// Commit the manual file C - should NOT get checkpoint because content-aware
-	// overlap check compares file hashes. The content is completely different
-	// from what the session wrote, so it's not linked.
-	env.GitCommitWithShadowHooks("Add file C (manual implementation)", "fileC.go")
+	// Commit the rewritten file C - it links by name, whatever its content.
+	env.GitCommitWithHooks("Add file C (manual implementation)", "fileC.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 
-	if secondCheckpointID != "" {
-		t.Errorf("Second commit should NOT have checkpoint trailer "+
-			"(content doesn't match shadow branch), got %s", secondCheckpointID)
-	} else {
-		t.Log("Second commit correctly has no checkpoint trailer (content mismatch)")
+	switch secondCheckpointID {
+	case "":
+		t.Error("Second commit should have a checkpoint trailer: fileC.go is a path the session created")
+	case firstCheckpointID:
+		t.Errorf("Second commit reused the first checkpoint ID %s", firstCheckpointID)
 	}
-
-	t.Log("RevertedFiles_ManualEditNoCheckpoint test completed successfully")
 }
 
-// TestShadow_ResetSession_ClearsTurnCheckpointIDs tests that resetting a session
+// TestManualCommit_ResetSession_ClearsTurnCheckpointIDs tests that resetting a session
 // properly clears TurnCheckpointIDs and doesn't leave orphaned checkpoints.
 //
 // Flow:
 // 1. Agent starts working (ACTIVE)
 // 2. User commits mid-turn → TurnCheckpointIDs populated
-// 3. User calls "entire reset --session <id> --force"
+// 3. User calls "entire clean --session <id> --force"
 // 4. Session state file should be deleted
 // 5. A new session can start cleanly without orphaned state
-func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
+func TestManualCommit_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -1010,7 +953,7 @@ func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
 	})
 
 	// User commits while agent is still ACTIVE → TurnCheckpointIDs gets populated
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 	commitHash := env.GetHeadHash()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
 	if checkpointID == "" {
@@ -1027,8 +970,8 @@ func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
 	}
 	t.Logf("TurnCheckpointIDs before reset: %v", state.TurnCheckpointIDs)
 
-	// Reset the session using the CLI
-	output, resetErr := env.RunCLIWithError("reset", "--session", sess.ID, "--force")
+	// Clean the session using the CLI
+	output, resetErr := env.RunCLIWithError("clean", "--session", sess.ID, "--force")
 	t.Logf("Reset output: %s", output)
 	if resetErr != nil {
 		t.Fatalf("Reset failed: %v", resetErr)
@@ -1064,7 +1007,7 @@ func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
 	t.Log("ResetSession_ClearsTurnCheckpointIDs test completed successfully")
 }
 
-// TestShadow_EndedSession_UserCommitsRemainingFiles tests that after a session ends
+// TestManualCommit_EndedSession_UserCommitsRemainingFiles tests that after a session ends
 // (IDLE → ENDED via session-end hook), user commits still get checkpoint trailers
 // and condensation happens correctly.
 //
@@ -1077,7 +1020,7 @@ func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
 // 3. User commits file A → checkpoint #1
 // 4. User commits file B → checkpoint #2
 // 5. Both checkpoints exist, unique IDs, no shadow branches remain
-func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
+func TestManualCommit_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -1090,12 +1033,12 @@ func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 	}
 
 	// Create files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	sess.CreateTranscript("Create files A and B", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 	})
 
 	// Stop session (IDLE)
@@ -1130,7 +1073,7 @@ func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 		state.Phase, state.EndedAt, state.FilesTouched)
 
 	// User commits file A → checkpoint #1
-	env.GitCommitWithShadowHooks("Add file A", "fileA.go")
+	env.GitCommitWithHooks("Add file A", "fileA.go")
 	firstCommitHash := env.GetHeadHash()
 	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	if firstCheckpointID == "" {
@@ -1156,7 +1099,7 @@ func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 	})
 
 	// User commits file B → checkpoint #2
-	env.GitCommitWithShadowHooks("Add file B", "fileB.go")
+	env.GitCommitWithHooks("Add file B", "fileB.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 	if secondCheckpointID == "" {
@@ -1178,18 +1121,13 @@ func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 		ExpectedPrompts: []string{"Create files A and B"},
 	})
 
-	// No shadow branches should remain
-	branchesAfter := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
-		}
-	}
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 
 	t.Log("EndedSession_UserCommitsRemainingFiles test completed successfully")
 }
 
-// TestShadow_DeletedFiles_CheckpointAndCarryForward tests that deleted files
+// TestManualCommit_DeletedFiles_CheckpointAndCarryForward tests that deleted files
 // in a session are properly handled: they get checkpoint trailers when committed
 // via git rm, and carry-forward works for remaining files.
 //
@@ -1200,7 +1138,7 @@ func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 // 4. User commits new_file.go → checkpoint #1
 // 5. User does git rm old_a.go + commit → checkpoint #2
 // 6. Both checkpoints validated, no shadow branches remain
-func TestShadow_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
+func TestManualCommit_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -1238,7 +1176,7 @@ func TestShadow_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 	}
 
 	// User commits new_file.go → checkpoint #1
-	env.GitCommitWithShadowHooks("Add new file", "new_file.go")
+	env.GitCommitWithHooks("Add new file", "new_file.go")
 	firstCommitHash := env.GetHeadHash()
 	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	if firstCheckpointID == "" {
@@ -1248,7 +1186,7 @@ func TestShadow_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 
 	// User does git rm old_a.go and commits the deletion
 	env.GitRm("old_a.go")
-	env.GitCommitStagedWithShadowHooks("Remove old_a.go")
+	env.GitCommitStagedWithHooks("Remove old_a.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 	// Deleted files may get a trailer via carry-forward, but condensation may not
@@ -1270,20 +1208,13 @@ func TestShadow_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 		ExpectedPrompts: []string{"Create new_file.go and delete old_a.go"},
 	})
 
-	// Check for remaining shadow branches.
-	// Note: deleted file carry-forward may leave shadow branches if condensation
-	// doesn't produce full metadata (known limitation).
-	branchesAfter := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Logf("Shadow branch remaining after commits (may be expected for deleted files): %s", b)
-		}
-	}
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 
 	t.Log("DeletedFiles_CheckpointAndCarryForward test completed successfully")
 }
 
-// TestShadow_CarryForward_ModifiedExistingFiles tests that modified (not new) files
+// TestManualCommit_CarryForward_ModifiedExistingFiles tests that modified (not new) files
 // in carry-forward get checkpoint trailers correctly. Modified files always trigger
 // overlap because the user is editing a file the session worked on.
 //
@@ -1295,7 +1226,7 @@ func TestShadow_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 // 5. User commits view.go → checkpoint #2
 // 6. User commits controller.go → checkpoint #3
 // 7. All IDs unique, all validated, no shadow branches
-func TestShadow_CarryForward_ModifiedExistingFiles(t *testing.T) {
+func TestManualCommit_CarryForward_ModifiedExistingFiles(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -1337,7 +1268,7 @@ func TestShadow_CarryForward_ModifiedExistingFiles(t *testing.T) {
 	files := []string{"model.go", "view.go", "controller.go"}
 
 	for i, file := range files {
-		env.GitCommitWithShadowHooks("Update "+file, file)
+		env.GitCommitWithHooks("Update "+file, file)
 		commitHash := env.GetHeadHash()
 		cpID := env.GetCheckpointIDFromCommitMessage(commitHash)
 		if cpID == "" {
@@ -1366,13 +1297,55 @@ func TestShadow_CarryForward_ModifiedExistingFiles(t *testing.T) {
 		})
 	}
 
-	// No shadow branches should remain
-	branchesAfter := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
-		}
-	}
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 
 	t.Log("CarryForward_ModifiedExistingFiles test completed successfully")
+}
+
+// commitDrivingGitHooksVerbosely commits path by invoking prepare-commit-msg
+// and post-commit directly, logging each hook's output.
+func commitDrivingGitHooksVerbosely(t *testing.T, env *TestEnv, path, msg string) {
+	t.Helper()
+
+	env.GitAdd(path)
+	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	if err := os.WriteFile(msgFile, []byte(msg), 0o644); err != nil {
+		t.Fatalf("failed to write commit message: %v", err)
+	}
+
+	prepCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
+	prepCmd.Dir = env.RepoDir
+	prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+	prepOutput, prepErr := prepCmd.CombinedOutput()
+	t.Logf("prepare-commit-msg output: %s (err: %v)", prepOutput, prepErr)
+
+	modifiedMsg, err := os.ReadFile(msgFile)
+	if err != nil {
+		t.Fatalf("failed to read commit message: %v", err)
+	}
+	t.Logf("Commit message after prepare-commit-msg: %s", modifiedMsg)
+
+	repo, err := git.PlainOpen(env.RepoDir)
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	if _, err := worktree.Commit(string(modifiedMsg), &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+			When:  time.Now(),
+		},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	postCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "post-commit")
+	postCmd.Dir = env.RepoDir
+	postOutput, postErr := postCmd.CombinedOutput()
+	t.Logf("post-commit output: %s (err: %v)", postOutput, postErr)
 }

@@ -424,6 +424,9 @@ migrate_new_format() {
         }]' "$CHECKPOINT_PATH/metadata.json" > "$TARGET_DIR/$CHECKPOINT_DIR/metadata.json"
 
     # Copy and transform each session subdir's metadata.json
+    # -name '[0-9]*' restricts matches to numeric session directories, which cannot
+    # contain whitespace or globbing characters, so word splitting is safe here.
+    # shellcheck disable=SC2044
     for SUBDIR in $(find "$CHECKPOINT_PATH" -maxdepth 1 -mindepth 1 -type d -name '[0-9]*'); do
         local SUBDIR_NUM
         SUBDIR_NUM=$(basename "$SUBDIR")

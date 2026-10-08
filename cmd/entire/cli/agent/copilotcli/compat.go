@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 )
@@ -42,20 +43,25 @@ var vsCodeEventToHookNames = map[string][]string{
 	VSCodeEventPreToolUse:       {HookNamePreToolUse},
 	VSCodeEventPostToolUse:      {HookNamePostToolUse},
 	VSCodeEventPreCompact:       {},
-	VSCodeEventSubagentStart:    {},
+	VSCodeEventSubagentStart:    {HookNameSubagentStart},
 }
 
 type hookEnvelope struct {
-	Host           HookHost
-	SessionID      string
-	Prompt         string
-	TranscriptPath string
-	HookEventName  string
-	Source         string
-	InitialPrompt  string
-	StopReason     string
-	Reason         string
-	Timestamp      time.Time
+	Host             HookHost
+	SessionID        string
+	Prompt           string
+	TranscriptPath   string
+	CWD              string
+	AgentID          string
+	AgentType        string
+	AgentName        string
+	AgentDescription string
+	HookEventName    string
+	Source           string
+	InitialPrompt    string
+	StopReason       string
+	Reason           string
+	Timestamp        time.Time
 }
 
 func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
@@ -69,18 +75,23 @@ func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
 	}
 
 	env := &hookEnvelope{
-		Host:           detectHookHost(raw),
-		SessionID:      firstString(raw, "sessionId", "session_id"),
-		Prompt:         firstString(raw, "prompt"),
-		TranscriptPath: firstString(raw, "transcriptPath", "transcript_path"),
-		HookEventName:  firstString(raw, "hookEventName"),
-		Source:         firstString(raw, "source"),
-		InitialPrompt:  firstString(raw, "initialPrompt"),
-		StopReason:     firstString(raw, "stopReason"),
-		Reason:         firstString(raw, "reason"),
+		Host:             detectHookHost(raw),
+		SessionID:        firstString(raw, "sessionId", "session_id"),
+		Prompt:           firstString(raw, "prompt"),
+		TranscriptPath:   firstString(raw, "transcriptPath", "transcript_path"),
+		CWD:              firstString(raw, "cwd"),
+		AgentID:          firstString(raw, "agentId", "agent_id"),
+		AgentType:        firstString(raw, "agentType", "agent_type"),
+		AgentName:        firstString(raw, "agentName", "agent_name"),
+		AgentDescription: firstString(raw, "agentDescription", "agent_description"),
+		HookEventName:    firstString(raw, "hookEventName"),
+		Source:           firstString(raw, "source"),
+		InitialPrompt:    firstString(raw, "initialPrompt"),
+		StopReason:       firstString(raw, "stopReason"),
+		Reason:           firstString(raw, "reason"),
 	}
 
-	ts, err := parseTimestamp(raw["timestamp"])
+	ts, err := ParseTimestamp(raw["timestamp"])
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
@@ -126,17 +137,29 @@ func firstString(raw map[string]json.RawMessage, keys ...string) string {
 	return ""
 }
 
-func parseTimestamp(raw json.RawMessage) (time.Time, error) {
+// ParseTimestamp decodes a Copilot event timestamp, which may be either numeric
+// epoch-millis or an RFC3339(Nano) string. The numeric form may carry a
+// fractional part (Copilot CLI 1.0.71 emits e.g. 1784283185447.0); sub-millisecond
+// precision is truncated. A null/zero value returns the zero time (callers treat
+// that as "missing"). Exported so transcript importers can decode the same
+// dual-format field without re-implementing the logic.
+func ParseTimestamp(raw json.RawMessage) (time.Time, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return time.Time{}, nil
 	}
 
-	var millis int64
+	var millis float64
 	if err := json.Unmarshal(raw, &millis); err == nil {
-		if millis == 0 {
+		// Guard the float→int64 conversion: out-of-range values are
+		// implementation-defined in Go, so reject them instead.
+		if millis >= float64(math.MaxInt64) || millis <= float64(math.MinInt64) {
+			return time.Time{}, fmt.Errorf("timestamp %v out of range", millis)
+		}
+		ms := int64(millis) // truncates any fractional milliseconds
+		if ms == 0 {
 			return time.Time{}, nil // Treat epoch as missing — triggers time.Now() fallback.
 		}
-		return time.UnixMilli(millis), nil
+		return time.UnixMilli(ms), nil
 	}
 
 	var ts string
@@ -163,7 +186,7 @@ func isJSONNumber(raw json.RawMessage) bool {
 	if len(raw) == 0 || raw[0] == 'n' {
 		return false
 	}
-	var n int64
+	var n float64
 	return json.Unmarshal(raw, &n) == nil
 }
 

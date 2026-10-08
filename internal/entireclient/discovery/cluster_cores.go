@@ -1,7 +1,6 @@
 package discovery
 
 import (
-	"path/filepath"
 	"time"
 )
 
@@ -20,6 +19,17 @@ const (
 	// so a long TTL is fine. On expiry we re-fetch /.well-known and only fall
 	// back to the stale entry if that fetch fails.
 	ClusterCoresTTL = 24 * time.Hour
+
+	// CoresSchemaVersion is the set of fields a cached entry was written to
+	// carry. Bump it when adding a field whose absence in a cached entry is
+	// indistinguishable from "this resource advertises none" — an entry
+	// stamped with an older version is treated as stale once, so the new
+	// field appears on the next command instead of up to ClusterCoresTTL
+	// later, and a resource that genuinely advertises nothing still caches
+	// normally afterwards.
+	//
+	// 1: login_url.
+	CoresSchemaVersion = 1
 )
 
 // ClusterCoresCache maps a cluster host to the control-plane core URLs that
@@ -37,15 +47,25 @@ type ClusterCoresCache map[string]*CoresEntry
 // Freshness is fetched_at + ClusterCoresTTL, computed at read time so a TTL
 // change re-interprets existing entries without a migration.
 type CoresEntry struct {
-	CoreURLs  []string  `json:"core_urls"`
-	FetchedAt time.Time `json:"fetched_at"`
+	CoreURLs []string `json:"core_urls"`
+	// LoginURL is the resource's advertised login server: the apex auth
+	// router, which dispatches an authorization request to whichever
+	// regional core owns the caller's account. Empty when the resource
+	// advertises none (or predates the field), leaving the trusted issuers
+	// as the only thing a login hint can name.
+	LoginURL string `json:"login_url,omitempty"`
+	// SchemaVersion is the CoresSchemaVersion in force when this entry was
+	// written. Absent (0) in entries written before versioning existed.
+	// Stamped by SetEntry, so every writer is covered by construction.
+	SchemaVersion int       `json:"v,omitempty"`
+	FetchedAt     time.Time `json:"fetched_at"`
 }
 
 // LoadClusterCores reads the cluster→cores cache. A missing or corrupt file
 // yields an empty cache. Unlocked read; use ModifyClusterCores for a
 // read-modify-write sequence.
 func LoadClusterCores(cacheDir string) (ClusterCoresCache, error) {
-	return readClusterCoresNoLock(filepath.Join(cacheDir, clusterCoresFileName))
+	return readClusterCoresNoLock(cacheFile{dir: cacheDir, name: clusterCoresFileName})
 }
 
 // ModifyClusterCores atomically applies fn to the cluster→cores cache under a
@@ -54,14 +74,14 @@ func ModifyClusterCores(cacheDir string, fn func(ClusterCoresCache) error) error
 	return modifyCacheFile(cacheDir, clusterCoresFileName, readClusterCoresNoLock, writeClusterCoresNoLock, fn)
 }
 
-func readClusterCoresNoLock(path string) (ClusterCoresCache, error) {
+func readClusterCoresNoLock(f cacheFile) (ClusterCoresCache, error) {
 	cache := make(ClusterCoresCache)
-	err := loadCacheFile(path, &cache, func() ClusterCoresCache { return make(ClusterCoresCache) })
+	err := loadCacheFile(f, &cache, func() ClusterCoresCache { return make(ClusterCoresCache) })
 	return cache, err
 }
 
-func writeClusterCoresNoLock(path string, cache ClusterCoresCache) error {
-	return writeCacheFile(path, cache)
+func writeClusterCoresNoLock(f cacheFile, cache ClusterCoresCache) error {
+	return writeCacheFile(f, cache)
 }
 
 // LoadAPICores / ModifyAPICores are the data-API siblings of
@@ -74,7 +94,7 @@ func writeClusterCoresNoLock(path string, cache ClusterCoresCache) error {
 // LoadAPICores reads the api-host→trusted-issuer-URLs cache. Unlocked read; use
 // ModifyAPICores for a read-modify-write sequence.
 func LoadAPICores(cacheDir string) (ClusterCoresCache, error) {
-	return readClusterCoresNoLock(filepath.Join(cacheDir, apiDiscoveryFileName))
+	return readClusterCoresNoLock(cacheFile{dir: cacheDir, name: apiDiscoveryFileName})
 }
 
 // ModifyAPICores atomically applies fn to the api-host→trusted-issuer-URLs
@@ -83,23 +103,25 @@ func ModifyAPICores(cacheDir string, fn func(ClusterCoresCache) error) error {
 	return modifyCacheFile(cacheDir, apiDiscoveryFileName, readClusterCoresNoLock, writeClusterCoresNoLock, fn)
 }
 
-// Get returns a cluster's cached core URLs, whether the entry is still fresh,
+// GetEntry returns a cluster's cached cores entry, whether it is still fresh,
 // and whether it exists at all. A present-but-stale entry returns
-// (urls, false, true) so callers can attempt a re-fetch yet fall back to the
-// stale URLs if that fetch fails.
-func (c ClusterCoresCache) Get(cluster string) (urls []string, fresh, ok bool) {
-	entry := c[cluster]
+// (entry, false, true) so callers can attempt a re-fetch yet fall back to
+// the stale entry if that fetch fails.
+func (c ClusterCoresCache) GetEntry(cluster string) (entry *CoresEntry, fresh, ok bool) {
+	entry = c[cluster]
 	if entry == nil || len(entry.CoreURLs) == 0 {
 		return nil, false, false
 	}
-	return entry.CoreURLs, time.Now().Before(entry.FetchedAt.Add(ClusterCoresTTL)), true
+	return entry, time.Now().Before(entry.FetchedAt.Add(ClusterCoresTTL)), true
 }
 
-// Set records a cluster's core URLs, stamping the fetch time to now. The
-// slice is copied so later mutation by the caller can't corrupt the cache.
-func (c ClusterCoresCache) Set(cluster string, urls []string) {
-	c[cluster] = &CoresEntry{
-		CoreURLs:  append([]string(nil), urls...),
-		FetchedAt: time.Now(),
-	}
+// SetEntry records a full discovery result (cores plus the jurisdiction
+// audience/core and login server when advertised), stamping the fetch time to
+// now and the schema version the entry was built against. The slice is copied
+// so later mutation by the caller can't corrupt the cache.
+func (c ClusterCoresCache) SetEntry(cluster string, entry CoresEntry) {
+	entry.CoreURLs = append([]string(nil), entry.CoreURLs...)
+	entry.FetchedAt = time.Now()
+	entry.SchemaVersion = CoresSchemaVersion
+	c[cluster] = &entry
 }

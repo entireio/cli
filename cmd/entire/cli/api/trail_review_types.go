@@ -26,7 +26,7 @@ type TrailReview struct {
 type TrailReviewCodeVersion struct {
 	ID           string    `json:"id"`
 	TrailID      string    `json:"trail_id"`
-	RepositoryID string    `json:"repository_id"`
+	RepositoryID string    `json:"repo_id"`
 	BaseRef      *string   `json:"base_ref"`
 	HeadRef      *string   `json:"head_ref"`
 	BaseSHA      *string   `json:"base_sha"`
@@ -45,16 +45,16 @@ type TrailReviewCounts struct {
 
 // TrailReviewCommentsResponse is returned by trail/review comment list endpoints.
 type TrailReviewCommentsResponse struct {
-	Comments   []TrailReviewComment `json:"comments"`
-	HasMore    bool                 `json:"has_more"`
-	NextOffset *int                 `json:"next_offset"`
+	Comments    []TrailReviewComment `json:"comments"`
+	NextCursor  *string              `json:"next_cursor,omitempty"`
+	EventCursor string               `json:"event_cursor,omitempty"`
 }
 
 // TrailReviewComment is a single agent-native review finding.
 type TrailReviewComment struct {
 	ID                        string                       `json:"id"`
 	TrailID                   string                       `json:"trail_id"`
-	RepositoryID              string                       `json:"repository_id"`
+	RepositoryID              string                       `json:"repo_id"`
 	ReviewID                  string                       `json:"review_id"`
 	CodeVersionID             string                       `json:"code_version_id"`
 	ActorID                   string                       `json:"actor_id"`
@@ -73,8 +73,8 @@ type TrailReviewComment struct {
 	UpdatedAt                 time.Time                    `json:"updated_at"`
 	Location                  TrailReviewLocation          `json:"location"`
 	SuggestedChanges          []TrailReviewSuggestedChange `json:"suggested_changes,omitempty"`
-	ThreadID                  *string                      `json:"thread_id,omitempty"`
-	ThreadMessageCount        int                          `json:"thread_message_count,omitempty"`
+	DiscussionID              *string                      `json:"discussion_id,omitempty"`
+	DiscussionMessageCount    int                          `json:"discussion_message_count,omitempty"`
 	OutgoingLinks             []TrailReviewOutgoingLink    `json:"outgoing_links,omitempty"`
 }
 
@@ -92,7 +92,7 @@ type TrailReviewStartRequest struct {
 type TrailReviewStartResponse struct {
 	ReviewID       string            `json:"review_id"`
 	TrailID        string            `json:"trail_id"`
-	RepositoryID   string            `json:"repository_id"`
+	RepositoryID   string            `json:"repo_id"`
 	CodeVersionID  string            `json:"code_version_id"`
 	BaseSHA        *string           `json:"base_sha"`
 	HeadSHA        *string           `json:"head_sha"`
@@ -166,6 +166,18 @@ type TrailReviewLocationCreateRequest struct {
 }
 
 // TrailReviewSuggestedChangeCreateRequest attaches a suggested fix to a new finding.
+//
+// Every change_type other than manual_instruction requires the full expected_*
+// anchor — the API rejects a patch that arrives without it. The anchor describes
+// the pre-image the patch was written against, so a later apply can tell whether
+// the file has moved on:
+//
+//   - ExpectedFileHash is the git blob OID of the whole file as it stood in the
+//     author's worktree, i.e. what `git hash-object <file>` prints in that repo.
+//     The server stores it opaquely, so this is the CLI's convention; keep
+//     producers in agreement before relying on it for staleness checks.
+//   - ExpectedLines is the byte-exact content of ExpectedStartLine..ExpectedEndLine
+//     with line endings intact — not CRLF-normalized display text.
 type TrailReviewSuggestedChangeCreateRequest struct {
 	ChangeType        string  `json:"change_type"`
 	Patch             *string `json:"patch,omitempty"`

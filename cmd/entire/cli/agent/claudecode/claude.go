@@ -52,8 +52,6 @@ func (c *ClaudeCodeAgent) Description() string {
 	return "Claude Code - Anthropic's CLI coding assistant"
 }
 
-func (c *ClaudeCodeAgent) IsPreview() bool { return false }
-
 // DetectPresence checks if Claude Code is configured in the repository.
 func (c *ClaudeCodeAgent) DetectPresence(ctx context.Context) (bool, error) {
 	// Get worktree root to check for .claude directory
@@ -88,8 +86,36 @@ func (c *ClaudeCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) 
 	return filepath.Join(sessionDir, agentSessionID+".jsonl")
 }
 
+// TaskTranscriptMatches reports whether path is agent-<agentID>.jsonl in the
+// session's subagents directory or, for older Claude versions, beside the
+// session transcript.
+func (c *ClaudeCodeAgent) TaskTranscriptMatches(parentPath, sessionID, agentID, path string) bool {
+	return agentID != "" &&
+		filepath.Base(path) == paths.AgentTranscriptFileName(agentID) &&
+		agent.TaskTranscriptBesideParent(parentPath, sessionID, path)
+}
+
 // ProtectedDirs returns directories that Claude uses for config/state.
 func (c *ClaudeCodeAgent) ProtectedDirs() []string { return []string{".claude"} }
+
+// claudeConfigDirEnvVar relocates Claude Code's configuration directory
+// (~/.claude by default). Claude Code documents that every ~/.claude path lives
+// under it when set, so transcripts, settings, skills and plugins move together;
+// resolving it in one place keeps Entire looking where Claude actually wrote.
+const claudeConfigDirEnvVar = "CLAUDE_CONFIG_DIR"
+
+// resolveClaudeConfigDir returns Claude Code's configuration directory. Where
+// home probes are enabled (commands run from the user's shell, see
+// agent.EnableHomeProbes) that is claude's own answer, which also covers a
+// CLAUDE_CONFIG_DIR set in its settings files; otherwise, and whenever the
+// probe fails, it is $CLAUDE_CONFIG_DIR when set, else ~/.claude. See
+// agent.ResolveHome for the override policy.
+func resolveClaudeConfigDir() (string, error) {
+	if dir := probedConfigDir(); dir != "" {
+		return dir, nil
+	}
+	return agent.ResolveHome(claudeConfigDirEnvVar, ".claude") //nolint:wrapcheck // the error already names the override and its value
+}
 
 // GetSessionDir returns the directory where Claude stores session transcripts.
 func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
@@ -98,25 +124,38 @@ func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 		return override, nil
 	}
 
-	homeDir, err := os.UserHomeDir()
+	configDir, err := resolveClaudeConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
 
 	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
+	return filepath.Join(configDir, "projects", projectDir), nil
 }
 
 // GetSessionBaseDir returns the base directory containing per-project session subdirectories.
 // Unlike GetSessionDir, this does NOT use ENTIRE_TEST_CLAUDE_PROJECT_DIR because the
 // test override points to a specific project dir, not the base containing all projects.
 func (c *ClaudeCodeAgent) GetSessionBaseDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	configDir, err := resolveClaudeConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
-	return filepath.Join(homeDir, ".claude", "projects"), nil
+	return filepath.Join(configDir, "projects"), nil
 }
+
+// SessionHome returns Claude Code's configuration directory.
+func (c *ClaudeCodeAgent) SessionHome() (string, error) {
+	return resolveClaudeConfigDir()
+}
+
+// HomeLayout reports that Claude Code keeps per-project session directories
+// under projects.
+func (c *ClaudeCodeAgent) HomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"projects"}}
+}
+
+var _ agent.HomeLayoutProvider = (*ClaudeCodeAgent)(nil)
 
 // ReadSession reads a session from Claude's storage (JSONL transcript file).
 // The session data is stored in NativeData as raw JSONL bytes.
@@ -169,9 +208,9 @@ func (c *ClaudeCodeAgent) WriteSession(_ context.Context, session *agent.AgentSe
 		return errors.New("session has no native data to write")
 	}
 
-	// Write the raw JSONL data
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	// Write the raw JSONL data through Claude Code's own session store.
+	if err := agent.WriteSessionFile(c, session, session.NativeData, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil
@@ -180,82 +219,6 @@ func (c *ClaudeCodeAgent) WriteSession(_ context.Context, session *agent.AgentSe
 // FormatResumeCommand returns the command to resume a Claude Code session.
 func (c *ClaudeCodeAgent) FormatResumeCommand(sessionID string) string {
 	return "claude -r " + sessionID
-}
-
-// Session helper methods - work on AgentSession with Claude's native JSONL data
-
-// TruncateAtUUID returns a new session truncated at the given UUID (inclusive).
-// This is used for rewind operations to restore transcript state.
-// Requires NativeData to be populated.
-func (c *ClaudeCodeAgent) TruncateAtUUID(session *agent.AgentSession, uuid string) (*agent.AgentSession, error) {
-	if session == nil {
-		return nil, errors.New("session is nil")
-	}
-
-	if len(session.NativeData) == 0 {
-		return nil, errors.New("session has no native data")
-	}
-
-	if uuid == "" {
-		// No truncation needed, return copy
-		return &agent.AgentSession{
-			SessionID:     session.SessionID,
-			AgentName:     session.AgentName,
-			RepoPath:      session.RepoPath,
-			SessionRef:    session.SessionRef,
-			StartTime:     session.StartTime,
-			NativeData:    session.NativeData,
-			ModifiedFiles: session.ModifiedFiles,
-		}, nil
-	}
-
-	// Parse, truncate, re-serialize
-	lines, err := transcript.ParseFromBytes(session.NativeData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse transcript: %w", err)
-	}
-
-	truncated := TruncateAtUUID(lines, uuid)
-
-	newData, err := SerializeTranscript(truncated)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize truncated transcript: %w", err)
-	}
-
-	return &agent.AgentSession{
-		SessionID:     session.SessionID,
-		AgentName:     session.AgentName,
-		RepoPath:      session.RepoPath,
-		SessionRef:    session.SessionRef,
-		StartTime:     session.StartTime,
-		NativeData:    newData,
-		ModifiedFiles: ExtractModifiedFiles(truncated),
-	}, nil
-}
-
-// FindCheckpointUUID finds the UUID of the message containing the tool_result
-// for the given tool use ID. Used for task checkpoint rewind.
-// Returns the UUID and true if found, empty string and false otherwise.
-func (c *ClaudeCodeAgent) FindCheckpointUUID(session *agent.AgentSession, toolUseID string) (string, bool) {
-	if session == nil || len(session.NativeData) == 0 {
-		return "", false
-	}
-
-	lines, err := transcript.ParseFromBytes(session.NativeData)
-	if err != nil {
-		return "", false
-	}
-
-	return FindCheckpointUUID(lines, toolUseID)
-}
-
-// ReadSessionFromPath is a convenience method that reads a session directly from a file path.
-// This is useful when you have the path but not a HookInput.
-func (c *ClaudeCodeAgent) ReadSessionFromPath(transcriptPath, sessionID string) (*agent.AgentSession, error) {
-	return c.ReadSession(&agent.HookInput{
-		SessionID:  sessionID,
-		SessionRef: transcriptPath,
-	})
 }
 
 // SanitizePathForClaude converts a path to Claude's project directory format.
@@ -314,7 +277,7 @@ func (c *ClaudeCodeAgent) GetTranscriptPosition(path string) (int, error) {
 //   - files: list of file paths modified by Claude (from Write/Edit tools)
 //   - currentPosition: total number of lines in the file
 //   - error: any error encountered during reading
-func (c *ClaudeCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+func (c *ClaudeCodeAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}
@@ -388,3 +351,9 @@ func (c *ClaudeCodeAgent) LaunchCmd(ctx context.Context, initialPrompt string) (
 	cmd.Env = os.Environ()
 	return cmd, nil
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Claude Code
+// publishes into the environment of the processes it spawns. A nested session
+// gets its own ID rather than its parent's, so this names the session actually
+// running the caller.
+func (c *ClaudeCodeAgent) CallerSessionEnvVar() string { return "CLAUDE_CODE_SESSION_ID" }

@@ -5,15 +5,24 @@ package gitremote
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
 	"strings"
+	"unicode"
 )
 
 const (
+	// ProtocolSSH is the ssh transport, whichever of git's three spellings
+	// named it: ssh://, git+ssh://, or ssh+git:// (see normalizeProtocol).
 	ProtocolSSH   = "ssh"
 	ProtocolHTTPS = "https"
+	// ProtocolHTTP and ProtocolGit are the remaining schemes whose host is the
+	// git host itself. ParseURL returns them for http:// and git:// remotes;
+	// nothing derives such a URL, so they exist to be recognized.
+	ProtocolHTTP = "http"
+	ProtocolGit  = "git"
 	// ProtocolEntire is the scheme of Entire's git remote helper (entire://).
 	// These URLs carry a forge/namespace prefix before owner/repo.
 	ProtocolEntire = "entire"
@@ -42,7 +51,7 @@ type Info struct {
 // trails API. entire:// URLs carry the forge in the path instead and bypass
 // this map.
 var hostToForge = map[string]string{
-	"github.com": "gh",
+	"github.com": ForgeGitHub,
 }
 
 // forgeToHost is the reverse of hostToForge: it maps a forge identifier back to
@@ -56,6 +65,110 @@ var forgeToHost = func() map[string]string {
 	return m
 }()
 
+const (
+	// ForgeGitHub is the entire:// path token for a GitHub mirror.
+	ForgeGitHub = "gh"
+
+	// ForgeNative is the entire:// path token for an Entire-native repo.
+	// Exported so callers holding a parsed forge can ask the question without a
+	// bare "et" literal.
+	ForgeNative = "et"
+)
+
+// GitDirSuffix is the suffix git tools habitually append to a repo path. It is
+// never part of a repo name Entire stores — see CutGitDirSuffix, and
+// cli.gitDirSuffix for why names have to stay free of it.
+const GitDirSuffix = ".git"
+
+// CutGitDirSuffix removes a trailing GitDirSuffix in ANY case, reporting
+// whether one was there. Every place in the CLI that asks Entire's `.git`
+// question goes through it, so the answer cannot vary by call site — which it
+// did, in five separate hand-rolled spellings, until this existed.
+//
+// Case-insensitive is the deliberate half of the choice, and it is not what
+// canonical git does everywhere. Git draws the line by PURPOSE. When it is
+// merely guessing a local directory name out of a URL the user pasted, it cuts
+// case-sensitively (git_url_basename in dir.c: `strncmp(end - 4, ".git", 4)`,
+// then one strip_suffix_mem). When the question is instead whether a path IS
+// the reserved `.git` — a safety question, where a miss is a vulnerability —
+// it matches with aggressive case-insensitivity and then some: is_hfs_dotgit
+// (utf8.c) skips Unicode codepoints HFS+ ignores, and is_ntfs_dotgit (path.c)
+// also admits `git~1`, trailing dots and spaces, and NTFS stream suffixes.
+//
+// Entire's uses fall on the reserved-spelling side of that line. `repo create`
+// asks whether a name collides with a spelling git tooling reserves. The ref
+// parsers ask which repository a path names — and the answer belongs to the
+// server, not to a local directory heuristic. Entire's transport accepts the
+// suffix on a repo path whatever its case, so a case-sensitive client
+// disagrees with the server it is dialing:
+// `git clone entire://…/et/acme/widgets.GIT` resolves while
+// `entire repo clone /et/acme/widgets.GIT` reports no such repo.
+//
+// That reasoning is Entire's alone. GitHub's transport cuts the suffix
+// case-sensitively (`github.com/git/git.GIT` is not found), so a URL a forge
+// serves directly must not come through here — see splitOwnerRepo.
+//
+// The cut happens exactly once, as git's single strip_suffix_mem does, so
+// "widgets.git.git" yields "widgets.git" rather than collapsing every dotted
+// segment. Slicing the last four bytes is safe against a multi-byte final
+// rune: a split rune decodes to RuneError, which never folds equal to ASCII.
+func CutGitDirSuffix(name string) (string, bool) {
+	if len(name) < len(GitDirSuffix) {
+		return name, false
+	}
+	cut := len(name) - len(GitDirSuffix)
+	if !strings.EqualFold(name[cut:], GitDirSuffix) {
+		return name, false
+	}
+	return name[:cut], true
+}
+
+// pathForges are the forge tokens Entire uses in an entire:// URL path
+// (`entire://<cluster-host>/<forge>/…`), mapped to the placeholder spelling of
+// the two segments that follow — a mirror is addressed by owner, a native repo
+// by project.
+//
+// Deliberately NOT derived from forgeToHost, which answers a different
+// question: that map is upstream git hosts, and a native repo has no upstream
+// host at all, which is exactly why "et" is absent there and present here.
+// Conflating the two is what made `entire://et/<project>/<repo>` try to dial a
+// cluster named "et" while `entire://gh/…` got an actionable message.
+//
+// The legacy "/git/" prefix is excluded on purpose: rows stamped with it are
+// addressed internally by ULID and `entire repo clone` does not accept a /git/
+// ref, so admitting it would have callers suggest a command that then fails.
+var pathForges = map[string]string{
+	ForgeGitHub: "<owner>/<repo>",
+	ForgeNative: "<project>/<repo>",
+}
+
+// IsForgePathToken reports whether forge is one of the forge tokens Entire uses
+// in an entire:// path ("gh", "et"). It rejects forge hostnames ("github.com")
+// and any other unrecognized value, so a caller parsing a bare
+// forge/owner/repo triple can fail clearly instead of forwarding a malformed
+// forge, and a caller holding a URL can tell a forge id typed in the
+// cluster-host slot apart from a real host.
+//
+// The name says syntax deliberately: this is NOT a capability check, and it
+// once was one (it read the upstream-host map, so it answered `{gh}`). Widening
+// it to the real path tokens is what a URL needs, but it means a caller after a
+// capability still has to narrow afterwards. Trails are the worked example: a
+// native repo is reachable there, but only by ULID rather than by the
+// forge/owner/repo path a mirror uses, so trailRepoBasePath routes on the forge
+// after this has answered yes. A caller that treats this as the capability gets
+// a token it says yes to and a route that does not exist.
+func IsForgePathToken(forge string) bool {
+	_, ok := pathForges[forge]
+	return ok
+}
+
+// ForgePathLabels returns the placeholder spelling of the two path segments
+// that follow forge in an entire:// URL, for error messages. Empty for a forge
+// IsForgePathToken rejects.
+func ForgePathLabels(forge string) string {
+	return pathForges[forge]
+}
+
 // CanonicalHost returns the canonical public host of the upstream forge.
 //
 // For direct git URLs this is just Host. For entire:// remotes — whose Host is
@@ -64,10 +177,26 @@ var forgeToHost = func() map[string]string {
 // to Host when the forge is unknown (e.g. a self-hosted GitHub Enterprise),
 // preserving the only host we know for it.
 func (i *Info) CanonicalHost() string {
-	if host, ok := forgeToHost[i.Forge]; ok {
+	if host, ok := i.UpstreamHost(); ok {
 		return host
 	}
 	return i.Host
+}
+
+// UpstreamHost is CanonicalHost without the fallback: it returns the forge's
+// canonical public host and whether one is known at all.
+//
+// The distinction matters for an entire:// remote, and only there. Host is a
+// cluster rather than a git host, so when the forge maps to nothing there is no
+// upstream host to fall back TO — CanonicalHost answers the cluster, which is
+// the right answer for "where do I reach this" and the wrong one for "which
+// forge backs this". ParseURL preserves any non-empty forge token it finds in
+// the path, so an unrecognized one reaches callers looking exactly like a
+// mirror. A caller that needs a real forge host must ask this instead and
+// handle the false.
+func (i *Info) UpstreamHost() (string, bool) {
+	host, ok := forgeToHost[i.Forge]
+	return host, ok
 }
 
 // HostPort returns Host, or "Host:Port" when Port is non-empty.
@@ -85,15 +214,77 @@ func GetRemoteURL(ctx context.Context, remoteName string) (string, error) {
 
 // GetRemoteURLInDir returns the URL configured for the named git remote in dir.
 func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
+	return GetRemoteURLInDirEnv(ctx, dir, nil, remoteName)
+}
+
+// GetRemoteURLInDirEnv is GetRemoteURLInDir with an explicit child environment,
+// the fetch-side counterpart of GetPushURLsInDir's env parameter — see there
+// for when to pass one, including why an empty dir takes nil. Both halves of
+// an ownership vote must make the same choice, or they reach git differently
+// and can describe different repositories.
+func GetRemoteURLInDirEnv(ctx context.Context, dir string, env []string, remoteName string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", remoteName)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
 	}
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("remote %q not found", remoteName)
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// GetPushURLs returns every URL a push to remoteName delivers to, in the order
+// git will use them.
+//
+// A remote's push destinations are remote.<name>.pushurl when any is set and its
+// remote.<name>.url otherwise (git's push_url_of_remote), and BOTH may repeat —
+// git pushes to all of them, in config order. So this, not GetRemoteURL,
+// describes where a push actually goes; GetRemoteURL reports the FETCH URL,
+// which can name a different repository entirely.
+//
+// Returns at least one entry on success.
+func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
+	return GetPushURLsInDir(ctx, "", nil, remoteName)
+}
+
+// GetPushURLsInDir is GetPushURLs against a specific worktree, the push-side
+// counterpart of GetRemoteURLInDir.
+//
+// env, when non-nil, replaces the child's environment. Pass
+// gitrepo.EnvWithoutRepoOverrides() when dir names the target and the caller
+// can run inside a git hook: git exports GIT_DIR and GIT_WORK_TREE to its
+// hooks and they outrank cmd.Dir. Pass nil when dir is empty — there the
+// ambient environment is what names the repository, and filtering it would
+// silently retarget the child at the process working directory.
+//
+// Filtered by the caller, because this package depends on nothing beyond the
+// standard library while gitrepo pulls in go-git.
+func GetPushURLsInDir(ctx context.Context, dir string, env []string, remoteName string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("remote %q not found", remoteName)
+	}
+	var urls []string
+	for _, line := range strings.Split(string(output), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			urls = append(urls, trimmed)
+		}
+	}
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("remote %q has no push URL", remoteName)
+	}
+	return urls, nil
 }
 
 // ParseURL parses a git remote URL (SSH SCP-style or HTTPS) into its components.
@@ -112,8 +303,8 @@ func ParseURL(rawURL string) (*Info, error) {
 			host = hostPart
 		}
 
-		pathPart := strings.TrimSuffix(parts[1], ".git")
-		owner, repo, err := splitOwnerRepo(pathPart)
+		// SCP syntax is never entire://, so a forge serves this path.
+		owner, repo, err := splitOwnerRepo(parts[1], false)
 		if err != nil {
 			return nil, err
 		}
@@ -135,12 +326,33 @@ func ParseURL(rawURL string) (*Info, error) {
 		// entire:// URLs encode the forge as the first path segment.
 		forge, pathPart = splitForgePrefix(pathPart)
 	}
-	owner, repo, err := splitOwnerRepo(pathPart)
+	owner, repo, err := splitOwnerRepo(pathPart, u.Scheme == ProtocolEntire)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Info{Protocol: u.Scheme, Host: u.Hostname(), Port: u.Port(), Forge: forge, Owner: owner, Repo: repo}, nil
+	return &Info{Protocol: normalizeProtocol(u.Scheme), Host: u.Hostname(), Port: u.Port(), Forge: forge, Owner: owner, Repo: repo}, nil
+}
+
+// normalizeProtocol returns the transport git dials for scheme.
+//
+// Protocol answers how a remote is reached, not how it is spelled. git accepts
+// git+ssh:// and ssh+git:// as aliases of ssh:// and dispatches all three to
+// ssh, so a caller switching on Protocol must never see an alias as a scheme
+// of its own: it would take a default branch, or refuse a remote it admits
+// under another name.
+//
+// Every other scheme is returned unchanged. An unrecognized "<x>+ssh" is a
+// remote helper to git, not a transport, and must keep failing closed. ftps://
+// is absent deliberately: git accepts it, but it is read-only and cannot carry
+// a push.
+func normalizeProtocol(scheme string) string {
+	switch scheme {
+	case "git+ssh", "ssh+git":
+		return ProtocolSSH
+	default:
+		return scheme
+	}
 }
 
 // splitForgePrefix returns the leading forge/namespace segment of an entire://
@@ -171,14 +383,20 @@ func RedactURL(rawURL string) string {
 	return u.Scheme + "://" + u.Host + u.Path
 }
 
-// ExtractOwnerFromRemoteURL extracts the owner component from a git remote URL.
-// Returns an empty string if the URL cannot be parsed.
-func ExtractOwnerFromRemoteURL(rawURL string) string {
-	info, err := ParseURL(rawURL)
-	if err != nil {
-		return ""
+// RedactURLOrPath renders a remote for display with any credentials removed,
+// accepting values that are not URLs at all.
+//
+// RedactURL cannot be applied blanket-fashion: it round-trips through url.Parse
+// and rebuilds "scheme://host/path", so a bare filesystem path like
+// /srv/repo.git comes back as ":///srv/repo.git" and a bare word like "origin"
+// as "://origin". Those inputs carry no credentials, so they pass through
+// unchanged. Use this wherever the value may be a remote name, a local path, or
+// a URL — i.e. anywhere a push/fetch target is shown to a user.
+func RedactURLOrPath(remote string) string {
+	if strings.Contains(remote, "://") || strings.Contains(remote, "@") {
+		return RedactURL(remote)
 	}
-	return info.Owner
+	return remote
 }
 
 // ResolveRemoteRepo returns the forge identifier, owner, and repo name for the
@@ -198,11 +416,64 @@ func ResolveRemoteRepo(ctx context.Context, remoteName string) (forge, owner, re
 	return info.Forge, info.Owner, info.Repo, nil
 }
 
-func splitOwnerRepo(path string) (string, string, error) {
-	path = strings.TrimSuffix(path, ".git")
+// splitOwnerRepo splits a remote path into owner and repo.
+//
+// A trailing `.git` is decoration on every forge and is dropped unconditionally:
+// it is what git tools append to a clone path, never part of the name Entire
+// stores. This is the only place the suffix is dropped, so it goes exactly once
+// — trimming again in ParseURL's SCP branch collapsed "repo.git.git" to "repo".
+// git strips it exactly once too (one strip_suffix_mem in git_url_basename), so
+// "repo.git.git" names "repo.git" here and clones into "repo.git" there.
+//
+// Case follows whoever serves the URL, because the question is which
+// repository a remote names and the authority on that is the server it
+// dials. entireServed is true for entire:// remotes: Entire's transport
+// accepts the suffix whatever its case, so the cut does too (see
+// CutGitDirSuffix). Every other URL is dialed straight at its forge, and
+// those cut case-sensitively — git's own strncmp, and GitHub's transport,
+// which does not find `git/git.GIT` — so "repo.GIT" there is a repo named
+// "repo.GIT", not "repo".
+//
+// Trailing separators go FIRST, which is also git's order. Trimming the suffix
+// first leaves "p/foo.git/" spelled with the suffix intact — a trailing slash is
+// exactly what a pasted URL carries — and lets "o/../" reach the dot-only guard
+// below still wearing a slash, where it no longer reads as dot-only.
+//
+// Separators only, not whitespace: git strips both, but ParseURL has already
+// trimmed the raw URL, and stripping a percent-encoded trailing newline here
+// would turn the control-character rejection below into a silent accept.
+func splitOwnerRepo(path string, entireServed bool) (string, string, error) {
+	path = strings.TrimRight(path, "/")
+	if entireServed {
+		path, _ = CutGitDirSuffix(path)
+	} else {
+		path = strings.TrimSuffix(path, GitDirSuffix)
+	}
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("cannot parse owner/repo from path: %s", path)
 	}
+	// Reject control characters (newlines, ANSI escapes, ...). The SCP-style
+	// branch in ParseURL bypasses net/url.Parse's built-in control-char
+	// rejection, so a crafted origin URL could otherwise smuggle a newline or
+	// escape into owner/repo and, via plain-text consumers like `entire
+	// agent-help`, into an agent's context or a user's terminal. This shared
+	// chokepoint protects every caller; the tainted bytes are not echoed back.
+	if strings.IndexFunc(parts[0]+"/"+parts[1], unicode.IsControl) >= 0 {
+		return "", "", errors.New("invalid control character in remote owner/repo")
+	}
+	// A dot-only segment names nothing, and the trim above can MANUFACTURE one:
+	// "..git" becomes "." and "...git" becomes "..". Neither addresses a repo,
+	// and both are path-traversal shapes for any caller that joins them. The
+	// /gh/ ref grammar already refuses this (parseMirrorCloneRef); refuse it on
+	// the URL path too, which is what ResolveRemoteRepo reads.
+	if isDotOnly(parts[0]) || isDotOnly(parts[1]) {
+		return "", "", fmt.Errorf("owner and repo cannot be dot-only: %s", path)
+	}
 	return parts[0], parts[1], nil
+}
+
+// isDotOnly reports whether s is non-empty and made only of '.' characters.
+func isDotOnly(s string) bool {
+	return s != "" && strings.Trim(s, ".") == ""
 }

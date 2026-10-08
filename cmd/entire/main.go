@@ -9,10 +9,15 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/procsignal"
+
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +28,14 @@ func main() {
 	// Create context that cancels on interrupt
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Memoize this process's .git/config remote reads. The checkpoint sync
+	// election re-runs per call by design and each run shells out to git for the
+	// same two answers; one command can elect several times. Answers are
+	// partitioned per git working directory, so a command walking several repos
+	// stays correct. `entire repo remote add` invalidates after re-pointing a
+	// remote, and `entire mcp` narrows this to one window per request.
+	ctx = strategy.WithGitRemoteCache(ctx)
+
 	// Handle interrupt signals
 	sigChan := make(chan os.Signal, 1)
 	signals := []os.Signal{os.Interrupt}
@@ -31,8 +44,27 @@ func main() {
 	}
 	signal.Notify(sigChan, signals...)
 	go func() {
-		<-sigChan
+		// First signal: cancel the context so in-flight work unwinds
+		// cleanly. signal.Notify has disabled Go's default "signal
+		// terminates" behavior, so without the second read below a user
+		// who Ctrl-C's again during a slow/stuck shutdown (e.g. a keyring
+		// read blocked in a subprocess we can't cancel) would find every
+		// further Ctrl-C swallowed. The second read restores an escape
+		// hatch: signal again to force-exit.
+		//
+		// We remember which signal fired so the eventual termination
+		// re-raises that same signal — a SIGTERM (from a supervisor /
+		// container stop) must exit 143, not masquerade as a SIGINT 130.
+		sig := <-sigChan
+		procsignal.Store(sig)
+		if sig == os.Interrupt {
+			fmt.Fprintln(os.Stderr, "\nInterrupting… press Ctrl-C again to force quit.")
+		} else {
+			fmt.Fprintln(os.Stderr, "\nReceived termination signal, shutting down… signal again to force quit.")
+		}
 		cancel()
+		<-sigChan
+		dieFromSignal(sig)
 	}()
 
 	// Create and execute root command
@@ -48,9 +80,9 @@ func main() {
 	// inherits the prepended PATH so it can spawn sibling managed plugins.
 	restorePATH := cli.PrependPluginBinDirToPATH(ctx)
 
-	if handled, code := cli.MaybeRunPlugin(ctx, rootCmd, os.Args[1:]); handled {
+	if handled, code, killedBy := cli.MaybeRunPlugin(ctx, rootCmd, os.Args[1:]); handled {
 		cancel()
-		os.Exit(code)
+		exitWithPluginOutcome(code, killedBy)
 	}
 	restorePATH()
 
@@ -64,10 +96,47 @@ func main() {
 	}
 
 	executed, err := rootCmd.ExecuteContextC(ctx)
+	// The only place the logger is closed, and it must be here: cobra returns out
+	// of Command.execute() as soon as RunE errors or required-flag validation
+	// fails, both before its PersistentPostRun loop, so those paths would
+	// otherwise exit with up to 8KB of buffered diagnostics unwritten. The logger
+	// rides the executed command's context, where the root pre-run put it; a
+	// failure raised before any pre-run carries none, and nothing logged yet.
+	if l := logging.LoggerFromContext(executed.Context()); l != nil {
+		_ = l.Close()
+	}
+
 	if err != nil {
 		var silent *cli.SilentError
+		var pluginExit *cli.PluginExitError
 
 		switch {
+		case errors.As(err, &pluginExit):
+			// A built-in ran a plugin for the user (agent-help delegation);
+			// exit with the plugin's outcome, as a dispatched plugin does.
+			cancel()
+			exitWithPluginOutcome(pluginExit.Code, pluginExit.KilledBy)
+		case errors.Is(err, context.Canceled) && procsignal.Load() != nil:
+			// A signal cancelled the root context (our handler fired) or a
+			// keyring read was aborted by Ctrl-C. Don't dump the raw
+			// transport/keyring cancellation string ("...: context canceled",
+			// "read access token: signal: interrupt") as if it were a failure
+			// — die quietly by re-raising the signal that triggered it (see
+			// dieFromSignal) so an enclosing `while ...; do entire; done` loop
+			// actually breaks on a single Ctrl-C, and a SIGTERM shutdown still
+			// exits 143.
+			//
+			// We gate on a signal having been recorded rather than on the
+			// error type alone: a context.Canceled that arose without a signal
+			// (e.g. an internally-cancelled sub-context) is a genuine error
+			// and must fall through to normal reporting, not masquerade as a
+			// user abort (which would also wrongly break an enclosing loop).
+			// procsignal is the shared source of truth written both by the
+			// handler above and by the keyring interrupt path; the latter
+			// records the signal on this same goroutine before returning, so
+			// this Load never races that write.
+			cancel()
+			dieFromSignal(terminatingSignal())
 		case errors.As(err, &silent):
 			// Command already printed the error
 		case strings.Contains(err.Error(), "unknown command") || strings.Contains(err.Error(), "unknown flag"):
@@ -81,13 +150,103 @@ func main() {
 			// deepest matched command, which is the one that failed.
 			showSuggestion(executed, err)
 		default:
-			fmt.Fprintln(rootCmd.OutOrStderr(), err)
+			// The choke point for everything a command returns rather than
+			// prints itself: see cli.RenderUserFacingError for what it strips
+			// and which other render sites exist.
+			fmt.Fprintln(rootCmd.OutOrStderr(), cli.RenderUserFacingError(err))
 		}
 
 		cancel()
 		os.Exit(1)
 	}
 	cancel() // Cleanup on successful exit
+}
+
+// exitWithPluginOutcome exits with a plugin's outcome: its exit code, or the
+// signal that ended it re-raised. It never returns. Shared by the pre-Cobra
+// dispatcher and by built-ins that run a plugin (cli.PluginExitError).
+func exitWithPluginOutcome(code int, killedBy os.Signal) {
+	if code == cli.ExitPluginSignalled {
+		// The plugin was terminated by a signal, or a signal interrupted
+		// the on-demand install before it ran. Re-raise so the shell sees
+		// WIFSIGNALED: an enclosing loop breaks on one Ctrl-C, and the
+		// conventional 128+signum reaches whoever ran us.
+		//
+		// Gated on the plugin's own outcome rather than on a signal
+		// having fired somewhere in this process: Ctrl-C reaches the whole
+		// foreground process group, so a plugin that handles it itself and
+		// exits with a meaningful code (a TUI quitting on Ctrl-C exits 0)
+		// must keep that code instead of being reported as killed.
+		switch {
+		case procsignal.Load() != nil:
+			// A signal we received outranks the child's, because when we
+			// were signalled the child's signal is usually OUR signal
+			// laundered — and laundered lossily. Cancelling the context
+			// makes runPlugin's cmd.Cancel send the child SIGINT whatever
+			// we got, so a supervisor's SIGTERM comes back as a SIGINT
+			// child and would report 130 for a shutdown that must report
+			// 143. That is the exact confusion dieFromSignal exists to
+			// prevent.
+			dieFromSignal(terminatingSignal())
+		case killedBy != nil:
+			// We were not signalled, so the child's signal is genuinely
+			// its own: `kill -TERM` aimed at the plugin still exits 143,
+			// and a SIGPIPE from `entire graph | head -1` still exits
+			// 141. Nothing laundered it, so it is the outcome to
+			// propagate.
+			dieFromSignal(killedBy)
+		default:
+			// -1 with no signal on either side. Windows reports a killed
+			// child as an ordinary exit code, so it never lands here;
+			// anything that does is unaccounted for, and -1 is not an
+			// exit status (os.Exit would truncate it to 255), so report a
+			// plain failure rather than inventing a signal.
+			os.Exit(1)
+		}
+	}
+	os.Exit(code)
+}
+
+// terminatingSignal returns the signal that cancelled the root context,
+// defaulting to SIGINT when the cancellation came from something other than a
+// recorded terminating signal (so a stray context.Canceled still exits 130).
+// The recorded signal lives in the shared procsignal package, written by the
+// handler goroutine (SIGINT/SIGTERM) and by the keyring interrupt path (SIGINT).
+func terminatingSignal() os.Signal {
+	if s := procsignal.Load(); s != nil {
+		return s
+	}
+	return os.Interrupt
+}
+
+// dieFromSignal terminates the process as if it had been killed by sig, rather
+// than exiting normally. The distinction matters to an interactive shell: it
+// only aborts a `while true; do entire ...; done` loop when the child is
+// *killed by* SIGINT (WIFSIGNALED). A plain os.Exit(130) is an ordinary exit,
+// so the loop keeps respawning entire and Ctrl-C never escapes it. Re-raising
+// the actual signal also keeps a SIGTERM shutdown reporting the conventional
+// 143 (not 130). We reset sig to its default disposition, re-raise it to
+// ourselves, and briefly wait for delivery; if the re-raise can't be delivered
+// (e.g. Windows, where signal-to-self is unsupported) we fall back to a
+// conventional 128+signal exit so we never hang.
+func dieFromSignal(sig os.Signal) {
+	signal.Reset(sig)
+	if p, err := os.FindProcess(os.Getpid()); err == nil {
+		if err := p.Signal(sig); err == nil {
+			time.Sleep(500 * time.Millisecond) // signal delivery ends the process well before this elapses
+		}
+	}
+	os.Exit(exitCodeForSignal(sig))
+}
+
+// exitCodeForSignal maps a signal to the conventional 128+signum exit code
+// (130 for SIGINT, 143 for SIGTERM), falling back to 130 for a signal that
+// doesn't carry a numeric value on this platform.
+func exitCodeForSignal(sig os.Signal) int {
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return 130
 }
 
 // isPositionalArgError reports whether err looks like a cobra positional-

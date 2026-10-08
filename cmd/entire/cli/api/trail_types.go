@@ -1,69 +1,94 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 )
 
-// TrailListResponse is the response from GET /api/v1/trails/:org/:repo.
-// The endpoint paginates: Trails holds one page (server max 200 rows) and
-// Total is the full match count for the requested filters.
+// TrailListResponse is the response from entire-api's trail list endpoint.
 type TrailListResponse struct {
-	Trails        []TrailResource `json:"trails"`
-	Total         int             `json:"total"`
-	Limit         int             `json:"limit"`
-	Offset        int             `json:"offset"`
-	RepoFullName  string          `json:"repo_full_name"`
-	DefaultBranch string          `json:"default_branch"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	Trails     []TrailResource `json:"items"`
+	Total      int             `json:"total_count"`
+	NextCursor *string         `json:"next_cursor"`
 }
 
-// TrailResource represents a single trail from the API.
+// TrailResource represents a trail returned by entire-api. The backend uses
+// snake_case and nullable branch fields. Branch is empty when the trail is
+// currently unlinked; OriginalBranch separately preserves its last link.
 type TrailResource struct {
-	ID              string           `json:"id,omitempty"`
-	Number          int              `json:"number,omitempty"`
-	Branch          string           `json:"branch"`
-	Base            string           `json:"base"`
-	Title           string           `json:"title"`
-	Body            string           `json:"body"`
-	Status          string           `json:"status"`
-	Phase           string           `json:"phase,omitempty"`
-	Author          *trail.Author    `json:"author"`
-	Assignees       []string         `json:"assignees"`
-	Labels          []string         `json:"labels"`
-	Priority        string           `json:"priority,omitempty"`
-	Type            string           `json:"type,omitempty"`
-	Reviewers       []trail.Reviewer `json:"reviewers,omitempty"`
-	CreatedAt       time.Time        `json:"created_at"`
-	UpdatedAt       time.Time        `json:"updated_at"`
-	MergedAt        *time.Time       `json:"merged_at,omitempty"`
-	CommentCount    int              `json:"comment_count,omitempty"`
-	UnresolvedCount int              `json:"unresolved_count,omitempty"`
-	CheckpointCount int              `json:"checkpoint_count,omitempty"`
-	CommitsAhead    int              `json:"commits_ahead,omitempty"`
+	ID                 string             `json:"id,omitempty"`
+	Number             int                `json:"number,omitempty"`
+	URL                string             `json:"url,omitempty"`
+	Branch             string             `json:"branch"`
+	OriginalBranch     string             `json:"original_branch,omitempty"`
+	Base               string             `json:"base"`
+	Title              string             `json:"title"`
+	Body               string             `json:"body,omitempty"`
+	Status             string             `json:"status"`
+	Phase              string             `json:"phase,omitempty"`
+	Author             *trail.Author      `json:"author"`
+	Assignees          []string           `json:"assignees"`
+	Labels             []string           `json:"labels,omitempty"`
+	Priority           string             `json:"priority,omitempty"`
+	Type               string             `json:"type,omitempty"`
+	Reviewers          []trail.Reviewer   `json:"reviewers,omitempty"`
+	RequestedReviewers []string           `json:"requested_reviewers,omitempty"`
+	CreatedAt          time.Time          `json:"created_at"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+	MergedAt           *time.Time         `json:"merged_at,omitempty"`
+	CommentCount       int                `json:"comment_count,omitempty"`
+	UnresolvedCount    int                `json:"unresolved_count,omitempty"`
+	CheckpointCount    int                `json:"checkpoint_count,omitempty"`
+	CommitsAhead       int                `json:"commits_ahead,omitempty"`
+	BodyDocument       *TrailBodyDocument `json:"body_document,omitempty"`
+	// Mergeability is served on the detail resource only; list items omit it.
+	// It stays raw so that every detail-route decode (approve, update, resume,
+	// review-target resolution, ...) does not depend on the snapshot's shape;
+	// only `trail show` reads it, through DecodeMergeability.
+	Mergeability json.RawMessage `json:"mergeability,omitempty"`
+	// FromDetail reports that the resource was decoded from the detail route
+	// rather than a list page. It is the reliable marker: body_document can be
+	// absent from a valid detail response.
+	FromDetail bool `json:"-"`
 }
 
-// ToMetadata converts a TrailResource to a trail.Metadata for display.
+// TrailBodyDocument is the trail's description editor document. TextSnapshot
+// is the rendered plain text displayed by the CLI. The document is also what a
+// body write returns (see TrailBodyRequest), so both directions decode into this
+// type; the fields the CLI does not use (id, document_key, schema_version,
+// content_json, updated_at) are simply left out of it. ETag is populated on a
+// read as well as on a write response, and is what makes If-Match viable on
+// the next write (see sendTrailBody).
+type TrailBodyDocument struct {
+	TextSnapshot string `json:"text_snapshot"`
+	ETag         string `json:"etag,omitempty"`
+}
+
+// DecodeMergeability decodes the detail resource's mergeability snapshot. It
+// returns nil, nil when the snapshot is absent or null.
+func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
+	if len(r.Mergeability) == 0 || string(r.Mergeability) == "null" {
+		return nil, nil //nolint:nilnil // nil, nil means "no snapshot served"
+	}
+	var m TrailMergeability
+	if err := json.Unmarshal(r.Mergeability, &m); err != nil {
+		return nil, fmt.Errorf("decode trail mergeability: %w", err)
+	}
+	return &m, nil
+}
+
+// ToMetadata converts a TrailResource to display metadata.
 func (r *TrailResource) ToMetadata() *trail.Metadata {
 	m := &trail.Metadata{
-		Number:    r.Number,
-		TrailID:   trail.ID(r.ID),
-		Branch:    r.Branch,
-		Base:      r.Base,
-		Title:     r.Title,
-		Body:      r.Body,
-		Status:    trail.Status(r.Status),
-		Phase:     r.Phase,
-		Author:    r.Author,
-		Assignees: r.Assignees,
-		Labels:    r.Labels,
-		Priority:  trail.Priority(r.Priority),
-		Type:      trail.Type(r.Type),
-		Reviewers: r.Reviewers,
-		CreatedAt: r.CreatedAt,
-		UpdatedAt: r.UpdatedAt,
-		MergedAt:  r.MergedAt,
+		Number: r.Number, TrailID: trail.ID(r.ID), URL: r.URL,
+		Branch: r.Branch, OriginalBranch: r.OriginalBranch, Base: r.Base, Title: r.Title, Body: r.Body,
+		Status: trail.Status(r.Status), Phase: r.Phase, Author: r.Author,
+		Assignees: r.Assignees, Labels: r.Labels, Type: trail.Type(r.Type),
+		Priority: trail.Priority(r.Priority), Reviewers: r.Reviewers,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, MergedAt: r.MergedAt,
 	}
 	if m.Assignees == nil {
 		m.Assignees = []string{}
@@ -76,53 +101,166 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 
 // TrailCreateRequest is the body for POST /api/v1/trails/:host/:owner/:repo.
 type TrailCreateRequest struct {
-	Title      string   `json:"title"`
-	Body       string   `json:"body,omitempty"`
-	BranchName string   `json:"branch_name"`
-	Base       string   `json:"base,omitempty"`
-	Status     string   `json:"status,omitempty"`
-	Assignees  []string `json:"assignees,omitempty"`
-	Labels     []string `json:"labels,omitempty"`
-	Priority   string   `json:"priority,omitempty"`
-	Type       string   `json:"type,omitempty"`
+	Title        string   `json:"title"`
+	Body         string   `json:"body,omitempty"`
+	BranchName   string   `json:"branch_name,omitempty"`
+	BranchAction string   `json:"branch_action,omitempty"`
+	Base         string   `json:"base,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	Assignees    []string `json:"assignees,omitempty"`
+	Priority     string   `json:"priority,omitempty"`
+	Type         string   `json:"type,omitempty"`
 }
 
-// TrailCreateResponse is the response from POST /api/v1/trails/:org/:repo.
 type TrailCreateResponse struct {
-	Trail         TrailResource `json:"trail"`
-	BranchCreated bool          `json:"branch_created"`
+	Trail TrailResource `json:"trail"`
 }
 
-// TrailDetailResponse is the response from GET /api/v1/trails/:org/:repo/:trailId.
-type TrailDetailResponse struct {
-	Trail       TrailResource     `json:"trail"`
-	Discussion  trail.Discussion  `json:"discussion"`
-	Checkpoints trail.Checkpoints `json:"checkpoints"`
-}
-
-// TrailUpdateRequest is the body for PATCH /api/v1/trails/:host/:owner/:repo/:trailId.
-// Pointer fields distinguish "not provided" (nil) from "set to value".
-// For slices, *[]string is used so nil means "no change" while &[]string{} means "clear".
+// TrailUpdateRequest uses pointers to distinguish absent fields from clears.
+// There is deliberately no Labels field: the trails API does not accept label
+// writes, so `trail update` exposes no label flags (labels are read-only, see
+// TrailResource.Labels).
+//
+// There is deliberately no Body field either. The trails API does not serve
+// body writes on this route — it rejects a body field outright and names the
+// dedicated route to use instead — so the description has its own route and its
+// own request shape; see TrailBodyRequest. Do not reintroduce the field to save
+// a request: the rejection has been served as a redacted 5xx, which reads to
+// the caller as a flaky server rather than as the wrong route, and that is what
+// made this bug survive as long as it did.
 type TrailUpdateRequest struct {
-	Branch    *string   `json:"branch,omitempty"`
-	Base      *string   `json:"base,omitempty"`
-	Status    *string   `json:"status,omitempty"`
-	Title     *string   `json:"title,omitempty"`
-	Body      *string   `json:"body,omitempty"`
-	Assignees *[]string `json:"assignees,omitempty"`
-	Labels    *[]string `json:"labels,omitempty"`
-	Priority  *string   `json:"priority,omitempty"`
-	Type      *string   `json:"type,omitempty"`
+	Status             *string   `json:"status,omitempty"`
+	Title              *string   `json:"title,omitempty"`
+	Assignees          *[]string `json:"assignees,omitempty"`
+	RequestedReviewers *[]string `json:"requested_reviewers,omitempty"`
+	Type               *string   `json:"type,omitempty"`
+	Priority           *string   `json:"priority,omitempty"`
 }
 
-// TrailUpdateResponse is the response from PATCH /api/v1/trails/:org/:repo/:trailId.
 type TrailUpdateResponse struct {
 	Trail TrailResource `json:"trail"`
 }
 
-// TrailDeleteResponse is the response from DELETE /api/v1/trails/:host/:owner/:repo/:number.
-// OK is the server's explicit success signal; a destructive delete should not be
-// reported as done unless it is true.
-type TrailDeleteResponse struct {
+// TrailBodyRequest is the body for PUT
+// /api/v1/trails/:host/:owner/:repo/:number/body, the only route that writes a
+// trail's description (see TrailUpdateRequest for why it is not PATCH). The
+// route answers with the resulting document, which decodes into
+// TrailBodyDocument.
+//
+// Markdown carries no omitempty: an empty string is how a description is
+// cleared, and the server distinguishes present-and-empty from absent — with
+// omitempty the field would vanish from the JSON and the request would be
+// rejected as "exactly one of markdown/content_json is required".
+//
+// The route also accepts content_json (ProseMirror JSON, written as-is) in place
+// of markdown; the CLI only ever writes Markdown, so content_json is not
+// modeled here. The route also accepts an If-Match header for optimistic
+// concurrency, populated from a prior read of TrailBodyDocument.ETag — see
+// sendTrailBody for the dispatch between If-Match and Overwrite.
+type TrailBodyRequest struct {
+	Markdown  string `json:"markdown"`
+	Overwrite bool   `json:"overwrite,omitempty"`
+}
+
+// TrailApproval is a single approval decision on a trail. Author is exposed as
+// a login string while UnmarshalJSON accepts both shapes entire-api itself
+// uses: the approvals collection sends a bare login string, the trail resource
+// sends an {id,login} object. Both are live — this is not legacy tolerance.
+type TrailApproval struct {
+	ID        string    `json:"id"`
+	Author    string    `json:"author"`
+	Event     string    `json:"event"`
+	Body      string    `json:"body,omitempty"`
+	CommitSHA string    `json:"commit_sha,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (a *TrailApproval) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		ID        string          `json:"id"`
+		Author    json.RawMessage `json:"author"`
+		Event     string          `json:"event"`
+		Body      *string         `json:"body"`
+		CommitSHA string          `json:"commit_sha"`
+		CreatedAt time.Time       `json:"created_at"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return fmt.Errorf("decode trail approval: %w", err)
+	}
+	a.ID, a.Event, a.CommitSHA, a.CreatedAt = wire.ID, wire.Event, wire.CommitSHA, wire.CreatedAt
+	if wire.Body != nil {
+		a.Body = *wire.Body
+	}
+	if len(wire.Author) == 0 || string(wire.Author) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(wire.Author, &a.Author); err == nil {
+		return nil
+	}
+	var author trail.Author
+	if err := json.Unmarshal(wire.Author, &author); err != nil {
+		return fmt.Errorf("decode trail approval author: %w", err)
+	}
+	if author.Login != nil {
+		a.Author = *author.Login
+	}
+	return nil
+}
+
+type TrailApprovalRequest struct {
+	Event string `json:"event"`
+	Body  string `json:"body,omitempty"`
+}
+
+type TrailApprovalResponse struct {
+	OK       bool          `json:"ok"`
+	Approval TrailApproval `json:"approval"`
+}
+
+type TrailApprovalsResponse struct {
+	Approvals []TrailApproval `json:"approvals"`
+}
+
+// TrailMergeabilityResponse is the full mergeability snapshot the detail
+// resource serves (TrailMergeability, as `trail show` reads it) plus the
+// fields the merge command needs to decide on and explain a bypass.
+type TrailMergeabilityResponse struct {
+	TrailMergeability
+
+	BypassPolicy     string `json:"bypass_policy"`
+	BehindBy         int    `json:"behind_by"`
+	ComparisonStatus string `json:"comparison_status"`
+}
+
+// TrailMergeDetail is the part of GET .../trails/{number} the merge command
+// reads: the mergeability snapshot and the caller's merge actions, both from
+// the same server read.
+type TrailMergeDetail struct {
+	Actions      *TrailActions              `json:"actions"`
+	Mergeability *TrailMergeabilityResponse `json:"mergeability"`
+}
+
+// TrailActions is the detail's per-caller availability of each operation;
+// only the merge operations are decoded. The server revalidates on submit.
+type TrailActions struct {
+	Merge           TrailActionAvailability `json:"merge"`
+	MergeWithBypass TrailActionAvailability `json:"merge_with_bypass"`
+}
+
+// TrailActionAvailability.State is enabled, blocked, or unavailable; Reason
+// says why when it is not enabled.
+type TrailActionAvailability struct {
+	State  string  `json:"state"`
+	Reason *string `json:"reason"`
+}
+
+type TrailMergeRequest struct {
+	ExpectedHeadSha string `json:"expectedHeadSha,omitempty"`
+	Bypass          bool   `json:"bypass,omitempty"`
+}
+
+type TrailMergeResponse struct {
 	OK bool `json:"ok"`
+	// Empty when the merge fast-forwarded or the base was already up to date.
+	MergeCommitSha string `json:"mergeCommitSha"`
 }

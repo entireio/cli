@@ -1,0 +1,5 @@
+{"type":"system","subtype":"status","status":"requesting","session_id":"test-session"}
+{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":9,"cache_read_input_tokens":1234,"output_tokens":5}}},"ttft_ms":935,"session_id":"test-session"}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello, "}},"session_id":"test-session"}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"world."}},"session_id":"test-session"}
+{"type":"result","subtype":"success","is_error":false,"api_error_status":null,"duration_ms":2509,"result":"Hello, world.","usage":{"input_tokens":9,"output_tokens":3,"cache_read_input_tokens":1234},"session_id":"test-session"}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -27,6 +28,14 @@ func strPtr(v string) *string { return &v }
 // "Not logged in" hint; that was wrong because real STS / network
 // failures got mis-labeled. This PR surfaces real errors but has to
 // keep the cancellation case silent.
+//
+// The passed-in context is actually cancelled (not merely a mock returning
+// context.Canceled) to mirror main.go, which cancels the real ctx on
+// Ctrl+C before any command code runs: renderDataAPIAuthError silences a
+// wrapped context.Canceled/DeadlineExceeded only when the caller's own ctx
+// has actually fired (ctx.Err() != nil), precisely to distinguish this case
+// from an internal resolver timeout that fires on its own derived context
+// while the caller's ctx is still live.
 func TestRunActivity_SilencesContextCanceled(t *testing.T) {
 	// No t.Parallel: SetResolveContextForAPIForTest mutates package-level
 	// auth state.
@@ -34,13 +43,17 @@ func TestRunActivity_SilencesContextCanceled(t *testing.T) {
 	// Simulate the user hitting Ctrl+C during auth resolution: the
 	// cancellation surfaces from the discovery fetch, and runActivity must
 	// silence it rather than mislabel it "Not logged in".
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
 	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
 		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
 			return nil, context.Canceled
 		}))
 
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
 	var out, errOut bytes.Buffer
-	err := runActivity(t.Context(), &out, &errOut)
+	err := runActivity(ctx, &out, &errOut, false)
 	if err == nil {
 		t.Fatal("expected error when STS exchange is cancelled")
 	}
@@ -66,6 +79,7 @@ func TestRunActivity_PrintsLoginHintOnNotLoggedIn(t *testing.T) {
 	//
 	// Discovery selects a context whose keyring slot holds nothing, so the
 	// per-context provider reports ErrNotLoggedIn.
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
 	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
 	c := &contexts.Context{Name: "me@core", CoreURL: "https://core.example", Handle: "me", KeychainService: "kc:me"}
 	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
@@ -74,7 +88,7 @@ func TestRunActivity_PrintsLoginHintOnNotLoggedIn(t *testing.T) {
 		}))
 
 	var out, errOut bytes.Buffer
-	err := runActivity(t.Context(), &out, &errOut)
+	err := runActivity(t.Context(), &out, &errOut, false)
 	if err == nil {
 		t.Fatal("expected error when not logged in")
 	}
@@ -240,6 +254,113 @@ func TestFormatCommitDate(t *testing.T) {
 			}
 			if tt.excludes != "" && containsStr(got, tt.excludes) {
 				t.Errorf("formatCommitDate(%q) = %q, should not contain %q", tt.input, got, tt.excludes)
+			}
+		})
+	}
+}
+
+func TestFormatCommitDate_DST(t *testing.T) {
+	t.Parallel()
+	sydney, err := time.LoadLocation("Australia/Sydney")
+	if err != nil {
+		t.Fatalf("load Sydney timezone: %v", err)
+	}
+	tests := []struct {
+		name  string
+		now   time.Time
+		input string
+		want  string
+	}{
+		{
+			name:  "23-hour yesterday",
+			now:   time.Date(2026, time.October, 5, 7, 38, 0, 0, sydney),
+			input: "2026-10-04",
+			want:  "Sunday 4 Oct (yesterday)",
+		},
+		{
+			name:  "spring today with UTC now",
+			now:   time.Date(2026, time.October, 5, 7, 38, 0, 0, sydney).UTC(),
+			input: "2026-10-05",
+			want:  "Monday 5 Oct (today)",
+		},
+		{
+			name:  "23-hour tomorrow",
+			now:   time.Date(2026, time.October, 4, 7, 38, 0, 0, sydney),
+			input: "2026-10-05",
+			want:  "Monday 5 Oct",
+		},
+		{
+			name:  "47-hour older day",
+			now:   time.Date(2026, time.October, 6, 7, 38, 0, 0, sydney),
+			input: "2026-10-04",
+			want:  "Sunday 4 Oct",
+		},
+		{
+			name:  "25-hour yesterday",
+			now:   time.Date(2026, time.April, 6, 7, 38, 0, 0, sydney),
+			input: "2026-04-05",
+			want:  "Sunday 5 Apr (yesterday)",
+		},
+		{
+			name:  "autumn today",
+			now:   time.Date(2026, time.April, 6, 7, 38, 0, 0, sydney),
+			input: "2026-04-06",
+			want:  "Monday 6 Apr (today)",
+		},
+		{
+			name:  "invalid",
+			now:   time.Date(2026, time.October, 5, 7, 38, 0, 0, sydney),
+			input: "bad-date",
+			want:  "bad-date",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatCommitDateAt(tt.input, tt.now, sydney)
+			if got != tt.want {
+				t.Errorf("formatCommitDateAt(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatCommitDate_MidnightDST(t *testing.T) {
+	t.Parallel()
+	havana, err := time.LoadLocation("America/Havana")
+	if err != nil {
+		t.Fatalf("load Havana timezone: %v", err)
+	}
+	tests := []struct {
+		name  string
+		now   time.Time
+		input string
+		want  string
+	}{
+		{
+			name:  "today when midnight is skipped",
+			now:   time.Date(2026, time.March, 8, 12, 0, 0, 0, havana),
+			input: "2026-03-08",
+			want:  "Sunday 8 Mar (today)",
+		},
+		{
+			name:  "yesterday when today's midnight is skipped",
+			now:   time.Date(2026, time.March, 8, 12, 0, 0, 0, havana),
+			input: "2026-03-07",
+			want:  "Saturday 7 Mar (yesterday)",
+		},
+		{
+			name:  "yesterday when its midnight was skipped",
+			now:   time.Date(2026, time.March, 9, 12, 0, 0, 0, havana),
+			input: "2026-03-08",
+			want:  "Sunday 8 Mar (yesterday)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatCommitDateAt(tt.input, tt.now, havana); got != tt.want {
+				t.Errorf("formatCommitDateAt(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

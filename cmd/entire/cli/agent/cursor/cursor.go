@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // Compile-time interface assertion.
@@ -52,8 +53,6 @@ func (c *CursorAgent) Type() types.AgentType {
 func (c *CursorAgent) Description() string {
 	return "Cursor - AI-powered code editor"
 }
-
-func (c *CursorAgent) IsPreview() bool { return true }
 
 // DetectPresence checks if Cursor is configured in the repository.
 func (c *CursorAgent) DetectPresence(ctx context.Context) (bool, error) {
@@ -92,10 +91,29 @@ func (c *CursorAgent) ResolveSessionFile(sessionDir, agentSessionID string) stri
 	return filepath.Join(sessionDir, agentSessionID+".jsonl")
 }
 
+// ResolveSessionFileCandidates returns the nested <id>/<id>.jsonl layout
+// followed by the flat <id>.jsonl layout, so discovery still finds a session
+// whose nested directory exists but holds no transcript.
+func (c *CursorAgent) ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string {
+	return []string{
+		filepath.Join(sessionDir, agentSessionID, agentSessionID+".jsonl"),
+		filepath.Join(sessionDir, agentSessionID+".jsonl"),
+	}
+}
+
+var _ agent.SessionFileCandidatesProvider = (*CursorAgent)(nil)
+
 // ProtectedDirs returns directories that Cursor uses for config/state.
 func (c *CursorAgent) ProtectedDirs() []string { return []string{".cursor"} }
 
 // GetSessionDir returns the directory where Cursor stores session transcripts.
+// No relocation variable applies. Cursor's CLI bundle does resolve a data dir
+// from CURSOR_DATA_DIR and advertises <data>/projects/<hash>/agent-transcripts
+// to the model, but the transcript files are written by its native file
+// service, which stays anchored on the real home: with the variable set,
+// cursor-agent 2026.09.08 still writes them under ~/.cursor (verified locally).
+// Following the variable here would point resume, attach and owner detection
+// at a directory Cursor never writes to.
 func (c *CursorAgent) GetSessionDir(repoPath string) (string, error) {
 	if override := os.Getenv("ENTIRE_TEST_CURSOR_PROJECT_DIR"); override != "" {
 		return override, nil
@@ -122,9 +140,9 @@ func (c *CursorAgent) GetSessionBaseDir() (string, error) {
 }
 
 // ReadSession reads a session from Cursor's storage (JSONL transcript file).
-// Note: ModifiedFiles is left empty because Cursor's transcript does not contain
-// tool_use blocks for file detection. TranscriptAnalyzer extracts prompts and
-// summaries; file detection relies on git status.
+// ModifiedFiles is populated from the transcript's tool_use blocks; see
+// ExtractModifiedFiles. Git status remains the broader signal, since Cursor can
+// also change files through Shell commands that record no path.
 func (c *CursorAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {
 	if input.SessionRef == "" {
 		return nil, errors.New("session reference (transcript path) is required")
@@ -135,12 +153,18 @@ func (c *CursorAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, 
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}
 
+	lines, err := transcript.ParseFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
 	return &agent.AgentSession{
-		SessionID:  input.SessionID,
-		AgentName:  c.Name(),
-		SessionRef: input.SessionRef,
-		StartTime:  time.Now(),
-		NativeData: data,
+		SessionID:     input.SessionID,
+		AgentName:     c.Name(),
+		SessionRef:    input.SessionRef,
+		StartTime:     time.Now(),
+		NativeData:    data,
+		ModifiedFiles: ExtractModifiedFiles(lines),
 	}, nil
 }
 
@@ -220,8 +244,8 @@ func (c *CursorAgent) WriteSession(_ context.Context, session *agent.AgentSessio
 		return errors.New("session has no native data to write")
 	}
 
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	if err := agent.WriteSessionFile(c, session, session.NativeData, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil
@@ -254,3 +278,10 @@ func (c *CursorAgent) ChunkTranscript(_ context.Context, content []byte, maxSize
 func (c *CursorAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return agent.ReassembleJSONL(chunks), nil
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Cursor
+// publishes into the environment of the processes its shell tool spawns,
+// alongside CURSOR_AGENT. It is the same conversation ID every Cursor
+// lifecycle event reports as its session ID, so it resolves against session
+// state without translation.
+func (c *CursorAgent) CallerSessionEnvVar() string { return "CURSOR_CONVERSATION_ID" }

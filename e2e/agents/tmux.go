@@ -13,6 +13,7 @@ import (
 type TmuxSession struct {
 	name         string
 	stableAtSend string   // stable content snapshot when Send was last called
+	rawAtSend    string   // unstripped snapshot from the same moment
 	cleanups     []func() // run on Close
 }
 
@@ -64,31 +65,77 @@ func NewTmuxSession(name string, dir string, unsetEnv []string, command string, 
 }
 
 func (s *TmuxSession) Send(input string) error {
-	preSend := stableContent(s.Capture())
-	// Send text and Enter separately — Claude's TUI can swallow Enter
+	preSendRaw := s.Capture()
+	// Send text and Enter separately — TUIs (Claude, droid) can swallow Enter
 	// if it arrives before the input handler finishes processing the text.
+	// Droid ingests long pasted prompts over several seconds, so wait until
+	// the echoed input has fully rendered before submitting.
 	if err := s.SendKeys(input); err != nil {
 		return err
 	}
-	time.Sleep(200 * time.Millisecond)
-	if err := s.SendKeys("Enter"); err != nil {
-		return err
-	}
+	settled := s.waitForInputIngested(preSendRaw)
 
-	// Wait for the terminal to reflect the echoed input, then snapshot.
-	// This ensures WaitFor compares against post-echo content, preventing
-	// false matches on prompt characters (e.g. ❯) in the echoed input.
-	deadline := time.Now().Add(5 * time.Second)
+	// Snapshot the post-echo, pre-submit content. WaitFor requires content to
+	// change from this snapshot before it can settle, preventing false matches
+	// on prompt characters (e.g. ❯) in the echoed input. Taken before Enter so
+	// it can never include response output from a fast agent.
+	s.stableAtSend = stableContent(settled)
+	s.rawAtSend = settled
+
+	// Verify the pane reacted to Enter; a swallowed Enter leaves the prompt
+	// sitting unsubmitted in the input box. Retry a couple of times — TUIs
+	// treat Enter on an already-submitted (empty) input box as a no-op, and
+	// the vogon REPL ignores empty lines.
+	preEnter := settled
+	for range 3 {
+		if err := s.SendKeys("Enter"); err != nil {
+			return err
+		}
+		if s.paneChangedFrom(preEnter, 2*time.Second) {
+			break
+		}
+		preEnter = s.Capture()
+	}
+	return nil
+}
+
+// waitForInputIngested waits until the pane content has changed from preSend
+// (the echoed input is visible) and held still for two consecutive polls
+// (the TUI's input handler has caught up — droid renders long pastes in
+// bursts, so a single quiet interval can fake stability), then returns the
+// settled content. Gives up after 15s and returns the last capture.
+//
+// Compares raw captures: the input box lives in the bottom lines that
+// stableContent strips, so stable comparison would be blind to the echo.
+func (s *TmuxSession) waitForInputIngested(preSend string) string {
+	deadline := time.Now().Add(15 * time.Second)
+	last := s.Capture()
+	stablePolls := 0
 	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		current := stableContent(s.Capture())
-		if current != preSend {
-			s.stableAtSend = current
-			return nil
+		time.Sleep(300 * time.Millisecond)
+		current := s.Capture()
+		if current != last || current == preSend {
+			stablePolls = 0
+			last = current
+			continue
+		}
+		stablePolls++
+		if stablePolls >= 2 {
+			return current
 		}
 	}
-	s.stableAtSend = stableContent(s.Capture())
-	return nil
+	return last
+}
+
+func (s *TmuxSession) paneChangedFrom(prev string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		if s.Capture() != prev {
+			return true
+		}
+	}
+	return false
 }
 
 // SendKeys sends raw tmux key names without appending Enter.
@@ -115,6 +162,17 @@ func stableContent(content string) string {
 		lines = lines[:len(lines)-3]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// paneLines counts the lines in a pane capture. WaitFor compares growth
+// rather than raw inequality: the tail lines a capture ends with repaint on
+// their own (spinners, clocks, prompt redraws) without adding lines, so only
+// growth is evidence of appended output.
+func paneLines(content string) int {
+	if content == "" {
+		return 0
+	}
+	return strings.Count(content, "\n") + 1
 }
 
 func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, error) {
@@ -146,8 +204,14 @@ func (s *TmuxSession) WaitFor(pattern string, timeout time.Duration) (string, er
 			continue
 		}
 
-		// Detect content change since Send was called
-		if !contentChanged && stable != s.stableAtSend {
+		// Detect content change since Send was called. The stripped compare
+		// aliases when a fast agent's entire response fits in the stripped
+		// tail (a 2-line echo is identical before and after "Working/Done/>"
+		// are appended and stripped), so also accept the raw pane having
+		// grown: an unsubmitted echo plus tail-chrome repaints adds no lines.
+		// Copilot's custom Send leaves rawAtSend unset; the empty check keeps
+		// its exact previous behavior.
+		if !contentChanged && (stable != s.stableAtSend || (s.rawAtSend != "" && paneLines(content) > paneLines(s.rawAtSend))) {
 			contentChanged = true
 		}
 
@@ -195,6 +259,38 @@ func (s *TmuxSession) Close() error {
 	for _, fn := range s.cleanups {
 		fn()
 	}
+	return s.Terminate()
+}
+
+// Quit asks the foreground program to exit the way a user would — by sending
+// Ctrl+C — and waits for the process to actually exit. It sends Ctrl+C again
+// each poll because some TUIs (Codex among them) treat a single Ctrl+C as
+// "cancel the current turn" and need a second press to quit, and that gesture
+// is version-dependent. If the process has still not exited by timeout it falls
+// back to a hard kill: callers use Quit when they need the process gone (e.g.
+// to release a lock it holds) and must not hang on an agent that changed its
+// quit keybinding. Like Terminate, it does NOT run the OnClose cleanups, so a
+// caller that needs a registered resource torn down owns that itself.
+func (s *TmuxSession) Quit(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if s.IsPaneDead() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return s.Terminate()
+		}
+		_ = s.SendKeys("C-c")
+		time.Sleep(pollInterval)
+	}
+}
+
+// Terminate kills the tmux session (and the process it runs) WITHOUT running
+// the registered OnClose cleanups. Use it when the process must die but a
+// resource it registered for teardown — e.g. an isolated HOME that a later
+// step in the same test still reads — has to outlive the process. Callers that
+// bypass Close this way own the surviving resource's cleanup themselves.
+func (s *TmuxSession) Terminate() error {
 	cmd := exec.Command("tmux", "kill-session", "-t", s.name)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

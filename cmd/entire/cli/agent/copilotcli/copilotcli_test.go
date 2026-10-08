@@ -58,14 +58,6 @@ func TestCopilotCLIAgent_Description(t *testing.T) {
 	}
 }
 
-func TestCopilotCLIAgent_IsPreview(t *testing.T) {
-	t.Parallel()
-	ag := &CopilotCLIAgent{}
-	if !ag.IsPreview() {
-		t.Error("IsPreview() = false, want true")
-	}
-}
-
 func TestCopilotCLIAgent_ProtectedDirs(t *testing.T) {
 	t.Parallel()
 	ag := &CopilotCLIAgent{}
@@ -124,9 +116,25 @@ func TestCopilotCLIAgent_GetSessionDir_EnvOverride(t *testing.T) {
 	}
 }
 
+func TestCopilotCLIAgent_GetSessionDir_CopilotHome(t *testing.T) {
+	ag := &CopilotCLIAgent{}
+	t.Setenv("ENTIRE_TEST_COPILOT_SESSION_DIR", "")
+	t.Setenv("COPILOT_HOME", filepath.Join("/tmp", "isolated-copilot"))
+
+	dir, err := ag.GetSessionDir("/some/repo")
+	if err != nil {
+		t.Fatalf("GetSessionDir() error = %v", err)
+	}
+	want := filepath.Join("/tmp", "isolated-copilot", "session-state")
+	if dir != want {
+		t.Errorf("GetSessionDir() = %q, want %q", dir, want)
+	}
+}
+
 func TestCopilotCLIAgent_GetSessionDir_DefaultPath(t *testing.T) {
 	ag := &CopilotCLIAgent{}
 	t.Setenv("ENTIRE_TEST_COPILOT_SESSION_DIR", "")
+	t.Setenv("COPILOT_HOME", "")
 
 	dir, err := ag.GetSessionDir("/some/repo")
 	if err != nil {

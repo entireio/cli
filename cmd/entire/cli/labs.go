@@ -9,51 +9,51 @@ import (
 )
 
 type experimentalCommandInfo struct {
-	Name       string
-	Invocation string
-	Summary    string
+	CommandPath []string
+	Invocation  string
+	Summary     string
 }
 
 var experimentalCommands = []experimentalCommandInfo{
 	{
-		Name:       "review",
-		Invocation: "entire review",
-		Summary:    "Run configured review skills against the current branch",
+		CommandPath: []string{cmdReview},
+		Invocation:  "entire review",
+		Summary:     "Run a multi-agent review against the current branch",
 	},
 	{
-		Name:       "investigate",
-		Invocation: "entire investigate",
-		Summary:    "Run a multi-agent investigation against a topic, issue, or seed doc",
+		CommandPath: []string{"import", "claude-code"},
+		Invocation:  "entire import claude-code",
+		Summary:     "Import existing Claude Code transcripts as local, read-only history",
 	},
 	{
-		Name:       "org",
-		Invocation: "entire org",
-		Summary:    "Manage Entire organizations (create, list)",
+		CommandPath: []string{cmdTokens},
+		Invocation:  "entire tokens",
+		Summary:     "Analyze experimental token usage diagnostics",
 	},
 	{
-		Name:       "project",
-		Invocation: "entire project",
-		Summary:    "Manage Entire projects (create, list)",
+		CommandPath: []string{"tokens", "profile"},
+		Invocation:  "entire tokens profile",
+		Summary:     "Aggregate token usage across committed checkpoints",
 	},
 	{
-		Name:       "repo",
-		Invocation: "entire repo",
-		Summary:    "Manage Entire repositories (create, list, get, delete)",
+		CommandPath: []string{cmdSession, cmdTokens},
+		Invocation:  "entire session tokens",
+		Summary:     "Show token usage and recommendations for a session",
 	},
 	{
-		Name:       "grant",
-		Invocation: "entire grant",
-		Summary:    "Manage access grants and org membership (org, project, repo)",
+		CommandPath: []string{"blame"},
+		Invocation:  "entire blame",
+		Summary:     "Show which lines came from Entire checkpoints",
 	},
 	{
-		Name:       "blame",
-		Invocation: "entire blame",
-		Summary:    "Show which lines came from Entire checkpoints",
+		CommandPath: []string{"why"},
+		Invocation:  "entire why",
+		Summary:     "Show why a line exists (commit, checkpoint, prompt, session)",
 	},
 	{
-		Name:       "why",
-		Invocation: "entire why",
-		Summary:    "Show why a line exists (commit, checkpoint, prompt, session)",
+		CommandPath: []string{"experts"},
+		Invocation:  "entire experts",
+		Summary:     "Show agent, skill, and tool provenance for files or topics",
 	},
 }
 
@@ -96,13 +96,12 @@ Available experimental commands:
 ` + renderExperimentalCommands(experimentalCommands) + `
 Try:
   entire review --help
-  entire investigate --help
-  entire org --help
-  entire project --help
-  entire repo --help
-  entire grant --help
+  entire tokens --help
+  entire tokens profile --help
+  entire session tokens --help
   entire blame --help
   entire why --help
+  entire experts --help
 `
 }
 

@@ -40,7 +40,7 @@ func TestSubagentAccumulation_Issue591(t *testing.T) {
 	const numSubagents = 4
 	subagents := make([]subagentInfo, 0, numSubagents)
 
-	for i := 0; i < numSubagents; i++ {
+	for i := range numSubagents {
 		sub := env.NewSession()
 		file := fmt.Sprintf("subagent_work_%d.go", i)
 		content := fmt.Sprintf("package main\n\nfunc SubagentWork%d() {}\n", i)
@@ -57,7 +57,7 @@ func TestSubagentAccumulation_Issue591(t *testing.T) {
 		// Commit the subagent's file BEFORE stopping, so FilesTouched is empty at stop time.
 		// This allows CondenseAndMarkFullyCondensed to eagerly condense at stop.
 		env.GitAdd(file)
-		env.GitCommitWithShadowHooks("Add "+file+" from subagent", file)
+		env.GitCommitWithHooks("Add "+file+" from subagent", file)
 
 		if err := env.SimulateStop(sub.ID, sub.TranscriptPath); err != nil {
 			t.Fatalf("SimulateStop for subagent %d failed: %v", i, err)
@@ -107,7 +107,7 @@ func TestSubagentAccumulation_Issue591(t *testing.T) {
 		t.Fatalf("SimulateStop for parent failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Parent commit", parentFile)
+	env.GitCommitWithHooks("Parent commit", parentFile)
 
 	t.Log("Phase 3: verify FullyCondensed subagents were skipped or cleaned up by PostCommit")
 
@@ -116,10 +116,10 @@ func TestSubagentAccumulation_Issue591(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetSessionState after parent commit for subagent %d failed: %v", i, err)
 		}
-		// State may be nil: listAllSessionStates cleans up ENDED sessions whose
-		// shadow branch was deleted and LastCheckpointID is empty. This is expected
-		// for sessions that were eagerly condensed at stop time (shadow branch cleaned
-		// up before PostCommit could set LastCheckpointID).
+		// State may be nil: listAllSessionStates cleans up ENDED sessions with
+		// no pending work and an empty LastCheckpointID. This is expected for
+		// sessions that were eagerly condensed at stop time (pending work consumed
+		// before PostCommit could set LastCheckpointID).
 		if state == nil {
 			t.Logf("subagent %d state cleaned up after parent commit — OK (eagerly condensed)", i)
 			continue
@@ -149,7 +149,7 @@ func TestSubagentAccumulation_Issue591(t *testing.T) {
 		t.Fatalf("SimulateStop for follow-up session failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Follow-up commit", followUpFile)
+	env.GitCommitWithHooks("Follow-up commit", followUpFile)
 
 	for i, sub := range subagents {
 		state, err := env.GetSessionState(sub.SessionID)

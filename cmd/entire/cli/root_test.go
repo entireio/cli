@@ -6,8 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
 
 func TestVersionFlag_OutputMatchesVersionCmd(t *testing.T) {
@@ -212,7 +214,7 @@ func TestRoot_NounGroupShorthandsUseCobraAliases(t *testing.T) {
 	}
 }
 
-func TestCheckpointSearchIsVisibleButTopLevelSearchIsHidden(t *testing.T) {
+func TestSearchIsVisibleAtTopLevelAndUnderCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	root := NewRootCmd()
@@ -225,12 +227,94 @@ func TestCheckpointSearchIsVisibleButTopLevelSearchIsHidden(t *testing.T) {
 		t.Fatal("checkpoint search should be visible in checkpoint help")
 	}
 
+	// The top-level `entire search` is the canonical spelling: visible in
+	// every build (not experimental-gated) and grouped with sessions.
 	topLevelSearch, _, err := root.Find([]string{"search"})
 	if err != nil {
 		t.Fatalf("find top-level search: %v", err)
 	}
-	if !topLevelSearch.Hidden {
-		t.Fatal("top-level search should remain hidden as a compatibility alias")
+	if topLevelSearch.Hidden {
+		t.Fatal("top-level search should be visible in every build")
+	}
+	if topLevelSearch.GroupID != groupSessions {
+		t.Fatalf("top-level search GroupID = %q, want %q", topLevelSearch.GroupID, groupSessions)
+	}
+}
+
+func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
+	t.Parallel()
+
+	// Commands intentionally left out of any group. version, labs, agent-help,
+	// and help render under cobra's "Additional Commands"; completion is
+	// allowlisted for completeness but never renders (hidden via
+	// CompletionOptions.HiddenDefaultCmd in NewRootCmd).
+	ungrouped := map[string]bool{
+		"version":    true,
+		"labs":       true,
+		"agent-help": true,
+		"help":       true,
+		"completion": true,
+	}
+
+	wantGroups := map[string]string{
+		"enable":     groupSetup,
+		"disable":    groupSetup,
+		"configure":  groupSetup,
+		"agent":      groupSetup,
+		"plugin":     groupSetup,
+		"status":     groupSetup,
+		"doctor":     groupSetup,
+		"clean":      groupSetup,
+		"session":    groupSessions,
+		"checkpoint": groupSessions,
+		"search":     groupSessions,
+		"recap":      groupSessions,
+		"activity":   groupSessions,
+		"dispatch":   groupSessions,
+		"login":      groupAccount,
+		"logout":     groupAccount,
+		"auth":       groupAccount,
+		"cluster":    groupControlPlane,
+		"org":        groupControlPlane,
+		"project":    groupControlPlane,
+		"repo":       groupControlPlane,
+		"api":        groupControlPlane,
+	}
+
+	root := NewRootCmd()
+
+	registered := make(map[string]bool)
+	for _, g := range root.Groups() {
+		registered[g.ID] = true
+	}
+
+	for _, c := range root.Commands() {
+		if c.Hidden || c.Deprecated != "" {
+			continue
+		}
+		// Experimental commands are grouped by experimental.Register (visible
+		// only in developer/nightly builds) — not part of this table.
+		if c.GroupID == experimental.GroupID {
+			continue
+		}
+		name := c.Name()
+		if ungrouped[name] {
+			if c.GroupID != "" {
+				t.Errorf("%q should stay ungrouped, got GroupID %q", name, c.GroupID)
+			}
+			continue
+		}
+		want, ok := wantGroups[name]
+		if !ok {
+			t.Errorf("visible command %q missing from group table; assign it a group or add it to the ungrouped allowlist", name)
+			continue
+		}
+		if c.GroupID != want {
+			t.Errorf("%q GroupID = %q, want %q", name, c.GroupID, want)
+		}
+		if !registered[want] {
+			t.Errorf("group %q used by %q is not registered on root (cobra panics at Execute)", want, name)
+		}
 	}
 }
 
@@ -241,4 +325,50 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestCommandGroupsRejectUnknownSubcommands pins that a group answers an
+// unknown subcommand with an error instead of printing help and reporting
+// success. Removing a verb must make its old spelling fail, not silently do
+// nothing: `entire auth use prod && entire repo delete …` would otherwise
+// delete under the previous identity.
+//
+// Each group is executed under a parent, which is what the bug needs: cobra
+// rejects an unknown subcommand only on a parentless command, and below that it
+// returns flag.ErrHelp for any command with no RunE before it ever validates
+// arguments. So NoArgs alone is a no-op on a group; it needs a RunE too.
+func TestCommandGroupsRejectUnknownSubcommands(t *testing.T) {
+	t.Parallel()
+
+	groups := map[string]func() *cobra.Command{
+		"auth":            newAuthCmd,
+		"repo":            newRepoCmd,
+		"repo grant":      newRepoGrantCmd,
+		"repo mirror":     newRepoMirrorCmd,
+		"repo protection": newRepoProtectionCmd,
+		"repo remote":     newRepoRemoteCmd,
+		"repo visibility": newRepoVisibilityCmd,
+	}
+	for name, newCmd := range groups {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			run := func(args ...string) error {
+				group := newCmd()
+				parent := &cobra.Command{Use: "entire"}
+				parent.AddCommand(group)
+				parent.SetOut(&bytes.Buffer{})
+				parent.SetErr(&bytes.Buffer{})
+				// SetArgs(nil) makes cobra read os.Args, which under `go test`
+				// is the test binary's own flags.
+				parent.SetArgs(append([]string{group.Name()}, args...))
+				return parent.ExecuteContext(t.Context())
+			}
+
+			require.Error(t, run("definitely-not-a-subcommand"),
+				"an unknown subcommand must not report success")
+			require.NoError(t, run(),
+				"the bare group must still print its help and succeed")
+		})
+	}
 }

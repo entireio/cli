@@ -4,14 +4,15 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,9 +39,9 @@ func TestFilesOverlapWithContent_ModifiedFile(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create shadow branch with same file content as session created
+	// Record turn-end hashes with same file content as session created
 	sessionContent := []byte("session modified content")
-	createShadowBranchWithContent(t, repo, "abc1234", "e3b0c4", map[string][]byte{
+	hashes := recordedHashes(map[string][]byte{
 		"test.txt": sessionContent,
 	})
 
@@ -58,8 +59,7 @@ func TestFilesOverlapWithContent_ModifiedFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test: Modified file should count as overlap even with different content
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("abc1234", "e3b0c4")
-	result := filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"test.txt"})
+	result := filesOverlapWithContent(context.Background(), hashes, commit, []string{"test.txt"})
 	assert.True(t, result, "Modified file should count as overlap (user edited session's work)")
 }
 
@@ -72,9 +72,9 @@ func TestFilesOverlapWithContent_NewFile_ContentMatch(t *testing.T) {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Create shadow branch with a new file
+	// Record turn-end hashes with a new file
 	originalContent := []byte("session created this content")
-	createShadowBranchWithContent(t, repo, "def5678", "e3b0c4", map[string][]byte{
+	hashes := recordedHashes(map[string][]byte{
 		"newfile.txt": originalContent,
 	})
 
@@ -95,27 +95,29 @@ func TestFilesOverlapWithContent_NewFile_ContentMatch(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test: New file with matching content should count as overlap
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("def5678", "e3b0c4")
-	result := filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"newfile.txt"})
+	result := filesOverlapWithContent(context.Background(), hashes, commit, []string{"newfile.txt"})
 	assert.True(t, result, "New file with matching content should count as overlap")
 }
 
-// TestFilesOverlapWithContent_NewFile_ContentMismatch tests that a new file with
-// completely different content does NOT count as overlap (reverted & replaced scenario).
-func TestFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
+// TestFilesOverlapWithContent_NewFile_UserRewriteStillLinks tests that a new file
+// committed with different content than the agent left still links: linking is
+// by name, because editing an agent-created file before committing it is far
+// more common than replacing it.
+func TestFilesOverlapWithContent_NewFile_UserRewriteStillLinks(t *testing.T) {
 	t.Parallel()
 	dir := setupGitRepo(t)
 
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Create shadow branch with a file
+	// Record turn-end hashes with a file
 	sessionContent := []byte("session created this")
-	createShadowBranchWithContent(t, repo, "ghi9012", "e3b0c4", map[string][]byte{
+	hashes := recordedHashes(map[string][]byte{
 		"replaced.txt": sessionContent,
 	})
 
-	// Commit a file with COMPLETELY DIFFERENT content (user reverted & replaced)
+	// Commit the file with different content than the agent left (the user
+	// edited, or even rewrote, the agent's new file before committing).
 	testFile := filepath.Join(dir, "replaced.txt")
 	require.NoError(t, os.WriteFile(testFile, []byte("user wrote something totally unrelated"), 0o644))
 
@@ -131,10 +133,36 @@ func TestFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
 	commit, err := repo.CommitObject(headCommit)
 	require.NoError(t, err)
 
-	// Test: New file with different content should NOT count as overlap
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("ghi9012", "e3b0c4")
-	result := filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"replaced.txt"})
-	assert.False(t, result, "New file with different content should NOT count as overlap (reverted & replaced)")
+	// Linking is by name: the commit carries a path the session created.
+	result := filesOverlapWithContent(context.Background(), hashes, commit, []string{"replaced.txt"})
+	assert.True(t, result, "a new file in FilesTouched links by name, whatever its committed content")
+}
+
+// TestFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink pins the one
+// exception to name matching: the agent's last action on the path was deleting
+// it, so a commit that adds the path as a new file re-creates someone else's
+// file and does not link.
+func TestFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "recreated.txt"), []byte("re-created by the user"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("recreated.txt")
+	require.NoError(t, err)
+	headCommit, err := wt.Commit("Re-create file", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(headCommit)
+	require.NoError(t, err)
+
+	hashes := map[string]string{"recreated.txt": touchedFileDeleted}
+	assert.False(t, filesOverlapWithContent(context.Background(), hashes, commit, []string{"recreated.txt"}))
 }
 
 // TestFilesOverlapWithContent_FileNotInCommit tests that a file in filesTouched
@@ -146,10 +174,10 @@ func TestFilesOverlapWithContent_FileNotInCommit(t *testing.T) {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Create shadow branch with files
+	// Record turn-end hashes with files
 	fileAContent := []byte("file A content")
 	fileBContent := []byte("file B content")
-	createShadowBranchWithContent(t, repo, "jkl3456", "e3b0c4", map[string][]byte{
+	hashes := recordedHashes(map[string][]byte{
 		"fileA.txt": fileAContent,
 		"fileB.txt": fileBContent,
 	})
@@ -171,12 +199,11 @@ func TestFilesOverlapWithContent_FileNotInCommit(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test: Only fileB in filesTouched, which is not in commit
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("jkl3456", "e3b0c4")
-	result := filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"fileB.txt"})
+	result := filesOverlapWithContent(context.Background(), hashes, commit, []string{"fileB.txt"})
 	assert.False(t, result, "File not in commit should not count as overlap")
 
 	// Test: fileA in filesTouched and in commit - should overlap (new file with matching content)
-	result = filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"fileA.txt"})
+	result = filesOverlapWithContent(context.Background(), hashes, commit, []string{"fileA.txt"})
 	assert.True(t, result, "File in commit with matching content should count as overlap")
 }
 
@@ -203,8 +230,8 @@ func TestFilesOverlapWithContent_DeletedFile(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create shadow branch (simulating agent work that includes the deletion)
-	createShadowBranchWithContent(t, repo, "del1234", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes (simulating agent work that includes the deletion)
+	hashes := recordedHashes(map[string][]byte{
 		"other.txt": []byte("other content"),
 	})
 
@@ -220,20 +247,21 @@ func TestFilesOverlapWithContent_DeletedFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test: deleted file in filesTouched should count as overlap
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("del1234", "e3b0c4")
-	result := filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"to_delete.txt"})
+	result := filesOverlapWithContent(context.Background(), hashes, commit, []string{"to_delete.txt"})
 	assert.True(t, result, "Deleted file should count as overlap (agent's deletion being committed)")
 }
 
-// TestFilesOverlapWithContent_NoShadowBranch tests fallback when shadow branch doesn't exist.
-func TestFilesOverlapWithContent_NoShadowBranch(t *testing.T) {
+// TestFilesOverlapWithContent_NoRecordedHash tests the name-match fallback for
+// a new file with no recorded hash (e.g. it reached FilesTouched via a task
+// record, not a turn-end step).
+func TestFilesOverlapWithContent_NoRecordedHash(t *testing.T) {
 	t.Parallel()
 	dir := setupGitRepo(t)
 
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Create a commit without any shadow branch
+	// Create a commit adding a file nothing recorded a hash for
 	testFile := filepath.Join(dir, "test.txt")
 	require.NoError(t, os.WriteFile(testFile, []byte("content"), 0o644))
 	wt, err := repo.Worktree()
@@ -248,9 +276,13 @@ func TestFilesOverlapWithContent_NoShadowBranch(t *testing.T) {
 	commit, err := repo.CommitObject(headCommit)
 	require.NoError(t, err)
 
-	// Test: Non-existent shadow branch should fall back to assuming overlap
-	result := filesOverlapWithContent(context.Background(), repo, "entire/nonexistent-e3b0c4", commit, []string{"test.txt"})
-	assert.True(t, result, "Missing shadow branch should fall back to assuming overlap")
+	// Test: a path without a recorded hash falls back to name matching
+	result := filesOverlapWithContent(context.Background(), nil, commit, []string{"test.txt"})
+	assert.True(t, result, "A committed path without a recorded hash should match by name")
+
+	// ...but a path absent from the commit still does not overlap.
+	result = filesOverlapWithContent(context.Background(), nil, commit, []string{"elsewhere.txt"})
+	assert.False(t, result, "Name matching must still require the path to be committed")
 }
 
 // TestFilesWithRemainingAgentChanges_FileNotCommitted tests that files not in the commit
@@ -262,15 +294,16 @@ func TestFilesWithRemainingAgentChanges_FileNotCommitted(t *testing.T) {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Create shadow branch with two files
-	createShadowBranchWithContent(t, repo, "abc1234", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes with two files
+	hashes := recordedHashes(map[string][]byte{
 		"fileA.txt": []byte("content A"),
 		"fileB.txt": []byte("content B"),
 	})
 
-	// Only commit fileA
+	// The agent wrote both files; only fileA is committed.
 	fileA := filepath.Join(dir, "fileA.txt")
 	require.NoError(t, os.WriteFile(fileA, []byte("content A"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "fileB.txt"), []byte("content B"), 0o644))
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
 	_, err = wt.Add("fileA.txt")
@@ -283,11 +316,10 @@ func TestFilesWithRemainingAgentChanges_FileNotCommitted(t *testing.T) {
 	commit, err := repo.CommitObject(headCommit)
 	require.NoError(t, err)
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("abc1234", "e3b0c4")
 	committedFiles := map[string]struct{}{"fileA.txt": {}}
 
 	// fileB was not committed - should be in remaining
-	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit, []string{"fileA.txt", "fileB.txt"}, committedFiles)
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit, []string{"fileA.txt", "fileB.txt"}, committedFiles)
 	assert.Equal(t, []string{"fileB.txt"}, remaining, "Uncommitted file should be in remaining")
 }
 
@@ -302,8 +334,8 @@ func TestFilesWithRemainingAgentChanges_FullyCommitted(t *testing.T) {
 
 	content := []byte("exact same content")
 
-	// Create shadow branch with file
-	createShadowBranchWithContent(t, repo, "def5678", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes with file
+	hashes := recordedHashes(map[string][]byte{
 		"test.txt": content,
 	})
 
@@ -322,11 +354,10 @@ func TestFilesWithRemainingAgentChanges_FullyCommitted(t *testing.T) {
 	commit, err := repo.CommitObject(headCommit)
 	require.NoError(t, err)
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("def5678", "e3b0c4")
 	committedFiles := map[string]struct{}{"test.txt": {}}
 
 	// File was fully committed - should NOT be in remaining
-	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit, []string{"test.txt"}, committedFiles)
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit, []string{"test.txt"}, committedFiles)
 	assert.Empty(t, remaining, "Fully committed file should not be in remaining")
 }
 
@@ -340,9 +371,9 @@ func TestFilesWithRemainingAgentChanges_PartialCommit(t *testing.T) {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Shadow branch has the full agent content
+	// The recorded hash is of the full agent content
 	fullContent := []byte("line 1\nline 2\nline 3\nline 4\n")
-	createShadowBranchWithContent(t, repo, "ghi9012", "e3b0c4", map[string][]byte{
+	hashes := recordedHashes(map[string][]byte{
 		"test.txt": fullContent,
 	})
 
@@ -366,11 +397,10 @@ func TestFilesWithRemainingAgentChanges_PartialCommit(t *testing.T) {
 	commit, err := repo.CommitObject(headCommit)
 	require.NoError(t, err)
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("ghi9012", "e3b0c4")
 	committedFiles := map[string]struct{}{"test.txt": {}}
 
 	// Content doesn't match and working tree is dirty - file should be in remaining
-	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit, []string{"test.txt"}, committedFiles)
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit, []string{"test.txt"}, committedFiles)
 	assert.Equal(t, []string{"test.txt"}, remaining, "Partially committed file with dirty working tree should be in remaining")
 }
 
@@ -384,9 +414,9 @@ func TestFilesWithRemainingAgentChanges_ReplacedContent(t *testing.T) {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Shadow branch has the agent's content
+	// The recorded hash is of the agent's content
 	agentContent := []byte("func GetPort() int { return 8080 }\n")
-	createShadowBranchWithContent(t, repo, "rep1234", "e3b0c4", map[string][]byte{
+	hashes := recordedHashes(map[string][]byte{
 		"config.go": agentContent,
 	})
 
@@ -408,23 +438,130 @@ func TestFilesWithRemainingAgentChanges_ReplacedContent(t *testing.T) {
 	commit, err := repo.CommitObject(headCommit)
 	require.NoError(t, err)
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("rep1234", "e3b0c4")
 	committedFiles := map[string]struct{}{"config.go": {}}
 
-	// Content differs from shadow but working tree is clean — no carry-forward
-	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit, []string{"config.go"}, committedFiles)
+	// Content differs from the recorded hash but working tree is clean — no carry-forward
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit, []string{"config.go"}, committedFiles)
 	assert.Empty(t, remaining, "Replaced content with clean working tree should not be in remaining")
 }
 
-// TestFilesWithRemainingAgentChanges_NoShadowBranch tests fallback to file-level subtraction.
-func TestFilesWithRemainingAgentChanges_NoShadowBranch(t *testing.T) {
+// TestFilesWithRemainingAgentChanges_AutocrlfNormalizedWorkingTree verifies that
+// line-ending normalization does not create phantom carry-forward files.
+func TestFilesWithRemainingAgentChanges_AutocrlfNormalizedWorkingTree(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	testutil.RunGit(t, dir, "config", "core.autocrlf", "true")
+
+	agentContent := []byte("package main\r\n\r\nimport \"fmt\"\r\n\r\nfunc main() {\r\n\tfmt.Println(\"hello world\")\n\tfmt.Println(\"goodbye world\")\n}\n")
+	hashes := recordedHashes(map[string][]byte{
+		"src/main.go": agentContent,
+	})
+
+	workingTreeContent := "package main\r\n\r\nimport \"fmt\"\r\n\r\nfunc main() {\r\n\tfmt.Println(\"hello world\")\r\n\tfmt.Println(\"goodbye world\")\r\n}\r\n"
+	testutil.WriteFile(t, dir, "src/main.go", workingTreeContent)
+	testutil.RunGit(t, dir, "add", "--", "src/main.go")
+	testutil.RunGit(t, dir, "commit", "-m", "Commit normalized content")
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	committedFile, err := commit.File("src/main.go")
+	require.NoError(t, err)
+	committedContent, err := committedFile.Contents()
+	require.NoError(t, err)
+	assert.NotContains(t, committedContent, "\r\n", "native git add must normalize the committed blob to LF")
+	diskContent, err := os.ReadFile(filepath.Join(dir, "src", "main.go"))
+	require.NoError(t, err)
+	assert.Equal(t, workingTreeContent, string(diskContent), "the working tree must retain CRLF bytes")
+
+	committedFiles := map[string]struct{}{"src/main.go": {}}
+
+	// Git reports no diff here even though the on-disk bytes are CRLF and the
+	// committed blob is LF-normalized under core.autocrlf=true.
+	testutil.RunGit(t, dir, "diff", "--exit-code", "--", "src/main.go")
+
+	remaining := filesWithRemainingAgentChanges(t.Context(), repo, hashes, commit, []string{"src/main.go"}, committedFiles)
+	assert.Empty(t, remaining, "autocrlf-only working tree differences should not be carried forward")
+}
+
+// TestFilesWithRemainingAgentChanges_ComparesWorktreeToCommitNotIndex is a
+// design pin: it passes with the raw-hash fallback too, but fails if the native
+// Git check is simplified to an index-relative bare `git diff`.
+func TestFilesWithRemainingAgentChanges_ComparesWorktreeToCommitNotIndex(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	hashes := recordedHashes(map[string][]byte{
+		"config.go": []byte("agent content\n"),
+	})
+
+	testutil.WriteFile(t, dir, "config.go", "committed replacement\n")
+	testutil.GitAdd(t, dir, "config.go")
+	testutil.GitCommit(t, dir, "Replace config")
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+
+	// Move both the index and working tree past the commit. A plain `git diff`
+	// reports clean because it compares these two, but carry-forward must compare
+	// the working tree with the commit that was just created.
+	testutil.WriteFile(t, dir, "config.go", "next staged change\n")
+	testutil.GitAdd(t, dir, "config.go")
+	testutil.RunGit(t, dir, "diff", "--exit-code", "--", "config.go")
+
+	committedFiles := map[string]struct{}{"config.go": {}}
+	remaining := filesWithRemainingAgentChanges(t.Context(), repo, hashes, commit, []string{"config.go"}, committedFiles)
+	assert.Equal(t, []string{"config.go"}, remaining)
+}
+
+// A committed symlink is judged by git status, which compares the link target
+// with the symlink blob: unchanged after the commit it is done; retargeted it
+// is still pending. Uses t.Chdir — do NOT add t.Parallel().
+func TestFilesWithRemainingAgentChanges_SymlinkJudgedByStatus(t *testing.T) {
+	testutil.SkipWithoutSymlinks(t)
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	require.NoError(t, os.Symlink("real.txt", filepath.Join(dir, "link.txt")))
+	testutil.RunGit(t, dir, "add", "link.txt")
+	testutil.RunGit(t, dir, "commit", "-q", "-m", "link")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	commit := headCommit(t, dir)
+	committed := map[string]struct{}{"link.txt": {}}
+
+	assert.Empty(t, filesWithRemainingAgentChanges(t.Context(), repo, nil, commit, []string{"link.txt"}, committed),
+		"an unchanged committed symlink is done")
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "link.txt")))
+	require.NoError(t, os.Symlink("other.txt", filepath.Join(dir, "link.txt")))
+	assert.Equal(t, []string{"link.txt"},
+		filesWithRemainingAgentChanges(t.Context(), repo, nil, commit, []string{"link.txt"}, committed),
+		"a retargeted symlink still differs from the commit")
+}
+
+// TestFilesWithRemainingAgentChanges_NoRecordedHash tests the fallback to
+// file-level subtraction for paths without a recorded hash, including the
+// phantom-path guard for uncommitted paths missing from the worktree.
+func TestFilesWithRemainingAgentChanges_NoRecordedHash(t *testing.T) {
 	t.Parallel()
 	dir := setupGitRepo(t)
 
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Create a commit without any shadow branch
+	// Create a commit; nothing recorded hashes for these paths
 	testFile := filepath.Join(dir, "test.txt")
 	require.NoError(t, os.WriteFile(testFile, []byte("content"), 0o644))
 	wt, err := repo.Worktree()
@@ -439,17 +576,49 @@ func TestFilesWithRemainingAgentChanges_NoShadowBranch(t *testing.T) {
 	commit, err := repo.CommitObject(headCommit)
 	require.NoError(t, err)
 
-	// Non-existent shadow branch should fall back to file-level subtraction
+	// other.txt exists but is uncommitted; phantom.txt was never created.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "other.txt"), []byte("uncommitted"), 0o644))
 	committedFiles := map[string]struct{}{"test.txt": {}}
-	remaining := filesWithRemainingAgentChanges(context.Background(), repo, "entire/nonexistent-e3b0c4", commit, []string{"test.txt", "other.txt"}, committedFiles)
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, nil, commit, []string{"test.txt", "other.txt", "phantom.txt"}, committedFiles)
 
-	// With file-level subtraction: test.txt is in committedFiles, other.txt is not
-	assert.Equal(t, []string{"other.txt"}, remaining, "Fallback should use file-level subtraction")
+	// test.txt is committed and the worktree matches the commit, other.txt is
+	// not committed; phantom.txt is neither committed nor in the worktree.
+	assert.Equal(t, []string{"other.txt"}, remaining, "unhashed paths: committed-and-clean drops, uncommitted stays, phantom drops")
 }
 
-// resolveCommitTrees is a test helper that resolves HEAD tree, parent tree, and
-// shadow tree from a commit and shadow branch. Used to test cache equivalence.
-func resolveCommitTrees(t *testing.T, repo *git.Repository, commit *object.Commit, shadowBranchName string) (headTree, parentTree, shadowTree *object.Tree) {
+// TestFilesWithRemainingAgentChanges_NoRecordedHash_PartialCommitKept: a
+// committed path with no recorded hash (an upgraded session, or one whose hash
+// MergeUnhashedFilesTouched cleared) stays while the worktree still holds more
+// than was committed, as a hashed path would.
+func TestFilesWithRemainingAgentChanges_NoRecordedHash_PartialCommitKept(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// The user commits the first half of the file...
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "half.txt"), []byte("first half\n"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("half.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Commit half", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+	// ...while the rest is still in the worktree.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "half.txt"), []byte("first half\nsecond half\n"), 0o644))
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, nil, commit,
+		[]string{"half.txt"}, map[string]struct{}{"half.txt": {}})
+	assert.Equal(t, []string{"half.txt"}, remaining)
+}
+
+// resolveCommitTrees is a test helper that resolves the HEAD tree and parent
+// tree of a commit. Used to test cache equivalence.
+func resolveCommitTrees(t *testing.T, commit *object.Commit) (headTree, parentTree *object.Tree) {
 	t.Helper()
 
 	var err error
@@ -463,16 +632,7 @@ func resolveCommitTrees(t *testing.T, repo *git.Repository, commit *object.Commi
 		require.NoError(t, err)
 	}
 
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	shadowRef, err := repo.Reference(refName, true)
-	if err == nil {
-		shadowCommit, err := repo.CommitObject(shadowRef.Hash())
-		require.NoError(t, err)
-		shadowTree, err = shadowCommit.Tree()
-		require.NoError(t, err)
-	}
-
-	return headTree, parentTree, shadowTree
+	return headTree, parentTree
 }
 
 // TestFilesOverlapWithContent_CacheEquivalence verifies that calling
@@ -497,8 +657,8 @@ func TestFilesOverlapWithContent_CacheEquivalence(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create shadow branch
-	createShadowBranchWithContent(t, repo, "abc1234", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes
+	hashes := recordedHashes(map[string][]byte{
 		"test.txt": []byte("session modified"),
 	})
 
@@ -514,16 +674,14 @@ func TestFilesOverlapWithContent_CacheEquivalence(t *testing.T) {
 	commit, err := repo.CommitObject(headHash)
 	require.NoError(t, err)
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("abc1234", "e3b0c4")
-	headTree, parentTree, shadowTree := resolveCommitTrees(t, repo, commit, shadowBranch)
+	headTree, parentTree := resolveCommitTrees(t, commit)
 
 	// Cache miss (no opts)
-	resultWithout := filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"test.txt"})
+	resultWithout := filesOverlapWithContent(context.Background(), hashes, commit, []string{"test.txt"})
 
 	// Cache hit (all trees pre-resolved)
-	resultWith := filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"test.txt"}, overlapOpts{
+	resultWith := filesOverlapWithContent(context.Background(), hashes, commit, []string{"test.txt"}, overlapOpts{
 		headTree:      headTree,
-		shadowTree:    shadowTree,
 		parentTree:    parentTree,
 		hasParentTree: true,
 	})
@@ -532,8 +690,8 @@ func TestFilesOverlapWithContent_CacheEquivalence(t *testing.T) {
 	assert.True(t, resultWith, "Modified file should count as overlap")
 }
 
-// TestFilesOverlapWithContent_PartialCache verifies correct behavior when only
-// some trees are pre-resolved (e.g., headTree cached but shadowTree nil).
+// TestFilesOverlapWithContent_PartialCache verifies correct behavior when the
+// trees are pre-resolved for a new file whose content matches the recorded hash.
 func TestFilesOverlapWithContent_PartialCache(t *testing.T) {
 	t.Parallel()
 	dir := setupGitRepo(t)
@@ -541,9 +699,9 @@ func TestFilesOverlapWithContent_PartialCache(t *testing.T) {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Create shadow branch with new file
+	// Record turn-end hashes with new file
 	content := []byte("session content")
-	createShadowBranchWithContent(t, repo, "part1234", "e3b0c4", map[string][]byte{
+	hashes := recordedHashes(map[string][]byte{
 		"newfile.txt": content,
 	})
 
@@ -562,15 +720,13 @@ func TestFilesOverlapWithContent_PartialCache(t *testing.T) {
 	commit, err := repo.CommitObject(headHash)
 	require.NoError(t, err)
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("part1234", "e3b0c4")
-	headTree, parentTree, _ := resolveCommitTrees(t, repo, commit, shadowBranch)
+	headTree, parentTree := resolveCommitTrees(t, commit)
 
-	// Partial cache: headTree and parentTree provided, shadowTree nil (will be resolved from repo)
-	result := filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"newfile.txt"}, overlapOpts{
+	// Pre-resolved headTree and parentTree
+	result := filesOverlapWithContent(context.Background(), hashes, commit, []string{"newfile.txt"}, overlapOpts{
 		headTree:      headTree,
 		parentTree:    parentTree,
 		hasParentTree: true,
-		// shadowTree intentionally nil — triggers fallback resolution
 	})
 
 	assert.True(t, result, "Partial cache (headTree only) should still detect overlap")
@@ -591,17 +747,16 @@ func TestFilesOverlapWithContent_CacheWithInitialCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, commit.NumParents(), "setupGitRepo should create an initial commit")
 
-	// Create shadow branch with content matching the initial commit's file
-	createShadowBranchWithContent(t, repo, "init123", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes with content matching the initial commit's file
+	hashes := recordedHashes(map[string][]byte{
 		"test.txt": []byte("initial content"),
 	})
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("init123", "e3b0c4")
 	headTree, err := commit.Tree()
 	require.NoError(t, err)
 
 	// Cache with hasParentTree=true and parentTree=nil (initial commit has no parent)
-	result := filesOverlapWithContent(context.Background(), repo, shadowBranch, commit, []string{"test.txt"}, overlapOpts{
+	result := filesOverlapWithContent(context.Background(), hashes, commit, []string{"test.txt"}, overlapOpts{
 		headTree:      headTree,
 		parentTree:    nil,
 		hasParentTree: true, // Explicitly resolved as nil (initial commit)
@@ -619,8 +774,8 @@ func TestFilesWithRemainingAgentChanges_CacheEquivalence(t *testing.T) {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Create shadow branch with two files
-	createShadowBranchWithContent(t, repo, "rem1234", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes with two files
+	hashes := recordedHashes(map[string][]byte{
 		"fileA.txt": []byte("agent content A"),
 		"fileB.txt": []byte("agent content B"),
 	})
@@ -642,19 +797,17 @@ func TestFilesWithRemainingAgentChanges_CacheEquivalence(t *testing.T) {
 	commit, err := repo.CommitObject(headHash)
 	require.NoError(t, err)
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("rem1234", "e3b0c4")
-	headTree, _, shadowTree := resolveCommitTrees(t, repo, commit, shadowBranch)
+	headTree, _ := resolveCommitTrees(t, commit)
 
 	committedFiles := map[string]struct{}{"fileA.txt": {}}
 	filesTouched := []string{"fileA.txt", "fileB.txt"}
 
 	// Cache miss
-	resultWithout := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit, filesTouched, committedFiles)
+	resultWithout := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit, filesTouched, committedFiles)
 
 	// Cache hit
-	resultWith := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit, filesTouched, committedFiles, overlapOpts{
-		headTree:   headTree,
-		shadowTree: shadowTree,
+	resultWith := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit, filesTouched, committedFiles, overlapOpts{
+		headTree: headTree,
 	})
 
 	assert.Equal(t, resultWithout, resultWith, "Cache hit and cache miss should produce the same result")
@@ -665,10 +818,10 @@ func TestFilesWithRemainingAgentChanges_CacheEquivalence(t *testing.T) {
 }
 
 // TestFilesWithRemainingAgentChanges_PhantomFile tests that files tracked in
-// filesTouched but not present in the shadow branch tree are skipped. This
+// filesTouched with no recorded hash and missing from the worktree are skipped. This
 // happens when an agent's transcript references a file path (e.g. via a
 // write_file tool call) that was never actually created on disk — for example
-// when Gemini tries to write src/types.go but creates src/types/types.go
+// when an agent tries to write src/types.go but creates src/types/types.go
 // instead. Without this check, phantom files cause infinite carry-forward.
 func TestFilesWithRemainingAgentChanges_PhantomFile(t *testing.T) {
 	t.Parallel()
@@ -677,9 +830,9 @@ func TestFilesWithRemainingAgentChanges_PhantomFile(t *testing.T) {
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Shadow branch only contains the REAL file (buildTreeWithChanges skips
-	// non-existent files, so the phantom path is never in the tree).
-	createShadowBranchWithContent(t, repo, "phn1234", "e3b0c4", map[string][]byte{
+	// Only the REAL file has a recorded hash (the phantom path was never
+	// created, so there was nothing to hash).
+	hashes := recordedHashes(map[string][]byte{
 		"src/types/types.go": []byte("package types\n\ntype User struct{}\n"),
 	})
 
@@ -699,24 +852,21 @@ func TestFilesWithRemainingAgentChanges_PhantomFile(t *testing.T) {
 	commit, err := repo.CommitObject(headCommit)
 	require.NoError(t, err)
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("phn1234", "e3b0c4")
 	committedFiles := map[string]struct{}{"src/types/types.go": {}}
 
 	// filesTouched includes both the real path and a phantom path.
-	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit,
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
 		[]string{"src/types.go", "src/types/types.go"}, committedFiles)
 
-	// src/types.go is not committed AND not in shadow tree → skip.
+	// src/types.go is not committed, has no recorded hash, and is missing → skip.
 	// src/types/types.go is committed with matching content → skip.
-	assert.Empty(t, remaining, "Phantom files not in shadow tree should not be carried forward")
+	assert.Empty(t, remaining, "Phantom files should not be carried forward")
 }
 
 // TestFilesWithRemainingAgentChanges_UncommittedDeletion verifies that an
-// agent-deleted file that the user didn't commit is correctly skipped.
-// The file won't be in the shadow tree (buildTreeWithChanges excludes files
-// missing from disk), so the "not in shadow tree" guard handles it.
-// Carrying it forward would be a no-op — buildTreeWithChanges would just
-// record another deletion since there's nothing on disk to snapshot.
+// agent deletion the user did not commit is carried forward: the commit tree
+// still has the path and the worktree still lacks it, so the later commit that
+// deletes it must still link the session.
 func TestFilesWithRemainingAgentChanges_UncommittedDeletion(t *testing.T) {
 	t.Parallel()
 	dir := setupGitRepo(t)
@@ -731,41 +881,13 @@ func TestFilesWithRemainingAgentChanges_UncommittedDeletion(t *testing.T) {
 	require.NoError(t, err)
 	_, err = wt.Add("to_delete.txt")
 	require.NoError(t, err)
-	baseCommitHash, err := wt.Commit("Add file that agent will delete", &git.CommitOptions{
+	_, err = wt.Commit("Add file that agent will delete", &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
 	})
 	require.NoError(t, err)
 
-	// Build shadow branch WITHOUT to_delete.txt (agent deleted it on disk,
-	// so buildTreeWithChanges excluded it from the shadow tree).
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit("del1234", "e3b0c4")
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-
-	baseCommit, err := repo.CommitObject(baseCommitHash)
-	require.NoError(t, err)
-	baseTree, err := baseCommit.Tree()
-	require.NoError(t, err)
-
-	entries := make(map[string]object.TreeEntry)
-	err = checkpoint.FlattenTree(repo, baseTree, "", entries)
-	require.NoError(t, err)
-	delete(entries, "to_delete.txt")
-
-	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
-	require.NoError(t, err)
-
-	shadowCommitObj := &object.Commit{
-		Author:    object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-		Committer: object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-		Message:   "Shadow checkpoint (agent deleted to_delete.txt)",
-		TreeHash:  treeHash,
-	}
-	encodedObj := repo.Storer.NewEncodedObject()
-	err = shadowCommitObj.Encode(encodedObj)
-	require.NoError(t, err)
-	shadowHash, err := repo.Storer.SetEncodedObject(encodedObj)
-	require.NoError(t, err)
-	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, shadowHash)))
+	// The agent's turn-end step recorded the deletion.
+	hashes := map[string]string{"to_delete.txt": touchedFileDeleted}
 
 	// Delete file on disk (agent did this) but user doesn't commit the deletion
 	require.NoError(t, os.Remove(targetFile))
@@ -784,13 +906,231 @@ func TestFilesWithRemainingAgentChanges_UncommittedDeletion(t *testing.T) {
 	require.NoError(t, err)
 
 	committedFiles := map[string]struct{}{"other.txt": {}}
-	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranchName, userCommit,
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, userCommit,
 		[]string{"to_delete.txt", "other.txt"}, committedFiles)
 
-	// to_delete.txt is correctly skipped: it's not in the shadow tree because
-	// the agent deleted it from disk. Carrying it forward would be pointless —
-	// buildTreeWithChanges would just see the file is missing and record a no-op.
-	assert.Empty(t, remaining, "Deleted file not in shadow tree should not be carried forward")
+	// to_delete.txt is kept: the deletion is still pending. other.txt has no
+	// recorded hash, was committed, and the worktree matches the commit, so it
+	// drops.
+	assert.Equal(t, []string{"to_delete.txt"}, remaining, "a pending recorded deletion is carried forward")
+}
+
+// recordedDeletionRepo commits to_delete.txt and removes it from the worktree,
+// as an agent's deletion would, returning the repo, its worktree, and the
+// recorded hashes for that deletion.
+func recordedDeletionRepo(t *testing.T) (string, *git.Repository, *git.Worktree, map[string]string) {
+	t.Helper()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "to_delete.txt"), []byte("will be deleted"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("to_delete.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Add file that agent will delete", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(filepath.Join(dir, "to_delete.txt")))
+	return dir, repo, wt, map[string]string{"to_delete.txt": touchedFileDeleted}
+}
+
+// TestFilesWithRemainingAgentChanges_CommittedDeletion: once a commit carries
+// the agent's deletion, nothing of it is left to carry forward.
+func TestFilesWithRemainingAgentChanges_CommittedDeletion(t *testing.T) {
+	t.Parallel()
+	_, repo, wt, hashes := recordedDeletionRepo(t)
+
+	_, err := wt.Remove("to_delete.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Commit the deletion", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"to_delete.txt"}, map[string]struct{}{"to_delete.txt": {}})
+	assert.Empty(t, remaining)
+}
+
+// TestFilesWithRemainingAgentChanges_RecreatedDeletion: a recorded deletion
+// whose path is back in the worktree was re-created by someone else; it is no
+// longer the agent's pending work.
+func TestFilesWithRemainingAgentChanges_RecreatedDeletion(t *testing.T) {
+	t.Parallel()
+	dir, repo, wt, hashes := recordedDeletionRepo(t)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "other.txt"), []byte("other"), 0o644))
+	_, err := wt.Add("other.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Unrelated commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "to_delete.txt"), []byte("re-created"), 0o644))
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"to_delete.txt"}, map[string]struct{}{"other.txt": {}})
+	assert.Empty(t, remaining)
+}
+
+// TestFilesWithRemainingAgentChanges_StagedEditCommittedDeletionPending: the
+// user staged an edit to a file, the agent then deleted it from the worktree,
+// and the user committed the staged edit. The commit modified the path — it is
+// in the commit's changed set — but the commit tree still has it and the
+// worktree still lacks it, so the agent's deletion is still pending.
+func TestFilesWithRemainingAgentChanges_StagedEditCommittedDeletionPending(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	target := filepath.Join(dir, "edited.txt")
+	require.NoError(t, os.WriteFile(target, []byte("original\n"), 0o644))
+	_, err = wt.Add("edited.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Add file", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// The user stages an edit...
+	require.NoError(t, os.WriteFile(target, []byte("original\nuser edit\n"), 0o644))
+	_, err = wt.Add("edited.txt")
+	require.NoError(t, err)
+	// ...the agent deletes the file from the worktree...
+	require.NoError(t, os.Remove(target))
+	// ...and the user commits what was staged.
+	testutil.GitCommit(t, dir, "Commit the staged edit")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	_, err = commit.File("edited.txt")
+	require.NoError(t, err, "fixture: the commit carries the staged edit, not the deletion")
+
+	hashes := map[string]string{"edited.txt": touchedFileDeleted}
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"edited.txt"}, map[string]struct{}{"edited.txt": {}})
+	assert.Equal(t, []string{"edited.txt"}, remaining)
+}
+
+// TestFilesWithRemainingAgentChanges_NoRecordedHash_PendingTrackedDeletion: a
+// path with no recorded hash that the commit still has but the worktree lacks
+// is a pending deletion of a tracked file (an older CLI's state, or a route
+// that records no hash), not a phantom. Only a path absent from both the
+// commit and the worktree is a phantom.
+func TestFilesWithRemainingAgentChanges_NoRecordedHash_PendingTrackedDeletion(t *testing.T) {
+	t.Parallel()
+	_, repo, wt, _ := recordedDeletionRepo(t)
+
+	require.NoError(t, os.WriteFile(filepath.Join(wt.Filesystem().Root(), "other.txt"), []byte("other"), 0o644))
+	_, err := wt.Add("other.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Commit another file", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, nil, commit,
+		[]string{"to_delete.txt", "other.txt", "never_existed.txt"}, map[string]struct{}{"other.txt": {}})
+	assert.Equal(t, []string{"to_delete.txt"}, remaining,
+		"the pending tracked deletion stays; the committed file and the phantom drop")
+}
+
+// TestFilesWithRemainingAgentChanges_HashedFileDeletedByCommit: the agent
+// edited a tracked file (so a hash is recorded), and the human deleted it and
+// committed the deletion. The recorded hash is history, not remaining work:
+// with the file gone from both the commit and the worktree, nothing is left to
+// carry forward.
+func TestFilesWithRemainingAgentChanges_HashedFileDeletedByCommit(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	testutil.WriteFile(t, dir, "edited.txt", "original\n")
+	testutil.GitAdd(t, dir, "edited.txt")
+	testutil.GitCommit(t, dir, "Add file")
+	testutil.WriteFile(t, dir, "edited.txt", "agent edit\n")
+	hashes := map[string]string{"edited.txt": gitHashObject(t, dir, "edited.txt")}
+
+	testutil.RunGit(t, dir, "rm", "-q", "-f", "--", "edited.txt")
+	testutil.GitCommit(t, dir, "Delete the file")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"edited.txt"}, map[string]struct{}{"edited.txt": {}})
+	assert.Empty(t, remaining)
+}
+
+// TestFilesWithRemainingAgentChanges_UnreadableParentKeepsDeletion: when the
+// worktree cannot be inspected (here the parent directory is unreadable, so
+// Lstat fails with a permission error rather than "does not exist"), a pending
+// recorded deletion is kept rather than dropped as re-created.
+func TestFilesWithRemainingAgentChanges_UnreadableParentKeepsDeletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits do not block Lstat on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	testutil.WriteFile(t, dir, "locked/gone.txt", "tracked\n")
+	testutil.WriteFile(t, dir, "other.txt", "other\n")
+	testutil.GitAdd(t, dir, "locked/gone.txt")
+	testutil.GitCommit(t, dir, "Add file")
+	require.NoError(t, os.Remove(filepath.Join(dir, "locked", "gone.txt")))
+	testutil.GitAdd(t, dir, "other.txt")
+	testutil.GitCommit(t, dir, "Commit another file")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+
+	locked := filepath.Join(dir, "locked")
+	require.NoError(t, os.Chmod(locked, 0))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) }) //nolint:errcheck // best-effort so t.TempDir can clean up
+
+	hashes := map[string]string{"locked/gone.txt": touchedFileDeleted}
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"locked/gone.txt"}, map[string]struct{}{"other.txt": {}})
+	assert.Equal(t, []string{"locked/gone.txt"}, remaining)
+}
+
+// TestFilesOverlapWithContent_CarriedForwardDeletionLinks: the later commit
+// that finally deletes a carried-forward recorded deletion (the parent has the
+// path, HEAD does not) links the session.
+func TestFilesOverlapWithContent_CarriedForwardDeletionLinks(t *testing.T) {
+	t.Parallel()
+	_, repo, wt, hashes := recordedDeletionRepo(t)
+
+	_, err := wt.Remove("to_delete.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Commit the deletion", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+
+	assert.True(t, filesOverlapWithContent(context.Background(), hashes, commit, []string{"to_delete.txt"}))
 }
 
 // TestStagedFilesOverlapWithContent_ModifiedFile tests that a modified file
@@ -811,22 +1151,13 @@ func TestStagedFilesOverlapWithContent_ModifiedFile(t *testing.T) {
 	_, err = wt.Add("test.txt")
 	require.NoError(t, err)
 
-	// Create shadow branch (content doesn't matter for modified files)
-	createShadowBranchWithContent(t, repo, "abc1234", "e3b0c4", map[string][]byte{
-		"test.txt": []byte("shadow content"),
+	// Record turn-end hashes (content doesn't matter for modified files)
+	hashes := recordedHashes(map[string][]byte{
+		"test.txt": []byte("agent content"),
 	})
 
-	// Get shadow tree
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("abc1234", "e3b0c4")
-	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
-	require.NoError(t, err)
-	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
-	require.NoError(t, err)
-	shadowTree, err := shadowCommit.Tree()
-	require.NoError(t, err)
-
 	// Modified file should count as overlap regardless of content
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"test.txt"}, []string{"test.txt"})
+	result := stagedFilesOverlapWithContent(context.Background(), repo, hashes, []string{"test.txt"}, []string{"test.txt"})
 	assert.True(t, result, "Modified file should always count as overlap")
 }
 
@@ -848,35 +1179,26 @@ func TestStagedFilesOverlapWithContent_NewFile_ContentMatch(t *testing.T) {
 	_, err = wt.Add("newfile.txt")
 	require.NoError(t, err)
 
-	// Create shadow branch with SAME content
-	createShadowBranchWithContent(t, repo, "def5678", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes with SAME content
+	hashes := recordedHashes(map[string][]byte{
 		"newfile.txt": content,
 	})
 
-	// Get shadow tree
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("def5678", "e3b0c4")
-	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
-	require.NoError(t, err)
-	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
-	require.NoError(t, err)
-	shadowTree, err := shadowCommit.Tree()
-	require.NoError(t, err)
-
 	// New file with matching content should count as overlap
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"newfile.txt"}, []string{"newfile.txt"})
+	result := stagedFilesOverlapWithContent(context.Background(), repo, hashes, []string{"newfile.txt"}, []string{"newfile.txt"})
 	assert.True(t, result, "New file with matching content should count as overlap")
 }
 
-// TestStagedFilesOverlapWithContent_NewFile_ContentMismatch tests that a new file
-// with different content does NOT count as overlap (reverted & replaced scenario).
-func TestStagedFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
+// TestStagedFilesOverlapWithContent_NewFile_UserRewriteStillLinks: the
+// prepare-commit-msg side of TestFilesOverlapWithContent_NewFile_UserRewriteStillLinks.
+func TestStagedFilesOverlapWithContent_NewFile_UserRewriteStillLinks(t *testing.T) {
 	t.Parallel()
 	dir := setupGitRepo(t)
 
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// Create a NEW file with different content than shadow branch
+	// Create a NEW file with different content than the agent left
 	newFile := filepath.Join(dir, "newfile.txt")
 	require.NoError(t, os.WriteFile(newFile, []byte("user replaced content"), 0o644))
 	wt, err := repo.Worktree()
@@ -884,23 +1206,33 @@ func TestStagedFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
 	_, err = wt.Add("newfile.txt")
 	require.NoError(t, err)
 
-	// Create shadow branch with DIFFERENT content (agent's original)
-	createShadowBranchWithContent(t, repo, "ghi9012", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes with DIFFERENT content (agent's original)
+	hashes := recordedHashes(map[string][]byte{
 		"newfile.txt": []byte("agent original content"),
 	})
 
-	// Get shadow tree
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("ghi9012", "e3b0c4")
-	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
-	require.NoError(t, err)
-	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
-	require.NoError(t, err)
-	shadowTree, err := shadowCommit.Tree()
+	// Linking is by name: the staged path is one the session created.
+	result := stagedFilesOverlapWithContent(context.Background(), repo, hashes, []string{"newfile.txt"}, []string{"newfile.txt"})
+	assert.True(t, result, "a staged new file in FilesTouched links by name, whatever its content")
+}
+
+// TestStagedFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink: see
+// TestFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink.
+func TestStagedFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
 
-	// New file with different content should NOT count as overlap
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"newfile.txt"}, []string{"newfile.txt"})
-	assert.False(t, result, "New file with mismatched content should not count as overlap")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "recreated.txt"), []byte("re-created by the user"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("recreated.txt")
+	require.NoError(t, err)
+
+	hashes := map[string]string{"recreated.txt": touchedFileDeleted}
+	assert.False(t, stagedFilesOverlapWithContent(context.Background(), repo, hashes, []string{"recreated.txt"}, []string{"recreated.txt"}))
 }
 
 // TestStagedFilesOverlapWithContent_NoOverlap tests that non-overlapping files
@@ -920,22 +1252,13 @@ func TestStagedFilesOverlapWithContent_NoOverlap(t *testing.T) {
 	_, err = wt.Add("other.txt")
 	require.NoError(t, err)
 
-	// Create shadow branch
-	createShadowBranchWithContent(t, repo, "jkl3456", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes
+	hashes := recordedHashes(map[string][]byte{
 		"session.txt": []byte("session content"),
 	})
 
-	// Get shadow tree
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("jkl3456", "e3b0c4")
-	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
-	require.NoError(t, err)
-	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
-	require.NoError(t, err)
-	shadowTree, err := shadowCommit.Tree()
-	require.NoError(t, err)
-
 	// Staged file "other.txt" is not in filesTouched "session.txt"
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"other.txt"}, []string{"session.txt"})
+	result := stagedFilesOverlapWithContent(context.Background(), repo, hashes, []string{"other.txt"}, []string{"session.txt"})
 	assert.False(t, result, "Non-overlapping files should return false")
 }
 
@@ -969,8 +1292,8 @@ func TestStagedFilesOverlapWithContent_DeletedFile(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create shadow branch (simulating agent work on the file)
-	createShadowBranchWithContent(t, repo, "mno7890", "e3b0c4", map[string][]byte{
+	// Record turn-end hashes (simulating agent work on the file)
+	hashes := recordedHashes(map[string][]byte{
 		"to_delete.txt": []byte("agent modified content"),
 	})
 
@@ -978,349 +1301,27 @@ func TestStagedFilesOverlapWithContent_DeletedFile(t *testing.T) {
 	_, err = worktree.Remove("to_delete.txt")
 	require.NoError(t, err)
 
-	// Get shadow tree
-	shadowBranch := checkpoint.ShadowBranchNameForCommit("mno7890", "e3b0c4")
-	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
-	require.NoError(t, err)
-	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
-	require.NoError(t, err)
-	shadowTree, err := shadowCommit.Tree()
-	require.NoError(t, err)
-
 	// Deleted file SHOULD count as overlap - the agent's deletion is being committed
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"to_delete.txt"}, []string{"to_delete.txt"})
+	result := stagedFilesOverlapWithContent(context.Background(), repo, hashes, []string{"to_delete.txt"}, []string{"to_delete.txt"})
 	assert.True(t, result, "Deleted file should count as overlap (agent's deletion being committed)")
 }
 
-// createShadowBranchWithContent creates a shadow branch with the given file contents.
-// This helper directly uses go-git APIs to avoid paths.WorktreeRoot() dependency.
-//
-//nolint:unparam // worktreeID is kept as a parameter for flexibility even if tests currently use same value
-func createShadowBranchWithContent(t *testing.T, repo *git.Repository, baseCommit, worktreeID string, fileContents map[string][]byte) {
-	t.Helper()
-
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-
-	// Get HEAD for base tree
-	head, err := repo.Head()
-	require.NoError(t, err)
-
-	headCommit, err := repo.CommitObject(head.Hash())
-	require.NoError(t, err)
-
-	baseTree, err := headCommit.Tree()
-	require.NoError(t, err)
-
-	// Flatten existing tree into map
-	entries := make(map[string]object.TreeEntry)
-	err = checkpoint.FlattenTree(repo, baseTree, "", entries)
-	require.NoError(t, err)
-
-	// Add/update files with provided content
-	for filePath, content := range fileContents {
-		// Create blob with content
-		blob := repo.Storer.NewEncodedObject()
-		blob.SetType(plumbing.BlobObject)
-		blob.SetSize(int64(len(content)))
-		writer, err := blob.Writer()
-		require.NoError(t, err)
-		_, err = writer.Write(content)
-		require.NoError(t, err)
-		err = writer.Close()
-		require.NoError(t, err)
-
-		blobHash, err := repo.Storer.SetEncodedObject(blob)
-		require.NoError(t, err)
-
-		entries[filePath] = object.TreeEntry{
-			Name: filePath,
-			Mode: filemode.Regular,
-			Hash: blobHash,
-		}
+// recordedHashes returns the TouchedFileHashes a turn-end step would record
+// for files with the given contents. Use touchedFileDeleted directly for a
+// recorded deletion.
+func recordedHashes(fileContents map[string][]byte) map[string]string {
+	hashes := make(map[string]string, len(fileContents))
+	for path, content := range fileContents {
+		hashes[path] = blobHashOf(content).String()
 	}
-
-	// Build tree from entries
-	treeHash, err := checkpoint.BuildTreeFromEntries(context.Background(), repo, entries)
-	require.NoError(t, err)
-
-	// Create commit
-	commit := &object.Commit{
-		TreeHash: treeHash,
-		Message:  "Test checkpoint",
-		Author: object.Signature{
-			Name:  "Test",
-			Email: "test@test.com",
-			When:  time.Now(),
-		},
-		Committer: object.Signature{
-			Name:  "Test",
-			Email: "test@test.com",
-			When:  time.Now(),
-		},
-	}
-
-	commitObj := repo.Storer.NewEncodedObject()
-	err = commit.Encode(commitObj)
-	require.NoError(t, err)
-
-	commitHash, err := repo.Storer.SetEncodedObject(commitObj)
-	require.NoError(t, err)
-
-	// Create branch reference
-	newRef := plumbing.NewHashReference(refName, commitHash)
-	err = repo.Storer.SetReference(newRef)
-	require.NoError(t, err)
+	return hashes
 }
 
-// TestExtractSignificantLines tests the line extraction with length-based filtering.
-// Lines must be >= 10 characters after trimming whitespace.
-func TestExtractSignificantLines(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		content  string
-		wantKeys []string // lines that should be in the result
-		wantNot  []string // lines that should NOT be in the result
-	}{
-		{
-			name: "go function",
-			content: `package main
-
-func hello() {
-	fmt.Println("hello world")
-	return
-}`,
-			wantKeys: []string{
-				"package main",               // 12 chars
-				"func hello() {",             // 14 chars
-				`fmt.Println("hello world")`, // 26 chars
-			},
-			wantNot: []string{
-				"}",      // 1 char
-				"return", // 6 chars
-			},
-		},
-		{
-			name: "python function",
-			content: `def calculate(x, y):
-    result = x + y
-    print(f"Result: {result}")
-    return result`,
-			wantKeys: []string{
-				"def calculate(x, y):",       // 20 chars
-				"result = x + y",             // 14 chars
-				`print(f"Result: {result}")`, // 25 chars
-				"return result",              // 13 chars
-			},
-			wantNot: []string{},
-		},
-		{
-			name: "javascript",
-			content: `const handler = async (req) => {
-  const data = await fetch(url);
-  return data.json();
-};`,
-			wantKeys: []string{
-				"const handler = async (req) => {", // 32 chars
-				"const data = await fetch(url);",   // 30 chars
-				"return data.json();",              // 19 chars
-			},
-			wantNot: []string{
-				"};", // 2 chars
-			},
-		},
-		{
-			name: "short lines filtered",
-			content: `a = 1
-b = 2
-longVariableName = 42`,
-			wantKeys: []string{
-				"longVariableName = 42", // 21 chars
-			},
-			wantNot: []string{
-				"a = 1", // 5 chars
-				"b = 2", // 5 chars
-			},
-		},
-		{
-			name: "structural lines filtered by length",
-			content: `{
-  });
-  ]);
-  },
-}`,
-			wantKeys: []string{},
-			wantNot: []string{
-				"{",   // 1 char
-				"});", // 3 chars
-				"]);", // 3 chars
-				"},",  // 2 chars
-				"}",   // 1 char
-			},
-		},
-		{
-			name: "regex and special chars kept if long enough",
-			content: `short
-/^[a-z0-9]+@[a-z]+\.[a-z]{2,}$/
-x`,
-			wantKeys: []string{
-				"/^[a-z0-9]+@[a-z]+\\.[a-z]{2,}$/", // 32 chars - kept even though mostly non-alpha
-			},
-			wantNot: []string{
-				"short", // 5 chars
-				"x",     // 1 char
-			},
-		},
+// blobHashOf returns the SHA-1 git blob hash of content.
+func blobHashOf(content []byte) plumbing.Hash {
+	h := plumbing.NewHasher(config.SHA1, plumbing.BlobObject, int64(len(content)))
+	if _, err := h.Write(content); err != nil {
+		panic(err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			result := extractSignificantLines(tt.content)
-
-			for _, want := range tt.wantKeys {
-				if !result[want] {
-					t.Errorf("extractSignificantLines() missing expected line: %q", want)
-				}
-			}
-
-			for _, notWant := range tt.wantNot {
-				if result[notWant] {
-					t.Errorf("extractSignificantLines() should not contain: %q", notWant)
-				}
-			}
-		})
-	}
-}
-
-// TestHasSignificantContentOverlap tests the content overlap detection logic.
-// We require at least 2 matching significant lines to count as overlap.
-func TestHasSignificantContentOverlap(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		stagedContent string
-		shadowContent string
-		wantOverlap   bool
-	}{
-		{
-			name:          "two matching significant lines - overlap",
-			stagedContent: "this is a significant line\nanother matching line here\nshort",
-			shadowContent: "this is a significant line\nanother matching line here\nother",
-			wantOverlap:   true,
-		},
-		{
-			name:          "only one matching significant line - no overlap",
-			stagedContent: "this is a significant line\ncompletely different staged",
-			shadowContent: "this is a significant line\ncompletely different shadow",
-			wantOverlap:   false,
-		},
-		{
-			name:          "no matching significant lines",
-			stagedContent: "completely different content here",
-			shadowContent: "this is the shadow content now",
-			wantOverlap:   false,
-		},
-		{
-			name:          "both have only short lines - no significant content",
-			stagedContent: "a = 1\nb = 2\nc = 3",
-			shadowContent: "x = 1\ny = 2\nz = 3",
-			wantOverlap:   false,
-		},
-		{
-			name:          "shadow has significant lines but staged has none",
-			stagedContent: "a = 1\nb = 2",
-			shadowContent: "this is significant content from shadow",
-			wantOverlap:   false,
-		},
-		{
-			name:          "staged has significant lines but shadow has none",
-			stagedContent: "this is significant content from staged",
-			shadowContent: "x = 1\ny = 2",
-			wantOverlap:   false,
-		},
-		{
-			name:          "empty strings",
-			stagedContent: "",
-			shadowContent: "",
-			wantOverlap:   false,
-		},
-		{
-			name:          "single shared line like package main - no overlap (boilerplate)",
-			stagedContent: "package main\nfunc NewImplementation() {}",
-			shadowContent: "package main\nfunc OriginalCode() {}",
-			wantOverlap:   false,
-		},
-		{
-			name:          "multiple shared lines - overlap (user kept agent work)",
-			stagedContent: "package main\nfunc SharedFunction() {\nreturn nil",
-			shadowContent: "package main\nfunc SharedFunction() {\nreturn nil",
-			wantOverlap:   true,
-		},
-		{
-			name:          "very small file with single match - overlap (small file exception)",
-			stagedContent: "this is a unique line here\nshort",
-			shadowContent: "this is a unique line here\nshort",
-			wantOverlap:   true, // Shadow has only 1 significant line, so 1 match counts
-		},
-		{
-			name:          "very small file no match - no overlap",
-			stagedContent: "completely different staged content",
-			shadowContent: "short",
-			wantOverlap:   false, // Shadow is very small but no matching lines
-		},
-		{
-			name:          "large staged vs very small shadow with single match - overlap",
-			stagedContent: "line one here\nline two here\nline three here\nshared content line",
-			shadowContent: "shared content line\nshort",
-			wantOverlap:   true, // Shadow has only 1 significant line, so 1 match counts
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := hasSignificantContentOverlap(tt.stagedContent, tt.shadowContent)
-			if got != tt.wantOverlap {
-				t.Errorf("hasSignificantContentOverlap() = %v, want %v", got, tt.wantOverlap)
-			}
-		})
-	}
-}
-
-// TestTrimLine tests whitespace trimming from lines.
-func TestTrimLine(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		line string
-		want string
-	}{
-		{"no whitespace", "hello", "hello"},
-		{"leading spaces", "   hello", "hello"},
-		{"trailing spaces", "hello   ", "hello"},
-		{"both leading and trailing spaces", "   hello   ", "hello"},
-		{"leading tabs", "\t\thello", "hello"},
-		{"trailing tabs", "hello\t\t", "hello"},
-		{"mixed whitespace", " \t hello \t ", "hello"},
-		{"only spaces", "     ", ""},
-		{"only tabs", "\t\t\t", ""},
-		{"empty string", "", ""},
-		{"spaces in middle preserved", "hello world", "hello world"},
-		{"tabs in middle preserved", "hello\tworld", "hello\tworld"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := trimLine(tt.line)
-			if got != tt.want {
-				t.Errorf("trimLine(%q) = %q, want %q", tt.line, got, tt.want)
-			}
-		})
-	}
+	return h.Sum()
 }

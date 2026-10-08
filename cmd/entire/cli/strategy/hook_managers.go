@@ -63,7 +63,7 @@ func detectHookManagers(repoRoot string) []hookManager {
 }
 
 // hookManagerWarning builds a warning string for detected hook managers.
-// cmdPrefix is the CLI command prefix (e.g., "entire" or "./scripts/entire-dev").
+// cmdPrefix is the CLI command prefix (e.g., "entire" or an absolute binary path).
 func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 	if len(managers) == 0 {
 		return ""
@@ -120,9 +120,8 @@ func extractCommandLine(hookContent string) string {
 
 // CheckAndWarnHookManagers detects external hook managers and writes a warning
 // to w if any are found.
-// localDev controls whether the warning references "go run" or the "entire" binary.
 // absolutePath embeds the full binary path for GUI git clients.
-func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolutePath bool) {
+func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, absolutePath bool) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return
@@ -133,7 +132,7 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, localDev, absolu
 		return
 	}
 
-	cmdPrefix, err := hookCmdPrefix(localDev, absolutePath)
+	cmdPrefix, err := hookCmdPrefix(absolutePath)
 	if err != nil {
 		// Best-effort: hook manager warnings are advisory, skip on resolution failure
 		return

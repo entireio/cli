@@ -4,20 +4,19 @@ package integration
 
 import (
 	"context"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/go-git/go-git/v6/plumbing"
+
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // TestWorktreeOpenRepository verifies that OpenRepository() works correctly
 // in a worktree context by checking it can read HEAD and refs.
 //
-// NOTE: This test uses os.Chdir() so it cannot use t.Parallel().
+// NOTE: This test uses t.Chdir() so it cannot use t.Parallel().
 func TestWorktreeOpenRepository(t *testing.T) {
 	env := NewTestEnv(t)
 	env.InitRepo()
@@ -31,20 +30,9 @@ func TestWorktreeOpenRepository(t *testing.T) {
 		worktreeDir = filepath.Join(resolved, "worktree")
 	}
 
-	cmd := exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-branch")
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to create worktree: %v\nOutput: %s", err, output)
-	}
+	testutil.RunGit(t, env.RepoDir, "worktree", "add", worktreeDir, "-b", "test-branch")
 
-	originalWd, _ := os.Getwd()
-	if err := os.Chdir(worktreeDir); err != nil {
-		t.Fatalf("failed to chdir: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(originalWd)
-	})
+	t.Chdir(worktreeDir)
 
 	repo, err := strategy.OpenRepository(context.Background())
 	if err != nil {
@@ -66,10 +54,12 @@ func TestWorktreeOpenRepository(t *testing.T) {
 	}
 
 	refCount := 0
-	_ = refs.ForEach(func(ref *plumbing.Reference) error {
+	if err := refs.ForEach(func(_ *plumbing.Reference) error {
 		refCount++
 		return nil
-	})
+	}); err != nil {
+		t.Fatalf("failed to iterate refs: %v", err)
+	}
 
 	if refCount == 0 {
 		t.Error("expected to find refs, but found none")

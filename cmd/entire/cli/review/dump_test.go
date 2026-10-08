@@ -13,9 +13,8 @@ func makeSummary(runs ...reviewtypes.AgentRun) reviewtypes.RunSummary {
 	return reviewtypes.RunSummary{AgentRuns: runs}
 }
 
-// Tests use bytes.Buffer as the writer, which is NOT a terminal — so DumpSink's
-// markdown is passed through as-is via mdrender.RenderForWriter. Assertions
-// therefore match the raw markdown body the user would see when running
+// DumpSink writes plain markdown directly (no glamour styling), so assertions
+// match the raw markdown body the user sees both on screen and when running
 // `entire review > out.txt`.
 
 func TestDumpSink_SucceededAgent(t *testing.T) {
@@ -209,7 +208,7 @@ func TestDumpSink_CancelledAgent(t *testing.T) {
 	sink := DumpSink{W: &buf}
 
 	run := reviewtypes.AgentRun{
-		Name:   "gemini-cli",
+		Name:   "opencode",
 		Status: reviewtypes.AgentStatusCancelled,
 		Buffer: []reviewtypes.Event{
 			reviewtypes.AssistantText{Text: "partial output"},
@@ -244,7 +243,7 @@ func TestDumpSink_Mixed(t *testing.T) {
 			Err:    errors.New("timeout"),
 		},
 		reviewtypes.AgentRun{
-			Name:   "gemini-cli",
+			Name:   "opencode",
 			Status: reviewtypes.AgentStatusCancelled,
 		},
 	)
@@ -257,8 +256,8 @@ func TestDumpSink_Mixed(t *testing.T) {
 	if !strings.Contains(out, "# codex review") {
 		t.Errorf("expected codex heading, got:\n%s", out)
 	}
-	if !strings.Contains(out, "# gemini-cli review") {
-		t.Errorf("expected gemini-cli heading, got:\n%s", out)
+	if !strings.Contains(out, "# opencode review") {
+		t.Errorf("expected opencode heading, got:\n%s", out)
 	}
 	if !strings.Contains(out, "3 agent(s) done — 1 succeeded, 1 failed, 1 cancelled") {
 		t.Errorf("expected mixed counts line, got:\n%s", out)

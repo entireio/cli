@@ -55,6 +55,8 @@ type ToolInput struct {
 	Pattern      string `json:"pattern,omitempty"`
 	// Skill tool fields
 	Skill string `json:"skill,omitempty"`
+	// Task/Agent tool fields: the dispatched subagent's name.
+	SubagentType string `json:"subagent_type,omitempty"`
 	// WebFetch tool fields
 	URL    string `json:"url,omitempty"`
 	Prompt string `json:"prompt,omitempty"`

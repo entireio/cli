@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestExternalCommand_SigintReachesPlugin(t *testing.T) {
 			"i=0\nwhile [ $i -lt %d ]; do sleep 0.1; i=$((i+1)); done\nexit 0\n",
 		signalFile, readyFile, pluginLoopSeconds*10,
 	)
-	if err := os.WriteFile(filepath.Join(dir, "entire-trapint"), []byte(body), 0o755); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(filepath.Join(dir, "entire-trapint"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write plugin: %v", err)
 	}
 
@@ -50,8 +51,12 @@ func TestExternalCommand_SigintReachesPlugin(t *testing.T) {
 	}
 
 	if !waitForFile(readyFile, 3*time.Second) {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			t.Logf("kill process: %v", killErr)
+		}
+		if waitErr := cmd.Wait(); waitErr != nil {
+			t.Logf("wait after kill: %v", waitErr)
+		}
 		t.Fatalf("plugin never reached ready state\nparent stderr:\n%s", pStderr.String())
 	}
 
@@ -60,10 +65,14 @@ func TestExternalCommand_SigintReachesPlugin(t *testing.T) {
 	}
 
 	if !waitForFile(signalFile, 5*time.Second) {
-		_ = cmd.Wait()
+		if waitErr := cmd.Wait(); waitErr != nil {
+			t.Logf("wait after signal: %v", waitErr)
+		}
 		t.Fatalf("plugin never observed SIGINT — marker missing\nparent stderr:\n%s", pStderr.String())
 	}
-	_ = cmd.Wait()
+	if waitErr := cmd.Wait(); waitErr != nil {
+		t.Logf("wait: %v", waitErr)
+	}
 
 	contents, err := os.ReadFile(signalFile)
 	if err != nil {
@@ -83,4 +92,129 @@ func waitForFile(path string, timeout time.Duration) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// A signal Entire received outranks the one its child died of.
+//
+// Cancelling the context makes runPlugin send the plugin SIGINT whatever
+// Entire itself was sent, so the child's signal is often Entire's own signal
+// laundered — and laundered lossily. A supervisor's SIGTERM must still leave
+// Entire dying of SIGTERM (143), not of whatever the child ended up with:
+// this plugin ignores SIGINT, so it outlives WaitDelay and os/exec SIGKILLs
+// it, which reported 137 before the precedence was fixed.
+func TestExternalCommand_ParentsSignalOutranksTheChilds(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	readyFile := filepath.Join(dir, "ready.txt")
+	// Longer than the parent's WaitDelay (5s) plus grace, so the child is
+	// still alive when the delay expires and is killed rather than exiting.
+	const pluginLoopSeconds = 20
+	body := fmt.Sprintf(
+		"#!/bin/sh\ntrap '' INT\n"+
+			"echo ready > %q\n"+
+			"i=0\nwhile [ $i -lt %d ]; do sleep 0.1; i=$((i+1)); done\nexit 0\n",
+		readyFile, pluginLoopSeconds*10,
+	)
+	if err := os.WriteFile(filepath.Join(dir, "entire-ignoreint"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+
+	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "ignoreint")
+	cmd.Env = pathWith(dir)
+	var pStderr bytes.Buffer
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &pStderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !waitForFile(readyFile, 5*time.Second) {
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			t.Logf("kill process: %v", killErr)
+		}
+		if waitErr := cmd.Wait(); waitErr != nil {
+			t.Logf("wait after kill: %v", waitErr)
+		}
+		t.Fatalf("plugin never reached ready state\nparent stderr:\n%s", pStderr.String())
+	}
+
+	// A supervisor or container stop, not a terminal Ctrl-C: only the parent
+	// is signalled, and with SIGTERM rather than SIGINT.
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal parent: %v", err)
+	}
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		t.Fatalf("parent exited 0 after SIGTERM\nparent stderr:\n%s", pStderr.String())
+	}
+
+	// Re-raised, so the parent is genuinely WIFSIGNALED: an os.Exit(143) would
+	// not break an enclosing shell loop.
+	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("no wait status: %v", waitErr)
+	}
+	if !ws.Signaled() {
+		t.Fatalf("parent exited %d rather than dying from a signal\nparent stderr:\n%s",
+			cmd.ProcessState.ExitCode(), pStderr.String())
+	}
+	if ws.Signal() != syscall.SIGTERM {
+		t.Errorf("parent died of %v, want SIGTERM — the child's signal (SIGKILL here) must not outrank ours\nparent stderr:\n%s",
+			ws.Signal(), pStderr.String())
+	}
+}
+
+// agent-help's delegation runs the plugin inside a Cobra command, whose
+// errors main.go otherwise turns into a plain exit 1. The plugin's outcome
+// must come back the way a dispatched plugin's does: its exit code verbatim,
+// and a signal that reached only the plugin re-raised, so the parent is
+// genuinely WIFSIGNALED and an enclosing shell loop breaks.
+func TestExternalCommand_AgentHelpPropagatesThePluginsOutcome(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		script   string
+		wantCode int            // for an ordinary exit
+		wantSig  syscall.Signal // for a signalled plugin; 0 means none
+	}{
+		{name: "exit code", script: "exit 42", wantCode: 42},
+		{name: "own SIGTERM", script: "trap - TERM\nkill -TERM $$", wantSig: syscall.SIGTERM},
+		// Go's runtime ignores a SIGPIPE it did not get from a write to
+		// stdout/stderr, so dieFromSignal's re-raise is not delivered and it
+		// falls back to 128+13 — the dispatcher's own outcome for this case.
+		{name: "broken pipe", script: "trap - PIPE\nkill -PIPE $$", wantCode: 141},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "entire-outcome"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755); err != nil {
+				t.Fatalf("write plugin: %v", err)
+			}
+
+			cmd := execx.NonInteractive(context.Background(), getTestBinary(), "agent-help", "outcome")
+			cmd.Env = pathWith(dir)
+			var stderr bytes.Buffer
+			cmd.Stdout = &bytes.Buffer{}
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err == nil {
+				t.Fatal("expected agent-help to fail with the plugin")
+			}
+			ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if !ok {
+				t.Fatal("no wait status")
+			}
+			if tc.wantSig != 0 {
+				if !ws.Signaled() || ws.Signal() != tc.wantSig {
+					t.Errorf("parent: signaled=%v signal=%v exit=%d, want death by %v\nstderr: %s",
+						ws.Signaled(), ws.Signal(), cmd.ProcessState.ExitCode(), tc.wantSig, stderr.String())
+				}
+				return
+			}
+			if got := cmd.ProcessState.ExitCode(); got != tc.wantCode {
+				t.Errorf("exit code = %d, want the plugin's own %d\nstderr: %s", got, tc.wantCode, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "exited with code") {
+				t.Errorf("main printed its own message over the plugin's: %q", stderr.String())
+			}
+		})
+	}
 }

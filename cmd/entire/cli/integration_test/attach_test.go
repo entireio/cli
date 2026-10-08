@@ -3,14 +3,12 @@
 package integration
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
@@ -32,7 +30,7 @@ func TestAttach_NewSession_NoHooks(t *testing.T) {
 	}
 
 	// Run attach
-	output := env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", sessionID, "-a", agentClaudeCode, "-f")
 
 	// Verify output
 	if !strings.Contains(output, "Attached session") {
@@ -77,7 +75,7 @@ func TestAttach_ResearchSession_NoFileChanges(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	output := env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", sessionID, "-a", agentClaudeCode, "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -113,7 +111,7 @@ func TestAttach_ExistingCheckpoint_AddSession(t *testing.T) {
 	}
 
 	// Commit with hooks to trigger condensation and get checkpoint trailer.
-	env.GitCommitWithShadowHooks("add login endpoint", "src/login.go")
+	env.GitCommitWithHooks("add login endpoint", "src/login.go")
 
 	// Verify first checkpoint exists
 	firstCpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
@@ -132,7 +130,7 @@ func TestAttach_ExistingCheckpoint_AddSession(t *testing.T) {
 	}
 
 	// Attach the second session
-	output := env.RunCLI("session", "attach", session2ID, "-a", "claude-code")
+	output := env.RunCLI("session", "attach", session2ID, "-a", agentClaudeCode)
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -189,7 +187,7 @@ func TestAttach_AlreadyTracked_NoCheckpoint(t *testing.T) {
 	env.GitCommit("add research notes")
 
 	// Now attach — session state exists but has no checkpoint.
-	output := env.RunCLI("session", "attach", session1.ID, "-a", "claude-code", "-f")
+	output := env.RunCLI("session", "attach", session1.ID, "-a", agentClaudeCode, "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -227,7 +225,7 @@ func TestAttach_AlreadyTracked_HasCheckpoint(t *testing.T) {
 	}
 
 	// Commit with hooks to get checkpoint trailer.
-	env.GitCommitWithShadowHooks("add config parser", "config.go")
+	env.GitCommitWithHooks("add config parser", "config.go")
 
 	firstCpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if firstCpID == "" {
@@ -245,7 +243,7 @@ func TestAttach_AlreadyTracked_HasCheckpoint(t *testing.T) {
 	}
 
 	// Re-attach the same session
-	output := env.RunCLI("session", "attach", session1.ID, "-a", "claude-code")
+	output := env.RunCLI("session", "attach", session1.ID, "-a", agentClaudeCode)
 
 	if !strings.Contains(output, "already has checkpoint") {
 		t.Errorf("expected 'already has checkpoint' in output, got:\n%s", output)
@@ -285,7 +283,7 @@ func TestAttach_DifferentWorkingDirectory(t *testing.T) {
 	// Set ENTIRE_TEST_CLAUDE_PROJECT_DIR to an empty dir so the primary lookup fails,
 	// and set HOME to fakeHome so the fallback search finds our transcript.
 	emptyProjectDir := t.TempDir()
-	cmd := exec.Command(getTestBinary(), "attach", sessionID, "-a", "claude-code", "-f")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "session", "attach", sessionID, "-a", agentClaudeCode, "-f")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(env.cliEnv(),
 		"HOME="+fakeHome,
@@ -327,7 +325,7 @@ func TestAttach_CodexSessionTreeLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(getTestBinary(), "attach", sessionID, "-a", "codex", "-f")
+	cmd := exec.CommandContext(t.Context(), getTestBinary(), "session", "attach", sessionID, "-a", "codex", "-f")
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(env.cliEnv(),
 		"ENTIRE_TEST_CODEX_SESSION_DIR="+codexDir,
@@ -360,51 +358,8 @@ func TestAttach_InvalidSessionID(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
 
-	_, err := env.RunCLIWithError("session", "attach", "../path-traversal", "-a", "claude-code")
+	_, err := env.RunCLIWithError("session", "attach", "../path-traversal", "-a", agentClaudeCode)
 	if err == nil {
 		t.Error("expected error for invalid session ID")
 	}
-}
-
-// TestAttach_MirrorsToV1CustomRefWhenOptedIn verifies that running attach
-// through the real entire binary with checkpoints_version "1.1" leaves
-// refs/entire/checkpoints/v1.1 at the same hash as entire/checkpoints/v1.
-func TestAttach_MirrorsToV1CustomRefWhenOptedIn(t *testing.T) {
-	t.Parallel()
-	env := NewFeatureBranchEnv(t)
-
-	env.PatchSettings(map[string]any{
-		"strategy_options": map[string]any{"checkpoints_version": "1.1"},
-	})
-
-	sessionID := "attach-v1-1-mirror"
-	tb := NewTranscriptBuilder()
-	tb.AddUserMessage("hello")
-	tb.AddAssistantMessage("hi")
-	transcriptPath := filepath.Join(env.ClaudeProjectDir, sessionID+".jsonl")
-	if err := tb.WriteToFile(transcriptPath); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	env.RunCLI("session", "attach", sessionID, "-a", "claude-code", "-f")
-
-	v1 := revParse(t, env.RepoDir, "entire/checkpoints/v1")
-	custom := revParse(t, env.RepoDir, "refs/entire/checkpoints/v1.1")
-	if v1 != custom {
-		t.Errorf("refs/entire/checkpoints/v1.1 = %s, want %s (entire/checkpoints/v1)", custom, v1)
-	}
-}
-
-func revParse(t *testing.T, dir, ref string) string {
-	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", "--verify", ref)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git rev-parse %s in %s failed: %v\n%s", ref, dir, err, stderr.String())
-	}
-	return strings.TrimSpace(string(out))
 }

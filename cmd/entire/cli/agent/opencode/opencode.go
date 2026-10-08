@@ -24,7 +24,10 @@ func init() {
 }
 
 //nolint:revive // OpenCodeAgent is clearer than Agent in this context
-type OpenCodeAgent struct{}
+type OpenCodeAgent struct {
+	// CommandRunner overrides text-generation subprocess creation when non-nil.
+	CommandRunner agent.TextCommandRunner
+}
 
 // NewOpenCodeAgent creates a new OpenCode agent instance.
 func NewOpenCodeAgent() agent.Agent {
@@ -36,7 +39,6 @@ func NewOpenCodeAgent() agent.Agent {
 func (a *OpenCodeAgent) Name() types.AgentName    { return agent.AgentNameOpenCode }
 func (a *OpenCodeAgent) Type() types.AgentType    { return agent.AgentTypeOpenCode }
 func (a *OpenCodeAgent) Description() string      { return "OpenCode - AI-powered terminal coding agent" }
-func (a *OpenCodeAgent) IsPreview() bool          { return true }
 func (a *OpenCodeAgent) ProtectedDirs() []string  { return []string{".opencode"} }
 func (a *OpenCodeAgent) ProtectedFiles() []string { return []string{"opencode.json"} }
 
@@ -60,7 +62,7 @@ func (a *OpenCodeAgent) DetectPresence(ctx context.Context) (bool, error) {
 // ReadTranscript reads the transcript for a session.
 // The sessionRef is expected to be a path to the export JSON file.
 func (a *OpenCodeAgent) ReadTranscript(sessionRef string) ([]byte, error) {
-	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path from agent hook
+	data, err := agent.ReadTranscriptFile(sessionRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read opencode transcript: %w", err)
 	}
@@ -188,7 +190,7 @@ func (a *OpenCodeAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession
 	if input.SessionRef == "" {
 		return nil, errors.New("no session ref provided")
 	}
-	data, err := os.ReadFile(input.SessionRef)
+	data, err := agent.ReadTranscriptFile(input.SessionRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session: %w", err)
 	}
@@ -222,22 +224,21 @@ func (a *OpenCodeAgent) WriteSession(ctx context.Context, session *agent.AgentSe
 	}
 
 	// Import the session into OpenCode's database.
-	// This enables `opencode -s <id>` for both resume and rewind.
+	// This enables `opencode -s <id>` to resume the restored session.
 	return a.importSessionIntoOpenCode(ctx, session.SessionID, session.NativeData)
 }
 
 // importSessionIntoOpenCode writes the export JSON to a temp file and runs
 // `opencode import` to restore the session into OpenCode's database.
-// For rewind (session already exists), the session is deleted first so the
-// reimport replaces it with the checkpoint-state messages.
+// An existing session is deleted first so the import replaces its messages.
 func (a *OpenCodeAgent) importSessionIntoOpenCode(ctx context.Context, sessionID string, exportData []byte) error {
 	// Delete existing session first so reimport replaces it cleanly.
 	// opencode import uses ON CONFLICT DO NOTHING, so existing messages
-	// would be skipped without this step (breaking rewind).
+	// would be skipped without this step.
 	if err := runOpenCodeSessionDelete(ctx, sessionID); err != nil {
 		// Non-fatal: session might not exist yet (first session).
-		// Import will still work for new sessions; only rewind of existing sessions
-		// would have stale messages.
+		// Import will still work for new sessions; restoring an existing session
+		// would leave stale messages.
 		logging.Warn(ctx, "could not delete existing opencode session",
 			slog.String("session_id", sessionID),
 			slog.String("error", err.Error()),
@@ -273,7 +274,7 @@ func (a *OpenCodeAgent) FormatResumeCommand(sessionID string) string {
 var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
 
 // SanitizePathForOpenCode converts a path to a safe directory name.
-// Replaces any non-alphanumeric character with a dash (same approach as Claude/Gemini).
+// Replaces any non-alphanumeric character with a dash (same approach as Claude).
 func SanitizePathForOpenCode(path string) string {
 	return nonAlphanumericRegex.ReplaceAllString(path, "-")
 }

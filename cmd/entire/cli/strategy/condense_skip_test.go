@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
@@ -59,7 +60,7 @@ func TestCondenseSession_SkipsEmptySessionEvenWithCommittedFiles(t *testing.T) {
 	s := &ManualCommitStrategy{}
 	checkpointID := id.MustCheckpointID("b2c3d4e5f6a1")
 
-	// Session with no transcript path, no shadow branch, no FilesTouched (empty Codex companion)
+	// Session with no transcript path, no steps, no FilesTouched (empty Codex companion)
 	state := &SessionState{
 		SessionID:  "empty-codex-with-committed-files",
 		AgentType:  "Codex",
@@ -153,7 +154,7 @@ func TestCondenseSession_SkipsWhenNoOverlapAndRedactionFails(t *testing.T) {
 
 	// Force the redactor to fail so redactedTranscript ends up empty.
 	originalRedactor := redactSessionJSONLBytes
-	redactSessionJSONLBytes = func(_ []byte) (redact.RedactedBytes, error) {
+	redactSessionJSONLBytes = func(_ context.Context, _ []byte) (redact.RedactedBytes, error) {
 		return redact.RedactedBytes{}, errors.New("simulated redaction failure")
 	}
 	t.Cleanup(func() { redactSessionJSONLBytes = originalRedactor })
@@ -272,21 +273,20 @@ func TestCondenseSessionByID_SkippedPreservesState(t *testing.T) {
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 
-	// Write a dummy file so SaveStep has something to commit to the shadow branch
+	// Write a dummy file so SaveStep has something to record
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "dummy.txt"), []byte("x"), 0o644))
 
-	// SaveStep creates the shadow branch (so CondenseSessionByID gets past the
-	// hasShadowBranch check), but there's no transcript in the metadata dir.
+	// SaveStep records a turn-end step (so CondenseSessionByID sees pending
+	// work), but there's no transcript in the metadata dir.
 	err := s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{},
-		NewFiles:       []string{"dummy.txt"},
-		DeletedFiles:   []string{},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint without transcript",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: []string{},
+		NewFiles:      []string{"dummy.txt"},
+		DeletedFiles:  []string{},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint without transcript",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	})
 	require.NoError(t, err)
 
@@ -323,20 +323,19 @@ func TestCondenseAndMarkFullyCondensed_SkippedMarksFullyCondensed(t *testing.T) 
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 
-	// Write a dummy file so SaveStep has something to commit to the shadow branch
+	// Write a dummy file so SaveStep has something to record
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "dummy.txt"), []byte("x"), 0o644))
 
-	// SaveStep creates the shadow branch
+	// SaveStep records a turn-end step
 	err := s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{},
-		NewFiles:       []string{"dummy.txt"},
-		DeletedFiles:   []string{},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint without transcript",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: []string{},
+		NewFiles:      []string{"dummy.txt"},
+		DeletedFiles:  []string{},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint without transcript",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	})
 	require.NoError(t, err)
 
@@ -380,13 +379,63 @@ func TestTryAgentCommitFastPath_SkipsEmptySession(t *testing.T) {
 	}
 
 	// Fast path should NOT add a trailer for the empty session
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{emptySession}, "message")
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{emptySession}, "message", nil)
 	assert.False(t, result, "fast path should not fire for empty session")
 
 	// Verify no trailer was added
 	content, err := os.ReadFile(commitMsgFile)
 	require.NoError(t, err)
 	assert.NotContains(t, string(content), "Entire-Checkpoint", "should not add trailer for empty session")
+}
+
+func TestTryAgentCommitFastPath_SkipsAntigravityWithUnflushedTranscript(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
+
+	// agy writes its transcript only after Stop: mid-turn the recorded path
+	// points at a missing (or empty placeholder) file. With no tracked files
+	// and no turn-end step, condensation degrades to an empty transcript and
+	// the skip gate fires — a stamped trailer would dangle permanently.
+	emptyTranscript := filepath.Join(dir, "transcript_full.jsonl")
+	require.NoError(t, os.WriteFile(emptyTranscript, nil, 0o600))
+
+	for name, path := range map[string]string{
+		"missing transcript file": filepath.Join(dir, "does-not-exist.jsonl"),
+		"empty transcript file":   emptyTranscript,
+	} {
+		agySession := &SessionState{
+			SessionID:      "agy-midturn-" + name,
+			AgentType:      agent.AgentTypeAntigravity,
+			Phase:          session.PhaseActive,
+			TranscriptPath: path,
+		}
+		result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{agySession}, "message", nil)
+		assert.False(t, result, "fast path must not fire for agy with %s", name)
+	}
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.NotContains(t, string(content), "Entire-Checkpoint", "no trailer for agy sessions condensation would skip")
+
+	// Once the transcript has real content, the trailer is stamped as usual.
+	populated := filepath.Join(dir, "transcript_populated.jsonl")
+	require.NoError(t, os.WriteFile(populated, []byte(`{"type":"USER_INPUT","content":"hi"}`+"\n"), 0o600))
+	agySession := &SessionState{
+		SessionID:      "agy-midturn-populated",
+		AgentType:      agent.AgentTypeAntigravity,
+		Phase:          session.PhaseActive,
+		TranscriptPath: populated,
+	}
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{agySession}, "message", nil)
+	assert.True(t, result, "fast path should fire for agy with a flushed transcript")
+	content, err = os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "Entire-Checkpoint")
 }
 
 func TestTryAgentCommitFastPath_AcceptsSessionWithContent(t *testing.T) {
@@ -407,7 +456,7 @@ func TestTryAgentCommitFastPath_AcceptsSessionWithContent(t *testing.T) {
 		StepCount:      1,
 	}
 
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{contentSession}, "message")
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{contentSession}, "message", nil)
 	assert.True(t, result, "fast path should fire for session with content")
 
 	// Verify trailer was added
@@ -439,12 +488,115 @@ func TestTryAgentCommitFastPath_SkipsEmptyButAcceptsContentSession(t *testing.T)
 		StepCount:      1,
 	}
 
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{emptySession, contentSession}, "message")
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{emptySession, contentSession}, "message", nil)
 	assert.True(t, result, "fast path should fire for the content session")
 
 	content, err := os.ReadFile(commitMsgFile)
 	require.NoError(t, err)
 	assert.Contains(t, string(content), "Entire-Checkpoint", "should add trailer from the content session")
+}
+
+// TestTryAgentCommitFastPath_IdleTaskRecordEligibility covers the idle+record
+// eligibility regressions in one table: an IDLE session links only with a
+// fresh in-flight task record (the incident fix — six of seven commits on a real
+// subagent-driven branch went unlinked under the old ACTIVE-only gate), while
+// no-record idle, completed-record, ENDED-with-record, and stale-record
+// sessions all decline.
+func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
+	freshRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now()},
+	}
+	staleRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now().Add(-25 * time.Hour)},
+	}
+	completedRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now(), CompletedAt: time.Now()},
+	}
+	boundaryRecord := []session.TaskRecord{
+		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now().Add(-activeSessionInteractionThreshold)},
+	}
+	tests := []struct {
+		name        string
+		phase       session.Phase
+		taskRecords []session.TaskRecord
+		wantLinked  bool
+	}{
+		{
+			// An idle session with a fresh task record must take the fast path.
+			name:        "AcceptsIdleSessionWithTaskRecord",
+			phase:       session.PhaseIdle,
+			taskRecords: freshRecord,
+			wantLinked:  true,
+		},
+		{
+			// A completed subagent can no longer be the committer. Its files
+			// reached FilesTouched at completion, so content detection links
+			// the commit when it carries them; the fast path must not.
+			name:        "DeclinesIdleSessionWithCompletedTaskRecord",
+			phase:       session.PhaseIdle,
+			taskRecords: completedRecord,
+			wantLinked:  false,
+		},
+		{
+			// An idle session with no records is an ordinary post-turn commit
+			// and must stay unlinked.
+			name:       "DeclinesIdleSessionWithoutTaskRecords",
+			phase:      session.PhaseIdle,
+			wantLinked: false,
+		},
+		{
+			// An ENDED session's records belong to its own final condensation,
+			// not this fast path.
+			name:        "DeclinesEndedSessionWithTaskRecord",
+			phase:       session.PhaseEnded,
+			taskRecords: freshRecord,
+			wantLinked:  false,
+		},
+		{
+			// A record older than idleWithLiveTaskRecord's 24h freshness bound
+			// must not confer linkage forever.
+			name:        "DeclinesIdleSessionWithStaleTaskRecord",
+			phase:       session.PhaseIdle,
+			taskRecords: staleRecord,
+			wantLinked:  false,
+		},
+		{
+			// The bound is exclusive: a record exactly at 24h is already out.
+			name:        "DeclinesIdleSessionAtFreshnessBoundary",
+			phase:       session.PhaseIdle,
+			taskRecords: boundaryRecord,
+			wantLinked:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+
+			s := &ManualCommitStrategy{}
+			commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+			require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
+
+			state := &SessionState{
+				SessionID:      "claude-session",
+				AgentType:      "Claude Code",
+				Phase:          tt.phase,
+				TranscriptPath: "/some/path/to/transcript.jsonl",
+				TaskRecords:    tt.taskRecords,
+			}
+
+			result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{state}, "message", nil)
+			assert.Equal(t, tt.wantLinked, result, "fast path taken")
+
+			content, err := os.ReadFile(commitMsgFile)
+			require.NoError(t, err)
+			if tt.wantLinked {
+				assert.Contains(t, string(content), "Entire-Checkpoint")
+			} else {
+				assert.NotContains(t, string(content), "Entire-Checkpoint")
+			}
+		})
+	}
 }
 
 // getHeadHash returns the HEAD commit hash as a string.

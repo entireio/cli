@@ -5,18 +5,32 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
-	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 )
@@ -34,10 +48,10 @@ Checks performed:
      entire/checkpoints/v1 branches share no common ancestor (caused by a
      previous bug). Fixes by cherry-picking local checkpoints onto remote tip.
 
-  2. Checkpoint read mirror (checkpoints v1.1 only): detects when the
-     local-only refs/entire/checkpoints/v1.1 read mirror is missing, stale,
-     or diverged relative to entire/checkpoints/v1, which makes reads miss
-     checkpoints. Fixes by pointing the mirror at the v1 tip.
+  2. Operational logs: warn when .entire/logs cannot be written. Every other
+     diagnostic is delivered by writing there, and that write is silent about
+     its own failure, so an unwritable log directory looks exactly like a repo
+     where nothing ran.
 
   When Codex hooks are installed:
   3. Codex hook trust: warn when hooks declared in .codex/hooks.json
@@ -45,21 +59,64 @@ Checks performed:
      review hasn't run yet on this machine, or a newer entire release
      added a hook the user hasn't approved yet).
 
-  4. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  For each installed agent that reports hook-config drift:
+  4. Hook config: warn when the installed hooks no longer match what this
+     CLI writes (e.g. an older release wrote Claude Code tool matchers that
+     no longer fire, or a committed Pi/OpenCode extension has gone stale).
+     Fix by re-running 'entire enable --force'.
+
+  5. Retired Gemini CLI hooks: remove Entire hook entries left in
+     .gemini/settings.json. Gemini CLI support was removed; the entries now do
+     nothing but run a no-op on every Gemini event.
+
+  6. Summary provider: warn when summary_generation.provider names a registered
+     agent that cannot generate text (e.g. factoryai-droid), which makes
+     'entire checkpoint explain --generate', 'entire dispatch' and
+     'entire runner setup' fail. Reports the file to change; does not rewrite it.
+
+  7. Legacy shadow branches: report entire/<commit>-<worktree> branches older
+     versions wrote at every turn. They hold full snapshots of the working
+     tree and nothing reads them anymore. Fix with 'entire doctor --force',
+     which deletes only the branches; a later 'git gc' frees the space once
+     the unreachable objects are two weeks old ('git gc --prune=now' frees it
+     at once but drops every unreachable object, so run it only when no other
+     git process is active); a branch
+     checked out in a worktree is left alone. Bare entire/<commit> branches
+     are only pointed at ('entire clean --all --dry-run'), never deleted.
+
+  8. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
-  - It is in ENDED phase with uncondensed checkpoint data on a shadow branch
+  - It is in ENDED phase with uncondensed checkpoint data
 
 For each stuck session, you can choose to:
   - Condense: Save session data to permanent storage
-  - Discard: Remove the session state and shadow branch data
+  - Discard: Remove the session state
   - Skip: Leave the session as-is
 
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
-be condensed will be discarded.`,
-		PreRun: func(_ *cobra.Command, _ []string) {
-			strategy.EnsureRedactionConfigured()
+be condensed will be discarded.
+
+Without a terminal to prompt on (agents, CI), doctor reports each issue and
+points at --force instead of prompting.`,
+		// On the group, not on doctor's own PreRunE, so it also covers
+		// `doctor logs` and `doctor bundle`, which read .entire/logs. Runs
+		// before the PreRunE below, which loads redaction settings from
+		// .entire/settings.json — itself a read through the path in question.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			return reportBrokenEntireDir(cmd)
+		},
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Cobra runs the persistent pre-runs before a command's own PreRunE,
+			// so the root hook has already put an initialized logger in this
+			// context: redaction diagnostics and the load-time summary land in
+			// .entire/logs/, which is where `entire doctor bundle` collects them
+			// and where a user debugging custom rules greps for
+			// component=redaction. Answering "did my rules load?" is doctor's
+			// job, so it must not be the one command whose diagnostics go to
+			// bare stderr.
+			return strategy.EnsureRedactionConfigured(cmd.Context())
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSessionsFix(cmd, forceFlag)
@@ -72,6 +129,7 @@ be condensed will be discarded.`,
 	cmd.AddCommand(newTraceCmd())
 	cmd.AddCommand(newDoctorLogsCmd())
 	cmd.AddCommand(newDoctorBundleCmd())
+	cmd.AddCommand(newDoctorMigrateCheckpointsCmd())
 
 	return cmd
 }
@@ -80,8 +138,6 @@ be condensed will be discarded.`,
 type stuckSession struct {
 	State             *strategy.SessionState
 	Reason            string
-	ShadowBranch      string
-	HasShadowBranch   bool
 	CheckpointCount   int
 	FilesTouchedCount int
 }
@@ -96,20 +152,64 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		finalErr = NewSilentError(fmt.Errorf("metadata check failed: %w", metadataErr))
 	}
 
-	// Check 2: v1.1 read-mirror drift (after check 1: reconciliation rewrites
-	// v1 and re-mirrors).
-	if mirrorErr := checkCommittedMetadataMirror(cmd, force); mirrorErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Error: checkpoint read mirror check failed: %v\n", mirrorErr)
-		if finalErr == nil {
-			finalErr = NewSilentError(fmt.Errorf("checkpoint read mirror check failed: %w", mirrorErr))
-		}
-	}
 	fmt.Fprintln(cmd.OutOrStdout())
 
 	ctx := cmd.Context()
 
+	// Ahead of checkGitHooks, which is the check a symlinked hooks directory
+	// makes fail: the cause should be on screen before the failure it explains.
+	checkGitHookSymlinks(cmd)
+
+	// The git hook surface. Checked before the agent hook checks because it is
+	// the more fundamental one: if git hooks are broken, commits are not captured
+	// at all and agent-config drift is noise by comparison.
+	if hooksErr := checkGitHooks(cmd, force); hooksErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: git hook check failed: %v\n", hooksErr)
+		finalErr = NewSilentError(fmt.Errorf("git hook check failed: %w", hooksErr))
+	}
+
+	// Before checkLogSink, because a symlinked .entire/logs is one of the reasons
+	// that check fires and this one names the cause.
+	checkEntireDirSymlinks(cmd)
+	checkAgentDirSymlinks(cmd)
+
+	// Before the remaining checks, because it is the channel they and every
+	// other command write their diagnostics to: if this is broken, an empty
+	// entire.log is not evidence of a healthy repo.
+	checkLogSink(cmd)
+
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
+
+	// Agent-specific: Antigravity title-tee (token-usage surface).
+	checkAntigravityTitleTee(cmd)
+
+	// Agent-specific: does agy actually load the workspace hooks?
+	checkAntigravityHooksLoaded(cmd)
+
+	// Agent-specific: Claude Code hook config drift.
+	checkHookDrift(cmd)
+
+	// Retired permission rule that makes ordinary commands need approval.
+	// Fixes rather than only reporting: what it removes is a rule Entire wrote.
+	checkRetiredDenyRule(cmd)
+
+	// Hooks left by removed Gemini CLI support. Fixes rather than only
+	// reporting, for the same reason: every entry it removes is Entire's own.
+	checkRetiredGeminiHooks(cmd)
+
+	// A configured summary provider that cannot generate text. After the hook
+	// checks: it breaks three commands, not capture, so it is the milder fault.
+	checkSummaryProvider(cmd)
+
+	// Where checkpoints land, when the repo's remotes make that ambiguous.
+	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
+
+	// Shadow branches older versions left behind: storage only, never read.
+	if legacyErr := checkLegacyShadowBranches(cmd, force); legacyErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: legacy shadow branch check failed: %v\n", legacyErr)
+		finalErr = NewSilentError(fmt.Errorf("legacy shadow branch check failed: %w", legacyErr))
+	}
 
 	// Stuck sessions
 	// Load all session states
@@ -126,19 +226,20 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		return nil
 	}
 
-	// Open repository to check shadow branches (uses worktree-aware helper)
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+	// Finalize any non-ended session whose agent process has exited (no SessionStop
+	// hook fired). A gone process is unambiguous, so these are condensed on the
+	// spot rather than left for the interactive prompt below; the sweep marks
+	// them ended in place so classifySession won't re-flag them.
+	if n := finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget)); n > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Finalized %d exited session(s) (agent process gone).\n\n", n)
 	}
-	defer repo.Close()
 
 	// Identify stuck sessions
 	now := time.Now()
 	var stuck []stuckSession
 
 	for _, state := range states {
-		ss := classifySession(state, repo, now)
+		ss := classifySession(state, now)
 		if ss != nil {
 			stuck = append(stuck, *ss)
 		}
@@ -157,11 +258,13 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Found %d stuck session(s):\n\n", len(stuck))
 
+	canPrompt := interactive.CanPromptInteractively()
+
 	for _, ss := range stuck {
 		displayStuckSession(cmd, ss)
 
 		if force {
-			if ss.HasShadowBranch && ss.CheckpointCount > 0 {
+			if canCondenseStuckSession(ss) {
 				if err := strat.CondenseSessionByID(ctx, ss.State.SessionID); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to condense session %s: %v\n", ss.State.SessionID, err)
 				} else {
@@ -169,12 +272,27 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 				}
 			} else {
 				// Discard if we can't condense
-				if err := discardSession(ctx, ss, repo, cmd.ErrOrStderr()); err != nil {
+				if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
 				} else {
 					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
 				}
 			}
+			continue
+		}
+
+		// Degrade to warn-only when there is nobody to ask, same as
+		// checkGitHooks: an agent or CI run must not crash on a TTY prompt.
+		// Disclose what --force would do to this session, using the same
+		// predicate the force branch above applies.
+		if !canPrompt {
+			if canCondenseStuckSession(ss) {
+				fmt.Fprintln(cmd.OutOrStdout(), "  Fix: condense to permanent storage.")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "  Fix: discard (no condensable checkpoint data).")
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "  Run `entire doctor --force` to apply it.")
+			fmt.Fprintln(cmd.OutOrStdout())
 			continue
 		}
 
@@ -195,7 +313,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", ss.State.SessionID)
 			}
 		case "discard":
-			if err := discardSession(ctx, ss, repo, cmd.ErrOrStderr()); err != nil {
+			if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
@@ -214,49 +332,48 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 // classifySession determines if a session is stuck and returns diagnostic info.
 // Returns nil if the session is healthy.
-func classifySession(state *strategy.SessionState, repo *git.Repository, now time.Time) *stuckSession {
-	// Determine shadow branch info
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, refErr := repo.Reference(refName, true)
-	hasShadowBranch := refErr == nil
-
-	switch {
-	case state.Phase.IsActive():
-		if !state.IsStuckActive() {
-			return nil
-		}
-
-		var reason string
-		if state.LastInteractionTime != nil {
-			reason = fmt.Sprintf("active, last interaction %s ago", now.Sub(*state.LastInteractionTime).Truncate(time.Minute))
-		} else {
-			reason = fmt.Sprintf("active, started %s ago with no recorded interaction", now.Sub(state.StartedAt).Truncate(time.Minute))
-		}
-
+func classifySession(state *strategy.SessionState, now time.Time) *stuckSession {
+	stuck := func(reason string) *stuckSession {
 		return &stuckSession{
 			State:             state,
 			Reason:            reason,
-			ShadowBranch:      shadowBranch,
-			HasShadowBranch:   hasShadowBranch,
-			CheckpointCount:   state.StepCount,
+			CheckpointCount:   state.StepCount + len(state.TaskRecords),
 			FilesTouchedCount: len(state.FilesTouched),
+		}
+	}
+
+	// A dead owner is unambiguous and phase-independent, so it is checked ahead
+	// of the phase switch: an agent that quit without firing a session-end hook
+	// leaves the session IDLE just as often as ACTIVE (see State.OwnerExited).
+	// Detected immediately, with no timeout wait. These are normally finalized
+	// up front in runSessionsFix; this covers sessions that couldn't be.
+	if state.OwnerExited() {
+		pid := 0
+		if state.Owner != nil {
+			pid = state.Owner.PID
+		}
+		return stuck(fmt.Sprintf("agent process %d exited (no longer running)", pid))
+	}
+
+	switch {
+	case state.Phase.IsActive():
+		switch {
+		case !state.IsStuckActive():
+			return nil
+		case state.LastInteractionTime != nil:
+			return stuck(fmt.Sprintf("active, last interaction %s ago", now.Sub(*state.LastInteractionTime).Truncate(time.Minute)))
+		default:
+			return stuck(fmt.Sprintf("active, started %s ago with no recorded interaction", now.Sub(state.StartedAt).Truncate(time.Minute)))
 		}
 
 	case state.Phase == session.PhaseEnded:
-		// Ended sessions are stuck if they have uncondensed data
-		if state.StepCount <= 0 || !hasShadowBranch {
+		// FullyCondensed = everything worth keeping is materialized; a leftover
+		// live record can never complete (owner gone) and must not re-flag
+		// forever.
+		if state.FullyCondensed || !state.HasPendingWork() {
 			return nil
 		}
-
-		return &stuckSession{
-			State:             state,
-			Reason:            "ended with uncondensed checkpoint data",
-			ShadowBranch:      shadowBranch,
-			HasShadowBranch:   hasShadowBranch,
-			CheckpointCount:   state.StepCount,
-			FilesTouchedCount: len(state.FilesTouched),
-		}
+		return stuck("ended with uncondensed checkpoint data")
 
 	default:
 		return nil
@@ -279,12 +396,15 @@ func displayStuckSession(cmd *cobra.Command, ss stuckSession) {
 		fmt.Fprintf(w, "  Last interaction: %s\n", ss.State.LastInteractionTime.Format(time.RFC3339))
 	}
 
-	shadowStatus := "not found"
-	if ss.HasShadowBranch {
-		shadowStatus = fmt.Sprintf("exists (%s)", ss.ShadowBranch)
-	}
-	fmt.Fprintf(w, "  Shadow branch: %s\n", shadowStatus)
-	fmt.Fprintf(w, "  Checkpoints: %d, Files touched: %d\n", ss.CheckpointCount, ss.FilesTouchedCount)
+	fmt.Fprintf(w, "  Pending turns: %d, Task records: %d, Files touched: %d\n",
+		ss.State.StepCount, len(ss.State.TaskRecords), ss.FilesTouchedCount)
+}
+
+// canCondenseStuckSession reports whether a stuck session has content the
+// condense path can save (State.HasPendingWork). A record-bearing dead-owner
+// session must be condensed (materialized), never discarded.
+func canCondenseStuckSession(ss stuckSession) bool {
+	return ss.State.HasPendingWork()
 }
 
 // promptSessionAction asks the user what to do with a stuck session.
@@ -292,7 +412,7 @@ func promptSessionAction(ss stuckSession) (string, error) {
 	var action string
 
 	options := make([]huh.Option[string], 0, 3)
-	if ss.HasShadowBranch && ss.CheckpointCount > 0 {
+	if canCondenseStuckSession(ss) {
 		options = append(options, huh.NewOption("Condense (save to permanent storage)", "condense"))
 	}
 	options = append(options,
@@ -316,28 +436,52 @@ func promptSessionAction(ss stuckSession) (string, error) {
 	return action, nil
 }
 
-// discardSession removes session state and cleans up the shadow branch.
-func discardSession(ctx context.Context, ss stuckSession, _ *git.Repository, errW io.Writer) error {
-	// Clear session state file
-	if err := strategy.ClearSessionState(ctx, ss.State.SessionID); err != nil {
+// discardSession removes session state.
+func discardSession(ctx context.Context, ss stuckSession, errW io.Writer) error {
+	if err := strategy.ClearSessionStateWithProgress(ctx, ss.State.SessionID, errW, strategy.SessionLockNoticeDelay); err != nil {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
+	return nil
+}
 
-	// Delete shadow branch if it exists and no other sessions need it
-	if ss.HasShadowBranch {
-		if shouldDelete, err := canDeleteShadowBranch(ctx, ss.ShadowBranch, ss.State.SessionID); err != nil {
-			fmt.Fprintf(errW, "Warning: could not check other sessions for shadow branch: %v\n", err)
-		} else if shouldDelete {
-			if err := strategy.DeleteBranchCLI(ctx, ss.ShadowBranch); err != nil {
-				// Branch already gone is not an error — keeps discard idempotent
-				if !errors.Is(err, strategy.ErrBranchNotFound) {
-					return fmt.Errorf("failed to delete shadow branch: %w", err)
-				}
-			}
-		}
+// reportMetadataDivergence prints the metadata-branch verdict for a comparison
+// that is not disconnected: either plain OK, or DIVERGED when both sides advanced
+// since their merge base.
+//
+// Divergence needs saying because it is the one state whose resolution rewrites
+// the local ref: the next fetch from the elected sync remote replays the local
+// commits onto the fetched tip (SafelyAdvanceLocalRef), which loses no
+// checkpoints but does move the ref and re-hash those commits. Nothing else
+// surfaces that — the replay itself only logs.
+//
+// Takes the already-computed comparison rather than re-deriving it: the verdict
+// costs a merge-base subprocess, and the caller has one in hand.
+func reportMetadataDivergence(ctx context.Context, w io.Writer, comparison strategy.MetadataComparison, remoteName string, primary plumbing.ReferenceName) {
+	if comparison.Relation != strategy.MetadataRelationDiverged {
+		fmt.Fprintln(w, "✓ Metadata branches: OK")
+		return
 	}
 
-	return nil
+	fmt.Fprintln(w, "Metadata branches: DIVERGED")
+	fmt.Fprintf(w, "  Local and remote %s have both advanced since they last agreed.\n", primary.Short())
+	// Labels are fixed-width and the remote name trails the hash: padding it
+	// into the label misaligns the pair for every remote name that is not
+	// exactly as long as "origin".
+	fmt.Fprintf(w, "    local:  %s\n", comparison.Local.String()[:12])
+	fmt.Fprintf(w, "    remote: %s  (%s)\n", comparison.Remote.String()[:12], remoteName)
+
+	// Whether the divergence resolves itself depends on the confinement rule:
+	// only the elected sync remote may advance the local ref, so a diverged
+	// legacy-tier ref sits there indefinitely and says nothing about local state.
+	elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx)
+	if electErr == nil && elected.Name == remoteName {
+		fmt.Fprintln(w, "  No action needed: the next fetch from this remote replays your local")
+		fmt.Fprintln(w, "  checkpoints onto its tip. No checkpoints are lost, but the local ref moves")
+		fmt.Fprintln(w, "  and the replayed commits get new hashes.")
+		return
+	}
+	fmt.Fprintf(w, "  %q is the legacy read tier, not the elected checkpoint sync remote, so it\n", remoteName)
+	fmt.Fprintln(w, "  never advances the local ref. Nothing will reconcile this on its own.")
 }
 
 // checkDisconnectedMetadata detects and optionally repairs disconnected
@@ -350,29 +494,56 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	defer repo.Close()
 
 	ctx := cmd.Context()
-	refs := checkpoint.ResolveCommittedRefs(ctx)
+	refs := checkpoint.ResolveRefs(ctx)
 	w := cmd.OutOrStdout()
-	if !refs.PrimaryFetchableFromOrigin() {
-		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to origin)\n", refs.Primary)
+	if !refs.PrimaryFetchableFromRemote() {
+		fmt.Fprintf(w, "✓ Metadata branches: OK (primary ref %s is not pushed to a remote)\n", refs.Primary)
 		return nil
 	}
-	remoteRefName := plumbing.NewRemoteReferenceName("origin", refs.Primary.Short())
-	disconnected, err := strategy.IsMetadataDisconnected(ctx, repo, remoteRefName)
+	// Check against the first checkpoint read candidate whose remote-tracking
+	// ref exists — a pure read across both tiers (elected sync remote, then
+	// the legacy origin tier).
+	remoteName, remoteRefName, ok := strategy.FirstReadCandidateTrackingRef(ctx, repo, refs.Primary)
+	if !ok {
+		fmt.Fprintln(w, "✓ Metadata branches: OK (no remote-tracking metadata ref found)")
+		return nil
+	}
+	// One classification for both verdicts: disconnected and diverged are two
+	// answers from the same merge base, and computing them separately meant two
+	// merge-base subprocesses that could disagree.
+	comparison, err := strategy.CompareMetadataWithRemote(ctx, repo, remoteRefName)
 	if err != nil {
 		return fmt.Errorf("could not check metadata branch state: %w", err)
 	}
 
-	if !disconnected {
-		fmt.Fprintln(w, "✓ Metadata branches: OK")
+	if comparison.Relation != strategy.MetadataRelationDisconnected {
+		reportMetadataDivergence(ctx, w, comparison, remoteName, refs.Primary)
 		return nil
 	}
 
 	fmt.Fprintln(w, "Metadata branches: DISCONNECTED")
 	fmt.Fprintf(w, "  Local and remote %s branches share no common ancestor.\n", refs.Primary.Short())
 	fmt.Fprintln(w, "  Some remote checkpoints may not be visible locally.")
+
+	// The repair advances the local ref from the remote tip, so it is
+	// confined to the elected checkpoint sync remote: a stale legacy-tier
+	// origin must never drive a local-ref rewrite. Report-only otherwise.
+	elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx)
+	if electErr != nil || elected.Name != remoteName {
+		fmt.Fprintf(w, "  The disconnected tracking ref belongs to remote %q, which is not the elected checkpoint sync remote.\n", remoteName)
+		fmt.Fprintln(w, "  Automatic repair only reconciles against the elected sync remote; fetch its metadata branch and re-run 'entire doctor'.")
+		return nil
+	}
+
 	fmt.Fprintln(w, "  Fix: cherry-pick local checkpoints onto remote tip (preserves all data).")
 
 	if !force {
+		// Degrade to warn-only when there is nobody to ask, same as
+		// checkGitHooks: an agent or CI run must not crash on a TTY prompt.
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, "  Run `entire doctor --force` to apply it.")
+			return nil
+		}
 		proceed, promptErr := confirmDoctorFix(ctx, w, "Fix disconnected metadata branches?")
 		if promptErr != nil {
 			return promptErr
@@ -390,84 +561,22 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 	return nil
 }
 
-// checkCommittedMetadataMirror detects and optionally repairs v1.1 read-mirror
-// drift. Read paths use the mirror as-is, so doctor is the repair tool.
-// Silent when the topology has no mirror.
-func checkCommittedMetadataMirror(cmd *cobra.Command, force bool) error {
-	ctx := cmd.Context()
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	diag, err := strategy.DiagnoseCommittedMetadataMirror(ctx, repo)
-	if err != nil {
-		return fmt.Errorf("could not check checkpoint read mirror state: %w", err)
-	}
-
-	w := cmd.OutOrStdout()
-	primary := diag.Refs.Primary.Short()
-
-	switch diag.Status {
-	case strategy.MirrorNotConfigured:
-		return nil
-	case strategy.MirrorOK:
-		fmt.Fprintln(w, "✓ Checkpoint read mirror: OK")
-		return nil
-	case strategy.MirrorNoMetadata:
-		fmt.Fprintln(w, "✓ Checkpoint read mirror: OK (no committed metadata yet)")
-		return nil
-	case strategy.MirrorPrimaryMissing:
-		fmt.Fprintf(w, "Checkpoint read mirror: %s\n", diag.Status)
-		fmt.Fprintf(w, "  The read mirror %s exists, but the %s branch it mirrors is gone.\n",
-			diag.Refs.Mirror, primary)
-		fmt.Fprintln(w, "  Restore the branch and re-run doctor:")
-		fmt.Fprintf(w, "    git fetch origin %s:%s\n", primary, primary)
-		return nil
-	case strategy.MirrorMissing:
-		fmt.Fprintf(w, "Checkpoint read mirror: %s\n", diag.Status)
-		fmt.Fprintf(w, "  %s does not exist; reads will find no checkpoints.\n", diag.Refs.Mirror)
-		fmt.Fprintf(w, "  Fix: seed the mirror at the %s tip.\n", primary)
-	case strategy.MirrorBehind:
-		fmt.Fprintf(w, "Checkpoint read mirror: %s\n", diag.Status)
-		fmt.Fprintf(w, "  Mirror is at %s, behind %s at %s; reads miss newer checkpoints.\n",
-			shortMirrorHash(diag.Mirror), primary, shortMirrorHash(diag.Primary))
-		fmt.Fprintf(w, "  Fix: advance the mirror to the %s tip.\n", primary)
-	case strategy.MirrorDiverged:
-		fmt.Fprintf(w, "Checkpoint read mirror: %s\n", diag.Status)
-		fmt.Fprintf(w, "  Mirror at %s has commits not on %s (at %s). Writes never target the\n",
-			shortMirrorHash(diag.Mirror), primary, shortMirrorHash(diag.Primary))
-		fmt.Fprintln(w, "  mirror, so something outside entire moved it.")
-		fmt.Fprintf(w, "  Fix: reset the mirror to the %s tip — the diverged mirror commits\n", primary)
-		fmt.Fprintf(w, "  are discarded (%s is the source of truth).\n", primary)
-	}
-
-	if !force {
-		proceed, promptErr := confirmDoctorFix(ctx, w, "Repair checkpoint read mirror?")
-		if promptErr != nil {
-			return promptErr
-		}
-		if !proceed {
-			return nil
-		}
-	}
-
-	if fixErr := strategy.MirrorCommittedMetadataRef(ctx, repo, diag.Refs); fixErr != nil {
-		return fmt.Errorf("failed to repair checkpoint read mirror: %w", fixErr)
-	}
-	fmt.Fprintf(w, "  ✓ Fixed: mirror now points at the %s tip\n", primary)
-	return nil
-}
-
 // confirmDoctorFix prompts to apply a doctor fix. Declining (which prints
-// "-> Skipped"), aborting (Ctrl+C), and context cancellation all return false
-// with no error.
+// "-> Skipped"), aborting (Ctrl+C), context cancellation, and a
+// non-interactive environment all return false with no error. Callers that
+// want to hint at `--force` for the non-interactive case should check
+// interactive.CanPromptInteractively themselves before calling; the guard
+// here is the safety net so no future call site can crash on a TTY prompt.
 func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, error) {
 	// huh opens the TTY during form startup regardless of context state, so
 	// guard explicitly to honor an already-cancelled command context.
 	if ctx.Err() != nil {
 		return false, nil //nolint:nilerr // cancelled context is a clean skip, not an error
+	}
+	// Never open the TTY prompt when there is nobody to ask (agents, CI):
+	// decline silently instead of crashing with "could not open TTY".
+	if !interactive.CanPromptInteractively() {
+		return false, nil
 	}
 	var confirmed bool
 	form := NewAccessibleForm(
@@ -489,82 +598,1219 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 	return confirmed, nil
 }
 
-// shortMirrorHash abbreviates a hash for mirror-check output; "none" when zero.
-func shortMirrorHash(h plumbing.Hash) string {
-	if h.IsZero() {
-		return "none"
+// checkGitHooks reports whether Entire's git hooks are installed and current,
+// and offers to reinstall them when they are not.
+//
+// This is the one hook surface a user cannot see going wrong. Agent hook configs
+// are committed files that turn up in a diff; .git/hooks is per-clone and
+// untracked, so pulling a release that changes hook generation never touches it.
+// A hook left by the removed local-dev mode still carries Entire's marker, so it
+// looks installed while naming a launcher inside the working tree that no longer
+// exists — and because that shape got no availability guard while pre-push
+// deliberately propagates exit codes, the symptom a user actually sees is `git
+// push` being rejected.
+//
+// Unlike the agent hook checks this one repairs rather than only warning: the
+// reinstall is content-idempotent, backs up any foreign hook it displaces, and
+// writes exactly what the next turn-start would write anyway. Someone reaching
+// for doctor after a rejected push wants to be unblocked, not handed a second
+// command to run.
+func checkGitHooks(cmd *cobra.Command, force bool) error {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	switch strategy.CheckGitHookState(ctx) {
+	case strategy.GitHooksCurrent:
+		fmt.Fprintln(w, "✓ Git hooks: OK")
+		return nil
+
+	case strategy.GitHooksAbsent:
+		// Missing hooks are only a problem where Entire was actually set up.
+		// doctor runs in any git repo, so treating this as actionable would let
+		// `entire doctor --force` install hooks into — and back up the existing
+		// hooks of — a repo that never opted in. That is the loudest possible
+		// surprise from a diagnostic command. The sibling checks already hold this
+		// line: checkHookDrift stays silent on HooksAbsent, and
+		// checkCodexHookTrust returns early when there is no codex hooks file.
+		//
+		// IsSetUpAny rather than IsSetUpAndEnabled: a repo that ran `entire
+		// disable` still wants working hooks, because the hooks themselves are
+		// what no-op while disabled.
+		if !settings.IsSetUpAny(ctx) {
+			return nil
+		}
+		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")
+		fmt.Fprintln(w, "  Commits in this repository are not captured as checkpoints.")
+
+	case strategy.GitHooksOutdated:
+		// Actionable whatever the settings say: a hook carrying Entire's marker
+		// means this repo opted in at some point, and a stale one is actively
+		// broken rather than merely missing.
+		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
+		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
+		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
 	}
-	return h.String()[:7]
+	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
+
+	if !force {
+		// Degrade to warn-only when there is nobody to ask. An agent or CI run
+		// must not be blocked on a prompt, and rewriting a repo's hooks
+		// unasked is worse than naming the command that does it.
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, "  Run `entire doctor --force` to apply it.")
+			return nil
+		}
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Reinstall Entire git hooks?")
+		if promptErr != nil {
+			return promptErr
+		}
+		if !proceed {
+			return nil
+		}
+	}
+
+	if _, err := strategy.ReinstallGitHooks(ctx); err != nil {
+		return fmt.Errorf("failed to reinstall git hooks: %w", err)
+	}
+	fmt.Fprintln(w, "  ✓ Fixed: git hooks reinstalled")
+	return nil
 }
 
-// checkCodexHookTrust warns about two kinds of drift in the Codex hook
-// setup:
-//
-//  1. .codex/hooks.json is stale relative to what the CLI installs
-//     today (e.g. a release added PostToolUse after the user enabled
-//     Codex). Fix: re-run `entire enable`.
-//
-//  2. A declared hook lacks a `trusted_hash` entry in the user's Codex
-//     config — either a fresh clone or a newer hook on the file the
-//     user hasn't approved yet. Fix: open /hooks in Codex.
-//
-// Both checks are structural (file/key presence). Stays silent when
-// this repo doesn't have codex hooks installed or when we can't
-// resolve the worktree root. Warn-only.
-func checkCodexHookTrust(cmd *cobra.Command) {
-	repoRoot, err := paths.WorktreeRoot(cmd.Context())
+// checkLegacyShadowBranches reports the strict-shape entire/<7+hex>-<6hex>
+// shadow branches older versions wrote at every agent turn. Nothing reads them
+// anymore, they hold full snapshots of the working tree, and they are never
+// removed automatically. The remedy is `entire doctor --force`, not plain
+// `entire clean`: clean also clears the session state of every session based on
+// HEAD, and session state is now the only record of pending agent work. Under
+// --force (or a confirmed prompt) doctor deletes the branches through
+// `git branch -D`, which
+// refuses a branch checked out in any worktree; such a branch is reported and
+// kept. The bare entire/<hex> form is counted and pointed at
+// `entire clean --all --dry-run` but never deleted here, because a human
+// short-SHA branch looks the same.
+func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	branches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
 	if err != nil {
+		return fmt.Errorf("list legacy shadow branches: %w", err)
+	}
+	// The bare entire/<hex> form is never deleted here (a human short-SHA
+	// branch looks the same), but it is always surfaced, alongside the strict
+	// form or on its own: saying "none" while `entire clean --all` lists some
+	// would mislead.
+	bareCount := 0
+	if all, allErr := strategy.ListLegacyShadowBranches(ctx); allErr == nil {
+		bareCount = max(len(all)-len(branches), 0)
+	}
+	if len(branches) == 0 {
+		if bareCount > 0 {
+			fmt.Fprintf(w, "Legacy shadow branches: %d in the oldest entire/<commit> form\n", bareCount)
+			printBareLegacyBranchNote(w)
+			return nil
+		}
+		fmt.Fprintln(w, "✓ Legacy shadow branches: none")
+		return nil
+	}
+
+	fmt.Fprintf(w, "Legacy shadow branches: %d FOUND\n", len(branches))
+	fmt.Fprintln(w, "  Older versions wrote these at every turn; nothing reads them now, and they")
+	fmt.Fprintln(w, "  hold full snapshots of your working tree.")
+	printCappedList(w, branches, func(name string) string { return name })
+	if bareCount > 0 {
+		fmt.Fprintf(w, "  Also %s in the oldest entire/<commit> form.\n", pluralCount(bareCount, "branch", "branches"))
+		printBareLegacyBranchNote(w)
+	}
+
+	if !force {
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, "  Fix: run `entire doctor --force` to delete them (only the branches; pending")
+			fmt.Fprintln(w, "  agent work in session state is kept).")
+			printLegacyBranchSpaceNote(w)
+			return nil
+		}
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Delete these legacy shadow branches? (Only the branches; pending agent work in session state is kept.)")
+		if promptErr != nil {
+			return promptErr
+		}
+		if !proceed {
+			return nil
+		}
+	}
+
+	deleted, failed := strategy.DeleteLegacyShadowBranches(ctx, branches)
+	if len(deleted) > 0 {
+		fmt.Fprintf(w, "  ✓ Fixed: deleted %s\n", pluralCount(len(deleted), "legacy shadow branch", "legacy shadow branches"))
+		printLegacyBranchSpaceNote(w)
+	}
+	if len(failed) > 0 {
+		fmt.Fprintf(w, "  Kept %d branch(es) git refused to delete (checked out in a worktree?):\n", len(failed))
+		printCappedList(w, failed, func(name string) string { return name })
+	}
+	return nil
+}
+
+// printLegacyBranchSpaceNote explains when deleting legacy shadow branches
+// actually frees their space. Plain `git gc` is the advice: it prunes the
+// unreachable objects once they are older than gc.pruneExpire (two weeks by
+// default). `--prune=now` is only mentioned with its caveat, because it drops
+// every unreachable object at once (recently dropped stashes included) and
+// can corrupt the repository if another git process is writing.
+func printLegacyBranchSpaceNote(w io.Writer) {
+	fmt.Fprintln(w, "  Deleting the branches frees no space by itself: `git gc` reclaims it once their")
+	fmt.Fprintln(w, "  objects are two weeks old. `git gc --prune=now` frees it at once but drops every")
+	fmt.Fprintln(w, "  unreachable object (recent stashes too); run it only when no other git process is active.")
+}
+
+// printBareLegacyBranchNote explains why doctor leaves the bare entire/<hex>
+// legacy shadow branches alone and where to review them.
+func printBareLegacyBranchNote(w io.Writer) {
+	fmt.Fprintln(w, "  These may be yours (a branch named after a short SHA looks the same), so doctor")
+	fmt.Fprintln(w, "  does not delete them. Review them with `entire clean --all --dry-run`.")
+}
+
+// symlinkReportLimit bounds the list checkEntireDirSymlinks prints. A repo with
+// more than a handful has one systematic cause, and the fix is the same for all
+// of them; the count tells the user there are more.
+const symlinkReportLimit = 10
+
+// checkEntireDirSymlinks reports symlinks inside .entire.
+//
+// Entire refuses to create or write through a symlinked directory there
+// (osroot.MkdirAllNoSymlink), so unlike most misconfigurations this one does not
+// degrade quietly in one place — it stops that whole subtree being written. A
+// symlinked .entire/metadata means no session metadata is captured, and a
+// symlinked .entire/logs means the very diagnostics that would explain it are
+// dropped, which is why this runs before checkLogSink.
+//
+// Read-only. The fix is to replace the link with a real directory, which means
+// deciding what to do with whatever the link pointed at — not something doctor
+// can take on the user's behalf.
+//
+// .entire itself used to be reported but not refused, on the grounds that
+// os.OpenRoot follows a symlinked root so an existing setup kept working. It no
+// longer does: entiredir opens .entire as a checked child of the worktree root
+// (osroot.SharedChild), which refuses a link. Doctor is exempt from the pre-run
+// guard precisely so it still runs and can say so, and it must not tell the user
+// their setup is fine when every other command will now stop.
+func checkEntireDirSymlinks(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	if dir, err := entiredir.Path(ctx); err == nil {
+		if info, lerr := os.Lstat(dir); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(w, "%s: SYMLINK\n", paths.EntireDir)
+			fmt.Fprintf(w, "  %s -> %s\n", dir, readlinkOrUnknown(dir))
+			fmt.Fprintln(w, "  Entire refuses to read or write through this link, so every command")
+			fmt.Fprintln(w, "  other than doctor will stop until it is replaced with a real directory.")
+			fmt.Fprintln(w, "  Move the target's contents into place:")
+			fmt.Fprintf(w, "    rm %s && mv %s %s\n", dir, readlinkOrUnknown(dir), dir)
+		}
+	}
+
+	root, err := entiredir.OpenForRead(ctx)
+	if err != nil {
+		return // no .entire, or no repository: nothing to check
+	}
+
+	links, err := osroot.SymlinkPaths(root, ".")
+	if err != nil {
+		fmt.Fprintf(w, "%s contents: NOT READABLE\n", paths.EntireDir)
+		fmt.Fprintf(w, "  %v\n", err)
 		return
 	}
-	if _, statErr := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); statErr != nil {
+	if len(links) == 0 {
+		return
+	}
+
+	fmt.Fprintf(w, "%s contents: SYMLINKS PRESENT\n", paths.EntireDir)
+	printCappedList(w, links, func(name string) string {
+		return path.Join(paths.EntireDir, name) + " -> " + readlinkOrUnknownIn(root, name)
+	})
+	fmt.Fprintln(w, "  Entire will not create or write through a symlinked directory here, so")
+	fmt.Fprintln(w, "  anything that belongs under one of these paths is not being captured.")
+	fmt.Fprintln(w, "  Fix: replace each path above with a real directory. If it is tracked in git,")
+	fmt.Fprintln(w, "  `git rm --cached` it first, and add it to .gitignore so it does not come back.")
+}
+
+// printCappedList prints one indented line per name via render, replacing the
+// tail past symlinkReportLimit with a count. Four call sites had this loop
+// inline, differing only in the item line, so the off-by-one truncation
+// contract was written out four times.
+func printCappedList(w io.Writer, names []string, render func(string) string) {
+	for i, name := range names {
+		if i == symlinkReportLimit {
+			fmt.Fprintf(w, "  ... and %d more\n", len(names)-symlinkReportLimit)
+			return
+		}
+		fmt.Fprintf(w, "  %s\n", render(name))
+	}
+}
+
+// checkAgentDirSymlinks reports a symlink at any directory component Entire
+// creates or writes through for an agent: the agents' own config directories
+// (.claude, .codex, .cursor, .factory, .opencode, .pi, .github/hooks)
+// and the managed skill scaffolds' parents (.claude/skills, .codex/agents, ...).
+//
+// The condition is otherwise invisible after the fact. `entire enable` fails
+// loudly on it (agent.HookConfigFile and writeManagedScaffold both create
+// through osroot.MkdirAllNoSymlink), but once the repo is enabled
+// HookConfigFile.Exists() deliberately reports a symlinked parent as absent —
+// so `entire status` shows the hooks missing without saying why, and
+// `entire clean` skips the directory on the stated grounds that doctor is what
+// reports a symlinked agent directory. Until this check, nothing did.
+//
+// Unlike .entire, these trees are the agent's and largely the user's, so this
+// examines only the components Entire itself creates and writes through, rather
+// than listing every symlink beneath them the way checkEntireDirSymlinks does.
+// A `.claude/skills/my-own -> ../../shared/skills/my-own` is a real setup and
+// none of Entire's business; reporting it would train the user to ignore this
+// section.
+//
+// Read-only. The fix means deciding what to do with whatever the link pointed
+// at, which is not doctor's call.
+func checkAgentDirSymlinks(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return // no repository: nothing to check
+	}
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		// Reported, not swallowed, for the same reason a single unreadable
+		// component is: a worktree root that will not open is a state where
+		// every hook install also fails, so printing nothing here would hand
+		// back a clean bill of health on a repo where nothing can be installed.
+		fmt.Fprintln(w, "Agent config directories: NOT CHECKED")
+		fmt.Fprintf(w, "  %v\n", err)
+		fmt.Fprintln(w, "  Entire could not open the worktree root, so it cannot say whether the")
+		fmt.Fprintln(w, "  paths it installs hooks and skills under are real directories.")
+		fmt.Fprintln(w, "  Fix: check the ownership and permissions of the repository root.")
+		return
+	}
+
+	var links, unreadable, wrongType, vouched []string
+	reported := make(map[string]struct{})
+	for _, candidate := range agentSymlinkCheckPaths() {
+		name, outcome := scanForSymlinkedComponent(root, candidate)
+		if outcome == componentScanClean {
+			continue
+		}
+		// Several candidates share a prefix (.claude, .claude/settings.json), so
+		// a symlinked .claude would otherwise be named once per candidate. The
+		// vouched branch below does its own recording, because it has two names
+		// to track: the followed link and whatever it finds beneath it.
+		if outcome != componentScanLinked || !slices.Contains(agent.VouchedSymlinkedDirs(worktreeRoot), name) {
+			if _, dup := reported[name]; dup {
+				continue
+			}
+			reported[name] = struct{}{}
+		}
+		// A link the user vouched for in settings.local.json is followed, not
+		// refused, so reporting it as a fault would be wrong twice: it names a
+		// problem that is not one, and it hides the fact that Entire is writing
+		// somewhere other than where the path appears to lead. Reported below in
+		// its own section instead.
+		//
+		// And then the scan CONTINUES beneath it. Stopping here reported the one
+		// link that is fine and stayed silent about the one that is not: with
+		// `.claude` vouched and `.claude/skills` a link inside the target,
+		// scaffold installation follows the first and refuses the second, so the
+		// user saw a failed install and a doctor that named only the allowed
+		// link.
+		if outcome == componentScanLinked && slices.Contains(agent.VouchedSymlinkedDirs(worktreeRoot), name) {
+			if _, dup := reported[name]; !dup {
+				reported[name] = struct{}{}
+				vouched = append(vouched, name)
+			}
+			name, outcome = scanBeneathVouchedDir(worktreeRoot, candidate)
+			if outcome == componentScanClean {
+				continue
+			}
+			if _, dup := reported[name]; dup {
+				continue
+			}
+			reported[name] = struct{}{}
+		}
+		switch outcome {
+		case componentScanUnreadable:
+			unreadable = append(unreadable, name)
+		case componentScanWrongType:
+			wrongType = append(wrongType, name)
+		case componentScanLinked:
+			links = append(links, name)
+		case componentScanClean:
+			// Filtered out above; listed so a new outcome fails the build here.
+		}
+	}
+
+	if len(vouched) > 0 {
+		fmt.Fprintln(w, "Agent config directories: FOLLOWING SYMLINKS")
+		printCappedList(w, vouched, func(name string) string {
+			return name + " -> " + readlinkOrUnknownIn(root, name)
+		})
+		fmt.Fprintf(w, "  Allowed by allow_symlinked_agent_dirs in %s. Entire installs hooks and\n",
+			settings.EntireSettingsLocalFile)
+		fmt.Fprintln(w, "  skills at the far end of these links rather than inside the repository.")
+		fmt.Fprintln(w, "  Remove the entry to go back to refusing them.")
+	}
+
+	if len(links) > 0 {
+		fmt.Fprintln(w, "Agent config directories: SYMLINKS PRESENT")
+		printCappedList(w, links, func(name string) string {
+			return name + " -> " + readlinkOrUnknownIn(root, name)
+		})
+		fmt.Fprintln(w, "  Entire will not create or write through a symlinked path here, so the")
+		fmt.Fprintln(w, "  hooks and skills that belong under these paths are not installed, and")
+		fmt.Fprintln(w, "  `entire status` reports them as absent rather than as blocked.")
+		fmt.Fprintln(w, "  Fix: replace each path above with a real directory or file. If it is")
+		fmt.Fprintln(w, "  tracked in git, `git rm --cached` it first, and add it to .gitignore so it")
+		fmt.Fprintln(w, "  does not come back.")
+	}
+
+	// A regular file where a directory belongs gets its own heading, because the
+	// fix is to replace the path and no amount of chmod reaches it. Same split
+	// the .entire scan makes between ErrEntireDirNotDirectory and
+	// ErrEntireDirUnreadable, for the same reason.
+	if len(wrongType) > 0 {
+		fmt.Fprintln(w, "Agent config directories: BROKEN")
+		printCappedList(w, wrongType, func(name string) string {
+			what := "of an unknown type"
+			if info, err := osroot.LstatNoSymlinks(root, name); err == nil {
+				what = paths.DescribeMode(info.Mode())
+			}
+			return fmt.Sprintf("%s is %s", name, what)
+		})
+		fmt.Fprintln(w, "  Entire cannot create the hooks and skills that belong under these paths,")
+		fmt.Fprintln(w, "  so `entire status` reports them as absent rather than as blocked.")
+		fmt.Fprintln(w, "  Fix: replace each path above with a real directory. If it is tracked in")
+		fmt.Fprintln(w, "  git, `git rm --cached` it first.")
+	}
+
+	// Separate from the links, and reported rather than swallowed: "we could not
+	// find out" is not "there is nothing here". Entire's own write will fail on
+	// the same path, so a silent scan would leave the user with hooks that never
+	// install and a doctor that says nothing.
+	if len(unreadable) > 0 {
+		fmt.Fprintln(w, "Agent config directories: NOT READABLE")
+		printCappedList(w, unreadable, func(name string) string { return name })
+		fmt.Fprintln(w, "  Entire could not tell whether these paths are real directories, so it")
+		fmt.Fprintln(w, "  cannot say whether hooks and skills can be installed under them.")
+		fmt.Fprintln(w, "  Fix: check the ownership and permissions of each path above.")
+	}
+}
+
+// checkGitHookSymlinks reports a symlink at the active git hooks directory, or
+// at one of the hooks Entire manages inside it.
+//
+// This needs its own function rather than an agentSymlinkCheckPaths entry, and
+// the reason is the path itself: that list is worktree-relative and scanned
+// through the worktree root, while core.hooksPath can name any directory at all
+// — a shared hooks directory in $HOME is a common setup — and a linked
+// worktree's hooks live in the common dir. Git resolves where the hooks are;
+// this only reports what is sitting there.
+//
+// The two findings differ in severity and so in remedy. A symlinked DIRECTORY
+// stops installation outright: Entire refuses to write hooks through a link, so
+// `entire status` reports them absent with nothing to say why — the same
+// invisible-after-the-fact condition checkAgentDirSymlinks exists for. A
+// symlinked HOOK FILE is not an error at all; it is simply not Entire's, so the
+// next install backs it up and chains to it, and the note is there so the user
+// is not surprised that the path they set up is no longer what git runs first.
+//
+// Read-only in both cases. Replacing a link means deciding what to do with its
+// target, which is not doctor's call.
+func checkGitHookSymlinks(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	hooksDir, err := strategy.GetHooksDir(ctx)
+	if err != nil {
+		return // no repository: nothing to check
+	}
+	info, err := os.Lstat(hooksDir)
+	if err != nil {
+		return // absent or unreadable: checkGitHooks reports what that costs
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		fmt.Fprintln(w, "Git hooks directory: SYMLINK")
+		// The resolved target, not os.Readlink's raw contents: a relative link
+		// reads relative to the link's own parent, so pasting it into the
+		// command below sets a path git resolves from somewhere else. When it
+		// cannot be resolved, no command is printed at all -- a remedy the user
+		// pastes must not contain a placeholder.
+		target, resolved := strategy.HooksDirLinkTarget(hooksDir)
+		if resolved {
+			fmt.Fprintf(w, "  %s -> %s\n", hooksDir, target)
+		} else {
+			fmt.Fprintf(w, "  %s -> %s (unresolvable)\n", hooksDir, readlinkOrUnknown(hooksDir))
+		}
+		fmt.Fprintln(w, "  Entire will not install hooks through a link, so its git hooks are not")
+		fmt.Fprintln(w, "  installed. Uninstalling still works: `entire disable` follows the link.")
+		if resolved {
+			fmt.Fprintln(w, "  Fix: point git at the target directly, which says the same thing without")
+			fmt.Fprintln(w, "  the indirection:")
+			fmt.Fprintf(w, "    %s\n", strategy.HooksPathCommand(target))
+			fmt.Fprintln(w, "  or replace the link with a real directory.")
+		} else {
+			fmt.Fprintln(w, "  Fix: find where the path is set, then point git at a real directory:")
+			fmt.Fprintln(w, "    git config --show-origin --get-all core.hooksPath")
+		}
+		return
+	}
+	if !info.IsDir() {
+		return // InstallGitHook's own error covers core.hooksPath=/dev/null
+	}
+
+	var links []string
+	for _, name := range strategy.ManagedGitHookNames() {
+		hookInfo, lerr := os.Lstat(filepath.Join(hooksDir, name))
+		if lerr == nil && hookInfo.Mode()&os.ModeSymlink != 0 {
+			links = append(links, name)
+		}
+	}
+	if len(links) == 0 {
+		return
+	}
+
+	// No symlinkReportLimit here: the candidates are the five managed hook
+	// names, so the list cannot run away the way a walk of .entire can.
+	fmt.Fprintln(w, "Git hooks: SYMLINKS PRESENT")
+	for _, name := range links {
+		full := filepath.Join(hooksDir, name)
+		fmt.Fprintf(w, "  %s -> %s\n", full, readlinkOrUnknown(full))
+	}
+	fmt.Fprintf(w, "  Entire never installs a hook as a symlink, so these belong to you or to\n"+
+		"  another tool. It does not read or write through them: the next install\n"+
+		"  moves each one to <hook>%s and chains to it, so it still runs, but\n"+
+		"  after Entire's rather than instead of it.\n", strategy.GitHookBackupSuffix)
+}
+
+// componentScanOutcome is what scanForSymlinkedComponent found.
+type componentScanOutcome int
+
+const (
+	// componentScanClean: every component that exists is a real file or
+	// directory. A component that is simply absent lands here too — an agent
+	// Entire was never enabled for has no directory, and that is not a fault.
+	componentScanClean componentScanOutcome = iota
+	// componentScanLinked: the named component is a symlink.
+	componentScanLinked
+	// componentScanUnreadable: the named component could not be statted, so
+	// nothing is known about it.
+	componentScanUnreadable
+	// componentScanWrongType: the named component exists as a regular file where
+	// a directory has to be. Separate from componentScanUnreadable because the
+	// remedies are different things — replace the path versus fix its ownership
+	// — and separate from componentScanLinked because the path to name and the
+	// thing to put back are both different.
+	componentScanWrongType
+)
+
+// agentSymlinkCheckPaths returns the worktree-relative paths Entire creates or
+// writes through on behalf of an agent, sorted and deduplicated. Each is a full
+// path rather than a directory, because scanForSymlinkedComponent examines every
+// component of what it is given and the leaf is refused too — for a symlink and
+// for a wrong file type alike: HookConfigFile
+// reads and writes through ReadFileNoFollow / a pinned-parent rename, and
+// writeManagedScaffold does the same, so a symlinked .claude/settings.json is
+// as broken as a symlinked .claude.
+//
+// Two sources, both read from the registry rather than from a list kept here,
+// so a newly integrated agent is covered without anyone remembering this
+// function: the hook-config paths (agent.HookConfigLocator) and the scaffold
+// templates.
+//
+// Deliberately NOT agent.ProtectedDirs(). That names what the AGENT owns, which
+// is a different set in both directions. It is too narrow — `.pi` is there but
+// the `.pi/extensions` and `.pi/extensions/entire` that Entire creates below it
+// are not, and a symlink at either produced no output at all until the config
+// paths were added here. And it is too broad — `.vogon` and an external
+// plugin's directories are in it while Entire writes nothing into them. Every
+// top-level agent directory Entire does write to is already covered, as a
+// component of the config or scaffold path underneath it.
+//
+// Not gated on the agent being configured, which is a deliberate call rather
+// than an oversight. Two of these trees are shared and user-owned — `.github`
+// (Copilot CLI's hook config) and `.agents` (Codex's documented skills path) —
+// so a monorepo that symlinks either is told about it even though it may never
+// enable those agents. That is noise, and it is the lesser fault: gating on
+// installation would have to ask whether hooks are installed, and that question
+// is answered by reading through the very config a symlink hides, so the check
+// would fall silent in exactly the case it exists for.
+func agentSymlinkCheckPaths() []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(p string) {
+		p = filepath.ToSlash(p)
+		if p == "" || p == "." || p == "/" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+
+	for _, relPath := range agent.AllHookConfigRelPaths() {
+		add(relPath)
+	}
+	for _, name := range agent.List() {
+		add(searchSkillTemplatePath(name))
+		add(agentHelpSkillTemplatePath(name))
+		// The pre-skill subagent Entire scaffolded and now deletes. Uninstall
+		// goes through osroot.LstatNoSymlinks, which refuses a symlinked parent,
+		// so .claude/agents/ has to be here or a link there is refused with
+		// nothing said about it. .codex/agents was already
+		// covered, but only as a side effect of the agent-help template living
+		// under them.
+		add(legacySearchSubagentPath(name))
+	}
+
+	slices.Sort(out)
+	return out
+}
+
+// scanBeneathVouchedDir continues the component scan inside a vouched symlinked
+// agent directory, returning what it finds as a worktree-relative name.
+//
+// The outer scan stops at the first symlink, which is the right answer when that
+// link is a fault. When it is one the user vouched for, the components below it
+// are still Entire's to check and still refused by MkdirAllNoSymlink, so the
+// scan has to resume from the link's target. agent.OpenAnchoredRoot is the same
+// resolution the writers use, so doctor reports on exactly the tree they act on.
+//
+// A vouched link that will not resolve is reported unreadable rather than
+// silently dropped: every write through it fails, which is precisely the state
+// worth naming.
+func scanBeneathVouchedDir(worktreeRoot, candidate string) (string, componentScanOutcome) {
+	innerRoot, innerName, err := agent.OpenAnchoredRoot(worktreeRoot, candidate)
+	if err != nil {
+		return candidate, componentScanUnreadable
+	}
+	if innerName == candidate {
+		// Nothing was followed after all, so the outer scan already had it.
+		return "", componentScanClean
+	}
+	found, outcome := scanForSymlinkedComponent(innerRoot, innerName)
+	if outcome == componentScanClean {
+		return "", componentScanClean
+	}
+	prefix := strings.TrimSuffix(candidate, "/"+innerName)
+	return prefix + "/" + found, outcome
+}
+
+// scanForSymlinkedComponent walks name one component at a time and reports the
+// shortest prefix that is a symlink, or that could not be statted at all.
+//
+// Prefixes are examined shortest first so the walk stops at a link before it
+// would resolve anything through it, which is both the correct answer to report
+// (the outermost link is the one to replace) and the reason a plain root.Lstat
+// of the full name is not enough: that call follows an in-root parent link and
+// reports the far end's mode.
+//
+// A component that does not exist ends the walk clean — an absent .claude is
+// not a misconfiguration — but every OTHER stat error is reported, matching
+// checkEntireDirSymlinks' NOT READABLE arm. Treating them alike would answer
+// "we could not find out" with "everything is fine", on exactly the paths
+// Entire is about to try to write to.
+func scanForSymlinkedComponent(root *os.Root, name string) (string, componentScanOutcome) {
+	components := strings.Split(name, "/")
+	for i := range components {
+		prefix := strings.Join(components[:i+1], "/")
+		info, err := root.Lstat(prefix)
+		if os.IsNotExist(err) {
+			return "", componentScanClean
+		}
+		if err != nil {
+			return prefix, componentScanUnreadable
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return prefix, componentScanLinked
+		}
+		// Every component's shape is checked, with the expectation depending on
+		// where it sits: a component with more path still to go has to be a
+		// directory, and the leaf has to be a regular file. Both are allowlists
+		// rather than tests for one rejected type — the .entire scan's doc spends
+		// a paragraph on why an allowlist a rejected type can enter by setting an
+		// extra bit is not an allowlist — and an earlier revision that only
+		// looked for a regular file at a non-leaf missed a FIFO, socket or device
+		// node entirely.
+		//
+		// The leaf matters as much as its parents, and for a worse reason: a FIFO
+		// at `.claude/settings.json` does not fail the read, it BLOCKS it. Every
+		// agent's config read goes through osroot.OpenNoFollow, whose open(2) has
+		// no O_NONBLOCK, so `entire doctor` hangs in openat until interrupted.
+		// Reporting it is all this scan can do; refusing to open one is
+		// OpenNoFollow's job.
+		//
+		// Identified from the mode rather than from the ENOTDIR the next Lstat
+		// would return, which would mean being right about which errno each
+		// platform picks. fs.ModeIrregular is tolerated the way the .entire scan
+		// tolerates it: Windows maps directory junctions and cloud placeholders
+		// onto that bit, a junction arriving as bare ModeIrregular (a
+		// name-surrogate reparse tag withholds ModeDir) and a placeholder
+		// directory as ModeDir|ModeIrregular.
+		if !componentHasExpectedShape(info.Mode(), prefix == name) {
+			return prefix, componentScanWrongType
+		}
+	}
+	return "", componentScanClean
+}
+
+// componentHasExpectedShape reports whether mode is what has to be at this
+// position: a regular file at the leaf, something a path can descend through
+// above it. fs.ModeIrregular is masked out of both tests rather than matched
+// against — see scanForSymlinkedComponent for why Windows makes that necessary,
+// and note it is why a bare ModeIrregular satisfies the leaf test as well as
+// the directory one.
+func componentHasExpectedShape(mode fs.FileMode, isLeaf bool) bool {
+	t := mode.Type() &^ fs.ModeIrregular
+	if isLeaf {
+		return t == 0
+	}
+	return t == fs.ModeDir
+}
+
+// readlinkOrUnknown renders a symlink's target for a diagnostic, never failing:
+// an unreadable link is still worth naming.
+func readlinkOrUnknown(name string) string {
+	target, err := os.Readlink(name)
+	if err != nil {
+		return "(unreadable)"
+	}
+	return target
+}
+
+// readlinkOrUnknownIn is readlinkOrUnknown for a name inside root.
+func readlinkOrUnknownIn(root *os.Root, name string) string {
+	target, err := root.Readlink(name)
+	if err != nil {
+		return "(unreadable)"
+	}
+	return target
+}
+
+// checkLogSink reports a .entire/logs Entire cannot write to.
+//
+// Every other diagnostic in the CLI is delivered by writing there, and that
+// write is deliberately silent about its own failure — a dropped log line must
+// never surface as an error in the caller. So an unwritable log directory
+// presents exactly like a repo where nothing ever ran: no message, exit 0, and
+// an absent or empty entire.log. That is the shape of the support report this
+// logging work exists to fix, so doctor is the wrong command to reproduce it.
+//
+// Read-only. The fixes are ownership and permissions, which doctor cannot take
+// on the user's behalf.
+//
+// A nil logger means the entry point declined to build one, i.e. Entire was
+// never set up here — nothing to nag about, and reading it back from the
+// context is what keeps this check on the same directory the logger actually
+// uses instead of re-deriving the path.
+func checkLogSink(cmd *cobra.Command) {
+	err := logging.LoggerFromContext(cmd.Context()).EnsureOpen()
+	if err == nil {
 		return
 	}
 
 	w := cmd.OutOrStdout()
-	missing := codex.MissingEntireHooks(repoRoot)
-	gaps := codex.HookTrustGaps(repoRoot)
+	fmt.Fprintln(w, "Operational logs: NOT WRITABLE")
+	fmt.Fprintf(w, "  %v\n", err)
+	fmt.Fprintf(w, "  Entire's diagnostics are being dropped, including the redaction warnings\n")
+	fmt.Fprintf(w, "  that explain why a custom rule isn't matching. `entire doctor logs` and\n")
+	fmt.Fprintf(w, "  `entire doctor bundle` have nothing to report until this is fixed.\n")
+	fmt.Fprintf(w, "  Fix: resolve the error above so %s is a writable directory — commonly\n", logging.LogsDir)
+	fmt.Fprintln(w, "  ownership or permissions, a regular file occupying the path, or a full disk.")
+}
 
-	if len(missing) == 0 && len(gaps) == 0 {
-		fmt.Fprintln(w, "✓ Codex hook trust: OK")
-		return
-	}
-
-	if len(missing) > 0 {
-		fmt.Fprintln(w, "Codex hooks: OUT OF DATE")
-		fmt.Fprintf(w, "  %d hook(s) the CLI installs today aren't declared in .codex/hooks.json:\n", len(missing))
-		for _, ev := range missing {
-			fmt.Fprintf(w, "    - %s\n", ev)
+// checkHookDrift warns when an installed agent's Entire hook config is out of
+// date — an older release wrote Claude Code tool matchers that no longer fire,
+// or a repo committed a Pi/OpenCode extension that the template has since moved
+// past. Read-only; the fix is `entire enable --force`. Stays silent for agents
+// that aren't installed here or don't implement a drift check.
+func checkHookDrift(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
 		}
-		fmt.Fprintln(w, "  Run `entire enable` to refresh the hooks file.")
-	}
-
-	if len(gaps) > 0 {
-		fmt.Fprintln(w, "Codex hook trust: REVIEW NEEDED")
-		fmt.Fprintf(w, "  %d hook(s) declared in .codex/hooks.json have no trusted_hash entry yet:\n", len(gaps))
-		for _, ev := range gaps {
-			fmt.Fprintf(w, "    - %s\n", ev)
+		if _, ownsDiagnostics := agent.AsEffectiveHookDiagnostics(ag); ownsDiagnostics {
+			continue
 		}
-		fmt.Fprintln(w, "  Open /hooks inside Codex to approve them.")
+		hf, ok := agent.AsHookFreshness(ag)
+		if !ok {
+			continue
+		}
+		displayName := string(ag.Type())
+		switch hf.CheckHookConfig(ctx) {
+		case agent.HooksAbsent:
+			// Not installed in this repo — nothing to report.
+		case agent.HooksCurrent:
+			fmt.Fprintf(w, "✓ %s hook config: OK\n", displayName)
+		case agent.HooksOutdated:
+			fmt.Fprintf(w, "%s hooks: OUT OF DATE\n", displayName)
+			fmt.Fprintln(w, "  The installed hook config no longer matches what this CLI writes,")
+			fmt.Fprintln(w, "  so some or all hooks may silently not fire.")
+			fmt.Fprintln(w, "  Run `entire enable --force` to update it.")
+		}
 	}
 }
 
-// canDeleteShadowBranch checks if a shadow branch can be safely deleted.
-// Returns true if no other sessions (besides excludeSessionID) need this branch.
-func canDeleteShadowBranch(ctx context.Context, shadowBranch, excludeSessionID string) (bool, error) {
-	states, err := strategy.ListSessionStates(ctx)
-	if err != nil {
-		return false, fmt.Errorf("failed to list session states: %w", err)
-	}
-
-	for _, state := range states {
-		if state.SessionID == excludeSessionID {
+// checkRetiredDenyRule finds and removes the retired metadata deny rule from
+// any installed agent's permission config. See agent.MetadataDenyRule for why
+// the rule went; the short version is that it made a recursive read anywhere
+// under the repo root need manual approval, which defeats unattended permission
+// modes, and it guarded a staging buffer rather than the durable copy.
+//
+// This is the one doctor check that repairs without asking, and the reason is
+// ownership: it deletes only a rule byte-identical to the string Entire itself
+// wrote, so nothing the user chose is touched. `entire enable` performs the same
+// removal; this exists because a user who has already enabled Entire has no
+// reason to run enable again, and the prompts give them no clue what to do.
+//
+// The config is usually tracked in git (a committed .claude/settings.json is the
+// normal setup), so the change shows up in `git status`. That is deliberately
+// left visible rather than hidden: the message says the file changed so the user
+// can commit or revert it.
+func checkRetiredDenyRule(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		ag, err := agent.Get(name)
+		if err != nil {
 			continue
 		}
-		otherShadow := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		if otherShadow == shadowBranch && state.StepCount > 0 {
-			return false, nil
+		// One pass: Repair reports whether it found the rule, so a separate
+		// detect call would only read and parse the same file twice.
+		//
+		// A repair error is logged rather than printed. An agent whose config
+		// will not parse never reaches here — AreHooksInstalled fails on it, so
+		// GetAgentsWithHooksInstalled leaves it out — which leaves only write
+		// failures, and printing "stale rule" for those would name the wrong
+		// problem. (That a broken config goes unreported at all is a separate,
+		// pre-existing gap: agentHookState.unchecked has no consumer.)
+		changed, repairErr := agent.RepairRetiredMetadataDenyRule(ctx, ag)
+		if repairErr != nil {
+			logging.Warn(ctx, "could not remove retired deny rule",
+				slog.String("agent", string(ag.Type())),
+				slog.String("error", repairErr.Error()))
+			continue
+		}
+		if changed {
+			displayName := string(ag.Type())
+			fmt.Fprintf(w, "%s permissions: STALE RULE\n", displayName)
+			fmt.Fprintf(w, "  A retired Entire deny rule (%s) was still present.\n", agent.MetadataDenyRule)
+			fmt.Fprintln(w, "  It makes ordinary commands (a recursive grep from the repo root, or any")
+			fmt.Fprintln(w, "  command naming that path) need manual approval, and it no longer protects")
+			fmt.Fprintln(w, "  anything: the file it guarded is removed once a session is condensed.")
+			fmt.Fprintln(w, "  ✓ Fixed: rule removed (your other deny rules are untouched).")
+			fmt.Fprintln(w, "  The settings file changed — commit or revert it as you prefer.")
 		}
 	}
+}
 
-	return true, nil
+// checkRetiredGeminiHooks removes the Entire hook entries Gemini CLI support
+// installed in .gemini/settings.json. Nothing else will: that agent is no
+// longer registered, so `entire enable`, `entire agent remove` and the uninstall
+// sweep over installed agents never visit its config. The user's own hooks and
+// settings in the file are kept.
+func checkRetiredGeminiHooks(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return // no repository: nothing to check
+	}
+	changed, err := removeRetiredGeminiHooks(worktreeRoot)
+	if err != nil {
+		fmt.Fprintln(w, "Gemini CLI hooks: CHECK FAILED")
+		fmt.Fprintf(w, "  Could not remove Entire hooks left by removed Gemini CLI support: %v\n", err)
+		fmt.Fprintf(w, "  Delete the entries running 'entire hooks gemini ...' from %s by hand.\n", retiredGeminiHookConfigRelPath)
+		return
+	}
+	if changed {
+		fmt.Fprintln(w, "Gemini CLI hooks: RETIRED")
+		fmt.Fprintf(w, "  Entire no longer supports Gemini CLI, but %s still ran Entire hooks.\n", retiredGeminiHookConfigRelPath)
+		fmt.Fprintln(w, "  ✓ Fixed: Entire's entries removed (your other hooks and settings are untouched).")
+		fmt.Fprintln(w, "  The settings file changed — commit or revert it as you prefer.")
+	}
+}
+
+// checkSummaryProvider reports a configured summary_generation.provider naming
+// a registered agent that cannot generate text. See
+// unsupportedSummaryProviderError for how such a value gets written.
+//
+// Worth a check of its own because nothing else says a word about it: the
+// settings loader validates only model-without-provider, `entire status` never
+// mentions summary generation, and the resolver's error surfaces at
+// `checkpoint explain --generate` / `dispatch` / `runner setup` — commands a
+// user may not run for weeks after the edit, by which time the cause is not in
+// view. Read-only; the remedy is the user's choice of provider, and the value
+// may live in a committed settings.json where a rewrite changes everyone's.
+//
+// Two conditions are deliberately out of scope. An UNREGISTERED name is the
+// external-plugin shape, where telling "not installed" from "installed but the
+// external_agents grant is missing" means running discovery — and doctor must
+// not exec a plugin to write a diagnostic (`entire status` already reports the
+// grant rejection). An off-$PATH binary is machine-local and expected, so the
+// resolver reports it at the point of use instead.
+func checkSummaryProvider(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	s, err := loadSummarySettings(ctx)
+	if err != nil {
+		// Not reported: a settings file that will not load is a louder problem
+		// than this check, and doctor's own PreRunE already reads it.
+		logging.Warn(ctx, "could not load settings for summary provider check",
+			slog.String("error", err.Error()))
+		return
+	}
+	if s.SummaryGeneration == nil || s.SummaryGeneration.Provider == "" {
+		return
+	}
+
+	name := types.AgentName(s.SummaryGeneration.Provider)
+	_, registered, capable := summaryCapableAgent(name)
+	// The retired name is unregistered, but unlike a plugin's it is known not
+	// to be coming back, so it is reported rather than left to the resolver.
+	retired := !registered && name == retiredGeminiAgentName && !retiredGeminiNameClaimed()
+	if (!registered && !retired) || capable {
+		return
+	}
+
+	w := cmd.OutOrStdout()
+	sourceFile, isLocal := summaryProviderSourceLayer(ctx, s)
+	fmt.Fprintln(w, "Summary provider: UNUSABLE")
+	if retired {
+		fmt.Fprintf(w, "  summary_generation.provider is %q in %s, but Gemini CLI is no longer supported.\n", name, sourceFile)
+	} else {
+		fmt.Fprintf(w, "  summary_generation.provider is %q in %s, which cannot generate text.\n", name, sourceFile)
+	}
+	fmt.Fprintln(w, "  `entire checkpoint explain --generate`, `entire dispatch`, and")
+	fmt.Fprintln(w, "  `entire runner setup` all fail while it is set.")
+	// The command names an INSTALLED provider, not merely a capable one.
+	// summaryCapableProviderNames is deliberately unfiltered by $PATH — it
+	// answers "what does this field accept" — but a command built from its
+	// first entry is alphabetical, so it says claude-code on a machine with no
+	// claude, and `configure` then rejects it for exactly that. The user this
+	// check fires for is the likeliest to have only one agent installed.
+	installed := listEnabledSummaryProviders(ctx)
+	if len(installed) > 0 {
+		fix := "entire configure --summarize-provider " + string(installed[0].Name)
+		if isLocal {
+			fix += " --local"
+		}
+		fmt.Fprintf(w, "  Fix: %s\n", fix)
+	}
+	if capable := summaryCapableProviderNames(); len(capable) > 0 {
+		// The accepted values, listed as data rather than as something to
+		// paste — a <a|b|c> placeholder is not copy-pasteable, since the shell
+		// reads < as a redirect and | as a pipe.
+		line := "  Supported: " + strings.Join(capable, ", ")
+		if len(installed) == 0 {
+			// No Fix line was printed above, so say why rather than leaving the
+			// reader to wonder where the command went.
+			line += " (none installed; install one first)"
+		}
+		fmt.Fprintln(w, line)
+	}
+	fmt.Fprintln(w, "  No `entire` command writes this value, so it was hand-edited or written by an agent.")
+}
+
+// summaryProviderSourceLayer reports which settings file supplies the effective
+// provider, and whether that file is the local layer.
+//
+// The remedy needs it. `entire configure` with no layer flag writes the PROJECT
+// file whenever one exists (settingsTargetFile), so a provider coming from
+// settings.local.json would be "fixed" in the wrong file: the command reports
+// success, the local layer still overrides it, and doctor still reports the
+// fault. Naming the file also answers the question the diagnosis otherwise
+// leaves open — which of two settings files to open.
+//
+// Local wins when it carries the key at all, which is the merge rule the loader
+// applies, so matching on the effective value is enough to identify the source.
+// A read failure or a missing file falls back to the project layer, matching
+// where `configure` would write.
+//
+// LocalLayerRejection is consulted first, and it is not an optimisation: a
+// TRACKED settings.local.json is dropped wholesale by the loader, so its
+// contents are not the effective value however well they match. Reading the
+// file directly cannot see that — it would attribute a provider both files
+// happen to share to the local layer and send the user to edit a file the
+// loader ignores, leaving the project-level fault in place behind a success
+// message. That is the same class of wrong-file advice as the missing --local.
+func summaryProviderSourceLayer(ctx context.Context, merged *settings.EntireSettings) (relPath string, isLocal bool) {
+	if merged == nil || merged.SummaryGeneration == nil {
+		return settings.EntireSettingsFile, false
+	}
+	if merged.LocalLayerRejection() != "" {
+		return settings.EntireSettingsFile, false
+	}
+	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
+	if err != nil {
+		return settings.EntireSettingsFile, false
+	}
+	// loadFromFile returns empty settings for a missing file, so absence is
+	// simply "the local layer does not supply it".
+	local, err := loadSummarySettingsFromFile(localAbs)
+	if err != nil {
+		return settings.EntireSettingsFile, false
+	}
+	if local.SummaryGeneration != nil && local.SummaryGeneration.Provider == merged.SummaryGeneration.Provider {
+		return settings.EntireSettingsLocalFile, true
+	}
+	return settings.EntireSettingsFile, false
+}
+
+// checkCodexHookTrust reports whether Codex can discover its effective
+// hooks file, whether its Entire-managed event set is current, and whether the
+// local Codex config has approval records for every declared hook. All checks
+// are structural; Entire never computes or copies Codex trust hashes.
+func checkCodexHookTrust(cmd *cobra.Command) {
+	diagnostics := codex.InspectHookDiagnostics(cmd.Context())
+	w := cmd.OutOrStdout()
+	issue := codexHookIssueFromDiagnostics(diagnostics)
+	if issue == nil {
+		if diagnostics.Discovered.State == codex.HookFileEntire && diagnostics.Discovery.ProjectLayerExists() {
+			writeCodexInstalledAndTrust(w, diagnostics)
+		}
+		return
+	}
+
+	worktreePath := diagnostics.WorktreeHooks.Path()
+	discoveredPath := diagnostics.Discovery.DiscoveredHooks.Path()
+	switch issue.State {
+	case codexHookStateDiscoveryUnresolved:
+		fmt.Fprintln(w, "Codex hooks: UNRESOLVED")
+		if worktreePath != "" {
+			fmt.Fprintf(w, "  Current-worktree hooks: %s\n", worktreePath)
+		}
+		fmt.Fprintf(w, "  Entire could not resolve the hooks file Codex discovers: %v\n", diagnostics.Discovery.Diagnostic)
+		fmt.Fprintln(w, "  Inspect the Git layout manually; Entire will not guess or write to another checkout.")
+	case codexHookStateMalformedDiscovered, codexHookStateUnavailableDiscovered:
+		writeCodexDiscoveredInspectionWarning(w, discoveredPath, diagnostics.Discovered.State, diagnostics.Discovered.Err)
+	case codexHookStateProjectLayerMissing:
+		writeCodexMissingProjectLayerWarning(w, filepath.Dir(worktreePath), discoveredPath)
+	case codexHookStateInactiveWorktreePath:
+		writeCodexInactiveWorktreeWarning(w, worktreePath, discoveredPath)
+	case codexHookStateWorktreePathNotDiscovered:
+		writeCodexActiveViaRoot(w, diagnostics)
+	case codexHookStateMalformedWorktree, codexHookStateUnavailableWorktree:
+		writeCodexWorktreeInspectionWarning(w, worktreePath, diagnostics.Worktree.State, diagnostics.Worktree.Err)
+	case codexHookStateOutdated:
+		writeCodexInstalledAndTrust(w, diagnostics)
+		fmt.Fprintln(w, "Codex hooks: OUT OF DATE")
+		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
+		if len(diagnostics.Discovered.Missing) > 0 {
+			fmt.Fprintf(w, "  %d hook(s) the CLI installs today aren't declared there:\n", len(diagnostics.Discovered.Missing))
+			for _, ev := range diagnostics.Discovered.Missing {
+				fmt.Fprintf(w, "    - %s\n", ev)
+			}
+		} else {
+			fmt.Fprintln(w, "  Entire-managed commands or timeouts there do not match this CLI.")
+		}
+		if diagnostics.PathsDiffer() {
+			writeCodexPrimaryCheckoutRemedy(w)
+		} else {
+			fmt.Fprintln(w, "  Run `entire enable --force` from this worktree to refresh it.")
+		}
+	case codexHookStateTrustReview:
+		writeCodexInstalledAndTrust(w, diagnostics)
+	}
+}
+
+func writeCodexInstalledAndTrust(w io.Writer, diagnostics codex.HookDiagnostics) {
+	writeCodexHookStatus(w, diagnostics, false)
+}
+
+func writeCodexActiveViaRoot(w io.Writer, diagnostics codex.HookDiagnostics) {
+	writeCodexHookStatus(w, diagnostics, true)
+}
+
+func writeCodexHookStatus(w io.Writer, diagnostics codex.HookDiagnostics, activeViaRoot bool) {
+	if diagnostics.Discovered.CoreInstalled {
+		if activeViaRoot {
+			fmt.Fprintln(w, "✓ Codex hooks: ACTIVE (via root checkout)")
+		} else {
+			fmt.Fprintln(w, "✓ Codex hooks: INSTALLED")
+		}
+		fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
+	}
+	switch {
+	case len(diagnostics.Trust.Declared) > 0 && !diagnostics.Trust.Known:
+		fmt.Fprintln(w, "Codex hook trust: UNKNOWN")
+		fmt.Fprintln(w, "  The hooks are installed, but Codex's local approval records could not be read.")
+		fmt.Fprintln(w, "  Open /hooks inside Codex to review their active state.")
+	case len(diagnostics.Trust.Gaps) > 0:
+		fmt.Fprintln(w, "Codex hook trust: REVIEW NEEDED")
+		fmt.Fprintf(w, "  %d installed hook(s) have no approval record at the Codex-discovered path:\n", len(diagnostics.Trust.Gaps))
+		for _, ev := range diagnostics.Trust.Gaps {
+			fmt.Fprintf(w, "    - %s\n", ev)
+		}
+		fmt.Fprintln(w, "  Open /hooks inside Codex to approve them.")
+	case len(diagnostics.Trust.Declared) > 0:
+		fmt.Fprintln(w, "✓ Codex hook approval records: PRESENT")
+	}
+}
+
+// antigravityDoctorSubject gates both Antigravity checks the same way: they
+// only apply where Entire's Antigravity hooks are installed and switched on
+// AND agy is on PATH. A teammate's checkout can carry the hooks on a machine
+// that never uses agy; reporting there would be a false positive. One gate,
+// evaluated once.
+//
+// The "enabled": false check is here rather than in AreHooksInstalled because
+// that predicate also drives agent auto-detection and `entire agent list`,
+// where an entry the user switched off is still genuinely present. Only
+// doctor's advice is unwanted for a configuration nobody asked to run.
+func antigravityDoctorSubject(cmd *cobra.Command) (*antigravity.AntigravityAgent, bool) {
+	ag := &antigravity.AntigravityAgent{}
+	installed, err := ag.AreHooksInstalled(cmd.Context())
+	if err != nil || !installed {
+		return nil, false
+	}
+	if disabled, err := ag.HooksDisabled(cmd.Context()); err != nil || disabled {
+		return nil, false
+	}
+	if _, err := exec.LookPath("agy"); err != nil {
+		return nil, false
+	}
+	return ag, true
+}
+
+// checkAntigravityTitleTee warns when Antigravity hooks are installed in this
+// repo but agy's global title slot — agy's only token-usage surface — is not
+// routed through Entire, which leaves token counts missing from checkpoints.
+// Warn-only.
+func checkAntigravityTitleTee(cmd *cobra.Command) {
+	if _, ok := antigravityDoctorSubject(cmd); !ok {
+		return
+	}
+	w := cmd.OutOrStdout()
+	if antigravity.TitleTeeInstalled() {
+		fmt.Fprintln(w, "✓ Antigravity title-tee: OK")
+		return
+	}
+
+	fmt.Fprintln(w, "Antigravity title-tee: NOT CONFIGURED")
+	fmt.Fprintln(w, "  agy's title command isn't routed through Entire, so token counts")
+	fmt.Fprintln(w, "  will be missing for Antigravity checkpoints.")
+	fmt.Fprintln(w, "  Re-run agent setup (`entire agent add antigravity`) to configure it.")
+}
+
+// checkAntigravityHooksLoaded reports two things about the installed hooks.
+//
+// Always, at zero cost: whether the "entire" entry in .agents/hooks.json is
+// the one this host needs. The command's shape is host-specific — agy runs it
+// through cmd.exe on Windows and sh elsewhere — and a file committed from a
+// macOS checkout carries a sh wrapper that cmd.exe tears apart: the hook exits
+// 1, the failure shows only in agy's log, the turn reports SUCCESS and nothing
+// is tracked. The file being present said nothing about that, and a green
+// doctor over zero tracked sessions is worse than no check.
+//
+// Only when ENTIRE_ANTIGRAVITY_DOCTOR_PROBE=1: ask agy itself whether it loads
+// this workspace's hooks (`agy -p /hooks --add-dir <root>`), which catches the
+// untrusted-workspace trap. Opt-in because agy 1.2.7 on Windows was observed
+// to answer that with a full model turn, and the probe must never spend the
+// user's quota by default. Warn-only throughout.
+func checkAntigravityHooksLoaded(cmd *cobra.Command) {
+	ag, ok := antigravityDoctorSubject(cmd)
+	if !ok {
+		return
+	}
+	w := cmd.OutOrStdout()
+
+	if installed, current, err := ag.HooksEntryMatchesHost(cmd.Context()); err == nil && installed && !current {
+		fmt.Fprintln(w, "Antigravity hooks: STALE FOR THIS HOST")
+		fmt.Fprintln(w, "  The \"entire\" entry in .agents/hooks.json is not the command this host")
+		fmt.Fprintln(w, "  needs (agy runs hooks through cmd.exe on Windows and sh elsewhere), so")
+		fmt.Fprintln(w, "  the hooks fail silently and nothing is tracked.")
+		fmt.Fprintln(w, "  Re-run `entire agent add antigravity` to reinstall them for this host.")
+	}
+
+	if os.Getenv(antigravity.DoctorProbeEnv) == "" {
+		return
+	}
+	repoRoot, err := paths.WorktreeRoot(cmd.Context())
+	if err != nil {
+		return
+	}
+	probe, err := antigravity.ProbeLoadedHooks(cmd.Context(), repoRoot)
+	switch {
+	case errors.Is(err, antigravity.ErrHooksProbeVersionUnknown):
+		fmt.Fprintf(w, "Antigravity hooks: NOT VERIFIED (could not determine the agy version from %q; skipping the `/hooks` probe)\n",
+			probe.Version)
+	case errors.Is(err, antigravity.ErrHooksProbeUnsupported):
+		fmt.Fprintf(w, "Antigravity hooks: NOT VERIFIED (agy %s is too old to answer `/hooks` headlessly; %s+ needed — run `agy update`)\n",
+			probe.Version, antigravity.MinHooksProbeVersion)
+	case err != nil:
+		fmt.Fprintf(w, "Antigravity hooks: NOT VERIFIED (%v)\n", err)
+	case probe.Loaded:
+		fmt.Fprintln(w, "✓ Antigravity hooks: LOADED by agy")
+	default:
+		fmt.Fprintln(w, "Antigravity hooks: NOT LOADED by agy")
+		fmt.Fprintln(w, "  .agents/hooks.json exists but agy does not load it for this workspace,")
+		fmt.Fprintln(w, "  so Entire's hooks never fire. Trust the folder in an interactive `agy`")
+		fmt.Fprintln(w, "  session, and pass `--add-dir <repo>` to `agy -p` runs.")
+	}
+}
+
+func writeCodexInactiveWorktreeWarning(w io.Writer, worktreePath, discoveredPath string) {
+	fmt.Fprintln(w, "Codex hooks: NOT ACTIVE IN THIS WORKTREE")
+	fmt.Fprintln(w, "  Entire hooks are configured at the current-worktree path:")
+	fmt.Fprintf(w, "    %s\n", worktreePath)
+	fmt.Fprintln(w, "  Codex currently discovers:")
+	fmt.Fprintf(w, "    %s\n", discoveredPath)
+	writeCodexPrimaryCheckoutRemedy(w)
+}
+
+func writeCodexWorktreeInspectionWarning(w io.Writer, worktreePath string, state codex.HookFileState, err error) {
+	if state == codex.HookFileMalformed {
+		fmt.Fprintln(w, "Codex hooks: MALFORMED CURRENT-WORKTREE CONFIGURATION")
+	} else {
+		fmt.Fprintln(w, "Codex hooks: CURRENT-WORKTREE CONFIGURATION UNAVAILABLE")
+	}
+	if worktreePath != "" {
+		fmt.Fprintf(w, "  Current-worktree hooks: %s\n", worktreePath)
+	}
+	fmt.Fprintf(w, "  Error: %v\n", err)
+	fmt.Fprintln(w, "  Fix the current-worktree .codex path or hooks.json file, then run `entire enable --force`.")
+	fmt.Fprintln(w, "  This may not be the file Codex reads. If Codex discovers another project root, apply/merge the generated .codex/hooks.json change there too.")
+	fmt.Fprintln(w, "  .codex/hooks.json is tracked — commit it and make sure the discovered project root has it too.")
+}
+
+func writeCodexDiscoveredInspectionWarning(w io.Writer, discoveredPath string, state codex.HookFileState, err error) {
+	if state == codex.HookFileMalformed {
+		fmt.Fprintln(w, "Codex hooks: MALFORMED DISCOVERED CONFIGURATION")
+	} else {
+		fmt.Fprintln(w, "Codex hooks: DISCOVERED CONFIGURATION UNAVAILABLE")
+	}
+	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
+	fmt.Fprintf(w, "  Error: %v\n", err)
+	fmt.Fprintln(w, "  Fix this discovered .codex/hooks.json file in its project root.")
+	writeCodexTrackedHooksRemedy(w)
+}
+
+func writeCodexMissingProjectLayerWarning(w io.Writer, projectLayerPath, discoveredPath string) {
+	fmt.Fprintln(w, "Codex hooks: PROJECT LAYER MISSING")
+	fmt.Fprintf(w, "  Current-worktree project layer: %s (missing)\n", projectLayerPath)
+	fmt.Fprintf(w, "  Codex-discovered hooks: %s\n", discoveredPath)
+	fmt.Fprintln(w, "  Current Codex needs the local .codex project layer before it loads the discovered file.")
+	fmt.Fprintln(w, "  Run `entire enable` from this worktree to create the local layer.")
+	writeCodexTrackedHooksRemedy(w)
+}
+
+func writeCodexPrimaryCheckoutRemedy(w io.Writer) {
+	fmt.Fprintln(w, "  Codex will read the discovered file above, not the current-worktree file above.")
+	writeCodexTrackedHooksRemedy(w)
+}
+
+func writeCodexTrackedHooksRemedy(w io.Writer) {
+	fmt.Fprintln(w, "  .codex/hooks.json is tracked — commit it and make sure the root worktree has it")
+	fmt.Fprintln(w, "  (merge to the default branch, or check that branch out there).")
 }

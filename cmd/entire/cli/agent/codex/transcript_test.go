@@ -1,6 +1,9 @@
 package codex
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,6 +31,74 @@ func writeSampleRollout(t *testing.T) string {
 	path := filepath.Join(dir, "rollout.jsonl")
 	require.NoError(t, os.WriteFile(path, []byte(sampleRollout), 0o600))
 	return path
+}
+
+func TestClassifyRollout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		data      string
+		want      rolloutClassification
+		wantIssue rolloutClassificationIssue
+	}{
+		{
+			name: "root thread source",
+			data: `{"type":"session_meta","payload":{"thread_source":"user"}}` + "\n",
+			want: rolloutRoot,
+		},
+		{
+			name: "root legacy string source",
+			data: `{"type":"session_meta","payload":{"source":"exec"}}` + "\n",
+			want: rolloutRoot,
+		},
+		{
+			name: "child thread source",
+			data: `{"type":"session_meta","payload":{"thread_source":"subagent"}}` + "\n",
+			want: rolloutChild,
+		},
+		{
+			name: "child legacy structured source",
+			data: `{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"parent_thread_id":"root-thread"}}}}}` + "\n",
+			want: rolloutChild,
+		},
+		{
+			name:      "missing session metadata",
+			data:      `{"type":"response_item","payload":{}}` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueMalformedMetadata,
+		},
+		{
+			name:      "malformed JSON",
+			data:      `{"type":"session_meta","payload":` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueMalformedMetadata,
+		},
+		{
+			name:      "unrecognized source",
+			data:      `{"type":"session_meta","payload":{"source":"other"}}` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueUnclassifiedSource,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			require.NoError(t, os.WriteFile(path, []byte(tt.data), 0o600))
+			got := classifyRolloutDetailed(path, []string{filepath.Dir(path)})
+			require.Equal(t, tt.want, got.Classification)
+			require.Equal(t, tt.wantIssue, got.Issue)
+		})
+	}
+
+	t.Run("missing path", func(t *testing.T) {
+		t.Parallel()
+		got := classifyRolloutDetailed(filepath.Join(t.TempDir(), "missing.jsonl"), nil)
+		require.Equal(t, rolloutUnknown, got.Classification)
+		require.Equal(t, rolloutIssueUnreadable, got.Issue)
+	})
 }
 
 func TestGetTranscriptPosition(t *testing.T) {
@@ -64,7 +135,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	path := writeSampleRollout(t)
 
 	// From beginning — should find all files
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.ElementsMatch(t, []string{"hello.txt", "docs/readme.md"}, files)
@@ -76,7 +147,7 @@ func TestExtractModifiedFilesFromOffset_WithOffset(t *testing.T) {
 	path := writeSampleRollout(t)
 
 	// Skip first 7 lines (past the first apply_patch) — should only find second patch files
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 7)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 7)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.ElementsMatch(t, []string{"docs/readme.md", "hello.txt"}, files)
@@ -87,7 +158,7 @@ func TestExtractModifiedFilesFromOffset_PastEnd(t *testing.T) {
 	ag := &CodexAgent{}
 	path := writeSampleRollout(t)
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 100)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 100)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.Empty(t, files)
@@ -326,11 +397,50 @@ func TestSanitizeRestoredTranscript_StripsEncryptedItems(t *testing.T) {
 {"timestamp":"2026-03-25T11:31:11.756Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
 `)
 
-	got := string(sanitizeRestoredTranscript(input))
+	got := string(SanitizePortableTranscript(input))
 	require.Contains(t, got, `"type":"reasoning"`)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
-	require.NotContains(t, got, `"type":"compaction"`)
 	require.Contains(t, got, `"type":"message"`)
+
+	// Top-level compaction items are stripped in place, NOT dropped: the item
+	// survives without its payload so the stored transcript keeps the same line
+	// numbering as the agent's rollout (CheckpointTranscriptStart is counted on the
+	// rollout but applied to the stored copy).
+	require.Contains(t, got, `"type":"compaction"`)
+	require.Len(t,
+		splitJSONL([]byte(got)), len(splitJSONL(input)),
+		"sanitization must preserve the line count")
+}
+
+func TestSanitizePortableTranscript_PreservesLineNumbering(t *testing.T) {
+	t.Parallel()
+
+	// Every transform the sanitizer performs must leave line numbering intact, so an
+	// offset counted on the raw rollout still indexes the stored copy correctly.
+	input := []byte(`{"type":"session_meta","payload":{"id":"abc"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"one"}]}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"Y2lwaGVy"}}
+{"type":"response_item","payload":{"type":"compaction","encrypted_content":"Y2lwaGVy"}}
+{"type":"response_item","payload":{"type":"compaction_summary","encrypted_content":"Y2lwaGVy"}}
+{"type":"compacted","payload":{"message":"","replacement_history":[{"type":"compaction","encrypted_content":"Y2lwaGVy"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"two"}]}}
+`)
+
+	rawLines := splitJSONL(input)
+	got := SanitizePortableTranscript(input)
+	gotLines := splitJSONL(got)
+
+	require.Len(t, gotLines, len(rawLines),
+		"line count changed: offsets into the stored transcript would drift")
+	require.NotContains(t, string(got), "Y2lwaGVy", "ciphertext survived")
+
+	// Line-for-line, each stored line must still correspond to the same rollout line.
+	for i := range rawLines {
+		var rawLine, gotLine rolloutLine
+		require.NoError(t, json.Unmarshal(rawLines[i], &rawLine))
+		require.NoError(t, json.Unmarshal(gotLines[i], &gotLine))
+		require.Equal(t, rawLine.Type, gotLine.Type, "line %d changed type", i)
+	}
 }
 
 func TestSanitizeRestoredTranscript_StripsEncryptedItemsFromCompactedHistory(t *testing.T) {
@@ -340,11 +450,101 @@ func TestSanitizeRestoredTranscript_StripsEncryptedItemsFromCompactedHistory(t *
 {"timestamp":"2026-03-25T11:31:11.754Z","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"reasoning","summary":[{"text":"brief"}],"encrypted_content":"REDACTED"},{"type":"compaction","encrypted_content":"REDACTED"},{"type":"compaction_summary","encrypted_content":"REDACTED"}]}}
 `)
 
-	got := string(sanitizeRestoredTranscript(input))
+	got := string(SanitizePortableTranscript(input))
 	require.Contains(t, got, `"type":"compacted"`)
 	require.Contains(t, got, `"type":"reasoning"`)
 	require.Contains(t, got, `"type":"message"`)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
 	require.NotContains(t, got, `"type":"compaction"`)
 	require.NotContains(t, got, `"type":"compaction_summary"`)
+}
+
+// TestSanitizePortableTranscript_StripsAgentMessageEncryptedContent covers the
+// multi-agent rollout shape: an "agent_message" response item carries a
+// plaintext input_text part plus an "encrypted_content" part holding Fernet
+// ciphertext (gAAAA..., ~700-1000 chars) that only the originating session can
+// decrypt. The ciphertext is not portable and the entropy layer would otherwise
+// replace it with REDACTED; the readable part and the line itself must survive.
+func TestSanitizePortableTranscript_StripsAgentMessageEncryptedContent(t *testing.T) {
+	t.Parallel()
+
+	const ciphertext = "gAAAAABqwRvDZmFrZS1jaXBoZXJ0ZXh0LWZvci10ZXN0cy1vbmx5"
+	input := []byte(`{"type":"session_meta","payload":{"id":"abc"}}` + "\n" +
+		`{"timestamp":"2026-10-01T10:00:00.000Z","type":"response_item","payload":{"type":"agent_message","id":"amsg_01","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK"},{"type":"encrypted_content","encrypted_content":"` + ciphertext + `"}]}}` + "\n" +
+		`{"timestamp":"2026-10-01T10:00:01.000Z","type":"response_item","payload":{"type":"agent_message","id":"amsg_02","author":"/root/worker","recipient":"/root","content":[{"type":"input_text","text":"Message Type: FINAL_ANSWER"}]}}` + "\n")
+
+	got := SanitizePortableTranscript(input)
+
+	require.NotContains(t, string(got), ciphertext, "agent_message ciphertext survived sanitization")
+	require.NotContains(t, string(got), "encrypted_content")
+	require.Contains(t, string(got), `"text":"Message Type: NEW_TASK"`)
+	require.Contains(t, string(got), `"text":"Message Type: FINAL_ANSWER"`)
+	require.Contains(t, string(got), `"recipient":"/root/worker"`)
+	require.Len(t, splitJSONL(got), len(splitJSONL(input)),
+		"sanitization must preserve the line count")
+
+	// A second pass must be a byte-for-byte no-op.
+	require.Equal(t, string(got), string(SanitizePortableTranscript(got)))
+}
+
+// TestSanitizePortableTranscript_StripsAgentMessageEncryptedContentInCompactedHistory
+// covers the same agent_message shape nested in a "compacted" line's
+// replacement_history, which sanitizeHistoryItems handles separately.
+func TestSanitizePortableTranscript_StripsAgentMessageEncryptedContentInCompactedHistory(t *testing.T) {
+	t.Parallel()
+
+	const ciphertext = "gAAAAABqwRn8bmVzdGVkLWNpcGhlcnRleHQtZm9yLXRlc3RzLW9ubHk"
+	input := []byte(`{"type":"session_meta","payload":{"id":"abc"}}` + "\n" +
+		`{"type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"agent_message","id":"amsg_01","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK"},{"type":"encrypted_content","encrypted_content":"` + ciphertext + `"}]}]}}` + "\n")
+
+	got := SanitizePortableTranscript(input)
+
+	require.NotContains(t, string(got), ciphertext, "nested agent_message ciphertext survived sanitization")
+	require.NotContains(t, string(got), "encrypted_content")
+	require.Contains(t, string(got), `"text":"Message Type: NEW_TASK"`)
+	require.Contains(t, string(got), `"type":"agent_message"`)
+	require.Len(t, splitJSONL(got), len(splitJSONL(input)),
+		"sanitization must preserve the line count")
+	require.Equal(t, string(got), string(SanitizePortableTranscript(got)))
+}
+
+// TestSanitizePortableTranscript_UnchangedInputReturnsSameBytes pins the fast path
+// that makes the "call it from every storage path" contract affordable: a transcript
+// with nothing to strip must come back as the identical backing array, not a
+// reassembled copy.
+func TestSanitizePortableTranscript_UnchangedInputReturnsSameBytes(t *testing.T) {
+	t.Parallel()
+
+	clean := []byte(`{"type":"session_meta","payload":{"id":"abc"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}` + "\n")
+
+	got := SanitizePortableTranscript(clean)
+	if !bytes.Equal(got, clean) {
+		t.Fatalf("clean transcript was altered:\nwant %s\ngot  %s", clean, got)
+	}
+	if len(got) > 0 && &got[0] != &clean[0] {
+		t.Error("clean transcript was copied; expected the original backing array (fast path missed)")
+	}
+}
+
+// TestSanitizePortableTranscript_IdempotentBytes proves a second pass over an
+// already-sanitized transcript is a no-op, which is what lets the Stop path,
+// condensation, finalize, and the checkpoint store each call it unconditionally.
+func TestSanitizePortableTranscript_IdempotentBytes(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{"type":"session_meta","payload":{"id":"abc"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"c2VjcmV0"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"compaction","encrypted_content":"c2VjcmV0"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}` + "\n")
+
+	once := SanitizePortableTranscript(input)
+	if bytes.Contains(once, []byte("encrypted_content")) {
+		t.Fatalf("first pass left encrypted_content: %s", once)
+	}
+
+	twice := SanitizePortableTranscript(once)
+	if !bytes.Equal(once, twice) {
+		t.Errorf("not byte-idempotent:\n once=%s\ntwice=%s", once, twice)
+	}
 }

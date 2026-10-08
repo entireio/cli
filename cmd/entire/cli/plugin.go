@@ -8,10 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
@@ -31,25 +33,148 @@ const (
 	agentPluginBinaryPrefix = "entire-agent-"
 )
 
+// selfUpdatePluginName is the plugin that replaces the entire binary on
+// disk (`entire upgrade` → entire-upgrade).
+const selfUpdatePluginName = "upgrade"
+
+// onDemandInstallPluginNames are the missing plugins the dispatcher offers to
+// install rather than falling through to Cobra's unknown-command path. Kept
+// beside the other plugin names the dispatcher special-cases, so the set is
+// readable in one place.
+//
+// Membership is deliberately narrow. The offer is a prompt that defaults to
+// Yes and ends in a downloaded binary linked onto $PATH, so it belongs only to
+// names this CLI previously answered itself — a user typing them has every
+// reason to expect the command to exist. `graph` is the on-demand semantic
+// index; `investigate` was a built-in until it moved to the
+// entire-investigate plugin, and without the offer `entire investigate` would
+// answer an established command with "unknown command for entire".
+//
+// A name here must be resolvable through the plugin index: the install path
+// looks it up there and nowhere else, so an unlisted name turns the prompt
+// into a failure that the fall-through would have reported more plainly.
+//
+//nolint:gochecknoglobals // package-level set; a slice because there is no const slice in Go.
+var onDemandInstallPluginNames = []string{"graph", "investigate"}
+
+// offersOnDemandInstall reports whether a missing plugin by this name should
+// be offered for installation.
+func offersOnDemandInstall(name string) bool {
+	return slices.Contains(onDemandInstallPluginNames, name)
+}
+
+// ExitPluginSignalled reports that a plugin was terminated by a signal, or
+// that a signal interrupted an on-demand install before the plugin ran. It is
+// deliberately not a valid exit status — os.Exit(-1) truncates to 255 — so
+// main.go re-raises the signal instead of exiting with it. -1 is already what
+// exec.ExitError.ExitCode() reports for a signalled child.
+//
+// MaybeRunPlugin's killedBy return says WHICH signal, when it is knowable.
+// The two are separate because they have different sources: the exit code
+// comes from the child's wait status, while the signal may have reached only
+// the child (`kill -TERM` at the plugin, SIGPIPE from a closed pipe) or only
+// this process (a Ctrl-C during the on-demand install, where there is no
+// child yet).
+const ExitPluginSignalled = -1
+
+// PluginExitError is returned by a built-in command that ran a plugin on the
+// user's behalf (agent-help's delegation) when the plugin did not exit 0. It
+// carries runPlugin's outcome so main.go can exit with it — the plugin's own
+// code, or its re-raised signal — exactly as it does for a dispatched plugin,
+// rather than the plain 1 every other returned error gets. The plugin's own
+// stderr is the user-facing message, so main prints nothing for it.
+type PluginExitError struct {
+	Code     int       // runPlugin's exit code; ExitPluginSignalled when killed by a signal
+	KilledBy os.Signal // runPlugin's killedBy; nil for an ordinary exit
+	Err      error
+}
+
+func (e *PluginExitError) Error() string { return e.Err.Error() }
+
+func (e *PluginExitError) Unwrap() error { return e.Err }
+
+// AlreadyPrinted reports that the plugin's stderr already carried the message.
+func (e *PluginExitError) AlreadyPrinted() bool { return true }
+
+// postPluginVersionCheck is a test seam for the version-check notice that
+// fires after a successful plugin run.
+var postPluginVersionCheck = versioncheck.CheckAndNotify
+
 // MaybeRunPlugin returns (true, exitCode) when an external command was
 // resolved and run. On launch failure (e.g. missing executable bit)
 // returns (true, 1) after printing to stderr. On no-match returns
-// (false, 0) so the caller can fall through to Cobra.
+// (false, 0) so the caller can fall through to Cobra. exitCode is
+// ExitPluginSignalled when the plugin was killed by a signal, or when a
+// signal interrupted an on-demand install before it ran; the caller turns
+// that into a re-raised signal rather than an exit status.
+//
+// killedBy is the signal the plugin was killed by, when the platform reports
+// one. It is nil for an ordinary exit, on Windows, and for an install
+// interrupted before any child existed — in that last case the signal is the
+// one this process received, which the caller already has.
 //
 // Telemetry and the version-check notice mirror Cobra's PersistentPostRun
 // behavior for built-ins: both fire only on a successful (exit-0) run.
-func MaybeRunPlugin(ctx context.Context, rootCmd *cobra.Command, args []string) (handled bool, exitCode int) {
+func MaybeRunPlugin(ctx context.Context, rootCmd *cobra.Command, args []string) (handled bool, exitCode int, killedBy os.Signal) {
 	binPath, pluginArgs, ok := resolvePlugin(rootCmd, args)
 	if !ok {
-		return false, 0
+		return false, 0, nil
 	}
 	pluginName := args[0]
-	exitCode = runPlugin(ctx, pluginName, binPath, pluginArgs)
+	if binPath == "" {
+		var err error
+		binPath, err = installMissingPlugin(ctx, rootCmd, pluginName)
+		if err != nil {
+			var silent *SilentError
+			if errors.As(silencePluginCancel(ctx, err), &silent) {
+				// A signal interrupted the install. Report it as a signal
+				// rather than a plain failure so main.go re-raises it: a
+				// shell breaks an enclosing loop only on WIFSIGNALED. No
+				// child ran, so there is no child signal to name — the
+				// caller falls back to the one it received.
+				return true, ExitPluginSignalled, nil
+			}
+			fmt.Fprintln(rootCmd.ErrOrStderr(), RenderUserFacingError(err))
+			return true, 1, nil
+		}
+		if binPath == "" {
+			// The command was not executed because installation was declined.
+			return true, 1, nil
+		}
+		// Say what is happening now: the install may have taken a while, and
+		// it is the reason the user is still waiting.
+		//
+		// The binary's name, never the arguments. They are the user's own
+		// command line, already on their screen, so echoing them back adds
+		// nothing — and it would put whatever they contain into stderr and
+		// into anything capturing it: a token passed as a flag, a newline
+		// that forges a second line of output, a terminal escape that
+		// repositions the cursor or repaints what is above it. That last one
+		// is the same hazard hasTerminalControlChars exists for.
+		fmt.Fprintf(rootCmd.ErrOrStderr(), "Running %s%s\n", pluginBinaryPrefix, pluginName)
+	} else if isManagedBinEntry(binPath) {
+		// LookPath accepts a 0-byte executable, so an empty managed entry
+		// resolves and then fails in exec with an opaque "exec format error".
+		// Diagnose it the way the on-demand path does, with the remedy.
+		if err := managedEntryUnrunnable(pluginName, binPath); err != nil {
+			fmt.Fprintln(rootCmd.ErrOrStderr(), RenderUserFacingError(err))
+			return true, 1, nil
+		}
+	}
+	exitCode, killedBy = runPlugin(ctx, pluginName, binPath, pluginArgs)
 	if exitCode == 0 {
 		maybeTrackPluginInvocation(ctx, pluginName)
-		versioncheck.CheckAndNotify(ctx, os.Stdout, versioninfo.Version)
+		// Stderr, matching the built-in PersistentPostRun: the plugin's own
+		// stdout may be machine-readable and piped.
+		//
+		// Skipped after a self-update: this process still carries the
+		// pre-upgrade compiled-in version, so the check would see itself as
+		// outdated and prompt to redo the upgrade that just completed.
+		if pluginName != selfUpdatePluginName {
+			postPluginVersionCheck(ctx, os.Stderr, versioninfo.Version)
+		}
 	}
-	return true, exitCode
+	return true, exitCode, killedBy
 }
 
 // maybeTrackPluginInvocation fires telemetry only for plugins on the
@@ -63,12 +188,15 @@ func maybeTrackPluginInvocation(ctx context.Context, pluginName string) {
 	if err != nil {
 		return
 	}
-	if s.Telemetry == nil || !*s.Telemetry {
+	if !s.IsTelemetryEnabled() {
 		return
 	}
 	telemetry.TrackPluginDetached(pluginName, s.Enabled, versioninfo.Version)
 }
 
+// resolvePlugin returns an empty binary path for a missing plugin named by
+// onDemandInstallPluginNames so the dispatcher can offer installation. Other
+// missing names fall through.
 func resolvePlugin(rootCmd *cobra.Command, args []string) (binPath string, pluginArgs []string, ok bool) {
 	if len(args) == 0 {
 		return "", nil, false
@@ -98,6 +226,9 @@ func resolvePlugin(rootCmd *cobra.Command, args []string) (binPath string, plugi
 		if p, found := findInaccessiblePlugin(binName); found {
 			return p, args[1:], true
 		}
+		if offersOnDemandInstall(name) && errors.Is(err, exec.ErrNotFound) {
+			return "", args[1:], true
+		}
 		return "", nil, false
 	}
 	if isAgentProtocolBinary(binPath) {
@@ -110,13 +241,22 @@ func resolvePlugin(rootCmd *cobra.Command, args []string) (binPath string, plugi
 // given name. Only meaningful after exec.LookPath has already failed —
 // indicates the file exists but lacks the executable bit (or the
 // equivalent platform-specific accessibility).
+//
+// The scan goes through execx.PathScanDirs, not a bare split: the rule that
+// only absolute entries are scanned is shared with the external-agent
+// scanner, and two copies of it is how they drifted apart in the first place.
+// The rule matters especially here, because this function runs only after
+// LookPath has failed. LookPath's error does not distinguish exec.ErrDot (its
+// refusal to resolve a match found through a relative PATH entry) from a
+// genuine "exists but not executable", so a scan that re-walked relative
+// entries would blindly re-find the exact binary LookPath just correctly
+// refused. runPlugin then execs it via a path containing a separator, which
+// bypasses exec.Command's own ErrDot re-check, since that only fires for a
+// bare name with no separator.
 func findInaccessiblePlugin(filename string) (string, bool) {
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
-			continue
-		}
+	for _, dir := range execx.PathScanDirs() {
 		candidate := filepath.Join(dir, filename)
-		info, err := os.Stat(candidate) //nolint:gosec // PATH entries are user-trusted; scanning them is the point.
+		info, err := os.Stat(candidate)
 		if err != nil || info.IsDir() {
 			continue
 		}
@@ -145,7 +285,7 @@ func isAgentProtocolBinary(binPath string) bool {
 // On context cancellation the child gets SIGINT (with a 5s grace before the
 // runtime falls back to SIGKILL) so plugins can clean up. Terminal signals
 // reach the child directly via the shared process group.
-func runPlugin(ctx context.Context, pluginName, binPath string, args []string) int {
+func runPlugin(ctx context.Context, pluginName, binPath string, args []string) (exitCode int, killedBy os.Signal) {
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = 5 * time.Second
@@ -188,12 +328,17 @@ func runPlugin(ctx context.Context, pluginName, binPath string, args []string) i
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode()
+			// A signalled child reports -1, i.e. ExitPluginSignalled: it is
+			// not an exit status, so the caller re-raises the signal rather
+			// than letting os.Exit truncate it to 255. Which signal comes
+			// from the wait status, because it need not be one this process
+			// received — see pluginTerminatingSignal.
+			return exitErr.ExitCode(), pluginTerminatingSignal(exitErr.ProcessState)
 		}
 		// Prefix with the plugin name so users can tell parent vs child
 		// errors apart in mixed stderr.
 		fmt.Fprintf(os.Stderr, "Failed to run plugin %s: %v\n", filepath.Base(binPath), err)
-		return 1
+		return 1, nil
 	}
-	return 0
+	return 0, nil
 }

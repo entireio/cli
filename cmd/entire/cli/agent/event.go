@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // EventType represents a normalized lifecycle event from any agent.
@@ -36,8 +39,8 @@ const (
 	SubagentEnd
 
 	// ModelUpdate indicates the agent reported the LLM model being used.
-	// This fires on hooks that carry model info but have no other lifecycle action
-	// (e.g., Gemini CLI's BeforeModel). The framework stores the model as a hint
+	// This fires on hooks that carry model info but have no other lifecycle action.
+	// No built-in agent emits it today; external agents can. The framework stores the model as a hint
 	// for subsequent TurnStart/TurnEnd events in the same session.
 	ModelUpdate
 
@@ -95,7 +98,7 @@ type Event struct {
 	Prompt string
 
 	// Model is the LLM model identifier (e.g., "claude-sonnet-4-20250514").
-	// Populated on SessionStart (Claude Code), ModelUpdate (Gemini CLI BeforeModel),
+	// Populated on SessionStart (Claude Code), ModelUpdate,
 	// and TurnStart/TurnEnd events when the agent provides model info.
 	Model string
 
@@ -105,8 +108,80 @@ type Event struct {
 	// ToolUseID identifies the tool invocation (for SubagentStart/SubagentEnd events).
 	ToolUseID string
 
+	// TurnID identifies the agent turn that produced the event.
+	TurnID string
+
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
+
+	// ProvisionalSubagentStop is true when a subagent-stop event may arrive
+	// before the root rollout has reached its final state.
+	ProvisionalSubagentStop bool
+
+	// Final is true only for events that represent true completion of a
+	// subagent (for example Claude Code or Copilot CLI's SubagentStop), never
+	// for the launch-time
+	// PostToolUse SubagentEnd, which fires at the background launch stub
+	// seconds after launch. Downstream lifecycle branching keys off this flag,
+	// not any payload sentinel. Final is the disambiguator for agents with a
+	// two-signal model (a launch-time stub plus a separate completion hook,
+	// like Claude Code's background tasks); agents whose single subagent-end
+	// event already fires at true completion normally leaves it false so the
+	// existing pipeline handles it unchanged. CompletionWithoutLaunch marks the
+	// narrow final-event shape whose identity becomes available only at stop.
+	Final bool
+
+	// SubagentLaunch is how the agent reports it ran the subagent, on a
+	// launch-time (non-Final) SubagentEnd. Unknown means the agent did not say,
+	// and the lifecycle falls back to tool_input.run_in_background.
+	SubagentLaunch SubagentLaunchMode
+
+	// SubagentLaunchIdempotent, on a launch-time background SubagentEnd, keeps
+	// an existing task record for ToolUseID instead of replacing it. Set when
+	// the launch signal is keyed by the subagent itself rather than by a fresh
+	// tool call (Claude Code's SubagentStart for Workflow agents), so a
+	// repeated or late launch signal cannot reset a record still held in
+	// session state (one condensation has not yet materialized and removed).
+	SubagentLaunchIdempotent bool
+
+	// SubagentFilesFromTranscript, on a launch-time foreground SubagentEnd,
+	// takes the task's files from its transcript only. Set when no pre-task
+	// baseline was captured at launch (Claude Code's Skill call, which has no
+	// PreToolUse hook), so a worktree diff would credit the task with every
+	// uncommitted change in the worktree.
+	SubagentFilesFromTranscript bool
+
+	// SubagentRunID, on a Final SubagentEnd, names the run this execution of
+	// SubagentID belonged to, for agents that reuse a subagent ID across runs
+	// (Claude Code resumes a Workflow run with its agents' IDs). The adapter
+	// sets it only together with a SubagentTranscriptPath it verified is that
+	// run's transcript for this agent. The lifecycle uses it to tell a later
+	// run's stop from a repeated stop of a run it already completed.
+	SubagentRunID string
+
+	// CompletionWithoutLaunch marks a true completion whose stable identity was
+	// learned at completion time rather than from a correlated start hook.
+	// Shared lifecycle may create the task record only when the parent session
+	// is still active; it must never create parent state for this path.
+	CompletionWithoutLaunch bool
+
+	// SubagentTranscriptUnavailable records an agent contract with no standalone
+	// child transcript. It prevents later generic layout probing from mistaking
+	// an unrelated agent-<id>.jsonl file for this child's transcript.
+	SubagentTranscriptUnavailable bool
+
+	// SubagentTranscriptPath is the agent-declared path to the subagent's own
+	// transcript (SubagentEnd). Set it whenever the hook payload names the file;
+	// Codex and Cursor both send agent_transcript_path, as does Claude Code's
+	// SubagentStop.
+	//
+	// When empty the framework probes the layout Claude Code and Factory AI Droid
+	// share (cli.ResolveAgentTranscriptPath). For any other agent that probe finds
+	// nothing and yields "" silently, so the only symptom is a task checkpoint with
+	// no subagent transcript plus file extraction falling back to the main
+	// transcript — where a subagent's edits never appear. Declaring the path is how
+	// an agent opts out of that guess.
+	SubagentTranscriptPath string
 
 	// ToolInput is the raw tool input JSON (for subagent type/description extraction).
 	// Used when both SubagentType and TaskDescription are empty (agents that don't provide
@@ -142,6 +217,12 @@ type Event struct {
 	ContextTokens     int   // Context window tokens used (e.g., Cursor PreCompact hook)
 	ContextWindowSize int   // Total context window size (e.g., Cursor PreCompact hook)
 
+	// TokenUsage carries per-turn token accounting reported by an agent hook
+	// directly (e.g., Cursor's Stop hook). Set when the hook payload contains
+	// authoritative token data that the JSONL transcript does not. Lifecycle
+	// handlers prefer this over transcript-based calculation when populated.
+	TokenUsage *TokenUsage
+
 	// SkillEvents records native agent skill signals surfaced by hooks.
 	// The lifecycle layer persists these to session state and later checkpoint metadata.
 	SkillEvents []SkillEvent
@@ -149,21 +230,95 @@ type Event struct {
 	// Metadata holds agent-specific state that the framework stores and makes available
 	// on subsequent events. Examples: Pi's activeLeafId, Cursor's is_background_agent.
 	Metadata map[string]string
+
+	// SuppressIfSessionActive marks a TurnStart the dispatcher should drop when
+	// an active (mid-turn) session already exists for SessionID. It exists for
+	// agents whose per-invocation hooks can't distinguish a follow-up model call
+	// from the first call of a resumed turn (e.g. Antigravity's PreInvocation,
+	// which fires per model invocation): the parser emits a conditional TurnStart
+	// and the dispatcher resolves it against session state (which agent packages
+	// may not read directly).
+	SuppressIfSessionActive bool
 }
 
-// ReadAndParseHookInput reads all bytes from stdin and unmarshals JSON into the given type.
-// This is a shared helper for agent ParseHookEvent implementations.
+// SubagentLaunchMode is how an agent ran a subagent, as reported by the agent
+// itself when the launching tool returns.
+type SubagentLaunchMode int
+
+const (
+	// SubagentLaunchUnknown means the agent did not report a mode.
+	SubagentLaunchUnknown SubagentLaunchMode = iota
+	// SubagentLaunchForeground means the launching tool returned after the
+	// subagent finished.
+	SubagentLaunchForeground
+	// SubagentLaunchBackground means the launching tool returned while the
+	// subagent keeps running; its completion arrives as a later Final event.
+	SubagentLaunchBackground
+)
+
+// ReadAndParseHookInput decodes a single JSON hook payload from stdin into the
+// given type. This is a shared helper for agent ParseHookEvent implementations.
+//
+// It deliberately does NOT use io.ReadAll, which waits for stdin to reach EOF.
+// Agents drive hooks by piping a JSON payload to the hook process, but some
+// keep the write end of that pipe open for the hook's lifetime rather than
+// closing it after writing — notably on Windows/Git Bash, where a full payload
+// arrives but EOF never does. io.ReadAll then blocked indefinitely and the hook
+// hung forever (issue #1398). A streaming
+// json.Decoder returns as soon as one complete JSON value has been read,
+// independent of when — or whether — stdin is closed.
 func ReadAndParseHookInput[T any](stdin io.Reader) (*T, error) {
-	data, err := io.ReadAll(stdin)
+	raw, err := ReadHookInputRaw(stdin)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read hook input: %w", err)
-	}
-	if len(data) == 0 {
-		return nil, errors.New("empty hook input")
+		return nil, err
 	}
 	var result T
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
 	return &result, nil
+}
+
+// ReadHookInputRaw returns the raw bytes of a single JSON hook payload read from
+// stdin, without waiting for EOF. It is the shared primitive behind every
+// agent's hook-input read (issue #1398); callers that need custom parsing
+// (e.g. key-name fallbacks, or forwarding the bytes to a subprocess) use this
+// directly, while the common case uses ReadAndParseHookInput.
+func ReadHookInputRaw(stdin io.Reader) (json.RawMessage, error) {
+	return ReadHookInputRawLimited(stdin, -1)
+}
+
+// ReadHookInputRawLimited is ReadHookInputRaw with a ceiling of limit bytes on
+// the JSON value (limit < 0 means unlimited). It is used at the external/plugin
+// boundary to bound an untrusted payload — without reintroducing the EOF-wait
+// hang, since the streaming decoder still returns on the first complete value.
+func ReadHookInputRawLimited(stdin io.Reader, limit int64) (json.RawMessage, error) {
+	// If stdin is an interactive terminal there is no payload coming at all: the
+	// command was run by hand, or the agent left the console attached instead of
+	// wiring up a pipe. Decoding would block waiting for input that never comes,
+	// so treat it as empty and return promptly.
+	if StdinLooksInteractive(stdin) {
+		return nil, errors.New("empty hook input")
+	}
+
+	r := stdin
+	if limit >= 0 {
+		r = io.LimitReader(stdin, limit)
+	}
+	var raw json.RawMessage
+	if err := json.NewDecoder(r).Decode(&raw); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("empty hook input")
+		}
+		return nil, fmt.Errorf("failed to parse hook input: %w", err)
+	}
+	return raw, nil
+}
+
+// StdinLooksInteractive reports whether r is an interactive terminal, i.e. no
+// piped hook payload is on its way. Hook readers use it to bail out promptly
+// instead of blocking on a read that will never complete (issue #1398).
+func StdinLooksInteractive(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
 }

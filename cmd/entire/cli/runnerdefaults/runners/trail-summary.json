@@ -1,0 +1,33 @@
+{
+  "id": "trail-summary",
+  "display_name": "Trail Summary",
+  "enabled": true,
+  "scope": "trail",
+  "runtime": {
+    "kind": "prompt_runner",
+    "agent": "claude",
+    "model": "haiku",
+    "timeout_ms": 300000,
+    "sandbox": {
+      "base_template": "claude",
+      "repo_token": "read"
+    }
+  },
+  "automation": {
+    "kind": "trail_prompt"
+  },
+  "prompt": {
+    "template": "You summarize code changes for reviewers. Analyze branch \"{{branch}}\" compared to \"{{base_branch}}\".\n\nRun `git diff origin/{{base_branch}}...HEAD`, then write a short Problem -> Solution summary in Markdown. Start with the `**Problem:**` line and include a `**Solution:**` line. Return Markdown only."
+  },
+  "select": {
+    "trigger_types": [
+      "api",
+      "push"
+    ]
+  },
+  "output": {
+    "adapter": "markdown",
+    "result_type": "trail_summary",
+    "trail_field": "body"
+  }
+}

@@ -16,8 +16,11 @@ import (
 // sessions), session metadata (agent field), and checkpoint existence.
 func TestSubagentCommitFlow(t *testing.T) {
 	testutil.ForEachAgent(t, 3*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
-		_, err := s.RunPrompt(t, ctx,
-			"use a subagent: create a markdown file at docs/red.md with a paragraph about the colour red. Do not commit the file. Do not ask for confirmation, just make the change.")
+		prompt := "use a subagent: create a markdown file at docs/red.md with a paragraph about the colour red. Run the subagent in the foreground and wait for it to finish; never run it in the background. Do not commit the file. Do not ask for confirmation, just make the change."
+		if s.Agent.Name() == "copilot-cli" {
+			prompt = "Use the entire-e2e-subagent agent exactly once to create docs/red.md with a paragraph about the colour red. Wait for it to finish. Do not create the file yourself, delegate further, or commit."
+		}
+		_, err := s.RunPrompt(t, ctx, prompt)
 		if err != nil {
 			t.Fatalf("agent failed: %v", err)
 		}
@@ -31,6 +34,9 @@ func TestSubagentCommitFlow(t *testing.T) {
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
+		if s.Agent.Name() == "copilot-cli" {
+			testutil.AssertCheckpointHasTaskRecord(t, s.Dir, cpID)
+		}
 
 		// Validate checkpoint metadata completeness.
 		meta := testutil.ReadCheckpointMetadata(t, s.Dir, cpID)
@@ -42,6 +48,12 @@ func TestSubagentCommitFlow(t *testing.T) {
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
 		assert.NotEmpty(t, sm.Agent, "session agent field should be populated")
 		assert.NotEmpty(t, sm.SessionID, "session_id should be set")
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
+
+		// The subagent's work must be attributed to the checkpoint. Only the
+		// subagent's own transcript records its Write, so this is what fails when
+		// subagent transcript resolution or file attribution breaks — the test
+		// previously passed on file existence alone and could not see that.
+		assert.Contains(t, meta.FilesTouched, "docs/red.md",
+			"the file the subagent created must be attributed to the checkpoint")
 	})
 }

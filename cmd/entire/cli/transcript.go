@@ -1,19 +1,16 @@
 package cli
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
@@ -34,22 +31,170 @@ func resolveTranscriptPath(ctx context.Context, sessionID string, agent agentpkg
 		return "", fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
-	sessionDir, err := agent.GetSessionDir(repoRoot)
+	// Through the agent's session store rather than a bare join: SessionFile
+	// converts the agent's own layout back into a name inside the store and
+	// rejects a session ID that walked out of it. ValidateSessionID above is the
+	// first gate; this is the one that does not depend on every future caller
+	// remembering it.
+	store, err := agentpkg.OpenSessionStore(agent, repoRoot)
 	if err != nil {
 		return "", fmt.Errorf("failed to get agent session directory: %w", err)
 	}
-	return agent.ResolveSessionFile(sessionDir, sessionID), nil
+	_, absPath, err := store.SessionFile(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("resolve transcript path: %w", err)
+	}
+	return absPath, nil
+}
+
+// discoverTranscript returns the transcript of sessionID in ag's session
+// directory for the current worktree: the first of the agent's candidate files
+// that is a regular file, following symbolic links as later reads do (the
+// fallback search is stricter; see isTranscriptFileInStore). It returns "" and
+// no error when no candidate is one.
+//
+// When the session directory lies in a store of the agent's home layout, the
+// candidates may also lie in the home's other stores, such as a Codex rollout
+// moved to archived_sessions.
+func discoverTranscript(ctx context.Context, sessionID string, ag agentpkg.Agent) (string, error) {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return "", fmt.Errorf("invalid session ID for transcript path: %w", err)
+	}
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get worktree root: %w", err)
+	}
+	store, err := agentpkg.OpenSessionStore(ag, repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("failed to get agent session directory: %w", err)
+	}
+	sessionDir := store.Dir()
+	inStore := func(string) bool { return true }
+	if provider, ok := agentpkg.AsHomeLayoutProvider(ag); ok {
+		layout := provider.HomeLayout()
+		home, homeErr := provider.SessionHome()
+		if homeErr != nil {
+			// Not fatal: the session directory is still searched, only the
+			// home's other stores are not.
+			logging.Debug(ctx, "agent home unavailable, searching only the session directory",
+				"agent", string(ag.Name()), "error", homeErr)
+		} else if layout.Holds(home, sessionDir) {
+			if store, err = agentpkg.OpenSessionStoreAt(ag, home); err != nil {
+				return "", fmt.Errorf("failed to open agent home: %w", err)
+			}
+			inStore = func(path string) bool { return layout.Holds(home, path) }
+		}
+	}
+
+	return firstTranscriptCandidate(store, sessionDir, sessionID, inStore)
+}
+
+// firstTranscriptCandidate returns the first of sessionID's candidate files in
+// sessionDir, a directory in store, that inStore accepts and that is a regular
+// file, following symbolic links. It returns "" and no error when none is.
+func firstTranscriptCandidate(store *agentpkg.SessionStore, sessionDir, sessionID string, inStore func(string) bool) (string, error) {
+	candidates, err := store.SessionFileCandidatesIn(sessionDir, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("resolve transcript path: %w", err)
+	}
+	for _, path := range candidates {
+		if !inStore(path) {
+			continue
+		}
+		if info, statErr := agentpkg.StatTranscriptFile(path); statErr == nil && info.Mode().IsRegular() {
+			return path, nil
+		}
+	}
+	return "", nil
+}
+
+// searchRecordedHomes looks for sessionID's transcript under the agent's homes
+// recorded in the per-user registry, most recently used first, leaving out the
+// active home when the active-home search already covered it. The registry's
+// homes are trusted: only homes resolved from the user's own environment are
+// recorded. It returns a zero foundTranscript when no recorded home holds the
+// transcript, and an error only when the registry cannot be read.
+//
+// An agent with per-project session directories has each store of a home
+// searched one level deep, where it keeps a session's own transcript. Any
+// other agent's candidates are resolved as discoverTranscript resolves them in
+// the active home: from the home's first store, accepting a candidate in any
+// of its stores (such as Codex's archived_sessions).
+func searchRecordedHomes(ctx context.Context, sessionID string, ag agentpkg.Agent) (foundTranscript, error) {
+	provider, ok := agentpkg.AsHomeLayoutProvider(ag)
+	if !ok {
+		return foundTranscript{}, nil
+	}
+	homes, err := agentpkg.KnownAgentHomesExcept(ag.Type(), activeHomeSearched(ctx, ag, provider))
+	if err != nil {
+		return foundTranscript{}, fmt.Errorf("search the agent's other recorded homes: %w", err)
+	}
+	_, walksProjects := agentpkg.AsSessionBaseDirProvider(ag)
+	layout := provider.HomeLayout()
+	for _, home := range homes {
+		if walksProjects {
+			for _, store := range layout.StoresUnder(home) {
+				if found := searchSessionBaseDir(ag, store, sessionID, 0); found != "" {
+					return foundTranscript{Path: found, RecordedHome: home}, nil
+				}
+			}
+			continue
+		}
+		stores := layout.StoresUnder(home)
+		if len(stores) == 0 {
+			continue
+		}
+		store, err := agentpkg.OpenSessionStoreAt(ag, home)
+		if err != nil {
+			logging.Debug(ctx, "recorded agent home skipped", "home", home, "error", err)
+			continue
+		}
+		inStore := func(path string) bool { return layout.Holds(home, path) }
+		found, err := firstTranscriptCandidate(store, stores[0], sessionID, inStore)
+		if err != nil {
+			logging.Debug(ctx, "recorded agent home skipped", "home", home, "error", err)
+			continue
+		}
+		if found != "" {
+			return foundTranscript{Path: found, RecordedHome: home}, nil
+		}
+	}
+	return foundTranscript{}, nil
+}
+
+// activeHomeSearched returns the agent's active home when the active-home
+// search (discoverTranscript, then searchTranscriptInProjectDirs) covered its
+// stores, so searchRecordedHomes need not search it again, or "" when it did
+// not, such as for a Pi session store relocated outside the home.
+func activeHomeSearched(ctx context.Context, ag agentpkg.Agent, provider agentpkg.HomeLayoutProvider) string {
+	active, err := provider.SessionHome()
+	if err != nil {
+		return ""
+	}
+	var searched string
+	if base, ok := agentpkg.AsSessionBaseDirProvider(ag); ok {
+		searched, err = base.GetSessionBaseDir()
+	} else {
+		var repoRoot string
+		if repoRoot, err = paths.WorktreeRoot(ctx); err == nil {
+			searched, err = ag.GetSessionDir(repoRoot)
+		}
+	}
+	if err != nil || !provider.HomeLayout().Holds(filepath.Clean(active), filepath.Clean(searched)) {
+		return ""
+	}
+	return active
 }
 
 // searchTranscriptInProjectDirs searches for a session transcript across an agent's
 // project directories that could plausibly belong to the current repository.
-// Agents like Claude Code and Gemini CLI derive the project directory from the cwd,
+// Agents like Claude Code derive the project directory from the cwd,
 // so the transcript may be stored under a different project directory if the session
 // was started from a different working directory.
 //
 // The search is scoped to the agent's base directory (e.g., ~/.claude/projects) and only
-// walks immediate subdirectories (plus one extra level for agents like Gemini that nest
-// chats under <project>/chats/).
+// walks immediate subdirectories (plus a few extra levels for agents that nest
+// transcripts under a project subdirectory).
 // Only agents implementing SessionBaseDirProvider support this fallback search.
 func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string, error) {
 	provider, ok := agentpkg.AsSessionBaseDirProvider(ag)
@@ -60,13 +205,22 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 	if err != nil {
 		return "", fmt.Errorf("failed to get base directory: %w", err)
 	}
-
 	// Walk subdirectories with a max depth of 3 (baseDir/project/subdir/file)
 	// to avoid scanning unrelated project trees.
-	const maxExtraDepth = 3
+	if found := searchSessionBaseDir(ag, baseDir, sessionID, 3); found != "" {
+		return found, nil
+	}
+	return "", errors.New("transcript not found in any project directory")
+}
 
+// searchSessionBaseDir looks for sessionID's transcript in baseDir and the
+// directories beneath it, and returns "" when none holds it. maxDepth counts
+// the separators in a directory's path relative to baseDir, so 0 searches
+// baseDir and its immediate subdirectories.
+func searchSessionBaseDir(ag agentpkg.Agent, baseDir, sessionID string, maxDepth int) string {
 	var found string
-	walkErr := filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
+	//nolint:errcheck // WalkDir returns only the callback's result, which is nil, SkipDir or SkipAll, none of which it reports
+	_ = filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // skip inaccessible dirs
 		}
@@ -79,164 +233,77 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 			return filepath.SkipDir
 		}
 		depth := strings.Count(rel, string(filepath.Separator))
-		if depth > maxExtraDepth {
+		if depth > maxDepth {
 			return filepath.SkipDir
 		}
-		candidate := ag.ResolveSessionFile(path, sessionID)
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			found = candidate
-			return filepath.SkipAll
+		// Each candidate project directory is its own store: the search is
+		// exactly the case where sessionID must not be trusted to stay inside
+		// the directory being probed.
+		store, storeErr := agentpkg.OpenSessionStoreAt(ag, path)
+		if storeErr != nil {
+			return nil //nolint:nilerr // an unusable candidate directory is skipped, not fatal to the search
+		}
+		candidates, resolveErr := store.SessionFileCandidatesIn(path, sessionID)
+		if resolveErr != nil {
+			// The ID does not resolve inside this candidate — the next one may
+			// still hold the session, so keep walking.
+			return nil //nolint:nilerr // see comment
+		}
+		for _, candidate := range candidates {
+			name, nameErr := store.Name(candidate)
+			if nameErr != nil {
+				continue
+			}
+			if isTranscriptFileInStore(store, name, candidate) {
+				found = candidate
+				return filepath.SkipAll
+			}
 		}
 		return nil
 	})
-	if walkErr != nil {
-		return "", fmt.Errorf("failed to search project directories: %w", walkErr)
-	}
-	if found != "" {
-		return found, nil
-	}
-	return "", errors.New("transcript not found in any project directory")
+	return found
 }
 
-// AgentTranscriptPath returns the path to a subagent's transcript file.
-// Subagent transcripts are stored as agent-{agentId}.jsonl in the same directory
-// as the main transcript.
-func AgentTranscriptPath(transcriptDir, agentID string) string {
-	return filepath.Join(transcriptDir, fmt.Sprintf("agent-%s.jsonl", agentID))
-}
-
-// toolResultBlock represents a tool_result in a user message
-type toolResultBlock struct {
-	Type      string `json:"type"`
-	ToolUseID string `json:"tool_use_id"`
-}
-
-// userMessageWithToolResults represents a user message that may contain tool results
-type userMessageWithToolResults struct {
-	Content []toolResultBlock `json:"content"`
-}
-
-// FindCheckpointUUID finds the UUID of the message containing the tool_result
-// for the given tool_use_id. This is used to find the checkpoint point for
-// transcript truncation when rewinding to a task.
-// Returns the UUID and true if found, empty string and false otherwise.
-func FindCheckpointUUID(lines []transcriptLine, toolUseID string) (string, bool) {
-	for _, line := range lines {
-		if line.Type != transcript.TypeUser {
-			continue
-		}
-
-		var msg userMessageWithToolResults
-		if err := json.Unmarshal(line.Message, &msg); err != nil {
-			continue
-		}
-
-		for _, block := range msg.Content {
-			if block.Type == "tool_result" && block.ToolUseID == toolUseID {
-				return line.UUID, true
-			}
-		}
-	}
-	return "", false
-}
-
-// TruncateTranscriptAtUUID returns transcript lines up to and including the
-// line with the given UUID. If the UUID is not found or is empty, returns
-// the entire transcript.
+// isTranscriptFileInStore reports whether name, the store's name for path, is a
+// regular file or a symbolic link to one. Like the store's other reads it
+// refuses a path whose directories below the store include a link.
 //
-//nolint:revive // Exported for testing purposes
-func TruncateTranscriptAtUUID(lines []transcriptLine, uuid string) []transcriptLine {
-	if uuid == "" {
-		return lines
-	}
-
-	for i, line := range lines {
-		if line.UUID == uuid {
-			return lines[:i+1]
-		}
-	}
-
-	// UUID not found, return full transcript
-	return lines
-}
-
-// writeTranscript writes transcript lines to a file in JSONL format.
-func writeTranscript(path string, lines []transcriptLine) error {
-	file, err := os.Create(path) //nolint:gosec // Writing to controlled git metadata path
+// That is stricter than discoverTranscript, which follows a link anywhere on
+// the path, as the transcript read after it does. This search reaches each
+// store through filepath.WalkDir, which does not follow linked directories, and
+// the check keeps it from following one below the store either.
+func isTranscriptFileInStore(store *agentpkg.SessionStore, name, path string) bool {
+	info, err := store.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
+		return false
 	}
-	defer func() { _ = file.Close() }()
-
-	for _, line := range lines {
-		data, err := json.Marshal(line)
+	if info.Mode()&os.ModeSymlink != 0 {
+		info, err = os.Stat(path)
 		if err != nil {
-			return fmt.Errorf("failed to marshal line: %w", err)
-		}
-		if _, err := file.Write(data); err != nil {
-			return fmt.Errorf("failed to write line: %w", err)
-		}
-		if _, err := file.WriteString("\n"); err != nil {
-			return fmt.Errorf("failed to write newline: %w", err)
+			return false
 		}
 	}
-
-	return nil
+	return info.Mode().IsRegular()
 }
 
-// TranscriptPosition contains the position information for a transcript file.
-type TranscriptPosition struct {
-	LastUUID  string // Last non-empty UUID (from user/assistant messages)
-	LineCount int    // Total number of lines
-}
-
-// GetTranscriptPosition reads a transcript file and returns the last UUID and line count.
-// Returns empty position if file doesn't exist or is empty.
-// Only considers UUIDs from actual messages (user/assistant), not summary rows which use leafUuid.
-func GetTranscriptPosition(path string) (TranscriptPosition, error) {
-	if path == "" {
-		return TranscriptPosition{}, nil
-	}
-
-	file, err := os.Open(path) //nolint:gosec // Reading from controlled transcript path
-	if err != nil {
-		if os.IsNotExist(err) {
-			return TranscriptPosition{}, nil
-		}
-		return TranscriptPosition{}, fmt.Errorf("failed to open transcript: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	var pos TranscriptPosition
-	reader := bufio.NewReader(file)
-
-	for {
-		lineBytes, err := reader.ReadBytes('\n')
-		if err != nil && err != io.EOF {
-			return TranscriptPosition{}, fmt.Errorf("failed to read transcript: %w", err)
-		}
-
-		if len(lineBytes) == 0 {
-			if err == io.EOF {
-				break
-			}
-			continue
-		}
-
-		pos.LineCount++
-
-		// Parse line to extract UUID (only from user/assistant messages, not summaries)
-		var line transcriptLine
-		if err := json.Unmarshal(lineBytes, &line); err == nil {
-			if line.UUID != "" {
-				pos.LastUUID = line.UUID
-			}
-		}
-
-		if err == io.EOF {
-			break
-		}
-	}
-
-	return pos, nil
+// ResolveAgentTranscriptPath returns the path to an existing subagent transcript
+// for agentID, or "" when none exists.
+//
+// It prefers the current layout, paths.SubagentsDir (which is also what the
+// turn-end extractor scans), falls back to the legacy sibling layout —
+// agent-<id>.jsonl directly beside the main transcript — so sessions recorded by
+// older agent versions still resolve, and finally to a Claude Code Workflow
+// run directory under paths.SubagentsDir (#2685).
+//
+// Order is the whole point: resolving only the legacy path silently yielded "" for
+// every modern Claude Code session, which left task checkpoints without a subagent
+// transcript and made file extraction fall back to scanning the main transcript,
+// where a subagent's edits never appear.
+//
+// An empty agentID never resolves — agent-.jsonl is not a real transcript.
+//
+// strategy.resolveTaskTranscriptPath shares this layout logic through
+// paths.ResolveSubagentTranscriptPath (the strategy package cannot import cli).
+func ResolveAgentTranscriptPath(transcriptDir, sessionID, agentID string) string {
+	return paths.ResolveSubagentTranscriptPath(transcriptDir, sessionID, agentID)
 }

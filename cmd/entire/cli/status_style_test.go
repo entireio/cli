@@ -6,27 +6,6 @@ import (
 	"testing"
 )
 
-func TestMetadataRow_PadsLabelToMin7(t *testing.T) {
-	t.Parallel()
-	s := newStatusStyles(io.Discard) // colorEnabled=false, deterministic
-	got := s.metadataRow("session", "2026-04-30-c4f1")
-	want := "  session  2026-04-30-c4f1\n"
-	if got != want {
-		t.Errorf("metadataRow short-label padding\n got: %q\nwant: %q", got, want)
-	}
-}
-
-func TestMetadataRow_PadsLongerLabelsByItself(t *testing.T) {
-	t.Parallel()
-	s := newStatusStyles(io.Discard)
-	got := s.metadataRow("checkpoints", "3")
-	// 11-char label fits without padding; layout is "  " + label + "  " + value + "\n".
-	want := "  checkpoints  3\n"
-	if got != want {
-		t.Errorf("metadataRow long-label\n got: %q\nwant: %q", got, want)
-	}
-}
-
 func TestMetadataRows_AlignsToWidestLabel(t *testing.T) {
 	t.Parallel()
 	s := newStatusStyles(io.Discard)

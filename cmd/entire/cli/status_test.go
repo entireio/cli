@@ -4,22 +4,31 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"charm.land/lipgloss/v2"
+
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
@@ -210,6 +219,81 @@ func TestRunStatus_Enabled(t *testing.T) {
 	}
 }
 
+// A relative agent relocation variable is refused, and several callers fail
+// open on the refusal, so status is where it has to be visible — in the short
+// output, the detailed output and --json alike.
+func TestRunStatus_ReportsRefusedAgentHome(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	for _, envVar := range agent.RelocationEnvVars() {
+		t.Setenv(envVar, "")
+	}
+	t.Setenv("CODEX_HOME", filepath.Join("relative", "codex"))
+
+	for _, detailed := range []bool{false, true} {
+		var stdout bytes.Buffer
+		if err := runStatus(context.Background(), &stdout, detailed, false); err != nil {
+			t.Fatalf("runStatus(detailed=%v) error = %v", detailed, err)
+		}
+		if !strings.Contains(stdout.String(), "ignoring agent home: CODEX_HOME must be an absolute path") {
+			t.Errorf("runStatus(detailed=%v) did not report the refused CODEX_HOME:\n%s", detailed, stdout.String())
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus(json) error = %v", err)
+	}
+	var got statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("status --json is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(got.RefusedAgentHomes) != 1 || !strings.Contains(got.RefusedAgentHomes[0], "CODEX_HOME") {
+		t.Errorf("refused_agent_homes = %q, want the relative CODEX_HOME", got.RefusedAgentHomes)
+	}
+}
+
+// `entire status` surfaces the agent-help pointer for agents on transports
+// without context injection (Cursor / Copilot / Droid), but only once entire is
+// set up — not for not-set-up or not-a-git-repo states.
+func TestRunStatus_ShowsAgentHelpHintWhenSetUp(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), agentHelpCommand) {
+		t.Errorf("expected agent-help hint in status output, got: %s", stdout.String())
+	}
+}
+
+func TestRunStatus_NoAgentHelpHintWhenNotSetUp(t *testing.T) {
+	setupTestRepo(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), agentHelpCommand) {
+		t.Errorf("agent-help hint should not appear when not set up, got: %s", stdout.String())
+	}
+}
+
+// agentHelpCommand is user-facing — docs, the installed skills, and agents key
+// off the exact string — so pin its value here. Every other assertion uses the
+// const; this guards against it silently drifting.
+func TestAgentHelpCommandValue(t *testing.T) {
+	t.Parallel()
+	const want = "entire agent-help"
+	if agentHelpCommand != want {
+		t.Errorf("agentHelpCommand = %q, want %q", agentHelpCommand, want)
+	}
+}
+
 func TestRunStatus_Disabled(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsDisabled)
@@ -221,6 +305,10 @@ func TestRunStatus_Disabled(t *testing.T) {
 
 	if !strings.Contains(stdout.String(), "Disabled") {
 		t.Errorf("Expected output to show 'Disabled', got: %s", stdout.String())
+	}
+	// The agent-help footer renders whenever entire is set up, including disabled.
+	if !strings.Contains(stdout.String(), agentHelpCommand) {
+		t.Errorf("Expected agent-help hint in disabled (but set-up) status, got: %s", stdout.String())
 	}
 }
 
@@ -279,8 +367,8 @@ func TestRunStatus_LocalSettingsOnly(t *testing.T) {
 
 func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 	setupTestRepo(t)
-	// Project: enabled=true, strategy=manual-commit
-	// Local: enabled=false, strategy=manual-commit
+	// Project: enabled=true
+	// Local: enabled=false
 	// Detailed mode shows effective status first, then each file separately
 	writeSettings(t, `{"enabled": true}`)
 	writeLocalSettings(t, `{"enabled": false}`)
@@ -292,12 +380,12 @@ func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 
 	output := stdout.String()
 	// Should show effective status first (local overrides project)
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show effective 'Disabled' with 'manual-commit', got: %s", output)
+	if !strings.Contains(output, "Disabled") {
+		t.Errorf("Expected output to show effective 'Disabled', got: %s", output)
 	}
 	// Should show both settings separately
-	if !strings.Contains(output, "Project") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show Project with manual-commit, got: %s", output)
+	if !strings.Contains(output, "Project") || !strings.Contains(output, "enabled") {
+		t.Errorf("Expected output to show Project with enabled, got: %s", output)
 	}
 	if !strings.Contains(output, "Local") || !strings.Contains(output, "disabled") {
 		t.Errorf("Expected output to show Local with disabled, got: %s", output)
@@ -306,8 +394,8 @@ func TestRunStatus_BothProjectAndLocal(t *testing.T) {
 
 func TestRunStatus_BothProjectAndLocal_Short(t *testing.T) {
 	setupTestRepo(t)
-	// Project: enabled=true, strategy=manual-commit
-	// Local: enabled=false, strategy=manual-commit
+	// Project: enabled=true
+	// Local: enabled=false
 	// Short mode shows merged/effective settings
 	writeSettings(t, `{"enabled": true}`)
 	writeLocalSettings(t, `{"enabled": false}`)
@@ -319,28 +407,8 @@ func TestRunStatus_BothProjectAndLocal_Short(t *testing.T) {
 
 	output := stdout.String()
 	// Should show merged/effective state (local overrides project)
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show 'Disabled' with 'manual-commit', got: %s", output)
-	}
-}
-
-func TestRunStatus_ShowsManualCommitStrategy(t *testing.T) {
-	setupTestRepo(t)
-	writeSettings(t, `{"enabled": false}`)
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, true, false); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	output := stdout.String()
-	// Should show effective status first
-	if !strings.Contains(output, "Disabled") || !strings.Contains(output, "manual-commit") {
-		t.Errorf("Expected output to show effective 'Disabled' with 'manual-commit', got: %s", output)
-	}
-	// Should show per-file details
-	if !strings.Contains(output, "Project") || !strings.Contains(output, "disabled") {
-		t.Errorf("Expected output to show 'Project' and 'disabled', got: %s", output)
+	if !strings.Contains(output, "Disabled") {
+		t.Errorf("Expected output to show 'Disabled', got: %s", output)
 	}
 }
 
@@ -360,6 +428,11 @@ func TestTimeAgo(t *testing.T) {
 		{"23 hours", 23 * time.Hour, "23h ago"},
 		{"1 day", 24 * time.Hour, "1d ago"},
 		{"7 days", 7 * 24 * time.Hour, "7d ago"},
+		{"29 days", 29 * 24 * time.Hour, "29d ago"},
+		{"30 days", 30 * 24 * time.Hour, "1mo ago"},
+		{"59 days", 59 * 24 * time.Hour, "1mo ago"},
+		{"60 days", 60 * 24 * time.Hour, "2mo ago"},
+		{"200 days", 200 * 24 * time.Hour, "6mo ago"},
 	}
 
 	for _, tt := range tests {
@@ -367,6 +440,41 @@ func TestTimeAgo(t *testing.T) {
 			got := timeAgo(time.Now().Add(-tt.duration))
 			if got != tt.want {
 				t.Errorf("timeAgo(%v ago) = %q, want %q", tt.duration, got, tt.want)
+			}
+		})
+	}
+}
+
+// formatRelativeDuration is signed: `entire auth status` reports session
+// expiries, which are in the future. The sign test has to precede the
+// near-zero test, or a negative duration satisfies d < time.Minute and a login
+// that expires in a month reports "just now".
+func TestFormatRelativeDuration_FutureAndPast(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"a minute from now", -1 * time.Minute, "in 1m"},
+		{"an hour from now", -1 * time.Hour, "in 1h"},
+		{"a day from now", -24 * time.Hour, "in 1d"},
+		{"29 days from now", -29 * 24 * time.Hour, "in 29d"},
+		// Every unit band starts at 1, so a month-long session expiry reads
+		// "in 1mo" rather than "in 30d".
+		{"30 days from now", -30 * 24 * time.Hour, "in 1mo"},
+		{"60 days from now", -60 * 24 * time.Hour, "in 2mo"},
+		{"just past", 30 * time.Second, "just now"},
+		{"just future (clock skew)", -30 * time.Second, "just now"},
+		{"exactly now", 0, "just now"},
+		{"a day ago", 24 * time.Hour, "1d ago"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatRelativeDuration(tt.d); got != tt.want {
+				t.Errorf("formatRelativeDuration(%v) = %q, want %q", tt.d, got, tt.want)
 			}
 		})
 	}
@@ -392,7 +500,7 @@ func TestWriteActiveSessions(t *testing.T) {
 			StartedAt:           now.Add(-2 * time.Hour),
 			LastInteractionTime: &recentInteraction,
 			LastPrompt:          "Fix auth bug in login flow",
-			AgentType:           types.AgentType("Claude Code"),
+			AgentType:           types.AgentType(testAgentClaude),
 			TokenUsage: &agent.TokenUsage{
 				InputTokens:  800,
 				OutputTokens: 400,
@@ -506,6 +614,85 @@ func TestWriteActiveSessions(t *testing.T) {
 	}
 }
 
+// Status must report every session, and reporting must not change what it
+// reports. Two sessions for the same agent are two sessions — --json collapses
+// them to one entry per agent today — and a stale record must survive being
+// looked at, because List deletes what ListReadOnly only reads. One fixture,
+// because both are the same property: status observes, it does not mutate.
+func TestRunStatusJSON_ListsEverySessionWithoutMutating(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	ctx := context.Background()
+
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	now := time.Now()
+	recent := now.Add(-2 * time.Minute)
+	// Two live sessions for the SAME agent, which --json collapses today.
+	live := []*session.State{
+		{
+			SessionID:           "same-agent-worktree-a",
+			WorktreePath:        "/Users/test/repo",
+			StartedAt:           now.Add(-30 * time.Minute),
+			LastInteractionTime: &recent,
+			AgentType:           types.AgentType("Claude Code"),
+		},
+		{
+			SessionID:    "same-agent-worktree-b",
+			WorktreePath: "/Users/test/repo/.worktrees/other",
+			StartedAt:    now.Add(-10 * time.Minute),
+			AgentType:    types.AgentType(testAgentClaude),
+		},
+	}
+	// A stale record: List deletes it on read, ListReadOnly must not.
+	staleInteraction := now.Add(-2 * session.StaleSessionThreshold)
+	stale := &session.State{
+		SessionID:           "stale-but-must-survive-a-read",
+		WorktreePath:        "/Users/test/repo",
+		StartedAt:           now.Add(-3 * session.StaleSessionThreshold),
+		LastInteractionTime: &staleInteraction,
+		AgentType:           types.AgentType("Codex"),
+	}
+	for _, st := range append(append([]*session.State{}, live...), stale) {
+		if err := store.Save(ctx, st); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+	}
+
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+	statePath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, stale.SessionID+".json")
+
+	var stdout bytes.Buffer
+	if err := runStatus(ctx, &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	claude := 0
+	for _, entry := range result.ActiveSessions {
+		if entry.Agent == testAgentClaude {
+			claude++
+		}
+	}
+	if claude != len(live) {
+		t.Errorf("active_sessions has %d Claude Code entries, want %d — sessions must not be collapsed by agent (got %+v)",
+			claude, len(live), result.ActiveSessions)
+	}
+
+	if _, err := os.Stat(statePath); err != nil {
+		t.Errorf("status deleted the stale session state: %v", err)
+	}
+}
+
 func TestWriteActiveSessions_ActiveTimeOmittedWhenClose(t *testing.T) {
 	setupTestRepo(t)
 
@@ -587,6 +774,41 @@ func TestWriteActiveSessions_EndedSessionsExcluded(t *testing.T) {
 	}
 }
 
+// A session ended by `entire session attach` carries PhaseEnded with no EndedAt
+// stamp. Status must drop it like any other ended session — filtering on EndedAt
+// alone left it listed as active while `entire session stop`, which filters on
+// IsEnded, refused to offer it.
+func TestWriteActiveSessions_PhaseEndedWithoutEndedAtExcluded(t *testing.T) {
+	setupTestRepo(t)
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	state := &session.State{
+		SessionID:    "attach-ended-session",
+		WorktreePath: "/Users/test/repo",
+		StartedAt:    time.Now().Add(-10 * time.Minute),
+		Phase:        session.PhaseEnded,
+	}
+
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	sty := newStatusStyles(&buf)
+	writeActiveSessions(context.Background(), &buf, sty)
+
+	if buf.Len() != 0 {
+		t.Errorf("Expected empty output for a PhaseEnded session with no EndedAt, got: %s", buf.String())
+	}
+	if got := filterActiveSessions([]*session.State{state}); len(got) != 0 {
+		t.Errorf("filterActiveSessions kept %d ended session(s); status and stop must agree", len(got))
+	}
+}
+
 func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testing.T) {
 	setupTestRepo(t)
 
@@ -612,11 +834,10 @@ func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testin
 
 	now := time.Now()
 	state := &session.State{
-		SessionID:             "stale-base-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            baseCommit,
-		AttributionBaseCommit: baseCommit,
+		SessionID:    "stale-base-session",
+		WorktreePath: repoDir,
+		StartedAt:    now.Add(-10 * time.Minute),
+		BaseCommit:   baseCommit,
 	}
 	if err := store.Save(context.Background(), state); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -638,9 +859,6 @@ func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testin
 	}
 	if reloaded.BaseCommit != baseCommit {
 		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, baseCommit)
-	}
-	if reloaded.AttributionBaseCommit != baseCommit {
-		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, baseCommit)
 	}
 }
 
@@ -664,11 +882,10 @@ func TestWriteActiveSessions_NoWarningWhenReconciled(t *testing.T) {
 
 	now := time.Now()
 	state := &session.State{
-		SessionID:             "reconciled-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            headCommit,
-		AttributionBaseCommit: headCommit,
+		SessionID:    "reconciled-session",
+		WorktreePath: repoDir,
+		StartedAt:    now.Add(-10 * time.Minute),
+		BaseCommit:   headCommit,
 	}
 	if err := store.Save(context.Background(), state); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -679,64 +896,8 @@ func TestWriteActiveSessions_NoWarningWhenReconciled(t *testing.T) {
 	writeActiveSessions(context.Background(), &buf, sty)
 
 	output := buf.String()
-	if strings.Contains(output, "diverged") || strings.Contains(output, "attribution") {
-		t.Fatalf("expected no divergence or attribution warning when BaseCommit == HEAD and AttributionBaseCommit == BaseCommit, got: %s", output)
-	}
-}
-
-func TestWriteActiveSessions_ShowsSoftWarningWhenAttributionDiverged(t *testing.T) {
-	setupTestRepo(t)
-
-	repoDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd() error = %v", err)
-	}
-
-	testutil.WriteFile(t, repoDir, "tracked.txt", "content")
-	testutil.GitAdd(t, repoDir, "tracked.txt")
-	testutil.GitCommit(t, repoDir, "initial commit")
-	headCommit := testutil.GetHeadHash(t, repoDir)
-
-	// Simulate: hooks already reconciled BaseCommit to HEAD, but
-	// AttributionBaseCommit is still pointing at the old commit (stale).
-	oldBaseCommit := strings.Repeat("a", 40)
-
-	store, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatalf("NewStateStore() error = %v", err)
-	}
-
-	now := time.Now()
-	state := &session.State{
-		SessionID:             "attribution-diverged-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            headCommit,
-		AttributionBaseCommit: oldBaseCommit,
-	}
-	if err := store.Save(context.Background(), state); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	var buf bytes.Buffer
-	sty := newStatusStyles(&buf)
-	writeActiveSessions(context.Background(), &buf, sty)
-
-	output := buf.String()
-	if !strings.Contains(output, "attribution") {
-		t.Fatalf("expected attribution warning when AttributionBaseCommit != BaseCommit, got: %s", output)
-	}
-
-	// Verify session state was NOT mutated (read-only)
-	reloaded, err := store.Load(context.Background(), state.SessionID)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if reloaded.BaseCommit != headCommit {
-		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, headCommit)
-	}
-	if reloaded.AttributionBaseCommit != oldBaseCommit {
-		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, oldBaseCommit)
+	if strings.Contains(output, "diverged") {
+		t.Fatalf("expected no divergence warning when BaseCommit == HEAD, got: %s", output)
 	}
 }
 
@@ -754,10 +915,9 @@ func TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning(t 
 
 	active := []*session.State{
 		{
-			SessionID:             "partially-initialized",
-			WorktreePath:          repoRoot,
-			BaseCommit:            "",
-			AttributionBaseCommit: strings.Repeat("a", 40),
+			SessionID:    "partially-initialized",
+			WorktreePath: repoRoot,
+			BaseCommit:   "",
 		},
 	}
 
@@ -769,11 +929,6 @@ func TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning(t 
 	}
 	if !strings.Contains(msg, "linkage incomplete") {
 		t.Fatalf("expected warning to mention linkage incomplete, got %q", msg)
-	}
-	// Must NOT be the attribution-divergence message — that would be misleading
-	// since the session isn't diverged; it's un-initialized.
-	if strings.Contains(msg, "attribution base diverged") {
-		t.Fatalf("empty-BaseCommit session should not produce attribution-divergence wording, got %q", msg)
 	}
 }
 
@@ -888,6 +1043,21 @@ func TestTotalTokens_DeepSubagentNesting(t *testing.T) {
 	// 100+50 + 200+100 + 50+25 = 525
 	if got := totalTokens(tu); got != 525 {
 		t.Errorf("totalTokens() = %d, want 525 (deep nesting)", got)
+	}
+}
+
+func TestTotalTokens_SaturatesOverflow(t *testing.T) {
+	t.Parallel()
+
+	maxInt := int(^uint(0) >> 1)
+	tu := &agent.TokenUsage{
+		InputTokens: maxInt,
+		SubagentTokens: &agent.TokenUsage{
+			OutputTokens: 1,
+		},
+	}
+	if got := totalTokens(tu); got != maxInt {
+		t.Errorf("totalTokens() = %d, want %d", got, maxInt)
 	}
 }
 
@@ -1162,8 +1332,7 @@ func TestFormatSettingsStatusShort_Enabled(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  true,
-		Strategy: "manual-commit",
+		Enabled: true,
 	}
 
 	result := formatSettingsStatusShort(context.Background(), s, sty)
@@ -1174,9 +1343,6 @@ func TestFormatSettingsStatusShort_Enabled(t *testing.T) {
 	if !strings.Contains(result, "Enabled") {
 		t.Errorf("Expected 'Enabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
-	}
 }
 
 func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
@@ -1184,8 +1350,7 @@ func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  false,
-		Strategy: "manual-commit",
+		Enabled: false,
 	}
 
 	result := formatSettingsStatusShort(context.Background(), s, sty)
@@ -1195,9 +1360,6 @@ func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
 	}
 	if !strings.Contains(result, "Disabled") {
 		t.Errorf("Expected 'Disabled' in output, got: %q", result)
-	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
 	}
 }
 
@@ -1217,6 +1379,62 @@ func TestRunStatus_ShowsEnabledAgents(t *testing.T) {
 	}
 	if !strings.Contains(output, "Claude Code") {
 		t.Errorf("Expected 'Claude Code' in output, got: %s", output)
+	}
+}
+
+// TestRunStatus_ScannerSelectionLine covers the "Secret scanners · ..." line
+// across both effective-settings call sites (short and --detailed) and both
+// the non-default and default (line absent) cases.
+func TestRunStatus_ScannerSelectionLine(t *testing.T) {
+	tests := []struct {
+		name        string
+		settings    string
+		detailed    bool
+		want        string // substring checked for presence or absence per wantPresent
+		wantPresent bool
+	}{
+		{
+			name:        "goredact only, short",
+			settings:    testSettingsGoredactOnly,
+			want:        "Secret scanners · goredact",
+			wantPresent: true,
+		},
+		{
+			name:        "both enabled, short",
+			settings:    `{"enabled": true, "redaction": {"betterleaks": {"enabled": true}, "goredact": {"enabled": true}}}`,
+			want:        "Secret scanners · betterleaks, goredact",
+			wantPresent: true,
+		},
+		{
+			name:        "default, short",
+			settings:    testSettingsEnabled,
+			want:        "Secret scanners",
+			wantPresent: false,
+		},
+		{
+			name:        "goredact only, detailed",
+			settings:    testSettingsGoredactOnly,
+			detailed:    true,
+			want:        "Secret scanners · goredact",
+			wantPresent: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, tc.settings)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, tc.detailed, false); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			output := stdout.String()
+			if got := strings.Contains(output, tc.want); got != tc.wantPresent {
+				t.Errorf("strings.Contains(output, %q) = %v, want %v; output: %s", tc.want, got, tc.wantPresent, output)
+			}
+		})
 	}
 }
 
@@ -1377,8 +1595,7 @@ func TestFormatSettingsStatus_Project(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  true,
-		Strategy: "manual-commit",
+		Enabled: true,
 	}
 
 	result := formatSettingsStatus("Project", s, sty)
@@ -1389,9 +1606,6 @@ func TestFormatSettingsStatus_Project(t *testing.T) {
 	if !strings.Contains(result, "enabled") {
 		t.Errorf("Expected 'enabled' in output, got: %q", result)
 	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
-	}
 }
 
 func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
@@ -1399,8 +1613,7 @@ func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  false,
-		Strategy: "manual-commit",
+		Enabled: false,
 	}
 
 	result := formatSettingsStatus("Local", s, sty)
@@ -1410,9 +1623,6 @@ func TestFormatSettingsStatus_LocalDisabled(t *testing.T) {
 	}
 	if !strings.Contains(result, "disabled") {
 		t.Errorf("Expected 'disabled' in output, got: %q", result)
-	}
-	if !strings.Contains(result, "manual-commit") {
-		t.Errorf("Expected strategy in output, got: %q", result)
 	}
 }
 
@@ -1642,8 +1852,7 @@ func TestFormatSettingsStatus_Separators(t *testing.T) {
 
 	sty := statusStyles{colorEnabled: false, width: 60}
 	s := &EntireSettings{
-		Enabled:  true,
-		Strategy: "manual-commit",
+		Enabled: true,
 	}
 
 	result := formatSettingsStatus("Project", s, sty)
@@ -1685,6 +1894,207 @@ func TestRunStatusJSON_Enabled(t *testing.T) {
 	if result.Error != "" {
 		t.Errorf("Expected no error, got %q", result.Error)
 	}
+	// No-channel agents (Cursor/Copilot/Droid/MCP) parse --json, not the text
+	// footer, so the agent-help pointer must be present once entire is set up.
+	if result.AgentHelp != agentHelpCommand {
+		t.Errorf("Expected agent_help='entire agent-help', got %q", result.AgentHelp)
+	}
+}
+
+// secret_scanners is omitted for the default selection and lists the enabled
+// engines for a non-default one.
+func TestRunStatusJSON_SecretScanners(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings string
+		want     []string // nil: field omitted for the default selection
+	}{
+		{"default omitted", testSettingsEnabled, nil},
+		{"goredact only listed", testSettingsGoredactOnly, []string{"goredact"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, tc.settings)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			var result statusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if !slices.Equal(result.SecretScanners, tc.want) {
+				t.Errorf("secret_scanners = %v, want %v", result.SecretScanners, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunStatusJSON_HooksOutdated — when Claude Code hooks are installed under
+// the outdated Task/TodoWrite matchers, `entire status --json` reports the agent
+// under hooks_outdated so scripts/agents can detect the drift.
+func TestRunStatusJSON_HooksOutdated(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	stale := `{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks claude-code stop"}]}],
+    "PreToolUse": [{"matcher": "Task", "hooks": [{"type": "command", "command": "entire hooks claude-code pre-task"}]}],
+    "PostToolUse": [
+      {"matcher": "Task", "hooks": [{"type": "command", "command": "entire hooks claude-code post-task"}]},
+      {"matcher": "TodoWrite", "hooks": [{"type": "command", "command": "entire hooks claude-code post-todo"}]}
+    ]
+  }
+}`
+	if err := os.WriteFile(".claude/settings.json", []byte(stale), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !slices.Contains(result.HooksOutdated, "claude-code") {
+		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
+	}
+}
+
+func TestRunStatusJSON_CodexLinkedWorktreeHooksReportInactiveDiscovery(t *testing.T) {
+	setupTestRepo(t)
+	repoRoot, err := paths.WorktreeRoot(context.Background())
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+	linkedRoot := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, repoRoot, "worktree", "add", "-b", "codex-linked-status", linkedRoot)
+	t.Chdir(linkedRoot)
+	writeSettings(t, testSettingsEnabled)
+	if err := os.MkdirAll(".codex", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	legacy := `{"hooks":{"Stop":[{"matcher":null,"hooks":[{"type":"command","command":"entire hooks codex stop"}]}]}}`
+	if err := os.WriteFile(filepath.Join(".codex", "hooks.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if slices.Contains(result.Agents, "Codex") {
+		t.Fatalf("ignored worktree-local hooks must not report Codex installed: %v", result.Agents)
+	}
+	if slices.Contains(result.HooksOutdated, "codex") {
+		t.Fatalf("Codex freshness must be represented by codex_hooks only: %v", result.HooksOutdated)
+	}
+	if result.CodexHooks == nil {
+		t.Fatal("expected codex_hooks diagnostic")
+	}
+	if result.CodexHooks.State != codexHookStateInactiveWorktreePath {
+		t.Fatalf("codex_hooks.state = %q, want %q", result.CodexHooks.State, codexHookStateInactiveWorktreePath)
+	}
+	if result.CodexHooks.WorktreePath != resolvedHooksPath(t, linkedRoot) {
+		t.Fatalf("worktree_path = %q", result.CodexHooks.WorktreePath)
+	}
+	if result.CodexHooks.DiscoveredPath != resolvedHooksPath(t, repoRoot) {
+		t.Fatalf("discovered_path = %q", result.CodexHooks.DiscoveredPath)
+	}
+}
+
+func TestRunStatus_CodexLinkedWorktreeRootHooksAreActive(t *testing.T) {
+	tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+	ag := &codex.CodexAgent{}
+	t.Chdir(repoRoot)
+	_, err := ag.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("install root Codex hooks: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	_, err = ag.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("install linked-worktree Codex hooks: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if strings.Contains(out, "Codex ignores this worktree's hooks file") {
+		t.Fatalf("active root hooks should not produce a status warning: %s", out)
+	}
+	if strings.Contains(out, "CURRENT-WORKTREE FILE NOT DISCOVERED") {
+		t.Fatalf("active root hooks should not produce a doctor warning: %s", out)
+	}
+}
+
+func TestRunStatusJSON_CodexInvalidWorktreePrecedesDiscovery(t *testing.T) {
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("directory symlinks require privileges on Windows")
+	}
+
+	for _, test := range []struct {
+		name       string
+		discovered string
+	}{
+		{name: "healthy discovered hooks", discovered: canonicalCodexHooksJSON()},
+		{name: "invalid discovered hooks", discovered: "{"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tmp, repoRoot, linkedRoot := setupLinkedRepoForDoctorTest(t)
+			writeCodexHooksForDiagnosticTest(t, repoRoot, test.discovered)
+			if err := os.Symlink(filepath.Join(repoRoot, ".codex"), filepath.Join(linkedRoot, ".codex")); err != nil {
+				t.Fatalf("create redirected project layer: %v", err)
+			}
+			t.Chdir(linkedRoot)
+			t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+			writeSettings(t, testSettingsEnabled)
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+			var result statusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if result.CodexHooks == nil {
+				t.Fatal("expected codex_hooks diagnostic")
+			}
+			wantState := codexHookStateProjectLayerMissing
+			if test.discovered == "{" {
+				wantState = codexHookStateMalformedDiscovered
+			}
+			if result.CodexHooks.State != wantState {
+				t.Fatalf("codex_hooks.state = %q, want %q", result.CodexHooks.State, wantState)
+			}
+			if result.CodexHooks.WorktreePath != resolvedHooksPath(t, linkedRoot) {
+				t.Fatalf("worktree_path = %q", result.CodexHooks.WorktreePath)
+			}
+			if test.discovered == "{" && !strings.Contains(result.CodexHooks.Error, "unexpected end of JSON input") {
+				t.Fatalf("codex_hooks.error = %q", result.CodexHooks.Error)
+			}
+		})
+	}
 }
 
 func TestRunStatusJSON_Disabled(t *testing.T) {
@@ -1703,6 +2113,11 @@ func TestRunStatusJSON_Disabled(t *testing.T) {
 
 	if result.Enabled {
 		t.Error("Expected enabled=false")
+	}
+	// Disabled-but-set-up still advertises the passive agent-help pointer (the
+	// hint is gated on "set up", not on "enabled") — matches the text footer.
+	if result.AgentHelp != agentHelpCommand {
+		t.Errorf("Expected agent_help='entire agent-help' when disabled-but-set-up, got %q", result.AgentHelp)
 	}
 }
 
@@ -1725,6 +2140,10 @@ func TestRunStatusJSON_NotSetUp(t *testing.T) {
 	if result.Error != "not set up" {
 		t.Errorf("Expected error='not set up', got %q", result.Error)
 	}
+	// Mirrors the text footer: no agent-help pointer until entire is set up.
+	if result.AgentHelp != "" {
+		t.Errorf("agent_help should be empty when not set up, got %q", result.AgentHelp)
+	}
 }
 
 func TestRunStatusJSON_NotGitRepo(t *testing.T) {
@@ -1745,6 +2164,9 @@ func TestRunStatusJSON_NotGitRepo(t *testing.T) {
 	}
 	if result.Error != "not a git repository" {
 		t.Errorf("Expected error='not a git repository', got %q", result.Error)
+	}
+	if result.AgentHelp != "" {
+		t.Errorf("agent_help should be empty when not a git repo, got %q", result.AgentHelp)
 	}
 }
 
@@ -1793,9 +2215,18 @@ func TestRunStatusJSON_WithActiveSessions(t *testing.T) {
 	if s.Status != "active" {
 		t.Errorf("Expected status='active', got %q", s.Status)
 	}
+	if result.AgentHelp != agentHelpCommand {
+		t.Errorf("Expected agent_help='entire agent-help' with active sessions, got %q", result.AgentHelp)
+	}
 }
 
-func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
+// Replaces TestRunStatusJSON_DeduplicatesSessions, which pinned the old
+// one-entry-per-agent shape. That shape could not represent two concurrent
+// sessions for the same agent — a real setup, one per worktree — so the
+// second one was invisible. Each session is now its own entry; consumers that
+// want a per-agent view can group on the agent field, which they could not do
+// in reverse.
+func TestRunStatusJSON_ReportsEachSessionSeparately(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 
@@ -1845,26 +2276,30 @@ func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if len(result.ActiveSessions) != 1 {
-		t.Fatalf("Expected 1 deduplicated session, got %d", len(result.ActiveSessions))
+	if len(result.ActiveSessions) != len(states) {
+		t.Fatalf("Expected %d session entries, got %d: %+v", len(states), len(result.ActiveSessions), result.ActiveSessions)
 	}
-	s := result.ActiveSessions[0]
-	if s.Agent != "Codex" {
-		t.Errorf("Expected agent='Codex', got %q", s.Agent)
+
+	byID := make(map[string]sessionBriefJSON, len(result.ActiveSessions))
+	for _, entry := range result.ActiveSessions {
+		if entry.Agent != "Codex" {
+			t.Errorf("Expected agent='Codex', got %q", entry.Agent)
+		}
+		byID[entry.SessionID] = entry
 	}
-	if s.Status != "active" {
-		t.Errorf("Expected status='active' (active wins over idle), got %q", s.Status)
+	for _, want := range states {
+		if _, ok := byID[want.SessionID]; !ok {
+			t.Errorf("session %s missing from active_sessions", want.SessionID)
+		}
 	}
-	if s.Model != "codex-mini" {
-		t.Errorf("Expected model='codex-mini' from active session, got %q", s.Model)
+	if got := byID["codex-active"]; got.Status != "active" || got.Model != "codex-mini" {
+		t.Errorf("active session entry = %+v, want status=active model=codex-mini", got)
+	}
+	if got := byID["codex-idle-1"]; got.Status != string(session.PhaseIdle) {
+		t.Errorf("idle session status = %q, want %q", got.Status, session.PhaseIdle)
 	}
 }
 
-// writeStatusHeadCheckpoint writes a v1 checkpoint with the requested
-// review/investigation flags, then amends HEAD to carry the
-// Entire-Checkpoint trailer. Mirrors the helper used in
-// head_checkpoint_flags_test.go but inlined to keep status_test.go
-// self-contained for readers comparing to other status tests.
 func writeStatusHeadCheckpoint(t *testing.T, hasReview, hasInvestigation bool) {
 	t.Helper()
 	cwd, err := os.Getwd()
@@ -1889,7 +2324,7 @@ func writeStatusHeadCheckpoint(t *testing.T, hasReview, hasInvestigation bool) {
 	}
 	cpID := id.MustCheckpointID(cpHex)
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	if err := store.WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	if err := store.Write(context.Background(), checkpoint.Session{
 		CheckpointID:     cpID,
 		SessionID:        "status-test-session",
 		Strategy:         "manual-commit",
@@ -1947,5 +2382,958 @@ func TestRunStatus_PrintsBothReviewAndInvestigation(t *testing.T) {
 	}
 	if !strings.Contains(out, "Investigation") || !strings.Contains(out, "investigated") {
 		t.Errorf("expected 'Investigation' / 'investigated' line in status output; got:\n%s", out)
+	}
+}
+
+// --- Checkpoint sync visibility (single-remote gate observability) ---
+
+// originRemoteName is the primary remote these fixtures create. Named rather
+// than repeated: it is also the remote the checkpoint election defaults to and
+// the read chain's legacy tier, so the string carries meaning here.
+const originRemoteName = "origin"
+
+func TestRunStatus_CheckpointPushDisabled(t *testing.T) {
+	testCheckpointPushDisabledFork(t, false)
+}
+
+func TestRunStatusJSON_CheckpointPushDisabled(t *testing.T) {
+	testCheckpointPushDisabledFork(t, true)
+}
+
+func testCheckpointPushDisabledFork(t *testing.T, jsonOutput bool) {
+	t.Helper()
+	// setupTestRepo changes CWD and git-config isolation changes process env.
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true,"strategy_options":{"push_sessions":false,"checkpoint_push_remote":"fork"}}`)
+	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+	testutil.AddRemote(t, ".", "fork", "https://github.com/user/repo.git")
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
+	assertCheckpointPushDisabledStatus(t, jsonOutput, false, "fork", "")
+}
+
+// assertCheckpointPushDisabledStatus asserts the disabled-pushing report:
+// wantRemote is the elected read destination status must still name, wantFallback
+// the remote reads fall open to when the election failed instead (at most one is
+// set; both "" means nothing resolved), and no phrasing may survive that
+// promises a push.
+func assertCheckpointPushDisabledStatus(t *testing.T, jsonOutput, detailed bool, wantRemote, wantFallback string) {
+	t.Helper()
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, detailed, jsonOutput); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	t.Logf("status output:\n%s", stdout.String())
+	if jsonOutput {
+		var result map[string]json.RawMessage
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("json.Unmarshal() error = %v", err)
+		}
+		for _, key := range []string{"enabled", "checkpoint_push_disabled"} {
+			raw, exists := result[key]
+			if !exists {
+				t.Errorf("missing %s", key)
+				continue
+			}
+			var value bool
+			if err := json.Unmarshal(raw, &value); err != nil || !value {
+				t.Errorf("%s = %s, want true (decode error: %v)", key, raw, err)
+			}
+		}
+		// The elected remote is still the read source, so the destination
+		// field stays populated; only the phrasing around it changes. A
+		// fail-open read source is reported separately, because nothing was
+		// elected — checkpoint_sync_remote must stay absent for it.
+		wantJSON := func(key, want string) {
+			if want != "" {
+				want = `"` + want + `"`
+			}
+			if got := string(result[key]); got != want {
+				t.Errorf("%s = %s, want %s: %s", key, got, want, stdout.String())
+			}
+		}
+		wantJSON("checkpoint_sync_remote", wantRemote)
+		wantJSON("checkpoint_read_fallback", wantFallback)
+		return
+	}
+	if !strings.Contains(stdout.String(), "Automatic checkpoint pushing: disabled (push_sessions=false)") {
+		t.Error("missing automatic checkpoint pushing disabled message")
+	}
+	for _, unwanted := range []string{"Checkpoints sync to:", "Checkpoints NOT syncing:", "not yet", "next 'git push"} {
+		if strings.Contains(stdout.String(), unwanted) {
+			t.Errorf("disabled pushing must not show %q", unwanted)
+		}
+	}
+	named := wantRemote + wantFallback
+	if named != "" && !strings.Contains(stdout.String(), "Checkpoints read from: ") {
+		t.Errorf("disabled pushing must still name the read source %q: %s", named, stdout.String())
+	}
+	if named == "" && strings.Contains(stdout.String(), "Checkpoints read from: ") {
+		t.Errorf("nothing resolved, so no read source may be named: %s", stdout.String())
+	}
+	if (wantFallback != "") != strings.Contains(stdout.String(), "(fallback; nothing was elected)") {
+		t.Errorf("fallback suffix must appear only for a failed election (want fallback %q): %s", wantFallback, stdout.String())
+	}
+}
+
+// formatUnpushedCheckpointsLine is pure, so its four branches are pinned here
+// rather than through a repo fixture. What the counter must never say with
+// pushing disabled is that the data is local-only: Unpushed compares against
+// the elected destination alone, so it cannot establish that checkpoints exist
+// nowhere else, and claiming otherwise would falsely reassure someone asking
+// whether checkpoint data has left their machine.
+func TestFormatUnpushedCheckpointsLine(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		info checkpointSyncInfo
+		want string
+	}{
+		{"pushing_enabled", checkpointSyncInfo{Remote: "origin", Source: "default", Unpushed: 2},
+			"2 checkpoints not yet on origin — they sync with your next 'git push origin'"},
+		{"pushing_enabled_dedicated", checkpointSyncInfo{Remote: "org/cp", Source: checkpointSyncSourceDedicated, Unpushed: 2},
+			"2 checkpoints not yet pushed"},
+		{"pushing_disabled", checkpointSyncInfo{PushDisabled: true, Remote: "origin", Source: "default", Unpushed: 1},
+			"1 checkpoint not on origin"},
+		{"pushing_disabled_dedicated", checkpointSyncInfo{PushDisabled: true, Remote: "org/cp", Source: checkpointSyncSourceDedicated, Unpushed: 2},
+			"2 checkpoints not pushed to the checkpoint remote"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatUnpushedCheckpointsLine(tc.info); got != tc.want {
+				t.Errorf("formatUnpushedCheckpointsLine() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
+	// These subtests mutate CWD and environment and cannot run in parallel.
+	for _, backend := range []string{"git-branch", "git-refs"} {
+		for _, tc := range []struct {
+			name    string
+			options string
+			origin  string
+			// wantRemote is the read destination status must still report with
+			// pushing disabled; wantSource is its provenance ("" when nothing
+			// resolved). Populating them is the point: the elected remote stays
+			// the checkpoint read source when push_sessions is false.
+			wantRemote string
+			wantSource string
+			// wantFallback is the remote reads fall OPEN to when the election
+			// failed closed, reported instead of (never alongside) wantRemote.
+			wantFallback string
+			// fork is the fetch URL of a second remote named "fork" ("" = none);
+			// forkPush overrides its push URL, so the two can have different
+			// owners and the push- and fetch-side ownership votes disagree.
+			fork     string
+			forkPush string
+			// originName renames the primary remote ("" = "origin"). A
+			// configured checkpoint_remote with no origin makes the read
+			// probe fail outright, which is not the same as it resolving
+			// elsewhere.
+			originName string
+			// wantReadUnknown pins that the probe failure is what suppressed
+			// the read source, rather than the row passing because nothing
+			// resolved for some other reason.
+			wantReadUnknown bool
+			// wantErr is the fail-closed election, and wantIgnored the
+			// "checkpoint_remote not in use" warning. Stated per row rather
+			// than matched on tc.name: several rows now reach each, and name
+			// matching silently mis-expects every row added afterwards.
+			wantErr     bool
+			wantIgnored bool
+		}{
+			{name: "origin", origin: "https://github.com/org/repo.git", wantRemote: "origin", wantSource: "default"},
+			{
+				name: "explicit_fork", options: `,"checkpoint_push_remote":"fork"`,
+				origin: "https://github.com/org/repo.git", fork: "https://github.com/user/repo.git",
+				wantRemote: "fork", wantSource: "config",
+			},
+			{
+				name: "dedicated", options: `,"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
+				origin:     "https://github.com/org/repo.git",
+				wantRemote: "org/checkpoints", wantSource: checkpointSyncSourceDedicated,
+			},
+			{
+				name: "inherited_dedicated_rejected", options: `,"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
+				origin:     "https://github.com/other/repo.git",
+				wantRemote: "origin", wantSource: "default", wantIgnored: true,
+			},
+			{name: "no_remotes"},
+			{
+				name: "missing_configured_remote", options: `,"checkpoint_push_remote":"gone"`,
+				origin: "https://github.com/org/repo.git", wantFallback: "origin", wantErr: true,
+			},
+			// The candidate's fetch and push urls have different owners. Both
+			// ownership votes — push side (InheritedCheckpointRemote) and
+			// read side (ReadsDedicatedStore) — require EVERY identity to be
+			// owned by the checkpoint repo's owner over the SAME set: origin
+			// plus the candidate's PUSH urls. Its FETCH url is deliberately
+			// not a vote: reads must land where writes went, and writes are
+			// decided by push urls (#2342). So a candidate fetching from
+			// another owner but pushing to the store's owner is accepted on
+			// both sides, and the dedicated store is the read source ...
+			{
+				name:    "dedicated_accepted_by_push_owner",
+				options: `,"checkpoint_push_remote":"fork","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
+				origin:  "https://github.com/org/repo.git",
+				fork:    "https://github.com/other/fork.git", forkPush: "https://github.com/org/fork.git",
+				wantRemote: "org/checkpoints", wantSource: checkpointSyncSourceDedicated,
+			},
+			// ... while one fetching from the store's owner but pushing
+			// elsewhere is rejected on both, so the elected remote is the
+			// read source and the configured store is reported as not in use.
+			// Before the votes were aligned this row's mirror image passed on
+			// the push side and failed on the read side.
+			{
+				name:    "dedicated_rejected_by_push_owner",
+				options: `,"checkpoint_push_remote":"fork","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
+				origin:  "https://github.com/org/repo.git",
+				fork:    "https://github.com/org/fork.git", forkPush: "https://github.com/other/fork.git",
+				wantRemote: "fork", wantSource: "config", wantIgnored: true,
+			},
+			// A failed election does not stop reads: they fail open, so the
+			// dedicated store still serves them when the fetch side owns it,
+			// and status reports it rather than nothing. The elected-remote
+			// fields carry it — nothing was elected, but "dedicated" was
+			// never an election — so wantFallback stays empty.
+			{
+				name:       "missing_configured_remote_with_dedicated",
+				options:    `,"checkpoint_push_remote":"gone","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
+				origin:     "https://github.com/org/repo.git",
+				wantRemote: "org/checkpoints", wantSource: checkpointSyncSourceDedicated, wantErr: true,
+			},
+			// Same, but the fetch side does not own the store, so reads land
+			// on the fail-open candidate and that is what is reported.
+			{
+				name:         "missing_configured_remote_with_disowned_dedicated",
+				options:      `,"checkpoint_push_remote":"gone","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
+				origin:       "https://github.com/other/repo.git",
+				wantFallback: "origin", wantErr: true,
+			},
+			// The read probe cannot resolve any URL (a configured
+			// checkpoint_remote derives from origin, and there is none), so
+			// no read source is named rather than the sole remote being
+			// reported as one while reads fail.
+			{
+				name: "dedicated_without_origin", options: `,"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
+				origin: "https://github.com/org/repo.git", originName: "upstream",
+				wantReadUnknown: true,
+			},
+		} {
+			t.Run(backend+"/"+tc.name, func(t *testing.T) {
+				testutil.IsolateGitConfigEnv(t)
+				setupTestRepo(t)
+				writeSettings(t, `{"enabled":true,"strategy_options":{"push_sessions":false`+tc.options+`},"checkpoints":{"primary":{"type":"`+backend+`"}}}`)
+				if tc.origin != "" {
+					name := tc.originName
+					if name == "" {
+						name = originRemoteName
+					}
+					testutil.AddRemote(t, ".", name, tc.origin)
+				}
+				if tc.fork != "" {
+					testutil.AddRemote(t, ".", "fork", tc.fork)
+					if tc.forkPush != "" {
+						testutil.RunGit(t, ".", "remote", "set-url", "--push", "fork", tc.forkPush)
+					}
+				}
+				head := checkpointSyncTestCommit(t, "a.txt", "one")
+				testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
+				cwd, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
+				if backend == "git-refs" {
+					for _, ref := range []string{"refs/entire/checkpoints/aa/bb0000000001", "refs/entire/checkpoints/aa/bb0000000002"} {
+						if err := queue.Enqueue(plumbing.ReferenceName(ref)); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				before, err := queue.Peek()
+				if err != nil {
+					t.Fatal(err)
+				}
+				s, err := LoadEntireSettings(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				info := computeCheckpointSyncInfo(t.Context(), s)
+				// Both "not in use" rows reach that warning through the
+				// push-side verdict, which votes on the same identity set as
+				// the read side. The read-side branch behind it covers the
+				// non-ownership reasons reads can decline a store (an origin
+				// URL that will not parse, a protocol with no checkpoint
+				// mapping), none of which this table stages.
+				if (info.Err != "") != tc.wantErr || (info.IgnoredRemote != "") != tc.wantIgnored {
+					t.Errorf("unexpected remote diagnostics: %+v", info)
+				}
+				if !info.PushDisabled || info.Remote != tc.wantRemote || info.Source != tc.wantSource {
+					t.Errorf("disabled pushing must still resolve the read destination %q/%q: %+v", tc.wantRemote, tc.wantSource, info)
+				}
+				// Reads fail open where the election failed closed, so the
+				// fallback is reported — but never through Remote, which
+				// means "elected" and has nothing to name here.
+				if info.ReadFallback != tc.wantFallback {
+					t.Errorf("read fallback = %q, want %q: %+v", info.ReadFallback, tc.wantFallback, info)
+				}
+				if info.ReadSourceUnknown != tc.wantReadUnknown {
+					t.Errorf("read source unknown = %v, want %v: %+v", info.ReadSourceUnknown, tc.wantReadUnknown, info)
+				}
+				// The counter is the only signal that checkpoint data is not
+				// reaching the destination, so it survives disabled pushing
+				// wherever it is meaningful at all. Dedicated URL mode on
+				// git-branch has no tracking ref to compare against and stays
+				// uncounted, as it does with pushing enabled.
+				// The fail-closed path returns before counting: with no
+				// election there is no destination to count against, even
+				// when the dedicated store still serves reads.
+				wantCount := !tc.wantErr && tc.wantRemote != "" &&
+					(tc.wantSource != checkpointSyncSourceDedicated || backend != "git-branch")
+				if (info.Unpushed > 0) != wantCount {
+					t.Errorf("unpushed count = %d, want counted: %v (%+v)", info.Unpushed, wantCount, info)
+				}
+				for _, jsonOutput := range []bool{false, true} {
+					assertCheckpointPushDisabledStatus(t, jsonOutput, false, tc.wantRemote, tc.wantFallback)
+					after, err := queue.Peek()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !slices.Equal(before, after) {
+						t.Errorf("status changed pending queue: before=%v after=%v", before, after)
+					}
+				}
+			})
+		}
+	}
+}
+
+// inheritedClaimCommand is the fix status must name for the fixture below: a
+// command to run, not a settings file to go and edit.
+const inheritedClaimCommand = "entire enable --local --checkpoint-remote github:org/checkpoints"
+
+// Not parallel: setupTestRepo changes CWD and isolates process environment.
+func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, options, key, text string
+		}{
+			{"inherited", `"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`, "checkpoint_remote_ignored", "org/checkpoints"},
+			{"missing", `"checkpoint_push_remote":"gone"`, "checkpoint_sync_error", `checkpoint_push_remote "gone"`},
+		} {
+			label := "pushing_enabled/" + tc.name
+			pushSetting := strconv.FormatBool(!disabled)
+			if disabled {
+				label = "pushing_disabled/" + tc.name
+			}
+			t.Run(label, func(t *testing.T) {
+				testutil.IsolateGitConfigEnv(t)
+				setupTestRepo(t)
+				writeSettings(t, `{"enabled":true,"strategy_options":{"push_sessions":`+pushSetting+`,`+tc.options+`}}`)
+				testutil.AddRemote(t, ".", originRemoteName, "https://github.com/other/repo.git")
+				for _, mode := range []struct {
+					name           string
+					detailed, json bool
+				}{{"text", false, false}, {"detailed", true, false}, {"json", false, true}} {
+					t.Run(mode.name, func(t *testing.T) {
+						var out bytes.Buffer
+						if err := runStatus(t.Context(), &out, mode.detailed, mode.json); err != nil {
+							t.Fatal(err)
+						}
+						if mode.json {
+							var result map[string]json.RawMessage
+							if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+								t.Fatal(err)
+							}
+							var diagnostic string
+							if err := json.Unmarshal(result[tc.key], &diagnostic); err != nil || !strings.Contains(diagnostic, tc.text) {
+								t.Errorf("missing %s diagnostic: %s", tc.key, out.String())
+							}
+							if tc.name == "inherited" && !strings.Contains(string(result["checkpoint_remote_ignored_reason"]), "differs from checkpoint owner") {
+								t.Errorf("missing rejection reason: %s", out.String())
+							}
+							// An agent reading --json has to be able to ACT on
+							// the rejection, not only report it, which is the
+							// whole reason the remedy is carried rather than
+							// left for the reader to assemble.
+							if tc.name == "inherited" && string(result["checkpoint_remote_ignored_verdict"]) != `"disproved"` {
+								t.Errorf("an owner mismatch must be reported as disproved: %s", out.String())
+							}
+							if tc.name == "inherited" && !strings.Contains(string(result["checkpoint_remote_ignored_remedy"]), inheritedClaimCommand) {
+								t.Errorf("missing remedy: %s", out.String())
+							}
+							if disabled {
+								var pushDisabled bool
+								if err := json.Unmarshal(result["checkpoint_push_disabled"], &pushDisabled); err != nil || !pushDisabled {
+									t.Errorf("missing disabled flag: %s", out.String())
+								}
+							}
+							return
+						}
+						if !strings.Contains(out.String(), tc.text) || (tc.name == "inherited" && !strings.Contains(out.String(), "not to the configured checkpoint_remote")) {
+							t.Errorf("missing remote diagnostic: %s", out.String())
+						}
+						if tc.name == "inherited" && !strings.Contains(out.String(), inheritedClaimCommand) {
+							t.Errorf("rejection named no command to fix it: %s", out.String())
+						}
+						if disabled && (!strings.Contains(out.String(), "Automatic checkpoint pushing: disabled") || strings.Contains(out.String(), "Checkpoints NOT syncing:")) {
+							t.Errorf("diagnostic must coexist with disabled pushing, not claim a push failure: %s", out.String())
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
+func TestRunStatus_CheckpointPushDisabledSettingsPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		shared   string
+		local    string
+		disabled bool
+	}{
+		{"local_false_overrides_shared_true", `{"enabled":true,"strategy_options":{"push_sessions":true}}`, `{"strategy_options":{"push_sessions":false}}`, true},
+		{"local_true_overrides_shared_false", `{"enabled":true,"strategy_options":{"push_sessions":false}}`, `{"strategy_options":{"push_sessions":true}}`, false},
+		{"absent", `{"enabled":true}`, "", false},
+		{"explicit_true", `{"enabled":true,"strategy_options":{"push_sessions":true}}`, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			setupTestRepo(t)
+			writeSettings(t, tc.shared)
+			if tc.local != "" {
+				testutil.WriteFile(t, ".", ".entire/settings.local.json", tc.local)
+			}
+			testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+			head := checkpointSyncTestCommit(t, "a.txt", "one")
+			testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
+			for _, jsonOutput := range []bool{false, true} {
+				if tc.disabled {
+					// --detailed and --json are mutually exclusive: only text
+					// exercises the detailed settings view.
+					assertCheckpointPushDisabledStatus(t, jsonOutput, !jsonOutput, "origin", "")
+					continue
+				}
+				var stdout bytes.Buffer
+				if err := runStatus(context.Background(), &stdout, false, jsonOutput); err != nil {
+					t.Fatal(err)
+				}
+				if jsonOutput {
+					var result map[string]json.RawMessage
+					if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+						t.Fatal(err)
+					}
+					if _, exists := result["checkpoint_push_disabled"]; exists {
+						t.Errorf("enabled pushing must omit checkpoint_push_disabled: %s", stdout.String())
+					}
+					if string(result["checkpoint_sync_remote"]) != `"origin"` || string(result["checkpoint_sync_remote_source"]) != `"default"` || string(result["unpushed_checkpoints"]) != "1" {
+						t.Errorf("enabled pushing lost existing destination/counter fields: %s", stdout.String())
+					}
+				} else if strings.Contains(stdout.String(), "Automatic checkpoint pushing:") || !strings.Contains(stdout.String(), "Checkpoints sync to: origin") || !strings.Contains(stdout.String(), "next 'git push origin'") {
+					t.Errorf("enabled pushing changed existing output: %s", stdout.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunStatus_CheckpointPushDisabledAbsentWithoutEnabledEntire(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		settings string
+	}{
+		{"entire_disabled", `{"enabled":false,"strategy_options":{"push_sessions":false}}`},
+		{"not_set_up", ""},
+		{"invalid_settings", `{"enabled":true,"strategy_options":{"push_sessions":false},`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			setupTestRepo(t)
+			if tc.settings != "" {
+				writeSettings(t, tc.settings)
+			}
+			for _, jsonOutput := range []bool{false, true} {
+				var stdout bytes.Buffer
+				err := runStatus(context.Background(), &stdout, false, jsonOutput)
+				if tc.name == "invalid_settings" && !jsonOutput {
+					if err == nil || !strings.Contains(err.Error(), "failed to load settings") {
+						t.Fatalf("invalid text settings error = %v", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(stdout.String(), "checkpoint_push_disabled") || strings.Contains(stdout.String(), "Automatic checkpoint pushing:") {
+					t.Errorf("inactive Entire must omit disabled-pushing status: %s", stdout.String())
+				}
+			}
+		})
+	}
+}
+
+// checkpointSyncTestCommit creates a commit in the cwd test repo and returns
+// its hash. setupTestRepo leaves the repo without commits, and both the v1
+// counter and ref updates need at least one.
+func checkpointSyncTestCommit(t *testing.T, name, content string) string {
+	t.Helper()
+	testutil.WriteFile(t, ".", name, content)
+	testutil.GitAdd(t, ".", name)
+	testutil.GitCommit(t, ".", "commit "+name)
+	return testutil.GetHeadHash(t, ".")
+}
+
+func TestRunStatus_CheckpointSyncDestination_Origin(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, ".", "publish", "https://example.com/publish.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: origin") {
+		t.Errorf("expected destination line naming origin, got:\n%s", out)
+	}
+	if strings.Contains(out, "(set by checkpoint_push_remote)") {
+		t.Errorf("default election must not carry the config annotation, got:\n%s", out)
+	}
+	if strings.Contains(out, "not yet on") {
+		t.Errorf("counter line must be omitted when nothing is unpushed, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncDestination_ConfigAnnotated(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "private"}}`)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, ".", "private", "https://example.com/private.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: private (set by checkpoint_push_remote)") {
+		t.Errorf("expected annotated destination line for configured remote, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncDestination_CapturedAnnotated(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, ".", "fork", "https://example.com/fork.git")
+	// A captured election (evidence-elected by a past tracked push) must be
+	// distinguishable from both the silent default and the explicit setting.
+	if err := os.WriteFile(filepath.Join(".git", "entire-checkpoint-sync-remotes.json"), []byte(`{"remotes":["fork"]}`), 0o600); err != nil {
+		t.Fatalf("write capture state: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: fork (follows your branch's push destination)") {
+		t.Errorf("expected annotated destination line for captured remote, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncFailClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+
+	for _, tt := range []struct {
+		name          string
+		remote        string
+		pushurlOnly   bool
+		emptyFetchURL bool
+		wantReason    string
+	}{
+		{name: "missing remote", remote: "gone"},
+		{name: "pushurl-only remote", remote: "pushonly", pushurlOnly: true, wantReason: "fetch URL"},
+		{name: "empty fetch URL", remote: "empty", emptyFetchURL: true, wantReason: "fetch URL"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, fmt.Sprintf(`{"enabled": true, "strategy_options": {"checkpoint_push_remote": %q}}`, tt.remote))
+			if tt.pushurlOnly {
+				testutil.RunGit(t, ".", "config", "remote."+tt.remote+".pushurl", "https://example.com/pushonly.git")
+			}
+			if tt.emptyFetchURL {
+				testutil.RunGit(t, ".", "config", "remote."+tt.remote+".url", "")
+			}
+			testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			out := stdout.String()
+			if !strings.Contains(out, "Checkpoints NOT syncing:") {
+				t.Errorf("expected fail-closed warning line, got:\n%s", out)
+			}
+			if !strings.Contains(out, fmt.Sprintf("%q", tt.remote)) {
+				t.Errorf("fail-closed line should name remote %q, got:\n%s", tt.remote, out)
+			}
+			if tt.wantReason != "" && !strings.Contains(out, tt.wantReason) {
+				t.Errorf("fail-closed line should contain %q, got:\n%s", tt.wantReason, out)
+			}
+			if strings.Contains(out, "Checkpoints sync to:") {
+				t.Errorf("fail-closed status must not also print a destination line, got:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestRunStatus_CheckpointSyncHiddenWhenNoRemotes(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), "Checkpoints sync") || strings.Contains(stdout.String(), "Checkpoints NOT syncing") {
+		t.Errorf("no remotes: checkpoint sync lines must be absent, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunStatus_CheckpointSyncHiddenWhenDisabled(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), "Checkpoints sync to:") {
+		t.Errorf("disabled: checkpoint sync lines must be absent, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	checkpointSyncTestCommit(t, "a.txt", "one")
+	second := checkpointSyncTestCommit(t, "b.txt", "two")
+	// Local v1 with no origin-tracking ref: every v1 commit counts as unpushed
+	// (the deferred-publish reading).
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, second)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "2 checkpoints not yet on origin — they sync with your next 'git push origin'") {
+		t.Errorf("expected unpushed counter line, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncCounterOmitted_WhenSynced(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
+	testutil.GitUpdateRef(t, ".", "refs/remotes/origin/"+paths.MetadataBranchName, head)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: origin") {
+		t.Errorf("expected destination line, got:\n%s", out)
+	}
+	if strings.Contains(out, "not yet on") {
+		t.Errorf("tracking ref equals local v1: counter must be omitted, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncDedicated_GitBranch_NoCounter(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	// Same owner ("org") as checkpoint_remote and a parseable GitHub URL, so
+	// PushURL derivation succeeds locally and dedicated mode is verified.
+	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	// A local v1 branch exists, but in dedicated URL mode on the git-branch
+	// backend the tracking-ref comparison would permanently read "all
+	// unpushed" — the counter must be suppressed.
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: dedicated checkpoint remote (org/checkpoints)") {
+		t.Errorf("expected dedicated destination line with repo slug, got:\n%s", out)
+	}
+	if strings.Contains(out, "not yet") {
+		t.Errorf("dedicated + git-branch: counter must be suppressed, got:\n%s", out)
+	}
+}
+
+func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
+	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+	checkpointSyncTestCommit(t, "a.txt", "one")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
+	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000001"); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000002"); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: dedicated checkpoint remote (org/checkpoints)") {
+		t.Errorf("expected dedicated destination line, got:\n%s", out)
+	}
+	// Dedicated mode has no remote name to phrase the counter around.
+	if !strings.Contains(out, "2 checkpoints not yet pushed") {
+		t.Errorf("expected queue-length counter without a remote name, got:\n%s", out)
+	}
+	if strings.Contains(out, "not yet on") {
+		t.Errorf("dedicated counter must not name a git remote, got:\n%s", out)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_Elected(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	checkpointSyncTestCommit(t, "a.txt", "one")
+	second := checkpointSyncTestCommit(t, "b.txt", "two")
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, second)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "origin" {
+		t.Errorf("checkpoint_sync_remote = %q, want %q", result.CheckpointSyncRemote, "origin")
+	}
+	if result.CheckpointSyncRemoteSource != "default" {
+		t.Errorf("checkpoint_sync_remote_source = %q, want %q", result.CheckpointSyncRemoteSource, "default")
+	}
+	if result.CheckpointSyncError != "" {
+		t.Errorf("checkpoint_sync_error should be empty, got %q", result.CheckpointSyncError)
+	}
+	if result.UnpushedCheckpoints != 2 {
+		t.Errorf("unpushed_checkpoints = %d, want 2", result.UnpushedCheckpoints)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_FailClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "gone"}}`)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "" {
+		t.Errorf("checkpoint_sync_remote should be empty when unresolved, got %q", result.CheckpointSyncRemote)
+	}
+	if result.CheckpointSyncRemoteSource != "" {
+		t.Errorf("checkpoint_sync_remote_source should be empty when unresolved, got %q", result.CheckpointSyncRemoteSource)
+	}
+	if !strings.Contains(result.CheckpointSyncError, `"gone"`) {
+		t.Errorf("checkpoint_sync_error should name the misconfigured remote, got %q", result.CheckpointSyncError)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_Dedicated(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "org/checkpoints" {
+		t.Errorf("checkpoint_sync_remote = %q, want the org/repo slug", result.CheckpointSyncRemote)
+	}
+	if result.CheckpointSyncRemoteSource != "dedicated" {
+		t.Errorf("checkpoint_sync_remote_source = %q, want %q", result.CheckpointSyncRemoteSource, "dedicated")
+	}
+	if result.UnpushedCheckpoints != 0 {
+		t.Errorf("dedicated + git-branch must not report a count, got %d", result.UnpushedCheckpoints)
+	}
+}
+
+// Dedicated mode is reported only when PushURL derivation succeeds (the same
+// condition the pre-push gate's exemption uses). An owner mismatch between the
+// elected remote and checkpoint_remote makes derivation fall back, so the next
+// push uses normal single-remote sync — status must say so.
+func TestRunStatus_CheckpointSyncDedicated_IneligibleFallsBackToElected(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	// Remote owner "other" != checkpoint_remote owner "org": fork detection
+	// rejects the dedicated store at push time.
+	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/other/repo.git")
+	checkpointSyncTestCommit(t, "a.txt", "one")
+	second := checkpointSyncTestCommit(t, "b.txt", "two")
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, second)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "dedicated") {
+		t.Errorf("ineligible derivation must not render dedicated mode, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Checkpoints sync to: origin") {
+		t.Errorf("expected normal elected-remote destination line, got:\n%s", out)
+	}
+	// The elected-remote counter applies in normal mode (v1 ahead, no
+	// tracking ref -> all commits count).
+	if !strings.Contains(out, "2 checkpoints not yet on origin") {
+		t.Errorf("expected elected-remote counter in fallback mode, got:\n%s", out)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_DedicatedIneligible(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/other/repo.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "origin" {
+		t.Errorf("checkpoint_sync_remote = %q, want the elected remote %q", result.CheckpointSyncRemote, "origin")
+	}
+	if result.CheckpointSyncRemoteSource != "default" {
+		t.Errorf("checkpoint_sync_remote_source = %q, want %q (not dedicated)", result.CheckpointSyncRemoteSource, "default")
+	}
+	if result.CheckpointSyncError != "" {
+		t.Errorf("checkpoint_sync_error should be empty, got %q", result.CheckpointSyncError)
+	}
+}
+
+func TestRunStatusJSON_CheckpointSync_AbsentWhenNoRemotes(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if result.CheckpointSyncRemote != "" || result.CheckpointSyncRemoteSource != "" || result.CheckpointSyncError != "" {
+		t.Errorf("no remotes: checkpoint sync JSON fields must be absent, got remote=%q source=%q err=%q",
+			result.CheckpointSyncRemote, result.CheckpointSyncRemoteSource, result.CheckpointSyncError)
+	}
+	if strings.Contains(stdout.String(), "checkpoint_sync_remote") {
+		t.Errorf("omitempty should drop empty checkpoint sync fields, got: %s", stdout.String())
+	}
+}
+
+// A user who wrote external_agents into .entire/settings.json sees it there
+// and has no other way to learn it is not in effect: discovery just does not
+// happen, and the agent simply never appears. Detailed status renders the
+// files, so it is where the discrepancy has to be named.
+func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolint:paralleltest // t.Chdir
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	entireDir := filepath.Join(dir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("create .entire: %v", err)
+	}
+	projectPath := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(projectPath, []byte(`{"enabled":true,"external_agents":true}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	t.Chdir(dir)
+
+	var out bytes.Buffer
+	sty := statusStyles{colorEnabled: false, width: 80}
+	if err := runStatusDetailed(t.Context(), &out, sty, projectPath,
+		filepath.Join(entireDir, "settings.local.json"), true, false); err != nil {
+		t.Fatalf("runStatusDetailed: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "external_agents") {
+		t.Errorf("status does not mention external_agents:\n%s", got)
+	}
+	if !strings.Contains(got, settings.EntireSettingsLocalFile) {
+		t.Errorf("status does not name where the setting must live:\n%s", got)
 	}
 }

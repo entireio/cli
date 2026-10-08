@@ -8,6 +8,8 @@ import (
 )
 
 func TestGetWorktreeID(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		setupFunc  func(dir string) error
@@ -19,6 +21,46 @@ func TestGetWorktreeID(t *testing.T) {
 			name: "main worktree (git directory)",
 			setupFunc: func(dir string) error {
 				return os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
+			},
+			wantID: "",
+		},
+		{
+			name: "ordinary submodule relative gitdir",
+			setupFunc: func(dir string) error {
+				content := "gitdir: ../../.git/modules/deps/go-git\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "",
+		},
+		{
+			name: "ordinary submodule absolute gitdir",
+			setupFunc: func(dir string) error {
+				content := "gitdir: /repo/.git/modules/deps/go-git\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "",
+		},
+		{
+			name: "nested ordinary submodule gitdir",
+			setupFunc: func(dir string) error {
+				content := "gitdir: /repo/.git/modules/libs/go-git/modules/vendor/crypto\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "",
+		},
+		{
+			name: "linked worktree of submodule",
+			setupFunc: func(dir string) error {
+				content := "gitdir: /repo/.git/modules/deps/go-git/worktrees/sub-linked\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
+			},
+			wantID: "sub-linked",
+		},
+		{
+			name: "ordinary submodule inside linked superproject worktree",
+			setupFunc: func(dir string) error {
+				content := "gitdir: /repo/.git/worktrees/super-linked/modules/deps/go-git\n"
+				return os.WriteFile(filepath.Join(dir, ".git"), []byte(content), 0o644)
 			},
 			wantID: "",
 		},
@@ -83,6 +125,8 @@ func TestGetWorktreeID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			dir := t.TempDir()
 			if err := tt.setupFunc(dir); err != nil {
 				t.Fatalf("setup failed: %v", err)

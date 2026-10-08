@@ -76,18 +76,6 @@ func TestIsTrailerLine(t *testing.T) {
 	}
 }
 
-func TestFormatMetadata(t *testing.T) {
-	message := "Update authentication logic"
-	metadataDir := ".entire/metadata/2025-01-28-abc123"
-
-	expected := "Update authentication logic\n\nEntire-Metadata: .entire/metadata/2025-01-28-abc123\n"
-	got := FormatMetadata(message, metadataDir)
-
-	if got != expected {
-		t.Errorf("FormatMetadata() = %q, want %q", got, expected)
-	}
-}
-
 func TestParseMetadata(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -123,104 +111,6 @@ func TestParseMetadata(t *testing.T) {
 			}
 			if gotDir != tt.wantDir {
 				t.Errorf("ParseMetadata() dir = %v, want %v", gotDir, tt.wantDir)
-			}
-		})
-	}
-}
-
-func TestFormatTaskMetadata(t *testing.T) {
-	message := "Task: Implement feature X"
-	taskMetadataDir := ".entire/metadata/2025-01-28-abc123/tasks/toolu_xyz"
-
-	expected := "Task: Implement feature X\n\nEntire-Metadata-Task: .entire/metadata/2025-01-28-abc123/tasks/toolu_xyz\n"
-	got := FormatTaskMetadata(message, taskMetadataDir)
-
-	if got != expected {
-		t.Errorf("FormatTaskMetadata() = %q, want %q", got, expected)
-	}
-}
-
-func TestParseTaskMetadata(t *testing.T) {
-	tests := []struct {
-		name      string
-		message   string
-		wantDir   string
-		wantFound bool
-	}{
-		{
-			name:      "task commit message",
-			message:   "Task: Feature\n\nEntire-Metadata-Task: .entire/metadata/2025-01-28-abc/tasks/toolu_123\n",
-			wantDir:   ".entire/metadata/2025-01-28-abc/tasks/toolu_123",
-			wantFound: true,
-		},
-		{
-			name:      "no task trailer",
-			message:   "Simple commit message",
-			wantDir:   "",
-			wantFound: false,
-		},
-		{
-			name:      "regular metadata trailer not matched",
-			message:   "Message\n\nEntire-Metadata: .entire/metadata/xyz\n",
-			wantDir:   "",
-			wantFound: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotDir, gotFound := ParseTaskMetadata(tt.message)
-			if gotFound != tt.wantFound {
-				t.Errorf("ParseTaskMetadata() found = %v, want %v", gotFound, tt.wantFound)
-			}
-			if gotDir != tt.wantDir {
-				t.Errorf("ParseTaskMetadata() dir = %v, want %v", gotDir, tt.wantDir)
-			}
-		})
-	}
-}
-
-func TestParseBaseCommit(t *testing.T) {
-	tests := []struct {
-		name      string
-		message   string
-		wantSHA   string
-		wantFound bool
-	}{
-		{
-			name:      "valid 40-char SHA",
-			message:   "Checkpoint\n\nBase-Commit: abc123def456789012345678901234567890abcd\n",
-			wantSHA:   "abc123def456789012345678901234567890abcd",
-			wantFound: true,
-		},
-		{
-			name:      "no trailer",
-			message:   "Simple commit message",
-			wantSHA:   "",
-			wantFound: false,
-		},
-		{
-			name:      "short hash rejected",
-			message:   "Message\n\nBase-Commit: abc123\n",
-			wantSHA:   "",
-			wantFound: false,
-		},
-		{
-			name:      "with multiple trailers",
-			message:   "Session\n\nBase-Commit: 0123456789abcdef0123456789abcdef01234567\nEntire-Strategy: linear-shadow\n",
-			wantSHA:   "0123456789abcdef0123456789abcdef01234567",
-			wantFound: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotSHA, gotFound := ParseBaseCommit(tt.message)
-			if gotFound != tt.wantFound {
-				t.Errorf("ParseBaseCommit() found = %v, want %v", gotFound, tt.wantFound)
-			}
-			if gotSHA != tt.wantSHA {
-				t.Errorf("ParseBaseCommit() sha = %v, want %v", gotSHA, tt.wantSHA)
 			}
 		})
 	}
@@ -272,61 +162,6 @@ func TestParseSession(t *testing.T) {
 	}
 }
 
-func TestParseAllSessions(t *testing.T) {
-	tests := []struct {
-		name    string
-		message string
-		want    []string
-	}{
-		{
-			name:    "single session trailer",
-			message: "Update logic\n\nEntire-Session: 2025-12-10-abc123def\n",
-			want:    []string{"2025-12-10-abc123def"},
-		},
-		{
-			name:    "no trailer",
-			message: "Simple commit message",
-			want:    nil,
-		},
-		{
-			name:    "multiple session trailers",
-			message: "Merge commit\n\nEntire-Session: session-1\nEntire-Session: session-2\nEntire-Session: session-3\n",
-			want:    []string{"session-1", "session-2", "session-3"},
-		},
-		{
-			name:    "duplicate session IDs are deduplicated",
-			message: "Merge\n\nEntire-Session: session-1\nEntire-Session: session-2\nEntire-Session: session-1\n",
-			want:    []string{"session-1", "session-2"},
-		},
-		{
-			name:    "trailers with extra spaces",
-			message: "Message\n\nEntire-Session:   session-a   \nEntire-Session:  session-b \n",
-			want:    []string{"session-a", "session-b"},
-		},
-		{
-			name:    "mixed with other trailers",
-			message: "Merge\n\nEntire-Session: session-1\nEntire-Metadata: .entire/metadata/xyz\nEntire-Session: session-2\n",
-			want:    []string{"session-1", "session-2"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ParseAllSessions(tt.message)
-			if len(got) != len(tt.want) {
-				t.Errorf("ParseAllSessions() returned %d items, want %d", len(got), len(tt.want))
-				t.Errorf("got: %v, want: %v", got, tt.want)
-				return
-			}
-			for i, wantID := range tt.want {
-				if got[i] != wantID {
-					t.Errorf("ParseAllSessions()[%d] = %v, want %v", i, got[i], wantID)
-				}
-			}
-		})
-	}
-}
-
 func TestParseAllCheckpoints(t *testing.T) {
 	t.Parallel()
 
@@ -365,6 +200,11 @@ func TestParseAllCheckpoints(t *testing.T) {
 			message: "Merge\n\nEntire-Checkpoint: a1b2c3d4e5f6\nEntire-Session: session-1\nEntire-Checkpoint: b2c3d4e5f6a1\n",
 			want:    []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"},
 		},
+		{
+			name:    "mixed hex and ULID checkpoint trailers",
+			message: "Squash (#3)\n\n* legacy\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n* new\n\nEntire-Checkpoint: 01KVBJCWYA4YW6J5M9GP655HZN\n",
+			want:    []string{"a1b2c3d4e5f6", "01KVBJCWYA4YW6J5M9GP655HZN"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -398,6 +238,12 @@ func TestParseCheckpoint(t *testing.T) {
 			name:      "valid checkpoint trailer",
 			message:   "Add feature\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
 			wantID:    "a1b2c3d4e5f6",
+			wantFound: true,
+		},
+		{
+			name:      "valid ULID checkpoint trailer",
+			message:   "Add feature\n\nEntire-Checkpoint: 01KVBJCWYA4YW6J5M9GP655HZN\n",
+			wantID:    "01KVBJCWYA4YW6J5M9GP655HZN",
 			wantFound: true,
 		},
 		{
@@ -446,6 +292,206 @@ func TestParseCheckpoint(t *testing.T) {
 			}
 			if gotID.String() != tt.wantID {
 				t.Errorf("ParseCheckpoint() id = %v, want %v", gotID.String(), tt.wantID)
+			}
+		})
+	}
+}
+
+// TestHasOPFApplied covers the Entire-OPF-Applied trailer reader. The
+// trailer marks a v1 commit whose blobs have been redacted by the
+// OpenAI Privacy Filter (OPF-applied, 9-layer); commits without it carry
+// regex-only (8-layer) content and are eligible for the pre-push rewrite
+// to add OPF.
+func TestHasOPFApplied(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		message string
+		want    bool
+	}{
+		{"present_lowercase_true", "Checkpoint: a1b2c3d4e5f6\n\nEntire-OPF-Applied: true\n", true},
+		{"absent", "Checkpoint: a1b2c3d4e5f6\n", false},
+		{"present_among_other_trailers", "msg\n\nEntire-Session: 2026-01\nEntire-OPF-Applied: true\nEntire-Strategy: manual-commit\n", true},
+		{"value_false_not_applied", "msg\n\nEntire-OPF-Applied: false\n", false},
+		{"value_other_not_applied", "msg\n\nEntire-OPF-Applied: yes\n", false},
+		{"empty_message", "", false},
+		{"trailer_with_extra_spaces", "msg\n\nEntire-OPF-Applied:   true   \n", true},
+		{"body_mention_not_trailer", "msg\n\nThis paragraph mentions a string that looks like metadata.\nEntire-OPF-Applied: true\n\nSigned-off-by: Test User <test@example.com>\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := HasOPFApplied(tc.message); got != tc.want {
+				t.Errorf("HasOPFApplied(%q) = %v, want %v", tc.message, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAppendOPFAppliedTrailer covers the formatter. Appending to a
+// message without a trailer block inserts a blank line; appending to
+// one with a trailer block joins directly. Idempotent — appending to
+// a message that already has the trailer must not duplicate it.
+func TestAppendOPFAppliedTrailer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{
+			name: "no_existing_trailers",
+			msg:  "Checkpoint: a1b2c3d4e5f6\n",
+			want: "Checkpoint: a1b2c3d4e5f6\n\nEntire-OPF-Applied: true\n",
+		},
+		{
+			name: "existing_trailer_block",
+			msg:  "Checkpoint: a1\n\nEntire-Session: s\nEntire-Strategy: manual-commit\n",
+			want: "Checkpoint: a1\n\nEntire-Session: s\nEntire-Strategy: manual-commit\nEntire-OPF-Applied: true\n",
+		},
+		{
+			name: "idempotent_when_already_applied",
+			msg:  "Checkpoint: a1\n\nEntire-OPF-Applied: true\n",
+			want: "Checkpoint: a1\n\nEntire-OPF-Applied: true\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := AppendOPFAppliedTrailer(tt.msg)
+			if got != tt.want {
+				t.Errorf("AppendOPFAppliedTrailer():\n got=%q\nwant=%q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRemoveCheckpointTrailers(t *testing.T) {
+	t.Parallel()
+	dead := checkpointID.MustCheckpointID("a1b2c3d4e5f6")
+	isDead := func(cpID checkpointID.CheckpointID) bool { return cpID == dead }
+
+	tests := []struct {
+		name        string
+		msg         string
+		want        string
+		wantRemoved []checkpointID.CheckpointID
+	}{
+		{
+			name:        "canonical trailer",
+			msg:         "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:        "Subject\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "no space after the colon",
+			msg:         "Subject\n\nSigned-off-by: A <a@b.c>\nEntire-Checkpoint:a1b2c3d4e5f6\n",
+			want:        "Subject\n\nSigned-off-by: A <a@b.c>\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "tab and trailing space",
+			msg:         "Subject\n\nEntire-Checkpoint:\ta1b2c3d4e5f6  \nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			want:        "Subject\n\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "editor comments below the trailer block",
+			msg:         "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# Please enter the commit message\n",
+			want:        "Subject\n\n# Please enter the commit message\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name: "mention in the body is not a trailer",
+			msg:  "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6 was wrong, see below.\nMore prose here.\n",
+			want: "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6 was wrong, see below.\nMore prose here.\n",
+		},
+		{
+			// git accepts mixed trailer blocks; any whole trailer line goes.
+			name:        "paragraph mixing prose and the trailer",
+			msg:         "Subject\n\nSome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:        "Subject\n\nSome prose\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "cherry-pick -x note below the trailer",
+			msg:         "subject\n\nbody\n\nEntire-Checkpoint: a1b2c3d4e5f6\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\n",
+			want:        "subject\n\nbody\n\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "non-trailer line in the block",
+			msg:         "subject\n\nSigned-off-by: A\nEntire-Checkpoint: a1b2c3d4e5f6\nnot a trailer line\n",
+			want:        "subject\n\nSigned-off-by: A\nnot a trailer line\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "token with a space",
+			msg:         "subject\n\nBREAKING CHANGE: api\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:        "subject\n\nBREAKING CHANGE: api\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "skip-ci marker after the trailer",
+			msg:         "subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n[skip ci]\n",
+			want:        "subject\n\n[skip ci]\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "custom comment character below the trailer",
+			msg:         "subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n; Please enter the commit message\n",
+			want:        "subject\n\n; Please enter the commit message\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "no blank lines left behind",
+			msg:         "subject\n\nbody\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n",
+			want:        "subject\n\nbody\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "indented line from a squash message",
+			msg:         "Squashed commit of the following:\n\ncommit 0123\n\n    part one\n\n    Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want:        "Squashed commit of the following:\n\ncommit 0123\n\n    part one\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "nothing below a scissors line is touched or trimmed",
+			msg:         "subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# ------------------------ >8 ------------------------\n Entire-Checkpoint: a1b2c3d4e5f6\n\n\n",
+			want:        "subject\n\n# ------------------------ >8 ------------------------\n Entire-Checkpoint: a1b2c3d4e5f6\n\n\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "blank paragraph gap collapsed",
+			msg:         "subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n# comment\n",
+			want:        "subject\n\n# comment\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name: "subject line is never a trailer",
+			msg:  "Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want: "Entire-Checkpoint: a1b2c3d4e5f6\n",
+		},
+		{
+			name: "live checkpoint kept",
+			msg:  "Subject\n\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			want: "Subject\n\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, removed := RemoveCheckpointTrailers(tt.msg, isDead)
+			if got != tt.want {
+				t.Errorf("message = %q, want %q", got, tt.want)
+			}
+			if len(removed) != len(tt.wantRemoved) {
+				t.Fatalf("removed = %v, want %v", removed, tt.wantRemoved)
+			}
+			for i := range removed {
+				if removed[i] != tt.wantRemoved[i] {
+					t.Errorf("removed[%d] = %v, want %v", i, removed[i], tt.wantRemoved[i])
+				}
 			}
 		})
 	}

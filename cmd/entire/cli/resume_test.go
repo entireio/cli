@@ -3,10 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -30,8 +34,12 @@ import (
 const resumeTestStrategy = "manual-commit"
 
 type recordingResumeAgent struct {
-	sessionDir     string
-	writtenSession *agent.AgentSession
+	sessionDir         string
+	outsidePath        string
+	getSessionDirCalls int
+	resolvedSessionIDs []string
+	writtenSessionIDs  []string
+	writtenSession     *agent.AgentSession
 }
 
 var _ agent.Agent = (*recordingResumeAgent)(nil)
@@ -39,7 +47,6 @@ var _ agent.Agent = (*recordingResumeAgent)(nil)
 func (a *recordingResumeAgent) Name() types.AgentName                          { return "recording-resume" }
 func (a *recordingResumeAgent) Type() types.AgentType                          { return "recording-resume" }
 func (a *recordingResumeAgent) Description() string                            { return "recording resume agent" }
-func (a *recordingResumeAgent) IsPreview() bool                                { return false }
 func (a *recordingResumeAgent) DetectPresence(_ context.Context) (bool, error) { return true, nil }
 func (a *recordingResumeAgent) ProtectedDirs() []string                        { return nil }
 func (a *recordingResumeAgent) ReadTranscript(string) ([]byte, error)          { return nil, nil }
@@ -54,15 +61,26 @@ func (a *recordingResumeAgent) ReassembleTranscript(chunks [][]byte) ([]byte, er
 	return out, nil
 }
 func (a *recordingResumeAgent) GetSessionID(*agent.HookInput) string { return "" }
-func (a *recordingResumeAgent) GetSessionDir(string) (string, error) { return a.sessionDir, nil }
+func (a *recordingResumeAgent) GetSessionDir(string) (string, error) {
+	a.getSessionDirCalls++
+	return a.sessionDir, nil
+}
 func (a *recordingResumeAgent) ResolveSessionFile(sessionDir, sessionID string) string {
+	a.resolvedSessionIDs = append(a.resolvedSessionIDs, sessionID)
+	if sessionID == ".. " && a.outsidePath != "" {
+		return filepath.Join(sessionDir, sessionID, "transcript.jsonl")
+	}
 	return filepath.Join(sessionDir, sessionID+".jsonl")
 }
 func (a *recordingResumeAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) {
 	return nil, nil //nolint:nilnil // Not used by this test agent.
 }
 func (a *recordingResumeAgent) WriteSession(_ context.Context, session *agent.AgentSession) error {
+	a.writtenSessionIDs = append(a.writtenSessionIDs, session.SessionID)
 	a.writtenSession = session
+	if session.SessionID == ".. " && a.outsidePath != "" {
+		return os.WriteFile(a.outsidePath, session.NativeData, 0o600)
+	}
 	return nil
 }
 func (a *recordingResumeAgent) FormatResumeCommand(sessionID string) string {
@@ -161,6 +179,21 @@ func setupResumeTestRepo(t *testing.T, tmpDir string, createFeatureBranch bool) 
 	return repo, w, commit
 }
 
+func cleanupResumeTestRepo(t *testing.T, repo *git.Repository, dir string) {
+	t.Helper()
+
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve test repo path: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = repo.Close()
+		osroot.Forget(filepath.Join(resolved, ".entire"))
+		osroot.Forget(filepath.Join(resolved, ".git"))
+		osroot.Forget(resolved)
+	})
+}
+
 func TestBranchExistsLocally(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -217,34 +250,51 @@ func TestCheckoutBranch(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects ref starting with dash to prevent argument injection", func(t *testing.T) {
-		// "git checkout -b evil" would create a new branch named "evil" instead
-		// of failing, because git interprets "-b" as a flag.
-		err := CheckoutBranch(context.Background(), "-b evil")
-		if err == nil {
-			t.Fatal("CheckoutBranch() should reject refs starting with '-', got nil")
+	// A leading dash was the only shape the old guard caught. `git checkout`
+	// reads several others, and the ref reaches here from `entire resume
+	// <branch>` and from a trail's branch field.
+	// Not "@{-1}": `check-ref-format --branch` resolves it to the previous
+	// branch and reports it valid, which is git's own feature rather than
+	// something this guard should override.
+	for _, ref := range []string{"-b evil", "..", "feature/../../etc", "feature\nmore"} {
+		t.Run("rejects "+strconv.Quote(ref), func(t *testing.T) {
+			err := CheckoutBranch(context.Background(), ref)
+			if err == nil {
+				t.Fatalf("CheckoutBranch(%q) should be rejected, got nil", ref)
+			}
+			if !strings.Contains(err.Error(), "invalid branch name") {
+				t.Errorf("CheckoutBranch(%q) error = %q, want error containing 'invalid branch name'", ref, err.Error())
+			}
+		})
+	}
+
+	// Validation cannot catch this one, and no amount of tightening it would:
+	// a filename is very often a legal branch name, so `check-ref-format
+	// --branch test.txt` exits 0. Without a trailing `--`, git falls back to
+	// reading the argument as a PATHSPEC, restores the file from the index, and
+	// exits 0 — the user's edits gone, reported as a successful checkout.
+	t.Run("a filename is not silently treated as a pathspec", func(t *testing.T) {
+		if err := CheckoutBranch(context.Background(), "feature"); err != nil {
+			t.Fatalf("setup checkout: %v", err)
 		}
-		if !strings.Contains(err.Error(), "invalid ref") {
-			t.Errorf("CheckoutBranch() error = %q, want error containing 'invalid ref'", err.Error())
+		const edited = "edited, must survive\n"
+		if err := os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte(edited), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		err := CheckoutBranch(context.Background(), "test.txt")
+		if err == nil {
+			t.Error("CheckoutBranch(\"test.txt\") = nil; a file that is not a ref must not report success")
+		}
+
+		got, readErr := os.ReadFile(filepath.Join(tmpDir, "test.txt"))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(got) != edited {
+			t.Errorf("test.txt = %q, want the uncommitted edit intact; git restored it from the index", got)
 		}
 	})
-}
-
-func TestPerformGitResetHard_RejectsArgumentInjection(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	setupResumeTestRepo(t, tmpDir, false)
-
-	// "git reset --hard -q" would silently reset to HEAD in quiet mode instead
-	// of failing, because git interprets "-q" as the --quiet flag.
-	err := performGitResetHard(context.Background(), "-q")
-	if err == nil {
-		t.Fatal("performGitResetHard() should reject hashes starting with '-', got nil")
-	}
-	if !strings.Contains(err.Error(), "invalid commit hash") {
-		t.Errorf("performGitResetHard() error = %q, want error containing 'invalid commit hash'", err.Error())
-	}
 }
 
 func TestResumeFromCurrentBranch_NoCheckpoint(t *testing.T) {
@@ -531,7 +581,7 @@ func writeCommittedResumeCheckpointWithTranscript(
 ) {
 	t.Helper()
 
-	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(context.Background(), checkpoint.WriteCommittedOptions{
+	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(context.Background(), checkpoint.Session{
 		CheckpointID: checkpointID,
 		SessionID:    sessionID,
 		CreatedAt:    createdAt,
@@ -546,46 +596,61 @@ func writeCommittedResumeCheckpointWithTranscript(
 	}
 }
 
-func mirrorMetadataBranchToV11Ref(t *testing.T, repo *git.Repository) {
+func tamperResumeCheckpointSessionID(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID, sessionIndex int, sessionID string) {
 	t.Helper()
 
-	v1Ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	refName := checkpoint.DefaultV1Refs().Primary
+	ref, err := repo.Reference(refName, true)
 	if err != nil {
-		t.Fatalf("read v1 metadata branch: %v", err)
+		t.Fatalf("read checkpoint ref: %v", err)
 	}
-	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(paths.MetadataRefName), v1Ref.Hash())); err != nil {
-		t.Fatalf("set v1.1 metadata ref: %v", err)
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("read checkpoint commit: %v", err)
 	}
-}
-
-func enableResumeV11(t *testing.T, repoRoot string) {
-	t.Helper()
-
-	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", filepath.Join(repoRoot, "claude-projects"))
-
-	if err := os.MkdirAll(filepath.Join(repoRoot, ".entire"), 0o755); err != nil {
-		t.Fatalf("create settings dir: %v", err)
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("read checkpoint tree: %v", err)
 	}
-	settingsPath := filepath.Join(repoRoot, ".entire", paths.SettingsFileName)
-	settingsJSON := []byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`)
-	if err := os.WriteFile(settingsPath, settingsJSON, 0o644); err != nil {
-		t.Fatalf("write settings: %v", err)
+	metadataPath := checkpointID.Path() + "/" + strconv.Itoa(sessionIndex) + "/" + paths.MetadataFileName
+	file, err := tree.File(metadataPath)
+	if err != nil {
+		t.Fatalf("read session metadata: %v", err)
 	}
-}
-
-func commitResumeTrailer(t *testing.T, worktree *git.Worktree, repoRoot, fileName, commitMessage string) {
-	t.Helper()
-
-	if err := os.WriteFile(filepath.Join(repoRoot, fileName), []byte("feature content"), 0o644); err != nil {
-		t.Fatalf("write feature file: %v", err)
+	raw, err := file.Contents()
+	if err != nil {
+		t.Fatalf("read session metadata content: %v", err)
 	}
-	if _, err := worktree.Add(fileName); err != nil {
-		t.Fatalf("add feature file: %v", err)
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		t.Fatalf("decode session metadata: %v", err)
 	}
-	if _, err := worktree.Commit(commitMessage, &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com"},
-	}); err != nil {
-		t.Fatalf("commit trailer: %v", err)
+	metadata["session_id"] = sessionID
+	edited, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatalf("encode session metadata: %v", err)
+	}
+	blobHash, err := checkpoint.CreateBlobFromContent(repo, edited)
+	if err != nil {
+		t.Fatalf("write session metadata blob: %v", err)
+	}
+	newTree, err := checkpoint.ApplyTreeChanges(t.Context(), repo, tree.Hash, []checkpoint.TreeChange{{
+		Path: metadataPath,
+		Entry: &object.TreeEntry{
+			Name: metadataPath,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("replace session metadata: %v", err)
+	}
+	commitHash, err := checkpoint.CreateCommit(t.Context(), repo, newTree, ref.Hash(), "test: tamper session metadata", "Test", "test@example.com")
+	if err != nil {
+		t.Fatalf("commit session metadata: %v", err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)); err != nil {
+		t.Fatalf("update checkpoint ref: %v", err)
 	}
 }
 
@@ -614,9 +679,12 @@ func TestResolveLatestCheckpoint(t *testing.T) {
 	// simulating git CLI squash merge trailer order.
 	reverseOrderIDs := []id.CheckpointID{cpID3, cpID2, cpID1}
 	reader := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	latest, err := resolveLatestCheckpoint(context.Background(), reader, reverseOrderIDs)
+	latest, found, err := resolveLatestCheckpoint(context.Background(), reader, reverseOrderIDs)
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if !found {
+		t.Fatal("resolveLatestCheckpoint() found = false")
 	}
 
 	// Should return the newest checkpoint regardless of input order
@@ -626,13 +694,104 @@ func TestResolveLatestCheckpoint(t *testing.T) {
 
 	// Also verify with chronological order
 	chronologicalIDs := []id.CheckpointID{cpID1, cpID2, cpID3}
-	latest2, err := resolveLatestCheckpoint(context.Background(), reader, chronologicalIDs)
+	latest2, found, err := resolveLatestCheckpoint(context.Background(), reader, chronologicalIDs)
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if !found {
+		t.Fatal("resolveLatestCheckpoint() found = false")
 	}
 	if latest2.CheckpointID.String() != cpID3.String() {
 		t.Errorf("resolveLatestCheckpoint() = %s, want newest %s", latest2.CheckpointID, cpID3)
 	}
+}
+
+func TestResolveLatestCheckpointUsesCheckpointInfoReader(t *testing.T) {
+	t.Parallel()
+
+	oldID := id.MustCheckpointID("aaa111bbb222")
+	newID := id.MustCheckpointID("ccc333ddd444")
+	reader := &resumeCheckpointInfoReaderStub{
+		summaries: map[id.CheckpointID]*checkpoint.CheckpointSummary{
+			oldID: {Sessions: []checkpoint.SessionFilePaths{{Metadata: "old"}}},
+			newID: {Sessions: []checkpoint.SessionFilePaths{{Metadata: "new"}}},
+		},
+		metadata: map[id.CheckpointID][]checkpoint.Metadata{
+			oldID: {{
+				SessionID: "old-session",
+				CreatedAt: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+			}},
+			newID: {{
+				SessionID: "new-session",
+				CreatedAt: time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC),
+			}},
+		},
+	}
+
+	latest, found, err := resolveLatestCheckpoint(context.Background(), reader, []id.CheckpointID{oldID, newID})
+	if err != nil {
+		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
+	}
+	if !found {
+		t.Fatal("resolveLatestCheckpoint() found = false")
+	}
+	if latest.CheckpointID != newID {
+		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, newID)
+	}
+}
+
+func TestResolveLatestCheckpointReturnsErrorWhenAnyCheckpointCannotBeRead(t *testing.T) {
+	t.Parallel()
+
+	missingID := id.MustCheckpointID("aaa111bbb222")
+	newID := id.MustCheckpointID("ccc333ddd444")
+	reader := &resumeCheckpointInfoReaderStub{
+		summaries: map[id.CheckpointID]*checkpoint.CheckpointSummary{
+			newID: {Sessions: []checkpoint.SessionFilePaths{{Metadata: "new"}}},
+		},
+		metadata: map[id.CheckpointID][]checkpoint.Metadata{
+			newID: {{
+				SessionID: "new-session",
+				CreatedAt: time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC),
+			}},
+		},
+	}
+
+	_, found, err := resolveLatestCheckpoint(context.Background(), reader, []id.CheckpointID{missingID, newID})
+	if err == nil {
+		t.Fatal("resolveLatestCheckpoint() error = nil, want read error")
+	}
+	if found {
+		t.Fatal("resolveLatestCheckpoint() found = true")
+	}
+	if !errors.Is(err, checkpoint.ErrCheckpointNotFound) {
+		t.Fatalf("resolveLatestCheckpoint() error = %v, want checkpoint not found", err)
+	}
+}
+
+type resumeCheckpointInfoReaderStub struct {
+	summaries map[id.CheckpointID]*checkpoint.CheckpointSummary
+	metadata  map[id.CheckpointID][]checkpoint.Metadata
+}
+
+func (r *resumeCheckpointInfoReaderStub) Read(_ context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	return r.summaries[checkpointID], nil
+}
+
+func (r *resumeCheckpointInfoReaderStub) List(context.Context) ([]checkpoint.CheckpointInfo, error) {
+	return nil, nil
+}
+
+func (r *resumeCheckpointInfoReaderStub) ReadSessionContent(_ context.Context, _ id.CheckpointID, _ int) (*checkpoint.SessionContent, error) {
+	return nil, checkpoint.ErrCheckpointNotFound
+}
+
+func (r *resumeCheckpointInfoReaderStub) ReadSessionMetadata(_ context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error) {
+	sessions := r.metadata[checkpointID]
+	if sessionIndex < 0 || sessionIndex >= len(sessions) {
+		return nil, checkpoint.ErrCheckpointNotFound
+	}
+	return &sessions[sessionIndex], nil
 }
 
 func TestReadCheckpointInfoFromStoreUsesLatestSessionMetadata(t *testing.T) {
@@ -663,7 +822,7 @@ func TestReadCheckpointInfoFromStoreUsesLatestSessionMetadata(t *testing.T) {
 		},
 	}
 	for _, session := range sessions {
-		if err := store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+		if err := store.Write(ctx, checkpoint.Session{
 			CheckpointID: cpID,
 			SessionID:    session.sessionID,
 			CreatedAt:    session.createdAt,
@@ -707,145 +866,15 @@ func TestResolveLatestCheckpointUsesV1Checkpoint(t *testing.T) {
 
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
 
-	latest, err := resolveLatestCheckpoint(context.Background(), store, []id.CheckpointID{targetID})
+	latest, found, err := resolveLatestCheckpoint(context.Background(), store, []id.CheckpointID{targetID})
 	if err != nil {
 		t.Fatalf("resolveLatestCheckpoint() error = %v", err)
 	}
+	if !found {
+		t.Fatal("resolveLatestCheckpoint() found = false")
+	}
 	if latest.CheckpointID != targetID {
 		t.Errorf("resolveLatestCheckpoint() = %s, want %s", latest.CheckpointID, targetID)
-	}
-}
-
-func TestResumeFromCurrentBranch_UsesV11MetadataOnly(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	repo, worktree, _ := setupResumeTestRepo(t, tmpDir, false)
-	enableResumeV11(t, tmpDir)
-
-	cpID := id.MustCheckpointID("b1b2b3b4b5b6")
-	sessionID := "session-v11-only"
-	writeCommittedResumeCheckpoint(t, repo, cpID, sessionID, time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
-	mirrorMetadataBranchToV11Ref(t, repo)
-
-	if err := repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName)); err != nil {
-		t.Fatalf("remove v1 metadata branch: %v", err)
-	}
-
-	commitResumeTrailer(t, worktree, tmpDir, "feature-v11-only.txt", "Add feature\n\nEntire-Checkpoint: "+cpID.String())
-
-	var stdout, stderr bytes.Buffer
-	if err := resumeFromCurrentBranch(context.Background(), &stdout, &stderr, "master", true); err != nil {
-		t.Fatalf("resumeFromCurrentBranch error: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
-	}
-
-	combined := stdout.String() + stderr.String()
-	if !strings.Contains(combined, sessionID) {
-		t.Fatalf("resume did not read v1.1 metadata for session %q:\n%s", sessionID, combined)
-	}
-	if strings.Contains(combined, "found in commit but the entire/checkpoints/v1 branch is not available") {
-		t.Fatalf("resume fell through to missing-v1 metadata message despite v1.1 metadata:\n%s", combined)
-	}
-}
-
-func TestResolveLatestCheckpoint_V11DoesNotFallbackToStaleV1(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
-	enableResumeV11(t, tmpDir)
-
-	baseHash := readMetadataBranchHash(t, repo)
-	customOnlyID := id.MustCheckpointID("c1c2c3c4c5c6")
-	writeCommittedResumeCheckpoint(t, repo, customOnlyID, "session-custom-only", time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
-	mirrorMetadataBranchToV11Ref(t, repo)
-
-	v1RefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	if err := repo.Storer.SetReference(plumbing.NewHashReference(v1RefName, baseHash)); err != nil {
-		t.Fatalf("reset v1 metadata branch: %v", err)
-	}
-
-	staleV1ID := id.MustCheckpointID("d1d2d3d4d5d6")
-	writeCommittedResumeCheckpoint(t, repo, staleV1ID, "session-stale-v1", time.Date(2025, 1, 3, 10, 0, 0, 0, time.UTC))
-
-	store := checkpoint.NewGitStore(repo, checkpoint.ResolveCommittedRefs(context.Background()))
-	store.SetBlobFetcher(FetchBlobsByHash)
-
-	_, err := resolveLatestCheckpoint(context.Background(), store, []id.CheckpointID{staleV1ID})
-	if err == nil {
-		t.Fatal("resolveLatestCheckpoint found checkpoint from stale v1 even though v1.1 custom ref differs")
-	}
-}
-
-func TestResumeFromCurrentBranch_V11DoesNotSeedFromV1(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	repo, worktree, _ := setupResumeTestRepo(t, tmpDir, false)
-	enableResumeV11(t, tmpDir)
-
-	cpID := id.MustCheckpointID("1122aabbccdd")
-	sessionID := "session-v1-only"
-	writeCommittedResumeCheckpoint(t, repo, cpID, sessionID, time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
-
-	commitResumeTrailer(t, worktree, tmpDir, "feature-v1-only.txt", "Add feature\n\nEntire-Checkpoint: "+cpID.String())
-
-	var stdout, stderr bytes.Buffer
-	if err := resumeFromCurrentBranch(context.Background(), &stdout, &stderr, "master", true); err != nil {
-		t.Fatalf("resumeFromCurrentBranch error: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
-	}
-
-	combined := stdout.String() + stderr.String()
-	if strings.Contains(combined, sessionID) {
-		t.Fatalf("resume used v1 metadata for session %q in v1.1 mode:\n%s", sessionID, combined)
-	}
-	if !strings.Contains(stderr.String(), paths.MetadataRefName) {
-		t.Fatalf("resume did not report missing v1.1 metadata ref:\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
-	}
-	if strings.Contains(combined, "git fetch origin entire/checkpoints/v1") {
-		t.Fatalf("resume suggested v1 fetch in v1.1 mode:\n%s", combined)
-	}
-	if !strings.Contains(stderr.String(), "entire explain "+cpID.String()) {
-		t.Fatalf("resume did not suggest 'entire explain' for missing v1.1 metadata:\nstderr: %s", stderr.String())
-	}
-}
-
-func TestResumeFromCurrentBranch_V11SquashUsesLatestMetadataTimestamp(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	repo, worktree, _ := setupResumeTestRepo(t, tmpDir, false)
-	enableResumeV11(t, tmpDir)
-
-	olderID := id.MustCheckpointID("e1e2e3e4e5e6")
-	newerID := id.MustCheckpointID("f1f2f3f4f5f6")
-	olderSession := "session-v11-older"
-	newerSession := "session-v11-newer"
-	writeCommittedResumeCheckpoint(t, repo, olderID, olderSession, time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
-	writeCommittedResumeCheckpoint(t, repo, newerID, newerSession, time.Date(2025, 1, 2, 11, 0, 0, 0, time.UTC))
-	mirrorMetadataBranchToV11Ref(t, repo)
-
-	if err := repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(paths.MetadataBranchName)); err != nil {
-		t.Fatalf("remove v1 metadata branch: %v", err)
-	}
-
-	squashMsg := fmt.Sprintf("Squash feature\n\nEntire-Checkpoint: %s\n\nEntire-Checkpoint: %s\n", olderID, newerID)
-	commitResumeTrailer(t, worktree, tmpDir, "feature-v11-squash.txt", squashMsg)
-
-	var stdout, stderr bytes.Buffer
-	if err := resumeFromCurrentBranch(context.Background(), &stdout, &stderr, "master", true); err != nil {
-		t.Fatalf("resumeFromCurrentBranch error: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
-	}
-
-	combined := stdout.String() + stderr.String()
-	if !strings.Contains(combined, "resuming from the latest") {
-		t.Fatalf("resume did not report latest-checkpoint selection:\n%s", combined)
-	}
-	if !strings.Contains(combined, newerSession) {
-		t.Fatalf("resume did not use newest v1.1 metadata session %q:\n%s", newerSession, combined)
-	}
-	if strings.Contains(combined, olderSession) {
-		t.Fatalf("resume used older v1.1 metadata session %q:\n%s", olderSession, combined)
 	}
 }
 
@@ -950,83 +979,276 @@ func TestFindBranchCheckpoint_SquashMergeMultipleCheckpoints(t *testing.T) {
 	}
 }
 
-// TestResumeSingleSession_RejectsPathTraversalSessionID is an end-to-end proof
-// that a malicious session ID cannot cause an arbitrary file write during resume.
-//
-// The checkpoint transcript is stored under a benign session ID; the attack is the
-// session ID that flows into path construction (in production this comes from the
-// remote checkpoint metadata via readCheckpointInfoFromStore). A "../"-laden ID
-// resolves to a path outside the agent's session directory. Before the fix,
-// resumeSingleSession would resolve the path, write the attacker-controlled
-// transcript there, and overwrite the sentinel — RCE if the target is e.g. a
-// shell init file. The fix must reject the ID and write nothing.
-func TestResumeSingleSession_RejectsPathTraversalSessionID(t *testing.T) {
+func TestResumeFromCurrentBranch_MultipleCheckpointsSaysLatest(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", filepath.Join(tmpDir, "claude-projects"))
+
+	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+	oldID := id.MustCheckpointID("aaa111bbb222")
+	newID := id.MustCheckpointID("ccc333ddd444")
+	writeCommittedResumeCheckpoint(t, repo, oldID, "session-old", time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+	writeCommittedResumeCheckpoint(t, repo, newID, "session-new", time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC))
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "squash.txt"), []byte("squash content"), 0o644); err != nil {
+		t.Fatalf("write squash file: %v", err)
+	}
+	if _, err := w.Add("squash.txt"); err != nil {
+		t.Fatalf("add squash file: %v", err)
+	}
+	commitMsg := fmt.Sprintf("Squash merge\n\nEntire-Checkpoint: %s\n\nEntire-Checkpoint: %s\n", oldID, newID)
+	if _, err := w.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test User", Email: "test@example.com"},
+	}); err != nil {
+		t.Fatalf("commit squash merge: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := resumeFromCurrentBranch(context.Background(), &stdout, &stderr, "master", true); err != nil {
+		t.Fatalf("resumeFromCurrentBranch() error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	want := "resuming from the latest checkpoint"
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want substring %q", stdout.String(), want)
+	}
+}
+
+func TestRestoreSingleSession_RejectsUnsafeCheckpointSessionIDBeforeAgentCalls(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
-
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
-		t.Fatalf("failed to create settings dir: %v", err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(tmpDir, ".entire", "settings.json"),
-		[]byte(`{"enabled": true}`),
-		0o644,
-	); err != nil {
-		t.Fatalf("failed to write settings: %v", err)
-	}
-
+	cleanupResumeTestRepo(t, repo, tmpDir)
 	ctx := context.Background()
 	cpID := id.MustCheckpointID("dddddddddddd")
-	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"payload"}]}}` + "\n")
-
-	v1Store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	if err := v1Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    "benign-session",
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted(raw),
-		AuthorName:   "Test",
-		AuthorEmail:  "test@example.com",
-	}); err != nil {
-		t.Fatalf("failed to write v1 checkpoint: %v", err)
+	writeCommittedResumeCheckpoint(t, repo, cpID, "benign-session", time.Now())
+	tamperResumeCheckpointSessionID(t, repo, cpID, 0, ".. ")
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	info, err := readCheckpointInfoFromStore(ctx, store, cpID)
+	if err != nil {
+		t.Fatalf("read checkpoint metadata: %v", err)
 	}
 
-	sessionDir := filepath.Join(tmpDir, "sessions")
-	ag := &recordingResumeAgent{sessionDir: sessionDir}
-
-	// Sentinel lives outside the session directory; the traversal targets it.
-	// recordingResumeAgent.ResolveSessionFile appends ".jsonl".
-	victimDir := filepath.Join(tmpDir, "victim")
-	if err := os.MkdirAll(victimDir, 0o755); err != nil {
-		t.Fatalf("failed to create victim dir: %v", err)
-	}
-	sentinel := filepath.Join(victimDir, "secret.jsonl")
-	if err := os.WriteFile(sentinel, []byte("SAFE"), 0o600); err != nil {
-		t.Fatalf("failed to write sentinel: %v", err)
+	outsidePath := filepath.Join(tmpDir, "transcript.jsonl")
+	ag := &recordingResumeAgent{
+		sessionDir:  filepath.Join(tmpDir, "sessions"),
+		outsidePath: outsidePath,
 	}
 
-	maliciousSessionID := "../victim/secret"
-
-	var stdout, stderr bytes.Buffer
-	err := resumeSingleSession(ctx, &stdout, &stderr, ag, maliciousSessionID, cpID, tmpDir, true)
+	var stdout bytes.Buffer
+	_, _, err = restoreSingleSession(ctx, &stdout, ag, info.SessionID, cpID, tmpDir, true)
 	if err == nil {
-		t.Fatalf("resumeSingleSession() with traversal session ID = nil error, want rejection\nstdout: %s", stdout.String())
+		t.Fatalf("restoreSingleSession() with unsafe session ID = nil error, want rejection\nstdout: %s", stdout.String())
 	}
-	if ag.writtenSession != nil {
-		t.Fatalf("resumeSingleSession() wrote a session despite malicious ID: ref=%s", ag.writtenSession.SessionRef)
+	if !strings.Contains(err.Error(), "surrounding whitespace") {
+		t.Fatalf("restoreSingleSession() error = %v, want session ID validation error", err)
 	}
-	got, readErr := os.ReadFile(sentinel)
-	if readErr != nil {
-		t.Fatalf("failed to read sentinel: %v", readErr)
+	if len(ag.resolvedSessionIDs) != 0 || len(ag.writtenSessionIDs) != 0 {
+		t.Fatalf("unsafe ID reached agent: resolved=%v written=%v", ag.resolvedSessionIDs, ag.writtenSessionIDs)
 	}
-	if string(got) != "SAFE" {
-		t.Fatalf("sentinel was overwritten via path traversal: %q", string(got))
+	if _, err := os.Stat(outsidePath); !os.IsNotExist(err) {
+		t.Fatalf("outside file was created; stat error = %v", err)
 	}
 }
 
-func TestResumeSingleSession_UsesV1Transcript(t *testing.T) {
+func TestRestoreLogsOnly_SkipsUnsafeCheckpointSessionIDBeforeAgentCalls(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cleanupResumeTestRepo(t, repo, tmpDir)
+	outsidePath := filepath.Join(tmpDir, "transcript.jsonl")
+	ag := &recordingResumeAgent{
+		sessionDir:  filepath.Join(tmpDir, "sessions"),
+		outsidePath: outsidePath,
+	}
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+	agent.Register(ag.Name(), func() agent.Agent { return ag })
+
+	cpID := id.MustCheckpointID("eeeeeeeeeeee")
+	createdAt := time.Now()
+	writeCommittedResumeCheckpointWithAgent(t, repo, cpID, "safe-session", createdAt, ag.Type())
+	writeCommittedResumeCheckpointWithAgent(t, repo, cpID, "benign-session", createdAt.Add(time.Second), ag.Type())
+	tamperResumeCheckpointSessionID(t, repo, cpID, 1, ".. ")
+
+	var stdout, stderr bytes.Buffer
+	restored, err := strategy.NewManualCommitStrategy().RestoreLogsOnly(t.Context(), &stdout, &stderr, strategy.PendingCheckpoint{
+		IsLogsOnly:   true,
+		CheckpointID: cpID,
+	}, false)
+	if err != nil {
+		t.Fatalf("RestoreLogsOnly() error = %v", err)
+	}
+	if len(restored) != 1 || restored[0].SessionID != "safe-session" {
+		t.Fatalf("restored sessions = %#v, want only safe-session", restored)
+	}
+	if len(ag.resolvedSessionIDs) != 2 || ag.resolvedSessionIDs[0] != "safe-session" || ag.resolvedSessionIDs[1] != "safe-session" ||
+		len(ag.writtenSessionIDs) != 1 || ag.writtenSessionIDs[0] != "safe-session" {
+		t.Fatalf("agent calls: resolved=%v written=%v, want only safe-session", ag.resolvedSessionIDs, ag.writtenSessionIDs)
+	}
+	if !strings.Contains(stderr.String(), "unsafe session ID") {
+		t.Fatalf("stderr = %q, want unsafe session ID warning", stderr.String())
+	}
+	if _, err := os.Stat(outsidePath); !os.IsNotExist(err) {
+		t.Fatalf("outside file was created; stat error = %v", err)
+	}
+}
+
+func TestRestoreResumeSessions_RejectsUnsafeModernSessionsWithoutLegacyFallback(t *testing.T) {
+	tests := []struct {
+		name              string
+		unsafeIDs         []string
+		topLevelSessionID string
+		checkpoint        id.CheckpointID
+	}{
+		{name: "single session", unsafeIDs: []string{".. "}, checkpoint: id.MustCheckpointID("fefefefefefe")},
+		{name: "multiple sessions", unsafeIDs: []string{".. ", " .."}, checkpoint: id.MustCheckpointID("ffffffffffff")},
+		{
+			name:              "multiple sessions with safe top-level ID",
+			unsafeIDs:         []string{".. ", " .."},
+			topLevelSessionID: "safe-session",
+			checkpoint:        id.MustCheckpointID("edededededed"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+
+			repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+			cleanupResumeTestRepo(t, repo, tmpDir)
+			outsidePath := filepath.Join(tmpDir, "transcript.jsonl")
+			ag := &recordingResumeAgent{
+				sessionDir:  filepath.Join(tmpDir, "sessions"),
+				outsidePath: outsidePath,
+			}
+			t.Cleanup(agent.SnapshotRegistryForTesting())
+			factoryCalls := 0
+			agent.Register(ag.Name(), func() agent.Agent {
+				factoryCalls++
+				return ag
+			})
+
+			createdAt := time.Now()
+			for i, unsafeID := range tt.unsafeIDs {
+				writeCommittedResumeCheckpointWithAgent(t, repo, tt.checkpoint, fmt.Sprintf("safe-session-%d", i), createdAt.Add(time.Duration(i)*time.Second), ag.Type())
+				tamperResumeCheckpointSessionID(t, repo, tt.checkpoint, i, unsafeID)
+			}
+
+			store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+			info, err := readCheckpointInfoFromStore(t.Context(), store, tt.checkpoint)
+			if err != nil {
+				t.Fatalf("read checkpoint metadata: %v", err)
+			}
+			if info.SessionCount != len(tt.unsafeIDs) || len(info.SessionIDs) != len(tt.unsafeIDs) {
+				t.Fatalf("checkpoint metadata sessions: count=%d IDs=%v, want %d", info.SessionCount, info.SessionIDs, len(tt.unsafeIDs))
+			}
+			if tt.topLevelSessionID != "" {
+				info.SessionID = tt.topLevelSessionID
+			}
+			factoryCalls = 0
+			ag.getSessionDirCalls = 0
+
+			var stdout, stderr bytes.Buffer
+			restored, err := restoreResumeSessions(t.Context(), &stdout, &stderr, info, false)
+			if err == nil {
+				t.Fatal("restoreResumeSessions() error = nil, want unsafe session ID rejection")
+			}
+			if !strings.Contains(err.Error(), "unsafe checkpoint session ID") {
+				t.Fatalf("restoreResumeSessions() error = %v, want unsafe checkpoint session ID rejection", err)
+			}
+			if len(restored) != 0 {
+				t.Fatalf("restored sessions = %#v, want none", restored)
+			}
+			if factoryCalls != 0 || ag.getSessionDirCalls != 0 {
+				t.Fatalf("unsafe IDs triggered agent setup: factories=%d session-dir calls=%d", factoryCalls, ag.getSessionDirCalls)
+			}
+			if len(ag.resolvedSessionIDs) != 0 || len(ag.writtenSessionIDs) != 0 {
+				t.Fatalf("unsafe IDs reached agent: resolved=%v written=%v", ag.resolvedSessionIDs, ag.writtenSessionIDs)
+			}
+			if got := strings.Count(stderr.String(), "unsafe session ID"); got != len(tt.unsafeIDs) {
+				t.Fatalf("unsafe session warnings = %d, want %d\nstderr: %s", got, len(tt.unsafeIDs), stderr.String())
+			}
+			if _, err := os.Stat(outsidePath); !os.IsNotExist(err) {
+				t.Fatalf("outside file was created; stat error = %v", err)
+			}
+			if _, err := os.Stat(ag.sessionDir); !os.IsNotExist(err) {
+				t.Fatalf("unsafe IDs created the agent session directory; stat error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRestoreResumeSessions_PreservesSafeSingleSessionNoTranscriptFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cleanupResumeTestRepo(t, repo, tmpDir)
+	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+	agent.Register(ag.Name(), func() agent.Agent { return ag })
+
+	cpID := id.MustCheckpointID("fafafafafafa")
+	const sessionID = "safe-session"
+	writeCommittedResumeCheckpointWithTranscript(t, repo, cpID, sessionID, time.Now(), ag.Type(), nil)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	info, err := readCheckpointInfoFromStore(t.Context(), store, cpID)
+	if err != nil {
+		t.Fatalf("read checkpoint metadata: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	restored, err := restoreResumeSessions(t.Context(), &stdout, &stderr, info, false)
+	if err != nil {
+		t.Fatalf("restoreResumeSessions() error = %v", err)
+	}
+	if len(restored) != 0 {
+		t.Fatalf("restored sessions = %#v, want none", restored)
+	}
+	if !strings.Contains(stdout.String(), "session log not available") {
+		t.Fatalf("stdout = %q, want missing-log message", stdout.String())
+	}
+	if want := ag.FormatResumeCommand(sessionID); !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want resume command %q", stdout.String(), want)
+	}
+}
+
+func TestRestoreResumeSessions_PreservesLegacySingleSessionFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cleanupResumeTestRepo(t, repo, tmpDir)
+	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+	agent.Register(ag.Name(), func() agent.Agent { return ag })
+
+	cpID := id.MustCheckpointID("abababababab")
+	const sessionID = "legacy-session"
+	writeCommittedResumeCheckpointWithAgent(t, repo, cpID, sessionID, time.Now(), "")
+	metadata := &strategy.CheckpointInfo{
+		CheckpointID: cpID,
+		SessionID:    sessionID,
+		Agent:        ag.Type(),
+	}
+
+	var stdout, stderr bytes.Buffer
+	restored, err := restoreResumeSessions(t.Context(), &stdout, &stderr, metadata, true)
+	if err != nil {
+		t.Fatalf("restoreResumeSessions() error = %v", err)
+	}
+	if len(restored) != 1 || restored[0].SessionID != sessionID {
+		t.Fatalf("restored sessions = %#v, want legacy session", restored)
+	}
+	if len(ag.writtenSessionIDs) != 1 || ag.writtenSessionIDs[0] != sessionID {
+		t.Fatalf("written sessions = %v, want %q", ag.writtenSessionIDs, sessionID)
+	}
+}
+
+func TestRestoreSingleSession_UsesV1TranscriptAndReturnsRestoredSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
@@ -1049,7 +1271,7 @@ func TestResumeSingleSession_UsesV1Transcript(t *testing.T) {
 	raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"resume v1 fallback"}]}}` + "\n")
 
 	v1Store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	if err := v1Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := v1Store.Write(ctx, checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    sessionID,
 		Strategy:     "manual-commit",
@@ -1061,66 +1283,66 @@ func TestResumeSingleSession_UsesV1Transcript(t *testing.T) {
 	}
 
 	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
-	var stdout, stderr bytes.Buffer
-	if err := resumeSingleSession(ctx, &stdout, &stderr, ag, sessionID, cpID, tmpDir, true); err != nil {
-		t.Fatalf("resumeSingleSession() error = %v", err)
+	var stdout bytes.Buffer
+	restored, ok, err := restoreSingleSession(ctx, &stdout, ag, sessionID, cpID, tmpDir, true)
+	if err != nil {
+		t.Fatalf("restoreSingleSession() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("restoreSingleSession() ok = false, want true")
+	}
+	if restored.SessionID != sessionID {
+		t.Fatalf("restored SessionID = %q, want %q", restored.SessionID, sessionID)
+	}
+	if restored.Agent != ag.Type() {
+		t.Fatalf("restored Agent = %q, want %q", restored.Agent, ag.Type())
+	}
+	if restored.CheckpointID != cpID.String() {
+		t.Fatalf("restored CheckpointID = %q, want %q", restored.CheckpointID, cpID.String())
 	}
 
 	if ag.writtenSession == nil {
-		t.Fatal("resumeSingleSession() did not restore a session")
+		t.Fatal("restoreSingleSession() did not restore a session")
 	}
 	if string(ag.writtenSession.NativeData) != string(raw) {
 		t.Fatalf("restored transcript = %q, want %q", string(ag.writtenSession.NativeData), string(raw))
 	}
 	if strings.Contains(stdout.String(), "session log not available") {
-		t.Fatalf("resumeSingleSession() reported missing log: %q", stdout.String())
+		t.Fatalf("restoreSingleSession() reported missing log: %q", stdout.String())
 	}
 }
 
-func TestResumeSingleSession_UsesV11Transcript(t *testing.T) {
+func TestRestoreSingleSession_NoTranscriptDoesNotReportRestored(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
-	enableResumeV11(t, tmpDir)
+	setupResumeTestRepo(t, tmpDir, false)
 
 	ctx := context.Background()
-	cpID := id.MustCheckpointID("bca123bca123")
-	sessionID := "resume-v11-session"
-	v11Raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"resume from v11"}]}}` + "\n")
-	staleV1Raw := []byte(`{"type":"user","message":{"content":[{"type":"text","text":"stale v1"}]}}` + "\n")
-
-	writeCommittedResumeCheckpointWithTranscript(
-		t,
-		repo,
-		cpID,
-		sessionID,
-		time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC),
-		agent.AgentTypeClaudeCode,
-		v11Raw,
-	)
-	mirrorMetadataBranchToV11Ref(t, repo)
-	writeCommittedResumeCheckpointWithTranscript(
-		t,
-		repo,
-		cpID,
-		sessionID,
-		time.Date(2025, 1, 3, 10, 0, 0, 0, time.UTC),
-		agent.AgentTypeClaudeCode,
-		staleV1Raw,
-	)
+	cpID := id.MustCheckpointID("abc123abc123")
+	sessionID := "resume-missing-transcript-session"
 
 	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
-	var stdout, stderr bytes.Buffer
-	if err := resumeSingleSession(ctx, &stdout, &stderr, ag, sessionID, cpID, tmpDir, true); err != nil {
-		t.Fatalf("resumeSingleSession() error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	var stdout bytes.Buffer
+	_, ok, err := restoreSingleSession(ctx, &stdout, ag, sessionID, cpID, tmpDir, false)
+	if err != nil {
+		t.Fatalf("restoreSingleSession() error = %v", err)
 	}
-
-	if ag.writtenSession == nil {
-		t.Fatal("resumeSingleSession() did not restore a session")
+	if ok {
+		t.Fatal("restoreSingleSession() ok = true, want false")
 	}
-	if string(ag.writtenSession.NativeData) != string(v11Raw) {
-		t.Fatalf("restored transcript = %q, want v1.1 transcript %q", string(ag.writtenSession.NativeData), string(v11Raw))
+	if ag.writtenSession != nil {
+		t.Fatalf("restoreSingleSession() wrote a session despite missing transcript: %#v", ag.writtenSession)
+	}
+	if !strings.Contains(stdout.String(), "session log not available") {
+		t.Fatalf("restoreSingleSession() output = %q, want missing log message", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "\nTo continue this session:\n") {
+		t.Fatalf("restoreSingleSession() output = %q, want continuation header", stdout.String())
+	}
+	wantCommand := "  " + ag.FormatResumeCommand(sessionID) + "\n"
+	if !strings.Contains(stdout.String(), wantCommand) {
+		t.Fatalf("restoreSingleSession() output = %q, want command %q", stdout.String(), wantCommand)
 	}
 }
 
@@ -1162,7 +1384,7 @@ func TestCheckRemoteMetadata_MetadataExistsOnRemote(t *testing.T) {
 
 	// Call checkRemoteMetadata - should find metadata on the remote tree and
 	// attempt to resume, but fail because the test checkpoint has no agent field.
-	err = checkRemoteMetadata(context.Background(), os.Stdout, os.Stderr, checkpointID, checkpoint.DefaultV1Refs())
+	_, err = checkRemoteMetadata(context.Background(), os.Stdout, os.Stderr, checkpointID, checkpoint.DefaultV1Refs())
 	if err == nil {
 		t.Error("checkRemoteMetadata() should return error when agent is missing from metadata")
 	} else if !strings.Contains(err.Error(), "failed to resolve agent") {
@@ -1184,7 +1406,7 @@ func TestCheckRemoteMetadata_NoRemoteMetadataBranch(t *testing.T) {
 	// Don't create any remote ref - simulating no remote entire/checkpoints/v1
 
 	// Call checkRemoteMetadata - should handle gracefully (no remote branch)
-	err := checkRemoteMetadata(
+	_, err := checkRemoteMetadata(
 		context.Background(),
 		os.Stdout,
 		os.Stderr,
@@ -1231,7 +1453,7 @@ func TestCheckRemoteMetadata_CheckpointNotOnRemote(t *testing.T) {
 	}
 
 	// Call checkRemoteMetadata with a DIFFERENT checkpoint ID (not on remote)
-	err = checkRemoteMetadata(
+	_, err = checkRemoteMetadata(
 		context.Background(),
 		os.Stdout,
 		os.Stderr,
@@ -1286,6 +1508,9 @@ func TestPromoteRemoteTrackingMetadataBranch_FastForwardsStaleLocal(t *testing.T
 	t.Chdir(tmpDir)
 
 	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	// Configure origin so the election elects it — promotion is confined to
+	// the elected remote's tracking ref.
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 
 	initialHash := readMetadataBranchHash(t, repo)
 	_ = createCheckpointOnMetadataBranch(t, repo, "2025-01-01-test-session-uuid")
@@ -1310,6 +1535,9 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", filepath.Join(tmpDir, "claude-projects"))
 
 	repo, w, _ := setupResumeTestRepo(t, tmpDir, false)
+	// Configure origin so the election elects it — the stale-local promotion
+	// this test pins is confined to the elected remote's tracking ref.
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
 	initialHash := readMetadataBranchHash(t, repo)
 
 	ctx := context.Background()
@@ -1318,7 +1546,7 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 
 	// Agent must be set so RestoreLogsOnly can resolve a session-write target.
 	v1Store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	if err := v1Store.WriteCommitted(ctx, checkpoint.WriteCommittedOptions{
+	if err := v1Store.Write(ctx, checkpoint.Session{
 		CheckpointID: cpID,
 		SessionID:    "2025-01-01-test-session-uuid",
 		Strategy:     "manual-commit",
@@ -1330,7 +1558,7 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 		t.Fatalf("WriteCommitted: %v", err)
 	}
 
-	_ = makeLocalMetadataBranchStale(t, repo, initialHash)
+	descendantHash := makeLocalMetadataBranchStale(t, repo, initialHash)
 
 	featureFile := filepath.Join(tmpDir, "feature.txt")
 	if err := os.WriteFile(featureFile, []byte("feature content"), 0o644); err != nil {
@@ -1354,6 +1582,12 @@ func TestResumeFromCurrentBranch_FastForwardsStaleLocalMetadata(t *testing.T) {
 	combined := stdout.String() + stderr.String()
 	if strings.Contains(combined, "session log not available") {
 		t.Errorf("resume reported missing log even though origin has the checkpoint metadata:\n%s", combined)
+	}
+	// Positive pin: the stale local ref must actually have been fast-forwarded
+	// to the elected remote's tracking ref — without this the test passes
+	// vacuously when the promotion silently no-ops.
+	if got := readMetadataBranchHash(t, repo); got != descendantHash {
+		t.Errorf("resume should fast-forward the stale local metadata branch: got %s, want %s", got, descendantHash)
 	}
 }
 
@@ -1418,9 +1652,9 @@ func TestDisplayRestoredSessions_SingleSessionOutput(t *testing.T) {
 		CreatedAt: time.Date(2026, time.February, 2, 12, 0, 0, 0, time.UTC),
 	}
 
-	ag, err := strategy.ResolveAgentForRewind(session.Agent)
+	ag, err := strategy.ResolveAgentForResume(session.Agent)
 	if err != nil {
-		t.Fatalf("ResolveAgentForRewind() error = %v", err)
+		t.Fatalf("ResolveAgentForResume() error = %v", err)
 	}
 
 	var output bytes.Buffer
@@ -1451,9 +1685,9 @@ func TestDisplayRestoredSessions_CodexShowsResumeCommand(t *testing.T) {
 		CreatedAt: time.Date(2026, time.April, 8, 18, 46, 0, 0, time.UTC),
 	}
 
-	ag, err := strategy.ResolveAgentForRewind(session.Agent)
+	ag, err := strategy.ResolveAgentForResume(session.Agent)
 	if err != nil {
-		t.Fatalf("ResolveAgentForRewind() error = %v", err)
+		t.Fatalf("ResolveAgentForResume() error = %v", err)
 	}
 
 	var output bytes.Buffer
@@ -1471,84 +1705,6 @@ func TestDisplayRestoredSessions_CodexShowsResumeCommand(t *testing.T) {
 	wantCommand := "  " + ag.FormatResumeCommand(session.SessionID) + "  # Can you take a look at the go code\n"
 	if !strings.Contains(got, wantCommand) {
 		t.Fatalf("displayRestoredSessions() missing command %q in %q", wantCommand, got)
-	}
-}
-
-func TestPrintMultiSessionResumeCommands_SingleSessionHasCheckmark(t *testing.T) {
-	t.Parallel()
-
-	sessions := []strategy.RestoredSession{
-		{
-			SessionID: "2026-02-02-rewind-single",
-			Agent:     "Claude Code",
-			Prompt:    "Fix the bug",
-		},
-	}
-
-	ag, err := strategy.ResolveAgentForRewind("Claude Code")
-	if err != nil {
-		t.Fatalf("ResolveAgentForRewind() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	var errOutput bytes.Buffer
-	printMultiSessionResumeCommands(&output, &errOutput, sessions)
-
-	got := output.String()
-	if !strings.Contains(got, "✓ Restored session 2026-02-02-rewind-single.\n") {
-		t.Fatalf("printMultiSessionResumeCommands() single session missing ✓ header, got: %q", got)
-	}
-	if !strings.Contains(got, "\nTo continue this session:\n") {
-		t.Fatalf("printMultiSessionResumeCommands() missing continuation line, got: %q", got)
-	}
-	wantCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-single") + "  # Fix the bug\n"
-	if !strings.Contains(got, wantCommand) {
-		t.Fatalf("printMultiSessionResumeCommands() missing command %q in %q", wantCommand, got)
-	}
-	if errOutput.Len() != 0 {
-		t.Fatalf("printMultiSessionResumeCommands() unexpected stderr: %q", errOutput.String())
-	}
-}
-
-func TestPrintMultiSessionResumeCommands_OutputMatchesResumeStyle(t *testing.T) {
-	t.Parallel()
-
-	sessions := []strategy.RestoredSession{
-		{
-			SessionID: "2026-02-02-rewind-old",
-			Agent:     "Claude Code",
-			Prompt:    "Old prompt",
-		},
-		{
-			SessionID: "2026-02-02-rewind-new",
-			Agent:     "Claude Code",
-			Prompt:    "Most recent prompt",
-		},
-	}
-
-	ag, err := strategy.ResolveAgentForRewind("Claude Code")
-	if err != nil {
-		t.Fatalf("ResolveAgentForRewind() error = %v", err)
-	}
-
-	var output bytes.Buffer
-	var errOutput bytes.Buffer
-	printMultiSessionResumeCommands(&output, &errOutput, sessions)
-
-	got := output.String()
-	if !strings.Contains(got, "\n✓ Restored 2 sessions. To continue:\n") {
-		t.Fatalf("printMultiSessionResumeCommands() missing multi-session header, got: %q", got)
-	}
-	oldCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-old") + "  # Old prompt\n"
-	if !strings.Contains(got, oldCommand) {
-		t.Fatalf("printMultiSessionResumeCommands() missing older command %q in %q", oldCommand, got)
-	}
-	newCommand := "  " + ag.FormatResumeCommand("2026-02-02-rewind-new") + "  # Most recent prompt (most recent)\n"
-	if !strings.Contains(got, newCommand) {
-		t.Fatalf("printMultiSessionResumeCommands() missing latest command %q in %q", newCommand, got)
-	}
-	if errOutput.Len() != 0 {
-		t.Fatalf("printMultiSessionResumeCommands() unexpected stderr: %q", errOutput.String())
 	}
 }
 
@@ -1573,5 +1729,203 @@ func TestGetMetadataTree_SucceedsWithLocalBranch(t *testing.T) {
 	}
 	if freshRepo == nil {
 		t.Fatal("getMetadataTree() returned nil repo")
+	}
+}
+
+// The multi-session half of PreservesSafeSingleSessionNoTranscriptFallback. A
+// checkpoint whose sessions all carry SAFE IDs but no transcript restores
+// nothing, and must still say so: gating the fallback on the session count made
+// this exit 0 having printed "Restoring 2 sessions from checkpoint:" and
+// nothing else, which is indistinguishable from a successful resume.
+func TestRestoreResumeSessions_PreservesSafeMultiSessionNoTranscriptFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cleanupResumeTestRepo(t, repo, tmpDir)
+	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+	agent.Register(ag.Name(), func() agent.Agent { return ag })
+
+	cpID := id.MustCheckpointID("dadadadadada")
+	createdAt := time.Now()
+	for i := range 2 {
+		writeCommittedResumeCheckpointWithTranscript(t, repo, cpID,
+			fmt.Sprintf("safe-session-%d", i), createdAt.Add(time.Duration(i)*time.Second), ag.Type(), nil)
+	}
+
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	info, err := readCheckpointInfoFromStore(t.Context(), store, cpID)
+	if err != nil {
+		t.Fatalf("read checkpoint metadata: %v", err)
+	}
+	if info.SessionCount < 2 {
+		t.Fatalf("checkpoint metadata session count = %d, want a multi-session checkpoint", info.SessionCount)
+	}
+
+	var stdout, stderr bytes.Buffer
+	restored, err := restoreResumeSessions(t.Context(), &stdout, &stderr, info, false)
+	if err != nil {
+		t.Fatalf("restoreResumeSessions() error = %v", err)
+	}
+	if len(restored) != 0 {
+		t.Fatalf("restored sessions = %#v, want none", restored)
+	}
+	if !strings.Contains(stdout.String(), "session log not available") {
+		t.Fatalf("stdout = %q, want the missing-log message rather than a silent no-op", stdout.String())
+	}
+	if want := ag.FormatResumeCommand(info.SessionID); !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want resume command %q", stdout.String(), want)
+	}
+}
+
+// Codex moves archived rollouts to archived_sessions, beside the session
+// directory rather than inside it. Resume restores the checkpoint into the live
+// store, where `codex resume` looks, and leaves the archived rollout alone.
+func TestRestoreResumeSessions_RestoresArchivedCodexSessionIntoLiveStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cleanupResumeTestRepo(t, repo, tmpDir)
+	home := relocateAgentHome(t, agent.AgentTypeCodex)
+	const sessionID = "019a0000-0000-7000-8000-00000000c0de"
+	archived := filepath.Join(home, "archived_sessions", "rollout-2026-09-30T10-00-00-"+sessionID+".jsonl")
+	writeTranscriptFile(t, archived)
+
+	cpID := id.MustCheckpointID("c0dec0dec0de")
+	transcript := []byte(`{"timestamp":"2026-09-30T10:00:00.000Z","type":"session_meta","payload":{"id":"` + sessionID + `","timestamp":"2026-09-30T10:00:00.000Z"}}` + "\n")
+	writeCommittedResumeCheckpointWithTranscript(t, repo, cpID, sessionID, time.Now(), agent.AgentTypeCodex, transcript)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	info, err := readCheckpointInfoFromStore(t.Context(), store, cpID)
+	if err != nil {
+		t.Fatalf("read checkpoint metadata: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	restored, err := restoreResumeSessions(t.Context(), &stdout, &stderr, info, false)
+	if err != nil {
+		t.Fatalf("restoreResumeSessions() error = %v\nstderr: %s", err, stderr.String())
+	}
+	if len(restored) != 1 || restored[0].SessionID != sessionID {
+		t.Fatalf("restored sessions = %#v, want %q\nstderr: %s", restored, sessionID, stderr.String())
+	}
+	live := filepath.Join(home, "sessions", "2026", "09", "30", "rollout-2026-09-30T10-00-00-"+sessionID+".jsonl")
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("restored rollout: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if data, err := os.ReadFile(archived); err != nil || string(data) != `{"type":"user"}`+"\n" {
+		t.Fatalf("archived rollout = %q, %v; want it untouched", data, err)
+	}
+}
+
+// A legacy multi-session checkpoint can carry a session with no ID at all:
+// readCheckpointInfoFromStore appends every entry and guards `!= ""` on the next
+// line. The tamper scan treated that as unsafe, which accused an untouched
+// checkpoint and killed the fallback the scan exists to protect.
+func TestRestoreResumeSessions_EmptyStoredSessionIDIsNotTampering(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cleanupResumeTestRepo(t, repo, tmpDir)
+	ag := &recordingResumeAgent{sessionDir: filepath.Join(tmpDir, "sessions")}
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+	agent.Register(ag.Name(), func() agent.Agent { return ag })
+
+	cpID := id.MustCheckpointID("cbcbcbcbcbcb")
+	createdAt := time.Now()
+	for i := range 2 {
+		writeCommittedResumeCheckpointWithTranscript(t, repo, cpID,
+			fmt.Sprintf("safe-session-%d", i), createdAt.Add(time.Duration(i)*time.Second), ag.Type(), nil)
+	}
+
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	info, err := readCheckpointInfoFromStore(t.Context(), store, cpID)
+	if err != nil {
+		t.Fatalf("read checkpoint metadata: %v", err)
+	}
+	// One session recorded without an ID, as an older checkpoint has it.
+	info.SessionIDs = append([]string{""}, info.SessionIDs...)
+
+	var stdout, stderr bytes.Buffer
+	restored, err := restoreResumeSessions(t.Context(), &stdout, &stderr, info, false)
+	if err != nil {
+		t.Fatalf("restoreResumeSessions() error = %v, want the fallback to run", err)
+	}
+	if len(restored) != 0 {
+		t.Fatalf("restored sessions = %#v, want none", restored)
+	}
+	if !strings.Contains(stdout.String(), "session log not available") {
+		t.Fatalf("stdout = %q, want the fallback's missing-log message", stdout.String())
+	}
+}
+
+// The unavailable-checkpoint message must name where the checkpoint actually
+// lives. A git-refs checkpoint is its own ref, so blaming (and suggesting a
+// fetch of) the v1 branch is wrong — the branch may well exist.
+func TestCheckRemoteMetadata_MessageNamesCheckpointStorage(t *testing.T) {
+	const ulid = "01M3PWG7BKWYH0XJKS810J0XEX"
+	const ulidRef = "refs/entire/checkpoints/EX/" + ulid
+	const hexRef = "refs/entire/checkpoints/22/aaa111bbb222"
+	tests := []struct {
+		name        string
+		refsPrimary bool
+		checkpoint  string
+		wantPhrase  string
+		wantRefs    []string
+	}{
+		{
+			name:       "ulid under branch primary is its own ref",
+			checkpoint: ulid,
+			wantPhrase: "its metadata is not in the local or remote checkpoint ref " + ulidRef + ".",
+			wantRefs:   []string{ulidRef},
+		},
+		{
+			// Read order is the ref, then the pre-migration v1 branch.
+			name:        "hex under refs primary is its ref or the v1 branch",
+			refsPrimary: true,
+			checkpoint:  "aaa111bbb222",
+			wantPhrase:  "its metadata is not in the local or remote checkpoint ref " + hexRef + " or " + paths.MetadataBranchName + " branch.",
+			wantRefs:    []string{hexRef, paths.MetadataBranchName},
+		},
+		{
+			name:       "hex under branch primary is the v1 branch",
+			checkpoint: "aaa111bbb222",
+			wantPhrase: "its metadata is not in the local or remote " + paths.MetadataBranchName + " branch.",
+			wantRefs:   []string{paths.MetadataBranchName},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.refsPrimary {
+				t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+			}
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			setupResumeTestRepo(t, tmpDir, false)
+			bare := t.TempDir()
+			runGitInDir(t, bare, "init", "--bare")
+			runGitInDir(t, tmpDir, "remote", "add", "origin", bare)
+
+			var errW bytes.Buffer
+			_, err := checkRemoteMetadata(context.Background(), io.Discard, &errW, id.MustCheckpointID(tt.checkpoint), checkpoint.DefaultV1Refs())
+			if err != nil {
+				t.Fatalf("checkRemoteMetadata() error = %v", err)
+			}
+			out := errW.String()
+			if !strings.Contains(out, tt.wantPhrase) {
+				t.Errorf("message should contain %q; got:\n%s", tt.wantPhrase, out)
+			}
+			if got := strings.Count(out, "git fetch "); got != len(tt.wantRefs) {
+				t.Errorf("message should suggest %d fetch(es), got %d:\n%s", len(tt.wantRefs), got, out)
+			}
+			for _, ref := range tt.wantRefs {
+				wantFetch := "git fetch origin " + ref + ":" + ref
+				if !strings.Contains(out, wantFetch) {
+					t.Errorf("message should suggest %q; got:\n%s", wantFetch, out)
+				}
+			}
+		})
 	}
 }

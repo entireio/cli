@@ -128,7 +128,6 @@ func TestCopilotVSCodeHooks_GeneratedHookCommands(t *testing.T) {
 
 	env := NewFeatureBranchEnv(t)
 	env.InitEntire()
-	writeNonLocalDevSettings(t, env)
 	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, t)
 
 	output, err := env.RunCLIWithError("enable", "--agent", "copilot-cli")
@@ -311,13 +310,4 @@ func resolveHookCommandWithBinary(command, binaryPath string) string {
 	}
 
 	return command
-}
-
-func writeNonLocalDevSettings(t *testing.T, env *TestEnv) {
-	t.Helper()
-
-	settingsPath := filepath.Join(env.RepoDir, ".entire", "settings.json")
-	if err := os.WriteFile(settingsPath, []byte("{\n  \"enabled\": true\n}\n"), 0o644); err != nil {
-		t.Fatalf("failed to write non-local-dev settings: %v", err)
-	}
 }

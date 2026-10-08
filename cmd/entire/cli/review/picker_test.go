@@ -1,7 +1,6 @@
 package review_test
 
 import (
-	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,7 +9,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/skilldiscovery"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 const (
@@ -100,42 +98,6 @@ func TestMergePickerResults(t *testing.T) {
 	}
 }
 
-// TestSelectReviewAgent_OverrideResolvesSpecificAgent pins that --agent flag
-// resolves a non-default configured agent when the map has multiple entries.
-func TestSelectReviewAgent_OverrideResolvesSpecificAgent(t *testing.T) {
-	t.Parallel()
-	reviewMap := map[string]settings.ReviewConfig{
-		testAgentName:  {Skills: []string{"/a"}},
-		testCodexAgent: {Skills: []string{"/b"}},
-	}
-
-	name, cfg, err := review.SelectReviewAgent(reviewMap, testCodexAgent)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if name != testCodexAgent || len(cfg.Skills) != 1 || cfg.Skills[0] != "/b" {
-		t.Errorf("override=%s returned name=%q cfg=%+v", testCodexAgent, name, cfg)
-	}
-
-	// Default (no override) must remain the alphabetically-first agent.
-	name, _, err = review.SelectReviewAgent(reviewMap, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if name != testAgentName {
-		t.Errorf("default pick = %q, want %q", name, testAgentName)
-	}
-
-	// Unknown override must surface a helpful error listing configured agents.
-	_, _, err = review.SelectReviewAgent(reviewMap, "gemini")
-	if err == nil {
-		t.Fatal("expected error for unconfigured --agent value")
-	}
-	if !strings.Contains(err.Error(), testAgentName) || !strings.Contains(err.Error(), testCodexAgent) {
-		t.Errorf("error should list configured agents; got: %v", err)
-	}
-}
-
 // TestSplitSavedPicks pins the partition logic used by the picker to
 // pre-select previously-saved skills.
 func TestSplitSavedPicks(t *testing.T) {
@@ -222,10 +184,10 @@ func TestBuildReviewPickerFields_StructureWithDiscovery(t *testing.T) {
 func TestBuildReviewPickerFields_EmptyBuiltinsRendersNote(t *testing.T) {
 	t.Parallel()
 	fields := review.BuildReviewPickerFields(
-		"gemini",
+		"codex",
 		nil,
 		nil,
-		[]skilldiscovery.InstallHint{{Message: "install gemini-code-review"}},
+		[]skilldiscovery.InstallHint{{Message: "install codex-review-pack"}},
 		"",
 		nil, nil, nil,
 	)
@@ -284,23 +246,5 @@ func TestBuildReviewPickerFields_SingleBuiltinDefaultsSelectedAndRenders(t *test
 	field.Focus()
 	if got := field.View(); !strings.Contains(got, "/review") {
 		t.Fatalf("single built-in option did not render:\n%s", got)
-	}
-}
-
-func TestSaveReviewFixAgent_PersistsSettings(t *testing.T) {
-	tmp := t.TempDir()
-	testutil.InitRepo(t, tmp)
-	t.Chdir(tmp)
-
-	if err := review.SaveReviewFixAgent(context.Background(), testCodexAgent); err != nil {
-		t.Fatal(err)
-	}
-
-	prefs, err := settings.LoadClonePreferences(context.Background())
-	if err != nil {
-		t.Fatalf("load preferences: %v", err)
-	}
-	if prefs.ReviewFixAgent != testCodexAgent {
-		t.Fatalf("ReviewFixAgent = %q, want %s", prefs.ReviewFixAgent, testCodexAgent)
 	}
 }

@@ -3,11 +3,14 @@ package cursor
 import (
 	"context"
 	"encoding/json"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
 func TestInstallHooks_FreshInstall(t *testing.T) {
@@ -15,7 +18,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CursorAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -63,6 +66,113 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-stop"))
 }
 
+// TestInstallHooks_WindowsProbeSuccessKeepsShWrappers verifies that on a
+// Windows host where a POSIX sh is runnable, Cursor keeps the sh-based wrappers
+// (parity with non-Windows). Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsProbeSuccessKeepsShWrappers(t *testing.T) {
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return true // sh works
+	}))
+
+	tempDir := t.TempDir()
+	// Installing hooks anchors a process-wide os.Root on the worktree root
+	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
+	// cannot remove a directory while a handle to it is open, so the registry
+	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
+	// TempDir registered its removal first, so this runs before it.
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(tempDir)
+
+	ag := &CursorAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	hooksFile := readHooksFile(t, tempDir)
+	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapProductionSilentHookCommand("entire hooks cursor session-start"))
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
+}
+
+// TestInstallHooks_WindowsProbeFailureUsesCmdWrappers verifies that on a Windows
+// host with no runnable POSIX sh, Cursor installs the native cmd.exe wrappers so
+// hooks actually fire (issue #1424). Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsProbeFailureUsesCmdWrappers(t *testing.T) {
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return false // no working sh
+	}))
+
+	tempDir := t.TempDir()
+	// Installing hooks anchors a process-wide os.Root on the worktree root
+	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
+	// cannot remove a directory while a handle to it is open, so the registry
+	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
+	// TempDir registered its removal first, so this runs before it.
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(tempDir)
+
+	ag := &CursorAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	hooksFile := readHooksFile(t, tempDir)
+	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor session-start"))
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor stop"))
+	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor subagent-stop"))
+}
+
+// TestInstallHooks_WindowsProbeFlipMigratesCleanly verifies that when a host's
+// sh availability changes between installs, a non-force reinstall REPLACES the
+// stale sh-wrapped hooks with cmd.exe ones rather than leaving both (which would
+// double-fire). Mirrors the codex migration test. Mutates the shared probe, so
+// no t.Parallel().
+func TestInstallHooks_WindowsProbeFlipMigratesCleanly(t *testing.T) {
+	shWorks := true
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return shWorks
+	}))
+
+	tempDir := t.TempDir()
+	// Installing hooks anchors a process-wide os.Root on the worktree root
+	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
+	// cannot remove a directory while a handle to it is open, so the registry
+	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
+	// TempDir registered its removal first, so this runs before it.
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(tempDir)
+	ag := &CursorAgent{}
+
+	// First install with a working sh → sh-based wrappers.
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+
+	// sh stops working; reinstall WITHOUT force.
+	shWorks = false
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+
+	hooksFile := readHooksFile(t, tempDir)
+	// Exactly one entry per type — the stale sh entry must be gone, not duplicated.
+	if len(hooksFile.Hooks.Stop) != 1 {
+		t.Errorf("Stop hooks = %d after wrapper migration, want 1 (no duplicate)", len(hooksFile.Hooks.Stop))
+	}
+	if len(hooksFile.Hooks.SessionStart) != 1 {
+		t.Errorf("SessionStart hooks = %d after wrapper migration, want 1 (no duplicate)", len(hooksFile.Hooks.SessionStart))
+	}
+	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor stop"))
+
+	// No sh-based Entire wrapper may survive the migration.
+	data, err := os.ReadFile(filepath.Join(tempDir, ".cursor", HooksFileName))
+	if err != nil {
+		t.Fatalf("failed to read hooks file: %v", err)
+	}
+	if strings.Contains(string(data), "sh -c") || strings.Contains(string(data), "command -v entire") {
+		t.Errorf("stale sh-based wrapper survived migration:\n%s", data)
+	}
+}
+
 func TestInstallHooks_Idempotent(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -70,7 +180,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	ag := &CursorAgent{}
 
 	// First install
-	count1, err := ag.InstallHooks(context.Background(), false, false)
+	count1, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
@@ -79,7 +189,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	}
 
 	// Second install
-	count2, err := ag.InstallHooks(context.Background(), false, false)
+	count2, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
@@ -99,7 +209,7 @@ func TestAreHooksInstalled_NotInstalled(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CursorAgent{}
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = true, want false (no hooks.json)")
 	}
 }
@@ -110,12 +220,12 @@ func TestAreHooksInstalled_AfterInstall(t *testing.T) {
 
 	ag := &CursorAgent{}
 
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
-	if !ag.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = false, want true")
 	}
 }
@@ -127,11 +237,11 @@ func TestUninstallHooks(t *testing.T) {
 	ag := &CursorAgent{}
 
 	// Install
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	if !ag.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ag) {
 		t.Fatal("hooks should be installed before uninstall")
 	}
 
@@ -141,7 +251,7 @@ func TestUninstallHooks(t *testing.T) {
 		t.Fatalf("UninstallHooks() error = %v", err)
 	}
 
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = true after uninstall, want false")
 	}
 }
@@ -159,6 +269,24 @@ func TestUninstallHooks_NoHooksFile(t *testing.T) {
 	}
 }
 
+// TestUninstallHooks_UnreadableHooksFileErrors pins the absent-vs-unreadable
+// split: an absent hooks file means nothing to uninstall, but a read error
+// must surface instead of reporting success with hooks still on disk. The
+// hooks path is created as a directory so os.ReadFile fails with a
+// non-ErrNotExist error on every platform.
+func TestUninstallHooks_UnreadableHooksFileErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, ".cursor", HooksFileName), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := (&CursorAgent{}).UninstallHooks(context.Background()); err == nil {
+		t.Fatal("UninstallHooks() = nil for unreadable hooks file, want error")
+	}
+}
+
 func TestInstallHooks_ForceReinstall(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -166,13 +294,13 @@ func TestInstallHooks_ForceReinstall(t *testing.T) {
 	ag := &CursorAgent{}
 
 	// Install normally
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
 
 	// Force reinstall
-	count, err := ag.InstallHooks(context.Background(), false, true)
+	count, err := ag.InstallHooks(context.Background(), true)
 	if err != nil {
 		t.Fatalf("force InstallHooks() error = %v", err)
 	}
@@ -205,7 +333,7 @@ func TestInstallHooks_PreservesExistingHooks(t *testing.T) {
 	})
 
 	ag := &CursorAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -227,18 +355,21 @@ func TestInstallHooks_PreservesExistingHooks(t *testing.T) {
 	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-stop"))
 }
 
-func TestInstallHooks_LocalDev(t *testing.T) {
+func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
-
+	ctx := context.Background()
 	ag := &CursorAgent{}
-	_, err := ag.InstallHooks(context.Background(), true, false)
-	if err != nil {
-		t.Fatalf("InstallHooks(localDev=true) error = %v", err)
-	}
 
-	hooksFile := readHooksFile(t, tempDir)
-	assertEntryCommand(t, hooksFile.Hooks.Stop, `"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks cursor stop`)
+	testutil.AssertLegacyHookReplaced(t,
+		filepath.Join(tempDir, ".cursor", HooksFileName),
+		agent.WrapProductionSilentHookCommandForOS("entire hooks cursor stop", agent.UseWindowsProductionHooks(ctx)),
+		testutil.LegacyLocalDevCommand("hooks cursor stop"),
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
 }
 
 func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
@@ -264,7 +395,7 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 	}
 
 	ag := &CursorAgent{}
-	count, err := ag.InstallHooks(context.Background(), false, false)
+	count, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
@@ -319,7 +450,7 @@ func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {
 
 	// Install hooks first
 	ag := &CursorAgent{}
-	_, err := ag.InstallHooks(context.Background(), false, false)
+	_, err := ag.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +515,7 @@ func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {
 	}
 
 	// Verify Entire hooks were actually removed
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("Entire hooks should be removed after uninstall")
 	}
 }
@@ -440,4 +571,71 @@ func assertEntryWithMatcher(t *testing.T, entries []CursorHookEntry, matcher, co
 		}
 	}
 	t.Errorf("hook with matcher=%q command=%q not found", matcher, command)
+}
+
+// TestInstallHooks_DropsLegacyHookAlongsideCurrent is the regression test for
+// syncEntireHook returning early when the current command was already present,
+// which left a legacy local-dev hook beside it so both fired.
+func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ctx := context.Background()
+	ag := &CursorAgent{}
+
+	configPath := filepath.Join(tempDir, ".cursor", HooksFileName)
+	current := agent.WrapProductionSilentHookCommandForOS("entire hooks cursor stop", agent.UseWindowsProductionHooks(ctx))
+	legacy := testutil.LegacyLocalDevCommand("hooks cursor stop")
+
+	testutil.AssertStaleHookDroppedAlongsideCurrent(t, configPath, current, legacy,
+		func() {
+			// Install, then append the legacy hook next to the current one.
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("seed InstallHooks() error = %v", err)
+			}
+			hooksFile := readHooksFile(t, tempDir)
+			hooksFile.Hooks.Stop = append(hooksFile.Hooks.Stop, CursorHookEntry{Command: legacy})
+			// Write with the same marshaller InstallHooks uses: the production
+			// hook command contains `>`, which encoding/json would escape to
+			// \u003e, so a seed written with json.MarshalIndent would not match
+			// what the CLI reads back.
+			data, err := jsonutil.MarshalIndentWithNewline(hooksFile, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal seed: %v", err)
+			}
+			if err := os.WriteFile(configPath, data, 0o600); err != nil {
+				t.Fatalf("write seed: %v", err)
+			}
+		},
+		func() {
+			if _, err := ag.InstallHooks(ctx, false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+		})
+}
+
+// TestCommittedDogfoodHooksIsCurrent guards this repo's own committed agent config against drifting from what
+// InstallHooks writes. A stale committed config is how the pi extension ended up
+// invoking a launcher script that had been deleted.
+func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
+	testutil.AssertCommittedDogfoodConfigStable(t, ".cursor/hooks.json", func(t *testing.T, dir string) (int, error) {
+		t.Helper()
+		t.Chdir(dir)
+		return (&CursorAgent{}).InstallHooks(context.Background(), false)
+	})
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

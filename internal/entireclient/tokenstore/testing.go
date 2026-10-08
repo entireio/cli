@@ -51,6 +51,14 @@ func UseFailingDeleteBackendForTesting(path string, failDelete func(service, use
 	return installFaultStore(faultStore{inner: &fileStore{path: path}, failDelete: failDelete})
 }
 
+// UseObservingBackendForTesting wraps a file backend so observe is called with
+// the operation ("get", "set" or "delete") and the (service, user) pair before
+// each call is applied; operations otherwise behave normally. Lets tests assert
+// ordering between a credential write and other bookkeeping around it.
+func UseObservingBackendForTesting(path string, observe func(op, service, user string)) func() {
+	return installFaultStore(faultStore{inner: &fileStore{path: path}, observe: observe})
+}
+
 func installFaultStore(fs faultStore) func() {
 	backendMu.Lock()
 	prevBackend := backend
@@ -72,9 +80,17 @@ type faultStore struct {
 	failSet    func(service, user string) bool
 	failGet    func(service, user string) bool
 	failDelete func(service, user string) bool
+	observe    func(op, service, user string)
+}
+
+func (f faultStore) note(op, service, user string) {
+	if f.observe != nil {
+		f.observe(op, service, user)
+	}
 }
 
 func (f faultStore) Get(service, user string) (string, error) {
+	f.note("get", service, user)
 	if f.failGet != nil && f.failGet(service, user) {
 		return "", fmt.Errorf("injected Get failure for %s/%s", service, user)
 	}
@@ -83,6 +99,7 @@ func (f faultStore) Get(service, user string) (string, error) {
 }
 
 func (f faultStore) Set(service, user, password string) error {
+	f.note("set", service, user)
 	if f.failSet != nil && f.failSet(service, user) {
 		return fmt.Errorf("injected Set failure for %s/%s", service, user)
 	}
@@ -91,6 +108,7 @@ func (f faultStore) Set(service, user, password string) error {
 }
 
 func (f faultStore) Delete(service, user string) error {
+	f.note("delete", service, user)
 	if f.failDelete != nil && f.failDelete(service, user) {
 		return fmt.Errorf("injected Delete failure for %s/%s", service, user)
 	}

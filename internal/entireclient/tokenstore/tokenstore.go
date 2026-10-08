@@ -10,9 +10,11 @@
 // directory — see internal/entireclient/userdirs).
 //
 // Service-name conventions:
-//   - "entire:<cluster-host>"        — entiredb cluster login tokens
-//   - "entire-core:<core-base-url>"  — entire-core control-plane tokens
-//   - "<service>:refresh"            — refresh-token entry paired with the
+//   - "entire:<cluster-host>"          — entiredb cluster login tokens
+//   - "entire-core:<core-base-url>"    — entire-core control-plane tokens
+//   - "entire-jurisdiction:<audience>" — jurisdiction (data-plane) access
+//     tokens, keyed by jurisdiction audience
+//   - "<service>:refresh"              — refresh-token entry paired with the
 //     corresponding access-token service
 package tokenstore
 
@@ -36,21 +38,25 @@ var ErrNotFound = keyring.ErrNotFound
 // at "entire-core:<base-url>" regardless of which CLI wrote it. Two CLIs
 // sharing this prefix on the same machine read each other's writes.
 const (
-	ClusterKeyringPrefix = "entire:"      // entiredb cluster-issued tokens
-	CoreKeyringPrefix    = "entire-core:" // entire-core control-plane tokens
+	ClusterKeyringPrefix      = "entire:"              // entiredb cluster-issued tokens
+	CoreKeyringPrefix         = "entire-core:"         // entire-core control-plane tokens
+	JurisdictionKeyringPrefix = "entire-jurisdiction:" // jurisdiction (data-plane) access tokens
 )
-
-// ClusterKeyringService returns the service name for tokens issued by an
-// entiredb cluster. host is typically the cluster's entry domain.
-func ClusterKeyringService(host string) string {
-	return ClusterKeyringPrefix + host
-}
 
 // CoreKeyringService returns the service name for tokens issued by
 // entire-core. coreURL is the base URL of the issuer; trailing slashes
 // are normalized away so callers don't have to.
 func CoreKeyringService(coreURL string) string {
 	return CoreKeyringPrefix + strings.TrimRight(coreURL, "/")
+}
+
+// JurisdictionService returns the service name for a jurisdiction (data-plane)
+// access token, keyed by the jurisdiction audience so tokens for different
+// jurisdictions — and for prod vs staging — can't be confused. The account key
+// is the login context's handle. Trailing slashes are normalized away so
+// callers don't have to.
+func JurisdictionService(audience string) string {
+	return JurisdictionKeyringPrefix + strings.TrimRight(audience, "/")
 }
 
 // RefreshService returns the paired refresh-token service name for an
@@ -60,19 +66,6 @@ func CoreKeyringService(coreURL string) string {
 // access token at (service, user).
 func RefreshService(service string) string {
 	return service + ":refresh"
-}
-
-// KeyringServiceForIssuerKey infers the right service prefix from a
-// raw issuer key (entire-core URL or entiredb cluster host). URL-shaped
-// keys (anything beginning with a scheme) are treated as entire-core
-// issuers; bare hostnames as cluster issuers. Used by callers that
-// derive a service name without already having a *contexts.Context in
-// hand (tests, entiredb's pre-resolution code paths).
-func KeyringServiceForIssuerKey(key string) string {
-	if strings.HasPrefix(key, "http://") || strings.HasPrefix(key, "https://") {
-		return CoreKeyringService(key)
-	}
-	return ClusterKeyringService(key)
 }
 
 // backendMu guards `resolved` and `backend`. It serializes the production
@@ -100,13 +93,84 @@ func currentBackend() store {
 	return backend
 }
 
+// BackendEnvVar selects the credential backend: set to "file" to use the
+// JSON file store instead of the OS keyring. PathEnvVar overrides where the
+// file store lives (default: tokens.json in the per-user config directory).
+// Exported so user-facing guidance (e.g. login's headless hint) names the
+// same variables this package actually reads.
+const (
+	BackendEnvVar = "ENTIRE_TOKEN_STORE"
+	PathEnvVar    = "ENTIRE_TOKEN_STORE_PATH"
+)
+
+// FileBackendSelected reports whether the environment selects the file
+// backend — the single predicate shared by backend resolution, provenance
+// wording, and login's headless hint, so they can never disagree.
+func FileBackendSelected() bool {
+	return os.Getenv(BackendEnvVar) == "file"
+}
+
+// BackendDescription names the credential backend the current environment
+// resolves to, for user-facing provenance lines (e.g. `entire auth status`).
+// It mirrors resolveBackendLocked's env semantics — the production resolution
+// — rather than introspecting the live backend, so test-only overrides don't
+// leak into user-facing wording.
+func BackendDescription() string {
+	if FileBackendSelected() {
+		return "file " + FileBackendPath()
+	}
+	return keyringProviderName()
+}
+
+// tokenStoreFileName is the file backend's name inside the per-user config dir.
+const tokenStoreFileName = "tokens.json"
+
+// FileBackendPath resolves where the file backend stores (or would store)
+// tokens: PathEnvVar when set, else tokens.json in the per-user config
+// directory. Exported so user-facing guidance can name the concrete path.
+//
+// The string form cannot report a rejected override, so it returns the path it
+// would use; fileBackendPathChecked is what the store itself calls.
+func FileBackendPath() string {
+	path, _ := fileBackendPathChecked() //nolint:errcheck // see doc comment: the store reports it
+	return path
+}
+
+// fileBackendPathChecked is FileBackendPath with the override check.
+//
+// The config-directory case is checked here rather than being left to the root
+// that opens it, because there is no such root: fileStore.dir anchors on
+// filepath.Dir of this path (an exception in docs/development/filesystem-safety.md,
+// since PathEnvVar names a file the caller chose) and reaches it through
+// filepath.Abs. That Abs is exactly the laundering the contexts and discovery
+// roots stopped doing. Without a check here, ENTIRE_CONFIG_DIR=foo silently put
+// bearer tokens at ./foo/tokens.json, which for a CLI run from a repository
+// means inside the repository.
+//
+// PathEnvVar is deliberately NOT checked: it names a file the user chose
+// directly, the same reasoning that exempts it from the root-base rule.
+func fileBackendPathChecked() (string, error) {
+	if path := os.Getenv(PathEnvVar); path != "" {
+		return path, nil
+	}
+	dir, err := userdirs.ConfigDirChecked()
+	if err != nil {
+		return filepath.Join(dir, tokenStoreFileName), err
+	}
+	return filepath.Join(dir, tokenStoreFileName), nil
+}
+
 func resolveBackendLocked() store {
-	if os.Getenv("ENTIRE_TOKEN_STORE") == "file" {
-		path := os.Getenv("ENTIRE_TOKEN_STORE_PATH")
-		if path == "" {
-			path = filepath.Join(userdirs.Config(), "tokens.json")
-		}
-		return &fileStore{path: path}
+	if FileBackendSelected() {
+		// Entire owns the directory only when it also picked it: an
+		// explicit PathEnvVar names a location the user chose, and its
+		// mode is theirs to set.
+		//
+		// pathErr is carried rather than resolved here: this function has no
+		// error return, and swallowing it is what put tokens in the working
+		// directory. Every operation reports it before touching the filesystem.
+		path, pathErr := fileBackendPathChecked()
+		return &fileStore{path: path, pathErr: pathErr, ownsDir: os.Getenv(PathEnvVar) == ""}
 	}
 	// Under `go test`, never fall through to the real OS keyring: a test
 	// that forgets tokenstore.UseFileBackendForTesting would otherwise write
@@ -114,7 +178,7 @@ func resolveBackendLocked() store {
 	// need isolation from each other still swap in a per-test file via
 	// UseFileBackendForTesting.
 	if dir, ok := testdirs.Dir("tokenstore"); ok {
-		return &fileStore{path: filepath.Join(dir, "tokens.json")}
+		return &fileStore{path: filepath.Join(dir, "tokens.json"), ownsDir: true}
 	}
 	return keyringStore{}
 }

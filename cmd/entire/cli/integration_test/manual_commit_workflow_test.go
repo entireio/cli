@@ -16,18 +16,17 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
-// TestShadow_FullWorkflow tests the complete shadow workflow as described in
-// docs/requirements/shadow-strategy/example.md
+// TestManualCommit_FullWorkflow tests the complete manual-commit workflow.
 //
 // This test simulates Alice's workflow:
 // 1. Start session, create checkpoints
-// 2. Rewind to earlier checkpoint
-// 3. Create new checkpoint after rewind
-// 4. User commits (triggers condensation)
-// 5. Continue working after commit (new shadow branch)
-// 6. User commits again (second condensation)
-// 7. Verify final state
-func TestShadow_FullWorkflow(t *testing.T) {
+// 2. User commits (triggers condensation)
+// 3. Continue working after commit (new pending turn-end steps)
+// 4. User commits again (second condensation)
+// 5. Verify final state
+//
+//nolint:maintidx // End-to-end workflow across 5 sequential phases; the phases share so much accumulated state that splitting them would obscure the flow this test exists to document.
+func TestManualCommit_FullWorkflow(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -42,7 +41,7 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 
-	// Switch to feature branch (shadow skips main/master)
+	// Switch to feature branch
 	env.GitCheckoutNewBranch("feature/auth")
 
 	// Initialize Entire AFTER branch switch to avoid go-git cleaning untracked files
@@ -83,18 +82,9 @@ func TestShadow_FullWorkflow(t *testing.T) {
 		t.Fatalf("SimulateStop (checkpoint 1) failed: %v", err)
 	}
 
-	// Verify shadow branch created with correct worktree-specific naming
-	expectedShadowBranch := env.GetShadowBranchNameForCommit(initialHead)
-	if !env.BranchExists(expectedShadowBranch) {
-		t.Errorf("Expected shadow branch %s to exist", expectedShadowBranch)
-	}
-
-	// Verify 1 rewind point
-	points := env.GetRewindPoints()
-	if len(points) != 1 {
-		t.Fatalf("Expected 1 rewind point after first checkpoint, got %d", len(points))
-	}
-	t.Logf("Checkpoint 1 created: %s", points[0].Message)
+	// Verify the turn end was recorded in session state (no git objects written)
+	env.AssertTurnEndRecorded(session.ID, "src/auth.go")
+	t.Log("Checkpoint 1 created")
 
 	// ========================================
 	// Phase 3: Second Checkpoint (continuing same session)
@@ -125,12 +115,9 @@ func TestShadow_FullWorkflow(t *testing.T) {
 		t.Fatalf("SimulateStop (checkpoint 2) failed: %v", err)
 	}
 
-	// Verify 2 rewind points on same shadow branch
-	points = env.GetRewindPoints()
-	if len(points) != 2 {
-		t.Fatalf("Expected 2 rewind points after second checkpoint, got %d", len(points))
-	}
-	t.Logf("Checkpoint 2 created: %s", points[0].Message)
+	// Verify checkpoint 2 recorded both files, with auth.go's hash now v2's
+	env.AssertTurnEndRecorded(session.ID, "src/hash.go", "src/auth.go")
+	t.Log("Checkpoint 2 created")
 
 	// Verify both files exist
 	if !env.FileExists("src/hash.go") {
@@ -141,61 +128,19 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	}
 
 	// ========================================
-	// Phase 4: Rewind to First Checkpoint
+	// Phase 4: Third Checkpoint (continue same session)
 	// ========================================
-	t.Log("Phase 4: Rewinding to first checkpoint")
+	t.Log("Phase 4: Creating third checkpoint (continuing same session)")
 
-	// Find checkpoint 1 by message (the one for "Create authentication module")
-	var checkpoint1ID string
-	for _, p := range points {
-		if p.Message == "Create authentication module" {
-			checkpoint1ID = p.ID
-			break
-		}
-	}
-	if checkpoint1ID == "" {
-		t.Fatalf("Could not find checkpoint for 'Create authentication module' in %d points", len(points))
-	}
-
-	if err := env.Rewind(checkpoint1ID); err != nil {
-		t.Fatalf("Rewind to checkpoint 1 failed: %v", err)
-	}
-
-	// Verify hash.go was removed (it was only added in checkpoint 2)
-	if env.FileExists("src/hash.go") {
-		t.Error("src/hash.go should NOT exist after rewind to checkpoint 1")
-	}
-
-	// Verify auth.go restored to v1 (without the "TODO: use hashed passwords" comment)
-	content := env.ReadFile("src/auth.go")
-	if content != authV1 {
-		t.Errorf("src/auth.go should be restored to v1 after rewind, got: %s", content)
-	}
-
-	// Verify HEAD unchanged (shadow doesn't modify user's branch)
-	if head := env.GetHeadHash(); head != initialHead {
-		t.Errorf("HEAD should be unchanged after rewind, got %s, want %s", head[:7], initialHead[:7])
-	}
-
-	// Verify shadow branch still exists (history preserved)
-	if !env.BranchExists(expectedShadowBranch) {
-		t.Errorf("Shadow branch %s should still exist after rewind", expectedShadowBranch)
-	}
-
-	// ========================================
-	// Phase 5: New Checkpoint After Rewind (continue same session)
-	// ========================================
-	t.Log("Phase 5: Creating checkpoint after rewind (continuing same session)")
-
-	// Continue the same session after rewind
+	// Continue the same session
 	if err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Use bcrypt for hashing"); err != nil {
-		t.Fatalf("SimulateUserPromptSubmitWithPrompt (after rewind) failed: %v", err)
+		t.Fatalf("SimulateUserPromptSubmitWithPrompt (checkpoint 3) failed: %v", err)
 	}
 
 	// Reset transcript builder for next checkpoint
 	session.TranscriptBuilder = NewTranscriptBuilder()
 
-	// Create bcrypt.go instead (different approach)
+	// Create bcrypt.go (different approach)
 	bcryptV1 := "package auth\n\nimport \"golang.org/x/crypto/bcrypt\"\n\nfunc HashPassword(pass string) ([]byte, error) {\n\treturn bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)\n}"
 	authV3 := "package auth\n\nfunc Authenticate(user, pass string) bool {\n\t// Use bcrypt for password hashing\n\treturn false\n}"
 	env.WriteFile("src/bcrypt.go", bcryptV1)
@@ -212,20 +157,16 @@ func TestShadow_FullWorkflow(t *testing.T) {
 		t.Fatalf("SimulateStop (checkpoint 3) failed: %v", err)
 	}
 
-	// Verify we now have checkpoints (may be 3 if history preserved, or could vary)
-	points = env.GetRewindPoints()
-	if len(points) < 1 {
-		t.Fatalf("Expected at least 1 rewind point after checkpoint 3, got %d", len(points))
-	}
-	t.Logf("After rewind and new checkpoint: %d rewind points", len(points))
+	// Verify checkpoint 3 was recorded
+	env.AssertTurnEndRecorded(session.ID, "src/bcrypt.go")
 
 	// ========================================
-	// Phase 6: User Commits (Condensation)
+	// Phase 5: User Commits (Condensation)
 	// ========================================
-	t.Log("Phase 6: User commits - triggering condensation")
+	t.Log("Phase 5: User commits - triggering condensation")
 
-	// Stage and commit with shadow hooks
-	env.GitCommitWithShadowHooks("Add user authentication with bcrypt", "src/auth.go", "src/bcrypt.go")
+	// Stage and commit with hooks
+	env.GitCommitWithHooks("Add user authentication with bcrypt", "src/auth.go", "src/bcrypt.go")
 
 	// Get the new commit
 	commit1Hash := env.GetHeadHash()
@@ -241,7 +182,7 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	}
 
 	// Get checkpoint ID by walking history - verifies condensation added the trailer
-	checkpoint1ID = env.GetLatestCheckpointIDFromHistory()
+	checkpoint1ID := env.GetLatestCheckpointIDFromHistory()
 	t.Logf("Checkpoint 1 ID: %s", checkpoint1ID)
 
 	// Verify entire/checkpoints/v1 branch exists with checkpoint folder
@@ -262,9 +203,9 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	}
 
 	// ========================================
-	// Phase 7: Continue Working After Commit
+	// Phase 6: Continue Working After Commit
 	// ========================================
-	t.Log("Phase 7: Continuing work after user commit")
+	t.Log("Phase 6: Continuing work after user commit")
 
 	// Verify HEAD changed
 	if commit1Hash == initialHead {
@@ -289,24 +230,18 @@ func TestShadow_FullWorkflow(t *testing.T) {
 		t.Fatalf("SimulateStop (checkpoint 4) failed: %v", err)
 	}
 
-	// Verify NEW shadow branch created (based on new HEAD)
-	expectedShadowBranch2 := env.GetShadowBranchNameForCommit(commit1Hash)
-	if !env.BranchExists(expectedShadowBranch2) {
-		t.Errorf("Expected new shadow branch %s after commit", expectedShadowBranch2)
+	// Verify the new session's step sits on the new HEAD
+	state4 := env.AssertTurnEndRecorded(session4.ID, "src/session.go")
+	if state4.BaseCommit != commit1Hash {
+		t.Errorf("session4 BaseCommit = %s, want the first commit %s", state4.BaseCommit, commit1Hash)
 	}
 
-	// Verify it's different from the first shadow branch
-	if expectedShadowBranch == expectedShadowBranch2 {
-		t.Error("New shadow branch should have different name than first (different base commit)")
-	}
-	t.Logf("New shadow branch after commit: %s", expectedShadowBranch2)
-
 	// ========================================
-	// Phase 8: Second User Commit
+	// Phase 7: Second User Commit
 	// ========================================
-	t.Log("Phase 8: Second user commit")
+	t.Log("Phase 7: Second user commit")
 
-	env.GitCommitWithShadowHooks("Add session management", "src/session.go")
+	env.GitCommitWithHooks("Add session management", "src/session.go")
 
 	commit2Hash := env.GetHeadHash()
 	t.Logf("User commit 2: %s", commit2Hash[:7])
@@ -334,9 +269,9 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	}
 
 	// ========================================
-	// Phase 9: Verify Final State
+	// Phase 8: Verify Final State
 	// ========================================
-	t.Log("Phase 9: Verifying final state")
+	t.Log("Phase 8: Verifying final state")
 
 	// 2 user commits on feature branch
 	// Both should be clean (no Entire-* trailers)
@@ -354,20 +289,15 @@ func TestShadow_FullWorkflow(t *testing.T) {
 		}
 	}
 
-	// Verify shadow branches exist (can be pruned later)
-	if !env.BranchExists(expectedShadowBranch) {
-		t.Logf("Note: First shadow branch %s may have been cleaned up", expectedShadowBranch)
-	}
-	if !env.BranchExists(expectedShadowBranch2) {
-		t.Logf("Note: Second shadow branch %s may have been cleaned up", expectedShadowBranch2)
-	}
+	// No shadow branches anywhere: nothing writes them
+	env.AssertNoShadowBranches()
 
-	t.Log("Shadow full workflow test completed successfully!")
+	t.Log("Manual-commit full workflow test completed successfully!")
 }
 
-// TestShadow_SessionStateLocation verifies session state is stored in .git/
+// TestManualCommit_SessionStateLocation verifies session state is stored in .git/
 // (not .entire/) so it's never accidentally committed.
-func TestShadow_SessionStateLocation(t *testing.T) {
+func TestManualCommit_SessionStateLocation(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -401,10 +331,10 @@ func TestShadow_SessionStateLocation(t *testing.T) {
 	}
 }
 
-// TestShadow_MultipleConcurrentSessions tests that starting a second Claude session
+// TestManualCommit_MultipleConcurrentSessions tests that starting a second Claude session
 // while another session has uncommitted checkpoints triggers a warning.
 // The first prompt is blocked with continue:false, subsequent prompts proceed.
-func TestShadow_MultipleConcurrentSessions(t *testing.T) {
+func TestManualCommit_MultipleConcurrentSessions(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -426,7 +356,7 @@ func TestShadow_MultipleConcurrentSessions(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit (session1) failed: %v", err)
 	}
 
-	// Create a checkpoint for session1 (this creates the shadow branch)
+	// Create a checkpoint for session1 (a turn-end step in its session state)
 	env.WriteFile("file.txt", "content")
 	session1.CreateTranscript("Add file", []FileChange{{Path: "file.txt", Content: "content"}})
 	if err := env.SimulateStop(session1.ID, session1.TranscriptPath); err != nil {
@@ -463,25 +393,23 @@ func TestShadow_MultipleConcurrentSessions(t *testing.T) {
 		t.Errorf("Expected 2 session state files after second session attempt, got %d", len(entries))
 	}
 
-	// Clear session1 state file - this makes the shadow branch "orphaned"
+	// Clear session1 state file - this drops its uncommitted work
 	if err := env.ClearSessionState(session1.ID); err != nil {
 		t.Fatalf("ClearSessionState failed: %v", err)
 	}
 
 	// Session2 had ConcurrentWarningShown=true, but now the conflict is resolved
 	// (session1 state cleared), so the warning flag is cleared and hooks proceed normally.
-	// The orphaned shadow branch (from session1) is reset, allowing session2 to proceed.
 	err = env.SimulateUserPromptSubmit(session2.ID)
 	if err != nil {
-		t.Errorf("Expected success after orphaned shadow branch is reset, got: %v", err)
-	} else {
-		t.Log("Session2 proceeded after orphaned shadow branch was reset")
+		t.Errorf("Expected success after session1's state was cleared, got: %v", err)
 	}
 }
 
-// TestShadow_ShadowBranchMigrationOnPull verifies that when the base commit changes
-// (e.g., after stash → pull → apply), the shadow branch is moved to the new commit.
-func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
+// TestManualCommit_BaseCommitFollowsPull verifies that when the base commit changes
+// (e.g., after stash → pull → apply), the session's BaseCommit follows HEAD and
+// its pending steps survive.
+func TestManualCommit_BaseCommitFollowsPull(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -496,7 +424,6 @@ func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
 	env.InitEntire()
 
 	originalHead := env.GetHeadHash()
-	originalShadowBranch := env.GetShadowBranchNameForCommit(originalHead)
 
 	// Start session and create checkpoint
 	session := env.NewSession()
@@ -510,11 +437,7 @@ func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	// Verify shadow branch exists at original commit
-	if !env.BranchExists(originalShadowBranch) {
-		t.Fatalf("Shadow branch %s should exist", originalShadowBranch)
-	}
-	t.Logf("Original shadow branch: %s", originalShadowBranch)
+	env.AssertTurnEndRecorded(session.ID, "file.txt")
 
 	// Simulate pull: create a new commit (simulating what pull would do)
 	// In real scenario: stash → pull → apply
@@ -524,31 +447,22 @@ func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
 	env.GitCommit("Simulated pull commit")
 
 	newHead := env.GetHeadHash()
-	newShadowBranch := env.GetShadowBranchNameForCommit(newHead)
 	t.Logf("After simulated pull: old=%s new=%s", originalHead[:7], newHead[:7])
 
 	// Restore the file (simulating stash apply)
 	env.WriteFile("file.txt", "content")
 
-	// Next prompt should migrate the shadow branch
+	// Next prompt moves the session's BaseCommit to the new HEAD
 	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
 		t.Fatalf("SimulateUserPromptSubmit after pull failed: %v", err)
 	}
 
-	// Verify old shadow branch is gone and new one exists
-	if env.BranchExists(originalShadowBranch) {
-		t.Errorf("Old shadow branch %s should be deleted after migration", originalShadowBranch)
-	}
-	if !env.BranchExists(newShadowBranch) {
-		t.Errorf("New shadow branch %s should exist after migration", newShadowBranch)
-	}
-
-	// Verify we can still create checkpoints on the new shadow branch
+	// Verify we can still record turn-end steps on the new base
 	env.WriteFile("file2.txt", "more content")
 	session.TranscriptBuilder = NewTranscriptBuilder()
 	session.CreateTranscript("Add file2", []FileChange{{Path: "file2.txt", Content: "more content"}})
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop after migration failed: %v", err)
+		t.Fatalf("SimulateStop after BaseCommit sync failed: %v", err)
 	}
 
 	// Verify session state has updated base commit and preserves agent type
@@ -560,74 +474,20 @@ func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
 		t.Errorf("Session base commit should be %s, got %s", newHead[:7], state.BaseCommit[:7])
 	}
 	if state.StepCount != 2 {
-		t.Errorf("Expected 2 checkpoints after migration, got %d", state.StepCount)
+		t.Errorf("Expected 2 steps after BaseCommit sync, got %d", state.StepCount)
 	}
-	// Verify agent_type is preserved across checkpoints and migration
+	// Verify agent_type is preserved across steps and the BaseCommit sync
 	expectedAgentType := agent.AgentTypeClaudeCode
 	if state.AgentType != expectedAgentType {
 		t.Errorf("Session AgentType should be %q, got %q", expectedAgentType, state.AgentType)
 	}
 
-	t.Log("Shadow branch successfully migrated after base commit change")
+	env.AssertNoShadowBranches()
 }
 
-// TestShadow_ShadowBranchNaming verifies shadow branches follow the
-// entire/<base-sha[:7]> naming convention.
-func TestShadow_ShadowBranchNaming(t *testing.T) {
-	t.Parallel()
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	env.InitRepo()
-
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-
-	env.GitCheckoutNewBranch("feature/test")
-
-	// Initialize AFTER branch switch
-	env.InitEntire()
-
-	baseHead := env.GetHeadHash()
-
-	session := env.NewSession()
-	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
-		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
-	}
-
-	env.WriteFile("file.txt", "content")
-	session.CreateTranscript("Add file", []FileChange{{Path: "file.txt", Content: "content"}})
-
-	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop failed: %v", err)
-	}
-
-	// Verify shadow branch name matches worktree-specific format
-	expectedBranch := env.GetShadowBranchNameForCommit(baseHead)
-	if !env.BranchExists(expectedBranch) {
-		t.Errorf("Shadow branch should be named %s", expectedBranch)
-	}
-
-	// List all entire/ branches
-	branches := env.ListBranchesWithPrefix("entire/")
-	t.Logf("Found entire/ branches: %v", branches)
-
-	foundExpected := false
-	for _, b := range branches {
-		if b == expectedBranch {
-			foundExpected = true
-			break
-		}
-	}
-	if !foundExpected {
-		t.Errorf("Expected branch %s not found in %v", expectedBranch, branches)
-	}
-}
-
-// TestShadow_TranscriptCondensation verifies that session transcripts are
+// TestManualCommit_TranscriptCondensation verifies that session transcripts are
 // included in the entire/checkpoints/v1 branch during condensation.
-func TestShadow_TranscriptCondensation(t *testing.T) {
+func TestManualCommit_TranscriptCondensation(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -656,13 +516,13 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 		[]FileChange{{Path: "main.go", Content: content}},
 	)
 
-	// Save checkpoint (this stores transcript in shadow branch)
+	// Save checkpoint (records the turn-end step in session state)
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
 	// Commit with hooks (triggers condensation)
-	env.GitCommitWithShadowHooks("Add main.go", "main.go")
+	env.GitCommitWithHooks("Add main.go", "main.go")
 
 	// Get checkpoint ID from entire/checkpoints/v1 branch (not from commit message)
 	checkpointID := env.GetLatestCheckpointID()
@@ -692,7 +552,7 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 	if !found {
 		t.Fatal("session metadata.json should be readable")
 	}
-	var sessionMetadata checkpoint.CommittedMetadata
+	var sessionMetadata checkpoint.Metadata
 	if err := json.Unmarshal([]byte(sessionMetadataContent), &sessionMetadata); err != nil {
 		t.Fatalf("failed to parse session metadata.json: %v", err)
 	}
@@ -704,13 +564,13 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 	}
 }
 
-// TestShadow_FullTranscriptContext verifies that each checkpoint includes
+// TestManualCommit_FullTranscriptContext verifies that each checkpoint includes
 // only the prompts from its checkpoint portion, not the entire session.
 //
 // This tests checkpoint-scoped prompts:
 // - First commit: prompt.txt includes prompts 1-2 (from checkpoint start)
 // - Second commit: prompt.txt includes only prompt 3 (from second checkpoint start)
-func TestShadow_FullTranscriptContext(t *testing.T) {
+func TestManualCommit_FullTranscriptContext(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -732,7 +592,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	}
 
 	// First prompt: create file A
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	// Build transcript with first prompt
@@ -746,7 +606,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	if err := env.SimulateUserPromptSubmitWithPrompt(session1.ID, "Now create function B in b.go"); err != nil {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt (second prompt) failed: %v", err)
 	}
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	session1.TranscriptBuilder.AddUserMessage("Now create function B in b.go")
@@ -768,7 +628,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	t.Log("Phase 2: First user commit")
 
 	// User commits
-	env.GitCommitWithShadowHooks("Add functions A and B", "a.go", "b.go")
+	env.GitCommitWithHooks("Add functions A and B", "a.go", "b.go")
 
 	// Get first checkpoint ID from commit message trailer
 	commit1Hash := env.GetHeadHash()
@@ -823,7 +683,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	t.Log("Phase 4: Second user commit")
 
 	// User commits again
-	env.GitCommitWithShadowHooks("Add function C", "c.go")
+	env.GitCommitWithHooks("Add function C", "c.go")
 
 	// Get second checkpoint ID from commit message trailer
 	commit2Hash := env.GetHeadHash()
@@ -852,269 +712,10 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 		}
 	}
 
-	t.Log("Shadow full transcript context test completed successfully!")
+	t.Log("Full transcript context test completed successfully!")
 }
 
-// TestShadow_RewindAndCondensation verifies that after rewinding to an earlier
-// checkpoint, the checkpoint only includes prompts up to that point.
-//
-// Workflow:
-// 1. Create checkpoint 1 (prompt 1)
-// 2. Create checkpoint 2 (prompt 2)
-// 3. Rewind to checkpoint 1
-// 4. User commits
-// 5. Verify checkpoint only contains prompt 1 (NOT prompt 2)
-func TestShadow_RewindAndCondensation(t *testing.T) {
-	t.Parallel()
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	// Setup repository
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test Repository")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-	env.GitCheckoutNewBranch("feature/rewind-test")
-	env.InitEntire()
-
-	t.Log("Phase 1: Create first checkpoint with prompt 1")
-
-	session := env.NewSession()
-	if err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Create function A in a.go"); err != nil {
-		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
-	}
-
-	// First prompt: create file A
-	fileAContent := "package main\n\nfunc A() {}\n"
-	env.WriteFile("a.go", fileAContent)
-
-	session.TranscriptBuilder.AddUserMessage("Create function A in a.go")
-	session.TranscriptBuilder.AddAssistantMessage("I'll create function A for you.")
-	toolID1 := session.TranscriptBuilder.AddToolUse("mcp__acp__Write", "a.go", fileAContent)
-	session.TranscriptBuilder.AddToolResult(toolID1)
-	session.TranscriptBuilder.AddAssistantMessage("Done creating function A!")
-
-	if err := session.TranscriptBuilder.WriteToFile(session.TranscriptPath); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop (checkpoint 1) failed: %v", err)
-	}
-
-	// Get checkpoint 1 for later
-	rewindPoints := env.GetRewindPoints()
-	if len(rewindPoints) != 1 {
-		t.Fatalf("Expected 1 rewind point after checkpoint 1, got %d", len(rewindPoints))
-	}
-	checkpoint1 := rewindPoints[0]
-	t.Logf("Checkpoint 1: %s - %s", checkpoint1.ID[:7], checkpoint1.Message)
-
-	t.Log("Phase 2: Create second checkpoint with prompt 2")
-
-	// Second prompt: modify file A (a different approach)
-	fileAModified := "package main\n\nfunc A() {\n\t// Modified version\n}\n"
-	env.WriteFile("a.go", fileAModified)
-
-	session.TranscriptBuilder.AddUserMessage("Actually, modify function A to have a comment")
-	session.TranscriptBuilder.AddAssistantMessage("I'll modify function A for you.")
-	toolID2 := session.TranscriptBuilder.AddToolUse("mcp__acp__Write", "a.go", fileAModified)
-	session.TranscriptBuilder.AddToolResult(toolID2)
-	session.TranscriptBuilder.AddAssistantMessage("Done modifying function A!")
-
-	if err := session.TranscriptBuilder.WriteToFile(session.TranscriptPath); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop (checkpoint 2) failed: %v", err)
-	}
-
-	rewindPoints = env.GetRewindPoints()
-	if len(rewindPoints) != 2 {
-		t.Fatalf("Expected 2 rewind points after checkpoint 2, got %d", len(rewindPoints))
-	}
-	t.Logf("Checkpoint 2: %s - %s", rewindPoints[0].ID[:7], rewindPoints[0].Message)
-
-	// Verify file has modified content
-	currentContent := env.ReadFile("a.go")
-	if currentContent != fileAModified {
-		t.Errorf("a.go should have modified content before rewind")
-	}
-
-	t.Log("Phase 3: Rewind to checkpoint 1")
-
-	// Rewind using the CLI (which calls the strategy internally)
-	if err := env.Rewind(checkpoint1.ID); err != nil {
-		t.Fatalf("Rewind failed: %v", err)
-	}
-
-	// Verify file content is restored to checkpoint 1
-	restoredContent := env.ReadFile("a.go")
-	if restoredContent != fileAContent {
-		t.Errorf("a.go should have original content after rewind.\nExpected:\n%s\nGot:\n%s", fileAContent, restoredContent)
-	}
-	t.Log("Files successfully restored to checkpoint 1")
-
-	t.Log("Phase 4: User commits after rewind")
-
-	// User commits - this should trigger condensation
-	env.GitCommitWithShadowHooks("Add function A (reverted)", "a.go")
-
-	// Get checkpoint ID from commit message trailer
-	commitHash := env.GetHeadHash()
-	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
-	t.Logf("Checkpoint ID: %s", checkpointID)
-
-	t.Log("Phase 5: Verify checkpoint only contains prompt 1")
-
-	// Check prompt.txt (uses session file path in numbered subdirectory)
-	promptPath := SessionFilePath(checkpointID, "prompt.txt")
-	promptContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, promptPath)
-	if !found {
-		t.Errorf("prompt.txt should exist at %s", promptPath)
-	} else {
-		t.Logf("prompt.txt content:\n%s", promptContent)
-
-		// Should contain prompt 1
-		if !strings.Contains(promptContent, "Create function A") {
-			t.Error("prompt.txt should contain 'Create function A' from checkpoint 1")
-		}
-
-		// Should NOT contain prompt 2 (because we rewound past it)
-		if strings.Contains(promptContent, "modify function A") {
-			t.Error("prompt.txt should NOT contain 'modify function A' - we rewound past that checkpoint")
-		}
-	}
-
-	t.Log("Shadow rewind and condensation test completed successfully!")
-}
-
-// TestShadow_RewindPreservesUntrackedFilesFromSessionStart tests that files that existed
-// in the working directory (but weren't tracked in git) before the session started are
-// preserved when rewinding. This was a bug where such files were incorrectly deleted.
-func TestShadow_RewindPreservesUntrackedFilesFromSessionStart(t *testing.T) {
-	t.Parallel()
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	// Setup repository with initial commit
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test Repository")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-	env.GitCheckoutNewBranch("feature/untracked-test")
-
-	// Create an untracked file BEFORE initializing Entire session
-	// This simulates files like .claude/settings.json created by "entire setup"
-	untrackedContent := `{"key": "value"}`
-	env.WriteFile(".claude/settings.json", untrackedContent)
-
-	// Initialize Entire with manual-commit strategy
-	env.InitEntire()
-
-	t.Log("Phase 1: Create first checkpoint")
-
-	session := env.NewSession()
-	if err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Create function A"); err != nil {
-		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
-	}
-
-	// First prompt: create file A
-	fileAContent := "package main\n\nfunc A() {}\n"
-	env.WriteFile("a.go", fileAContent)
-
-	session.TranscriptBuilder.AddUserMessage("Create function A")
-	session.TranscriptBuilder.AddAssistantMessage("Done!")
-	toolID1 := session.TranscriptBuilder.AddToolUse("mcp__acp__Write", "a.go", fileAContent)
-	session.TranscriptBuilder.AddToolResult(toolID1)
-
-	if err := session.TranscriptBuilder.WriteToFile(session.TranscriptPath); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop (checkpoint 1) failed: %v", err)
-	}
-
-	rewindPoints := env.GetRewindPoints()
-	if len(rewindPoints) != 1 {
-		t.Fatalf("Expected 1 rewind point, got %d", len(rewindPoints))
-	}
-	checkpoint1 := rewindPoints[0]
-	t.Logf("Checkpoint 1: %s", checkpoint1.ID[:7])
-
-	t.Log("Phase 2: Create second checkpoint")
-
-	// Second prompt: create file B
-	fileBContent := "package main\n\nfunc B() {}\n"
-	env.WriteFile("b.go", fileBContent)
-
-	session.TranscriptBuilder.AddUserMessage("Create function B")
-	session.TranscriptBuilder.AddAssistantMessage("Done!")
-	toolID2 := session.TranscriptBuilder.AddToolUse("mcp__acp__Write", "b.go", fileBContent)
-	session.TranscriptBuilder.AddToolResult(toolID2)
-
-	if err := session.TranscriptBuilder.WriteToFile(session.TranscriptPath); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop (checkpoint 2) failed: %v", err)
-	}
-
-	rewindPoints = env.GetRewindPoints()
-	if len(rewindPoints) != 2 {
-		t.Fatalf("Expected 2 rewind points, got %d", len(rewindPoints))
-	}
-	t.Logf("Checkpoint 2: %s", rewindPoints[0].ID[:7])
-
-	// Verify the untracked file still exists before rewind
-	if !env.FileExists(".claude/settings.json") {
-		t.Fatal("Untracked file .claude/settings.json should exist before rewind")
-	}
-
-	t.Log("Phase 3: Rewind to checkpoint 1")
-
-	if err := env.Rewind(checkpoint1.ID); err != nil {
-		t.Fatalf("Rewind failed: %v", err)
-	}
-
-	// Verify that the untracked file that existed before session start is PRESERVED
-	if !env.FileExists(".claude/settings.json") {
-		t.Error("CRITICAL: .claude/settings.json was deleted during rewind but it existed before the session started!")
-	} else {
-		restoredContent := env.ReadFile(".claude/settings.json")
-		if restoredContent != untrackedContent {
-			t.Errorf("Untracked file content changed.\nExpected:\n%s\nGot:\n%s", untrackedContent, restoredContent)
-		} else {
-			t.Log("✓ Untracked file .claude/settings.json was preserved correctly")
-		}
-	}
-
-	// Verify b.go was deleted (it was created after checkpoint 1)
-	if env.FileExists("b.go") {
-		t.Error("b.go should have been deleted during rewind (it was created after checkpoint 1)")
-	} else {
-		t.Log("✓ b.go was correctly deleted during rewind")
-	}
-
-	// Verify a.go was restored
-	if !env.FileExists("a.go") {
-		t.Error("a.go should exist after rewind to checkpoint 1")
-	} else {
-		restoredA := env.ReadFile("a.go")
-		if restoredA != fileAContent {
-			t.Errorf("a.go content incorrect after rewind")
-		} else {
-			t.Log("✓ a.go was correctly restored")
-		}
-	}
-
-	t.Log("Test completed successfully!")
-}
-
-// TestShadow_IntermediateCommitsWithoutPrompts tests that commits without new Claude
+// TestManualCommit_IntermediateCommitsWithoutPrompts tests that commits without new Claude
 // content do NOT get checkpoint trailers.
 //
 // Scenario:
@@ -1123,7 +724,7 @@ func TestShadow_RewindPreservesUntrackedFilesFromSessionStart(t *testing.T) {
 // 3. User commits unrelated files without new Claude work - NO trailer (no new content)
 // 4. User enters new prompt, creates more files
 // 5. Second commit with Claude content gets a trailer
-func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
+func TestManualCommit_IntermediateCommitsWithoutPrompts(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -1144,7 +745,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 	}
 
 	// First prompt: create file A
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function A in a.go")
@@ -1163,7 +764,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 
 	t.Log("Phase 2: First commit (with session content)")
 
-	env.GitCommitWithShadowHooks("Add function A", "a.go")
+	env.GitCommitWithHooks("Add function A", "a.go")
 	commit1Hash := env.GetHeadHash()
 	checkpoint1ID := env.GetCheckpointIDFromCommitMessage(commit1Hash)
 	t.Logf("First commit: %s, checkpoint from trailer: %s", commit1Hash[:7], checkpoint1ID)
@@ -1178,7 +779,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 	// User creates an unrelated file and commits without entering a new Claude prompt
 	// Since there's no new session content, this commit should NOT get a trailer
 	env.WriteFile("unrelated.txt", "This is an unrelated file")
-	env.GitCommitWithShadowHooks("Add unrelated file", "unrelated.txt")
+	env.GitCommitWithHooks("Add unrelated file", "unrelated.txt")
 
 	commit2Hash := env.GetHeadHash()
 	checkpoint2ID := env.GetCheckpointIDFromCommitMessage(commit2Hash)
@@ -1197,7 +798,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function B in b.go")
@@ -1214,7 +815,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Add function B", "b.go")
+	env.GitCommitWithHooks("Add function B", "b.go")
 
 	commit3Hash := env.GetHeadHash()
 	checkpoint3ID := env.GetCheckpointIDFromCommitMessage(commit3Hash)
@@ -1244,14 +845,14 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 	t.Log("Intermediate commits test completed successfully!")
 }
 
-// TestShadow_FullTranscriptCondensationWithIntermediateCommits tests that checkpoints
+// TestManualCommit_FullTranscriptCondensationWithIntermediateCommits tests that checkpoints
 // contain only checkpoint-scoped prompts across multiple commits.
 //
 // Scenario:
 // 1. Session with prompts A and B, commit 1 → prompt.txt has A and B
 // 2. Continue session with prompt C, commit 2 (without intermediate prompt submit)
 // 3. Verify commit 2's prompt.txt has only C (checkpoint-scoped)
-func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) {
+func TestManualCommit_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -1272,7 +873,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 	}
 
 	// First prompt
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function A")
@@ -1284,7 +885,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 	if err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Create function B"); err != nil {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt (second prompt) failed: %v", err)
 	}
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function B")
@@ -1302,7 +903,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 
 	t.Log("Phase 2: First commit")
 
-	env.GitCommitWithShadowHooks("Add functions A and B", "a.go", "b.go")
+	env.GitCommitWithHooks("Add functions A and B", "a.go", "b.go")
 	commit1Hash := env.GetHeadHash()
 	checkpoint1ID := env.GetCheckpointIDFromCommitMessage(commit1Hash)
 	t.Logf("First commit: %s, checkpoint: %s", commit1Hash[:7], checkpoint1ID)
@@ -1343,7 +944,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 
 	t.Log("Phase 4: Second commit")
 
-	env.GitCommitWithShadowHooks("Add function C", "c.go")
+	env.GitCommitWithHooks("Add function C", "c.go")
 	commit2Hash := env.GetHeadHash()
 	checkpoint2ID := env.GetCheckpointIDFromCommitMessage(commit2Hash)
 	t.Logf("Second commit: %s, checkpoint: %s", commit2Hash[:7], checkpoint2ID)
@@ -1376,150 +977,10 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 	t.Log("Checkpoint-scoped prompt condensation with intermediate commits test completed successfully!")
 }
 
-// TestShadow_RewindPreservesUntrackedFilesWithExistingShadowBranch tests that untracked files
-// present at session start are preserved during rewind, even when the shadow branch already
-// exists from a previous session.
-func TestShadow_RewindPreservesUntrackedFilesWithExistingShadowBranch(t *testing.T) {
-	t.Parallel()
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	// Setup repository with initial commit
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test Repository")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-	env.GitCheckoutNewBranch("feature/existing-shadow-test")
-	env.InitEntire()
-
-	t.Log("Phase 1: Create untracked file before session starts")
-
-	// Create an untracked file BEFORE the first checkpoint
-	// This simulates configuration files that exist before Claude starts
-	untrackedContent := `{"new": "config"}`
-	env.WriteFile(".claude/settings.json", untrackedContent)
-
-	t.Log("Phase 1: Create a previous session to establish shadow branch")
-
-	// First session - creates the shadow branch
-	session1 := env.NewSession()
-	if err := env.SimulateUserPromptSubmitWithPrompt(session1.ID, "Create old.go"); err != nil {
-		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
-	}
-
-	env.WriteFile("old.go", "package main\n")
-	session1.TranscriptBuilder.AddUserMessage("Create old.go")
-	session1.TranscriptBuilder.AddAssistantMessage("Done!")
-	toolID := session1.TranscriptBuilder.AddToolUse("mcp__acp__Write", "old.go", "package main\n")
-	session1.TranscriptBuilder.AddToolResult(toolID)
-
-	if err := session1.TranscriptBuilder.WriteToFile(session1.TranscriptPath); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	if err := env.SimulateStop(session1.ID, session1.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop (session 1) failed: %v", err)
-	}
-
-	// Verify shadow branch exists
-	shadowBranchName := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranchName) {
-		t.Fatalf("Shadow branch %s should exist after first session", shadowBranchName)
-	}
-	t.Logf("Shadow branch %s exists from first session", shadowBranchName)
-
-	t.Log("Phase 2: Continue session and create second checkpoint")
-
-	// Continue the SAME session (Claude resumes with the same session ID)
-	// This is the expected behavior - continuing work on the same base commit
-	if err := env.SimulateUserPromptSubmitWithPrompt(session1.ID, "Create A"); err != nil {
-		t.Fatalf("SimulateUserPromptSubmitWithPrompt (continue session) failed: %v", err)
-	}
-
-	// Reset transcript builder for next checkpoint
-	session1.TranscriptBuilder = NewTranscriptBuilder()
-
-	// Second checkpoint of session - should capture .claude/settings.json
-	env.WriteFile("a.go", "package main\n\nfunc A() {}\n")
-	session1.TranscriptBuilder.AddUserMessage("Create A")
-	session1.TranscriptBuilder.AddAssistantMessage("Done!")
-	toolID2 := session1.TranscriptBuilder.AddToolUse("mcp__acp__Write", "a.go", "package main\n\nfunc A() {}\n")
-	session1.TranscriptBuilder.AddToolResult(toolID2)
-
-	if err := session1.TranscriptBuilder.WriteToFile(session1.TranscriptPath); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	if err := env.SimulateStop(session1.ID, session1.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop (checkpoint 2) failed: %v", err)
-	}
-
-	rewindPoints := env.GetRewindPoints()
-	if len(rewindPoints) < 2 {
-		t.Fatalf("Expected at least 2 rewind points, got %d", len(rewindPoints))
-	}
-	// Find the most recent checkpoint (checkpoint 2)
-	checkpoint1 := &rewindPoints[0] // Most recent first
-	t.Logf("Checkpoint 2: %s", checkpoint1.ID[:7])
-
-	t.Log("Phase 3: Create third checkpoint")
-
-	// Continue the session for the third checkpoint
-	if err := env.SimulateUserPromptSubmitWithPrompt(session1.ID, "Create B"); err != nil {
-		t.Fatalf("SimulateUserPromptSubmitWithPrompt (checkpoint 3) failed: %v", err)
-	}
-
-	// Reset transcript builder for next checkpoint
-	session1.TranscriptBuilder = NewTranscriptBuilder()
-
-	env.WriteFile("b.go", "package main\n\nfunc B() {}\n")
-	session1.TranscriptBuilder.AddUserMessage("Create B")
-	session1.TranscriptBuilder.AddAssistantMessage("Done!")
-	toolID3 := session1.TranscriptBuilder.AddToolUse("mcp__acp__Write", "b.go", "package main\n\nfunc B() {}\n")
-	session1.TranscriptBuilder.AddToolResult(toolID3)
-
-	if err := session1.TranscriptBuilder.WriteToFile(session1.TranscriptPath); err != nil {
-		t.Fatalf("Failed to write transcript: %v", err)
-	}
-
-	if err := env.SimulateStop(session1.ID, session1.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop (checkpoint 3) failed: %v", err)
-	}
-
-	t.Log("Phase 4: Rewind to checkpoint 2")
-
-	if err := env.Rewind(checkpoint1.ID); err != nil {
-		t.Fatalf("Rewind failed: %v", err)
-	}
-
-	// Verify that the untracked file that existed at session start is PRESERVED
-	// Since .claude/settings.json was created before checkpoint 1, it's in checkpoint 1's tree
-	// and will flow through to checkpoint 2, so it should be preserved on rewind
-	if !env.FileExists(".claude/settings.json") {
-		t.Error(".claude/settings.json should have been preserved during rewind")
-	} else {
-		restoredContent := env.ReadFile(".claude/settings.json")
-		if restoredContent != untrackedContent {
-			t.Errorf("Untracked file content changed.\nExpected:\n%s\nGot:\n%s", untrackedContent, restoredContent)
-		} else {
-			t.Log("✓ .claude/settings.json was preserved correctly")
-		}
-	}
-
-	// Verify b.go was deleted
-	if env.FileExists("b.go") {
-		t.Error("b.go should have been deleted during rewind")
-	} else {
-		t.Log("✓ b.go was correctly deleted during rewind")
-	}
-
-	t.Log("Test completed successfully!")
-}
-
-// TestShadow_TrailerRemovalSkipsCondensation tests that removing the Entire-Checkpoint
+// TestManualCommit_TrailerRemovalSkipsCondensation tests that removing the Entire-Checkpoint
 // trailer during commit message editing causes condensation to be skipped.
 // This allows users to opt-out of linking a commit to their Claude session.
-func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
+func TestManualCommit_TrailerRemovalSkipsCondensation(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -1539,7 +1000,7 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
-	fileAContent := "package main\n\nfunc A() {}\n"
+	fileAContent := pkgFuncA
 	env.WriteFile("a.go", fileAContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function A")
@@ -1590,7 +1051,7 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmitWithPrompt failed: %v", err)
 	}
 
-	fileBContent := "package main\n\nfunc B() {}\n"
+	fileBContent := pkgFuncB
 	env.WriteFile("b.go", fileBContent)
 
 	session.TranscriptBuilder.AddUserMessage("Create function B")
@@ -1607,7 +1068,7 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 	}
 
 	// This time, keep the trailer (normal commit with hooks)
-	env.GitCommitWithShadowHooks("Add function B", "b.go")
+	env.GitCommitWithHooks("Add function B", "b.go")
 
 	commit2Hash := env.GetHeadHash()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commit2Hash)
@@ -1636,9 +1097,9 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 	t.Log("Trailer removal opt-out test completed successfully!")
 }
 
-// TestShadow_SessionsBranchCommitTrailers verifies that commits on the entire/checkpoints/v1
+// TestManualCommit_SessionsBranchCommitTrailers verifies that commits on the entire/checkpoints/v1
 // branch contain the expected trailers: Entire-Session, Entire-Strategy, and Entire-Agent.
-func TestShadow_SessionsBranchCommitTrailers(t *testing.T) {
+func TestManualCommit_SessionsBranchCommitTrailers(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -1666,7 +1127,7 @@ func TestShadow_SessionsBranchCommitTrailers(t *testing.T) {
 	}
 
 	// Commit to trigger condensation
-	env.GitCommitWithShadowHooks("Add main.go", "main.go")
+	env.GitCommitWithHooks("Add main.go", "main.go")
 
 	// Get the commit message on entire/checkpoints/v1 branch
 	sessionsCommitMsg := env.GetLatestCommitMessageOnBranch(paths.MetadataBranchName)

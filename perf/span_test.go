@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -469,4 +470,65 @@ func TestEnd_NoErrorFlagByDefault(t *testing.T) {
 	if parent.err != nil {
 		t.Errorf("parent span should have nil error, got %v", parent.err)
 	}
+}
+
+// Env-var tests cannot use t.Parallel(): t.Setenv panics if the test is parallel.
+
+func TestSlowSpanThreshold_DefaultWhenUnset(t *testing.T) {
+	t.Setenv(SlowSpanEnvVar, "")
+	os.Unsetenv(SlowSpanEnvVar)
+	require.Equal(t, DefaultSlowSpanThreshold, slowSpanThreshold())
+}
+
+func TestSlowSpanThreshold_HonorsOverride(t *testing.T) {
+	t.Setenv(SlowSpanEnvVar, "250")
+	require.Equal(t, 250*time.Millisecond, slowSpanThreshold())
+}
+
+func TestSlowSpanThreshold_InvalidFallsBackToDefault(t *testing.T) {
+	// A typo must not silently disable slow-hook diagnostics.
+	t.Setenv(SlowSpanEnvVar, "not-a-number")
+	require.Equal(t, DefaultSlowSpanThreshold, slowSpanThreshold())
+}
+
+func TestSlowSpanThreshold_ZeroOptsOut(t *testing.T) {
+	t.Setenv(SlowSpanEnvVar, "0")
+	require.Zero(t, slowSpanThreshold())
+}
+
+func TestIsSlowSpan_BoundaryIsInclusive(t *testing.T) {
+	t.Setenv(SlowSpanEnvVar, "100")
+	require.False(t, isSlowSpan(99*time.Millisecond))
+	require.True(t, isSlowSpan(100*time.Millisecond))
+	require.True(t, isSlowSpan(101*time.Millisecond))
+}
+
+func TestIsSlowSpan_OptOutNeverEscalates(t *testing.T) {
+	t.Setenv(SlowSpanEnvVar, "0")
+	require.False(t, isSlowSpan(time.Hour))
+}
+
+func TestEnd_SlowRootSpanCarriesSlowAttr(t *testing.T) {
+	t.Setenv(SlowSpanEnvVar, "10")
+
+	root := testEndedSpan("stop", 0)
+	root.ended = false
+	root.start = time.Now().Add(-50 * time.Millisecond)
+	root.ctx = context.Background()
+	root.End()
+
+	require.True(t, isSlowSpan(root.duration),
+		"a 50ms span must count as slow at a 10ms threshold")
+}
+
+func TestEnd_FastRootSpanIsNotSlow(t *testing.T) {
+	t.Setenv(SlowSpanEnvVar, "5000")
+
+	root := testEndedSpan("stop", 0)
+	root.ended = false
+	root.start = time.Now()
+	root.ctx = context.Background()
+	root.End()
+
+	require.False(t, isSlowSpan(root.duration))
 }

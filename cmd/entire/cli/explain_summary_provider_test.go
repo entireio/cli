@@ -3,9 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -61,7 +65,6 @@ type stubTextAgent struct {
 func (s *stubTextAgent) Name() types.AgentName                        { return s.name }
 func (s *stubTextAgent) Type() types.AgentType                        { return s.kind }
 func (s *stubTextAgent) Description() string                          { return "stub" }
-func (s *stubTextAgent) IsPreview() bool                              { return false }
 func (s *stubTextAgent) DetectPresence(context.Context) (bool, error) { return true, nil }
 func (s *stubTextAgent) ProtectedDirs() []string                      { return nil }
 func (s *stubTextAgent) ReadTranscript(string) ([]byte, error)        { return nil, nil }
@@ -79,6 +82,25 @@ func (s *stubTextAgent) WriteSession(context.Context, *agent.AgentSession) error
 func (s *stubTextAgent) FormatResumeCommand(string) string                       { return "" }
 func (s *stubTextAgent) GenerateText(context.Context, string, string) (string, error) {
 	return `{"intent":"Intent","outcome":"Outcome","learnings":{"repo":[],"code":[],"workflow":[]},"friction":[],"open_items":[]}`, nil
+}
+
+type stubNonTextAgent struct {
+	agent.Agent
+}
+
+func writeInfoSentinelExternalAgentBinary(t *testing.T, dir, name string) {
+	t.Helper()
+
+	script := `#!/bin/sh
+if [ "$1" = "info" ]; then
+  : > "$ENTIRE_TEST_UNRELATED_INFO_SENTINEL"
+  exit 1
+fi
+echo '{}'
+`
+	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
+		t.Fatalf("write unrelated external agent binary: %v", err)
+	}
 }
 
 func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
@@ -129,6 +151,467 @@ func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 	}
 	if provider.Model != "haiku" {
 		t.Fatalf("provider.Model = %q, want %q", provider.Model, "haiku")
+	}
+	if provider.TextGenerator == nil {
+		t.Fatal("provider.TextGenerator = nil, want configured provider's raw text generator")
+	}
+}
+
+func TestResolveDispatchSummaryProvider_ExplicitCodexUsesDefaultModelWithoutPersistence(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	ctx := context.Background()
+	codex := &stubTextAgent{name: agent.AgentNameCodex, kind: agent.AgentTypeCodex}
+
+	originalLoad := loadSummarySettings
+	originalLoadFile := loadSummarySettingsFromFile
+	originalSave := saveLocalSummarySettings
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	originalDiscover := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		loadSummarySettings = originalLoad
+		loadSummarySettingsFromFile = originalLoadFile
+		saveLocalSummarySettings = originalSave
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+		discoverNamedSummaryProvider = originalDiscover
+	})
+
+	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
+		t.Fatal("explicit dispatch provider must not load summary settings")
+		return nil, errors.New("unexpected settings load")
+	}
+	loadSummarySettingsFromFile = func(string) (*settings.EntireSettings, error) {
+		t.Fatal("explicit dispatch provider must not load settings for persistence")
+		return nil, errors.New("unexpected settings load for persistence")
+	}
+	saveLocalSummarySettings = func(context.Context, *settings.EntireSettings) error {
+		t.Fatal("explicit dispatch provider must not persist settings")
+		return nil
+	}
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		if name != agent.AgentNameCodex {
+			t.Fatalf("getSummaryAgent(%q), want %q", name, agent.AgentNameCodex)
+		}
+		return codex, nil
+	}
+	isSummaryCLIAvailable = func(name types.AgentName) bool {
+		return name == agent.AgentNameCodex
+	}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
+		t.Fatal("registered explicit provider should not trigger external discovery")
+		return nil
+	}
+
+	provider, err := resolveDispatchSummaryProvider(ctx, &bytes.Buffer{}, "  codex  ")
+	if err != nil {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v", err)
+	}
+	if provider.Name != agent.AgentNameCodex {
+		t.Fatalf("provider.Name = %q, want %q", provider.Name, agent.AgentNameCodex)
+	}
+	if provider.Model != "" {
+		t.Fatalf("provider.Model = %q, want provider CLI default", provider.Model)
+	}
+	if provider.TextGenerator != codex {
+		t.Fatalf("provider.TextGenerator = %T %p, want raw generator %T %p", provider.TextGenerator, provider.TextGenerator, codex, codex)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_EmptyOverrideUsesConfiguredProviderAndModel(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	ctx := context.Background()
+	configured := &stubTextAgent{name: agent.AgentNameCursor, kind: agent.AgentTypeCursor}
+
+	originalLoad := loadSummarySettings
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	originalDiscover := discoverSummaryProvidersAlways
+	t.Cleanup(func() {
+		loadSummarySettings = originalLoad
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProvidersAlways = originalDiscover
+	})
+
+	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
+		return &settings.EntireSettings{SummaryGeneration: &settings.SummaryGenerationSettings{
+			Provider: string(agent.AgentNameCursor),
+			Model:    "cursor-saved-model",
+		}}, nil
+	}
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		if name != agent.AgentNameCursor {
+			t.Fatalf("getSummaryAgent(%q), want %q", name, agent.AgentNameCursor)
+		}
+		return configured, nil
+	}
+	isSummaryCLIAvailable = func(name types.AgentName) bool {
+		return name == agent.AgentNameCursor
+	}
+	discoverSummaryProvidersAlways = func(context.Context) {
+		t.Fatal("configured registered provider should not trigger external discovery")
+	}
+
+	provider, err := resolveDispatchSummaryProvider(ctx, &bytes.Buffer{}, " \t\n")
+	if err != nil {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v", err)
+	}
+	if provider.Name != agent.AgentNameCursor {
+		t.Fatalf("provider.Name = %q, want %q", provider.Name, agent.AgentNameCursor)
+	}
+	if provider.Model != "cursor-saved-model" {
+		t.Fatalf("provider.Model = %q, want configured model", provider.Model)
+	}
+	if provider.TextGenerator != configured {
+		t.Fatalf("provider.TextGenerator = %T, want configured raw generator", provider.TextGenerator)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_ExplicitProviderIgnoresSavedProviderAndModel(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	ctx := context.Background()
+	codex := &stubTextAgent{name: agent.AgentNameCodex, kind: agent.AgentTypeCodex}
+	loadCalls := 0
+
+	originalLoad := loadSummarySettings
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	t.Cleanup(func() {
+		loadSummarySettings = originalLoad
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+	})
+
+	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
+		loadCalls++
+		return &settings.EntireSettings{SummaryGeneration: &settings.SummaryGenerationSettings{
+			Provider: string(agent.AgentNameClaudeCode),
+			Model:    "sonnet",
+		}}, nil
+	}
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) { return codex, nil }
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+
+	provider, err := resolveDispatchSummaryProvider(ctx, &bytes.Buffer{}, string(agent.AgentNameCodex))
+	if err != nil {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v", err)
+	}
+	if loadCalls != 0 {
+		t.Fatalf("loadSummarySettings calls = %d, want 0 for explicit override", loadCalls)
+	}
+	if provider.Name != agent.AgentNameCodex || provider.Model != "" {
+		t.Fatalf("provider = %+v, want explicit Codex with provider-default model", provider)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_ExplicitClaudeUsesSummaryDefaultModel(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	ctx := context.Background()
+	claude := &stubTextAgent{name: agent.AgentNameClaudeCode, kind: agent.AgentTypeClaudeCode}
+	loadCalls := 0
+
+	originalLoad := loadSummarySettings
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	t.Cleanup(func() {
+		loadSummarySettings = originalLoad
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+	})
+
+	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
+		loadCalls++
+		return &settings.EntireSettings{SummaryGeneration: &settings.SummaryGenerationSettings{
+			Provider: string(agent.AgentNameClaudeCode),
+			Model:    "opus",
+		}}, nil
+	}
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) { return claude, nil }
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+
+	provider, err := resolveDispatchSummaryProvider(ctx, &bytes.Buffer{}, string(agent.AgentNameClaudeCode))
+	if err != nil {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v", err)
+	}
+	if loadCalls != 0 {
+		t.Fatalf("loadSummarySettings calls = %d, want 0 for explicit override", loadCalls)
+	}
+	if provider.Model != summarize.DefaultModel {
+		t.Fatalf("provider.Model = %q, want summary default %q", provider.Model, summarize.DefaultModel)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_PropagatesDiscoveryDeadline(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	providerName := types.AgentName("external-discovery-deadline")
+
+	originalGet := getSummaryAgent
+	originalDiscover := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalDiscover
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return nil, errors.New("not registered")
+	}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
+		return fmt.Errorf("discovering external agent %q: %w", providerName, context.DeadlineExceeded)
+	}
+
+	_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, string(providerName))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v, want context deadline exceeded", err)
+	}
+	if strings.Contains(err.Error(), "unknown summary provider") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %q, do not want unknown-provider rewrite", err)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_PropagatesDiscoveryCancellation(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	providerName := types.AgentName("external-discovery-canceled")
+
+	originalGet := getSummaryAgent
+	originalDiscover := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalDiscover
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return nil, errors.New("not registered")
+	}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
+		return fmt.Errorf("discovering external agent %q: %w", providerName, context.Canceled)
+	}
+
+	_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, string(providerName))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v, want context canceled", err)
+	}
+	if strings.Contains(err.Error(), "unknown summary provider") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %q, do not want unknown-provider rewrite", err)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_PropagatesInvalidExternalInfo(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	providerName := types.AgentName("external-discovery-invalid-info")
+	infoErr := errors.New("invalid helper info")
+
+	originalGet := getSummaryAgent
+	originalDiscover := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalDiscover
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return nil, errors.New("not registered")
+	}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
+		return fmt.Errorf("loading info for external agent %q: info: invalid JSON: %w", providerName, infoErr)
+	}
+
+	_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, string(providerName))
+	if !errors.Is(err, infoErr) {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v, want invalid-info cause", err)
+	}
+	if !strings.Contains(err.Error(), string(providerName)) || !strings.Contains(err.Error(), "info: invalid JSON") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %q, want provider and invalid-info context", err)
+	}
+	if strings.Contains(err.Error(), "unknown summary provider") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %q, do not want unknown-provider rewrite", err)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_MissingExternalKeepsUnknownProviderError(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	providerName := types.AgentName("external-discovery-missing")
+
+	originalGet := getSummaryAgent
+	originalDiscover := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalDiscover
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return nil, errors.New("not registered")
+	}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error { return nil }
+
+	_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, string(providerName))
+	if err == nil || !strings.Contains(err.Error(), "unknown summary provider") {
+		t.Fatalf("resolveDispatchSummaryProvider() error = %v, want existing unknown-provider error", err)
+	}
+}
+
+func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
+	// Cannot use t.Parallel(): subtests mutate package-level resolution seams.
+	tests := []struct {
+		name          string
+		override      string
+		agent         agent.Agent
+		getErr        error
+		available     bool
+		wantError     string
+		unwantedError string
+	}{
+		{
+			name:      "unknown provider",
+			override:  "missing-provider",
+			getErr:    errors.New("not registered"),
+			available: true,
+			wantError: "unknown summary provider",
+		},
+		{
+			name:     "no text generator capability",
+			override: "no-text",
+			agent: &stubNonTextAgent{Agent: &stubTextAgent{
+				name: "no-text",
+				kind: agent.AgentTypeUnknown,
+			}},
+			available: true,
+			wantError: "does not support summary generation",
+		},
+		{
+			name:          "CLI unavailable",
+			override:      string(agent.AgentNameCodex),
+			agent:         &stubTextAgent{name: agent.AgentNameCodex, kind: agent.AgentTypeCodex},
+			available:     false,
+			wantError:     "install it or choose another provider",
+			unwantedError: "configured",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalGet := getSummaryAgent
+			originalCLI := isSummaryCLIAvailable
+			originalDiscover := discoverNamedSummaryProvider
+			t.Cleanup(func() {
+				getSummaryAgent = originalGet
+				isSummaryCLIAvailable = originalCLI
+				discoverNamedSummaryProvider = originalDiscover
+			})
+
+			getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+				if tt.getErr != nil {
+					return nil, tt.getErr
+				}
+				return tt.agent, nil
+			}
+			isSummaryCLIAvailable = func(types.AgentName) bool { return tt.available }
+			discoverNamedSummaryProvider = func(context.Context, types.AgentName) error { return nil }
+
+			_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, tt.override)
+			if err == nil {
+				t.Fatalf("resolveDispatchSummaryProvider(%q) error = nil, want %q", tt.override, tt.wantError)
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("resolveDispatchSummaryProvider(%q) error = %q, want substring %q", tt.override, err, tt.wantError)
+			}
+			if tt.unwantedError != "" && strings.Contains(err.Error(), tt.unwantedError) {
+				t.Fatalf("resolveDispatchSummaryProvider(%q) error = %q, do not want substring %q", tt.override, err, tt.unwantedError)
+			}
+		})
+	}
+}
+
+func TestResolveDispatchSummaryProvider_ExplicitExternalProviderDoesNotWriteLocalSettings(t *testing.T) {
+	// Cannot use t.Parallel(): subtests mutate cwd, PATH, and the agent registry.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	tests := []struct {
+		name         string
+		providerName string
+		localContent string
+	}{
+		{name: "does not create settings.local.json", providerName: "external-dispatch-no-create"},
+		{
+			name:         "does not update settings.local.json",
+			providerName: "external-dispatch-no-update",
+			localContent: `{"external_agents":false,"summary_generation":{"provider":"codex","model":"saved-model"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			tmpDir := t.TempDir()
+			testutil.InitRepo(t, tmpDir)
+			t.Chdir(tmpDir)
+
+			if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+				t.Fatalf("mkdir .entire: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true,"external_agents":false}`), 0o644); err != nil {
+				t.Fatalf("write settings.json: %v", err)
+			}
+
+			localPath := filepath.Join(tmpDir, ".entire", "settings.local.json")
+			if tt.localContent != "" {
+				if err := os.WriteFile(localPath, []byte(tt.localContent), 0o644); err != nil {
+					t.Fatalf("write settings.local.json: %v", err)
+				}
+			}
+
+			externalDir := t.TempDir()
+			writeExternalSummaryAgentBinary(t, externalDir, tt.providerName)
+			writeInfoSentinelExternalAgentBinary(t, externalDir, tt.providerName+"-unrelated")
+			t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			unrelatedInfoSentinel := filepath.Join(t.TempDir(), "unrelated-info-called")
+			t.Setenv("ENTIRE_TEST_UNRELATED_INFO_SENTINEL", unrelatedInfoSentinel)
+			modelRecord := filepath.Join(t.TempDir(), "model-args")
+			t.Setenv("ENTIRE_TEST_EXTERNAL_MODEL_RECORD", modelRecord)
+
+			provider, err := resolveDispatchSummaryProvider(ctx, &bytes.Buffer{}, tt.providerName)
+			if err != nil {
+				t.Fatalf("resolveDispatchSummaryProvider() error = %v", err)
+			}
+			if provider.Name != types.AgentName(tt.providerName) {
+				t.Fatalf("provider.Name = %q, want %q", provider.Name, tt.providerName)
+			}
+			if provider.Model != "" {
+				t.Fatalf("provider.Model = %q, want external CLI default", provider.Model)
+			}
+			if provider.TextGenerator == nil {
+				t.Fatal("provider.TextGenerator = nil, want external raw generator")
+			}
+			if _, err := os.Stat(unrelatedInfoSentinel); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unrelated plugin info was invoked: stat error = %v", err)
+			}
+
+			generated, err := provider.TextGenerator.GenerateText(ctx, "generate a summary", provider.Model)
+			if err != nil {
+				t.Fatalf("provider.TextGenerator.GenerateText() error = %v", err)
+			}
+			if !strings.Contains(generated, `"intent":"Intent"`) {
+				t.Fatalf("provider.TextGenerator.GenerateText() = %q, want generated summary", generated)
+			}
+			modelArgs, err := os.ReadFile(modelRecord)
+			if err != nil {
+				t.Fatalf("read external model args: %v", err)
+			}
+			if string(modelArgs) != "--model\n\n" {
+				t.Fatalf("external generate-text args = %q, want empty model argument", modelArgs)
+			}
+
+			got, err := os.ReadFile(localPath)
+			switch {
+			case tt.localContent == "" && !errors.Is(err, os.ErrNotExist):
+				t.Fatalf("settings.local.json read error = %v, want file to remain absent (content %q)", err, got)
+			case tt.localContent != "" && err != nil:
+				t.Fatalf("read settings.local.json: %v", err)
+			case tt.localContent != "" && string(got) != tt.localContent:
+				t.Fatalf("settings.local.json changed:\n got: %s\nwant: %s", got, tt.localContent)
+			}
+		})
 	}
 }
 
@@ -251,7 +734,7 @@ func TestResolveCheckpointSummaryProvider_NonInteractiveMultiCandidatePicksFirst
 		return &settings.EntireSettings{Enabled: true}, nil
 	}
 	listRegisteredAgents = func() []types.AgentName {
-		return []types.AgentName{agent.AgentNameCodex, agent.AgentNameGemini}
+		return []types.AgentName{agent.AgentNameCodex, agent.AgentNameCursor}
 	}
 	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
 		return &stubTextAgent{name: name, kind: agent.AgentTypeCodex}, nil
@@ -321,8 +804,14 @@ func TestResolveCheckpointSummaryProvider_ConfiguredExternalProvider(t *testing.
 	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
 		t.Fatalf("mkdir .entire: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true,"external_agents":true,"summary_generation":{"provider":"`+providerName+`","model":"external-model"}}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true,"summary_generation":{"provider":"`+providerName+`","model":"external-model"}}`), 0o644); err != nil {
 		t.Fatalf("write settings: %v", err)
+	}
+	// The grant lives in the untracked local layer, which is the only one
+	// settings.enforceExternalAgentsTrust honors — and the only one that lets
+	// the configured name reach discovery at all.
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.local.json"), []byte(`{"external_agents":true}`), 0o644); err != nil {
+		t.Fatalf("write local settings: %v", err)
 	}
 	externalDir := t.TempDir()
 	writeExternalSummaryAgentBinary(t, externalDir, providerName)
@@ -376,7 +865,7 @@ func TestPersistSummaryProviderSelection_ExternalFlipsFlagAndReturnsSignal(t *te
 	// Discover so getSummaryAgent returns a wrapped external (the type IsExternal recognizes).
 	discoverSummaryProvidersAlways(ctx)
 
-	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "")
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "", selectionByUser)
 	if err != nil {
 		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
 	}
@@ -410,7 +899,7 @@ func TestPersistSummaryProviderSelection_BuiltInDoesNotFlipFlag(t *testing.T) {
 		t.Fatalf("write settings: %v", err)
 	}
 
-	flagFlipped, err := persistSummaryProviderSelection(ctx, agent.AgentNameClaudeCode, "")
+	flagFlipped, err := persistSummaryProviderSelection(ctx, agent.AgentNameClaudeCode, "", selectionByUser)
 	if err != nil {
 		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
 	}
@@ -452,11 +941,445 @@ func TestPersistSummaryProviderSelection_ExternalAlreadyEnabledNoSignal(t *testi
 
 	discoverSummaryProvidersAlways(ctx)
 
-	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "")
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "", selectionByUser)
 	if err != nil {
 		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
 	}
 	if flagFlipped {
 		t.Fatal("expected flagFlipped=false when external_agents was already enabled")
+	}
+}
+
+// TestResolveCheckpointSummaryProvider_ConfiguredProviderUsesNamedDiscovery
+// pins that a configured-but-unregistered provider is resolved by NAME rather
+// than by the ungated sweep.
+//
+// summary_generation.provider is honored from the committed
+// .entire/settings.json, so a name that arrives there must not be able to
+// trigger DiscoverAndRegisterAlways, which globs every absolute $PATH
+// directory and executes every entire-agent-* binary's "info" subcommand. The
+// named lookup returns immediately for a built-in and touches exactly one
+// binary otherwise.
+func TestResolveCheckpointSummaryProvider_ConfiguredProviderUsesNamedDiscovery(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	ctx := context.Background()
+	grantExternalAgentsLocally(t)
+	const configuredName = types.AgentName("external-configured-provider")
+	stub := &stubTextAgent{name: configuredName, kind: agent.AgentTypeClaudeCode}
+
+	originalLoad := loadSummarySettings
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	originalSweep := discoverSummaryProvidersAlways
+	originalNamed := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		loadSummarySettings = originalLoad
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProvidersAlways = originalSweep
+		discoverNamedSummaryProvider = originalNamed
+	})
+
+	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
+		return &settings.EntireSettings{SummaryGeneration: &settings.SummaryGenerationSettings{
+			Provider: string(configuredName),
+		}}, nil
+	}
+	// Unregistered until the named discovery runs, which is what makes
+	// discoverSummaryProviderIfMissing reach for discovery at all.
+	registered := false
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		if !registered {
+			return nil, fmt.Errorf("agent %q not registered", name)
+		}
+		return stub, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	discoverSummaryProvidersAlways = func(context.Context) {
+		t.Fatal("a configured provider name must not trigger the ungated $PATH sweep")
+	}
+	namedCalls := 0
+	discoverNamedSummaryProvider = func(_ context.Context, name types.AgentName) error {
+		namedCalls++
+		if name != configuredName {
+			t.Fatalf("named discovery for %q, want %q", name, configuredName)
+		}
+		registered = true
+		return nil
+	}
+
+	provider, err := resolveCheckpointSummaryProvider(ctx, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("resolveCheckpointSummaryProvider() error = %v", err)
+	}
+	if provider.Name != configuredName {
+		t.Fatalf("provider.Name = %q, want %q", provider.Name, configuredName)
+	}
+	if namedCalls != 1 {
+		t.Fatalf("named discovery called %d times, want exactly 1", namedCalls)
+	}
+}
+
+// TestPersistSummaryProviderSelection_AutoSelectPersistsNothingForAnExternal
+// pins both halves of the automatic case.
+//
+// The repo-wide external_agents grant needs a human: the non-interactive
+// branches of resolveCheckpointSummaryProvider auto-select (single candidate,
+// or first-of-many with no TTY) and used to persist the grant on the way
+// through. That grant is not scoped to the chosen provider, it turns on the
+// $PATH sweep that runs every entire-agent-* binary from then on, so it must
+// not be minted by a code path where nobody chose anything.
+//
+// And with the grant withheld, the provider NAME must not be persisted either.
+// It used to be, on the reasoning that it resolved through an ungated named
+// lookup. That lookup is gated now, so the write produced a settings file whose
+// very next read fails with "unknown summary provider" -- Entire breaking
+// itself with its own write. Persisting nothing leaves the working behaviour:
+// the next run re-discovers and auto-selects the same provider.
+func TestPersistSummaryProviderSelection_AutoSelectPersistsNothingForAnExternal(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	const providerName = "external-summary-autoselect"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	discoverSummaryProvidersAlways(ctx)
+
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "", selectionAutomatic)
+	if !errors.Is(err, errSelectionNotPersistable) {
+		t.Fatalf("persistSummaryProviderSelection() error = %v, want errSelectionNotPersistable", err)
+	}
+	if flagFlipped {
+		t.Error("an automatic selection must not flip external_agents")
+	}
+
+	localFile := filepath.Join(tmpDir, ".entire", "settings.local.json")
+	if _, statErr := os.Stat(localFile); statErr == nil {
+		s, loadErr := settings.LoadFromFile(localFile)
+		if loadErr != nil {
+			t.Fatalf("LoadFromFile() error = %v", loadErr)
+		}
+		if s.ExternalAgents {
+			t.Error("external_agents granted without a human choosing the provider")
+		}
+		if s.SummaryGeneration != nil && s.SummaryGeneration.Provider != "" {
+			t.Errorf("provider %q persisted without the grant that makes it resolvable; "+
+				"the next run reads it back and fails", s.SummaryGeneration.Provider)
+		}
+	}
+}
+
+// The round trip the bug actually produced: auto-select, save, then resolve
+// again from the saved settings. It must not fail on what Entire itself wrote.
+//
+// The second resolution runs with the registry RESTORED to its pre-discovery
+// state, which is what a fresh process actually has. Without that this proves
+// much less than it appears to: the first call leaves the external agent
+// registered process-wide, so a second call in the same process resolves it
+// from memory whether or not anything usable was persisted. The bug is a
+// next-invocation bug, so the test has to be one too.
+func TestResolveCheckpointSummaryProvider_AutoSelectedExternalSurvivesTheNextRun(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	const providerName = "external-summary-roundtrip"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// The always-variant, which is what the real non-interactive path uses to
+	// build its candidate list: installation is the opt-in to "this plugin
+	// exists", and it is what makes the run in progress work without the grant.
+	restore := agent.SnapshotRegistryForTesting()
+	discoverSummaryProvidersAlways(ctx)
+
+	var first bytes.Buffer
+	got, err := autoSelectSummaryProvider(ctx, &first, types.AgentName(providerName),
+		"test: non-interactive auto-select", selectionAutomatic)
+	if err != nil {
+		t.Fatalf("autoSelectSummaryProvider() error = %v", err)
+	}
+	if got.Name != types.AgentName(providerName) {
+		t.Fatalf("provider = %q, want %q", got.Name, providerName)
+	}
+	if !strings.Contains(first.String(), "entire agent") {
+		t.Errorf("output should say how to make the choice stick, got %q", first.String())
+	}
+
+	// A fresh process: the plugin is on $PATH but nothing is registered yet.
+	restore()
+
+	if _, err := resolveCheckpointSummaryProvider(ctx, io.Discard); err != nil {
+		t.Fatalf("a fresh process failed on the settings the first run wrote: %v", err)
+	}
+}
+
+// The negative control for the test above, and the reason not-persisting is the
+// fix rather than a dodge.
+//
+// It writes by hand what the old code wrote by itself -- the provider name with
+// no external_agents grant -- and then resolves as a fresh process would. That
+// configuration is unusable: discoverSummaryProviderIfMissing gates the named
+// lookup on the grant, so the name resolves to nothing and the command fails on
+// something Entire put there. If a future change makes this state reachable
+// again, this test says so.
+func TestResolveCheckpointSummaryProvider_PersistedExternalWithoutTheGrantIsBroken(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	const providerName = "external-summary-persisted"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// What persisting used to produce: the name, and no grant.
+	local := fmt.Sprintf(`{"summary_generation":{"provider":%q}}`, providerName)
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.local.json"), []byte(local), 0o600); err != nil {
+		t.Fatalf("write local settings: %v", err)
+	}
+
+	_, err := resolveCheckpointSummaryProvider(ctx, io.Discard)
+	if err == nil {
+		t.Fatal("a persisted external provider with no grant resolved; the gate is not being applied")
+	}
+	if !strings.Contains(err.Error(), providerName) {
+		t.Errorf("error = %q, want it to name the unresolvable provider", err)
+	}
+}
+
+// grantExternalAgentsLocally puts the test in a repository whose UNTRACKED
+// .entire/settings.local.json enables external agents, which is the only layer
+// settings.enforceExternalAgentsTrust honors.
+func grantExternalAgentsLocally(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.local.json"), []byte(`{"external_agents":true}`), 0o600); err != nil {
+		t.Fatalf("write local settings: %v", err)
+	}
+}
+
+// summary_generation.provider is honored from the COMMITTED
+// .entire/settings.json, so the name deciding which binary to execute can
+// arrive in a pull request. Naming one binary rather than sweeping $PATH is not
+// enough on its own: without the external_agents grant, that one line would run
+// `entire-agent-<name> info` on everyone who pulls it.
+func TestDiscoverSummaryProviderIfMissing_ExternalNeedsTheGrant(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	originalGet := getSummaryAgent
+	originalNamed := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalNamed
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return nil, fmt.Errorf("agent %q not registered", name)
+	}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
+		t.Fatal("a committed provider name must not execute a plugin binary without the external_agents grant")
+		return nil
+	}
+
+	if blocked := discoverSummaryProviderIfMissing(context.Background(), "external-ungranted"); !blocked {
+		t.Fatal("discoverSummaryProviderIfMissing() should report that it declined for want of the grant")
+	}
+}
+
+// The gate must land only on the external case. A committed
+// `"provider": "claude-code"` is the ordinary configuration and has nothing to
+// do with plugins, so it must keep working with external agents off.
+func TestDiscoverSummaryProviderIfMissing_RegisteredProviderIsUnaffected(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	originalGet := getSummaryAgent
+	originalNamed := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalNamed
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return &stubTextAgent{name: "claude-code", kind: agent.AgentTypeClaudeCode}, nil
+	}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
+		t.Fatal("a registered provider must not reach discovery at all")
+		return nil
+	}
+
+	if blocked := discoverSummaryProviderIfMissing(context.Background(), "claude-code"); blocked {
+		t.Fatal("a registered provider must resolve regardless of the external_agents grant")
+	}
+}
+
+// Once granted, the named lookup runs as before.
+func TestDiscoverSummaryProviderIfMissing_GrantedExternalIsDiscovered(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	grantExternalAgentsLocally(t)
+
+	originalGet := getSummaryAgent
+	originalNamed := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalNamed
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return nil, fmt.Errorf("agent %q not registered", name)
+	}
+	calls := 0
+	discoverNamedSummaryProvider = func(_ context.Context, name types.AgentName) error {
+		calls++
+		if name != "external-granted" {
+			t.Fatalf("named discovery for %q, want %q", name, "external-granted")
+		}
+		return nil
+	}
+
+	if blocked := discoverSummaryProviderIfMissing(context.Background(), "external-granted"); blocked {
+		t.Fatal("discoverSummaryProviderIfMissing() should not report a block once the grant is in place")
+	}
+	if calls != 1 {
+		t.Fatalf("named discovery called %d times, want exactly 1", calls)
+	}
+}
+
+// stubSummaryRegistry points the resolution seams at a fixed set of agents.
+// capable names get a text generator, the rest get one with the capability
+// stripped, which is the opencode/factoryai-droid shape.
+func stubSummaryRegistry(t *testing.T, all []types.AgentName, capable ...types.AgentName) {
+	t.Helper()
+
+	originalList := listRegisteredAgents
+	originalGet := getSummaryAgent
+	t.Cleanup(func() {
+		listRegisteredAgents = originalList
+		getSummaryAgent = originalGet
+	})
+
+	isCapable := make(map[types.AgentName]bool, len(capable))
+	for _, name := range capable {
+		isCapable[name] = true
+	}
+	listRegisteredAgents = func() []types.AgentName { return all }
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		if !slices.Contains(all, name) {
+			return nil, fmt.Errorf("agent %s not registered", name)
+		}
+		base := &stubTextAgent{name: name, kind: types.AgentType(name)}
+		if isCapable[name] {
+			return base, nil
+		}
+		return &stubNonTextAgent{Agent: base}, nil
+	}
+}
+
+// The list is the reason this error exists: the bare sentence told the user the
+// value was wrong without saying what a right one looks like.
+func TestUnsupportedSummaryProviderError_NamesTheCapableProviders(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	stubSummaryRegistry(t,
+		[]types.AgentName{"codex", "cursor", "opencode"},
+		"codex", "cursor")
+
+	err := unsupportedSummaryProviderError("opencode")
+	if err == nil {
+		t.Fatal("expected an error for a non-capable provider")
+	}
+	got := err.Error()
+
+	if !strings.Contains(got, `agent "opencode" does not support summary generation`) {
+		t.Errorf("error does not name the rejected provider: %q", got)
+	}
+	// One assertion covers both halves: the exact list, and that the rejected
+	// provider is absent from it. Counting occurrences in the prose instead
+	// would fail on any rewording that legitimately names the value twice.
+	if !strings.Contains(got, "supported agents: codex, cursor,") {
+		t.Errorf("error does not carry the capable list: %q", got)
+	}
+}
+
+// An empty capable set must not produce a dangling "one of" with nothing after
+// it. Unreachable in the shipped binary, reached by any test that stubs the
+// registry.
+func TestUnsupportedSummaryProviderError_DegradesWithNoCapableProviders(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	stubSummaryRegistry(t, []types.AgentName{"opencode"})
+
+	got := unsupportedSummaryProviderError("opencode").Error()
+	if got != `agent "opencode" does not support summary generation` {
+		t.Errorf("unexpected degraded message: %q", got)
+	}
+}
+
+// Pins the accepted values against the registry. This test runs in the cli
+// package, where every built-in agent is registered, so it is the enforced copy
+// of the set README documents — and it fails in both directions: an agent that
+// gains GenerateText without the docs following, and one listed here that
+// quietly loses the capability.
+func TestSummaryCapableProviderNames_MatchesTheBuiltInAgents(t *testing.T) {
+	t.Parallel()
+
+	// factoryai-droid is deliberately absent: it is a registered agent with no
+	// GenerateText, and naming it is the fault this feature reports.
+	want := []string{"antigravity", "claude-code", "codex", "copilot-cli", "cursor", "opencode", "pi"}
+	got := summaryCapableProviderNames()
+	if !slices.Equal(got, want) {
+		t.Errorf("summary-capable providers = %v, want %v\n"+
+			"If an agent gained or lost GenerateText, update this list and README's\n"+
+			"\"cannot generate summaries\" note together.", got, want)
 	}
 }

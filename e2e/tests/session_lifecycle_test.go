@@ -44,7 +44,6 @@ func TestEndedSessionUserCommitsAfterExit(t *testing.T) {
 		assert.NotEqual(t, cpID1, cpID2, "each commit should have its own checkpoint ID")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -68,7 +67,7 @@ func TestSessionDepletedManualEditNoCheckpoint(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 
-		cpBranchAfterAgent := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
+		cpBranchAfterAgent := testutil.CheckpointState(s.Dir)
 
 		os.WriteFile(filepath.Join(s.Dir, "depleted.go"),
 			[]byte("package main\n\n// Manual user edit\nfunc Depleted() { return }\n"), 0o644)
@@ -77,11 +76,10 @@ func TestSessionDepletedManualEditNoCheckpoint(t *testing.T) {
 		s.Git(t, "commit", "-m", "Manual edit to depleted.go")
 
 		time.Sleep(5 * time.Second)
-		cpBranchAfterManual := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
+		cpBranchAfterManual := testutil.CheckpointState(s.Dir)
 		assert.Equal(t, cpBranchAfterAgent, cpBranchAfterManual,
-			"manual edit after session depletion should not advance checkpoint branch")
+			"manual edit after session depletion should not advance checkpoint state")
 		testutil.AssertNoCheckpointTrailer(t, s.Dir, "HEAD")
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -106,7 +104,5 @@ func TestTrailerRemovalSkipsCondensation(t *testing.T) {
 
 		time.Sleep(5 * time.Second)
 		testutil.AssertCheckpointNotAdvanced(t, s)
-		// Shadow branch legitimately persists: hooks were bypassed so
-		// post-commit cleanup never ran.
 	})
 }

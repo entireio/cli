@@ -8,13 +8,18 @@ The Entire CLI supports external agent plugins — standalone binaries that impl
 
 The CLI discovers external agents by scanning `$PATH` for executables matching the pattern `entire-agent-<name>`. For example, `entire-agent-cursor` would register as the "cursor" agent.
 
+Two rules bound that scan, both because discovery *executes* what it finds (it calls each binary's `info` subcommand):
+
+- It is off unless `external_agents` is set in an untracked `.entire/settings.local.json`. The committed `.entire/settings.json` cannot grant it — see [Why `external_agents` is local-only](../security-and-privacy.md#why-external_agents-is-local-only). Interactive setup flows scan regardless, so you can still pick a plugin before the setting exists.
+- Only absolute `$PATH` entries are scanned. A relative entry resolves against the working directory, which for a git hook is whatever repository invoked it.
+
 - Binaries whose `<name>` conflicts with an already-registered built-in agent are skipped.
 - Discovery runs once during CLI initialization (before building the hooks command tree).
 - The binary must be executable and respond to the `info` subcommand.
 
 ## Environment
 
-Every subcommand invocation sets:
+Every subcommand invocation except `generate-text` sets:
 
 | Variable | Description |
 |---|---|
@@ -22,6 +27,13 @@ Every subcommand invocation sets:
 | `ENTIRE_PROTOCOL_VERSION` | Protocol version (`1`) |
 
 The working directory is set to the repository root.
+
+`generate-text` is the exception. Its stdin is a summary prompt carrying
+untrusted transcript content, so it runs from a fresh empty temporary
+directory, without `ENTIRE_REPO_ROOT` and without `GIT_*` variables, the same
+isolation Entire gives its built-in summary generators. A plugin should not
+need the repository to generate text; if its model has tools, it should run
+them with none enabled, as the built-in generators do where their CLI allows.
 
 ## Communication Model
 
@@ -48,7 +60,6 @@ Returns agent metadata and declared capabilities.
   "name": "cursor",
   "type": "Cursor",
   "description": "Cursor - AI-powered code editor",
-  "is_preview": true,
   "protected_dirs": [".cursor"],
   "hook_names": ["session-start", "session-end", "stop"],
   "capabilities": {
@@ -64,6 +75,8 @@ Returns agent metadata and declared capabilities.
 ```
 
 The `capabilities` object determines which optional subcommands the CLI will call. If a capability is `false` or missing, the CLI will never invoke the corresponding subcommands.
+
+Optional: `"caller_env_vars": ["MYAGENT_SESSION_ID"]` lists environment variables the agent sets for the commands it runs (uppercase names only). `entire review` uses them to recognise the agent as the caller, so it refuses to approve reviews of someone else's code on the user's behalf and names the agent when one passes `--trust-target`. Agents that set the cross-tool `AI_AGENT` variable are recognised without declaring it.
 
 #### `detect`
 
@@ -210,13 +223,17 @@ Parses a raw agent hook payload into a structured event.
 
 **Output (stdout):** JSON — the parsed [Event object](#event-object), or `null` if the payload is not relevant.
 
-#### `install-hooks [--local-dev] [--force]`
+#### `install-hooks [--force]`
 
 Installs agent hooks for Entire integration.
 
 **Arguments:**
-- `--local-dev` — Use local development binary path (optional)
 - `--force` — Overwrite existing hooks (optional)
+
+`--local-dev` was removed: it asked the agent to point hooks at a build inside
+the working tree, which meant installed hooks ran whatever the checked-out
+branch contained. The CLI never sends it. Agents that still accept the flag
+should treat it as a no-op; hook commands must name the `entire` binary.
 
 **Output (stdout):** JSON
 
@@ -232,6 +249,13 @@ Removes installed agent hooks.
 
 **Output:** Exit 0 on success.
 
+Only your binary can remove your hooks, so `entire disable --uninstall` cannot
+finish without you. A non-zero exit fails the whole uninstall: the command
+exits non-zero, reports that Entire was not fully removed, and prints the exact
+command line the user can run to invoke this subcommand by hand. Write anything
+the user needs in order to act to stderr — the CLI captures it and shows it
+verbatim.
+
 #### `are-hooks-installed`
 
 Checks whether hooks are currently installed.
@@ -243,6 +267,13 @@ Checks whether hooks are currently installed.
 ```json
 {"installed": true}
 ```
+
+A non-zero exit or unparseable stdout is not read as "no hooks" — it means the
+state is unknown, which the CLI must treat as "hooks may still be installed".
+`entire disable --uninstall` then exits non-zero and hands the user the manual
+`uninstall-hooks` command rather than claiming Entire was fully removed. Report
+"installed": false when you know there are none; fail only when you genuinely
+could not find out.
 
 ### Capability: `transcript_analyzer`
 
@@ -492,12 +523,22 @@ Used as input to `write-session` and output from `read-session`.
 | `session_id` | string | Agent session identifier |
 | `agent_name` | string | Agent registry name |
 | `repo_path` | string | Absolute path to the repository |
-| `session_ref` | string | Path/reference to session in agent's storage |
+| `session_ref` | string | Path/reference to session in agent's storage. Constrained — see [session_ref constraints](#session_ref-constraints) |
 | `start_time` | string | RFC 3339 timestamp of session start |
 | `native_data` | bytes/null | Session content in agent's native format (opaque to CLI) |
 | `modified_files` | string[] | Files modified during the session |
 | `new_files` | string[] | Files created during the session |
 | `deleted_files` | string[] | Files deleted during the session |
+
+### session_ref constraints
+
+`session_ref` stays agent-defined: a plugin backed by a database may return an opaque key rather than a path, and the CLI forwards such a value to `write-session` unchanged. Which checks apply depends on the shape of the value, and one of them also depends on whether `repo_path` was supplied.
+
+**A reference that is absolute, or that carries a volume name** (`/home/u/.agentx/sessions/abc.jsonl`, `C:\Users\u\...`) is treated as a filesystem path. It must contain no `.` or `..` component — always, whether or not `repo_path` is set. When `repo_path` IS set, it must additionally resolve inside the directory the plugin itself reported from `get-session-dir`; without `repo_path` there is no session directory to resolve against, so that containment check does not run and the reference is forwarded.
+
+**Any other reference** is treated as an agent-defined key. It must not be rooted, and once cleaned it must not escape its own base, so `../outside.jsonl` and `nested/../../outside.jsonl` are refused. A key that merely *contains* a dot segment without escaping, such as `tenant/../session-key`, is forwarded as given. Note that the rooted check is reachable only on Windows: on Unix a leading separator makes the reference absolute, so it takes the filesystem branch above.
+
+This is a preflight, not a sandbox. The plugin runs as its own process and can write wherever its own permissions allow; the check exists so the CLI does not *hand* it a reference that leaves the store the plugin named.
 
 ### Event Object
 

@@ -4,7 +4,7 @@
 
 - **Windows 10 1809+** (required for ConPTY support in E2E tests)
 - **Git for Windows** — provides `git.exe` and bundled bash for git hooks
-- **Go 1.26+** — for building from source
+- **Go 1.27.1+** — for building from source
 
 ## Building
 
@@ -35,7 +35,7 @@ Git hooks use `#!/bin/sh` shebangs with POSIX shell syntax. Git for Windows exec
 
 ### Agent Hooks
 
-Agent-specific hooks (Claude Code, Cursor, Gemini, OpenCode) are JSON configuration — the agents themselves handle execution. The hooks call `entire.exe` directly via `exec.Command`, not through a shell.
+Agent-specific hooks (Claude Code, Cursor, OpenCode) are JSON configuration — the agents themselves handle execution. The hooks call `entire.exe` directly via `exec.Command`, not through a shell.
 
 ## Testing
 
@@ -54,7 +54,7 @@ E2E tests require the agent binary (e.g., `claude`) to be installed and availabl
 ```bash
 # Set required env vars
 set E2E_ENTIRE_BIN=entire.exe
-set E2E_AGENT=claude-code        # or gemini-cli, opencode
+set E2E_AGENT=claude-code        # or opencode
 
 # Run all E2E tests
 go test -tags=e2e -count=1 -timeout=30m ./e2e/tests/...
@@ -80,7 +80,7 @@ After building, verify these work on a Windows machine:
 2. `entire.exe enable` — in a git repo with an agent installed
 3. Start an agent session, make file changes
 4. `git add . && git commit -m "test"` — hooks should fire (prepare-commit-msg, post-commit)
-5. `entire.exe rewind --list` — should show checkpoint(s)
+5. `entire.exe checkpoint list --pending --json` — before the commit, should show the session's next-checkpoint preview (`"is_next_checkpoint": true`); after it, the commit's logs-only resume point
 6. `entire.exe explain` — pager should use `more` by default
 
 ## Architecture Notes

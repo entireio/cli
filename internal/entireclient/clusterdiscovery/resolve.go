@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"sort"
+	"os"
+	"slices"
 	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -15,8 +17,8 @@ import (
 // ResolveContextForCluster picks the local login context to authenticate
 // git operations against clusterHost.
 //
-// It separates two concerns that used to be conflated in a single
-// cluster→context binding:
+// It keeps two concerns separate rather than binding cluster→context
+// directly:
 //
 //   - Which control plane(s) front the cluster — an objective infra fact.
 //     Discovered from the cluster's /.well-known/entire-cluster.json and
@@ -25,25 +27,15 @@ import (
 //     miss or expiry we re-fetch; if the re-fetch fails we fall back to
 //     the stale cached cores rather than break the op.
 //
-//   - Which of the user's accounts to use — recomputed every call from the
-//     live contexts, never persisted. So a user with several accounts is
-//     never silently pinned to one identity.
+//   - Which of the user's accounts to use — whichever the user selected, via
+//     `--context`/$ENTIRE_CONTEXT for one invocation or the stored
+//     current_context otherwise, else the sole saved login the cluster's cores
+//     accept. Recomputed every call from the live contexts, never persisted,
+//     so a user with several accounts is never silently pinned to one. See
+//     selectLoginContext for the tiers.
 //
-// Account selection (selectContext):
-//
-//  1. If the active context (current_context) is issued by one of the
-//     cluster's cores, use it. This is the explicit lever: `entire auth
-//     use <name>` chooses the identity for every cluster that context's
-//     core fronts.
-//  2. Otherwise gather every local context eligible for the cluster (its
-//     CoreURL is among the advertised cores):
-//     - exactly one  → use it (the common single-account case);
-//     - none         → error with the login hint listing the cluster's cores;
-//     - more than one → error asking the user to pick with `entire auth use`,
-//     rather than silently guessing an account.
-//
-// We never fall back to an active context whose core does NOT front the
-// cluster: the cluster would reject the exchanged token as "unknown
+// In particular we never fall back to an active context whose core does NOT
+// front the cluster: the cluster would reject the exchanged token as "unknown
 // cluster_host", and silently authenticating a staging identity against a
 // prod cluster (or vice versa) is exactly the confusion the /.well-known
 // lookup exists to prevent.
@@ -53,31 +45,46 @@ func ResolveContextForCluster(ctx context.Context, configDir, cacheDir, clusterH
 	if debugf == nil {
 		debugf = func(string, ...any) {}
 	}
+	// DNS hostnames are case-insensitive, so fold case before the host drives any
+	// lookup: the cache key, the /.well-known fetch, and the cores→context match.
+	// Without this, `aws-US-east-2.entire.io` and `aws-us-east-2.entire.io`
+	// resolve as different hosts and a context determination can fail spuriously.
+	clusterHost = normalizeClusterHost(clusterHost)
 	f, err := contexts.Load(configDir)
 	if err != nil {
 		return nil, fmt.Errorf("load contexts: %w", err)
 	}
 
-	coreURLs, err := resolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debugf)
+	entry, err := resolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debugf)
 	if err != nil {
 		return nil, err
 	}
 
-	return selectContext(f, "cluster "+clusterHost, coreURLs, debugf)
+	return selectLoginContext(f, "cluster "+clusterHost, clusterHost,
+		loginTargets{coreURLs: entry.CoreURLs, loginURL: entry.LoginURL, autoSelect: true}, debugf)
 }
 
-// ResolveClusterCores returns the trusted control-plane core URLs that
-// front clusterHost, using the same cache-then-/.well-known discovery as
-// ResolveContextForCluster (see resolveClusterCores). Exported for callers
-// that need the cluster's trusted-core set without account selection — e.g.
-// the ENTIRE_TOKEN path validates that the env token's audience is one of
-// these before exchanging it, so an unverified JWT can't redirect the
-// token exchange to an attacker-chosen host.
-func ResolveClusterCores(ctx context.Context, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) ([]string, error) {
+// ResolveClusterCores returns the cluster's discovery entry — the trusted
+// control-plane core URLs that front clusterHost — using the same
+// cache-then-/.well-known discovery as ResolveContextForCluster (see
+// resolveClusterCores). Exported for callers that need the cluster facts
+// without account selection — e.g. the ENTIRE_TOKEN path validates that the
+// env token's audience is one of the advertised cores before presenting it,
+// so an unverified JWT can't redirect the request to an attacker-chosen
+// host.
+func ResolveClusterCores(ctx context.Context, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) (*discovery.CoresEntry, error) {
 	if debugf == nil {
 		debugf = func(string, ...any) {}
 	}
-	return resolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debugf)
+	return resolveClusterCores(ctx, cacheDir, normalizeClusterHost(clusterHost), httpClient, debugf)
+}
+
+// normalizeClusterHost folds a cluster host to its canonical form for use as a
+// lookup key. DNS is case-insensitive, so two hosts differing only in case (or
+// surrounding whitespace) name the same cluster and must resolve identically —
+// for the host→cores cache, /.well-known discovery, and context determination.
+func normalizeClusterHost(clusterHost string) string {
+	return strings.ToLower(strings.TrimSpace(clusterHost))
 }
 
 // resolveCachedCores is the shared cache-then-/.well-known resolution behind
@@ -87,14 +94,32 @@ func ResolveClusterCores(ctx context.Context, cacheDir, clusterHost string, http
 // live fetch fails, so a brief outage doesn't break a host whose cores we
 // already knew. load/modify select the cache file; discover wraps the
 // host-specific /.well-known fetch (and any host-specific error formatting);
-// label names the resource in debug output ("cluster" / "api host").
+// label names the resource in debug output and in the same-site refusal
+// ("cluster" / "API host").
+//
+// Every entry handed out — fresh from the cache, the stale fallback, or just
+// fetched — first passes requireSameSiteIssuers, and a fetched one passes it
+// BEFORE it is cached. Gating here rather than at the fetch is what makes one
+// check cover the git-cluster, data-API, and ENTIRE_TOKEN paths, and it is
+// why a cores entry poisoned on disk (a hand-edited or planted cache file) is
+// rejected on read instead of trusted for a TTL. Gating the fetch as well
+// keeps a hostile document from ever landing in the cache. Only CoreURLs is
+// gated: LoginURL is display-only and never eligible (see Response.LoginURL).
+//
+// An entry written against an older discovery.CoresSchemaVersion is stale for
+// every caller, because a field this client knows about cannot be told apart
+// from one the resource declined to advertise. Without this, a warm cache
+// pins a client to the old shape for a full TTL — and the people with a warm
+// entry are exactly the ones who just hit the error the new field improves.
+// It costs one re-fetch per host, after which the rewritten entry is current
+// and caches normally even when the field is genuinely absent.
 func resolveCachedCores(
 	cacheDir, host, label string,
 	load func(string) (discovery.ClusterCoresCache, error),
 	modify func(string, func(discovery.ClusterCoresCache) error) error,
-	discover func() ([]string, error),
+	discover func() (discovery.CoresEntry, error),
 	debugf DebugFunc,
-) ([]string, error) {
+) (*discovery.CoresEntry, error) {
 	cache, err := load(cacheDir)
 	if err != nil {
 		// A cache read problem must not block resolution — discover live.
@@ -102,110 +127,335 @@ func resolveCachedCores(
 		cache = nil
 	}
 
-	var stale []string
+	var stale *discovery.CoresEntry
 	if cache != nil {
-		if urls, fresh, ok := cache.Get(host); ok {
-			if fresh {
-				debugf("%s %s cores from cache: %v", label, host, urls)
-				return urls, nil
+		if entry, fresh, ok := cache.GetEntry(host); ok {
+			outdated := entry.SchemaVersion < discovery.CoresSchemaVersion
+			if fresh && !outdated {
+				if err := requireSameSiteIssuers(label, host, entry.CoreURLs); err != nil {
+					return nil, err
+				}
+				debugf("%s %s cores from cache: %v", label, host, entry.CoreURLs)
+				return entry, nil
 			}
-			stale = urls
-			debugf("%s %s cores cache expired; re-fetching /.well-known", label, host)
+			stale = entry
+			debugf("%s %s cores cache expired or schema v%d < v%d; re-fetching /.well-known",
+				label, host, entry.SchemaVersion, discovery.CoresSchemaVersion)
 		}
 	}
 
-	cores, err := discover()
+	fetched, err := discover()
 	if err != nil {
 		if stale != nil {
-			debugf("%s discovery for %s failed (%v); falling back to stale cached cores %v", label, host, err, stale)
+			if gateErr := requireSameSiteIssuers(label, host, stale.CoreURLs); gateErr != nil {
+				return nil, gateErr
+			}
+			debugf("%s discovery for %s failed (%v); falling back to stale cached cores %v", label, host, err, stale.CoreURLs)
 			return stale, nil
 		}
 		return nil, err
 	}
+	if err := requireSameSiteIssuers(label, host, fetched.CoreURLs); err != nil {
+		return nil, err
+	}
 
 	if mErr := modify(cacheDir, func(c discovery.ClusterCoresCache) error {
-		c.Set(host, cores)
+		c.SetEntry(host, fetched)
 		return nil
 	}); mErr != nil {
 		// Non-fatal: we resolved the cores, the next call just re-fetches.
 		debugf("%s cache write for %s failed: %v", label, host, mErr)
 	}
-	return cores, nil
+	return &fetched, nil
 }
 
 // resolveClusterCores returns the control-plane core URLs that front
 // clusterHost, from cluster_cores.json when fresh, otherwise via a live
 // /.well-known fetch (cached, with stale fallback on failure).
-func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) ([]string, error) {
+func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) (*discovery.CoresEntry, error) {
 	return resolveCachedCores(cacheDir, clusterHost, "cluster",
 		discovery.LoadClusterCores, discovery.ModifyClusterCores,
-		func() ([]string, error) {
+		func() (discovery.CoresEntry, error) {
 			body, err := Discover(ctx, clusterHost, httpClient, debugf)
 			if err != nil {
-				return nil, formatDiscoveryError(clusterHost, err)
+				return discovery.CoresEntry{}, formatDiscoveryError(clusterHost, err)
 			}
-			return body.CoreURLs, nil
+			return discovery.CoresEntry{
+				CoreURLs: body.CoreURLs,
+				LoginURL: body.LoginURL,
+			}, nil
 		}, debugf)
 }
 
-// selectContext applies the account-selection rules over a resource's
-// advertised trusted issuers. subject is a noun phrase identifying the
-// resource ("cluster nyc.entire.io" / "API host partial.to") used in
-// messages, so the same rules serve both the git-cluster and data-API
-// resolvers. See ResolveContextForCluster for the rationale.
-func selectContext(f *contexts.File, subject string, coreURLs []string, debugf DebugFunc) (*contexts.Context, error) {
-	eligible := eligibleContexts(f, coreURLs)
+// ErrNoAuthContext marks the case where no selected or saved login can
+// authenticate a discovered resource. The returned error retains the complete,
+// actionable login hint while allowing callers to use errors.Is.
+var ErrNoAuthContext = errors.New("no auth context")
 
-	// 1. Active context wins when it's eligible for this resource.
-	if current := f.Find(f.CurrentContext); current != nil {
-		for _, c := range eligible {
-			if c.Name == current.Name {
-				debugf("%s -> active context %s", subject, current.Name)
-				return current, nil
-			}
-		}
-	}
-
-	// 2. Otherwise the eligible set decides.
-	switch len(eligible) {
-	case 0:
-		return nil, errors.New(renderLoginHint(subject, coreURLs))
-	case 1:
-		debugf("%s -> sole eligible context %s", subject, eligible[0].Name)
-		return eligible[0], nil
-	default:
-		return nil, ambiguousContextError(subject, eligible)
-	}
+type noAuthContextError struct {
+	message string
 }
 
-// eligibleContexts returns the local contexts whose core is among coreURLs,
-// de-duplicated by name. Order is unspecified — callers either use the sole
-// element or report the whole set, never index [0] as a silent winner.
+func (e *noAuthContextError) Error() string { return e.message }
+func (e *noAuthContextError) Unwrap() error { return ErrNoAuthContext }
+
+// selectLoginContext resolves the login context for a resource, and is the one
+// place the CLI's account-selection policy lives. subject is a noun phrase
+// identifying the resource ("cluster nyc.entire.io" / "API host partial.to")
+// used in messages, so the same rule serves the git-cluster, data-API, and cell
+// resolvers.
+//
+// The tiers, in order:
+//
+//  1. An explicit `--context`/$ENTIRE_CONTEXT selection, when the resource
+//     accepts it. A saved-but-untrusted one is a hard error that never falls
+//     through: the user named that identity, so quietly acting as another is
+//     the very failure the override exists to prevent.
+//  2. The stored current_context, when the resource accepts it. `entire auth
+//     switch <name>` is the lever for every resource that context's core fronts.
+//  3. Otherwise the sole saved login the resource accepts, announced on
+//     autoSelectNoticeW — for cluster-addressed operations (t.autoSelect:
+//     git remotes and the mirror commands) under autoSelectSites only. Someone holding logins in two federations should
+//     be able to clone from either without first retargeting every shell on
+//     the machine. The data API never auto-selects: it follows the selected
+//     login, so a host that rejects it names the login that would work.
+//  4. Otherwise, when several fit, ambiguousContextError — we refuse to guess
+//     which account acts.
+//
+// Anything left over is a failure renderUnusableActiveContext explains — which
+// for a host outside autoSelectSites names the login that would work, so the
+// user selects it explicitly.
+//
+// host is the resource's own hostname (the cluster or API host the well-known
+// document came from), which tier 3 checks against autoSelectSites; subject is
+// the noun phrase built from it for messages.
+//
+// See docs/architecture/upstream-host-resolution.md#account-selection.
+func selectLoginContext(f *contexts.File, subject, host string, t loginTargets, debugf DebugFunc) (*contexts.Context, error) {
+	// An explicit --context/$ENTIRE_CONTEXT naming no saved login fails here,
+	// before any eligibility talk: "that context doesn't exist" and "that context
+	// isn't trusted here" are different mistakes with different fixes.
+	sel, err := f.Active()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
+	}
+	if sel.Context != nil && contextEligible(sel.Context, t.coreURLs) {
+		debugf("%s -> %s", subject, describeSelection(sel))
+		return sel.Context, nil
+	}
+	if sel.Context != nil {
+		debugf("%s -> %s (%s) is not trusted here", subject, describeSelection(sel), sel.Context.CoreURL)
+	}
+	eligible := eligibleContexts(f, t.coreURLs)
+	// Auto-selection is for an identity the user did not name. An explicit
+	// override the resource rejects falls straight through to the message that
+	// blames the flag.
+	if !sel.Explicit() {
+		if len(eligible) == 1 && !t.autoSelect {
+			debugf("%s -> sole eligible context %s not auto-selected: only cluster-addressed operations auto-select", subject, eligible[0].Name)
+		}
+		if len(eligible) == 1 && t.autoSelect && !autoSelectAllowed(host) {
+			debugf("%s -> sole eligible context %s not auto-selected: %s is not an Entire site", subject, eligible[0].Name, host)
+		}
+		if len(eligible) == 1 && t.autoSelect && autoSelectAllowed(host) {
+			debugf("%s -> sole eligible context %s", subject, eligible[0].Name)
+			// Tier 2 already returned if the stored default fit, so the login
+			// acting here is never the one the user set. Say which it is.
+			fmt.Fprintf(autoSelectNoticeW, "Using context '%s'.\n", eligible[0].Name)
+			return eligible[0], nil
+		}
+		if len(eligible) > 1 {
+			return nil, ambiguousContextError(subject, eligible)
+		}
+	}
+	message := renderUnusableActiveContext(subject, sel, eligible, t)
+	if sel.Context == nil && len(eligible) == 0 {
+		return nil, &noAuthContextError{message: message}
+	}
+	return nil, errors.New(message)
+}
+
+// autoSelectSites are the registrable domains whose hosts may have a login
+// chosen FOR the user (tier 3 of selectLoginContext): Entire's own production,
+// staging, and local-dev federations. Hardcoded on purpose — no setting, no
+// environment override — because the list is the answer to "which operators
+// do we trust enough to pick a credential for without being asked?", and a
+// knob that widened it would be set by exactly the party that benefits.
+//
+// Any other host — a self-hosted git.acme.com advertising auth.acme.com, say —
+// still passes requireSameSiteIssuers and still works when its login is the
+// stored default or named with --context/$ENTIRE_CONTEXT. It just never
+// auto-selects: the user is told which saved login would work and switches
+// explicitly.
+var autoSelectSites = []string{"entire.io", "partial.to", "localhost"}
+
+// autoSelectAllowed reports whether host is under one of autoSelectSites.
+func autoSelectAllowed(host string) bool {
+	return slices.Contains(autoSelectSites, registrableDomain(host))
+}
+
+// autoSelectNoticeW receives the line naming the login selectLoginContext
+// auto-selected. Package-level so tests can capture it, matching
+// tokenstore.loosePermsWarnW; production always writes to stderr.
+//
+// Stderr, never stdout: this resolves inside git-remote-entire, where stdout
+// carries the git remote-helper protocol and one stray line breaks the
+// transfer, and inside git hooks. Errors are ignored for the same reason the
+// other stderr notices ignore them — a failed notice must not fail the command.
+var autoSelectNoticeW io.Writer = os.Stderr
+
+// ambiguousContextError reports that several saved logins fit and none was
+// chosen. Auto-selection settles a single candidate only: picking among several
+// would make the acting identity depend on what else happens to be stored, so
+// the user picks. Names are sorted, so the message is stable across saves.
+// Both remedies are named, in the same words renderUnusableActiveContext uses
+// for its switchHint: the per-command one first, because a cluster that trusts
+// several cores makes ambiguity the ordinary case for anyone holding a login
+// per jurisdiction, and retargeting every shell to clone once is the wrong
+// lever. `--context` is named as a bare flag rather than inside an `entire …`
+// invocation because git-remote-entire reaches this too (ResolveClusterAuth),
+// so the same sentence prints as `fatal:` during a plain `git push`, where
+// there is no `entire` command to hang the flag on.
+func ambiguousContextError(subject string, eligible []*contexts.Context) error {
+	return fmt.Errorf("multiple login contexts can authenticate against %s (%s); name one with `--context <context>` (or %s=<context>) for a single command, or switch the default with `entire auth switch <context>`, then re-run",
+		subject, strings.Join(contextNames(eligible), ", "), contexts.EnvContextVar)
+}
+
+// describeSelection labels a resolved identity for debug output, naming the
+// mechanism that chose it so a trace answers "why this login?" and not just
+// "which login?".
+func describeSelection(sel contexts.Selection) string {
+	if sel.Explicit() {
+		return fmt.Sprintf("context %s (from %s)", sel.Context.Name, sel.Source)
+	}
+	return "active context " + sel.Context.Name
+}
+
+// contextEligible reports whether c's core is among the resource's advertised
+// trusted issuers. It is the single eligibility predicate: both the accept
+// decision and the candidate list reported on failure go through it, so the two
+// can never disagree about what "eligible" means.
+//
+// Comparison is trailing-slash- and whitespace-insensitive, matching
+// trustedLoginServers' normalisation of the same URLs — a core advertised with
+// padding must not be rejected here and then echoed back as trusted. A context
+// with no CoreURL is never eligible: it names no issuer to match, and without
+// this guard a resource advertising a blank core would match it.
+func contextEligible(c *contexts.Context, coreURLs []string) bool {
+	// A nil entry comes from a hand-edited or truncated contexts.json (`[null]`),
+	// the same trust boundary deleteContextKeychain's blank-audience guard
+	// contemplates. It is never eligible, and must not panic: eligibleContexts
+	// walks every stored entry on the failure path, and that path runs inside
+	// git-remote-entire during `git push`.
+	if c == nil {
+		return false
+	}
+	want := normalizeCoreURL(c.CoreURL)
+	if want == "" {
+		return false
+	}
+	return slices.ContainsFunc(coreURLs, func(coreURL string) bool {
+		return normalizeCoreURL(coreURL) == want
+	})
+}
+
+// normalizeCoreURL folds a core URL to the form core URLs are compared and
+// displayed in: whitespace and trailing slashes are insignificant, so
+// `https://core.example/ ` and `https://core.example` are the same issuer. The
+// single normaliser behind contextEligible, activeLoginLabel, and
+// trustedLoginServers, so the accept decision and every message agree.
+func normalizeCoreURL(coreURL string) string {
+	return strings.TrimRight(strings.TrimSpace(coreURL), "/")
+}
+
+// eligibleContexts returns the saved contexts this resource would accept: the
+// auto-selection candidates, and the set reported when selection fails.
+// Filtering f.Contexts once (rather than iterating coreURLs and collecting
+// per-issuer matches) makes duplicates structurally impossible, so no
+// de-duplication is needed even when a resource advertises the same core twice.
 func eligibleContexts(f *contexts.File, coreURLs []string) []*contexts.Context {
-	seen := make(map[string]bool)
 	var out []*contexts.Context
-	for _, coreURL := range coreURLs {
-		for _, c := range f.ContextsForIssuer(coreURL) {
-			if !seen[c.Name] {
-				seen[c.Name] = true
-				out = append(out, c)
-			}
+	for _, c := range f.Contexts {
+		if contextEligible(c, coreURLs) {
+			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// ambiguousContextError is returned when more than one local context could
-// authenticate against the resource and none is active. We refuse to guess —
-// the user picks explicitly. Names are sorted so the message is stable.
-func ambiguousContextError(subject string, eligible []*contexts.Context) error {
-	names := make([]string, len(eligible))
-	for i, c := range eligible {
+// renderUnusableActiveContext explains why no identity is available, in the
+// terms of what the user can actually do about it — a wrong remedy here is a
+// dead end. Two independent facts pick the message: whether an identity resolved
+// at all (is there a login to report as rejected?) and whether any saved login
+// is eligible (is the fix a local switch, or a new login?).
+//
+// Naming the login matters because "not logged in" is actively misleading for
+// someone who IS logged in, just to a federation this resource doesn't trust; it
+// sends them to `entire login`, which reproduces the same failure. The
+// no-identity cases must NOT use that phrasing, which is why they get their own
+// first lines rather than an interpolated-away clause.
+//
+// The remedy also tracks where the identity came from: someone who passed
+// `--context` needs to change that argument, not run `auth switch`, which would
+// leave the flag still overriding it on the next run.
+//
+// selectLoginContext reaches this only where auto-selection cannot apply: an
+// explicit override the resource rejected, or no eligible saved login at all.
+// The rest of the matrix stays because this renders "no identity is available"
+// as a whole, and it is exercised directly.
+//
+// Returns a string, matching renderLoginHint and leaving the single errors.New
+// to the caller.
+func renderUnusableActiveContext(subject string, sel contexts.Selection, eligible []*contexts.Context, t loginTargets) string {
+	names := strings.Join(contextNames(eligible), ", ")
+	switchHint := "Switch with `entire auth switch <context>`, then re-run your command."
+	if sel.Explicit() {
+		switchHint = fmt.Sprintf("Name one with `--context <context>` (or %s), then re-run your command.", contexts.EnvContextVar)
+	}
+	switch {
+	case sel.Context == nil && len(eligible) > 0:
+		// current_context unset or dangling, but a saved login would work. An
+		// explicit selection can't land here: it either matched or already errored.
+		return fmt.Sprintf("no active auth context for %s.\nThese saved logins can authenticate it: %s\n%s",
+			subject, names, switchHint)
+	case sel.Context == nil:
+		return renderLoginHint(subject, t)
+	case len(eligible) > 0:
+		return fmt.Sprintf("%s does not accept %s.\nThese saved logins can authenticate it: %s\n%s",
+			subject, loginLabel(sel), names, switchHint)
+	default:
+		return fmt.Sprintf("%s does not accept %s, and no other saved login does either.\n%s",
+			subject, loginLabel(sel), renderLoginInstruction(t))
+	}
+}
+
+// loginLabel names the rejected login and how it was chosen — "your active
+// login" reads as a mistake in stored state, which is wrong when the user named
+// the context on this very command line.
+//
+// The core URL degrades away when the metadata carries none, rather than
+// emitting a dangling `()`. A core-less context is never eligible, so it always
+// arrives here.
+func loginLabel(sel contexts.Selection) string {
+	role := "your active login"
+	if sel.Explicit() {
+		role = "the login selected by " + sel.Source
+	}
+	if core := normalizeCoreURL(sel.Context.CoreURL); core != "" {
+		return fmt.Sprintf("%s %q (%s)", role, sel.Context.Name, core)
+	}
+	return fmt.Sprintf("%s %q", role, sel.Context.Name)
+}
+
+// contextNames returns the contexts' names, sorted so error messages are stable
+// across saves and across runs.
+func contextNames(cs []*contexts.Context) []string {
+	names := make([]string, len(cs))
+	for i, c := range cs {
 		names[i] = c.Name
 	}
-	sort.Strings(names)
-	return fmt.Errorf("multiple login contexts can authenticate against %s (%s); choose one with `entire auth use <context>` and re-run",
-		subject, strings.Join(names, ", "))
+	slices.Sort(names)
+	return names
 }
 
 // formatDiscoveryError turns a Discover error into the message

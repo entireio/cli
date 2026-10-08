@@ -40,7 +40,8 @@ import (
 //     Only one line is held in memory at a time. A trailing partial line
 //     (agent mid-write) is silently dropped so consumers never see a
 //     truncated record.
-//   - Whole-document JSON agents (Gemini) — read snapshot into memory and
+//   - Whole-document JSON agents (Gemini CLI sessions recorded before its
+//     support was removed) — read snapshot into memory and
 //     validate with json.Valid before emitting. These transcripts are
 //     bounded by conversation size and rarely exceed a few MB even for
 //     long sessions, so buffering is acceptable here.
@@ -96,7 +97,8 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string, age
 }
 
 // isWholeDocumentJSONAgent reports whether an agent's on-disk transcript is
-// a single JSON document (e.g. Gemini's session-*.json) versus JSONL.
+// a single JSON document (Gemini's session-*.json) versus JSONL. Gemini CLI is
+// no longer supported, but session state it left behind can still be read.
 func isWholeDocumentJSONAgent(agentType types.AgentType) bool {
 	return agentType == agent.AgentTypeGemini
 }
@@ -156,26 +158,30 @@ func writeWholeDocumentJSONTranscript(ctx context.Context, w io.Writer, r io.Rea
 
 func newSessionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "session",
-		Aliases: []string{"sessions"},
+		Use:     cmdSession,
+		Aliases: []string{cmdSessionsAlias},
 		Short:   "Manage agent sessions tracked by Entire",
 		Long: `View and manage agent sessions tracked by Entire.
 
 Commands:
   list     List all sessions across all worktrees
   info     Show detailed information for a specific session
+  tokens   Show token usage and optimization recommendations
   stop     Stop one or more active sessions
   current  Show the active session for the current worktree
   attach   Attach an existing agent session
+  adopt    Adopt an active session from another worktree
   resume   Switch to a branch and resume its session
 
 Examples:
   entire session list                      List all sessions
   entire session info <session-id>         Show session details
   entire session info <session-id> --json  Output as JSON
+  entire session tokens <session-id>       Show token usage
   entire session stop                      Interactive stop
   entire session current                   Active session for cwd
   entire session attach <session-id>       Attach an external session
+  entire session adopt <session-id> --from ../repo  Adopt a moved session
   entire session resume <branch>           Resume from a branch`,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
@@ -187,9 +193,11 @@ Examples:
 
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newInfoCmd())
+	cmd.AddCommand(newTokensCmd())
 	cmd.AddCommand(newStopCmd())
 	cmd.AddCommand(newSessionCurrentCmd())
 	cmd.AddCommand(newAttachCmd())
+	cmd.AddCommand(newAdoptCmd())
 	cmd.AddCommand(newResumeCmd())
 
 	return cmd
@@ -272,17 +280,17 @@ func runStop(ctx context.Context, cmd *cobra.Command, sessionID string, all, for
 	return runStopMultiSelect(ctx, cmd, activeSessions, force)
 }
 
-// filterActiveSessions returns sessions that have not been explicitly ended.
-// A session is considered ended if Phase == PhaseEnded OR EndedAt is set.
-// This matches the logic in status.go's writeActiveSessions for consistency:
-// any session visible in `entire status` should also be visible in `sessions stop`.
+// filterActiveSessions returns sessions that have not been explicitly ended,
+// per session.State.IsEnded. `entire status` filters on the same predicate
+// (writeActiveSessions, runStatusJSON), so any session it lists as active is
+// also one `sessions stop` will offer.
 func filterActiveSessions(states []*strategy.SessionState) []*strategy.SessionState {
 	var active []*strategy.SessionState
 	for _, s := range states {
 		if s == nil {
 			continue
 		}
-		if s.Phase != session.PhaseEnded && s.EndedAt == nil {
+		if !s.IsEnded() {
 			active = append(active, s)
 		}
 	}
@@ -319,7 +327,7 @@ func newListCmd() *cobra.Command {
 	var jsonFlag bool
 
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List all sessions",
 		Long: `List all sessions tracked by Entire, including ended sessions.
 
@@ -431,9 +439,12 @@ func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
 		fmt.Fprintf(w, "%s \"%s\"\n", sty.render(sty.dim, ">"), prompt)
 	}
 
-	// Line 3: status · started X ago · active X ago · tokens X.Xk
+	// Line 3: status · [imported (read-only) ·] started X ago · active X ago · tokens X.Xk
 	var stats []string
 	stats = append(stats, sessionPhaseLabel(s))
+	if s.Kind.IsImported() {
+		stats = append(stats, "imported (read-only)")
+	}
 	stats = append(stats, "started "+timeAgo(s.StartedAt))
 	if s.LastInteractionTime != nil && s.LastInteractionTime.Sub(s.StartedAt) > time.Minute {
 		stats = append(stats, activeTimeDisplay(s.LastInteractionTime))
@@ -473,9 +484,12 @@ and files touched. Works for both active and ended sessions.
 Output modes:
   Default       Human-readable summary.
   --json        Metadata-only JSON envelope (no transcript bytes).
+                "pending_turns" counts turns not yet condensed into a
+                checkpoint. "checkpoints" is a deprecated alias with the
+                same value and will be removed in the next release.
   --transcript  Stream the live raw agent transcript bytes to stdout in
-                the agent's native format (JSONL for Claude/Cursor/Codex,
-                JSON for Gemini). Snapshot is bounded to the file size
+                the agent's native format (e.g. JSONL for
+                Claude/Cursor/Codex). Snapshot is bounded to the file size
                 observed at open. JSONL streams have a trailing partial
                 line trimmed; JSON documents are emitted intact.
 
@@ -485,7 +499,7 @@ Examples:
   entire sessions info <session-id> --transcript > session.jsonl`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionInfo(cmd.Context(), cmd, args[0], sessionOutputModeFromFlags(jsonFlag, transcriptFlag))
+			return runSessionInfo(cmd.Context(), cmd, args[0], sessionOutputModeFromFlags(jsonFlag, transcriptFlag), strategy.ResolutionNone)
 		},
 	}
 
@@ -507,7 +521,10 @@ func sessionOutputModeFromFlags(jsonFlag, transcriptFlag bool) sessionOutputMode
 	}
 }
 
-func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, mode sessionOutputMode) error {
+// runSessionInfo renders one session. resolution describes how sessionID was
+// arrived at and is reported alongside it; pass strategy.ResolutionNone when
+// the caller named the session outright, as `session info` does.
+func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, mode sessionOutputMode, resolution strategy.SessionResolution) error {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to load session: %w", err)
@@ -524,9 +541,9 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 	case sessionOutputTranscript:
 		return writeSessionTranscript(ctx, cmd, state)
 	case sessionOutputJSON:
-		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status)
+		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status, resolution)
 	case sessionOutputText:
-		return writeSessionInfoText(cmd.OutOrStdout(), state, status)
+		return writeSessionInfoText(cmd.OutOrStdout(), state, status, resolution)
 	default:
 		return fmt.Errorf("unknown session output mode: %d", mode)
 	}
@@ -534,8 +551,8 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 
 // writeSessionTranscript streams the live raw agent transcript for a session
 // to stdout. The transcript bytes are exactly what the agent has written to
-// disk in its native per-agent format (JSONL for Claude Code/Cursor, JSON for
-// Gemini, etc.) — Entire performs no normalization here.
+// disk in its native per-agent format (JSONL for Claude Code/Cursor,
+// etc.) — Entire performs no normalization here.
 func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
 	if state.TranscriptPath == "" {
 		cmd.SilenceUsage = true
@@ -560,22 +577,39 @@ func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *stra
 
 // sessionInfoJSON is the JSON output structure for sessions info --json.
 type sessionInfoJSON struct {
-	SessionID      string         `json:"session_id"`
-	Agent          string         `json:"agent"`
-	Model          string         `json:"model,omitempty"`
-	Status         string         `json:"status"`
-	Branch         string         `json:"branch,omitempty"`
-	WorktreeID     string         `json:"worktree_id,omitempty"`
-	WorktreePath   string         `json:"worktree_path,omitempty"`
-	StartedAt      time.Time      `json:"started_at"`
-	EndedAt        *time.Time     `json:"ended_at,omitempty"`
-	LastActive     *time.Time     `json:"last_active,omitempty"`
-	Turns          int            `json:"turns"`
+	SessionID    string     `json:"session_id"`
+	Agent        string     `json:"agent"`
+	Model        string     `json:"model,omitempty"`
+	Status       string     `json:"status"`
+	Kind         string     `json:"kind,omitempty"`
+	ReadOnly     bool       `json:"read_only,omitempty"`
+	Branch       string     `json:"branch,omitempty"`
+	WorktreeID   string     `json:"worktree_id,omitempty"`
+	WorktreePath string     `json:"worktree_path,omitempty"`
+	StartedAt    time.Time  `json:"started_at"`
+	EndedAt      *time.Time `json:"ended_at,omitempty"`
+	LastActive   *time.Time `json:"last_active,omitempty"`
+	Turns        int        `json:"turns"`
+	PendingTurns int        `json:"pending_turns"`
+	// Checkpoints is the deprecated name of PendingTurns, kept for one release
+	// so scripts reading `checkpoints` keep working. Remove it in the release
+	// after the one that introduced pending_turns.
 	Checkpoints    int            `json:"checkpoints"`
 	LastCheckpoint string         `json:"last_checkpoint_id,omitempty"`
 	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
 	LastPrompt     string         `json:"last_prompt,omitempty"`
 	FilesTouched   []string       `json:"files_touched,omitempty"`
+
+	// Resolution says how this session was picked when the caller did not name
+	// one — see strategy.SessionResolution. Present only for `session
+	// current`, which resolves; `session info <id>` and `session list` were
+	// told which sessions to report, so they omit it.
+	//
+	// A consumer that acts on the session rather than displaying it must check
+	// this: only "caller-env" and "ancestry" identify the calling process's
+	// own session. "other-worktree" in particular can be any unrelated session
+	// in the shared store.
+	Resolution string `json:"resolution,omitempty"`
 }
 
 type tokenInfoJSON struct {
@@ -598,6 +632,8 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		Agent:          agentLabel,
 		Model:          state.ModelName,
 		Status:         status,
+		Kind:           string(state.Kind),
+		ReadOnly:       state.Kind.IsImported(),
 		Branch:         state.Branch,
 		WorktreeID:     state.WorktreeID,
 		WorktreePath:   state.WorktreePath,
@@ -605,6 +641,7 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		EndedAt:        state.EndedAt,
 		LastActive:     state.LastInteractionTime,
 		Turns:          state.SessionTurnCount,
+		PendingTurns:   state.StepCount,
 		Checkpoints:    state.StepCount,
 		LastCheckpoint: string(state.LastCheckpointID),
 		LastPrompt:     state.LastPrompt,
@@ -622,17 +659,22 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 	return info
 }
 
-func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string) error {
+func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string, resolution strategy.SessionResolution) error {
+	info := buildSessionInfoJSON(state, status)
+	info.Resolution = string(resolution)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(buildSessionInfoJSON(state, status)); err != nil {
+	if err := enc.Encode(info); err != nil {
 		return fmt.Errorf("failed to encode session info: %w", err)
 	}
 	return nil
 }
 
-func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status string) error {
+func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status string, resolution strategy.SessionResolution) error {
 	fmt.Fprintf(w, "Session %s\n\n", state.SessionID)
+	if label := sessionResolutionLabel(resolution); label != "" {
+		fmt.Fprintf(w, "Resolved:    %s\n", label)
+	}
 
 	agentLabel := string(state.AgentType)
 	if agentLabel == "" {
@@ -644,6 +686,10 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 	}
 
 	fmt.Fprintf(w, "Status:      %s\n", status)
+
+	if state.Kind.IsImported() {
+		fmt.Fprintf(w, "Note:        imported history — read-only (not resumable)\n")
+	}
 
 	wt := sessionWorktreeLabel(state)
 	fmt.Fprintf(w, "Worktree:    %s\n", wt)
@@ -666,7 +712,7 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 		fmt.Fprintf(w, "Turns:       %d\n", state.SessionTurnCount)
 	}
 
-	fmt.Fprintf(w, "Checkpoints: %d\n", state.StepCount)
+	fmt.Fprintf(w, "Pending turns: %d\n", state.StepCount)
 
 	if state.LastCheckpointID != "" {
 		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)
@@ -719,7 +765,7 @@ func runStopSession(ctx context.Context, cmd *cobra.Command, sessionID string, f
 		return NewSilentError(fmt.Errorf("session not found: %s", sessionID))
 	}
 
-	if state.Phase == session.PhaseEnded || state.EndedAt != nil {
+	if state.IsEnded() {
 		fmt.Fprintf(cmd.OutOrStdout(), "Session %s is already stopped.\n", sessionID)
 		return nil
 	}
@@ -753,24 +799,34 @@ func runStopAll(ctx context.Context, cmd *cobra.Command, activeSessions []*strat
 	}
 
 	if !force {
-		var confirmed bool
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(fmt.Sprintf("Stop %d session(s)?", len(activeSessions))).
-					Value(&confirmed),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return handleFormCancellation(cmd.OutOrStdout(), "Stop", err)
-		}
-		if !confirmed {
-			fmt.Fprintln(cmd.OutOrStdout(), "Stop cancelled.")
-			return nil
+		confirmed, err := confirmStopSessions(cmd, len(activeSessions))
+		if err != nil || !confirmed {
+			return err
 		}
 	}
 
 	return stopSelectedSessions(ctx, cmd, activeSessions)
+}
+
+// confirmStopSessions asks the user to confirm stopping count sessions.
+// When declined or cancelled it prints the outcome and returns confirmed=false.
+func confirmStopSessions(cmd *cobra.Command, count int) (bool, error) {
+	var confirmed bool
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(fmt.Sprintf("Stop %d session(s)?", count)).
+				Value(&confirmed),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return false, handleFormCancellation(cmd.OutOrStdout(), "Stop", err)
+	}
+	if !confirmed {
+		fmt.Fprintln(cmd.OutOrStdout(), "Stop cancelled.")
+		return false, nil
+	}
+	return true, nil
 }
 
 // runStopMultiSelect shows a TUI multi-select for multiple active sessions.
@@ -813,20 +869,9 @@ func runStopMultiSelect(ctx context.Context, cmd *cobra.Command, activeSessions 
 
 	// Confirm only if not forcing
 	if !force {
-		var confirmed bool
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(fmt.Sprintf("Stop %d session(s)?", len(selectedIDs))).
-					Value(&confirmed),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return handleFormCancellation(cmd.OutOrStdout(), "Stop", err)
-		}
-		if !confirmed {
-			fmt.Fprintln(cmd.OutOrStdout(), "Stop cancelled.")
-			return nil
+		confirmed, err := confirmStopSessions(cmd, len(selectedIDs))
+		if err != nil || !confirmed {
+			return err
 		}
 	}
 
@@ -868,9 +913,9 @@ func stopSelectedSessions(ctx context.Context, cmd *cobra.Command, sessions []*s
 func stopSessionAndPrint(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
 	sessionID := state.SessionID
 	lastCheckpointID := state.LastCheckpointID
-	stepCount := state.StepCount
+	hasCondensableSteps := state.StepCount > 0 || state.HasTaskContent()
 
-	if err := markSessionEnded(ctx, nil, sessionID); err != nil {
+	if _, err := markSessionEnded(ctx, nil, sessionID, nil, endedNow); err != nil {
 		return fmt.Errorf("failed to stop session %s: %w", sessionID, err)
 	}
 
@@ -878,10 +923,39 @@ func stopSessionAndPrint(ctx context.Context, cmd *cobra.Command, state *strateg
 	switch {
 	case lastCheckpointID != "":
 		fmt.Fprintf(cmd.OutOrStdout(), "  Checkpoint: %s\n", lastCheckpointID)
-	case stepCount > 0:
+	case hasCondensableSteps:
 		fmt.Fprintln(cmd.OutOrStdout(), "  Work will be captured in your next checkpoint.")
 	default:
 		fmt.Fprintln(cmd.OutOrStdout(), "  No work recorded.")
 	}
 	return nil
+}
+
+// sessionResolutionLabel renders how a session was resolved, for humans.
+//
+// Every resolution gets a line except ResolutionNone, which means the caller
+// named the session outright and there is nothing to explain. An earlier
+// revision also returned "" for the plain worktree tier, on the grounds that
+// "the most recent session recorded here" is what someone typing `session
+// current` already assumes — but the command's own help promises the output
+// always says which question it answered, and silently omitting the most
+// common tier made that false. Cheaper to keep the promise than to qualify
+// it.
+func sessionResolutionLabel(resolution strategy.SessionResolution) string {
+	switch resolution {
+	case strategy.ResolutionCallerEnv:
+		return "your own session, named by the agent running this command"
+	case strategy.ResolutionAncestry:
+		return "your own session, matched by process ancestry"
+	case strategy.ResolutionCallerAmbiguous:
+		return "a guess — several agents claim this command and nothing could order them"
+	case strategy.ResolutionOtherWorktree:
+		return "another worktree's session — this worktree has none of its own"
+	case strategy.ResolutionWorktree:
+		return "the most recently active session recorded in this worktree"
+	case strategy.ResolutionNone:
+		return ""
+	default:
+		return ""
+	}
 }

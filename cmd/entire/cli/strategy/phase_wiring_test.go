@@ -7,8 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -181,22 +180,11 @@ func setupGitRepo(t *testing.T) string {
 	dir := t.TempDir()
 
 	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
 
-	// Create initial commit (required for HEAD to exist)
-	wt, err := repo.Worktree()
-	require.NoError(t, err)
-
-	// Create a test file
-	testFile := filepath.Join(dir, "test.txt")
-	require.NoError(t, writeTestFile(testFile, "initial content"))
-
-	_, err = wt.Add("test.txt")
-	require.NoError(t, err)
-
-	_, err = wt.Commit("initial commit", &git.CommitOptions{})
-	require.NoError(t, err)
+	// Create initial commit (required for HEAD to exist).
+	testutil.WriteFile(t, dir, "test.txt", "initial content")
+	testutil.GitAdd(t, dir, "test.txt")
+	testutil.GitCommit(t, dir, "initial commit")
 
 	return dir
 }
@@ -299,81 +287,6 @@ func TestInitializeSession_EmptyModelDoesNotOverwrite(t *testing.T) {
 		"InitializeSession should not clear ModelName when model parameter is empty")
 }
 
-// TestInitializeSession_ReconcileRecomputesAttributionAgainstNewBase verifies
-// the "reset-to-known-checkpoint" bug fix: when HEAD carries this session's
-// LastCheckpointID, reconcile advances BaseCommit + AttributionBaseCommit to
-// HEAD, and PendingPromptAttribution must be recomputed against the new base.
-// Otherwise the pre-migration attribution (computed against the stale pre-reset
-// base) would misattribute edits from the discarded history segment as churn.
-//
-// Scenario: C0 → C1 (condensed, trailer X) → C2 (discarded). User resets to C1
-// and modifies test.txt with one added line. Session state still references C2
-// (stale) with LastCheckpointID=X. InitializeSession must reconcile and
-// recompute attribution so UserLinesRemoved stays 0 (the "discarded" content
-// must not look like the user removed it).
-func TestInitializeSession_ReconcileRecomputesAttributionAgainstNewBase(t *testing.T) {
-	dir := setupGitRepo(t)
-	t.Chdir(dir)
-
-	// C1: condensed checkpoint with a matching Entire-Checkpoint trailer.
-	testutil.WriteFile(t, dir, "test.txt", "init\ncondensed\n")
-	testutil.GitAdd(t, dir, "test.txt")
-	testutil.GitCommit(t, dir, "condensed\n\nEntire-Checkpoint: abc123def456")
-	c1 := testutil.GetHeadHash(t, dir)
-
-	// C2: a discarded commit on top of C1 (simulating work the user reset away).
-	testutil.WriteFile(t, dir, "test.txt", "init\ncondensed\ndiscarded\n")
-	testutil.GitAdd(t, dir, "test.txt")
-	testutil.GitCommit(t, dir, "work the user will reset away")
-	c2 := testutil.GetHeadHash(t, dir)
-
-	// Simulate `git reset --hard C1`: HEAD moves back; worktree matches C1.
-	testutil.GitReset(t, dir, c1)
-
-	// User makes one additional edit after the reset.
-	testutil.WriteFile(t, dir, "test.txt", "init\ncondensed\nmy-edit\n")
-
-	s := &ManualCommitStrategy{}
-	seed := &SessionState{
-		SessionID:             "test-reconcile-attrib",
-		WorktreePath:          dir,
-		BaseCommit:            c2, // stale: session still believes HEAD is at C2
-		AttributionBaseCommit: c2,
-		LastCheckpointID:      id.CheckpointID("abc123def456"),
-		StepCount:             0,
-		StartedAt:             time.Now(),
-	}
-	require.NoError(t, s.saveSessionState(context.Background(), seed))
-
-	err := s.InitializeSession(context.Background(), seed.SessionID, agent.AgentTypeClaudeCode, "", "a prompt", "")
-	require.NoError(t, err)
-
-	reloaded, err := s.loadSessionState(context.Background(), seed.SessionID)
-	require.NoError(t, err)
-	require.NotNil(t, reloaded)
-
-	assert.Equal(t, c1, reloaded.BaseCommit,
-		"reconcile must advance BaseCommit to HEAD (= C1)")
-	assert.Equal(t, c1, reloaded.AttributionBaseCommit,
-		"reconcile must advance AttributionBaseCommit to HEAD (= C1)")
-
-	require.NotNil(t, reloaded.PendingPromptAttribution,
-		"InitializeSession must set PendingPromptAttribution")
-	// Correct attribution against the post-reconcile base (C1):
-	//   C1 test.txt: "init\ncondensed\n"
-	//   worktree:    "init\ncondensed\nmy-edit\n"
-	// → 1 line added, 0 removed.
-	//
-	// Buggy attribution against the stale pre-reset base (C2):
-	//   C2 test.txt: "init\ncondensed\ndiscarded\n"
-	//   worktree:    "init\ncondensed\nmy-edit\n"
-	// → 1 added (my-edit), 1 removed (discarded) — phantom churn.
-	assert.Equal(t, 1, reloaded.PendingPromptAttribution.UserLinesAdded,
-		"UserLinesAdded should reflect exactly the single post-reset edit")
-	assert.Equal(t, 0, reloaded.PendingPromptAttribution.UserLinesRemoved,
-		"UserLinesRemoved must be 0; any non-zero value means attribution ran against the stale pre-reset base and counted discarded-history lines as user removals")
-}
-
 // TestCondenseAndMarkFullyCondensed_Guards verifies the two early-exit conditions
 // in CondenseAndMarkFullyCondensed: sessions with no data are marked FullyCondensed
 // immediately, and sessions with FilesTouched are left untouched for PostCommit.
@@ -428,13 +341,55 @@ func TestCondenseAndMarkFullyCondensed_Guards(t *testing.T) {
 	})
 }
 
-// writeTestFile is a helper to create a test file with given content.
-func writeTestFile(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0o644)
+func TestCondenseAndMarkFullyCondensed_FilesWaitingForCommitDoesNotWaitForStateLock(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	const sessionID = "files-waiting-for-commit"
+	require.NoError(t, s.InitializeSession(ctx, sessionID, "Claude Code", "", "", ""))
+
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	state.Phase = session.PhaseEnded
+	state.EndedAt = &now
+	state.FilesTouched = []string{"some_file.txt"}
+	require.NoError(t, s.saveSessionState(ctx, state))
+
+	lockPath, err := stateLockPath(ctx, sessionID)
+	require.NoError(t, err)
+	release, err := flock.Acquire(lockPath)
+	require.NoError(t, err)
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.CondenseAndMarkFullyCondensed(ctx, sessionID)
+	}()
+
+	select {
+	case condenseErr := <-done:
+		require.NoError(t, condenseErr)
+	case <-time.After(500 * time.Millisecond):
+		release()
+		released = true
+		require.NoError(t, <-done)
+		t.Fatal("file-bearing session waited for the state lock instead of leaving the work for PostCommit")
+	}
+
+	release()
+	released = true
 }
 
 // TestCondenseAndMarkFullyCondensed_WithDataNoFiles verifies that a session with
-// uncondensed data (StepCount > 0, shadow branch exists) but no FilesTouched
+// uncondensed data (StepCount > 0) but no FilesTouched
 // is condensed and marked FullyCondensed. This is the subagent case from #591:
 // the subagent's files were already committed by the parent session.
 func TestCondenseAndMarkFullyCondensed_WithDataNoFiles(t *testing.T) {
@@ -456,17 +411,16 @@ func TestCondenseAndMarkFullyCondensed_WithDataNoFiles(t *testing.T) {
 	// Write a file the agent "modified" (but it will be committed by parent)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent_file.txt"), []byte("agent work"), 0o644))
 
-	// SaveStep creates the shadow branch
+	// SaveStep records a turn-end step
 	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{},
-		NewFiles:       []string{"agent_file.txt"},
-		DeletedFiles:   []string{},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: []string{},
+		NewFiles:      []string{"agent_file.txt"},
+		DeletedFiles:  []string{},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	})
 	require.NoError(t, err)
 

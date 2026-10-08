@@ -7,29 +7,23 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
 const (
 	// logsOnlyScanLimit is the maximum number of commits to scan for logs-only points.
 	logsOnlyScanLimit = 50
-
-	// maxLastPromptRunes is the maximum rune length for LastPrompt stored in session state.
-	maxLastPromptRunes = 100
 )
 
 // truncatePromptForStorage collapses whitespace and truncates a user prompt
-// for storage in LastPrompt.
+// for storage in LastPrompt. It delegates to session.TruncatePromptForStorage
+// so imports and live sessions format the field identically.
 func truncatePromptForStorage(prompt string) string {
-	return stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), maxLastPromptRunes, "...")
+	return session.TruncatePromptForStorage(prompt)
 }
 
 // SessionState is an alias for session.State.
 // Previously this was a separate struct with manual conversion functions.
 type SessionState = session.State
-
-// PromptAttribution is an alias for session.PromptAttribution.
-type PromptAttribution = session.PromptAttribution
 
 // CheckpointInfo represents checkpoint metadata stored on the sessions branch.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
@@ -44,6 +38,7 @@ type CheckpointInfo struct {
 	ToolUseID        string          `json:"tool_use_id,omitempty"`
 	SessionCount     int             `json:"session_count,omitempty"` // Number of sessions (1 if omitted)
 	SessionIDs       []string        `json:"session_ids,omitempty"`   // All session IDs in this checkpoint
+	Imported         bool            `json:"imported,omitempty"`      // True for read-only imported (commit-less) checkpoints
 }
 
 // CondenseResult contains the result of a session condensation operation.
@@ -54,16 +49,46 @@ type CondenseResult struct {
 	FilesTouched         []string
 	Prompts              []string // User prompts from the condensed session
 	TotalTranscriptLines int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
-	Transcript           []byte   // Raw transcript bytes for downstream consumers (trail title generation)
 	Skipped              bool     // True if condensation was skipped (no transcript or files to condense)
+
+	// SearchProbe records whether the session invoked Entire's history search
+	// and how that was determined. Telemetry only; see detectSearchUsage for why
+	// "could not tell" is a distinct state from "did not search".
+	SearchProbe searchProbe
+
+	// TranscriptSizeBaseline is the byte size to record as
+	// SessionState.CheckpointTranscriptSize. It must be measured on the SANITIZED,
+	// pre-externalization transcript so it lives in the same coordinate as the
+	// stored turn-end transcript it is later compared against in
+	// sessionHasNewContent (storedTranscriptSize). A raw-transcript size makes
+	// `storedSize > baseline` false forever for agents with
+	// a TranscriptSanitizer, so the session silently stops condensing after its
+	// first commit.
+	TranscriptSizeBaseline int64
+
+	// NewSkillEvents are the transcript-extracted skill events this
+	// condensation appended to session state (already deduped against
+	// everything previously recorded). Callers forward them to
+	// EmitSkillInvocationTelemetry after their MutateSessionState saves — an
+	// unsaved append is re-derived by the next extraction pass, so emitting
+	// early would double-report.
+	NewSkillEvents []agent.SkillEvent
 }
 
-// ExtractedSessionData contains data extracted from a shadow branch.
+// ExtractedSessionData contains the session data a condensation stores.
 type ExtractedSessionData struct {
 	Transcript          []byte   // Full transcript content for the session
 	FullTranscriptLines int      // Total line count in full transcript
 	Prompts             []string // User prompts from the current checkpoint portion
 	FilesTouched        []string
-	TokenUsage          *agent.TokenUsage  // Token usage calculated from transcript (since CheckpointTranscriptStart)
-	SkillEvents         []agent.SkillEvent // Skill events detected from transcript data
+	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	// SkillEvents are this condensation's extracted events. Transient — the
+	// durable ledger, and the per-hook cost of carrying it, is
+	// session.SessionState.SkillEvents; see its size note.
+	SkillEvents []agent.SkillEvent
+	// SearchProbe is `entire search` usage; see detectSearchUsage. Not set by
+	// the extractors: CondenseSession assigns it exactly once, gated on
+	// condenseOpts.searchProbeAllowed, so every result path carries the same
+	// value and ungated paths never pay the scan.
+	SearchProbe searchProbe
 }

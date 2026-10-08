@@ -51,6 +51,7 @@ func TestGetSessionDir_HonorsPiHomeOverride(t *testing.T) {
 	piHome := t.TempDir()
 	t.Setenv(piHomeEnvVar, piHome)
 	t.Setenv(piSessionDirEnvVar, "")
+	t.Setenv(piSessionStoreEnvVar, "")
 
 	dir, err := (&PiAgent{}).GetSessionDir("/Users/foo/repo")
 	if err != nil {
@@ -65,6 +66,7 @@ func TestGetSessionDir_HonorsPiHomeOverride(t *testing.T) {
 func TestGetSessionBaseDir_HonorsPiHomeOverride(t *testing.T) {
 	piHome := t.TempDir()
 	t.Setenv(piHomeEnvVar, piHome)
+	t.Setenv(piSessionStoreEnvVar, "")
 
 	base, err := (&PiAgent{}).GetSessionBaseDir()
 	if err != nil {
@@ -73,6 +75,49 @@ func TestGetSessionBaseDir_HonorsPiHomeOverride(t *testing.T) {
 	want := filepath.Join(piHome, "sessions")
 	if base != want {
 		t.Errorf("GetSessionBaseDir = %q, want %q", base, want)
+	}
+}
+
+// PI_CODING_AGENT_SESSION_DIR is Pi's session directory itself: Pi appends no
+// encoded repo path under it, and it outranks PI_CODING_AGENT_DIR.
+func TestGetSessionDir_HonorsPiSessionDirOverride(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv(piHomeEnvVar, t.TempDir())
+	t.Setenv(piSessionDirEnvVar, "")
+	t.Setenv(piSessionStoreEnvVar, store)
+
+	dir, err := (&PiAgent{}).GetSessionDir("/Users/foo/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != store {
+		t.Errorf("GetSessionDir = %q, want the flat override %q", dir, store)
+	}
+}
+
+func TestGetSessionBaseDir_HonorsPiSessionDirOverride(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv(piHomeEnvVar, t.TempDir())
+	t.Setenv(piSessionStoreEnvVar, store)
+
+	base, err := (&PiAgent{}).GetSessionBaseDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != store {
+		t.Errorf("GetSessionBaseDir = %q, want the flat override %q", base, store)
+	}
+}
+
+func TestGetSessionDir_RefusesRelativePiSessionDirOverride(t *testing.T) {
+	t.Setenv(piSessionDirEnvVar, "")
+	t.Setenv(piSessionStoreEnvVar, filepath.Join("relative", "sessions"))
+
+	if dir, err := (&PiAgent{}).GetSessionDir("/Users/foo/repo"); err == nil {
+		t.Fatalf("GetSessionDir = %q, want an error naming %s", dir, piSessionStoreEnvVar)
+	}
+	if dir, err := (&PiAgent{}).GetSessionBaseDir(); err == nil {
+		t.Fatalf("GetSessionBaseDir = %q, want an error naming %s", dir, piSessionStoreEnvVar)
 	}
 }
 

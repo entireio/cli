@@ -1,14 +1,15 @@
 package copilotcli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // VSCodeHooksFileName is the VS Code-native hook file managed by Entire. It is
@@ -61,24 +62,48 @@ type VSCodeHookEntry struct {
 	Comment string            `json:"comment,omitempty"`
 }
 
-// vsCodeHookCommand builds the command string for a VS Code hook verb. In
-// production it is wrapped so a missing Entire CLI exits cleanly; the shared
+// vsCodeHookCommand builds the command string for a VS Code hook verb. It is
+// wrapped so a missing Entire CLI exits cleanly; the shared
 // "entire hooks copilot-cli <verb>" handlers parse VS Code payload shapes.
-func vsCodeHookCommand(verb string, localDev bool) string {
-	if localDev {
-		return agent.LocalDevHookScript + " hooks copilot-cli " + verb
-	}
+func vsCodeHookCommand(verb string) string {
 	return agent.WrapProductionSilentHookCommand("entire hooks copilot-cli " + verb)
+}
+
+// vsCodeHookEntryCommand reads the command off a VS Code hook entry for the
+// shared helpers. VS Code stores it under `command`, not Copilot CLI's `bash`.
+func vsCodeHookEntryCommand(e VSCodeHookEntry) string { return e.Command }
+
+// copilotWorktreeRoot resolves the worktree both hook files live in. Not a
+// repository (tests, and `enable` before `git init`): the process directory is
+// the only candidate, and it is a directory the caller chose rather than one
+// derived from anything read off disk.
+func copilotWorktreeRoot(ctx context.Context) string {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "."
+	}
+	return worktreeRoot
+}
+
+// vsCodeHookConfig returns .github/hooks/entire-vscode.json inside worktreeRoot,
+// opened through the worktree's root exactly like the Copilot CLI file (see
+// copilotHookConfig): a checked-in symlink at `.github` or `.github/hooks` must
+// not be something Entire writes through.
+func vsCodeHookConfig(worktreeRoot string) (*agent.HookConfigFile, error) {
+	return agent.OpenHookConfig(worktreeRoot, hooksDir+"/"+VSCodeHooksFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // installVSCodeHooks writes/updates .github/hooks/entire-vscode.json with the
 // VS Code turn hooks. If force is true, existing Entire entries are removed
 // before installing. Unknown fields and event types are preserved on round-trip.
 // Returns the number of hook entries newly added.
-func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool, force bool) (int, error) {
-	hooksPath := filepath.Join(worktreeRoot, hooksDir, VSCodeHooksFileName)
+func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, force bool) (int, error) {
+	cfg, err := vsCodeHookConfig(worktreeRoot)
+	if err != nil {
+		return 0, err
+	}
 
-	rawFile, rawHooks, err := readVSCodeHooksFile(hooksPath)
+	rawFile, rawHooks, err := readVSCodeHooksFile(cfg)
 	if err != nil {
 		return 0, err
 	}
@@ -92,6 +117,7 @@ func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool,
 	}
 
 	count := 0
+	staleDropped := false
 	for _, h := range vsCodeManagedEvents {
 		var entries []VSCodeHookEntry
 		if err := parseVSCodeHookEvent(rawHooks, h.Event, &entries); err != nil {
@@ -100,11 +126,22 @@ func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool,
 		if force {
 			entries = removeEntireVSCodeHooks(entries)
 		}
+		// Drop Entire-owned entries carrying any other command (an older CLI's
+		// shape, including the removed local-dev mode) so they do not keep
+		// firing beside the current ones; see InstallHooks.
+		want := make([]string, 0, len(h.Verbs))
+		for _, verb := range h.Verbs {
+			want = append(want, vsCodeHookCommand(verb))
+		}
+		kept, dropped := agent.DropStaleManagedHooks(entries, vsCodeHookEntryCommand, want)
+		if dropped {
+			staleDropped = true
+		}
+		entries = kept
 		// All verbs share one event, so remove-on-force happens once above; then
 		// add each missing verb. Doing the force-removal per verb would wipe a
 		// sibling verb added earlier in this same loop.
-		for _, verb := range h.Verbs {
-			cmd := vsCodeHookCommand(verb, localDev)
+		for _, cmd := range want {
 			if !vsCodeCommandExists(entries, cmd) {
 				entries = append(entries, VSCodeHookEntry{
 					Type:    "command",
@@ -119,15 +156,15 @@ func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool,
 		}
 	}
 
-	// Nothing was added — all managed hooks are already present — so leave the
-	// file untouched rather than rewriting identical content and churning its
-	// formatting. (Under force the canonical verbs are always re-added, so
-	// count > 0 there; count == 0 strictly means no change.)
-	if count == 0 {
+	// Nothing was added or pruned — all managed hooks are already present — so
+	// leave the file untouched rather than rewriting identical content and
+	// churning its formatting. (Under force the canonical verbs are always
+	// re-added, so count > 0 there.)
+	if count == 0 && !staleDropped {
 		return 0, nil
 	}
 
-	if err := writeVSCodeHooksFile(hooksPath, rawFile, rawHooks); err != nil {
+	if err := writeVSCodeHooksFile(cfg, rawFile, rawHooks); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -139,9 +176,12 @@ func (c *CopilotCLIAgent) installVSCodeHooks(worktreeRoot string, localDev bool,
 // is deleted rather than left as an empty shell. If the user added their own
 // hooks or top-level fields, those are preserved and the file is rewritten.
 func (c *CopilotCLIAgent) uninstallVSCodeHooks(worktreeRoot string) error {
-	hooksPath := filepath.Join(worktreeRoot, hooksDir, VSCodeHooksFileName)
+	cfg, err := vsCodeHookConfig(worktreeRoot)
+	if err != nil {
+		return err
+	}
 
-	rawFile, rawHooks, err := readVSCodeHooksFile(hooksPath)
+	rawFile, rawHooks, err := readVSCodeHooksFile(cfg)
 	if err != nil {
 		return err
 	}
@@ -163,13 +203,10 @@ func (c *CopilotCLIAgent) uninstallVSCodeHooks(worktreeRoot string) error {
 	// Delete the file only when nothing user-owned remains: no hooks left and no
 	// top-level fields other than the structural ones Entire itself writes.
 	if len(rawHooks) == 0 && !hasUserTopLevelFields(rawFile) {
-		if err := os.Remove(hooksPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("failed to remove %s: %w", VSCodeHooksFileName, err)
-		}
-		return nil
+		return cfg.Remove() //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 
-	return writeVSCodeHooksFile(hooksPath, rawFile, rawHooks)
+	return writeVSCodeHooksFile(cfg, rawFile, rawHooks)
 }
 
 // hasUserTopLevelFields reports whether rawFile carries any top-level key beyond
@@ -186,30 +223,34 @@ func hasUserTopLevelFields(rawFile map[string]json.RawMessage) bool {
 }
 
 // areVSCodeHooksInstalled reports whether any Entire hook is present in
-// entire-vscode.json.
-func (c *CopilotCLIAgent) areVSCodeHooksInstalled(worktreeRoot string) bool {
-	hooksPath := filepath.Join(worktreeRoot, hooksDir, VSCodeHooksFileName)
-	rawFile, rawHooks, err := readVSCodeHooksFile(hooksPath)
+// entire-vscode.json. A missing file is an answer (false); an unreadable or
+// malformed one is an error, matching AreHooksInstalled.
+func (c *CopilotCLIAgent) areVSCodeHooksInstalled(worktreeRoot string) (bool, error) {
+	cfg, err := vsCodeHookConfig(worktreeRoot)
+	if err != nil {
+		return false, err
+	}
+	rawFile, rawHooks, err := readVSCodeHooksFile(cfg)
 	if err != nil || rawFile == nil {
-		return false
+		return false, err
 	}
 	for _, h := range vsCodeManagedEvents {
 		var entries []VSCodeHookEntry
 		if err := parseVSCodeHookEvent(rawHooks, h.Event, &entries); err != nil {
-			return false
+			return false, err
 		}
 		if hasEntireVSCodeHook(entries) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // readVSCodeHooksFile reads and parses entire-vscode.json into raw maps,
 // preserving unknown fields. Returns (nil, nil, nil) when the file is absent so
 // callers can distinguish "missing" from "empty".
-func readVSCodeHooksFile(hooksPath string) (rawFile, rawHooks map[string]json.RawMessage, err error) {
-	data, readErr := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+func readVSCodeHooksFile(cfg *agent.HookConfigFile) (rawFile, rawHooks map[string]json.RawMessage, err error) {
+	data, readErr := cfg.Read()
 	switch {
 	case readErr == nil:
 		if err := json.Unmarshal(data, &rawFile); err != nil {
@@ -233,10 +274,10 @@ func readVSCodeHooksFile(hooksPath string) (rawFile, rawHooks map[string]json.Ra
 }
 
 // writeVSCodeHooksFile marshals rawHooks back into rawFile and writes it,
-// creating the hooks directory if needed. When no hooks remain the "hooks" key
-// is dropped rather than written as an empty object. Callers must pass a
-// non-nil rawFile.
-func writeVSCodeHooksFile(hooksPath string, rawFile, rawHooks map[string]json.RawMessage) error {
+// creating the hooks directory if needed (refusing a symlinked one). When no
+// hooks remain the "hooks" key is dropped rather than written as an empty
+// object. Callers must pass a non-nil rawFile.
+func writeVSCodeHooksFile(cfg *agent.HookConfigFile, rawFile, rawHooks map[string]json.RawMessage) error {
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 		if err != nil {
@@ -247,18 +288,11 @@ func writeVSCodeHooksFile(hooksPath string, rawFile, rawHooks map[string]json.Ra
 		delete(rawFile, "hooks")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
-		return fmt.Errorf("failed to create %s directory: %w", hooksDir, err)
-	}
-
 	output, err := jsonutil.MarshalIndentWithNewline(rawFile, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal %s: %w", VSCodeHooksFileName, err)
 	}
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write %s: %w", VSCodeHooksFileName, err)
-	}
-	return nil
+	return cfg.Write(output, 0o600) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // parseVSCodeHookEvent parses a specific event's entries from rawHooks.

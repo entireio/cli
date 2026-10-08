@@ -4,13 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -110,6 +112,12 @@ func createSessionStateFile(t *testing.T, repoRoot string, sessionID string, com
 	return sessionFile
 }
 
+// legacyShadowBranchName returns a branch name in the shape older CLIs gave
+// shadow branches (entire/<commit[:7]>-<worktreeHash[:6]>).
+func legacyShadowBranchName(commitHash plumbing.Hash) string {
+	return "entire/" + commitHash.String()[:7] + "-e3b0c4"
+}
+
 func writeCleanSettingsFile(t *testing.T, repoRoot, content string) {
 	t.Helper()
 
@@ -166,13 +174,9 @@ func TestCleanCmd_DefaultMode_WithForce(t *testing.T) {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 	worktreePath := wt.Filesystem().Root()
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		t.Fatalf("failed to get worktree ID: %v", err)
-	}
 
-	// Create shadow branch
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(commitHash.String(), worktreeID)
+	// Create a legacy shadow branch an older CLI left behind
+	shadowBranch := legacyShadowBranchName(commitHash)
 	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)
 	if err := repo.Storer.SetReference(shadowRef); err != nil {
 		t.Fatalf("failed to create shadow branch: %v", err)
@@ -212,13 +216,9 @@ func TestCleanCmd_DefaultMode_DryRun(t *testing.T) {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 	worktreePath := wt.Filesystem().Root()
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		t.Fatalf("failed to get worktree ID: %v", err)
-	}
 
-	// Create shadow branch
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(commitHash.String(), worktreeID)
+	// Create a legacy shadow branch an older CLI left behind
+	shadowBranch := legacyShadowBranchName(commitHash)
 	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)
 	if err := repo.Storer.SetReference(shadowRef); err != nil {
 		t.Fatalf("failed to create shadow branch: %v", err)
@@ -316,13 +316,9 @@ func TestCleanCmd_DefaultMode_MultipleSessions(t *testing.T) {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 	worktreePath := wt.Filesystem().Root()
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		t.Fatalf("failed to get worktree ID: %v", err)
-	}
 
-	// Create shadow branch
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(commitHash.String(), worktreeID)
+	// Create a legacy shadow branch an older CLI left behind
+	shadowBranch := legacyShadowBranchName(commitHash)
 	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)
 	if err := repo.Storer.SetReference(shadowRef); err != nil {
 		t.Fatalf("failed to create shadow branch: %v", err)
@@ -656,13 +652,9 @@ func TestCleanCmd_All_FindsSessionWithShadowBranch(t *testing.T) {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 	worktreePath := wt.Filesystem().Root()
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		t.Fatalf("failed to get worktree ID: %v", err)
-	}
 
 	// Create shadow branch for the session's base commit
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(commitHash.String(), worktreeID)
+	shadowBranch := legacyShadowBranchName(commitHash)
 	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)
 	if err := repo.Storer.SetReference(shadowRef); err != nil {
 		t.Fatalf("failed to create shadow branch: %v", err)
@@ -716,7 +708,7 @@ func TestRunCleanAllWithItems_PartialFailure(t *testing.T) {
 	}
 
 	cmd, stdout, stderr := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil, nil, nil)
 
 	if err == nil {
 		t.Fatal("runCleanAllWithItems() should return error when items fail to delete")
@@ -750,7 +742,7 @@ func TestRunCleanAllWithItems_AllFailures(t *testing.T) {
 	}
 
 	cmd, stdout, stderr := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil, nil, nil)
 
 	if err == nil {
 		t.Fatal("runCleanAllWithItems() should return error when items fail to delete")
@@ -774,7 +766,7 @@ func TestRunCleanAllWithItems_NoItems(t *testing.T) {
 	setupCleanTestRepo(t)
 
 	cmd, stdout, _ := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, false, false, []strategy.CleanupItem{}, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, false, false, []strategy.CleanupItem{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runCleanAllWithItems() error = %v", err)
 	}
@@ -795,14 +787,14 @@ func TestRunCleanAllWithItems_MixedTypes_Preview(t *testing.T) {
 	}
 
 	cmd, stdout, _ := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, false, true, items, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, false, true, items, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runCleanAllWithItems() error = %v", err)
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Shadow branches") {
-		t.Errorf("Expected 'Shadow branches' section, got: %s", output)
+	if !strings.Contains(output, "Legacy shadow branches") {
+		t.Errorf("Expected 'Legacy shadow branches' section, got: %s", output)
 	}
 	if !strings.Contains(output, "Session states") {
 		t.Errorf("Expected 'Session states' section, got: %s", output)
@@ -832,5 +824,244 @@ func TestCleanCmd_MutuallyExclusiveFlags(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot be used together") {
 		t.Errorf("Expected mutual exclusion error, got: %v", err)
+	}
+}
+
+// --- Temp file deletion ---
+
+// TestDeleteTempFiles_ToleratesVanishedFile covers the race the OpenCode export
+// staging introduces: listAllTempFiles snapshots .entire/tmp, and a staged export
+// can be renamed into place before deleteTempFiles gets to it. A name that is
+// already gone is not a deletion failure.
+func TestDeleteTempFiles_ToleratesVanishedFile(t *testing.T) {
+	setupCleanTestRepo(t)
+	ctx := context.Background()
+
+	tmpDirAbs, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(tmpDirAbs, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDirAbs, "present.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, failed := deleteTempFiles(ctx, []string{"present.json", ".export-ses_x.json-42"})
+
+	if len(failed) != 0 {
+		t.Errorf("deleteTempFiles reported %d failure(s) for an already-gone file: %+v", len(failed), failed)
+	}
+	if len(deleted) != 1 || deleted[0] != "present.json" {
+		t.Errorf("deleted = %v, want [present.json]", deleted)
+	}
+}
+
+// .entire/tmp is where deleteTempFiles unlinks names it found on a previous
+// walk, so a link swapped in at the directory must be refused rather than
+// deleted through. os.Root stops only the links that leave the repository, and
+// this one does not have to.
+func TestDeleteTempFiles_RefusesASymlinkedTmpDirectory(t *testing.T) {
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("symlink creation is not generally available on Windows")
+	}
+	setupCleanTestRepo(t)
+	ctx := context.Background()
+
+	entireDirAbs, err := paths.AbsPath(ctx, ".entire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(entireDirAbs, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// The victim lives inside the repository, so nothing here escapes the root.
+	victimDir := filepath.Join(entireDirAbs, "victim")
+	if err := os.MkdirAll(victimDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(victimDir, "keep.json")
+	if err := os.WriteFile(victim, []byte(`{"keep":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("victim", filepath.Join(entireDirAbs, "tmp")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	deleted, failed := deleteTempFiles(ctx, []string{"keep.json"})
+
+	if len(deleted) != 0 {
+		t.Errorf("deleted = %v, want none: the delete must not follow the link", deleted)
+	}
+	if len(failed) != 1 {
+		t.Fatalf("failed = %+v, want exactly one refusal", failed)
+	}
+	if !errors.Is(failed[0].Err, osroot.ErrSymlinkedPath) {
+		t.Errorf("failed[0].Err = %v, want %v", failed[0].Err, osroot.ErrSymlinkedPath)
+	}
+	if _, err := os.Lstat(victim); err != nil {
+		t.Errorf("the link target must survive: %v", err)
+	}
+}
+
+// A failed listing does not abort the command, which means the summary is the
+// only place a caller learns the list was not complete. The warning goes to
+// stderr and the counts go to stdout, so stdout has to say it too.
+func TestRunCleanAllWithItems_NamesTheScansThatFailed(t *testing.T) {
+	t.Run("with nothing else to clean", func(t *testing.T) {
+		cmd, stdout, _ := newTestCleanCmd(t)
+
+		err := runCleanAllWithItems(cmd.Context(), cmd, true, false,
+			[]strategy.CleanupItem{}, nil, nil, []string{"stray agent temp files"})
+		if err != nil {
+			t.Fatalf("runCleanAllWithItems() error = %v", err)
+		}
+
+		out := stdout.String()
+		if !strings.Contains(out, "No items to clean up.") {
+			t.Errorf("stdout should still report what was found, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Could not scan stray agent temp files") {
+			t.Errorf("stdout should name the failed scan, got:\n%s", out)
+		}
+	})
+
+	t.Run("in the preview", func(t *testing.T) {
+		cmd, stdout, _ := newTestCleanCmd(t)
+
+		err := runCleanAllWithItems(cmd.Context(), cmd, false, true,
+			[]strategy.CleanupItem{}, []string{"a.json"}, nil,
+			[]string{"temp files", "stray agent temp files"})
+		if err != nil {
+			t.Fatalf("runCleanAllWithItems() error = %v", err)
+		}
+
+		out := stdout.String()
+		if !strings.Contains(out, "Could not scan temp files or stray agent temp files") {
+			t.Errorf("preview should name both failed scans, got:\n%s", out)
+		}
+	})
+
+	t.Run("and stays quiet when every scan worked", func(t *testing.T) {
+		cmd, stdout, _ := newTestCleanCmd(t)
+
+		err := runCleanAllWithItems(cmd.Context(), cmd, true, false,
+			[]strategy.CleanupItem{}, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("runCleanAllWithItems() error = %v", err)
+		}
+
+		if strings.Contains(stdout.String(), "Could not scan") {
+			t.Errorf("a complete scan must not print the note, got:\n%s", stdout.String())
+		}
+	})
+}
+
+// The plain clean confirmation lists what it deletes and says that clearing a
+// session with pending agent work drops that work's link to a future
+// checkpoint, pointing at `entire doctor --force` for deleting only branches.
+func TestPrintCurrentHeadCleanItems_WarnsAboutPendingWork(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	printCurrentHeadCleanItems(&out, []*strategy.SessionState{
+		{SessionID: "pending-session", StepCount: 2, FilesTouched: []string{"a.go"}},
+		{SessionID: "empty-session"},
+	}, []string{"entire/1234567-abcdef"})
+
+	text := out.String()
+	assertContains(t, text, "Session states (2):")
+	assertContains(t, text, "pending-session")
+	assertContains(t, text, "1 of these hold agent work not yet committed")
+	assertContains(t, text, "Legacy shadow branches (1):")
+	assertContains(t, text, "entire/1234567-abcdef")
+	assertContains(t, text, "entire doctor --force")
+}
+
+func assertContains(t *testing.T, text, want string) {
+	t.Helper()
+	if !strings.Contains(text, want) {
+		t.Errorf("output missing %q:\n%s", want, text)
+	}
+}
+
+// writeActiveSessionStateFile writes a session state in the ACTIVE phase based
+// on commitHash.
+func writeActiveSessionStateFile(t *testing.T, repoRoot, sessionID string, commitHash plumbing.Hash) string {
+	t.Helper()
+	sessionFile := createSessionStateFile(t, repoRoot, sessionID, commitHash)
+	data, err := json.Marshal(map[string]any{
+		"session_id":  sessionID,
+		"base_commit": commitHash.String(),
+		"phase":       "active",
+		"started_at":  time.Now().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal session state: %v", err)
+	}
+	if err := os.WriteFile(sessionFile, data, 0o600); err != nil {
+		t.Fatalf("failed to write session state file: %v", err)
+	}
+	return sessionFile
+}
+
+// An ACTIVE session refuses a plain clean, and the refusal lists what --force
+// would delete, including the doctor route for the legacy branches alone.
+func TestCleanCmd_DefaultMode_ActiveRefusalListsItems(t *testing.T) {
+	repo, commitHash := setupCleanTestRepo(t)
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	shadowBranch := legacyShadowBranchName(commitHash)
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)); err != nil {
+		t.Fatalf("failed to create shadow branch: %v", err)
+	}
+	sessionFile := writeActiveSessionStateFile(t, wt.Filesystem().Root(), "2026-10-08-active", commitHash)
+
+	cmd := newCleanCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("clean command error = %v", err)
+	}
+
+	out := stderr.String()
+	for _, want := range []string{"Active sessions detected", "Cleaning would delete:", "2026-10-08-active", shadowBranch, "entire clean --force", "entire doctor --force"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal output missing %q:\n%s", want, out)
+		}
+	}
+	if _, err := os.Stat(sessionFile); err != nil {
+		t.Errorf("refused clean must keep the session state: %v", err)
+	}
+}
+
+// --force deletes without a prompt but still lists what it deletes.
+func TestCleanCmd_DefaultMode_ForceListsItems(t *testing.T) {
+	repo, commitHash := setupCleanTestRepo(t)
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	sessionFile := writeActiveSessionStateFile(t, wt.Filesystem().Root(), "2026-10-08-forced", commitHash)
+
+	cmd := newCleanCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--force"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("clean command error = %v", err)
+	}
+
+	if out := stdout.String(); !strings.Contains(out, "This will delete:") || !strings.Contains(out, "2026-10-08-forced") {
+		t.Errorf("--force output should list the deleted session:\n%s", out)
+	}
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Error("session state file should be deleted")
 	}
 }

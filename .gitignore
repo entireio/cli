@@ -8,6 +8,12 @@
 *.so
 *.dylib
 
+# Generated Windows PE resource objects (mise run winversion). Go links a .syso
+# only from the package directory it compiles, so these two paths are the only
+# places they can be written.
+cmd/entire/*.syso
+cmd/git-remote-entire/*.syso
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -48,14 +54,13 @@ mise.local.toml
 /dist/
 /completions/
 
-
 # E2E test artifacts
 e2e/artifacts/
 
 # worktrees
 .worktrees/
+.entire/worktrees/
 .claude/worktrees/
-test-gemini.txt
 entire-main
 entire-test
 test_claude.txt
@@ -67,4 +72,7 @@ docs/superpowers
 tmp/
 .tmp/
 .superpowers/
+.clawpatch/
+entire-external-cp-test/
+/skills/
 /git-remote-entire

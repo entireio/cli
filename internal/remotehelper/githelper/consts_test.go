@@ -6,4 +6,5 @@ const (
 	testRefMain          = "refs/heads/main"
 	testRefFeatureBranch = "refs/heads/feature-branch"
 	testHeadSHA          = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	goosWindows          = "windows"
 )

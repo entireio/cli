@@ -8,28 +8,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/summarize"
 )
 
-type dispatchTextGenerator interface {
-	GenerateText(ctx context.Context, prompt string, model string) (string, error)
-}
-
-var dispatchTextGeneratorFactory = func() (dispatchTextGenerator, error) {
-	textGenerator, ok := agent.AsTextGenerator(claudecode.NewClaudeCodeAgent())
-	if !ok {
-		return nil, errors.New("default dispatch generator does not support text generation")
-	}
-	return textGenerator, nil
-}
-
-func generateLocalDispatch(ctx context.Context, dispatch *Dispatch, voice string) (string, error) {
-	textGenerator, err := dispatchTextGeneratorFactory()
-	if err != nil {
-		return "", err
+func generateLocalDispatch(
+	ctx context.Context,
+	dispatch *Dispatch,
+	voice string,
+	textGenerator TextGenerator,
+	model string,
+) (string, error) {
+	if textGenerator == nil {
+		return "", errors.New("local dispatch text generator is not configured")
 	}
 
 	prompt, err := buildDispatchPrompt(dispatch, voice)
@@ -37,7 +27,7 @@ func generateLocalDispatch(ctx context.Context, dispatch *Dispatch, voice string
 		return "", err
 	}
 
-	text, err := textGenerator.GenerateText(ctx, prompt, summarize.DefaultModel)
+	text, err := textGenerator.GenerateText(ctx, prompt, model)
 	if err != nil {
 		return "", fmt.Errorf("generate dispatch text: %w", err)
 	}

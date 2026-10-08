@@ -65,7 +65,7 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 	stale := time.Now().Add(-3 * time.Minute)
 	require.NoError(t, os.Chtimes(transcriptPath, stale, stale))
 
-	// Create session state: no shadow branch (it was deleted after last condensation),
+	// Create session state: no turn-end step since the last condensation,
 	// transcript path points to the file, agent type is Claude Code
 	now := time.Now()
 
@@ -87,7 +87,7 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Call sessionHasNewContent — should fall through to live transcript check
-	// since there's no shadow branch. Pass staged files via contentCheckOpts.
+	// since there's no turn-end step. Pass staged files via contentCheckOpts.
 	stagedFiles, err := getStagedFiles(context.Background())
 	require.NoError(t, err)
 	hasNew, err := s.sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{stagedFiles: stagedFiles})
@@ -95,6 +95,84 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 	assert.True(t, hasNew,
 		"sessionHasNewContent should return true when transcript has absolute paths "+
 			"that match repo-relative staged files after normalization")
+}
+
+// A records-only session must read as having new content — the predicate the pending-task triggers rest on.
+// TestSessionHasNewContentFromLiveTranscript_EmptyLateTranscriptTrustsHookFiles:
+// a user commits from a terminal during agy's first turn, before any Stop. No
+// shadow branch exists and the transcript is still an empty placeholder, so
+// transcript growth reads as zero — but PreToolUse already recorded the edit.
+// The hook-captured file must carry the decision; an empty transcript must not
+// veto it.
+func TestSessionHasNewContentFromLiveTranscript_EmptyLateTranscriptTrustsHookFiles(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	s := &ManualCommitStrategy{}
+
+	docsDir := filepath.Join(dir, "docs")
+	require.NoError(t, os.MkdirAll(docsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(docsDir, "blue.md"), []byte("Blue.\n"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("docs/blue.md")
+	require.NoError(t, err)
+
+	worktreePath, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	require.NoError(t, err)
+	// agy's placeholder: present and empty.
+	transcriptPath := filepath.Join(dir, "conv", ".system_generated", "logs", "transcript_full.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o755))
+	require.NoError(t, os.WriteFile(transcriptPath, nil, 0o600))
+
+	now := time.Now()
+	head, err := repo.Head()
+	require.NoError(t, err)
+	state := &SessionState{
+		SessionID:                 "agy-first-turn",
+		BaseCommit:                head.Hash().String(),
+		WorktreePath:              worktreePath,
+		WorktreeID:                worktreeID,
+		StartedAt:                 now,
+		Phase:                     session.PhaseActive,
+		LastInteractionTime:       &now,
+		AgentType:                 agent.AgentTypeAntigravity,
+		TranscriptPath:            transcriptPath,
+		FilesTouched:              []string{"docs/blue.md"},
+		CheckpointTranscriptStart: 0,
+	}
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	stagedFiles, err := getStagedFiles(context.Background())
+	require.NoError(t, err)
+	hasNew, err := s.sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{stagedFiles: stagedFiles})
+	require.NoError(t, err)
+	assert.True(t, hasNew, "hook-captured files overlapping the staged files are new content even when the late transcript is still empty")
+
+	// Without hook-captured files, an empty transcript is still no content.
+	state.FilesTouched = nil
+	hasNew, err = s.sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{stagedFiles: stagedFiles})
+	require.NoError(t, err)
+	assert.False(t, hasNew, "nothing captured and nothing written: no new content")
+}
+
+func TestSessionHasNewContent_RecordsOnlySession(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	state := &SessionState{SessionID: "records-only", BaseCommit: "abc1234", StartedAt: time.Now(), Phase: session.PhaseEnded}
+	hasNew, err := (&ManualCommitStrategy{}).sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{})
+	require.NoError(t, err)
+	assert.False(t, hasNew, "no records, no transcript, no files: no new content")
+	state.TaskRecords = []session.TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now(), CompletedAt: time.Now()}}
+	hasNew, err = (&ManualCommitStrategy{}).sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{})
+	require.NoError(t, err)
+	assert.True(t, hasNew, "a task record is pending checkpoint content")
 }
 
 // TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles verifies
@@ -161,7 +239,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 		[]byte(subagentTranscript), 0o644,
 	))
 
-	// Create session state: no shadow branch, transcript has only Task calls,
+	// Create session state: no turn-end step, transcript has only Task calls,
 	// agent type is Claude Code so the subagent path resolution works
 	now := time.Now()
 	head, err := repo.Head()
@@ -182,7 +260,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Call sessionHasNewContent — should fall through to live transcript check
-	// since there's no shadow branch, and should detect subagent file modifications.
+	// since there's no turn-end step, and should detect subagent file modifications.
 	// Pass staged files via contentCheckOpts.
 	stagedFiles, err := getStagedFiles(context.Background())
 	require.NoError(t, err)

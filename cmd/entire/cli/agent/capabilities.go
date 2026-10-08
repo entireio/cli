@@ -5,7 +5,7 @@ package agent
 // below use this interface to gate capability access: an agent must both implement
 // the optional interface AND declare the capability as true.
 //
-// Built-in agents (Claude Code, Gemini CLI, etc.) do NOT implement this interface.
+// Built-in agents (Claude Code, Codex, etc.) do NOT implement this interface.
 // For those agents, the As* helpers fall through to a direct type assertion,
 // preserving existing behavior.
 type CapabilityDeclarer interface {
@@ -17,9 +17,11 @@ type CapabilityDeclarer interface {
 // can deserialize directly into this type.
 //
 // Not every optional interface appears here: built-in-only capabilities that
-// have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor)
-// are intentionally excluded — their As* helpers resolve by type assertion
-// alone, with no DeclaredCaps gate.
+// have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
+// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher,
+// InventoryAwareExtractor, HomeScopedInventoryExtractor) are intentionally
+// excluded — their As* helpers resolve by type assertion alone (see
+// builtinCapability), with no DeclaredCaps gate.
 type DeclaredCaps struct {
 	Hooks                  bool `json:"hooks"`
 	TranscriptAnalyzer     bool `json:"transcript_analyzer"`
@@ -27,120 +29,214 @@ type DeclaredCaps struct {
 	TokenCalculator        bool `json:"token_calculator"`
 	CompactTranscript      bool `json:"compact_transcript"`
 	TextGenerator          bool `json:"text_generator"`
+	StreamingTextGenerator bool `json:"streaming_text_generator"`
 	HookResponseWriter     bool `json:"hook_response_writer"`
 	SubagentAwareExtractor bool `json:"subagent_aware_extractor"`
+}
+
+// declaredCapability returns the agent as T if it both implements T and (for
+// CapabilityDeclarer agents) has the capability selected by declared set to true.
+func declaredCapability[T any](ag Agent, declared func(DeclaredCaps) bool) (T, bool) {
+	t, ok := builtinCapability[T](ag)
+	if !ok {
+		return t, false
+	}
+	if cd, ok := ag.(CapabilityDeclarer); ok {
+		return t, declared(cd.DeclaredCapabilities())
+	}
+	return t, true
+}
+
+// builtinCapability returns the agent as T by type assertion alone, for
+// built-in-only capabilities that have no DeclaredCaps gate.
+func builtinCapability[T any](ag Agent) (T, bool) {
+	var zero T
+	if ag == nil {
+		return zero, false
+	}
+	t, ok := ag.(T)
+	if !ok {
+		return zero, false
+	}
+	return t, true
 }
 
 // AsHookSupport returns the agent as HookSupport if it both implements the
 // interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsHookSupport(ag Agent) (HookSupport, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	hs, ok := ag.(HookSupport)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return hs, cd.DeclaredCapabilities().Hooks
-	}
-	return hs, true
+	return declaredCapability[HookSupport](ag, func(c DeclaredCaps) bool { return c.Hooks })
+}
+
+// AsHookFreshness returns the agent as HookFreshness if it implements the
+// interface. No capability declaration is needed: hook-config drift detection
+// is built-in only, since it compares against a template the CLI itself
+// embeds. External agents own their hook config and report installation state
+// through their own protocol.
+func AsHookFreshness(ag Agent) (HookFreshness, bool) {
+	return builtinCapability[HookFreshness](ag)
+}
+
+// AsStaleHookReporter returns the agent as StaleHookReporter if it can report
+// stale Entire hooks its next install will remove.
+func AsStaleHookReporter(ag Agent) (StaleHookReporter, bool) {
+	return builtinCapability[StaleHookReporter](ag)
+}
+
+// AsEffectiveHookDiagnostics returns the agent as EffectiveHookDiagnostics if
+// it owns diagnostics for its effective hook configuration.
+func AsEffectiveHookDiagnostics(ag Agent) (EffectiveHookDiagnostics, bool) {
+	return builtinCapability[EffectiveHookDiagnostics](ag)
 }
 
 // AsTranscriptAnalyzer returns the agent as TranscriptAnalyzer if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptAnalyzer(ag Agent) (TranscriptAnalyzer, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	ta, ok := ag.(TranscriptAnalyzer)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return ta, cd.DeclaredCapabilities().TranscriptAnalyzer
-	}
-	return ta, true
+	return declaredCapability[TranscriptAnalyzer](ag, func(c DeclaredCaps) bool { return c.TranscriptAnalyzer })
 }
 
 // AsTranscriptPreparer returns the agent as TranscriptPreparer if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptPreparer(ag Agent) (TranscriptPreparer, bool) {
+	return declaredCapability[TranscriptPreparer](ag, func(c DeclaredCaps) bool { return c.TranscriptPreparer })
+}
+
+// AsSidecarImageProvider returns the agent as SidecarImageProvider if it
+// implements the interface. This is a best-effort, optional capability (image
+// capture from a store outside the transcript, e.g. Cursor's SQLite blob store),
+// so it resolves by type assertion alone with no DeclaredCaps gate.
+func AsSidecarImageProvider(ag Agent) (SidecarImageProvider, bool) {
 	if ag == nil {
 		return nil, false
 	}
-	tp, ok := ag.(TranscriptPreparer)
+	p, ok := ag.(SidecarImageProvider)
+	return p, ok
+}
+
+// AsTranscriptSanitizer returns the agent as TranscriptSanitizer if it implements
+// the interface. This is a pure local byte transform with no external process to
+// negotiate with, so it needs no DeclaredCaps gate.
+func AsTranscriptSanitizer(ag Agent) (TranscriptSanitizer, bool) {
+	return builtinCapability[TranscriptSanitizer](ag)
+}
+
+// SanitizeTranscriptForStorage applies the agent's storage sanitizer when it has one
+// and returns data unchanged otherwise. Every path that stores a transcript copy
+// should call this BEFORE redaction — see TranscriptSanitizer for why. A no-op for
+// agents without the capability and idempotent for those with it, so it is safe to
+// call on any transcript from any path.
+func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	s, ok := AsTranscriptSanitizer(ag)
 	if !ok {
-		return nil, false
+		return data
 	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return tp, cd.DeclaredCapabilities().TranscriptPreparer
+	sanitized := s.SanitizeTranscriptForStorage(data)
+	if sanitized == nil {
+		// Defensive: the interface forbids this, but a nil return would silently
+		// drop the whole session. Prefer the unsanitized transcript over none.
+		return data
 	}
-	return tp, true
+	return sanitized
+}
+
+// AsTranscriptFetcher returns the agent as TranscriptFetcher if it implements
+// the interface. This is an optional capability (materializing a transcript on
+// demand for sessions with no hook-cached file), so it resolves by type
+// assertion alone with no DeclaredCaps gate.
+func AsTranscriptFetcher(ag Agent) (TranscriptFetcher, bool) {
+	return builtinCapability[TranscriptFetcher](ag)
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
+	return declaredCapability[TokenCalculator](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
+}
+
+// AsLateTranscriptWriter returns the agent as LateTranscriptWriter if supported.
+// External (CapabilityDeclarer) agents are excluded: the late-transcript trait
+// is wire-format knowledge the external protocol does not currently express,
+// and DeclaredCaps has no field for this capability to opt into.
+func AsLateTranscriptWriter(ag Agent) (LateTranscriptWriter, bool) {
 	if ag == nil {
 		return nil, false
 	}
-	tc, ok := ag.(TokenCalculator)
+	lw, ok := ag.(LateTranscriptWriter)
 	if !ok {
 		return nil, false
 	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return tc, cd.DeclaredCapabilities().TokenCalculator
+	if _, isDeclarer := ag.(CapabilityDeclarer); isDeclarer {
+		return nil, false
 	}
-	return tc, true
+	return lw, true
+}
+
+// AsOutOfBandTokenSource returns the agent as OutOfBandTokenSource if supported.
+// External (CapabilityDeclarer) agents are excluded because the out-of-band
+// store is fed by a built-in shim subcommand they cannot provide, and
+// DeclaredCaps has no field for this capability to opt into.
+func AsOutOfBandTokenSource(ag Agent) (OutOfBandTokenSource, bool) {
+	if ag == nil {
+		return nil, false
+	}
+	src, ok := ag.(OutOfBandTokenSource)
+	if !ok {
+		return nil, false
+	}
+	if _, isDeclarer := ag.(CapabilityDeclarer); isDeclarer {
+		return nil, false
+	}
+	return src, true
+}
+
+// AsInventoryAwareExtractor returns the agent as InventoryAwareExtractor when
+// it implements the built-in-only inventory protocol. External agents cannot
+// declare this capability because its authoritative child ledger is internal to
+// Entire rather than the external-agent protocol.
+func AsInventoryAwareExtractor(ag Agent) (InventoryAwareExtractor, bool) {
+	return builtinCapability[InventoryAwareExtractor](ag)
+}
+
+// AsHomeScopedInventoryExtractor returns the agent as a
+// HomeScopedInventoryExtractor when it implements the built-in-only interface.
+func AsHomeScopedInventoryExtractor(ag Agent) (HomeScopedInventoryExtractor, bool) {
+	return builtinCapability[HomeScopedInventoryExtractor](ag)
 }
 
 // AsTextGenerator returns the agent as TextGenerator if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTextGenerator(ag Agent) (TextGenerator, bool) {
+	return declaredCapability[TextGenerator](ag, func(c DeclaredCaps) bool { return c.TextGenerator })
+}
+
+// AsStreamingTextGenerator returns the agent as StreamingTextGenerator if it both
+// implements the interface and (for CapabilityDeclarer agents) has declared the capability.
+func AsStreamingTextGenerator(ag Agent) (StreamingTextGenerator, bool) {
 	if ag == nil {
 		return nil, false
 	}
-	tg, ok := ag.(TextGenerator)
+	stg, ok := ag.(StreamingTextGenerator)
 	if !ok {
 		return nil, false
 	}
 	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return tg, cd.DeclaredCapabilities().TextGenerator
+		return stg, cd.DeclaredCapabilities().StreamingTextGenerator
 	}
-	return tg, true
+	return stg, true
 }
 
 // AsTranscriptCompactor returns the agent as TranscriptCompactor if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptCompactor(ag Agent) (TranscriptCompactor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	tc, ok := ag.(TranscriptCompactor)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return tc, cd.DeclaredCapabilities().CompactTranscript
-	}
-	return tc, true
+	return declaredCapability[TranscriptCompactor](ag, func(c DeclaredCaps) bool { return c.CompactTranscript })
 }
 
 // AsHookResponseWriter returns the agent as HookResponseWriter if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsHookResponseWriter(ag Agent) (HookResponseWriter, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	hrw, ok := ag.(HookResponseWriter)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return hrw, cd.DeclaredCapabilities().HookResponseWriter
-	}
-	return hrw, true
+	return declaredCapability[HookResponseWriter](ag, func(c DeclaredCaps) bool { return c.HookResponseWriter })
 }
 
 // AsPromptExtractor returns the agent as PromptExtractor if it both implements
@@ -149,31 +245,36 @@ func AsHookResponseWriter(ag Agent) (HookResponseWriter, bool) {
 // capability gate — this prevents calling extract-prompts on external agent binaries
 // that never declared transcript_analyzer support.
 func AsPromptExtractor(ag Agent) (PromptExtractor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	pe, ok := ag.(PromptExtractor)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return pe, cd.DeclaredCapabilities().TranscriptAnalyzer
-	}
-	return pe, true
+	return declaredCapability[PromptExtractor](ag, func(c DeclaredCaps) bool { return c.TranscriptAnalyzer })
+}
+
+// AsTranscriptPromptExtractor returns the agent as TranscriptPromptExtractor
+// under the same capability gate as AsPromptExtractor: it is transcript
+// analysis over bytes instead of a path.
+func AsTranscriptPromptExtractor(ag Agent) (TranscriptPromptExtractor, bool) {
+	return declaredCapability[TranscriptPromptExtractor](ag, func(c DeclaredCaps) bool { return c.TranscriptAnalyzer })
+}
+
+// AsSubagentAwareExtractor returns the agent as SubagentAwareExtractor if it both
+// implements the interface and (for CapabilityDeclarer agents) has declared the capability.
+func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
+	return declaredCapability[SubagentAwareExtractor](ag, func(c DeclaredCaps) bool { return c.SubagentAwareExtractor })
+}
+
+// AsSubagentSessionResolver returns the agent as SubagentSessionResolver if it
+// implements the interface. No capability declaration is needed: whether an
+// agent's subagents run as sessions of their own is a property of the agent's
+// own hook protocol, which only built-in agents model. External agents report
+// subagent boundaries through their own hooks.
+func AsSubagentSessionResolver(ag Agent) (SubagentSessionResolver, bool) {
+	return builtinCapability[SubagentSessionResolver](ag)
 }
 
 // AsSessionBaseDirProvider returns the agent as SessionBaseDirProvider if it implements
 // the interface. No capability declaration is needed since this is a built-in-only feature
 // (external agents use the agent binary's own session resolution).
 func AsSessionBaseDirProvider(ag Agent) (SessionBaseDirProvider, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	sbp, ok := ag.(SessionBaseDirProvider)
-	if !ok {
-		return nil, false
-	}
-	return sbp, true
+	return builtinCapability[SessionBaseDirProvider](ag)
 }
 
 // AsModelExtractor returns the agent as ModelExtractor if it implements the
@@ -181,39 +282,30 @@ func AsSessionBaseDirProvider(ag Agent) (SessionBaseDirProvider, bool) {
 // extraction is a built-in-only fallback for agents whose hooks omit the model
 // (e.g., Pi). External agents report the model through their own hook protocol.
 func AsModelExtractor(ag Agent) (ModelExtractor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	me, ok := ag.(ModelExtractor)
-	if !ok {
-		return nil, false
-	}
-	return me, true
-}
-
-// AsSubagentAwareExtractor returns the agent as SubagentAwareExtractor if it both
-// implements the interface and (for CapabilityDeclarer agents) has declared the capability.
-func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	sae, ok := ag.(SubagentAwareExtractor)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return sae, cd.DeclaredCapabilities().SubagentAwareExtractor
-	}
-	return sae, true
+	return builtinCapability[ModelExtractor](ag)
 }
 
 // AsSkillEventExtractor returns the agent as SkillEventExtractor if it implements
 // the interface. Skill-event extraction is currently built-in only; external
 // agents do not expose this optional interface through declared capabilities.
 func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	see, ok := ag.(SkillEventExtractor)
-	return see, ok
+	return builtinCapability[SkillEventExtractor](ag)
+}
+
+// AsToolInvocationScanner returns the agent as ToolInvocationScanner if it
+// implements the interface. Built-in only: reading tool calls out of a
+// transcript needs knowledge of that transcript's shape, which an external
+// agent's parse-hook does not convey.
+func AsToolInvocationScanner(ag Agent) (ToolInvocationScanner, bool) {
+	return builtinCapability[ToolInvocationScanner](ag)
+}
+
+// AsSessionEndBudgeter returns the agent as SessionEndBudgeter if it implements
+// the interface. Built-in only because no external agent needs it yet — not
+// because external agents could enforce a budget themselves: a plugin supplies
+// only parse-hook, while the work being bounded (endSessionNow, the condense)
+// runs in the entire process. Widen DeclaredCaps with a session_end_budget
+// field when an external agent has a host that clamps its session-end hook.
+func AsSessionEndBudgeter(ag Agent) (SessionEndBudgeter, bool) {
+	return builtinCapability[SessionEndBudgeter](ag)
 }

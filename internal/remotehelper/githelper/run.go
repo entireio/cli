@@ -31,6 +31,9 @@ import (
 func Run(ctx context.Context, t Transport, protocolVersion int, stdin io.Reader, stdout io.Writer) error {
 	commandReader := bufio.NewReader(stdin)
 	opts := &Options{}
+	// One advertisement snapshot per session: "push" reuses what
+	// "list for-push" fetched. See refAdvCache / ENCLI-267.
+	adv := &refAdvCache{}
 
 	for {
 		line, err := commandReader.ReadString('\n')
@@ -58,7 +61,7 @@ func Run(ctx context.Context, t Transport, protocolVersion int, stdin io.Reader,
 			fmt.Fprintln(stdout)
 
 		case line == "list" || line == "list for-push":
-			if err := handleList(ctx, t, line == "list for-push", stdout); err != nil {
+			if err := handleList(ctx, t, adv, line == "list for-push", stdout); err != nil {
 				return err
 			}
 
@@ -85,7 +88,7 @@ func Run(ctx context.Context, t Transport, protocolVersion int, stdin io.Reader,
 			return nil
 
 		case strings.HasPrefix(line, "push "):
-			if err := handlePush(ctx, t, line, opts, commandReader, stdout); err != nil {
+			if err := handlePush(ctx, t, adv, line, opts, commandReader, stdout); err != nil {
 				return err
 			}
 

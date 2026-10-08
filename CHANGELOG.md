@@ -5,6 +5,751 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.4] - 2026-10-06
+
+### Breaking changes and migrations
+
+- `entire repo mirror get` is removed; `entire repo view` is now the one repository view for both forges, listing name, visibility and every cluster holding a copy with its role, clone URL and status. It takes `/et/<project>/<repo>`, `/gh/<owner>/<repo>` or an `entire://` clone URL; the repo ULID and bare name with `--project` are no longer accepted. The CLUSTER column now prints the public host that `--cluster` accepts, and primary and mirror rows share one status vocabulary (`ready`, `processing`) ([#2547](https://github.com/entireio/cli/pull/2547))
+- A trailing `.git` is never part of a repo name: every ref parser drops it, so `/et/p/foo` and `/et/p/foo.git` address one repository, and `entire repo create` refuses names ending in `.git` in any letter case. This reverts the 0.11.2 rule that treated the suffix as part of a native repo name ([#2616](https://github.com/entireio/cli/pull/2616), [#2630](https://github.com/entireio/cli/pull/2630))
+
+### Added
+
+- `entire checkpoint explain` exposes subagent task records and the full session token breakdown (`subagent_tokens`, `subagent_tokens_complete`, `api_call_count`) ([#2649](https://github.com/entireio/cli/pull/2649))
+- Hidden `entire checkpoint create [session-id]` writes a checkpoint from a session that changed no files (research, planning, review), which previously never produced one ([#2632](https://github.com/entireio/cli/pull/2632))
+- `entire agent-help <plugin>` delegates to an installed `entire-<plugin>` command's own `agent-help` ([#2599](https://github.com/entireio/cli/pull/2599))
+- `entire trail create --repo` creates a trail through the API alone, without a local clone; `--title`, `--base` and `--branch` (or `--no-branch`) are required and the branch must already exist on the repo ([#2622](https://github.com/entireio/cli/pull/2622))
+- Project and repo grant lists show account display names, as org member lists already did ([#2614](https://github.com/entireio/cli/pull/2614))
+- `entire repo mirror add` also suggests the `entire repo remote add origin --override` command to repoint an existing checkout at the new mirror ([#2600](https://github.com/entireio/cli/pull/2600))
+- A committed `checkpoint_remote` rejected by the ownership check is now reported to the user, with an offer to claim it when the store is theirs, instead of only a warning in `.entire/logs` ([#2521](https://github.com/entireio/cli/pull/2521))
+
+### Changed
+
+- Org names resolve against the caller's own org list instead of the server's global name lookup; when several of your orgs share a name, the CLI lists them and asks for the ULID ([#2601](https://github.com/entireio/cli/pull/2601))
+- Google handles printed as `google:<id>` by `entire auth status` are now accepted as grantees, and org member names are shown in grant output ([#2603](https://github.com/entireio/cli/pull/2603))
+- `entire trail delete` now fails with a pointer to `entire trail update --status closed`, since the server no longer allows deleting trails. The command is hidden but stays registered so existing scripts get the guidance ([#2666](https://github.com/entireio/cli/pull/2666))
+
+### Fixed
+
+- `entire review` no longer loads execution-capable agent config from the reviewed checkout: Claude Code ignores project settings, hooks, MCP servers, commands and skills; pi ignores project-local extensions; Codex runs `--target` reviews with the checkout marked untrusted ([#2598](https://github.com/entireio/cli/pull/2598))
+- Claude Code turns that end on an API error (`StopFailure`: rate limit, overload, auth or billing failure, max output tokens) now end the turn, instead of leaving the session `ACTIVE` until the next prompt. Existing installs need to re-run `entire enable` to add the new hook; until then `entire doctor` reports the Claude Code hook config as outdated ([#2656](https://github.com/entireio/cli/pull/2656))
+- Session resume, attach and transcript lookup honor each agent's home relocation variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `FACTORY_HOME_OVERRIDE`, pi's dirs), including a `CLAUDE_CONFIG_DIR` set in Claude's own settings. Relative values are refused and reported by `entire status` ([#2375](https://github.com/entireio/cli/pull/2375))
+- Subagent capture: Claude Code background subagents now reach checkpoints, task records carry token usage, files and Codex completion before commit, Codex child transcripts resolve when the parent commits before its own Stop, and an aborted Codex turn counts as ended ([#2644](https://github.com/entireio/cli/pull/2644), [#2647](https://github.com/entireio/cli/pull/2647), [#2645](https://github.com/entireio/cli/pull/2645), [#2652](https://github.com/entireio/cli/pull/2652))
+- Read-only review sessions are no longer condensed into another session's mid-turn commit ([#2617](https://github.com/entireio/cli/pull/2617))
+- Commits redone after a `git reset` keep the dropped commits' `Entire-Checkpoint` trailers, so the session stays on the trail ([#2582](https://github.com/entireio/cli/pull/2582))
+- OPF redaction splits entities that span two batched leaves instead of dropping them, which previously left both unredacted under `Entire-OPF-Applied: true` ([#2624](https://github.com/entireio/cli/pull/2624))
+- `review_prompt` and `investigate_topic` in checkpoint `metadata.json` are redacted like prompts ([#2596](https://github.com/entireio/cli/pull/2596))
+- Redaction no longer replaces Claude Code tool-use ids or Codex `agent_message` ciphertext with `REDACTED` ([#2648](https://github.com/entireio/cli/pull/2648))
+- Checkpoint ref push fallback is bounded to two minutes or five consecutive failures, unpushed refs stay queued and rotate so later refs get a turn, and fetch errors keep their underlying cause ([#2522](https://github.com/entireio/cli/pull/2522))
+- Protocol v2 pushes through `git-remote-entire` declare their size, so an oversized push is refused up front with a clear 413 message instead of uploading fully and failing with `the remote end hung up unexpectedly` ([#2625](https://github.com/entireio/cli/pull/2625))
+- Missing-checkpoint errors name the refs where the checkpoint can actually live under the configured backend, instead of always suggesting a fetch of `entire/checkpoints/v1` ([#2620](https://github.com/entireio/cli/pull/2620))
+- `entire import` derives ULID checkpoint IDs under the git-refs backend ([#2609](https://github.com/entireio/cli/pull/2609))
+- On Windows, `entire status` and `entire doctor` no longer report approved Codex hooks as needing approval ([#2607](https://github.com/entireio/cli/pull/2607))
+- `entire search` and `entire dispatch` work from an Entire-native clone instead of failing with "remote is not a GitHub repository": the default scope comes from the origin's forge (`et/…` or `gh/…`), so a native repo and a same-named GitHub mirror stay distinct. `entire search` with `--repo`, `repo:` or `--all-repos` no longer requires a readable origin, and the `entire dispatch` wizard now discovers native checkouts ([#2639](https://github.com/entireio/cli/pull/2639), [#2667](https://github.com/entireio/cli/pull/2667))
+- `entire session adopt` validates declared subagent transcript paths against the agent's session directory and clears paths it cannot verify, instead of copying them unchecked into checkpoints ([#2655](https://github.com/entireio/cli/pull/2655))
+
+### Housekeeping
+
+- Local commit and reference reads use go-git ([#2590](https://github.com/entireio/cli/pull/2590))
+- Cluster discovery drops the unused jurisdiction audience fields and requirement ([#2602](https://github.com/entireio/cli/pull/2602))
+- Command-layer tests pin refusal of off-manifest 421 redirects ([#2500](https://github.com/entireio/cli/pull/2500))
+- Control-plane E2E login handles the new sign-in provider picker ([#2629](https://github.com/entireio/cli/pull/2629))
+
+## [0.11.3] - 2026-09-25
+
+### Breaking changes and migrations
+
+- Gemini CLI support is removed: `entire configure --agent gemini`, Gemini hook capture, the Gemini review runner and summary provider, session import and resume, and Gemini skill setup are gone. Entire hooks already installed in `.gemini/settings.json` now exit silently without recording anything; `entire doctor` and `entire disable --uninstall` remove them. Checkpoints recorded from earlier Gemini CLI sessions remain readable by `entire explain` and summaries. Antigravity CLI (below) is its successor ([#2570](https://github.com/entireio/cli/pull/2570))
+- `entire repo remote` has one verb: `repo remote use` becomes `repo remote add <remote-name> [repo]`, which refuses an occupied remote name unless `--override` is passed (re-adding the same URL is a no-op). `repo remote url` and `--upstream` are removed; `entire repo mirror get` lists clone URLs per cluster. No compatibility aliases ([#2548](https://github.com/entireio/cli/pull/2548))
+- `entire repo access` is removed. `entire repo grant list` now answers for both forges: `/et/` refs show the repo's grants and `/gh/` refs show the mirror's GitHub collaborators. `repo grant add|remove` refuse `/gh/` refs and point to GitHub ([#2517](https://github.com/entireio/cli/pull/2517))
+- `entire auth token --jurisdiction` is deprecated and now fails with a migration hint. The plain `entire auth token` output is accepted directly at every entire-api cell, so drop the flag; the jurisdiction token exchange is removed from the CLI ([#2584](https://github.com/entireio/cli/pull/2584))
+
+### Added
+
+- Antigravity CLI (`agy`) agent integration (preview): lifecycle hooks, transcript decoding, native token counts via a `title` tee, review-skill discovery and resume tracking. Note: agy writes its transcript after `Stop`, so first-turn mid-turn commits can produce a files/prompt-only checkpoint and mid-turn commits record zero tokens until the next condensation; tracking is silent inside agy, use `entire status` ([#1287](https://github.com/entireio/cli/pull/1287))
+- `entire org invite send|list|revoke` invites an email address to an organization, reaching people who have never signed in. The invitee accepts through the emailed link ([#2561](https://github.com/entireio/cli/pull/2561), [#2575](https://github.com/entireio/cli/pull/2575))
+- `entire repo clone --nearest` measures latency to each available cluster and picks the fastest, without `--cluster` or a terminal ([#2571](https://github.com/entireio/cli/pull/2571))
+- `entire org|project|repo grant add|remove` offer an interactive multi-select of grantees when the grantee is omitted on a terminal, with a role per grantee for `add` ([#2513](https://github.com/entireio/cli/pull/2513))
+- `entire trail show` surfaces the backend's mergeability snapshot in text and `--json` ([#2593](https://github.com/entireio/cli/pull/2593))
+- Windows `entire.exe` and `git-remote-entire.exe` embed PE version metadata, so Explorer and `Get-Command` report the real version instead of 0.0.0.0 ([#2503](https://github.com/entireio/cli/pull/2503))
+
+### Changed
+
+- `entire auth status` is condensed to a verdict line and a few rows, with humanized timestamps and `user` shown as the provider-qualified handle usable in `grant` commands. `--sessions` prints the full session table with the current CLI session marked, and `--json` is supported ([#2512](https://github.com/entireio/cli/pull/2512))
+- Non-interactive cluster selection for `repo clone` and `repo remote add` defaults to the repo's primary cluster instead of failing when a repo has several placements ([#2548](https://github.com/entireio/cli/pull/2548))
+
+### Fixed
+
+- Commits squashed locally with `git merge --squash` and a custom message keep the squashed commits' `Entire-Checkpoint` trailers. Inherited trailers are treated as links and never condensed into, and post-commit no longer writes pending work into an older checkpoint when a commit carries several trailers ([#2574](https://github.com/entireio/cli/pull/2574), [#2594](https://github.com/entireio/cli/pull/2594))
+- Hooks no longer delete live idle sessions. Previously a hook in any worktree could remove a healthy IDLE session after a linked commit, re-initializing it from scratch and leaving a commit in the gap with no session ([#2573](https://github.com/entireio/cli/pull/2573))
+- Condensation no longer resets the session-wide token totals shown by `entire status` and `entire session tokens` to the per-checkpoint usage ([#2383](https://github.com/entireio/cli/pull/2383))
+- Checkpoint sync remote election ignores remotes that only have a `pushurl` and no fetch URL, since Entire cannot read checkpoint history from them ([#2370](https://github.com/entireio/cli/pull/2370))
+- Remotes written as `git+ssh://` or `ssh+git://` are recognized as SSH, so checkpoint URL derivation and token handling work for them ([#2563](https://github.com/entireio/cli/pull/2563))
+- Git subprocesses that target a specific repository strip an inherited `GIT_COMMON_DIR`, which could otherwise make them read another repository's shared git data ([#2310](https://github.com/entireio/cli/pull/2310))
+- Adding an external agent through the interactive flow writes only to the settings file being edited, instead of copying merged project and local settings across scopes ([#2192](https://github.com/entireio/cli/pull/2192))
+- A symbolic-ref rejection from ref compare-and-swap is no longer misreported as a retryable lock error ([#2304](https://github.com/entireio/cli/pull/2304))
+
+### Housekeeping
+
+- Literal branch names are validated with go-git instead of `git check-ref-format`, with characterization tests pinning native Git behavior ahead of further go-git migration ([#2579](https://github.com/entireio/cli/pull/2579), [#2572](https://github.com/entireio/cli/pull/2572))
+- Removed Pi's unused active-session cache file ([#2238](https://github.com/entireio/cli/pull/2238))
+- E2E fixes: Codex runs without its app-server daemon (0.157+) and waits on the composer rather than the startup dialog, pinned to `gpt-6-luna`; agent installs retry and the Antigravity leg is authenticated; the control-plane suite is fixed and now runs on PRs ([#2591](https://github.com/entireio/cli/pull/2591), [#2567](https://github.com/entireio/cli/pull/2567), [#2569](https://github.com/entireio/cli/pull/2569), [#2581](https://github.com/entireio/cli/pull/2581), [#2565](https://github.com/entireio/cli/pull/2565), [#2578](https://github.com/entireio/cli/pull/2578))
+- Bumped posthog-go to 1.25.3 ([#2587](https://github.com/entireio/cli/pull/2587))
+- Added the v0.11.2 changelog ([#2562](https://github.com/entireio/cli/pull/2562))
+
+### Thanks
+
+Thanks to @MuskanPaliwal for fixing session token totals reset by condensation, pushurl-only checkpoint remote election, `GIT_COMMON_DIR` leaking into targeted git commands, settings-scope leaks when adding external agents, symbolic-ref error classification, and removing Pi's unused session cache! Thanks to @jaysomani for embedding Windows version metadata in the binaries!
+
+## [0.11.2] - 2026-09-23
+
+### Changed
+
+- Trail, review, thread and watch requests follow the RFD-026 cell contract (snake_case payloads, bracket filters, cursor pagination, dotted watch event names). `--json` output keeps its existing keys. `entire trail finding list` replaces `--offset` with `--cursor` and returns `next_cursor` alongside `has_more` when another page exists ([#2507](https://github.com/entireio/cli/pull/2507))
+
+### Fixed
+
+- A trailing `.git` in a native repository reference is now part of the repo name instead of being stripped. Previously `entire repo delete /et/<project>/foo.git` could delete a sibling repo named `foo`, and repo-scoped commands inside a clone of `foo.git` targeted `foo`. Confirmation lines now show the repository the server resolved, `repo create` accepts `.git` names as the API does, and dot-only owner or repo names are rejected ([#2557](https://github.com/entireio/cli/pull/2557))
+- `ENTIRE_CHECKPOINT_TOKEN` is only attached when the checkpoint remote uses a direct git transport. `entire://` and `file://` remotes are used as configured and are never rewritten into credentialed HTTPS URLs ([#2558](https://github.com/entireio/cli/pull/2558))
+- Session IDs containing surrounding whitespace, trailing periods, ASCII control characters or Windows reserved device names are rejected on every OS. Unsafe checkpoint metadata is refused before session files are resolved or restored, and external-agent session references are checked against the repository session store before `write-session` runs ([#2405](https://github.com/entireio/cli/pull/2405))
+
+### Housekeeping
+
+- Removed `filtered_fetches` from this repository's `.entire/settings.json` ([#2560](https://github.com/entireio/cli/pull/2560))
+
+### Thanks
+
+Thanks to @wernerkasselman-au for responsibly reporting the session ID path validation issue!
+
+## [0.11.0] - 2026-09-22
+
+### Breaking changes and migrations
+
+- Control-plane commands are renamed without compatibility aliases. `auth use` is now `auth switch`, `repo get` is `repo view`, `repo visibility set` is `repo edit --visibility`, `repo list <project>` takes `--project`, `repo mirror create|use` become `repo mirror add` and `repo remote use`, and `repo mirror collaborators list` becomes `repo access list`; positional cluster arguments become `--cluster`. `entire grant <noun> <verb>` becomes `entire <noun> grant <verb>`. Update scripts using the old spellings ([#2502](https://github.com/entireio/cli/pull/2502), [#2490](https://github.com/entireio/cli/pull/2490))
+- `entire logout` processes every saved login and revokes CLI sessions on other machines too. Older servers fall back to revoking only the current session. Browser and web sessions remain active unless `--everywhere` is passed. `--all-contexts` is removed, explicit `--context` is rejected, and Ctrl-C stops the sweep ([#2510](https://github.com/entireio/cli/pull/2510), [#2539](https://github.com/entireio/cli/pull/2539))
+- `entire enable` initializes repositories locally without creating or pushing a GitHub remote. `--repo-name`, `--repo-owner`, `--repo-visibility`, `--no-github` and `--push` are removed; publish separately. Git initialization, identity setup and the optional initial commit are unchanged ([#2485](https://github.com/entireio/cli/pull/2485))
+- Mirror creation always uses the asynchronous workflow. Remove the retired `async_mirror_requests` key from settings files; strict decoding rejects it ([#2267](https://github.com/entireio/cli/pull/2267))
+- `entire investigate` moves to the [entire-investigate](https://github.com/entireio/entire-investigate) plugin. Install with `entire plugin install investigate` or accept the install prompt; existing flags are unchanged. Copy the old `investigate` settings object into `.entire/investigate.local.json`; legacy settings blocks are ignored ([#2515](https://github.com/entireio/cli/pull/2515))
+
+### Added
+
+- Native repository references (`/et/<project>/<repo>`) are supported by `repo view`, `delete`, `visibility`, `protection`, `grant` and `checkpoint explain --repo`. Ambiguous bare `owner/repo` references are rejected with forge-qualified suggestions. `entire dispatch --repos` also accepts native repos and sends forge-qualified slugs ([#2387](https://github.com/entireio/cli/pull/2387), [#2247](https://github.com/entireio/cli/pull/2247), [#2396](https://github.com/entireio/cli/pull/2396), [#2553](https://github.com/entireio/cli/pull/2553))
+- `entire repo mirror` supports native repositories. `repo clone` and `repo remote url` offer an interactive choice of the home cluster and ready native mirrors. Non-interactive runs use the primary cluster unless `--cluster <host>` is supplied; GitHub mirrors use the same selection flow ([#2516](https://github.com/entireio/cli/pull/2516), [#2529](https://github.com/entireio/cli/pull/2529), [#2546](https://github.com/entireio/cli/pull/2546))
+- `entire cluster list` shows regions, cluster slugs and validated hosts for use with commands such as `org create --region` and `repo clone --cluster` ([#2480](https://github.com/entireio/cli/pull/2480))
+- `entire repo remote url <repo>` prints a repository's git remote URL and nothing else, so an existing local checkout can be connected with `git remote add entire "$(entire repo remote url /et/project/repo)"`. It works outside a git checkout and keeps placement prompts on stderr ([#2492](https://github.com/entireio/cli/pull/2492))
+- `entire repo protection list|add|remove` manages branch protection rules. Empty results distinguish unprotected native repositories from GitHub mirrors whose rules are managed upstream ([#2344](https://github.com/entireio/cli/pull/2344))
+- `entire auth switch` without an argument offers a saved-context picker. It and `auth contexts` consistently mark the active context ([#2326](https://github.com/entireio/cli/pull/2326), [#2347](https://github.com/entireio/cli/pull/2347))
+- Subagent tracking for Codex and Copilot CLI. Codex reports child token totals only with exact coverage. Copilot supports modern agent IDs and unambiguous name matching on 1.0.63; task records explain when child transcripts are unavailable ([#2209](https://github.com/entireio/cli/pull/2209), [#2341](https://github.com/entireio/cli/pull/2341))
+- `entire enable` asks which git remote should receive checkpoints, and `--checkpoint-push-remote <name>` selects one non-interactively. The override is written to `.entire/settings.local.json` only, leaving automatic election in place when you keep the current destination ([#2345](https://github.com/entireio/cli/pull/2345))
+- `entire configure --checkpoint-remote` accepts `gitlab:<owner>/<repo>`. Mirror push-through, the trails API, issue linking and entire.io checkpoint discovery remain GitHub-only ([#2528](https://github.com/entireio/cli/pull/2528))
+- OpenCode can generate summaries and tailor runners: `entire configure --summarize-provider opencode` works for `checkpoint explain --generate` and `runner setup`. The adapter runs in a temporary directory with a dedicated tool-denying agent and sharing disabled ([#2361](https://github.com/entireio/cli/pull/2361))
+- `entire graph` offers to install the Graph plugin on demand, with confirmation and progress on stderr. Non-interactive runs print an `entire plugin install graph` hint; stdout remains reserved for plugin output ([#2324](https://github.com/entireio/cli/pull/2324))
+- `entire repo create` waits up to 10 minutes for provisioning by default. `--no-wait` skips waiting; `--wait-timeout` changes the limit. If readiness cannot be confirmed, the command prints the created repository and recovery instructions and exits nonzero. `repo view` reads registry details by default; pass `--authoritative` to check provisioning status ([#2483](https://github.com/entireio/cli/pull/2483))
+- `entire enable` fills missing repo-local git identity fields from the verified Entire profile without overwriting configured values. It signs in when needed, or provides `ENTIRE_TOKEN` guidance in detected automation ([#2415](https://github.com/entireio/cli/pull/2415))
+- `entire login` automatically uses device-code authentication on Linux and BSD without a graphical display, including headless sessions not detected as SSH. WSL and an explicit `BROWSER` are excluded ([#2504](https://github.com/entireio/cli/pull/2504))
+- Nightly smoke tests install published artifacts on Linux, macOS and Windows and verify agent checkpointing. A stable-install job also tests the documented Homebrew command ([#2159](https://github.com/entireio/cli/pull/2159), [#2409](https://github.com/entireio/cli/pull/2409))
+- A control-plane E2E suite covers device-flow login and organization, project and repository lifecycle operations without a coding agent, using isolated credentials and automatic resource cleanup ([#2411](https://github.com/entireio/cli/pull/2411))
+
+### Changed
+
+- Data-API commands and links follow `ENTIRE_TOKEN` or the selected login's environment rather than defaulting to production. `entire api --to cell` and `-j <jurisdiction>` use that login's cluster catalog. Commands acting as a saved login announce the context on stderr when multiple logins exist ([#2509](https://github.com/entireio/cli/pull/2509), [#2414](https://github.com/entireio/cli/pull/2414), [#2538](https://github.com/entireio/cli/pull/2538))
+- `entire --context X` propagates to child processes through `ENTIRE_CONTEXT`, fixing inconsistent login selection in `repo clone`, `resume`, `explain` and `trail create`. Unknown context names are rejected before spawning children ([#2413](https://github.com/entireio/cli/pull/2413))
+- `entire status --json` reports one entry per session, with `session_id`, `worktree_path` and `branch`, instead of collapsing sessions for the same agent ([#2363](https://github.com/entireio/cli/pull/2363))
+- The hidden `entire checkpoint policy` command and its enforcement are removed. Its policy ref used a server-reserved namespace and could block repository mirroring ([#2508](https://github.com/entireio/cli/pull/2508))
+- Redaction and transcript reads use less memory and avoid repeated searches for duplicate findings. Redaction output and fingerprints are unchanged ([#2291](https://github.com/entireio/cli/pull/2291))
+- Agents no longer display a Preview suffix during setup. `Agent.IsPreview` and the external-agent `info` field `is_preview` are removed; external agents still emitting the field remain compatible ([#2554](https://github.com/entireio/cli/pull/2554))
+- Removed an unreachable wrong-cluster hint from `git-remote-entire` and outdated semantic-search rollout wording ([#2384](https://github.com/entireio/cli/pull/2384), [#2366](https://github.com/entireio/cli/pull/2366))
+
+### Fixed
+
+- Imported checkpoints, including onboarding imports, carry a validated anchor commit to prevent hydration failures. The anchor must be a full hex commit ID; validation also applies to `--dry-run`. Existing imports are not repaired ([#2491](https://github.com/entireio/cli/pull/2491))
+- Fixed missing `factoryai-droid` checkpoints on Windows by installing native `cmd.exe` hook wrappers, including on hosts with Git Bash ([#2349](https://github.com/entireio/cli/pull/2349))
+- Managed plugin executables work on Windows without symlinks. Fixed the hardlink fallback on all platforms ([#2371](https://github.com/entireio/cli/pull/2371))
+- Interactive prompts use native Windows console handles. Plugin confirmations no longer require an extra keypress to close the prompt ([#2333](https://github.com/entireio/cli/pull/2333), [#2481](https://github.com/entireio/cli/pull/2481))
+- Commands run through Cursor's or OpenCode's shell tools no longer show unattended interactive prompts ([#2317](https://github.com/entireio/cli/pull/2317))
+- Already-committed files are no longer checkpointed again at turn-end. Comparisons against HEAD respect `autocrlf`, `.gitattributes` and Git LFS without refreshing the index ([#2482](https://github.com/entireio/cli/pull/2482), [#2336](https://github.com/entireio/cli/pull/2336), [#2372](https://github.com/entireio/cli/pull/2372))
+- `entire doctor` respects a valid checkpoint push remote, and `status` correctly reports disabled session pushing. Checkpoint fetches retain the selected read remote, fixing missing metadata and transcripts in clones with inherited checkpoint-remote settings ([#2329](https://github.com/entireio/cli/pull/2329), [#2337](https://github.com/entireio/cli/pull/2337), [#2342](https://github.com/entireio/cli/pull/2342))
+- Rejected checkpoint pushes preserve the remote's explanation, including secret-scanning and repository-rule failures. Confirmed policy and hook rejections no longer trigger speculative fetch/replay or get mislabeled as divergence ([#2488](https://github.com/entireio/cli/pull/2488), [#2514](https://github.com/entireio/cli/pull/2514))
+- `entire session current` uses agent session IDs and process ancestry instead of selecting the most recently active session, avoiding misidentification across worktrees and nested agents. Ambiguous matches are reported explicitly. `session adopt` does not yet enforce caller identification ([#2322](https://github.com/entireio/cli/pull/2322))
+- `entire status` no longer deletes stale records or finalizes exited sessions while reading them. Cleanup remains with `doctor` and the session sweeper ([#2363](https://github.com/entireio/cli/pull/2363))
+- Mid-turn commits record subagent tokens even when no shadow branch is resolved. Totals remain checkpoint-scoped rather than repeating cumulative usage ([#2334](https://github.com/entireio/cli/pull/2334))
+- Checkpoints remain visible in `checkpoint list` and `explain` when a case-insensitive filesystem changes the casing of a shard directory ([#2403](https://github.com/entireio/cli/pull/2403))
+- Native repositories shared by a direct pull grant resolve by `/et/` path without requiring project-level access. This fixes cloning and name resolution for repository management and cell-routing commands; each operation still requires its own permissions ([#2543](https://github.com/entireio/cli/pull/2543))
+- Unsupported summary providers produce an actionable error listing supported agents. `entire doctor` also detects invalid provider settings ([#2359](https://github.com/entireio/cli/pull/2359))
+- `entire logout` and `auth status` no longer count `null` or nameless entries in `contexts.json` as saved logins ([#2511](https://github.com/entireio/cli/pull/2511))
+- Shell completion installation and E2E transcript writes report file-close errors instead of silently accepting potentially incomplete writes ([#2357](https://github.com/entireio/cli/pull/2357))
+- Optimized the duplicate-key scan added in [#2321](https://github.com/entireio/cli/pull/2321) for large JSON objects while preserving unconditional detection ([#2348](https://github.com/entireio/cli/pull/2348))
+
+### Security
+
+- Restored the cross-host redirect guard on cross-jurisdiction token exchanges after a regression between [#2224](https://github.com/entireio/cli/pull/2224) and [#2235](https://github.com/entireio/cli/pull/2235). This prevents redirects from forwarding login tokens to another host or accepting substituted tokens. Exchange URL validation remains in place ([#2261](https://github.com/entireio/cli/pull/2261))
+- Git hook installation uses confined filesystem operations, rejects symlinked hook directories and preserves foreign symlinked hooks. `doctor` reports unsafe hook directories. External summary-provider discovery requires the `external_agents` grant, and branch-name validation is strengthened ([#2315](https://github.com/entireio/cli/pull/2315))
+- JSONL redaction verifies replacements even when strings use alternate JSON encodings, falling back to structural rewriting or failing closed. Custom investigate and review prompts also require trusted settings before being passed to agents with approvals disabled ([#2321](https://github.com/entireio/cli/pull/2321))
+- GitHub Actions jobs declare explicit least-privilege token permissions. CodeQL scanning is limited to languages used in this repository ([#2354](https://github.com/entireio/cli/pull/2354), [#2355](https://github.com/entireio/cli/pull/2355))
+
+### Housekeeping
+
+- Repository instructions are split into a compact `CLAUDE.md` and task-specific development references, with tests enforcing the root-file size budget and local documentation links. `AGENTS.md` remains a symlink ([#2506](https://github.com/entireio/cli/pull/2506))
+- Homebrew installation uses a single fully qualified cask command compatible with Homebrew 6's tap trust. The copyable command no longer includes a comment that fails in default interactive zsh. Requires Homebrew 6.0.10+ ([#2409](https://github.com/entireio/cli/pull/2409), [#2505](https://github.com/entireio/cli/pull/2505))
+- Updated Go from 1.26.6 to 1.27.1 and golangci-lint from 2.11.3 to 2.13.2, resolving findings from the updated linters ([#2356](https://github.com/entireio/cli/pull/2356))
+- Dependency bumps: `gofrs/flock`, `mattn/go-runewidth`, `posthog/posthog-go`, `golang.org/x/crypto`, `golang.org/x/mod`, `golang.org/x/sync`, `golang.org/x/sys`, and `aws-actions/configure-aws-credentials` ([#2314](https://github.com/entireio/cli/pull/2314), [#2325](https://github.com/entireio/cli/pull/2325), [#2530](https://github.com/entireio/cli/pull/2530))
+- All E2E agent runners honor `E2E_TIMEOUT` and per-test prompt timeouts. Malformed timeout values produce an error ([#2113](https://github.com/entireio/cli/pull/2113))
+- Consolidated E2E workflows with agent and test-regex selection. Nightly smoke failures now mark the individual agent's step as failed ([#2353](https://github.com/entireio/cli/pull/2353), [#2377](https://github.com/entireio/cli/pull/2377))
+- Codex E2E tests no longer use the retired `gpt-5.4-mini`. Multi-session prompts allow hook-added checkpoint trailers ([#2525](https://github.com/entireio/cli/pull/2525), [#2527](https://github.com/entireio/cli/pull/2527))
+- Fixed a terminal-test race, macOS path comparisons and `ENTIRE_TOKEN` test isolation. Redaction fixtures no longer embed a complete AWS-key-shaped value that triggers push protection ([#2526](https://github.com/entireio/cli/pull/2526), [#2339](https://github.com/entireio/cli/pull/2339), [#2489](https://github.com/entireio/cli/pull/2489), [#2544](https://github.com/entireio/cli/pull/2544), [#2542](https://github.com/entireio/cli/pull/2542), [#2389](https://github.com/entireio/cli/pull/2389))
+- Removed `.opencode/package-lock.json` from version control and tracked `.opencode/.gitignore` so fresh clones inherit its rules. Removed the repo-local `trail-summary` runner to prevent self-triggered trail-body updates ([#1980](https://github.com/entireio/cli/pull/1980), [#2407](https://github.com/entireio/cli/pull/2407))
+
+### Thanks
+
+Thanks to @KC1706 for fixing checkpoints silently disappearing from `list` and `explain` when a case-insensitive filesystem folds a shard directory's case ([#2403](https://github.com/entireio/cli/pull/2403))!
+
+## [0.10.6] - 2026-09-07
+
+### Added
+
+- A Windows PowerShell installer, `scripts/install.ps1`, works under both Windows PowerShell 5.1 and PowerShell 7: `irm https://entire.io/install.ps1 | iex`. It resolves stable and nightly releases, verifies SHA-256 checksums, installs `entire.exe` and `git-remote-entire.exe`, and delegates to Scoop for stable installs when Scoop is on PATH. Update nudges now print that one-liner — naming the directory the running binary lives in, so the installer replaces it in place — instead of sending you to the GitHub releases page. Install detection is per-OS (brew and mise on unix, Scoop and mise on Windows) and honours relocated install roots ([#2152](https://github.com/entireio/cli/pull/2152), [#2217](https://github.com/entireio/cli/pull/2217))
+
+### Changed
+
+- Reworked `entire runner setup` flags and interaction flow. Interactive setup now asks whether to tailor runners or create generic defaults; `-y` selects tailoring, replacing the deprecated `--run`. `--print-prompt` preserves the previous default behavior, `--defaults-only` creates generic runners, and `--dry-run` previews tailoring without writing files. `--agent <name>` skips provider selection for this run without changing saved settings. Non-interactive use requires an explicit mode ([#2272](https://github.com/entireio/cli/pull/2272), [#2306](https://github.com/entireio/cli/pull/2306))
+
+### Fixed
+
+- `entire trail create` now runs pre-push hooks when pushing the trail branch, allowing existing checkpoints to sync through the normal push path. Hook output and prompts are streamed instead of buffered, so checkpoint sync failures and OPF prompts remain visible ([#2239](https://github.com/entireio/cli/pull/2239))
+- `entire trail` commands work against Entire-native repos. Trail resolution discarded the forge and looked up `<owner>/<repo>`, so a native `/et/<project>/<repo>` remote with a same-named legacy GitHub mirror — `entirehq/marvin` — returned the `/gh/` repo's trails. The `et` namespace is now preserved through resolution, native repos are addressed by repository ULID against their home cell, and `list`, `show`, `update`, `delete` and runner trail gathering all follow ([#2245](https://github.com/entireio/cli/pull/2245))
+- A named pipe where Entire expects a config file no longer hangs the process. `mkfifo .claude/settings.json` made `entire doctor` block in `openat` until SIGINT, because `open(2)` on a FIFO with no writer waits for one. Every no-follow read now refuses a non-regular leaf before opening it, which covers all nine agents, the plugin manifest, doctor's log readers and the settings loader ([#2308](https://github.com/entireio/cli/pull/2308))
+- `entire enable` no longer silently drops Vercel deployment blocking in a repo whose `vercel.json` is an absolute symlink into a monorepo's shared config. `os.Root` refuses an absolute link target unconditionally, even one landing inside the root, and the refusal is not "file not found" — so the check reported `path escapes from parent` and returned false ([#2290](https://github.com/entireio/cli/pull/2290))
+- A concurrent checkpoint write can no longer silently discard an OPF rewrite. The OPF paths used go-git's compare-and-swap, which does not take native Git's reference lock, so a native transaction landing afterwards overwrote the rewrite while both reported success. Ref updates now go through a native `git update-ref --stdin` transaction that holds the lock across the symbolic-ref check, with a bounded retry for transient lock contention and a terminal error for a genuine stale value ([#2211](https://github.com/entireio/cli/pull/2211))
+- Session and checkpoint file locks revalidate the locked file's inode after acquiring, and retry against the current file if the name has since been replaced ([#2273](https://github.com/entireio/cli/pull/2273))
+- `entire doctor` reports a regular file, FIFO, socket or device node where an agent directory belongs. It tested for a symlink and nothing else, so those came back clean while every hook install and `os.Root` open failed on them; a regular file at `.claude` was additionally reported as `NOT READABLE` with a permissions remedy that could not fix it. `.claude/agents/`, `.codex/agents` and `.gemini/agents` are also scanned now, and a worktree root that will not open is reported rather than passing silently ([#2220](https://github.com/entireio/cli/pull/2220), [#2290](https://github.com/entireio/cli/pull/2290))
+- The repo docs embedded into the tailoring prompt `entire runner setup` sends to the model are truncated on a rune boundary. The cap is a byte budget applied to text described in characters, so a doc whose 6000th byte landed inside a multi-byte rune put invalid UTF-8 into the prompt. A file that is not UTF-8 to begin with keeps its own bytes rather than being reduced to a truncation marker ([#2307](https://github.com/entireio/cli/pull/2307))
+
+### Security
+
+- The migration command's opt-in "Push N migrated checkpoint ref(s) now?" applies the OpenAI Privacy Filter. With `redaction.openai_privacy_filter.enabled` set, answering yes sent 8-layer content to the remote untagged — the skip outcome without the decision ever being resolved or surfaced, and the opposite safety to answering no, which left the refs queued for the next `git push`, where OPF does run ([#2236](https://github.com/entireio/cli/pull/2236))
+- `external_agents` joins `openai_privacy_filter.command` behind the settings trust gate: it is honored only from a verified-untracked `.entire/settings.local.json`, because it grants execution of every `entire-agent-*` binary on `$PATH` and a committed one-line JSON diff does not read as executable to a reviewer. Rejection is a downgrade with the reason surfaced by `entire status`, not a hard error. Every `$PATH` scanner now returns only absolute entries, and the external-agent runner refuses a non-absolute binary path before spawning — Go's own `ErrDot` protection does not reach a scanner that resolves by glob, and the scanner executes what it finds ([#2268](https://github.com/entireio/cli/pull/2268))
+- Pi's `.pi/extensions/entire/` is created, read, written and removed through the worktree anchor like the other eight agents, so a repository shipping a symlinked `.pi` no longer has `entire enable` install through it — and uninstall `RemoveAll` through it — without the user ever naming pi, which matters because pi is auto-detected. The uninstall guard is stated positively as "a directory Entire named" rather than as a blocklist, so an agent whose config sits one level below its root cannot reach `RemoveAll` on the user's own config ([#2220](https://github.com/entireio/cli/pull/2220), [#2290](https://github.com/entireio/cli/pull/2290))
+
+### Housekeeping
+
+- Physical git worktree metadata — git dir, common dir, worktree id — has one owner, `gitrepo.ResolveWorktreeMetadata`, resolved once per open and passed into repository storage, alternates inspection and reftable inspection. The checkpoint package's duplicate traversal, its `git rev-parse --git-common-dir` subprocess, and the mutex and cache compensating for it are deleted; inspection errors now reach the caller instead of reading as "feature absent" ([#2241](https://github.com/entireio/cli/pull/2241), [#2254](https://github.com/entireio/cli/pull/2254))
+- The `e2e-tests (opencode)` leg is green again and runs in 469s rather than timing out at 1266s. opencode forks a background 27-package plugin install for every `.opencode` directory it finds and then blocks on all of them with no timeout and no output, so each of the ~40 fresh test repos paid it — in-process via `@npmcli/arborist`, measured at 5m00.9s against `npm install`'s 3s for the identical tree. The tree is now built once and seeded into each repo, and opencode's own logs are collected into the artifacts, which is what made the diagnosis possible ([#2270](https://github.com/entireio/cli/pull/2270))
+- Test fixes for failures that named the wrong cause: a leaked goroutine in the reentrant-clear test panicked the whole `strategy` package run from a `t.Errorf` after completion; `TestRootBasesAreTrusted` accused its own detection pattern of going stale when git was configured to colorize into a pipe; the versioncheck probe tests read the host's mise and Scoop roots, and three unix-only tests were untagged. Brew-before-mise probe precedence is now pinned, since it decides whether a user with both installs is told to run `brew upgrade` ([#2266](https://github.com/entireio/cli/pull/2266), [#2309](https://github.com/entireio/cli/pull/2309), [#2311](https://github.com/entireio/cli/pull/2311))
+
+### Thanks
+
+Thanks to @MuskanPaliwal for serializing OPF ref updates against native git's reference lock, and for splitting git metadata resolution onto a single canonical owner!
+
+Thanks to @Rohitkanithi for the flock inode revalidation!
+
+## [0.10.5] - 2026-09-03
+
+### Changed
+
+- Mirror creation goes through the control plane's async request routes by default, reporting queued, placing, and cloning progress instead of holding one request open for the whole placement; the `async_mirror_requests` setting it shipped behind in 0.10.4 now defaults on. Opt out with `"async_mirror_requests": false`. In async mode `--wait-timeout` is one deadline across submission, placement, and clone readiness, not clone readiness alone ([#2246](https://github.com/entireio/cli/pull/2246))
+- Entire no longer installs a `Read(./.entire/metadata/**)` deny rule into Claude Code's or Factory Droid's permission config, so agents in auto mode stop prompting for permission on ordinary commands. A deny rule is a hard block auto mode's classifier cannot get past, and it matched on the path being named rather than on anything being read, so a recursive grep from the repo root needed hand approval. `entire enable` clears one an older CLI left behind and `entire doctor` repairs it ([#2258](https://github.com/entireio/cli/pull/2258))
+- `entire experts --repo <owner>/<repo>` takes the repo id from the placement lookup that already chose its cell, and now tells "not onboarded" apart from "processing placement failed or suspended" instead of guessing at three causes ([#2222](https://github.com/entireio/cli/pull/2222))
+
+### Fixed
+
+- A session's `full.jsonl` is released from `.entire/metadata` once its content has been condensed into a checkpoint. Nothing ever emptied that staging buffer, so transcripts accumulated in the worktree forever after being committed and pushed — 460 MB across 392 session directories in one checkout. Existing files are not reclaimed automatically ([#2258](https://github.com/entireio/cli/pull/2258))
+- `git clone entire://<cluster>/…` works again when your active login is on a different federation and exactly one saved login can authenticate that cluster; the CLI uses it and names it on stderr. `--context` and `$ENTIRE_CONTEXT` are unchanged ([#2248](https://github.com/entireio/cli/pull/2248))
+- `entire doctor` says it is waiting for a session lock instead of stalling with no output ([#2232](https://github.com/entireio/cli/pull/2232))
+
+### Security
+
+- A cluster's `/.well-known/entire-cluster.json` can no longer advertise login servers outside its own registrable domain. That document decides which saved login's JWT is sent to the host as a bearer, so a hostile cluster naming `foo.auth.entire.io` in `core_urls` was handed a real entire.io token — through `--context`, the active context, and `ENTIRE_TOKEN` alike. Choosing a login *for* you is additionally limited to Entire's own sites ([#2248](https://github.com/entireio/cli/pull/2248))
+- `entire checkpoint explain --repo <owner>/<name>` verifies a cell's response is for the repo and checkpoint that were requested before caching or rendering it, and labels the result with the server's own checkpoint ID. A wrong-repo or wrong-checkpoint response would otherwise have rendered as belonging to the repo you asked about ([#2225](https://github.com/entireio/cli/pull/2225))
+- Clearing a session's state file takes the same per-session gate every other write to that file takes. A concurrent, properly locked write landing between the "safe to clear" decision and the delete was destroyed silently ([#2232](https://github.com/entireio/cli/pull/2232))
+- `docs/security-and-privacy.md` discloses what happens to a pasted image: no redaction pass reads image content, there is no OCR or vision scan, and the outcome is per-agent — unredacted inline base64 on Claude Code, destroyed by the entropy layer on Codex, not stored at all on Cursor ([#2227](https://github.com/entireio/cli/pull/2227))
+
+### Housekeeping
+
+- The cross-jurisdiction HTTP transport (421 follow plus RFC 8693 token exchange) moves to `entireio/auth-go`'s `crossjuris` package, shared with entiredb and entire-ci ([#2235](https://github.com/entireio/cli/pull/2235))
+
+## [0.10.4] - 2026-09-02
+
+### Added
+
+- `entire repo clone /et/<project>/<repo>` clones an Entire-native repo, resolving its home cluster through the control plane. Previously this meant hand-building the `entire://` URL. Every ref names its forge — the bare `<project>/<repo>` shorthand is gone, since nothing in it says which forge was meant — and a ref matching no grammar gets a targeted error instead of one generic message: the rule its project or repo name broke, or, for a bare pair, the forge-qualified refs it could have meant ([#2185](https://github.com/entireio/cli/pull/2185), [#2223](https://github.com/entireio/cli/pull/2223), [#2240](https://github.com/entireio/cli/pull/2240), [#2252](https://github.com/entireio/cli/pull/2252))
+- `entire dispatch --jurisdiction <slug>` scopes a cloud dispatch to one region, and the wizard asks for a jurisdiction before the repo picker. A repo placed outside your home region used to fail with a bare "repository not found". The same change fixes cloud dispatch generally: it had been 502ing since ~Aug 20, because the gateway can no longer re-exchange the narrow api-access token ([#2153](https://github.com/entireio/cli/pull/2153))
+- `entire enable --search-skill` installs a real Agent Skill on all eight agents. It had scaffolded a dispatchable subagent instead, so nothing appeared in Claude Code's skill list and five agents reported the skill unsupported ([#2198](https://github.com/entireio/cli/pull/2198))
+- `entire trail list --json` and `entire trail show --json` expose `original_branch`, so a completed or closed trail that has been unlinked from its branch can still be matched to its worktree ([#2142](https://github.com/entireio/cli/pull/2142))
+- Mirror creation can go through the control plane's async request routes, reporting queued, placing, and cloning progress instead of holding one request open for the whole placement. Opt in with `"async_mirror_requests": true`; default off ([#2207](https://github.com/entireio/cli/pull/2207))
+
+### Changed
+
+- `entire runner setup` scaffolds six runners instead of seven. `trail-review-focus` writes neither a trail body nor a monitor, so entire-api's push admission rule rejects it before launch every time — it has never run anywhere, nothing consumes its output, and its failures buried real runner problems in the same query ([#2221](https://github.com/entireio/cli/pull/2221))
+
+### Security
+
+- `.entire` must be a real directory, and the entries directly inside it regular files or directories. A file or symlink at that path was previously read and written through, redirecting settings, transcripts, and logs. Settings are additionally never read through a link at the read itself, since eighteen call sites reach `settings.Load` without passing the pre-run guard ([#2154](https://github.com/entireio/cli/pull/2154), [#2156](https://github.com/entireio/cli/pull/2156))
+- Filesystem operations are confined to `os.Root` anchors, one per tree Entire addresses with names it does not control — session and tool-use IDs, investigation run IDs, `git status` output, and checkpoint tree entries fetched from a remote. Symlinks are refused beneath an anchor, path components are pinned between check and use, and a guard test keeps new root-opening sites on an allowlist ([#2180](https://github.com/entireio/cli/pull/2180))
+- The OAuth token-exchange POST no longer follows cross-host redirects. `subject_token` travels as a POST form field, and Go's default client strips only sensitive headers on a cross-host redirect while copying the body, so a 307/308 pointing at another origin would forward the token there ([#2224](https://github.com/entireio/cli/pull/2224))
+- The plugin resolver's fallback path scans absolute `$PATH` entries only. It previously returned the file `exec.LookPath` had declined for sitting under a relative entry, and the path it returned contains a separator, which bypasses Go's `ErrDot` re-check at exec ([#2228](https://github.com/entireio/cli/pull/2228))
+- Unattended shadow-branch cleanup requires the worktree-hash suffix, which is present on every branch Entire mints. The optional-suffix pattern also matched hand-created branches, and those have no session-state entry, so they were force-deleted with no merge check on the next push. The interactive `entire clean --all` path is unchanged ([#2230](https://github.com/entireio/cli/pull/2230))
+- `entire investigate fix` resolves its findings through the investigation store by validated run ID, rather than reading the manifest's absolute `FindingsDoc` path — which decided which file was read into the launched fix agent's prompt ([#2231](https://github.com/entireio/cli/pull/2231))
+- Every `entire investigate` run prints a notice that the agents it spawns run without sandboxing, naming both bypass flags. Only the `--issue-link` path warned before ([#2233](https://github.com/entireio/cli/pull/2233))
+- `~/.config/entire` is created `0700`, and an existing directory has its group and other bits cleared. Three callers create it, and the one asking for `0755` fires from the root command's post-run, so it almost always won ([#2163](https://github.com/entireio/cli/pull/2163))
+
+### Fixed
+
+- Concurrent checkpoint writers no longer lose each other's work: persistent ref writes take a per-ref cross-process lock and use Git CAS, retrying from a freshly read parent. A follow-up keeps a repeat migration from taking that lock and running `git update-ref H H` for every already-imported checkpoint ([#1926](https://github.com/entireio/cli/pull/1926), [#2200](https://github.com/entireio/cli/pull/2200))
+- `entire review` could hang at "Final judge is consolidating…" past the judge deadline when Codex was the judge. CLI-backed judge and summary providers now stop on context cancellation ([#2140](https://github.com/entireio/cli/pull/2140))
+- A commit that ships an `Entire-Checkpoint` trailer no session condensed into now leaves a DEBUG line naming it — the trailer is stamped by one hook and the decision to condense made independently by another, so the divergence was invisible. Amends and sequencer replays are excluded, where the trailer legitimately rides along ([#2119](https://github.com/entireio/cli/pull/2119))
+
+### Housekeeping
+
+- Test runs stop touching the developer's machine, in seven ways found by pointing `HOME` at a throwaway directory and diffing it: a summarize test launched the real `claude` binary while asserting nothing, an auth test wrote lock files into the real user cache, four strategy tests failed outright on a host `init.defaultBranch`, and 55 call sites ran git with the host's config. Git isolation now has one implementation. Two interop hashes gained known-answer vectors, and the E2E canary fails when no agent registered instead of skipping everything and exiting 0 ([#2169](https://github.com/entireio/cli/pull/2169), [#2170](https://github.com/entireio/cli/pull/2170), [#2171](https://github.com/entireio/cli/pull/2171), [#2172](https://github.com/entireio/cli/pull/2172), [#2173](https://github.com/entireio/cli/pull/2173), [#2174](https://github.com/entireio/cli/pull/2174), [#2184](https://github.com/entireio/cli/pull/2184))
+- The dead rewind restore path is gone — over 1,800 lines across the restore code, the agent comments still describing it as live, and the session helpers that existed to serve it. What survives is renamed for what it does (`RewindPoint` → `PendingCheckpoint`); no JSON key, flag, or command path ever contained "rewind", so `checkpoint list --pending --json` is byte-identical ([#2178](https://github.com/entireio/cli/pull/2178), [#2186](https://github.com/entireio/cli/pull/2186), [#2187](https://github.com/entireio/cli/pull/2187), [#2189](https://github.com/entireio/cli/pull/2189), [#2191](https://github.com/entireio/cli/pull/2191))
+- `README.md` and `docs/security-and-privacy.md` lead with the refs checkpoint backend new repos already default to, and drop claims that were wrong rather than stale: a top-level `entire clone`, `entire resume` and `entire explain`, "can be rewound independently", a `known_hosts` section for fetches that don't use go-git, and a `summary_timeout_seconds` default that doesn't exist ([#2216](https://github.com/entireio/cli/pull/2216))
+- `scripts/` is now shellcheck'd, including the `install.sh` served from entire.io and piped into users' shells. The same line's shebang test matched only literal `/bin/sh` and `/bin/bash`, so four `#!/usr/bin/env bash` tasks were skipped too; coverage goes from 18 files to 32 ([#2206](https://github.com/entireio/cli/pull/2206))
+- Real-agent E2E is green again after Claude Code's workspace-trust change and Copilot CLI v1.0.81: startup dialogs are keyed on affirmative wording, both the old and new Copilot prompt shapes are recognized, and each interactive Copilot test gets an isolated home ([#2158](https://github.com/entireio/cli/pull/2158))
+- `tools/complexity` computes a deterministic per-feature and per-command baseline — complexity, coverage, churn, duplication, and what each command exclusively owns. It is a separate Go module, so its dependencies stay out of the CLI's `go.mod` ([#2194](https://github.com/entireio/cli/pull/2194))
+- Go dependencies bumped as a group: bubbles 2.2.1 and posthog-go 1.24.0 ([#2151](https://github.com/entireio/cli/pull/2151))
+
+### Thanks
+
+Thanks to @ChetanReddyC for making concurrent persistent ref updates safe with per-ref locking and Git CAS, @MuskanPaliwal for keeping repeat migrations from re-locking every already-imported checkpoint and for clearing the stale rewind code out of the agent integrations, and @Solarthis for putting `scripts/` — including the install script piped into users' shells — under shellcheck!
+
+## [0.10.3] - 2026-08-27
+
+### Added
+
+- Subagent work now survives into committed checkpoints, for every agent that reports subagent completion: Claude Code, Codex, Cursor, Copilot CLI, and Factory AI Droid. 0.10.2 shipped the in-session half and noted that committed checkpoints still carried no per-subagent data for any agent — this is the durable half. A subagent's work becomes a `task_records` ledger on the parent session, and condensation materializes each record's transcript into `tasks/<tool-use-id>/` inside the parent session's checkpoint, so every checkpoint is self-contained; the ledger, the materializer, and the commit linkage are all agent-agnostic. Commits a subagent makes between the parent's turns link to their session too, instead of shipping with no `Entire-Checkpoint` trailer at all — six of seven commits on a real subagent-driven branch had gone unlinked. The one agent-specific piece is Claude Code's `SubagentStop` hook, now registered: a backgrounded `Task` fires `PostToolUse` at the launch acknowledgment, before the subagent has done anything, so a session that dispatched 29 background agents running 5–18 minutes each had captured nothing but a launch stub per agent. Gemini CLI, OpenCode, and Pi expose no subagent hook and are unchanged ([#2032](https://github.com/entireio/cli/pull/2032), [#2034](https://github.com/entireio/cli/pull/2034))
+- An agent's commit links to its session by *who made it*, not by worktree path: the owner fingerprint already recorded at every turn start is matched against the commit hook's own process ancestry, so a commit made in a sibling worktree links automatically with no `entire session adopt`. Nearest ancestor wins for nested agents, host/boot/start-time guards defeat PID reuse, and a human commit typed in the same terminal still never matches. Identity is unioned with worktree matching, never a replacement; on Windows, where the process walk is unavailable, linking is unchanged ([#2013](https://github.com/entireio/cli/pull/2013))
+- Zombie sessions self-heal instead of waiting for someone to run `entire doctor`. The session-start hook cheaply detects sessions whose agent died without a stop hook, or that have been sitting on uncondensed checkpoint data for over 24h, and fires a detached `__sweep_sessions` that finalizes and condenses them — one real session had been stuck for 4 days with 60 checkpoints, slowing every commit in the meantime. The hook's own timeout budget is untouched regardless of backlog ([#2029](https://github.com/entireio/cli/pull/2029))
+- Teams can choose which secret-scanner engines feed redaction, via `redaction.betterleaks.enabled` and `redaction.goredact.enabled` in committed `.entire/settings.json`. Defaults are unchanged (betterleaks on, goredact off), the keys are deliberately ignored in `settings.local.json` — the choice affects everyone who reads the repo's checkpoints — and disabling both fails settings load rather than shipping unscanned content. If the sole enabled engine fails at runtime, transcript writes fail closed instead of persisting under-scanned data ([#2081](https://github.com/entireio/cli/pull/2081))
+- `entire doctor trace --summary` aggregates hook traces into per-hook p50/p90/max with the dominant step, and `--slow` narrows to the slow ones — the question with slow traces accumulating is "what is slow in general", which previously meant hand-rolling a grep over `.entire/logs`. The command's help no longer claims traces need DEBUG to be enabled; they have been emitted at WARN by default since 0.10.1 ([#2092](https://github.com/entireio/cli/pull/2092))
+- Redaction diagnostics reach `.entire/logs` and `entire doctor` reports a log directory Entire cannot write to. Pack load failures, rule compile errors and sample mismatches went to the process-default logger — bare stderr, which hook contexts swallow — so a user debugging custom rules could grep for `component=redaction`, find nothing, and reasonably conclude the rules never ran. There is now also one INFO summary per process naming pack/rule/inline counts and PII/OPF state, and an unwritable `.entire/logs` is called out by name instead of presenting as a silent exit 0 ([#1973](https://github.com/entireio/cli/pull/1973), [#2082](https://github.com/entireio/cli/pull/2082))
+- `entire trail update --body` sends the description's ETag as `If-Match`, so a body write is rejected rather than silently clobbering a description that changed since it was read. `--overwrite` writes unconditionally, and a server or trail without an etag degrades to the previous behavior ([#2079](https://github.com/entireio/cli/pull/2079))
+- Telemetry gained three content-free signals, all gated on the same opt-in setting and `ENTIRE_TELEMETRY_OPTOUT`: `cli_skill_invoked` for skill invocations (skill name from a closed vocabulary — no prompt text or arguments), `cli_commit_condensed` for whether a commit landed files already carrying AI checkpoint history without the session ever consulting search, and `cli_search_completed` for whether a search actually returned a usable response rather than just that it ran ([#2023](https://github.com/entireio/cli/pull/2023), [#2024](https://github.com/entireio/cli/pull/2024), [#2100](https://github.com/entireio/cli/pull/2100), [#2130](https://github.com/entireio/cli/pull/2130))
+
+### Changed
+
+- The search TUI scrolls continuously instead of paging 10 results at a time — commit search reads like a pruned `git log`, and the next API page loads automatically as you approach the end. Type tabs move on ←/→ (or tab/shift+tab) with wraparound; the `1`-`3` number keys are gone, and the status row reports `N of M results` instead of `page X/Y` ([#2138](https://github.com/entireio/cli/pull/2138))
+- CLI search results match the web's. Per-cell responses were always identical — only the client-side merges diverged: the CLI cut the merged list globally at 100 where the web windows per type, reported summed corpus counts up to 13× larger, deduped every type where the web dedupes sessions only, and dropped every completeness flag. Counts now describe exactly what you can see (with a `+` when lower-bounded), incomplete results are labeled rather than silent, and the retired ANN fallback tail no longer renders ([#2090](https://github.com/entireio/cli/pull/2090))
+- A logged-out `git pull` against a cluster now names one login server — `entire login` — instead of printing a list of seven hosts and leaving you to pick, three of which were not login servers at all. Staging still names `--server` where the flag is genuinely required ([#2128](https://github.com/entireio/cli/pull/2128))
+
+### Security
+
+- `task.json`'s `task_description` — the free text an agent writes when dispatching a subagent — was copied verbatim into the pushed checkpoint while the subagent transcript beside it went through the full sanitize → externalize → redact pipeline. The checkpoint writer now redacts it, covering both persistent backends ([#2129](https://github.com/entireio/cli/pull/2129))
+- betterleaks moves to 1.8.0, which closes a real under-redaction gap: a bare `password=<secret>` assignment previously escaped every layer. Validated with an A/B diff over 22 real checkpoint transcripts (64MB) — 21 byte-identical, one file with five safe-direction over-redactions of test-fixture passwords, zero under-redactions. The upstream dependency swap also makes the transcript redaction path 1.36× faster and shrinks the binary ([#2042](https://github.com/entireio/cli/pull/2042))
+
+### Fixed
+
+- Every `git status` Entire runs now passes `--no-optional-locks`. `git status` is a write: it refreshes the index's stat cache, holds `.git/index.lock` for the whole worktree walk, and renames a fresh index over `.git/index`. Entire read the porcelain output once and discarded it, so that write bought nothing — but on a filesystem where rename-over-existing is not atomic against a concurrent lookup (virtiofs / gRPC-FUSE bind mounts, i.e. Docker Desktop devcontainers — measured at 9.9% ENOENT across 29,596 opens, versus 0 on ext4) a reader can observe `.git/index` missing, and git treats ENOENT, and only ENOENT, as an *empty* index: a `git commit` landing in that window records the empty tree with exit 0 and no warning. Output is byte-identical with the flag. This removes Entire's contribution rather than the hazard — any concurrent `git status` on an affected mount opens the same window, including several agents working one repo, and the environment-wide mitigation is `GIT_OPTIONAL_LOCKS=0` ([#2143](https://github.com/entireio/cli/pull/2143))
+- A Stop hook on a large transcript no longer re-redacts the whole thing. Redaction was 99.7% of the blob write, and because `full.jsonl` is append-only but was re-redacted in full at every checkpoint, a session with N checkpoints re-redacted O(N²) bytes — a 70MB Codex transcript took ~67s. The line pass is now sharded across goroutines (byte-balanced, output byte-identical) and the previous checkpoint's redacted prefix is reused, so only appended lines are redacted: ~66s → **2.0s** on a simulated 14-checkpoint session. The same reuse now covers post-commit condensation and the Stop finalize rewrite, which had been left out — a coworker was hitting Codex's 30s Stop-hook timeout on a 65MB rollout and losing the checkpoint's final transcript rewrite to the kill ([#2002](https://github.com/entireio/cli/pull/2002), [#2107](https://github.com/entireio/cli/pull/2107))
+- A pathological repo can no longer leave orphaned hook processes grinding for hours. A stray `git init` in a user's `$HOME` meant every Stop hook walked the entire home directory: the agent stopped waiting at its ~60s hook timeout but the `entire` process survived, and two were found hours later at ~1.8GB RSS each, one with 25 CPU-minutes, still writing loose objects — silently, with no session state, no checkpoint, and no log line. Agent-hook status walks are now bounded by a 20s wall-clock budget with a process-local latch, the unbounded `git status` subprocess on the first-checkpoint path is bounded the same way, capture degrades to transcript-derived data instead of failing the turn, and `entire status` reports the degradation instead of showing a healthy session with new-file detection silently off ([#1977](https://github.com/entireio/cli/pull/1977))
+- Session-end condensation could write a checkpoint durably before saving its updated session state, so a hook killed in that window left recovery thinking the transcript was unfinished — and `entire doctor` would write it again under a different checkpoint ID. Condensation now reserves its checkpoint ID write-ahead and reuses it on retry, and `doctor` reconciles interrupted writes from older CLI versions by session identity and transcript bounds rather than minting a new ID. Existing duplicate pairs are deliberately left in place ([#2038](https://github.com/entireio/cli/pull/2038))
+- `entire disable --uninstall` reported success while leaving an external agent's hooks on disk — the uninstall reached agents only through the registry and never ran external-agent discovery, so the plugin was absent from the confirmation summary and its `UninstallHooks` never ran, leaving agent hooks calling into an Entire that was no longer installed. Discovery is now ungated (the setting that would gate it lives in the `.entire/` this command deletes), `AreHooksInstalled` distinguishes "no hooks" from "cannot tell" instead of collapsing both into "none", and any step that fails exits non-zero with a per-agent remedy rather than claiming a success it could not verify ([#2010](https://github.com/entireio/cli/pull/2010))
+- Cursor's file attribution used the transcript. Six places in the Cursor agent asserted as fact that Cursor transcripts contain no `tool_use` blocks — a real session has 26 of them — so `ExtractModifiedFilesFromOffset` returned nothing and every session fell back to git status while real `Write`/`StrReplace` blocks sat unread. `Shell` stays excluded, since the transcript records only the command string ([#2120](https://github.com/entireio/cli/pull/2120))
+- Imported Cursor session titles no longer read `<timestamp>Tuesday, Aug 18, 2026, 2:37 PM…</timestamp>`; Cursor's injected block is stripped by the single shared prompt cleaner, fixing live and imported prompts at once ([#2045](https://github.com/entireio/cli/pull/2045))
+- Codex 0.149.0 can load project hooks from a different checkout than the one it runs in, so a linked worktree's own `.codex/hooks.json` was silently not the file Codex used. `entire doctor` and `entire status` now report the discovered path alongside the current worktree's, while installs, removals and cleanup still touch only the checkout the command was invoked from ([#2052](https://github.com/entireio/cli/pull/2052))
+- OpenCode hooks fire under OpenCode Desktop: the plugin spawned via `Bun.spawn`, which does not exist in the Electron sidecar's Node runtime, and now uses `node:child_process` so both the Bun CLI/TUI and Desktop work ([#2018](https://github.com/entireio/cli/pull/2018))
+- `entire session attach <id> --agent opencode` works for sessions Entire never tracked. Preparation was only attempted when a transcript file already existed, but OpenCode produces its transcript on demand via `opencode export` for any session in its store — so a session spawned outside a hooked terminal could not be attached at all. A new optional agent capability materializes the transcript on demand; file-based agents are unaffected ([#1877](https://github.com/entireio/cli/pull/1877))
+- Search routed each repo to every placement it has, home and mirrors alike, so a multi-region repo returned the union of all its namespaces — 100 rows against the web's 6 on one measured query, 94 of them duplicate or stale mirror rows. Each repo now routes to exactly one home placement, and a home placement that is not ready is reported as skipped rather than substituted with a mirror ([#2044](https://github.com/entireio/cli/pull/2044))
+- `entire search --json --compact` no longer emits a repo `description`; its only source was the legacy MySQL repos table, which is gone server-side, so the field could never be populated again. `checkpointCount` stays, re-sourced from core ([#2125](https://github.com/entireio/cli/pull/2125))
+- `entire trail create` delivered the trail's branch to a hardcoded `origin` in four places with nothing warning, so a fork workflow, `remote.pushDefault`, or `branch.<name>.pushRemote` all sent it to the wrong remote. Delivery now resolves through git's own precedence, once, so push and cleanup cannot disagree ([#2086](https://github.com/entireio/cli/pull/2086))
+- `entire enable` showed only six of its eight agents, hiding OpenCode and Pi below the initial viewport even on a tall terminal — a `huh` height-sizing bug, worked around here for single-line multi-select fields while the library fix is handled upstream ([#2132](https://github.com/entireio/cli/pull/2132))
+- `entire doctor` without a TTY crashed on a stuck session instead of reporting it: the fix prompt went straight to an interactive select, bubbletea failed with `could not open TTY`, and the whole scan aborted mid-report with exit 1. It now prints the diagnosis with a `--force` hint and completes the scan ([#2015](https://github.com/entireio/cli/pull/2015))
+- Checkpoint reads on a partial clone no longer hammer the remote one blob at a time. `entire checkpoint explain` could trigger a Git lazy fetch per missing blob per promisor remote before reaching its own batched prefetch, so blob-existence probes and fallback reads now set `GIT_NO_LAZY_FETCH=1`, and the probe settles a whole candidate set with one `git cat-file --batch-check` rather than one subprocess per blob. Two hook paths — post-commit attribution and the stop hook's turn finalize — opened the checkpoint store with a ref fetcher and no blob fetcher, so with lazy fetch off a filtered-out `metadata.json` read as "checkpoint not found": attribution was skipped, the finalized transcript never reached its checkpoints, and nothing above DEBUG said why. Both now carry a blob fetcher bounded by a 15s whole-call budget with non-interactive SSH, memoized so a dead network costs one budget per store instead of one per checkpoint ([#2141](https://github.com/entireio/cli/pull/2141), [#2145](https://github.com/entireio/cli/pull/2145), [#2146](https://github.com/entireio/cli/pull/2146))
+- Telemetry payload building no longer shells out once per event. The machine ID is resolved via `ioreg` on macOS (p50 11.8ms), the registry on Windows, and nothing cached it — so a hook draining a 20-event skill backlog paid 217ms of blocking subprocesses in the parent. It is now resolved once per process, dropping ~11.6ms from every command that builds an event ([#2101](https://github.com/entireio/cli/pull/2101))
+- The committed `SessionStart` hook in `.claude/settings.json` left `${CLAUDE_PROJECT_DIR}` unquoted, so any checkout whose path contains a space failed on every session start ([#2139](https://github.com/entireio/cli/pull/2139))
+- Every control-plane request went out as `Go-http-client/2.0`, not `entire-cli/<version>` — so `entire org|project|repo|grant|search|api|auth` traffic was invisible to server-side CLI version gating, along with cluster discovery, the cluster catalog GET, and plugin release-asset downloads. The User-Agent is now stamped at the client constructors, innermost in each transport chain so the token-exchange and federation hops carry it too ([#2096](https://github.com/entireio/cli/pull/2096))
+
+### Housekeeping
+
+- `mise run lint` no longer rewrites source. The local path passed `--fix`, which made the documented pre-commit sequence a mutating command — it could strip a `//nolint` directive, report 0 issues, and fail on the next run with the deprecation the directive was suppressing. Rewriting stays with `mise run fmt` ([#2117](https://github.com/entireio/cli/pull/2117))
+- This repo's committed dogfood hook configs are now checked against their templates on the CI path, using the same drift check `entire doctor` already runs. The committed Pi extension had sat two commits behind its template for three weeks, silently forwarding a subagent's lifecycle as the user's session ([#2084](https://github.com/entireio/cli/pull/2084))
+- A Cloud Agent development environment boots with the pinned toolchain, the CLI built, and `entire` on PATH so this repo's committed hooks fire ([#2114](https://github.com/entireio/cli/pull/2114))
+- Two CI flakes removed at the mechanism rather than the probability: a `Text file busy` (ETXTBSY) fork race on test-written fake binaries, now linked instead of written, and the Factory Droid E2E tests, which had polled shadow branches for task data that [#2032](https://github.com/entireio/cli/pull/2032) stopped writing and had failed on every push to main since ([#2094](https://github.com/entireio/cli/pull/2094), [#2095](https://github.com/entireio/cli/pull/2095))
+- The logger is closed in one place (`main.go`, which covers the error paths cobra's post-run loop skips), the security-review runner prompt is reframed around an engineer who owns the codebase rather than a checklist auditor, and three docs corrections landed: the ref-backend doc no longer lists pre-push OPF among the paths the primary backend drives, the log-flush comments point at `main.go`, and `phone` PII redaction is qualified as North American (NANP) formats only ([#1914](https://github.com/entireio/cli/pull/1914), [#2083](https://github.com/entireio/cli/pull/2083), [#2093](https://github.com/entireio/cli/pull/2093), [#2097](https://github.com/entireio/cli/pull/2097), [#2110](https://github.com/entireio/cli/pull/2110))
+- The `gemini-cli` E2E leg is dropped from the automatic agent fan-out, where it had been reddening `main` on every push; it stays in every `workflow_dispatch` choice list so it can be run by hand against a newer release. This turns off the alarm, not the bug — since Gemini CLI 0.57.0 the agent forces `core.hooksPath=''` on every shell command it runs, so a commit the agent makes records no checkpoint, and no change on Entire's side can win that back ([#2147](https://github.com/entireio/cli/pull/2147))
+- Go dependencies bumped as a group: bubbles 2.2.0, bubbletea 2.0.9, betterleaks 1.8.1, posthog-go 1.23.1, testify 1.12.1, `x/mod` 0.40.0, `x/net` 0.58.0 ([#2118](https://github.com/entireio/cli/pull/2118))
+
+### Thanks
+
+Thanks to @Legonaftik for making `entire session attach` work for OpenCode sessions Entire never tracked, @sdshah09 for fixing OpenCode hooks under OpenCode Desktop's Node sidecar and qualifying the phone PII pattern as NANP-only in the docs, and @MuskanPaliwal for preventing duplicate session-end checkpoints, making Codex hook discovery honest in linked worktrees, and unhiding OpenCode and Pi in the agent picker!
+
+## [0.10.2] - 2026-08-19
+
+### Added
+
+- Better subagent handling for Codex and Cursor (subagent tracking remains work in progress): Entire now consumes Codex's `SubagentStart`/`SubagentStop` hooks, and an agent can declare its own subagent transcript path instead of having the Claude Code layout guessed for it — which also fixes Cursor, which had parsed that path all along and dropped it. This is the in-session half only. Committed checkpoints still carry no per-subagent data for any agent, Codex does not aggregate subagent token usage, and only thread-spawned Codex subagents fire the hooks ([#1958](https://github.com/entireio/cli/pull/1958))
+- `entire repo create --object-format` selects `sha1` or `sha256`, validated client-side so a typo fails fast instead of coming back as an opaque 422 ([#2043](https://github.com/entireio/cli/pull/2043))
+
+### Changed
+
+- The `entire search` TUI drops its Checkpoints tab and defaults to Sessions. Search now folds checkpoint hits into their owning sessions server-side, so the old default tab always showed zero results; a checkpoint stays reachable by ID via `entire checkpoint explain` ([#2022](https://github.com/entireio/cli/pull/2022))
+
+### Security
+
+- `redaction.openai_privacy_filter.command` is honored only from a `.entire/settings.local.json` verified to be untracked. It becomes `argv[0]` of an exec on every push, and was read from the version-controlled `.entire/settings.json` with no validation — so a pull request could pair the setting with a payload committed alongside it and run code on every developer who pushes, including non-interactively in CI. A tracked `settings.local.json` is now ignored wholesale, since `.gitignore` does not apply to an already-tracked path. Rejection downgrades to resolving `opf` on `$PATH` rather than erroring, and the rewrite fails closed if that is missing ([#2056](https://github.com/entireio/cli/pull/2056))
+
+### Fixed
+
+- Repo-scoped data could be read from the wrong region. Cell resolution scanned mirrors and silently fell back to the caller's home cell whenever a repo was mirrored in more than one region, so `entire trail list --repo <multi-region repo>` printed "No open trails found" instead of the repo's real trails. Resolution now goes through the repo's processing placement, and every failure is a returned error instead of a silent fallback. `entire agent-help`'s trails probe and `entire enable`'s post-success report had the same bug against the BFF, which does not proxy trails for CLI bearers ([#2046](https://github.com/entireio/cli/pull/2046), [#2047](https://github.com/entireio/cli/pull/2047))
+- A repo that is not onboarded — or not visible to your login — is now named in one honest line across `entire trail`, `entire experts`, and `entire checkpoint explain --repo`, instead of an anonymous "This repository" on one surface and a raw internal resolution chain on the others. Single-repo cell resolution also tolerates the same catalog gaps the multi-repo fan-out already survived, and `entire enable`'s trails probe gets its own deadline so a slow enable report can no longer starve it ([#2054](https://github.com/entireio/cli/pull/2054))
+- `entire trail update --body` never worked: the description was sent as a field on the metadata `PATCH`, a route that does not serve body writes, and the rejection arrived as a bare `Service Unavailable`. Descriptions now go to the dedicated body route, and `--body=` clears one ([#2055](https://github.com/entireio/cli/pull/2055))
+- Cloud-mode `entire dispatch` sends `entire-cli/<version>` as its User-Agent instead of Go's default, so its traffic is no longer invisible to server-side CLI version gating ([#2049](https://github.com/entireio/cli/pull/2049))
+
+### Housekeeping
+
+- `go-runewidth` moves to 0.0.28 and the version pin from 0.10.1 is dropped — upstream builds its width table lazily now, so startup stays at ~18ms without pinning ([#2040](https://github.com/entireio/cli/pull/2040))
+- Trail wire handling consumes entire-api's camelCase contract directly, dropping the remaining snake_case JSON and SSE normalization along with obsolete list-response compatibility fields ([#2037](https://github.com/entireio/cli/pull/2037))
+- The Linux CI test jobs no longer `apt-get install gnome-keyring`: the token store has resolved to a temp file backend under test for some time, and the step's only remaining effect was to make three PR-blocking jobs depend on an Ubuntu mirror that intermittently hung them for the full 6-hour default timeout. Those jobs now also carry a 30-minute timeout ([#2072](https://github.com/entireio/cli/pull/2072))
+
+## [0.10.1] - 2026-08-18
+
+### Added
+
+- `entire login` keeps the authorization URL visible and clickable, starts waiting for the callback immediately, and offers Enter to open the browser or `c` to copy — so a login can be finished in a different browser or profile without a terminal keypress ([#1961](https://github.com/entireio/cli/pull/1961))
+- Checkpoints now follow the remote you actually push to: when a push agrees with your branch's declared push destination, that observed remote is recorded as the checkpoint sync remote, announced on stderr, and the same push carries the checkpoints. `entire status` shows it as "follows your branch's push destination" ([#1991](https://github.com/entireio/cli/pull/1991), [#2036](https://github.com/entireio/cli/pull/2036))
+- On the git-refs backend, a fresh clone discovers checkpoints without a dedicated `checkpoint_remote` — `checkpoint list` and the branch view ls-remote the read candidates and merge the listings ([#1956](https://github.com/entireio/cli/pull/1956))
+- `entire trail show --json` prints one trail object in the same shape as an entry of `trail list --json` ([#1970](https://github.com/entireio/cli/pull/1970))
+
+### Changed
+
+- `entire login` defaults to `https://auth.entire.io` and follows its regional handoff, exchanging the code at the region that minted it; `--server` stays for special cases ([#1945](https://github.com/entireio/cli/pull/1945))
+- Commands no longer pick a login for you. When several logins are saved, the acting identity must be selected explicitly — `entire auth use`, or `--context` / `ENTIRE_CONTEXT` for one-offs. Previously adding a second login could silently change which identity an existing command authenticated as ([#1982](https://github.com/entireio/cli/pull/1982))
+- `entire trail` talks to entire-api directly; the legacy backend and `ENTIRE_TRAILS_BACKEND` are retired ([#1949](https://github.com/entireio/cli/pull/1949), [#2021](https://github.com/entireio/cli/pull/2021))
+- `local_dev` mode is removed. It existed only to dogfood unreleased changes in this repo, pointing installed hooks at a launcher inside the working tree. Hooks now always name the `entire` binary, the `--local-dev` flags and `scripts/entire-dev` are gone, and the settings key is accepted as a documented no-op so existing settings files still parse ([#1999](https://github.com/entireio/cli/pull/1999))
+- Checkpoint reads follow the elected sync remote, with `origin` kept as a read-only legacy tier. Reads previously hardcoded `origin`, so a repo with `checkpoint_push_remote` set — or with no `origin` at all — wrote checkpoints it could never read back ([#1951](https://github.com/entireio/cli/pull/1951))
+- A push that does not carry checkpoints now says so on stderr, naming the sync remote and the setting to change, instead of stranding them silently ([#1987](https://github.com/entireio/cli/pull/1987))
+
+### Fixed
+
+- `entire login` on Windows opened a truncated authorization URL and was rejected for a missing `redirect_uri`; the browser now launches via `ShellExecute` instead of `cmd /c start`, which cut the URL at its first `&` ([#1981](https://github.com/entireio/cli/pull/1981))
+- Every `entire` invocation is roughly 1.9× faster to start — 33.8ms → 18.0ms — by dropping a 2.2MB lookup table that `go-runewidth` v0.0.26 built in `init()` on every run, including every agent hook fire ([#2026](https://github.com/entireio/cli/pull/2026))
+- Codex sessions no longer pile up: Codex's `SessionEnd` hook is now registered, and the dead-owner sweep in `entire status` / `entire doctor` also covers sessions whose agent quit after its last turn (previously only fully-active ones), so an agent killed before its hook runs is still finalized ([#1940](https://github.com/entireio/cli/pull/1940))
+- Codex sessions are titled from the genuine prompt instead of Codex's injected runtime preamble (`<environment_context>`, `# AGENTS.md`, `<recommended_plugins>`, `<user_action>`, `<turn_aborted>`) ([#2016](https://github.com/entireio/cli/pull/2016))
+- Factory AI Droid Worker sessions are attributed to their parent task now that Droid dispatches Workers in the background ([#2000](https://github.com/entireio/cli/pull/2000))
+- `entire enable` no longer downloads the whole checkpoint archive on a fresh clone — 31s and a silent give-up on every run became 0.9s ([#1994](https://github.com/entireio/cli/pull/1994))
+- Checkpoint `metadata.json` could outgrow GitHub's 100MB blob limit and make `entire/checkpoints/v1` permanently unpushable. Nested git checkouts under the repo root (agent worktrees, vendored clones) are excluded from worktree status the way git itself excludes them, and `files_touched` is deduped at the checkpoint write boundary ([#1937](https://github.com/entireio/cli/pull/1937), [#1969](https://github.com/entireio/cli/pull/1969))
+- The OpenAI privacy filter fails closed when it is enabled with no effective categories, instead of stamping `Entire-OPF-Applied: true` on commits it never scanned — which permanently exempted them from later rewrites ([#1986](https://github.com/entireio/cli/pull/1986))
+- Resuming a session after the repo directory was renamed or moved reconciles the recorded worktree path, so commits keep their `Entire-Checkpoint` trailer ([#1896](https://github.com/entireio/cli/pull/1896))
+- `entire search` orders semantic results by rerank score and dedupes folded legacy sessions by checkpoint ID, so the CLI and the web return the same results for the same query ([#1976](https://github.com/entireio/cli/pull/1976), [#2004](https://github.com/entireio/cli/pull/2004))
+- `entire trail finding add --patch` / `--patch-file` sends the pre-image anchor the API requires; it had never once succeeded since the flags shipped ([#1995](https://github.com/entireio/cli/pull/1995))
+- `entire auth status` reads the home jurisdiction from the login token instead of `/me`, so the slug it prints is the one `--jurisdiction` actually routes on ([#1997](https://github.com/entireio/cli/pull/1997))
+- An unreachable login server names the context that chose it and what to run next, instead of surfacing an OpenAPI security-scheme chain ([#1998](https://github.com/entireio/cli/pull/1998))
+- Windows Scoop installs of the pre-rename `cli` package keep receiving releases, and are guided through a failure-safe migration to `entire` ([#1946](https://github.com/entireio/cli/pull/1946))
+- `entire login` no longer closes a TTY descriptor its key reader may still hold, fixing a data race that intermittently took ~30 unrelated tests down with it ([#2006](https://github.com/entireio/cli/pull/2006), [#2009](https://github.com/entireio/cli/pull/2009))
+
+### Housekeeping
+
+- Hook traces at or above 1.5s now log at WARN, so a slow hook records its own per-step breakdown in real INFO sessions instead of only under DEBUG ([#1984](https://github.com/entireio/cli/pull/1984))
+- One process-wide go-git object cache replaces a fresh cache per repository open: 36% fewer object reads and 27% fewer bytes on a 447MB-pack repo, and one 96MiB cache instead of one per open. Latency is unchanged ([#1985](https://github.com/entireio/cli/pull/1985))
+- Three CI flakes from test helpers sharing state across parallel tests are fixed ([#1983](https://github.com/entireio/cli/pull/1983))
+- The login quit watchdog collapses into `context.AfterFunc`, dropping a kill fallback that could not unblock a wedged event loop ([#2011](https://github.com/entireio/cli/pull/2011))
+- Go bumped to 1.26.6, clearing six stdlib advisories, plus go-git (for partial-clone promisor bookkeeping), ogen, posthog-go, x/mod, lipgloss, and x/ansi bumps ([#1945](https://github.com/entireio/cli/pull/1945), [#1971](https://github.com/entireio/cli/pull/1971), [#1988](https://github.com/entireio/cli/pull/1988), [#2005](https://github.com/entireio/cli/pull/2005))
+
+### Thanks
+
+Thanks to @MuskanPaliwal for tracking down the checkpoint metadata bloat — both the nested-checkout status walk and the `files_touched` dedupe at the write boundary — which had made `entire/checkpoints/v1` unpushable on repos with agent worktrees!
+
+Thanks to @ChetanReddyC for privately reporting that the OpenAI privacy filter, when enabled with no effective categories, stamped `Entire-OPF-Applied: true` on commits it never scanned — fixed in this release by failing closed at push time!
+
+## [0.10.0] - 2026-08-12
+
+### Added
+
+- `entire plugin` gains remote install, index discovery, and plugin dependencies — install a plugin by name, URL, or path from any git host, without cloning ([#1422](https://github.com/entireio/cli/pull/1422))
+- `entire repo mirror use` repoints the current clone's git remote at a mirror, closing the last manual step in mirror onboarding ([#1875](https://github.com/entireio/cli/pull/1875))
+- `entire checkpoint explain --repo <owner/name>` explains a checkpoint owned by another repository, reading it from that repo's entire-api cell over HTTP — the drill-down for a cross-repo `search` hit ([#1942](https://github.com/entireio/cli/pull/1942))
+- `entire search --compact` emits a token-lean JSON shape for agents: per hit only identifiers, metadata, and a truncated title snippet, never the full prompt ([#1908](https://github.com/entireio/cli/pull/1908))
+- `entire review --target` reviews a branch, trail ID, or trail URL you are not on, checked out in an isolated worktree ([#1921](https://github.com/entireio/cli/pull/1921))
+- `entire enable` shows live progress while importing existing agent sessions ([#1868](https://github.com/entireio/cli/pull/1868), [#1867](https://github.com/entireio/cli/pull/1867))
+- Repositories using git's reftable ref backend now work; previously `entire enable` and every capture operation aborted with `unknown extension: refstorage` ([#1723](https://github.com/entireio/cli/pull/1723))
+- `entire-ci` is registered as an official plugin, discovered as `entire ci` on PATH ([#1791](https://github.com/entireio/cli/pull/1791))
+
+### Changed
+
+- Long-deprecated commands are removed: `entire reset` (use `entire clean`), `entire rewind` and `entire checkpoint rewind`, and the hidden top-level `resume` / `attach` / `explain` / `trace` shortcuts (use the `session`, `checkpoint`, and `doctor` subcommands) ([#1747](https://github.com/entireio/cli/pull/1747))
+- Checkpoints now sync to a single elected remote instead of every remote you push to, and `entire status` names the destination. In a repo with several remotes, pushing anywhere previously copied session transcripts there ([#1893](https://github.com/entireio/cli/pull/1893), [#1905](https://github.com/entireio/cli/pull/1905), [#1898](https://github.com/entireio/cli/pull/1898))
+- `entire search` is promoted out of the experimental gate and is now the canonical spelling across the first-turn injection, the managed search skill, and `agent-help`; `entire checkpoint search` remains as an alias ([#1963](https://github.com/entireio/cli/pull/1963))
+- Code search is generally available: `entire search --code` and the TUI's Code tab no longer require `ENTIRE_CODE_SEARCH=1`, so stable builds stop advertising a flag that refused to run ([#1975](https://github.com/entireio/cli/pull/1975))
+- `entire enable` no longer asks new users to pick a checkpoint backend — git-refs is written silently on first run, and `--checkpoint-backend branch` still selects the branch backend non-interactively ([#1900](https://github.com/entireio/cli/pull/1900))
+- entire-api cell calls and git smart-HTTP traffic authenticate with login JWTs directly, dropping the jurisdiction-token exchange ([#1895](https://github.com/entireio/cli/pull/1895))
+- `entire agent-help` groups commands by who should initiate them, and the first-turn context injection is trimmed to the invariants that hold on every turn ([#1967](https://github.com/entireio/cli/pull/1967))
+
+### Fixed
+
+- Agent hook latency: `UserPromptSubmit` no longer blocks on the session lock, and go-git's worktree status no longer walks ignored directories on every hook ([#1880](https://github.com/entireio/cli/pull/1880), [#1911](https://github.com/entireio/cli/pull/1911), [#1968](https://github.com/entireio/cli/pull/1968))
+- Git hooks no longer prompt when a full-screen TUI git client (lazygit, gitui, tig) owns the terminal ([#1907](https://github.com/entireio/cli/pull/1907))
+- A captured file path containing a `.git` component no longer fails the whole checkpoint at tree-encode time ([#1863](https://github.com/entireio/cli/pull/1863))
+- Subagents: resolve transcripts in Claude Code's current layout, carry subagent tokens through to committed checkpoints, skip the task checkpoint when the subagent already committed, and stop Pi's nested subagent processes from claiming the parent session ([#1935](https://github.com/entireio/cli/pull/1935), [#1938](https://github.com/entireio/cli/pull/1938), [#1950](https://github.com/entireio/cli/pull/1950), [#1936](https://github.com/entireio/cli/pull/1936))
+- Checkpoint storage: route backfill writes to the store holding the checkpoint, fetch a locally-missing ref before declaring a backfill target absent, classify a remoteless repo as ref absence rather than an outage, and fall back to the v1-branch store when no checkpoint remote is configured ([#1811](https://github.com/entireio/cli/pull/1811), [#1824](https://github.com/entireio/cli/pull/1824), [#1886](https://github.com/entireio/cli/pull/1886), [#1888](https://github.com/entireio/cli/pull/1888))
+- Hook-config drift is detected for every agent, not just Claude Code, so a committed `.pi` or `.opencode` extension no longer blocks `entire agent add` ([#1939](https://github.com/entireio/cli/pull/1939))
+- Codex: sanitize transcripts before redaction and keep them line-aligned, stop writing `.codex/config.toml` (hooks are on by default), and close the tailer emitted-flag race that made token counts flap ([#1901](https://github.com/entireio/cli/pull/1901), [#1760](https://github.com/entireio/cli/pull/1760), [#1865](https://github.com/entireio/cli/pull/1865))
+- Redaction preserves thinking-block signatures, fixing a 400 on replay ([#1866](https://github.com/entireio/cli/pull/1866))
+- `entire enable` stops the history import on Ctrl-C, and no longer runs it under `--yes` ([#1925](https://github.com/entireio/cli/pull/1925))
+- `entire logout` deletes cached jurisdiction tokens ([#1869](https://github.com/entireio/cli/pull/1869))
+- `entire search` reports an unmatched repo filter as a repo-filter miss instead of a missing region ([#1944](https://github.com/entireio/cli/pull/1944))
+- External command discovery consults the caller's context when resolving a named agent ([#1906](https://github.com/entireio/cli/pull/1906))
+- `entire trail` decodes an approval's author as the login string the API sends ([#1947](https://github.com/entireio/cli/pull/1947))
+
+### Housekeeping
+
+- Windows unit tests now run on every PR and are wired into the required aggregate check, instead of silently skipping in Ubuntu-only jobs ([#1878](https://github.com/entireio/cli/pull/1878))
+- golangci-lint now covers build-tagged test files — roughly 10k lines of integration and E2E code that no linter had ever seen — and the dead code they were hiding is removed ([#1966](https://github.com/entireio/cli/pull/1966), [#1855](https://github.com/entireio/cli/pull/1855))
+- Go bumped to 1.26.5 to fix `-race` fork-child crashes on darwin, plus go-git and CodeQL action bumps ([#1904](https://github.com/entireio/cli/pull/1904), [#1874](https://github.com/entireio/cli/pull/1874), [#1892](https://github.com/entireio/cli/pull/1892))
+- The Vogon canary now fires subagent hooks, so the subagent path is covered without real agent calls ([#1964](https://github.com/entireio/cli/pull/1964))
+- Test and refactor follow-ups: pin down checkpoint push behavior for multi-push-URL remotes, gate the status cache centrally and hoist `EnsureSetup`, and select the restored Codex rollout by recency in E2E ([#1897](https://github.com/entireio/cli/pull/1897), [#1922](https://github.com/entireio/cli/pull/1922), [#1910](https://github.com/entireio/cli/pull/1910), [#1919](https://github.com/entireio/cli/pull/1919))
+
+### Thanks
+
+Thanks to @ecgang for the `entire enable` import-progress reporter, which shows live progress while existing agent sessions are imported!
+
+## [0.9.0] - 2026-07-27
+
+### Added
+
+- `entire doctor migrate-checkpoints` migrates existing checkpoints from the git-branch backend to git-refs ([#1611](https://github.com/entireio/cli/pull/1611))
+- git-refs checkpoints can be discovered on a second device via remote enumeration, and `entire checkpoint list --json` gives a machine-readable listing (migrate off `rewind --list`) ([#1771](https://github.com/entireio/cli/pull/1771), [#1768](https://github.com/entireio/cli/pull/1768))
+- Hidden `entire checkpoint resume` command ([#1701](https://github.com/entireio/cli/pull/1701))
+- `entire explain` streams live progress and reports an observable-state timeout diagnostic ([#964](https://github.com/entireio/cli/pull/964))
+- `entire review`: live token counts for the Claude and Codex reviewers, and Codex now runs real skills via on-disk `$name` discovery and native invocation ([#1666](https://github.com/entireio/cli/pull/1666), [#1669](https://github.com/entireio/cli/pull/1669))
+- Import gains imported sessions in `entire session list`, anchors imported checkpoints to the default-branch head, and warns when importing agent history while logged out ([#1699](https://github.com/entireio/cli/pull/1699), [#1825](https://github.com/entireio/cli/pull/1825), [#1774](https://github.com/entireio/cli/pull/1774))
+- `entire dispatch` gains local agent selection ([#1797](https://github.com/entireio/cli/pull/1797))
+- Transcript image externalization for Claude Code and Codex, plus capture of Cursor sidecar images ([#1589](https://github.com/entireio/cli/pull/1589))
+- Experimental commands are gated behind a build-time visibility flag — shown in developer/nightly builds, hidden in stable releases, always runnable ([#1703](https://github.com/entireio/cli/pull/1703))
+- `entire agent-help` teaches agents entire usage through worked examples and an injected first-turn invariant ([#1821](https://github.com/entireio/cli/pull/1821))
+- `entire doctor`/`entire status` warn when Claude Code hook config has drifted out of date ([#1808](https://github.com/entireio/cli/pull/1808))
+- The non-git `entire enable` bootstrap collapses into a single setup question ([#1818](https://github.com/entireio/cli/pull/1818))
+- `entire search` accepts multiple repos for semantic search ([#1845](https://github.com/entireio/cli/pull/1845))
+
+### Changed
+
+- `entire search` now routes to the v4 query-serve path with cross-cell fan-out; the v3 path is removed ([#1800](https://github.com/entireio/cli/pull/1800))
+- New setups now default to git-refs checkpoint storage; the setup wizard keeps a checkpoint-storage question with git-refs recommended ([#1789](https://github.com/entireio/cli/pull/1789), [#1799](https://github.com/entireio/cli/pull/1799))
+- `entire repo mirror list` now covers both mirrored and mirrorable repos in one listing, with per-cluster detail available via `mirror get` ([#1681](https://github.com/entireio/cli/pull/1681))
+- Root help output is grouped by user journey, and `--json` moves off the shared persistent flag onto the specific commands that support it ([#1745](https://github.com/entireio/cli/pull/1745), [#1680](https://github.com/entireio/cli/pull/1680))
+- Checkpoints route through `entire://` push-through mirrors ([#1732](https://github.com/entireio/cli/pull/1732))
+- `entire status` no longer prints the strategy name ([#1793](https://github.com/entireio/cli/pull/1793))
+- Code-search results read more clearly in the terminal ([#1742](https://github.com/entireio/cli/pull/1742))
+- `entire repo clone` resolves `/gh/` shorthand via a pull-gated placement lookup ([#1779](https://github.com/entireio/cli/pull/1779))
+- The self-update plugin skips the post-plugin version check ([#1731](https://github.com/entireio/cli/pull/1731))
+- Display-only Repo read enums are loosened for forward compatibility ([#1663](https://github.com/entireio/cli/pull/1663))
+
+### Fixed
+
+- Session linking: match sessions across sibling worktrees, and warn when ambiguous worktree sessions block commit linking ([#1440](https://github.com/entireio/cli/pull/1440), [#1856](https://github.com/entireio/cli/pull/1856))
+- `entire enable` writes the enabled flag to the resolved settings scope, recognizes a local-only setup so hooks run after `enable --local`, confirms before init/create/push in a non-repo directory, and fetches an existing `checkpoint_remote` branch instead of orphaning it ([#1714](https://github.com/entireio/cli/pull/1714), [#1713](https://github.com/entireio/cli/pull/1713), [#1720](https://github.com/entireio/cli/pull/1720), [#1719](https://github.com/entireio/cli/pull/1719))
+- `entire enable` explains `core.hooksPath` when the hooks dir is not a directory (e.g. an `ENOTDIR` path) instead of failing cryptically ([#1851](https://github.com/entireio/cli/pull/1851))
+- Checkpoint push: fail fast on an interactive SSH prompt during pre-push, defer push until a normal remote branch exists, stamp adhoc checkpoint remotes at creation, exclude protected dirs from the first-checkpoint snapshot, and skip an empty v1 orphan seed under the git-refs backend ([#1721](https://github.com/entireio/cli/pull/1721), [#1744](https://github.com/entireio/cli/pull/1744), [#1746](https://github.com/entireio/cli/pull/1746), [#1764](https://github.com/entireio/cli/pull/1764), [#1819](https://github.com/entireio/cli/pull/1819))
+- Hook latency and safety: short-circuit immediately when disabled, cut synchronous work from session start/end paths, and exclude URL-keyed promisor entries from `git fetch --all` ([#1722](https://github.com/entireio/cli/pull/1722), [#1724](https://github.com/entireio/cli/pull/1724), [#1733](https://github.com/entireio/cli/pull/1733))
+- `entire explain`: surface post-resolution and export-path failures instead of masking them as "no checkpoint or commit found", and point hints and prompts at the canonical `entire checkpoint explain` ([#1812](https://github.com/entireio/cli/pull/1812), [#1816](https://github.com/entireio/cli/pull/1816), [#1813](https://github.com/entireio/cli/pull/1813))
+- Windows: fix Cursor hooks and Scoop app-dir naming, and stop agent hooks hanging on stdin EOF under Windows/Git Bash ([#1735](https://github.com/entireio/cli/pull/1735), [#1738](https://github.com/entireio/cli/pull/1738))
+- Attribution: scan the full transcript for subagents spawned before a checkpoint, extract the Claude Code model from the transcript to fix "Unknown" attribution, target current tool matchers for subagent hooks, and stamp the importer's git identity on checkpoint commits ([#1710](https://github.com/entireio/cli/pull/1710), [#1805](https://github.com/entireio/cli/pull/1805), [#1806](https://github.com/entireio/cli/pull/1806), [#1846](https://github.com/entireio/cli/pull/1846))
+- Redaction: catch Supabase `sb_secret_` keys, and reconcile layer-count vocabulary while pinning provider-token boundaries ([#1726](https://github.com/entireio/cli/pull/1726), [#1751](https://github.com/entireio/cli/pull/1751))
+- `entire dispatch --local`: fix auth for API-key users without loading user settings, and surface recent merged work ([#1787](https://github.com/entireio/cli/pull/1787), [#1788](https://github.com/entireio/cli/pull/1788))
+- `entire review`: fix interactive setup and Codex defaults, and prevent the TUI sink from backpressuring the orchestrator ([#1749](https://github.com/entireio/cli/pull/1749), [#1677](https://github.com/entireio/cli/pull/1677))
+- `entire session current --json` prints prose and exits 0 when no session exists ([#1828](https://github.com/entireio/cli/pull/1828))
+- `entire auth token --jurisdiction` follows the active context ([#1734](https://github.com/entireio/cli/pull/1734))
+- `entire login`: headless keyring hint, real-backend provenance, and a loose-permissions warning ([#1750](https://github.com/entireio/cli/pull/1750))
+- OpenCode clears a pending injection on session change ([#1830](https://github.com/entireio/cli/pull/1830))
+- Copilot CLI accepts float timestamps in hook payloads ([#1796](https://github.com/entireio/cli/pull/1796))
+- Claude Code strips IDE context tags from the captured turn prompt ([#1715](https://github.com/entireio/cli/pull/1715))
+- Pi transcripts are parsed during attach and explain ([#1860](https://github.com/entireio/cli/pull/1860))
+- Handle submodule gitdirs in worktree IDs ([#1359](https://github.com/entireio/cli/pull/1359))
+- Remote helper: skip the receive-pack POST when send-pack emits no request, and reuse the list-for-push advertisement ([#1795](https://github.com/entireio/cli/pull/1795), [#1739](https://github.com/entireio/cli/pull/1739))
+
+### Housekeeping
+
+- Regenerate the coreapi client against the current `/repos` spec and latest core swagger ([#1694](https://github.com/entireio/cli/pull/1694), [#1772](https://github.com/entireio/cli/pull/1772))
+- Bump go-git to latest for v2 fetches ([#1736](https://github.com/entireio/cli/pull/1736), [#1861](https://github.com/entireio/cli/pull/1861))
+- Delete dead code unreachable from production ([#1775](https://github.com/entireio/cli/pull/1775))
+- Lint the build-tagged test files and remove the dead code they were hiding ([#1855](https://github.com/entireio/cli/pull/1855))
+- Docs: ref-based checkpoint backend architecture doc, split Quick Start install by OS, and clarify human-added attribution ([#1693](https://github.com/entireio/cli/pull/1693), [#1822](https://github.com/entireio/cli/pull/1822), [#1186](https://github.com/entireio/cli/pull/1186))
+- Tests: submodule-worktree session checkpoint regression test, isolate git config in the author-fallback test, fix flaky investigate picker tests, and dismiss the Droid trust-folder dialog in E2E ([#1765](https://github.com/entireio/cli/pull/1765), [#1849](https://github.com/entireio/cli/pull/1849), [#1692](https://github.com/entireio/cli/pull/1692), [#1839](https://github.com/entireio/cli/pull/1839))
+- Set a 60s timeout on the local-dev Claude Code SessionEnd hook ([#1850](https://github.com/entireio/cli/pull/1850))
+- Group codeql-action bumps into one dependabot PR, and routine dependency bumps ([#1837](https://github.com/entireio/cli/pull/1837), [#1688](https://github.com/entireio/cli/pull/1688), [#1689](https://github.com/entireio/cli/pull/1689), [#1690](https://github.com/entireio/cli/pull/1690), [#1695](https://github.com/entireio/cli/pull/1695), [#1706](https://github.com/entireio/cli/pull/1706), [#1740](https://github.com/entireio/cli/pull/1740), [#1766](https://github.com/entireio/cli/pull/1766), [#1781](https://github.com/entireio/cli/pull/1781), [#1784](https://github.com/entireio/cli/pull/1784), [#1785](https://github.com/entireio/cli/pull/1785), [#1786](https://github.com/entireio/cli/pull/1786), [#1809](https://github.com/entireio/cli/pull/1809), [#1810](https://github.com/entireio/cli/pull/1810), [#1834](https://github.com/entireio/cli/pull/1834), [#1838](https://github.com/entireio/cli/pull/1838), [#1842](https://github.com/entireio/cli/pull/1842), [#1853](https://github.com/entireio/cli/pull/1853), [#1854](https://github.com/entireio/cli/pull/1854))
+
+### Thanks
+
+Thanks to @MuskanPaliwal for handling submodule gitdirs in worktree IDs and clarifying the human-added attribution docs!
+
+## [0.8.42] - 2026-07-08
+
+### Added
+
+- Cross-region code search (work in progress, behind `ENTIRE_CODE_SEARCH=1`): `--code` and `--case-sensitive` flags on `entire search` plus a Code tab in the search TUI, backed by peregrine. It fans out across mirror placements — listing repos, grouping them by cell, searching each cell in parallel with per-cell timeouts, and merging/deduping results client-side — rather than only hitting the home cell ([#1616](https://github.com/entireio/cli/pull/1616), [#1674](https://github.com/entireio/cli/pull/1674))
+- `entire repo mirror list` gained a `--name` filter (matches the owner/repo form shown in the table) and `--sort` with shell-friendly kebab-case column keys, failing fast on an unknown sort key ([#1665](https://github.com/entireio/cli/pull/1665), [#1679](https://github.com/entireio/cli/pull/1679))
+
+### Changed
+
+- `entire review` no longer imposes a default reviewer timeout — reviewers run until done — while the judge's default rises from 5m to 20m; `--timeout` still governs both ([#1664](https://github.com/entireio/cli/pull/1664))
+- `org`, `project`, `repo`, and `grant` are promoted out of `entire labs` into the visible top-level command surface, so they now appear in `entire --help` (canonical paths unchanged) ([#1672](https://github.com/entireio/cli/pull/1672))
+- git-remote-entire prints an actionable hint when the cluster host is missing, and only suggests `clone` for a complete forge/owner/repo ref ([#1649](https://github.com/entireio/cli/pull/1649))
+
+### Fixed
+
+- `entire repo mirror get` resolves clone URLs via the owning cluster's login server instead of the control-plane core ([#1676](https://github.com/entireio/cli/pull/1676))
+
+### Housekeeping
+
+- Bump aws-actions/configure-aws-credentials from 6.2.1 to 6.2.2 ([#1670](https://github.com/entireio/cli/pull/1670))
+
+## [0.8.1] - 2026-07-07
+
+### Added
+
+- `--checkpoint-backend branch|refs` on `entire enable` and `entire configure` selects the checkpoint store, with an interactive selector on first-time setup (defaults to `branch`, which writes no config block) ([#1661](https://github.com/entireio/cli/pull/1661))
+- First-time `entire enable` now offers to import pre-existing agent history for the agents you select, instead of leaving the hidden `entire import` command to be discovered; non-interactive runs (`--yes` or no TTY) auto-import all eligible agents ([#1595](https://github.com/entireio/cli/pull/1595))
+- `entire api` gained `--jurisdiction <slug>` (short `-j`, e.g. `us`, `eu`) to target a specific jurisdiction's entire-api cell instead of your home cell (implies `--to cell`); the command is now also documented in CLAUDE.md ([#1631](https://github.com/entireio/cli/pull/1631))
+
+### Changed
+
+- `entire activity` now lists recent sessions (from `/me/sessions`) instead of recent commits, matching the entire.io Overview feed ([#1650](https://github.com/entireio/cli/pull/1650))
+- All TUI colors migrated to the base16 (ANSI 0–15) palette via a new `palette` package, so the UI respects the user's terminal theme; the primary accent moved from orange to magenta, and `entire experts` was migrated too ([#1542](https://github.com/entireio/cli/pull/1542), [#1610](https://github.com/entireio/cli/pull/1610))
+- Homebrew auto-update now runs `brew upgrade --yes`, so accepting the update prompt no longer triggers a second Homebrew confirmation ([#1653](https://github.com/entireio/cli/pull/1653))
+
+### Fixed
+
+- The post-run "update available" notice now prints to stderr instead of stdout, so it no longer corrupts `$(entire … --json)` command substitutions and pipes ([#1656](https://github.com/entireio/cli/pull/1656))
+- git-remote-entire now re-mints its credential and retries once on a data-plane 401 instead of failing the command, smoothing over mid-TTL token invalidation from core key rotation or clock skew ([#1658](https://github.com/entireio/cli/pull/1658))
+- `entire repo mirror create` renders a stale-read 404 from the status poll as the server's "mirror not found" message instead of a raw struct dump, and widens the poll retry budget (~8s → ~30s) to ride out the placement-visibility window ([#1660](https://github.com/entireio/cli/pull/1660))
+
+### Housekeeping
+
+- Cell-routing foundation: a shared `auth.CellClientFactory` (one identity token per jurisdiction across a fan-out), a generic repo→cell resolver, and multi-cell client-side fan-out/merge, so multi-cell commands stop growing parallel copies of the routing plumbing ([#1641](https://github.com/entireio/cli/pull/1641))
+- This repo now dogfoods the git-refs checkpoint backend for its own checkpoints ([#1648](https://github.com/entireio/cli/pull/1648))
+- git-remote test coverage (1/4): a committed test plan plus an integration backend matrix that exercises real git-hook pushes across both checkpoint backends ([#1636](https://github.com/entireio/cli/pull/1636))
+- `explain` follow-up from trail review: naming, test-helper, and doc refinements, no behavior change ([#1569](https://github.com/entireio/cli/pull/1569))
+- Release: stable tags now mirror to the nightly channel so `entire@nightly` users aren't stranded below the just-shipped stable build ([#1662](https://github.com/entireio/cli/pull/1662))
+- Dependency bumps (charm bubbles/bubbletea/lipgloss, posthog-go; betterleaks held at v1.5.0) ([#1654](https://github.com/entireio/cli/pull/1654))
+
+## [0.8.0] - 2026-07-06
+
+### Added
+
+- A git-refs checkpoint store (per-checkpoint git-ref backend) with ULID checkpoint IDs, ID-kind read routing across git backends, and pre-push push progress ([#1566](https://github.com/entireio/cli/pull/1566), [#1629](https://github.com/entireio/cli/pull/1629), [#1630](https://github.com/entireio/cli/pull/1630), [#1632](https://github.com/entireio/cli/pull/1632))
+- `entire agent-help`: machine-readable, agent-facing usage rendered live from the Cobra command tree, plus active and passive discovery paths so no-channel agents (Cursor, Copilot CLI, Factory Droid, MCP hosts) can reach it via `entire help`, the `status` footer, `status --json`, and an MCP tool ([#1562](https://github.com/entireio/cli/pull/1562), [#1585](https://github.com/entireio/cli/pull/1585))
+- `entire experts` (hidden, via `entire labs`): ranks prior agent sessions with real evidence for a given path — matching checkpoints, attributed lines, skills, tools, and MCP servers — without exposing prompts or transcripts, routed to the repo's entire-api cell with an identity token ([#1573](https://github.com/entireio/cli/pull/1573), [#1588](https://github.com/entireio/cli/pull/1588))
+- `entire api`, a `gh api`-style authenticated passthrough that dials the control-plane core (default) or your home entire-api cell (`--to cell`) with the right bearer, filling `{owner}`/`{repo}`/`{repo_id}` placeholders from the current repo ([#1605](https://github.com/entireio/cli/pull/1605))
+- `entire auth token` is now visible and takes `--jurisdiction <slug>` to mint a jurisdictional identity token for that jurisdiction's entire-api cells ([#1619](https://github.com/entireio/cli/pull/1619))
+- Pi review-runner adapter, so Pi can drive `entire review` ([#1313](https://github.com/entireio/cli/pull/1313))
+- Codex session token diagnostics under `entire labs` ([#1558](https://github.com/entireio/cli/pull/1558))
+- Interactive one-shot `entire repo mirror create` now offers a cluster picker ([#1645](https://github.com/entireio/cli/pull/1645))
+
+### Changed
+
+- Control-plane commands (`org`, `project`, `repo`, `grant`) now print human-readable confirmations by default; the wire JSON (including `repo create`'s `entire://` remote) moved behind `--json`. Empty `--json` lists emit `[]`, and success messages moved from stderr to stdout ([#1626](https://github.com/entireio/cli/pull/1626))
+- Each checkpoint now stores the full compacted transcript with a scope marker, so every checkpoint is self-contained ([#1581](https://github.com/entireio/cli/pull/1581))
+- git-remote-entire authenticates git pushes with persisted jurisdictional access tokens, and the `ENTIRE_TOKEN` (CI) path was migrated to jurisdiction tokens ([#1621](https://github.com/entireio/cli/pull/1621), [#1622](https://github.com/entireio/cli/pull/1622))
+- git-remote-entire binaries are now published per-commit to the public release bucket ([#1623](https://github.com/entireio/cli/pull/1623))
+- `entire activity` and `entire recap` route through the entire-api cell client ([#1592](https://github.com/entireio/cli/pull/1592))
+- Checkpoint writes are gated on repo policy support, with telemetry for policy-blocked hooks ([#1541](https://github.com/entireio/cli/pull/1541), [#1586](https://github.com/entireio/cli/pull/1586))
+- `entire review` raised its timeouts (reviewer 10m→20m) and `--timeout` now also governs the judge (default 5m), plus an agent-safe plain-text findings fallback when stdout isn't a terminal ([#1584](https://github.com/entireio/cli/pull/1584), [#1598](https://github.com/entireio/cli/pull/1598))
+- `entire repo mirror create` splits placement and clone into separate progress steps and warns when creating against an admin-suspended mirror (sunset collaborator verbs removed) ([#1587](https://github.com/entireio/cli/pull/1587), [#1602](https://github.com/entireio/cli/pull/1602))
+- `entire attach` warns on an empty transcript, captures the session footer, and notes when an amend fails ([#1568](https://github.com/entireio/cli/pull/1568))
+- Removed `checkpoint_version` from checkpoint metadata ([#1620](https://github.com/entireio/cli/pull/1620))
+
+### Fixed
+
+- Ctrl-C now escapes shell loops and aborts cleanly, closing a keyring-interrupt race in the signal-abort path ([#1604](https://github.com/entireio/cli/pull/1604), [#1625](https://github.com/entireio/cli/pull/1625))
+- Fixed the Codex Windows hook fallback ([#1555](https://github.com/entireio/cli/pull/1555))
+- Wrong-cluster clone errors are now surfaced clearly in git-remote-entire ([#1575](https://github.com/entireio/cli/pull/1575))
+
+### Housekeeping
+
+- De-slop pass: removed dead code and deduplicated hot spots (−5.6k lines) ([#1606](https://github.com/entireio/cli/pull/1606))
+- Removed a dead `entiredb-original-url` read path in checkpoint/remote ([#1624](https://github.com/entireio/cli/pull/1624))
+- Build checkpoint subtree paths via a `path.Join` helper (no tree change) ([#1576](https://github.com/entireio/cli/pull/1576))
+- Resolved goconst lint findings for checkpoint/trail, and fixed a red main by routing corecmd stub handlers through `printJSON` ([#1594](https://github.com/entireio/cli/pull/1594), [#1640](https://github.com/entireio/cli/pull/1640))
+- Added agent-safe CLI fallback guidance and a review rule to the docs ([#1596](https://github.com/entireio/cli/pull/1596))
+- Pretty-print the vendored OpenAPI spec via jq ([#1603](https://github.com/entireio/cli/pull/1603))
+- E2E: `e2e-checkpoint-store`'s blank agent now runs all agents, the Copilot GitHub token is scoped to the copilot-cli agent, and droid/claude-code subagent flakes were fixed ([#1580](https://github.com/entireio/cli/pull/1580), [#1583](https://github.com/entireio/cli/pull/1583), [#1599](https://github.com/entireio/cli/pull/1599))
+- Dependency bumps ([#1608](https://github.com/entireio/cli/pull/1608), [#1609](https://github.com/entireio/cli/pull/1609))
+
+## [0.7.8] - 2026-06-30
+
+### Added
+
+- `entire import` brings sessions created before Entire was enabled into checkpoints, with support for Cursor, Pi, Factory, Codex, Copilot, and Gemini ([#1527](https://github.com/entireio/cli/pull/1527), [#1540](https://github.com/entireio/cli/pull/1540))
+- Sessions can now be adopted across repos and worktrees, and ACTIVE sessions whose agent has exited are finalized automatically ([#1472](https://github.com/entireio/cli/pull/1472), [#1488](https://github.com/entireio/cli/pull/1488))
+- Multi-agent review profiles for `entire review` ([#1312](https://github.com/entireio/cli/pull/1312))
+- OpenAI Privacy Filter with a pre-push redaction architecture ([#1214](https://github.com/entireio/cli/pull/1214))
+- Codex token-usage diagnostics ([#1393](https://github.com/entireio/cli/pull/1393))
+- A `.worktreeinclude` file for controlling worktree contents ([#1517](https://github.com/entireio/cli/pull/1517))
+- `entire repo clone`, a `visibility` verb, and `entire repo mirror list --show-available` for working with mirrored repositories ([#1529](https://github.com/entireio/cli/pull/1529), [#1531](https://github.com/entireio/cli/pull/1531), [#1490](https://github.com/entireio/cli/pull/1490))
+- Control-plane CLI gained org/project `get`+`delete`, repo grant `list`+`remove`, and friendly-name resolution ([#1499](https://github.com/entireio/cli/pull/1499), [#1498](https://github.com/entireio/cli/pull/1498))
+- Hidden checkpoint policy command plus repo-level checkpoint policy enforcement ([#1508](https://github.com/entireio/cli/pull/1508), [#1509](https://github.com/entireio/cli/pull/1509))
+
+### Changed
+
+- Checkpoints now record storage-version metadata, run format-compatibility checks, and surface a `compact_transcript` path in `metadata.json`; the compact `transcript.jsonl` is stored and pushed in v1 checkpoints ([#1494](https://github.com/entireio/cli/pull/1494), [#1507](https://github.com/entireio/cli/pull/1507), [#1515](https://github.com/entireio/cli/pull/1515), [#1419](https://github.com/entireio/cli/pull/1419))
+- `entire explain` enriches its JSON summary and surfaces list truncation ([#1560](https://github.com/entireio/cli/pull/1560))
+- The CLI sends a versioned `User-Agent` (`entire-cli/{version}`) and collects the installed git version in telemetry ([#1489](https://github.com/entireio/cli/pull/1489), [#1520](https://github.com/entireio/cli/pull/1520))
+- Connect timeouts were loosened for slow links ([#1487](https://github.com/entireio/cli/pull/1487))
+- The Entire search skill is now opt-in ([#1521](https://github.com/entireio/cli/pull/1521))
+- The Pi extension was updated for context injection ([#1469](https://github.com/entireio/cli/pull/1469))
+- Refined checkpoint version-policy error handling ([#1528](https://github.com/entireio/cli/pull/1528))
+
+### Fixed
+
+- Copilot no longer creates phantom sessions for subagent turns ([#1578](https://github.com/entireio/cli/pull/1578))
+- Fixed Cursor hook misattribution and added Cursor token-usage support ([#1263](https://github.com/entireio/cli/pull/1263))
+- `entire review` no longer wedges multi-agent runs on "Finalizing output..." ([#1561](https://github.com/entireio/cli/pull/1561))
+- Attribution `why` prompts are now honest, with unified blame/why line syntax ([#1535](https://github.com/entireio/cli/pull/1535))
+- `entire grant` resolves repos by name, supports `github:` handle grantees, and returns a repo clone URL ([#1549](https://github.com/entireio/cli/pull/1549))
+- Control-plane commands now display the core a request actually dials, and cluster-addressed `repo mirror` commands route to the cluster's core ([#1478](https://github.com/entireio/cli/pull/1478), [#1475](https://github.com/entireio/cli/pull/1475))
+- Stopped shallow-fetching the metadata tip, fixing a false "disconnected" state ([#1443](https://github.com/entireio/cli/pull/1443))
+- ULID checkpoint IDs are now recognized alongside legacy hex ([#1546](https://github.com/entireio/cli/pull/1546))
+- `entire activity` truncates repo names rune-safely in the repo chart ([#1473](https://github.com/entireio/cli/pull/1473))
+- OPF prompt defaults are ordered correctly, and OPF progress is routed to stderr instead of `/dev/tty` ([#1464](https://github.com/entireio/cli/pull/1464), [#1470](https://github.com/entireio/cli/pull/1470))
+- Fixed escaping in help text ([#1553](https://github.com/entireio/cli/pull/1553))
+
+### Housekeeping
+
+- Major checkpoint-storage refactor toward pluggable stores: split into persistent/ephemeral stores with generic read/write, a store registry + topology, an `Open` factory facade, unified committed writes behind `Store.Write`, an extracted persistent contract under `api/checkpoint`, and a `treeWriter` for checkpoint writes; removed the checkpoints v1.1 mirror machinery ([#1451](https://github.com/entireio/cli/pull/1451), [#1480](https://github.com/entireio/cli/pull/1480), [#1481](https://github.com/entireio/cli/pull/1481), [#1495](https://github.com/entireio/cli/pull/1495), [#1504](https://github.com/entireio/cli/pull/1504), [#1533](https://github.com/entireio/cli/pull/1533), [#1556](https://github.com/entireio/cli/pull/1556), [#1454](https://github.com/entireio/cli/pull/1454), [#1482](https://github.com/entireio/cli/pull/1482))
+- Added a manual-dispatch `e2e-checkpoint-store` workflow and tackled failing E2E tests ([#1567](https://github.com/entireio/cli/pull/1567), [#1577](https://github.com/entireio/cli/pull/1577))
+- De-flaked the ColdPathFailover redirect-target test and stopped `resolvePushSettings` tests from fetching github.com ([#1574](https://github.com/entireio/cli/pull/1574), [#1463](https://github.com/entireio/cli/pull/1463))
+- Removed the `ireturn` lint and its directives, and refreshed/regenerated the Core API OpenAPI spec and client ([#1548](https://github.com/entireio/cli/pull/1548), [#1502](https://github.com/entireio/cli/pull/1502), [#1518](https://github.com/entireio/cli/pull/1518), [#1512](https://github.com/entireio/cli/pull/1512))
+- `mise run dev:publish` now always installs to `~/go/bin` (ignoring stray `$GOBIN`) and allows a custom target directory ([#1550](https://github.com/entireio/cli/pull/1550), [#1543](https://github.com/entireio/cli/pull/1543))
+- Docs: README now mentions tap trust, and the Codex hooks feature-flag docs were updated ([#1534](https://github.com/entireio/cli/pull/1534), [#1545](https://github.com/entireio/cli/pull/1545))
+- Dependency bumps ([#1564](https://github.com/entireio/cli/pull/1564), [#1563](https://github.com/entireio/cli/pull/1563), [#1526](https://github.com/entireio/cli/pull/1526), [#1525](https://github.com/entireio/cli/pull/1525), [#1524](https://github.com/entireio/cli/pull/1524), [#1516](https://github.com/entireio/cli/pull/1516), [#1485](https://github.com/entireio/cli/pull/1485), [#1467](https://github.com/entireio/cli/pull/1467), [#1466](https://github.com/entireio/cli/pull/1466), [#1465](https://github.com/entireio/cli/pull/1465))
+
+### Thanks
+
+Thanks to @SnowingFox for fixing Cursor hook misattribution and adding Cursor token-usage support, @suhaanthayyil for honest `why` prompts and unified blame/why line syntax, @Mohit-Katyal for rune-safe repo-name truncation in the activity chart, and @ronaldtebrake for updating the Codex hooks feature-flag docs!
+
+## [0.7.7] - 2026-06-18
+
+### Added
+
+- `entire trail` (work in progress): trail context is now injected into the model when trails are enabled, an `entire trail delete` subcommand was added, and `entire trail create --branch` defaults to the checked-out branch, alongside command-behavior fixes ([#1435](https://github.com/entireio/cli/pull/1435), [#1455](https://github.com/entireio/cli/pull/1455), [#1456](https://github.com/entireio/cli/pull/1456), [#1447](https://github.com/entireio/cli/pull/1447))
+- Interactive resume picker for stopped/idle sessions ([#1445](https://github.com/entireio/cli/pull/1445))
+- `entire repo mirror collaborators` with `add`/`remove`/`list` subcommands ([#1458](https://github.com/entireio/cli/pull/1458))
+- `ENTIRE_TOKEN` support, along with git-remote-entire push reliability fixes ([#1438](https://github.com/entireio/cli/pull/1438))
+
+### Changed
+
+- Auth was hardened by removing static fallbacks, the legacy store, and the v1 provider ([#1410](https://github.com/entireio/cli/pull/1410))
+- External agent transcripts are now compacted for `--full`/`--verbose` display ([#1421](https://github.com/entireio/cli/pull/1421))
+- Runner configs moved from `.entire/runners/v2` to `.entire/runners` ([#1442](https://github.com/entireio/cli/pull/1442))
+- `entire repo create` now stamps a usable `entire://` remote in its JSON output ([#1441](https://github.com/entireio/cli/pull/1441))
+
+### Fixed
+
+- Fixed dot-dot-prefixed repo path filtering and prevented checkpoint symlink target disclosure ([#1395](https://github.com/entireio/cli/pull/1395), [#1415](https://github.com/entireio/cli/pull/1415))
+- `entire auth status` dates are now stable across timezones ([#1407](https://github.com/entireio/cli/pull/1407))
+- Restored the keyring timeout and corrected stale auth fallback comments ([#1430](https://github.com/entireio/cli/pull/1430))
+- Existence checks on Entire-owned paths now use `os.Lstat` ([#1449](https://github.com/entireio/cli/pull/1449))
+- `entire search` now supports Entire mirror remotes ([#1452](https://github.com/entireio/cli/pull/1452))
+- Control-plane commands now handle cross-jurisdiction routing ([#1457](https://github.com/entireio/cli/pull/1457))
+
+### Housekeeping
+
+- Tests now isolate the token store and git config so spawned binaries skip the keychain, and the trail test build was repaired after the auth-fallback removal ([#1450](https://github.com/entireio/cli/pull/1450), [#1448](https://github.com/entireio/cli/pull/1448), [#1436](https://github.com/entireio/cli/pull/1436))
+- Parallelized pure agent tests and standardized git test repository setup ([#1406](https://github.com/entireio/cli/pull/1406), [#1390](https://github.com/entireio/cli/pull/1390))
+- Copilot E2E now detects the trust dialog case-insensitively ([#1446](https://github.com/entireio/cli/pull/1446))
+- Dependency bumps ([#1432](https://github.com/entireio/cli/pull/1432), [#1437](https://github.com/entireio/cli/pull/1437))
+
+### Thanks
+
+Thanks to @stale2000 for fixing dot-dot-prefixed repo path filtering, preventing checkpoint symlink target disclosure, keeping `entire auth status` dates stable across timezones, and improving the test suite!
+
 ## [0.7.6] - 2026-06-15
 
 ### Added

@@ -3,18 +3,20 @@ package cursor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // Ensure CursorAgent implements HookSupport
 var (
-	_ agent.HookSupport = (*CursorAgent)(nil)
+	_ agent.HookSupport       = (*CursorAgent)(nil)
+	_ agent.HookConfigLocator = (*CursorAgent)(nil)
 )
 
 // Cursor hook names - these become subcommands under `entire hooks cursor`
@@ -31,15 +33,6 @@ const (
 // HooksFileName is the hooks file used by Cursor.
 const HooksFileName = "hooks.json"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// "go run" prefix is retained so hooks installed by older versions are still
-// recognized.
-var entireHookPrefixes = []string{
-	"entire ",
-	agent.LocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
-
 // HookNames returns the hook verbs Cursor supports.
 // These become subcommands: entire hooks cursor <verb>
 func (c *CursorAgent) HookNames() []string {
@@ -54,23 +47,36 @@ func (c *CursorAgent) HookNames() []string {
 	}
 }
 
+// cursorHookConfig returns .cursor/hooks.json for the current worktree, opened through the
+// worktree's root. That directory lives in the working tree, which arrives by
+// clone, so a checked-in symlink at `.cursor` must not be something Entire creates
+// directories under and writes through. See agent.HookConfigFile.
+func cursorHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// Not a repository (tests, and `enable` before `git init`): the process
+		// directory is the only candidate, and it is a directory the caller
+		// chose rather than one derived from anything read off disk.
+		worktreeRoot = "."
+	}
+	return agent.OpenHookConfig(worktreeRoot, (&CursorAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+}
+
 // InstallHooks installs Cursor hooks in .cursor/hooks.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 // Unknown top-level fields and hook types are preserved on round-trip.
-func (c *CursorAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
+func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
+	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
-		worktreeRoot = "."
+		return 0, err
 	}
-
-	hooksPath := filepath.Join(worktreeRoot, ".cursor", HooksFileName)
 
 	// Use raw maps to preserve unknown fields on round-trip
 	var rawFile map[string]json.RawMessage
 	var rawHooks map[string]json.RawMessage
 
-	existingData, readErr := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	existingData, readErr := cfg.Read()
 	if readErr == nil {
 		if err := json.Unmarshal(existingData, &rawFile); err != nil {
 			return 0, fmt.Errorf("failed to parse existing "+HooksFileName+": %w", err)
@@ -115,63 +121,53 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, localDev bool, force boo
 	}
 
 	// Define hook commands
-	var cmdPrefix string
-	if localDev {
-		cmdPrefix = agent.LocalDevHookScript + " hooks cursor "
-	} else {
-		cmdPrefix = "entire hooks cursor "
-	}
+	const cmdPrefix = "entire hooks cursor "
 
-	sessionStartCmd := cmdPrefix + HookNameSessionStart
-	sessionEndCmd := cmdPrefix + HookNameSessionEnd
-	beforeSubmitPromptCmd := cmdPrefix + HookNameBeforeSubmitPrompt
-	stopCmd := cmdPrefix + HookNameStop
-	preCompactCmd := cmdPrefix + HookNamePreCompact
-	subagentStartCmd := cmdPrefix + HookNameSubagentStart
-	subagentEndCmd := cmdPrefix + HookNameSubagentStop
-	if !localDev {
-		sessionStartCmd = agent.WrapProductionSilentHookCommand(sessionStartCmd)
-		sessionEndCmd = agent.WrapProductionSilentHookCommand(sessionEndCmd)
-		beforeSubmitPromptCmd = agent.WrapProductionSilentHookCommand(beforeSubmitPromptCmd)
-		stopCmd = agent.WrapProductionSilentHookCommand(stopCmd)
-		preCompactCmd = agent.WrapProductionSilentHookCommand(preCompactCmd)
-		subagentStartCmd = agent.WrapProductionSilentHookCommand(subagentStartCmd)
-		subagentEndCmd = agent.WrapProductionSilentHookCommand(subagentEndCmd)
-	}
+	// Cursor spawns hook commands through the native OS shell (cmd.exe on
+	// Windows), so a `sh -c '…'` wrapper silently fails to launch on a
+	// Windows host without a working POSIX sh — no hook fires and, because
+	// this is the *silent* wrapper, no error surfaces (issue #1424).
+	// UseWindowsProductionHooks probes for a runnable sh and only swaps in
+	// the native cmd.exe wrapper when one is absent, so this is a no-op on
+	// hosts (incl. all non-Windows) where the sh wrapper already works.
+	useWindowsHooks := agent.UseWindowsProductionHooks(ctx)
+	sessionStartCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionStart, useWindowsHooks)
+	sessionEndCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionEnd, useWindowsHooks)
+	beforeSubmitPromptCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameBeforeSubmitPrompt, useWindowsHooks)
+	stopCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameStop, useWindowsHooks)
+	preCompactCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNamePreCompact, useWindowsHooks)
+	subagentStartCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSubagentStart, useWindowsHooks)
+	subagentEndCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSubagentStop, useWindowsHooks)
 
 	count := 0
 
-	// Add hooks if they don't exist
-	if !hookCommandExists(sessionStart, sessionStartCmd) {
-		sessionStart = append(sessionStart, CursorHookEntry{Command: sessionStartCmd})
-		count++
-	}
-	if !hookCommandExists(sessionEnd, sessionEndCmd) {
-		sessionEnd = append(sessionEnd, CursorHookEntry{Command: sessionEndCmd})
-		count++
-	}
-	if !hookCommandExists(beforeSubmitPrompt, beforeSubmitPromptCmd) {
-		beforeSubmitPrompt = append(beforeSubmitPrompt, CursorHookEntry{Command: beforeSubmitPromptCmd})
-		count++
-	}
-	if !hookCommandExists(stop, stopCmd) {
-		stop = append(stop, CursorHookEntry{Command: stopCmd})
-		count++
-	}
-	if !hookCommandExists(preCompact, preCompactCmd) {
-		preCompact = append(preCompact, CursorHookEntry{Command: preCompactCmd})
-		count++
-	}
-	if !hookCommandExists(subagentStart, subagentStartCmd) {
-		subagentStart = append(subagentStart, CursorHookEntry{Command: subagentStartCmd})
-		count++
-	}
-	if !hookCommandExists(subagentStop, subagentEndCmd) {
-		subagentStop = append(subagentStop, CursorHookEntry{Command: subagentEndCmd})
-		count++
-	}
+	// Sync each hook to its desired command. syncEntireHook replaces any
+	// stale-form Entire hook (e.g. an sh-wrapped entry from a previous install)
+	// with the current command even without --force, so a wrapper-form change —
+	// notably the sh↔cmd.exe migration driven by UseWindowsProductionHooks when
+	// a Windows host gains or loses a working POSIX sh — cleanly replaces rather
+	// than leaving a dead duplicate entry that could double-fire (issue #1424).
+	staleDropped := false
+	var dropped bool
+	sessionStart, count, dropped = syncEntireHook(sessionStart, sessionStartCmd, count)
+	staleDropped = staleDropped || dropped
+	sessionEnd, count, dropped = syncEntireHook(sessionEnd, sessionEndCmd, count)
+	staleDropped = staleDropped || dropped
+	beforeSubmitPrompt, count, dropped = syncEntireHook(beforeSubmitPrompt, beforeSubmitPromptCmd, count)
+	staleDropped = staleDropped || dropped
+	stop, count, dropped = syncEntireHook(stop, stopCmd, count)
+	staleDropped = staleDropped || dropped
+	preCompact, count, dropped = syncEntireHook(preCompact, preCompactCmd, count)
+	staleDropped = staleDropped || dropped
+	subagentStart, count, dropped = syncEntireHook(subagentStart, subagentStartCmd, count)
+	staleDropped = staleDropped || dropped
+	subagentStop, count, dropped = syncEntireHook(subagentStop, subagentEndCmd, count)
+	staleDropped = staleDropped || dropped
 
-	if count == 0 {
+	// staleDropped forces a write even when nothing was added: a config holding
+	// both a stale and a current hook adds nothing, and returning early here
+	// would leave the stale hook on disk.
+	if count == 0 && !staleDropped {
 		return 0, nil
 	}
 
@@ -192,17 +188,13 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, localDev bool, force boo
 	rawFile["hooks"] = hooksJSON
 
 	// Write to file
-	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
-		return 0, fmt.Errorf("failed to create .cursor directory: %w", err)
-	}
-
 	output, err := jsonutil.MarshalIndentWithNewline(rawFile, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal "+HooksFileName+": %w", err)
 	}
 
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return 0, fmt.Errorf("failed to write "+HooksFileName+": %w", err)
+	if err := cfg.Write(output, 0o600); err != nil {
+		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 
 	return count, nil
@@ -211,14 +203,18 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, localDev bool, force boo
 // UninstallHooks removes Entire hooks from Cursor HooksFileName.
 // Unknown top-level fields and hook types are preserved on round-trip.
 func (c *CursorAgent) UninstallHooks(ctx context.Context) error {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
-		worktreeRoot = "."
+		return err
 	}
-	hooksPath := filepath.Join(worktreeRoot, ".cursor", HooksFileName)
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	if err != nil {
-		return nil //nolint:nilerr // No hooks file means nothing to uninstall
+		// An absent file means nothing to uninstall; an unreadable one does not.
+		// Collapsing both leaves hooks on disk while reporting success.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var rawFile map[string]json.RawMessage
@@ -281,28 +277,38 @@ func (c *CursorAgent) UninstallHooks(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal "+HooksFileName+": %w", err)
 	}
 
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write "+HooksFileName+": %w", err)
+	if err := cfg.Write(output, 0o600); err != nil {
+		return err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 
 	return nil
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
-func (c *CursorAgent) AreHooksInstalled(ctx context.Context) bool {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (c *CursorAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
-		worktreeRoot = "."
+		return false, err
 	}
-	hooksPath := filepath.Join(worktreeRoot, ".cursor", HooksFileName)
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "cursor: failed to read hooks file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var hooksFile CursorHooksFile
 	if err := json.Unmarshal(data, &hooksFile); err != nil {
-		return false
+		logging.Warn(ctx, "cursor: failed to parse hooks file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 
 	return hasEntireHook(hooksFile.Hooks.SessionStart) ||
@@ -311,7 +317,7 @@ func (c *CursorAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHook(hooksFile.Hooks.Stop) ||
 		hasEntireHook(hooksFile.Hooks.PreCompact) ||
 		hasEntireHook(hooksFile.Hooks.SubagentStart) ||
-		hasEntireHook(hooksFile.Hooks.SubagentStop)
+		hasEntireHook(hooksFile.Hooks.SubagentStop), nil
 }
 
 // GetSupportedHooks returns the hook types Cursor supports.
@@ -351,6 +357,25 @@ func marshalCursorHookType(rawHooks map[string]json.RawMessage, hookType string,
 
 // Helper functions for hook management
 
+// syncEntireHook ensures entries contains exactly the given Entire hook command
+// and no other Entire-owned entry, returning the incremented count when it had to
+// add one and whether it dropped a stale entry.
+//
+// Dropping happens even when command is already present. Checking presence first
+// (as this did before) left a hook written by an older version sitting next to the
+// current one, so both fired — for the removed local-dev mode that meant a script
+// inside the working tree kept running on every agent turn.
+func syncEntireHook(entries []CursorHookEntry, command string, count int) ([]CursorHookEntry, int, bool) {
+	entries, dropped := agent.DropStaleManagedHooks(entries, hookEntryCommand, []string{command})
+	if hookCommandExists(entries, command) {
+		return entries, count, dropped
+	}
+	return append(entries, CursorHookEntry{Command: command}), count + 1, dropped
+}
+
+// hookEntryCommand reads the command off a hook entry for the shared helpers.
+func hookEntryCommand(e CursorHookEntry) string { return e.Command }
+
 func hookCommandExists(entries []CursorHookEntry, command string) bool {
 	for _, entry := range entries {
 		if entry.Command == command {
@@ -361,7 +386,7 @@ func hookCommandExists(entries []CursorHookEntry, command string) bool {
 }
 
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
 func hasEntireHook(entries []CursorHookEntry) bool {
@@ -382,3 +407,6 @@ func removeEntireHooks(entries []CursorHookEntry) []CursorHookEntry {
 	}
 	return result
 }
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (c *CursorAgent) HookConfigRelPath() string { return ".cursor/" + HooksFileName }

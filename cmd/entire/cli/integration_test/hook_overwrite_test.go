@@ -22,7 +22,7 @@ import (
 //  4. Prompt 2 starts (user-prompt-submit) → EnsureSetup reinstalls hooks
 //  5. Agent commits via hooks → checkpoint trailer ✓ (hooks restored)
 //
-// The key insight: GitCommitWithShadowHooks invokes the binary directly (simulating
+// The key insight: GitCommitWithHooks invokes the binary directly (simulating
 // working hooks), while GitAdd+GitCommit uses go-git without hooks (simulating
 // overwritten hooks where `entire` is never called).
 func TestHookOverwrite_MidTurnWipe_NextPromptRecovers(t *testing.T) {
@@ -38,16 +38,16 @@ func TestHookOverwrite_MidTurnWipe_NextPromptRecovers(t *testing.T) {
 		sess.ID, "Create files A and B", sess.TranscriptPath)
 	require.NoError(t, err)
 
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	sess.CreateTranscript("Create files A and B", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 	})
 
 	// First commit — hooks are intact, binary is invoked → trailer added
-	env.GitCommitWithShadowHooks("Add file A", "fileA.go")
+	env.GitCommitWithHooks("Add file A", "fileA.go")
 	cpID1 := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	require.NotEmpty(t, cpID1, "first commit should have checkpoint trailer")
 
@@ -100,11 +100,11 @@ func TestHookOverwrite_MidTurnWipe_NextPromptRecovers(t *testing.T) {
 	for _, hookName := range strategy.ManagedGitHookNames() {
 		backupPath := filepath.Join(hooksDir, hookName+".pre-entire")
 		_, err := os.Stat(backupPath)
-		assert.NoError(t, err, "backup %s.pre-entire should exist after reinstall", hookName)
+		require.NoError(t, err, "backup %s.pre-entire should exist after reinstall", hookName)
 	}
 
 	// Third commit — hooks restored, agent commits (no TTY) → trailer added via fast path
-	env.GitCommitWithShadowHooksAsAgent("Add file C", "fileC.go")
+	env.GitCommitWithHooksAsAgent("Add file C", "fileC.go")
 	cpID3 := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	assert.NotEmpty(t, cpID3,
 		"third commit should have trailer (hooks reinstalled by prompt 2)")

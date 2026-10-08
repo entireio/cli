@@ -1,6 +1,9 @@
 package claudecode
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -129,4 +132,116 @@ func TestParseGenerateTextResponse(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStreamClaudeResponse_Success(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "stream_success.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	var phases []string
+	final, malformed, err := streamClaudeResponse(bytes.NewReader(data), func(ev streamEvent) {
+		switch {
+		case ev.Type == streamEventTypeSystem && ev.Subtype == "status" && ev.Status == "requesting":
+			phases = append(phases, "connecting")
+		case ev.Type == streamEventTypeStreamEvent && ev.Event.Type == "message_start":
+			phases = append(phases, "first-token")
+		case ev.Type == streamEventTypeStreamEvent && ev.Event.Type == "content_block_delta":
+			phases = append(phases, "generating")
+		case ev.Type == streamEventTypeResult:
+			phases = append(phases, streamEventTypeResult)
+		}
+	})
+
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if malformed != 0 {
+		t.Errorf("malformed = %d, want 0", malformed)
+	}
+	if final == nil {
+		t.Fatal("expected final result event")
+	}
+	if final.IsError {
+		t.Error("expected is_error=false on success fixture")
+	}
+	if final.Result == nil || *final.Result != "Hello, world." {
+		t.Errorf("result = %v, want %q", final.Result, "Hello, world.")
+	}
+	wantPhases := []string{"connecting", "first-token", "generating", "generating", streamEventTypeResult}
+	if !equalStrings(phases, wantPhases) {
+		t.Errorf("phases = %v, want %v", phases, wantPhases)
+	}
+}
+
+func TestStreamClaudeResponse_ErrorEnvelope(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "stream_error_404.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	final, _, err := streamClaudeResponse(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if final == nil {
+		t.Fatal("expected final result event")
+	}
+	if !final.IsError {
+		t.Error("expected is_error=true")
+	}
+	if final.APIErrorStatus == nil || *final.APIErrorStatus != 404 {
+		t.Errorf("api_error_status = %v, want 404", final.APIErrorStatus)
+	}
+}
+
+func TestStreamClaudeResponse_MalformedLineSkipped(t *testing.T) {
+	t.Parallel()
+
+	stream := `{"type":"system","subtype":"status","status":"requesting"}
+this is not json
+{"type":"result","is_error":false,"result":"ok"}
+`
+	final, malformed, err := streamClaudeResponse(strings.NewReader(stream), nil)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if malformed != 1 {
+		t.Errorf("malformed = %d, want 1", malformed)
+	}
+	if final == nil || final.Result == nil || *final.Result != "ok" {
+		t.Errorf("expected result %q, got %+v", "ok", final)
+	}
+}
+
+func TestStreamClaudeResponse_NoResultEvent(t *testing.T) {
+	t.Parallel()
+
+	stream := `{"type":"system","subtype":"status","status":"requesting"}
+`
+	_, _, err := streamClaudeResponse(strings.NewReader(stream), nil)
+	if err == nil {
+		t.Fatal("expected error when stream has no result event")
+	}
+	if !strings.Contains(err.Error(), "without a result event") {
+		t.Errorf("error = %q, want 'without a result event'", err)
+	}
+}
+
+// equalStrings is a local helper to avoid pulling in reflect.DeepEqual.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

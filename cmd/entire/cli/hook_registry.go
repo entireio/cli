@@ -10,19 +10,15 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/perf"
 
 	"github.com/spf13/cobra"
 )
-
-// agentHookLogCleanup stores the cleanup function for agent hook logging.
-// Set by PersistentPreRunE, called by PersistentPostRunE.
-var agentHookLogCleanup func()
 
 // currentHookAgentName stores the agent name for the currently executing hook.
 // Set by newAgentHookVerbCmdWithLogging before calling the handler.
@@ -48,20 +44,15 @@ func GetCurrentHookAgent() (agent.Agent, error) {
 // newAgentHooksCmd creates a hooks subcommand for an agent that implements HookSupport.
 // It dynamically creates subcommands for each hook the agent supports.
 func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cobra.Command {
+	// No PersistentPreRun here: it would also run for every command attached
+	// to this one that is not a lifecycle verb. title-tee is such a command,
+	// and agy fires it on every state change during a turn, so the session
+	// scan and redactor construction ran roughly once a second per turn to
+	// append one JSON line. The hook session is set up per verb instead.
 	cmd := &cobra.Command{
 		Use:    string(agentName),
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			agentHookLogCleanup = initHookLogging(cmd.Context())
-			return nil
-		},
-		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
-			if agentHookLogCleanup != nil {
-				agentHookLogCleanup()
-			}
-			return nil
-		},
 	}
 
 	for _, hookName := range handler.HookNames() {
@@ -71,42 +62,56 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 	return cmd
 }
 
+// Hook categories reported by getHookType.
+const (
+	hookTypeAgent    = "agent"
+	hookTypeSubagent = "subagent"
+)
+
 // getHookType returns the hook type based on the hook name.
-// Returns "subagent" for task-related hooks (pre-task, post-task, post-todo),
-// "tool" for tool-related hooks (before-tool, after-tool),
-// "agent" for all other agent hooks.
+// Returns "subagent" for task-related hooks (pre-task, post-task, post-todo,
+// subagent-start, subagent-stop) and "agent" for all other agent hooks.
 func getHookType(hookName string) string {
 	switch hookName {
-	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo:
-		return "subagent"
-	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
-		return "tool"
+	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo,
+		claudecode.HookNameSubagentStart, claudecode.HookNameSubagentStop:
+		return hookTypeSubagent
 	default:
-		return "agent"
+		return hookTypeAgent
 	}
 }
 
 // executeAgentHook runs the core hook execution logic for a given agent and hook name.
-// It handles git repo checks, enabled checks, logging, event parsing, and lifecycle dispatch.
+// It handles git repo checks, enabled checks, the hook logging context, event
+// parsing, and lifecycle dispatch.
 // Used by both the registered subcommand path and the RunE fallback for external agents.
-// When initLogging is true, it initializes and cleans up hook logging (used by the RunE fallback
-// since it doesn't go through PersistentPreRunE). Built-in agent subcommands pass false since
-// their parent command's PersistentPreRunE already handles logging.
-func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, initLogging bool) error {
+// When stampSession is true, it attaches the hook session context itself (used by
+// the RunE fallback since it doesn't go through PersistentPreRun). Built-in hook
+// verbs pass false because each verb's OWN PersistentPreRun already did it — not
+// an inherited one: the shared per-agent command deliberately defines no hook, so
+// anything else attached to it (Antigravity's title-tee) is not stamped either.
+func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
 	if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
 		return nil
 	}
 
-	// Skip if Entire is not enabled
-	enabled, err := IsEnabled(cmd.Context())
-	if err == nil && !enabled {
+	// Skip if Entire is not set up and enabled. This must fail closed: any
+	// settings read error (missing file, corrupted JSON, transient I/O
+	// failure) is treated as disabled so a hook never silently falls through
+	// to full lifecycle work just because settings couldn't be read. Using
+	// IsEnabled here previously failed OPEN on error (`err == nil && !enabled`
+	// only short-circuits when the read succeeded), which meant a corrupted
+	// or unreadable settings file made every hook invocation pay the full
+	// dispatch cost instead of exiting fast (#524).
+	// settings.IsSetUpAndEnabled is the same fail-closed gate the git hooks
+	// use (see PersistentPreRun in hooks_git_cmd.go).
+	if !settings.IsSetUpAndEnabled(cmd.Context()) {
 		return nil
 	}
 
-	if initLogging {
-		cleanup := initHookLogging(cmd.Context())
-		defer cleanup()
+	if stampSession {
+		cmd.SetContext(withHookSession(cmd.Context()))
 	}
 
 	// Initialize logging context with agent name
@@ -152,10 +157,23 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	}
 
 	if event != nil {
+		// Cross-agent guard: when Cursor IDE invokes a hook configured under
+		// .claude/settings.json (because .cursor/hooks.json is missing), the
+		// hook payload's transcript_path proves the session belongs to Cursor.
+		// Skip dispatch so the session isn't claimed for the wrong agent (#1262).
+		if shouldSkipForwardedHook(ctx, ag, event) {
+			logging.Debug(ctx, "skipping forwarded hook: transcript belongs to another agent",
+				slog.String("hook", hookName),
+				slog.String("firing_agent", string(agentName)),
+				slog.String("session_ref", event.SessionRef),
+			)
+			return nil
+		}
 		// Lifecycle event — use the generic dispatcher
 		hookErr = DispatchLifecycleEvent(ctx, ag, event)
 	} else if agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostTodo {
-		// PostTodo is Claude-specific: creates incremental checkpoints during subagent execution
+		// PostTodo is Claude-specific and records nothing; it stays registered so
+		// hook configs written by older CLIs keep working until an install prunes them.
 		hookErr = handleClaudeCodePostTodo(ctx)
 	}
 	// Other pass-through hooks (nil event, no special handling) are no-ops
@@ -172,6 +190,19 @@ func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) 
 		Use:    hookName,
 		Hidden: true,
 		Short:  "Called on " + hookName,
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			// On the verb rather than the shared agent command, so only
+			// lifecycle verbs pay for it. withHookSession scans session state
+			// and loads redactors, so it must not run in a repo that never
+			// enabled Entire. Same fail-closed gate the git-hook tree applies
+			// before its own call.
+			if !settings.IsSetUpAndEnabled(cmd.Context()) {
+				return
+			}
+			// SetContext hands the session-stamped context straight to this
+			// command's RunE via cmd.Context().
+			cmd.SetContext(withHookSession(cmd.Context()))
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return executeAgentHook(cmd, agentName, hookName, false)
 		},

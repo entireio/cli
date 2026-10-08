@@ -2,14 +2,13 @@ package testutil
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -90,22 +89,70 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	Git(t, dir, "config", "core.autocrlf", "true")
 	Git(t, dir, "commit", "--allow-empty", "-m", "initial commit")
 
+	// Copilot prompt mode requires repository instructions. Commit the custom
+	// agent fixture before Entire starts capture so setup files cannot be
+	// attributed to the child under test.
+	if agent.Name() == "copilot-cli" {
+		agentsDir := filepath.Join(dir, ".github", "agents")
+		if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+			t.Fatalf("create Copilot agent directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".github", "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
+			t.Fatalf("write copilot-instructions.md: %v", err)
+		}
+		agentFile := "---\nname: entire-e2e-subagent\ndescription: Creates the single file delegated by the parent.\ntools: [\"*\"]\n---\nCreate only the requested file and do not delegate further.\n"
+		if err := os.WriteFile(filepath.Join(agentsDir, "entire-e2e-subagent.agent.md"), []byte(agentFile), 0o644); err != nil {
+			t.Fatalf("write Copilot custom agent: %v", err)
+		}
+		Git(t, dir, "add", ".github")
+		Git(t, dir, "commit", "-m", "Add Copilot E2E agent fixture")
+	}
+
 	// External agents need external_agents enabled in settings before enable,
 	// so the CLI can discover the agent binary via PATH during DiscoverAndRegister.
+	//
+	// The grant goes in settings.local.json: it enables execution of
+	// entire-agent-* binaries found on $PATH, so the loader honors it only
+	// from an untracked local file. Nothing commits this one — the repo has
+	// its initial commit already — so it verifies as this clone's own.
+	//
+	// An empty settings.json goes alongside it, and is load-bearing rather
+	// than decorative. `entire enable` picks its target file by asking
+	// whether project settings already exist, so a repo carrying only a local
+	// file would send enable's own write there too and never create
+	// settings.json — which PatchSettings below then cannot find. Creating
+	// both keeps the target resolution exactly where it was when this fixture
+	// wrote the grant into settings.json.
 	if ea, ok := agent.(agents.ExternalAgent); ok && ea.IsExternalAgent() {
 		entireDir := filepath.Join(dir, ".entire")
 		if err := os.MkdirAll(entireDir, 0o755); err != nil {
 			t.Fatalf("create .entire for external agent: %v", err)
 		}
 		if err := os.WriteFile(filepath.Join(entireDir, "settings.json"),
+			[]byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("write project settings: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"),
 			[]byte("{\"external_agents\": true}\n"), 0o644); err != nil {
 			t.Fatalf("write external_agents setting: %v", err)
 		}
 	}
 
 	entire.Enable(t, dir, agent.EntireAgent())
-	if agent.Name() == "gemini-cli" {
-		setupGeminiTestHome(t, dir)
+	if preparer, ok := agent.(agents.RepoPreparer); ok {
+		if err := preparer.PrepareRepo(dir); err != nil {
+			t.Fatalf("prepare repo for %s: %v", agent.Name(), err)
+		}
+	}
+	// Registered after the repo's own RemoveAll and before artifact capture
+	// (t.Cleanup runs last-in first-out), so agent state beside the repo is
+	// still there when artifacts are collected and gone when the test ends.
+	if cleaner, ok := agent.(agents.RepoCleaner); ok && !keepRepos {
+		t.Cleanup(func() {
+			if err := cleaner.CleanupRepo(dir); err != nil {
+				t.Logf("cleanup agent state for %s: %v", agent.Name(), err)
+			}
+		})
 	}
 	if agent.Name() == "factoryai-droid" {
 		if err := configureDroidRepoSettings(dir); err != nil {
@@ -115,34 +162,21 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	// commit_linking=always ensures the prepare-commit-msg hook adds the
 	// Entire-Checkpoint trailer unconditionally. This is needed because
 	// interactive agents run inside tmux (CanPromptInteractively()=true) but
-	// can't respond to prompts, and content detection may fail on the first
-	// checkpoint when no shadow branch exists yet. Prompt-mode agents still
+	// can't respond to prompts, and content detection may fail mid-turn, before
+	// any turn end has recorded the session's files. Prompt-mode agents still
 	// exercise the !CanPromptInteractively() fast path since they have no TTY
 	// regardless of this setting.
 	PatchSettings(t, dir, map[string]any{"log_level": "debug", "commit_linking": "always"})
 
-	// Copilot CLI blocks on a "No copilot instructions found" notice in fresh
-	// repos that lack .github/copilot-instructions.md, preventing the interactive
-	// prompt from appearing.
-	if agent.Name() == "copilot-cli" {
-		ghDir := filepath.Join(dir, ".github")
-		if err := os.MkdirAll(ghDir, 0o755); err != nil {
-			t.Fatalf("create .github dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(ghDir, "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
-			t.Fatalf("write copilot-instructions.md: %v", err)
-		}
-	}
-
-	// OpenCode's non-interactive mode auto-rejects external_directory permission
-	// since there's no user to prompt. Write a config to allow it.
-	if agent.Name() == "opencode" {
-		cfg := `{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}}`
-		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-			cfg = fmt.Sprintf(`{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}, "provider": {"anthropic": {"options": {"apiKey": %q}}}}`, key)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(cfg+"\n"), 0o644); err != nil {
-			t.Fatalf("write opencode.json: %v", err)
+	// Agents that need files planted before their first run in a repo get them
+	// here — after `entire enable` has written the agent's own config, so a
+	// seed can sit alongside it. opencode uses this for its config file and for
+	// a pre-built .opencode dependency tree it would otherwise install on the
+	// clock; keeping both in the agent is why this is an interface rather than
+	// another arm of the name switch above.
+	if seeder, ok := agent.(agents.RepoSeeder); ok {
+		if err := seeder.SeedRepo(dir); err != nil {
+			t.Fatalf("seed repo for %s: %v", agent.Name(), err)
 		}
 	}
 
@@ -160,7 +194,7 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 		Dir:              dir,
 		ArtifactDir:      artDir,
 		HeadBefore:       GitOutput(t, dir, "rev-parse", "HEAD"),
-		CheckpointBefore: strings.TrimSpace(gitOutputSafe(dir, "rev-parse", checkpointReadRef())),
+		CheckpointBefore: CheckpointState(dir),
 		ConsoleLog:       consoleLog,
 	}
 
@@ -178,87 +212,27 @@ func checkpointReadRef() string {
 	return checkpointRefV1
 }
 
-// CurrentCheckpointRef returns the current hash of the checkpoint ref used for
-// reads in the active suite mode. It fails if the ref does not exist.
+// CurrentCheckpointRef returns the current committed-checkpoint state used for
+// advance detection in the active suite mode: the v1 branch hash (git-branch) or
+// the per-checkpoint-ref digest (git-refs). Pair it with WaitForCheckpointAdvanceFrom.
 func CurrentCheckpointRef(t *testing.T, dir string) string {
 	t.Helper()
+	if UsingGitRefs() {
+		return CheckpointState(dir)
+	}
 	return GitOutput(t, dir, "rev-parse", checkpointReadRef())
 }
 
-// CheckpointVerifyRef returns the exact local metadata ref name tests should
-// use for presence checks such as rev-parse --verify.
-func CheckpointVerifyRef() string {
-	return "refs/heads/" + checkpointRefV1
-}
-
-// PushCheckpointRefs pushes the checkpoint ref to the origin remote.
+// PushCheckpointRefs pushes the committed checkpoint refs to the origin remote.
 // Remote-resume tests use this instead of hardcoding v1 branch pushes.
 func PushCheckpointRefs(t *testing.T, dir string) {
 	t.Helper()
 
+	if UsingGitRefs() {
+		Git(t, dir, "push", "origin", checkpointRefPrefix+"*:"+checkpointRefPrefix+"*")
+		return
+	}
 	Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
-}
-
-func setupGeminiTestHome(t *testing.T, repoDir string) {
-	t.Helper()
-
-	homeDir := geminiTestHomeDir(repoDir)
-	t.Cleanup(func() {
-		if err := os.RemoveAll(homeDir); err != nil {
-			t.Errorf("remove gemini test home: %v", err)
-		}
-	})
-
-	geminiDir := filepath.Join(homeDir, ".gemini")
-	if err := os.MkdirAll(filepath.Join(geminiDir, "acknowledgments"), 0o755); err != nil {
-		t.Fatalf("create gemini test home: %v", err)
-	}
-
-	config := `{"security":{"auth":{"selectedType":"gemini-api-key"}}}`
-	if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(config), 0o644); err != nil {
-		t.Fatalf("write gemini settings: %v", err)
-	}
-
-	agentFile := filepath.Join(repoDir, ".gemini", "agents", "entire-search.md")
-	content, err := os.ReadFile(agentFile)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return
-		}
-		t.Fatalf("read gemini agent file: %v", err)
-	}
-
-	sum := sha256.Sum256(content)
-	hash := hex.EncodeToString(sum[:])
-
-	ackPath := filepath.Join(geminiDir, "acknowledgments", "agents.json")
-	acks := map[string]map[string]string{}
-	if data, readErr := os.ReadFile(ackPath); readErr == nil {
-		if err := json.Unmarshal(data, &acks); err != nil {
-			t.Fatalf("parse gemini acknowledgments: %v", err)
-		}
-	} else if !errors.Is(readErr, os.ErrNotExist) {
-		t.Fatalf("read gemini acknowledgments: %v", readErr)
-	}
-
-	if acks[repoDir] == nil {
-		acks[repoDir] = map[string]string{}
-	}
-	acks[repoDir]["entire-search"] = hash
-
-	out, err := json.MarshalIndent(acks, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal gemini acknowledgments: %v", err)
-	}
-	out = append(out, '\n')
-
-	if err := os.WriteFile(ackPath, out, 0o644); err != nil {
-		t.Fatalf("write gemini acknowledgments: %v", err)
-	}
-}
-
-func geminiTestHomeDir(repoDir string) string {
-	return filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-gemini-home")
 }
 
 func configureDroidRepoSettings(repoDir string) error {
@@ -445,7 +419,7 @@ func runForAgents(t *testing.T, all []agents.Agent, timeout time.Duration, fn fu
 			defer agents.ReleaseSlot(agent)
 
 			// Per-test timeout starts after slot is acquired, scaled
-			// by the agent's multiplier (e.g. 2.5× for gemini).
+			// by the agent's multiplier.
 			scaled := time.Duration(float64(timeout) * agent.TimeoutMultiplier())
 
 			var prevState *RepoState
@@ -513,7 +487,7 @@ func (s *RepoState) RunPrompt(t *testing.T, ctx context.Context, prompt string, 
 	s.logPromptResult(out)
 
 	if err != nil && s.Agent.IsTransientError(out, err) {
-		errMsg := fmt.Sprintf("transient API error (stderr: %s)", strings.TrimSpace(out.Stderr))
+		errMsg := fmt.Sprintf("transient API error: %v (stderr: %s)", err, strings.TrimSpace(out.Stderr))
 		t.Logf("%s — restarting scenario", errMsg)
 		fmt.Fprintf(s.ConsoleLog, "> [transient] %s — restarting scenario\n", errMsg)
 		panic(errScenarioRestart{msg: errMsg})
@@ -540,6 +514,20 @@ func (s *RepoState) Git(t *testing.T, args ...string) {
 // mode. The session is closed automatically during test cleanup.
 func (s *RepoState) StartSession(t *testing.T, ctx context.Context) agents.Session {
 	t.Helper()
+	// Every agent's interactive driver is tmux-backed (agents/tmux.go), and
+	// Windows has no tmux. main_test.go's preflight already states that
+	// interactive tests are skipped there -- which is why it does not require
+	// the tmux binary on Windows -- but nothing enforced it, so the tests ran
+	// and every one failed with `exec: "tmux": executable file not found in
+	// %PATH%`. Only claude carried a guard of its own, so antigravity and
+	// droid, the other two agents on the Windows matrix, hit it.
+	//
+	// The guard belongs here rather than in each agent: the reason is the
+	// platform, not the agent, and one place means the next tmux-driven agent
+	// inherits it instead of having to remember.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	session, err := s.Agent.StartSession(ctx, s.Dir)
 	if err != nil {
 		t.Fatalf("start session: %v", err)
@@ -678,10 +666,20 @@ func GitOutput(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// NewCheckpointCommits returns the SHAs of commits added to the
-// entire/checkpoints/v1 branch since the test was set up, oldest first.
+// NewCheckpointCommits returns the SHAs of checkpoint commits to capture for
+// artifacts. Under git-branch these are the commits added to entire/checkpoints/v1
+// since setup, oldest first. Under git-refs there is no single advancing branch,
+// so it returns the tip commit of each per-checkpoint ref (diagnostic only).
 func NewCheckpointCommits(t *testing.T, s *RepoState) []string {
 	t.Helper()
+
+	if UsingGitRefs() {
+		out := gitOutputSafe(s.Dir, "for-each-ref", "--format=%(objectname)", checkpointRefPrefix)
+		if strings.TrimSpace(out) == "" {
+			return nil
+		}
+		return strings.Split(strings.TrimSpace(out), "\n")
+	}
 
 	log := GitOutput(t, s.Dir, "log", "--reverse", "--format=%H", s.CheckpointBefore+".."+checkpointReadRef())
 	if log == "" {
@@ -695,6 +693,24 @@ func NewCheckpointCommits(t *testing.T, s *RepoState) []string {
 // ({prefix}/{suffix}/metadata.json) and returns the concatenated IDs.
 func CheckpointIDs(t *testing.T, dir string) []string {
 	t.Helper()
+	if UsingGitRefs() {
+		out := gitOutputSafe(dir, "for-each-ref", "--format=%(refname)", checkpointRefPrefix)
+		if strings.TrimSpace(out) == "" {
+			return nil
+		}
+		seen := map[string]bool{}
+		var ids []string
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			// refs/entire/checkpoints/<shard>/<id> — the ID is the last segment.
+			parts := strings.Split(strings.TrimSpace(line), "/")
+			id := parts[len(parts)-1]
+			if id != "" && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
 	out := gitOutputSafe(dir, "ls-tree", "-r", "--name-only", checkpointReadRef())
 	if out == "" {
 		return nil
@@ -720,8 +736,7 @@ func CheckpointIDs(t *testing.T, dir string) []string {
 func ReadCheckpointMetadata(t *testing.T, dir string, checkpointID string) CheckpointMetadata {
 	t.Helper()
 
-	path := CheckpointPath(checkpointID) + "/metadata.json"
-	blob := checkpointReadRef() + ":" + path
+	blob := checkpointBlobSpec(checkpointID, "metadata.json")
 
 	raw := GitOutput(t, dir, "show", blob)
 
@@ -738,8 +753,7 @@ func ReadCheckpointMetadata(t *testing.T, dir string, checkpointID string) Check
 func ReadSessionMetadata(t *testing.T, dir string, checkpointID string, sessionIndex int) SessionMetadata {
 	t.Helper()
 
-	path := fmt.Sprintf("%s/%d/metadata.json", CheckpointPath(checkpointID), sessionIndex)
-	blob := checkpointReadRef() + ":" + path
+	blob := checkpointBlobSpec(checkpointID, fmt.Sprintf("%d/metadata.json", sessionIndex))
 
 	raw := GitOutput(t, dir, "show", blob)
 
@@ -758,8 +772,7 @@ func ReadSessionMetadata(t *testing.T, dir string, checkpointID string, sessionI
 func WaitForSessionMetadata(t *testing.T, dir string, checkpointID string, sessionIndex int, timeout time.Duration) SessionMetadata {
 	t.Helper()
 
-	path := fmt.Sprintf("%s/%d/metadata.json", CheckpointPath(checkpointID), sessionIndex)
-	blob := checkpointReadRef() + ":" + path
+	blob := checkpointBlobSpec(checkpointID, fmt.Sprintf("%d/metadata.json", sessionIndex))
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

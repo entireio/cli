@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -145,7 +147,7 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 // This method always refreshes the transcript to ensure the latest agent activity is captured.
 func (a *OpenCodeAgent) PrepareTranscript(ctx context.Context, sessionRef string) error {
 	// Validate the session ref path
-	if _, err := os.Stat(sessionRef); err != nil && !os.IsNotExist(err) {
+	if _, err := agent.StatTranscriptFile(sessionRef); err != nil && !os.IsNotExist(err) {
 		// Permission denied, broken symlink, or other non-recoverable errors
 		return fmt.Errorf("failed to stat OpenCode transcript path %s: %w", sessionRef, err)
 	}
@@ -168,6 +170,14 @@ func (a *OpenCodeAgent) PrepareTranscript(ctx context.Context, sessionRef string
 	return err
 }
 
+// FetchTranscript materializes the session's transcript via `opencode export`
+// and returns the cached path. Unlike PrepareTranscript (which only refreshes
+// an existing file), this works for sessions Entire never tracked — e.g.
+// sessions spawned by an external host, where no hook ever cached an export.
+func (a *OpenCodeAgent) FetchTranscript(ctx context.Context, sessionID string) (string, error) {
+	return a.fetchAndCacheExport(ctx, sessionID)
+}
+
 // sessionTranscriptPath validates the session ID and returns the expected transcript path.
 func sessionTranscriptPath(ctx context.Context, sessionID string) (string, error) {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
@@ -177,8 +187,14 @@ func sessionTranscriptPath(ctx context.Context, sessionID string) (string, error
 	if err != nil {
 		repoRoot = "."
 	}
+	// Absolute on purpose: this value is handed to callers that pass it to other
+	// processes and to agent-facing APIs. Reads and writes still go through the
+	// shared root (see fetchAndCacheExport).
 	return filepath.Join(repoRoot, paths.EntireTmpDir, sessionID+".json"), nil
 }
+
+// entireTmpName is .entire/tmp relative to the .entire root.
+var entireTmpName = entiredir.MustName(paths.EntireTmpDir)
 
 // fetchAndCacheExport calls `opencode export <sessionID>` and writes the result
 // to a temporary file. Returns the path to the temp file.
@@ -198,12 +214,21 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 		repoRoot = "."
 	}
 
-	tmpDir := filepath.Join(repoRoot, paths.EntireTmpDir)
-	tmpFile := filepath.Join(tmpDir, sessionID+".json")
+	// Every read, write, and rename below goes through the shared .entire root.
+	// The absolute paths are still needed alongside it, because `opencode export`
+	// is a separate process that takes a path, and the transcript path is handed
+	// back to callers that pass it across the same boundary.
+	root, err := entiredir.OpenAt(repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("open %s for export cache: %w", paths.EntireDir, err)
+	}
+	entireDirAbs := filepath.Join(repoRoot, paths.EntireDir)
+	tmpName := entireTmpName + "/" + sessionID + ".json"
+	tmpFile := filepath.Join(entireDirAbs, filepath.FromSlash(tmpName))
 
 	// Integration test mode: use pre-written mock file without calling opencode export
 	if os.Getenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT") != "" {
-		if _, err := os.Stat(tmpFile); err == nil {
+		if _, err := root.Stat(tmpName); err == nil {
 			return tmpFile, nil
 		}
 		return "", fmt.Errorf("mock export file not found: %s (ENTIRE_TEST_OPENCODE_MOCK_EXPORT is set)", tmpFile)
@@ -211,16 +236,38 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 
 	// Write export directly to temp file under .entire. Avoid stdout capture,
 	// which can truncate large payloads in some opencode versions.
-	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+	if err := osroot.MkdirAllNoSymlink(root, entireTmpName, 0o750); err != nil {
 		return "", fmt.Errorf("failed to create temp dir: %w", err)
 	}
 
-	if err := runOpenCodeExportToFileFn(ctx, sessionID, tmpFile); err != nil {
-		return "", fmt.Errorf("opencode export failed: %w", err)
+	// Export to a staging file and move it into place only once the bytes are
+	// known good. tmpFile is frequently the ONLY local copy of the session — the
+	// turn-end hook writes it and nothing condenses it into a checkpoint until
+	// the user commits — and every caller re-exports over a possibly-populated
+	// path (PrepareTranscript on every turn end, FetchTranscript on attach).
+	// Writing in place means a missing binary, a rejected session, a timeout, or
+	// an `opencode export` that exits 0 with truncated output replaces a good
+	// transcript with nothing or with garbage. Garbage is the worse of the two:
+	// attach's os.Stat branch accepts whatever is at this path and treats
+	// PrepareTranscript's failure as best-effort, so a corrupt file is used
+	// silently while a missing one at least falls through to a re-fetch.
+	staged, err := stageExportPath(root, entireTmpName, sessionID)
+	if err != nil {
+		return "", err
+	}
+	stagedAbs := filepath.Join(entireDirAbs, filepath.FromSlash(staged))
+	keepStaged := false
+	defer func() {
+		if !keepStaged {
+			_ = root.Remove(staged) //nolint:errcheck // best-effort cleanup of a staging file we are abandoning
+		}
+	}()
+
+	if err := runOpenCodeExportToFileFn(ctx, root, sessionID, staged); err != nil {
+		return "", err
 	}
 
-	//nolint:gosec // tmpFile is constructed from validated session ID under repo .entire/tmp
-	data, err := os.ReadFile(tmpFile)
+	data, err := entiredir.ReadFile(root, staged)
 	if err != nil {
 		return "", fmt.Errorf("failed to read export file: %w", err)
 	}
@@ -229,10 +276,21 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 		logging.Debug(logging.WithComponent(ctx, "lifecycle"),
 			"opencode export file contained invalid JSON",
 			slog.Int("bytes", len(data)),
-			slog.String("path", tmpFile),
+			slog.String("path", stagedAbs),
 		)
-		return "", fmt.Errorf("opencode export returned invalid JSON (%d bytes)", len(data))
+		return "", &openCodeExportError{
+			message: fmt.Sprintf("OpenCode returned invalid transcript data for session %q. Try updating OpenCode and running the command again.", sessionID),
+		}
 	}
+
+	if err := renameOverExisting(root, staged, tmpName); err != nil {
+		// The staged export is intact and validated; keep it rather than delete a
+		// transcript we may be the last holder of, and name it so the user can
+		// recover it by hand.
+		keepStaged = true
+		return "", fmt.Errorf("failed to install export file (export saved at %s): %w", stagedAbs, err)
+	}
+	keepStaged = true
 
 	return tmpFile, nil
 }

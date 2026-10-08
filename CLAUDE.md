@@ -1,578 +1,200 @@
-# Entire - CLI
-
-This repo contains the CLI for Entire.
-
-## Architecture
-
-- CLI built with github.com/spf13/cobra and github.com/charmbracelet/huh
-
-## Key Directories
-
-### Commands (`cmd/`)
-
-- `entire/`: Main CLI entry point. Also home to kubectl-style external-command resolution (`entire <name>` → `entire-<name>` on PATH) — see [External Commands](docs/architecture/external-commands.md).
-- `entire/cli`: CLI utilities and helpers (Cobra commands, helpers, group roots)
-- `entire/cli/commands`: actual command implementations
-- `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
-- `entire/cli/strategy`: strategy implementation (manual-commit) - see section below
-- `entire/cli/checkpoint`: checkpoint storage abstractions (temporary and committed)
-- `entire/cli/session`: session state management
-- `entire/cli/integration_test`: integration tests (simulated hooks)
-- `e2e/`: E2E tests with real agent calls (see [e2e/README.md](e2e/README.md))
-
-### Command Layout
-
-The CLI is organized around five noun groups plus a small set of top-level
-verbs. The groups are the canonical home for each verb; legacy top-level
-shortcuts remain functional but hidden, and emit a deprecation hint pointing
-at the canonical group form.
-
-- `session` (alias: `sessions`): `list`, `info`, `stop`, `attach`, `resume`, `current`.
-  `resume` with a branch arg switches to it and resumes its session; with no arg
-  it opens an interactive picker of stopped sessions (across all worktrees),
-  resolving each to its branch and pointing at the owning worktree when the
-  branch is checked out elsewhere. Resume keeps an existing local session log
-  as-is by default (`--force` overwrites it from the checkpoint).
-- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `search`, plus
-  the deprecated `rewind` (functional, prints a cobra deprecation message, will
-  be removed in a future release)
-- `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
-- `configure`: bare prints help and a hint pointing at `entire agent`; flags
-  manage non-agent settings (telemetry, git-hook installation mode, strategy
-  options, summary provider). Agent CRUD lives under `entire agent`.
-- `auth`: `login`, `logout`, `status`, `contexts`, `use`. `logout` takes
-  `--everywhere` (revoke every session on the active core, not just the
-  current one) and `--all-contexts` (log out of every saved login)
-- `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
-
-Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
-`login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`.
-
-Hidden top-level shortcuts (functional, emit a one-line deprecation hint):
-`resume` → `session resume`, `attach` → `session attach`, `explain` →
-`checkpoint explain`, `trace` → `doctor trace`.
-Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
-`checkpoint`. The `search` top-level remains hidden without a hint.
-
-Deprecated top-level commands (functional, print a cobra deprecation message):
-`reset` → `clean`, and `rewind` (no replacement, announces removal — same
-deprecation as `checkpoint rewind`).
-
-Hidden infrastructure commands: `hooks`, `trail`,
-`curl-bash-post-install`, `__send_analytics`.
-
-The `hideAsAlias(cmd, canonical)` helper in `cmd/entire/cli/aliascmd.go`
-marks a command Hidden and sets cobra's `Deprecated` field so the hint
-renders to stderr on every invocation while the command stays functional.
-Diagnostic subcommands live alongside `doctor.go` as `doctor_logs.go` and
-`doctor_bundle.go`. Group roots and noun-group children live in files
-named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
-
-## Tech Stack
-
-- Language: Go 1.26.x
-- Build tool: mise, go modules
-- Linting: golangci-lint
-
-## Development
-
-### Running Tests
-
-```bash
-mise run test
-```
-
-### Running Integration Tests
-
-```bash
-mise run test:integration
-```
-
-### Running All Tests (CI)
-
-```bash
-mise run test:ci
-```
-
-This runs unit tests, integration tests, and the E2E canary (Vogon agent) in sequence. Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
-
-### Running E2E Canary Tests (Vogon Agent)
-
-The Vogon agent is a deterministic fake agent that exercises the full E2E test suite without making any API calls.
-
-```bash
-mise run test:e2e:canary           # Run all E2E tests with the Vogon agent
-mise run test:e2e:canary TestFoo   # Run a specific test
-```
-
-- **Runs as part of `test:ci`** — canary failures block merges
-- **No API calls, no cost** — safe to run freely, unlike real agent E2E tests
-- **If a canary test fails, the bug is in the CLI or test infrastructure**, not in an agent
-- Located in `e2e/vogon/` (binary) and `cmd/entire/cli/agent/vogon/` (Agent interface)
-- The binary parses prompts via regex, creates/modifies/deletes files, and fires lifecycle hooks
-- **IMPORTANT: When changing E2E test prompt wording**, the Vogon binary (`e2e/vogon/main.go`) parses prompts with hardcoded regexes. New phrasing may not match existing patterns — always run `mise run test:e2e:canary` after changing prompt text and fix Vogon's parsing if tests fail.
-
-### Running E2E Tests (Only When Explicitly Requested)
-
-**IMPORTANT: Do NOT run E2E tests proactively.** E2E tests make real API calls to agents, which consume tokens and cost money. Only run them when the user explicitly asks for E2E testing.
-
-```bash
-mise run test:e2e [filter]                          # All agents, filtered
-mise run test:e2e --agent claude-code [filter]       # Claude Code only as an example here, replace `claude-code` with other agents to run tests for those agents
-```
-
-E2E tests:
-
-- Use the `//go:build e2e` build tag
-- Located in `e2e/tests/`
-- See [`e2e/README.md`](e2e/README.md) for full documentation (structure, debugging, adding agents)
-- Test real agent interactions (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi, or Vogon creating files, committing, etc.)
-- Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
-- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`, `cursor`, `factoryai-droid`, `copilot-cli`, `pi`, `vogon`)
-
-**Environment variables:**
-
-- `E2E_AGENT` - Agent to test with (default: `claude-code`)
-- `E2E_CLAUDE_MODEL` - Claude model to use (default: `haiku` for cost efficiency)
-- `E2E_TIMEOUT` - Timeout per prompt (default: `2m`)
-
-### Test Parallelization
-
-**Always use `t.Parallel()` in tests.** Every top-level test function and subtest should call `t.Parallel()` unless it modifies process-global state (e.g., `os.Chdir()`).
-
-```go
-func TestFeature_Foo(t *testing.T) {
-    t.Parallel()
-    // ...
-}
-
-// Integration tests with TestEnv
-func TestFeature_Bar(t *testing.T) {
-    t.Parallel()
-    env := NewFeatureBranchEnv(t)
-    // ...
-}
-```
-
-**Exception:** Tests that modify process-global state cannot be parallelized. This includes `os.Chdir()`/`t.Chdir()` and `os.Setenv()`/`t.Setenv()` — Go's test framework will panic if these are used after `t.Parallel()`.
-
-### Git in Tests
-
-**Tests that touch git state must use an isolated temp repo — never the real repo CWD.**
-
-Many handlers (lifecycle, strategy, hooks) resolve the git repo from CWD via `OpenRepository`, `GetGitCommonDir`, `DetectFileChanges`, etc. Without isolation, tests can create session state files, shadow branches, or other artifacts in the real `.git/` directory.
-
-Use the `testutil` helpers:
-
-```go
-tmpDir := t.TempDir()
-testutil.InitRepo(t, tmpDir)                    // git init + user config + disable GPG
-testutil.WriteFile(t, tmpDir, "f.txt", "init")  // create a file
-testutil.GitAdd(t, tmpDir, "f.txt")             // stage it
-testutil.GitCommit(t, tmpDir, "init")           // commit (needs at least one commit for HEAD)
-t.Chdir(tmpDir)                                 // redirect CWD-based git resolution
-```
-
-`testutil.InitRepo` configures `user.name`, `user.email`, and disables GPG signing — safe for CI environments without global git config.
-
-**Prefer `testutil.InitRepo()` over direct `git.PlainInit()` in tests.** When a test in this repo needs an initialized repository, use `testutil.InitRepo(t, dir)` unless the test specifically needs lower-level initialization behavior that the helper cannot provide. Do not call `git.PlainInit()` directly and then create commits or run CLI git operations without also reproducing the helper's repo-local config.
-
-**Do NOT** shell out to `git init`/`git commit` directly without setting user config and `--no-gpg-sign`, and **do NOT** run lifecycle/strategy handlers from the real repo CWD in tests.
-
-### Config/Cache/Keyring Isolation in Tests
-
-Tests must never read or write the developer's real `~/.config/entire`
-(contexts.json, version_check.json), `~/.cache/entire` (nodes.json,
-cluster_cores.json, api_discovery.json), or OS keychain. The developer may be
-using `entire` for real while tests run.
-
-- **Single resolver**: `internal/entireclient/userdirs` is the only place
-  that resolves the per-user config dir (`userdirs.Config()`:
-  `$ENTIRE_CONFIG_DIR` else `~/.config/entire`) and cache dir
-  (`userdirs.Cache()`: `$XDG_CACHE_HOME/entire` else `~/.cache/entire`).
-  Never derive these paths anywhere else.
-- **In-process safety net**: `userdirs` and the `tokenstore` default backend
-  detect `go test` (via `internal/testdirs`) and fall back to a throwaway
-  per-process temp directory when their env override is unset. The fallback
-  is shared across tests in one process — for per-test isolation still set
-  `t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())` and
-  `tokenstore.UseFileBackendForTesting(...)`.
-- **Spawned binaries are NOT covered**: `testing.Testing()` is false in a
-  subprocess. The integration and e2e TestMains set `ENTIRE_CONFIG_DIR`,
-  `XDG_CACHE_HOME`, `ENTIRE_TOKEN_STORE=file`, `ENTIRE_TOKEN_STORE_PATH`, and
-  `ENTIRE_TEST_AUTH_STORE_FILE` process-wide so every spawned `entire` (and
-  every agent-invoked hook) inherits isolation. Any new harness that spawns
-  the real binary must do the same.
-- **Legacy auth store**: `auth.NewStore()` talks straight to the zalando
-  keyring; packages whose tests can reach it need `keyring.MockInit()` in
-  `TestMain` (see `cmd/entire/cli/global_test.go`) — the `testdirs` fallback
-  does not cover it in-process.
-
-### Spawning subprocesses in tests (TTY detection)
-
-Tests that spawn the real `entire` or `git` binary need the child to be non-interactive so prompts don't hang on a developer terminal.
-
-`interactive.CanPromptInteractively()` resolves in this order:
-
-1. `ENTIRE_TEST_TTY=1` → force interactive ON (any other non-empty value → force OFF).
-2. `testing.Testing()` → false. In-process `go test` runs are non-interactive by default; no per-test `t.Setenv("ENTIRE_TEST_TTY", "0")` is needed.
-3. Agent sentinels (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`) → false.
-4. `CI=<non-empty-non-false>` → false.
-5. `/dev/tty` probe.
-
-For subprocesses spawning the real `entire` binary (e2e, integration tests, `entire` calling itself from a hook), prefer `execx.NonInteractive` over env-var plumbing:
-
-```go
-import "github.com/entireio/cli/cmd/entire/cli/execx"
-
-cmd := execx.NonInteractive(ctx, getTestBinary(), "status")
-cmd.Dir = repoDir
-out, err := cmd.CombinedOutput()
-```
-
-`execx.NonInteractive` puts the child in a new session with no controlling terminal (`Setsid` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows), so the child's `/dev/tty` probe fails naturally. No env var required.
-
-`interactive.UnderTest()` returns true when `testing.Testing()` or `ENTIRE_TEST_TTY` is set — use it where code needs to skip a real-terminal operation even if `CanPromptInteractively()` returns true (e.g., reading from `/dev/tty` directly inside `askConfirmTTY`).
-
-### Linting and Formatting
-
-```bash
-mise run fmt && mise run lint
-```
-
-`mise run fmt` can rewrite files. Treat `mise run fmt && mise run lint` as a single verification sequence: if formatting changes anything, run lint again on the formatted tree rather than assuming a previous lint result still applies.
-
-### Before Every Commit (REQUIRED)
-
-**CI will fail if you skip these steps:**
-
-```bash
-mise run check
-```
-
-Equivalent expanded form:
-
-```bash
-mise run fmt      # Format code (CI enforces gofmt)
-mise run lint     # Lint check (CI enforces golangci-lint)
-mise run test:ci  # Run all tests (unit + integration)
-```
-
-`mise run check` runs the three commands above.
-
-Safety note: do not treat a clean `mise run lint` result as final unless it was run after the most recent `mise run fmt` pass.
-
-### Before Any Push Or Remote Code Update (REQUIRED)
-
-Before pushing commits or otherwise sending code changes to any remote, run `mise run lint` on the current tree and ensure it passes. If `mise run fmt` changed files, rerun `mise run lint` on the formatted tree before pushing.
-
-**Common CI failures from skipping this:**
-
-- `gofmt` formatting differences → run `mise run fmt`
-- Lint errors → run `mise run lint` and fix issues
-- Test failures → run `mise run test` and fix
-
-### Code Duplication Prevention
-
-Before implementing Go code, use `/go:discover-related` to find existing utilities and patterns that might be reusable.
-
-**Check for duplication:**
-
-```bash
-mise run dup           # Comprehensive check (threshold 50) with summary
-mise run dup:staged    # Check only staged files
-mise run lint          # Normal lint includes dupl at threshold 75 (new issues only)
-mise run lint:full     # All issues at threshold 75
-```
-
-**Tiered thresholds:**
-
-- **75 tokens** (lint/CI) - Blocks on serious duplication (~20+ lines)
-- **50 tokens** (dup) - Advisory, catches smaller patterns (~10+ lines)
-
-When duplication is found:
-
-1. Check if a helper already exists in `common.go` or nearby utility files
-2. If not, consider extracting the duplicated logic to a shared helper
-3. If duplication is intentional (e.g., test setup), add a `//nolint:dupl` comment with explanation
-
-## Code Patterns
-
-### Error Handling
-
-The CLI uses a specific pattern for error output to avoid duplication between Cobra and main.go.
-
-**How it works:**
-
-- `root.go` sets `SilenceErrors: true` globally - Cobra never prints errors
-- `main.go` prints errors to stderr, unless the error is a `SilentError`
-- Commands return `NewSilentError(err)` when they've already printed a custom message
-
-**When to use `SilentError`:**
-Use `NewSilentError()` when you want to print a custom, user-friendly error message instead of the raw error:
-
-```go
-// In a command's RunE function:
-if _, err := paths.WorktreeRoot(); err != nil {
-    cmd.SilenceUsage = true  // Don't show usage for prerequisite errors
-    fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run 'entire enable' from within a git repository.")
-    return NewSilentError(errors.New("not a git repository"))
-}
-```
-
-**When NOT to use `SilentError`:**
-For normal errors where the default error message is sufficient, return the error directly. main.go will print it:
-
-```go
-// Normal error - main.go will print "unknown strategy: foo"
-return fmt.Errorf("unknown strategy: %s", name)
-```
-
-**Key files:**
-
-- `errors.go` - Defines `SilentError` type and `NewSilentError()` constructor
-- `root.go` - Sets `SilenceErrors: true` on root command
-- `main.go` - Checks for `SilentError` before printing
-
-### Settings
-
-All settings access should go through the `settings` package (`cmd/entire/cli/settings/`).
-
-**Why a separate package:**
-The `settings` package exists to avoid import cycles. The `cli` package imports `strategy`, so `strategy` cannot import `cli`. The `settings` package provides shared settings loading that both can use.
-
-**Usage:**
-
-```go
-import "github.com/entireio/cli/cmd/entire/cli/settings"
-
-// Load full settings object
-s, err := settings.Load()
-if err != nil {
-    // handle error
-}
-if s.Enabled {
-    // ...
-}
-
-// Or use convenience functions
-if settings.IsSummarizeEnabled() {
-    // ...
-}
-```
-
-**Do NOT:**
-
-- Read `.entire/settings.json` or `.entire/settings.local.json` directly with `os.ReadFile`
-- Duplicate settings parsing logic in other packages
-- Create new settings helpers without adding them to the `settings` package
-
-**Key files:**
-
-- `settings/settings.go` - `EntireSettings` struct, `Load()`, and helper methods
-- `config.go` - Higher-level config functions that use settings (for `cli` package consumers)
-
-### Logging vs User Output
-
-- **Internal/debug logging**: Use `logging.Debug/Info/Warn/Error(ctx, msg, attrs...)` from `cmd/entire/cli/logging/`. Writes to `.entire/logs/`.
-- **Enabling debug/perf logs locally**: Prefer adding `"log_level": "DEBUG"` to `.entire/settings.local.json` when you need detailed hook/perf logs. This file is gitignored. `ENTIRE_LOG_LEVEL=debug` also works and takes precedence.
-- **User-facing output**: Use `fmt.Fprint*(cmd.OutOrStdout(), ...)` or `cmd.ErrOrStderr()`.
-
-Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocations, strategy decisions) - those should use the `logging` package.
-
-**Privacy**: Don't log user content (prompts, file contents, commit messages). Log only operational metadata (IDs, counts, paths, durations).
-
-### Git Operations
-
-We use github.com/go-git/go-git for most git operations, but with important exceptions:
-
-#### go-git v5 Bugs - Use CLI Instead
-
-**Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**
-
-go-git v5 has a bug where `worktree.Reset()` with `git.HardReset` and `worktree.Checkout()` incorrectly delete untracked directories even when they're listed in `.gitignore`. This would destroy `.entire/` and `.worktrees/` directories.
-
-Use the git CLI instead:
-
-```go
-// WRONG - go-git deletes ignored directories
-worktree.Reset(&git.ResetOptions{
-    Commit: hash,
-    Mode:   git.HardReset,
-})
-
-// CORRECT - use git CLI
-cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hash.String())
-```
-
-See `HardResetWithProtection()` in `common.go` and `CheckoutBranch()` in `git_operations.go` for examples.
-
-Regression tests in `hard_reset_test.go` verify this behavior - if go-git v6 fixes this issue, those tests can be used to validate switching back.
-
-#### Repo Root vs Current Working Directory
-
-**Always use repo root (not `os.Getwd()`) when working with git-relative paths.**
-
-Git commands like `git status` and `worktree.Status()` return paths relative to the **repository root**, not the current working directory. When an agent runs from a subdirectory (e.g., `/repo/frontend`), using `os.Getwd()` to construct absolute paths will produce incorrect results for files in sibling directories.
-
-```go
-// WRONG - breaks when running from subdirectory
-cwd, _ := os.Getwd()  // e.g., /repo/frontend
-absPath := filepath.Join(cwd, file)  // file="api/src/types.ts" → /repo/frontend/api/src/types.ts (WRONG)
-
-// CORRECT - use repo root
-repoRoot, _ := paths.WorktreeRoot()
-absPath := filepath.Join(repoRoot, file)  // → /repo/api/src/types.ts (CORRECT)
-```
-
-This also affects path filtering. The `paths.ToRelativePath()` function rejects paths starting with `..`, so computing relative paths from cwd instead of repo root will filter out files in sibling directories:
-
-```go
-// WRONG - filters out sibling directory files
-cwd, _ := os.Getwd()  // /repo/frontend
-relPath := paths.ToRelativePath("/repo/api/file.ts", cwd)  // returns "" (filtered out as "../api/file.ts")
-
-// CORRECT - keeps all repo files
-repoRoot, _ := paths.WorktreeRoot()
-relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/file.ts"
-```
-
-**When to use `os.Getwd()`:** Only when you actually need the current directory (e.g., finding agent session directories that are cwd-relative).
-
-**When to use repo root:** Any time you're working with paths from git status, git diff, or any git-relative file list.
-
-Test case in `state_test.go`: `TestFilterAndNormalizePaths_SiblingDirectories` documents this bug pattern.
-
-### Session Strategy (`cmd/entire/cli/strategy/`)
-
-The CLI uses a manual-commit strategy for managing session data and checkpoints. The strategy implements the `Strategy` interface defined in `strategy.go`.
-
-#### Strategy Interface
-
-The `Strategy` interface provides:
-
-- `SaveStep()` - Save session step checkpoint (code + metadata)
-- `SaveTaskStep()` - Save subagent task step checkpoint
-- `GetRewindPoints()` / `Rewind()` - List and restore to checkpoints
-- `GetSessionLog()` / `GetSessionInfo()` - Retrieve session data
-
-#### How It Works
-
-The manual-commit strategy (`manual_commit*.go`) does not modify the active branch - no commits are created on the working branch. Instead it:
-
-- Creates shadow branch `entire/<HEAD-commit-hash[:7]>-<worktreeHash[:6]>` per base commit + worktree
-- **Worktree-specific branches** - each git worktree gets its own shadow branch namespace, preventing conflicts
-- **Supports multiple concurrent sessions** - checkpoints from different sessions in the same directory interleave on the same shadow branch
-- Condenses session logs to permanent `entire/checkpoints/v1` branch on user commits
-- When `checkpoints_version` is `1.1`, best-effort mirrors v1 metadata to the `refs/entire/checkpoints/v1.1` read ref after entire-managed v1 writes and fetches; mirror failures are logged, not fatal. The resolver also adds v1.1 to the push set, so `PrePush` pushes it to the configured remote alongside v1 (re-pointing the mirror at the current v1 tip first); v1.1 is a non-branch ref, so it gets no origin-tracking shadow and reads do not bootstrap it from origin (reads target v1.1 while Primary stays v1). The resume bootstrap that promotes local v1 from origin's remote-tracking ref is the deliberate exception — it does not mirror and is skipped entirely in v1.1 mode. Read paths use the configured ref as-is.
-- Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
-- Builds git trees in-memory using go-git plumbing APIs
-- Rewind restores files from shadow branch commit tree (does not use `git reset`)
-- **Location-independent transcript resolution** - transcript paths are always computed dynamically from the current repo location (via `agent.GetSessionDir` + `agent.ResolveSessionFile`), never stored in checkpoint metadata. This ensures restore/rewind works after repo relocation or across machines.
-- **Copilot token scoping** - Copilot CLI `session.shutdown` contains session-wide token aggregates. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart`; condensation may separately backfill full-session Copilot totals into session state for `entire status`.
-- Tracks session state in `.git/entire-sessions/` (shared across worktrees)
-- **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
-- **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
-- PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
-- Safe to use on main/master since it never modifies commit history
-
-#### Key Files
-
-- `strategy.go` - Interface definition and context structs (`StepContext`, `TaskStepContext`, `RewindPoint`, etc.)
-- `common.go` - Helpers for metadata extraction, tree building, rewind validation, `ListCheckpoints()`
-- `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, rewind, git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
-- `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
-- `session_state.go` - Package-level session state functions
-- `hooks.go` - Git hook installation
-
-Note: `checkpoint/configloader.go` overrides go-git's default config loader with a symlink-following `billy.Basic` (`osSymlinkFS`) — go-git's default reads config via `os.Root`, which rejects absolute symlinks in any path component (e.g. a `~/.config` managed by a dotfile tool), silently dropping global config so author identity fell back to "Unknown" and signing was skipped.
-
-#### Deep-Dive Reference
-
-The phase state machine, metadata directory layout, sharded checkpoint format, multi-session metadata, checkpoint ID linking, commit trailers, and concurrent-session / shadow-branch-migration behavior are documented in:
-
-- [Sessions and Checkpoints](docs/architecture/sessions-and-checkpoints.md) - domain model, storage layout, checkpoint ID linking, commit trailers, package structure
-- [Checkpoint Scenarios](docs/architecture/checkpoint-scenarios.md) - phase state machine and worked condensation scenarios
-
-#### When Modifying the Strategy
-
-- The strategy must implement the full `Strategy` interface
-- Test with `mise run test` - strategy tests are in `*_test.go` files
-- Keep this file and `docs/architecture/sessions-and-checkpoints.md` current when changing strategy behavior (`AGENTS.md` is a symlink to this file)
-
-### `entire review` Command
-
-`entire review` runs a set of configured review skills inside an agent session. The review session is an immutable fact attached to a checkpoint — no verdict, no status tracking, no empty commits. On the next `git commit`, the review session is condensed into the checkpoint metadata alongside normal sessions, permanently recording that the code was reviewed and which skills were run.
-
-Configured per-agent in `.entire/settings.json` (`EntireSettings.Review`); launchable agents (claude-code, codex, gemini-cli) receive `ENTIRE_REVIEW_*` env vars that the `UserPromptSubmit` hook reads to tag the session as `Kind = "agent_review"`. Multi-agent runs use a TUI dashboard + opt-in cross-agent synthesis.
-
-See [Review Command](docs/architecture/review-command.md) for the full command surface, settings schema, env-var handshake, multi-agent UI, anti-features (do NOT recreate), and key-file map.
-
-# Important Notes
-
-- **Before committing:** Follow the "Before Every Commit (REQUIRED)" checklist above - CI will fail without it
-- Integration tests: run `mise run test:integration` when changing integration test code
-- When adding new features, ensure they are well-tested and documented.
-- Always check for code duplication and refactor as needed.
-
-## Go Code Style
-
-- Write lint-compliant Go code on the first attempt. Before outputting Go code, mentally verify it passes `golangci-lint` (or your specific linter).
-- Follow standard Go idioms: proper error handling, no unused variables/imports, correct formatting (gofmt), meaningful names.
-- Handle all errors explicitly—don't leave them unchecked.
-- Reference `.golangci.yml` for enabled linters before writing Go code.
-
-## Accessibility
-
-The CLI supports an accessibility mode for users who rely on screen readers. This mode uses simpler text prompts instead of interactive TUI elements.
-
-### Environment Variable
-
-- `ACCESSIBLE=1` (or any non-empty value) enables accessibility mode
-- Users can set this in their shell profile (`.bashrc`, `.zshrc`) for persistent use
-
-### Implementation Guidelines
-
-When adding new interactive forms or prompts using `huh`:
-
-**In the `cli` package:**
-Use `NewAccessibleForm()` instead of `huh.NewForm()`:
-
-```go
-// Good - respects ACCESSIBLE env var
-form := NewAccessibleForm(
-    huh.NewGroup(
-        huh.NewSelect[string]().
-            Title("Choose an option").
-            Options(...).
-            Value(&choice),
-    ),
-)
-
-// Bad - ignores accessibility setting
-form := huh.NewForm(...)
-```
-
-**In the `strategy` package:**
-Use the `isAccessibleMode()` helper. Note that `WithAccessible()` is only available on forms, not individual fields, so wrap confirmations in a form:
-
-```go
-form := huh.NewForm(
-    huh.NewGroup(
-        huh.NewConfirm().
-            Title("Confirm action?").
-            Value(&confirmed),
-    ),
-)
-if isAccessibleMode() {
-    form = form.WithAccessible(true)
-}
-if err := form.Run(); err != nil { ... }
-```
-
-### Key Points
-
-- Always use the accessibility helpers for any `huh` forms/prompts
-- Test new interactive features with `ACCESSIBLE=1` to ensure they work
-- The accessible mode is documented in `--help` output
+# Entire CLI — repository instructions
+
+Go CLI built with Cobra and Charmbracelet Huh. `AGENTS.md` is a symlink to this
+file. Keep this entry point short: repo-wide rules and pointers, not command
+catalogs, implementation histories, or subsystem specifications.
+
+## Project map
+
+- `cmd/entire/`: entry point and external-command dispatch.
+- `cmd/entire/cli/`: Cobra commands, group roots, and CLI helpers. Group/verb files
+  use `<noun>_group.go` and `<noun>_<verb>.go`.
+- `cmd/entire/cli/agent/`: built-in agent integrations and external-agent protocol.
+- `cmd/entire/cli/strategy/`: manual-commit strategy and lifecycle/git hooks.
+- `cmd/entire/cli/checkpoint/`: persistent checkpoint storage (written at commit).
+- `cmd/entire/cli/session/`: session state shared across worktrees.
+- `cmd/entire/cli/integration_test/`: simulated-hook integration tests.
+- `e2e/`: real-agent tests and deterministic Vogon canary.
+- `internal/entireclient/`: API clients, authentication, and user directories.
+
+Use the Go version pinned by `go.mod` and tools configured in `mise.toml`.
+For installed CLI usage, run `entire agent-help`, then
+`entire agent-help <command>` for current flags; do not guess from a static list.
+
+## Read when relevant
+
+Read the applicable reference **before changing that area**, not every reference
+at session start. Follow its related links when the task crosses those boundaries.
+
+| Area being changed | Reference |
+| --- | --- |
+| Commands, help, experimental visibility, repo refs, prompts | [CLI conventions](docs/development/cli-conventions.md) |
+| Test harnesses, isolation, TTY behavior, source guards | [Testing](docs/development/testing.md) |
+| Filesystem I/O, `.entire`, symlinks, hook configs, root anchors | [Filesystem safety](docs/development/filesystem-safety.md) |
+| Git operations, executable lookup, subprocesses, Windows launching | [Git and subprocess safety](docs/development/git-safety.md) |
+| Caller identification or session current/tokens/adopt | [Caller-session resolution](docs/development/caller-session-resolution.md) |
+| Control-plane auth or data-plane routing | [API routing](docs/development/api-routing.md) |
+| Checkpoint writes, lifecycle, sync, settings trust, redaction | [Implementation contracts](docs/development/checkpoint-implementation.md), [domain model](docs/architecture/sessions-and-checkpoints.md), [scenarios](docs/architecture/checkpoint-scenarios.md) |
+| Ref-based checkpoint backend | [Ref backend](docs/architecture/ref-checkpoint-backend.md) |
+| Agent integrations | [Agent guide](docs/architecture/agent-guide.md), [integration checklist](docs/architecture/agent-integration-checklist.md) |
+| External commands or agents | [External commands](docs/architecture/external-commands.md), [agent protocol](docs/architecture/external-agent-protocol.md) |
+| Security, privacy, scanners, OPF | [Security and privacy](docs/security-and-privacy.md), [implementation contracts](docs/development/checkpoint-implementation.md) |
+| Review command | [Review architecture](docs/architecture/review-command.md) |
+| E2E tests | [E2E guide](e2e/README.md) |
+
+## Verification
+
+| Task | Command / requirement |
+| --- | --- |
+| Unit tests | `mise run test` |
+| Integration tests | `mise run test:integration`; required when changing integration test code |
+| Deterministic E2E canary | `mise run test:e2e:canary`; safe without API calls |
+| All CI tests | `mise run test:ci` (unit + integration + canary) |
+| Format and lint | `mise run fmt && mise run lint` |
+| Before every commit | **`mise run check`** (format, lint, all CI tests) |
+| Before any push or remote code update | **`mise run lint` on the current tree**, after the latest formatting pass |
+| After every push to an open PR | **check the trail's findings** (`entire trail finding list --freshness any`; uses the current branch's trail, or pass `--trail <trail number>` — not the PR number); fix real ones, resolve with `-m`, and re-check after the fix lands. Not done until findings are clear |
+| Duplication checks | `mise run dup` or `mise run dup:staged`; normal lint also checks duplication |
+| Windows installer | `mise run test:ps1`; see testing reference for prerequisites |
+
+**Do not run real-agent E2E tests unless the user explicitly requests them.** They
+make paid API calls. Vogon is the exception: its canary is deterministic and free.
+When changing E2E prompt wording, run the canary and update Vogon's regex parsing
+if needed. Formatting can rewrite files; an earlier lint pass is not sufficient.
+
+Before implementing Go code, search nearby packages and helpers for reusable
+patterns. Use `/go:discover-related` when available, otherwise `rg` and related
+implementations/tests. Check `.golangci.yaml`; handle errors and avoid duplication.
+
+## Test safety
+
+- Every top-level test and subtest calls `t.Parallel()` unless it changes
+  process-global state (`t.Chdir`, `t.Setenv`, or their `os` equivalents).
+- Git tests use isolated temporary repositories, preferably
+  `testutil.InitRepo(t, dir)` plus its file/add/commit helpers. Redirect CWD before
+  calling CWD-based handlers. Never mutate the real checkout's git/session state.
+- Tests must not access the developer's real config, cache, or keychain.
+  In-process fallbacks are shared per process; use per-test overrides and
+  `tokenstore.UseFileBackendForTesting` when isolation between tests is needed.
+  Tests that can reach the OS keyring need `keyring.MockInit()` in `TestMain`.
+- Spawned binaries do not inherit Go's test detection. Harnesses must isolate
+  `ENTIRE_CONFIG_DIR`, `XDG_CACHE_HOME`, `ENTIRE_TOKEN_STORE=file`,
+  `ENTIRE_TOKEN_STORE_PATH`, and `ENTIRE_TEST_AUTH_STORE_FILE`.
+- Prefer `execx.NonInteractive` for real CLI/git test subprocesses so a developer's
+  terminal cannot make them prompt or hang.
+- Caller-resolution tests clear every variable from `agent.CallerSessionEnvVars()`;
+  never hand-maintain a partial list or inherit the developer's agent identity.
+- Source-scanning guards use `testutil.GitGrepGuard`, restrict pathspecs to Go
+  files, and fail on zero matches. Do not weaken guard ledgers to silence failures.
+
+## Filesystem and settings safety
+
+**Use the existing anchor for each tree; never assemble a path and perform bare
+I/O beneath it.** Read the filesystem reference before adding or changing I/O.
+
+| Tree | Canonical owner |
+| --- | --- |
+| `.entire` | `entiredir` |
+| Git common directory | `gitdir` |
+| Working tree | `worktreedir` |
+| Agent hook configuration | `agent.HookConfigFile` |
+| Agent session store | `agent.SessionStore` |
+| Active git hooks directory | `strategy.hooksRootForInstall` / `ForRemoval` |
+| Per-user config/cache | `userdirs.ConfigRoot` / `CacheRoot` |
+| Managed plugins | `pluginRoot` |
+
+- Root bases come from trusted resolvers, **not `filepath.Dir(target)`**. Confining
+  a file to its own derived parent proves nothing. Prefer an existing anchor.
+- Roots share the `osroot.Shared` registry. Open child roots with
+  `osroot.SharedChild` / `OpenChild`, not bare `parent.OpenRoot`.
+- Use `osroot` operations and `jsonutil.WriteFileAtomicIn` / `CreateTempIn`.
+  Directories use `MkdirAllNoSymlink`; rooted read-only operations must also
+  enforce symlink policy. Atomic writes replace leaf links rather than follow them.
+- `.entire` must be a real directory; validate through
+  `paths.ValidateEntireDirAt` / `RequireEntireDir`. Do not treat an unresolved
+  repository as absent. Settings reads must also refuse symlinks themselves.
+- Do not broaden symlink exceptions. Developer-vouched agent config directories
+  are scoped, locally trusted exceptions; `.entire` and git hooks are not vouchable.
+- `entiredir.OpenForRead` must not create directories. Reset cached roots before
+  deleting/recreating their directories. Use `entiredir.Name` / `MustName` to
+  bridge repo-relative constants and root-relative I/O names.
+- All settings access goes through `settings`; never read or parse settings JSON
+  ad hoc. Per-user config/cache resolution belongs only to `userdirs`.
+- Repository-controlled settings must not authorize executable discovery, custom
+  executables, or instructions for permission-bypassed agents. Preserve the
+  existing local-provenance gates and their rejection reporting.
+- Existing exceptions (explicit user paths, global git config, transcript-read
+  protocol gaps) are documented in the references; do not generalize them.
+
+## Git and subprocess safety
+
+- Open repositories only through `gitrepo.OpenCurrent(ctx)` or
+  `gitrepo.OpenPath(root)`, never direct go-git opens. This preserves alternates
+  and reftable support. Do not fall back to CWD after failed repo resolution.
+- Use `gitrepo.Status`, never `worktree.Status()`. Agent-hook capture paths use
+  `StatusWithBudget` and preserve degraded-capture reporting on budget exhaustion.
+- Every `git status` subprocess passes **`--no-optional-locks`**. This does not
+  protect worktree-comparing `git diff` from refreshing the index; use the
+  hook-safe alternatives in the git reference.
+- Use the git CLI, not go-git v5, for checkout and hard reset; go-git can delete
+  ignored/untracked directories. This is an implementation rule, not permission
+  to run destructive git commands.
+- Git-relative paths resolve against `paths.WorktreeRoot`, never process CWD.
+- A git subprocess running inside a hook and targeting a repo via `Dir` or `-C`
+  must use `gitrepo.EnvWithoutRepoOverrides()`. User-invoked CWD commands instead
+  honor intentionally exported repo selectors.
+- PATH scanners use `execx.PathScanDirs()`; external-agent execution requires
+  absolute binary paths. User-directory overrides use the checked `userdirs`
+  resolvers before any I/O. Preserve the documented developer-owned OPF exception.
+- When Entire owns execution, pass arguments separately; never interpolate
+  dynamic values into `cmd.exe`. Agent-owned shell execution uses the shared
+  escaping helper. See the reference for the literal-only Unix updater exception.
+
+## CLI behavior and output
+
+- Load settings through the `settings` package, not new helpers in CLI consumers.
+- Operational/debug messages use `logging.Debug/Info/Warn/Error`; user output uses
+  `cmd.OutOrStdout()` / `cmd.ErrOrStderr()`. Never log prompts, file contents, or
+  commit messages; log operational metadata only.
+- Cobra suppresses errors globally; `main.go` prints returned errors. Return
+  `NewSilentError(err)` only after printing a custom error yourself.
+- Every read-only workflow must work without a TUI: provide complete text/JSON,
+  stable IDs and detail commands, or direct selection flags. Test that path.
+- Use `uiform.New` (or `NewAccessibleForm` in `cli`) for Huh forms; these wire
+  accessibility and theming centrally. Do not hand-roll `WithAccessible`.
+- Separately opened prompt terminals use `interactive.OpenPromptTTY()` and
+  `PromptTTY.Close()`, not a bare file close (Windows pending reads can hang).
+- Register experimental commands with `experimental.Register`. Classify new
+  commands in `agentHelpClassification`; default to unlisted/user-owned and
+  flag the product choice for review. Agent guidance belongs in `agentHelpGuidance`,
+  not Cobra `Short`/`Long` or first-turn injection.
+
+## Session, checkpoint, and API contracts
+
+- `*strategy.ManualCommitStrategy` is the only strategy; there is no interface or
+  worktree restore path. Turn ends write session state only; checkpoints are
+  metadata refs written at commit, never working-branch commits. Log resume is distinct from restoring worktree files.
+- Caller identity comes from `strategy.ResolveCallerSession`, not newest state.
+  Preserve resolution provenance; do not narrate worktree fallback or ambiguous
+  matches as identified callers. `IsCaller()` excludes those guesses; consult
+  the caller-resolution reference for current enforcement gaps.
+- Preserve sanitize → image externalization → redact ordering where all apply,
+  fail-closed scanner behavior, and checkpoint-scoped token accounting. Read the
+  implementation contracts before modifying any transcript/storage pipeline.
+- Control-plane precedence belongs to `coreapi`; display `client.CoreOrigin()`
+  rather than independently resolving a possibly different target.
+- Repo-scoped data-plane requests resolve the repo's cell and fail on resolution
+  failure. `/me` uses the home cell; repo-set queries use shared fanout helpers.
+  Multi-cell operations share one `auth.CellClientFactory` per operation.
+
+## Maintaining these instructions
+
+Update the relevant reference when subsystem behavior changes. Update this file
+only for repository-wide development rules or routing links. Preserve safety
+contracts in references and regression tests rather than accumulating incident
+narratives here. Prefer existing docs over a second account of the same behavior.
+
+The root-file budget is **20 KiB**, enforced alongside local documentation links
+by `go test ./docs/development`. Extract specialized material instead of expanding
+that budget. Do not require every linked document
+to be loaded on every task. Keep `AGENTS.md` as the symlink to this file.

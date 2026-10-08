@@ -5,18 +5,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
+	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/agent/vogon"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -40,11 +47,20 @@ func setupTestDir(t *testing.T) string {
 	return tmpDir
 }
 
-// setupTestRepo creates a temp directory with a git repo initialized.
-func setupTestRepo(t *testing.T) {
+// setupTestRepo creates a temp directory with a git repo initialized, chdirs
+// into it, and returns its path. Callers that only need the chdir can ignore the
+// result.
+//
+// Prefer this over setupTestDir for anything that resolves a worktree root.
+// setupTestDir leaves the directory repository-less, and paths.WorktreeRoot
+// fails there — which used to be papered over by callers falling back to
+// os.Getwd(). Those fallbacks are gone, because a fallback that exists for the
+// tests is a fallback shipping to users.
+func setupTestRepo(t *testing.T) string {
 	t.Helper()
 	tmpDir := setupTestDir(t)
 	testutil.InitRepo(t, tmpDir)
+	return tmpDir
 }
 
 // writeSettings writes settings content to the settings file.
@@ -128,13 +144,54 @@ func copyExecutable(src, dst string) error {
 	return os.WriteFile(dst, data, info.Mode())
 }
 
+func clearLocalGitIdentity(t *testing.T, repoDir string) {
+	t.Helper()
+	testutil.RunGit(t, repoDir, "config", "--local", "--unset-all", "user.name")
+	testutil.RunGit(t, repoDir, "config", "--local", "--unset-all", "user.email")
+}
+
+func localGitConfig(t *testing.T, repoDir, key string) (string, bool) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "config", "--local", "--get", key)
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return "", false
+	}
+	t.Fatalf("read local git config %s: %v", key, err)
+	return "", false
+}
+
 func writeExternalAgentBinary(t *testing.T, dir, name string) {
 	t.Helper()
+	writeExternalAgentBinaryEx(t, dir, name, false)
+}
 
+// writeExternalAgentBinaryEx writes a mock external-agent binary whose
+// are-hooks-installed subcommand reports hooksInstalled, so callers can
+// simulate both installed and available (uninstalled) external plugins.
+func writeExternalAgentBinaryEx(t *testing.T, dir, name string, hooksInstalled bool) {
+	t.Helper()
+	// Whatever this mock is written for, discovering it registers it into the
+	// process-global registry, which outlives the TempDir holding the binary.
+	// Restore the registry so later tests walking agent.List() do not exec a
+	// path that no longer exists.
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+
+	installed := strconv.FormatBool(hooksInstalled)
+
+	// When ENTIRE_TEST_EXEC_LOG is set, record every invocation's subcommand so a
+	// test can assert which subcommands the CLI actually invoked. Unset in other
+	// tests, so they are undisturbed.
 	script := `#!/bin/sh
+[ -n "$ENTIRE_TEST_EXEC_LOG" ] && echo "$1" >> "$ENTIRE_TEST_EXEC_LOG"
 case "$1" in
   info)
-    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","is_preview":false,"protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
     ;;
   detect)
     if [ "$ENTIRE_TEST_EXTERNAL_PRESENT" = "1" ]; then
@@ -147,10 +204,22 @@ case "$1" in
     echo '{"hooks_installed": 1}'
     ;;
   uninstall-hooks)
+    # ENTIRE_TEST_FAIL_UNINSTALL_HOOKS simulates a plugin that cannot remove its
+    # own hooks, so a test can drive the CLI's leftover-hooks recovery path.
+    if [ -n "$ENTIRE_TEST_FAIL_UNINSTALL_HOOKS" ]; then
+      echo "mock uninstall-hooks failure" >&2
+      exit 1
+    fi
     exit 0
     ;;
   are-hooks-installed)
-    echo '{"installed": false}'
+    # ENTIRE_TEST_PROBE drives the two ways a plugin can fail to answer, so a test
+    # can tell "no hooks" apart from "could not say".
+    case "$ENTIRE_TEST_PROBE" in
+      fail)    echo "mock probe failure" >&2; exit 1 ;;
+      garbage) echo 'not json' ;;
+      *)       echo '{"installed": ` + installed + `}' ;;
+    esac
     ;;
   *)
     echo '{}'
@@ -165,16 +234,20 @@ esac
 
 func writeExternalSummaryAgentBinary(t *testing.T, dir, name string) {
 	t.Helper()
+	t.Cleanup(agent.SnapshotRegistryForTesting())
 
 	script := `#!/bin/sh
 case "$1" in
   info)
-    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External summary test agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":false,"text_generator":true,"hook_response_writer":false,"subagent_aware_extractor":false}}'
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External summary test agent","protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":false,"text_generator":true,"hook_response_writer":false,"subagent_aware_extractor":false}}'
     ;;
   detect)
     echo '{"present": true}'
     ;;
   generate-text)
+    if [ -n "$ENTIRE_TEST_EXTERNAL_MODEL_RECORD" ]; then
+      printf '%s\n%s\n' "$2" "$3" > "$ENTIRE_TEST_EXTERNAL_MODEL_RECORD"
+    fi
     echo '{"text":"{\"intent\":\"Intent\",\"outcome\":\"Outcome\",\"learnings\":{\"repo\":[],\"code\":[],\"workflow\":[]},\"friction\":[],\"open_items\":[]}"}'
     ;;
   *)
@@ -224,34 +297,116 @@ func TestRunEnable_AlreadyEnabled(t *testing.T) {
 	}
 }
 
-// TestRunEnable_ProjectFlag_ClearsLocalDisable verifies that `entire enable --project`
-// after `entire disable` (which writes to local) actually re-enables by updating both files.
+// TestRunEnableOnConfiguredRepo_RecoversLegacySplitState covers recovering
+// the split state a pre-fix binary left on disk — committed
+// settings.json enabled:false, settings.local.json enabled:true. The local
+// override wins in the merged view, so IsEnabled reports true; a bare early
+// return on the merged view would leave the committed project file disabled
+// forever, even with an explicit --project. runEnableOnConfiguredRepo must
+// detect that the target scope is itself disabled and flip it.
+func TestRunEnableOnConfiguredRepo_RecoversLegacySplitState(t *testing.T) {
+	setupTestRepo(t)
+	// Legacy split state.
+	writeSettings(t, testSettingsDisabled)
+	writeLocalSettings(t, `{"enabled": true}`)
+
+	// Sanity: the merged view already reports enabled (local override wins).
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Fatal("precondition: merged view should report enabled (local override wins)")
+	}
+
+	cmd := newEnableCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := runEnableOnConfiguredRepo(context.Background(), cmd, EnableOptions{UseProjectSettings: true}); err != nil {
+		t.Fatalf("runEnableOnConfiguredRepo(--project) error = %v", err)
+	}
+
+	// The committed project file must now be enabled — this split state could
+	// not recover before this fix.
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if !projectS.Enabled {
+		t.Error("committed settings.json should be enabled:true after enable --project recovered the split state")
+	}
+}
+
+// TestRunEnableOnConfiguredRepo_BareEnable_RecoversLegacySplitState verifies the
+// same recovery happens for a bare `entire enable` (no --project), which
+// resolves to the committed settings.json via settingsTargetFile.
+func TestRunEnableOnConfiguredRepo_BareEnable_RecoversLegacySplitState(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled)
+	writeLocalSettings(t, `{"enabled": true}`)
+
+	cmd := newEnableCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := runEnableOnConfiguredRepo(context.Background(), cmd, EnableOptions{}); err != nil {
+		t.Fatalf("runEnableOnConfiguredRepo() error = %v", err)
+	}
+
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if !projectS.Enabled {
+		t.Error("committed settings.json should be enabled:true after a bare enable recovered the split state")
+	}
+}
+
+// TestRunEnableOnConfiguredRepo_AlreadyEnabled_NoSplit verifies the early
+// return still fires (nothing to flip, "already enabled") when the merged view
+// AND the resolved target scope agree that Entire is enabled.
+func TestRunEnableOnConfiguredRepo_AlreadyEnabled_NoSplit(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newEnableCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := runEnableOnConfiguredRepo(context.Background(), cmd, EnableOptions{}); err != nil {
+		t.Fatalf("runEnableOnConfiguredRepo() error = %v", err)
+	}
+	if !strings.Contains(buf.String(), "already enabled") {
+		t.Errorf("expected 'already enabled' output when nothing to recover, got: %s", buf.String())
+	}
+}
+
+// TestRunEnable_ProjectFlag_ClearsLocalDisable verifies that `entire enable
+// --project` clears a real local disable override. The precondition is seeded
+// directly (settings.local.json enabled:false with a local-only field) rather
+// than through runDisable, so the "local override wins and must be cleared"
+// scenario is genuinely exercised — the local-sync in setEnabledFlag's project
+// branch is what makes the re-enable stick.
 func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)
+	// A real local disable override with a local-only field to prove the sync
+	// touches only the enabled key.
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
-	// Simulate `entire disable` (writes enabled:false to local)
-	var buf bytes.Buffer
-	if err := runDisable(context.Background(), &buf, false); err != nil {
-		t.Fatalf("runDisable() error = %v", err)
-	}
-
-	// Verify it's disabled
+	// Precondition: the local override wins, so the merged view is disabled.
 	enabled, err := IsEnabled(context.Background())
 	if err != nil {
 		t.Fatalf("IsEnabled() error = %v", err)
 	}
 	if enabled {
-		t.Fatal("Expected disabled after runDisable")
+		t.Fatal("precondition: local override should make the merged view disabled")
 	}
 
-	// Now re-enable with --project flag
-	buf.Reset()
+	var buf bytes.Buffer
 	if err := runEnable(context.Background(), &buf, true); err != nil {
 		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
-	// Must actually be enabled — local override must not win
+	// Must actually be enabled — the local override must have been cleared.
 	enabled, err = IsEnabled(context.Background())
 	if err != nil {
 		t.Fatalf("IsEnabled() error = %v", err)
@@ -259,24 +414,35 @@ func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 	if !enabled {
 		t.Error("Expected enabled after runEnable --project, but IsEnabled() returned false (local override not cleared)")
 	}
+
+	// The local file's enabled key was synced to true, and its local-only
+	// field survived.
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
+		t.Errorf("local override should be synced to enabled:true, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local-only field absolute_git_hook_path should be retained, got: %s", localContent)
+	}
 }
 
-// TestRunEnable_DefaultFlag_ClearsLocalDisable verifies that `entire enable`
-// (default, no --project) after `entire disable` actually re-enables.
-func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
+// TestRunEnable_ProjectScope_ClearsExplicitLocalDisable seeds both files
+// disabled (committed settings.json enabled:false AND settings.local.json
+// enabled:false with absolute_git_hook_path) and asserts that a project-scope enable flips
+// both and retains the local-only field. This is the mutation-sensitive test
+// for setEnabledFlag's project-branch local sync: skipping the sync leaves the
+// local override at enabled:false, which would win and keep IsEnabled false.
+func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
 	setupTestDir(t)
-	writeSettings(t, testSettingsEnabled)
+	writeSettings(t, testSettingsDisabled)
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
-	// Simulate `entire disable` (writes enabled:false to local)
 	var buf bytes.Buffer
-	if err := runDisable(context.Background(), &buf, false); err != nil {
-		t.Fatalf("runDisable() error = %v", err)
-	}
-
-	// Now re-enable with default (no --project)
-	buf.Reset()
-	if err := runEnable(context.Background(), &buf, false); err != nil {
-		t.Fatalf("runEnable(project=false) error = %v", err)
+	if err := runEnable(context.Background(), &buf, true); err != nil {
+		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
 	enabled, err := IsEnabled(context.Background())
@@ -284,26 +450,85 @@ func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
 		t.Fatalf("IsEnabled() error = %v", err)
 	}
 	if !enabled {
-		t.Error("Expected enabled after runEnable, but IsEnabled() returned false")
+		t.Error("Expected enabled after runEnable --project (local override must be synced to enabled:true)")
+	}
+
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if !strings.Contains(string(projectContent), `"enabled":true`) && !strings.Contains(string(projectContent), `"enabled": true`) {
+		t.Errorf("committed project settings should be enabled:true, got: %s", projectContent)
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
+		t.Errorf("local override should be synced to enabled:true, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local-only field absolute_git_hook_path should be retained, got: %s", localContent)
 	}
 }
 
-func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
-	setupTestRepo(t)
+// TestRunEnable_DefaultFlag_ClearsLocalDisable verifies that `entire enable`
+// (default/local scope) clears an explicitly-seeded local disable override.
+func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
+	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)
-	writeClaudeHooksFixture(t)
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
-	var buf bytes.Buffer
-	if err := runDisable(context.Background(), &buf, false); err != nil {
-		t.Fatalf("runDisable() error = %v", err)
-	}
-
+	// Precondition: local override wins → disabled.
 	enabled, err := IsEnabled(context.Background())
 	if err != nil {
 		t.Fatalf("IsEnabled() error = %v", err)
 	}
 	if enabled {
-		t.Fatal("expected disabled after runDisable")
+		t.Fatal("precondition: local override should make the merged view disabled")
+	}
+
+	var buf bytes.Buffer
+	if err := runEnable(context.Background(), &buf, false); err != nil {
+		t.Fatalf("runEnable(project=false) error = %v", err)
+	}
+
+	enabled, err = IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Error("Expected enabled after runEnable, but IsEnabled() returned false")
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local-only field absolute_git_hook_path should be retained, got: %s", localContent)
+	}
+}
+
+// TestSetupAgentHooksNonInteractive_ClearsLocalDisable verifies that a
+// project-scope `enable --agent` clears a real local disable override. The
+// precondition is seeded directly (settings.local.json enabled:false) rather
+// than via runDisable, and the assertion checks the local override was actually
+// synced — otherwise "ClearsLocalDisable" would assert nothing.
+func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
+	writeClaudeHooksFixture(t)
+
+	// Precondition: local override wins → disabled.
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if enabled {
+		t.Fatal("precondition: local override should make the merged view disabled")
 	}
 
 	ag, err := agent.Get(types.AgentName("claude-code"))
@@ -311,8 +536,10 @@ func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 		t.Fatalf("agent.Get(claude-code) error = %v", err)
 	}
 
-	buf.Reset()
-	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{}); err != nil {
+	var buf bytes.Buffer
+	// UseProjectSettings so the enable resolves to the committed file and its
+	// project branch syncs the local override.
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{UseProjectSettings: true}); err != nil {
 		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
 	}
 
@@ -321,8 +548,268 @@ func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 		t.Fatalf("IsEnabled() error = %v", err)
 	}
 	if !enabled {
-		t.Fatal("expected enabled after setupAgentHooksNonInteractive")
+		t.Fatal("expected enabled after setupAgentHooksNonInteractive (local override must be cleared)")
 	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
+		t.Errorf("local override should be synced to enabled:true, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local-only field absolute_git_hook_path should be retained, got: %s", localContent)
+	}
+}
+
+// TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject:
+// `entire enable --agent <name>` on an already-configured repo used to load the
+// merged settings view (LoadEntireSettings) and write it back wholesale to the
+// project file via saveEnabledState, flattening settings.local.json-only
+// overrides (e.g. log_level) into the shared, committed settings.json — the
+// same leak fixed for the bare enable/disable path, just via a different
+// entry point (setupAgentHooksNonInteractive).
+func TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"log_level": "debug"}`)
+	writeClaudeHooksFixture(t)
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{}); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.LogLevel != "" {
+		t.Errorf("local-only log_level leaked into project settings: %q", projectS.LogLevel)
+	}
+	if !projectS.Enabled {
+		t.Error("expected project settings to remain enabled")
+	}
+
+	localS, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	if localS.LogLevel != "debug" {
+		t.Errorf("expected local log_level to be preserved, got %q", localS.LogLevel)
+	}
+}
+
+// TestSetupAgentHooksNonInteractive_UsesMergedAbsoluteHookPathForHookInstall
+// covers the merged view for hook generation:
+// with absolute_git_hook_path set only in settings.local.json while the enable
+// resolves (via --project) to settings.json, the generated hook must embed the
+// absolute binary path from the merged view — not fall back to the bare
+// "entire" prefix the target-scoped struct alone would yield. Guards against a
+// mutation reverting hookAbsoluteGitHookPath to the scoped struct.
+func TestSetupAgentHooksNonInteractive_UsesMergedAbsoluteHookPathForHookInstall(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	// absolute_git_hook_path only in the local override.
+	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
+	writeClaudeHooksFixture(t)
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	opts := EnableOptions{UseProjectSettings: true}
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, opts); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	// The hook must embed the resolved absolute executable path (what
+	// absolute_git_hook_path produces), proving the merged override was honored.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		t.Fatalf("EvalSymlinks() error = %v", err)
+	}
+
+	hooksDir, err := strategy.GetHooksDir(context.Background())
+	if err != nil {
+		t.Fatalf("GetHooksDir() error = %v", err)
+	}
+	hookContent, err := os.ReadFile(filepath.Join(hooksDir, "post-commit"))
+	if err != nil {
+		t.Fatalf("failed to read post-commit hook: %v", err)
+	}
+	if !strings.Contains(string(hookContent), resolved) {
+		t.Errorf("expected hook to embed absolute binary path %q from the merged view, got: %s", resolved, hookContent)
+	}
+
+	// The write path must still stay scoped: absolute_git_hook_path must not
+	// leak into the committed project settings.json.
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.AbsoluteGitHookPath {
+		t.Error("local-only absolute_git_hook_path override leaked into project settings")
+	}
+}
+
+// TestSetupAgentHooksNonInteractive_LocalTarget_DoesNotLeakProjectFieldsIntoLocal
+// covers the mirror-image direction: writing to settings.local.json (--local)
+// must not flatten project-only fields into the local file either.
+func TestSetupAgentHooksNonInteractive_LocalTarget_DoesNotLeakProjectFieldsIntoLocal(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "log_level": "warn"}`)
+	writeClaudeHooksFixture(t)
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	opts := EnableOptions{UseLocalSettings: true}
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, opts); err != nil {
+		t.Fatalf("setupAgentHooksNonInteractive() error = %v", err)
+	}
+
+	localS, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	if localS.LogLevel != "" {
+		t.Errorf("project-only log_level leaked into local settings: %q", localS.LogLevel)
+	}
+	if !localS.Enabled {
+		t.Error("expected local settings to be enabled")
+	}
+
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load project settings: %v", err)
+	}
+	if projectS.LogLevel != "warn" {
+		t.Errorf("expected project log_level to be preserved, got %q", projectS.LogLevel)
+	}
+}
+
+// TestSetupAgentHooksNonInteractive_RefusesToClobberUnparseableSettings covers
+// the finding that `entire enable --agent` silently wiped a corrupt or
+// newer-versioned target settings file to defaults. settings.LoadFromFile
+// errors on invalid JSON AND on any unknown key (DisallowUnknownFields); the
+// old catch replaced the struct with defaults and wrote it back, so a
+// settings.json with strategy_options/log_level/one-unknown-key became exactly
+// {"enabled": true}. Now it refuses and leaves the file untouched.
+func TestSetupAgentHooksNonInteractive_RefusesToClobberUnparseableSettings(t *testing.T) {
+	setupTestRepo(t)
+	// A settings.json a newer CLI could write: valid JSON, real content, plus a
+	// key this build doesn't recognize (rejected by DisallowUnknownFields).
+	original := `{"enabled": false, "log_level": "debug", "totally_unknown_future_key": 42}`
+	writeSettings(t, original)
+	writeClaudeHooksFixture(t)
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := setupAgentHooksNonInteractive(context.Background(), &buf, ag, EnableOptions{}); err == nil {
+		t.Fatal("expected setupAgentHooksNonInteractive to refuse on an unparseable settings file, got nil error")
+	}
+
+	// The file must be left as-is, not wiped to {"enabled": true}.
+	got, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if !strings.Contains(string(got), "totally_unknown_future_key") {
+		t.Errorf("unknown key must survive (file must not be clobbered), got: %s", got)
+	}
+	if !strings.Contains(string(got), "log_level") {
+		t.Errorf("log_level must survive (file must not be clobbered), got: %s", got)
+	}
+	if strings.Contains(string(got), `"enabled": true`) || strings.Contains(string(got), `"enabled":true`) {
+		t.Errorf("enabled must not have been flipped/rewritten, got: %s", got)
+	}
+}
+
+func TestSetupAgentHooksNonInteractive_InstallsCodexWhenDiscoveryIsUnresolved(t *testing.T) {
+	ag, linkedRoot := setupCodexAgentWithUnresolvedDiscovery(t)
+
+	var output bytes.Buffer
+	if err := setupAgentHooksNonInteractive(t.Context(), &output, ag, EnableOptions{}); err != nil {
+		t.Fatalf("enable Codex with unresolved discovery: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("current-worktree hooks were not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".entire")); err != nil {
+		t.Fatalf("enable did not write project state: %v", err)
+	}
+}
+
+func TestRunEnableInteractive_InstallsCodexWhenDiscoveryIsUnresolved(t *testing.T) {
+	ag, linkedRoot := setupCodexAgentWithUnresolvedDiscovery(t)
+
+	var output bytes.Buffer
+	if err := runEnableInteractive(t.Context(), &output, []agent.Agent{ag}, EnableOptions{Yes: true, Telemetry: true}); err != nil {
+		t.Fatalf("interactive enable Codex with unresolved discovery: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("current-worktree hooks were not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".entire")); err != nil {
+		t.Fatalf("enable did not write project state: %v", err)
+	}
+}
+
+func setupCodexAgentWithUnresolvedDiscovery(t *testing.T) (agent.Agent, string) {
+	t.Helper()
+	tmp := setupTestDir(t)
+	primaryRoot := filepath.Join(tmp, "primary")
+	linkedRoot := filepath.Join(tmp, "linked")
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = testutil.GitIsolatedEnv()
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	testutil.InitRepo(t, primaryRoot)
+	testutil.WriteFile(t, primaryRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, primaryRoot, "README.md")
+	testutil.GitCommit(t, primaryRoot, "initial")
+	runGit(primaryRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	// Codex discovery refuses a project layer that is also CODEX_HOME, while
+	// current-worktree installation remains independently valid.
+	if err := os.MkdirAll(filepath.Join(primaryRoot, ".codex"), 0o750); err != nil {
+		t.Fatalf("create colliding CODEX_HOME: %v", err)
+	}
+	t.Setenv("CODEX_HOME", filepath.Join(primaryRoot, ".codex"))
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	return ag, linkedRoot
 }
 
 func TestRunDisable(t *testing.T) {
@@ -468,10 +955,15 @@ func TestRunDisable_WithProjectFlag(t *testing.T) {
 	}
 }
 
-// TestRunDisable_CreatesLocalSettingsWhenMissing verifies that running
-// `entire disable` without --project creates settings.local.json when it
-// doesn't exist, rather than writing to settings.json.
-func TestRunDisable_CreatesLocalSettingsWhenMissing(t *testing.T) {
+// TestRunDisable_BareCommand_WritesLocalOverrideWhenProjectOnly verifies that a
+// bare `entire disable`, on a repo that only has a committed settings.json (no
+// settings.local.json yet), writes the enabled:false override into
+// settings.local.json and leaves the committed settings.json untouched. Bare
+// disable is a personal, non-destructive silence: because local overrides
+// project in the merged view, it makes IsEnabled false without editing shared
+// team config. Restores origin/main behavior; regression test for the bare
+// disable scope-resolution finding.
+func TestRunDisable_BareCommand_WritesLocalOverrideWhenProjectOnly(t *testing.T) {
 	setupTestDir(t)
 	// Only create project settings (no local settings)
 	writeSettings(t, testSettingsEnabled)
@@ -481,7 +973,7 @@ func TestRunDisable_CreatesLocalSettingsWhenMissing(t *testing.T) {
 		t.Fatalf("runDisable() error = %v", err)
 	}
 
-	// Should be disabled
+	// Should be disabled (local override wins in the merged view).
 	enabled, err := IsEnabled(context.Background())
 	if err != nil {
 		t.Fatalf("IsEnabled(context.Background()) error = %v", err)
@@ -490,36 +982,237 @@ func TestRunDisable_CreatesLocalSettingsWhenMissing(t *testing.T) {
 		t.Error("Entire should be disabled after running disable command")
 	}
 
-	// Local settings file should be created with enabled:false
+	// The local override should be created with enabled:false.
 	localContent, err := os.ReadFile(EntireSettingsLocalFile)
 	if err != nil {
-		t.Fatalf("Local settings file should have been created: %v", err)
+		t.Fatalf("settings.local.json should have been created: %v", err)
 	}
 	if !strings.Contains(string(localContent), `"enabled":false`) && !strings.Contains(string(localContent), `"enabled": false`) {
-		t.Errorf("Local settings should have enabled:false, got: %s", localContent)
+		t.Errorf("local settings should have enabled:false, got: %s", localContent)
 	}
 
-	// Project settings should remain unchanged (still enabled)
+	// The committed project file must be left untouched (still enabled).
 	projectContent, err := os.ReadFile(EntireSettingsFile)
 	if err != nil {
 		t.Fatalf("Failed to read project settings: %v", err)
 	}
 	if !strings.Contains(string(projectContent), `"enabled":true`) && !strings.Contains(string(projectContent), `"enabled": true`) {
-		t.Errorf("Project settings should still have enabled:true, got: %s", projectContent)
+		t.Errorf("committed project settings should stay enabled:true after a bare disable, got: %s", projectContent)
+	}
+}
+
+// TestRunDisable_CreatesSettingsDirWhenMissing verifies that a bare `entire
+// disable` succeeds in a repo that has never created a .entire/ directory,
+// creating settings.local.json (with its parent dir) rather than hard-failing.
+// End-to-end regression test for the saveRaw MkdirAll fix.
+func TestRunDisable_CreatesSettingsDirWhenMissing(t *testing.T) {
+	setupTestDir(t)
+	// No .entire/ directory or settings files at all.
+
+	var stdout bytes.Buffer
+	if err := runDisable(context.Background(), &stdout, false); err != nil {
+		t.Fatalf("runDisable() in a repo with no .entire/ dir should succeed, got: %v", err)
+	}
+
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled(context.Background()) error = %v", err)
+	}
+	if enabled {
+		t.Error("Entire should be disabled after running disable command")
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("settings.local.json should have been created: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":false`) && !strings.Contains(string(localContent), `"enabled": false`) {
+		t.Errorf("local settings should have enabled:false, got: %s", localContent)
+	}
+}
+
+// TestRunDisable_BareCommand_WritesLocalWhenBothExist verifies that a bare
+// `entire disable`, when both settings.json and settings.local.json exist,
+// writes enabled:false into the local override only and leaves the committed
+// settings.json untouched (no field leakage between scopes). Regression test
+// for the bare disable scope-resolution finding.
+func TestRunDisable_BareCommand_WritesLocalWhenBothExist(t *testing.T) {
+	setupTestDir(t)
+	writeSettings(t, `{"enabled": true, "log_level": "warn"}`)
+	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
+
+	var stdout bytes.Buffer
+	if err := runDisable(context.Background(), &stdout, false); err != nil {
+		t.Fatalf("runDisable() error = %v", err)
+	}
+
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if enabled {
+		t.Error("Entire should be disabled after running disable command")
+	}
+
+	// The committed project file must be untouched: still enabled, keeps its
+	// own fields, and never gains the local-only override.
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if !strings.Contains(string(projectContent), `"enabled":true`) && !strings.Contains(string(projectContent), `"enabled": true`) {
+		t.Errorf("committed project settings should stay enabled:true after a bare disable, got: %s", projectContent)
+	}
+	if !strings.Contains(string(projectContent), "log_level") {
+		t.Errorf("project settings should retain its own log_level field, got: %s", projectContent)
+	}
+	if strings.Contains(string(projectContent), "absolute_git_hook_path") {
+		t.Errorf("project settings must not gain local-only override absolute_git_hook_path, got: %s", projectContent)
+	}
+
+	// The local override carries the disable and keeps its own fields.
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":false`) && !strings.Contains(string(localContent), `"enabled": false`) {
+		t.Errorf("local settings should have enabled:false, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local settings should retain its own absolute_git_hook_path field, got: %s", localContent)
+	}
+}
+
+// TestRunDisable_ProjectFlag_WritesCommittedFile verifies that `entire disable
+// --project` flips the committed settings.json and syncs the local override so
+// a stale local file can't leave the repo enabled.
+func TestRunDisable_ProjectFlag_WritesCommittedFile(t *testing.T) {
+	setupTestDir(t)
+	writeSettings(t, `{"enabled": true, "log_level": "warn"}`)
+	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
+
+	var stdout bytes.Buffer
+	if err := runDisable(context.Background(), &stdout, true); err != nil {
+		t.Fatalf("runDisable(project=true) error = %v", err)
+	}
+
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if !strings.Contains(string(projectContent), `"enabled":false`) && !strings.Contains(string(projectContent), `"enabled": false`) {
+		t.Errorf("project settings should have enabled:false, got: %s", projectContent)
+	}
+	if strings.Contains(string(projectContent), "absolute_git_hook_path") {
+		t.Errorf("project settings must not leak local-only override absolute_git_hook_path, got: %s", projectContent)
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":false`) && !strings.Contains(string(localContent), `"enabled": false`) {
+		t.Errorf("local settings should be synced to enabled:false, got: %s", localContent)
+	}
+}
+
+// TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides verifies that
+// `entire enable --project` with a local-only override present (e.g.
+// absolute_git_hook_path, set via settings.local.json) does not write that override into
+// the shared, committed project settings.json — only the enabled flag should
+// change there (runEnable must not round-trip the merged settings view
+// through the project file).
+func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
+	setupTestDir(t)
+	writeSettings(t, testSettingsDisabled)
+	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
+
+	var buf bytes.Buffer
+	if err := runEnable(context.Background(), &buf, true); err != nil {
+		t.Fatalf("runEnable(project=true) error = %v", err)
+	}
+
+	// The merged view is correctly enabled.
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Error("expected enabled after runEnable --project")
+	}
+
+	// The project file must be flipped to enabled, and must NOT gain the
+	// local-only override.
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if !strings.Contains(string(projectContent), `"enabled":true`) && !strings.Contains(string(projectContent), `"enabled": true`) {
+		t.Errorf("project settings should have enabled:true, got: %s", projectContent)
+	}
+	if strings.Contains(string(projectContent), "absolute_git_hook_path") {
+		t.Errorf("project settings must not leak local-only override absolute_git_hook_path, got: %s", projectContent)
+	}
+
+	// The local file's own override must be preserved untouched.
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local settings should still contain absolute_git_hook_path override, got: %s", localContent)
+	}
+}
+
+// TestRunEnable_LocalScope_PreservesLocalOnlyFields verifies that `entire
+// enable` (default, no --project) with an existing local-only override only
+// flips the enabled flag in settings.local.json and leaves the rest of that
+// file's own content (like absolute_git_hook_path) intact.
+func TestRunEnable_LocalScope_PreservesLocalOnlyFields(t *testing.T) {
+	setupTestDir(t)
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
+
+	var buf bytes.Buffer
+	if err := runEnable(context.Background(), &buf, false); err != nil {
+		t.Fatalf("runEnable(project=false) error = %v", err)
+	}
+
+	enabled, err := IsEnabled(context.Background())
+	if err != nil {
+		t.Fatalf("IsEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Error("expected enabled after runEnable")
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to read local settings: %v", err)
+	}
+	if !strings.Contains(string(localContent), `"enabled":true`) && !strings.Contains(string(localContent), `"enabled": true`) {
+		t.Errorf("local settings should have enabled:true, got: %s", localContent)
+	}
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("local settings should still contain absolute_git_hook_path override, got: %s", localContent)
+	}
+
+	// Project settings must be untouched by the local-scope write.
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if strings.Contains(string(projectContent), "absolute_git_hook_path") {
+		t.Errorf("project settings must not gain local-only override absolute_git_hook_path, got: %s", projectContent)
 	}
 }
 
 func TestDetermineSettingsTarget_ExplicitLocalFlag(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create settings.json
-	settingsPath := filepath.Join(tmpDir, paths.SettingsFileName)
-	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
-		t.Fatalf("Failed to create settings file: %v", err)
-	}
+	setupTestRepo(t)
+	writeSettings(t, `{}`)
 
 	// With --local flag, should always use local
-	useLocal, showNotification := determineSettingsTarget(tmpDir, true, false)
+	useLocal, showNotification := determineSettingsTarget(context.Background(), true, false)
 	if !useLocal {
 		t.Error("determineSettingsTarget() should return useLocal=true with --local flag")
 	}
@@ -529,16 +1222,11 @@ func TestDetermineSettingsTarget_ExplicitLocalFlag(t *testing.T) {
 }
 
 func TestDetermineSettingsTarget_ExplicitProjectFlag(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create settings.json
-	settingsPath := filepath.Join(tmpDir, paths.SettingsFileName)
-	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
-		t.Fatalf("Failed to create settings file: %v", err)
-	}
+	setupTestRepo(t)
+	writeSettings(t, `{}`)
 
 	// With --project flag, should always use project
-	useLocal, showNotification := determineSettingsTarget(tmpDir, false, true)
+	useLocal, showNotification := determineSettingsTarget(context.Background(), false, true)
 	if useLocal {
 		t.Error("determineSettingsTarget() should return useLocal=false with --project flag")
 	}
@@ -548,16 +1236,11 @@ func TestDetermineSettingsTarget_ExplicitProjectFlag(t *testing.T) {
 }
 
 func TestDetermineSettingsTarget_SettingsExists_NoFlags(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create settings.json
-	settingsPath := filepath.Join(tmpDir, paths.SettingsFileName)
-	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
-		t.Fatalf("Failed to create settings file: %v", err)
-	}
+	setupTestRepo(t)
+	writeSettings(t, `{}`)
 
 	// Without flags, should auto-redirect to local with notification
-	useLocal, showNotification := determineSettingsTarget(tmpDir, false, false)
+	useLocal, showNotification := determineSettingsTarget(context.Background(), false, false)
 	if !useLocal {
 		t.Error("determineSettingsTarget() should return useLocal=true when settings.json exists")
 	}
@@ -567,12 +1250,12 @@ func TestDetermineSettingsTarget_SettingsExists_NoFlags(t *testing.T) {
 }
 
 func TestDetermineSettingsTarget_SettingsNotExists_NoFlags(t *testing.T) {
-	tmpDir := t.TempDir()
+	setupTestRepo(t)
 
 	// No settings.json exists
 
 	// Should use project settings (create new)
-	useLocal, showNotification := determineSettingsTarget(tmpDir, false, false)
+	useLocal, showNotification := determineSettingsTarget(context.Background(), false, false)
 	if useLocal {
 		t.Error("determineSettingsTarget() should return useLocal=false when settings.json doesn't exist")
 	}
@@ -622,7 +1305,7 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "uninstalled successfully") {
+	if !strings.Contains(output, "has been removed from this repository") {
 		t.Errorf("Expected success message, got: %s", output)
 	}
 }
@@ -634,7 +1317,7 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 	writeSettings(t, testSettingsEnabled)
 
 	// Install git hooks
-	if _, err := strategy.InstallGitHook(context.Background(), true, false, false); err != nil {
+	if _, err := strategy.InstallGitHook(context.Background(), true, false); err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 
@@ -657,6 +1340,788 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "Removed git hooks") {
 		t.Errorf("Expected output to mention removed git hooks, got: %s", output)
+	}
+}
+
+// installExternalAgentPluginForUninstall prepares a repo whose $PATH carries a
+// mock external agent plugin reporting its hooks as installed, with
+// external_agents enabled — the state `entire agent add <plugin>` leaves behind,
+// and the only state in which uninstall has an external agent to deal with.
+//
+// setupTestRepo scrubs $PATH down to git and sh, so a real entire-agent-* binary
+// on the developer's machine cannot leak in.
+func installExternalAgentPluginForUninstall(t *testing.T, agentName string, hooksInstalled bool) {
+	t.Helper()
+
+	// The mock is a #!/bin/sh script.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	// external_agents goes in the local file — the only layer the loader
+	// honors it from, since it grants execution of entire-agent-* binaries.
+	writeLocalSettings(t, `{"external_agents":true}`)
+
+	externalDir := t.TempDir()
+	writeExternalAgentBinaryEx(t, externalDir, agentName, hooksInstalled)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestRunUninstall_RemovesExternalAgentHooks pins that `entire disable
+// --uninstall` actually uninstalls an external agent's hooks. The uninstall
+// path reaches the plugin only through the registry, so without discovery the
+// plugin is invisible: its UninstallHooks is never called and its hooks survive
+// an uninstall that reports success.
+func TestRunUninstall_RemovesExternalAgentHooks(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		t.Fatalf("reading exec log: %v (uninstall never executed the plugin)", err)
+	}
+	if !strings.Contains(string(data), "uninstall-hooks") {
+		t.Errorf("uninstall must invoke the external plugin's uninstall-hooks, exec log:\n%s\nstdout:\n%s", data, stdout.String())
+	}
+	// Every are-hooks-installed is a subprocess. One uninstall needs one answer:
+	// the confirmation summary's detection is reused for the removal decision.
+	if got := strings.Count(string(data), "are-hooks-installed"); got != 1 {
+		t.Errorf("plugin queried for installed hooks %d times, want 1, exec log:\n%s", got, data)
+	}
+}
+
+// TestRunUninstall_SummaryNamesExternalAgent pins the other half: the
+// confirmation summary must name the external agent whose hooks are about to be
+// removed, or the user approves an uninstall whose scope they cannot see.
+func TestRunUninstall_SummaryNamesExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-summary-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+
+	// force=false prints the summary, then stops at the no-terminal guard: a
+	// `go test` run never counts as interactive. Asserting that specific stop
+	// keeps the test from passing on an early return that never reached the
+	// summary at all.
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, false)
+	if err == nil {
+		t.Fatalf("expected the no-terminal confirmation guard to stop the uninstall, stdout:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Re-run with --force") {
+		t.Errorf("expected the guard to point at --force, stderr:\n%s", stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "agent hooks") {
+		t.Fatalf("expected the summary to list agent hooks, got:\n%s", out)
+	}
+	if !strings.Contains(out, agentName) {
+		t.Errorf("summary must name the external agent %q whose hooks will be removed, got:\n%s", agentName, out)
+	}
+}
+
+// TestRunUninstall_SkipsUnenabledExternalAgent pins that uninstall leaves a
+// plugin alone when it reports no hooks installed. Discovery registers every
+// entire-agent-* binary on $PATH, not just the one `entire agent add` chose, so
+// calling the mutating uninstall-hooks on all of them runs a write command
+// against plugins the user never enabled.
+func TestRunUninstall_SkipsUnenabledExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unenabled-test"
+	installExternalAgentPluginForUninstall(t, agentName, false)
+
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	// A missing log is a pass: it means the plugin was never executed at all.
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		return
+	}
+	if strings.Contains(string(data), "uninstall-hooks") {
+		t.Errorf("uninstall must not invoke uninstall-hooks on a plugin reporting no hooks installed, exec log:\n%s", data)
+	}
+}
+
+// TestRunUninstall_ReportsUnremovedExternalAgentHooks pins the failure path
+// for a plugin whose uninstall-hooks fails: the run exits non-zero with a
+// did-not-complete verdict, and the hooks left behind are named with both
+// remedies — re-running the uninstall (discovery is ungated, so a re-run
+// reaches the plugin again) and the run-by-hand plugin command, since the
+// plugin binary itself may be what is broken.
+func TestRunUninstall_ReportsUnremovedExternalAgentHooks(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-failure-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "1")
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("a plugin failure must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (warnings are already printed), got %T: %v", err, err)
+	}
+
+	assertLeftoverPluginReported(t, stderr.String(), agentName, "hooks are still installed")
+	if !strings.Contains(stderr.String(), "entire disable --uninstall") {
+		t.Errorf("stderr must also point at re-running the uninstall, got:\n%s", stderr.String())
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("uninstall must not report success when a plugin's hooks were not removed, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_EntireDirRemovalFailureFailsTheCommand pins the exit-code
+// policy on Entire's own removal steps: a failure in one of them — here
+// .entire/ — fails the command. The directory is made unremovable by denying
+// writes on a subdirectory, so os.RemoveAll cannot unlink its child.
+func TestRunUninstall_EntireDirRemovalFailureFailsTheCommand(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd.
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("permission-based removal failure is not portable to Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+	locked := filepath.Join(paths.EntireDir, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+	// Restore before t.TempDir's own cleanup, which fails the test if it cannot
+	// delete the tree.
+	t.Cleanup(func() {
+		if err := os.Chmod(locked, 0o755); err != nil {
+			t.Logf("restoring permissions: %v", err)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("a failed .entire removal must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
+	}
+
+	if !strings.Contains(stderr.String(), "failed to remove .entire directory") {
+		t.Errorf("the failure must be warned about on stderr, got:\n%s", stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("uninstall must not report success when its own step failed, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_HalfUninstallRecoversOnRerun pins that a half-completed
+// uninstall converges to a clean one. Three steps fail on the first run —
+// agent hooks (unreadable config), git hooks and .entire/ (write-denied
+// directories) — each printing its own warning while the others still do
+// their work. Once the causes are fixed, a re-run removes exactly what
+// survived and reports success.
+func TestRunUninstall_HalfUninstallRecoversOnRerun(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and file permissions.
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("permission-based failures are not portable to Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	// Real Claude Code hooks, made unreadable so the sweep cannot check them.
+	claudeSettings := filepath.Join(".claude", "settings.json")
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	hookJSON := `{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"entire hooks claude-code stop"}]}]}}`
+	if err := os.WriteFile(claudeSettings, []byte(hookJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(claudeSettings, 0o000); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	// Real git hooks, in a directory that denies their removal.
+	if _, err := strategy.InstallGitHook(context.Background(), true, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	hooksDir := filepath.Join(".git", "hooks")
+	if err := os.Chmod(hooksDir, 0o555); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	// .entire/ with a write-denied subdirectory so RemoveAll cannot clear it.
+	locked := filepath.Join(paths.EntireDir, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	// Safety net for early t.Fatal: t.TempDir's cleanup fails the test if it
+	// cannot delete the tree.
+	t.Cleanup(func() {
+		for path, mode := range map[string]os.FileMode{claudeSettings: 0o600, hooksDir: 0o755, locked: 0o755} {
+			// A path the re-run already removed is the expected end state.
+			if err := os.Chmod(path, mode); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Logf("restoring permissions on %s: %v", path, err)
+			}
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("first run must fail while three steps cannot finish, stdout:\n%s", stdout.String())
+	}
+	errOut := stderr.String()
+	for _, want := range []string{
+		"could not check whether Claude Code hooks are installed",
+		"failed to remove git hooks",
+		"failed to remove .entire directory",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("first run must warn %q, stderr:\n%s", want, errOut)
+		}
+	}
+	if !strings.Contains(stdout.String(), "did not complete") {
+		t.Errorf("first run must close with did-not-complete, stdout:\n%s", stdout.String())
+	}
+
+	// Fix all three causes; the re-run should finish the job.
+	for path, mode := range map[string]os.FileMode{claudeSettings: 0o600, hooksDir: 0o755, locked: 0o755} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatalf("Chmod(%s) error = %v", path, err)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("re-run error = %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "has been removed from this repository") {
+		t.Errorf("re-run must complete the uninstall, stdout:\n%s", stdout.String())
+	}
+
+	// Nothing of Entire's survives.
+	data, err := os.ReadFile(claudeSettings)
+	if err != nil {
+		t.Fatalf("reading claude settings: %v", err)
+	}
+	if strings.Contains(string(data), "entire hooks") {
+		t.Errorf("claude settings must no longer carry Entire hooks, got:\n%s", data)
+	}
+	if strategy.IsGitHookInstalled(context.Background()) {
+		t.Error("git hooks must be removed by the re-run")
+	}
+	if checkEntireDirExists(context.Background()) {
+		t.Error(".entire/ must be removed by the re-run")
+	}
+}
+
+// TestRunUninstall_RerunAfterPluginFailureFinishesTheJob pins that the
+// uninstall is re-runnable after a plugin failure. The first run deletes
+// .entire/ — and with it the external_agents setting that normally gates
+// discovery — so only uninstall's ungated discovery lets the re-run still see
+// the plugin, retry its uninstall-hooks, and finish the job.
+func TestRunUninstall_RerunAfterPluginFailureFinishesTheJob(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-rerun-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "1")
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err == nil {
+		t.Fatalf("first run: a plugin failure must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	if checkEntireDirExists(context.Background()) {
+		t.Fatal("the .entire/ step is isolated from the plugin failure and must still remove the directory")
+	}
+
+	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "")
+	stdout.Reset()
+	stderr.Reset()
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("re-run error = %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "has been removed from this repository") {
+		t.Errorf("re-run must reach the plugin without the external_agents gate and complete the uninstall, stdout:\n%s", stdout.String())
+	}
+}
+
+// TestRunUninstall_UncheckableExternalAgentReported pins the plugin that cannot
+// say whether its hooks are installed. Its hooks are not removed — asking a
+// plugin that cannot answer to mutate state is not ours to do — so the run must
+// say so, name the plugin, and hand over a command the user can run. .entire/ is
+// about to go, and with it the setting that makes the plugin discoverable, so
+// this run is the only place that can be said. An unknown state is a problem
+// too: the run must not report success while a plugin's hooks are in doubt,
+// so it exits non-zero.
+func TestRunUninstall_UncheckableExternalAgentReported(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unprobeable-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "fail")
+
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("an unprobeable plugin must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError, got %T: %v", err, err)
+	}
+	if !strings.Contains(stdout.String(), "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", stdout.String())
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "could not check whether") {
+		t.Errorf("stderr must say the plugin could not be checked, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "mock probe failure") {
+		t.Errorf("stderr must carry the probe's own error, got:\n%s", errOut)
+	}
+	assertLeftoverPluginReported(t, errOut, agentName, "hooks may still be installed")
+
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		t.Fatalf("reading exec log: %v", err)
+	}
+	if strings.Contains(string(data), "uninstall-hooks") {
+		t.Errorf("a plugin that could not be asked must not be told to uninstall, exec log:\n%s", data)
+	}
+	// Still one question per uninstall, even when the answer never arrives.
+	if got := strings.Count(string(data), "are-hooks-installed"); got != 1 {
+		t.Errorf("plugin queried for installed hooks %d times, want 1, exec log:\n%s", got, data)
+	}
+}
+
+// TestRunUninstall_UncheckableExternalAgentGarbageJSON pins that a plugin
+// printing junk is classified the same as one that crashes. Both mean we do not
+// know, and only a clean answer means there is nothing to remove.
+func TestRunUninstall_UncheckableExternalAgentGarbageJSON(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-garbage-probe-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "garbage")
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err == nil {
+		t.Fatalf("a plugin printing junk must fail the uninstall like one that crashes, stdout:\n%s", stdout.String())
+	}
+
+	if !strings.Contains(stderr.String(), "could not check whether") {
+		t.Errorf("malformed JSON must be reported as unchecked, not treated as no hooks, stderr:\n%s", stderr.String())
+	}
+}
+
+// TestRunUninstall_SummaryNamesUncheckableExternalAgent pins that the user
+// approving the uninstall is told the plugin's state is unknown, on its own line:
+// listing it as having hooks installed would assert the thing we could not find
+// out, and omitting it hides part of the scope they are approving.
+func TestRunUninstall_SummaryNamesUncheckableExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unprobeable-summary-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "fail")
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, false); err == nil {
+		t.Fatalf("expected the no-terminal confirmation guard to stop the uninstall, stdout:\n%s", stdout.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "could not be checked") {
+		t.Fatalf("summary must list the plugin as unchecked, got:\n%s", out)
+	}
+	if !strings.Contains(out, agentName) {
+		t.Errorf("summary must name the plugin %q, got:\n%s", agentName, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "agent hooks") && strings.Contains(line, agentName) {
+			t.Errorf("an unchecked plugin must not be listed as having hooks installed, got:\n%s", out)
+		}
+	}
+}
+
+// TestGetAgentHookState_CancelledContextIsNotAPluginFault pins that our own
+// cancellation is not reported as a plugin that could not answer. Every plugin on
+// $PATH answers over a subprocess, so one Ctrl-C would otherwise diagnose all of
+// them at once. Driven at the sweep rather than through runUninstall, which bails
+// on a dead context long before it classifies anything.
+func TestGetAgentHookState_CancelledContextIsNotAPluginFault(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-hook-state-cancelled-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	external.DiscoverAndRegister(context.Background())
+
+	// Registered under a live context, probed under a dead one: the probe fails
+	// for a reason that has nothing to do with the plugin.
+	live := getAgentHookState(context.Background())
+	if len(live.installed) == 0 {
+		t.Fatalf("plugin was not registered, so the cancelled case below would prove nothing")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	state := getAgentHookState(ctx)
+	if len(state.unchecked) != 0 {
+		t.Errorf("cancellation must not be charged to the plugin, got unchecked = %v", state.uncheckedNames())
+	}
+}
+
+// TestPluginUninstallCommand_PerOS pins the recovery command's shape on both
+// shell families. It is printed when it is the user's last chance to remove a
+// plugin's hooks, so it must run in the shell they actually have: the POSIX
+// `cd x && VAR=y bin` form is a syntax error in PowerShell, and would hand a
+// Windows user a command that cannot run.
+func TestPluginUninstallCommand_PerOS(t *testing.T) {
+	t.Parallel()
+
+	const name = types.AgentName("ext-cmd-test")
+
+	posix := pluginUninstallCommandFor("linux", "/My Repo/it's here", name)
+	wantPosix := `cd '/My Repo/it'\''s here' && ENTIRE_REPO_ROOT='/My Repo/it'\''s here' ` +
+		fmt.Sprintf("ENTIRE_PROTOCOL_VERSION=%d entire-agent-%s uninstall-hooks", external.ProtocolVersion, name)
+	if posix != wantPosix {
+		t.Errorf("posix command =\n%s\nwant\n%s", posix, wantPosix)
+	}
+
+	win := pluginUninstallCommandFor("windows", `C:\My Repo\it's here`, name)
+	wantWin := `cd 'C:\My Repo\it''s here'; $env:ENTIRE_REPO_ROOT = 'C:\My Repo\it''s here'; ` +
+		fmt.Sprintf("$env:ENTIRE_PROTOCOL_VERSION = '%d'; entire-agent-%s uninstall-hooks", external.ProtocolVersion, name)
+	if win != wantWin {
+		t.Errorf("windows command =\n%s\nwant\n%s", win, wantWin)
+	}
+}
+
+// assertLeftoverPluginReported checks the shape every leftover-hooks report
+// shares on stderr: the plugin named, what state its hooks are in, and a
+// runnable recovery command. The closing stdout verdict is each caller's own
+// assertion.
+func assertLeftoverPluginReported(t *testing.T, stderr, agentName, lead string) {
+	t.Helper()
+
+	if !strings.Contains(stderr, agentName) {
+		t.Errorf("stderr must name the plugin whose hooks may survive, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, lead) {
+		t.Errorf("stderr must say %q, got:\n%s", lead, stderr)
+	}
+	if !strings.Contains(stderr, "entire-agent-"+agentName+" uninstall-hooks") {
+		t.Errorf("stderr must say how to remove the hooks, got:\n%s", stderr)
+	}
+	// The protocol guarantees every subcommand these, so a bare invocation is a
+	// command a conforming plugin may reject — useless as the user's last resort.
+	for _, want := range []string{"ENTIRE_REPO_ROOT=", "ENTIRE_PROTOCOL_VERSION="} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("recovery command must carry %s, got:\n%s", want, stderr)
+		}
+	}
+}
+
+// fakeBuiltinHookAgent is a built-in (non-external) hook-supporting agent whose
+// UninstallHooks is observable. It embeds vogon so the Agent surface stays
+// whatever the interface requires, and overrides only what these tests turn on.
+type fakeBuiltinHookAgent struct {
+	*vogon.Agent
+
+	name           types.AgentName
+	installed      bool
+	uninstallCalls *int
+	uninstallErr   error
+	checkErr       error
+}
+
+func (f *fakeBuiltinHookAgent) Name() types.AgentName { return f.name }
+func (f *fakeBuiltinHookAgent) Type() types.AgentType { return types.AgentType(f.name) }
+
+// AreHooksInstalled reports the configured answer: installed for tests about a
+// detected built-in whose removal then fails, checkErr for tests about a
+// built-in that could not read its own config, and a plain false for tests
+// about a built-in the installed-hooks sweep did not pick up.
+func (f *fakeBuiltinHookAgent) AreHooksInstalled(context.Context) (bool, error) {
+	return f.installed, f.checkErr
+}
+
+func (f *fakeBuiltinHookAgent) UninstallHooks(context.Context) error {
+	*f.uninstallCalls++
+	return f.uninstallErr
+}
+
+// registerFakeBuiltinHookAgent registers a built-in hook-supporting agent whose
+// hooks report as not installed, and returns its UninstallHooks call count.
+func registerFakeBuiltinHookAgent(t *testing.T, name types.AgentName, uninstallErr error) *int {
+	t.Helper()
+	return registerFakeBuiltinHookAgentEx(t, name, false, uninstallErr, nil)
+}
+
+func registerFakeBuiltinHookAgentEx(t *testing.T, name types.AgentName, installed bool, uninstallErr, checkErr error) *int {
+	t.Helper()
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+
+	calls := 0
+	agent.Register(name, func() agent.Agent {
+		return &fakeBuiltinHookAgent{
+			Agent:          &vogon.Agent{},
+			name:           name,
+			installed:      installed,
+			uninstallCalls: &calls,
+			uninstallErr:   uninstallErr,
+			checkErr:       checkErr,
+		}
+	})
+	return &calls
+}
+
+// TestRunUninstall_BuiltinNotDetectedIsLeftAlone pins that uninstall acts on
+// exactly the sweep's answer: an agent that cleanly reported no hooks is in
+// neither the installed nor the unchecked set, so its UninstallHooks is never
+// called — the removal worklist is what the confirmation summary showed, not
+// the whole registry.
+func TestRunUninstall_BuiltinNotDetectedIsLeftAlone(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	calls := registerFakeBuiltinHookAgent(t, "fake-builtin-undetected", nil)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	if *calls != 0 {
+		t.Errorf("a built-in that cleanly reported no hooks must not have UninstallHooks called, stdout:\n%s", stdout.String())
+	}
+}
+
+// TestRunUninstall_BuiltinHookFailureFailsTheCommand pins that a built-in whose
+// removal failed fails the uninstall. A built-in is Entire's own code: its
+// removal failing means the uninstall did not do its job, and a success
+// verdict would assert the opposite of the warning just printed.
+func TestRunUninstall_BuiltinHookFailureFailsTheCommand(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-failing"
+	registerFakeBuiltinHookAgentEx(t, agentName, true, errors.New("mock builtin uninstall failure"), nil)
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("a built-in hook removal failure must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "failed to remove agent hooks") || !strings.Contains(errOut, string(agentName)) {
+		t.Errorf("the failure must be warned about on stderr, naming the agent, got:\n%s", errOut)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("uninstall must not report success when a built-in's hooks were not removed, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_UncheckableBuiltinFailsTheCommand pins the built-in that
+// could not read its own config, e.g. a malformed or unreadable hooks.json.
+// The reason is reported, no removal is attempted (an unverifiable check means
+// the removal would read the same broken file), and no plugin command is
+// offered — but the command must not report success, and the exit code has to
+// say so.
+func TestRunUninstall_UncheckableBuiltinFailsTheCommand(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-unreadable"
+	calls := registerFakeBuiltinHookAgentEx(t, agentName, false, nil, errors.New("parse hooks.json: unexpected end of input"))
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("an unchecked built-in must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "could not check whether") || !strings.Contains(errOut, "parse hooks.json") {
+		t.Errorf("the reason must be reported, stderr:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "entire-agent-"+string(agentName)) {
+		t.Errorf("a built-in must not be handed a plugin command, stderr:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "may or may not remain") || !strings.Contains(errOut, string(agentName)) {
+		t.Errorf("the warning must name the unverified agent, stderr:\n%s", errOut)
+	}
+	if *calls != 0 {
+		t.Error("a built-in whose check failed must not be asked to uninstall")
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("uninstall must not report success while a built-in's hooks are unverified, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_UncheckedBuiltinAloneIsNotNotInstalled pins the second run
+// of the unreadable-config repro: everything else already removed, the only
+// trace left is a built-in whose config cannot be read. "Not installed" would
+// assert the one thing the failed check makes unknowable, and would return
+// before the warning that surfaces the reason.
+func TestRunUninstall_UncheckedBuiltinAloneIsNotNotInstalled(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-unreadable-only"
+	registerFakeBuiltinHookAgentEx(t, agentName, false, nil, errors.New("read settings.json: permission denied"))
+	// The helper writes .entire/settings.json; remove it so the unchecked
+	// built-in is the only thing left, as after a first partial uninstall.
+	if err := os.RemoveAll(paths.EntireDir); err != nil {
+		t.Fatalf("removing .entire: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("an unchecked built-in as the only leftover must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "not installed in this repository") {
+		t.Errorf("must not claim Entire is not installed when a built-in could not be checked, stdout:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "permission denied") {
+		t.Errorf("the unreadable-config reason must reach the user, stderr:\n%s", stderr.String())
+	}
+}
+
+// cancellingHookAgent is a built-in whose UninstallHooks cancels the run's
+// context before returning, simulating Ctrl-C arriving mid-removal.
+type cancellingHookAgent struct {
+	*fakeBuiltinHookAgent
+
+	cancel context.CancelFunc
+}
+
+func (c *cancellingHookAgent) UninstallHooks(ctx context.Context) error {
+	*c.uninstallCalls++
+	c.cancel()
+	return ctx.Err()
+}
+
+// TestRunUninstall_CancellationIsNotAnAgentFault pins that a ctx cancelled
+// mid-removal (Ctrl-C) is reported as an interruption, not charged to the
+// agent whose removal it killed: no failure warning naming the agent, no
+// recovery command asserting its hooks are still installed — just the
+// interruption notice and a did-not-complete verdict, since a re-run finishes
+// the job.
+func TestRunUninstall_CancellationIsNotAnAgentFault(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-cancelling"
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	agent.Register(agentName, func() agent.Agent {
+		return &cancellingHookAgent{
+			fakeBuiltinHookAgent: &fakeBuiltinHookAgent{
+				Agent:          &vogon.Agent{},
+				name:           agentName,
+				installed:      true,
+				uninstallCalls: &calls,
+			},
+			cancel: cancel,
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(ctx, &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("an interrupted uninstall must not report success, stdout:\n%s", stdout.String())
+	}
+	if calls != 1 {
+		t.Errorf("UninstallHooks calls = %d, want 1", calls)
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "interrupted while removing agent hooks") {
+		t.Errorf("stderr must report the interruption, got:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "failed to remove agent hooks") {
+		t.Errorf("cancellation must not be reported as an agent failure, stderr:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "uninstall-hooks") {
+		t.Errorf("cancellation must not print a plugin recovery command, stderr:\n%s", errOut)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("an interrupted uninstall must not close with the success verdict, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
 	}
 }
 
@@ -1012,6 +2477,174 @@ func TestEnableCmd_AgentFlagEmptyValue(t *testing.T) {
 	}
 }
 
+func TestEnableCmd_ExistingRepoRepairsGitIdentityFromEntire(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	repoDir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	clearLocalGitIdentity(t, repoDir)
+
+	resolveCalls := 0
+	cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+		return func(context.Context) (*authProfile, error) {
+			resolveCalls++
+			return &authProfile{DisplayName: "Octo Cat", Handle: "octo", Provider: "github", ProviderUserID: "42"}, nil
+		}
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable existing repo: %v", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("profile resolver calls = %d, want 1", resolveCalls)
+	}
+	if got, ok := localGitConfig(t, repoDir, "user.name"); !ok || got != "Octo Cat" {
+		t.Fatalf("local user.name = %q, configured %v", got, ok)
+	}
+	if got, ok := localGitConfig(t, repoDir, "user.email"); !ok || got != "42+octo@users.noreply.github.com" {
+		t.Fatalf("local user.email = %q, configured %v", got, ok)
+	}
+}
+
+func TestEnableCmd_IdentityPreflightOrdering(t *testing.T) {
+	tests := []struct {
+		name        string
+		newRepo     bool
+		args        []string
+		wantResolve int
+		wantErrText string
+	}{
+		{name: "invalid agent fails before identity", args: []string{"--agent", "definitely-not-an-agent"}, wantErrText: "wrong agent name"},
+		{
+			name:        "new repo skip initial commit does not need identity",
+			newRepo:     true,
+			args:        []string{"--init-repo", "--skip-initial-commit", "--agent", "claude-code"},
+			wantResolve: 0,
+		},
+		{name: "existing repo validates agent then resolves identity", args: []string{"--agent", "claude-code"}, wantResolve: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			if tt.newRepo {
+				setupTestDir(t)
+			} else {
+				repoDir := setupTestRepo(t)
+				clearLocalGitIdentity(t, repoDir)
+			}
+			resolveCalls := 0
+			cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+				return func(context.Context) (*authProfile, error) {
+					resolveCalls++
+					return &authProfile{DisplayName: "Entire User", Email: "entire@example.com"}, nil
+				}
+			})
+			var stderr bytes.Buffer
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(tt.args)
+			err := cmd.Execute()
+			if tt.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Fatalf("error = %v, stderr = %q, want %q", err, stderr.String(), tt.wantErrText)
+				}
+			} else if err != nil {
+				t.Fatalf("enable: %v; stderr=%s", err, stderr.String())
+			}
+			if resolveCalls != tt.wantResolve {
+				t.Fatalf("profile resolver calls = %d, want %d", resolveCalls, tt.wantResolve)
+			}
+		})
+	}
+}
+
+func TestEnableCmd_IdentityFailureLeavesSetupAbsent(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	repoDir := setupTestRepo(t)
+	clearLocalGitIdentity(t, repoDir)
+
+	cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+		return func(context.Context) (*authProfile, error) { return nil, errors.New("profile unavailable") }
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--agent", "claude-code"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "profile unavailable") {
+		t.Fatalf("error = %v, want profile failure", err)
+	}
+	for _, path := range []string{
+		EntireSettingsFile,
+		EntireSettingsLocalFile,
+		filepath.Join(paths.EntireDir, "logs"),
+		filepath.Join(".claude", "settings.json"),
+	} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("setup artifact %s exists or could not be checked: %v", path, statErr)
+		}
+	}
+}
+
+func TestRunManageAgents_PreflightFollowsSelection(t *testing.T) {
+	setupTestRepo(t)
+	events := make([]string, 0, 2)
+	selectFn := func(available []string) ([]string, error) {
+		events = append(events, "select")
+		if len(available) == 0 {
+			return nil, errors.New("no available agents")
+		}
+		return []string{available[0]}, nil
+	}
+	preflight := func() error {
+		events = append(events, "identity")
+		return errors.New("stop before apply")
+	}
+	err := runManageAgentsWithPreflight(t.Context(), io.Discard, EnableOptions{}, selectFn, preflight)
+	if err == nil || !strings.Contains(err.Error(), "stop before apply") {
+		t.Fatalf("error = %v, want preflight error", err)
+	}
+	if got := strings.Join(events, " -> "); got != "select -> identity" {
+		t.Fatalf("events = %q, want selection before identity", got)
+	}
+}
+
+func TestEnableCmd_IdentityFailurePreservesConfiguredSettings(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "direct settings flow", args: []string{"--checkpoint-backend", "git-refs"}},
+		{name: "noninteractive agent-management fallback", args: []string{"--telemetry=false"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			repoDir := setupTestRepo(t)
+			clearLocalGitIdentity(t, repoDir)
+			original := `{"enabled":true,"strategy":"manual-commit","strategy_options":{"push_sessions":true}}`
+			writeSettings(t, original)
+
+			cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+				return func(context.Context) (*authProfile, error) { return nil, errors.New("profile unavailable") }
+			})
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs(tt.args)
+			if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "profile unavailable") {
+				t.Fatalf("error = %v, want profile failure", err)
+			}
+			raw, err := os.ReadFile(EntireSettingsFile)
+			if err != nil {
+				t.Fatalf("read settings: %v", err)
+			}
+			if string(raw) != original {
+				t.Fatalf("settings changed on identity failure:\n got: %s\nwant: %s", raw, original)
+			}
+		})
+	}
+}
+
 func TestEnableUsesSetupFlow(t *testing.T) {
 	t.Parallel()
 
@@ -1025,11 +2658,11 @@ func TestEnableUsesSetupFlow(t *testing.T) {
 		{name: "project only", args: []string{"--project"}, want: false},
 		{name: "local only", args: []string{"--local"}, want: false},
 		{name: "force", args: []string{"--force"}, want: true},
-		{name: "local dev", args: []string{"--local-dev"}, want: true},
 		{name: "absolute hook path", args: []string{"--absolute-git-hook-path"}, want: true},
 		{name: "telemetry changed", args: []string{"--telemetry=false"}, want: true},
 		{name: "checkpoint remote", args: []string{"--checkpoint-remote", "github:org/repo"}, want: true},
 		{name: "skip push sessions", args: []string{"--skip-push-sessions"}, want: true},
+		{name: "search skill", args: []string{"--search-skill"}, want: true},
 		{name: "agent flag", args: []string{"--agent", "claude-code"}, agentName: "claude-code", want: true},
 		{name: "yes flag", args: []string{"--yes"}, want: true},
 		{name: "yes short flag", args: []string{"-y"}, want: true},
@@ -1163,6 +2796,35 @@ func TestEnableCmd_ForceAndStrategyFlagsOnConfiguredDisabledRepo_ReenablesAndUpd
 	}
 }
 
+// Regression: `entire enable --checkpoint-remote ...` (no --project)
+// on a repo disabled at the project level must re-enable the project
+// settings.json, not write the enabled flag to a shadow settings.local.json —
+// which left the file the user disabled still enabled=false.
+func TestEnableCmd_StrategyFlagsOnDisabledProjectRepo_EnablesProjectFile(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsDisabled) // settings.json: {"enabled": false}
+	writeClaudeHooksFixture(t)
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--checkpoint-remote", "github:org/repo", "--skip-push-sessions"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable error = %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	// The project file the user disabled must be enabled again.
+	projectS, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("load project settings: %v", err)
+	}
+	if !projectS.Enabled {
+		t.Errorf("settings.json still enabled=false after enable; the enabled flag went to the wrong file")
+	}
+}
+
 // Tests for detectOrSelectAgent
 
 func TestDetectOrSelectAgent_AgentDetected(t *testing.T) {
@@ -1174,6 +2836,9 @@ func TestDetectOrSelectAgent_AgentDetected(t *testing.T) {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
 
+	// No TTY here, so this exercises the non-interactive fallback: the single
+	// detected agent is used without a picker. The interactive path pre-selects
+	// it in the multi-select instead (see FirstRun_SingleBuiltIn test below).
 	var buf bytes.Buffer
 	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
 	if err != nil {
@@ -1197,13 +2862,13 @@ func TestDetectOrSelectAgent_AgentDetected(t *testing.T) {
 	}
 }
 
-func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
+func TestDetectOrSelectAgent_CursorDetected(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)
 
-	// Create .gemini directory so Gemini agent is detected
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	// Create .cursor directory so Cursor agent is detected
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -1212,17 +2877,69 @@ func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
 		t.Fatalf("detectOrSelectAgent() error = %v", err)
 	}
 
-	// Should detect Gemini
+	// Should detect Cursor
 	if len(agents) != 1 {
 		t.Fatalf("detectOrSelectAgent() returned %d agents, want 1", len(agents))
 	}
-	if agents[0].Name() != agent.AgentNameGemini {
-		t.Errorf("detectOrSelectAgent() agent name = %v, want %v", agents[0].Name(), agent.AgentNameGemini)
+	if agents[0].Name() != agent.AgentNameCursor {
+		t.Errorf("detectOrSelectAgent() agent name = %v, want %v", agents[0].Name(), agent.AgentNameCursor)
 	}
 
 	output := buf.String()
 	if !strings.Contains(output, "Detected agent:") {
 		t.Errorf("Expected output to contain 'Detected agent:', got: %s", output)
+	}
+}
+
+func TestDetectOrSelectAgent_FirstRun_SingleBuiltIn_ShowsPickerPreSelected(t *testing.T) {
+	// Not parallel: uses t.Chdir/t.Setenv and swaps the package-level
+	// promptAgentSelection seam.
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	// Create .claude directory so exactly one built-in agent (Claude Code) is detected.
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("Failed to create .claude directory: %v", err)
+	}
+
+	// First run: no hooks installed yet.
+	if installed := GetAgentsWithHooksInstalled(context.Background()); len(installed) != 0 {
+		t.Fatalf("Expected no installed hooks on first run, got %v", installed)
+	}
+
+	// Stub the real picker so we can assert it is shown (rather than the agent
+	// being auto-used) and inspect which options it was given. Driving the
+	// selectFn == nil path is what makes this a real regression guard: the old
+	// shortcut returned early precisely when selectFn == nil, so a test that
+	// injected a selectFn would have passed even before the fix.
+	prev := promptAgentSelection
+	t.Cleanup(func() { promptAgentSelection = prev })
+	var offered []string
+	var shown bool
+	promptAgentSelection = func(options []huh.Option[string]) ([]string, error) {
+		shown = true
+		for _, o := range options {
+			offered = append(offered, o.Value)
+		}
+		return []string{string(agent.AgentNameClaudeCode)}, nil
+	}
+
+	var buf bytes.Buffer
+	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
+	if err != nil {
+		t.Fatalf("detectOrSelectAgent() error = %v", err)
+	}
+
+	// A lone detected built-in agent must no longer be auto-used: the picker
+	// must be shown so the user can confirm it or add more.
+	if !shown {
+		t.Fatal("Expected the picker to be shown for a single detected agent, but it was auto-used")
+	}
+	if !slices.Contains(offered, string(agent.AgentNameClaudeCode)) {
+		t.Errorf("Expected the detected agent among the picker options, got %v", offered)
+	}
+	if len(agents) != 1 || agents[0].Name() != agent.AgentNameClaudeCode {
+		t.Fatalf("Expected the picked agent [claude-code] to be returned, got %v", agents)
 	}
 }
 
@@ -1314,7 +3031,7 @@ func TestDetectOrSelectAgent_NoDetection_NoTTY_FallsBackToDefault(t *testing.T) 
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
 
-	// No .claude or .gemini directory - detection will fail
+	// No .claude or .cursor directory - detection will fail
 
 	var buf bytes.Buffer
 	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
@@ -1344,7 +3061,7 @@ func TestDetectOrSelectAgent_NoDetection_WithTTY_ShowsPromptMessages(t *testing.
 	setupTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
-	// No .claude or .gemini directory - detection will fail
+	// No .claude or .cursor directory - detection will fail
 
 	// Inject selector to avoid blocking on interactive form.Run().
 	// The selector receives available agent names so tests can validate the options.
@@ -1418,12 +3135,12 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 	setupTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
-	// Create both .claude and .gemini directories
+	// Create both .claude and .cursor directories
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	// Inject selector — receives available names, returns both
@@ -1431,7 +3148,7 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 		if len(available) < 2 {
 			t.Errorf("expected at least 2 available agents, got %d", len(available))
 		}
-		return []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameGemini)}, nil
+		return []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCursor)}, nil
 	}
 
 	var buf bytes.Buffer
@@ -1452,8 +3169,8 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 	if !strings.Contains(output, "Claude Code") {
 		t.Errorf("Expected output to mention Claude Code, got: %s", output)
 	}
-	if !strings.Contains(output, "Gemini CLI") {
-		t.Errorf("Expected output to mention Gemini CLI, got: %s", output)
+	if !strings.Contains(output, string(agent.AgentTypeCursor)) {
+		t.Errorf("Expected output to mention Cursor, got: %s", output)
 	}
 	if !strings.Contains(output, "Selected agents:") {
 		t.Errorf("Expected output to contain 'Selected agents:', got: %s", output)
@@ -1464,12 +3181,12 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_NoTTY_UsesAll(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
 
-	// Create both .claude and .gemini directories
+	// Create both .claude and .cursor directories
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -1501,21 +3218,21 @@ func writeClaudeHooksFixture(t *testing.T) {
 	}
 }
 
-// writeGeminiHooksFixture writes a minimal .gemini/settings.json with Entire hooks installed.
-// AreHooksInstalled() checks for any hook command starting with "entire ".
-func writeGeminiHooksFixture(t *testing.T) {
+// writeCursorHooksFixture writes a minimal .cursor/hooks.json with Entire hooks installed.
+// AreHooksInstalled() checks each hook list for an Entire-managed command.
+func writeCursorHooksFixture(t *testing.T) {
 	t.Helper()
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 	hooksJSON := `{
+		"version": 1,
 		"hooks": {
-			"enabled": true,
-			"SessionStart": [{"hooks": [{"type": "command", "command": "entire hooks gemini session-start"}]}]
+			"sessionStart": [{"command": "entire hooks cursor session-start"}]
 		}
 	}`
-	if err := os.WriteFile(".gemini/settings.json", []byte(hooksJSON), 0o644); err != nil {
-		t.Fatalf("Failed to write .gemini/settings.json: %v", err)
+	if err := os.WriteFile(".cursor/hooks.json", []byte(hooksJSON), 0o644); err != nil {
+		t.Fatalf("Failed to write .cursor/hooks.json: %v", err)
 	}
 }
 
@@ -1596,12 +3313,13 @@ func checkClaudeCodeHooksInstalled() bool {
 	if !ok {
 		return false
 	}
-	return hookAgent.AreHooksInstalled(context.Background())
+	installed, err := hookAgent.AreHooksInstalled(context.Background())
+	return err == nil && installed
 }
 
-// checkGeminiCLIHooksInstalled checks if Gemini CLI hooks are installed.
-func checkGeminiCLIHooksInstalled() bool {
-	ag, err := agent.Get(agent.AgentNameGemini)
+// checkCursorHooksInstalled checks if Cursor hooks are installed.
+func checkCursorHooksInstalled() bool {
+	ag, err := agent.Get(agent.AgentNameCursor)
 	if err != nil {
 		return false
 	}
@@ -1609,7 +3327,8 @@ func checkGeminiCLIHooksInstalled() bool {
 	if !ok {
 		return false
 	}
-	return hookAgent.AreHooksInstalled(context.Background())
+	installed, err := hookAgent.AreHooksInstalled(context.Background())
+	return err == nil && installed
 }
 
 func TestUninstallDeselectedAgentHooks(t *testing.T) {
@@ -1639,6 +3358,248 @@ func TestUninstallDeselectedAgentHooks(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Removed") {
 		t.Errorf("Expected output to mention removal, got: %s", output)
+	}
+}
+
+func TestRunUninstall_CodexLinkedWorktreeDoesNotRemovePrimaryHooks(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	installed, err := hookAgent.AreHooksInstalled(t.Context())
+	if err != nil {
+		t.Fatalf("check Codex hooks: %v", err)
+	}
+	if installed {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksAbsent {
+		t.Fatal("primary-checkout Codex hooks must not count as local removable configuration")
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(t.Context(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("uninstall Entire: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("primary-checkout Codex hooks changed after uninstall from linked worktree: %v", err)
+	}
+	if strings.Contains(stdout.String(), "Removed Codex hooks") {
+		t.Fatalf("uninstall reported removing non-local Codex hooks: %s", stdout.String())
+	}
+}
+
+func TestUninstallDeselectedAgentHooks_CodexIgnoresPrimaryOnlyHooks(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	installed, err := hookAgent.AreHooksInstalled(t.Context())
+	if err != nil {
+		t.Fatalf("check Codex hooks: %v", err)
+	}
+	if installed {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksAbsent {
+		t.Fatal("primary-checkout Codex hooks must not count as local removable configuration")
+	}
+
+	var output bytes.Buffer
+	if err := uninstallDeselectedAgentHooks(t.Context(), &output, nil); err != nil {
+		t.Fatalf("uninstallDeselectedAgentHooks() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("primary-checkout Codex hooks changed after deselection from linked worktree: %v", err)
+	}
+	if strings.Contains(output.String(), "Removed Codex hooks") {
+		t.Fatalf("deselection reported removing non-local Codex hooks: %s", output.String())
+	}
+}
+
+func TestUninstallDeselectedAgentHooks_CodexLinkedWorktreeOwnership(t *testing.T) {
+	t.Parallel()
+	assertCodexLinkedWorktreeCleanupOwnership(t, "deselect", "deselection")
+}
+
+func TestRemoveAgentHooks_CodexLinkedWorktreeOwnership(t *testing.T) {
+	t.Parallel()
+	assertCodexLinkedWorktreeCleanupOwnership(t, "clean", "clean")
+}
+
+func assertCodexLinkedWorktreeCleanupOwnership(t *testing.T, action, description string) {
+	t.Helper()
+	repoRoot, linkedRoot := setupCodexOwnershipWorktrees(t)
+	primaryPath := filepath.Join(repoRoot, ".codex", "hooks.json")
+	linkedPath := filepath.Join(linkedRoot, ".codex", "hooks.json")
+	primaryBefore := readSetupTestFile(t, primaryPath)
+
+	runSetupCodexOwnershipHelper(t, linkedRoot, action)
+
+	if got := readSetupTestFile(t, primaryPath); got != primaryBefore {
+		t.Fatalf("primary hooks changed after linked-worktree %s\nwant: %s\n got: %s", description, primaryBefore, got)
+	}
+	if data := readSetupTestFile(t, linkedPath); strings.Contains(data, "entire hooks codex") {
+		t.Fatalf("linked-worktree Entire hooks still exist after %s: %s", description, data)
+	}
+}
+
+func TestSetupCodexLinkedWorktreeOwnershipHelper(t *testing.T) {
+	t.Parallel()
+	action := os.Getenv("ENTIRE_SETUP_CODEX_OWNERSHIP_HELPER")
+	if action == "" {
+		t.Skip("subprocess helper")
+	}
+	var output bytes.Buffer
+	switch action {
+	case "deselect":
+		if err := uninstallDeselectedAgentHooks(t.Context(), &output, nil); err != nil {
+			t.Fatal(err)
+		}
+	case "clean":
+		// uninstallAgentHooks is what `entire disable --uninstall` runs; it
+		// replaced removeAgentHooks, so the ownership guarantee is asserted
+		// against the function that actually removes hooks today.
+		repoRoot, err := paths.WorktreeRoot(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := newUninstallPrinter(&output, &output)
+		if !uninstallAgentHooks(t.Context(), p, repoRoot, getAgentHookState(t.Context())) {
+			t.Fatalf("uninstall agent hooks reported failure: %s", output.String())
+		}
+	default:
+		t.Fatalf("unknown ownership helper action %q", action)
+	}
+}
+
+func setupCodexOwnershipWorktrees(t *testing.T) (repoRoot, linkedRoot string) {
+	t.Helper()
+	tmp := t.TempDir()
+	repoRoot = filepath.Join(tmp, "repo")
+	linkedRoot = filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create linked worktree: %v: %s", err, output)
+	}
+	for _, root := range []string{repoRoot, linkedRoot} {
+		hooksPath := filepath.Join(root, ".codex", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hooksPath, []byte(canonicalCodexHooksJSON()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return repoRoot, linkedRoot
+}
+
+func runSetupCodexOwnershipHelper(t *testing.T, dir, action string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(t.Context(), executable, "-test.run=^TestSetupCodexLinkedWorktreeOwnershipHelper$", "-test.count=1")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"ENTIRE_SETUP_CODEX_OWNERSHIP_HELPER="+action,
+		"ENTIRE_TEST_TTY=0",
+		"CODEX_HOME="+filepath.Join(t.TempDir(), "codex-home"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run ownership helper: %v: %s", err, output)
+	}
+}
+
+func readSetupTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func setupCodexRepositoryWithLinkedWorktree(t *testing.T) {
+	t.Helper()
+	tmp := setupTestDir(t)
+	repoRoot := filepath.Join(tmp, "repo")
+	linkedRoot := filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create linked worktree: %v: %s", err, output)
+	}
+	if err := os.MkdirAll(filepath.Join(linkedRoot, ".codex"), 0o750); err != nil {
+		t.Fatalf("create linked Codex project layer: %v", err)
+	}
+
+	t.Chdir(repoRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	if _, err := hookAgent.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install Codex hooks: %v", err)
 	}
 }
 
@@ -1676,9 +3637,9 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)
 
-	// Install both Claude Code and Gemini hooks
+	// Install both Claude Code and Cursor hooks
 	writeClaudeHooksFixture(t)
-	writeGeminiHooksFixture(t)
+	writeCursorHooksFixture(t)
 
 	// Verify both are installed
 	installed := GetAgentsWithHooksInstalled(context.Background())
@@ -1686,7 +3647,7 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 		t.Fatalf("Expected at least 2 agents installed, got %d", len(installed))
 	}
 
-	// Keep only Claude Code selected (deselect Gemini)
+	// Keep only Claude Code selected (deselect Cursor)
 	claudeAgent, err := agent.Get(agent.AgentNameClaudeCode)
 	if err != nil {
 		t.Fatalf("Failed to get claude-code agent: %v", err)
@@ -1703,9 +3664,9 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 		t.Error("Expected Claude Code hooks to remain installed")
 	}
 
-	// Gemini hooks should be removed
-	if checkGeminiCLIHooksInstalled() {
-		t.Error("Expected Gemini CLI hooks to be uninstalled after deselection")
+	// Cursor hooks should be removed
+	if checkCursorHooksInstalled() {
+		t.Error("Expected Cursor hooks to be uninstalled after deselection")
 	}
 
 	output := buf.String()
@@ -1727,9 +3688,9 @@ func TestManageAgents_DeselectRemovesAgent(t *testing.T) {
 		t.Fatal("Expected Claude Code hooks to be installed before test")
 	}
 
-	// Deselect claude-code, select gemini instead
+	// Deselect claude-code, select cursor instead
 	selectFn := func(_ []string) ([]string, error) {
-		return []string{string(agent.AgentNameGemini)}, nil
+		return []string{string(agent.AgentNameCursor)}, nil
 	}
 
 	var buf bytes.Buffer
@@ -1781,6 +3742,82 @@ func TestManageAgents_DeselectAll_RemovesAllAndShowsGuidance(t *testing.T) {
 
 	if checkClaudeCodeHooksInstalled() {
 		t.Error("Expected Claude Code hooks to be uninstalled after deselecting all")
+	}
+}
+
+func TestManageAgents_DeselectIgnoresPrimaryOnlyCodexHooks(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	installed, err := hookAgent.AreHooksInstalled(t.Context())
+	if err != nil {
+		t.Fatalf("check Codex hooks: %v", err)
+	}
+	if installed {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksAbsent {
+		t.Fatal("primary-checkout Codex hooks must not count as local removable configuration")
+	}
+
+	var output bytes.Buffer
+	selectNone := func(_ []string) ([]string, error) { return nil, nil }
+	if err := runManageAgents(t.Context(), &output, EnableOptions{}, selectNone); err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("primary-checkout Codex hooks changed after deselection: %v", err)
+	}
+	if strings.Contains(output.String(), "Removed Codex hooks") {
+		t.Fatalf("deselection reported removing non-local Codex hooks: %s", output.String())
+	}
+}
+
+func TestManageAgents_DoesNotRemoveInvalidCodexFile(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	hooksPath := filepath.Join(repoRoot, ".codex", "hooks.json")
+	const malformed = `{not-json`
+	if err := os.WriteFile(hooksPath, []byte(malformed), 0o600); err != nil {
+		t.Fatalf("write malformed Codex hooks: %v", err)
+	}
+
+	var output bytes.Buffer
+	selectNone := func(_ []string) ([]string, error) { return nil, nil }
+	if err := runManageAgents(t.Context(), &output, EnableOptions{}, selectNone); err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read malformed Codex hooks: %v", err)
+	}
+	if string(data) != malformed {
+		t.Fatalf("invalid Codex file was changed: %q", data)
+	}
+	if strings.Contains(output.String(), "Removed Codex") {
+		t.Fatalf("invalid Codex file was offered for removal: %s", output.String())
 	}
 }
 
@@ -1927,9 +3964,9 @@ func TestManageAgents_AddAndRemove(t *testing.T) {
 	// Install Claude Code hooks
 	writeClaudeHooksFixture(t)
 
-	// Deselect claude-code, add gemini
+	// Deselect claude-code, add cursor
 	selectFn := func(_ []string) ([]string, error) {
-		return []string{string(agent.AgentNameGemini)}, nil
+		return []string{string(agent.AgentNameCursor)}, nil
 	}
 
 	var buf bytes.Buffer
@@ -1946,12 +3983,98 @@ func TestManageAgents_AddAndRemove(t *testing.T) {
 		t.Errorf("Expected 'Removed agents' in output, got: %s", output)
 	}
 
-	// Verify hooks on disk: Claude removed, Gemini added
+	// Verify hooks on disk: Claude removed, Cursor added
 	if checkClaudeCodeHooksInstalled() {
 		t.Error("Expected Claude Code hooks to be uninstalled after deselection")
 	}
-	if !checkGeminiCLIHooksInstalled() {
-		t.Error("Expected Gemini CLI hooks to be installed after selection")
+	if !checkCursorHooksInstalled() {
+		t.Error("Expected Cursor hooks to be installed after selection")
+	}
+}
+
+func TestManageAgents_ExternalAgentSettingDoesNotLeakAcrossScopes(t *testing.T) {
+	// Cannot use t.Parallel because setupTestRepo changes the working directory
+	// and the external agent registry is process-global.
+	tests := []struct {
+		name string
+		opts EnableOptions
+	}{
+		{
+			name: "default scope",
+		},
+		{
+			name: "project scope",
+			opts: EnableOptions{UseProjectSettings: true},
+		},
+		{
+			name: "local scope",
+			opts: EnableOptions{UseLocalSettings: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const externalAgentName = "external-settings-scope-test"
+			const projectSettings = `{"log_level":"warn"}`
+			const localSettings = `{"strategy_options":{"push":false},"absolute_git_hook_path":true}`
+
+			setupTestRepo(t)
+			writeSettings(t, projectSettings)
+			writeLocalSettings(t, localSettings)
+
+			externalDir := t.TempDir()
+			writeExternalAgentBinary(t, externalDir, externalAgentName)
+			t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ENTIRE_TEST_EXTERNAL_PRESENT", "1")
+
+			selectExternalAgent := func(_ []string) ([]string, error) {
+				return []string{externalAgentName}, nil
+			}
+			if err := runManageAgents(t.Context(), &bytes.Buffer{}, tt.opts, selectExternalAgent); err != nil {
+				t.Fatalf("runManageAgents() error = %v", err)
+			}
+
+			if projectData := readSetupTestFile(t, EntireSettingsFile); projectData != projectSettings {
+				t.Fatalf("adding an external agent changed project settings:\n%s", projectData)
+			}
+
+			data, err := os.ReadFile(EntireSettingsLocalFile)
+			if err != nil {
+				t.Fatalf("read target settings: %v", err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("parse target settings: %v", err)
+			}
+			if _, exists := raw["log_level"]; exists {
+				t.Fatalf("project log_level leaked into local settings:\n%s", data)
+			}
+			var original map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(localSettings), &original); err != nil {
+				t.Fatalf("parse original local settings: %v", err)
+			}
+			for key, want := range original {
+				var compact bytes.Buffer
+				if err := json.Compact(&compact, raw[key]); err != nil || !bytes.Equal(compact.Bytes(), want) {
+					t.Errorf("local setting %s changed: got %s, want %s", key, raw[key], want)
+				}
+			}
+			var externalAgents bool
+			if err := json.Unmarshal(raw["external_agents"], &externalAgents); err != nil || !externalAgents {
+				t.Fatalf("external_agents was not enabled in local settings:\n%s", data)
+			}
+			if len(raw) != len(original)+1 {
+				t.Fatalf("adding an external agent changed fields other than external_agents in local settings:\n%s", data)
+			}
+			effective, err := settings.Load(t.Context())
+			if err != nil {
+				t.Fatalf("load effective settings: %v", err)
+			}
+			if !effective.ExternalAgents {
+				reason, _ := effective.ExternalAgentsRejection()
+				t.Fatalf("external_agents grant was not honored by the settings loader: %s", reason)
+			}
+		})
 	}
 }
 
@@ -2118,9 +4241,9 @@ func TestDetectOrSelectAgent_ReRun_NewlyDetectedAgentAvailableNotPreSelected(t *
 	// Simulate: Claude Code hooks installed from a previous run
 	writeClaudeHooksFixture(t)
 
-	// Simulate: user added .gemini directory since last enable (detected but not installed)
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	// Simulate: user added .cursor directory since last enable (detected but not installed)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	// Track which agents the selector receives
@@ -2540,8 +4663,16 @@ func TestConfigureCmd_SummarizeProvider_ExternalEnablesExternalAgents(t *testing
 	if s.SummaryGeneration.Provider != provider {
 		t.Fatalf("summary provider = %q, want %q", s.SummaryGeneration.Provider, provider)
 	}
-	if !s.ExternalAgents {
-		t.Fatal("external summary provider should enable external_agents")
+	if s.ExternalAgents {
+		t.Fatal("external_agents must not be written to the project file, where the loader ignores it")
+	}
+	effective, err := settings.Load(t.Context())
+	if err != nil {
+		t.Fatalf("failed to load merged settings: %v", err)
+	}
+	if !effective.ExternalAgents {
+		reason, _ := effective.ExternalAgentsRejection()
+		t.Fatalf("external summary provider should enable external_agents (rejection: %q)", reason)
 	}
 	if !strings.Contains(stdout.String(), externalAgentsAutoEnabledNotice) {
 		t.Fatalf("expected notice surfacing the external_agents flip, got stdout:\n%s", stdout.String())
@@ -2554,7 +4685,10 @@ func TestConfigureCmd_SummarizeProvider_ExternalAlreadyEnabled_NoNotice(t *testi
 	}
 
 	setupTestRepo(t)
-	writeSettings(t, `{"enabled": true, "external_agents": true}`)
+	writeSettings(t, testSettingsEnabled)
+	// The local file is the only place the loader honors external_agents, so
+	// it is the only place "already enabled" can be expressed.
+	writeLocalSettings(t, `{"external_agents": true}`)
 
 	const provider = "external-summary-already-on"
 	externalDir := t.TempDir()
@@ -2583,7 +4717,7 @@ func TestConfigureCmd_SummarizeProvider_InvalidProvider(t *testing.T) {
 	cmd := newSetupCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--summarize-provider", "opencode"})
+	cmd.SetArgs([]string{"--summarize-provider", "factoryai-droid"})
 
 	err := cmd.Execute()
 	if err == nil {
@@ -2702,7 +4836,7 @@ func TestConfigureCmd_SummarizeModel_UsesExistingProvider(t *testing.T) {
 
 func TestSelectAllAgents_ReturnsAll(t *testing.T) {
 	t.Parallel()
-	available := []string{"claude-code", "gemini-cli", "opencode"}
+	available := []string{"claude-code", "cursor", "opencode"}
 	selected, err := selectAllAgents(available)
 	if err != nil {
 		t.Fatalf("selectAllAgents() error = %v", err)
@@ -2731,7 +4865,7 @@ func TestDetectOrSelectAgent_YesSelectsAll(t *testing.T) {
 		t.Fatalf("detectOrSelectAgent() with selectAllAgents error = %v", err)
 	}
 
-	// Should return at least 2 agents (claude-code + gemini-cli are registered in test imports)
+	// Should return at least 2 agents (every built-in agent is registered in package cli)
 	if len(agents) < 2 {
 		t.Errorf("expected at least 2 agents with selectAllAgents, got %d", len(agents))
 	}
@@ -3094,10 +5228,11 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		rawURL  string
-		want    string
-		wantErr bool
+		name     string
+		rawURL   string
+		want     string
+		wantSkip bool // the remote names no upstream forge, so nothing is reported
+		wantErr  bool
 	}{
 		{
 			name:   "https without credentials is normalized",
@@ -3140,6 +5275,37 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 			want:   "https://ghe.corp.example.com/entireio/cli.git",
 		},
 		{
+			// A native repo mirrors nothing, so CanonicalHost falls back to the
+			// Entire cluster and no forge clone URL exists to report. Reporting
+			// a synthesized one would name a URL that addresses nothing.
+			name:     "native origin reports nothing",
+			rawURL:   "entire://aws-us-east-2.entire.io/et/widgets/web",
+			wantSkip: true,
+		},
+		{
+			name:     "native origin spelled with the .git alias reports nothing",
+			rawURL:   "entire://aws-us-east-2.entire.io/et/widgets/web.git",
+			wantSkip: true,
+		},
+		{
+			// ParseURL preserves ANY non-empty forge token, so an unrecognized
+			// one reaches here looking like a mirror. It maps to no upstream
+			// host either, so it is the same fiction as the native case and is
+			// skipped for the same reason -- `et` is not a special case, "no
+			// known upstream host" is the rule.
+			name:     "entire:// origin with an unrecognized forge reports nothing",
+			rawURL:   "entire://aws-us-east-2.entire.io/jk/myproject/repo",
+			wantSkip: true,
+		},
+		{
+			// The skip is scoped to entire:// remotes. A direct remote is
+			// reached over a git transport, so its Host IS a git host even when
+			// the forge is unmapped -- see the enterprise case above.
+			name:   "direct remote with an unmapped forge is still reportable",
+			rawURL: "https://git.corp.example.com/team/app",
+			want:   "https://git.corp.example.com/team/app.git",
+		},
+		{
 			name:    "unparseable single-segment path errors",
 			rawURL:  "https://github.com/onlyowner.git",
 			wantErr: true,
@@ -3150,15 +5316,22 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := cleanRemoteURLForReport(tt.rawURL)
+			info, err := gitremote.ParseURL(tt.rawURL)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("expected error for %q, got %q", tt.rawURL, got)
+					t.Fatalf("expected ParseURL error for %q", tt.rawURL)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("unexpected error for %q: %v", tt.rawURL, err)
+				t.Fatalf("unexpected error parsing %q: %v", tt.rawURL, err)
+			}
+			got, ok := cleanRemoteURLForReport(info)
+			if ok == tt.wantSkip {
+				t.Fatalf("cleanRemoteURLForReport(%q) ok = %v, want %v", tt.rawURL, ok, !tt.wantSkip)
+			}
+			if !ok && got != "" {
+				t.Errorf("cleanRemoteURLForReport(%q) returned %q alongside ok=false", tt.rawURL, got)
 			}
 			if got != tt.want {
 				t.Errorf("cleanRemoteURLForReport(%q) = %q, want %q", tt.rawURL, got, tt.want)
@@ -3170,5 +5343,330 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunRemoveAgent_AntigravityWarnsAboutGlobalTeeRemoval pins the
+// machine-global side effect of a repo-scoped command: removing the
+// Antigravity agent uninstalls the title-tee from agy's GLOBAL settings, which
+// disables token capture for every other repo still using Antigravity. The
+// user must be told, since the breakage is otherwise silent (zero-token
+// checkpoints) until doctor or agent add runs in the other repo.
+func TestRunRemoveAgent_AntigravityWarnsAboutGlobalTeeRemoval(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentsDir, "hooks.json"), []byte(antigravityHooksJSON()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgDir := filepath.Join(t.TempDir(), "agy")
+	if err := os.MkdirAll(cfgDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	teeSettings := `{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(teeSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
+
+	var out bytes.Buffer
+	if err := runRemoveAgent(context.Background(), &out, "antigravity"); err != nil {
+		t.Fatalf("runRemoveAgent: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "Removed Antigravity hooks.") {
+		t.Errorf("missing removal confirmation: %q", got)
+	}
+	if !strings.Contains(got, "token capture") || !strings.Contains(got, "other repositories") {
+		t.Errorf("missing global title-tee removal warning: %q", got)
+	}
+}
+
+// First-time setups get the git-refs checkpoint backend written explicitly
+// into the new settings.json — new users must not answer a storage-topology
+// question (the old wizard prompt), and the explicit write is what keeps the
+// choice durable. The config-less runtime default (git-branch, see
+// checkpoint.resolvePrimaryType) is deliberately untouched so repos set up
+// before this change keep their behavior.
+func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
+	enable := func(t *testing.T, opts EnableOptions) *settings.CheckpointsConfig {
+		t.Helper()
+		ag, err := agent.Get(types.AgentName("claude-code"))
+		if err != nil {
+			t.Fatalf("agent.Get(claude-code) error = %v", err)
+		}
+		var buf bytes.Buffer
+		if err := runEnableInteractive(context.Background(), &buf, []agent.Agent{ag}, opts); err != nil {
+			t.Fatalf("runEnableInteractive() error = %v", err)
+		}
+		s, err := settings.Load(context.Background())
+		if err != nil {
+			t.Fatalf("settings.Load() error = %v", err)
+		}
+		return s.Checkpoints
+	}
+
+	t.Run("first run writes git-refs explicitly", func(t *testing.T) {
+		setupTestRepo(t)
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
+		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitRefs {
+			t.Errorf("Checkpoints = %+v, want explicit git-refs primary", cfg)
+		}
+	})
+
+	t.Run("explicit --checkpoint-backend branch wins", func(t *testing.T) {
+		setupTestRepo(t)
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true, CheckpointBackend: "branch"})
+		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitBranch {
+			t.Errorf("Checkpoints = %+v, want explicit git-branch primary", cfg)
+		}
+	})
+
+	t.Run("env override suppresses the first-run default", func(t *testing.T) {
+		setupTestRepo(t)
+		// ENTIRE_CHECKPOINTS_PRIMARY fully replaces the settings block, so
+		// writing the refs default under it would persist config diverging
+		// from the backend actually in use (and break harnesses pinning
+		// git-branch via the env).
+		t.Setenv(settings.EnvCheckpointsPrimary, "git-branch")
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
+		if cfg != nil {
+			t.Errorf("Checkpoints = %+v, want none written under the env override", cfg)
+		}
+	})
+
+	t.Run("re-run of an existing config-less repo stays config-less", func(t *testing.T) {
+		setupTestRepo(t)
+		// A repo set up before this change: settings.json exists, no
+		// checkpoints block. Re-running setup must not inject git-refs.
+		writeSettings(t, testSettingsEnabled)
+		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
+		if cfg != nil {
+			t.Errorf("Checkpoints = %+v, want none added on a pre-existing setup", cfg)
+		}
+	})
+}
+
+// TestPluginUninstallCommand_QuotesRepoRoot pins that the recovery command
+// survives an ordinary repo path. A space is the common case; the metacharacters
+// matter because this line is meant to be pasted into a shell, where an
+// unquoted path silently runs `cd` against the wrong argument.
+func TestPluginUninstallCommand_QuotesRepoRoot(t *testing.T) {
+	t.Parallel()
+
+	got := pluginUninstallCommand("/Users/me/My Repo", "flaky")
+	if !strings.Contains(got, "cd '/Users/me/My Repo'") {
+		t.Errorf("repo root must be quoted for the shell, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ENTIRE_REPO_ROOT='/Users/me/My Repo'") {
+		t.Errorf("env value must be quoted too, got:\n%s", got)
+	}
+	// A single quote in a path terminates the quoting unless escaped.
+	if got := pluginUninstallCommand("/tmp/it's", "flaky"); !strings.Contains(got, `'/tmp/it'\''s'`) {
+		t.Errorf("a single quote in the path must be escaped, got:\n%s", got)
+	}
+}
+
+// TestConfigureCmd_SummarizeProvider_ExternalLocalTarget_GrantSurvives covers
+// the case where the summary settings and the external_agents grant land in
+// the SAME file. The grant is a raw read-modify-write of the local file, so a
+// struct save that happens afterwards rewrites that file from a struct whose
+// ExternalAgents is still false — and the field is omitempty, so the key is
+// dropped rather than written as false. The user is told external agents were
+// enabled, and the very next load does not honor the setting.
+func TestConfigureCmd_SummarizeProvider_ExternalLocalTarget_GrantSurvives(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	const provider = "external-summary-local-target"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, provider)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--local", "--summarize-provider", provider})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --local --summarize-provider external failed: %v", err)
+	}
+
+	local, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	if local.SummaryGeneration == nil || local.SummaryGeneration.Provider != provider {
+		t.Fatalf("local summary provider = %+v, want %q", local.SummaryGeneration, provider)
+	}
+
+	effective, err := settings.Load(t.Context())
+	if err != nil {
+		t.Fatalf("failed to load merged settings: %v", err)
+	}
+	if !effective.ExternalAgents {
+		reason, _ := effective.ExternalAgentsRejection()
+		t.Fatalf("external_agents grant did not survive the settings save (rejection: %q); stdout:\n%s",
+			reason, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), externalAgentsAutoEnabledNotice) {
+		t.Fatalf("expected notice surfacing the external_agents flip, got stdout:\n%s", stdout.String())
+	}
+}
+
+// TestConfigureCmd_SummarizeProvider_ExternalLocalOnlyRepo_GrantSurvives is the
+// same collision reached without --local: in a repo that has only
+// settings.local.json, settingsTargetFile resolves there on its own.
+func TestConfigureCmd_SummarizeProvider_ExternalLocalOnlyRepo_GrantSurvives(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeLocalSettings(t, testSettingsEnabled)
+
+	const provider = "external-summary-local-only"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, provider)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-provider", provider})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --summarize-provider external failed: %v", err)
+	}
+
+	effective, err := settings.Load(t.Context())
+	if err != nil {
+		t.Fatalf("failed to load merged settings: %v", err)
+	}
+	if !effective.ExternalAgents {
+		reason, _ := effective.ExternalAgentsRejection()
+		t.Fatalf("external_agents grant did not survive the settings save (rejection: %q); stdout:\n%s",
+			reason, stdout.String())
+	}
+}
+
+// TestWorktreeFileName covers the shapes vercel.json can arrive in. The
+// absolute-in-repo row is the regression the helper exists for: os.Root reports
+// `vercel.json -> /abs/path/inside/repo/shared/vercel.json` as "path escapes
+// from parent", which is not os.ErrNotExist, so detection printed a note and
+// skipped — silently dropping the feature for a monorepo setup that worked
+// before the anchor went in.
+//
+// worktreedir.TestNameFollowingLinks asserts the link cases one layer down;
+// this table is the caller's view, plus the rows that never reach the resolve.
+func TestWorktreeFileName(t *testing.T) {
+	t.Parallel()
+
+	const name = "vercel.json"
+	for _, tc := range []struct {
+		desc     string
+		link     func(t *testing.T, dir string) // nil: a real file, no link
+		wantName string                         // "" means absent
+		wantErr  bool
+	}{
+		{
+			desc:     "a real file is read by its own name",
+			wantName: name,
+		},
+		{
+			desc: "an absolute link inside the worktree resolves to its target",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join(dir, "shared", name))
+			},
+			wantName: "shared/vercel.json",
+		},
+		{
+			// os.Root follows a RELATIVE link that stays inside it, so the fast
+			// path succeeds and the original name is what to read by. Only an
+			// absolute target reaches the resolve, which is the whole asymmetry
+			// this helper exists for.
+			desc: "a relative link inside the worktree needs no resolving",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join("shared", name))
+			},
+			wantName: name,
+		},
+		{
+			desc: "a link out of the worktree is refused, not followed",
+			link: func(t *testing.T, dir string) {
+				outside := filepath.Join(t.TempDir(), name)
+				if err := os.WriteFile(outside, []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				linkTo(t, dir, outside)
+			},
+			wantErr: true,
+		},
+		{
+			desc: "a dangling link reads as absent, as os.Stat gave before",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join(dir, "missing.json"))
+			},
+		},
+		{
+			desc: "an absent file reads as absent",
+			link: func(*testing.T, string) {}, // no file at all
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			shared := filepath.Join(dir, "shared")
+			if err := os.MkdirAll(shared, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(shared, name), []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.link == nil {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				tc.link(t, dir)
+			}
+
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+
+			gotName, gotErr := worktreeFileName(dir, root, name)
+			if (gotErr != nil) != tc.wantErr {
+				t.Fatalf("worktreeFileName() error = %v, wantErr %v", gotErr, tc.wantErr)
+			}
+			if gotName != tc.wantName {
+				t.Errorf("worktreeFileName() = %q, want %q", gotName, tc.wantName)
+			}
+		})
+	}
+}
+
+// linkTo symlinks the vercel.json under test inside dir to target, skipping
+// where symlinks need privileges.
+func linkTo(t *testing.T, dir, target string) {
+	t.Helper()
+	testutil.SkipWithoutSymlinks(t)
+	if err := os.Symlink(target, filepath.Join(dir, "vercel.json")); err != nil {
+		t.Fatal(err)
 	}
 }

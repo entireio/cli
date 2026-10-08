@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
 )
 
@@ -21,7 +22,10 @@ type recapTUIOptions struct {
 	View  recap.ViewMode
 	Agent string
 	Repo  string
-	Color bool
+	// RepoName is the human owner/repo display name for the scoped repo; Repo is
+	// the ?repo= query value (a repo_id ULID when routed to a cell).
+	RepoName string
+	Color    bool
 }
 
 type recapDataMsg struct {
@@ -35,9 +39,10 @@ type recapErrMsg struct {
 }
 
 type recapTUIModel struct {
-	ctx    context.Context
-	client *api.Client
-	repo   string
+	ctx      context.Context
+	client   *api.Client
+	repo     string
+	repoName string
 
 	rangeKey recap.RangeKey
 	view     recap.ViewMode
@@ -77,6 +82,7 @@ func newRecapTUIModel(ctx context.Context, client *api.Client, opts recapTUIOpti
 		ctx:       ctx,
 		client:    client,
 		repo:      opts.Repo,
+		repoName:  opts.RepoName,
 		rangeKey:  opts.Range,
 		view:      opts.View,
 		agent:     opts.Agent,
@@ -244,15 +250,24 @@ func (m recapTUIModel) withViewport() recapTUIModel {
 	}
 	if m.resp != nil {
 		m.viewport.SetContent(recap.RenderStaticRecap(m.resp, recap.RenderOptions{
-			Range: m.rangeKey,
-			View:  m.view,
-			Agent: m.agent,
-			Width: m.width,
-			Color: m.color,
+			Range:    m.rangeKey,
+			View:     m.view,
+			Agent:    m.agent,
+			Width:    m.width,
+			Color:    m.color,
+			RepoName: m.repoName,
 		}))
 	}
 	return m
 }
+
+// Footer key-hint labels, repeated across the progressively shorter footer
+// variants renderFooter picks between.
+const (
+	recapHintView  = "view"
+	recapHintAgent = "agent"
+	recapHintQuit  = "quit"
+)
 
 func (m recapTUIModel) renderFooter() string {
 	choices := []string{
@@ -261,24 +276,24 @@ func (m recapTUIModel) renderFooter() string {
 			{"w", "week"},
 			{"m", "month"},
 			{"r", "90d"},
-			{"v", "view"},
-			{"a", "agent"},
+			{"v", recapHintView},
+			{"a", recapHintAgent},
 			{"R", "reload"},
-			{"q", "quit"},
+			{"q", recapHintQuit},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
 			{"d/w/m/r", "range"},
-			{"v", "view"},
-			{"a", "agent"},
-			{"q", "quit"},
+			{"v", recapHintView},
+			{"a", recapHintAgent},
+			{"q", recapHintQuit},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
 			{"d/w/m/r", "range"},
-			{"v", "view"},
-			{"q", "quit"},
+			{"v", recapHintView},
+			{"q", recapHintQuit},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
-			{"q", "quit"},
+			{"q", recapHintQuit},
 		}),
 	}
 	for _, choice := range choices {
@@ -302,8 +317,8 @@ func recapFooterLine(color bool, items []recapHelpItem) string {
 		}
 		return strings.Join(parts, " · ")
 	}
-	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Faint(true)
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Muted)).Bold(true)
 	item := func(k, desc string) string {
 		return keyStyle.Render(k) + helpStyle.Render(" "+desc)
 	}

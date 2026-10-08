@@ -2,30 +2,35 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// newOrgCmd is the hidden `entire org` command group: create and list
-// organizations on the Entire control plane. Surfaced via `entire labs`
-// while the control-plane surface matures.
+// newOrgCmd is the `entire org` command group: create, list, get, and
+// delete organizations on the Entire control plane, the `grant` subtree for
+// membership (see grant.go), and the `invite` subtree for inviting by email
+// (see org_invite.go).
 func newOrgCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:    "org",
-		Short:  "Manage Entire organizations",
-		Hidden: true,
+		Use:   cmdOrg,
+		Short: "Manage Entire organizations",
 	}
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newOrgCreateCmd())
 	cmd.AddCommand(newOrgListCmd())
+	cmd.AddCommand(newOrgGetCmd())
+	cmd.AddCommand(newOrgDeleteCmd())
+	cmd.AddCommand(newOrgGrantCmd())
+	cmd.AddCommand(newOrgInviteCmd())
 	return cmd
 }
 
 // orgColumns is the human table/field view of an org, shared by list and
 // any future `org get`.
-var orgColumns = []string{"ID", "NAME", "REGION", "CREATED"}
+var orgColumns = []string{"ID", colHeaderName, colHeaderRegion, "CREATED"}
 
 func orgRow(o coreapi.Org) []string {
 	return []string{o.ID, o.Name, o.Region, o.CreatedAt.Format("2006-01-02")}
@@ -34,36 +39,93 @@ func orgRow(o coreapi.Org) []string {
 func newOrgCreateCmd() *cobra.Command {
 	var region string
 	cmd := &cobra.Command{
-		Use:   "create <name>",
+		Use:   cmdCreateName,
 		Short: "Create an organization",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreJSON(cmd, func(ctx context.Context, c *coreapi.Client) (any, error) {
+			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
 				body := &coreapi.CreateOrgInputBody{Name: args[0]}
 				if region != "" {
 					body.Region = coreapi.NewOptString(region)
 				}
-				return c.CreateOrg(ctx, body)
+				created, err := c.CreateOrg(ctx, body)
+				if err != nil {
+					return "", nil, err
+				}
+				org := &created.Response
+				return fmt.Sprintf("✓ Created org %s (%s)", org.Name, org.ID), org, nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&region, "region", "", "jurisdiction slug (defaults to the server's home jurisdiction)")
+	cmd.Flags().StringVar(&region, "region", "", "Jurisdiction slug (defaults to the server's home jurisdiction)")
+	addJSONFlag(cmd)
 	return cmd
 }
 
 func newOrgListCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
+	cmd := &cobra.Command{
+		Use:   cmdList,
 		Short: "List organizations you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCoreList(cmd, orgColumns, orgRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Org, error) {
-				out, err := c.ListOrgs(ctx)
+			return runCoreList(cmd, "No organizations found.", orgColumns, orgRow, listAllOrgs)
+		},
+	}
+	addJSONFlag(cmd)
+	return cmd
+}
+
+// listAllOrgs walks every page of the caller's org listing. The list is the
+// caller's own orgs, so resolveOrgRef also matches names against it.
+func listAllOrgs(ctx context.Context, c *coreapi.Client) ([]coreapi.Org, error) {
+	return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Org, string, error) {
+		params := coreapi.ListOrgsParams{}
+		if cursor != "" {
+			params.PageToken = coreapi.NewOptString(cursor)
+		}
+		out, err := c.ListOrgs(ctx, params)
+		if err != nil {
+			return nil, "", err
+		}
+		return out.Response.Orgs, out.Response.NextPageToken.Or(""), nil
+	})
+}
+
+func newOrgGetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get <org>",
+		Short: "Show an organization by name or ULID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCoreObject(cmd, orgColumns, orgRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Org, error) {
+				orgID, err := resolveOrgRef(ctx, c, args[0])
 				if err != nil {
 					return nil, err
 				}
-				return out.Orgs, nil
+				return c.GetOrg(ctx, coreapi.GetOrgParams{OrgId: orgID})
 			})
 		},
 	}
+	addJSONFlag(cmd)
+	return cmd
+}
+
+func newOrgDeleteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete <org>",
+		Short: "Delete an organization by name or ULID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runControlPlaneDelete(cmd, "org", args[0],
+				func(ctx context.Context, c *coreapi.Client) (resolvedRef, error) {
+					return resolveOrgRefResolved(ctx, c, args[0])
+				},
+				func(ctx context.Context, c *coreapi.Client, id string) error {
+					_, err := c.DeleteOrg(ctx, coreapi.DeleteOrgParams{OrgId: id})
+					return err
+				})
+		},
+	}
+	addForceFlag(cmd)
+	return cmd
 }

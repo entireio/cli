@@ -1,4 +1,10 @@
 version: "2"
+# Without these, every `//go:build integration` and `//go:build e2e` file is
+# invisible to golangci-lint.
+run:
+  build-tags:
+    - integration
+    - e2e
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
@@ -33,7 +39,6 @@ linters:
     - inamedparam
     - ineffassign
     - intrange
-    - ireturn
     - loggercheck
     - maintidx
     - makezero
@@ -69,6 +74,31 @@ linters:
     - whitespace
     - wrapcheck
   settings:
+    goconst:
+      # golangci-lint 2.13's goconst upgrade began scanning composite literals,
+      # which turned ~2.3k previously-unreported strings into findings. The two
+      # knobs below are NOT equivalent in what they give up:
+      #
+      #   ignore-map-keys restores the prior scope exactly: a map-literal key
+      #   was never reported before 2.13, so nothing is lost.
+      #
+      #   ignore-tests is broader than the 2.13 change and DOES give up
+      #   coverage this repo had. goconst used to lint test logic -- the proof
+      #   is the three //nolint:goconst directives in _test.go files that the
+      #   Go 1.27 bump deleted as unused; they were suppressing real
+      #   comparison/assignment findings under 2.11. Those shapes are no longer
+      #   checked in tests.
+      #
+      # It is accepted anyway because no narrower exclusion exists. goconst
+      # settings are global (there is no per-path variant), the remainder is
+      # 2016 findings across 62 packages so a path-scoped rule would have to
+      # name nearly every one, and the field that looks like the right tool --
+      # exclude-types: [CompositeLit] -- REPLACES the default exclusion set
+      # rather than adding to it, so it re-enables Call findings and takes the
+      # count up to 6255. Revisit if goconst gains per-path settings or fixes
+      # exclude-types.
+      ignore-tests: true
+      ignore-map-keys: true
     gosec:
       excludes:
         - G204 # subprocess with variables is expected for git/opencode CLI wrappers
@@ -102,37 +132,17 @@ linters:
         - pattern: '^.*\.Checkout$'
           msg: "go-git Checkout deletes .gitignored dirs - use CheckoutBranch() from git_operations.go"
           pkg: 'github\.com/go-git/go-git'
+        - pattern: '^.*Worktree\.Status$'
+          msg: "go-git Worktree.Status() walks the whole worktree - use gitrepo.Status(ctx, repo)"
+          pkg: 'github\.com/go-git/go-git'
+        - pattern: '^.*\.(Print|Println|Printf)$'
+          msg: "cobra's Print* writes to OutOrStderr (stderr in production); use fmt.Fprint*(cmd.OutOrStdout(), ...)"
+          pkg: 'github\.com/spf13/cobra'
     govet:
       enable-all: true
       disable:
         - fieldalignment
         - shadow
-    ireturn:
-      allow:
-        - anon
-        - error
-        - empty
-        - stdlib
-        - charm.land/bubbletea/v2.Model
-        - grpc.DialOption
-        - github.com/entireio/cli/cmd/entire/cli/summarize.Generator
-        - github.com/entireio/cli/cmd/entire/cli/agent\..+
-        - github.com/entireio/cli/cmd/entire/cli/agent/spawn.Spawner
-        - github.com/entireio/cli/cmd/entire/cli/review/types.Process
-        - github.com/entireio/cli/cmd/entire/cli/review/types.AgentReviewer
-        - github.com/entireio/cli/cmd/entire/cli/review.SynthesisProvider
-        - github.com/entireio/cli/cmd/entire/cli/checkpoint.CommittedReader
-        - github.com/entireio/cli/cmd/entire/cli/strategy.Strategy
-        - github.com/entireio/cli/internal/entireclient/tokenstore.store
-        - github.com/go-git/go-git/v6/x/plugin.Signer
-        - github.com/go-git/go-git/v6/plumbing/storer.ReferenceIter
-        - github.com/go-git/go-git/v6/plumbing.EncodedObject
-        - github.com/go-git/go-git/v6/storage.Storer
-        - github.com/go-git/go-git/v6/plumbing/storer.EncodedObjectIter
-        - github.com/entireio/cli/e2e/agents.Session
-        - github.com/go-git/go-billy/v6.File
-        - github.com/go-git/go-billy/v6.Filesystem
-        - golang.org/x/crypto/ssh/agent.Agent
     nolintlint:
       require-explanation: true
       require-specific: true
@@ -162,18 +172,17 @@ linters:
           - revive
           - usetesting
           - wrapcheck
+      # Test harness that happens not to end in _test.go, so the rules above
+      # miss it. Same exemption `^e2e/` already gets for its support files.
+      - path: ^cmd/entire/cli/integration_test/
+        linters:
+          - gosec
       - path: ^test/workloads/
         linters:
           - wrapcheck
       - path: ^internal/sim/
         linters:
           - wrapcheck
-      - path: ^cmd/entire/cli/review/tui_model\.go$
-        linters:
-          - ireturn
-      - path: ^cmd/entire/cli/investigate/cmd\.go$
-        linters:
-          - ireturn
       # configloader.go is a thin os-backed billy.Basic adapter. It must return
       # raw os errors unwrapped so go-git's os.IsNotExist() fall-through (for
       # absent config files) keeps working; wrapping would break it.

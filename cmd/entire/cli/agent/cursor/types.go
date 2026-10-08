@@ -55,6 +55,11 @@ type sessionStartRaw struct {
 // stopHookInputRaw is the JSON structure from Stop hooks.
 // IDE provides transcript_path; CLI sends null.
 // Both provide status and loop_count.
+//
+// Token fields (input_tokens, output_tokens, cache_read_tokens,
+// cache_write_tokens) are reported per turn by recent Cursor versions and are
+// the only authoritative source of token accounting — the JSONL transcript
+// does not include usage data.
 type stopHookInputRaw struct {
 	// common
 	ConversationID string   `json:"conversation_id"`
@@ -67,8 +72,12 @@ type stopHookInputRaw struct {
 	TranscriptPath string   `json:"transcript_path"`
 
 	// hook specific
-	Status    string      `json:"status"`
-	LoopCount json.Number `json:"loop_count"`
+	Status           string      `json:"status"`
+	LoopCount        json.Number `json:"loop_count"`
+	InputTokens      json.Number `json:"input_tokens"`       // Total input tokens (includes cache portions)
+	OutputTokens     json.Number `json:"output_tokens"`      // Generated output tokens
+	CacheReadTokens  json.Number `json:"cache_read_tokens"`  // Tokens served from cache (subset of input_tokens)
+	CacheWriteTokens json.Number `json:"cache_write_tokens"` // Tokens written to cache (subset of input_tokens)
 }
 
 // sessionEndRaw is the JSON structure from SessionEnd hooks.
@@ -178,4 +187,24 @@ type subagentStopHookInputRaw struct {
 	Task                 string      `json:"task"`
 	Description          string      `json:"description"`
 	AgentTranscriptPath  string      `json:"agent_transcript_path"`
+}
+
+// FileModificationTools lists the Cursor tool names that create or modify files.
+//
+// Captured from a real Cursor session (testdata/real_session_tool_use.jsonl):
+// Write creates or overwrites a file, StrReplace edits one in place. Cursor's
+// read-only tools (Read, Grep, Glob, Shell) are deliberately absent — Shell can
+// of course modify files, but the transcript records only the command string, so
+// attributing files to it would mean parsing shell, not reading a path.
+//
+// Cursor's names differ from Claude Code's (Write/Edit), so this list cannot be
+// shared with claudecode.FileModificationTools.
+var FileModificationTools = []string{"Write", "StrReplace"}
+
+// toolInput is the subset of a Cursor tool_use input that carries the target file.
+//
+// Cursor keys it "path", where Claude Code uses "file_path" — which is why the
+// shared transcript.ToolInput type does not fit. Values observed are absolute.
+type toolInput struct {
+	Path string `json:"path"`
 }

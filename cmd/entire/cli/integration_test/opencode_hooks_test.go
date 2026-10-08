@@ -44,14 +44,11 @@ func TestOpenCodeHookFlow(t *testing.T) {
 		t.Fatalf("turn-end error: %v", err)
 	}
 
-	// 6. Verify checkpoint was created
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Fatal("expected at least 1 rewind point after turn-end")
-	}
+	// 6. Verify the turn end was recorded in session state
+	env.AssertTurnEndRecorded(session.ID, "feature.go")
 
 	// 7. For manual-commit, user commits manually (triggers condensation).
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 
 	// 8. session-end
 	if err := env.SimulateOpenCodeSessionEnd(session.ID, session.TranscriptPath); err != nil {
@@ -73,7 +70,7 @@ func TestOpenCodeHookFlow(t *testing.T) {
 }
 
 // TestOpenCodeAgentStrategyComposition verifies that the OpenCode agent and strategy
-// work together correctly — agent parses session, strategy saves checkpoint, rewind works.
+// work together correctly — agent parses session, strategy records the turn end in session state.
 func TestOpenCodeAgentStrategyComposition(t *testing.T) {
 	t.Parallel()
 
@@ -122,86 +119,8 @@ func TestOpenCodeAgentStrategyComposition(t *testing.T) {
 		t.Fatalf("turn-end error = %v", err)
 	}
 
-	// Verify checkpoint was created
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Fatal("expected at least 1 rewind point after turn-end")
-	}
-}
-
-// TestOpenCodeRewind verifies that rewind works with OpenCode checkpoints.
-func TestOpenCodeRewind(t *testing.T) {
-	t.Parallel()
-
-	env := NewFeatureBranchEnv(t)
-	// Test with manual-commit strategy as it has full file restoration on rewind
-	env.InitEntireWithAgent(agent.AgentNameOpenCode)
-
-	// First session
-	session := env.NewOpenCodeSession()
-	transcriptPath := session.TranscriptPath
-
-	if err := env.SimulateOpenCodeSessionStart(session.ID, transcriptPath); err != nil {
-		t.Fatalf("session-start error: %v", err)
-	}
-
-	// Turn 1: create file1.go (AFTER turn-start so it's detected as new)
-	if err := env.SimulateOpenCodeTurnStart(session.ID, transcriptPath, "Create file1"); err != nil {
-		t.Fatalf("turn-start error: %v", err)
-	}
-
-	env.WriteFile("file1.go", "package main\n// file1 v1")
-	session.CreateOpenCodeTranscript("Create file1", []FileChange{
-		{Path: "file1.go", Content: "package main\n// file1 v1"},
-	})
-
-	if err := env.SimulateOpenCodeTurnEnd(session.ID, transcriptPath); err != nil {
-		t.Fatalf("turn-end error: %v", err)
-	}
-
-	points1 := env.GetRewindPoints()
-	if len(points1) == 0 {
-		t.Fatal("no rewind point after first turn")
-	}
-	checkpoint1ID := points1[0].ID
-
-	// Turn 2: modify file1 and create file2 (AFTER turn-start)
-	if err := env.SimulateOpenCodeTurnStart(session.ID, transcriptPath, "Modify file1"); err != nil {
-		t.Fatalf("turn-start error: %v", err)
-	}
-
-	env.WriteFile("file1.go", "package main\n// file1 v2")
-	env.WriteFile("file2.go", "package main\n// file2")
-	session.CreateOpenCodeTranscript("Modify file1, create file2", []FileChange{
-		{Path: "file1.go", Content: "package main\n// file1 v2"},
-		{Path: "file2.go", Content: "package main\n// file2"},
-	})
-
-	if err := env.SimulateOpenCodeTurnEnd(session.ID, transcriptPath); err != nil {
-		t.Fatalf("turn-end error: %v", err)
-	}
-
-	// Verify 2 checkpoints
-	points2 := env.GetRewindPoints()
-	if len(points2) < 2 {
-		t.Fatalf("expected at least 2 rewind points, got %d", len(points2))
-	}
-
-	// Rewind to first checkpoint
-	if err := env.Rewind(checkpoint1ID); err != nil {
-		t.Fatalf("Rewind() error = %v", err)
-	}
-
-	// Verify file1 is restored to v1
-	content := env.ReadFile("file1.go")
-	if content != "package main\n// file1 v1" {
-		t.Errorf("file1.go after rewind = %q, want v1 content", content)
-	}
-
-	// file2 should not exist after rewind to checkpoint 1
-	if env.FileExists("file2.go") {
-		t.Error("file2.go should not exist after rewind to checkpoint 1")
-	}
+	// Verify the turn end was recorded in session state
+	env.AssertTurnEndRecorded(session.ID, "feature.go")
 }
 
 // TestOpenCodeMultiTurnCondensation verifies that multiple turns in a session
@@ -234,14 +153,11 @@ func TestOpenCodeMultiTurnCondensation(t *testing.T) {
 		t.Fatalf("turn-end error: %v", err)
 	}
 
-	// Verify checkpoint
-	points := env.GetRewindPoints()
-	if len(points) == 0 {
-		t.Fatal("expected rewind point after first turn")
-	}
+	// Verify the turn end was recorded in session state
+	env.AssertTurnEndRecorded(session.ID, "app.go")
 
 	// Commit with hooks (triggers condensation)
-	env.GitCommitWithShadowHooks("Implement app", "app.go")
+	env.GitCommitWithHooks("Implement app", "app.go")
 
 	// session-end
 	if err := env.SimulateOpenCodeSessionEnd(session.ID, transcriptPath); err != nil {
@@ -309,7 +225,7 @@ func TestOpenCodeMidTurnCommit(t *testing.T) {
 	// 6. Agent commits mid-turn (no turn-end yet!)
 	// This triggers: PrepareCommitMsg (adds trailer) → PostCommit (runs condensation)
 	// Condensation needs the transcript, which PrepareTranscript should provide.
-	env.GitCommitWithShadowHooksAsAgent("Add script", "script.sh")
+	env.GitCommitWithHooksAsAgent("Add script", "script.sh")
 
 	// 7. Verify commit has checkpoint trailer
 	commitHash := env.GetHeadHash()
@@ -366,13 +282,10 @@ func TestOpenCodeResumedSessionAfterCommit(t *testing.T) {
 		t.Fatalf("turn-end 1 error: %v", err)
 	}
 
-	points1 := env.GetRewindPoints()
-	if len(points1) == 0 {
-		t.Fatal("expected rewind point after turn 1")
-	}
+	env.AssertTurnEndRecorded(session.ID, "app.go")
 
 	// === User commits (triggers condensation) ===
-	env.GitCommitWithShadowHooks("Create app", "app.go")
+	env.GitCommitWithHooks("Create app", "app.go")
 
 	// Verify condensation happened
 	checkpointID := env.TryGetLatestCheckpointID()
@@ -394,14 +307,11 @@ func TestOpenCodeResumedSessionAfterCommit(t *testing.T) {
 		t.Fatalf("turn-end 2 error: %v", err)
 	}
 
-	// === Verify: a new checkpoint was created for turn 2 ===
-	points2 := env.GetRewindPoints()
-	if len(points2) == 0 {
-		t.Fatal("expected rewind point after turn 2 (resumed session), got none")
-	}
+	// === Verify: turn 2 (resumed session) recorded a new turn-end step ===
+	env.AssertTurnEndRecorded(session.ID, "app.go")
 
 	// For manual-commit: commit turn 2 and verify second condensation
-	env.GitCommitWithShadowHooks("Add color output", "app.go")
+	env.GitCommitWithHooks("Add color output", "app.go")
 
 	checkpointID2 := env.TryGetLatestCheckpointID()
 	if checkpointID2 == "" {

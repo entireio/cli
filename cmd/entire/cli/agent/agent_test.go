@@ -19,7 +19,6 @@ var _ Agent = (*mockAgent)(nil) // Compile-time interface check
 func (m *mockAgent) Name() types.AgentName                          { return mockAgentName }
 func (m *mockAgent) Type() types.AgentType                          { return mockAgentType }
 func (m *mockAgent) Description() string                            { return "Mock agent for testing" }
-func (m *mockAgent) IsPreview() bool                                { return false }
 func (m *mockAgent) DetectPresence(_ context.Context) (bool, error) { return false, nil }
 
 func (m *mockAgent) GetSessionID(_ *HookInput) string { return "" }
@@ -59,9 +58,9 @@ func (m *mockHookSupport) HookNames() []string { return nil }
 func (m *mockHookSupport) ParseHookEvent(_ context.Context, _ string, _ io.Reader) (*Event, error) {
 	return nil, nil
 }
-func (m *mockHookSupport) InstallHooks(_ context.Context, _, _ bool) (int, error) { return 0, nil }
-func (m *mockHookSupport) UninstallHooks(_ context.Context) error                 { return nil }
-func (m *mockHookSupport) AreHooksInstalled(_ context.Context) bool               { return false }
+func (m *mockHookSupport) InstallHooks(_ context.Context, _ bool) (int, error) { return 0, nil }
+func (m *mockHookSupport) UninstallHooks(_ context.Context) error              { return nil }
+func (m *mockHookSupport) AreHooksInstalled(_ context.Context) (bool, error)   { return false, nil }
 
 // mockFileWatcher implements both Agent and FileWatcher interfaces.
 type mockFileWatcher struct {
@@ -135,31 +134,6 @@ func TestHookTypeConstants(t *testing.T) {
 	}
 }
 
-func TestEntryTypeConstants(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		entryType EntryType
-		expected  string
-	}{
-		{EntryUser, "user"},
-		{EntryAssistant, "assistant"},
-		{EntryTool, "tool"},
-		{EntrySystem, "system"},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.entryType), func(t *testing.T) {
-			t.Parallel()
-
-			if string(tt.entryType) != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, string(tt.entryType))
-			}
-		})
-	}
-}
-
-//nolint:govet // testing struct field assignment
 func TestHookInputStructure(t *testing.T) {
 	t.Parallel()
 

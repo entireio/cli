@@ -93,7 +93,7 @@ Please answer these questions in your bug report:
 
 ### Prerequisites
 
-- **Go 1.26.x** - Check with `go version`
+- **Go 1.27.1+** - Check with `go version`. `go.mod` pins the minimum, so an older toolchain fails unless it can download the pinned one (`GOTOOLCHAIN=local` cannot).
 - **mise** - Task runner and version manager. Install with `curl https://mise.run | sh`
 
 ### Clone and Install
@@ -119,7 +119,7 @@ mise run build
 mise run test
 ```
 
-> See [CLAUDE.md](CLAUDE.md) for detailed architecture and development reference.
+> See the [reference map](CLAUDE.md#read-when-relevant) for architecture and development documentation.
 
 ---
 
@@ -143,7 +143,7 @@ mise run test
 
 ## Code Style
 
-Follow standard Go idioms and conventions. For detailed guidance, see the **Go Code Style** section in [CLAUDE.md](CLAUDE.md).
+Follow standard Go idioms and conventions. See the [verification requirements](CLAUDE.md#verification) and [CLI conventions](docs/development/cli-conventions.md) for repository-specific guidance.
 
 ### Key Points
 
@@ -156,7 +156,7 @@ Follow standard Go idioms and conventions. For detailed guidance, see the **Go C
 
 ## Testing
 
-> See [CLAUDE.md](CLAUDE.md) for complete testing documentation.
+> See [Testing and development tools](docs/development/testing.md) for complete testing documentation.
 
 ```bash
 # Unit tests - always run before committing
@@ -213,7 +213,7 @@ These are markdown files that define specialized behaviors for Claude Code (e.g.
 
 ### 2. Coding Agent Integrations (Go)
 
-These are Go implementations that integrate Entire with different AI coding tools (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, etc.) using the Agent abstraction layer.
+These are Go implementations that integrate Entire with different AI coding tools (Claude Code, Codex, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, etc.) using the Agent abstraction layer.
 
 - **Location:** `cmd/entire/cli/agent/`
 - **Steps:**
@@ -221,7 +221,7 @@ These are Go implementations that integrate Entire with different AI coding tool
    2. Register your agent in the agent registry
    3. Add setup and hook configuration as needed
    4. Ensure session and checkpoint tracking is handled per the abstraction
-- **Reference:** See [CLAUDE.md](CLAUDE.md) for architecture and code examples.
+- **Reference:** Use the [reference map](CLAUDE.md#read-when-relevant) to find architecture and code examples.
 
 ---
 
@@ -272,7 +272,7 @@ Addressing Copilot feedback upfront is the fastest path to maintainer review.
 
 Entire exists to help you work with AI coding agents, so it would be odd if you weren't using one to contribute. There's no need to tell us you did. Our general thinking: use whatever agent and methodology you like, but until the robot revolution comes, you are responsible for the final code. Before submitting a PR for review, make sure you have reviewed it yourself. We'll close PRs that obviously skipped this step.
 
-Entire supports Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with.
+Entire supports Claude Code, Codex, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with.
 
 One thing to watch out for is LLM eagerness. Agents like to please and they're in a hurry. A few common failure modes to push back on:
 
@@ -344,8 +344,8 @@ Join the Entire community:
 ## Additional Resources
 
 - [README](README.md) - Setup and usage documentation
-- [CLAUDE.md](CLAUDE.md) - Architecture and development reference (Claude Code)
-- [AGENTS.md](AGENTS.md) - Architecture and development reference (Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI)
+- [CLAUDE.md](CLAUDE.md) - Repository rules and task-specific reference map (Claude Code)
+- [AGENTS.md](AGENTS.md) - Same instructions via symlink (Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI)
 - [Code of Conduct](CODE_OF_CONDUCT.md) - Community guidelines
 - [Security Policy](SECURITY.md) - Reporting security vulnerabilities
 

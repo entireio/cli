@@ -3,11 +3,10 @@ package dispatch
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
-)
 
-var githubRepoSlugPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$`)
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+)
 
 func ResolveOptions(
 	flagLocal bool,
@@ -16,19 +15,28 @@ func ResolveOptions(
 	flagAllBranches bool,
 	flagRepos []string,
 	flagVoice string,
+	flagJurisdiction string,
 	flagInsecureHTTPAuth bool,
 	currentBranch func() (string, error),
 ) (Options, error) {
 	flagRepos = normalizeScopeValues(flagRepos)
+	jurisdiction, err := normalizeJurisdiction(flagJurisdiction)
+	if err != nil {
+		return Options{}, err
+	}
 
 	if flagLocal && len(flagRepos) > 0 {
 		return Options{}, errors.New("--repos cannot be used with --local")
+	}
+	if flagLocal && jurisdiction != "" {
+		return Options{}, errors.New("--jurisdiction cannot be used with --local (cloud dispatch only)")
 	}
 	if !flagLocal && flagAllBranches {
 		return Options{}, errors.New("--all-branches only applies to --local (cloud dispatch uses each repo's default branch)")
 	}
 	if !flagLocal {
-		if err := validateRepoSlugs(flagRepos); err != nil {
+		flagRepos, err = normalizeRepoSlugs(flagRepos)
+		if err != nil {
 			return Options{}, err
 		}
 	}
@@ -61,8 +69,20 @@ func ResolveOptions(
 		AllBranches:           flagAllBranches,
 		ImplicitCurrentBranch: implicitCurrentBranch,
 		Voice:                 flagVoice,
+		Jurisdiction:          jurisdiction,
 		InsecureHTTPAuth:      flagInsecureHTTPAuth,
 	}, nil
+}
+
+// normalizeJurisdiction applies auth's single jurisdiction rule to the
+// --jurisdiction flag (empty = the caller's home jurisdiction), phrasing the
+// rejection in the flag's terms.
+func normalizeJurisdiction(value string) (string, error) {
+	jurisdiction, err := auth.NormalizeJurisdiction(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid --jurisdiction (expected a slug such as us or eu): %w", err)
+	}
+	return jurisdiction, nil
 }
 
 func normalizeScopeValues(values []string) []string {
@@ -80,13 +100,4 @@ func normalizeScopeValues(values []string) []string {
 		normalized = append(normalized, value)
 	}
 	return normalized
-}
-
-func validateRepoSlugs(values []string) error {
-	for _, value := range values {
-		if !githubRepoSlugPattern.MatchString(value) {
-			return fmt.Errorf("invalid repo %q: expected owner/repo", value)
-		}
-	}
-	return nil
 }

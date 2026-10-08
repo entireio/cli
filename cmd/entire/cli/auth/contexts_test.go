@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,48 @@ func makeJWT(t *testing.T, payloadJSON string) string {
 	header := enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	payload := enc.EncodeToString([]byte(payloadJSON))
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
+}
+
+func TestLocalIdentityCacheKey_ActiveContext(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	t.Setenv(EnvTokenVar, "")
+
+	ctx := &contexts.Context{
+		Name:            "alice@core",
+		CoreURL:         "https://core.example.com/",
+		Handle:          "alice",
+		KeychainService: "entire-core:https://core.example.com",
+	}
+	if err := contexts.Save(cfgDir, &contexts.File{CurrentContext: ctx.Name, Contexts: []*contexts.Context{ctx}}); err != nil {
+		t.Fatalf("save contexts: %v", err)
+	}
+
+	got, err := LocalIdentityCacheKey()
+	if err != nil {
+		t.Fatalf("LocalIdentityCacheKey: %v", err)
+	}
+	want := "context|https://core.example.com|alice@core|alice|entire-core:https://core.example.com"
+	if got != want {
+		t.Fatalf("cache key = %q, want %q", got, want)
+	}
+}
+
+func TestLocalIdentityCacheKey_EnvToken(t *testing.T) {
+	token := makeJWT(t, `{"iss":"https://core.example.com/","sub":"svc-1","handle":"robot","aud":"https://api.example.com"}`)
+	t.Setenv(EnvTokenVar, token)
+
+	got, err := LocalIdentityCacheKey()
+	if err != nil {
+		t.Fatalf("LocalIdentityCacheKey: %v", err)
+	}
+	want := "env|https://core.example.com|svc-1|robot|https://api.example.com"
+	if got != want {
+		t.Fatalf("cache key = %q, want %q", got, want)
+	}
+	if strings.Contains(got, token) {
+		t.Fatalf("cache key appears to contain raw JWT material: %q", got)
+	}
 }
 
 // RecordLoginContext must persist the refresh token before the access token,
@@ -146,82 +189,6 @@ func TestLoginTokenForContext(t *testing.T) {
 
 	if _, err := LoginTokenForContext(nil); err == nil {
 		t.Fatal("expected error for nil context")
-	}
-}
-
-func TestRemoveCurrentContext(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	exp := time.Now().Add(time.Hour).Unix()
-	token := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example.com","handle":"alice","exp":%d}`, exp))
-	if _, err := RecordLoginContext(token, testRefreshToken, true); err != nil {
-		t.Fatalf("RecordLoginContext: %v", err)
-	}
-	if _, current, err := Contexts(); err != nil || current == "" {
-		t.Fatalf("precondition: expected a current context (current=%q, err=%v)", current, err)
-	}
-	svc := tokenstore.CoreKeyringService("https://core.example.com")
-	if r, _ := tokenstore.Get(tokenstore.RefreshService(svc), "alice"); r != testRefreshToken { //nolint:errcheck // read-back; only the value matters
-		t.Fatalf("precondition: expected refresh slot seeded, got %q", r)
-	}
-
-	if err := RemoveCurrentContext(); err != nil {
-		t.Fatalf("RemoveCurrentContext: %v", err)
-	}
-	if _, current, err := Contexts(); err != nil || current != "" {
-		t.Fatalf("after RemoveCurrentContext, expected no current context (current=%q, err=%v)", current, err)
-	}
-	// Logout must scrub both slots: the access token and the long-lived
-	// refresh token. A leftover refresh token would let any keyring-capable
-	// process mint fresh access tokens after logout.
-	if v, err := tokenstore.Get(svc, "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
-		t.Fatalf("access slot survived logout: value=%q err=%v", v, err)
-	}
-	if v, err := tokenstore.Get(tokenstore.RefreshService(svc), "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
-		t.Fatalf("refresh slot survived logout: value=%q err=%v", v, err)
-	}
-
-	// Idempotent: a second call with nothing current is a no-op.
-	if err := RemoveCurrentContext(); err != nil {
-		t.Fatalf("second RemoveCurrentContext: %v", err)
-	}
-}
-
-func TestRemoveCurrentContext_DoesNotSwitchToAnother(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
-		t.Fatalf("record a: %v", err)
-	}
-	active, err := RecordLoginContext(makeJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"alice","exp":%d}`, exp)), "", true)
-	if err != nil {
-		t.Fatalf("record b: %v", err)
-	}
-
-	// Logging out of the active context must NOT silently switch to the
-	// surviving one — current_context is cleared.
-	if err := RemoveCurrentContext(); err != nil {
-		t.Fatalf("RemoveCurrentContext: %v", err)
-	}
-	f, err := contexts.Load(cfgDir)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if f.CurrentContext != "" {
-		t.Fatalf("current_context = %q after logout, want empty (not switched)", f.CurrentContext)
-	}
-	if f.Find(active) != nil {
-		t.Fatalf("active context %q should have been removed", active)
-	}
-	if len(f.Contexts) != 1 {
-		t.Fatalf("want the other context to survive; got %d contexts", len(f.Contexts))
 	}
 }
 

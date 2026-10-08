@@ -2,15 +2,15 @@ package strategy
 
 import (
 	"context"
-	"io"
+	"errors"
 	"log/slog"
 	"os"
-	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
@@ -22,38 +22,45 @@ func truncateStringSlice(s []string, n int) []string {
 	return s[:n]
 }
 
-// Content-aware overlap detection for checkpoint management.
+// Overlap detection for checkpoint linking and carry-forward.
 //
-// These functions determine whether a commit contains session-related work by comparing
-// file content (not just filenames) against the shadow branch. This enables accurate
-// detection of the "reverted and replaced" scenario where a user:
-// 1. Reverts session changes (e.g., git checkout -- file.txt)
-// 2. Creates completely different content in the same file
-// 3. Commits the new content
+// Linking (filesOverlapWithContent in PostCommit, stagedFilesOverlapWithContent
+// in PrepareCommitMsg) decides whether a commit carries a session's work and so
+// gets its Entire-Checkpoint trailer. It is by NAME: any committed (or staged)
+// path in FilesTouched counts, whether the file is modified, deleted, or new,
+// and whatever its content. A user editing an agent-created file before
+// committing it is far more common than a user overwriting it wholesale, and
+// comparing the committed blob with the recorded hash turned the common case
+// into a missing trailer.
 //
-// In this scenario, the commit should NOT get a checkpoint trailer because the
-// session's work was discarded, not incorporated.
+// The one exception is a recorded deletion (SessionState.TouchedFileHashes
+// holds "" for the path): if the agent's last action on a path was to delete
+// it and the commit adds that path as a new file, someone else re-created it,
+// so it does not link. A later turn in which the agent re-creates the path
+// records a hash for it and removes the exception.
 //
-// The key distinction:
-// - Modified files (exist in parent commit): Always count as overlap, regardless of
-//   content changes. The user is editing session's work.
-// - New files (don't exist in parent): Require content match against shadow branch.
-//   If content differs completely, the session's work was likely reverted & replaced.
+// Carry-forward (filesWithRemainingAgentChanges) is a different question: what
+// is LEFT of the agent's work after a commit. It does compare the committed blob
+// and the worktree with the recorded turn-end hash (see touched_file_hashes.go)
+// to tell fully committed from replaced from partially committed. A path with no
+// recorded hash — one that reached FilesTouched through a task record, a
+// per-tool hook, or a Codex child-file merge (MergeUnhashedFilesTouched), or a
+// symlink or unhashable file — falls back to name matching there too.
 
 // overlapOpts provides pre-resolved git objects to avoid redundant reads.
 // When fields are non-nil, they are used directly instead of reading from the repo.
 type overlapOpts struct {
 	headTree      *object.Tree // HEAD commit tree
-	shadowTree    *object.Tree // Shadow branch tree
 	parentTree    *object.Tree // HEAD's first parent tree (nil = initial commit or not provided)
 	hasParentTree bool         // True if parentTree was explicitly resolved (distinguishes nil-not-resolved from nil-initial-commit)
 }
 
-// filesOverlapWithContent checks if any file in filesTouched overlaps with the committed
-// content, using content-aware comparison to detect the "reverted and replaced" scenario.
+// filesOverlapWithContent reports whether the commit touches any path in
+// filesTouched: a modified, deleted, or new file, matched by name. A new file
+// the session recorded as deleted does not count (see the header above).
 //
 // This is used in PostCommit to determine if a session has work in the commit.
-func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBranchName string, headCommit *object.Commit, filesTouched []string, opts ...overlapOpts) bool {
+func filesOverlapWithContent(ctx context.Context, hashes map[string]string, headCommit *object.Commit, filesTouched []string, opts ...overlapOpts) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
 	// Use pre-resolved trees if provided, otherwise resolve from repo.
@@ -74,35 +81,6 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 		}
 	}
 
-	shadowTree := o.shadowTree
-	if shadowTree == nil {
-		refName := plumbing.NewBranchReferenceName(shadowBranchName)
-		shadowRef, err := repo.Reference(refName, true)
-		if err != nil {
-			logging.Debug(logCtx, "filesOverlapWithContent: shadow branch not found, falling back to filename check",
-				slog.String("branch", shadowBranchName),
-				slog.String("error", err.Error()),
-			)
-			return len(filesTouched) > 0
-		}
-
-		shadowCommit, err := repo.CommitObject(shadowRef.Hash())
-		if err != nil {
-			logging.Debug(logCtx, "filesOverlapWithContent: failed to get shadow commit, falling back to filename check",
-				slog.String("error", err.Error()),
-			)
-			return len(filesTouched) > 0
-		}
-
-		shadowTree, err = shadowCommit.Tree()
-		if err != nil {
-			logging.Debug(logCtx, "filesOverlapWithContent: failed to get shadow tree, falling back to filename check",
-				slog.String("error", err.Error()),
-			)
-			return len(filesTouched) > 0
-		}
-	}
-
 	parentTree := o.parentTree
 	if parentTree == nil && !o.hasParentTree {
 		if headCommit.NumParents() > 0 {
@@ -117,7 +95,7 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 	// Check each file in filesTouched
 	for _, filePath := range filesTouched {
 		// Get file from HEAD tree (the committed content)
-		headFile, err := headTree.File(filePath)
+		_, err := headTree.File(filePath)
 		if err != nil {
 			// File not in HEAD commit. Check if this is a deletion (existed in parent).
 			// Deletions count as overlap because the agent's action (deleting the file)
@@ -151,30 +129,10 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 			return true
 		}
 
-		// For new files, check content against shadow branch
-		shadowFile, err := shadowTree.File(filePath)
-		if err != nil {
-			// File not in shadow branch - this shouldn't happen but skip it
-			logging.Debug(logCtx, "filesOverlapWithContent: file in filesTouched but not in shadow branch",
-				slog.String("file", filePath),
-			)
-			continue
-		}
-
-		// Compare by hash (blob hash) - exact content match required for new files
-		if headFile.Hash == shadowFile.Hash {
-			logging.Debug(logCtx, "filesOverlapWithContent: new file content match found",
-				slog.String("file", filePath),
-				slog.String("hash", headFile.Hash.String()),
-			)
+		// New files count by name, unless the agent's last action was deleting it.
+		if newFileIsSessionWork(logCtx, "filesOverlapWithContent", hashes, filePath) {
 			return true
 		}
-
-		logging.Debug(logCtx, "filesOverlapWithContent: new file content mismatch (may be reverted & replaced)",
-			slog.String("file", filePath),
-			slog.String("head_hash", headFile.Hash.String()),
-			slog.String("shadow_hash", shadowFile.Hash.String()),
-		)
 	}
 
 	logging.Debug(logCtx, "filesOverlapWithContent: no overlapping files found",
@@ -183,15 +141,29 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 	return false
 }
 
-// stagedFilesOverlapWithContent checks if any staged file overlaps with filesTouched,
-// distinguishing between modified files (always overlap) and new files (check content).
+// newFileIsSessionWork reports whether a file the commit adds counts as the
+// session's work. It does, by name, unless the session recorded the path as
+// deleted: then someone else re-created it after the agent deleted it.
+func newFileIsSessionWork(logCtx context.Context, caller string, hashes map[string]string, filePath string) bool {
+	if _, _, deleted := recordedFileHash(hashes, filePath); deleted {
+		logging.Debug(logCtx, caller+": new file the session recorded as deleted",
+			slog.String("file", filePath),
+		)
+		return false
+	}
+	logging.Debug(logCtx, caller+": new file counts as overlap",
+		slog.String("file", filePath),
+	)
+	return true
+}
+
+// stagedFilesOverlapWithContent reports whether any staged path is in
+// filesTouched, matched by name for modified, deleted, and new files alike. A
+// new file the session recorded as deleted does not count (see the header
+// above).
 //
-// For modified files (already exist in HEAD), we count as overlap because the user
-// is editing the session's work. For new files (don't exist in HEAD), we require
-// content match to detect the "reverted and replaced" scenario.
-//
-// This is used in PrepareCommitMsg for carry-forward scenarios.
-func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowTree *object.Tree, stagedFiles, filesTouched []string) bool {
+// This is used in PrepareCommitMsg.
+func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, hashes map[string]string, stagedFiles, filesTouched []string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
 	// Build set of filesTouched for quick lookup
@@ -223,21 +195,6 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 		return hasOverlappingFiles(stagedFiles, filesTouched)
 	}
 
-	// Get the git index to access staged file hashes
-	idx, err := repo.Storer.Index()
-	if err != nil {
-		logging.Debug(logCtx, "stagedFilesOverlapWithContent: failed to get index, falling back to filename check",
-			slog.String("error", err.Error()),
-		)
-		return hasOverlappingFiles(stagedFiles, filesTouched)
-	}
-
-	// Build a map of index entries for O(1) lookup (avoid O(n*m) nested loop)
-	indexEntries := make(map[string]plumbing.Hash, len(idx.Entries))
-	for _, entry := range idx.Entries {
-		indexEntries[entry.Name] = entry.Hash
-	}
-
 	// Check each staged file
 	for _, stagedPath := range stagedFiles {
 		if !touchedSet[stagedPath] {
@@ -261,85 +218,10 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 			return true
 		}
 
-		// For new files, check content against shadow branch
-		stagedHash, found := indexEntries[stagedPath]
-		if !found {
-			continue // Not in index (shouldn't happen but be safe)
-		}
-
-		// Get file from shadow branch tree
-		shadowFile, err := shadowTree.File(stagedPath)
-		if err != nil {
-			// File not in shadow branch - can't verify content overlap.
-			// Don't assume overlap just because it's in filesTouched.
-			logging.Debug(logCtx, "stagedFilesOverlapWithContent: file not in shadow tree, skipping",
-				slog.String("file", stagedPath),
-			)
-			continue
-		}
-
-		// Compare hashes - exact match means file is unchanged
-		if stagedHash == shadowFile.Hash {
-			logging.Debug(logCtx, "stagedFilesOverlapWithContent: new file content match found",
-				slog.String("file", stagedPath),
-				slog.String("hash", stagedHash.String()),
-			)
+		// New files count by name, unless the agent's last action was deleting it.
+		if newFileIsSessionWork(logCtx, "stagedFilesOverlapWithContent", hashes, stagedPath) {
 			return true
 		}
-
-		// Hashes differ - check if there's significant content overlap.
-		// This distinguishes partial staging (user kept some agent content) from
-		// "reverted and replaced" (user wrote completely different content).
-		shadowContent, shadowErr := shadowFile.Contents()
-		if shadowErr != nil {
-			logging.Debug(logCtx, "stagedFilesOverlapWithContent: failed to read shadow content",
-				slog.String("file", stagedPath),
-				slog.String("error", shadowErr.Error()),
-			)
-			continue
-		}
-
-		// Read staged content from object store
-		stagedBlob, blobErr := repo.BlobObject(stagedHash)
-		if blobErr != nil {
-			logging.Debug(logCtx, "stagedFilesOverlapWithContent: failed to read staged blob",
-				slog.String("file", stagedPath),
-				slog.String("error", blobErr.Error()),
-			)
-			continue
-		}
-		stagedReader, readerErr := stagedBlob.Reader()
-		if readerErr != nil {
-			logging.Debug(logCtx, "stagedFilesOverlapWithContent: failed to get staged reader",
-				slog.String("file", stagedPath),
-				slog.String("error", readerErr.Error()),
-			)
-			continue
-		}
-		stagedBytes, readErr := io.ReadAll(stagedReader)
-		_ = stagedReader.Close() // Best effort close
-		if readErr != nil {
-			logging.Debug(logCtx, "stagedFilesOverlapWithContent: failed to read staged content",
-				slog.String("file", stagedPath),
-				slog.String("error", readErr.Error()),
-			)
-			continue
-		}
-		stagedContent := string(stagedBytes)
-
-		// Check for significant content overlap
-		if hasSignificantContentOverlap(stagedContent, shadowContent) {
-			logging.Debug(logCtx, "stagedFilesOverlapWithContent: new file has partial overlap (partial staging)",
-				slog.String("file", stagedPath),
-			)
-			return true
-		}
-
-		logging.Debug(logCtx, "stagedFilesOverlapWithContent: new file has no significant overlap (reverted & replaced)",
-			slog.String("file", stagedPath),
-			slog.String("staged_hash", stagedHash.String()),
-			slog.String("shadow_hash", shadowFile.Hash.String()),
-		)
 	}
 
 	logging.Debug(logCtx, "stagedFilesOverlapWithContent: no overlapping files found",
@@ -369,21 +251,35 @@ func hasOverlappingFiles(stagedFiles, filesTouched []string) bool {
 
 // filesWithRemainingAgentChanges returns files from filesTouched that still have
 // uncommitted agent changes. This is used for carry-forward after partial commits.
+// hashes is the session's TouchedFileHashes as they were before condensation.
 //
-// A file has remaining agent changes if:
+// A file with a recorded hash has remaining agent changes if:
 //   - It wasn't committed at all (not in committedFiles), OR
-//   - It was committed but the committed content doesn't match the shadow branch
+//   - It was committed but the committed blob doesn't match the recorded hash
 //     AND the working tree still has changes (e.g., user did git add -p)
 //
-// When committed content differs from the shadow but the working tree is clean
-// (matches the commit), the user intentionally wrote different content — there
-// is nothing left to carry forward.
+// When the committed blob differs from the recorded one but the working tree
+// is clean (matches the commit), the user intentionally wrote different
+// content — there is nothing left to carry forward.
 //
-// Falls back to file-level subtraction if shadow branch is unavailable.
+// A file without a recorded hash (a session from an older CLI, or a path added
+// by a task record, per-tool hook, or Codex child-file merge) is judged the
+// same way against the commit, minus the recorded-hash shortcut: once
+// committed, it stays while the working tree still differs from the committed
+// blob and drops when they match. An uncommitted one stays unless it is
+// absent from both the commit and the worktree (the phantom-path guard:
+// transcript parsing can name files the agent never created, and carrying
+// those forward would never end); one the commit still has but the worktree
+// lacks is a pending deletion of a tracked file and stays.
+//
+// A recorded agent deletion stays while it is still pending: the commit tree
+// still has the path and the worktree still lacks it, so the later commit that
+// deletes it links the session. It drops once a commit removes the path, or
+// when the file is back in the worktree (someone re-created it).
 func filesWithRemainingAgentChanges(
 	ctx context.Context,
 	repo *git.Repository,
-	shadowBranchName string,
+	hashes map[string]string,
 	headCommit *object.Commit,
 	filesTouched []string,
 	committedFiles map[string]struct{},
@@ -409,105 +305,91 @@ func filesWithRemainingAgentChanges(
 		}
 	}
 
-	shadowTree := o.shadowTree
-	if shadowTree == nil {
-		refName := plumbing.NewBranchReferenceName(shadowBranchName)
-		shadowRef, err := repo.Reference(refName, true)
-		if err != nil {
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: shadow branch not found, falling back to file subtraction",
-				slog.String("branch", shadowBranchName),
-				slog.String("error", err.Error()),
-			)
-			return subtractFilesByName(ctx, filesTouched, committedFiles)
-		}
-
-		shadowCommit, err := repo.CommitObject(shadowRef.Hash())
-		if err != nil {
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: failed to get shadow commit, falling back to file subtraction",
-				slog.String("error", err.Error()),
-			)
-			return subtractFilesByName(ctx, filesTouched, committedFiles)
-		}
-
-		shadowTree, err = shadowCommit.Tree()
-		if err != nil {
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: failed to get shadow tree, falling back to file subtraction",
-				slog.String("error", err.Error()),
-			)
-			return subtractFilesByName(ctx, filesTouched, committedFiles)
-		}
-	}
-
 	// Get worktree root for working tree checks when committed content
-	// differs from shadow (distinguishes replacement from partial staging).
+	// differs from the recorded hash (distinguishes replacement from partial
+	// staging), and for the phantom-path guard.
 	var worktreeRoot string
 	if wt, wtErr := repo.Worktree(); wtErr == nil {
 		worktreeRoot = wt.Filesystem().Root()
 	}
+	var root *os.Root
+	if worktreeRoot != "" {
+		if r, rootErr := worktreedir.OpenAt(worktreeRoot); rootErr == nil {
+			root = r
+		}
+	}
 
-	var remaining []string
+	classify := remainingClassifier{logCtx: logCtx, commitTree: commitTree, root: root, worktreeRoot: worktreeRoot}
+	keep := make([]bool, len(filesTouched))
+	var candidates []worktreeCandidate
+	var vanished []int
+	for i, filePath := range filesTouched {
+		_, wasCommitted := committedFiles[filePath]
+		kept, candidate, gone := classify.file(filePath, wasCommitted, hashes)
+		keep[i] = kept
+		if candidate != nil {
+			candidate.index = i
+			candidates = append(candidates, *candidate)
+		}
+		if gone {
+			vanished = append(vanished, i)
+		}
+	}
+	keepStagedVanished(ctx, logCtx, worktreeRoot, filesTouched, vanished, keep)
 
-	for _, filePath := range filesTouched {
-		// Skip files absent from the shadow tree — nothing to carry forward.
-		// This covers two cases:
-		//  1. Phantom paths: transcript mentions files the agent never created
-		//     (e.g. agent writes src/types.go then creates src/types/types.go).
-		//  2. Agent deletions: file was deleted on disk, so buildTreeWithChanges
-		//     excluded it from the shadow tree. Carrying it forward would be a
-		//     no-op since there's no content on disk to snapshot.
-		// Without this check, phantom paths cause infinite carry-forward loops.
-		shadowFile, err := shadowTree.File(filePath)
-		if err != nil {
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not in shadow tree, skipping",
-				slog.String("file", filePath),
+	// Whether the worktree still differs from what was committed is git
+	// status's answer, not a comparison of `git hash-object` with the commit:
+	// status applies the index-aware line-ending rule `git add` does (a file
+	// committed with CRLF is not normalized by text=auto or core.autocrlf),
+	// hash-object does not, and a hash comparison read every such file as
+	// dirty forever. This runs right after the commit, so HEAD is the commit.
+	// A path status does not report matches the index and HEAD and is done;
+	// anything reported (modified, staged, untracked, or deleted in the
+	// worktree — the pending deletion of a tracked file) keeps its place. If
+	// status fails, every candidate is kept rather than dropped on a guess.
+	var statuses map[string]string
+	var statusErr error
+	if len(candidates) > 0 {
+		if worktreeRoot == "" {
+			statusErr = errors.New("no worktree root")
+		} else {
+			candidatePaths := make([]string, 0, len(candidates))
+			for _, candidate := range candidates {
+				candidatePaths = append(candidatePaths, candidate.path)
+			}
+			statuses, statusErr = gitrepo.PathStatuses(ctx, worktreeRoot, candidatePaths)
+		}
+		if statusErr != nil {
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: git status failed for carry-forward candidates, keeping them",
+				slog.String("error", statusErr.Error()))
+		}
+	}
+
+	for _, candidate := range candidates {
+		code, reported := statuses[candidate.path]
+		if statusErr == nil && !reported {
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content differs from recorded but working tree is clean, skipping",
+				slog.String("file", candidate.path),
+				slog.String("commit_hash", candidate.commitHash.String()[:7]),
+				slog.String("recorded_hash", candidate.recordedHash.String()[:7]),
 			)
 			continue
 		}
 
-		// File wasn't committed at all — it has remaining changes
-		if _, wasCommitted := committedFiles[filePath]; !wasCommitted {
-			remaining = append(remaining, filePath)
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
-				slog.String("file", filePath),
-			)
-			continue
-		}
-
-		commitFile, err := commitTree.File(filePath)
-		if err != nil {
-			// File not in commit tree (deleted?) - keep it if it's in shadow
-			remaining = append(remaining, filePath)
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not in commit tree but in shadow, keeping",
-				slog.String("file", filePath),
-			)
-			continue
-		}
-
-		if commitFile.Hash == shadowFile.Hash {
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content fully committed",
-				slog.String("file", filePath),
-			)
-			continue
-		}
-
-		// Committed content differs from shadow. Check whether the working tree
-		// still has changes — if clean, the user intentionally replaced the content
-		// and there's nothing left to carry forward.
-		if worktreeRoot != "" && workingTreeMatchesCommit(worktreeRoot, filePath, commitFile.Hash) {
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content differs from shadow but working tree is clean, skipping",
-				slog.String("file", filePath),
-				slog.String("commit_hash", commitFile.Hash.String()[:7]),
-				slog.String("shadow_hash", shadowFile.Hash.String()[:7]),
-			)
-			continue
-		}
-
-		remaining = append(remaining, filePath)
-		logging.Debug(logCtx, "filesWithRemainingAgentChanges: content mismatch with dirty working tree, keeping for carry-forward",
-			slog.String("file", filePath),
-			slog.String("commit_hash", commitFile.Hash.String()[:7]),
-			slog.String("shadow_hash", shadowFile.Hash.String()[:7]),
+		keep[candidate.index] = true
+		logging.Debug(logCtx, "filesWithRemainingAgentChanges: working tree still differs from the commit, keeping for carry-forward",
+			slog.String("file", candidate.path),
+			slog.String("status", code),
+			slog.String("commit_hash", candidate.commitHash.String()[:7]),
+			slog.String("recorded_hash", candidate.recordedHash.String()[:7]),
 		)
+	}
+
+	remaining := make([]string, 0, len(filesTouched))
+	for i, filePath := range filesTouched {
+		if keep[i] {
+			remaining = append(remaining, filePath)
+		}
 	}
 
 	logging.Debug(logCtx, "filesWithRemainingAgentChanges: result",
@@ -519,23 +401,169 @@ func filesWithRemainingAgentChanges(
 	return remaining
 }
 
-// workingTreeMatchesCommit checks if the file on disk matches the committed blob hash.
-// Returns true if the working tree is clean for this file (no remaining changes).
-func workingTreeMatchesCommit(worktreeRoot, filePath string, commitHash plumbing.Hash) bool {
-	absPath := filepath.Join(worktreeRoot, filePath)
-	diskContent, err := os.ReadFile(absPath) //nolint:gosec // filePath is from git status, not user input
+// keepStagedVanished keeps, among the vanished paths (hashed, uncommitted, and
+// absent from both the worktree and the commit tree), those whose blob is still
+// staged as a new file (gitrepo.PathsStagedAsNew; an intent-to-add entry holds
+// no blob and does not count). The user staged such a file before it left the
+// worktree,
+// so the next commit adds the staged blob, which is the agent's content;
+// dropping it would stop that commit linking the session. The rest were
+// untracked files the agent removed and drop. When git cannot answer, every
+// vanished path is kept rather than dropped on a guess. That is the intended
+// fail-safe: the paths stay in FilesTouched with their hashes, and the next
+// commit's carry-forward asks again and drops them once the check succeeds,
+// so a transient failure costs one extra pending cycle, not a permanent one.
+func keepStagedVanished(ctx, logCtx context.Context, worktreeRoot string, filesTouched []string, vanished []int, keep []bool) {
+	if len(vanished) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(vanished))
+	for _, i := range vanished {
+		paths = append(paths, filesTouched[i])
+	}
+	var stagedNew map[string]struct{}
+	var err error
+	if worktreeRoot == "" {
+		err = errors.New("no worktree root")
+	} else {
+		stagedNew, err = gitrepo.PathsStagedAsNew(ctx, worktreeRoot, paths)
+	}
 	if err != nil {
-		return false
+		logging.Warn(logCtx, "carry-forward: could not check staged blobs for files missing from the worktree; keeping them pending until the next commit's check succeeds",
+			slog.Int("files", len(paths)),
+			slog.String("error", err.Error()))
 	}
-	of := config.SHA1
-	if commitHash.Size() == config.SHA256.Size() {
-		of = config.SHA256
+	for _, i := range vanished {
+		filePath := filesTouched[i]
+		_, staged := stagedNew[filePath]
+		switch {
+		case err != nil:
+			keep[i] = true
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: could not check the index for a file missing from the worktree, keeping",
+				slog.String("file", filePath), slog.String("error", err.Error()))
+		case staged:
+			keep[i] = true
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file missing from the worktree is still staged, keeping",
+				slog.String("file", filePath))
+		default:
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: untracked file removed from the worktree, skipping",
+				slog.String("file", filePath))
+		}
 	}
-	h := plumbing.NewHasher(of, plumbing.BlobObject, int64(len(diskContent)))
-	if _, err := h.Write(diskContent); err != nil {
-		return false
+}
+
+// worktreeCandidate is a committed path whose fate depends on whether the
+// working tree still differs from the committed blob.
+type worktreeCandidate struct {
+	index        int
+	path         string
+	commitHash   plumbing.Hash
+	recordedHash plumbing.Hash // zero when no hash was recorded
+}
+
+// remainingClassifier holds what filesWithRemainingAgentChanges resolves once
+// per commit for classifying each touched path.
+type remainingClassifier struct {
+	logCtx       context.Context
+	commitTree   *object.Tree
+	root         *os.Root
+	worktreeRoot string
+}
+
+// file decides one touched path without hashing the worktree: keep reports a
+// path that stays in FilesTouched outright; a non-nil candidate defers the
+// decision to the worktree-versus-commit comparison. See
+// filesWithRemainingAgentChanges for the rules.
+//
+// vanished reports a hashed, uncommitted path absent from both the worktree and
+// the commit tree. It is dropped unless the index still has it, which the
+// caller checks for all such paths at once (keepStagedVanished).
+func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map[string]string) (keep bool, candidate *worktreeCandidate, vanished bool) {
+	recorded, hasHash, deleted := recordedFileHash(hashes, filePath)
+	switch {
+	case deleted:
+		if c.deletionPending(filePath) {
+			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: recorded deletion not yet committed, keeping",
+				slog.String("file", filePath))
+			return true, nil, false
+		}
+		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: recorded deletion committed or path re-created, skipping",
+			slog.String("file", filePath))
+		return false, nil, false
+	case !wasCommitted && !hasHash:
+		// Phantom guard: a path the agent never actually produced is absent
+		// from both the commit and the worktree. A path the commit still has
+		// but the worktree lacks is a pending deletion of a tracked file
+		// (an older CLI's state, or a route that records no hash), and stays.
+		if c.worktreeState(filePath) == worktreeEntryAbsent && !c.inCommit(filePath) {
+			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file without recorded hash missing from commit and worktree, skipping",
+				slog.String("file", filePath))
+			return false, nil, false
+		}
+		return true, nil, false
+	case !wasCommitted:
+		// A hashed file absent from both the worktree and the commit tree was
+		// an untracked file the agent created and then removed (git status
+		// reports no deletion for it); nothing of it is left to carry
+		// forward. See untrackedDeletionCandidates for the `git stash -u`
+		// trade-off. One the index still has was staged by the user and the
+		// next commit adds its blob; keepStagedVanished keeps that one.
+		if c.worktreeState(filePath) == worktreeEntryAbsent && !c.inCommit(filePath) {
+			return false, nil, true
+		}
+		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
+			slog.String("file", filePath))
+		return true, nil, false
 	}
-	return commitHash.Equal(h.Sum())
+
+	commitFile, err := c.commitTree.File(filePath)
+	if err != nil {
+		// The commit removed the path. Only something still in the worktree
+		// (re-created, or `git rm --cached`) is left to commit; a recorded hash
+		// is history, not evidence of remaining work. When the worktree cannot
+		// be inspected, keep the path rather than guess.
+		if c.worktreeState(filePath) != worktreeEntryAbsent {
+			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file not in commit tree but may still be in the worktree, keeping",
+				slog.String("file", filePath))
+			return true, nil, false
+		}
+		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: commit removed the file and the worktree lacks it, skipping",
+			slog.String("file", filePath))
+		return false, nil, false
+	}
+	if hasHash && commitFile.Hash.Equal(recorded) {
+		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: content fully committed",
+			slog.String("file", filePath))
+		return false, nil, false
+	}
+	// Without a recorded hash there is no shortcut: keep the path while the
+	// worktree still differs from what was committed (a partial commit).
+	return false, &worktreeCandidate{
+		path:         filePath,
+		commitHash:   commitFile.Hash,
+		recordedHash: recorded,
+	}, false
+}
+
+// deletionPending reports whether a recorded agent deletion of path has not
+// reached a commit yet: the commit tree still has the path and the worktree
+// still lacks it. Whether the commit touched the path does not matter — a
+// commit of a staged edit to it leaves the deletion pending. When the worktree
+// cannot be inspected, a deletion the commit tree still has counts as pending,
+// so it is never dropped on a guess.
+func (c remainingClassifier) deletionPending(path string) bool {
+	return c.inCommit(path) && c.worktreeState(path) != worktreeEntryPresent
+}
+
+// inCommit reports whether the commit's tree has path.
+func (c remainingClassifier) inCommit(path string) bool {
+	_, err := c.commitTree.File(path)
+	return err == nil
+}
+
+// worktreeState probes path in the worktree; see worktreeEntryState.
+func (c remainingClassifier) worktreeState(path string) worktreeEntryState {
+	return probeWorktreeEntry(c.root, c.worktreeRoot, path)
 }
 
 // subtractFilesByName returns files from filesTouched that are NOT in committedFiles.
@@ -553,83 +581,4 @@ func subtractFilesByName(ctx context.Context, filesTouched []string, committedFi
 		}
 	}
 	return remaining
-}
-
-// hasSignificantContentOverlap checks if two file contents share significant lines.
-// This distinguishes partial staging (user kept some agent content) from
-// "reverted and replaced" (user wrote completely different content).
-//
-// For larger files, we require at least 2 matching lines because a single match
-// (like "package main") is likely common boilerplate. For small files (≤ 2
-// significant lines in either file), any single match counts as overlap since
-// there aren't many lines to match anyway.
-//
-// The function filters out trivial lines (short lines < 10 chars like braces,
-// empty lines, etc.) because these commonly appear in many files and don't
-// indicate meaningful overlap.
-func hasSignificantContentOverlap(stagedContent, shadowContent string) bool {
-	// Build set of significant lines from shadow (agent) content
-	shadowLines := extractSignificantLines(shadowContent)
-
-	// Build set of significant lines from staged (user) content
-	stagedLines := extractSignificantLines(stagedContent)
-
-	// If either has no significant lines, no meaningful overlap possible
-	if len(shadowLines) == 0 || len(stagedLines) == 0 {
-		return false
-	}
-
-	// For very small files (0-1 significant lines), any single match is meaningful
-	// since requiring 2 matches would be impossible. The 2-line requirement is
-	// mainly to filter out coincidental boilerplate (like "package main") in
-	// larger files where we CAN require multiple matches.
-	isVerySmallFile := len(shadowLines) < 2 || len(stagedLines) < 2
-	requiredMatches := 2
-	if isVerySmallFile {
-		requiredMatches = 1
-	}
-
-	// Count matching lines
-	matchCount := 0
-	for line := range stagedLines {
-		if shadowLines[line] {
-			matchCount++
-			if matchCount >= requiredMatches {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-// extractSignificantLines returns a set of significant lines from content.
-// Lines are trimmed and must be at least 10 characters.
-//
-// This simple length-based filter works well because:
-// - Most structural boilerplate is short: `{`, `}`, `});`, `} else {` (all < 10 chars)
-// - Long lines (>= 10 chars) are usually meaningful regardless of language
-// - No language-specific pattern matching needed
-func extractSignificantLines(content string) map[string]bool {
-	lines := make(map[string]bool)
-	for _, line := range splitLines([]byte(content)) {
-		trimmed := trimLine(line)
-		if len(trimmed) >= 10 {
-			lines[trimmed] = true
-		}
-	}
-	return lines
-}
-
-// trimLine removes leading and trailing whitespace from a line.
-func trimLine(line string) string {
-	start := 0
-	end := len(line)
-	for start < end && (line[start] == ' ' || line[start] == '\t') {
-		start++
-	}
-	for end > start && (line[end-1] == ' ' || line[end-1] == '\t') {
-		end--
-	}
-	return line[start:end]
 }

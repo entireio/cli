@@ -1,17 +1,21 @@
 package validation
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
 
 func TestValidateSessionID(t *testing.T) {
-	tests := []struct {
+	t.Parallel()
+
+	type testCase struct {
 		name      string
 		sessionID string
 		wantErr   bool
 		errMsg    string
-	}{
+	}
+	tests := []testCase{
 		// Valid cases
 		{
 			name:      "valid session ID with date prefix and uuid",
@@ -40,6 +44,18 @@ func TestValidateSessionID(t *testing.T) {
 			sessionID: "   ",
 			wantErr:   true,
 			errMsg:    "session ID cannot be empty",
+		},
+		{name: "leading whitespace", sessionID: " session", wantErr: true, errMsg: "surrounding whitespace"},
+		{name: "trailing whitespace", sessionID: "session ", wantErr: true, errMsg: "surrounding whitespace"},
+		{name: "double dot with trailing space", sessionID: ".. ", wantErr: true, errMsg: "surrounding whitespace"},
+		{name: "double dot with leading space", sessionID: " ..", wantErr: true, errMsg: "surrounding whitespace"},
+		{name: "double dot with surrounding spaces", sessionID: " .. ", wantErr: true, errMsg: "surrounding whitespace"},
+		// Leading dash (security-critical - option injection prevention)
+		{
+			name:      "leading dash",
+			sessionID: "--dangerously-skip-permissions",
+			wantErr:   true,
+			errMsg:    "starts with dash",
 		},
 		// Path separators (security-critical - path traversal prevention)
 		{
@@ -90,6 +106,10 @@ func TestValidateSessionID(t *testing.T) {
 			sessionID: "a..b",
 			wantErr:   false,
 		},
+		{name: "terminal period", sessionID: "session.", wantErr: true, errMsg: "ends with period"},
+		{name: "multiple terminal periods", sessionID: "session...", wantErr: true, errMsg: "ends with period"},
+		{name: "terminal period and space", sessionID: "session. ", wantErr: true, errMsg: "surrounding whitespace"},
+		{name: "terminal spaces and periods", sessionID: "session. . ", wantErr: true, errMsg: "surrounding whitespace"},
 		// Windows drive-relative path (separator-free, not reported absolute)
 		{
 			name:      "windows drive-relative path",
@@ -117,9 +137,37 @@ func TestValidateSessionID(t *testing.T) {
 			errMsg:    "glob metacharacters",
 		},
 	}
+	for control := rune(0); control <= 0x1f; control++ {
+		tests = append(tests, testCase{
+			name:      fmt.Sprintf("ASCII control 0x%02x", control),
+			sessionID: "session" + string(control) + "id",
+			wantErr:   true,
+			errMsg:    "control character",
+		})
+	}
+	tests = append(tests, testCase{
+		name:      "ASCII delete",
+		sessionID: "session\x7fid",
+		wantErr:   true,
+		errMsg:    "control character",
+	})
+	for _, device := range []string{
+		"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"COM¹", "COM²", "COM³",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+		"LPT¹", "LPT²", "LPT³",
+	} {
+		tests = append(tests,
+			testCase{name: device, sessionID: device, wantErr: true, errMsg: "reserved Windows device name"},
+			testCase{name: device + " with extension", sessionID: strings.ToLower(device) + ".jsonl", wantErr: true, errMsg: "reserved Windows device name"},
+			testCase{name: device + " with space before extension", sessionID: strings.ToLower(device) + " .jsonl", wantErr: true, errMsg: "reserved Windows device name"},
+		)
+	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			err := ValidateSessionID(tt.sessionID)
 			if tt.wantErr {
 				if err == nil {
@@ -258,7 +306,25 @@ func TestValidateAgentID(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowRunID(t *testing.T) {
+	t.Parallel()
+
+	for id, wantErr := range map[string]bool{
+		"wf_e5264e60-494": false,
+		"":                true,
+		"..":              true,
+		"wf_1/agent":      true,
+		"wf.1":            true,
+	} {
+		if err := ValidateWorkflowRunID(id); (err != nil) != wantErr {
+			t.Errorf("ValidateWorkflowRunID(%q) error = %v, wantErr %v", id, err, wantErr)
+		}
+	}
+}
+
 func TestValidateAgentSessionID(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		id      string
@@ -270,6 +336,8 @@ func TestValidateAgentSessionID(t *testing.T) {
 		{name: "test session id", id: "test-session-1", wantErr: false},
 		{name: "alphanumeric", id: "session123", wantErr: false},
 		{name: "with underscores", id: "test_session_1", wantErr: false},
+		// Invalid - option injection
+		{name: "leading dash", id: "--dangerously-skip-permissions", wantErr: true},
 		// Invalid - empty (required field)
 		{name: "empty rejected", id: "", wantErr: true},
 		// Invalid - path traversal
@@ -282,9 +350,52 @@ func TestValidateAgentSessionID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			err := ValidateAgentSessionID(tt.id)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ValidateAgentSessionID(%q) error = %v, wantErr %v", tt.id, err, tt.wantErr)
+			}
+		})
+	}
+
+	for _, device := range []string{
+		"CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+	} {
+		for _, id := range []string{strings.ToLower(device), strings.ToLower(device) + ".jsonl"} {
+			t.Run("Windows reserved device "+id, func(t *testing.T) {
+				t.Parallel()
+
+				err := ValidateAgentSessionID(id)
+				if err == nil || !strings.Contains(err.Error(), "reserved Windows device name") {
+					t.Errorf("ValidateAgentSessionID(%q) error = %v, want reserved Windows device name", id, err)
+				}
+			})
+		}
+	}
+}
+
+// A separator inside a "component" is rejected, not split on. The exported name
+// invites a caller that has not split first, and every traversal below passes
+// the other rules: "../x" is clean, and "../.." trips only the trailing-period
+// check, so the gap survives a casual smoke test.
+func TestValidateFileNameComponentRejectsSeparators(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{
+		"/etc/passwd",
+		"../x",
+		"sub/../../../etc",
+		`..\..\windows`,
+		`sub\child`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if err := ValidateFileNameComponent(name); err == nil {
+				t.Errorf("ValidateFileNameComponent(%q) = nil, want error", name)
 			}
 		})
 	}

@@ -28,7 +28,7 @@ func TestAgentContinuesAfterCommit(t *testing.T) {
 
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		cpID1 := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
-		cpBranchAfterFirst := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
+		cpBranchAfterFirst := testutil.CheckpointState(s.Dir)
 
 		// Second prompt — agent creates another file, user commits.
 		_, err = s.RunPrompt(t, ctx,
@@ -43,7 +43,7 @@ func TestAgentContinuesAfterCommit(t *testing.T) {
 		// Wait for checkpoint branch to advance past the first checkpoint.
 		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
-			after := testutil.GitOutput(t, s.Dir, "rev-parse", "entire/checkpoints/v1")
+			after := testutil.CheckpointState(s.Dir)
 			if after != cpBranchAfterFirst {
 				break
 			}
@@ -54,7 +54,6 @@ func TestAgentContinuesAfterCommit(t *testing.T) {
 		assert.NotEqual(t, cpID1, cpID2, "checkpoint IDs should be distinct")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -86,7 +85,6 @@ func TestAgentAmendsCommit(t *testing.T) {
 		// The amended commit should still carry a valid checkpoint trailer.
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -121,7 +119,6 @@ func TestDirtyWorkingTree(t *testing.T) {
 		assert.Equal(t, "# Human notes\n", string(data), "human file should be untouched")
 
 		testutil.AssertCommitLinkedToCheckpoint(t, s.Dir, "HEAD")
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -147,11 +144,10 @@ func TestRapidSequentialCommits(t *testing.T) {
 
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			ref := fmt.Sprintf("HEAD~%d", i)
 			testutil.AssertHasCheckpointTrailer(t, s.Dir, ref)
 		}
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -190,6 +186,5 @@ func TestAgentCommitsMidTurnUserCommitsRemainder(t *testing.T) {
 			"user and agent checkpoints should have distinct IDs")
 		testutil.AssertCheckpointExists(t, s.Dir, userCpID)
 		testutil.AssertCheckpointExists(t, s.Dir, agentCpID)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

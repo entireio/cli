@@ -2,27 +2,19 @@ package strategy
 
 import (
 	"context"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
-func TestIsShadowBranch(t *testing.T) {
+func TestIsLegacyShadowBranch(t *testing.T) {
 	tests := []struct {
 		name       string
 		branchName string
@@ -61,15 +53,15 @@ func TestIsShadowBranch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsShadowBranch(tt.branchName)
+			got := IsLegacyShadowBranch(tt.branchName)
 			if got != tt.want {
-				t.Errorf("IsShadowBranch(%q) = %v, want %v", tt.branchName, got, tt.want)
+				t.Errorf("IsLegacyShadowBranch(%q) = %v, want %v", tt.branchName, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestListShadowBranches(t *testing.T) {
+func TestListLegacyShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with various branches
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -117,14 +109,14 @@ func TestListShadowBranches(t *testing.T) {
 	}
 
 	// Test ListShadowBranches
-	shadowBranches, err := ListShadowBranches(context.Background())
+	shadowBranches, err := ListLegacyShadowBranches(context.Background())
 	if err != nil {
-		t.Fatalf("ListShadowBranches(context.Background()) error = %v", err)
+		t.Fatalf("ListLegacyShadowBranches(context.Background()) error = %v", err)
 	}
 
 	// Should have exactly 2 shadow branches
 	if len(shadowBranches) != 2 {
-		t.Errorf("ListShadowBranches(context.Background()) returned %d branches, want 2: %v", len(shadowBranches), shadowBranches)
+		t.Errorf("ListLegacyShadowBranches(context.Background()) returned %d branches, want 2: %v", len(shadowBranches), shadowBranches)
 	}
 
 	// Check that the expected branches are present
@@ -134,17 +126,17 @@ func TestListShadowBranches(t *testing.T) {
 	}
 
 	if !shadowSet["entire/abc1234"] {
-		t.Error("ListShadowBranches(context.Background()) missing 'entire/abc1234'")
+		t.Error("ListLegacyShadowBranches(context.Background()) missing 'entire/abc1234'")
 	}
 	if !shadowSet["entire/def5678"] {
-		t.Error("ListShadowBranches(context.Background()) missing 'entire/def5678'")
+		t.Error("ListLegacyShadowBranches(context.Background()) missing 'entire/def5678'")
 	}
 	if shadowSet[paths.MetadataBranchName] {
-		t.Errorf("ListShadowBranches(context.Background()) should not include '%s'", paths.MetadataBranchName)
+		t.Errorf("ListLegacyShadowBranches(context.Background()) should not include '%s'", paths.MetadataBranchName)
 	}
 }
 
-func TestListShadowBranches_Empty(t *testing.T) {
+func TestListLegacyShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo with no shadow branches
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -173,21 +165,21 @@ func TestListShadowBranches_Empty(t *testing.T) {
 	}
 
 	// Test ListShadowBranches returns empty slice (not nil)
-	shadowBranches, err := ListShadowBranches(context.Background())
+	shadowBranches, err := ListLegacyShadowBranches(context.Background())
 	if err != nil {
-		t.Fatalf("ListShadowBranches(context.Background()) error = %v", err)
+		t.Fatalf("ListLegacyShadowBranches(context.Background()) error = %v", err)
 	}
 
 	if shadowBranches == nil {
-		t.Error("ListShadowBranches(context.Background()) returned nil, want empty slice")
+		t.Error("ListLegacyShadowBranches(context.Background()) returned nil, want empty slice")
 	}
 
 	if len(shadowBranches) != 0 {
-		t.Errorf("ListShadowBranches(context.Background()) returned %d branches, want 0", len(shadowBranches))
+		t.Errorf("ListLegacyShadowBranches(context.Background()) returned %d branches, want 0", len(shadowBranches))
 	}
 }
 
-func TestDeleteShadowBranches(t *testing.T) {
+func TestDeleteLegacyShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with shadow branches
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -225,17 +217,14 @@ func TestDeleteShadowBranches(t *testing.T) {
 	}
 
 	// Delete shadow branches
-	deleted, failed, err := DeleteShadowBranches(context.Background(), shadowBranches)
-	if err != nil {
-		t.Fatalf("DeleteShadowBranches() error = %v", err)
-	}
+	deleted, failed := DeleteLegacyShadowBranches(context.Background(), shadowBranches)
 
 	// All should be deleted successfully
 	if len(deleted) != 2 {
-		t.Errorf("DeleteShadowBranches() deleted %d branches, want 2", len(deleted))
+		t.Errorf("DeleteLegacyShadowBranches() deleted %d branches, want 2", len(deleted))
 	}
 	if len(failed) != 0 {
-		t.Errorf("DeleteShadowBranches() failed %d branches, want 0: %v", len(failed), failed)
+		t.Errorf("DeleteLegacyShadowBranches() failed %d branches, want 0: %v", len(failed), failed)
 	}
 
 	// Verify branches are actually deleted using git CLI
@@ -252,7 +241,7 @@ func TestDeleteShadowBranches(t *testing.T) {
 	}
 }
 
-func TestDeleteShadowBranches_NonExistent(t *testing.T) {
+func TestDeleteLegacyShadowBranches_NonExistent(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -282,21 +271,18 @@ func TestDeleteShadowBranches_NonExistent(t *testing.T) {
 
 	// Try to delete non-existent branches
 	nonExistent := []string{"entire/doesnotexist"}
-	deleted, failed, err := DeleteShadowBranches(context.Background(), nonExistent)
-	if err != nil {
-		t.Fatalf("DeleteShadowBranches() error = %v", err)
-	}
+	deleted, failed := DeleteLegacyShadowBranches(context.Background(), nonExistent)
 
 	// Should have one failed branch
 	if len(deleted) != 0 {
-		t.Errorf("DeleteShadowBranches() deleted %d branches, want 0", len(deleted))
+		t.Errorf("DeleteLegacyShadowBranches() deleted %d branches, want 0", len(deleted))
 	}
 	if len(failed) != 1 {
-		t.Errorf("DeleteShadowBranches() failed %d branches, want 1", len(failed))
+		t.Errorf("DeleteLegacyShadowBranches() failed %d branches, want 1", len(failed))
 	}
 }
 
-func TestDeleteShadowBranches_Empty(t *testing.T) {
+func TestDeleteLegacyShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -304,288 +290,9 @@ func TestDeleteShadowBranches_Empty(t *testing.T) {
 	t.Chdir(dir)
 
 	// Delete empty list should return empty results
-	deleted, failed, err := DeleteShadowBranches(context.Background(), []string{})
-	if err != nil {
-		t.Fatalf("DeleteShadowBranches() error = %v", err)
-	}
+	deleted, failed := DeleteLegacyShadowBranches(context.Background(), []string{})
 
 	if len(deleted) != 0 || len(failed) != 0 {
-		t.Errorf("DeleteShadowBranches([]) = (%v, %v), want ([], [])", deleted, failed)
-	}
-}
-
-// TestListOrphanedSessionStates_RecentSessionNotOrphaned tests that recently started
-// sessions are NOT marked as orphaned, even if they have no checkpoints yet.
-//
-// P1 Bug: A session that just started (via InitializeSession) but hasn't created
-// its first checkpoint yet would be incorrectly marked as orphaned because it has:
-// - A session state file
-// - No checkpoints on entire/checkpoints/v1
-// - No shadow branch before first checkpoint
-//
-// This test should FAIL with the current implementation, demonstrating the bug.
-func TestListOrphanedSessionStates_RecentSessionNotOrphaned(t *testing.T) {
-	// Setup: create a temp git repo
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	// Create initial commit
-	emptyTreeHash := plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
-	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTreeHash, plumbing.ZeroHash, "initial commit", "test", "test@test.com")
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Create HEAD reference
-	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("master"))
-	if err := repo.Storer.SetReference(headRef); err != nil {
-		t.Fatalf("failed to set HEAD: %v", err)
-	}
-	masterRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), commitHash)
-	if err := repo.Storer.SetReference(masterRef); err != nil {
-		t.Fatalf("failed to set master: %v", err)
-	}
-
-	// Create a session state file that was JUST started (simulating InitializeSession)
-	// This session has no checkpoints and no shadow branch yet
-	state := &SessionState{
-		SessionID:  "recent-session-123",
-		BaseCommit: commitHash.String(), // Full 40-char hash
-		StartedAt:  time.Now(),          // Just started!
-		StepCount:  0,                   // No checkpoints yet
-	}
-	if err := SaveSessionState(context.Background(), state); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	// List orphaned session states
-	orphaned, err := ListOrphanedSessionStates(context.Background())
-	if err != nil {
-		t.Fatalf("ListOrphanedSessionStates() error = %v", err)
-	}
-
-	// The recently started session should NOT be marked as orphaned
-	// because it's actively being used (StartedAt is recent)
-	for _, item := range orphaned {
-		if item.ID == "recent-session-123" {
-			t.Errorf("ListOrphanedSessionStates() incorrectly marked recent session as orphaned.\n"+
-				"Session was started %v ago, which is too recent to be considered orphaned.\n"+
-				"Expected: session to be protected from cleanup during active use.\n"+
-				"Got: session marked as orphaned with reason: %q",
-				time.Since(state.StartedAt), item.Reason)
-		}
-	}
-}
-
-// TestListOrphanedSessionStates_ShadowBranchMatching tests that session states are correctly
-// matched against shadow branches using worktree-specific naming.
-//
-// Shadow branches use the format "entire/<commit[:7]>-<worktreeHash[:6]>" and session states
-// store both the full BaseCommit and WorktreeID. The comparison constructs the expected
-// branch name from these fields and checks if it exists.
-func TestListOrphanedSessionStates_ShadowBranchMatching(t *testing.T) {
-	// Setup: create a temp git repo
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	// Create initial commit
-	emptyTreeHash := plumbing.NewHash("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
-	commitHash, err := checkpoint.CreateCommit(context.Background(), repo, emptyTreeHash, plumbing.ZeroHash, "initial commit", "test", "test@test.com")
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Create HEAD reference
-	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("master"))
-	if err := repo.Storer.SetReference(headRef); err != nil {
-		t.Fatalf("failed to set HEAD: %v", err)
-	}
-	masterRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), commitHash)
-	if err := repo.Storer.SetReference(masterRef); err != nil {
-		t.Fatalf("failed to set master: %v", err)
-	}
-
-	// Create a shadow branch using worktree-specific naming (matching real behavior)
-	// Real code: shadowBranch := checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
-	fullHash := commitHash.String()
-	worktreeID := "" // Main worktree
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(fullHash, worktreeID)
-	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranchName), commitHash)
-	if err := repo.Storer.SetReference(shadowRef); err != nil {
-		t.Fatalf("failed to create shadow branch: %v", err)
-	}
-
-	// Create a session state with the FULL 40-char hash and WorktreeID (matching real behavior)
-	// Real code: state.BaseCommit = head.Hash().String(), state.WorktreeID = worktreeID
-	state := &SessionState{
-		SessionID:  "session-with-shadow-branch",
-		BaseCommit: fullHash, // Full 40-char hash
-		WorktreeID: worktreeID,
-		StartedAt:  time.Now().Add(-1 * time.Hour),
-		StepCount:  1,
-	}
-	if err := SaveSessionState(context.Background(), state); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	// Verify the shadow branch exists with worktree-specific name
-	shadowBranches, err := ListShadowBranches(context.Background())
-	if err != nil {
-		t.Fatalf("ListShadowBranches(context.Background()) error = %v", err)
-	}
-	if len(shadowBranches) != 1 || shadowBranches[0] != shadowBranchName {
-		t.Fatalf("Expected shadow branch %q, got %v", shadowBranchName, shadowBranches)
-	}
-
-	// Log info about the branch naming
-	t.Logf("Shadow branch name: %q", shadowBranchName)
-	t.Logf("Session BaseCommit (40 chars): %q", fullHash)
-	t.Logf("Session WorktreeID: %q", worktreeID)
-
-	// List orphaned session states
-	orphaned, err := ListOrphanedSessionStates(context.Background())
-	if err != nil {
-		t.Fatalf("ListOrphanedSessionStates() error = %v", err)
-	}
-
-	// The session should NOT be marked as orphaned because it HAS a shadow branch!
-	// With worktree-specific naming, the expected branch name is constructed from
-	// BaseCommit and WorktreeID, which should match the actual shadow branch.
-	for _, item := range orphaned {
-		if item.ID == "session-with-shadow-branch" {
-			t.Errorf("ListOrphanedSessionStates() incorrectly marked session as orphaned.\n"+
-				"Shadow branch exists: %q\n"+
-				"Session BaseCommit: %q\n"+
-				"Session WorktreeID: %q\n"+
-				"Expected branch: %q\n"+
-				"Got: session marked as orphaned with reason: %q",
-				shadowBranchName, fullHash, worktreeID,
-				checkpoint.ShadowBranchNameForCommit(fullHash, worktreeID), item.Reason)
-		}
-	}
-}
-
-// In v1.1 mode, a session whose checkpoint lives only on v1 must be flagged
-// orphaned because the topology read goes to the (unset) mirror.
-func TestListOrphanedSessionStates_V11ReadsViaTopology(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	const sessionID = "test-session-v11-orphan"
-	cpID := id.MustCheckpointID("b2c3d4e5f6a1")
-	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
-		CheckpointID: cpID,
-		SessionID:    sessionID,
-		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
-		Prompts:      []string{"prompt"},
-		AuthorName:   "Test",
-		AuthorEmail:  "test@test.com",
-	}))
-
-	// BaseCommit is arbitrary; no shadow branch is created, so any value routes
-	// through the same orphan path. StartedAt clears the grace window.
-	state := &SessionState{
-		SessionID:  sessionID,
-		BaseCommit: "0000000000000000000000000000000000000000",
-		StartedAt:  time.Now().Add(-(sessionGracePeriod + time.Minute)),
-		StepCount:  1,
-	}
-	require.NoError(t, SaveSessionState(t.Context(), state))
-
-	settingsDir := filepath.Join(dir, ".entire")
-	require.NoError(t, os.MkdirAll(settingsDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(settingsDir, paths.SettingsFileName),
-		[]byte(`{"enabled": true, "strategy_options": {"checkpoints_version": "1.1"}}`),
-		0o644,
-	))
-
-	orphans, err := ListOrphanedSessionStates(t.Context())
-	require.NoError(t, err)
-
-	var flagged bool
-	for _, item := range orphans {
-		if item.ID == sessionID {
-			flagged = true
-			break
-		}
-	}
-	assert.True(t, flagged, "session must be flagged orphaned: mirror is unset, so topology read returns no checkpoints")
-}
-
-// Archived sessions of a multi-session condensed checkpoint must not be
-// flagged as orphaned: their IDs appear in cp.SessionIDs even though
-// cp.SessionID is the most-recent session.
-func TestListOrphanedSessionStates_MultiSessionArchivedNotOrphaned(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-
-	t.Chdir(dir)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	cpID := id.MustCheckpointID("c3d4e5f6a1b2")
-	const archivedSessionID = "archived-session"
-	const latestSessionID = "latest-session"
-
-	// Two sequential writes with the same checkpoint ID produce a multi-session
-	// checkpoint: the second write archives the first session under <sharded>/0
-	// and lists both IDs in SessionIDs.
-	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	for _, sid := range []string{archivedSessionID, latestSessionID} {
-		require.NoError(t, store.WriteCommitted(t.Context(), checkpoint.WriteCommittedOptions{
-			CheckpointID: cpID,
-			SessionID:    sid,
-			Strategy:     "manual-commit",
-			Transcript:   redact.AlreadyRedacted([]byte("transcript\n")),
-			Prompts:      []string{"prompt-" + sid},
-			AuthorName:   "Test",
-			AuthorEmail:  "test@test.com",
-		}))
-	}
-
-	staleStart := time.Now().Add(-(sessionGracePeriod + time.Minute))
-	for _, sid := range []string{archivedSessionID, latestSessionID} {
-		require.NoError(t, SaveSessionState(t.Context(), &SessionState{
-			SessionID:  sid,
-			BaseCommit: "0000000000000000000000000000000000000000",
-			StartedAt:  staleStart,
-			StepCount:  1,
-		}))
-	}
-
-	orphans, err := ListOrphanedSessionStates(t.Context())
-	require.NoError(t, err)
-
-	for _, item := range orphans {
-		assert.NotEqual(t, archivedSessionID, item.ID,
-			"archived session in multi-session checkpoint must not be flagged orphaned")
-		assert.NotEqual(t, latestSessionID, item.ID,
-			"latest session in multi-session checkpoint must not be flagged orphaned")
+		t.Errorf("DeleteLegacyShadowBranches([]) = (%v, %v), want ([], [])", deleted, failed)
 	}
 }

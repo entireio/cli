@@ -2,13 +2,17 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -26,6 +30,500 @@ func init() {
 //nolint:revive // CodexAgent is clearer than Agent in this context
 type CodexAgent struct {
 	CommandRunner agent.TextCommandRunner
+	// RolloutRoots overrides the active and archived rollout roots for callers
+	// that already know them (notably tests). Nil uses Codex's normal home.
+	RolloutRoots []string
+	// loadRollout and walkDir are package-private deterministic test seams.
+	// Production uses verified same-descriptor reads plus the bounded,
+	// incremental directory walker.
+	loadRollout func(string) (loadedRollout, error)
+	walkDir     func(string, fs.WalkDirFunc) error
+	// scanLimits and observeRolloutRead are deterministic test seams for the
+	// fallback rollout budget. Production uses defaultRolloutScanLimits and no
+	// observer.
+	scanLimits         *rolloutScanLimits
+	observeRolloutRead func(string, int)
+}
+
+type loadedRollout struct {
+	Path string
+	Data []byte
+}
+
+const (
+	rolloutScanTimeout       = 500 * time.Millisecond
+	rolloutCandidateLimit    = 20_000
+	rolloutMetadataByteLimit = int64(64 << 10)
+	rolloutBodyByteLimit     = int64(128 << 20)
+	rolloutAggregateLimit    = int64(256 << 20)
+	rolloutReadDirBatch      = 128
+	rolloutBodyReadChunk     = 32 << 10
+	rolloutMetadataChunk     = 1 << 10
+)
+
+type rolloutScanLimits struct {
+	timeout            time.Duration
+	candidateLimit     int
+	metadataByteLimit  int64
+	bodyByteLimit      int64
+	aggregateByteLimit int64
+	readDirBatch       int
+	now                func() time.Time
+}
+
+var defaultRolloutScanLimits = rolloutScanLimits{ //nolint:gochecknoglobals // immutable production defaults
+	timeout:            rolloutScanTimeout,
+	candidateLimit:     rolloutCandidateLimit,
+	metadataByteLimit:  rolloutMetadataByteLimit,
+	bodyByteLimit:      rolloutBodyByteLimit,
+	aggregateByteLimit: rolloutAggregateLimit,
+	readDirBatch:       rolloutReadDirBatch,
+	now:                time.Now,
+}
+
+var errRolloutScanBudget = errors.New("codex rollout scan budget exceeded")
+
+type rolloutScanBudget struct {
+	ctx            context.Context
+	limits         rolloutScanLimits
+	deadline       time.Time
+	candidates     int
+	aggregateBytes int64
+}
+
+func newRolloutScanBudget(ctx context.Context, limits rolloutScanLimits) *rolloutScanBudget {
+	if limits.now == nil {
+		limits.now = time.Now
+	}
+	if limits.readDirBatch <= 0 {
+		limits.readDirBatch = rolloutReadDirBatch
+	}
+	return &rolloutScanBudget{
+		ctx:      ctx,
+		limits:   limits,
+		deadline: limits.now().Add(limits.timeout),
+	}
+}
+
+func (b *rolloutScanBudget) check() error {
+	if err := b.ctx.Err(); err != nil {
+		return fmt.Errorf("rollout scan canceled: %w: %w", err, errRolloutScanBudget)
+	}
+	if b.limits.timeout > 0 && !b.limits.now().Before(b.deadline) {
+		return fmt.Errorf("rollout scan deadline reached: %w", errRolloutScanBudget)
+	}
+	return nil
+}
+
+func (b *rolloutScanBudget) observeCandidate() error {
+	if err := b.check(); err != nil {
+		return err
+	}
+	b.candidates++
+	if b.limits.candidateLimit >= 0 && b.candidates > b.limits.candidateLimit {
+		return fmt.Errorf("rollout candidate limit %d exceeded: %w", b.limits.candidateLimit, errRolloutScanBudget)
+	}
+	return nil
+}
+
+func (b *rolloutScanBudget) observeBytes(count int64) error {
+	if count < 0 || count > b.limits.aggregateByteLimit || b.aggregateBytes > b.limits.aggregateByteLimit-count {
+		return fmt.Errorf("aggregate rollout byte limit %d exceeded: %w", b.limits.aggregateByteLimit, errRolloutScanBudget)
+	}
+	b.aggregateBytes += count
+	return nil
+}
+
+func readRegularRolloutContext(ctx context.Context, roots []string, path string, byteLimit int64, observe func(string, int)) (loadedRollout, error) {
+	file, opened, err := openScopedRollout(roots, path)
+	if err != nil {
+		return loadedRollout{}, err
+	}
+	defer file.Close()
+	if opened.Size() > byteLimit {
+		return loadedRollout{}, fmt.Errorf("rollout size %d exceeds limit %d", opened.Size(), byteLimit)
+	}
+	data, err := readRolloutBody(file, rolloutReadOptions{
+		path: path, byteLimit: byteLimit, check: ctx.Err, observe: observe,
+		limitErr: fmt.Errorf("rollout exceeds byte limit %d", byteLimit),
+	})
+	if err != nil {
+		return loadedRollout{}, fmt.Errorf("read rollout: %w", err)
+	}
+	return loadedRollout{Path: path, Data: data}, nil
+}
+
+// openScopedRollout accepts files only inside configured rollout roots. Root
+// operations retain containment across directory/symlink replacement races.
+func openScopedRollout(roots []string, path string) (*os.File, fs.FileInfo, error) {
+	for _, base := range roots {
+		rel, err := filepath.Rel(base, path)
+		if err != nil || !filepath.IsLocal(rel) {
+			continue
+		}
+		root, err := os.OpenRoot(base)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open rollout root: %w", err)
+		}
+		file, info, err := openRolloutFile(root, rel)
+		_ = root.Close()
+		return file, info, err
+	}
+	return nil, nil, errors.New("rollout is outside configured roots")
+}
+
+func openRolloutFile(root *os.Root, name string) (*os.File, fs.FileInfo, error) {
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, nil, fmt.Errorf("lstat rollout: %w", err)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, nil, errors.New("rollout is not a regular file")
+	}
+	file, err := root.OpenFile(name, os.O_RDONLY|rolloutNonblock, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open rollout: %w", err)
+	}
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return nil, nil, errors.New("rollout changed or is not a regular file")
+	}
+	return file, opened, nil
+}
+
+type rolloutReadOptions struct {
+	path      string
+	byteLimit int64
+	check     func() error
+	account   func(int64) error
+	observe   func(string, int)
+	limitErr  error
+}
+
+func readRolloutBody(file *os.File, opts rolloutReadOptions) ([]byte, error) {
+	data := make([]byte, 0)
+	buffer := make([]byte, rolloutBodyReadChunk)
+	for {
+		if err := opts.check(); err != nil {
+			return nil, err
+		}
+		n, err := file.Read(buffer)
+		if n > 0 {
+			if opts.account != nil {
+				if accountErr := opts.account(int64(n)); accountErr != nil {
+					return nil, accountErr
+				}
+			}
+			if opts.observe != nil {
+				opts.observe(opts.path, n)
+			}
+			if int64(len(data)+n) > opts.byteLimit {
+				return nil, opts.limitErr
+			}
+			data = append(data, buffer[:n]...)
+		}
+		if errors.Is(err, io.EOF) {
+			return data, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read rollout body: %w", err)
+		}
+	}
+}
+
+func (c *CodexAgent) loadCandidateRollout(ctx context.Context, path string) (loadedRollout, error) {
+	if c.loadRollout != nil {
+		return c.loadRollout(path)
+	}
+	return readRegularRolloutContext(ctx, c.rolloutRoots(), path, rolloutBodyByteLimit, c.observeRolloutRead)
+}
+
+func (c *CodexAgent) loadVerifiedRollout(ctx context.Context, path, agentID string) (loadedRollout, bool) {
+	loaded, err := c.loadCandidateRollout(ctx, path)
+	if err != nil {
+		return loadedRollout{}, false
+	}
+	if loaded.Path == "" {
+		loaded.Path = path
+	}
+	if loaded.Path != path {
+		return loadedRollout{}, false
+	}
+	id, err := sessionMetaID(loaded.Data)
+	if err != nil || id != agentID {
+		return loadedRollout{}, false
+	}
+	return loaded, true
+}
+
+func (c *CodexAgent) rolloutRoots() []string {
+	if c.RolloutRoots != nil {
+		return c.RolloutRoots
+	}
+	sessionDir, err := c.GetSessionDir("")
+	if err != nil {
+		return nil
+	}
+	codexHome, err := resolveCodexHome()
+	if err != nil {
+		return []string{sessionDir}
+	}
+	return append([]string{sessionDir}, codexHomeLayout().StoresUnder(codexHome)[1:]...)
+}
+
+func (c *CodexAgent) loadDirectRollout(ctx context.Context, ref agent.SubagentReference) (loadedRollout, bool) {
+	for _, path := range []string{ref.DeclaredTranscriptPath, ref.ResolvedTranscriptPath} {
+		if path == "" {
+			continue
+		}
+		if loaded, ok := c.loadVerifiedRollout(ctx, path, ref.AgentID); ok {
+			return loaded, true
+		}
+	}
+	return loadedRollout{}, false
+}
+
+func (c *CodexAgent) walkRollouts(ctx context.Context, root string, budget *rolloutScanBudget, visit func(string, fs.DirEntry) error) error {
+	if c.walkDir != nil {
+		return c.walkDir(root, func(path string, entry fs.DirEntry, entryErr error) error {
+			if entryErr != nil {
+				if path == root && errors.Is(entryErr, fs.ErrNotExist) {
+					return nil
+				}
+				return entryErr
+			}
+			if err := budget.check(); err != nil {
+				return err
+			}
+			return visit(path, entry)
+		})
+	}
+	if err := walkRolloutsIncremental(ctx, root, budget, visit); err != nil {
+		return fmt.Errorf("walk Codex rollouts: %w", err)
+	}
+	return nil
+}
+
+func walkRolloutsIncremental(ctx context.Context, root string, budget *rolloutScanBudget, visit func(string, fs.DirEntry) error) error {
+	if err := budget.check(); err != nil {
+		return err
+	}
+	scoped, err := os.OpenRoot(root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("open rollout root: %w", err)
+	}
+	defer scoped.Close()
+	return walkRolloutDirectory(ctx, scoped, root, ".", budget, visit)
+}
+
+func walkRolloutDirectory(ctx context.Context, root *os.Root, base, dirPath string, budget *rolloutScanBudget, visit func(string, fs.DirEntry) error) error {
+	dir, err := root.Open(dirPath)
+	if err != nil {
+		return fmt.Errorf("open rollout directory: %w", err)
+	}
+	defer dir.Close()
+
+	for {
+		if err := budget.check(); err != nil {
+			return err
+		}
+		entries, readErr := dir.ReadDir(budget.limits.readDirBatch)
+		for _, entry := range entries {
+			if err := budget.check(); err != nil {
+				return err
+			}
+			path := filepath.Join(dirPath, entry.Name())
+			if entry.IsDir() {
+				if err := walkRolloutDirectory(ctx, root, base, path, budget, visit); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := visit(filepath.Join(base, path), entry); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("read rollout directory: %w", readErr)
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("walk rollout directory canceled: %w", err)
+		}
+	}
+}
+
+func (c *CodexAgent) inspectFallbackCandidate(
+	path string,
+	agentIDs map[string]struct{},
+	budget *rolloutScanBudget,
+) (string, loadedRollout, error) {
+	if c.loadRollout != nil {
+		loaded, loadErr := c.loadRollout(path)
+		if loadErr != nil {
+			return "", loadedRollout{}, loadErr
+		}
+		if loaded.Path == "" {
+			loaded.Path = path
+		}
+		if loaded.Path != path {
+			return "", loadedRollout{}, errors.New("rollout loader returned a different path")
+		}
+		id, metaErr := sessionMetaID(loaded.Data)
+		if metaErr != nil {
+			return "", loadedRollout{}, metaErr
+		}
+		if _, wanted := agentIDs[id]; !wanted {
+			return id, loadedRollout{}, nil
+		}
+		if int64(len(loaded.Data)) > budget.limits.bodyByteLimit {
+			return "", loadedRollout{}, errRolloutScanBudget
+		}
+		if err := budget.observeBytes(int64(len(loaded.Data))); err != nil {
+			return "", loadedRollout{}, err
+		}
+		return id, loaded, nil
+	}
+
+	file, opened, err := openScopedRollout(c.rolloutRoots(), path)
+	if err != nil {
+		return "", loadedRollout{}, err
+	}
+	defer file.Close()
+
+	metadata, err := c.readFallbackMetadata(file, path, budget)
+	if err != nil {
+		return "", loadedRollout{}, err
+	}
+	id, err := sessionMetaID(metadata)
+	if err != nil {
+		return "", loadedRollout{}, err
+	}
+	if _, wanted := agentIDs[id]; !wanted {
+		return id, loadedRollout{}, nil
+	}
+	if opened.Size() > budget.limits.bodyByteLimit {
+		return "", loadedRollout{}, fmt.Errorf("rollout body size %d exceeds limit %d: %w", opened.Size(), budget.limits.bodyByteLimit, errRolloutScanBudget)
+	}
+	if opened.Size() > budget.limits.aggregateByteLimit-budget.aggregateBytes {
+		return "", loadedRollout{}, fmt.Errorf("aggregate rollout size exceeds limit %d: %w", budget.limits.aggregateByteLimit, errRolloutScanBudget)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", loadedRollout{}, fmt.Errorf("seek rollout candidate: %w", err)
+	}
+	data, err := readRolloutBody(file, rolloutReadOptions{
+		path: path, byteLimit: budget.limits.bodyByteLimit, check: budget.check,
+		account: budget.observeBytes, observe: c.observeRolloutRead, limitErr: errRolloutScanBudget,
+	})
+	if err != nil {
+		return "", loadedRollout{}, err
+	}
+	return id, loadedRollout{Path: path, Data: data}, nil
+}
+
+func (c *CodexAgent) readFallbackMetadata(file *os.File, path string, budget *rolloutScanBudget) ([]byte, error) {
+	data := make([]byte, 0, min(rolloutMetadataChunk, int(budget.limits.metadataByteLimit)))
+	buffer := make([]byte, rolloutMetadataChunk)
+	for {
+		if err := budget.check(); err != nil {
+			return nil, err
+		}
+		remaining := budget.limits.metadataByteLimit + 1 - int64(len(data))
+		if remaining <= 0 {
+			return nil, fmt.Errorf("rollout metadata exceeds limit %d: %w", budget.limits.metadataByteLimit, errRolloutScanBudget)
+		}
+		readSize := len(buffer)
+		if int64(readSize) > remaining {
+			readSize = int(remaining)
+		}
+		n, err := file.Read(buffer[:readSize])
+		if n > 0 {
+			if budgetErr := budget.observeBytes(int64(n)); budgetErr != nil {
+				return nil, budgetErr
+			}
+			if c.observeRolloutRead != nil {
+				c.observeRolloutRead(path, n)
+			}
+			chunk := buffer[:n]
+			if newline := bytes.IndexByte(chunk, '\n'); newline >= 0 {
+				data = append(data, chunk[:newline+1]...)
+				if int64(len(data)) > budget.limits.metadataByteLimit {
+					return nil, fmt.Errorf("rollout metadata exceeds limit %d: %w", budget.limits.metadataByteLimit, errRolloutScanBudget)
+				}
+				return data, nil
+			}
+			data = append(data, chunk...)
+			if int64(len(data)) > budget.limits.metadataByteLimit {
+				return nil, fmt.Errorf("rollout metadata exceeds limit %d: %w", budget.limits.metadataByteLimit, errRolloutScanBudget)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			if len(data) == 0 {
+				return nil, errors.New("rollout metadata is empty")
+			}
+			return data, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read rollout metadata: %w", err)
+		}
+	}
+}
+
+// scanFallbackRollouts scans every configured root once. Any traversal or
+// regular-candidate metadata failure discards all results: partial results
+// cannot prove a child ID is unique.
+func (c *CodexAgent) scanFallbackRollouts(ctx context.Context, agentIDs map[string]struct{}) (map[string]loadedRollout, error) {
+	if len(agentIDs) == 0 {
+		return map[string]loadedRollout{}, nil
+	}
+	limits := defaultRolloutScanLimits
+	if c.scanLimits != nil {
+		limits = *c.scanLimits
+	}
+	budget := newRolloutScanBudget(ctx, limits)
+	matches := make(map[string][]loadedRollout)
+	seenPaths := make(map[string]struct{})
+	for _, root := range c.rolloutRoots() {
+		if root == "" {
+			continue
+		}
+		walkErr := c.walkRollouts(ctx, root, budget, func(path string, entry fs.DirEntry) error {
+			if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
+				return nil
+			}
+			if err := budget.observeCandidate(); err != nil {
+				return err
+			}
+			id, loaded, err := c.inspectFallbackCandidate(path, agentIDs, budget)
+			if err != nil {
+				return fmt.Errorf("inspect rollout candidate: %w", err)
+			}
+			if loaded.Path == "" {
+				return nil
+			}
+			if _, duplicate := seenPaths[path]; !duplicate {
+				seenPaths[path] = struct{}{}
+				matches[id] = append(matches[id], loaded)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	}
+	resolved := make(map[string]loadedRollout)
+	for id, candidates := range matches {
+		if len(candidates) == 1 {
+			resolved[id] = candidates[0]
+		}
+	}
+	return resolved, nil
 }
 
 // NewCodexAgent creates a new Codex agent instance.
@@ -48,12 +546,9 @@ func (c *CodexAgent) Description() string {
 	return "Codex - OpenAI's CLI coding agent"
 }
 
-// IsPreview returns true because this is a new integration.
-func (c *CodexAgent) IsPreview() bool { return true }
-
 // DetectPresence checks if Codex is configured in the repository.
 func (c *CodexAgent) DetectPresence(ctx context.Context) (bool, error) {
-	return c.AreHooksInstalled(ctx), nil
+	return c.AreHooksInstalled(ctx)
 }
 
 // GetSessionID extracts the session ID from hook input.
@@ -62,15 +557,11 @@ func (c *CodexAgent) GetSessionID(input *agent.HookInput) string {
 }
 
 // resolveCodexHome returns the Codex home directory (CODEX_HOME or ~/.codex).
+// See agent.ResolveHome for the override policy. Every CODEX_HOME read in this
+// package goes through here — session dirs, config.toml, the user-wide hook
+// root check — so a blank or relative value means one thing to all of them.
 func resolveCodexHome() (string, error) {
-	if codexHome := os.Getenv("CODEX_HOME"); codexHome != "" {
-		return codexHome, nil
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-	return filepath.Join(homeDir, ".codex"), nil
+	return agent.ResolveHome("CODEX_HOME", ".codex") //nolint:wrapcheck // the error already names the override and its value
 }
 
 // GetSessionDir returns the directory where Codex stores session transcripts.
@@ -83,13 +574,34 @@ func (c *CodexAgent) GetSessionDir(_ string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(codexHome, "sessions"), nil
+	return codexHomeLayout().StoresUnder(codexHome)[0], nil
 }
+
+// SessionHome returns Codex's home directory: $CODEX_HOME or ~/.codex.
+func (c *CodexAgent) SessionHome() (string, error) {
+	return resolveCodexHome()
+}
+
+// HomeLayout reports that Codex keeps live rollouts under sessions and moves
+// rotated ones to archived_sessions, both in dated subdirectories.
+func (c *CodexAgent) HomeLayout() agent.HomeLayout {
+	return codexHomeLayout()
+}
+
+// codexHomeLayout is the one spelling of Codex's stores: the session
+// directory, then the archives that rollout lookups also search.
+func codexHomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"sessions", "archived_sessions"}}
+}
+
+var _ agent.HomeLayoutProvider = (*CodexAgent)(nil)
 
 // ResolveSessionFile returns the path to a Codex session transcript file.
 // Codex provides the transcript path directly in hook payloads as an absolute path.
-// When only a session ID is available, attach/rewind must recover it from the
-// sessions/YYYY/MM/DD/rollout-...-<session-id>.jsonl layout.
+// When only a session ID is available, callers recover it from the
+// sessions/YYYY/MM/DD/rollout-...-<session-id>.jsonl layout. Only sessionDir
+// is searched: an archived rollout lies outside it, where SessionStore refuses
+// the result, so archives are left to ResolveSessionFileCandidates.
 func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	if filepath.IsAbs(agentSessionID) {
 		return agentSessionID
@@ -101,6 +613,17 @@ func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) strin
 		return filepath.Join(sessionDir, agentSessionID+".jsonl")
 	}
 	return agentSessionID
+}
+
+// TaskTranscriptMatches reports whether path is named as the rollout of the
+// child thread agentID: rollout-<timestamp>-<agentID>.jsonl. Codex keeps child
+// rollouts in its dated session stores, not relative to the parent, so
+// parentPath and sessionID are not consulted.
+func (c *CodexAgent) TaskTranscriptMatches(_, _, agentID, path string) bool {
+	name := filepath.Base(path)
+	return agentID != "" &&
+		strings.HasPrefix(name, "rollout-") &&
+		strings.HasSuffix(name, "-"+agentID+".jsonl")
 }
 
 // ResolveRestoredSessionFile returns the canonical Codex rollout path for a
@@ -175,9 +698,9 @@ func (c *CodexAgent) WriteSession(_ context.Context, session *agent.AgentSession
 		return errors.New("session has no native data to write")
 	}
 
-	dataToWrite := sanitizeRestoredTranscript(session.NativeData)
-	if err := os.WriteFile(session.SessionRef, dataToWrite, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	dataToWrite := SanitizePortableTranscript(session.NativeData)
+	if err := agent.WriteSessionFile(c, session, dataToWrite, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil
@@ -240,26 +763,68 @@ func (c *CodexAgent) LaunchCmd(ctx context.Context, initialPrompt string) (*exec
 	return cmd, nil
 }
 
-func findRolloutBySessionID(codexHome, agentSessionID string) string {
-	if codexHome == "" || validation.ValidateAgentSessionID(agentSessionID) != nil {
-		return ""
+func findRolloutBySessionID(sessionDir, agentSessionID string) string {
+	if candidates := rolloutsBySessionID(sessionDir, agentSessionID); len(candidates) > 0 {
+		return candidates[0]
 	}
-
-	patterns := []string{
-		filepath.Join(codexHome, "rollout-*-"+agentSessionID+".jsonl"),
-		filepath.Join(codexHome, "*", "*", "*", "rollout-*-"+agentSessionID+".jsonl"),
-		filepath.Join(filepath.Dir(codexHome), "archived_sessions", "*", "*", "*", "rollout-*-"+agentSessionID+".jsonl"),
-	}
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(pattern)
-		if err != nil || len(matches) == 0 {
-			continue
-		}
-		// Multiple restored rollouts for the same session ID can exist. Return the
-		// lexicographically latest path so newer dated restores win deterministically.
-		sort.Strings(matches)
-		return matches[len(matches)-1]
-	}
-
 	return ""
 }
+
+// ResolveSessionFileCandidates returns every rollout of agentSessionID beneath
+// sessionDir and then the home's other stores, preferred first, followed by
+// the <id>.jsonl path ResolveSessionFile predicts when there is none.
+func (c *CodexAgent) ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string {
+	// The home is sessionDir's parent, not CODEX_HOME: the candidates belong to
+	// the session directory the caller passed. One that is not a home's
+	// sessions store, such as a test override, has no archives.
+	var archives []string
+	if stores := codexHomeLayout().StoresUnder(filepath.Dir(sessionDir)); stores[0] == filepath.Clean(sessionDir) {
+		archives = stores[1:]
+	}
+	candidates := rolloutsBySessionID(sessionDir, agentSessionID, archives...)
+	if sessionDir != "" {
+		candidates = append(candidates, filepath.Join(sessionDir, agentSessionID+".jsonl"))
+	}
+	return candidates
+}
+
+var _ agent.SessionFileCandidatesProvider = (*CodexAgent)(nil)
+
+// rolloutsBySessionID returns the rollouts of agentSessionID beneath sessionDir
+// and then each archive, in each directory flat and then in dated
+// subdirectories. Codex archives a rollout flat, under its original file name.
+// Within each group the lexicographically latest path comes first, so newer
+// dated restores of the same session win.
+func rolloutsBySessionID(sessionDir, agentSessionID string, archives ...string) []string {
+	if sessionDir == "" || validation.ValidateAgentSessionID(agentSessionID) != nil {
+		return nil
+	}
+
+	name := "rollout-*-" + agentSessionID + ".jsonl"
+	var patterns []string
+	for _, dir := range append([]string{sessionDir}, archives...) {
+		patterns = append(patterns,
+			filepath.Join(dir, name),
+			filepath.Join(dir, "*", "*", "*", name),
+		)
+	}
+	var candidates []string
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+		candidates = append(candidates, matches...)
+	}
+	return candidates
+}
+
+// CallerSessionEnvVar names the variable holding the session ID Codex
+// publishes into the environment of the processes it spawns.
+//
+// Codex publishes two IDs and this is the root-session identity, shared by
+// every descendant thread — the one session state is keyed on. CODEX_THREAD_ID
+// is deliberately unused: it follows forks and subagent threads, so it names a
+// transcript file rather than a session.
+func (c *CodexAgent) CallerSessionEnvVar() string { return "CODEX_SESSION_ID" }

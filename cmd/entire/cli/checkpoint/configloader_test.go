@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/go-git/go-billy/v6/osfs"
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
@@ -47,19 +48,13 @@ func writeSymlinkedGlobalConfig(t *testing.T, contents string) (home string) {
 
 // pointHomeAt isolates global git config resolution onto home: it sets HOME,
 // disables system config, and forces XDG resolution onto ~/.config by clearing
-// XDG_CONFIG_HOME and GIT_CONFIG_GLOBAL (the latter is unset, not emptied,
-// since an empty value disables global config entirely).
+// XDG_CONFIG_HOME and unsetting GIT_CONFIG_GLOBAL (see gitenv.UnsetGlobalConfig).
 func pointHomeAt(t *testing.T, home string) {
 	t.Helper()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	// t.Setenv registers restoration of the original value; unset it for the
-	// test so go-git falls back to XDG (an empty value disables global config).
-	t.Setenv("GIT_CONFIG_GLOBAL", "")
-	if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
-		t.Fatal(err)
-	}
+	gitenv.UnsetGlobalConfig(t)
 }
 
 // TestOSSymlinkFS_ReadsGlobalConfigBehindSymlink reproduces the customer's

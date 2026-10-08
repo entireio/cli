@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// gitHooksDisabled is set by PersistentPreRunE when Entire is not set up or disabled.
+// gitHooksDisabled is set by PersistentPreRun when Entire is not set up or disabled.
 // When true, all git hook commands return early without doing any work.
 var gitHooksDisabled bool
 
@@ -58,36 +59,39 @@ func (g *gitHookContext) logCompleted(err error) {
 	g.span.RecordError(err)
 }
 
-// initHookLogging initializes logging for hooks by finding the most recent session.
-// Returns a cleanup function that should be deferred.
-// If Entire is not set up or disabled, returns a no-op to avoid creating files.
-func initHookLogging(ctx context.Context) func() {
-	// Don't create any files if Entire is not set up or disabled.
-	// This is checked here as defense-in-depth (also checked in PersistentPreRunE).
-	if !settings.IsSetUpAndEnabled(ctx) {
-		return func() {}
+// withHookSession adds the session the root pre-run cannot know without
+// scanning session state on every command, and configures redaction. Returns
+// the context to pass down with cmd.SetContext.
+//
+// Every caller must gate on settings.IsSetUpAndEnabled first — it scans session
+// state and loads redactors, neither of which may touch a repo that never
+// enabled Entire. The check is not repeated here: it costs an uncached
+// settings.Load, and this runs on the per-commit and per-turn paths.
+func withHookSession(ctx context.Context) context.Context {
+	// Resolve the caller rather than the most recent session: a git hook an
+	// agent triggered inherits that agent's session ID in its environment, so
+	// log lines get attributed to the session that actually ran the commit
+	// instead of whichever session in the shared store moved last.
+	ctx = logging.WithSessionID(ctx, strategy.ResolveCallerSession(ctx).SessionID)
+
+	// Hooks are the checkpoint-writing path, so this cannot be left to the root
+	// pre-run: without it only always-on secret scanning would run.
+	//
+	// A scanner-config failure is logged, not propagated: callers gate on
+	// IsSetUpAndEnabled, which already fails closed on the settings error that
+	// carries ErrScannerConfig, and the built-in goredact config cannot fail to
+	// construct — so this branch is unreachable from a hook. The loud paths for
+	// a bad scanner config are status, doctor, import, and attach. If a future
+	// engine constructor ever does fail here, the process falls back to the
+	// default betterleaks-only set: different coverage, not merely less.
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		logging.Error(logging.WithComponent(ctx, "redaction"),
+			"redaction scanner configuration failed",
+			slog.String("error", err.Error()))
 	}
 
-	// Set up log level getter so logging can read from settings
-	logging.SetLogLevelGetter(GetLogLevel)
-
-	// Read session ID for the slog attribute (empty string is fine - log file is fixed)
-	sessionID := strategy.FindMostRecentSession(ctx)
-	if err := logging.Init(ctx, sessionID); err != nil {
-		// Init failed - logging will use stderr fallback
-		return func() {}
-	}
-
-	// Configure redaction once at startup: PII (opt-in), inline custom_redactions,
-	// and rule packs discovered under .entire/redactors/. No-op if nothing is configured.
-	strategy.EnsureRedactionConfigured()
-
-	return logging.Close
+	return ctx
 }
-
-// hookLogCleanup stores the cleanup function for hook logging.
-// Set by PersistentPreRunE, called by PersistentPostRunE.
-var hookLogCleanup func()
 
 func newHooksGitCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -95,14 +99,14 @@ func newHooksGitCmd() *cobra.Command {
 		Short:  "Git hook handlers",
 		Long:   "Commands called by git hooks. These delegate to the current strategy.",
 		Hidden: true, // Internal command, not for direct user use
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
 			ctx := cmd.Context()
 			// Check if Entire is set up and enabled before doing any work.
 			// This prevents global git hooks from doing anything in repos where
 			// Entire was never enabled or has been disabled.
 			if !settings.IsSetUpAndEnabled(ctx) {
 				gitHooksDisabled = true
-				return nil
+				return
 			}
 			// Discover external agent plugins so GetByAgentType works correctly
 			// during condensation (e.g. post-commit). Without this, external agents
@@ -111,14 +115,10 @@ func newHooksGitCmd() *cobra.Command {
 			discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			external.DiscoverAndRegister(discoveryCtx)
-			hookLogCleanup = initHookLogging(ctx)
-			return nil
-		},
-		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
-			if hookLogCleanup != nil {
-				hookLogCleanup()
-			}
-			return nil
+			// Cobra invokes this PersistentPreRun with the leaf command, so
+			// SetContext hands the session-stamped context straight to the
+			// verb's RunE via cmd.Context().
+			cmd.SetContext(withHookSession(ctx))
 		},
 	}
 
@@ -196,6 +196,7 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked()
 
+			strategy.SetBeforeCondense(refreshCodexInventoriesBeforeCondense)
 			hookErr := g.strategy.PostCommit(g.ctx)
 			g.logCompleted(hookErr)
 
@@ -231,6 +232,13 @@ func newHooksGitPrePushCmd() *cobra.Command {
 		Use:   "pre-push <remote>",
 		Short: "Handle pre-push git hook",
 		Args:  cobra.ExactArgs(1),
+		// SilenceUsage/Errors so non-zero exits from privacy-critical
+		// failures (OPF rewrite errors) print only the error message,
+		// not cobra's usage banner. The error message itself already
+		// includes user guidance (see ErrV1Diverged / ErrBootstrapTooLarge /
+		// ErrV1RefMoved in strategy/manual_commit_opf_rewrite.go).
+		SilenceUsage:  true,
+		SilenceErrors: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if gitHooksDisabled {
 				return nil
@@ -242,10 +250,24 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked(slog.String("remote", remote))
 
-			hookErr := g.strategy.PrePush(g.ctx, remote)
+			hookErr := g.strategy.PrePushFromGitHook(g.ctx, remote)
 			g.logCompleted(hookErr)
 
-			return nil
+			// Propagate the error so the hook script exits non-zero and
+			// git push aborts the entire batch. PrePush itself only
+			// returns errors for privacy-critical failures (OPF rewrite —
+			// e.g., V1DivergedError, BootstrapTooLargeError,
+			// V1RefMovedError, OPFRuntimeFailedError,
+			// OPFNoCategoriesError); transient
+			// checkpoint-push failures are logged and swallowed before
+			// reaching this point. See strategy/manual_commit_push.go
+			// for the contract. We wrap with a short "pre-push:" prefix
+			// so the user sees the source of the abort without losing
+			// the underlying type (errors.As still finds the sentinels).
+			if hookErr == nil {
+				return nil
+			}
+			return fmt.Errorf("pre-push: %w", hookErr)
 		},
 	}
 }

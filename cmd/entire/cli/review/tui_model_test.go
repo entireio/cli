@@ -301,19 +301,16 @@ func TestTUIModel_DashboardUsesAltScreen(t *testing.T) {
 	}
 }
 
-func TestTUIModel_FinishedStopsTickRedraws(t *testing.T) {
+// The dashboard must keep ticking through finalize so the footer animates.
+func TestTUIModel_FinishedKeepsTicking(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})
 	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
 	m = mustModel(t, updated)
 
 	_, tickCmd := m.Update(tickMsg(time.Now()))
-	if tickCmd != nil {
-		t.Fatal("finished dashboard should not schedule duration ticks")
-	}
-	_, spinnerCmd := m.Update(m.spinner.Tick())
-	if spinnerCmd != nil {
-		t.Fatal("finished dashboard should not schedule spinner ticks")
+	if tickCmd == nil {
+		t.Fatal("finalizing dashboard should keep scheduling duration ticks")
 	}
 }
 
@@ -428,6 +425,51 @@ func TestTUIModel_RunFinishedMsg_MarksFinished(t *testing.T) {
 	}
 }
 
+// A summary Failed must override an optimistic stream Succeeded so the row and
+// the counts line agree.
+func TestTUIModel_RunFinishedMsg_SummaryFailedOverridesStreamSucceeded(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.Finished{Success: true}})
+	m = mustModel(t, updated)
+	if m.rows[0].status != reviewtypes.AgentStatusSucceeded {
+		t.Fatalf("setup: want stream Succeeded, got %v", m.rows[0].status)
+	}
+
+	summary := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		{Name: "agent-a", Status: reviewtypes.AgentStatusFailed},
+	}}
+	updated, _ = m.Update(runFinishedMsg{summary: summary})
+	m = mustModel(t, updated)
+
+	if m.rows[0].status != reviewtypes.AgentStatusFailed {
+		t.Errorf("row should downgrade to failed to match summary, got %v", m.rows[0].status)
+	}
+	if got := m.countsLine(); !strings.Contains(got, "1 failed") {
+		t.Errorf("counts line should report 1 failed, got %q", got)
+	}
+}
+
+// Stream Failed (a real RunError) must not be downgraded to a blanket Cancelled.
+func TestTUIModel_RunFinishedMsg_StreamFailedStickyOverCancel(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+
+	updated, _ := m.Update(agentEventMsg{agent: "agent-a", ev: reviewtypes.RunError{Err: errors.New("boom")}})
+	m = mustModel(t, updated)
+
+	summary := reviewtypes.RunSummary{AgentRuns: []reviewtypes.AgentRun{
+		{Name: "agent-a", Status: reviewtypes.AgentStatusCancelled},
+	}}
+	updated, _ = m.Update(runFinishedMsg{summary: summary})
+	m = mustModel(t, updated)
+
+	if m.rows[0].status != reviewtypes.AgentStatusFailed {
+		t.Errorf("stream Failed should stay sticky over summary Cancelled, got %v", m.rows[0].status)
+	}
+}
+
 // TestTUIModel_PostFinishCtrlOEntersDetailMode pins that Ctrl+O still enters
 // drill-in after both agents finish so the user can inspect completed output.
 // Previously any-key-quits behavior swallowed Ctrl+O on the post-finish frame.
@@ -520,10 +562,7 @@ func TestTUIModel_PostFinishIgnoresRandomKeys(t *testing.T) {
 	}
 }
 
-// TestTUIModel_PostFinishFooterUsesExplicitExitKeys pins the dashboard footer
-// switches from the old "Press any key to exit." prompt to an explicit-keys
-// hint that mentions Ctrl+O and the named exit keys.
-func TestTUIModel_PostFinishFooterUsesExplicitExitKeys(t *testing.T) {
+func TestTUIModel_PostFinishFooterShowsFinalizing(t *testing.T) {
 	t.Parallel()
 	m := newTestModel([]string{"agent-a"}, func() {})
 	m.termWidth = 120
@@ -531,14 +570,11 @@ func TestTUIModel_PostFinishFooterUsesExplicitExitKeys(t *testing.T) {
 	m = mustModel(t, updated)
 
 	out := m.dashboardView()
-	if strings.Contains(out, "Press any key to exit.") {
-		t.Errorf("post-finish footer must not show legacy 'Press any key to exit.' line:\n%s", out)
+	if !strings.Contains(out, "Finalizing output...") {
+		t.Errorf("post-finish footer should show finalizing output:\n%s", out)
 	}
-	if !strings.Contains(out, "Ctrl+O") {
-		t.Errorf("post-finish footer should mention Ctrl+O for drill-in:\n%s", out)
-	}
-	if !strings.Contains(out, "q/Esc/Enter") {
-		t.Errorf("post-finish footer should list q/Esc/Enter as exit keys:\n%s", out)
+	if strings.Contains(out, "q/Esc/Enter") {
+		t.Errorf("post-finish footer should not ask for a dismissal key:\n%s", out)
 	}
 }
 
@@ -1202,5 +1238,51 @@ func TestTUIModel_PostFinishInDetailMode_EscReturnsToDashboard(t *testing.T) {
 				t.Error("Esc post-finish in detail mode must NOT quit; it returns to dashboard")
 			}
 		}
+	}
+}
+
+func TestTUIModel_RunFinishedWaitsForPostRunComplete(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	updated, cmd := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	if !mustModel(t, updated).finished {
+		t.Fatal("model should be finished after runFinishedMsg")
+	}
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("runFinishedMsg must not quit; the final judge may still be running")
+		}
+	}
+
+	_, cmd = mustModel(t, updated).Update(postRunCompleteMsg{})
+	if cmd == nil {
+		t.Fatal("postRunCompleteMsg should return a quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("postRunCompleteMsg command = %T, want tea.QuitMsg", cmd())
+	}
+}
+
+func TestTUIModel_FinalPhaseRow(t *testing.T) {
+	t.Parallel()
+	m := newTestModel([]string{"agent-a"}, func() {})
+	m.termWidth = 120
+	updated, _ := m.Update(runFinishedMsg{summary: reviewtypes.RunSummary{}})
+	m = mustModel(t, updated)
+	updated, _ = m.Update(finalPhaseStartedMsg{name: "judge: claude-code"})
+	m = mustModel(t, updated)
+
+	out := m.dashboardView()
+	if !strings.Contains(out, "judge: claude-code") || !strings.Contains(out, "judging") {
+		t.Fatalf("final phase should be visible while running:\n%s", out)
+	}
+	if !strings.Contains(out, "Final judge is consolidating") {
+		t.Fatalf("footer should describe final judge phase:\n%s", out)
+	}
+
+	updated, _ = m.Update(finalPhaseFinishedMsg{})
+	out = mustModel(t, updated).dashboardView()
+	if !strings.Contains(out, "✓ done") {
+		t.Fatalf("final phase should show done after completion:\n%s", out)
 	}
 }

@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -26,7 +28,10 @@ import (
 )
 
 // resumePickerCancel is the sentinel option value for the picker's Cancel entry.
-const resumePickerCancel = "cancel"
+const (
+	resumePickerCancel = "cancel"
+	unknownAgentLabel  = "(unknown agent)"
+)
 
 // resumableSession pairs a session with the branch and committed checkpoint we
 // resolved for it. A session is only resumable when BOTH are known: the branch
@@ -55,14 +60,17 @@ func (r resumableSession) unresumableReason() string {
 
 // runResumePicker lists stopped sessions across all worktrees and lets the user
 // pick one to resume. Selecting a session checks out its branch (or, when the
-// branch is already checked out in another worktree, points there) and prints
-// the command to continue the agent.
+// branch is already checked out in another worktree, points there), restores its
+// checkpoint session log, and offers to start the agent.
 func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error {
+	// Restores and looks up agent transcripts from the user's shell, where a
+	// home an agent reads from its own settings is invisible to the environment.
+	agent.EnableHomeProbes()
 	w := cmd.OutOrStdout()
 
 	// The picker is interactive. Without a usable terminal (CI, piped, agent
 	// subprocess) the form can't render — bail with guidance instead of hanging
-	// or erroring on /dev/tty, matching `entire attach`.
+	// or erroring on /dev/tty, matching `entire session attach`.
 	if !interactive.CanPromptInteractively() {
 		fmt.Fprintln(w, "The resume picker needs an interactive terminal.")
 		fmt.Fprintln(w, "Pass a branch instead, e.g. 'entire session resume <branch>'.")
@@ -77,6 +85,9 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 	resumable := filterResumableSessions(states)
 	if len(resumable) == 0 {
 		fmt.Fprintln(w, "No resumable sessions found.")
+		if n := countImportedSessions(states); n > 0 {
+			fmt.Fprintf(w, "(skipping %d read-only imported session(s) — imported history can't be resumed.)\n", n)
+		}
 		fmt.Fprintln(w, "Tip: pass a branch to resume directly, e.g. 'entire session resume <branch>'.")
 		return nil
 	}
@@ -100,8 +111,8 @@ func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error 
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Resume a session").
-				Description("Checks out the branch and prints the command to continue the agent.\n" +
-					"Lists sessions from this machine — to resume a branch from origin, run: entire resume <branch>").
+				Description("Checks out the branch, restores the session log, and offers to start the agent.\n" +
+					"Lists sessions from this machine — to resume a branch from origin, run: entire session resume <branch>").
 				Options(options...).
 				Value(&selected),
 		),
@@ -161,12 +172,29 @@ func filterResumableSessions(states []*strategy.SessionState) []*strategy.Sessio
 		if s.Phase == session.PhaseActive {
 			continue
 		}
+		// Imported sessions are read-only; they can't be resumed.
+		if s.Kind.IsImported() {
+			continue
+		}
 		resumable = append(resumable, s)
 	}
 	sort.SliceStable(resumable, func(i, j int) bool {
 		return sessionLastActiveTime(resumable[i]).After(sessionLastActiveTime(resumable[j]))
 	})
 	return resumable
+}
+
+// countImportedSessions counts read-only imported sessions in the set. Used to
+// explain an empty resume picker when the only sessions present are imports
+// (which are deliberately filtered out of the resumable list).
+func countImportedSessions(states []*strategy.SessionState) int {
+	n := 0
+	for _, s := range states {
+		if s != nil && s.Kind.IsImported() {
+			n++
+		}
+	}
+	return n
 }
 
 // sessionLastActiveTime returns the best timestamp to represent when a session
@@ -247,7 +275,7 @@ const (
 // This deliberately avoids go-git's MergeBase (which walks full history and,
 // run once per branch, becomes O(branches × history) and hangs on large repos);
 // the precomputed default-commit set is a cheap stand-in for branch-only scoping.
-// Internal entire/ refs (checkpoint metadata + shadow branches) are never
+// Internal entire/ refs (checkpoint metadata, trails, legacy shadow branches) are never
 // indexed — they are not resumable and number in the hundreds.
 func buildCheckpointBranchIndex(repo *git.Repository) map[string]string {
 	index := map[string]string{}
@@ -378,7 +406,7 @@ func resumeOptionLabel(item resumableSession) string {
 
 	agentLabel := string(s.AgentType)
 	if agentLabel == "" {
-		agentLabel = "(unknown agent)"
+		agentLabel = unknownAgentLabel
 	}
 
 	prompt := strings.TrimSpace(s.LastPrompt)
@@ -452,25 +480,11 @@ func branchCheckedOutElsewhere(ctx context.Context, branch string) (string, bool
 
 // parseWorktreeForBranch scans `git worktree list --porcelain` output and returns
 // the path of a worktree (other than currentRoot) that has branch checked out.
-//
-// Each worktree is a block beginning with a `worktree <path>` line and separated
-// by a blank line; a `branch <ref>` line only appears for non-detached worktrees.
-// curPath is reset at each block boundary and a branch line is only considered
-// when a worktree line was seen in the same block, so a detached worktree (no
-// branch line) can never pair a branch with a stale path or return an empty one.
+// See gitrepo.ParseWorktreeBranches for how blocks are paired.
 func parseWorktreeForBranch(porcelain, branch, currentRoot string) (string, bool) {
-	var curPath string
-	for _, line := range strings.Split(porcelain, "\n") {
-		switch {
-		case line == "":
-			curPath = "" // block boundary
-		case strings.HasPrefix(line, "worktree "):
-			curPath = strings.TrimPrefix(line, "worktree ")
-		case strings.HasPrefix(line, "branch ") && curPath != "":
-			name := strings.TrimPrefix(strings.TrimPrefix(line, "branch "), "refs/heads/")
-			if name == branch && normalizeWorktreePath(curPath) != currentRoot {
-				return curPath, true
-			}
+	for _, wt := range gitrepo.ParseWorktreeBranches(porcelain) {
+		if wt.Branch == branch && normalizeWorktreePath(wt.Path) != currentRoot {
+			return wt.Path, true
 		}
 	}
 	return "", false

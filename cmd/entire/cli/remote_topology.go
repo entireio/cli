@@ -1,0 +1,263 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"sort"
+	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
+)
+
+// Checkpoint destinations are unambiguous in the ordinary single-remote,
+// single-URL repo and stop being unambiguous in two topologies users set up
+// deliberately. Neither is broken, but in both the destination is decided by
+// something other than "the repo I work in", so it is worth saying out loud once
+// at `entire enable` and on demand from `entire doctor` rather than letting
+// someone discover it when a resume comes up empty.
+
+// remoteDestination is one remote and what checkpoints pushed to it would do.
+type remoteDestination struct {
+	name string
+	// pushURLs are the URLs a push to this remote delivers to, in git's order.
+	pushURLs []string
+	// pinned reports that remote.PushURL resolves this remote to a configured
+	// checkpoint_remote, so its own push URLs are irrelevant to checkpoints.
+	//
+	// Asked of the resolver rather than derived from settings on purpose: a
+	// checkpoint_remote that is *present* is not necessarily *in effect* —
+	// PushURL falls back to the push remote on an owner mismatch, an
+	// unparseable URL, or a protocol it cannot map. Reading settings directly
+	// would report "pinned" while pushes really went elsewhere, the same class
+	// of bug the CoreOrigin() rule in CLAUDE.md exists to prevent.
+	pinned bool
+}
+
+// fansOut reports whether checkpoints pushed to this remote face more than one
+// destination.
+func (d remoteDestination) fansOut() bool { return !d.pinned && len(d.pushURLs) > 1 }
+
+// remoteTopology summarizes checkpoint-destination ambiguity in this repo.
+type remoteTopology struct {
+	// destinations is every configured remote, sorted by name.
+	destinations []remoteDestination
+	// primaryIsRefs reports whether the git-refs backend is active, which
+	// decides what a fanning-out remote means for checkpoints.
+	primaryIsRefs bool
+	// pushDisabled reports that push_sessions is off, which makes every claim
+	// below about where a push delivers checkpoints conditional: nothing is
+	// pushed at all. Read as a caveat on the note, not a reason to suppress
+	// it — the ambiguity is still what re-enabling pushing would run into,
+	// and still what a user pins with checkpoint_remote.
+	pushDisabled bool
+	// explicitRemote is the remote a valid checkpoint_push_remote settles on.
+	// Named for its provenance rather than for the election: every resolver
+	// tier elects a remote, but only this one is an explicit checkpoint
+	// destination choice, and that is what justifies suppressing the note.
+	// That remote's own push URLs may still need a warning.
+	//
+	// Empty when no valid explicit selection resolved, which is three states,
+	// not one: no setting at all; a setting naming a remote that is not
+	// configured (fail-closed — checkpoint sync is disabled entirely, and
+	// `entire status` reports that); or settings that could not be read.
+	//
+	// Observed elections deliberately retain the choice explanation: they are
+	// inferred from a past push, not an explicit checkpoint destination choice.
+	explicitRemote string
+}
+
+// inspectRemoteTopology reads the repo's remotes and checkpoint configuration.
+// Best-effort and offline: every failure yields an empty topology, which reports
+// nothing, because this is advisory output that must never obstruct enable or
+// doctor.
+func inspectRemoteTopology(ctx context.Context) remoteTopology {
+	var t remoteTopology
+
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return t
+	}
+
+	// One `git remote -v` rather than `git remote` plus a get-url per remote:
+	// it already applies git's pushurl-replaces-url rule and lists every push
+	// URL in order, so N+1 subprocesses collapse to one — and all of it runs in
+	// repoRoot instead of mixing dir-aware and cwd-dependent lookups.
+	pushURLs, err := pushURLsByRemote(ctx, repoRoot)
+	if err != nil {
+		logging.Debug(ctx, "remote topology: could not read remotes", slog.String("error", err.Error()))
+		return t
+	}
+
+	names := make([]string, 0, len(pushURLs))
+	for name := range pushURLs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		dest := remoteDestination{name: name, pushURLs: pushURLs[name]}
+		if _, enabled, err := remote.PushURL(ctx, name); err == nil {
+			dest.pinned = enabled
+		}
+		t.destinations = append(t.destinations, dest)
+	}
+
+	if cpCfg, err := settings.LoadCheckpointsConfig(ctx); err == nil {
+		t.primaryIsRefs = checkpoint.PrimaryIsRefs(cpCfg)
+	}
+	// Best-effort like everything else here: an unreadable settings file reads
+	// as "pushing enabled", which is the note this code has always printed.
+	if s, err := settings.Load(ctx); err == nil {
+		t.pushDisabled = s.IsPushSessionsDisabled()
+	}
+	if elected, err := strategy.ResolveCheckpointSyncRemote(ctx); err == nil && elected.Source == strategy.SyncRemoteSourceConfig {
+		t.explicitRemote = elected.Name
+	}
+
+	return t
+}
+
+// pushURLsByRemote parses `git remote -v` into remote name -> push URLs in git's
+// own order.
+func pushURLsByRemote(ctx context.Context, dir string) (map[string][]string, error) {
+	out, err := gitRunner(ctx, dir, "remote", "-v")
+	if err != nil {
+		return nil, fmt.Errorf("list git remotes: %w", err)
+	}
+	urls := make(map[string][]string)
+	for _, line := range strings.Split(out, "\n") {
+		// "<name>\t<url> (push)" — fetch lines are the same shape and ignored.
+		name, rest, found := strings.Cut(strings.TrimSpace(line), "\t")
+		if !found || !strings.HasSuffix(rest, "(push)") {
+			continue
+		}
+		url := strings.TrimSpace(strings.TrimSuffix(rest, "(push)"))
+		if url != "" {
+			urls[name] = append(urls[name], url)
+		}
+	}
+	// An empty map is a legitimate answer (a repo with no remotes), so it is
+	// returned as such rather than as an error the caller would have to classify.
+	return urls, nil
+}
+
+// ambiguous reports whether anything is worth telling the user: a remote whose
+// checkpoints face several push URLs, or several remotes to choose between.
+func (t remoteTopology) ambiguous() bool {
+	unpinned := 0
+	for _, d := range t.destinations {
+		if t.fanOutMatters(d) {
+			return true
+		}
+		if !d.pinned {
+			unpinned++
+		}
+	}
+	return t.explicitRemote == "" && unpinned > 1
+}
+
+// fanOutMatters excludes every remote but the explicit one once
+// checkpoint_push_remote settles the destination: the others' push URLs carry
+// code but no checkpoint data. A pinned remote fans out to nothing regardless,
+// so fansOut() is asked first.
+func (t remoteTopology) fanOutMatters(d remoteDestination) bool {
+	return d.fansOut() && (t.explicitRemote == "" || d.name == t.explicitRemote)
+}
+
+// describeCheckpointDestination writes an explanation of where checkpoints go,
+// under the given header. Writes nothing when the destination is unambiguous.
+func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string) {
+	if !t.ambiguous() {
+		return
+	}
+
+	fmt.Fprintln(w, header)
+
+	// Said first, because it qualifies every "pushes to" below. The note is
+	// still worth printing: the ambiguity it describes is what re-enabling
+	// pushing would run into, and it is what checkpoint_remote pins.
+	//
+	// Deliberately silent about where checkpoints are READ from, even though
+	// that is the live question when nothing is pushed: what this note lists
+	// is PUSH URLs, and a fan-out remote's reads use its fetch URL instead
+	// (the git-branch branch below says as much — "only the fetch URL is ever
+	// reconciled").
+	//
+	// It points at `entire status` for that rather than answering it, and
+	// without promising an answer: status names a read source where it can
+	// establish one, and says so when it cannot — a failed election with a
+	// configured checkpoint_remote resolves to neither.
+	if t.pushDisabled {
+		fmt.Fprintln(w, "  Automatic checkpoint pushing is disabled (push_sessions=false), so no")
+		fmt.Fprintln(w, "  checkpoints are pushed anywhere right now. The destination below is where")
+		fmt.Fprintln(w, "  they would go if you re-enabled it; for where they are read from today,")
+		fmt.Fprintln(w, "  see `entire status`.")
+	}
+
+	t.describeFanout(w)
+	if names := t.unpinnedNames(); t.explicitRemote == "" && len(names) > 1 {
+		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
+		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote — not to whichever one you")
+		fmt.Fprintln(w, "    push to. A push to any other remote carries your code but no session")
+		fmt.Fprintln(w, "    history. Run `entire status` to see the elected destination and how much")
+		fmt.Fprintln(w, "    checkpoint data has not reached it.")
+	}
+
+	fmt.Fprintln(w, "  To pin one repository for checkpoints, set checkpoint_remote in")
+	fmt.Fprintln(w, "  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).")
+}
+
+// describeFanout is shared by doctor's complete topology report and enable's
+// report of the selected checkpoint destination.
+func (t remoteTopology) describeFanout(w io.Writer) {
+	for _, d := range t.destinations {
+		if !t.fanOutMatters(d) {
+			continue
+		}
+		fmt.Fprintf(w, "  Remote %q pushes to %d URLs:\n", d.name, len(d.pushURLs))
+		for i, u := range d.pushURLs {
+			marker := "  "
+			if i == 0 && t.primaryIsRefs {
+				marker = "→ "
+			}
+			fmt.Fprintf(w, "    %s%s\n", marker, gitremote.RedactURLOrPath(u))
+		}
+		if t.primaryIsRefs {
+			fmt.Fprintln(w, "    Checkpoints go to the first URL only; the others receive your code but")
+			fmt.Fprintln(w, "    no session history. Clone that first repository to resume elsewhere.")
+		} else {
+			fmt.Fprintln(w, "    Checkpoints are pushed to every URL. If one rejects them or is")
+			fmt.Fprintln(w, "    unreachable it is reported and left behind, and only the fetch URL is")
+			fmt.Fprintln(w, "    ever reconciled — so those URLs can fall permanently out of date.")
+		}
+	}
+}
+
+// unpinnedNames lists the remotes whose checkpoint destination is not already
+// pinned by a checkpoint_remote.
+func (t remoteTopology) unpinnedNames() []string {
+	var names []string
+	for _, d := range t.destinations {
+		if !d.pinned {
+			names = append(names, d.name)
+		}
+	}
+	return names
+}
+
+// printCheckpointDestinationNote explains where checkpoints go when this repo's
+// remotes make that a choice. Shared by `entire enable` — the moment a user is
+// most likely to be looking, and the least surprising place to learn it — and by
+// `entire doctor`, which reports it on demand. Silent on the ordinary repo, so it
+// adds nothing to the common output.
+func printCheckpointDestinationNote(ctx context.Context, w io.Writer, header string) {
+	inspectRemoteTopology(ctx).describeCheckpointDestination(w, header)
+}
