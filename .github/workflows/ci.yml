@@ -51,6 +51,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
       - name: Install latest Codex CLI
+        env:
+          CODEX_NON_INTERACTIVE: "1"
         run: curl -fsSL https://chatgpt.com/codex/install.sh | sh
       - name: Codex app-server integration tests
         env:
