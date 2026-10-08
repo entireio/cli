@@ -43,11 +43,12 @@ const treeGitlinkMode = "160000"
 //     <paths>`, where base is HEAD, or the empty tree when HEAD is unborn. It
 //     prints only index entries that differ from base under the named paths,
 //     so an unchanged directory costs nothing. (`git ls-files -s` would list
-//     the directory's entire subtree on every call.) A record whose
-//     destination mode is 160000 is a gitlink staged but not in HEAD; one
-//     whose source mode is 160000 and destination 000000 is a gitlink whose
-//     removal is staged. A gitlink present unchanged in both is found by the
-//     HEAD side.
+//     the directory's entire subtree on every call.) --ignore-submodules=none
+//     keeps a `submodule.<name>.ignore` setting in .gitmodules or config from
+//     hiding a staged gitlink. A record whose destination mode is 160000 is a
+//     gitlink staged but not in HEAD; one whose source mode is 160000 and
+//     destination 000000 is a gitlink whose removal is staged. A gitlink
+//     present unchanged in both is found by the HEAD side.
 //
 // The call is bounded by PathClassificationBudget on top of the caller's
 // context. On error the returned set holds what was found so far; callers keep
@@ -74,7 +75,7 @@ func GitlinkPaths(ctx context.Context, repoRoot string, paths []string) (map[str
 	for start := 0; start < len(paths); start += pathClassificationChunk {
 		chunk := paths[start:min(start+pathClassificationChunk, len(paths))]
 
-		indexOut, err := literalPathspecCommand(ctx, repoRoot, chunk, "diff-index", "--cached", "--raw", "-z", "--no-renames", base).Output()
+		indexOut, err := literalPathspecCommand(ctx, repoRoot, chunk, "diff-index", "--cached", "--raw", "-z", "--no-renames", "--ignore-submodules=none", base).Output()
 		if err != nil {
 			return found, fmt.Errorf("git diff-index --cached: %w", err)
 		}

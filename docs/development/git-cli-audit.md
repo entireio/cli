@@ -181,7 +181,7 @@ and `pushInsteadOf`. Keep native `remote get-url` / `remote -v` here.
 
 ### Ignore/status/worktree content
 
-- `gitrepo/ignore.go` — `check-ignore -z --stdin` (touched-file filter); `gitrepo/gitlink.go` — pathspec-limited `diff-index --cached --raw` (against HEAD, or the empty tree when HEAD is unborn) / `ls-tree HEAD`, both bounded by differences or named entries rather than by the size of an ancestor directory.
+- `gitrepo/ignore.go` — `check-ignore -z --stdin` (touched-file filter); `gitrepo/gitlink.go` — pathspec-limited `diff-index --cached --raw --ignore-submodules=none` (against HEAD, or the empty tree when HEAD is unborn) / `ls-tree HEAD`, both bounded by differences or named entries rather than by the size of an ancestor directory.
 - `trail_checkout_worktree.go:97,226` — ignore directory probe / ignored-file listing.
 - `strategy/common.go:1643` — nonignored untracked files.
 - `git_operations.go:216`, `review/scope.go:238`,

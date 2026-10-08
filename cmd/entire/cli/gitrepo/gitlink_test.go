@@ -175,11 +175,37 @@ func TestGitlinkPaths_IndexQueryIsBoundedByDifferences(t *testing.T) {
 	gitIn(t, dir, "commit", "-q", "-m", "monorepo")
 
 	query := []string{"packages", "packages/p007", "packages/p007/f.txt"}
-	out, err := literalPathspecCommand(t.Context(), dir, query, "diff-index", "--cached", "--raw", "-z", "--no-renames", "HEAD").Output()
+	out, err := literalPathspecCommand(t.Context(), dir, query, "diff-index", "--cached", "--raw", "-z", "--no-renames", "--ignore-submodules=none", "HEAD").Output()
 	require.NoError(t, err)
 	assert.Empty(t, out, "an unchanged directory contributes nothing to the index query")
 
 	found, err := GitlinkPaths(context.Background(), dir, query)
 	require.NoError(t, err)
 	assert.Empty(t, found)
+}
+
+// A staged, not yet committed submodule is a gitlink even when .gitmodules
+// sets `ignore = all` for it; that setting must not hide the index record.
+func TestGitlinkPaths_StagedSubmoduleWithIgnoreAll(t *testing.T) {
+	// Not parallel: isolateGitConfig uses t.Setenv.
+	isolateGitConfig(t)
+
+	subSrc := initGitlinkRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(subSrc, "lib.txt"), []byte("v1\n"), 0o644))
+	gitIn(t, subSrc, "add", "lib.txt")
+	gitIn(t, subSrc, "commit", "-q", "-m", "lib v1")
+
+	dir := initGitlinkRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a\n"), 0o644))
+	gitIn(t, dir, "add", "a.txt")
+	gitIn(t, dir, "commit", "-q", "-m", "init")
+
+	gitIn(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", subSrc, "sub")
+	gitIn(t, dir, "config", "-f", ".gitmodules", "submodule.sub.ignore", "all")
+	gitIn(t, dir, "add", ".gitmodules")
+
+	found, err := GitlinkPaths(context.Background(), dir, []string{"sub"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]struct{}{"sub": {}}, found,
+		"diff-index honours submodule.<name>.ignore=all and drops the staged gitlink; pass --ignore-submodules=none")
 }
