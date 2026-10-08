@@ -28,6 +28,17 @@ var agentConfigCommandKeys = []string{"apiKeyHelper", "awsAuthRefresh", "awsCred
 // would choose the code.
 var projectLaunchers = []string{"npx", "pnpx", "bunx", "uvx", "yarn", "pnpm", "bun", "deno", "uv", "poetry", "pipx"}
 
+// isProjectLauncher matches a launcher by its program name, so an absolute
+// path to one (/usr/local/bin/npx) is caught too: where it is installed
+// doesn't change that it resolves tools from the project.
+func isProjectLauncher(word string) bool {
+	name := strings.ToLower(filepath.Base(strings.ReplaceAll(word, `\`, "/")))
+	for _, ext := range []string{".exe", ".cmd", ".bat", ".ps1"} {
+		name = strings.TrimSuffix(name, ext)
+	}
+	return slices.Contains(projectLaunchers, name)
+}
+
 var mcpServerNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // toAgentConfig converts a profile's config for a run; nil stays nil.
@@ -99,7 +110,7 @@ func validateMCPServer(name string, raw json.RawMessage, forbiddenRoots []string
 	switch {
 	case server.Command != "":
 		// The command is one program path, not a shell line: check it whole.
-		if strings.Contains(server.Command, "CLAUDE_PROJECT_DIR") || slices.Contains(projectLaunchers, server.Command) {
+		if strings.Contains(server.Command, "CLAUDE_PROJECT_DIR") || isProjectLauncher(server.Command) {
 			return fmt.Errorf("MCP server %q: %q resolves from the reviewed project; use an absolute path to the tool", name, server.Command)
 		}
 		if err := validateCommandWord(server.Command, forbiddenRoots); err != nil {
@@ -109,7 +120,7 @@ func validateMCPServer(name string, raw json.RawMessage, forbiddenRoots []string
 			if strings.Contains(arg, "CLAUDE_PROJECT_DIR") {
 				return fmt.Errorf("MCP server %q: argument %q refers to the project directory, which is the reviewed checkout", name, arg)
 			}
-			if slices.Contains(projectLaunchers, arg) {
+			if isProjectLauncher(arg) {
 				return fmt.Errorf("MCP server %q: argument %q resolves tools from the reviewed project", name, arg)
 			}
 			if err := validateCommandWord(arg, forbiddenRoots); err != nil {
@@ -181,7 +192,7 @@ func validateCommand(command string, forbiddenRoots []string) error {
 		return errors.New("empty command")
 	}
 	for _, word := range words {
-		if slices.Contains(projectLaunchers, word) {
+		if isProjectLauncher(word) {
 			return fmt.Errorf("%q runs %s, which resolves tools from the reviewed project; use an absolute path to the tool", command, word)
 		}
 		if err := validateCommandWord(word, forbiddenRoots); err != nil {
@@ -192,23 +203,21 @@ func validateCommand(command string, forbiddenRoots []string) error {
 }
 
 func validateCommandWord(word string, forbiddenRoots []string) error {
-	values := []string{word}
+	v := word
 	if _, value, ok := strings.Cut(word, "="); ok && strings.HasPrefix(word, "-") {
-		values = append(values, value) // --flag=value
+		v = value // --flag=value: the value is what can be a path
 	}
-	for _, v := range values {
-		switch {
-		case strings.HasPrefix(v, "$"):
-			return fmt.Errorf("%q depends on a variable; use an absolute path", v)
-		case strings.Contains(v, "://"):
-			// A URL, not a path.
-		case filepath.IsAbs(v):
-			if under(v, forbiddenRoots) {
-				return fmt.Errorf("%q is inside a checkout", v)
-			}
-		case strings.ContainsAny(v, `/\`):
-			return fmt.Errorf("%q is a relative path, which resolves inside the reviewed checkout; use an absolute path", v)
+	switch {
+	case strings.HasPrefix(v, "$"):
+		return fmt.Errorf("%q depends on a variable; use an absolute path", v)
+	case strings.Contains(v, "://"):
+		// A URL, not a path.
+	case filepath.IsAbs(v):
+		if under(v, forbiddenRoots) {
+			return fmt.Errorf("%q is inside a checkout", v)
 		}
+	case strings.ContainsAny(v, `/\`):
+		return fmt.Errorf("%q is a relative path, which resolves inside the reviewed checkout; use an absolute path", v)
 	}
 	return nil
 }
