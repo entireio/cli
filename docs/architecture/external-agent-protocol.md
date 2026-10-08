@@ -19,7 +19,7 @@ Two rules bound that scan, both because discovery *executes* what it finds (it c
 
 ## Environment
 
-Every subcommand invocation sets:
+Every subcommand invocation except `generate-text` sets:
 
 | Variable | Description |
 |---|---|
@@ -27,6 +27,13 @@ Every subcommand invocation sets:
 | `ENTIRE_PROTOCOL_VERSION` | Protocol version (`1`) |
 
 The working directory is set to the repository root.
+
+`generate-text` is the exception. Its stdin is a summary prompt carrying
+untrusted transcript content, so it runs from a fresh empty temporary
+directory, without `ENTIRE_REPO_ROOT` and without `GIT_*` variables, the same
+isolation Entire gives its built-in summary generators. A plugin should not
+need the repository to generate text; if its model has tools, it should run
+them with none enabled, as the built-in generators do where their CLI allows.
 
 ## Communication Model
 

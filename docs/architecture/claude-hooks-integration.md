@@ -4,7 +4,7 @@ This document describes the hooks that Entire installs in Claude Code's `.claude
 
 ## Overview
 
-Entire integrates with Claude Code through six hooks that fire at different points during a session:
+Entire integrates with Claude Code through these hooks that fire at different points during a session:
 
 | Hook                     | Trigger                        | Purpose                                        |
 | ------------------------ | ------------------------------ | ---------------------------------------------- |
@@ -13,6 +13,7 @@ Entire integrates with Claude Code through six hooks that fire at different poin
 | `Stop`                   | Claude finishes responding     | Record the turn end in session state           |
 | `PreToolUse[Agent]`      | Subagent is about to start     | Capture pre-task state for diff computation    |
 | `PostToolUse[Agent]`     | Subagent finishes              | Complete the subagent's task record            |
+| `PostToolUse[Skill]`     | A skill runs                   | Record the agent a `context: fork` skill runs in |
 
 > **Tool matcher note.** Claude Code's subagent dispatch tool is `Agent` (there was never a `Task` tool). Older CLI versions installed the subagent hooks under `Task`, where they silently never fired; re-run `entire enable --force` to strip the stale entries and reinstall under the matchers above. See [tools-reference](https://code.claude.com/docs/en/tools-reference.md) and [hooks matcher rules](https://code.claude.com/docs/en/hooks.md).
 >
@@ -186,4 +187,32 @@ Fires after a subagent finishes its work. Completes the subagent's task record o
 6.  **Complete the Task Record**: `strategy.CompleteTaskRecord` attaches the files, declared transcript path, and token usage to the session's `TaskRecord` exactly once and merges the files into `FilesTouched` (without hashes, so they are matched by name at commit time). No git objects are written.
 
 7.  **Cleanup**: Deletes `.entire/tmp/pre-task-<tool-use-id>.json`.
+
+### `PostToolUse[Skill]`
+
+- **Command**: `entire hooks claude-code post-task` (the same command as `PostToolUse[Agent]`)
+
+A skill with `context: fork` runs in an agent of its own. Claude Code names that
+agent only in the Skill call's result (`tool_response`: `"status": "forked"`,
+`"agentId"`, `"background"`); its `SubagentStart` reports an ordinary agent type
+(e.g. `general-purpose`), so no `SubagentStart` matcher can single it out.
+`post-task` turns a forked result into a launch keyed by the Skill call's
+`tool_use_id`, described by the skill name (never its args):
+
+- Unless `background` is explicitly `false`, the agent is still running: the
+  launch records an in-flight task that the agent's `SubagentStop` completes by
+  agent ID, like a background `Agent` call.
+- With `background: false` the fork already finished, so the record completes
+  now. No `PreToolUse` ran for the Skill call, so there is no pre-task baseline,
+  and the task's files come from its transcript alone.
+
+An inline skill's result has no `status` and no agent; `post-task` does nothing
+for it. The parent transcript's structured `toolUseResult` names the agent too,
+so its tokens count toward the session's `subagent_tokens` and its edits toward
+turn-end file attribution.
+
+A forked skill's agent can stop more than once: a background child it launched
+wakes it again. The first `SubagentStop` completes the record and later ones are
+skipped, so the record's files and token usage stop at the first stop; the
+parent's next turn end still attributes the later edits to the session.
 

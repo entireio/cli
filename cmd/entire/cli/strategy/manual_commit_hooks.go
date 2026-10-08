@@ -348,6 +348,10 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 
+	// A trailer naming a checkpoint deleted from this clone goes first: kept,
+	// post-commit would condense into the dead ID and re-create it.
+	strippedDeleted := stripDeletedCheckpointTrailers(ctx, commitMsgFile)
+
 	// Inherited trailers link the squashed commits' checkpoints; matching still
 	// runs so work the session holds gets a checkpoint of its own.
 	inherited := s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source)
@@ -364,7 +368,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	// Handle amend (source="commit") separately: preserve or restore trailer
 	if source == "commit" {
-		return s.prepareAmendCommitMsg(ctx, commitMsgFile)
+		return s.prepareAmendCommitMsg(ctx, commitMsgFile, strippedDeleted)
 	}
 
 	_, openRepoSpan := perf.Start(ctx, "open_repository")
@@ -437,7 +441,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	message := string(content)
 
 	// A trailer prepare already stamped is kept (e.g. amend); inherited ones are links
-	if existingCpID, found := stampedTrailer(message, inherited); found {
+	if existingCpID, found := stampedTrailer(ctx, message, inherited); found {
 		readCommitMessageSpan.End()
 		// Trailer already exists (e.g., amend) - keep it
 		logging.Debug(logCtx, "prepare-commit-msg: trailer already exists",
@@ -569,7 +573,7 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 		return nil // no squash in progress (or unreadable: fall through to normal matching)
 	}
 
-	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
+	inherited := withoutDeletedCheckpoints(ctx, trailers.ParseAllCheckpoints(string(squashMsg)))
 	if len(inherited) == 0 {
 		return nil
 	}
@@ -697,7 +701,7 @@ func stripInheritedCheckpointTrailers(commitMsgFile string, inherited []id.Check
 
 // handleAmendCommitMsg handles the prepare-commit-msg hook for amend operations
 // (source="commit"). It preserves existing trailers or restores from LastCheckpointID.
-func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitMsgFile string) error {
+func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitMsgFile string, strippedDeleted bool) error {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	// Read current commit message
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
@@ -707,13 +711,18 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 
 	message := string(content)
 
-	// If message already has a trailer, keep it unchanged
-	if existingCpID, found := trailers.ParseCheckpoint(message); found {
+	// If message already has a live trailer, keep it unchanged. A deleted ID
+	// still mentioned somewhere (not as a whole trailer line, so not stripped)
+	// does not count: preserving on it would keep the dead checkpoint linked.
+	mentioned := trailers.ParseAllCheckpoints(message)
+	if live := withoutDeletedCheckpoints(ctx, mentioned); len(live) > 0 {
 		logging.Debug(logCtx, "prepare-commit-msg: amend preserves existing trailer",
 			slog.String("strategy", "manual-commit"),
-			slog.String("checkpoint_id", existingCpID.String()),
+			slog.String("checkpoint_id", live[0].String()),
 		)
 		return nil
+	} else if len(mentioned) > 0 {
+		strippedDeleted = true
 	}
 
 	// No trailer in message — check if any session has LastCheckpointID to restore
@@ -751,6 +760,11 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 		if state.LastCheckpointID.IsEmpty() {
 			continue
 		}
+		// A delete lists the ID before clearing it from session state, so an
+		// amend racing that window must not restore it.
+		if len(withoutDeletedCheckpoints(ctx, []id.CheckpointID{state.LastCheckpointID})) == 0 {
+			continue
+		}
 		cpID := state.LastCheckpointID
 		source := "LastCheckpointID"
 
@@ -769,11 +783,112 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 		return nil
 	}
 
+	if strippedDeleted {
+		// The amended commit's checkpoint was deleted. Work a session still
+		// holds gets a fresh checkpoint (see stampFreshCheckpointForAmend for
+		// how this differs from an ordinary commit's linking).
+		s.stampFreshCheckpointForAmend(ctx, repo, worktreePath, commitMsgFile)
+		return nil
+	}
+
 	// No checkpoint ID found - leave message unchanged
 	logging.Debug(logCtx, "prepare-commit-msg: amend with no checkpoint to restore",
 		slog.String("strategy", "manual-commit"),
 	)
 	return nil
+}
+
+// stampFreshCheckpointForAmend links an amend whose deleted checkpoint trailer
+// was removed to a new checkpoint when a session has new content for it. With
+// nothing new, the amend simply carries no trailer.
+//
+// It runs only the core of ordinary linking: find the linkable sessions, keep
+// those with new content, pick their checkpoint ID, and append a plain
+// trailer. It deliberately skips the rest of PrepareCommitMsg's path: no
+// mid-turn agent fast path, no TTY link prompt, and no explanatory editor
+// comment beside the trailer. An amend's
+// source is always "commit", and the old trailer it replaces carried no
+// comment either.
+func (s *ManualCommitStrategy) stampFreshCheckpointForAmend(ctx context.Context, repo *git.Repository, worktreePath, commitMsgFile string) {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
+	if err != nil || len(sessions) == 0 {
+		return
+	}
+	withContent := s.filterSessionsWithNewContent(ctx, repo, sessions)
+	if len(withContent) == 0 {
+		return
+	}
+	cpID, err := checkpointIDForSessions(ctx, withContent)
+	if err != nil {
+		return
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(addCheckpointTrailer(string(content), cpID)), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return
+	}
+	logging.Info(logCtx, "prepare-commit-msg: amend of a deleted checkpoint linked to a new one",
+		slog.String("strategy", "manual-commit"),
+		slog.String("checkpoint_id", cpID.String()),
+	)
+}
+
+// withoutDeletedCheckpoints drops IDs deleted from this clone, so inheriting
+// trailers (squash, redo) cannot put back one stripDeletedCheckpointTrailers
+// removed. An unreadable list filters nothing: hooks fail open.
+func withoutDeletedCheckpoints(ctx context.Context, ids []id.CheckpointID) []id.CheckpointID {
+	if len(ids) == 0 {
+		return ids
+	}
+	deleted, err := checkpoint.LoadDeletedCheckpoints(ctx)
+	if err != nil || len(deleted) == 0 {
+		return ids
+	}
+	kept := make([]id.CheckpointID, 0, len(ids))
+	for _, cpID := range ids {
+		if !deleted.Contains(cpID) {
+			kept = append(kept, cpID)
+		}
+	}
+	return kept
+}
+
+// stripDeletedCheckpointTrailers removes Entire-Checkpoint trailers naming
+// checkpoints deleted from this clone, reporting whether the message file was
+// actually rewritten. Every whole (possibly indented) trailer line after the
+// subject and above any scissors line is considered, by the same matcher that
+// decides what to remove (see trailers.RemoveCheckpointTrailers). A list that
+// cannot be read strips nothing: hooks fail open.
+func stripDeletedCheckpointTrailers(ctx context.Context, commitMsgFile string) bool {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	deleted, err := checkpoint.LoadDeletedCheckpoints(ctx)
+	if err != nil {
+		logging.Debug(logCtx, "prepare-commit-msg: deleted checkpoints list unavailable",
+			slog.String("error", err.Error()))
+		return false
+	}
+	if len(deleted) == 0 {
+		return false
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return false
+	}
+	stripped, removed := trailers.RemoveCheckpointTrailers(string(content), deleted.Contains)
+	if len(removed) == 0 {
+		return false
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(stripped), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		logging.Debug(logCtx, "prepare-commit-msg: could not rewrite message without deleted trailers",
+			slog.String("error", err.Error()))
+		return false
+	}
+	logging.Info(logCtx, "prepare-commit-msg: removed trailers of deleted checkpoints",
+		slog.Int("removed", len(removed)))
+	return true
 }
 
 // PostCommit is called by the git post-commit hook after a commit is created.
@@ -2461,7 +2576,7 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	message := string(content)
 
 	// Don't add if prepare already stamped one (inherited trailers are links)
-	if _, found := stampedTrailer(message, inherited); found {
+	if _, found := stampedTrailer(logCtx, message, inherited); found {
 		return nil
 	}
 
@@ -2696,7 +2811,9 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	// the state is missing (or the loaded state has an empty BaseCommit, a
 	// partial-state remnant from a concurrent warning), fall through to
 	// the initialize-new-session branch.
-	turnStartErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+	var remember string
+	var homeAgentType types.AgentType
+	turnStartErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.BaseCommit == "" {
 			return errPartialState
 		}
@@ -2732,6 +2849,8 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 				transitionSessionToCodex(state)
 			}
 			state.AgentType = corrected
+			// The recorded home belonged to the previous agent's layout.
+			state.AgentHome = ""
 		} else if state.AgentType == "" && resolvedAgentType != "" {
 			state.AgentType = resolvedAgentType
 		}
@@ -2744,6 +2863,8 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
 			state.TranscriptPath = transcriptPath
 		}
+		remember = updateSessionAgentHome(ctx, state)
+		homeAgentType = state.AgentType
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
 		reconcileWorktreePathForResumedTurn(ctx, state)
@@ -2755,7 +2876,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		state.LastCheckpointID = ""
 		state.TurnCheckpointIDs = nil
 		return nil
-	})
+	}, func() { rememberAgentHome(ctx, homeAgentType, remember) })
 	if turnStartErr == nil {
 		return nil
 	}

@@ -33,6 +33,7 @@ const (
 	HookNamePreTask          = "pre-task"
 	HookNamePostTask         = "post-task"
 	HookNamePostTodo         = "post-todo"
+	HookNameSubagentStart    = "subagent-start"
 	HookNameSubagentStop     = "subagent-stop"
 )
 
@@ -48,7 +49,22 @@ const (
 // Configs written by older CLI versions used the outdated matchers "Task" and
 // "TodoWrite", where the hooks silently never fired. Those are not rewritten in
 // place on a normal `entire enable`; run with --force to strip and reinstall.
-const subagentToolMatcher = "Agent"
+const (
+	subagentToolMatcher = "Agent"
+	// skillToolMatcher routes Skill calls to post-task, which records the agent
+	// a `context: fork` skill runs in and ignores inline skills. PostToolUse
+	// only: a forked skill has no launch-time marker to write, and a
+	// PreToolUse hook would run a worktree scan for every inline skill.
+	skillToolMatcher = skillToolName
+)
+
+// workflowAgentMatcher is the agent-type matcher for Entire's SubagentStart
+// hook. SubagentStart matchers filter on agent type (hooks.md), and Workflow
+// agents report "workflow-subagent". A Workflow launches its agents without an
+// Agent tool call, so SubagentStart is the only launch signal Entire gets for
+// them; direct Agent launches are already recorded by PreToolUse/PostToolUse
+// [Agent], so the matcher keeps them from invoking Entire twice.
+const workflowAgentMatcher = workflowAgentType
 
 // ClaudeSettingsFileName is the settings file used by Claude Code.
 // This is Claude-specific and not shared with other agents.
@@ -178,18 +194,21 @@ func loadRawClaudeSettingsForInstall(cfg *agent.HookConfigFile) (rawSettings, ra
 
 type entireSimpleHook struct {
 	hookType string
+	matcher  string
 	command  string
 }
 
-// entireSimpleHooks lists the hooks Entire registers under an empty matcher.
+// entireSimpleHooks lists the hooks Entire registers alone in their hook
+// type, each under one matcher (empty for all but SubagentStart).
 func entireSimpleHooks() []entireSimpleHook {
 	return []entireSimpleHook{
-		{"SessionStart", agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)},
-		{"SessionEnd", agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")},
-		{"Stop", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")},
-		{"StopFailure", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop-failure")},
-		{"SubagentStop", agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")},
-		{"UserPromptSubmit", agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")},
+		{"SessionStart", "", agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)},
+		{"SessionEnd", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")},
+		{"Stop", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")},
+		{"StopFailure", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop-failure")},
+		{"SubagentStart", workflowAgentMatcher, agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-start")},
+		{"SubagentStop", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")},
+		{"UserPromptSubmit", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")},
 	}
 }
 
@@ -234,8 +253,8 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	parseHookType(rawHooks, "PostToolUse", &postToolUse)
 
 	// The "simple" hook types all share one shape: a single Entire command
-	// under an empty-string matcher, no tool-use targeting. Handling them
-	// data-driven (rather than one parse/strip/add/marshal block per type)
+	// under one matcher (empty for most), alone in its hook type. Handling
+	// them data-driven (rather than one parse/strip/add/marshal block per type)
 	// keeps this function's complexity from growing linearly with each new
 	// simple hook type Entire registers.
 	simpleHooks := entireSimpleHooks()
@@ -282,8 +301,12 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	// Add hooks if they don't exist
 	for _, h := range simpleHooks {
 		m := simpleMatchers[h.hookType]
-		if !hookCommandExists(m, h.command) {
-			simpleMatchers[h.hookType] = addHookToMatcher(m, "", h.command)
+		exists := hookCommandExists(m, h.command)
+		if h.matcher != "" {
+			exists = hookCommandExistsWithMatcher(m, h.matcher, h.command)
+		}
+		if !exists {
+			simpleMatchers[h.hookType] = addHookToMatcher(m, h.matcher, h.command)
 			count++
 		}
 	}
@@ -293,6 +316,10 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
 		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
+		count++
+	}
+	if !hookCommandExistsWithMatcher(postToolUse, skillToolMatcher, postTaskCmd) {
+		postToolUse = addHookToMatcher(postToolUse, skillToolMatcher, postTaskCmd)
 		count++
 	}
 
@@ -398,11 +425,12 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	}
 
 	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, stop, stopFailure, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
+	var sessionStart, sessionEnd, stop, stopFailure, subagentStart, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
 	parseHookType(rawHooks, "SessionStart", &sessionStart)
 	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
 	parseHookType(rawHooks, "Stop", &stop)
 	parseHookType(rawHooks, "StopFailure", &stopFailure)
+	parseHookType(rawHooks, "SubagentStart", &subagentStart)
 	parseHookType(rawHooks, "SubagentStop", &subagentStop)
 	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
 	parseHookType(rawHooks, "PreToolUse", &preToolUse)
@@ -413,6 +441,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	sessionEnd = removeEntireHooks(sessionEnd)
 	stop = removeEntireHooks(stop)
 	stopFailure = removeEntireHooks(stopFailure)
+	subagentStart = removeEntireHooks(subagentStart)
 	subagentStop = removeEntireHooks(subagentStop)
 	userPromptSubmit = removeEntireHooks(userPromptSubmit)
 	preToolUse = removeEntireHooksFromMatchers(preToolUse)
@@ -423,6 +452,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
 	marshalHookType(rawHooks, "Stop", stop)
 	marshalHookType(rawHooks, "StopFailure", stopFailure)
+	marshalHookType(rawHooks, "SubagentStart", subagentStart)
 	marshalHookType(rawHooks, "SubagentStop", subagentStop)
 	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
 	marshalHookType(rawHooks, "PreToolUse", preToolUse)
@@ -546,7 +576,8 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 // current, or outdated. It is a read-only diagnostic used by `entire status`
 // and `entire doctor`; it never modifies settings. Outdated is detected on the
 // positive spec: Entire is installed (Stop hook present) yet one of the current
-// tool-use matchers, SubagentStop, or StopFailure does not carry its Entire hook.
+// tool-use matchers (Agent, Skill), SubagentStart (for
+// Workflow agents), SubagentStop, or StopFailure does not carry its Entire hook.
 func CheckHookConfig(ctx context.Context) HookConfigState {
 	settings, err := loadClaudeSettings(ctx)
 	// An unreadable or malformed settings file collapses to HooksAbsent
@@ -561,6 +592,8 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 	subagentTools := splitMatcherTools(subagentToolMatcher)
 	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, []string{skillToolMatcher}) ||
+		!hasEntireHookCoveringTools(settings.Hooks.SubagentStart, []string{workflowAgentMatcher}) ||
 		!hasEntireHook(settings.Hooks.SubagentStop) ||
 		!hasEntireHook(settings.Hooks.StopFailure) {
 		return HooksOutdated
@@ -610,7 +643,8 @@ func splitMatcherTools(matcher string) []string {
 // hasEntireHookCoveringTools reports whether an Entire hook is installed under a
 // matcher that covers every tool in want. A widened matcher still counts: a
 // matcher of "TaskCreate|TaskUpdate|TaskGet" covers {TaskCreate, TaskUpdate},
-// so users who broaden a matcher aren't falsely flagged as outdated.
+// so users who broaden a matcher aren't falsely flagged as outdated. The same
+// exact-string rules apply to SubagentStart's agent-type matchers.
 func hasEntireHookCoveringTools(matchers []ClaudeHookMatcher, want []string) bool {
 	for _, matcher := range matchers {
 		have := splitMatcherTools(matcher.Matcher)

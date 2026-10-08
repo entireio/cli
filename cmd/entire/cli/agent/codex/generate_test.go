@@ -162,3 +162,22 @@ func TestGenerateText_SlowProbeDoesNotConsumeTheDeadline(t *testing.T) {
 		t.Errorf("disabled = %v, want the full list", d)
 	}
 }
+
+// The features probe runs against an empty CODEX_HOME, as the generation run
+// ignores the user's config.toml: a malformed one otherwise fails the probe
+// ("failed to load bootstrap configuration") and drops the narrowing.
+func TestKnownFeatures_ProbesWithoutTheUserConfig(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{CommandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		// A config file in CODEX_HOME stands in for a malformed user config.
+		return exec.CommandContext(ctx, "sh", "-c",
+			`if [ -z "$CODEX_HOME" ] || [ -n "$(ls -A "$CODEX_HOME")" ] || [ "$CODEX_HOME" = "$HOME/.codex" ]; then echo "Error: failed to load bootstrap configuration" >&2; exit 1; fi; echo "shell_tool  stable  true"`)
+	}}
+	known, err := ag.knownFeatures(context.Background())
+	if err != nil {
+		t.Fatalf("knownFeatures: %v", err)
+	}
+	if !known[probeAnchorFeature] {
+		t.Fatalf("known = %v, want %s", known, probeAnchorFeature)
+	}
+}

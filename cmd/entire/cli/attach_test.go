@@ -268,8 +268,8 @@ func TestAttach_Success(t *testing.T) {
 // recognize the session as active and never wrote Entire-Checkpoint trailers
 // onto subsequent commits in that session.
 //
-// After attach, BaseCommit (and AttributionBaseCommit) must be populated
-// from HEAD so the session is recognized as active.
+// After attach, BaseCommit must be populated from HEAD so the session is
+// recognized as active.
 func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 	setupAttachTestRepo(t)
 
@@ -300,7 +300,7 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 		SessionID: sessionID,
 		AgentType: agent.AgentTypeClaudeCode,
 		StartedAt: time.Now(),
-		// BaseCommit and AttributionBaseCommit deliberately empty.
+		// BaseCommit deliberately empty.
 	}); err != nil {
 		t.Fatal(err)
 	}

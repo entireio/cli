@@ -39,6 +39,17 @@ e2e/
 - Use the `entire` package for CLI interactions, not raw `exec.Command`.
 - Skip tests pending CLI fixes with `t.Skip("ENT-XXX: reason")`.
 
+### OpenCode dependency cache
+
+OpenCode setup shares a version-keyed plugin dependency tree under the system
+temporary directory. A reusable tree must contain a `node_modules` directory
+and regular `package.json` and `package-lock.json` files. Incomplete trees are
+removed and rebuilt in staging; setup validates the staged tree before publishing
+it and validates any competing process's tree before reusing it. An interprocess
+lock beside the cache serializes validation, cleanup, installation, and publication;
+its lock file is retained so waiters keep using the same lock. Cache installs
+explicitly enable npm lockfile generation even when local npm settings disable it.
+
 ## Control-Plane Tests
 
 `controlplane/` runs the `entire` binary against the production control plane with no coding agent involved. Its `TestMain` logs in once per run with `entire login --device`, completing GitHub sign-in and the device approval in headless Chromium (playwright-go) as the GitHub test user named by `E2E_GH_USERNAME` / `E2E_GH_PASSWORD` / `E2E_GH_TOTP_SECRET`; every test then starts from that session. The account has authenticator-app 2FA enabled on purpose: GitHub skips its emailed new-device verification for 2FA accounts, and the test computes the one-time code from the secret. The CLI's config and token store live in a temp dir outside `e2e/artifacts/`, which CI uploads.

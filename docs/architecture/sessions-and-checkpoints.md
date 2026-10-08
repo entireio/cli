@@ -321,16 +321,35 @@ A subagent invocation (Claude Code's Task tool) is captured through a durable
 **task record** — `session.TaskRecord` (json `task_records`) on session state
 (`session/state.go`): `ToolUseID`, `AgentID`, `StartedAt`, `SubagentType`,
 `TaskDescription`, `DeclaredTranscriptPath`, `Files`, `TokenUsage`,
-`CompletedAt` (zero = still in flight). Mid-turn the record is a **pointer,
-not a payload**: the subagent's transcript stays wherever the agent wrote it,
-and the record remembers how to find it — the transcript path the agent's
-stop hook declared (Claude Code's `agent_transcript_path`), with the
-agent-layout convention as fallback. Nothing is written to git for task work
-mid-turn; the payload is materialized at condensation (below).
+`TokenUsageFromTranscript`, `CompletedAt` (zero = still in flight). Mid-turn
+the record is a **pointer, not a payload**: the subagent's transcript stays
+wherever the agent wrote it, and the record remembers how to find it — the
+transcript path the agent's stop hook declared (Claude Code's
+`agent_transcript_path`), with the agent-layout convention as fallback. Nothing
+is written to git for task work mid-turn; the payload is materialized at
+condensation (below).
+
+**Task token usage.** When the completing event carries no usage, completion
+computes it from the subagent's transcript and, except for Codex (whose child
+usage comes from its rollout inventory), sets `TokenUsageFromTranscript`.
+That read can be short: Claude Code fires `SubagentStop` before the agent's last
+API call is in its transcript, and a background agent woken again by a child it
+launched stops more than once while only its first stop completes the record.
+Condensation therefore recounts a completed record's usage from the raw
+transcript it reads for storage (before redaction, which could rewrite the
+message IDs usage is deduplicated by), so `task.json`'s usage matches the
+stored transcript. It keeps the recorded usage for agent-reported usage (Codex's
+inventory usage, where nil is deliberate), live records (their usage would be
+partial and stored again once complete), external agents (their usage comes
+from what their binary's `read-transcript` returns), and a recount with fewer
+API calls than recorded (a different or unparseable file). A re-wake after a
+commit has already condensed and removed the record is not captured.
 
 **Producers.**
 
 - **Background launch**: Claude Code reports the launch mode in the Agent tool's PostToolUse `tool_response` (`status: "async_launched"` with `isAsync`, versus `"completed"` for foreground), which the parser carries as `agent.Event.SubagentLaunch`. That report wins; `tool_input.run_in_background` (a boolean or a boolean string) is only the fallback, because Claude Code usually runs Agent calls in the background without the model passing it. A background PostToolUse fires at the launch acknowledgment, seconds after dispatch, so the launch only records an in-flight record (with the `agentId` from the response) and captures nothing. `SubagentType`/`TaskDescription` are captured here because `SubagentStop`'s payload carries none of them.
+- **Workflow agent launch** (subagent-start, non-final): agents a Claude Code Workflow launches have no Agent call of their own — the Workflow's PostToolUse reports a run ID, not agents — so Claude Code's `SubagentStart` hook (installed with matcher `workflow-subagent`; other agent types are ignored at parse time too) records each one's in-flight record, keyed by its `agent_id` as both `ToolUseID` and `AgentID`. The launch is `SubagentLaunchIdempotent`: an existing record for that key is kept rather than replaced, so a repeated `SubagentStart` cannot reset the record while it is still in session state; once condensation has materialized and removed a completed record, a late repeat would start a new live one. Their transcripts live in `subagents/workflows/<runId>/agent-<id>.jsonl`. The stop's `agent_transcript_path` is used only when it is exactly that file for this session and agent inside the parent's session directory, with no link below it; otherwise it is dropped and the layout lookup applies. That file's run becomes the event's `SubagentRunID`: a resumed run reuses its agents' IDs, so its launch can find the earlier run's completed record and add none, and the stop then completes a record of its own (keyed `<agent_id>`, or `<agent_id>-<runId>` while that key is taken) unless a record already holds the same run's transcript, which makes it a repeated stop. The transcript resolvers (`paths.ResolveSubagentTranscriptPath`) probe every run for an agent ID; the session's `subagent_tokens` total counts only the runs the transcript (or, at import, the turn's transcript prefix) launched, named by the Workflow launch's structured `toolUseResult.runId` (`taskType: local_workflow`) or, as a fallback, its result's `Run ID:` lines (`paths.WorkflowRunAgentTranscripts`). A Workflow launched from inside a subagent names its run in that subagent's transcript, not the parent's, so its agents get task records but are not counted in the parent session's `subagent_tokens` — the same limit nested `Agent` subagents have.
+- **Forked skill launch** (post-task, non-final): a Claude Code skill with `context: fork` runs in an agent that Claude Code reports only in the Skill call's PostToolUse result (`status: "forked"`, `agentId`). Entire installs `PostToolUse[Skill]` → `post-task`, which records the launch under the Skill call's `tool_use_id` with that agent ID; the agent's `SubagentStop` completes it by agent ID. A result with `background: false` completes the record at once with files from the transcript only (`SubagentFilesFromTranscript`: no pre-task baseline exists for a Skill call); a missing `background` is treated as running. The agent can stop again when a background child wakes it; only the first stop updates the record.
 - **Foreground completion** (post-task, non-final): PostToolUse fires at true completion, so the record is created-and-completed in one step, files and transcript path attached. Claude Code's foreground `SubagentStop` arrives just *before* this PostToolUse, when no record exists yet, and is a no-op.
 - **SubagentStop (final, authoritative)**: the real completion signal for background tasks. Claude Code's payload carries `agent_id` but no `tool_use_id`, so `handleSubagentStopFinal` finds the record by `AgentID` (`FindTaskRecordByAgentID`, a live record before a completed one) and adopts its `ToolUseID`, which keys exactly-once completion and the checkpoint's `tasks/<tool_use_id>/` tree. It then completes the live record, bypassing any "no changes, skip" instinct: a read-only subagent (reviewer, search agent) still produced a transcript worth materializing. File attribution is analyzer-only (the subagent's own transcript, never a whole-worktree scan that would sweep in the parent's concurrent work); the accepted trade is that shell side-effect files the transcript never names, and deletions, are under-captured. A record already completed (duplicate/racing Final event) is skipped. Known gap: a subagent continued with `SendMessage` gets a second `SubagentStart`/`SubagentStop` under the same `agent_id` but no new Agent call, so its stop finds the completed record and the resumed run's edits are not attributed to the task.
 - **SessionEnd sweep** (`completeLiveTaskRecords`): a session closing with
@@ -760,6 +779,74 @@ are for human readability in `git log` only. The CLI always reads from the tree 
 ```
 
 The checkpoint ID creates a **bidirectional link**: user commits can find their metadata, and metadata can find the commits that reference it.
+
+### Deleting a Checkpoint
+
+`entire checkpoint delete <id>` removes one checkpoint from this clone and from
+every checkpoint remote that holds it (`--remote` narrows that, `--local-only`
+skips remotes without contacting them, `--dry-run` only reports). The summary
+names every holder a narrowed delete left alone. Mechanics are in the
+[ref backend](ref-checkpoint-backend.md#non-force-fast-forward-only) reference.
+What it means for the domain model:
+
+- **Sessions and checkpoints are many-to-many, and each checkpoint carries the
+  session's full compacted transcript.** Deleting one checkpoint removes almost
+  none of a long session's content: any remaining checkpoint of that session
+  can rebuild it. The command lists other local checkpoints of the same
+  sessions (a local, capped scan) and deletes none of them; the session stays
+  visible on entire.io while any remain.
+- **Token totals.** Each session entry stores the token delta since the previous
+  condensation, so removing a checkpoint subtracts its delta from server-side
+  session sums. Local `SessionState` token offsets, usage and baselines are
+  never touched: resetting any of them would make the next checkpoint
+  re-count tokens surviving checkpoints already carry.
+- **Session state.** States holding the ID lose `LastCheckpointID` (and its
+  commit hash), a matching `CondensationAttempt`, and the ID in
+  `TurnCheckpointIDs`, so an amend cannot restore the trailer and a pending
+  condensation cannot re-create the checkpoint. Clearing `LastCheckpointID`
+  makes an ended state eligible for cleanup. A session that has not ended
+  blocks the delete unless `--force` is passed.
+- **Commits keep their trailers.** `explain` on such a commit reports
+  "checkpoint not found (deleted with `entire checkpoint delete`)" when the ID
+  is on this clone's deleted-checkpoints list, and a plain not-found otherwise.
+  Every `prepare-commit-msg` outside a rebase, cherry-pick or revert (not only
+  an amend) drops every whole `Entire-Checkpoint` line after the subject whose
+  ID is on that list (wherever git would see a trailer), an amend never
+  preserves a deleted ID, and squash/redo inheritance skips those IDs; new
+  agent work in an amend gets a fresh ID.
+- **The `v1` branch keeps history.** A checkpoint (of any ID kind; a git-branch
+  mirror stores ULIDs there too) is removed from the branch tip; its content
+  stays in the branch history on every remote.
+- **On the git-branch primary, a delete must not leave a v1 push destination
+  holding the copy.** The local removal is a `v1` commit, and the next
+  pre-push fast-forwards every destination (each pushurl of the sync remote,
+  or the dedicated `checkpoint_remote` URL derived from any remote) to it,
+  deleting those copies too. `--local-only` probes only those destinations; a
+  delete whose selection leaves one out is refused before anything is written
+  when that destination holds a `v1` copy (remedy: also delete there, or use
+  the git-refs backend) or cannot be reached (remedy: retry once reachable).
+  Known limitations: a push to a not-yet-elected remote can elect it on the
+  spot (capture) and send `v1` there; such a remote is not checked. A
+  dedicated `checkpoint_remote` URL derived from a remote spelling this clone
+  cannot authenticate to probes as unreachable, so the refusal ("retry when
+  reachable") persists until that spelling works. With
+  `push_sessions` disabled nothing is pushed, but re-enabling it later carries
+  the removal to the sync remote.
+- **Local and remote `v1` stay in one line.** After the removal is pushed to
+  a `v1` push destination, local `v1` is rebuilt on that pushed commit (local
+  unpushed checkpoints replayed on top), so the next push is a fast-forward and
+  the OPF pre-push rewrite does not see a diverged branch. This happens only
+  when the two removal commits are the whole difference: a remote that was
+  ahead or rewritten before the delete is left for pre-push to reconcile (or
+  for OPF to refuse), and with several pushurls only the first destination is
+  adopted, so the others can still diverge.
+- **`--local-only` copies can come back into view.** On git-refs, a read
+  (explain, backfill) that misses locally fetches the remote copy and recreates
+  the local ref. On git-branch, reads do not refetch a deleted local copy.
+  Remote-tracking `v1` refs that hold the checkpoint are listed in the plan;
+  they move only when that remote's copy is deleted.
+- **Server side.** The CLI deletes the git data; removing indexed rows on
+  entire.io is the backend's job when it observes the ref delete.
 
 ### Package Structure
 

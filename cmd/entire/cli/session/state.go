@@ -407,6 +407,16 @@ type State struct {
 	// TranscriptPath is the path to the live transcript file (for mid-session commit detection)
 	TranscriptPath string `json:"transcript_path,omitempty"`
 
+	// AgentHome is the agent's home directory (for example CLAUDE_CONFIG_DIR or
+	// CODEX_HOME) whose session stores held TranscriptPath when it was last set
+	// at session initialization or turn start, in whichever spelling (as the
+	// environment sets it, or canonical) contains TranscriptPath. A home set by
+	// an earlier turn is kept while its stores still hold TranscriptPath. It is
+	// "" when the agent has no home layout or the transcript lies in none of
+	// the home's stores. It grants no trust: readers pass it to
+	// agent.ResolveTrustedHome before relying on it.
+	AgentHome string `json:"agent_home,omitempty"`
+
 	// LastPrompt is the most recent user prompt for this session (truncated for display).
 	// Updated on every turn start (UserPromptSubmit). JSON tag kept as "first_prompt"
 	// for backward compatibility with existing state files.
@@ -467,7 +477,10 @@ type SubagentInventoryEntry struct {
 // SessionEnd sweep to retry.
 type TaskRecord struct {
 	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
-	// to key TaskMetadataDir. Dedup key for AddTaskRecord.
+	// to key TaskMetadataDir. Dedup key for AddTaskRecord. For a Claude Code
+	// Workflow agent it is the agent ID instead: those agents have no tool call
+	// of their own (the Workflow's tool_use_id is shared by every agent in the
+	// run), so the record is keyed by the subagent, and AgentID equals it.
 	ToolUseID string `json:"tool_use_id"`
 
 	// AgentID is the subagent identifier (tool_response.agentId at launch
@@ -506,8 +519,16 @@ type TaskRecord struct {
 	Files []string `json:"files,omitempty"`
 
 	// TokenUsage is this subagent's token usage, when the completing hook
-	// payload provided one. nil when unavailable.
+	// payload provided one or the agent computed it from the subagent's
+	// transcript. nil when unavailable.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// TokenUsageFromTranscript records that TokenUsage was computed from the
+	// subagent's transcript at completion (or would have been, had that read
+	// found usage) rather than reported by the agent. Condensation recomputes
+	// such usage from the transcript it stores, which by then holds API calls
+	// the agent had not yet written when it stopped.
+	TokenUsageFromTranscript bool `json:"token_usage_from_transcript,omitempty"`
 
 	// CompletedAt is when this record was completed (CompleteTaskRecord).
 	// Zero means the record is still in flight. See the type doc comment.
