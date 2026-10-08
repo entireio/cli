@@ -86,6 +86,45 @@ func TestCondenseSessionByID_ReadsStoredCopyFromLinkedWorktree(t *testing.T) { /
 	require.NoError(t, err)
 	assert.Contains(t, string(content.Transcript), "linked-worktree-transcript")
 	assert.Contains(t, content.Prompts, "prompt from linked-worktree-transcript")
+
+	// The condensation consumed the stored copy, so it is released from the
+	// worktree it was read from, as the commit path releases it.
+	assertStoredCopyReleased(t, worktreeDir, sessionID)
+}
+
+// assertStoredCopyReleased asserts the session's stored prompt.txt and
+// full.jsonl are gone from worktreeRoot's .entire.
+func assertStoredCopyReleased(t *testing.T, worktreeRoot, sessionID string) {
+	t.Helper()
+	metadataDir := filepath.Join(worktreeRoot, filepath.FromSlash(paths.SessionMetadataDirFromSessionID(sessionID)))
+	for _, name := range []string{paths.PromptFileName, paths.TranscriptFileName} {
+		_, err := os.Stat(filepath.Join(metadataDir, name))
+		assert.True(t, os.IsNotExist(err), "%s should be released after a commit-less condense", name)
+	}
+}
+
+// A commit-less condense of a session in the current worktree releases its
+// stored copy too. Uses t.Chdir — do NOT add t.Parallel().
+func TestCondenseSessionByID_ReleasesStoredCopy(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	s := &ManualCommitStrategy{}
+	sessionID := "release-stored-copy"
+	writeStoredCopy(t, dir, sessionID, "current-worktree-transcript")
+	testutil.WriteFile(t, dir, "work.txt", "agent content")
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     sessionID,
+		NewFiles:      []string{"work.txt"},
+		MetadataDir:   paths.SessionMetadataDirFromSessionID(sessionID),
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+	}))
+
+	require.NoError(t, s.CondenseSessionByID(t.Context(), sessionID))
+	assertStoredCopyReleased(t, dir, sessionID)
 }
 
 // Every WorktreePath the gate does not positively accept falls back to the
@@ -143,7 +182,7 @@ func TestStoredSessionRoot_RefusesUntrustedWorktreePaths(t *testing.T) { //nolin
 	// Control: the same registered worktree named absolutely IS read, so the
 	// relative case above was refused for how it was named, not for its copy.
 	state := &SessionState{SessionID: sessionID, WorktreePath: linked}
-	transcript, _ := condensationTranscript(context.Background(), nil, state)
+	transcript, _ := condensationTranscript(context.Background(), nil, state, storedSessionRootOrNil(context.Background(), state))
 	assert.Contains(t, string(transcript), "linked-copy")
 }
 
@@ -178,7 +217,7 @@ func TestStoredSessionRoot_RefusesSymlinkedEntireInRegisteredWorktree(t *testing
 // copy fell back to the current (main) worktree's copy.
 func assertReadsMainCopy(t *testing.T, state *SessionState) {
 	t.Helper()
-	transcript, path := condensationTranscript(t.Context(), nil, state)
+	transcript, path := condensationTranscript(t.Context(), nil, state, storedSessionRootOrNil(t.Context(), state))
 	assert.Empty(t, path)
 	assert.Contains(t, string(transcript), "main-worktree-copy")
 

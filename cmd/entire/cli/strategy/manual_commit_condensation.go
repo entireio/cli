@@ -125,6 +125,12 @@ type condenseOpts struct {
 	// snapshot exists for its transcript, so one written without it — or
 	// reported as "nothing to checkpoint" — would be a silent wrong answer.
 	failOnRedactionError bool
+
+	// storedRoot is the .entire root holding the session's stored transcript
+	// and prompt copy (storedSessionRoot), when the caller already resolved it
+	// so it can also release the copy afterwards. nil means CondenseSession
+	// resolves it itself, once.
+	storedRoot *os.Root
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -586,7 +592,11 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	extractStart := time.Now()
 	_, extractSessionDataSpan := perf.Start(ctx, "extract_session_data")
-	sessionData, extractErr := s.extractSessionData(ctx, ag, state)
+	storedRoot := o.storedRoot
+	if storedRoot == nil {
+		storedRoot = storedSessionRootOrNil(ctx, state)
+	}
+	sessionData, extractErr := s.extractSessionDataFrom(ctx, ag, state, storedRoot)
 	if extractErr != nil {
 		extractSessionDataSpan.RecordError(extractErr)
 		extractSessionDataSpan.End()
@@ -1257,7 +1267,10 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 // For a session with a live transcript path that is still active, the
 // transcript is prepared first (OpenCode creates it lazily via `opencode
 // export`).
-func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionState) (data []byte, path string) {
+//
+// storedRoot is the .entire root holding the stored copy (storedSessionRoot),
+// resolved once per condensation; nil means there is none to read.
+func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionState, storedRoot *os.Root) (data []byte, path string) {
 	if state.TranscriptPath != "" {
 		if state.Phase.IsActive() {
 			prepareTranscriptIfNeeded(ctx, ag, state.TranscriptPath)
@@ -1268,11 +1281,10 @@ func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionS
 			}
 		}
 	}
-	root, err := storedSessionRoot(ctx, state)
-	if err != nil {
+	if storedRoot == nil {
 		return nil, ""
 	}
-	return readStoredTranscriptIn(root, state.SessionID), ""
+	return readStoredTranscriptIn(storedRoot, state.SessionID), ""
 }
 
 // extractSessionData extracts what a condensation stores for a session: its
@@ -1301,8 +1313,14 @@ func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionS
 //     landed): error, so the failed condensation leaves session state
 //     untouched and the next commit re-condenses with the populated transcript.
 func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, ag agent.Agent, state *SessionState) (*ExtractedSessionData, error) {
+	return s.extractSessionDataFrom(ctx, ag, state, storedSessionRootOrNil(ctx, state))
+}
+
+// extractSessionDataFrom is extractSessionData with the stored-copy root
+// already resolved (see condensationTranscript).
+func (s *ManualCommitStrategy) extractSessionDataFrom(ctx context.Context, ag agent.Agent, state *SessionState, storedRoot *os.Root) (*ExtractedSessionData, error) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-	transcript, transcriptPath := condensationTranscript(ctx, ag, state)
+	transcript, transcriptPath := condensationTranscript(ctx, ag, state, storedRoot)
 
 	if len(transcript) == 0 {
 		_, lateWriter := agent.AsLateTranscriptWriter(ag)
@@ -1329,8 +1347,8 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, ag agent.
 	}
 
 	promptSource := "filesystem prompt.txt"
-	if root, rootErr := storedSessionRoot(ctx, state); rootErr == nil {
-		data.Prompts = readPromptsIn(root, state.SessionID)
+	if storedRoot != nil {
+		data.Prompts = readPromptsIn(storedRoot, state.SessionID)
 	}
 	// Late-flush fallback: re-extract from the transcript bytes being
 	// checkpointed when prompt.txt is still empty (e.g. Antigravity writes the
@@ -1758,6 +1776,16 @@ func storedSessionRoot(ctx context.Context, state *SessionState) (*os.Root, erro
 	return entiredir.OpenForRead(ctx) //nolint:wrapcheck // callers treat any failure as "no stored copy"
 }
 
+// storedSessionRootOrNil is storedSessionRoot with a failure reported as nil:
+// no .entire to read a stored copy from.
+func storedSessionRootOrNil(ctx context.Context, state *SessionState) *os.Root {
+	root, err := storedSessionRoot(ctx, state)
+	if err != nil {
+		return nil
+	}
+	return root
+}
+
 // foreignWorktreeEntireRoot opens the .entire directory of recorded, a
 // worktree path read from a session-state file, when and only when that path
 // is a different worktree registered for THIS repository. ok is false for an
@@ -1864,6 +1892,18 @@ func clearFilesystemStagedFiles(ctx context.Context, sessionID string) {
 	if err != nil {
 		return
 	}
+	clearStagedFilesIn(root, sessionID)
+}
+
+// clearStagedFilesIn is clearFilesystemStagedFiles against an already-opened
+// .entire root: the one a commit-less condensation read the stored copy from
+// (storedSessionRoot), which may be another worktree's. Removal goes through
+// that anchored root without following a symlinked metadata or session
+// directory, never through an assembled path.
+func clearStagedFilesIn(root *os.Root, sessionID string) {
+	if root == nil || validation.ValidateSessionID(sessionID) != nil {
+		return
+	}
 	// Open the session directory once and remove leaves from it. The obvious
 	// osroot.RemoveNoSymlinks(root, <full path>) per file would re-resolve
 	// .entire/metadata and the session directory on every call, three times over
@@ -1943,6 +1983,9 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 
 	var cleared bool
 	var newSkillEvents []agent.SkillEvent
+	// releaseRoot is set once a condensation succeeded: the root its stored
+	// copy was read from, released after the state is saved.
+	var releaseRoot *os.Root
 	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.PendingCondensationID() != checkpointID {
 			return ErrMutationSkip
@@ -1976,7 +2019,10 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			return ErrMutationSkip
 		}
 
-		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true})
+		// Resolve the stored copy's root once: the condensation reads it, and
+		// a successful one releases it from the same root.
+		storedRoot := storedSessionRootOrNil(ctx, state)
+		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true, storedRoot: storedRoot})
 		if err != nil {
 			return fmt.Errorf("failed to condense session: %w", err)
 		}
@@ -2010,6 +2056,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// and a resumed turn starts a fresh window.
 		state.FilesTouched = nil
 		state.TouchedFileHashes = nil
+		releaseRoot = storedRoot
 		return nil
 	}, func() {
 		// Skill telemetry only. commitCondensedEmitter.emit is deliberately NOT
@@ -2027,6 +2074,12 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	if mutErr != nil {
 		return mutErr
 	}
+
+	// Nothing is left pending, so release the staged prompt.txt and full.jsonl
+	// as the commit path does once every file is committed; otherwise they stay
+	// in the worktree indefinitely. Only after the state is saved, so a failed
+	// save leaves the copy for the retry. The next Stop recreates them.
+	clearStagedFilesIn(releaseRoot, sessionID)
 
 	if cleared {
 		// Already cleared inside the locked mutation closure above -- see
