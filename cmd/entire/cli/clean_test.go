@@ -958,3 +958,30 @@ func TestRunCleanAllWithItems_NamesTheScansThatFailed(t *testing.T) {
 		}
 	})
 }
+
+// The plain clean confirmation lists what it deletes and says that clearing a
+// session with pending agent work drops that work's link to a future
+// checkpoint, pointing at `entire doctor --force` for deleting only branches.
+func TestPrintCurrentHeadCleanItems_WarnsAboutPendingWork(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	printCurrentHeadCleanItems(&out, []*strategy.SessionState{
+		{SessionID: "pending-session", StepCount: 2, FilesTouched: []string{"a.go"}},
+		{SessionID: "empty-session"},
+	}, []string{"entire/1234567-abcdef"})
+
+	text := out.String()
+	assertContains(t, text, "Session states (2):")
+	assertContains(t, text, "pending-session")
+	assertContains(t, text, "1 of these hold agent work not yet committed")
+	assertContains(t, text, "Legacy shadow branches (1):")
+	assertContains(t, text, "entire/1234567-abcdef")
+	assertContains(t, text, "entire doctor --force")
+}
+
+func assertContains(t *testing.T, text, want string) {
+	t.Helper()
+	if !strings.Contains(text, want) {
+		t.Errorf("output missing %q:\n%s", want, text)
+	}
+}

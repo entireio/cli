@@ -652,7 +652,7 @@ Two exceptions to field-by-field merging:
 
 Entire automatically redacts detected secrets (API keys, tokens, credentials) from transcripts and metadata before writing a checkpoint, but redaction is best-effort.
 
-Older Entire versions also kept local `entire/<commit>-<worktree>` shadow branches whose code-file snapshots were raw blobs of your working tree. Current versions no longer create them, but do not delete leftover ones automatically: `entire doctor` reports them, `entire clean` deletes them, and `entire clean --all` also covers the oldest `entire/<commit>` form. See [docs/security-and-privacy.md](docs/security-and-privacy.md) for the full picture, including the configurable scanner layers, opt-in PII redaction, and the OpenAI Privacy Filter pass.
+Older Entire versions also kept local `entire/<commit>-<worktree>` shadow branches whose code-file snapshots were raw blobs of your working tree. Current versions no longer create them, but do not delete leftover ones automatically: `entire doctor` reports them and `entire doctor --force` deletes them, leaving pending agent work alone (plain `entire clean` would also clear the session state that records it). `entire clean --all` also covers the oldest `entire/<commit>` form. See [docs/security-and-privacy.md](docs/security-and-privacy.md) for the full picture, including the configurable scanner layers, opt-in PII redaction, and the OpenAI Privacy Filter pass.
 
 ## Troubleshooting
 

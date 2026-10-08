@@ -76,8 +76,9 @@ Checks performed:
 
   7. Legacy shadow branches: report entire/<commit>-<worktree> branches older
      versions wrote at every turn. They hold full snapshots of the working
-     tree and nothing reads them anymore. Fix with 'entire clean' (or
-     --force here); a branch checked out in a worktree is left alone.
+     tree and nothing reads them anymore. Fix with 'entire doctor --force',
+     which deletes only the branches; a branch checked out in a worktree is
+     left alone.
 
   8. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
@@ -673,8 +674,11 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 // checkLegacyShadowBranches reports the strict-shape entire/<7+hex>-<6hex>
 // shadow branches older versions wrote at every agent turn. Nothing reads them
 // anymore, they hold full snapshots of the working tree, and they are never
-// removed automatically: the remedy is `entire clean`. Under --force (or a
-// confirmed prompt) doctor deletes them itself through `git branch -D`, which
+// removed automatically. The remedy is `entire doctor --force`, not plain
+// `entire clean`: clean also clears the session state of every session based on
+// HEAD, and session state is now the only record of pending agent work. Under
+// --force (or a confirmed prompt) doctor deletes the branches through
+// `git branch -D`, which
 // refuses a branch checked out in any worktree; such a branch is reported and
 // kept. The bare entire/<hex> form is not reported here, because a human
 // short-SHA branch looks the same; `entire clean --all` lists it for review.
@@ -695,7 +699,8 @@ func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
 	fmt.Fprintln(w, "  Older versions wrote these at every turn; nothing reads them now, and they")
 	fmt.Fprintln(w, "  hold full snapshots of your working tree.")
 	printCappedList(w, branches, func(name string) string { return name })
-	fmt.Fprintln(w, "  Fix: run `entire clean` to delete them.")
+	fmt.Fprintln(w, "  Fix: run `entire doctor --force` to delete them (only the branches; pending")
+	fmt.Fprintln(w, "  agent work in session state is kept).")
 
 	if !force {
 		if !interactive.CanPromptInteractively() {

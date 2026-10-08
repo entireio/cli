@@ -51,7 +51,7 @@ func TestCheckLegacyShadowBranches_ReportsWithoutForce(t *testing.T) {
 	assert.Contains(t, out, "Legacy shadow branches: 1 FOUND")
 	assert.Contains(t, out, "entire/1234567-abcdef")
 	assert.NotContains(t, out, "entire/fedcba9")
-	assert.Contains(t, out, "entire clean")
+	assert.Contains(t, out, "entire doctor --force")
 	assert.Contains(t, localBranchList(t, dir), "entire/1234567-abcdef", "nothing is deleted without --force")
 }
 

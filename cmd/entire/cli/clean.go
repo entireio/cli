@@ -117,14 +117,27 @@ func runCleanCurrentHead(ctx context.Context, cmd *cobra.Command, force, dryRun 
 		}
 	}
 
-	// Prompt for confirmation
+	// Prompt for confirmation, listing exactly what will be deleted: the
+	// sessions based on HEAD (whose state is the only record of their pending
+	// agent work) and every strict-shape legacy shadow branch in the repository.
 	if !force {
+		sessions, legacyBranches, listErr := currentHeadCleanItems(ctx)
+		if listErr != nil {
+			return listErr
+		}
+		if len(sessions) == 0 && len(legacyBranches) == 0 {
+			fmt.Fprintln(w, "Nothing to clean for current HEAD.")
+			return nil
+		}
+		fmt.Fprint(w, "This will delete:\n\n")
+		printCurrentHeadCleanItems(w, sessions, legacyBranches)
+
 		var confirmed bool
 
 		form := NewAccessibleForm(
 			huh.NewGroup(
 				huh.NewConfirm().
-					Title("Clean session data for current HEAD?").
+					Title("Delete these items?").
 					Value(&confirmed),
 			),
 		)
@@ -150,40 +163,63 @@ func runCleanCurrentHead(ctx context.Context, cmd *cobra.Command, force, dryRun 
 
 // previewCurrentHead shows what would be cleaned for the current HEAD.
 func previewCurrentHead(ctx context.Context, w io.Writer) error {
-	repo, err := openRepository(ctx)
+	sessions, legacyBranches, err := currentHeadCleanItems(ctx)
 	if err != nil {
 		return err
 	}
-	defer repo.Close()
-
-	head, err := repo.Head()
-	if err != nil {
-		return fmt.Errorf("failed to get HEAD: %w", err)
-	}
-
-	legacyBranches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list legacy shadow branches: %w", err)
-	}
-
-	// Find sessions for this commit
-	strat := GetStrategy(ctx)
-	sessions, err := strat.FindSessionsForCommit(ctx, head.Hash().String())
-	if err != nil {
-		sessions = nil
-	}
-
 	if len(legacyBranches) == 0 && len(sessions) == 0 {
 		fmt.Fprintln(w, "Nothing to clean for current HEAD.")
 		return nil
 	}
 
 	fmt.Fprint(w, "Would clean the following items:\n\n")
+	printCurrentHeadCleanItems(w, sessions, legacyBranches)
+	fmt.Fprintln(w, "Run without --dry-run to clean these items.")
+	return nil
+}
 
+// currentHeadCleanItems returns what a plain `entire clean` deletes: the
+// sessions based on the current HEAD and the strict-shape legacy shadow
+// branches anywhere in the repository (the same lists Reset acts on).
+func currentHeadCleanItems(ctx context.Context) ([]*strategy.SessionState, []string, error) {
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer repo.Close()
+
+	head, err := repo.Head()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+
+	legacyBranches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list legacy shadow branches: %w", err)
+	}
+
+	sessions, err := GetStrategy(ctx).FindSessionsForCommit(ctx, head.Hash().String())
+	if err != nil {
+		sessions = nil
+	}
+	return sessions, legacyBranches, nil
+}
+
+// printCurrentHeadCleanItems lists the sessions and legacy branches a plain
+// clean deletes, warning when a session still holds pending agent work.
+func printCurrentHeadCleanItems(w io.Writer, sessions []*strategy.SessionState, legacyBranches []string) {
 	if len(sessions) > 0 {
 		fmt.Fprintf(w, "Session states (%d):\n", len(sessions))
+		pending := 0
 		for _, s := range sessions {
 			fmt.Fprintf(w, "  %s (checkpoints: %d)\n", s.SessionID, s.StepCount)
+			if s.HasPendingWork() {
+				pending++
+			}
+		}
+		if pending > 0 {
+			fmt.Fprintf(w, "  %d of these hold agent work not yet committed. Their file changes stay in\n", pending)
+			fmt.Fprintln(w, "  your worktree, but will no longer link to a checkpoint when you commit them.")
 		}
 		fmt.Fprintln(w)
 	}
@@ -193,11 +229,9 @@ func previewCurrentHead(ctx context.Context, w io.Writer) error {
 		for _, branch := range legacyBranches {
 			fmt.Fprintf(w, "  %s\n", branch)
 		}
+		fmt.Fprintln(w, "  To delete only these branches and keep session state, run `entire doctor --force`.")
 		fmt.Fprintln(w)
 	}
-
-	fmt.Fprintln(w, "Run without --dry-run to clean these items.")
-	return nil
 }
 
 // runCleanSession handles the --session flag: clean/reset a single session.

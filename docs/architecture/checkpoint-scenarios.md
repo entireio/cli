@@ -471,7 +471,7 @@ This is correct behavior - the recorded hash reflects the **current combined sta
 Most orphaned data is cleaned up automatically:
 
 - **Session states**: An ended session with no pending work (`State.HasPendingWork`) and no `LastCheckpointID` is removed during session listing
-- **Legacy shadow branches**: Branches older CLI versions wrote (`entire/<hex>-<hex>`) are not deleted automatically; `entire doctor` reports them and `entire clean` deletes them
+- **Legacy shadow branches**: Branches older CLI versions wrote (`entire/<hex>-<hex>`) are not deleted automatically; `entire doctor` reports them and `entire doctor --force` deletes them without touching session state
 
 For anything that slips through, run `entire clean --all` manually:
 
