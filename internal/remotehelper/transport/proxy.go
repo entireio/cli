@@ -52,9 +52,8 @@ type Config struct {
 	OnUnauthorized func()
 	// UserAgent is stamped on every outbound HTTP request so the
 	// server can attribute git smart-HTTP traffic to the remote
-	// helper. Empty disables the wrapper, in which case the request
-	// carries Go's default ("Go-http-client/1.1") — useful for tests
-	// that don't care about identity. Production callers set it.
+	// helper. Empty sends no User-Agent header at all, which is what
+	// git does for GIT_HTTP_USER_AGENT="" — never Go's default.
 	UserAgent string
 }
 
@@ -135,9 +134,7 @@ func New(cfg Config) *Proxy {
 		if cfg.OnUnauthorized != nil {
 			rt = &unauthorizedObserver{next: rt, fn: cfg.OnUnauthorized}
 		}
-		if cfg.UserAgent != "" {
-			rt = &httpclient.UserAgentTransport{Next: rt, UA: cfg.UserAgent}
-		}
+		rt = &httpclient.UserAgentTransport{Next: rt, UA: cfg.UserAgent}
 		return rt
 	}
 	p.client = &http.Client{

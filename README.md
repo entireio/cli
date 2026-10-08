@@ -112,7 +112,7 @@ go install github.com/entireio/cli/cmd/git-remote-entire@latest
 export PATH="$HOME/go/bin:$PATH"
 ```
 
-Install both, or just `entire` if you never clone over `entire://`. Git finds the helper by name on `$PATH`, which is what `go install` produces, so nothing else needs configuring.
+Install both, or just `entire` if you never clone over `entire://`. Git finds the helper by name on `$PATH`, which is what `go install` produces, so nothing else needs configuring. Like git itself, the helper honours `GIT_HTTP_USER_AGENT` for the HTTP `User-Agent` it sends.
 
 One difference from a stable release: a `go install` build leaves [experimental commands](#experimental-commands) visible in `entire help`, the same as a nightly or a local build.
 

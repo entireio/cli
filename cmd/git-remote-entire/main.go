@@ -68,16 +68,22 @@ func run(args []string) int {
 	}
 
 	// Build info drives the identifier the helper advertises upstream.
-	// One string covers both surfaces:
+	// One default string covers both surfaces:
 	//   - githelper.Agent rides in the git protocol pkt-line agent=
 	//     capability appended to upload-pack / receive-pack / v2 requests.
 	//   - httpUserAgent rides in the HTTP User-Agent header on every
 	//     outbound request so server access logs can attribute traffic.
-	// Using the same value keeps the two log surfaces correlatable.
+	// They differ only when the user overrides the HTTP header through
+	// git's own GIT_HTTP_USER_AGENT (resolveHTTPUserAgent). The pkt-line
+	// agent is never overridable: the protocol allows one token with no
+	// whitespace, so a free-form user string would corrupt the capability.
 	versioninfo.Load()
 	helperAgent := remotehelper.BinaryName + "/" + versioninfo.Version
 	githelper.Agent = helperAgent
-	httpUserAgent := helperAgent
+	httpUserAgent := resolveHTTPUserAgent(helperAgent, os.LookupEnv)
+	if httpUserAgent != helperAgent {
+		debuglog.Printf("http user-agent set from %s", httpUserAgentEnvVar)
+	}
 
 	rawURL := args[2]
 	parsedURL, err := url.Parse(rawURL)
@@ -282,6 +288,29 @@ func infoFlagText(flag, version string) (string, bool) {
 			remotehelper.BinaryName, version), true
 	}
 	return "", false
+}
+
+// httpUserAgentEnvVar is git's own override for the HTTP User-Agent
+// header (git-config(1), http.userAgent: "Can be overridden by the
+// GIT_HTTP_USER_AGENT environment variable"). Git passes its environment
+// through to remote helpers, so the same knob reaches us.
+const httpUserAgentEnvVar = "GIT_HTTP_USER_AGENT"
+
+// resolveHTTPUserAgent returns the HTTP User-Agent to send, matching
+// git's handling of GIT_HTTP_USER_AGENT: a set value replaces defaultUA
+// verbatim, and a set-but-empty value sends no User-Agent header at all
+// (verified against git 2.55.0: curl drops the header for an empty
+// CURLOPT_USERAGENT; Go's net/http does the same for an empty header
+// value). Unset keeps defaultUA. The http.userAgent config key is not
+// read — the helper never shells out to `git config`, and git only
+// forwards -c values, not .gitconfig, in GIT_CONFIG_PARAMETERS.
+//
+// lookup is os.LookupEnv in production; injected so tests stay parallel.
+func resolveHTTPUserAgent(defaultUA string, lookup func(string) (string, bool)) string {
+	if ua, ok := lookup(httpUserAgentEnvVar); ok {
+		return ua
+	}
+	return defaultUA
 }
 
 // resolveProtocolVersion reads the effective protocol.version from
