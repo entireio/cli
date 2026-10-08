@@ -245,8 +245,12 @@ func TestAttachCommit_PushedOlderCommitIsLinkedInTheCheckpoint(t *testing.T) {
 func TestAttachCommit_UnpushedOlderCommitGetsTheTrailer(t *testing.T) {
 	setupAttachTestRepo(t)
 	target := commitAt(t, "work.txt")
-	later := commitAt(t, "later.txt")
-
+	// A committer other than whoever runs attach, which the rewrite must keep.
+	dir := mustGetwd(t)
+	testutil.WriteFile(t, dir, "later.txt", "later.txt")
+	testutil.GitAdd(t, dir, "later.txt")
+	testutil.RunGit(t, dir, "-c", "user.name=Original Committer", "-c", "user.email=original@example.com", "commit", "-q", "-m", "add later.txt")
+	later := headCommitOf(t)
 	out, err := attachHeadless(t, "attach-unpushed-older", attachOptions{Commit: target.Hash.String()})
 	if err != nil {
 		t.Fatalf("runAttach: %v\n%s", err, out)
@@ -254,6 +258,9 @@ func TestAttachCommit_UnpushedOlderCommitGetsTheTrailer(t *testing.T) {
 	head := headCommitOf(t)
 	if head.Hash == later.Hash || head.TreeHash != later.TreeHash || head.Message != later.Message {
 		t.Fatalf("HEAD should be the replayed later commit with the same tree and message: %s %q", head.Hash, head.Message)
+	}
+	if head.Author.String() != later.Author.String() || head.Committer.String() != later.Committer.String() || !head.Committer.When.Equal(later.Committer.When) {
+		t.Fatalf("replay changed author or committer: %v / %v, want %v / %v", head.Author, head.Committer, later.Author, later.Committer)
 	}
 	parent, err := head.Parent(0)
 	if err != nil {

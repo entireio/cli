@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -162,7 +163,8 @@ func otherRefsContaining(ctx context.Context, target *object.Commit) []string {
 }
 
 // rewriteWithTrailer adds the checkpoint trailer to chain[0] and replays the
-// rest of chain on top, keeping every tree, author and message, then moves the
+// rest of chain on top, keeping every tree, author, committer and message (as
+// git filter-branch does), then moves the
 // checked-out branch (or a detached HEAD) to the new tip if it is still at the
 // old one. Trees are reused, so the worktree and index are untouched, and no
 // commit hooks run. Session state that names the old commits is remapped as
@@ -187,10 +189,13 @@ func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit
 		}
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Stdin = strings.NewReader(message)
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(withoutIdentityEnv(os.Environ()),
 			"GIT_AUTHOR_NAME="+c.Author.Name,
 			"GIT_AUTHOR_EMAIL="+c.Author.Email,
 			fmt.Sprintf("GIT_AUTHOR_DATE=@%d %s", c.Author.When.Unix(), c.Author.When.Format("-0700")),
+			"GIT_COMMITTER_NAME="+c.Committer.Name,
+			"GIT_COMMITTER_EMAIL="+c.Committer.Email,
+			fmt.Sprintf("GIT_COMMITTER_DATE=@%d %s", c.Committer.When.Unix(), c.Committer.When.Format("-0700")),
 		)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -226,4 +231,13 @@ func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit
 	}
 	fmt.Fprintln(w, ")")
 	return nil
+}
+
+// withoutIdentityEnv drops GIT_AUTHOR_* and GIT_COMMITTER_* from env, so the
+// identity rewriteWithTrailer sets is the only one: with a duplicate, which
+// one git sees depends on the platform's getenv.
+func withoutIdentityEnv(env []string) []string {
+	return slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
+		return strings.HasPrefix(kv, "GIT_AUTHOR_") || strings.HasPrefix(kv, "GIT_COMMITTER_")
+	})
 }
