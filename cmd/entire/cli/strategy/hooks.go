@@ -793,6 +793,14 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			}
 		}
 
+		moved, err := refreshMovedEntireHooks(root, spec.name, spec.content)
+		if err != nil {
+			return installedCount, fmt.Errorf("failed to update the copy of Entire's %s hook another tool moved aside: %w", spec.name, err)
+		}
+		if len(moved) > 0 {
+			logging.Info(ctx, "updated moved copies of Entire's git hook", slog.String("hook", spec.name), slog.String("copies", strings.Join(moved, ",")))
+		}
+
 		// Chain to the backup, unless it is Entire's own hook, which would call itself.
 		content := spec.content
 		if hookFileExists(root, backupName) && !carriesEntireMarker(root, backupName) {

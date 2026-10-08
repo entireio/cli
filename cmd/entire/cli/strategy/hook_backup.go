@@ -398,6 +398,38 @@ func reclaimFromPreCommit(root *os.Root, hook string) (bool, error) {
 	return true, nil
 }
 
+// refreshMovedEntireHooks rewrites copies of Entire's hook that a hook
+// manager moved aside (any <hook>.<suffix> carrying Entire's marker, other
+// than the backup and its older copies) to content, which never chains. A
+// manager's wrapper that runs such a copy becomes Entire's backup on the next
+// install, and a copy written before the chain guard existed chains straight
+// back to that backup, so commits would recurse forever. It reports the names
+// it rewrote.
+func refreshMovedEntireHooks(root *os.Root, hook, content string) ([]string, error) {
+	names, err := hookDirNames(root)
+	if err != nil {
+		return nil, err
+	}
+	backup := hook + backupSuffix
+	var rewritten []string
+	for _, n := range names {
+		if !strings.HasPrefix(n, hook+".") || n == backup || strings.HasPrefix(n, backup+".") {
+			continue
+		}
+		if !carriesEntireMarker(root, n) {
+			continue
+		}
+		written, err := writeHookFile(root, n, content)
+		if err != nil {
+			return rewritten, err
+		}
+		if written {
+			rewritten = append(rewritten, n)
+		}
+	}
+	return rewritten, nil
+}
+
 // restoreLegacy undoes reclaimFromPreCommit on uninstall: .legacy gets the
 // user's hook back if pre-commit moved Entire's onto it, and the keep copy goes.
 func restoreLegacy(root *os.Root, hook string) error {

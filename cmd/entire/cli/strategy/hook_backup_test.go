@@ -820,3 +820,47 @@ func TestInstallHooks_ForeignWrapperOverEntireDoesNotRecurse(t *testing.T) {
 		t.Errorf("ran %s, want entire,entire,tool", got)
 	}
 }
+
+// The same layout after an upgrade: the hook the tool moved aside was written by
+// an Entire release that predates the chain guard, so it never checks it and
+// chains straight back to .pre-entire, which is now the tool's wrapper.
+func TestInstallHooks_ForeignWrapperOverPreGuardEntireDoesNotRecurse(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs POSIX shell hooks")
+	}
+	f := newHooksFixture(t)
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "log")
+	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\necho entire >> "+log+"\n")
+	spec := specFor(t, "commit-msg")
+	// The chain block released Entire versions append, before the guard.
+	preGuardChained := spec.content + chainComment + `
+_entire_hook_dir="$(dirname "$0")"
+if [ -x "$_entire_hook_dir/commit-msg.pre-entire" ]; then
+    "$_entire_hook_dir/commit-msg.pre-entire" "$@"
+fi
+`
+	f.write("commit-msg"+backupSuffix, "#!/bin/sh\necho user >> "+log+"\n")
+	f.write("commit-msg.tool-old", preGuardChained)
+	f.write("commit-msg", "#!/bin/sh\n\"$(dirname \"$0\")/commit-msg.tool-old\" \"$@\" || exit $?\necho tool >> "+log+"\n")
+
+	f.install(spec)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second) // a recursive chain never ends
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(f.dir, "commit-msg"), filepath.Join(t.TempDir(), "MSG"))
+	cmd.WaitDelay = time.Second
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		data, readErr := os.ReadFile(log)
+		t.Fatalf("hook failed: %v (Entire's hook ran %d times; log: %v)\n%s", err, strings.Count(string(data), "entire\n"), readErr, out)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(strings.Fields(string(data)), ","); got != "entire,entire,tool" {
+		t.Errorf("ran %s, want entire,entire,tool", got)
+	}
+}
