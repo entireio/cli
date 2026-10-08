@@ -610,7 +610,7 @@ func TestResolveDeleteTargets_DedicatedStoreWithoutElectedRemote(t *testing.T) {
 		"the destination is a selectable target")
 }
 
-func TestClassifyRemoteV1_ULIDWithUnfetchedTip(t *testing.T) {
+func TestClassifyRemoteV1_UnfetchedTipIsUnknown(t *testing.T) {
 	f := newDeleteFixture(t, "git-branch")
 	repo, err := gitrepo.OpenPath(f.workDir)
 	require.NoError(t, err)
@@ -618,8 +618,33 @@ func TestClassifyRemoteV1_ULIDWithUnfetchedTip(t *testing.T) {
 	ulid := id.MustCheckpointID("01K6ZQ2M8E3V7R5T9Y4X6W2A1B")
 	unfetched := plumbing.NewHash("1111111111111111111111111111111111111111")
 
-	assert.Equal(t, V1CopyUnknown, classifyRemoteV1(repo, ulid, unfetched, true), "a git-branch primary can have pushed ULIDs to v1")
-	assert.Equal(t, V1CopyAbsent, classifyRemoteV1(repo, ulid, unfetched, false))
+	assert.Equal(t, V1CopyUnknown, classifyRemoteV1(repo, ulid, unfetched))
+}
+
+// A git-refs clone still removes a ULID copy that another clone (or this one
+// under an earlier backend) pushed to the remote v1 branch.
+func TestCheckpointDelete_RefsPrimaryRemovesRemoteV1CopyPushedElsewhere(t *testing.T) {
+	f := newDeleteFixture(t, "git-refs")
+	cid := id.MustCheckpointID("01K6ZQ2M8E3V7R5T9Y4X6W2A1B")
+	f.writeCheckpoint(t, cid, "sess-1")
+
+	otherDir := t.TempDir()
+	testutil.InitRepo(t, otherDir)
+	tree := addFileToBranchTree(t, otherDir, "--empty", cid.Path()+"/0/full.jsonl", "other clone's session")
+	commit := strings.TrimSpace(testutil.RunGit(t, otherDir, "commit-tree", tree, "-m", "other clone"))
+	testutil.RunGit(t, otherDir, "push", "--no-verify", f.bareDir, commit+":refs/heads/entire/checkpoints/v1")
+
+	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
+	require.NoError(t, err)
+	holders := plan.HolderTargets()
+	require.Len(t, holders, 1)
+	assert.Equal(t, V1CopyUnknown, holders[0].V1)
+
+	result, err := ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{Targets: holders})
+	require.NoError(t, err)
+	require.False(t, result.Failed(), "%+v", result.Targets)
+	assert.Equal(t, DeleteOutcomeDeleted, result.Targets[0].V1)
+	assert.NotContains(t, testutil.RunGit(t, f.bareDir, "ls-tree", "-r", "--name-only", "entire/checkpoints/v1"), cid.Path()+"/")
 }
 
 // A retry that fails before deleting anything must not take the ID off the

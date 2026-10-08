@@ -145,9 +145,6 @@ type CheckpointDeletePlan struct {
 	SessionStates         []CheckpointDeleteState
 	OtherLocalCheckpoints []CheckpointDeleteSibling
 	OtherLocalTruncated   bool
-	// branchPrimary records a git-branch primary, whose remote v1 branches
-	// can hold ULID checkpoints too.
-	branchPrimary bool
 	// PushSessionsDisabled reports push_sessions=false; the delete still
 	// reaches remotes when the user asks for it.
 	PushSessionsDisabled bool
@@ -299,7 +296,6 @@ func PlanCheckpointDelete(ctx context.Context, cid id.CheckpointID, opts Checkpo
 	plan.LocalV1 = commitHasCheckpoint(repo, refTip(repo, v1BranchRef), cid)
 	plan.TrackingV1 = trackingV1Holders(ctx, repo, cid)
 
-	plan.branchPrimary = !primaryIsGitRefs(ctx)
 	targets := resolveDeleteTargets(ctx, root, plan)
 	if opts.LocalOnly {
 		// No remote is contacted, except a v1 push destination when this
@@ -314,9 +310,9 @@ func PlanCheckpointDelete(ctx context.Context, cid id.CheckpointID, opts Checkpo
 			t.NotChecked = true
 			skip = append(skip, t)
 		}
-		plan.Targets = append(probeDeleteTargets(ctx, root, repo, cid, probe, plan.branchPrimary), skip...)
+		plan.Targets = append(probeDeleteTargets(ctx, root, repo, cid, probe), skip...)
 	} else {
-		plan.Targets = probeDeleteTargets(ctx, root, repo, cid, targets, plan.branchPrimary)
+		plan.Targets = probeDeleteTargets(ctx, root, repo, cid, targets)
 	}
 	for _, t := range plan.Targets {
 		if !t.Reachable && !t.NotChecked {
@@ -537,7 +533,7 @@ func dedupeDeleteTargets(candidates []deleteTargetCandidate) []CheckpointDeleteT
 
 // probeDeleteTargets ls-remotes each target for the checkpoint ref and the v1
 // branch. A failed probe marks the target unreachable.
-func probeDeleteTargets(ctx context.Context, root string, repo *git.Repository, cid id.CheckpointID, targets []CheckpointDeleteTarget, branchPrimary bool) []CheckpointDeleteTarget {
+func probeDeleteTargets(ctx context.Context, root string, repo *git.Repository, cid id.CheckpointID, targets []CheckpointDeleteTarget) []CheckpointDeleteTarget {
 	for i := range targets {
 		t := &targets[i]
 		listing, err := lsRemoteCheckpoint(ctx, root, t.URL, cid)
@@ -548,12 +544,12 @@ func probeDeleteTargets(ctx context.Context, root string, repo *git.Repository, 
 		t.Reachable = true
 		t.RefName, t.RefOID = listing.ref, listing.refOID
 		t.V1Tip = listing.v1Tip
-		t.V1 = classifyRemoteV1(repo, cid, listing.v1Tip, branchPrimary)
+		t.V1 = classifyRemoteV1(repo, cid, listing.v1Tip)
 	}
 	return targets
 }
 
-func classifyRemoteV1(repo *git.Repository, cid id.CheckpointID, tip plumbing.Hash, branchPrimary bool) V1CopyState {
+func classifyRemoteV1(repo *git.Repository, cid id.CheckpointID, tip plumbing.Hash) V1CopyState {
 	switch {
 	case tip.IsZero():
 		return V1CopyAbsent
@@ -563,14 +559,9 @@ func classifyRemoteV1(repo *git.Repository, cid id.CheckpointID, tip plumbing.Ha
 		if _, err := repo.CommitObject(tip); err == nil {
 			return V1CopyAbsent // the tip is local and has no such subtree
 		}
-		// On a git-refs primary a ULID is never pushed to a remote v1 branch
-		// (pre-push does not push a git-branch mirror), so an unfetched tip
-		// cannot hold one; treating it as unknown would fetch the whole branch
-		// for every ULID delete. A git-branch primary pushes whatever IDs it
-		// wrote, so its tip has to be checked at delete time.
-		if cid.Kind() != id.KindLegacy && !branchPrimary {
-			return V1CopyAbsent
-		}
+		// Any ID kind: another clone, or this one under an earlier backend,
+		// can have pushed a ULID to the remote v1 branch, so its contents are
+		// checked when the delete runs.
 		return V1CopyUnknown
 	}
 }
