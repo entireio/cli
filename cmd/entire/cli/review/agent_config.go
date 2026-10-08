@@ -111,7 +111,7 @@ func validateMCPServer(name string, raw json.RawMessage, forbiddenRoots []string
 	case server.Command != "":
 		// The command is one program path, not a shell line: check it whole.
 		if strings.Contains(server.Command, "CLAUDE_PROJECT_DIR") || isProjectLauncher(server.Command) {
-			return fmt.Errorf("MCP server %q: %q resolves from the reviewed project; use an absolute path to the tool", name, server.Command)
+			return fmt.Errorf("MCP server %q: %q resolves from the reviewed project (a launcher such as npx does even by absolute path); point at the installed tool itself", name, server.Command)
 		}
 		if err := validateCommandWord(server.Command, forbiddenRoots); err != nil {
 			return fmt.Errorf("MCP server %q: %w", name, err)
@@ -121,7 +121,7 @@ func validateMCPServer(name string, raw json.RawMessage, forbiddenRoots []string
 				return fmt.Errorf("MCP server %q: argument %q refers to the project directory, which is the reviewed checkout", name, arg)
 			}
 			if isProjectLauncher(arg) {
-				return fmt.Errorf("MCP server %q: argument %q resolves tools from the reviewed project", name, arg)
+				return fmt.Errorf("MCP server %q: argument %q is a launcher that resolves tools from the reviewed project; point at the installed tool itself", name, arg)
 			}
 			if err := validateCommandWord(arg, forbiddenRoots); err != nil {
 				return fmt.Errorf("MCP server %q: %w", name, err)
@@ -193,7 +193,7 @@ func validateCommand(command string, forbiddenRoots []string) error {
 	}
 	for _, word := range words {
 		if isProjectLauncher(word) {
-			return fmt.Errorf("%q runs %s, which resolves tools from the reviewed project; use an absolute path to the tool", command, word)
+			return fmt.Errorf("%q runs %s, which resolves tools from the reviewed project even by absolute path; point at the installed tool itself", command, word)
 		}
 		if err := validateCommandWord(word, forbiddenRoots); err != nil {
 			return fmt.Errorf("%q: %w", command, err)
