@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/redact"
 
 	"github.com/charmbracelet/x/ansi"
@@ -61,6 +62,10 @@ func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outp
 	}()
 
 	cmd := exec.CommandContext(ctx, "opencode", "export", sessionID)
+	// Exports run inside git hooks (condensation, the commit-overlap check),
+	// whose GIT_DIR / GIT_INDEX_FILE would otherwise reach OpenCode's own git
+	// calls (project detection) and point them at the hook's state.
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	cmd.Stdout = file
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

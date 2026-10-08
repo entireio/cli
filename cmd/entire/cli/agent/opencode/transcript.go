@@ -187,11 +187,29 @@ func extractFilePaths(state *ToolState) []string {
 func ExtractTextFromParts(parts []Part) string {
 	var texts []string
 	for _, part := range parts {
-		if part.Type == "text" && part.Text != "" {
+		if part.Type == partTypeText && part.Text != "" {
 			texts = append(texts, part.Text)
 		}
 	}
 	return strings.Join(texts, "\n")
+}
+
+// OnlySyntheticText reports whether every text part is synthetic: a user
+// message OpenCode wrote itself (a background task's `<task … state=…>`
+// result), not a prompt. A real prompt carrying synthetic attachment text
+// alongside the user's own words is kept.
+func OnlySyntheticText(parts []Part) bool {
+	sawText := false
+	for _, part := range parts {
+		if part.Type != partTypeText || part.Text == "" {
+			continue
+		}
+		if !part.Synthetic {
+			return false
+		}
+		sawText = true
+	}
+	return sawText
 }
 
 // Tags used by oh-my-opencode and similar orchestration tools to inject
@@ -247,7 +265,7 @@ func ExtractAllUserPrompts(data []byte) ([]string, error) {
 
 	var prompts []string
 	for _, msg := range session.Messages {
-		if msg.Info.Role != roleUser {
+		if msg.Info.Role != roleUser || OnlySyntheticText(msg.Parts) {
 			continue
 		}
 		content := ExtractTextFromParts(msg.Parts)

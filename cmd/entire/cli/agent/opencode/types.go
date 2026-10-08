@@ -1,5 +1,7 @@
 package opencode
 
+import "time"
+
 // sessionInfoRaw matches the JSON payload piped from the OpenCode plugin for session events.
 // The plugin sends only session_id; Go calls `opencode export` to get the transcript.
 type sessionInfoRaw struct {
@@ -18,6 +20,22 @@ type turnStartRaw struct {
 type turnEndRaw struct {
 	SessionID string `json:"session_id"`
 	Model     string `json:"model"`
+}
+
+// subagentRaw is the payload the plugin sends for both subagent-start (when
+// the parent's `task` tool part first carries the child session ID,
+// state.metadata.sessionId) and subagent-stop (tool.execute.after for the
+// `task` tool). The child's model is not carried: task records have no model
+// field, and the exported child transcript records it per message.
+type subagentRaw struct {
+	SessionID       string `json:"session_id"`       // parent
+	ToolUseID       string `json:"tool_use_id"`      // task part callID
+	SubagentID      string `json:"subagent_id"`      // child session ID
+	SubagentType    string `json:"subagent_type"`    // task args.subagent_type
+	TaskDescription string `json:"task_description"` // task args.description
+	// StartedAt is the plugin's clock at tool.execute.before for this call, in
+	// Unix ms; 0 when the plugin did not see the call begin.
+	StartedAt int64 `json:"started_at"`
 }
 
 // --- Export JSON types (from `opencode export`) ---
@@ -60,6 +78,9 @@ const (
 	roleUser      = "user"
 )
 
+// partTypeText is the Part.Type of a text part.
+const partTypeText = "text"
+
 // Time holds message timestamps.
 type Time struct {
 	Created   int64 `json:"created"`
@@ -82,12 +103,15 @@ type Cache struct {
 
 // Part represents a message part (text, tool, etc.).
 type Part struct {
-	ID     string     `json:"id,omitempty"` // Part ID (e.g., "prt_..."), added in OpenCode 1.2.x
-	Type   string     `json:"type"`         // "text", "tool", etc.
-	Text   string     `json:"text,omitempty"`
-	Tool   string     `json:"tool,omitempty"`
-	CallID string     `json:"callID,omitempty"`
-	State  *ToolState `json:"state,omitempty"`
+	ID   string `json:"id,omitempty"` // Part ID (e.g., "prt_..."), added in OpenCode 1.2.x
+	Type string `json:"type"`         // "text", "tool", etc.
+	Text string `json:"text,omitempty"`
+	// Synthetic marks text OpenCode wrote into the conversation itself, such
+	// as a background task's result injected as a user message.
+	Synthetic bool       `json:"synthetic,omitempty"`
+	Tool      string     `json:"tool,omitempty"`
+	CallID    string     `json:"callID,omitempty"`
+	State     *ToolState `json:"state,omitempty"`
 }
 
 // ToolState represents tool execution state.
@@ -123,4 +147,12 @@ var FileModificationTools = []string{
 	"edit",
 	"write",
 	"apply_patch",
+}
+
+// startedAt converts the plugin's call start to a time, zero when unknown.
+func (r *subagentRaw) startedAt() time.Time {
+	if r.StartedAt <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(r.StartedAt)
 }

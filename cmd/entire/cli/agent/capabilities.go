@@ -19,7 +19,7 @@ type CapabilityDeclarer interface {
 // Not every optional interface appears here: built-in-only capabilities that
 // have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
 // SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher,
-// InventoryAwareExtractor, HomeScopedInventoryExtractor) are intentionally
+// SubagentTranscriptFetcher, InventoryAwareExtractor, HomeScopedInventoryExtractor) are intentionally
 // excluded — their As* helpers resolve by type assertion alone (see
 // builtinCapability), with no DeclaredCaps gate.
 type DeclaredCaps struct {
@@ -147,6 +147,12 @@ func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
 // assertion alone with no DeclaredCaps gate.
 func AsTranscriptFetcher(ag Agent) (TranscriptFetcher, bool) {
 	return builtinCapability[TranscriptFetcher](ag)
+}
+
+// AsSubagentTranscriptFetcher returns the agent as SubagentTranscriptFetcher if
+// it implements the interface. Built-in only, like TranscriptFetcher.
+func AsSubagentTranscriptFetcher(ag Agent) (SubagentTranscriptFetcher, bool) {
+	return builtinCapability[SubagentTranscriptFetcher](ag)
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both

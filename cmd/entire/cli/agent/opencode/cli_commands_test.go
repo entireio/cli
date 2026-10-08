@@ -139,6 +139,38 @@ func TestRunOpenCodeExportToFile_WritesStdoutToPath(t *testing.T) {
 	}
 }
 
+// TestRunOpenCodeExportToFile_DropsHookRepoOverrides pins that an export run
+// inside a git hook does not hand the hook's repository selectors to OpenCode.
+func TestRunOpenCodeExportToFile_DropsHookRepoOverrides(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub opencode is a shell script")
+	}
+	// No t.Parallel: t.Setenv.
+	dir := t.TempDir()
+	root := mustOpenRoot(t, dir)
+	const staged = ".export-ses_env.json-1"
+
+	stubDir := t.TempDir()
+	script := "#!/bin/sh\nprintf '{\"git_dir\":\"%s\",\"index\":\"%s\"}' \"$GIT_DIR\" \"$GIT_INDEX_FILE\"\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "opencode"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir)
+	t.Setenv("GIT_DIR", "/hook/.git")
+	t.Setenv("GIT_INDEX_FILE", "/hook/.git/index.lock")
+
+	if err := runOpenCodeExportToFile(context.Background(), root, "ses_env", staged); err != nil {
+		t.Fatalf("runOpenCodeExportToFile failed: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, staged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"git_dir":"","index":""}` {
+		t.Fatalf("opencode export saw the hook's repo overrides: %s", got)
+	}
+}
+
 func TestRenameOverExisting_ReplacesDestination(t *testing.T) {
 	t.Parallel()
 

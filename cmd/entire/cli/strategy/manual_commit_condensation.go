@@ -420,35 +420,12 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			StartedAt:       record.StartedAt,
 			CompletedAt:     record.CompletedAt,
 		}
-		if record.TranscriptUnavailable {
+		raw, transcriptPath, readErr := readTaskTranscript(ctx, logCtx, ag, state, record, inventoryPaths[record.AgentID])
+		if transcriptPath == "" && readErr == nil {
 			payload.TranscriptUnavailableReason = taskTranscriptReasonUnresolvable
 			payloads = append(payloads, payload)
 			continue
 		}
-
-		// Candidate transcript paths, tried in order: the agent-declared path
-		// first, then the agent's verified inventory resolution, then the
-		// agent-layout fallback — declared paths are unreliable (agents
-		// relocate/clean up transcripts), which is why the fallback resolvers
-		// exist at all, so a declared-but-unreadable path must not
-		// short-circuit past them.
-		var candidates []string
-		if record.DeclaredTranscriptPath != "" {
-			candidates = append(candidates, record.DeclaredTranscriptPath)
-		}
-		if resolved := inventoryPaths[record.AgentID]; resolved != "" {
-			candidates = append(candidates, resolved)
-		}
-		if fallback := resolveTaskTranscriptPath(state, record.AgentID); fallback != "" && fallback != record.DeclaredTranscriptPath {
-			candidates = append(candidates, fallback)
-		}
-		if len(candidates) == 0 {
-			payload.TranscriptUnavailableReason = taskTranscriptReasonUnresolvable
-			payloads = append(payloads, payload)
-			continue
-		}
-
-		raw, transcriptPath, readErr := readFirstTranscript(candidates)
 		if readErr != nil {
 			logging.Warn(logCtx, "failed to read subagent transcript; storing task without it",
 				slog.String("session_id", state.SessionID),
@@ -489,6 +466,63 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 	}
 
 	return payloads, assets
+}
+
+// readTaskTranscript reads a task record's transcript: the agent-declared
+// path first, then the agent's verified inventory resolution (inventoryPath),
+// then the agent-layout fallback — declared paths are unreliable (agents
+// relocate/clean up transcripts), which is why the fallback resolvers exist at
+// all, so a declared-but-unreadable path must not short-circuit past them. A
+// record marked TranscriptUnavailable skips all three, since its agent said
+// nothing at those paths belongs to it.
+//
+// When none yields a transcript, an agent that can re-export its subagents
+// (SubagentTranscriptFetcher) is asked for one. That covers an in-flight
+// record, which has no declared path until its stop hook runs, and a stop hook
+// whose export failed. A fetch error is logged and the earlier outcome stands.
+//
+// Returns an empty path and nil error when nothing could be resolved, and a
+// non-nil error when a candidate existed but could not be read.
+func readTaskTranscript(ctx, logCtx context.Context, ag agent.Agent, state *SessionState, record session.TaskRecord, inventoryPath string) ([]byte, string, error) {
+	var candidates []string
+	if !record.TranscriptUnavailable {
+		if record.DeclaredTranscriptPath != "" {
+			candidates = append(candidates, record.DeclaredTranscriptPath)
+		}
+		if inventoryPath != "" {
+			candidates = append(candidates, inventoryPath)
+		}
+		if fallback := resolveTaskTranscriptPath(state, record.AgentID); fallback != "" && fallback != record.DeclaredTranscriptPath {
+			candidates = append(candidates, fallback)
+		}
+	}
+	var readErr error
+	if len(candidates) > 0 {
+		raw, path, err := readFirstTranscript(candidates)
+		if err == nil {
+			return raw, path, nil
+		}
+		readErr = err
+	}
+
+	fetcher, ok := agent.AsSubagentTranscriptFetcher(ag)
+	if !ok {
+		return nil, "", readErr
+	}
+	path, err := fetcher.FetchSubagentTranscript(ctx, record.AgentID, record.ToolUseID, record.StartedAt, record.CompletedAt)
+	if err != nil {
+		logging.Warn(logCtx, "failed to fetch subagent transcript from the agent",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+			slog.String("error", err.Error()),
+		)
+		return nil, "", readErr
+	}
+	raw, err := agent.ReadTranscriptFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read fetched subagent transcript: %w", err)
+	}
+	return raw, path, nil
 }
 
 // condensedTaskTokenUsage returns the token usage to store for a task: its
