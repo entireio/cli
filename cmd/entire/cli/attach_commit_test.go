@@ -166,6 +166,46 @@ func TestAttachCommit_PushedHeadIsLinkedInTheCheckpoint(t *testing.T) {
 	}
 }
 
+// Under the git-refs primary the pushed-commit path pushes through the
+// pre-push queue, and delivery is confirmed against the checkpoint's own ref.
+// Not parallel: sets ENTIRE_CHECKPOINTS_PRIMARY.
+func TestAttachCommit_PushedHeadIsDeliveredOnGitRefs(t *testing.T) {
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+	remote := pushToOrigin(t)
+
+	out, err := attachHeadless(t, "attach-pushed-head-refs", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("pushed HEAD was rewritten: %s", got.Hash)
+	}
+	state, err := loadAttachState(t, "attach-pushed-head-refs")
+	if err != nil || state == nil {
+		t.Fatalf("load state: %v, %v", state, err)
+	}
+	if !strings.Contains(out, "Pushed checkpoint metadata to origin") {
+		t.Fatalf("expected a confirmed push, got:\n%s", out)
+	}
+	cpID := state.LastCheckpointID.String()
+	local := strings.TrimSpace(testutil.RunGit(t, mustGetwd(t), "for-each-ref", "--format=%(refname) %(objectname)", "refs/entire"))
+	remoteRefs := testutil.RunGit(t, remote, "for-each-ref", "--format=%(refname) %(objectname)", "refs/entire")
+	found := false
+	for _, line := range strings.Split(local, "\n") {
+		if strings.Contains(line, cpID) {
+			found = true
+			if !strings.Contains(remoteRefs, line) {
+				t.Fatalf("checkpoint ref %q is not on the remote:\n%s", line, remoteRefs)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no local ref names checkpoint %s:\n%s", cpID, local)
+	}
+}
+
 // An older pushed commit is linked in the checkpoint, never rewritten.
 func TestAttachCommit_PushedOlderCommitIsLinkedInTheCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)

@@ -756,13 +756,49 @@ func remoteContainingCommit(ctx context.Context, target *object.Commit, remotes 
 				continue
 			}
 		}
-		for _, tip := range tips {
-			if exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", sha, tip).Run() == nil {
-				return remote, unreachable
-			}
+		if reachableFromAny(ctx, target, untrackedTips(ctx, tips)) {
+			return remote, unreachable
 		}
 	}
 	return "", unreachable
+}
+
+// untrackedTips drops the tips a local remote-tracking ref already points at:
+// remoteHoldingCommit has checked those.
+func untrackedTips(ctx context.Context, tips []string) []string {
+	out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(objectname)", "refs/remotes").Output()
+	if err != nil {
+		return tips
+	}
+	tracked := strings.Fields(string(out))
+	return slices.DeleteFunc(slices.Clone(tips), func(tip string) bool { return slices.Contains(tracked, tip) })
+}
+
+// reachableFromAny reports whether target is an ancestor of (or is) any of
+// tips, in one walk: the commits reachable from tips but not from target's
+// parents include target exactly when one of tips reaches it, and the walk
+// stops at history older than target. A walk that fails or times out counts as
+// reachable, so a commit that might be shared is never rewritten.
+func reachableFromAny(ctx context.Context, target *object.Commit, tips []string) bool {
+	if len(tips) == 0 {
+		return false
+	}
+	var in strings.Builder
+	for _, tip := range tips {
+		in.WriteString(tip + "\n")
+	}
+	for _, p := range target.ParentHashes {
+		in.WriteString("^" + p.String() + "\n")
+	}
+	walkCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(walkCtx, "git", "rev-list", "--stdin")
+	cmd.Stdin = strings.NewReader(in.String())
+	out, err := cmd.Output()
+	if err != nil {
+		return true
+	}
+	return slices.Contains(strings.Fields(string(out)), target.Hash.String())
 }
 
 // branchesWithMissingTips returns the branches whose tip commit isn't in the
