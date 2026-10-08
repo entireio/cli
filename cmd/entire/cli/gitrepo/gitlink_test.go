@@ -2,6 +2,7 @@ package gitrepo
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -156,4 +157,29 @@ func TestPathStatuses(t *testing.T) {
 	empty, err := PathStatuses(context.Background(), dir, nil)
 	require.NoError(t, err)
 	assert.Empty(t, empty)
+}
+
+// A large committed directory named as an ancestor must not make the index
+// query list its subtree: diff-index reports only index entries that differ
+// from HEAD, so an unchanged directory produces no output at all.
+func TestGitlinkPaths_IndexQueryIsBoundedByDifferences(t *testing.T) {
+	// Not parallel: isolateGitConfig uses t.Setenv.
+	isolateGitConfig(t)
+	dir := initGitlinkRepo(t)
+	for i := range 300 {
+		sub := filepath.Join(dir, "packages", fmt.Sprintf("p%03d", i))
+		require.NoError(t, os.MkdirAll(sub, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(sub, "f.txt"), []byte("x\n"), 0o644))
+	}
+	gitIn(t, dir, "add", ".")
+	gitIn(t, dir, "commit", "-q", "-m", "monorepo")
+
+	query := []string{"packages", "packages/p007", "packages/p007/f.txt"}
+	out, err := literalPathspecCommand(t.Context(), dir, query, "diff-index", "--cached", "--raw", "-z", "--no-renames", "HEAD").Output()
+	require.NoError(t, err)
+	assert.Empty(t, out, "an unchanged directory contributes nothing to the index query")
+
+	found, err := GitlinkPaths(context.Background(), dir, query)
+	require.NoError(t, err)
+	assert.Empty(t, found)
 }

@@ -24,20 +24,34 @@ const PathClassificationBudget = 5 * time.Second
 const pathClassificationChunk = 500
 
 // treeGitlinkMode is the tree-entry mode git uses for a submodule commit
-// pointer, as printed by ls-files -s and ls-tree.
+// pointer, as printed by ls-tree and diff-index --raw.
 const treeGitlinkMode = "160000"
 
 // GitlinkPaths returns the subset of paths (relative to repoRoot) that are
 // submodule gitlinks (mode 160000) in HEAD's tree or in the index, so a
-// submodule added but not yet committed counts too.
+// submodule added but not yet committed counts too, and so does one whose
+// removal is staged (it cannot be committed as a file either).
 //
-// It runs pathspec-limited git commands — `git ls-files -s -z` for the index
-// and `git ls-tree -z HEAD` for HEAD — with literal pathspecs, so only the
-// named paths are read and a name containing glob characters matches only
-// itself. An unborn HEAD contributes no entries. The call is bounded by
-// PathClassificationBudget on top of the caller's context. On error the
-// returned set holds what was found so far; callers keep the remaining paths
-// (fail open).
+// Both sides are pathspec-limited with literal pathspecs, so a name containing
+// glob characters matches only itself, and both are bounded by what differs
+// rather than by repository size, because callers include ancestor directories
+// (a monorepo's "packages") in paths:
+//
+//   - HEAD: `git ls-tree -z HEAD -- <paths>`, which without -r prints only the
+//     named entries, never a directory's subtree.
+//   - The index: `git diff-index --cached --raw -z --no-renames <base> --
+//     <paths>`, where base is HEAD, or the empty tree when HEAD is unborn. It
+//     prints only index entries that differ from base under the named paths,
+//     so an unchanged directory costs nothing. (`git ls-files -s` would list
+//     the directory's entire subtree on every call.) A record whose
+//     destination mode is 160000 is a gitlink staged but not in HEAD; one
+//     whose source mode is 160000 and destination 000000 is a gitlink whose
+//     removal is staged. A gitlink present unchanged in both is found by the
+//     HEAD side.
+//
+// The call is bounded by PathClassificationBudget on top of the caller's
+// context. On error the returned set holds what was found so far; callers keep
+// the remaining paths (fail open).
 func GitlinkPaths(ctx context.Context, repoRoot string, paths []string) (map[string]struct{}, error) {
 	found := make(map[string]struct{})
 	if len(paths) == 0 {
@@ -46,27 +60,68 @@ func GitlinkPaths(ctx context.Context, repoRoot string, paths []string) (map[str
 	ctx, cancel := context.WithTimeout(ctx, PathClassificationBudget)
 	defer cancel()
 
+	unborn, err := headIsUnborn(ctx, repoRoot)
+	if err != nil {
+		return found, err
+	}
+	base := "HEAD"
+	if unborn {
+		if base, err = emptyTreeID(ctx, repoRoot); err != nil {
+			return found, err
+		}
+	}
+
 	for start := 0; start < len(paths); start += pathClassificationChunk {
 		chunk := paths[start:min(start+pathClassificationChunk, len(paths))]
 
-		// Index records: "<mode> <object> <stage>\t<path>".
-		indexOut, err := literalPathspecCommand(ctx, repoRoot, chunk, "ls-files", "-s", "-z").Output()
+		indexOut, err := literalPathspecCommand(ctx, repoRoot, chunk, "diff-index", "--cached", "--raw", "-z", "--no-renames", base).Output()
 		if err != nil {
-			return found, fmt.Errorf("git ls-files: %w", err)
+			return found, fmt.Errorf("git diff-index --cached: %w", err)
 		}
-		collectGitlinks(indexOut, found)
+		collectIndexGitlinks(indexOut, found)
 
+		if unborn {
+			continue // nothing committed yet: the index is the only source
+		}
 		// Tree records: "<mode> <type> <object>\t<path>".
 		treeOut, err := literalPathspecCommand(ctx, repoRoot, chunk, "ls-tree", "-z", "HEAD").Output()
 		if err != nil {
-			if unborn, checkErr := headIsUnborn(ctx, repoRoot); checkErr == nil && unborn {
-				continue // nothing committed yet: the index is the only source
-			}
 			return found, fmt.Errorf("git ls-tree HEAD: %w", err)
 		}
 		collectGitlinks(treeOut, found)
 	}
 	return found, nil
+}
+
+// emptyTreeID returns the object ID of the empty tree in the repository's
+// object format (sha1 or sha256), as git computes it.
+func emptyTreeID(ctx context.Context, repoRoot string) (string, error) {
+	cmd := worktreeGitCommand(ctx, repoRoot, "hash-object", "-t", "tree", "--stdin")
+	cmd.Stdin = strings.NewReader("")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git hash-object empty tree: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// collectIndexGitlinks adds the path of every `git diff-index --raw -z`
+// record that stages a gitlink (destination mode 160000) or stages a
+// gitlink's removal (source mode 160000, destination 000000). Each record is
+// ":<src mode> <dst mode> <src oid> <dst oid> <status>" NUL "<path>" NUL.
+func collectIndexGitlinks(out []byte, found map[string]struct{}) {
+	fields := bytes.Split(out, []byte{0})
+	for i := 0; i+1 < len(fields); i += 2 {
+		meta := strings.Fields(strings.TrimPrefix(string(fields[i]), ":"))
+		path := string(fields[i+1])
+		if len(meta) < 2 || path == "" {
+			continue
+		}
+		src, dst := meta[0], meta[1]
+		if dst == treeGitlinkMode || (src == treeGitlinkMode && dst == "000000") {
+			found[path] = struct{}{}
+		}
+	}
 }
 
 // literalPathspecCommand builds a git command whose trailing pathspecs (after

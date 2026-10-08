@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -191,4 +192,26 @@ func TestFilterTrackableChanges_CachesAnswersPerProcess(t *testing.T) {
 	resetTrackablePathCacheForTesting()
 	kept, _, _ = FilterTrackableChanges(ctx, dir, []string{"ignored.env", "src.go"}, nil, nil)
 	assert.Equal(t, []string{"ignored.env", "src.go"}, kept, "after a reset git is asked again")
+}
+
+// A submodule that is added but not yet committed is a gitlink only in the
+// index. It is still found, and a path beneath it is dropped. Uses t.Chdir —
+// do NOT add t.Parallel().
+func TestFilterTrackableChanges_DropsPathsInsideStagedSubmodule(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	subSrc := t.TempDir()
+	testutil.InitRepo(t, subSrc)
+	testutil.WriteFile(t, subSrc, "lib.txt", "v1\n")
+	testutil.GitAdd(t, subSrc, "lib.txt")
+	testutil.GitCommit(t, subSrc, "lib v1")
+	testutil.RunGit(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", subSrc, "sub")
+	testutil.WriteFile(t, dir, "sub/lib.txt", "v2\n")
+
+	found, err := gitrepo.GitlinkPaths(context.Background(), dir, []string{"sub"})
+	require.NoError(t, err)
+	assert.Contains(t, found, "sub", "the staged-only submodule is a gitlink")
+
+	kept, _, _ := FilterTrackableChanges(context.Background(), dir, []string{"agent.txt", "sub/lib.txt"}, nil, nil)
+	assert.Equal(t, []string{"agent.txt"}, kept)
 }
