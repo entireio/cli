@@ -68,7 +68,7 @@ Cross-reference console.log (what happened) with the test (what should have happ
 | Wrong checkpoint content | Check `git-tree.txt` for checkpoint branch files, `checkpoint-metadata/` for session info |
 | Hooks didn't fire | Check `entire-logs/entire.log` for missing hook entries (session-start, user-prompt-submit, stop, post-commit) |
 | Stash/unstash problems | Check `entire-logs/entire.log` for stash-related log lines, `git-log.txt` for commit ordering |
-| Attribution issues | Check `checkpoint-metadata/` for `files_touched`, session metadata for attribution data |
+| File-tracking issues | Check `checkpoint-metadata/` for `files_touched` and the session metadata's `files_touched` |
 | Strategy mismatch | Check `entire-logs/entire.log` for `strategy` field, verify auto-commit vs manual-commit behavior |
 
 ### 5. Deep dive files
@@ -84,5 +84,5 @@ Identify whether the issue is in:
 - **CLI hooks** (prepare-commit-msg, commit-msg, post-commit)
 - **Session management** (phase transitions, session tracking)
 - **Checkpoint creation** (branch management, metadata writing)
-- **Attribution** (file tracking, prompt correlation)
+- **File tracking** (files touched, prompt correlation)
 - **Strategy logic** (auto-commit vs manual-commit behavior)

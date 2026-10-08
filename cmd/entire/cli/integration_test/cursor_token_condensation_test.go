@@ -92,7 +92,7 @@ func TestCursorTokenUsage_SurvivesCondensation(t *testing.T) {
 	require.Equal(t, 4000, liveState.TokenUsage.CacheReadTokens)
 	require.Equal(t, 800, liveState.TokenUsage.CacheCreationTokens)
 
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 
 	checkpointID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID, "expected a condensed checkpoint after commit")
@@ -164,7 +164,7 @@ func TestCursorTokenUsage_PerCheckpointScoping(t *testing.T) {
 		"cache_read_tokens":  4000,
 		"cache_write_tokens": 800,
 	})
-	env.GitCommitWithShadowHooks("Turn 1", "turn1.go")
+	env.GitCommitWithHooks("Turn 1", "turn1.go")
 	checkpoint1 := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpoint1, "expected a checkpoint after turn 1 commit")
 
@@ -185,7 +185,7 @@ func TestCursorTokenUsage_PerCheckpointScoping(t *testing.T) {
 		"cache_read_tokens":  2000,
 		"cache_write_tokens": 500,
 	})
-	env.GitCommitWithShadowHooks("Turn 2", "turn2.go")
+	env.GitCommitWithHooks("Turn 2", "turn2.go")
 	checkpoint2 := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpoint2, "expected a checkpoint after turn 2 commit")
 	require.NotEqual(t, checkpoint1, checkpoint2, "turn 2 must produce a distinct checkpoint")

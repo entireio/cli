@@ -2,13 +2,10 @@ package pi
 
 import (
 	"context"
-	"errors"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -35,11 +32,7 @@ func TestPiReviewer_BuildCmd(t *testing.T) {
 	if cmd.Args[0] != "pi" {
 		t.Fatalf("Args[0] = %q, want pi; args=%v", cmd.Args[0], cmd.Args)
 	}
-	extPath, err := reviewExtensionPath()
-	if err != nil {
-		t.Fatalf("reviewExtensionPath: %v", err)
-	}
-	wantPrefix := []string{"pi", "--mode", "json", "--print", "--no-approve", "--no-extensions", "--extension", extPath, "--model", "anthropic/claude-sonnet-4-5:high"}
+	wantPrefix := []string{"pi", "--mode", "json", "--print", "--append-system-prompt", review.ReviewerGuardrail, "--model", "anthropic/claude-sonnet-4-5:high"}
 	if len(cmd.Args) != len(wantPrefix)+1 {
 		t.Fatalf("args len = %d, want %d: %v", len(cmd.Args), len(wantPrefix)+1, cmd.Args)
 	}
@@ -61,36 +54,6 @@ func TestPiReviewer_BuildCmd(t *testing.T) {
 	}
 	if env[review.EnvStartingSHA] != "abc123" {
 		t.Errorf("%s = %q, want abc123", review.EnvStartingSHA, env[review.EnvStartingSHA])
-	}
-}
-
-// Pi loads every extension under the checkout's .pi/extensions as code, so the
-// reviewer turns discovery off and loads Entire's extension from a copy the
-// binary writes outside the checkout.
-func TestPiReviewer_LoadsEntireExtensionFromBinary(t *testing.T) {
-	// No t.Parallel: t.Setenv isolates the cache directory the copy lands in.
-	cacheHome := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cacheHome)
-	// Prepare opens a shared root over the cache dir; release it so the temp
-	// dir can be removed (an open handle blocks that on Windows).
-	t.Cleanup(osroot.ResetShared)
-
-	if err := NewReviewer().Prepare(context.Background()); err != nil {
-		t.Fatalf("Prepare: %v", err)
-	}
-	extPath, err := reviewExtensionPath()
-	if err != nil {
-		t.Fatalf("reviewExtensionPath: %v", err)
-	}
-	if !strings.HasPrefix(extPath, cacheHome) {
-		t.Fatalf("extension path %q is not under the cache dir %q", extPath, cacheHome)
-	}
-	got, err := os.ReadFile(extPath)
-	if err != nil {
-		t.Fatalf("read written extension: %v", err)
-	}
-	if string(got) != renderExtension() {
-		t.Error("written extension does not match the one the binary renders")
 	}
 }
 
@@ -252,28 +215,80 @@ func envMap(env []string) map[string]string {
 	return out
 }
 
-// TestPiReviewer_TooOldForIsolation: a pi that predates --no-approve (e.g.
-// 0.70.2) rejects it with "Unknown option" and exits before loading anything,
-// so the review fails closed. It must say to update pi rather than surface the
-// bare option error; an unrelated failure keeps the default error.
-func TestPiReviewer_TooOldForIsolation(t *testing.T) {
+// A provider error (here, an exhausted API balance) used to leave the review
+// with an empty "Failed" report. It must surface once, though Pi repeats the
+// failed message in message_end and turn_end.
+func TestPiReviewer_ParseSurfacesProviderError(t *testing.T) {
 	t.Parallel()
-	classify := NewReviewer().ClassifyExit
-	if classify == nil {
-		t.Fatal("pi reviewer has no ClassifyExit; a pi too old for --no-approve would fail with a bare option error")
-	}
-	exitErr := errors.New("exit status 1")
+	const failed = `{"role":"assistant","content":[],"stopReason":"error","errorMessage":"You have no credits remaining."}`
+	input := `{"type":"agent_start"}` + "\n" +
+		`{"type":"turn_start"}` + "\n" +
+		`{"type":"message_end","message":` + failed + `}` + "\n" +
+		`{"type":"turn_end","message":` + failed + `}` + "\n" +
+		`{"type":"agent_end"}` + "\n"
 
-	got := classify("Error: Unknown option: --no-approve", exitErr)
-	if got == nil || !strings.Contains(got.Error(), "--no-approve") || !strings.Contains(got.Error(), "update pi") {
-		t.Fatalf("classify(unknown --no-approve) = %v, want an update-pi error naming --no-approve", got)
-	}
-	if !errors.Is(got, exitErr) {
-		t.Errorf("classified error does not wrap the exit error")
-	}
-	for _, stderr := range []string{"Error: Unknown option: --frobnicate", `Error: Model "x" not found.`, ""} {
-		if got := classify(stderr, exitErr); got != nil {
-			t.Errorf("classify(%q) = %v, want nil", stderr, got)
+	var errs []string
+	var finished *reviewtypes.Finished
+	for _, ev := range collectPiReviewEvents(input) {
+		switch e := ev.(type) {
+		case reviewtypes.RunError:
+			errs = append(errs, e.Err.Error())
+		case reviewtypes.Finished:
+			finished = &e
 		}
+	}
+	if len(errs) != 1 || errs[0] != "pi: You have no credits remaining." {
+		t.Fatalf("RunErrors = %q, want the provider error once", errs)
+	}
+	if finished == nil || finished.Success {
+		t.Fatalf("Finished = %+v, want a failure", finished)
+	}
+}
+
+// Pi auto-retries errors such as "overloaded". A run that recovers must not
+// report the attempt that failed.
+func TestPiReviewer_ParseRecoveredRetryIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	const failed = `{"role":"assistant","content":[],"stopReason":"error","errorMessage":"overloaded"}`
+	const ok = `{"role":"assistant","content":[{"type":"text","text":"approve"}],"stopReason":"stop"}`
+	input := `{"type":"agent_start"}` + "\n" +
+		`{"type":"message_end","message":` + failed + `}` + "\n" +
+		`{"type":"turn_end","message":` + failed + `}` + "\n" +
+		`{"type":"agent_end","willRetry":true}` + "\n" +
+		`{"type":"auto_retry_start"}` + "\n" +
+		`{"type":"message_end","message":` + ok + `}` + "\n" +
+		`{"type":"turn_end","message":` + ok + `}` + "\n" +
+		`{"type":"agent_end"}` + "\n"
+
+	finishes := 0
+	for _, ev := range collectPiReviewEvents(input) {
+		switch e := ev.(type) {
+		case reviewtypes.RunError:
+			t.Fatalf("recovered retry reported an error: %v", e.Err)
+		case reviewtypes.Finished:
+			finishes++
+			if !e.Success {
+				t.Fatal("recovered retry reported as failed")
+			}
+		}
+	}
+	if finishes != 1 {
+		t.Fatalf("Finished emitted %d times, want once", finishes)
+	}
+}
+
+// A failure without an errorMessage still says why the review failed.
+func TestPiReviewer_ParseErrorWithoutMessage(t *testing.T) {
+	t.Parallel()
+	const failed = `{"role":"assistant","content":[],"stopReason":"aborted"}`
+	input := `{"type":"message_end","message":` + failed + `}` + "\n" + `{"type":"agent_end"}` + "\n"
+	var errs []string
+	for _, ev := range collectPiReviewEvents(input) {
+		if e, ok := ev.(reviewtypes.RunError); ok {
+			errs = append(errs, e.Err.Error())
+		}
+	}
+	if len(errs) != 1 || errs[0] != "pi: stopped with aborted" {
+		t.Fatalf("RunErrors = %q, want the stop reason", errs)
 	}
 }

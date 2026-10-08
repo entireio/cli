@@ -260,7 +260,7 @@ func TestHooksRunAfterLocalOnlyEnable(t *testing.T) {
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	env.GitCommitWithShadowHooksAsAgent("add hello", "hello.txt")
+	env.GitCommitWithHooksAsAgent("add hello", "hello.txt")
 
 	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if cpID == "" {

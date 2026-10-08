@@ -35,6 +35,7 @@ var nonRelocationReads = map[string]string{
 	"configDirEnv":              "ENTIRE_ANTIGRAVITY_CONFIG_DIR, Entire's own override, refused when relative",
 	"statusDirEnv":              "ENTIRE_ANTIGRAVITY_STATUS_DIR, Entire's own snapshot cache override, refused when relative",
 	`"OPENCODE_CONFIG_CONTENT"`: "inline config merged into the generation config handed to opencode, not a location",
+	"adcCredentialsEnvVar":      "GOOGLE_APPLICATION_CREDENTIALS, a credential file agy reads, not where it keeps state; checked only so a value the user set is inherited unchanged",
 }
 
 // TestAgentEnvReadsGoThroughResolveHome pins that no agent reads a relocation

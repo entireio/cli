@@ -10,7 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
-// TestShadow_CommitBeforeStop tests the "commit while agent is still working" flow.
+// TestManualCommit_CommitBeforeStop tests the "commit while agent is still working" flow.
 //
 // When the user commits while the agent is in the ACTIVE phase (between
 // SimulateUserPromptSubmit and SimulateStop), the session should stay ACTIVE
@@ -20,7 +20,7 @@ import (
 // State machine transitions tested:
 //   - ACTIVE + GitCommit -> ACTIVE + ActionCondense (immediate condensation)
 //   - ACTIVE + TurnEnd -> IDLE
-func TestShadow_CommitBeforeStop(t *testing.T) {
+func TestManualCommit_CommitBeforeStop(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -73,12 +73,9 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 		t.Errorf("StepCount after first checkpoint should be 1, got %d", state.StepCount)
 	}
 
-	// Verify shadow branch was created
+	// Verify the turn end recorded its pending work (and wrote no shadow branch)
 	initialHead := state.BaseCommit
-	shadowBranch := env.GetShadowBranchNameForCommit(initialHead)
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("Shadow branch %s should exist after first checkpoint", shadowBranch)
-	}
+	env.AssertNoShadowBranches()
 
 	// ========================================
 	// Phase 2: Start new turn and create more work
@@ -112,7 +109,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	t.Log("Phase 3: User commits while agent is ACTIVE")
 
 	headBefore := env.GetHeadHash()
-	env.GitCommitWithShadowHooks("Add feature and utils", "feature.go", "utils.go")
+	env.GitCommitWithHooks("Add feature and utils", "feature.go", "utils.go")
 	commitHash := env.GetHeadHash()
 
 	if commitHash == headBefore {
@@ -122,7 +119,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	// Verify checkpoint trailer was added
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
 	if checkpointID == "" {
-		t.Log("Note: checkpoint trailer may not be present if no shadow branch content was detected (mid-session commit scenario)")
+		t.Log("Note: checkpoint trailer may not be present if no pending content was detected (mid-session commit scenario)")
 	} else {
 		t.Logf("Commit has checkpoint trailer: %s", checkpointID)
 	}
@@ -141,9 +138,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	}
 	t.Logf("Session phase after mid-turn commit: %s", state.Phase)
 
-	// Verify shadow branch was migrated to the new HEAD
-	// The old shadow branch (based on initialHead) may still exist or be cleaned up.
-	// The important thing is that the session's BaseCommit was updated.
+	// The session's BaseCommit should follow the new HEAD.
 	if state.BaseCommit == initialHead {
 		t.Logf("Note: BaseCommit not yet updated (may happen during migration)")
 	}
@@ -190,7 +185,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	t.Log("CommitBeforeStop test completed successfully")
 }
 
-// TestShadow_AmendPreservesTrailer tests that `git commit --amend` preserves
+// TestManualCommit_AmendPreservesTrailer tests that `git commit --amend` preserves
 // the checkpoint trailer from the original commit.
 //
 // When a user amends a commit that has an Entire-Checkpoint trailer, the
@@ -200,7 +195,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 // Hook behavior tested:
 //   - prepare-commit-msg with source="commit": preserves existing trailer
 //   - post-commit after amend: no duplicate condensation
-func TestShadow_AmendPreservesTrailer(t *testing.T) {
+func TestManualCommit_AmendPreservesTrailer(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -225,7 +220,7 @@ func TestShadow_AmendPreservesTrailer(t *testing.T) {
 	}
 
 	// Commit with hooks (triggers condensation)
-	env.GitCommitWithShadowHooks("Initial implementation", "main.go")
+	env.GitCommitWithHooks("Initial implementation", "main.go")
 
 	originalCommitHash := env.GetHeadHash()
 	originalCheckpointID := env.GetCheckpointIDFromCommitMessage(originalCommitHash)
@@ -249,7 +244,7 @@ func TestShadow_AmendPreservesTrailer(t *testing.T) {
 	t.Log("Phase 2: Amend the commit")
 
 	// Amend with the same message (simulating a minor message edit or staging additional files)
-	env.GitCommitAmendWithShadowHooks("Initial implementation (amended)")
+	env.GitCommitAmendWithHooks("Initial implementation (amended)")
 
 	amendedCommitHash := env.GetHeadHash()
 	t.Logf("Amended commit: %s", amendedCommitHash[:7])
@@ -307,10 +302,10 @@ func TestShadow_AmendPreservesTrailer(t *testing.T) {
 	t.Log("AmendPreservesTrailer test completed successfully")
 }
 
-// TestShadow_PostRewriteAmendRemapsSessionState verifies that the git
+// TestManualCommit_PostRewriteAmendRemapsSessionState verifies that the git
 // post-rewrite hook updates local session linkage after an amend rewrites the
 // commit SHA.
-func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
+func TestManualCommit_PostRewriteAmendRemapsSessionState(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -328,7 +323,7 @@ func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Initial implementation", "main.go")
+	env.GitCommitWithHooks("Initial implementation", "main.go")
 
 	originalCommitHash := env.GetHeadHash()
 	originalCheckpointID := env.GetCheckpointIDFromCommitMessage(originalCommitHash)
@@ -347,7 +342,7 @@ func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
 		t.Fatalf("BaseCommit before amend = %q, want %q", stateBeforeAmend.BaseCommit, originalCommitHash)
 	}
 
-	env.GitCommitAmendWithShadowHooks("Initial implementation (amended)")
+	env.GitCommitAmendWithHooks("Initial implementation (amended)")
 	amendedCommitHash := env.GetHeadHash()
 	if amendedCommitHash == originalCommitHash {
 		t.Fatal("Amended commit should have a different hash")
@@ -364,7 +359,7 @@ func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
 		t.Fatalf("BaseCommit after amend = %q, want original %q before post-rewrite", stateAfterAmend.BaseCommit, originalCommitHash)
 	}
 
-	env.GitPostRewriteWithShadowHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
+	env.GitPostRewriteWithHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
 
 	stateAfterRewrite, err := env.GetSessionState(sess.ID)
 	if err != nil {
@@ -376,15 +371,12 @@ func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
 	if stateAfterRewrite.BaseCommit != amendedCommitHash {
 		t.Fatalf("BaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.BaseCommit, amendedCommitHash)
 	}
-	if stateAfterRewrite.AttributionBaseCommit != amendedCommitHash {
-		t.Fatalf("AttributionBaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.AttributionBaseCommit, amendedCommitHash)
-	}
 	if stateAfterRewrite.LastCheckpointID.String() != originalCheckpointID {
 		t.Fatalf("LastCheckpointID after post-rewrite = %q, want %q", stateAfterRewrite.LastCheckpointID.String(), originalCheckpointID)
 	}
 }
 
-func TestShadow_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T) {
+func TestManualCommit_PostRewriteAmendRemapsPendingSession(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -403,27 +395,18 @@ func TestShadow_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T) {
 	}
 
 	originalCommitHash := env.GetHeadHash()
-	originalShadowBranch := env.GetShadowBranchNameForCommit(originalCommitHash)
-	if !env.BranchExists(originalShadowBranch) {
-		t.Fatalf("expected original shadow branch %q to exist", originalShadowBranch)
-	}
+	env.AssertTurnEndRecorded(sess.ID, "main.go")
 
-	env.GitCommitAmendWithShadowHooks("Initial commit (amended)")
+	env.GitCommitAmendWithHooks("Initial commit (amended)")
 
 	amendedCommitHash := env.GetHeadHash()
 	if amendedCommitHash == originalCommitHash {
 		t.Fatal("Amended commit should have a different hash")
 	}
 
-	env.GitPostRewriteWithShadowHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
+	env.GitPostRewriteWithHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
 
-	newShadowBranch := env.GetShadowBranchNameForCommit(amendedCommitHash)
-	if !env.BranchExists(newShadowBranch) {
-		t.Fatalf("expected migrated shadow branch %q to exist", newShadowBranch)
-	}
-	if env.BranchExists(originalShadowBranch) {
-		t.Fatalf("expected original shadow branch %q to be removed", originalShadowBranch)
-	}
+	env.AssertNoShadowBranches()
 
 	stateAfterRewrite, err := env.GetSessionState(sess.ID)
 	if err != nil {
@@ -435,12 +418,9 @@ func TestShadow_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T) {
 	if stateAfterRewrite.BaseCommit != amendedCommitHash {
 		t.Fatalf("BaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.BaseCommit, amendedCommitHash)
 	}
-	if stateAfterRewrite.AttributionBaseCommit != originalCommitHash {
-		t.Fatalf("AttributionBaseCommit after post-rewrite = %q, want original %q when shadow branch migrates", stateAfterRewrite.AttributionBaseCommit, originalCommitHash)
-	}
 }
 
-func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
+func TestManualCommit_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 	t.Parallel()
 
 	env := NewTestEnv(t)
@@ -467,7 +447,7 @@ func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Feature work", "feature.txt")
+	env.GitCommitWithHooks("Feature work", "feature.txt")
 	originalFeatureCommit := env.GetHeadHash()
 
 	stateBeforeRebase, err := env.GetSessionState(sess.ID)
@@ -514,7 +494,7 @@ func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 		t.Fatalf("BaseCommit after rebase = %q, want original %q before post-rewrite", stateAfterRebase.BaseCommit, originalFeatureCommit)
 	}
 
-	env.GitPostRewriteWithShadowHooks("rebase", [2]string{originalFeatureCommit, rebasedFeatureCommit})
+	env.GitPostRewriteWithHooks("rebase", [2]string{originalFeatureCommit, rebasedFeatureCommit})
 
 	stateAfterRewrite, err := env.GetSessionState(sess.ID)
 	if err != nil {
@@ -525,8 +505,5 @@ func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 	}
 	if stateAfterRewrite.BaseCommit != rebasedFeatureCommit {
 		t.Fatalf("BaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.BaseCommit, rebasedFeatureCommit)
-	}
-	if stateAfterRewrite.AttributionBaseCommit != rebasedFeatureCommit {
-		t.Fatalf("AttributionBaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.AttributionBaseCommit, rebasedFeatureCommit)
 	}
 }

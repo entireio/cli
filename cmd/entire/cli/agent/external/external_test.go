@@ -16,6 +16,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // testBinaryDir creates a temp directory with a mock entire-agent-test binary.
@@ -1270,5 +1271,67 @@ func TestAgentRun_NoArgs(t *testing.T) {
 	}
 	if out != nil {
 		t.Errorf("run returned %q alongside an error, want nil", out)
+	}
+}
+
+// TestGenerateText_RunsOutsideTheRepository pins that generate-text, whose
+// stdin carries untrusted transcript content, is not handed the repository:
+// it runs from a fresh empty directory with no ENTIRE_REPO_ROOT, the same
+// isolation the built-in text generators get. Every other subcommand still
+// runs from the repository root.
+func TestGenerateText_RunsOutsideTheRepository(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("shell-script mock binary")
+	}
+	repo := t.TempDir()
+	testutil.InitRepo(t, repo)
+	t.Chdir(repo)
+	t.Setenv("ENTIRE_REPO_ROOT", "/inherited/should/not/survive")
+
+	script := `#!/bin/sh
+case "$1" in
+  info)
+    echo '` + validInfoJSON + `'
+    ;;
+  generate-text)
+    cat > /dev/null
+    entries=$(ls -A | wc -l | tr -d ' ')
+    printf '{"text":"dir=%s entries=%s root=%s"}' "$(pwd -P)" "$entries" "${ENTIRE_REPO_ROOT-unset}"
+    ;;
+  get-session-dir)
+    printf '{"session_dir":"%s|%s"}' "$(pwd -P)" "${ENTIRE_REPO_ROOT-unset}"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`
+	ea := newExternalAgent(t, testBinaryDir(t, script))
+
+	out, err := ea.GenerateText(context.Background(), "prompt", "")
+	if err != nil {
+		t.Fatalf("GenerateText: %v", err)
+	}
+	realRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, realRepo) {
+		t.Errorf("generate-text ran inside the repository: %s", out)
+	}
+	if !strings.Contains(out, "entries=0 ") {
+		t.Errorf("generate-text working directory is not empty: %s", out)
+	}
+	if !strings.HasSuffix(out, "root=unset") {
+		t.Errorf("generate-text received ENTIRE_REPO_ROOT: %s", out)
+	}
+
+	// Other subcommands are unchanged: they run from, and are told, the root.
+	dir, err := ea.GetSessionDir(realRepo)
+	if err != nil {
+		t.Fatalf("GetSessionDir: %v", err)
+	}
+	if want := realRepo + "|" + realRepo; dir != want {
+		t.Errorf("get-session-dir saw %q, want %q", dir, want)
 	}
 }
