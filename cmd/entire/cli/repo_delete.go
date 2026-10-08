@@ -23,14 +23,11 @@ type repoDeleteOptions struct {
 }
 
 func newRepoDeleteCmd() *cobra.Command {
-	var (
-		project string
-		opts    repoDeleteOptions
-	)
+	var opts repoDeleteOptions
 	cmd := &cobra.Command{
 		Use:   "delete <repo>",
-		Short: "Delete a repository by /et/<project>/<repo> path or name",
-		Long: "Delete a repository.\n\n" +
+		Short: "Delete a repository by its /et/<project>/<repo> path",
+		Long: "Delete the repository named by its /et/<project>/<repo> path.\n\n" +
 			"A repo with mirrors on other clusters (see `entire repo mirror add`) " +
 			"is refused until its mirrors are removed. Pass --cascade to delete the repo " +
 			"and every mirror in one command: the server removes the mirrors first, and " +
@@ -50,10 +47,9 @@ func newRepoDeleteCmd() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoDelete(cmd, args[0], project, opts)
+			return runRepoDelete(cmd, args[0], opts)
 		},
 	}
-	bindRepoProjectFlag(cmd, &project)
 	addForceFlag(cmd)
 	cmd.Flags().BoolVar(&opts.cascade, "cascade", false, "Also delete the repo's mirrors on other clusters")
 	cmd.Flags().BoolVar(&opts.noWait, "no-wait", false, "Return once the server accepts a cascade delete")
@@ -64,11 +60,11 @@ func newRepoDeleteCmd() *cobra.Command {
 // runRepoDelete is `repo delete`. It is not runControlPlaneDelete because a
 // cascade can answer 202: the server then owns completion, and the command
 // polls until the repo is gone instead of reporting a finished delete.
-func runRepoDelete(cmd *cobra.Command, ref, project string, opts repoDeleteOptions) error {
+func runRepoDelete(cmd *cobra.Command, ref string, opts repoDeleteOptions) error {
 	force := forceRequested(cmd)
 	out := cmd.OutOrStdout()
 	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		resolved, err := resolveRepoRefResolved(ctx, c, ref, project)
+		resolved, err := resolveRepoDeleteRef(ctx, c, ref)
 		if err != nil {
 			return err
 		}
@@ -106,11 +102,23 @@ func runRepoDelete(cmd *cobra.Command, ref, project string, opts repoDeleteOptio
 		waitCtx, cancel := context.WithTimeout(ctx, opts.waitTimeout)
 		defer cancel()
 		if err := awaitRepoDeleted(waitCtx, c, resolved.ID); err != nil {
-			return reportUnfinishedDelete(cmd.ErrOrStderr(), label+mirrors, repoCheckCommand(name, project), opts.waitTimeout, err)
+			return reportUnfinishedDelete(cmd.ErrOrStderr(), label+mirrors, repoCheckCommand(name), opts.waitTimeout, err)
 		}
 		fmt.Fprintf(out, "✓ Deleted %s\n", label)
 		return nil
 	})
+}
+
+// resolveRepoDeleteRef resolves the repo `repo delete` names: its
+// /et/<project>/<repo> path, the one spelling the help advertises. A bare name
+// is refused, as `repo grant` refuses it: a delete should not need --project to
+// know which repo it removes. A ULID still resolves for callers that hold one,
+// but is not advertised.
+func resolveRepoDeleteRef(ctx context.Context, c repoRefClient, ref string) (resolvedRef, error) {
+	if looksLikeULID(ref) {
+		return resolvedRef{ID: ref}, nil
+	}
+	return resolveRepoPathResolved(ctx, c, ref)
 }
 
 // repoDeleteName is how `repo delete` names the repo: the path the server
@@ -136,20 +144,17 @@ func reportUnfinishedDelete(w io.Writer, what, check string, timeout time.Durati
 	return err
 }
 
-// repoCheckCommand suggests how to follow a delete the wait stopped watching.
-// `repo view` takes only /et/<project>/<repo> paths. name is usually the
-// server-resolved path, but a repo found by bare name can lack one (a project
-// ULID routes through the project listing, whose answer may carry no path);
-// the --project listing then shows it instead. A ULID ref with neither gets no
-// suggestion.
-func repoCheckCommand(name, project string) string {
-	if strings.HasPrefix(name, "/"+nativeCloneForge+"/") {
-		return "entire repo view " + name
+// repoCheckCommand suggests `repo view` to follow a delete the wait stopped
+// watching. name is a path (the server's, or the ref as typed when the server
+// echoed none, possibly without its leading slash), so it is reparsed into
+// the canonical spelling `repo view` takes. Only a ULID ref has no path and
+// gets no suggestion.
+func repoCheckCommand(name string) string {
+	project, repo, err := parseNativeCloneRef(name)
+	if err != nil {
+		return ""
 	}
-	if project = strings.TrimSpace(project); project != "" {
-		return "entire repo list --project " + project
-	}
-	return ""
+	return "entire repo view " + nativeRepoPath(project+"/"+repo)
 }
 
 // mirrorsSuffix names the mirrors a cascade removes, for the prompt and the

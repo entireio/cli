@@ -871,12 +871,12 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 		// warning rides on bindRepoProjectFlag so it cannot be wired for some
 		// and missed for others. Asserting the PreRunE exists is what pins
 		// that, without standing up a server per command.
-		// `repo view` is deliberately absent: it takes the /et/<project>/<repo>
-		// path and nothing else, so there is no bare name for --project to
-		// scope and no flag to warn about.
+		// `repo view` and `repo delete` are deliberately absent: they take the
+		// /et/<project>/<repo> path (delete also an unadvertised ULID), so
+		// there is no bare name for --project to scope and no flag to warn
+		// about.
 		for name, newCmd := range map[string]func() *cobra.Command{
 			"repo edit":              newRepoEditCmd,
-			"repo delete":            newRepoDeleteCmd,
 			"repo visibility get":    newRepoVisibilityGetCmd,
 			"repo protection list":   newRepoProtectionListCmd,
 			"repo protection add":    newRepoProtectionAddCmd,

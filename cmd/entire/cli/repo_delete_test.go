@@ -333,8 +333,24 @@ func TestReportUnfinishedDelete(t *testing.T) {
 
 func TestRepoCheckCommand(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, "entire repo view /et/acme/web", repoCheckCommand("/et/acme/web", ""))
-	require.Equal(t, "entire repo view /et/acme/web", repoCheckCommand("/et/acme/web", "acme"), "a path wins over the listing")
-	require.Equal(t, "entire repo list --project "+testDeleteULID, repoCheckCommand("web", testDeleteULID), "a bare name with no path falls back to the project listing")
-	require.Empty(t, repoCheckCommand(testDeleteULID, ""), "repo view takes only paths")
+	require.Equal(t, "entire repo view /et/acme/web", repoCheckCommand("/et/acme/web"))
+	require.Equal(t, "entire repo view /et/acme/web", repoCheckCommand("et/acme/web"), "the canonical spelling, whatever was typed")
+	require.Empty(t, repoCheckCommand(testDeleteULID), "repo view takes only paths")
+}
+
+// TestRepoDelete_TakesPathsOnly pins the grammar `repo delete` accepts: the
+// /et/<project>/<repo> path. A bare name is refused before any request, and
+// there is no --project to scope one.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoDelete_TakesPathsOnly(t *testing.T) {
+	require.Nil(t, newRepoDeleteCmd().Flags().Lookup(projectFlagName),
+		"--project scoped a bare name, which this verb no longer takes")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	_, _, err := runCoreCmd(t, newRepoDeleteCmd, srv.URL, "web", "--force")
+	require.EqualError(t, err, `repo "web" must be a /et/<project>/<repo> path`)
 }
