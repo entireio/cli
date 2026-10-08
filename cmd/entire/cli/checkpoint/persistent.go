@@ -226,10 +226,9 @@ func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, e
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
 }
 
-// applyAttributionBackfill rewrites the checkpoint root summary's combined
-// attribution on the checkpoint's current subtree, returning the new subtree
-// hash. Returns ErrCheckpointNotFound when the checkpoint has no root summary.
-func (s *treeWriter) applyAttributionBackfill(ctx context.Context, existing *object.Tree, basePath string, combinedAttribution *Attribution) (plumbing.Hash, error) {
+// applyCheckpointSummaryUpdate updates only the root summary, preserving all
+// session blobs. Missing checkpoints are never created by a backfill.
+func (s *treeWriter) applyCheckpointSummaryUpdate(ctx context.Context, existing *object.Tree, basePath string, update func(*CheckpointSummary) error) (plumbing.Hash, error) {
 	entries, err := s.flattenExisting(existing, basePath)
 	if err != nil {
 		return plumbing.ZeroHash, err
@@ -245,7 +244,9 @@ func (s *treeWriter) applyAttributionBackfill(ctx context.Context, existing *obj
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to read checkpoint summary: %w", err)
 	}
-	summary.CombinedAttribution = combinedAttribution
+	if err := update(summary); err != nil {
+		return plumbing.ZeroHash, err
+	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
 	if err != nil {
@@ -791,10 +792,12 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	// session package imports checkpoint, so we can't reference its constant.
 	imported := opts.Kind == "imported"
 	commitSHA := opts.CommitSHA
+	var linkedCommits []LinkedCommit
 	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
 		if readErr == nil {
+			linkedCommits = existingSummary.LinkedCommits
 			if combinedAttribution == nil {
 				combinedAttribution = existingSummary.CombinedAttribution
 			}
@@ -822,6 +825,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		Strategy:            opts.Strategy,
 		Branch:              opts.Branch,
 		CommitSHA:           commitSHA,
+		LinkedCommits:       linkedCommits,
 		CheckpointsCount:    checkpointsCount,
 		FilesTouched:        filesTouched,
 		Sessions:            sessions,
@@ -851,6 +855,13 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 // backfillAttribution updates root-level checkpoint metadata fields that depend
 // on the full set of sessions already written to the checkpoint.
 func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.CheckpointID, combinedAttribution *Attribution) error {
+	return s.updateCheckpointSummary(ctx, checkpointID, func(summary *CheckpointSummary) error {
+		summary.CombinedAttribution = combinedAttribution
+		return nil
+	})
+}
+
+func (s *GitStore) updateCheckpointSummary(ctx context.Context, checkpointID id.CheckpointID, update func(*CheckpointSummary) error) error {
 	if err := ctx.Err(); err != nil {
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
@@ -865,7 +876,7 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 		if err != nil {
 			return plumbing.ZeroHash, err
 		}
-		checkpointSubtree, err := s.applyAttributionBackfill(ctx, existing, checkpointID.Path()+"/", combinedAttribution)
+		checkpointSubtree, err := s.applyCheckpointSummaryUpdate(ctx, existing, checkpointID.Path()+"/", update)
 		if err != nil {
 			return plumbing.ZeroHash, err
 		}
@@ -875,6 +886,9 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 			return plumbing.ZeroHash, err
 		}
 
+		if newTreeHash.Equal(rootTreeHash) {
+			return parentHash, nil
+		}
 		authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 		commitMsg := fmt.Sprintf("Update checkpoint summary for %s", checkpointID)
 		return CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
@@ -1617,6 +1631,7 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 	}
 
 	info.CheckpointsCount = summary.CheckpointsCount
+	info.LinkedCommits = summary.LinkedCommits
 	info.FilesTouched = summary.FilesTouched
 	info.SessionCount = len(summary.Sessions)
 	info.Imported = summary.Imported

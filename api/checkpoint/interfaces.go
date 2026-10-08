@@ -59,7 +59,7 @@ type PersistentStore interface {
 // mirror/fan-out store forwards the same value to each backend's Write.
 //
 // Four requests are session-level (Session, ReservedSession, SessionTranscript,
-// SessionSummary) and one is checkpoint-level (CheckpointAttribution). Adding
+// SessionSummary); attribution and commit links are checkpoint-level. Adding
 // a write operation is a new request type plus one dispatch case in every
 // backend. The Store interface stays unchanged, so seam tests must exercise the
 // full union because Go does not exhaustively check type switches.
@@ -95,6 +95,17 @@ type CheckpointAttribution struct {
 	CheckpointID id.CheckpointID
 	Attribution  *Attribution
 }
+
+// CheckpointCommitLinks adds immutable commit associations to an existing
+// checkpoint. It never creates a checkpoint or replaces session content.
+//
+//nolint:revive // Checkpoint-level operation matches the write union naming.
+type CheckpointCommitLinks struct {
+	CheckpointID id.CheckpointID
+	Links        []LinkedCommit
+}
+
+func (CheckpointCommitLinks) isWriteRequest() {}
 
 func (Session) isWriteRequest()               {}
 func (ReservedSession) isWriteRequest()       {}

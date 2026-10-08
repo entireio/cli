@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -641,8 +642,8 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 	if commitErr != nil {
 		return fmt.Errorf("failed to get commit %s: %w", abbreviateCommitHash(lookup.repo, hash), commitErr)
 	}
-	cpID, hasCheckpoint := trailers.ParseCheckpoint(commit.Message)
-	if !hasCheckpoint {
+	cpIDs := checkpoint.CheckpointsForCommit(lookup.committed, hash.String(), trailers.ParseAllCheckpoints(commit.Message))
+	if len(cpIDs) == 0 {
 		// Side-effect modes must error — silently succeeding would leave
 		// scripts unable to distinguish "done" from "didn't happen".
 		if generate || rawTranscript {
@@ -651,14 +652,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		printNoTrailerMessage(w, lookup.repo, hash)
 		return nil
 	}
-	logging.Debug(ctx, "explain auto: resolved commit to checkpoint via trailer",
-		slog.String("target", target),
-		slog.String("commit", abbreviateCommitHash(lookup.repo, hash)),
-		slog.String("checkpoint_id", cpID.String()))
-	if err := runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds); err != nil {
-		return trailerCheckpointError(ctx, lookup.repo, hash, cpID, err)
-	}
-	return nil
+	return explainCommitCheckpoints(ctx, w, errW, lookup, hash, cpIDs, noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
 }
 
 // runExplainAutoAmbiguityGuard refuses --generate when the positional
@@ -867,7 +861,7 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	}
 
 	// Find associated commits (git commits with matching Entire-Checkpoint trailer)
-	associatedCommits, _ := getAssociatedCommits(ctx, lookup.repo, fullCheckpointID, searchAll) //nolint:errcheck // Best-effort
+	associatedCommits, _ := getAssociatedCommits(ctx, lookup.repo, fullCheckpointID, searchAll, summary.LinkedCommits...) //nolint:errcheck // Best-effort
 
 	// Derive author from the first associated commit (the user who made the commit).
 	// Fall back to the committed checkpoint store for checkpoints
@@ -1807,14 +1801,16 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 // Searches commits on the current branch for Entire-Checkpoint trailer matches.
 // When searchAll is true, uses full DAG walk with no depth limit (may be slow).
 // This finds checkpoint commits on merged feature branches (second parents of merges).
-func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointID id.CheckpointID, searchAll bool) ([]associatedCommit, error) {
+func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointID id.CheckpointID, searchAll bool, linked ...checkpoint.LinkedCommit) ([]associatedCommit, error) {
 	head, err := repo.Head()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get HEAD: %w", err)
 	}
 
 	commits := []associatedCommit{} // Initialize as empty slice, not nil (nil means "not searched")
-	targetID := checkpointID.String()
+	matches := func(c *object.Commit) bool {
+		return slices.Contains(trailers.ParseAllCheckpoints(c.Message), checkpointID) || slices.ContainsFunc(linked, func(link checkpoint.LinkedCommit) bool { return plumbing.NewHash(link.SHA).Equal(c.Hash) })
+	}
 
 	collectCommit := func(c *object.Commit) {
 		fullSHA := c.Hash.String()
@@ -1848,8 +1844,7 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 			if err := ctx.Err(); err != nil {
 				return err //nolint:wrapcheck // Propagating context cancellation
 			}
-			cpID, found := trailers.ParseCheckpoint(c.Message)
-			if found && cpID.String() == targetID {
+			if matches(c) {
 				collectCommit(c)
 			}
 			return nil
@@ -1866,8 +1861,7 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 				return errStopIteration
 			}
 
-			cpID, found := trailers.ParseCheckpoint(c.Message)
-			if found && cpID.String() == targetID {
+			if matches(c) {
 				collectCommit(c)
 			}
 			return nil
@@ -2586,41 +2580,40 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	isOnDefault, _ := strategy.IsOnDefaultBranch(repo)
 
 	var points []strategy.PendingCheckpoint
+	links := checkpoint.NewCommitLinkIndex(committedInfos)
 
 	collectCheckpoint := func(c *object.Commit) {
-		cpID, found := trailers.ParseCheckpoint(c.Message)
-		if !found {
-			return
-		}
-		cpInfo, found := committedByID[cpID]
-		if !found {
-			return
-		}
-		// Defer hydration of remote-discovered stubs until after sort+truncate
-		// below: hydrating here (during the commitScanLimit walk) can issue up
-		// to hundreds of sequential ref fetches to display at most `limit`
-		// entries. Stubs project with empty SessionID; hydrateListedBranchCheckpoints
-		// fills them before --session filters run.
+		for _, cpID := range links.Resolve(c.Hash.String(), trailers.ParseAllCheckpoints(c.Message)) {
+			cpInfo, found := committedByID[cpID]
+			if !found {
+				continue
+			}
+			// Defer hydration of remote-discovered stubs until after sort+truncate
+			// below: hydrating here (during the commitScanLimit walk) can issue up
+			// to hundreds of sequential ref fetches to display at most `limit`
+			// entries. Stubs project with empty SessionID; hydrateListedBranchCheckpoints
+			// fills them before --session filters run.
 
-		message := strings.Split(c.Message, "\n")[0]
-		point := strategy.PendingCheckpoint{
-			ID:               c.Hash.String(),
-			Message:          message,
-			Date:             c.Committer.When,
-			IsLogsOnly:       true, // Committed checkpoints are logs-only
-			CheckpointID:     cpID,
-			SessionID:        cpInfo.SessionID,
-			SessionCount:     cpInfo.SessionCount,
-			SessionIDs:       cpInfo.SessionIDs,
-			IsTaskCheckpoint: cpInfo.IsTask,
-			ToolUseID:        cpInfo.ToolUseID,
-			Agent:            cpInfo.Agent,
-		}
-		if !cpInfo.ListedStub {
-			point.SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, cpInfo.SessionCount)
-		}
+			message := strings.Split(c.Message, "\n")[0]
+			point := strategy.PendingCheckpoint{
+				ID:               c.Hash.String(),
+				Message:          message,
+				Date:             c.Committer.When,
+				IsLogsOnly:       true, // Committed checkpoints are logs-only
+				CheckpointID:     cpID,
+				SessionID:        cpInfo.SessionID,
+				SessionCount:     cpInfo.SessionCount,
+				SessionIDs:       cpInfo.SessionIDs,
+				IsTaskCheckpoint: cpInfo.IsTask,
+				ToolUseID:        cpInfo.ToolUseID,
+				Agent:            cpInfo.Agent,
+			}
+			if !cpInfo.ListedStub {
+				point.SessionPrompt = readLatestCommittedSessionPrompt(ctx, store, cpID, cpInfo.SessionCount)
+			}
 
-		points = append(points, point)
+			points = append(points, point)
+		}
 	}
 
 	if isOnDefault {
@@ -3024,9 +3017,15 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 		return fmt.Errorf("failed to get commit: %w", err)
 	}
 
-	// Extract Entire-Checkpoint trailer
-	checkpointID, hasCheckpoint := trailers.ParseCheckpoint(commit.Message)
-	if !hasCheckpoint {
+	lookup, lookupErr := newExplainCheckpointLookup(ctx)
+	if lookup != nil {
+		defer lookup.Close()
+	}
+	cpIDs := trailers.ParseAllCheckpoints(commit.Message)
+	if lookupErr == nil {
+		cpIDs = checkpoint.CheckpointsForCommit(lookup.committed, hash.String(), cpIDs)
+	}
+	if len(cpIDs) == 0 {
 		// Side-effect modes must error so scripts can distinguish "done"
 		// from "didn't happen"; read-only modes print a friendly message.
 		if generate || rawTranscript {
@@ -3036,29 +3035,34 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 		return nil
 	}
 
-	// Delegate to checkpoint detail view, forwarding the full flag set so
-	// --generate / --raw-transcript / --force work via --commit as well.
-	if err := runExplainCheckpoint(ctx, w, errW, checkpointID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds); err != nil {
-		return trailerCheckpointError(ctx, repo, hash, checkpointID, err)
+	if lookupErr != nil {
+		return runExplainCheckpoint(ctx, w, errW, cpIDs[0].String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
+	}
+	return explainCommitCheckpoints(ctx, w, errW, lookup, hash, cpIDs, noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
+}
+
+func explainCommitCheckpoints(ctx context.Context, w, errW io.Writer, lookup *explainCheckpointLookup, hash plumbing.Hash, ids []id.CheckpointID, noPager, verbose, full, rawTranscript, generate, force, searchAll bool, summaryTimeoutSeconds int) error {
+	if generate && len(ids) > 1 {
+		return fmt.Errorf("commit %s links multiple checkpoints; use --checkpoint <id> to generate a specific summary", abbreviateCommitHash(lookup.repo, hash))
+	}
+	for _, cpID := range ids {
+		if err := runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager || len(ids) > 1, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds); err != nil {
+			return trailerCheckpointError(ctx, lookup.repo, hash, cpID, err)
+		}
 	}
 	return nil
 }
 
 // trailerCheckpointError attributes a checkpoint failure to the commit whose
-// Entire-Checkpoint trailer named it. Commits keep their trailers when
-// `entire checkpoint delete` removes a checkpoint, so a miss on an ID this
-// clone deleted says so; any other miss stays a plain not-found.
+// trailer or recorded link named it. Deleted local checkpoints get a specific hint.
 func trailerCheckpointError(ctx context.Context, repo *git.Repository, hash plumbing.Hash, cpID id.CheckpointID, err error) error {
 	if errors.Is(err, checkpoint.ErrCheckpointNotFound) && shouldFallBackToCommitResolution(err) && deletedFromThisClone(ctx, cpID) {
-		return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w (deleted with `entire checkpoint delete`)", abbreviateCommitHash(repo, hash), cpID, checkpoint.ErrCheckpointNotFound)
+		return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer or recorded link: %w (deleted with `entire checkpoint delete`)", abbreviateCommitHash(repo, hash), cpID, checkpoint.ErrCheckpointNotFound)
 	}
-	// The user typed a commit, not this checkpoint ID — without the trailer
-	// linkage the error reads as if they asked for an unknown ID.
-	return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w", abbreviateCommitHash(repo, hash), cpID, err)
+	return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer or recorded link: %w", abbreviateCommitHash(repo, hash), cpID, err)
 }
 
-// deletedFromThisClone reports whether cpID is on the local deleted list. An
-// unreadable list answers no: the hint is informational.
+// deletedFromThisClone reports whether cpID is on the local deleted list.
 func deletedFromThisClone(ctx context.Context, cpID id.CheckpointID) bool {
 	deleted, err := checkpoint.LoadDeletedCheckpoints(ctx)
 	return err == nil && deleted.Contains(cpID)

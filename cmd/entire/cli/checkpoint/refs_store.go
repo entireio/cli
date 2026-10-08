@@ -124,6 +124,8 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 		return s.backfillSummary(ctx, r.CheckpointID, r.Summary)
 	case CheckpointAttribution:
 		return s.backfillAttribution(ctx, r.CheckpointID, r.Attribution)
+	case CheckpointCommitLinks:
+		return s.updateCheckpointSummary(ctx, r.CheckpointID, commitLinksUpdate(r.Links))
 	default:
 		return fmt.Errorf("checkpoint: unsupported write request %T", req)
 	}
@@ -322,6 +324,13 @@ func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.Chec
 }
 
 func (s *gitRefsStore) backfillAttribution(ctx context.Context, checkpointID id.CheckpointID, combinedAttribution *Attribution) error {
+	return s.updateCheckpointSummary(ctx, checkpointID, func(summary *CheckpointSummary) error {
+		summary.CombinedAttribution = combinedAttribution
+		return nil
+	})
+}
+
+func (s *gitRefsStore) updateCheckpointSummary(ctx context.Context, checkpointID id.CheckpointID, update func(*CheckpointSummary) error) error {
 	if err := ctx.Err(); err != nil {
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
@@ -331,9 +340,12 @@ func (s *gitRefsStore) backfillAttribution(ctx context.Context, checkpointID id.
 			return s.refBaseForBackfill(ctx, checkpointID)
 		},
 		func(parentHash plumbing.Hash, existing *object.Tree) (plumbing.Hash, error) {
-			checkpointSubtree, err := s.applyAttributionBackfill(ctx, existing, "", combinedAttribution)
+			checkpointSubtree, err := s.applyCheckpointSummaryUpdate(ctx, existing, "", update)
 			if err != nil {
 				return plumbing.ZeroHash, err
+			}
+			if checkpointSubtree.Equal(existing.Hash) {
+				return parentHash, nil
 			}
 			authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 			commitMsg := fmt.Sprintf("Update checkpoint summary for %s", checkpointID)
