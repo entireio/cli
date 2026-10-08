@@ -831,6 +831,10 @@ type postCommitActionHandler struct {
 	// memoized gate into condensation so the search-usage transcript scan is
 	// skipped entirely when telemetry is opted out or not opted in.
 	condensedTelemetry *commitCondensedEmitter
+	// storedRoot is the .entire root condensation read the session's stored
+	// transcript and prompt copy from (storedSessionRoot), resolved once and
+	// reused by the release after carry-forward so both act on the same copy.
+	storedRoot *os.Root
 }
 
 // searchProbeGate adapts the emitter's memoized telemetry gate to the
@@ -858,9 +862,11 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 	)
 
 	if shouldCondense {
+		h.storedRoot = storedSessionRootOrNil(h.ctx, state)
 		h.condensed, h.newSkillEvents, h.condensedSignal = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.committedFileSet, condenseOpts{
 			repoDir:            h.repoDir,
 			searchProbeAllowed: h.searchProbeGate(),
+			storedRoot:         h.storedRoot,
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead, h.repoDir)
@@ -881,9 +887,11 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 	)
 
 	if shouldCondense {
+		h.storedRoot = storedSessionRootOrNil(h.ctx, state)
 		h.condensed, h.newSkillEvents, h.condensedSignal = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.committedFileSet, condenseOpts{
 			repoDir:            h.repoDir,
 			searchProbeAllowed: h.searchProbeGate(),
+			storedRoot:         h.storedRoot,
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead, h.repoDir)
@@ -1543,8 +1551,9 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		// Release the staged prompt.txt and full.jsonl only when ALL files are
 		// committed. If carry-forward files remain they must persist, so the
 		// next condensation (triggered by the next commit) can still read them.
+		// Released through the root the condensation read them from.
 		if len(state.FilesTouched) == 0 {
-			clearFilesystemStagedFiles(ctx, state.SessionID)
+			clearStagedFilesIn(handler.storedRoot, state.SessionID)
 		}
 	}
 	carryForwardSpan.End()

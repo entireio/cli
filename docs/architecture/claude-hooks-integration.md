@@ -97,9 +97,10 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
     Both files are a staging buffer for the checkpoint writer, not the durable
     copy. The durable copy is written to the checkpoint store
     (`entire/checkpoints/v1` or per-checkpoint refs) when the work is
-    committed. `clearFilesystemStagedFiles` releases both (plus a legacy
+    committed. `clearStagedFilesIn` releases both (plus a legacy
     `full.log`) once the session's work is condensed and no carry-forward
-    files remain.
+    files remain, through the same `.entire` root the condensation read
+    them from.
 
 3.  **Compute File Changes**:
 

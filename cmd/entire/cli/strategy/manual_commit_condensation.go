@@ -1858,7 +1858,7 @@ var stagedSessionFiles = []string{
 	paths.TranscriptFileNameLegacy,
 }
 
-// clearFilesystemStagedFiles releases a session's staged metadata files after
+// clearStagedFilesIn releases a session's staged metadata files after
 // its work has been condensed into a checkpoint and no carry-forward files
 // remain. Best-effort throughout: a file left behind is overwritten or ignored
 // rather than breaking the next turn.
@@ -1887,19 +1887,13 @@ var stagedSessionFiles = []string{
 //
 // The session's metadata directory itself is left in place — the next Stop
 // writes into it.
-func clearFilesystemStagedFiles(ctx context.Context, sessionID string) {
-	root, err := entiredir.OpenForRead(ctx)
-	if err != nil {
-		return
-	}
-	clearStagedFilesIn(root, sessionID)
-}
-
-// clearStagedFilesIn is clearFilesystemStagedFiles against an already-opened
-// .entire root: the one a commit-less condensation read the stored copy from
-// (storedSessionRoot), which may be another worktree's. Removal goes through
-// that anchored root without following a symlinked metadata or session
-// directory, never through an assembled path.
+//
+// root is the .entire root the condensation read the stored copy from
+// (storedSessionRoot, resolved once per condensation), which may be the
+// session's own linked worktree rather than the committing one; releasing
+// anywhere else would leave the consumed copy behind. Removal goes through that
+// anchored root without following a symlinked metadata or session directory,
+// never through an assembled path. A nil root releases nothing.
 func clearStagedFilesIn(root *os.Root, sessionID string) {
 	if root == nil || validation.ValidateSessionID(sessionID) != nil {
 		return

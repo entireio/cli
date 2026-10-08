@@ -1709,7 +1709,7 @@ func TestClearFilesystemStagedFiles_ReleasesAllStagedFiles(t *testing.T) {
 		require.NoError(t, os.WriteFile(p, []byte(`{"x":1}`+"\n"), 0o600))
 	}
 
-	clearFilesystemStagedFiles(context.Background(), sessionID)
+	releaseStoredCopyForTest(context.Background(), sessionID)
 
 	for _, p := range staged {
 		assert.NoFileExists(t, p, "%s should be released after condensation", filepath.Base(p))
@@ -1731,11 +1731,11 @@ func TestClearFilesystemStagedFiles_MissingFilesAreNotAnError(t *testing.T) {
 	t.Chdir(repoDir)
 
 	// No metadata directory at all, then an empty one.
-	clearFilesystemStagedFiles(context.Background(), "session-never-staged")
+	releaseStoredCopyForTest(context.Background(), "session-never-staged")
 
 	metaDir := filepath.Join(repoDir, paths.SessionMetadataDirFromSessionID("session-empty"))
 	require.NoError(t, os.MkdirAll(metaDir, 0o750))
-	clearFilesystemStagedFiles(context.Background(), "session-empty")
+	releaseStoredCopyForTest(context.Background(), "session-empty")
 	assert.DirExists(t, metaDir)
 }
 
