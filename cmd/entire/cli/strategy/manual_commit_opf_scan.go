@@ -43,11 +43,6 @@ import (
 
 const opfScanComponent = "opf-scan"
 
-// opfScanSpawnThrottle collapses a burst of pushes into one spawn. The worker
-// lock already keeps a second worker from doing anything, so this only saves
-// the fork.
-const opfScanSpawnThrottle = time.Minute
-
 // opfScanMaxPasses bounds the worker's loop. A pass repeats only while new
 // unscanned content keeps appearing (a session still writing checkpoints), so
 // this exists to stop a detached process nobody watches from spinning.
@@ -90,9 +85,14 @@ func inOPFScanWorker(ctx context.Context) bool {
 }
 
 // maybeSpawnOPFScan starts the scan worker for remote unless this already is
-// the worker or a worker was spawned within opfScanSpawnThrottle. Callers
-// invoke it only when the push resolved OPFRun and something was held back as
-// not yet scanned.
+// the worker or a worker is running. A running worker picks up the new work: it
+// re-collects after every pass and once more after releasing its lock (see
+// RunOPFScan). Callers invoke it only when the push resolved OPFRun and
+// something was held back as not yet scanned.
+//
+// Gating on the lock rather than on time since the last spawn means a push
+// right after a worker finished always gets a new one. The cost is that a
+// persistently failing OPF runtime is retried on every push.
 func maybeSpawnOPFScan(ctx context.Context, remote string) {
 	if inOPFScanWorker(ctx) || !redact.OPFEnabled() {
 		return
@@ -104,13 +104,9 @@ func maybeSpawnOPFScan(ctx context.Context, remote string) {
 			slog.String("error", err.Error()))
 		return
 	}
-	commonDir, err := gitdir.CommonDir(ctx)
-	if err != nil {
-		logging.Debug(logCtx, "skipping OPF scan spawn: could not resolve git common dir",
-			slog.String("error", err.Error()))
-		return
-	}
-	if spawnmarker.RecentlySpawned(commonDir, "opf-scan-spawn", opfScanSpawnThrottle, time.Now()) {
+	release, held := acquireOPFScanWorkerLock(ctx)
+	release()
+	if held {
 		return
 	}
 	opfScanSpawn(root, remote)
@@ -119,10 +115,8 @@ func maybeSpawnOPFScan(ctx context.Context, remote string) {
 
 // RunOPFScan is the body of the detached `entire __opf_scan <remote>` worker.
 // Each pass collects the content waiting for OPF, scans what the span cache
-// lacks, and then runs the pre-push delivery for remote, which rewrites from
-// the cache and pushes whatever is now covered. It stops when nothing is left,
-// when a pass finds exactly the work the previous one did (nothing will change
-// without new input), or after opfScanMaxPasses.
+// lacks, and runs the pre-push delivery for remote after each scan batch. It
+// stops when nothing new is pending, or after opfScanMaxPasses.
 //
 // Best-effort by construction: every failure is logged, never returned as a
 // process error, because nothing watches this child's exit code.
@@ -154,13 +148,13 @@ func RunOPFScan(ctx context.Context, remote string) error {
 		logging.Debug(logCtx, "opf scan skipped: another worker is already running")
 		return nil
 	}
-	defer release()
 	// One line on every exit of a worker that ran, so a failed or stalled
 	// background scan can be told apart from one that never started.
 	defer logging.Info(logCtx, "opf scan worker finished")
 
 	cache, err := checkpoint.OPFSpanCacheForRepo(repo)
 	if err != nil {
+		release()
 		logging.Warn(logCtx, "opf scan skipped: span cache unavailable", slog.String("error", err.Error()))
 		return nil
 	}
@@ -171,48 +165,108 @@ func RunOPFScan(ctx context.Context, remote string) error {
 	}
 
 	ctx = withinOPFScanWorker(ctx)
-	var previous []string
-	for range opfScanMaxPasses {
-		units, collectErr := collectOPFScanUnits(ctx, repo, remote)
+	w := &opfScanWorker{remote: remote, repo: repo, cache: cache, seen: make(map[string]struct{})}
+	for {
+		w.runPasses(ctx)
+		opfScanBeforeRelease()
+		release()
+		// A push that held new work while this worker held the lock saw it
+		// held and spawned nothing, so look once more now that it is free. Only
+		// work this process has not already tried brings it back, so units it
+		// could not scan or deliver do not make it spin.
+		if w.passes >= opfScanMaxPasses || !w.hasUnseenWork(ctx) {
+			return nil
+		}
+		if release, held = acquireOPFScanWorkerLock(ctx); held {
+			return nil // another worker took it and owns the new work
+		}
+	}
+}
+
+// opfScanBeforeRelease runs after a worker's passes and before it releases the
+// lock: the window in which a push holds new work but sees a worker running.
+var opfScanBeforeRelease = func() {} //nolint:gochecknoglobals // exit-race test seam
+
+// opfScanWorker carries one worker process's state across its passes and
+// across re-acquiring the lock.
+type opfScanWorker struct {
+	remote string
+	repo   *git.Repository
+	cache  redact.OPFSpanCache
+	// seen holds the IDs of every commit a pass has already worked on.
+	seen   map[string]struct{}
+	passes int
+}
+
+// runPasses collects, scans and delivers until nothing new is pending, a pass
+// fails, or the pass budget runs out. Each pass delivers after every scan
+// batch, so a checkpoint ships about one model call after it is scanned rather
+// than after the whole backlog.
+func (w *opfScanWorker) runPasses(ctx context.Context) {
+	logCtx := logging.WithComponent(ctx, opfScanComponent)
+	for ; w.passes < opfScanMaxPasses; w.passes++ {
+		units, collectErr := collectOPFScanUnits(ctx, w.repo, w.remote)
 		if collectErr != nil {
 			logging.Warn(logCtx, "opf scan: could not collect pending checkpoints",
 				slog.String("error", collectErr.Error()))
-			return nil
+			return
 		}
-		if len(units) == 0 {
-			return nil
+		if !w.markSeen(units) {
+			// Everything still pending was already scanned and delivered by
+			// this process, so delivery failed for a reason a retry here will
+			// not fix. The next user push tries again.
+			return
 		}
-		ids := opfScanUnitIDs(units)
-		if slices.Equal(ids, previous) {
-			// The last pass scanned and delivered this exact set and it is
-			// still pending, so delivery failed for a reason a retry in this
-			// process will not fix. The next user push tries again.
-			return nil
-		}
-		previous = ids
-
-		scanned, scanErr := scanOPFUnits(ctx, repo, units, cache)
+		scanned, scanErr := scanOPFUnits(ctx, w.repo, units, w.cache, w.deliver)
 		if scanErr != nil {
-			logging.Warn(logCtx, "opf scan failed; checkpoints stay held", slog.String("error", scanErr.Error()))
-			return nil
+			logging.Warn(logCtx, "opf scan stopped; checkpoints stay held", slog.String("error", scanErr.Error()))
+			return
 		}
 		if scanned == 0 {
 			// Every pending unit is over a cap; the rewrite would refuse them
 			// too, so there is nothing to deliver.
-			return nil
-		}
-		deliverCtx, cancel := context.WithTimeout(ctx, opfScanDeliveryTimeout)
-		deliverErr := NewManualCommitStrategy().PrePushFromGitHook(deliverCtx, remote)
-		cancel()
-		if deliverErr != nil {
-			logging.Warn(logCtx, "opf scan: delivery failed; checkpoints stay queued for the next push",
-				slog.String("error", deliverErr.Error()))
-			return nil
+			return
 		}
 	}
 	logging.Warn(logCtx, "opf scan: stopping after the maximum number of passes",
 		slog.Int("passes", opfScanMaxPasses))
+}
+
+// deliver runs the pre-push delivery for the worker's remote, which rewrites
+// from the cache and pushes whatever is now covered.
+func (w *opfScanWorker) deliver(ctx context.Context) error {
+	deliverCtx, cancel := context.WithTimeout(ctx, opfScanDeliveryTimeout)
+	defer cancel()
+	if err := NewManualCommitStrategy().PrePushFromGitHook(deliverCtx, w.remote); err != nil {
+		return fmt.Errorf("delivery failed; checkpoints stay queued for the next push: %w", err)
+	}
 	return nil
+}
+
+// markSeen records units' commits and reports whether any was new.
+func (w *opfScanWorker) markSeen(units [][]*object.Commit) bool {
+	added := false
+	for _, id := range opfScanUnitIDs(units) {
+		if _, ok := w.seen[id]; !ok {
+			w.seen[id] = struct{}{}
+			added = true
+		}
+	}
+	return added
+}
+
+// hasUnseenWork reports whether anything pending is new to this process.
+func (w *opfScanWorker) hasUnseenWork(ctx context.Context) bool {
+	units, err := collectOPFScanUnits(ctx, w.repo, w.remote)
+	if err != nil {
+		return false
+	}
+	for _, id := range opfScanUnitIDs(units) {
+		if _, ok := w.seen[id]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // collectOPFScanUnits returns the checkpoint commits that still lack the OPF
@@ -231,6 +285,7 @@ func collectOPFScanUnits(ctx context.Context, repo *git.Repository, remote strin
 		if err != nil {
 			return nil, fmt.Errorf("peek push queue: %w", err)
 		}
+		bootstrapLimit := resolveBootstrapLimit()
 		existing, _ := partitionLocalRefs(repo, queued)
 		for _, refName := range existing {
 			ref, refErr := repo.Reference(refName, true)
@@ -240,6 +295,13 @@ func collectOPFScanUnits(ctx context.Context, repo *git.Repository, remote strin
 			chain, _, chainErr := unappliedAncestry(repo, ref.Hash())
 			if chainErr != nil {
 				return nil, fmt.Errorf("walk ancestry of %s: %w", refName, chainErr)
+			}
+			if len(chain) > bootstrapLimit {
+				// The rewrite refuses it (BootstrapTooLargeError), so scanning
+				// it would only burn model time.
+				logging.Warn(logging.WithComponent(ctx, opfScanComponent), "opf scan: skipping checkpoint over the bootstrap limit",
+					slog.String("ref", refName.String()), slog.Int("commits", len(chain)), slog.Int("limit", bootstrapLimit))
+				continue
 			}
 			if len(chain) > 0 {
 				units = append(units, chain)
@@ -262,24 +324,29 @@ var opfScanBlobs = redact.ScanBlobsWithPrivacyFilter //nolint:gochecknoglobals /
 
 // scanOPFUnits scans units into the cache in batches whose raw blob bytes stay
 // within one unit's raw cap, so the worker's resident input is bounded however
-// long the backlog is. Each unit is capped the way the rewrite caps it; a unit
+// long the backlog is, and whose prose stays within about one model call, so
+// deliver runs after each batch and scanned checkpoints ship without waiting
+// for the rest of the backlog. Each unit is capped the way the rewrite caps it; a unit
 // over a cap is left out and logged, because the rewrite would refuse it anyway
 // and scanning pathological content only burns model time. It returns how many
 // units were scanned.
-func scanOPFUnits(ctx context.Context, repo *git.Repository, units [][]*object.Commit, cache redact.OPFSpanCache) (int, error) {
+func scanOPFUnits(ctx context.Context, repo *git.Repository, units [][]*object.Commit, cache redact.OPFSpanCache, deliver func(context.Context) error) (int, error) {
 	logCtx := logging.WithComponent(ctx, opfScanComponent)
 	batchLimit := resolveBatchLimit()
 	rawCap := rawByteCapForBatchLimit(batchLimit)
 
 	var batch []redact.NamedBlob
-	batchRaw, scanned := 0, 0
+	batchRaw, batchLeaf, scanned := 0, 0, 0
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
 		err := opfScanBlobs(ctx, batch, cache)
-		batch, batchRaw = nil, 0
-		return err
+		batch, batchRaw, batchLeaf = nil, 0, 0
+		if err != nil {
+			return err
+		}
+		return deliver(ctx)
 	}
 	for _, unit := range units {
 		unitBlobs, err := collectCommitBlobsForOPF(repo, unit, rawCap)
@@ -291,7 +358,8 @@ func scanOPFUnits(ctx context.Context, repo *git.Repository, units [][]*object.C
 			}
 			return scanned, err
 		}
-		if leafBytes := redact.SumProseLeafBytes(unitBlobs); leafBytes > batchLimit {
+		leafBytes := redact.SumProseLeafBytes(unitBlobs)
+		if leafBytes > batchLimit {
 			logging.Warn(logCtx, "opf scan: skipping checkpoint over the prose-leaf cap",
 				slog.Int("leaf_bytes", leafBytes), slog.Int("limit", batchLimit))
 			continue
@@ -300,13 +368,14 @@ func scanOPFUnits(ctx context.Context, repo *git.Repository, units [][]*object.C
 		for _, b := range unitBlobs {
 			unitRaw += len(b.Content)
 		}
-		if batchRaw+unitRaw > rawCap {
+		if batchRaw+unitRaw > rawCap || batchLeaf+leafBytes > redact.OPFBatchChunkBytes {
 			if err := flush(); err != nil {
 				return scanned, err
 			}
 		}
 		batch = append(batch, unitBlobs...)
 		batchRaw += unitRaw
+		batchLeaf += leafBytes
 		scanned++
 	}
 	return scanned, flush()
@@ -331,6 +400,13 @@ func v1CommitsAwaitingOPF(ctx context.Context, repo *git.Repository, remote stri
 	unpushed, err := listUnpushedV1Commits(repo, localTip, remoteTip)
 	if err != nil {
 		return nil, fmt.Errorf("list unpushed v1 commits: %w", err)
+	}
+	if limit := resolveBootstrapLimit(); remoteTip.IsZero() && len(unpushed) > limit {
+		// The rewrite refuses this bootstrap (BootstrapTooLargeError), so
+		// scanning it would only burn model time.
+		logging.Warn(logging.WithComponent(ctx, opfScanComponent), "opf scan: skipping v1 over the bootstrap limit",
+			slog.Int("commits", len(unpushed)), slog.Int("limit", limit))
+		return nil, nil
 	}
 	pending := unpushed[:0]
 	for _, c := range unpushed {

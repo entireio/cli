@@ -169,6 +169,31 @@ func TestScanBlobsWithPrivacyFilter_RuntimeFailureStoresNothing(t *testing.T) {
 	}
 }
 
+// A long scan is stored one model call's worth of blobs at a time, so a failure
+// in a later call keeps the results of the calls that finished.
+func TestScanBlobsWithPrivacyFilter_FailureKeepsEarlierGroups(t *testing.T) {
+	configureFakeOPF(t, &fakeRuntime{failFromBatch: 2}, cacheTestCats)
+	prose := strings.Repeat("the team reviewed the plan ", OPFBatchChunkBytes/27)
+	blobs := []NamedBlob{
+		{Name: "0/a.txt", ID: "blob-a", Content: []byte("first " + prose)},
+		{Name: "0/b.txt", ID: "blob-b", Content: []byte("second " + prose)},
+	}
+	cache := newMemSpanCache()
+
+	if err := ScanBlobsWithPrivacyFilter(context.Background(), blobs, cache); err == nil {
+		t.Fatal("want the second call's failure")
+	}
+	if cache.stores != 1 {
+		t.Fatalf("stores = %d, want the first group kept", cache.stores)
+	}
+	if _, err := ApplyCachedPrivacyFilter(blobs[:1], cache); err != nil {
+		t.Fatalf("first blob must be fully cached: %v", err)
+	}
+	if _, err := ApplyCachedPrivacyFilter(blobs[1:], cache); !errors.Is(err, ErrOPFScanPending) {
+		t.Fatalf("second blob err = %v, want pending", err)
+	}
+}
+
 // FuzzApplyCachedPrivacyFilter pins the two properties the trailer depends on,
 // for arbitrary blob contents: applying cached results gives exactly what the
 // one-pass batch gives, and an entry missing any single prose leaf makes the

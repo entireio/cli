@@ -174,6 +174,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 				fmt.Fprintln(stderrWriter, opfScanPendingNotice)
 				maybeHintGitRefsForOPF(ctx)
 				maybeSpawnOPFScan(ctx, ps.remote)
+				cleanupPushedShadowBranches(ctx)
 				return nil
 			}
 			if rewriteErr != nil {

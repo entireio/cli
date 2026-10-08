@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -31,6 +32,10 @@ var ErrOPFUnavailable = errors.New("OpenAI Privacy Filter is unavailable for the
 
 // opfCacheVersion is part of every cache key. Bump it when the entry format or
 // the meaning of a stored span changes, so older entries are never read.
+//
+// The key does not identify the model: bump this whenever the opf model or
+// its output changes in a way that should invalidate stored results, or old
+// entries keep being applied for up to the cache's max age.
 const opfCacheVersion = "1"
 
 // opfBlobCacheKey names one blob's entry. OPF's output depends only on the leaf
@@ -88,22 +93,61 @@ func ScanBlobsWithPrivacyFilter(ctx context.Context, inputs []NamedBlob, cache O
 		return nil
 	}
 
-	spansByLeaf, err := scanProseLeaves(ctx, cfg, cats, uniqueProseLeaves(pending), len(pending))
-	if err != nil {
-		return err
-	}
-	for _, in := range pending {
-		entry := make(map[string][]Span)
-		collectLeaves(in, func(v string) {
-			if isProseLeaf(v) {
-				entry[opfLeafKey(v)] = spansByLeaf[v]
+	// Scan and store one model call's worth of blobs at a time, so a failure,
+	// a killed process or a sleeping laptop loses at most the group in flight
+	// rather than every result of a long scan. spansByLeaf spans the groups, so
+	// a leaf repeated across blobs is still scanned once.
+	spansByLeaf := make(map[string][]Span)
+	for _, group := range groupBlobsByLeafBytes(pending, OPFBatchChunkBytes) {
+		var leaves []string
+		for _, leaf := range uniqueProseLeaves(group) {
+			if _, done := spansByLeaf[leaf]; !done {
+				leaves = append(leaves, leaf)
 			}
-		})
-		if err := cache.StoreOPFSpans(opfBlobCacheKey(in.ID, cats), entry); err != nil {
-			return fmt.Errorf("store OPF span cache entry: %w", err)
+		}
+		scanned, err := scanProseLeaves(ctx, cfg, cats, leaves, len(group))
+		if err != nil {
+			return err
+		}
+		maps.Copy(spansByLeaf, scanned)
+		for _, in := range group {
+			entry := make(map[string][]Span)
+			collectLeaves(in, func(v string) {
+				if isProseLeaf(v) {
+					entry[opfLeafKey(v)] = spansByLeaf[v]
+				}
+			})
+			if err := cache.StoreOPFSpans(opfBlobCacheKey(in.ID, cats), entry); err != nil {
+				return fmt.Errorf("store OPF span cache entry: %w", err)
+			}
 		}
 	}
 	return nil
+}
+
+// groupBlobsByLeafBytes splits blobs, in order, into groups whose prose leaves
+// fit one model call by the measure chunkOPFBatchInputs uses. A blob larger
+// than limit gets a group of its own; scanProseLeaves still chunks inside it.
+func groupBlobsByLeafBytes(blobs []NamedBlob, limit int) [][]NamedBlob {
+	var groups [][]NamedBlob
+	var current []NamedBlob
+	size := 0
+	for _, b := range blobs {
+		n := 0
+		for _, leaf := range uniqueProseLeaves([]NamedBlob{b}) {
+			n += len(leaf) + len(opfBatchSeparator)
+		}
+		if len(current) > 0 && size+n > limit {
+			groups = append(groups, current)
+			current, size = nil, 0
+		}
+		current = append(current, b)
+		size += n
+	}
+	if len(current) > 0 {
+		groups = append(groups, current)
+	}
+	return groups
 }
 
 // ApplyCachedPrivacyFilter redacts inputs using cached OPF results only; it

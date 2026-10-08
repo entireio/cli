@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -61,7 +62,7 @@ func TestRunOPFScan_ScansAndDeliversGitRefs(t *testing.T) {
 
 // A long backlog is scanned in batches bounded by one ref's raw cap rather than
 // loaded whole, so the detached worker's memory does not grow with the queue.
-// Every ref still gets scanned and delivered.
+// Every ref still gets scanned, and each batch is delivered as it finishes.
 func TestRunOPFScan_BoundsEachScanBatchByTheRawCap(t *testing.T) {
 	configureFakeOPF(t, &fakeOPFForRewrite{})
 	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1", "c3d4e5f6a1b2")
@@ -79,7 +80,7 @@ func TestRunOPFScan_BoundsEachScanBatchByTheRawCap(t *testing.T) {
 	require.Greater(t, totalRaw, rawCap, "fixture: the whole backlog must exceed one raw cap")
 	t.Setenv(batchEnvVar, strconv.Itoa(limit))
 
-	var batchRaw []int
+	var batchRaw, deliveredBefore []int
 	old := opfScanBlobs
 	opfScanBlobs = func(ctx context.Context, blobs []redact.NamedBlob, cache redact.OPFSpanCache) error {
 		n := 0
@@ -87,6 +88,7 @@ func TestRunOPFScan_BoundsEachScanBatchByTheRawCap(t *testing.T) {
 			n += len(b.Content)
 		}
 		batchRaw = append(batchRaw, n)
+		deliveredBefore = append(deliveredBefore, len(refs)-len(queuedRefs(t, repo)))
 		return old(ctx, blobs, cache)
 	}
 	t.Cleanup(func() { opfScanBlobs = old })
@@ -94,6 +96,8 @@ func TestRunOPFScan_BoundsEachScanBatchByTheRawCap(t *testing.T) {
 	require.NoError(t, RunOPFScan(t.Context(), "origin"))
 
 	require.Greater(t, len(batchRaw), 1, "the backlog must be split across scans")
+	require.Positive(t, deliveredBefore[len(deliveredBefore)-1],
+		"each batch is delivered before the next is scanned, not after the whole backlog")
 	for _, n := range batchRaw {
 		require.LessOrEqual(t, n, rawCap, "no scan batch may exceed the raw cap")
 	}
@@ -101,6 +105,68 @@ func TestRunOPFScan_BoundsEachScanBatchByTheRawCap(t *testing.T) {
 	for _, ref := range refs {
 		require.NotEmpty(t, remoteRefHash(t, bareDir, ref))
 	}
+}
+
+// A push spawns a worker whenever none is running, even right after another
+// one was spawned and finished; while one runs, it leaves the work to it.
+func TestMaybeSpawnOPFScan_GatesOnTheWorkerLockNotTime(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	spawns := swapOPFScanSpawn(t)
+
+	maybeSpawnOPFScan(t.Context(), "origin")
+	maybeSpawnOPFScan(t.Context(), "origin")
+	require.Len(t, *spawns, 2, "no worker is running, so each push must start one")
+
+	release, held := acquireOPFScanWorkerLock(t.Context())
+	require.False(t, held)
+	defer release()
+	maybeSpawnOPFScan(t.Context(), "origin")
+	require.Len(t, *spawns, 2, "a running worker owns the new work")
+}
+
+// Work held by a push while the worker still held its lock (so the push spawned
+// nothing) is picked up by the worker once it releases the lock.
+func TestRunOPFScan_PicksUpWorkHeldJustBeforeRelease(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+	swapOPFScanSpawn(t)
+
+	const lateID = "b2c3d4e5f6a1"
+	added := false
+	old := opfScanBeforeRelease
+	opfScanBeforeRelease = func() {
+		if !added {
+			added = true
+			addGitRefsSession(t, repo, lateID, "sess-late")
+		}
+	}
+	t.Cleanup(func() { opfScanBeforeRelease = old })
+
+	require.NoError(t, RunOPFScan(t.Context(), "origin"))
+
+	require.NotEmpty(t, remoteRefHash(t, bareDir, refs[0]))
+	require.NotEmpty(t, remoteRefHash(t, bareDir, mustRefName(t, id.MustCheckpointID(lateID))),
+		"work held just before the worker released its lock must still be delivered")
+	require.Empty(t, queuedRefs(t, repo))
+}
+
+// A ref whose unscanned history is over the bootstrap limit is refused by the
+// rewrite, so the worker does not spend model time on it.
+func TestRunOPFScan_SkipsRefsOverTheBootstrapLimit(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, _ := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
+	t.Setenv("ENTIRE_OPF_BOOTSTRAP_LIMIT", "1")
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+	swapOPFScanSpawn(t)
+
+	require.NoError(t, RunOPFScan(t.Context(), "origin"))
+	require.Zero(t, fake.batchCallCount(), "an over-limit ref must not reach the model")
 }
 
 // A worker already running owns the work: a second one must leave it alone

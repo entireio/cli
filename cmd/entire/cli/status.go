@@ -691,10 +691,9 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 	}
 }
 
-// formatPendingOPFLine phrases the pending-redaction counter: checkpoints held
-// until the background OPF scan covers them. The scan worker delivers them
-// when it finishes, so this is informational: the count going down on its own
-// is the normal case.
+// formatPendingOPFLine phrases the pending-redaction counter: unpushed
+// checkpoints that do not carry the OPF trailer yet. It does not claim a scan
+// is running: none is until a push resolves OPFRun and holds them.
 //
 // It deliberately says nothing about whether these checkpoints can be pushed.
 // That depends on the OPF decision resolved at push time, and a user who
@@ -705,7 +704,7 @@ func formatPendingOPFLine(pending int) string {
 	if pending == 1 {
 		noun = nounCheckpoint
 	}
-	return fmt.Sprintf("%d %s pending OpenAI Privacy Filter redaction (runs in the background)", pending, noun)
+	return fmt.Sprintf("%d %s pending OpenAI Privacy Filter redaction", pending, noun)
 }
 
 // formatUnpushedCheckpointsLine phrases the unpushed counter. Dedicated URL

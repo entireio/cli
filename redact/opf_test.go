@@ -27,6 +27,8 @@ type fakeRuntime struct {
 	err        error
 	calls      int
 	batchCalls int
+	// failFromBatch, when set, fails that RedactBatch call and every later one.
+	failFromBatch int
 }
 
 func (f *fakeRuntime) Redact(_ context.Context, _ string, _ []string) ([]Span, error) {
@@ -42,6 +44,9 @@ func (f *fakeRuntime) RedactBatch(_ context.Context, inputs []string, _ []string
 	f.batchCalls++
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.failFromBatch > 0 && f.batchCalls >= f.failFromBatch {
+		return nil, errors.New("opf killed mid-scan")
 	}
 	out := make([][]Span, len(inputs))
 	for i := range inputs {

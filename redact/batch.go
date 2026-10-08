@@ -159,6 +159,10 @@ func scanProseLeaves(ctx context.Context, cfg *OPFConfig, cats []string, leaves 
 // adaptive deadline, and the ~6s model load it adds is under 1% of that.
 const opfBatchChunkBytes = 1024 * 1024
 
+// OPFBatchChunkBytes is opfBatchChunkBytes for callers that pace work by model
+// call, such as the background scan worker.
+const OPFBatchChunkBytes = opfBatchChunkBytes
+
 // chunkOPFBatchInputs splits inputs, in order, into consecutive groups whose
 // joined length (each input plus its separator) stays within limit. An input
 // larger than limit on its own gets a group of its own rather than being

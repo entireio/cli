@@ -516,7 +516,11 @@ func readV1Tip(repo *git.Repository, refName plumbing.ReferenceName) (plumbing.H
 // opfRewriteFetchTmpRef is the temp ref used to stage the URL-fetched
 // remote v1 tip during OPF rewrite. Cleaned up at the end of each
 // resolveRemoteV1Tip call so the tracking is invisible to the user.
-const opfRewriteFetchTmpRef = FetchTmpRefPrefix + "opf-rewrite-v1"
+//
+// It is per process: the scan worker's delivery and a user's push can resolve
+// the remote tip at the same time, and a shared name let one delete the ref
+// while the other read it, which reads as "remote has no v1" (a bootstrap).
+var opfRewriteFetchTmpRef = FetchTmpRefPrefix + "opf-rewrite-v1-" + strconv.Itoa(os.Getpid()) //nolint:gochecknoglobals // fixed per process
 
 // resolveRemoteV1Tip returns the hash of the remote's
 // entire/checkpoints/v1 tip.
