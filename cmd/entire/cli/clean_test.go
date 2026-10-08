@@ -985,3 +985,83 @@ func assertContains(t *testing.T, text, want string) {
 		t.Errorf("output missing %q:\n%s", want, text)
 	}
 }
+
+// writeActiveSessionStateFile writes a session state in the ACTIVE phase based
+// on commitHash.
+func writeActiveSessionStateFile(t *testing.T, repoRoot, sessionID string, commitHash plumbing.Hash) string {
+	t.Helper()
+	sessionFile := createSessionStateFile(t, repoRoot, sessionID, commitHash)
+	data, err := json.Marshal(map[string]any{
+		"session_id":  sessionID,
+		"base_commit": commitHash.String(),
+		"phase":       "active",
+		"started_at":  time.Now().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal session state: %v", err)
+	}
+	if err := os.WriteFile(sessionFile, data, 0o600); err != nil {
+		t.Fatalf("failed to write session state file: %v", err)
+	}
+	return sessionFile
+}
+
+// An ACTIVE session refuses a plain clean, and the refusal lists what --force
+// would delete, including the doctor route for the legacy branches alone.
+func TestCleanCmd_DefaultMode_ActiveRefusalListsItems(t *testing.T) {
+	repo, commitHash := setupCleanTestRepo(t)
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	shadowBranch := legacyShadowBranchName(commitHash)
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)); err != nil {
+		t.Fatalf("failed to create shadow branch: %v", err)
+	}
+	sessionFile := writeActiveSessionStateFile(t, wt.Filesystem().Root(), "2026-10-08-active", commitHash)
+
+	cmd := newCleanCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("clean command error = %v", err)
+	}
+
+	out := stderr.String()
+	for _, want := range []string{"Active sessions detected", "Cleaning would delete:", "2026-10-08-active", shadowBranch, "entire clean --force", "entire doctor --force"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal output missing %q:\n%s", want, out)
+		}
+	}
+	if _, err := os.Stat(sessionFile); err != nil {
+		t.Errorf("refused clean must keep the session state: %v", err)
+	}
+}
+
+// --force deletes without a prompt but still lists what it deletes.
+func TestCleanCmd_DefaultMode_ForceListsItems(t *testing.T) {
+	repo, commitHash := setupCleanTestRepo(t)
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	sessionFile := writeActiveSessionStateFile(t, wt.Filesystem().Root(), "2026-10-08-forced", commitHash)
+
+	cmd := newCleanCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--force"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("clean command error = %v", err)
+	}
+
+	if out := stdout.String(); !strings.Contains(out, "This will delete:") || !strings.Contains(out, "2026-10-08-forced") {
+		t.Errorf("--force output should list the deleted session:\n%s", out)
+	}
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Error("session state file should be deleted")
+	}
+}

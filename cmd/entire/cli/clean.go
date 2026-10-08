@@ -99,39 +99,48 @@ func runCleanCurrentHead(ctx context.Context, cmd *cobra.Command, force, dryRun 
 		return previewCurrentHead(ctx, w)
 	}
 
+	// List exactly what will be deleted: the sessions based on HEAD (whose
+	// state is the only record of their pending agent work) and every
+	// strict-shape legacy shadow branch in the repository. The same listing
+	// backs the confirmation prompt, the active-session refusal, and --force.
+	sessions, legacyBranches, listErr := currentHeadCleanItems(ctx)
+	if listErr != nil {
+		return listErr
+	}
+	if len(sessions) == 0 && len(legacyBranches) == 0 {
+		fmt.Fprintln(w, "Nothing to clean for current HEAD.")
+		return nil
+	}
+
 	// Check for active sessions before cleaning
 	if !force {
+		errW := cmd.ErrOrStderr()
 		activeSessions, err := activeSessionsOnCurrentHead(ctx)
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not check for active sessions: %v\n", err)
-			fmt.Fprintln(cmd.ErrOrStderr(), "Use --force to override.")
+			fmt.Fprintf(errW, "Warning: could not check for active sessions: %v\n", err)
+			fmt.Fprint(errW, "Cleaning would delete:\n\n")
+			printCurrentHeadCleanItems(errW, sessions, legacyBranches)
+			printCleanForceHint(errW)
 			return nil
 		}
 		if len(activeSessions) > 0 {
-			fmt.Fprintln(cmd.ErrOrStderr(), "Active sessions detected on current HEAD:")
+			fmt.Fprintln(errW, "Active sessions detected on current HEAD:")
 			for _, s := range activeSessions {
-				fmt.Fprintf(cmd.ErrOrStderr(), "  %s (phase: %s)\n", s.SessionID, s.Phase)
+				fmt.Fprintf(errW, "  %s (phase: %s)\n", s.SessionID, s.Phase)
 			}
-			fmt.Fprintln(cmd.ErrOrStderr(), "Use --force to override or wait for sessions to finish.")
+			fmt.Fprint(errW, "\nCleaning would delete:\n\n")
+			printCurrentHeadCleanItems(errW, sessions, legacyBranches)
+			fmt.Fprintln(errW, "Wait for the sessions to finish, or override:")
+			printCleanForceHint(errW)
 			return nil
 		}
 	}
 
-	// Prompt for confirmation, listing exactly what will be deleted: the
-	// sessions based on HEAD (whose state is the only record of their pending
-	// agent work) and every strict-shape legacy shadow branch in the repository.
-	if !force {
-		sessions, legacyBranches, listErr := currentHeadCleanItems(ctx)
-		if listErr != nil {
-			return listErr
-		}
-		if len(sessions) == 0 && len(legacyBranches) == 0 {
-			fmt.Fprintln(w, "Nothing to clean for current HEAD.")
-			return nil
-		}
-		fmt.Fprint(w, "This will delete:\n\n")
-		printCurrentHeadCleanItems(w, sessions, legacyBranches)
+	fmt.Fprint(w, "This will delete:\n\n")
+	printCurrentHeadCleanItems(w, sessions, legacyBranches)
 
+	// Prompt for confirmation; --force skips it but still lists the items.
+	if !force {
 		var confirmed bool
 
 		form := NewAccessibleForm(
@@ -232,6 +241,13 @@ func printCurrentHeadCleanItems(w io.Writer, sessions []*strategy.SessionState, 
 		fmt.Fprintln(w, "  To delete only these branches and keep session state, run `entire doctor --force`.")
 		fmt.Fprintln(w)
 	}
+}
+
+// printCleanForceHint tells a refused `entire clean` how to override. The
+// listing above it already names `entire doctor --force` for deleting only the
+// legacy shadow branches.
+func printCleanForceHint(w io.Writer) {
+	fmt.Fprintln(w, "  `entire clean --force` deletes everything listed above.")
 }
 
 // runCleanSession handles the --session flag: clean/reset a single session.
