@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -421,8 +422,9 @@ const (
 	// version writes.
 	GitHooksCurrent
 	// GitHooksOutdated means the hooks are ours but at least one is a shape we no
-	// longer write. Today that means running Entire from the working tree, which
-	// is broken as well as stale — the path it names is gone.
+	// longer write: one running Entire from the working tree, which is broken as
+	// well as stale — the path it names is gone — or one calling its backup in
+	// the wrong form, which for a Husky wrapper silently skips Husky's hook.
 	GitHooksOutdated
 )
 
@@ -522,7 +524,7 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 		if !strings.Contains(content, entireHookMarker) {
 			return GitHooksAbsent
 		}
-		if entireHookLineRunsFromWorkingTree(content) {
+		if entireHookLineRunsFromWorkingTree(content) || chainFormIsStale(root, hook, content) {
 			outdated = true
 		}
 	}
@@ -554,6 +556,38 @@ func entireHookLineRunsFromWorkingTree(content string) bool {
 		}
 	}
 	return false
+}
+
+// chainFormIsStale reports whether content is exactly the chained hook Entire
+// generates, but calling its backup in the other form than chainFormFor now
+// picks: executing a Husky wrapper, as earlier versions did, or sourcing a
+// backup that is no longer one.
+//
+// Whole-file equality, for the reason entireHookLineRunsFromWorkingTree is
+// scoped to one line: an Outdated hook is rewritten without a backup, so a
+// hand-edited hook must never match. Both command prefixes this build installs
+// are tried; a hook naming some other binary is left alone.
+func chainFormIsStale(root *os.Root, hook, content string) bool {
+	if !strings.Contains(content, chainComment) {
+		return false
+	}
+	stale := chainSourceHusky
+	if chainFormFor(root, hook) == chainSourceHusky {
+		stale = chainExec
+	}
+	matches := func(prefix string) bool {
+		for _, spec := range buildHookSpecs(prefix) {
+			if spec.name == hook {
+				return content == generateChainedContent(spec.content, hook, stale)
+			}
+		}
+		return false
+	}
+	if matches(bareEntireHookCmd) {
+		return true
+	}
+	absolute, err := hookCmdPrefix(true)
+	return err == nil && matches(absolute)
 }
 
 // buildHookSpecs returns the hook specifications for all managed hooks.
@@ -757,7 +791,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 		// Chain to backup if one exists
 		content := spec.content
 		if backupExists {
-			content = generateChainedContent(spec.content, spec.name)
+			content = generateChainedContent(spec.content, spec.name, chainFormFor(root, spec.name))
 		}
 
 		written, err := writeHookFile(root, spec.name, content)
@@ -888,22 +922,152 @@ func RemoveGitHookDetailed(ctx context.Context) (GitHookRemoval, error) {
 	return res, nil
 }
 
+// chainForm is how a generated hook calls the pre-existing hook it backed up.
+type chainForm int
+
+const (
+	// chainExec runs the backup as its own program.
+	chainExec chainForm = iota
+	// chainSourceHusky sources a Husky v9 wrapper in a subshell; see chainCall.
+	chainSourceHusky
+)
+
+// ChainedHookEnvVar is set to "<hook>:<hooks dir>" while Entire's generated
+// hook runs the Husky wrapper it chains. `entire hooks git <hook>` exits at once
+// when the marker names its own hook and hooks directory (ChainedHookAlreadyRan):
+// Entire already ran it, and the user's .husky/<hook> may call it again as
+// Entire's Husky warning suggests.
+const ChainedHookEnvVar = "ENTIRE_CHAINED_HOOK"
+
+// ChainedHookAlreadyRan reports whether marker, the value of ChainedHookEnvVar,
+// says Entire's generated hook for hook in the hooks directory of the repo at
+// dir already ran it.
+//
+// The directory is what keeps the marker from leaking: a git operation the
+// user's hook runs in another Entire repo inherits it, and a plain Entire hook
+// there never clears it, so a hook name alone would skip Entire's pre-push
+// (checkpoints and privacy filter included) in that repo. Any doubt, including
+// a failure to resolve either directory, runs Entire: twice is harmless, never
+// is not.
+func ChainedHookAlreadyRan(ctx context.Context, marker, hook, dir string) bool {
+	markedDir, ok := strings.CutPrefix(marker, hook+":")
+	if !ok || markedDir == "" {
+		return false
+	}
+	hooksDir, err := getHooksDirInPath(ctx, dir)
+	if err != nil {
+		return false
+	}
+	marked, err := os.Stat(markedDir)
+	if err != nil {
+		return false
+	}
+	own, err := os.Stat(hooksDir)
+	if err != nil {
+		return false
+	}
+	// SameFile, not a path comparison: the shell resolves symlinks with pwd -P
+	// and Windows paths with pwd -W, and case-insensitive filesystems differ again.
+	return os.SameFile(marked, own)
+}
+
+// huskyV9Wrappers are the whole files Husky v9 writes at .husky/_/<hook>: the
+// first in 9.0.1–9.1.0, the second in 9.1.1–9.1.7. Husky writes them with no
+// trailing newline; one is tolerated.
+var huskyV9Wrappers = []string{
+	"#!/usr/bin/env sh\n. \"${0%/*}/h\"",
+	"#!/usr/bin/env sh\n. \"$(dirname \"$0\")/h\"",
+}
+
+// maxHuskyV9WrapperSize bounds the read: a wrapper is under 50 bytes.
+const maxHuskyV9WrapperSize = 64
+
+// isHuskyV9Wrapper reports whether name in root is exactly a Husky v9 wrapper.
+// Install and state classification both decide the chain form with it, so they
+// cannot disagree about a hook.
+func isHuskyV9Wrapper(root *os.Root, name string) bool {
+	info, err := root.Lstat(name)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxHuskyV9WrapperSize {
+		return false
+	}
+	data, err := osroot.ReadFileNoFollow(root, name)
+	if err != nil {
+		return false
+	}
+	content := strings.TrimSuffix(string(data), "\n")
+	return slices.Contains(huskyV9Wrappers, content)
+}
+
+// chainFormFor decides how hookName calls its backup in root.
+func chainFormFor(root *os.Root, hookName string) chainForm {
+	if isHuskyV9Wrapper(root, hookName+backupSuffix) {
+		return chainSourceHusky
+	}
+	return chainExec
+}
+
+// chainCall returns the line that calls hookName's backup.
+//
+// Any backup but a Husky v9 wrapper is executed: it may be bash, python or a
+// binary, and sourcing it into this /bin/sh script would break it.
+//
+// A Husky v9 wrapper must be sourced instead. It sources .husky/_/h, which
+// finds the user's hook as .husky/$(basename "$0") and exits 0 when that file
+// does not exist. Executed, $0 is the backup's own path, so h looks for
+// .husky/<hook>.pre-entire and every Husky hook silently stops running.
+// Sourced, $0 stays this hook's path, .husky/_/<hook>. (Under native zsh $0
+// would change on sourcing; irrelevant, this file's shebang is /bin/sh.)
+//
+// The subshell contains what h does to the shell: its exit, set -x, PATH
+// change, and in 9.1.0–9.1.2 its set -e and EXIT trap, which would otherwise
+// replace post-rewrite's cleanup trap. Its status is h's, so a failing Husky
+// hook still fails the git operation. `.` gets no arguments (not portable);
+// the sourced file sees this hook's "$@".
+//
+// The marker's directory is resolved the way ChainedHookAlreadyRan compares it.
+// CDPATH is cleared because cd prints the directory it finds through CDPATH,
+// which would land in the marker. pwd -W is Git for Windows' sh, whose pwd -P
+// answers /c/...; elsewhere it fails silently and pwd -P answers.
+func chainCall(hookName string, form chainForm) string {
+	backup := fmt.Sprintf(`"$_entire_hook_dir/%s%s"`, hookName, backupSuffix)
+	call := backup + ` "$@"`
+	if form == chainSourceHusky {
+		call = fmt.Sprintf(`( %s="%s:$(CDPATH= cd -- "$_entire_hook_dir" && { pwd -W 2>/dev/null || pwd -P; })"; export %s; . %s )`,
+			ChainedHookEnvVar, hookName, ChainedHookEnvVar, backup)
+	}
+	if hookName == postRewriteHook {
+		call += ` < "$_entire_stdin"`
+	}
+	return call
+}
+
 // generateChainedContent appends a chain call to the base hook content,
 // so the pre-existing hook (backed up to .pre-entire) is called after our hook.
-func generateChainedContent(baseContent, hookName string) string {
+func generateChainedContent(baseContent, hookName string, form chainForm) string {
+	content := generateChainedHook(baseContent, hookName, form)
+	if form == chainSourceHusky {
+		// The marker is for the user's own `entire hooks git <hook>` inside the
+		// sourced wrapper. A nested hook (a pre-push script running `git push`)
+		// inherits it, so clear it before Entire's call here.
+		content = strings.Replace(content, "#!/bin/sh\n", "#!/bin/sh\nunset "+ChainedHookEnvVar+"\n", 1)
+	}
+	return content
+}
+
+func generateChainedHook(baseContent, hookName string, form chainForm) string {
 	if hookName == postRewriteHook {
-		return generatePostRewriteChainedContent(baseContent)
+		return generatePostRewriteChainedContent(baseContent, form)
 	}
 
 	return baseContent + fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/%s%s" ]; then
-    "$_entire_hook_dir/%s%s" "$@"
+    %s
 fi
-`, chainComment, hookName, backupSuffix, hookName, backupSuffix)
+`, chainComment, hookName, backupSuffix, chainCall(hookName, form))
 }
 
-func generatePostRewriteChainedContent(baseContent string) string {
+func generatePostRewriteChainedContent(baseContent string, form chainForm) string {
 	const original = `hooks git post-rewrite "$1" 2>/dev/null || true`
 	const replacement = `hooks git post-rewrite "$1" < "$_entire_stdin" 2>/dev/null || true`
 
@@ -920,9 +1084,9 @@ trap 'rm -f "$_entire_stdin"' EXIT
 %s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then
-    "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
+    %s
 fi
-`, chainComment, backupSuffix, backupSuffix)
+`, chainComment, backupSuffix, chainCall(postRewriteHook, form))
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.
