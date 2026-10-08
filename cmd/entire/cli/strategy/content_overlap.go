@@ -447,6 +447,16 @@ func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map
 		}
 		return true, nil
 	case !wasCommitted:
+		// A hashed file absent from both the worktree and the commit tree was
+		// an untracked file the agent created and then removed (git status
+		// reports no deletion for it); nothing of it is left to carry
+		// forward. See untrackedDeletionCandidates for the `git stash -u`
+		// trade-off.
+		if c.worktreeState(filePath) == worktreeEntryAbsent && !c.inCommit(filePath) {
+			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: untracked file removed from the worktree, skipping",
+				slog.String("file", filePath))
+			return false, nil
+		}
 		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
 			slog.String("file", filePath))
 		return true, nil

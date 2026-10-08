@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
+	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -228,4 +229,104 @@ func TestSaveStep_PhantomOnlyStepIsSkipped(t *testing.T) {
 	assert.Zero(t, state.StepCount)
 	assert.Empty(t, state.FilesTouched)
 	assert.False(t, state.HasPendingWork())
+}
+
+// saveTestStep records a turn-end step for sessionID with the given new files.
+func saveTestStep(t *testing.T, s *ManualCommitStrategy, dir, sessionID string, newFiles ...string) {
+	t.Helper()
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644))
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		NewFiles:      newFiles,
+		MetadataDir:   metadataDir,
+		CommitMessage: "turn end",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+}
+
+// An untracked file the agent created and later removed with `rm` is reported
+// by no git status, so nothing records its deletion. The next turn-end step
+// records it as a deletion: it no longer counts as pending agent content, and
+// a later, unrelated file the user creates at that path does not link the
+// session by name. Uses t.Chdir — do NOT add t.Parallel().
+func TestSaveStep_RecordsRemovedUntrackedFileAsDeletion(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-10-08-untracked-rm"
+
+	testutil.WriteFile(t, dir, "scratch.txt", "agent scratch\n")
+	saveTestStep(t, s, dir, sessionID, "scratch.txt")
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotEqual(t, touchedFileDeleted, state.TouchedFileHashes["scratch.txt"], "fixture: turn 1 hashed the file")
+
+	// Turn 2: the agent removes scratch.txt with `rm` and writes another file.
+	require.NoError(t, os.Remove(filepath.Join(dir, "scratch.txt")))
+	testutil.WriteFile(t, dir, "other.txt", "other\n")
+	saveTestStep(t, s, dir, sessionID, "other.txt")
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	hash, recorded := state.TouchedFileHashes["scratch.txt"]
+	require.True(t, recorded)
+	assert.Equal(t, touchedFileDeleted, hash, "the removed untracked file is a recorded deletion")
+
+	// Later the user creates their own scratch.txt and stages it: it must not
+	// link the session.
+	testutil.WriteFile(t, dir, "scratch.txt", "the user's own file\n")
+	testutil.GitAdd(t, dir, "scratch.txt")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	assert.False(t, stagedFilesOverlapWithContent(context.Background(), repo, state.TouchedFileHashes,
+		[]string{"scratch.txt"}, state.FilesTouched))
+}
+
+// A turn whose only effect is removing such a file saves no step (git sees no
+// change), so turn end records it through RecordVanishedUntrackedFiles; a file
+// tracked in HEAD is left alone. Uses t.Chdir — do NOT add t.Parallel().
+func TestRecordVanishedUntrackedFiles(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-10-08-untracked-rm-only"
+
+	testutil.WriteFile(t, dir, "scratch.txt", "agent scratch\n")
+	testutil.WriteFile(t, dir, "test.txt", "agent edit of a tracked file\n")
+	saveTestStep(t, s, dir, sessionID, "scratch.txt", "test.txt")
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "scratch.txt")))
+	require.NoError(t, os.Remove(filepath.Join(dir, "test.txt")))
+	require.NoError(t, s.RecordVanishedUntrackedFiles(context.Background(), sessionID))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, touchedFileDeleted, state.TouchedFileHashes["scratch.txt"])
+	assert.NotEqual(t, touchedFileDeleted, state.TouchedFileHashes["test.txt"],
+		"a tracked file's deletion is git status's to report, not this check's")
+}
+
+// A hashed, uncommitted file absent from both the worktree and the commit tree
+// is an untracked file the agent removed; carry-forward drops it instead of
+// re-arming the session for it after every commit.
+func TestFilesWithRemainingAgentChanges_RemovedUntrackedFileDropped(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	testutil.WriteFile(t, dir, "other.txt", "other\n")
+	testutil.GitAdd(t, dir, "other.txt")
+	testutil.GitCommit(t, dir, "commit other")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+
+	hashes := map[string]string{"scratch.txt": "1111111111111111111111111111111111111111"}
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"scratch.txt", "other.txt"}, map[string]struct{}{"other.txt": {}})
+	assert.Empty(t, remaining)
 }

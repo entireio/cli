@@ -301,9 +301,10 @@ func TestFilesWithRemainingAgentChanges_FileNotCommitted(t *testing.T) {
 		"fileB.txt": []byte("content B"),
 	})
 
-	// Only commit fileA
+	// The agent wrote both files; only fileA is committed.
 	fileA := filepath.Join(dir, "fileA.txt")
 	require.NoError(t, os.WriteFile(fileA, []byte("content A"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "fileB.txt"), []byte("content B"), 0o644))
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
 	_, err = wt.Add("fileA.txt")

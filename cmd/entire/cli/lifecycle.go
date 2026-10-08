@@ -1011,6 +1011,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
+		// A turn that only removed an untracked file the agent created
+		// earlier changes nothing git can see; record that deletion anyway.
+		if recErr := GetStrategy(ctx).RecordVanishedUntrackedFiles(ctx, sessionID); recErr != nil {
+			logging.Warn(logCtx, "failed to record removed untracked files",
+				slog.String("error", recErr.Error()))
+		}
 		recordCaptureDegraded(ctx, sessionID, captureDegraded)
 		// SaveStep is skipped, but out-of-band token usage must still be
 		// recorded: an Antigravity turn that commits ALL its work mid-turn

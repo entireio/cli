@@ -56,6 +56,10 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	_, hashSpan := perf.Start(ctx, "hash_touched_files")
 	stepFileHashes := hashTouchedFiles(ctx, worktreeRoot, changedFiles)
 	hashSpan.End()
+	// Untracked files the agent created in an earlier turn and has since
+	// removed: git status reports no deletion for them (see
+	// untrackedDeletionCandidates). Resolved outside the lock like hashing.
+	untrackedGone := s.untrackedDeletionCandidates(ctx, worktreeRoot, sessionID, changedFiles, step.DeletedFiles)
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		invalidateStaleSubagentSnapshot(&step, state)
@@ -85,6 +89,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		state.StepCount++
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
 		applyTouchedFileHashes(state, changedFiles, stepFileHashes, step.DeletedFiles)
+		recordUntrackedDeletions(worktreeRoot, state, untrackedGone)
 		dropPhantomFilesTouched(worktreeRoot, state, changedFiles)
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier

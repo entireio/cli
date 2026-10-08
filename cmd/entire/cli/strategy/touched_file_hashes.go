@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"maps"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -196,6 +198,123 @@ func dropPhantomFilesTouched(worktreeRoot string, state *SessionState, stepPaths
 	}
 	state.FilesTouched = kept
 	pruneTouchedFileHashes(state)
+}
+
+// untrackedDeletionCandidates returns the paths this session recorded a hash
+// for in an earlier turn that are now absent from both the worktree and HEAD.
+// Such a path was an untracked file the agent created and later removed: git
+// status reports no deletion for an untracked file, so no turn-end step
+// recorded one, and left alone the hashed path would stay pending forever and
+// let a later, unrelated file the user creates at that path link the session
+// by name. recordUntrackedDeletions records them as deletions instead, which
+// extends the recorded-deletion exception to untracked deletions: the next
+// commit's carry-forward drops them, and a new file at the path does not link.
+//
+// Trade-off: a file moved out of the worktree with `git stash -u` (or by hand)
+// between turns looks the same. Restored and committed later, it no longer
+// links by name unless the agent touches it again, which records a fresh hash.
+// The alternative, keeping every vanished hashed path, is the unbounded
+// mis-linking window this closes.
+//
+// Paths the current step names (changed or deleted) are left to the step.
+// Reads session state without the lock; recordUntrackedDeletions re-checks
+// under it. Any error yields no candidates.
+func (s *ManualCommitStrategy) untrackedDeletionCandidates(ctx context.Context, worktreeRoot, sessionID string, stepChanged, stepDeleted []string) []string {
+	state, err := s.loadSessionState(ctx, sessionID)
+	if err != nil || state == nil || len(state.TouchedFileHashes) == 0 {
+		return nil
+	}
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return nil
+	}
+	inStep := make(map[string]struct{}, len(stepChanged)+len(stepDeleted))
+	for _, path := range stepChanged {
+		inStep[filepath.ToSlash(path)] = struct{}{}
+	}
+	for _, path := range stepDeleted {
+		inStep[filepath.ToSlash(path)] = struct{}{}
+	}
+	var absent []string
+	for path, hash := range state.TouchedFileHashes {
+		if hash == touchedFileDeleted {
+			continue
+		}
+		if _, ok := inStep[path]; ok {
+			continue
+		}
+		if probeWorktreeEntry(root, worktreeRoot, path) == worktreeEntryAbsent {
+			absent = append(absent, path)
+		}
+	}
+	if len(absent) == 0 {
+		return nil
+	}
+	slices.Sort(absent)
+	inHead, err := gitrepo.PathsInHEAD(ctx, worktreeRoot, absent)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "could not check HEAD for vanished touched files; leaving them",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	candidates := absent[:0]
+	for _, path := range absent {
+		if _, tracked := inHead[path]; !tracked {
+			candidates = append(candidates, path)
+		}
+	}
+	return candidates
+}
+
+// RecordVanishedUntrackedFiles records, for a turn end that saves no step (no
+// file changes git can see), the untracked files this session created earlier
+// and has since removed; see untrackedDeletionCandidates. A turn whose only
+// effect is `rm` of such a file is exactly that case. No-op when the session
+// has no state.
+func (s *ManualCommitStrategy) RecordVanishedUntrackedFiles(ctx context.Context, sessionID string) error {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get worktree root: %w", err)
+	}
+	candidates := s.untrackedDeletionCandidates(ctx, worktreeRoot, sessionID, nil, nil)
+	if len(candidates) == 0 {
+		return nil
+	}
+	err = MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		before := maps.Clone(state.TouchedFileHashes)
+		recordUntrackedDeletions(worktreeRoot, state, candidates)
+		if maps.Equal(before, state.TouchedFileHashes) {
+			return ErrMutationSkip
+		}
+		return nil
+	})
+	if errors.Is(err, ErrStateNotFound) {
+		return nil
+	}
+	return err
+}
+
+// recordUntrackedDeletions marks each candidate from
+// untrackedDeletionCandidates as a recorded deletion, re-checking under the
+// session lock that it still has a recorded content hash and is still absent
+// from the worktree.
+func recordUntrackedDeletions(worktreeRoot string, state *SessionState, candidates []string) {
+	if len(candidates) == 0 || len(state.TouchedFileHashes) == 0 {
+		return
+	}
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return
+	}
+	for _, path := range candidates {
+		hash, ok := state.TouchedFileHashes[path]
+		if !ok || hash == touchedFileDeleted {
+			continue
+		}
+		if probeWorktreeEntry(root, worktreeRoot, path) == worktreeEntryAbsent {
+			state.TouchedFileHashes[path] = touchedFileDeleted
+		}
+	}
 }
 
 // stepHasWork reports whether a turn-end step records anything: a deletion,
