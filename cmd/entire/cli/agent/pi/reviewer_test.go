@@ -244,3 +244,51 @@ func TestPiReviewer_ParseSurfacesProviderError(t *testing.T) {
 		t.Fatalf("Finished = %+v, want a failure", finished)
 	}
 }
+
+// Pi auto-retries errors such as "overloaded". A run that recovers must not
+// report the attempt that failed.
+func TestPiReviewer_ParseRecoveredRetryIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	const failed = `{"role":"assistant","content":[],"stopReason":"error","errorMessage":"overloaded"}`
+	const ok = `{"role":"assistant","content":[{"type":"text","text":"approve"}],"stopReason":"stop"}`
+	input := `{"type":"agent_start"}` + "\n" +
+		`{"type":"message_end","message":` + failed + `}` + "\n" +
+		`{"type":"turn_end","message":` + failed + `}` + "\n" +
+		`{"type":"agent_end","willRetry":true}` + "\n" +
+		`{"type":"auto_retry_start"}` + "\n" +
+		`{"type":"message_end","message":` + ok + `}` + "\n" +
+		`{"type":"turn_end","message":` + ok + `}` + "\n" +
+		`{"type":"agent_end"}` + "\n"
+
+	finishes := 0
+	for _, ev := range collectPiReviewEvents(input) {
+		switch e := ev.(type) {
+		case reviewtypes.RunError:
+			t.Fatalf("recovered retry reported an error: %v", e.Err)
+		case reviewtypes.Finished:
+			finishes++
+			if !e.Success {
+				t.Fatal("recovered retry reported as failed")
+			}
+		}
+	}
+	if finishes != 1 {
+		t.Fatalf("Finished emitted %d times, want once", finishes)
+	}
+}
+
+// A failure without an errorMessage still says why the review failed.
+func TestPiReviewer_ParseErrorWithoutMessage(t *testing.T) {
+	t.Parallel()
+	const failed = `{"role":"assistant","content":[],"stopReason":"aborted"}`
+	input := `{"type":"message_end","message":` + failed + `}` + "\n" + `{"type":"agent_end"}` + "\n"
+	var errs []string
+	for _, ev := range collectPiReviewEvents(input) {
+		if e, ok := ev.(reviewtypes.RunError); ok {
+			errs = append(errs, e.Err.Error())
+		}
+	}
+	if len(errs) != 1 || errs[0] != "pi: stopped with aborted" {
+		t.Fatalf("RunErrors = %q, want the stop reason", errs)
+	}
+}
