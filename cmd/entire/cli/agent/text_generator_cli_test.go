@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -255,5 +258,68 @@ func TestRunIsolatedTextGeneratorCLI_EnvironmentOverrides(t *testing.T) {
 	}
 	if !strings.Contains(out, "ENTIRE_GENERATION_PROBE=last") || strings.Contains(out, "ENTIRE_GENERATION_PROBE=first") || strings.Contains(out, "GIT_DIR=") {
 		t.Fatalf("overrides not applied or Git environment leaked: %q", out)
+	}
+}
+
+// The prompt carries untrusted transcript content and the agent CLIs let
+// their file tools reach the working directory without approval, so each run
+// gets a fresh empty directory, never the shared system temp dir, and the
+// directory is gone afterwards.
+func TestRunIsolatedTextGeneratorCLI_RunsInFreshEmptyDir(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsOS {
+		t.Skip("uses sh")
+	}
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", `pwd -P; ls -A`)
+	}
+	out, _, _, err := RunIsolatedTextGeneratorCLI(context.Background(), runner, "test", "test-agent", nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	lines := strings.Split(out, "\n")
+	dir := lines[0]
+	sharedTemp, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(dir) == filepath.Clean(sharedTemp) {
+		t.Fatalf("ran in the shared temp dir %q", dir)
+	}
+	if len(lines) > 1 {
+		t.Errorf("working dir %q is not empty: %q", dir, lines[1:])
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("working dir %q still exists after the run (stat err = %v)", dir, err)
+	}
+}
+
+// The caller's working directory is usually the repository, and a shell
+// exports it as PWD. exec.Cmd does not rewrite PWD for an explicit Env, so
+// without TextGenerationEnv the generator would be told where the repository
+// is even though it runs elsewhere. env reports the environment it received
+// without normalizing PWD, as a shell would.
+func TestRunIsolatedTextGeneratorCLI_DoesNotLeakTheCallersDirectory(t *testing.T) {
+	t.Setenv("PWD", "/repo/must-not-leak")
+	t.Setenv("OLDPWD", "/repo/must-not-leak-either")
+	t.Setenv("git_dir", "/repo/.git") // Windows names are case-insensitive
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return exec.CommandContext(ctx, "env") }
+	dir, cleanup, err := NewTextGenerationDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	out, _, _, err := RunIsolatedTextGeneratorCLIIn(t.Context(), runner, dir, "test", "test", nil, "")
+	if err != nil {
+		t.Fatalf("RunIsolatedTextGeneratorCLIIn: %v", err)
+	}
+	// Report only the offending entries: the rest is the test's environment.
+	for _, kv := range strings.Split(out, "\n") {
+		if strings.Contains(kv, "/repo/") {
+			t.Errorf("generator environment names the caller's directory: %s", kv)
+		}
+	}
+	if !slices.Contains(strings.Split(out, "\n"), "PWD="+dir) {
+		t.Errorf("PWD is not the generation directory %q", dir)
 	}
 }

@@ -42,6 +42,11 @@
 // default — so a server that does not send them yet must not fail the whole
 // request.
 //
+// Transform 2c (read-model fields sent as null): wrap selected $ref fields in
+// anyOf [$ref, null] (see readModelNullableFields). The server sends JSON null
+// for an absent object the spec types as the object alone, and ogen's
+// decoder then rejects the whole response.
+//
 // Transform 3 (unsupported security schemes): drop the interactive login
 // schemes (oauth2, oidc) the spec lists on every operation. The CLI never
 // drives them through the generated client, and ogen has no generator for
@@ -97,6 +102,7 @@ func run() error {
 	ops := foldErrorResponses(doc)
 	loosened := loosenReadModelEnums(doc)
 	optional := loosenReadModelRequired(doc)
+	nullable := allowReadModelNulls(doc)
 	schemes, err := dropInteractiveSecurity(doc)
 	if err != nil {
 		return err
@@ -113,7 +119,7 @@ func run() error {
 		return fmt.Errorf("write spec: %w", err)
 	}
 
-	fmt.Printf("normalize: folded error responses on %d operation(s), loosened %d read-model enum field(s), made %d read-model field(s) optional, dropped %d interactive security scheme(s) → %s\n", ops, loosened, optional, schemes, outPath)
+	fmt.Printf("normalize: folded error responses on %d operation(s), loosened %d read-model enum field(s), made %d read-model field(s) optional, made %d read-model field(s) nullable, dropped %d interactive security scheme(s) → %s\n", ops, loosened, optional, nullable, schemes, outPath)
 	return nil
 }
 
@@ -237,15 +243,19 @@ func filterSecurityRequirements(reqs []any) ([]any, error) {
 // SetRepoVisibilityInputBody) keep their enums so we still reject a bad
 // value before sending it.
 var readModelEnumFields = map[string][]string{
-	"CreatedRepo":       {"objectFormat", "provider", "state", "visibility"},
-	"Invitation":        {"role", "status"},
-	"Membership":        {"role", "status"},
-	"OrgMemberListItem": {"role", "status"},
-	"Repo":              {"objectFormat", "provider", "state", "visibility"},
-	"RepoIDResolution":  {"provider"},
-	"RepoIndexEntry":    {"permission", "provider"},
-	"RepoReference":     {"provider"},
-	"RepoResolution":    {"provider"},
+	"CreatedRepo":        {"objectFormat", "provider", "state", "visibility"},
+	"DetachAccessEntry":  {"source", "subjectType"},
+	"DetachPrecondition": {"precondition"},
+	"DetachRepoResult":   {"status"},
+	"Invitation":         {"role", "status"},
+	"Membership":         {"role", "status"},
+	"OrgMemberListItem":  {"role", "status"},
+	"Repo":               {"objectFormat", "provider", "state", "visibility"},
+	"RepoDetachState":    {"status"},
+	"RepoIDResolution":   {"provider"},
+	"RepoIndexEntry":     {"permission", "provider"},
+	"RepoReference":      {"provider"},
+	"RepoResolution":     {"provider"},
 }
 
 // readModelOptionalFields lists response read-model fields the spec marks
@@ -270,17 +280,43 @@ var readModelOptionalFields = map[string][]string{
 	"RepoIndexEntry":      {"org", "provider"},
 }
 
+// readModelNullableFields lists response read-model $ref fields the server
+// sends as JSON null, keyed by component schema name.
+//
+// ResourcePerson.directGrant is null for anyone without a direct grant (every
+// GitHub-synced collaborator), so without this no repo or project people
+// listing decodes; `repo mirror detach` reads one to name the accounts it
+// shows.
+var readModelNullableFields = map[string][]string{
+	"ResourcePerson": {"directGrant"},
+}
+
+// allowReadModelNulls rewrites each field named in readModelNullableFields
+// from {"$ref": X} to {"anyOf": [{"$ref": X}, {"type": "null"}]}. A field that
+// is already nullable upstream no longer has a bare $ref and is left alone.
+// Returns the number of fields rewritten.
+func allowReadModelNulls(doc map[string]any) int {
+	return forEachListedProperty(doc, readModelNullableFields, func(props map[string]any, field string) bool {
+		prop, ok := props[field].(map[string]any)
+		if !ok {
+			return false
+		}
+		ref, ok := prop["$ref"].(string)
+		if !ok || len(prop) != 1 {
+			return false
+		}
+		props[field] = map[string]any{"anyOf": []any{
+			map[string]any{"$ref": ref},
+			map[string]any{"type": "null"},
+		}}
+		return true
+	})
+}
+
 // loosenReadModelRequired removes each field named in readModelOptionalFields
 // from its schema's "required" list. Returns the number of fields removed.
 func loosenReadModelRequired(doc map[string]any) int {
-	components, ok := doc["components"].(map[string]any)
-	if !ok {
-		return 0
-	}
-	schemas, ok := components["schemas"].(map[string]any)
-	if !ok {
-		return 0
-	}
+	schemas := componentSchemas(doc)
 	count := 0
 	for schemaName, fields := range readModelOptionalFields {
 		schema, ok := schemas[schemaName].(map[string]any)
@@ -312,16 +348,34 @@ func loosenReadModelRequired(doc map[string]any) int {
 // loosened; a missing schema or field is skipped (a spec refresh that renames
 // or removes one simply loosens nothing there).
 func loosenReadModelEnums(doc map[string]any) int {
-	components, ok := doc["components"].(map[string]any)
-	if !ok {
-		return 0
-	}
-	schemas, ok := components["schemas"].(map[string]any)
-	if !ok {
-		return 0
-	}
+	return forEachListedProperty(doc, readModelEnumFields, func(props map[string]any, field string) bool {
+		prop, ok := props[field].(map[string]any)
+		if !ok {
+			return false
+		}
+		if _, had := prop["enum"]; !had {
+			return false
+		}
+		delete(prop, "enum")
+		return true
+	})
+}
+
+// componentSchemas returns doc's components.schemas, or nil when the document
+// has none.
+func componentSchemas(doc map[string]any) map[string]any {
+	components, _ := doc["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+	return schemas
+}
+
+// forEachListedProperty calls fn for each field listed, by schema name, in
+// fields whose schema has a properties map, and counts the calls that report
+// a change. Schemas and fields the document lacks are skipped.
+func forEachListedProperty(doc map[string]any, fields map[string][]string, fn func(props map[string]any, field string) bool) int {
+	schemas := componentSchemas(doc)
 	count := 0
-	for schemaName, fields := range readModelEnumFields {
+	for schemaName, names := range fields {
 		schema, ok := schemas[schemaName].(map[string]any)
 		if !ok {
 			continue
@@ -330,13 +384,8 @@ func loosenReadModelEnums(doc map[string]any) int {
 		if !ok {
 			continue
 		}
-		for _, field := range fields {
-			prop, ok := props[field].(map[string]any)
-			if !ok {
-				continue
-			}
-			if _, had := prop["enum"]; had {
-				delete(prop, "enum")
+		for _, field := range names {
+			if fn(props, field) {
 				count++
 			}
 		}

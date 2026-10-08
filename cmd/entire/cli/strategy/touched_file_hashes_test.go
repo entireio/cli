@@ -1,0 +1,488 @@
+package strategy
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// gitHashObject returns what `git hash-object` reports for a worktree path —
+// the blob a commit of the unchanged file would hold.
+func gitHashObject(t *testing.T, dir, path string) string {
+	t.Helper()
+	return strings.TrimSpace(testutil.RunGit(t, dir, "hash-object", "--", path))
+}
+
+func TestHashTouchedFiles_HashesRegularFilesLikeGitAdd(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	testutil.WriteFile(t, dir, "new.txt", "agent wrote this\n")
+	testutil.WriteFile(t, dir, "test.txt", "agent modified\n")
+
+	hashes := hashTouchedFiles(context.Background(), dir, []string{"new.txt", "test.txt", "missing.txt"})
+
+	assert.Equal(t, map[string]string{
+		"new.txt":  gitHashObject(t, dir, "new.txt"),
+		"test.txt": gitHashObject(t, dir, "test.txt"),
+	}, hashes, "missing paths are not hashed")
+}
+
+// A clean filter changes what a commit stores; the recorded hash must be the
+// committed blob, or every autocrlf user's new files would read as replaced.
+func TestHashTouchedFiles_AppliesCleanFilters(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	testutil.RunGit(t, dir, "config", "core.autocrlf", "true")
+	testutil.WriteFile(t, dir, "crlf.txt", "line one\r\nline two\r\n")
+
+	hashes := hashTouchedFiles(context.Background(), dir, []string{"crlf.txt"})
+
+	testutil.GitAdd(t, dir, "crlf.txt")
+	staged := strings.Fields(testutil.RunGit(t, dir, "ls-files", "--stage", "--", "crlf.txt"))
+	require.GreaterOrEqual(t, len(staged), 2)
+	assert.Equal(t, staged[1], hashes["crlf.txt"])
+}
+
+func TestHashTouchedFiles_SkipsSymlinks(t *testing.T) {
+	testutil.SkipWithoutSymlinks(t)
+	t.Parallel()
+	dir := setupGitRepo(t)
+	require.NoError(t, os.Symlink("test.txt", filepath.Join(dir, "link.txt")))
+
+	assert.Empty(t, hashTouchedFiles(context.Background(), dir, []string{"link.txt"}),
+		"git hash-object follows symlinks, while a commit stores the target path; leave them to name matching")
+}
+
+func TestApplyTouchedFileHashes(t *testing.T) {
+	t.Parallel()
+	state := &SessionState{TouchedFileHashes: map[string]string{
+		"kept.txt":     "1111111111111111111111111111111111111111",
+		"rehashed.txt": "2222222222222222222222222222222222222222",
+		"unhashed.txt": "3333333333333333333333333333333333333333",
+	}}
+
+	applyTouchedFileHashes(state,
+		[]string{"rehashed.txt", "unhashed.txt", "new.txt"},
+		map[string]string{
+			"rehashed.txt": "4444444444444444444444444444444444444444",
+			"new.txt":      "5555555555555555555555555555555555555555",
+		},
+		[]string{"gone.txt"},
+	)
+
+	assert.Equal(t, map[string]string{
+		"kept.txt":     "1111111111111111111111111111111111111111",
+		"rehashed.txt": "4444444444444444444444444444444444444444",
+		"new.txt":      "5555555555555555555555555555555555555555",
+		"gone.txt":     touchedFileDeleted,
+	}, state.TouchedFileHashes, "a later step overwrites, a path it could not hash loses its stale entry")
+
+	_, recorded, deleted := recordedFileHash(state.TouchedFileHashes, "gone.txt")
+	assert.True(t, recorded)
+	assert.True(t, deleted)
+	_, recorded, _ = recordedFileHash(state.TouchedFileHashes, "unhashed.txt")
+	assert.False(t, recorded)
+}
+
+func TestDropPhantomFilesTouched_OnlyDropsThisStepsMissingPaths(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	testutil.WriteFile(t, dir, "real.txt", "x")
+	state := &SessionState{
+		FilesTouched: []string{"deleted.txt", "earlier-missing.txt", "phantom.txt", "real.txt"},
+		TouchedFileHashes: map[string]string{
+			"deleted.txt":         touchedFileDeleted,
+			"earlier-missing.txt": "1111111111111111111111111111111111111111",
+		},
+	}
+
+	dropPhantomFilesTouched(dir, state, []string{"deleted.txt", "phantom.txt", "real.txt"})
+
+	assert.Equal(t, []string{"deleted.txt", "earlier-missing.txt", "real.txt"}, state.FilesTouched,
+		"a missing path from this step that is not a recorded deletion is a phantom; an earlier step's missing file (e.g. stashed) stays")
+}
+
+func TestPruneTouchedFileHashes(t *testing.T) {
+	t.Parallel()
+	state := &SessionState{
+		FilesTouched: []string{"a.txt"},
+		TouchedFileHashes: map[string]string{
+			"a.txt": "1111111111111111111111111111111111111111",
+			"b.txt": "2222222222222222222222222222222222222222",
+		},
+	}
+	pruneTouchedFileHashes(state)
+	assert.Equal(t, map[string]string{"a.txt": "1111111111111111111111111111111111111111"}, state.TouchedFileHashes)
+
+	state.FilesTouched = nil
+	pruneTouchedFileHashes(state)
+	assert.Nil(t, state.TouchedFileHashes)
+}
+
+// SaveStep is where turn-end hashes are recorded. Uses t.Chdir — do NOT add
+// t.Parallel().
+func TestSaveStep_RecordsTouchedFileHashes(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-10-06-touched-hashes"
+
+	testutil.WriteFile(t, dir, "test.txt", "agent modified\n")
+	testutil.WriteFile(t, dir, "new.txt", "agent created\n")
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt", "phantom.txt"},
+		NewFiles:      []string{"new.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "turn end",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, 1, state.StepCount)
+	assert.Equal(t, []string{"new.txt", "test.txt"}, state.FilesTouched, "the phantom path is dropped at turn end")
+	assert.Equal(t, map[string]string{
+		"new.txt":  gitHashObject(t, dir, "new.txt"),
+		"test.txt": gitHashObject(t, dir, "test.txt"),
+	}, state.TouchedFileHashes)
+}
+
+// Task-record completion merges the subagent's files without hashing them; a
+// hash an earlier step recorded for one of those paths is stale (the subagent
+// may have rewritten the file) and must fall back to name matching.
+func TestApplyTaskRecordCompletion_DropsStaleTouchedFileHashes(t *testing.T) {
+	t.Parallel()
+	state := &SessionState{
+		FilesTouched: []string{"kept.txt", "rewritten.txt"},
+		TouchedFileHashes: map[string]string{
+			"kept.txt":      "1111111111111111111111111111111111111111",
+			"rewritten.txt": "2222222222222222222222222222222222222222",
+		},
+	}
+	state.AddTaskRecord(session.TaskRecord{ToolUseID: "toolu_1", StartedAt: time.Now()})
+
+	require.NoError(t, applyTaskRecordCompletion(state, session.TaskRecord{
+		ToolUseID: "toolu_1",
+		Files:     []string{"rewritten.txt", "added.txt"},
+	}))
+
+	assert.Equal(t, []string{"added.txt", "kept.txt", "rewritten.txt"}, state.FilesTouched)
+	assert.Equal(t, map[string]string{"kept.txt": "1111111111111111111111111111111111111111"}, state.TouchedFileHashes)
+}
+
+func TestMergeUnhashedFilesTouched_ClearsEmptyMap(t *testing.T) {
+	t.Parallel()
+	state := &SessionState{
+		FilesTouched:      []string{"a.txt"},
+		TouchedFileHashes: map[string]string{"a.txt": touchedFileDeleted},
+	}
+	MergeUnhashedFilesTouched(state, []string{"a.txt"})
+	assert.Equal(t, []string{"a.txt"}, state.FilesTouched)
+	assert.Nil(t, state.TouchedFileHashes)
+}
+
+// A step whose every changed path is a phantom (named by the transcript, absent
+// from the worktree) and that deletes nothing records no work: it must not
+// count a step, or the session stays pending with nothing a commit can match.
+// Uses t.Chdir — do NOT add t.Parallel().
+func TestSaveStep_PhantomOnlyStepIsSkipped(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-10-07-phantom-only"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"never/created.go"},
+		NewFiles:      []string{"also/missing.go"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "turn end",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Zero(t, state.StepCount)
+	assert.Empty(t, state.FilesTouched)
+	assert.False(t, state.HasPendingWork())
+}
+
+// saveTestStep records a turn-end step for sessionID with the given new files.
+func saveTestStep(t *testing.T, s *ManualCommitStrategy, dir, sessionID string, newFiles ...string) {
+	t.Helper()
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644))
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		NewFiles:      newFiles,
+		MetadataDir:   metadataDir,
+		CommitMessage: "turn end",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+}
+
+// An untracked file the agent created and later removed with `rm` is reported
+// by no git status, so nothing records its deletion. The next turn-end step
+// records it as a deletion: it no longer counts as pending agent content, and
+// a later, unrelated file the user creates at that path does not link the
+// session by name. Uses t.Chdir — do NOT add t.Parallel().
+func TestSaveStep_RecordsRemovedUntrackedFileAsDeletion(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-10-08-untracked-rm"
+
+	testutil.WriteFile(t, dir, "scratch.txt", "agent scratch\n")
+	saveTestStep(t, s, dir, sessionID, "scratch.txt")
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotEqual(t, touchedFileDeleted, state.TouchedFileHashes["scratch.txt"], "fixture: turn 1 hashed the file")
+
+	// Turn 2: the agent removes scratch.txt with `rm` and writes another file.
+	require.NoError(t, os.Remove(filepath.Join(dir, "scratch.txt")))
+	testutil.WriteFile(t, dir, "other.txt", "other\n")
+	saveTestStep(t, s, dir, sessionID, "other.txt")
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	hash, recorded := state.TouchedFileHashes["scratch.txt"]
+	require.True(t, recorded)
+	assert.Equal(t, touchedFileDeleted, hash, "the removed untracked file is a recorded deletion")
+
+	// Later the user creates their own scratch.txt and stages it: it must not
+	// link the session.
+	testutil.WriteFile(t, dir, "scratch.txt", "the user's own file\n")
+	testutil.GitAdd(t, dir, "scratch.txt")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	assert.False(t, stagedFilesOverlapWithContent(context.Background(), repo, state.TouchedFileHashes,
+		[]string{"scratch.txt"}, state.FilesTouched))
+}
+
+// A turn whose only effect is removing such a file saves no step (git sees no
+// change), so turn end records it through RecordVanishedUntrackedFiles; a file
+// tracked in HEAD is left alone. Uses t.Chdir — do NOT add t.Parallel().
+func TestRecordVanishedUntrackedFiles(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-10-08-untracked-rm-only"
+
+	testutil.WriteFile(t, dir, "scratch.txt", "agent scratch\n")
+	testutil.WriteFile(t, dir, "test.txt", "agent edit of a tracked file\n")
+	saveTestStep(t, s, dir, sessionID, "scratch.txt", "test.txt")
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "scratch.txt")))
+	require.NoError(t, os.Remove(filepath.Join(dir, "test.txt")))
+	require.NoError(t, s.RecordVanishedUntrackedFiles(context.Background(), sessionID))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, touchedFileDeleted, state.TouchedFileHashes["scratch.txt"])
+	assert.NotEqual(t, touchedFileDeleted, state.TouchedFileHashes["test.txt"],
+		"a tracked file's deletion is git status's to report, not this check's")
+}
+
+// A hashed, uncommitted file absent from both the worktree and the commit tree
+// is an untracked file the agent removed; carry-forward drops it instead of
+// re-arming the session for it after every commit.
+func TestFilesWithRemainingAgentChanges_RemovedUntrackedFileDropped(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	testutil.WriteFile(t, dir, "other.txt", "other\n")
+	testutil.GitAdd(t, dir, "other.txt")
+	testutil.GitCommit(t, dir, "commit other")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+
+	hashes := map[string]string{"scratch.txt": "1111111111111111111111111111111111111111"}
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"scratch.txt", "other.txt"}, map[string]struct{}{"other.txt": {}})
+	assert.Empty(t, remaining)
+}
+
+// The agent creates new.go, the user stages it, and the file then leaves the
+// worktree before the next turn end. Committing the staged blob (the agent's
+// exact content) must still link the session.
+func TestStagedThenRemovedFileStillLinks(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-10-08-staged-then-removed"
+	ctx := context.Background()
+
+	testutil.WriteFile(t, dir, "new.go", "package main\n")
+	saveTestStep(t, s, dir, sid, "new.go")
+	testutil.GitAdd(t, dir, "new.go")
+	require.NoError(t, os.Remove(filepath.Join(dir, "new.go")))
+	require.NoError(t, s.RecordVanishedUntrackedFiles(ctx, sid))
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	assert.NotEqual(t, touchedFileDeleted, state.TouchedFileHashes["new.go"],
+		"a path still staged in the index is not an untracked file the agent removed")
+
+	testutil.GitCommit(t, dir, "commit staged new.go")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	assert.True(t, filesOverlapWithContent(ctx, state.TouchedFileHashes, commit, state.FilesTouched),
+		"the commit holds the agent's new.go and should link the session")
+}
+
+// saveTestDeletionStep records a turn-end step for sessionID that deletes the
+// given paths, as DetectFileChanges reports them.
+func saveTestDeletionStep(t *testing.T, s *ManualCommitStrategy, dir, sessionID string, deleted ...string) {
+	t.Helper()
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644))
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		DeletedFiles:  deleted,
+		MetadataDir:   metadataDir,
+		CommitMessage: "turn end",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+}
+
+// headCommit returns the commit HEAD names in dir.
+func headCommit(t *testing.T, dir string) *object.Commit {
+	t.Helper()
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	return commit
+}
+
+// A file the agent created and the user staged, which then leaves the worktree,
+// is reported by git status as "AD" and so reaches the next turn-end step as a
+// deletion. The staged blob is still the agent's content and the next commit
+// adds it, so the step must not record a deletion for it. Uses t.Chdir — do NOT
+// add t.Parallel().
+func TestSaveStep_StagedThenRemovedFileKeepsHash(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-10-08-staged-then-removed-step"
+	ctx := context.Background()
+
+	testutil.WriteFile(t, dir, "new.go", "package main\n")
+	saveTestStep(t, s, dir, sid, "new.go")
+	testutil.GitAdd(t, dir, "new.go")
+	require.NoError(t, os.Remove(filepath.Join(dir, "new.go")))
+	require.Equal(t, "AD new.go", strings.TrimSpace(testutil.RunGit(t, dir, "status", "--porcelain", "--", "new.go")),
+		"fixture: git status reports the staged-then-removed file as AD")
+
+	saveTestDeletionStep(t, s, dir, sid, "new.go")
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	assert.NotEqual(t, touchedFileDeleted, state.TouchedFileHashes["new.go"],
+		"a path not in HEAD but still in the index is the agent's staged content, not a deletion")
+
+	testutil.GitCommit(t, dir, "commit staged new.go")
+	assert.True(t, filesOverlapWithContent(ctx, state.TouchedFileHashes, headCommit(t, dir), state.FilesTouched),
+		"the commit holds the agent's new.go and should link the session")
+}
+
+// Deleting a file tracked in HEAD, whether with `git rm` or a plain `rm`, is
+// still recorded as a deletion. Uses t.Chdir — do NOT add t.Parallel().
+func TestSaveStep_TrackedDeletionsStillRecorded(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-10-08-tracked-deletions"
+
+	testutil.WriteFile(t, dir, "rm.txt", "plain rm\n")
+	testutil.WriteFile(t, dir, "gitrm.txt", "git rm\n")
+	testutil.GitAdd(t, dir, "rm.txt")
+	testutil.GitAdd(t, dir, "gitrm.txt")
+	testutil.GitCommit(t, dir, "tracked files")
+
+	testutil.WriteFile(t, dir, "rm.txt", "agent edit\n")
+	testutil.WriteFile(t, dir, "gitrm.txt", "agent edit\n")
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID: sid, ModifiedFiles: []string{"rm.txt", "gitrm.txt"}, MetadataDir: ".entire/metadata/" + sid,
+		CommitMessage: "turn end", AuthorName: "Test", AuthorEmail: "test@test.com",
+	}))
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "rm.txt")))
+	testutil.RunGit(t, dir, "rm", "-q", "-f", "gitrm.txt")
+	saveTestDeletionStep(t, s, dir, sid, "rm.txt", "gitrm.txt")
+
+	state, err := s.loadSessionState(context.Background(), sid)
+	require.NoError(t, err)
+	for _, path := range []string{"rm.txt", "gitrm.txt"} {
+		hash, recorded := state.TouchedFileHashes[path]
+		assert.True(t, recorded, path)
+		assert.Equal(t, touchedFileDeleted, hash, "%s: a deletion of a file in HEAD is recorded", path)
+	}
+}
+
+// An intent-to-add entry (`git add -N`) is in `ls-files --cached` but a
+// commit never includes it. When its file is then deleted, git status reports
+// " D" and the step sees a deletion, which must be recorded: there is no staged
+// blob for a commit to add. Uses t.Chdir — do NOT add t.Parallel().
+func TestSaveStep_IntentToAddThenRemovedIsADeletion(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-10-08-intent-to-add"
+	ctx := context.Background()
+
+	testutil.WriteFile(t, dir, "n.go", "package main\n")
+	saveTestStep(t, s, dir, sid, "n.go")
+	testutil.RunGit(t, dir, "add", "-N", "n.go")
+	require.NoError(t, os.Remove(filepath.Join(dir, "n.go")))
+
+	metadataDir := ".entire/metadata/" + sid
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644))
+	require.NoError(t, s.SaveStep(ctx, StepContext{
+		SessionID: sid, DeletedFiles: []string{"n.go"}, MetadataDir: metadataDir,
+		CommitMessage: "turn end", AuthorName: "Test", AuthorEmail: "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	assert.Equal(t, touchedFileDeleted, state.TouchedFileHashes["n.go"],
+		"an intent-to-add entry holds no staged blob; treating it as staged keeps n.go pending forever")
+}

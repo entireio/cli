@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 type openCodeAgent struct {
@@ -235,16 +237,54 @@ func buildPluginDeps() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := openCodeDepsDir(version)
-	if _, err := os.Stat(filepath.Join(dir, "node_modules")); err == nil {
+	return buildPluginDepsAt(version, openCodeDepsDir(version), installOpenCodePluginDeps)
+}
+
+// validateOpenCodePluginDeps checks every entry SeedRepo consumes, not just the
+// directory npm may have created before an interrupted install.
+func validateOpenCodePluginDeps(dir string) error {
+	for _, name := range []string{"node_modules", "package.json", "package-lock.json"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			return fmt.Errorf("stat plugin deps %s: %w", name, err)
+		}
+		if (name == "node_modules" && !info.IsDir()) || (name != "node_modules" && !info.Mode().IsRegular()) {
+			return fmt.Errorf("plugin deps %s has unexpected file type %s", name, info.Mode())
+		}
+	}
+	return nil
+}
+
+func buildPluginDepsAt(version, dir string, install func(string) error) (string, error) {
+	// Keep the lock outside the replaceable tree, and leave its file in place:
+	// unlinking it could let waiters lock different inodes for the same cache.
+	lock := flock.New(dir + ".lock")
+	ctx, cancel := context.WithTimeout(context.Background(), openCodeDepsBudget)
+	defer cancel()
+	locked, err := lock.TryLockContext(ctx, 50*time.Millisecond)
+	if err != nil {
+		return "", fmt.Errorf("lock plugin deps: %w", err)
+	}
+	if !locked {
+		return "", errors.New("timed out locking plugin deps")
+	}
+	defer func() { _ = lock.Unlock() }()
+
+	// Validate only after acquiring the interprocess lock: otherwise a stale
+	// invalid verdict could delete a tree another process has just published.
+	if err := validateOpenCodePluginDeps(dir); err == nil {
 		return dir, nil
+	}
+	// A partial tree must not prevent the staged replacement from being
+	// renamed into place on this or every subsequent attempt.
+	if err := os.RemoveAll(dir); err != nil {
+		return "", fmt.Errorf("remove incomplete plugin deps: %w", err)
 	}
 
 	// Built in a staging directory and renamed into place, so a reader never
-	// sees a half-installed tree. Bootstrap normally wins this race and the test
-	// process takes the Stat above; if bootstrap was skipped, a loser here
-	// adopts the winner's tree rather than failing.
-	staging, err := os.MkdirTemp(os.TempDir(), "entire-e2e-opencode-deps-*")
+	// sees a half-installed tree. Cooperating builders are serialized by the
+	// lock; the rename fallback also handles trees published by older binaries.
+	staging, err := os.MkdirTemp(filepath.Dir(dir), "entire-e2e-opencode-deps-*")
 	if err != nil {
 		return "", fmt.Errorf("create staging dir: %w", err)
 	}
@@ -255,26 +295,36 @@ func buildPluginDeps() (string, error) {
 	}
 
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), openCodeDepsBudget)
-	defer cancel()
-	// The npm CLI, deliberately: opencode installs the same tree with
-	// @npmcli/arborist in-process, which measured 5m00s against npm's 3s for an
-	// identical result. Using npm here is the point of doing it ourselves.
-	cmd := exec.CommandContext(ctx, "npm", "install", "--no-audit", "--no-fund", "--loglevel=error")
-	cmd.Dir = staging
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("npm install %s@%s: %w\n%s", openCodePluginPkg, version, err, out)
+	if err := install(staging); err != nil {
+		return "", fmt.Errorf("install %s@%s: %w", openCodePluginPkg, version, err)
+	}
+	if err := validateOpenCodePluginDeps(staging); err != nil {
+		return "", fmt.Errorf("incomplete installed plugin deps: %w", err)
 	}
 	elapsed := time.Since(start).Round(time.Millisecond)
 
 	if err := os.Rename(staging, dir); err != nil {
-		if _, statErr := os.Stat(filepath.Join(dir, "node_modules")); statErr == nil {
+		if validationErr := validateOpenCodePluginDeps(dir); validationErr == nil {
 			return dir, nil // lost the race; the winner's tree is equivalent
 		}
 		return "", fmt.Errorf("publish plugin deps to %q: %w", dir, err)
 	}
 	fmt.Fprintf(os.Stderr, "opencode: built plugin deps for %s in %s at %s\n", version, elapsed, dir)
 	return dir, nil
+}
+
+func installOpenCodePluginDeps(dir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), openCodeDepsBudget)
+	defer cancel()
+	// The npm CLI, deliberately: opencode installs the same tree with
+	// @npmcli/arborist in-process, which measured 5m00s against npm's 3s for an
+	// identical result. Using npm here is the point of doing it ourselves.
+	cmd := exec.CommandContext(ctx, "npm", "install", "--package-lock=true", "--no-audit", "--no-fund", "--loglevel=error")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("npm install: %w\n%s", err, out)
+	}
+	return nil
 }
 
 // openCodeVersion reports the running opencode's version, which is the version

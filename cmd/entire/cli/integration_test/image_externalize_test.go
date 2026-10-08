@@ -62,7 +62,7 @@ func TestImageExternalization_FullHookFlow(t *testing.T) {
 
 	// Mid-turn commit -> post-commit condensation externalizes.
 	env.WriteFile("feature.go", "package main\n")
-	env.GitCommitWithShadowHooks("add feature", "feature.go")
+	env.GitCommitWithHooks("add feature", "feature.go")
 
 	// Stop -> finalize rewrites each turn checkpoint with the full transcript. This
 	// is where the (fixed) re-inlining bug lived: assert externalization survives it.
@@ -163,7 +163,7 @@ func TestImageExternalization_FinalizeWithFlagOffPreservesAssets(t *testing.T) {
 
 	// Mid-turn commit with the flag ON: condensation stores placeholder + asset.
 	env.WriteFile("feature.go", "package main\n")
-	env.GitCommitWithShadowHooks("add feature", "feature.go")
+	env.GitCommitWithHooks("add feature", "feature.go")
 
 	cpID := env.GetLatestCheckpointIDFromHistory()
 	if cpID == "" {

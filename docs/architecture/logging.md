@@ -58,8 +58,6 @@ Logs use a hierarchical tracing model inspired by OpenTelemetry concepts:
 session_id: 2025-12-31-abc123           ← root trace (all logs)
 ├── user-prompt-submit                   ← agent-level (no tool_use_id)
 ├── pre-task (tool_use_id: X)           ← span X starts
-│   ├── post-todo (tool_use_id: X)      ← within span X
-│   └── post-todo (tool_use_id: X)
 ├── post-task (tool_use_id: X)          ← span X ends
 ├── pre-task (tool_use_id: Y)           ← span Y starts
 ├── post-task (tool_use_id: Y)          ← span Y ends
@@ -100,7 +98,7 @@ Future consideration: Generate a `prompt_id` at `user-prompt-submit` and persist
 
 ### Tool Use Logging
 
-Currently only Task and TodoWrite tool uses are hooked. Other tool uses (Edit, Write, Bash) are not logged. This is intentional for checkpoint purposes but limits observability.
+Entire hooks subagent dispatch (pre-task and post-task for the Claude Code Agent tool, and the equivalent events of other agents). Agents with per-tool hooks also report the files a tool use touched, which is recorded into the session's `FilesTouched`; the tool calls themselves (Edit, Write, Bash) are not logged. This is enough for checkpoints but limits observability.
 
 ## Privacy: No User Data in Logs
 
@@ -124,8 +122,7 @@ Currently only Task and TodoWrite tool uses are hooked. Other tool uses (Edit, W
 - Timing (duration_ms)
 - Success/failure status
 - Strategy name
-- File counts (modified_files, new_files, deleted_files)
-- Branch names (shadow_branch)
+- File counts (modified_files, new_files, deleted_files, files_touched)
 
 ### Example
 
@@ -155,7 +152,6 @@ Logs are tagged with a `component` field indicating the logging source:
 | `lifecycle` | Session phase transitions |
 | `session` | Session state reads and writes |
 | `redaction` | Rule loading, regex compile failures, pack sample mismatches, and the load-time `redaction configured` summary — the lines to grep when a custom rule is not matching |
-| `attribution` | Prompt-to-change attribution |
 | `migration` | Checkpoint-format migration |
 
 The list is not closed — `grep -rn 'WithComponent(' cmd/ internal/` is the source of truth. Smaller ones in use today: `state`, `resume`, `manual-commit`, `attach`, `cleanup`, `summarize`, `condense-by-id`, `filter-uncommitted`, `trail-refresh`.
@@ -208,28 +204,7 @@ The list is not closed — `grep -rn 'WithComponent(' cmd/ internal/` is the sou
   "modified_files": 2,
   "new_files": 1,
   "deleted_files": 0,
-  "shadow_branch": "entire/a1b2c3d",
-  "branch_created": false
-}
-```
-
-**Task checkpoint log example:**
-```json
-{
-  "time": "2025-12-31T12:28:30.789012+11:00",
-  "level": "INFO",
-  "msg": "task checkpoint saved",
-  "session_id": "2025-12-31-abc123",
-  "component": "checkpoint",
-  "strategy": "manual-commit",
-  "checkpoint_type": "task",
-  "tool_use_id": "toolu_xyz789",
-  "subagent_type": "general-purpose",
-  "modified_files": 5,
-  "new_files": 2,
-  "deleted_files": 0,
-  "shadow_branch": "entire/a1b2c3d",
-  "branch_created": false
+  "files_touched": 3
 }
 ```
 

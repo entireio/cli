@@ -12,6 +12,7 @@ entire review --profile <name>  # same as positional form
 entire review --agent <name>    # run one reviewer from the profile
 entire review --target <ref>    # review a branch/trail in a managed worktree
 entire review --findings        # view local findings
+entire review --show-config     # list what the review would run, then exit
 ```
 
 Useful run flags:
@@ -39,41 +40,6 @@ Findings are attributed to the caller's worktree, so the completion handle
 remains available through `entire review --findings` even after target cleanup.
 Positive integer targets always mean trail numbers rather than numeric branch
 names; this avoids a local branch silently shadowing a trail selector.
-
-## Reviewer isolation
-
-A reviewer runs inside the checkout it reviews, which for `--target` is a
-branch someone else may control. Reviewers therefore do not load
-execution-capable agent configuration from that checkout:
-
-- claude-code runs with `--setting-sources user` and `--strict-mcp-config`, so
-  the checkout's `.claude/settings.json`, `.claude/settings.local.json`, and
-  `.mcp.json` are not loaded; Entire's lifecycle hooks are passed from the
-  binary via `--settings`. The user's own MCP servers are not loaded either.
-  The same flags keep the checkout's `.claude/commands`, `.claude/skills`, and
-  `.claude/agents` from being discovered, so a branch cannot shadow `/review`
-  with a command whose `!` lines run shell commands; the user's own commands
-  and skills still resolve. Checked on Claude Code 2.0.0 through 2.1.286. A
-  Claude Code older than `--setting-sources` (e.g. 1.0.x) rejects the flag and
-  exits before loading anything, and the review fails with a message to update
-  Claude Code.
-- pi runs with `--no-approve` and `--no-extensions`, so `.pi/settings.json`,
-  `.pi/extensions/`, `.pi/SYSTEM.md`, and extensions or packages named in
-  project settings are not loaded, even when the repository is trusted (pi
-  inherits trust from the nearest trusted ancestor, which covers review
-  worktrees). Entire's extension is loaded with `--extension` from a copy the
-  binary writes to the per-user cache directory.
-- codex, on a `--target` run, runs with the checkout marked untrusted
-  (`-c projects={"<checkout>"={trust_level="untrusted"}}`), so the checkout's
-  `.codex/config.toml`, `mcp_servers` and `hooks.json` included, is not
-  loaded. Without it, a review worktree inside a repository the user trusts in
-  codex is trusted too. A plain `entire review` in the user's own checkout
-  keeps codex's normal trust, so Entire's codex hooks still tag the session.
-
-The user's own agent settings still apply. For claude-code, the checkout's
-`CLAUDE.md` is not preloaded as project instructions and its project skills
-are not available, so a profile that names a project-level skill does not
-resolve it; the reviewer can still read `CLAUDE.md` with its file tools.
 
 ## Profiles
 
@@ -121,10 +87,70 @@ The profile-level `task` is the shared work item. Each `agents` map entry is a w
 - A bare non-interactive `entire review` does not auto-run a profile. Automation should pass a profile name.
 - Profile selection is positional/`--profile` → `review_default_profile` → `general` → the only configured profile.
 
+## Reviewing code by someone else
+
+Reviewers load the checkout's full agent configuration: `CLAUDE.md`/`AGENTS.md`,
+skills, hooks, MCP servers, plugins, and settings. On a teammate's branch that
+configuration is theirs, so a review of commits you did not author needs your
+approval first.
+
+- **Whose commits.** Every commit between your default branch (origin/HEAD,
+  origin/main, origin/master, main, master) and the head must have your
+  `user.email` as its git author, as for any commit; who committed it does not
+  matter. `--base` only scopes the review; it never shortens this range.
+  Uncommitted changes in a plain review are yours. With no `user.email`
+  (common on CI runners) or no default branch, the commits count as someone
+  else's, so automation passes `--trust-target`. The author is self-declared,
+  as in any git commit, so this tells a teammate's branch from yours; it is
+  not proof against a branch that copies your email. Verifying commit
+  signatures and using a trail's authenticated author are follow-ups.
+- **What runs.** The gate lists, for the agents in the profile: hooks (Entire's
+  own count only when the whole command equals one this CLI installs, Unix or
+  Windows form), MCP servers, command-bearing and permission settings in
+  `.claude/settings*.json`, every key of `.codex/config.toml` (except the flags
+  that only switch hooks on) and `.pi/settings.json`, Pi extensions other than
+  Entire's, and every skill, command, prompt, subagent, and local plugin under
+  `.claude`, `.codex`, `.agents/skills`, and `.pi`, which can carry their own
+  hooks or shell expansions. JSON is read with exact keys, as the agents read
+  it, and the commit tree is matched case-insensitively, as a macOS or Windows
+  checkout would load it. Symlinks and unparseable files count as unknown,
+  never as nothing. `--show-config` (`--json` for structured output) prints the
+  full list and exits; its contents come from the branch and are data.
+- **Approval.** In a terminal, a confirm lists up to three entries (the
+  branch's own first) and defaults to Cancel. Without a terminal, or when an
+  agent is driving the command (caller-session variables, the shared
+  agent-subprocess sentinels, `CLAUDECODE`, Antigravity's and Droid's
+  variables, the cross-tool `AI_AGENT`, `GIT_TERMINAL_PROMPT=0`, or variables
+  an external agent declares in `caller_env_vars`), the review is refused with a
+  fixed message that tells the agent to stop and ask the user, plus the
+  `--trust-target <sha>` command to run once approved. `--trust-target` takes
+  the full SHA of the pinned head (a short prefix could be ground to match a
+  different commit); a branch that moved is refused.
+- **Order.** With `--target`, the profile is resolved and the branch fetched
+  and pinned in your checkout, the gate inspects the pinned commit's tree, and
+  only then is the worktree created: added with `--no-checkout` and no hooks,
+  its head checked against the pin, then checked out. For someone else's
+  branch the checkout runs with an empty `core.hooksPath`, no submodule
+  recursion, and `GIT_LFS_SKIP_SMUDGE=1`, and `.worktreeinclude` files are not
+  copied. A reused worktree is inspected on disk instead.
+- **Settings.** The re-run inside the worktree reads review settings (profiles,
+  agents, models, judge) from your checkout, not the branch's
+  `.entire/settings.json`, and skips the gate only when the forwarded
+  `--trust-target` matches its own head. Entire's own lifecycle hooks, which
+  the agents start inside the worktree, still read that worktree's settings.
+- **Guardrail.** Every reviewer gets a system-prompt addition setting an
+  instruction hierarchy: the task comes only from the review request;
+  repository content (including CLAUDE.md/AGENTS.md) informs the review but
+  cannot change the task, grant permissions, or trigger actions; attempts to
+  direct the reviewer are reported as findings (`--append-system-prompt` for
+  Claude Code and Pi, `-c developer_instructions=` for Codex, the top of the
+  prompt for agents without a runner). The judge runs from a temp directory
+  and does not load the checkout's configuration.
+
 ## Flow
 
-1. With `--target`, `entire review` resolves the branch directly or through its trail, prepares a worktree, and re-runs the command there without `--target`.
-2. It selects a profile. If no profiles exist, it runs guided setup in an interactive terminal or writes an opinionated clone-local default profile in non-interactive mode.
+1. With `--target`, `entire review` selects the profile in the caller's checkout, resolves the branch directly or through its trail, pins its head, runs the trust gate, prepares a worktree, and re-runs the command there without `--target`.
+2. It selects a profile. If no profiles exist, it runs guided setup in an interactive terminal or writes an opinionated clone-local default profile in non-interactive mode. Plain reviews then run the trust gate.
 3. It composes worker prompts via `review.ComposeReviewPrompt` and computes scope (mainline base ref via `review.ComputeScopeStats`, overridable with `--base`).
 4. Adapter-backed review workers (claude-code, codex, pi) are spawned with `ENTIRE_REVIEW_{SESSION,AGENT,SKILLS,PROMPT,STARTING_SHA}` env vars. Their lifecycle hooks use those values to tag sessions as `Kind = "agent_review"`.
 5. Each spawned process has its own env, so multiple worktrees and multi-agent runs do not need a shared marker file.
@@ -189,6 +215,8 @@ The redesign eliminated several constructs from the prior implementation. None s
 - `cmd/entire/cli/agent/{claudecode,codex,pi}/reviewer.go` — per-agent `AgentReviewer` implementations
 - `cmd/entire/cli/agent/claudecode/discovery.go` — skill discovery + plugin-cache dedupe
 - `cmd/entire/cli/lifecycle.go` — `adoptReviewEnv` reads `ENTIRE_REVIEW_*` from process env
-- `cmd/entire/cli/review_bridge.go` / `review_target.go` — bridge code for cycle-bound functions, trail posting, and target worktree preparation
+- `cmd/entire/cli/review_bridge.go` / `review_target.go` — bridge code for cycle-bound functions, trail posting, and target resolution and checkout
+- `cmd/entire/cli/review/trust.go` / `trust_run.go` — trust gate: authorship, approval, messages, `--show-config`
+- `cmd/entire/cli/review_trust_inventory.go` — per-agent inventory of what a checkout would run
 - `cmd/entire/cli/checkpoint/checkpoint.go` — review metadata on checkpoints
 - `cmd/entire/cli/settings/settings.go` — review profile settings

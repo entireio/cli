@@ -162,63 +162,27 @@ func TestState_NormalizeAfterLoad(t *testing.T) {
 		assert.Equal(t, 200, state.CheckpointTranscriptStart)
 		assert.Equal(t, 0, state.TranscriptLinesAtStart)
 	})
-
-	t.Run("heals_stale_divergence_flag_when_attribution_aligned", func(t *testing.T) {
-		t.Parallel()
-		// DivergenceNoticeShown is only meaningful while attribution is diverged.
-		// A state file carrying notice=true with base==attribution must self-heal on load —
-		// otherwise a legitimate future divergence would be suppressed by the stale flag.
-		state := &State{
-			BaseCommit:            "aaaaaaa",
-			AttributionBaseCommit: "aaaaaaa",
-			DivergenceNoticeShown: true,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.False(t, state.DivergenceNoticeShown,
-			"DivergenceNoticeShown must be cleared when AttributionBaseCommit == BaseCommit")
-	})
-
-	t.Run("heals_stale_divergence_flag_when_attribution_empty", func(t *testing.T) {
-		t.Parallel()
-		// Empty AttributionBaseCommit gets backfilled to BaseCommit below; once aligned,
-		// the flag is meaningless and must clear.
-		state := &State{
-			BaseCommit:            "bbbbbbb",
-			AttributionBaseCommit: "",
-			DivergenceNoticeShown: true,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.False(t, state.DivergenceNoticeShown,
-			"DivergenceNoticeShown must be cleared when AttributionBaseCommit is empty/backfilled")
-	})
-
-	t.Run("preserves_divergence_flag_when_actually_diverged", func(t *testing.T) {
-		t.Parallel()
-		state := &State{
-			BaseCommit:            "cccccc1",
-			AttributionBaseCommit: "cccccc0",
-			DivergenceNoticeShown: true,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.True(t, state.DivergenceNoticeShown,
-			"DivergenceNoticeShown must be preserved when attribution is genuinely diverged")
-	})
 }
 
-func TestState_RealignAttributionBase_ClearsDivergenceFlag(t *testing.T) {
+// TestState_LegacyAttributionKeysIgnored pins that state files written before
+// line attribution was removed still load, and that saving drops the keys.
+func TestState_LegacyAttributionKeysIgnored(t *testing.T) {
 	t.Parallel()
 
-	state := &State{
-		BaseCommit:            "ccccccc",
-		AttributionBaseCommit: "aaaaaaa",
-		DivergenceNoticeShown: true,
-	}
-	state.RealignAttributionBase("ccccccc")
+	legacy := `{"session_id":"s1","base_commit":"aaaaaaa","checkpoint_count":2,` +
+		`"attribution_base_commit":"bbbbbbb","divergence_notice_shown":true,` +
+		`"prompt_attributions":[{"checkpoint_number":1,"user_lines_added":3}],` +
+		`"pending_prompt_attribution":{"checkpoint_number":2},"last_checkpoint_commit_hash":"ccccccc"}`
+	var state State
+	require.NoError(t, json.Unmarshal([]byte(legacy), &state))
+	assert.Equal(t, "aaaaaaa", state.BaseCommit)
+	assert.Equal(t, 2, state.StepCount)
 
-	assert.Equal(t, "ccccccc", state.AttributionBaseCommit,
-		"AttributionBaseCommit must be updated to the new base")
-	assert.False(t, state.DivergenceNoticeShown,
-		"DivergenceNoticeShown must be cleared whenever attribution is realigned")
+	out, err := json.Marshal(&state)
+	require.NoError(t, err)
+	for _, key := range []string{"attribution_base_commit", "divergence_notice_shown", "prompt_attributions", "pending_prompt_attribution", "last_checkpoint_commit_hash"} {
+		assert.NotContains(t, string(out), key)
+	}
 }
 
 func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
@@ -1367,6 +1331,31 @@ func TestState_RebaselineSubagentTokensPreservesLegacyNilUsage(t *testing.T) {
 			state.RebaselineSubagentTokens()
 			require.Equal(t, &agent.TokenUsage{InputTokens: 7}, state.SubagentTokensBaseline)
 			require.Nil(t, state.SubagentTokensBaselineComplete)
+		})
+	}
+}
+
+func TestState_HasPendingWork(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state State
+		want  bool
+	}{
+		{name: "empty", state: State{}, want: false},
+		{name: "turn-end step", state: State{StepCount: 1}, want: true},
+		{name: "files awaiting a commit", state: State{FilesTouched: []string{"a.go"}}, want: true},
+		{name: "task record", state: State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}}}, want: true},
+		// FullyCondensed is the caller's concern (see HasPendingWork's doc).
+		{name: "fully condensed with nothing left", state: State{FullyCondensed: true}, want: false},
+		{name: "fully condensed with an in-flight record", state: State{FullyCondensed: true, TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}}}, want: true},
+		{name: "condensed checkpoint id alone", state: State{LastCheckpointID: id.MustCheckpointID("abc123def456")}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.state.HasPendingWork())
 		})
 	}
 }
