@@ -167,6 +167,9 @@ own approval behavior.
 
 `resolveTextGenerationAuth` is the only generation-side discovery of ambient
 home/config/ADC sources. Home preparation takes those sources explicitly.
+When no ADC file is selected, preparation explicitly clears
+`GOOGLE_APPLICATION_CREDENTIALS` in the child environment so ambient inheritance
+cannot bypass the selected sources; Windows default ADC still uses APPDATA.
 Generation unit tests use `newTestTextGenerator` with temporary authentication
 fixtures; replacing `CommandRunner` alone does **not** isolate credential
 preparation. Tests of the production resolver must override HOME/USERPROFILE,

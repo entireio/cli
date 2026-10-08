@@ -205,20 +205,22 @@ var adcCredentialsFile = filepath.Join(".config", "gcloud", "application_default
 
 // adcCredentialsEnv points GOOGLE_APPLICATION_CREDENTIALS at the user's
 // application-default credentials, which agy would otherwise look for under
-// the isolated home. A variable the user already set is inherited as it is,
-// and Windows needs nothing because agy finds the file through %APPDATA%.
+// the isolated home. A variable captured during source resolution is preserved.
+// With no selected file it explicitly clears any ambient value inherited by
+// the subprocess. Windows still finds default credentials through %APPDATA%.
 func adcCredentialsEnv(auth textGenerationAuth) []string {
 	if auth.adcCredentials != "" {
 		return []string{adcCredentialsEnvVar + "=" + auth.adcCredentials}
 	}
-	if runtime.GOOS == "windows" || auth.userHome == "" {
-		return nil
+	if runtime.GOOS != "windows" && auth.userHome != "" {
+		path := filepath.Join(auth.userHome, adcCredentialsFile)
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return []string{adcCredentialsEnvVar + "=" + path}
+		}
 	}
-	path := filepath.Join(auth.userHome, adcCredentialsFile)
-	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
-		return nil
-	}
-	return []string{adcCredentialsEnvVar + "=" + path}
+	// RunIsolatedTextGeneratorCLI appends overrides to os.Environ. Omitting
+	// this entry would let an ambient credential escape the source snapshot.
+	return []string{adcCredentialsEnvVar + "="}
 }
 
 // linkLoginKeychain links home/Library/Keychains/login.keychain-db to the

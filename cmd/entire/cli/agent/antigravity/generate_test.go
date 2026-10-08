@@ -111,6 +111,33 @@ func TestGenerateText_SignInFailureNamesTheIsolation(t *testing.T) {
 	}
 }
 
+// Test the actual child environment, not just preparation's override list:
+// an absent override would let os.Environ reintroduce an ambient ADC path.
+func TestGenerateText_ClearsAmbientADCWhenNoSourceIsSelected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh to report the child's environment")
+	}
+	for _, name := range []string{"empty sources", "missing default file"} {
+		t.Run(name, func(t *testing.T) {
+			// Setenv requires serial execution; the ambient pointer is fake.
+			ambient := filepath.Join(t.TempDir(), "ambient-adc.json")
+			t.Setenv(adcCredentialsEnvVar, ambient)
+			a := newTestTextGenerator(t, func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "sh", "-c", `printf 'adc=%s' "${GOOGLE_APPLICATION_CREDENTIALS-unset}"`)
+			})
+			if name == "empty sources" {
+				a.textGenerationAuth = &textGenerationAuth{}
+			} else {
+				a.textGenerationAuth.adcCredentials = ""
+			}
+			out, err := a.GenerateText(t.Context(), "prompt", "")
+			if err != nil || out != "adc=" {
+				t.Fatalf("child environment = (%q, %v), want explicitly cleared ADC", out, err)
+			}
+		})
+	}
+}
+
 // Exercise the production resolver too, but only after replacing every source
 // it can inspect. Injected-source tests above can run in parallel without HOME
 // or config overrides and cannot discover the developer's files.

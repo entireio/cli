@@ -212,16 +212,16 @@ func TestADCCredentialsEnv_OnlyUsesExplicitSources(t *testing.T) {
 			}
 			want := auth.adcCredentials
 			if !explicit {
-				if got := adcCredentialsEnv(auth); len(got) != 0 {
-					t.Fatalf("missing default file produced ADC override %q", got)
+				if got := adcCredentialsEnv(auth); !slices.Equal(got, []string{adcCredentialsEnvVar + "="}) {
+					t.Fatalf("missing default file must clear ambient ADC, got %q", got)
 				}
 				want = filepath.Join(auth.userHome, adcCredentialsFile)
 				writeTextGenerationFixture(t, want, `{}`)
 			}
 			got := adcCredentialsEnv(auth)
 			if !explicit && runtime.GOOS == "windows" {
-				if len(got) != 0 {
-					t.Fatalf("Windows default ADC must keep using APPDATA, got %q", got)
+				if !slices.Equal(got, []string{adcCredentialsEnvVar + "="}) {
+					t.Fatalf("Windows default ADC must clear the ambient pointer and keep using APPDATA, got %q", got)
 				}
 			} else if !slices.Equal(got, []string{adcCredentialsEnvVar + "=" + want}) {
 				t.Fatalf("ADC override = %q, want only %q", got, want)
@@ -237,10 +237,8 @@ func TestIsolatedHomeEnv_EmptySourcesDoNotFallBack(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("empty sources populated the isolated home: %v (error: %v)", entries, err)
 	}
-	for _, entry := range env {
-		if strings.HasPrefix(entry, adcCredentialsEnvVar+"=") {
-			t.Errorf("empty sources discovered ADC: %q", entry)
-		}
+	if !slices.Contains(env, adcCredentialsEnvVar+"=") {
+		t.Errorf("empty sources must explicitly clear ambient ADC, got %q", env)
 	}
 }
 
