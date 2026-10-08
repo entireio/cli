@@ -743,8 +743,15 @@ func TestInstallHooks_PrunesPostTodoHook(t *testing.T) {
   }
 }`, todo))
 
-	if _, err := (&ClaudeCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
+	c := &ClaudeCodeAgent{}
+	if !c.HasStaleManagedHooks(context.Background()) {
+		t.Fatal("HasStaleManagedHooks() = false before install, want true: enable must be able to report the prune")
+	}
+	if _, err := c.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if c.HasStaleManagedHooks(context.Background()) {
+		t.Error("HasStaleManagedHooks() = true after install, want false")
 	}
 
 	settings := readClaudeSettings(t, tempDir)

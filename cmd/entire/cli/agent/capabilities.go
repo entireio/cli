@@ -76,6 +76,12 @@ func AsHookFreshness(ag Agent) (HookFreshness, bool) {
 	return builtinCapability[HookFreshness](ag)
 }
 
+// AsStaleHookReporter returns the agent as StaleHookReporter if it can report
+// stale Entire hooks its next install will remove.
+func AsStaleHookReporter(ag Agent) (StaleHookReporter, bool) {
+	return builtinCapability[StaleHookReporter](ag)
+}
+
 // AsEffectiveHookDiagnostics returns the agent as EffectiveHookDiagnostics if
 // it owns diagnostics for its effective hook configuration.
 func AsEffectiveHookDiagnostics(ag Agent) (EffectiveHookDiagnostics, bool) {

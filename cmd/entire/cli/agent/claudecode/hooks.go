@@ -95,6 +95,23 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 	return count, nil
 }
 
+// HasStaleManagedHooks implements agent.StaleHookReporter: whether a plain
+// install would drop Entire hooks this CLI no longer writes (the retired
+// post-todo hook, or a hook left by an older command shape). Read-only: it
+// runs the install's hook merge on a freshly loaded copy and discards it.
+func (c *ClaudeCodeAgent) HasStaleManagedHooks(ctx context.Context) bool {
+	cfg, err := claudeHookConfig(ctx)
+	if err != nil {
+		return false
+	}
+	_, rawHooks, _, err := loadRawClaudeSettingsForInstall(cfg)
+	if err != nil {
+		return false
+	}
+	_, staleDropped := installHookEntries(rawHooks, false)
+	return staleDropped
+}
+
 // claudeHookConfig returns .claude/settings.json for the current worktree,
 // opened through the worktree's root. Every read, write and removal of that
 // file goes through it: the path lives in the working tree, which arrives by

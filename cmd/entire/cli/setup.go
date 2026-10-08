@@ -2233,7 +2233,13 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
-	// Install agent hooks (agent hooks don't depend on settings)
+	// Install agent hooks (agent hooks don't depend on settings). Ask first
+	// whether the install will also prune stale Entire hooks, so the message
+	// below does not call a changed config "already installed".
+	prunedStaleHooks := false
+	if reporter, ok := agent.AsStaleHookReporter(ag); ok {
+		prunedStaleHooks = reporter.HasStaleManagedHooks(ctx)
+	}
 	installedHooks, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
@@ -2340,9 +2346,14 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath)
 
-	if installedHooks == 0 {
+	switch {
+	case installedHooks == 0 && prunedStaleHooks:
+		fmt.Fprintf(w, "  Removed outdated Entire hooks for %s (hooks no longer used by this version)\n", ag.Description())
+	case installedHooks == 0:
 		fmt.Fprintf(w, "  Hooks for %s already installed\n", ag.Description())
-	} else {
+	case prunedStaleHooks:
+		fmt.Fprintf(w, "  Installed %d hooks for %s and removed outdated ones\n", installedHooks, ag.Description())
+	default:
 		fmt.Fprintf(w, "  Installed %d hooks for %s\n", installedHooks, ag.Description())
 	}
 	fmt.Fprintln(w, "  ✓ Configured project")

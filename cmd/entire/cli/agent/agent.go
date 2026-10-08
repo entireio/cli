@@ -167,6 +167,19 @@ type HookFreshness interface {
 	CheckHookConfig(ctx context.Context) HookConfigState
 }
 
+// StaleHookReporter is implemented by hook-supporting agents whose install
+// also prunes Entire hooks that older CLIs wrote and this one no longer does
+// (for Claude Code, the retired post-todo hook). `entire enable` asks before
+// installing, so it can say it removed them instead of reporting the hooks as
+// already installed. Implementations must be read-only.
+type StaleHookReporter interface {
+	Agent
+
+	// HasStaleManagedHooks reports whether the agent's hook config holds
+	// Entire hooks the next install will remove.
+	HasStaleManagedHooks(ctx context.Context) bool
+}
+
 // EffectiveHookDiagnostics marks agents whose effective hook state is reported
 // by an agent-owned diagnostic surface rather than generic freshness output.
 type EffectiveHookDiagnostics interface {
