@@ -212,7 +212,7 @@ func printCurrentHeadCleanItems(w io.Writer, sessions []*strategy.SessionState, 
 		fmt.Fprintf(w, "Session states (%d):\n", len(sessions))
 		pending := 0
 		for _, s := range sessions {
-			fmt.Fprintf(w, "  %s (checkpoints: %d)\n", s.SessionID, s.StepCount)
+			fmt.Fprintf(w, "  %s (pending turns: %d)\n", s.SessionID, s.StepCount)
 			if s.HasPendingWork() {
 				pending++
 			}
@@ -249,7 +249,7 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 
 	if dryRun {
 		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "Would %s session %s (phase: %s, checkpoints: %d)\n", strings.ToLower(actionVerb), sessionID, state.Phase, state.StepCount)
+		fmt.Fprintf(w, "Would %s session %s (phase: %s, pending turns: %d)\n", strings.ToLower(actionVerb), sessionID, state.Phase, state.StepCount)
 		return nil
 	}
 
@@ -257,7 +257,7 @@ func runCleanSession(ctx context.Context, cmd *cobra.Command, strat *strategy.Ma
 		var confirmed bool
 
 		title := fmt.Sprintf("%s session %s?", actionVerb, sessionID)
-		description := fmt.Sprintf("Phase: %s, Checkpoints: %d", state.Phase, state.StepCount)
+		description := fmt.Sprintf("Phase: %s, Pending turns: %d", state.Phase, state.StepCount)
 
 		form := NewAccessibleForm(
 			huh.NewGroup(

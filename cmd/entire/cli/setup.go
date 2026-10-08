@@ -3032,7 +3032,7 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 		rows = append(rows, explainRow{Label: "session states", Value: strconv.Itoa(summary.sessionStateCount)})
 	}
 	if summary.shadowBranchCount > 0 {
-		rows = append(rows, explainRow{Label: "shadow branches", Value: strconv.Itoa(summary.shadowBranchCount)})
+		rows = append(rows, explainRow{Label: "legacy shadow branches", Value: strconv.Itoa(summary.shadowBranchCount)})
 	}
 	if summary.entireDirExists {
 		rows = append(rows, explainRow{Label: ".entire/", Value: "settings, logs, metadata"})

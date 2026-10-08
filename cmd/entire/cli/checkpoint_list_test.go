@@ -354,3 +354,21 @@ func setupCheckpointListRepoWithCommittedCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, points, "seed must produce at least one branch checkpoint")
 }
+
+// Logs-only resume points get their own heading in the --pending text view,
+// so they do not read as part of the next-checkpoint preview above them.
+func TestRenderPendingPoints_LogsOnlyRowsHaveHeading(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	renderPendingPoints(&out, []strategy.PendingCheckpoint{
+		{ID: "abc1234", Message: "first", IsLogsOnly: true},
+		{ID: "def5678", Message: "second", IsLogsOnly: true},
+	})
+	text := out.String()
+	if strings.Count(text, "Resume points (commits whose session logs can be restored):") != 1 {
+		t.Fatalf("want exactly one heading before the logs-only rows:\n%s", text)
+	}
+	if !strings.HasPrefix(text, "Resume points") {
+		t.Fatalf("heading must come before the rows:\n%s", text)
+	}
+}

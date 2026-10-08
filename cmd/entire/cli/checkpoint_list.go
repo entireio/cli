@@ -229,11 +229,23 @@ func runCheckpointPendingListHuman(ctx context.Context, w io.Writer) error {
 		}
 	}
 
-	multi := hasMultipleSessions(listing.points)
-	for _, p := range listing.points {
+	renderPendingPoints(w, listing.points)
+	return nil
+}
+
+// renderPendingPoints prints the task-record and logs-only rows that follow
+// the next-checkpoint preview. Logs-only rows are resume points, not part of
+// the preview, so they get their own heading and do not read as its contents.
+func renderPendingPoints(w io.Writer, points []strategy.PendingCheckpoint) {
+	multi := hasMultipleSessions(points)
+	logsOnlyHeading := false
+	for _, p := range points {
+		if p.IsLogsOnly && !logsOnlyHeading {
+			fmt.Fprintln(w, "Resume points (commits whose session logs can be restored):")
+			logsOnlyHeading = true
+		}
 		fmt.Fprintln(w, pendingCheckpointLabel(p, multi))
 	}
-	return nil
 }
 
 // previewPromptWidth caps each prompt in the human preview; the JSON carries

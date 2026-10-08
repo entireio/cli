@@ -5563,7 +5563,7 @@ func TestRunExplainBranchWithFilter_NoCheckpoints_ShowsHelpfulMessage(t *testing
 	if !strings.Contains(output, "checkpoints  0") {
 		t.Errorf("expected 'checkpoints  0' in output, got: %s", output)
 	}
-	if !strings.Contains(output, "Checkpoints will appear") || !strings.Contains(output, "agent session") {
+	if !strings.Contains(output, "after you commit agent work") || !strings.Contains(output, "entire checkpoint list --pending") {
 		t.Errorf("expected helpful message about checkpoints, got: %s", output)
 	}
 }

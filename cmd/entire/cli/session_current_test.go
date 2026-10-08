@@ -128,8 +128,8 @@ func TestSessionCurrent_JSONPrintsCurrentSessionInfo(t *testing.T) {
 	if got.SessionID != state.SessionID {
 		t.Fatalf("session_id = %q, want %q", got.SessionID, state.SessionID)
 	}
-	if got.Checkpoints != state.StepCount {
-		t.Fatalf("checkpoints = %d, want %d", got.Checkpoints, state.StepCount)
+	if got.PendingTurns != state.StepCount {
+		t.Fatalf("pending_turns = %d, want %d", got.PendingTurns, state.StepCount)
 	}
 	if got.WorktreePath != dir {
 		t.Fatalf("worktree_path = %q, want %q", got.WorktreePath, dir)

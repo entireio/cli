@@ -2875,7 +2875,7 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.P
 
 	if len(groups) == 0 {
 		sb.WriteString("No checkpoints found on this branch.\n")
-		sb.WriteString("Checkpoints will appear here after you save changes during an agent session.\n")
+		sb.WriteString("Checkpoints appear here after you commit agent work. Run `entire checkpoint list --pending` to see what the next checkpoint will contain.\n")
 		return sb.String()
 	}
 

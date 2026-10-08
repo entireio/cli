@@ -393,7 +393,8 @@ func displayStuckSession(cmd *cobra.Command, ss stuckSession) {
 		fmt.Fprintf(w, "  Last interaction: %s\n", ss.State.LastInteractionTime.Format(time.RFC3339))
 	}
 
-	fmt.Fprintf(w, "  Checkpoints: %d, Files touched: %d\n", ss.CheckpointCount, ss.FilesTouchedCount)
+	fmt.Fprintf(w, "  Pending turns: %d, Task records: %d, Files touched: %d\n",
+		ss.State.StepCount, len(ss.State.TaskRecords), ss.FilesTouchedCount)
 }
 
 // canCondenseStuckSession reports whether a stuck session has content the

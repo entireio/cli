@@ -95,8 +95,7 @@ current branch. Use --pending for work that is not a checkpoint yet:
 Output modes:
   --json             Machine-readable JSON instead of the human view.
   --pending          Select the pending dataset described above.
-  --pending --json   The pending dataset as a JSON array (replaces the
-                     deprecated rewind --list).
+  --pending --json   The pending dataset as a JSON array.
 
 Each --pending --json element has id, message, metadata_dir, date (RFC3339),
 is_task_checkpoint, is_logs_only, and when set tool_use_id, condensation_id,

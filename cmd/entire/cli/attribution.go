@@ -952,6 +952,10 @@ func renderAttributionBlameTable(w io.Writer, result *fileAttributionResult, lin
 	}
 
 	body(sty)
+	// The Agent column names the agent of the checkpoint linked to the line's
+	// commit. It does not claim the agent wrote the line: linking is by file,
+	// so a human edit committed alongside agent work shows the same agent.
+	fmt.Fprintf(w, "  %s\n", sty.render(sty.dim, "Agent: the agent of the checkpoint linked to the line's commit, not necessarily who wrote the line"))
 	renderAttributionMarkerLegend(w, sty, result.Lines)
 	renderAttributionSummary(w, sty, result.Summary, lineFlag)
 }

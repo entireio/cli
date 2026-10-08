@@ -587,7 +587,7 @@ type sessionInfoJSON struct {
 	EndedAt        *time.Time     `json:"ended_at,omitempty"`
 	LastActive     *time.Time     `json:"last_active,omitempty"`
 	Turns          int            `json:"turns"`
-	Checkpoints    int            `json:"checkpoints"`
+	PendingTurns   int            `json:"pending_turns"`
 	LastCheckpoint string         `json:"last_checkpoint_id,omitempty"`
 	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
 	LastPrompt     string         `json:"last_prompt,omitempty"`
@@ -634,7 +634,7 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		EndedAt:        state.EndedAt,
 		LastActive:     state.LastInteractionTime,
 		Turns:          state.SessionTurnCount,
-		Checkpoints:    state.StepCount,
+		PendingTurns:   state.StepCount,
 		LastCheckpoint: string(state.LastCheckpointID),
 		LastPrompt:     state.LastPrompt,
 		FilesTouched:   state.FilesTouched,
@@ -704,7 +704,7 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 		fmt.Fprintf(w, "Turns:       %d\n", state.SessionTurnCount)
 	}
 
-	fmt.Fprintf(w, "Checkpoints: %d\n", state.StepCount)
+	fmt.Fprintf(w, "Pending turns: %d\n", state.StepCount)
 
 	if state.LastCheckpointID != "" {
 		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)
