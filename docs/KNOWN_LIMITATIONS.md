@@ -52,3 +52,13 @@ When multiple sessions are ACTIVE in the same directory and one session's agent 
 **Impact:** Cosmetic — extra metadata entries on `entire/checkpoints/v1` with minimal content. No data loss or corruption.
 
 **Workaround:** Use separate git worktrees for concurrent sessions. A commit condenses the sessions with pending work in its own worktree (plus any session whose agent process made the commit), so sessions in different worktrees don't interfere.
+
+## Upgrades and Downgrades
+
+### Downgrading Discards Pending Agent Work
+
+Commit any pending agent work before downgrading to a version that still writes shadow branches, or before running such a version (for example an editor-bundled or pinned `entire`) against the same clone.
+
+**Why:** Current versions record pending work in session state only and never write the `entire/<commit>-<worktree>` shadow branch. Older versions delete any ended, never-condensed session state whose shadow branch is missing, which they check on every `prepare-commit-msg` and `post-commit`. Every ended session with uncommitted agent work matches, so the older hook deletes its state before linking: the commit gets no trailer and no checkpoint.
+
+**Workaround:** Commit (or discard) the agent's work with the current version first; `entire checkpoint list --pending` shows what is still pending.
