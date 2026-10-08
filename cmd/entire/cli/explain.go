@@ -260,13 +260,15 @@ Viewing specific items:
   entire checkpoint explain --commit <ref>        Force interpretation as commit ref
 
 Checkpoints in another repo:
-  entire checkpoint explain <id> --repo gh/owner/name
-  entire checkpoint explain <id> --repo et/project/repo
+  entire checkpoint explain <id-or-sha> --repo gh/owner/name
+  entire checkpoint explain <id-or-sha> --repo et/project/repo
                  Explain a checkpoint owned by another repository — the
                  drill-down for a cross-repo 'entire search' hit. Reads it from
                  that repo's Entire API; nothing is written to this repo.
-                 Needs a full checkpoint ID (positional or --checkpoint) and a
-                 checkpoint that has been pushed.
+                 Needs ` + explainRepoTargetShapes + `
+                 (positional, --checkpoint, or --commit) and a checkpoint that
+                 has been pushed. A commit SHA is resolved to its checkpoint
+                 by that repo's Entire API, so prefixes cannot be used here.
 
 Filtering the list view:
   --session      Filter checkpoints by session ID (or prefix)
@@ -355,10 +357,6 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 			// (commit walks, prefix matching, blob prefetch) applies to a repo
 			// that isn't checked out here.
 			if repoFlag != "" {
-				target := positional
-				if target == "" {
-					target = checkpointFlag
-				}
 				if !explainRepoTargetsCurrentRepo(cmd.Context(), repoFlag) {
 					// Past flag parsing every failure is a runtime one
 					// (network, auth, missing checkpoint), not a usage
@@ -366,7 +364,9 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 					cmd.SilenceUsage = true
 					return runCrossRepoExplain(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), crossRepoExplainOptions{
 						repoFlag:      repoFlag,
-						target:        target,
+						target:        positional,
+						checkpointID:  checkpointFlag,
+						commitSHA:     commitFlag,
 						json:          jsonFlag,
 						transcript:    transcriptFlag,
 						rawTranscript: rawTranscriptFlag,
@@ -431,11 +431,14 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
 	// --task replaces the session as the transcript's source.
 	cmd.MarkFlagsMutuallyExclusive("task", "session-index")
-	// --repo reads another repo over HTTP: --commit resolves against local
-	// history, --session filters the local list view, --search-all walks local
-	// commits, and --generate would write a summary the foreign repo never
-	// sees.
-	cmd.MarkFlagsMutuallyExclusive("repo", "commit")
+	// --repo reads another repo over HTTP: --session filters the local list
+	// view, --search-all walks local commits, and --generate would write a
+	// summary the foreign repo never sees. --commit is allowed: a full SHA
+	// resolves through the foreign repo's cell instead of local history.
+	// Two explicit targets are rejected before any dispatch: the cross-repo
+	// path does not reach runExplain's runtime check, and picking one would
+	// silently explain a checkpoint the caller did not name.
+	cmd.MarkFlagsMutuallyExclusive("commit", "checkpoint")
 	cmd.MarkFlagsMutuallyExclusive("repo", "session")
 	cmd.MarkFlagsMutuallyExclusive("repo", "generate")
 	cmd.MarkFlagsMutuallyExclusive("repo", "search-all")
@@ -471,10 +474,10 @@ func validateExplainFlagCombinations(cmd *cobra.Command, v explainFlagValues, po
 	if v.force && !v.generate {
 		return errors.New("--force requires --generate flag")
 	}
-	// --repo needs a specific checkpoint: there is no local history to resolve a
-	// commit ref or an ID prefix against.
-	if v.repo != "" && positional == "" && v.checkpoint == "" {
-		return errors.New("--repo requires a checkpoint ID (positional or --checkpoint/-c)")
+	// --repo needs a specific target: there is no local list view to fall
+	// back to in another repo.
+	if v.repo != "" && !hasCheckpointTarget {
+		return errors.New("--repo requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
 	}
 	if cmd.Flags().Changed("insecure-http-auth") && v.repo == "" {
 		return errors.New("--insecure-http-auth only applies with --repo")

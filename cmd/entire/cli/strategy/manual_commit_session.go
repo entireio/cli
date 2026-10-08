@@ -705,54 +705,148 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 	// between our caller's existence check and our save would have its
 	// fields (TranscriptPath, LastPrompt, ModelName, accumulated TurnID)
 	// overwritten with blanks here.
-	_, _, release, lockErr := acquireSessionGate(ctx, sessionID)
-	if lockErr != nil {
-		return fmt.Errorf("acquire state lock: %w", lockErr)
-	}
-	defer release()
-	existing, loadErr := s.loadSessionState(ctx, sessionID)
-	if loadErr != nil {
-		return fmt.Errorf("re-load session state under lock: %w", loadErr)
-	}
-	if existing != nil && existing.BaseCommit != "" {
-		return nil
-	}
-	if existing != nil && agentType == agent.AgentTypeCodex {
-		// Repair the partial state in place. A child hook can have recorded task
-		// content and accounting before the parent session initializes, so a
-		// fresh replacement would silently discard durable child state.
-		state = existing
-		state.CLIVersion = versioninfo.Version
-		state.BaseCommit = headHash
-		state.AttributionBaseCommit = headHash
-		state.WorktreePath = worktreePath
-		state.WorktreeID = worktreeID
-		if state.StartedAt.IsZero() {
-			state.StartedAt = now
+	//
+	// The agent home is remembered only after the gate is released, so the
+	// registry's I/O never extends the hold time for a concurrent hook.
+	remember, err := func() (string, error) {
+		_, _, release, lockErr := acquireSessionGate(ctx, sessionID)
+		if lockErr != nil {
+			return "", fmt.Errorf("acquire state lock: %w", lockErr)
 		}
-		state.LastInteractionTime = &now
-		state.TurnID = turnID.String()
-		state.AgentType = agentType
-		if model != "" {
-			state.ModelName = model
+		defer release()
+		existing, loadErr := s.loadSessionState(ctx, sessionID)
+		if loadErr != nil {
+			return "", fmt.Errorf("re-load session state under lock: %w", loadErr)
 		}
-		if transcriptPath != "" {
-			state.TranscriptPath = transcriptPath
+		if existing != nil && existing.BaseCommit != "" {
+			return "", nil
 		}
-		if userPrompt != "" {
-			state.LastPrompt = truncatePromptForStorage(userPrompt)
-		}
-		if state.UntrackedFilesAtStart == nil {
-			state.UntrackedFilesAtStart = untrackedFiles
-		}
+		if existing != nil && agentType == agent.AgentTypeCodex {
+			// Repair the partial state in place. A child hook can have
+			// recorded task content and accounting before the parent session
+			// initializes, so a fresh replacement would silently discard
+			// durable child state.
+			state = existing
+			state.CLIVersion = versioninfo.Version
+			state.BaseCommit = headHash
+			state.AttributionBaseCommit = headHash
+			state.WorktreePath = worktreePath
+			state.WorktreeID = worktreeID
+			if state.StartedAt.IsZero() {
+				state.StartedAt = now
+			}
+			state.LastInteractionTime = &now
+			state.TurnID = turnID.String()
+			state.AgentType = agentType
+			if model != "" {
+				state.ModelName = model
+			}
+			if transcriptPath != "" {
+				state.TranscriptPath = transcriptPath
+			}
+			if userPrompt != "" {
+				state.LastPrompt = truncatePromptForStorage(userPrompt)
+			}
+			if state.UntrackedFilesAtStart == nil {
+				state.UntrackedFilesAtStart = untrackedFiles
+			}
 
-		// This is a repair, not an authoritative SessionStart inventory. Keep
-		// the ledger and token data but retain conservative coverage markers.
-		incomplete := false
-		state.SubagentInventoryComplete = &incomplete
-		state.SubagentTokensBaselineComplete = &incomplete
+			// This is a repair, not an authoritative SessionStart inventory.
+			// Keep the ledger and token data but retain conservative coverage
+			// markers.
+			incomplete := false
+			state.SubagentInventoryComplete = &incomplete
+			state.SubagentTokensBaselineComplete = &incomplete
+		}
+		remember := updateSessionAgentHome(ctx, state)
+		return remember, s.saveSessionState(ctx, state)
+	}()
+	if err != nil {
+		return err
 	}
-	return s.saveSessionState(ctx, state)
+	rememberAgentHome(ctx, state.AgentType, remember)
+	return nil
+}
+
+// updateSessionAgentHome sets state.AgentHome for state.AgentType and
+// state.TranscriptPath, and returns the home the caller should pass to
+// rememberAgentHome once state is saved, or "" when there is none.
+//
+// state.AgentHome becomes the agent's active home when one of that home's
+// stores holds the transcript, spelled as the environment sets it or in its
+// canonical form, whichever contains the transcript path; that home is
+// returned. Otherwise an existing state.AgentHome is kept while its stores hold
+// the transcript, and cleared when they do not. With no transcript path,
+// state.AgentHome is left unchanged. For an unknown agent, or one without a
+// home layout, it is cleared. A home read from state is never returned, so it
+// never reaches the registry.
+func updateSessionAgentHome(ctx context.Context, state *SessionState) (remember string) {
+	ag, err := agent.GetByAgentType(state.AgentType)
+	if err != nil {
+		state.AgentHome = ""
+		return ""
+	}
+	provider, ok := agent.AsHomeLayoutProvider(ag)
+	if !ok {
+		state.AgentHome = ""
+		return ""
+	}
+	if state.TranscriptPath == "" {
+		return ""
+	}
+	layout := provider.HomeLayout()
+	transcript := filepath.Clean(state.TranscriptPath)
+	if active, ok := activeHomeHolding(ctx, provider, transcript); ok {
+		state.AgentHome = active
+		return active
+	}
+	if state.AgentHome != "" {
+		if _, ok := layout.StoreContaining(filepath.Clean(state.AgentHome), transcript); ok {
+			return ""
+		}
+	}
+	state.AgentHome = ""
+	return ""
+}
+
+// activeHomeHolding returns provider's active home if one of its session
+// stores holds transcript, a clean path. The home is returned as the
+// environment sets it or in its canonical form, whichever contains transcript,
+// since an agent may report transcript paths through either.
+func activeHomeHolding(ctx context.Context, provider agent.HomeLayoutProvider, transcript string) (string, bool) {
+	active, err := provider.SessionHome()
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "session"), "agent home unavailable",
+			slog.String("agent", string(provider.Type())),
+			slog.String("error", err.Error()))
+		return "", false
+	}
+	layout := provider.HomeLayout()
+	active = filepath.Clean(active)
+	if _, ok := layout.StoreContaining(active, transcript); ok {
+		return active, true
+	}
+	if canonical, err := filepath.EvalSymlinks(active); err == nil && canonical != active {
+		if _, ok := layout.StoreContaining(canonical, transcript); ok {
+			return canonical, true
+		}
+	}
+	return "", false
+}
+
+// rememberAgentHome records home, as returned by updateSessionAgentHome, in the
+// per-user registry of agentType's homes, and does nothing for "". A failure is
+// logged rather than returned: it only stops later lookups from trusting this
+// home.
+func rememberAgentHome(ctx context.Context, agentType types.AgentType, home string) {
+	if home == "" {
+		return
+	}
+	if err := agent.RememberAgentHome(agentType, home); err != nil {
+		logging.Warn(logging.WithComponent(ctx, "session"), "failed to record agent home",
+			slog.String("agent", string(agentType)),
+			slog.String("error", err.Error()))
+	}
 }
 
 // getShadowBranchNameForCommit returns the shadow branch name for the given base commit and worktree ID.

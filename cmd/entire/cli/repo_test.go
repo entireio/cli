@@ -283,6 +283,11 @@ func serveRepoCreateWith(t *testing.T, created *coreapi.Repo) <-chan []byte {
 			bodyCh <- raw
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/projects/"):
+			// The one lookup made when nothing else names the new repo.
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":%q,"name":"acme","ownerType":"org","ownerId":"o","region":"us","createdAt":"2026-01-01T00:00:00Z","capabilities":{"canCreateRepository":true,"canDelete":false,"canManageAccess":false,"canManageTrails":false}}`, strings.TrimPrefix(r.URL.Path, "/api/v1/projects/"))
+			return
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/"+created.ID && r.URL.Query().Get("authoritative") == "true":
 			w.Header().Set("Content-Type", "application/json")
 		default:

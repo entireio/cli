@@ -664,18 +664,22 @@ func uniqueCommitAgents(c userCommit) []string {
 }
 
 func formatCommitDate(dateStr string) string {
-	t, err := time.ParseInLocation("2006-01-02", dateStr, time.Local)
+	return formatCommitDateAt(dateStr, time.Now(), time.Local)
+}
+
+func formatCommitDateAt(dateStr string, now time.Time, loc *time.Location) string {
+	t, err := time.Parse("2006-01-02", dateStr)
 	if err != nil {
 		return dateStr
 	}
-	now := time.Now().Local()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	days := int(today.Sub(t).Hours() / 24)
-
-	switch days {
-	case 0:
+	now = now.In(loc)
+	// Represent calendar dates in UTC: local days can span 23 or 25 hours,
+	// and DST can even skip local midnight.
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	switch {
+	case t.Equal(today):
 		return t.Format("Monday 2 Jan") + " (today)"
-	case 1:
+	case t.Equal(today.AddDate(0, 0, -1)):
 		return t.Format("Monday 2 Jan") + " (yesterday)"
 	default:
 		return t.Format("Monday 2 Jan")

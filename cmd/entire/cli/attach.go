@@ -725,6 +725,11 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 
 	state.CLIVersion = versioninfo.Version
 	state.AttachedManually = true
+	if state.AgentType != agentType || state.TranscriptPath != transcriptPath {
+		// The home belonged to the previous transcript; the next turn start
+		// records the right one.
+		state.AgentHome = ""
+	}
 	state.AgentType = agentType
 	state.TranscriptPath = transcriptPath
 	state.LastCheckpointID = checkpointID
@@ -895,7 +900,7 @@ const (
 // resolveAndValidateTranscript finds the transcript file for a session, searching alternative
 // project directories if needed.
 func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agent.Agent, lookup transcriptLookup) (string, error) {
-	transcriptPath, err := resolveTranscriptPath(ctx, sessionID, ag)
+	transcriptPath, err := discoverTranscript(ctx, sessionID, ag)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve transcript path: %w", err)
 	}
@@ -903,7 +908,7 @@ func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agen
 	// in-progress writes, but can't conjure a file that was never started.
 	// This avoids agents like Cursor polling for 3s on non-existent files
 	// during auto-detection.
-	if _, statErr := agent.StatTranscriptFile(transcriptPath); statErr == nil {
+	if transcriptPath != "" {
 		if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
 			if prepErr := preparer.PrepareTranscript(ctx, transcriptPath); prepErr != nil {
 				logging.Debug(ctx, "PrepareTranscript failed (best-effort)", "error", prepErr)

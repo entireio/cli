@@ -1380,7 +1380,7 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 		refs = append(refs, agent.SubagentReference{ObservedTurnIDs: entry.ObservedTurnIDs, AgentID: entry.AgentID, DeclaredTranscriptPath: entry.DeclaredTranscriptPath, ResolvedTranscriptPath: entry.ResolvedTranscriptPath})
 	}
 	version := state.SubagentLedgerVersion
-	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, parent, fromOffset, refs)
+	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, parent, fromOffset, refs, state.AgentHome)
 	if !ok {
 		return nil, &version
 	}

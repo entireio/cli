@@ -19,7 +19,7 @@ type CapabilityDeclarer interface {
 // Not every optional interface appears here: built-in-only capabilities that
 // have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
 // SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher,
-// InventoryAwareExtractor) are intentionally
+// InventoryAwareExtractor, HomeScopedInventoryExtractor) are intentionally
 // excluded — their As* helpers resolve by type assertion alone (see
 // builtinCapability), with no DeclaredCaps gate.
 type DeclaredCaps struct {
@@ -191,6 +191,12 @@ func AsOutOfBandTokenSource(ag Agent) (OutOfBandTokenSource, bool) {
 // Entire rather than the external-agent protocol.
 func AsInventoryAwareExtractor(ag Agent) (InventoryAwareExtractor, bool) {
 	return builtinCapability[InventoryAwareExtractor](ag)
+}
+
+// AsHomeScopedInventoryExtractor returns the agent as a
+// HomeScopedInventoryExtractor when it implements the built-in-only interface.
+func AsHomeScopedInventoryExtractor(ag Agent) (HomeScopedInventoryExtractor, bool) {
+	return builtinCapability[HomeScopedInventoryExtractor](ag)
 }
 
 // AsTextGenerator returns the agent as TextGenerator if it both

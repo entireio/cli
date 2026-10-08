@@ -43,6 +43,8 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo mirror add":    false,
 		"repo mirror list":   true,
 		"repo mirror remove": false,
+		// detach renders the server's plan (dry run) or result.
+		"repo mirror detach": true,
 		// `remote add` writes local git config and reports what it changed;
 		// there is no object to render, so it stays off the --json surface like
 		// the other side-effect verbs.

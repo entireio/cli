@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -44,6 +45,63 @@ func resolveTranscriptPath(ctx context.Context, sessionID string, agent agentpkg
 		return "", fmt.Errorf("resolve transcript path: %w", err)
 	}
 	return absPath, nil
+}
+
+// discoverTranscript returns the transcript of sessionID in ag's session
+// directory for the current worktree: the first of the agent's candidate files
+// that is a regular file, following symbolic links as later reads do (the
+// fallback search is stricter; see isTranscriptFileInStore). It returns "" and
+// no error when no candidate is one.
+//
+// When the session directory lies in a store of the agent's home layout, the
+// candidates may also lie in the home's other stores, such as a Codex rollout
+// moved to archived_sessions.
+func discoverTranscript(ctx context.Context, sessionID string, ag agentpkg.Agent) (string, error) {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return "", fmt.Errorf("invalid session ID for transcript path: %w", err)
+	}
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get worktree root: %w", err)
+	}
+	store, err := agentpkg.OpenSessionStore(ag, repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("failed to get agent session directory: %w", err)
+	}
+	sessionDir := store.Dir()
+	inStore := func(string) bool { return true }
+	if provider, ok := agentpkg.AsHomeLayoutProvider(ag); ok {
+		layout := provider.HomeLayout()
+		home, homeErr := provider.SessionHome()
+		if homeErr != nil {
+			// Not fatal: the session directory is still searched, only the
+			// home's other stores are not.
+			logging.Debug(ctx, "agent home unavailable, searching only the session directory",
+				"agent", string(ag.Name()), "error", homeErr)
+		} else if _, ok := layout.StoreContaining(home, sessionDir); ok {
+			if store, err = agentpkg.OpenSessionStoreAt(ag, home); err != nil {
+				return "", fmt.Errorf("failed to open agent home: %w", err)
+			}
+			inStore = func(path string) bool {
+				_, ok := layout.StoreContaining(home, path)
+				return ok
+			}
+		}
+	}
+
+	candidates, err := store.SessionFileCandidatesIn(sessionDir, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("resolve transcript path: %w", err)
+	}
+	for _, path := range candidates {
+		if !inStore(path) {
+			continue
+		}
+		if info, statErr := agentpkg.StatTranscriptFile(path); statErr == nil && info.Mode().IsRegular() {
+			return path, nil
+		}
+	}
+	return "", nil
 }
 
 // searchTranscriptInProjectDirs searches for a session transcript across an agent's
@@ -94,15 +152,21 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 		if storeErr != nil {
 			return nil //nolint:nilerr // an unusable candidate directory is skipped, not fatal to the search
 		}
-		name, absPath, resolveErr := store.SessionFile(sessionID)
+		candidates, resolveErr := store.SessionFileCandidatesIn(path, sessionID)
 		if resolveErr != nil {
 			// The ID does not resolve inside this candidate — the next one may
 			// still hold the session, so keep walking.
 			return nil //nolint:nilerr // see comment
 		}
-		if store.Exists(name) {
-			found = absPath
-			return filepath.SkipAll
+		for _, candidate := range candidates {
+			name, nameErr := store.Name(candidate)
+			if nameErr != nil {
+				continue
+			}
+			if isTranscriptFileInStore(store, name, candidate) {
+				found = candidate
+				return filepath.SkipAll
+			}
 		}
 		return nil
 	})
@@ -113,6 +177,28 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 		return found, nil
 	}
 	return "", errors.New("transcript not found in any project directory")
+}
+
+// isTranscriptFileInStore reports whether name, the store's name for path, is a
+// regular file or a symbolic link to one. Like the store's other reads it
+// refuses a path whose directories below the store include a link.
+//
+// That is stricter than discoverTranscript, which follows a link anywhere on
+// the path, as the transcript read after it does. This search reaches each
+// store through filepath.WalkDir, which does not follow linked directories, and
+// the check keeps it from following one below the store either.
+func isTranscriptFileInStore(store *agentpkg.SessionStore, name, path string) bool {
+	info, err := store.Lstat(name)
+	if err != nil {
+		return false
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		info, err = os.Stat(path)
+		if err != nil {
+			return false
+		}
+	}
+	return info.Mode().IsRegular()
 }
 
 // ResolveAgentTranscriptPath returns the path to an existing subagent transcript

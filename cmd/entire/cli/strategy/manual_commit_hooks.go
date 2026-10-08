@@ -3019,7 +3019,9 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	// the state is missing (or the loaded state has an empty BaseCommit, a
 	// partial-state remnant from a concurrent warning), fall through to
 	// the initialize-new-session branch.
-	turnStartErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+	var remember string
+	var homeAgentType types.AgentType
+	turnStartErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.BaseCommit == "" {
 			return errPartialState
 		}
@@ -3055,6 +3057,8 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 				transitionSessionToCodex(state)
 			}
 			state.AgentType = corrected
+			// The recorded home belonged to the previous agent's layout.
+			state.AgentHome = ""
 		} else if state.AgentType == "" && resolvedAgentType != "" {
 			state.AgentType = resolvedAgentType
 		}
@@ -3067,6 +3071,8 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
 			state.TranscriptPath = transcriptPath
 		}
+		remember = updateSessionAgentHome(ctx, state)
+		homeAgentType = state.AgentType
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
 		reconcileWorktreePathForResumedTurn(ctx, state)
@@ -3090,7 +3096,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		state.LastCheckpointID = ""
 		state.TurnCheckpointIDs = nil
 		return nil
-	})
+	}, func() { rememberAgentHome(ctx, homeAgentType, remember) })
 	if turnStartErr == nil {
 		return nil
 	}
