@@ -160,19 +160,23 @@ func validateClaudeSettings(raw json.RawMessage, forbiddenRoots []string) error 
 	return nil
 }
 
-// validateCommand accepts a shell command only if none of its words can make
-// the reviewed checkout supply code: every word is checked, including those of
-// commands chained with ;, && or |. A word that is a path must be absolute and
-// outside the forbidden roots; relative paths, $VAR paths, command
-// substitution, the project directory and project launchers are refused.
+// shellSyntax are characters that would make a command a shell program
+// rather than a plain program and arguments.
+const shellSyntax = ";&|<>()$`'\"\\\n"
+
+// validateCommand accepts only a plain command: an absolute program (or a bare
+// tool name) and plain arguments, with no shell syntax. That keeps splitting
+// on whitespace exact, so every word can be checked: paths must be absolute
+// and outside the forbidden roots, and project launchers are refused. Hooks
+// that need shell features belong in a script at an absolute path.
 func validateCommand(command string, forbiddenRoots []string) error {
 	if strings.Contains(command, "CLAUDE_PROJECT_DIR") {
 		return fmt.Errorf("%q refers to the project directory, which is the reviewed checkout", command)
 	}
-	words, err := splitShellWords(command)
-	if err != nil {
-		return fmt.Errorf("%q: %w", command, err)
+	if strings.ContainsAny(command, shellSyntax) {
+		return fmt.Errorf("%q uses shell syntax; use an absolute program path and plain arguments, or put the logic in a script at an absolute path", command)
 	}
+	words := strings.Fields(command)
 	if len(words) == 0 {
 		return errors.New("empty command")
 	}
@@ -207,68 +211,6 @@ func validateCommandWord(word string, forbiddenRoots []string) error {
 		}
 	}
 	return nil
-}
-
-// splitShellWords splits a command line into words the way a POSIX shell
-// would for these checks: quotes and backslashes group, and control operators
-// (; & | < > ( )) separate commands. Command substitution is refused, since
-// its result can't be checked.
-func splitShellWords(s string) ([]string, error) {
-	var words []string
-	var cur strings.Builder
-	inWord := false
-	flush := func() {
-		if inWord {
-			words = append(words, cur.String())
-			cur.Reset()
-			inWord = false
-		}
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '`' || (c == '$' && i+1 < len(s) && s[i+1] == '('):
-			return nil, errors.New("command substitution isn't allowed")
-		case c == ' ' || c == '\t' || c == '\n':
-			flush()
-		case strings.IndexByte(";&|<>()", c) >= 0:
-			flush()
-		case c == '\\':
-			if i+1 < len(s) {
-				i++
-				cur.WriteByte(s[i])
-				inWord = true
-			}
-		case c == '\'':
-			end := strings.IndexByte(s[i+1:], '\'')
-			if end < 0 {
-				return nil, errors.New("unterminated single quote")
-			}
-			cur.WriteString(s[i+1 : i+1+end])
-			i += end + 1
-			inWord = true
-		case c == '"':
-			i++
-			for ; i < len(s) && s[i] != '"'; i++ {
-				if s[i] == '`' || (s[i] == '$' && i+1 < len(s) && s[i+1] == '(') {
-					return nil, errors.New("command substitution isn't allowed")
-				}
-				if s[i] == '\\' && i+1 < len(s) && strings.IndexByte(`"\$`+"`", s[i+1]) >= 0 {
-					i++
-				}
-				cur.WriteByte(s[i])
-			}
-			if i >= len(s) {
-				return nil, errors.New("unterminated double quote")
-			}
-			inWord = true
-		default:
-			cur.WriteByte(c)
-			inWord = true
-		}
-	}
-	flush()
-	return words, nil
 }
 
 func under(path string, roots []string) bool {

@@ -177,10 +177,13 @@ Rules:
   layer that owns the profile, else clone-local preferences, which then holds a
   copy of the whole profile.
 - **Commands stay outside the checkout.** Every hook, MCP and helper command
-  must be an absolute path outside the reviewed and the user's checkout, or a
-  bare tool name; relative paths, `$CLAUDE_PROJECT_DIR`, and launchers that
-  resolve tools from the project (`npx`, `uvx`, `bunx`, …) are refused, at save
-  time and again before each run.
+  must be a plain command: an absolute program outside the reviewed and the
+  user's checkout (or a bare tool name) with plain arguments. Shell syntax
+  (`;`, `&`, `|`, redirects, `$`, backticks, quotes) is refused, so splitting
+  on whitespace is exact and every word is checked; hooks that need a shell go
+  in a script at an absolute path. Relative paths, `$CLAUDE_PROJECT_DIR`, and
+  launchers that resolve tools from the project (`npx`, `uvx`, `bunx`, …) are
+  refused, at save time and again before each run.
 - **Fail, don't fall back.** An agent that can't apply a field (Codex
   `settings`, Pi `mcp_servers`, …) fails the review with an explanation.
 - **Gate.** Skills and commands can run their own commands, so reviewing
