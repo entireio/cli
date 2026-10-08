@@ -102,11 +102,6 @@ func (s *GitStore) Refs() PersistentRefs {
 	return s.refs
 }
 
-// PersistentReadRef returns the ref that committed-checkpoint reads resolve against.
-func (s *GitStore) PersistentReadRef() plumbing.ReferenceName {
-	return s.refs.Read
-}
-
 func (s *GitStore) updatePrimaryRef(ctx context.Context, build func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error)) error {
 	return updatePersistentRef(ctx, s.repo, s.refs.Primary, func() (plumbing.Hash, plumbing.Hash, error) {
 		parentHash, rootTreeHash, err := s.getSessionsBranchRef()

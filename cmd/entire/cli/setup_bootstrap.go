@@ -415,15 +415,3 @@ func ghCurrentUser(ctx context.Context, runner bootstrapRunner) (string, error) 
 	}
 	return strings.TrimSpace(out), nil
 }
-
-// ghAvailable reports whether the gh CLI is installed.
-func ghAvailable(ctx context.Context, runner bootstrapRunner) bool {
-	_, err := runner.Run(ctx, "gh", "--version")
-	return err == nil
-}
-
-// ghAuthenticated reports whether `gh auth status` succeeds.
-func ghAuthenticated(ctx context.Context, runner bootstrapRunner) bool {
-	_, err := runner.Run(ctx, "gh", "auth", "status")
-	return err == nil
-}

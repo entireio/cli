@@ -48,12 +48,11 @@ import (
 )
 
 const (
-	pagerEnvVar       = "PAGER"
-	lessEnvVar        = "LESS"
-	lessPagerName     = "less"
-	lessRawControlEnv = "LESS=-R"
-	windowsGOOS       = "windows"
-	darwinGOOS        = "darwin"
+	pagerEnvVar   = "PAGER"
+	lessEnvVar    = "LESS"
+	lessPagerName = "less"
+	windowsGOOS   = "windows"
+	darwinGOOS    = "darwin"
 )
 
 var generateTranscriptSummary = summarize.GenerateFromTranscript

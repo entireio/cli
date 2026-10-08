@@ -1522,33 +1522,6 @@ func (s *GitStore) ReadLatestSessionContent(ctx context.Context, checkpointID id
 	return s.ReadSessionContent(ctx, checkpointID, latestIndex)
 }
 
-// ReadSessionContentByID reads a session's content by its session ID.
-// This is useful when you have the session ID but don't know its index within the checkpoint.
-// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
-// Returns an error if no session with the given ID exists in the checkpoint.
-func (s *GitStore) ReadSessionContentByID(ctx context.Context, checkpointID id.CheckpointID, sessionID string) (*SessionContent, error) {
-	summary, err := s.Read(ctx, checkpointID)
-	if err != nil {
-		return nil, err
-	}
-	if summary == nil {
-		return nil, ErrCheckpointNotFound
-	}
-
-	// Iterate through sessions to find the one with matching session ID
-	for i := range len(summary.Sessions) {
-		content, readErr := s.ReadSessionContent(ctx, checkpointID, i)
-		if readErr != nil {
-			continue
-		}
-		if content != nil && content.Metadata.SessionID == sessionID {
-			return content, nil
-		}
-	}
-
-	return nil, fmt.Errorf("session %q not found in checkpoint %s", sessionID, checkpointID)
-}
-
 // List lists all committed checkpoints from the entire/checkpoints/v1 branch.
 // Scans sharded paths: <id[:2]>/<id[2:]>/ directories containing metadata.json.
 //

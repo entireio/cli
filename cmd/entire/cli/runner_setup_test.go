@@ -326,11 +326,11 @@ func newRunnerSetupRepo(t *testing.T) string {
 func stubUnavailableSummaryProvider(t *testing.T) {
 	t.Helper()
 	originalLoad, originalGet := loadSummarySettings, getSummaryAgent
-	originalDiscover, originalDiscoverAlways := discoverSummaryProviders, discoverSummaryProvidersAlways
+	originalDiscover, originalDiscoverAlways := discoverSummaryProvidersAlways, discoverSummaryProvidersAlways
 	t.Cleanup(func() {
 		loadSummarySettings = originalLoad
 		getSummaryAgent = originalGet
-		discoverSummaryProviders = originalDiscover
+		discoverSummaryProvidersAlways = originalDiscover
 		discoverSummaryProvidersAlways = originalDiscoverAlways
 	})
 	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
@@ -344,7 +344,7 @@ func stubUnavailableSummaryProvider(t *testing.T) {
 	// No-ops, not assertions: an unresolvable provider name legitimately reaches
 	// discovery (discoverSummaryProviderIfMissing calls it when the agent lookup
 	// fails). Replacing it is what keeps the test off the real $PATH.
-	discoverSummaryProviders = func(context.Context) {}
+	discoverSummaryProvidersAlways = func(context.Context) {}
 	discoverSummaryProvidersAlways = func(context.Context) {}
 }
 

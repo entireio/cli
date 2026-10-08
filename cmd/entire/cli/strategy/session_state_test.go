@@ -1036,3 +1036,13 @@ func TestClearSessionState_PackageLevel_SerializesAgainstConcurrentMutation(t *t
 	<-writerFinished
 	<-clearReturned
 }
+
+// getSessionStateDir returns the path to the session state directory.
+// This is stored in the git common dir so it's shared across all worktrees.
+func getSessionStateDir(ctx context.Context) (string, error) {
+	commonDir, err := GetGitCommonDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(commonDir, session.SessionStateDirName), nil
+}

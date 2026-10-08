@@ -967,3 +967,13 @@ func TestAppendStatusSnapshot_PruneLeavesNoOrphanLockBehind(t *testing.T) {
 		t.Error("pruning created a lock file for the conversation it deleted")
 	}
 }
+
+// statusFilePath returns the absolute path of a conversation's snapshot file.
+// Diagnostics and tests only: production I/O goes through the root by name.
+func statusFilePath(conversationID string) (string, error) {
+	st, err := openStatusStore()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(st.root.Name(), filepath.FromSlash(st.fileName(conversationID))), nil
+}

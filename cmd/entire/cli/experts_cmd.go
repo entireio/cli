@@ -35,16 +35,6 @@ var newExpertsAPIClient = func(ctx context.Context, insecureHTTP bool, target *a
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target)
 }
 
-func setExpertsClientFactoryForTest(
-	t interface{ Helper() },
-	fn func(context.Context, bool, *auth.CellTarget) (expertsAPIClient, error),
-) func() {
-	t.Helper()
-	prev := newExpertsAPIClient
-	newExpertsAPIClient = fn
-	return func() { newExpertsAPIClient = prev }
-}
-
 type expertsFlags struct {
 	repo         string
 	branch       string

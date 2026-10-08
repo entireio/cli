@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"regexp"
 	"strings"
@@ -304,18 +303,4 @@ func classifyWaitContextErr(err error, what string) error {
 		return NewSilentError(err)
 	}
 	return fmt.Errorf("timed out %s: %w", what, err)
-}
-
-// explainSuspendedMirror tells the user a suspended placement can't be served
-// and to contact support. Suspension usually follows a loss of upstream GitHub
-// access (App uninstalled, repo went private, or a transient API error); the
-// fix is operator-side, so we point at support rather than leaking an internal
-// admin command.
-func explainSuspendedMirror(w io.Writer, mirrorID string) {
-	fmt.Fprintf(w,
-		"\nMirror %s is registered but suspended, so it can't be cloned yet.\n"+
-			"This usually means upstream GitHub access was lost (App uninstalled,\n"+
-			"the repo went private, or a transient API error). Contact support to\n"+
-			"restore it.\n",
-		mirrorID)
 }
