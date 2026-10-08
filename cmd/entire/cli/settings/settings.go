@@ -2116,6 +2116,17 @@ func (s *EntireSettings) IsPushSessionsDisabled() bool {
 	return false
 }
 
+// IsBackgroundCheckpointUploadDisabled reports whether
+// strategy_options.background_checkpoint_upload is explicitly false, which keeps
+// the whole git-refs checkpoint upload inside the pre-push hook.
+func (s *EntireSettings) IsBackgroundCheckpointUploadDisabled() bool {
+	if s.StrategyOptions == nil {
+		return false
+	}
+	val, ok := s.StrategyOptions["background_checkpoint_upload"].(bool)
+	return ok && !val
+}
+
 // IsExternalAgentsEnabled checks if external agent discovery is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsExternalAgentsEnabled(ctx context.Context) bool {

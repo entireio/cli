@@ -446,7 +446,8 @@ func TestPushQueuedCheckpointRefs_BatchNotBudgeted(t *testing.T) {
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, false)
+	res, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
 	restore()
 	require.NoError(t, err)
 	assert.Equal(t, len(refs), pushed)
@@ -555,7 +556,7 @@ func TestPushQueuedCheckpointRefs_FallbackGetsFreshBudget(t *testing.T) {
 	enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	_, err = flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, false)
+	_, err = flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, flushOptions{})
 	restore()
 	require.Error(t, err, "the blocked ref still fails")
 	assert.Equal(t, refHashOf(t, repo, refs[1]), remoteRefHash(t, bareDir, refs[1]),
@@ -580,7 +581,8 @@ func TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered(t *testing.T)
 	enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	pushed, err := flushCheckpointRefsQueue(checkpointremote.WithNonInteractiveSSH(t.Context()), repo, pushSettings{remote: bareDir}, true)
+	res, err := flushCheckpointRefsQueue(checkpointremote.WithNonInteractiveSSH(t.Context()), repo, pushSettings{remote: bareDir}, flushOptions{boundBatch: true})
+	pushed := res.pushed
 	output := restore()
 	require.Error(t, err)
 	assert.Equal(t, 2, pushed, "the first chunk landed before the auth failure and is reported as pushed")

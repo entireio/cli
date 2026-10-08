@@ -375,6 +375,23 @@ var checkpointPushBudget = 2 * time.Minute
 // Declared as a var so tests can shrink it.
 var checkpointFlushBudget = 2 * time.Minute
 
+type flushBudgetKey struct{}
+
+// withFlushBudget records the budget a flush runs under, so its stop reason
+// names that budget rather than the pre-push default.
+func withFlushBudget(ctx context.Context, budget time.Duration) context.Context {
+	return context.WithValue(ctx, flushBudgetKey{}, budget)
+}
+
+// flushBudgetFrom returns the budget withFlushBudget recorded, or
+// checkpointFlushBudget.
+func flushBudgetFrom(ctx context.Context) time.Duration {
+	if d, ok := ctx.Value(flushBudgetKey{}).(time.Duration); ok {
+		return d
+	}
+	return checkpointFlushBudget
+}
+
 // checkpointRefPushChunkSize is the most queued refs one batch push carries.
 // Large on purpose: every push pays a fixed cost — the connection and the
 // remote advertising every ref it holds, one per checkpoint — so a healthy
@@ -416,7 +433,7 @@ const maxConsecutiveRefPushFailures = 5
 func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return fmt.Sprintf("budget (%s) exhausted", checkpointFlushBudget)
+		return fmt.Sprintf("budget (%s) exhausted", flushBudgetFrom(ctx))
 	case ctx.Err() != nil:
 		return "interrupted"
 	case consecutiveFailures >= maxConsecutiveRefPushFailures:
