@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -361,4 +362,98 @@ func TestStagedThenRemovedFileStillLinks(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, filesOverlapWithContent(ctx, state.TouchedFileHashes, commit, state.FilesTouched),
 		"the commit holds the agent's new.go and should link the session")
+}
+
+// saveTestDeletionStep records a turn-end step for sessionID that deletes the
+// given paths, as DetectFileChanges reports them.
+func saveTestDeletionStep(t *testing.T, s *ManualCommitStrategy, dir, sessionID string, deleted ...string) {
+	t.Helper()
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644))
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		DeletedFiles:  deleted,
+		MetadataDir:   metadataDir,
+		CommitMessage: "turn end",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+}
+
+// headCommit returns the commit HEAD names in dir.
+func headCommit(t *testing.T, dir string) *object.Commit {
+	t.Helper()
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	return commit
+}
+
+// A file the agent created and the user staged, which then leaves the worktree,
+// is reported by git status as "AD" and so reaches the next turn-end step as a
+// deletion. The staged blob is still the agent's content and the next commit
+// adds it, so the step must not record a deletion for it. Uses t.Chdir — do NOT
+// add t.Parallel().
+func TestSaveStep_StagedThenRemovedFileKeepsHash(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-10-08-staged-then-removed-step"
+	ctx := context.Background()
+
+	testutil.WriteFile(t, dir, "new.go", "package main\n")
+	saveTestStep(t, s, dir, sid, "new.go")
+	testutil.GitAdd(t, dir, "new.go")
+	require.NoError(t, os.Remove(filepath.Join(dir, "new.go")))
+	require.Equal(t, "AD new.go", strings.TrimSpace(testutil.RunGit(t, dir, "status", "--porcelain", "--", "new.go")),
+		"fixture: git status reports the staged-then-removed file as AD")
+
+	saveTestDeletionStep(t, s, dir, sid, "new.go")
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	assert.NotEqual(t, touchedFileDeleted, state.TouchedFileHashes["new.go"],
+		"a path not in HEAD but still in the index is the agent's staged content, not a deletion")
+
+	testutil.GitCommit(t, dir, "commit staged new.go")
+	assert.True(t, filesOverlapWithContent(ctx, state.TouchedFileHashes, headCommit(t, dir), state.FilesTouched),
+		"the commit holds the agent's new.go and should link the session")
+}
+
+// Deleting a file tracked in HEAD, whether with `git rm` or a plain `rm`, is
+// still recorded as a deletion. Uses t.Chdir — do NOT add t.Parallel().
+func TestSaveStep_TrackedDeletionsStillRecorded(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-10-08-tracked-deletions"
+
+	testutil.WriteFile(t, dir, "rm.txt", "plain rm\n")
+	testutil.WriteFile(t, dir, "gitrm.txt", "git rm\n")
+	testutil.GitAdd(t, dir, "rm.txt")
+	testutil.GitAdd(t, dir, "gitrm.txt")
+	testutil.GitCommit(t, dir, "tracked files")
+
+	testutil.WriteFile(t, dir, "rm.txt", "agent edit\n")
+	testutil.WriteFile(t, dir, "gitrm.txt", "agent edit\n")
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID: sid, ModifiedFiles: []string{"rm.txt", "gitrm.txt"}, MetadataDir: ".entire/metadata/" + sid,
+		CommitMessage: "turn end", AuthorName: "Test", AuthorEmail: "test@test.com",
+	}))
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "rm.txt")))
+	testutil.RunGit(t, dir, "rm", "-q", "-f", "gitrm.txt")
+	saveTestDeletionStep(t, s, dir, sid, "rm.txt", "gitrm.txt")
+
+	state, err := s.loadSessionState(context.Background(), sid)
+	require.NoError(t, err)
+	for _, path := range []string{"rm.txt", "gitrm.txt"} {
+		hash, recorded := state.TouchedFileHashes[path]
+		assert.True(t, recorded, path)
+		assert.Equal(t, touchedFileDeleted, hash, "%s: a deletion of a file in HEAD is recorded", path)
+	}
 }

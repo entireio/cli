@@ -113,6 +113,72 @@ func applyTouchedFileHashes(state *SessionState, changed []string, hashes map[st
 	}
 }
 
+// stagedOnlyDeletions returns the step's deleted paths that are absent from
+// HEAD but still have an index entry. git status reports a file the user staged
+// (`git add`) and that then left the worktree as "AD", so it reaches the step as
+// a deletion; but the next commit adds the staged blob, which is the content the
+// agent wrote. Such a path keeps its recorded hash instead of being recorded as
+// a deletion, so that commit still links the session.
+//
+// A path in HEAD is a tracked deletion (`git rm`, or `rm` of a committed file)
+// and is recorded as one; a path in neither is an untracked file that is gone
+// (see untrackedDeletionCandidates). If git cannot answer, every path is
+// recorded as a deletion, as before.
+func stagedOnlyDeletions(ctx context.Context, worktreeRoot string, deleted []string) map[string]struct{} {
+	if len(deleted) == 0 {
+		return nil
+	}
+	candidates := make([]string, 0, len(deleted))
+	for _, path := range deleted {
+		candidates = append(candidates, filepath.ToSlash(path))
+	}
+	slices.Sort(candidates)
+	candidates = slices.Compact(candidates)
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	inHead, err := gitrepo.PathsInHEAD(ctx, worktreeRoot, candidates)
+	if err != nil {
+		logging.Debug(logCtx, "could not check HEAD for deleted files; recording them as deletions",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	notInHead := make([]string, 0, len(candidates))
+	for _, path := range candidates {
+		if _, tracked := inHead[path]; !tracked {
+			notInHead = append(notInHead, path)
+		}
+	}
+	inIndex, err := gitrepo.PathsInIndex(ctx, worktreeRoot, notInHead)
+	if err != nil {
+		logging.Debug(logCtx, "could not check the index for deleted files; recording them as deletions",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	if len(inIndex) == 0 {
+		return nil
+	}
+	staged := make(map[string]struct{}, len(inIndex))
+	for _, path := range notInHead {
+		if _, ok := inIndex[path]; ok {
+			staged[path] = struct{}{}
+		}
+	}
+	return staged
+}
+
+// withoutPaths returns list minus every path in drop (compared slash-separated).
+func withoutPaths(list []string, drop map[string]struct{}) []string {
+	if len(drop) == 0 {
+		return list
+	}
+	kept := make([]string, 0, len(list))
+	for _, path := range list {
+		if _, skip := drop[filepath.ToSlash(path)]; !skip {
+			kept = append(kept, path)
+		}
+	}
+	return kept
+}
+
 // MergeUnhashedFilesTouched merges paths into state.FilesTouched for every
 // route other than a turn-end step: task-record completion, per-tool hooks, and
 // subagent child-file merges. Those routes do not hash what they add, so any

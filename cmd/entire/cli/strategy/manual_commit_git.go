@@ -60,6 +60,9 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	// removed: git status reports no deletion for them (see
 	// untrackedDeletionCandidates). Resolved outside the lock like hashing.
 	untrackedGone := s.untrackedDeletionCandidates(ctx, worktreeRoot, sessionID, changedFiles, step.DeletedFiles)
+	// A staged-then-removed file (git status "AD") arrives as a deletion, but
+	// the next commit adds its staged blob; see stagedOnlyDeletions.
+	recordedDeletions := withoutPaths(step.DeletedFiles, stagedOnlyDeletions(ctx, worktreeRoot, step.DeletedFiles))
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		invalidateStaleSubagentSnapshot(&step, state)
@@ -88,7 +91,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		// trailers on amend operations.
 		state.StepCount++
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
-		applyTouchedFileHashes(state, changedFiles, stepFileHashes, step.DeletedFiles)
+		applyTouchedFileHashes(state, changedFiles, stepFileHashes, recordedDeletions)
 		recordUntrackedDeletions(worktreeRoot, state, untrackedGone)
 		dropPhantomFilesTouched(worktreeRoot, state, changedFiles)
 		if state.StepCount == 1 {
