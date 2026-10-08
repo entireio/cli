@@ -622,6 +622,17 @@ func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts Wr
 func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteOptions, sessionDir string, entries map[string]object.TreeEntry) (SessionFilePaths, error) {
 	filePaths := SessionFilePaths{}
 
+	// An overwrite of an existing session slot keeps the line attribution an
+	// older CLI recorded for it (opaque, never recomputed); see
+	// Metadata.LegacyInitialAttribution.
+	var legacyInitialAttribution, legacyPromptAttributions json.RawMessage
+	if entry, ok := entries[checkpointSubtreePath(sessionDir, paths.MetadataFileName)]; ok {
+		if existing, readErr := s.readMetadataFromBlob(entry.Hash); readErr == nil {
+			legacyInitialAttribution = existing.LegacyInitialAttribution
+			legacyPromptAttributions = existing.LegacyPromptAttributions
+		}
+	}
+
 	// Clear any existing entries under this session dir so stale files from a
 	// previous write (e.g. prompt.txt) don't persist on overwrite. Match on the
 	// dir plus "/" so a sibling session (e.g. "10") isn't caught by "1".
@@ -714,6 +725,8 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		ReviewPrompt:                redact.String(opts.ReviewPrompt),
 		InvestigateRunID:            opts.InvestigateRunID,
 		InvestigateTopic:            redact.String(opts.InvestigateTopic),
+		LegacyInitialAttribution:    legacyInitialAttribution,
+		LegacyPromptAttributions:    legacyPromptAttributions,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")
@@ -750,10 +763,13 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	// session package imports checkpoint, so we can't reference its constant.
 	imported := opts.Kind == "imported"
 	commitSHA := opts.CommitSHA
+	var legacyCombinedAttribution json.RawMessage
 	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
 		if readErr == nil {
+			// Opaque; see CheckpointSummary.LegacyCombinedAttribution.
+			legacyCombinedAttribution = existingSummary.LegacyCombinedAttribution
 			if !hasReview {
 				hasReview = existingSummary.HasReview
 			}
@@ -785,6 +801,8 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		HasReview:        hasReview,
 		HasInvestigation: hasInvestigation,
 		Imported:         imported,
+
+		LegacyCombinedAttribution: legacyCombinedAttribution,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")

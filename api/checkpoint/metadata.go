@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -486,6 +487,16 @@ type Metadata struct {
 	// AI-generated summary of the checkpoint
 	Summary *Summary `json:"summary,omitempty"`
 
+	// LegacyInitialAttribution and LegacyPromptAttributions carry the line
+	// attribution older CLIs wrote (initial_attribution, prompt_attributions)
+	// through a rewrite of an existing checkpoint, byte for byte. The CLI no
+	// longer computes, reads or sets them: they are opaque, and absent on
+	// checkpoints this version creates. Without them, decoding and re-encoding
+	// an old checkpoint (a summary backfill, a transcript finalize, an attached
+	// session) would strip data entire.io still reads.
+	LegacyInitialAttribution json.RawMessage `json:"initial_attribution,omitempty"`
+	LegacyPromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
+
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
 	Kind string `json:"kind,omitempty"`
 
@@ -580,6 +591,11 @@ type CheckpointSummary struct {
 	FilesTouched     []string           `json:"files_touched"`
 	Sessions         []SessionFilePaths `json:"sessions"`
 	TokenUsage       *types.TokenUsage  `json:"token_usage,omitempty"`
+
+	// LegacyCombinedAttribution carries the combined_attribution older CLIs
+	// wrote into the root summary through rewrites, byte for byte; see
+	// Metadata.LegacyInitialAttribution. Never computed, read or set here.
+	LegacyCombinedAttribution json.RawMessage `json:"combined_attribution,omitempty"`
 
 	// HasReview is the umbrella "any review happened" flag: true when at least
 	// one session in this checkpoint has a review-kind Kind (currently

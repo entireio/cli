@@ -421,6 +421,10 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 
 func upsertSession(sessions []storedSession, session storedSession) []storedSession {
 	if idx := sessionIndexByID(sessions, session.SessionID); idx >= 0 {
+		// Keep the opaque line attribution an older CLI recorded for this
+		// session through the overwrite, as the git store does.
+		session.Metadata.LegacyInitialAttribution = sessions[idx].Metadata.LegacyInitialAttribution
+		session.Metadata.LegacyPromptAttributions = sessions[idx].Metadata.LegacyPromptAttributions
 		sessions[idx] = session
 		return sessions
 	}
