@@ -1738,3 +1738,21 @@ func TestClearFilesystemStagedFiles_MissingFilesAreNotAnError(t *testing.T) {
 	clearFilesystemStagedFiles(context.Background(), "session-empty")
 	assert.DirExists(t, metaDir)
 }
+
+// TestResolveTaskTranscriptPath_FindsWorkflowRunTranscript: a Workflow agent's
+// task record whose declared path was lost still resolves to its transcript
+// under <subagents>/workflows/<runId>/ (#2685), the layout
+// cli.ResolveAgentTranscriptPath also probes.
+func TestResolveTaskTranscriptPath_FindsWorkflowRunTranscript(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const sessionID = "parent-sess"
+	want := filepath.Join(paths.SubagentsDir(dir, sessionID), "workflows", "wf_1", "agent-ae3d7b8f2930c8787.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(want), 0o750))
+	require.NoError(t, os.WriteFile(want, []byte("{}\n"), 0o600))
+	state := &SessionState{SessionID: sessionID, TranscriptPath: filepath.Join(dir, sessionID+".jsonl")}
+
+	assert.Equal(t, want, resolveTaskTranscriptPath(state, "ae3d7b8f2930c8787"))
+	assert.Empty(t, resolveTaskTranscriptPath(state, "other"))
+}

@@ -72,6 +72,9 @@ func TestSetupClaudeHooks_AddsAllRequiredHooks(t *testing.T) {
 	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Agent") {
 		t.Error("PostToolUse[Agent] hook should exist")
 	}
+	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "Skill") {
+		t.Error("PostToolUse[Skill] hook should exist")
+	}
 	if !hasHookWithMatcher(settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate") {
 		t.Error("PostToolUse[TaskCreate|TaskUpdate] hook should exist")
 	}

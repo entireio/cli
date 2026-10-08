@@ -205,9 +205,10 @@ func isTranscriptFileInStore(store *agentpkg.SessionStore, name, path string) bo
 // for agentID, or "" when none exists.
 //
 // It prefers the current layout, paths.SubagentsDir (which is also what the
-// turn-end extractor scans), and falls back to the legacy sibling layout —
+// turn-end extractor scans), falls back to the legacy sibling layout —
 // agent-<id>.jsonl directly beside the main transcript — so sessions recorded by
-// older agent versions still resolve.
+// older agent versions still resolve, and finally to a Claude Code Workflow
+// run directory under paths.SubagentsDir (#2685).
 //
 // Order is the whole point: resolving only the legacy path silently yielded "" for
 // every modern Claude Code session, which left task checkpoints without a subagent
@@ -216,19 +217,8 @@ func isTranscriptFileInStore(store *agentpkg.SessionStore, name, path string) bo
 //
 // An empty agentID never resolves — agent-.jsonl is not a real transcript.
 //
-// strategy.resolveTaskTranscriptPath duplicates this exact layout logic (the
-// strategy package cannot import cli, so it cannot call this function
-// directly) — a layout change here must be mirrored there.
+// strategy.resolveTaskTranscriptPath shares this layout logic through
+// paths.ResolveSubagentTranscriptPath (the strategy package cannot import cli).
 func ResolveAgentTranscriptPath(transcriptDir, sessionID, agentID string) string {
-	if agentID == "" {
-		return ""
-	}
-	name := paths.AgentTranscriptFileName(agentID)
-	if nested := filepath.Join(paths.SubagentsDir(transcriptDir, sessionID), name); fileExists(nested) {
-		return nested
-	}
-	if legacy := filepath.Join(transcriptDir, name); fileExists(legacy) {
-		return legacy
-	}
-	return ""
+	return paths.ResolveSubagentTranscriptPath(transcriptDir, sessionID, agentID)
 }
