@@ -30,6 +30,13 @@ import (
 // agreement when a developer points Pi at a non-default home.
 const piHomeEnvVar = "PI_CODING_AGENT_DIR"
 
+// piSessionStoreEnvVar replaces Pi's session directory outright. Unlike
+// piHomeEnvVar it keeps no per-repo nesting: Pi's SessionManager uses the value
+// as the directory itself and skips getDefaultSessionDir, so every repo's
+// sessions land flat in it. The --session-dir flag outranks it inside Pi, but a
+// flag is per-invocation and invisible to Entire.
+const piSessionStoreEnvVar = "PI_CODING_AGENT_SESSION_DIR"
+
 // piSessionDirEnvVar lets tests redirect Pi's session lookup without
 // touching the real ~/.pi/agent. Mirrors ENTIRE_TEST_<AGENT>_SESSION_DIR
 // used by Codex.
@@ -55,13 +62,12 @@ func NewPiAgent() agent.Agent {
 func (a *PiAgent) Name() types.AgentName    { return agent.AgentNamePi }
 func (a *PiAgent) Type() types.AgentType    { return agent.AgentTypePi }
 func (a *PiAgent) Description() string      { return "Pi coding agent integration for Entire" }
-func (a *PiAgent) IsPreview() bool          { return true }
 func (a *PiAgent) ProtectedDirs() []string  { return []string{".pi"} }
 func (a *PiAgent) ProtectedFiles() []string { return nil }
 
 // DetectPresence reports whether pi is configured for *this repo*. We only
 // check repo-local config (.pi/) and intentionally ignore $PATH — in-tree
-// agents follow the convention used by Claude/Gemini/OpenCode where
+// agents follow the convention used by Claude/OpenCode where
 // detection means "this repo is set up for this agent", not "this agent is
 // installed somewhere on this machine". The external plugin uses the broader
 // $PATH check because it can't see repo state; we don't have that limitation.
@@ -128,8 +134,10 @@ func (a *PiAgent) GetSessionID(input *agent.HookInput) string {
 //
 // Resolution order:
 //  1. ENTIRE_TEST_PI_SESSION_DIR (test override; no encoding applied)
-//  2. PI_CODING_AGENT_DIR (Pi's own override; encoding still applies)
-//  3. ~/.pi/agent (default)
+//  2. PI_CODING_AGENT_SESSION_DIR (Pi's session-dir override; used as is,
+//     no encoding applied, as Pi does)
+//  3. PI_CODING_AGENT_DIR (Pi's home override; encoding still applies)
+//  4. ~/.pi/agent (default)
 //
 // The .entire/tmp/pi/ cache stays as a hook-internal detail —
 // captureTranscript writes there and the TurnEnd event records that
@@ -139,6 +147,9 @@ func (a *PiAgent) GetSessionID(input *agent.HookInput) string {
 func (a *PiAgent) GetSessionDir(repoPath string) (string, error) {
 	if override := os.Getenv(piSessionDirEnvVar); override != "" {
 		return override, nil
+	}
+	if dir, ok, err := agent.LookupOverride(piSessionStoreEnvVar); err != nil || ok {
+		return dir, err //nolint:wrapcheck // the error already names the override and its value
 	}
 	home, err := resolvePiHome()
 	if err != nil {
@@ -150,14 +161,34 @@ func (a *PiAgent) GetSessionDir(repoPath string) (string, error) {
 // GetSessionBaseDir returns the base directory containing per-project
 // session subdirectories. Used by attach's cross-project fallback
 // (searchTranscriptInProjectDirs) when a session was started from a
-// different cwd than the current worktree root.
+// different cwd than the current worktree root. Under
+// PI_CODING_AGENT_SESSION_DIR every repo shares one flat directory, so that
+// directory is the base; the search probes the base itself as well as its
+// subdirectories.
 func (a *PiAgent) GetSessionBaseDir() (string, error) {
+	if dir, ok, err := agent.LookupOverride(piSessionStoreEnvVar); err != nil || ok {
+		return dir, err //nolint:wrapcheck // the error already names the override and its value
+	}
 	home, err := resolvePiHome()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, "sessions"), nil
 }
+
+// SessionHome returns Pi's home directory: $PI_CODING_AGENT_DIR or ~/.pi/agent.
+// A session store relocated with PI_CODING_AGENT_SESSION_DIR lies outside it.
+func (a *PiAgent) SessionHome() (string, error) {
+	return resolvePiHome()
+}
+
+// HomeLayout reports that Pi keeps per-project session directories under
+// sessions.
+func (a *PiAgent) HomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"sessions"}}
+}
+
+var _ agent.HomeLayoutProvider = (*PiAgent)(nil)
 
 // ResolveSessionFile returns the path to the Pi session file for
 // agentSessionID in sessionDir. Pi names files <timestamp>_<id>.jsonl,
@@ -182,16 +213,9 @@ func (a *PiAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 }
 
 // resolvePiHome returns Pi's home directory: $PI_CODING_AGENT_DIR or
-// ~/.pi/agent.
+// ~/.pi/agent. See agent.ResolveHome for the override policy.
 func resolvePiHome() (string, error) {
-	if dir := os.Getenv(piHomeEnvVar); dir != "" {
-		return dir, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user home: %w", err)
-	}
-	return filepath.Join(home, ".pi", "agent"), nil
+	return agent.ResolveHome(piHomeEnvVar, filepath.Join(".pi", "agent")) //nolint:wrapcheck // the error already names the override and its value
 }
 
 // encodeRepoPathForPi encodes an absolute repo path into Pi's
@@ -219,15 +243,37 @@ func encodeRepoPathForPi(repoPath string) string {
 // the lexicographically latest match (most recent timestamp) or "" when
 // no match exists or sessionDir/sessionID is empty.
 func findPiSessionByID(sessionDir, sessionID string) string {
+	if matches := piSessionsByID(sessionDir, sessionID); len(matches) > 0 {
+		return matches[0]
+	}
+	return ""
+}
+
+// ResolveSessionFileCandidates returns every <timestamp>_<id>.jsonl file for
+// agentSessionID in sessionDir, latest first, followed by the <id>.jsonl path
+// ResolveSessionFile predicts when there is none.
+func (a *PiAgent) ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string {
+	candidates := piSessionsByID(sessionDir, agentSessionID)
+	if sessionDir != "" {
+		candidates = append(candidates, filepath.Join(sessionDir, agentSessionID+".jsonl"))
+	}
+	return candidates
+}
+
+var _ agent.SessionFileCandidatesProvider = (*PiAgent)(nil)
+
+// piSessionsByID returns the session files for sessionID in sessionDir,
+// lexicographically latest (most recent timestamp) first.
+func piSessionsByID(sessionDir, sessionID string) []string {
 	if sessionDir == "" || sessionID == "" {
-		return ""
+		return nil
 	}
 	matches, err := filepath.Glob(filepath.Join(sessionDir, "*_"+sessionID+".jsonl"))
-	if err != nil || len(matches) == 0 {
-		return ""
+	if err != nil {
+		return nil
 	}
-	sort.Strings(matches)
-	return matches[len(matches)-1]
+	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+	return matches
 }
 
 // ReadSession loads a captured Pi transcript and returns it as an AgentSession.
@@ -279,3 +325,10 @@ func (a *PiAgent) FormatResumeCommand(sessionID string) string {
 	}
 	return "pi --session " + id
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Pi publishes
+// into the environment of the processes it spawns. Pi also publishes
+// PI_SESSION_FILE, the transcript path itself; the ID is preferred because
+// ResolveSessionFile derives the same path from it, keeping one resolution
+// point instead of two.
+func (a *PiAgent) CallerSessionEnvVar() string { return "PI_SESSION_ID" }

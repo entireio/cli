@@ -11,7 +11,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 )
 
 // catRunner returns a TextCommandRunner that invokes `cat`, which echoes
@@ -37,36 +36,46 @@ func TestGenerateText_PromptViaStdin(t *testing.T) {
 		{
 			name:          "codex",
 			agent:         &codex.CodexAgent{},
-			requiredFlags: []string{"exec", "--skip-git-repo-check"},
+			requiredFlags: []string{"exec", "--skip-git-repo-check", "--ignore-user-config"},
 			extraCheck: func(t *testing.T, args []string) {
 				t.Helper()
 				if len(args) == 0 || args[len(args)-1] != "-" {
 					t.Fatalf("expected trailing %q stdin sentinel, got %v", "-", args)
 				}
+				// Every tool-bearing feature stays off: with any of them on, an
+				// injected instruction could read a file into the summary.
+				for _, feature := range []string{"shell_tool", "unified_exec", "code_mode_host", "apps", "plugins", "browser_use", "browser_use_external", "computer_use", "in_app_browser", "view_image", "multi_agent", "image_generation"} {
+					i := slices.Index(args, feature)
+					if i < 1 || args[i-1] != "--disable" {
+						t.Errorf("expected --disable %s in args, got %v", feature, args)
+					}
+				}
 			},
 		},
 		{
-			name:          "copilot",
-			agent:         &copilotcli.CopilotCLIAgent{},
-			requiredFlags: []string{"--allow-all-tools", "--disable-builtin-mcps"},
+			name:  "copilot",
+			agent: &copilotcli.CopilotCLIAgent{},
+			// The full tool policy is pinned in the copilotcli package
+			// (TestGenerateText_PinsMinimalToolSurface). Here only the flags
+			// tied to this test's stdin contract are asserted.
+			requiredFlags: []string{"--disable-builtin-mcps", "--no-ask-user"},
 		},
 		{
 			name:          "cursor",
 			agent:         &cursor.CursorAgent{},
-			requiredFlags: []string{"--print", "--force", "--trust", "--workspace"},
-		},
-		{
-			name:          "gemini",
-			agent:         &geminicli.GeminiCLIAgent{},
-			requiredFlags: []string{"-p"},
+			requiredFlags: []string{"--print", "--trust", "--workspace"},
 			extraCheck: func(t *testing.T, args []string) {
 				t.Helper()
-				pIdx := slices.Index(args, "-p")
-				if pIdx < 0 || pIdx+1 >= len(args) || args[pIdx+1] != " " {
-					t.Fatalf("expected -p followed by space placeholder, got %v", args)
+				// --force auto-approves shell commands; see the cursor package's
+				// TestGenerateText_DeniesEveryPermission for the workspace config.
+				if slices.Contains(args, "--force") {
+					t.Fatalf("--force must not be passed to a text-generation run: %v", args)
 				}
 			},
 		},
+		// antigravity is deliberately absent: agy 1.2.x ignores stdin in print
+		// mode, so its prompt travels in argv. That contract is pinned in the
+		// antigravity package (TestGenerateText_PassesPromptInArgv).
 	}
 
 	for _, tt := range tests {
@@ -99,7 +108,7 @@ func TestGenerateText_PromptViaStdin(t *testing.T) {
 	}
 }
 
-// setRunner injects a test CommandRunner into any of the 4 supported agent
+// setRunner injects a test CommandRunner into any of the 3 supported agent
 // types. This is the external-test equivalent of the package-level var
 // mutation the old per-package tests used.
 func setRunner(tg agent.TextGenerator, runner agent.TextCommandRunner) {
@@ -109,8 +118,6 @@ func setRunner(tg agent.TextGenerator, runner agent.TextCommandRunner) {
 	case *copilotcli.CopilotCLIAgent:
 		a.CommandRunner = runner
 	case *cursor.CursorAgent:
-		a.CommandRunner = runner
-	case *geminicli.GeminiCLIAgent:
 		a.CommandRunner = runner
 	}
 }

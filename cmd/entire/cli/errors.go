@@ -10,7 +10,7 @@ import "github.com/entireio/cli/internal/coreapi"
 //
 // It exists as a named function because there is more than one place the CLI
 // turns an error into text, and they can't share one: main.go prints the error
-// a command returns, renderCoreError feeds the mirror-create wizard (which
+// a command returns, renderCoreError feeds the mirror-add wizard (which
 // prints its own errors and returns a SilentError, so main.go never sees them),
 // and the search TUI captures err.Error() into its model before the command
 // returns nil. Call this at any new site that renders an error for a user

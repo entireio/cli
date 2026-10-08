@@ -410,6 +410,19 @@ func TestAttributionResolverMissingMetadataIncludesReason(t *testing.T) {
 	require.Contains(t, ctx.MetadataMissingReason, "entire checkpoint explain cab2c3d4e5f6")
 }
 
+// A git-refs (ULID) checkpoint lives at its own ref, so the missing-metadata
+// hint must fetch that ref rather than the v1 branch.
+func TestMetadataMissingReasonNamesCheckpointRef(t *testing.T) {
+	newAttributionRepo(t)
+
+	cpID := checkpointid.MustCheckpointID("01M3PWG7BKWYH0XJKS810J0XEX")
+	reason := metadataMissingReason(context.Background(), cpID, nil)
+	const ref = "refs/entire/checkpoints/EX/01M3PWG7BKWYH0XJKS810J0XEX"
+	require.Contains(t, reason, "git fetch ")
+	require.Contains(t, reason, ref+":"+ref)
+	require.NotContains(t, reason, "entire/checkpoints/v1")
+}
+
 type attributionCheckpointReaderStub struct {
 	summary *checkpoint.CheckpointSummary
 	content *checkpoint.SessionContent

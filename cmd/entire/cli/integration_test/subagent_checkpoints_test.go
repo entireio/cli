@@ -390,7 +390,7 @@ func hasLiveTaskRecord(state *strategy.SessionState, toolUseID string) bool {
 
 // TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop covers the
 // background-subagent bug this PR fixes: Claude Code background subagents
-// (run_in_background: true) return a launch stub immediately, so post-task
+// return a launch stub immediately, so post-task
 // (PostToolUse) used to fire seconds after launch — before the subagent had
 // done any real work — and save (or skip) a task step from that stub alone.
 // The real completion signal, SubagentStop, fired no hook entire listened to,
@@ -400,10 +400,12 @@ func hasLiveTaskRecord(state *strategy.SessionState, toolUseID string) bool {
 // transcript (session.CreateSubagentTranscript — the same builder
 // TestSubagentCheckpoints_StoresSubagentTranscript uses) so the real
 // transcript analyzer, not a stub, is what extracts the modified file:
-//  1. post-task with run_in_background: true records an in-flight marker and
-//     completes nothing — capture is deferred, not lost.
-//  2. subagent-stop (the authoritative final capture) completes the record
-//     with the subagent's real modified file and declared transcript path.
+//  1. post-task reporting status "async_launched" (with no run_in_background
+//     in tool_input, as real Agent calls usually have) records an in-flight
+//     marker and completes nothing — capture is deferred, not lost.
+//  2. subagent-stop (the authoritative final capture), which carries agent_id
+//     but no tool_use_id, finds the marker by agent ID and completes it with
+//     the subagent's real modified file and declared transcript path.
 //  3. the next commit's condensation materializes the record's transcript
 //     under the permanent checkpoint's tasks/ subtree (#2058's pointer model,
 //     anchored through the real hook pipeline).
@@ -426,14 +428,14 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 		t.Fatalf("SimulatePreTask failed: %v", err)
 	}
 
-	// Launch stub: PostToolUse fires immediately with run_in_background: true
+	// Launch stub: PostToolUse fires immediately with status "async_launched"
 	// and the launch-assigned agentId, before the subagent has done any work.
 	if err := env.SimulatePostTask(PostTaskInput{
-		SessionID:       session.ID,
-		TranscriptPath:  session.TranscriptPath,
-		ToolUseID:       taskToolUseID,
-		AgentID:         subagentID,
-		RunInBackground: true,
+		SessionID:      session.ID,
+		TranscriptPath: session.TranscriptPath,
+		ToolUseID:      taskToolUseID,
+		AgentID:        subagentID,
+		Background:     true,
 	}); err != nil {
 		t.Fatalf("SimulatePostTask (background stub) failed: %v", err)
 	}
@@ -461,7 +463,6 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 		TranscriptPath:      session.TranscriptPath,
 		AgentID:             subagentID,
 		AgentTranscriptPath: subagentTranscriptPath,
-		ToolUseID:           taskToolUseID,
 	}); err != nil {
 		t.Fatalf("SimulateSubagentStop failed: %v", err)
 	}
@@ -533,11 +534,11 @@ func TestSubagentCheckpoints_TurnEnd_ThenSubagentStop(t *testing.T) {
 		t.Fatalf("SimulatePreTask failed: %v", err)
 	}
 	if err := env.SimulatePostTask(PostTaskInput{
-		SessionID:       session.ID,
-		TranscriptPath:  session.TranscriptPath,
-		ToolUseID:       taskToolUseID,
-		AgentID:         subagentID,
-		RunInBackground: true,
+		SessionID:      session.ID,
+		TranscriptPath: session.TranscriptPath,
+		ToolUseID:      taskToolUseID,
+		AgentID:        subagentID,
+		Background:     true,
 	}); err != nil {
 		t.Fatalf("SimulatePostTask (background stub) failed: %v", err)
 	}
@@ -577,7 +578,6 @@ func TestSubagentCheckpoints_TurnEnd_ThenSubagentStop(t *testing.T) {
 		TranscriptPath:      session.TranscriptPath,
 		AgentID:             subagentID,
 		AgentTranscriptPath: subagentTranscriptPath,
-		ToolUseID:           taskToolUseID,
 	}); err != nil {
 		t.Fatalf("SimulateSubagentStop failed: %v", err)
 	}
@@ -598,15 +598,14 @@ func TestSubagentCheckpoints_TurnEnd_ThenSubagentStop(t *testing.T) {
 	}
 }
 
-// TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce: a foreground task
-// (no run_in_background) completes immediately at post-task time — its record
-// is created-on-completion, already completed. Claude Code fires SubagentStop
-// for every completed Task, foreground and background alike, so entire also
-// sees a SubagentStop for this same tool_use_id after the foreground
-// completion already ran. Without the exactly-once completion guard, that
-// second event would re-run the capture. This verifies the regression stays
-// closed: the record completes exactly once and the SubagentStop double-fire
-// produces no additional commit.
+// TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce follows a
+// foreground subagent through Claude Code's real hook order: SubagentStop
+// fires first, carrying agent_id but no tool_use_id, and only then does
+// PostToolUse report status "completed" with the agentId that links the two.
+// The stop has nothing to correlate with yet and must not create a record;
+// PostToolUse captures the subagent. A redelivered SubagentStop afterwards
+// now finds the completed record by agent ID and must be a no-op: the record
+// completes exactly once and no additional commit appears.
 func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -627,9 +626,26 @@ func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 	}
 
 	env.WriteFile(editedFile, "# Foreground\n\nWritten by a foreground subagent.\n")
+	stop := SubagentStopInput{
+		SessionID:      session.ID,
+		TranscriptPath: session.TranscriptPath,
+		AgentID:        subagentID,
+	}
 
-	// Foreground completion: PostToolUse fires with no run_in_background, so
-	// this is captured immediately — the existing, unchanged behavior.
+	// SubagentStop arrives before the PostToolUse that names its tool_use_id.
+	if err := env.SimulateSubagentStop(stop); err != nil {
+		t.Fatalf("SimulateSubagentStop failed: %v", err)
+	}
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state != nil && len(state.TaskRecords) != 0 {
+		t.Fatalf("a foreground SubagentStop must not create a record before PostToolUse, got %+v", state.TaskRecords)
+	}
+
+	// Foreground completion: PostToolUse reports status "completed", so this
+	// is captured immediately.
 	if err := env.SimulatePostTask(PostTaskInput{
 		SessionID:      session.ID,
 		TranscriptPath: session.TranscriptPath,
@@ -639,8 +655,7 @@ func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 		t.Fatalf("SimulatePostTask failed: %v", err)
 	}
 
-	// Foreground tasks complete their record at post-task time.
-	state, err := env.GetSessionState(session.ID)
+	state, err = env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
@@ -648,36 +663,36 @@ func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 		t.Fatalf("foreground post-task must leave a COMPLETED record, state=%+v", state)
 	}
 	rec := state.FindTaskRecord(taskToolUseID)
+	if rec.AgentID != subagentID {
+		t.Errorf("record AgentID = %q, want %q", rec.AgentID, subagentID)
+	}
 	if !containsFile(rec.Files, editedFile) {
 		t.Fatalf("the foreground record must carry the task's file, got %v", rec.Files)
 	}
 	firstCompletedAt := rec.CompletedAt
 	commitsAfterPostTask := env.GetGitLog()
 
-	// The double-fire: SubagentStop for the same tool_use_id, with the record
-	// already completed. Must be a no-op, not a second capture.
-	if err := env.SimulateSubagentStop(SubagentStopInput{
-		SessionID:      session.ID,
-		TranscriptPath: session.TranscriptPath,
-		AgentID:        subagentID,
-		ToolUseID:      taskToolUseID,
-	}); err != nil {
-		t.Fatalf("SimulateSubagentStop failed: %v", err)
+	// A redelivered SubagentStop matches the completed record by agent ID and
+	// must be a no-op, not a second capture.
+	if err := env.SimulateSubagentStop(stop); err != nil {
+		t.Fatalf("SimulateSubagentStop (redelivery) failed: %v", err)
 	}
 
 	commitsAfterSubagentStop := env.GetGitLog()
 	if len(commitsAfterSubagentStop) != len(commitsAfterPostTask) {
-		t.Errorf("SubagentStop double-fire created a new commit: before=%d after=%d",
+		t.Errorf("SubagentStop redelivery created a new commit: before=%d after=%d",
 			len(commitsAfterPostTask), len(commitsAfterSubagentStop))
 	}
 
-	// Still exactly one completion.
 	state, err = env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
 	}
+	if len(state.TaskRecords) != 1 {
+		t.Errorf("expected exactly one task record, got %+v", state.TaskRecords)
+	}
 	rec = state.FindTaskRecord(taskToolUseID)
 	if rec == nil || !rec.CompletedAt.Equal(firstCompletedAt) {
-		t.Errorf("the double-fire must not re-complete the record, got %+v", rec)
+		t.Errorf("the redelivery must not re-complete the record, got %+v", rec)
 	}
 }

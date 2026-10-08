@@ -31,7 +31,7 @@ import (
 // --json is deliberately NOT persistent here: it only makes sense on the read
 // and mutation verbs that render a wire payload, so it's registered per-command
 // with addJSONFlag. A persistent --json was inherited by side-effect verbs
-// (delete, clone, mirror create/remove, grant remove) that silently ignored it;
+// (delete, clone, mirror add/remove, grant remove) that silently ignored it;
 // cobra can't hide a persistent flag from a subset of children, so the flag
 // lives on exactly the commands that honor it.
 func addControlPlaneFlags(cmd *cobra.Command) {
@@ -72,8 +72,15 @@ func addForceFlag(cmd *cobra.Command) {
 	cmd.Flags().BoolP("yes", "y", false, "Skip the confirmation prompt (alias for --force)")
 }
 
-// forceRequested reports whether the delete should skip its confirmation
-// prompt, i.e. --force or its --yes alias was set.
+// addYesFlag registers only --yes/-y, for a command whose prompt guards
+// nothing a flag could override: --force would read as overriding a refusal.
+// forceRequested reads it as well.
+func addYesFlag(cmd *cobra.Command) {
+	cmd.Flags().BoolP("yes", "y", false, "Skip the confirmation prompt")
+}
+
+// forceRequested reports whether the command should skip its confirmation
+// prompt, i.e. --force or --yes was set (either may be unregistered).
 func forceRequested(cmd *cobra.Command) bool {
 	force, ferr := cmd.Flags().GetBool("force")
 	yes, yerr := cmd.Flags().GetBool("yes")
@@ -81,24 +88,25 @@ func forceRequested(cmd *cobra.Command) bool {
 }
 
 // runControlPlaneDelete is the shared body of the destructive `delete` verbs
-// (org/project/repo). It resolves the target ref to a ULID, gates on a
+// (org/project). It resolves the target ref to a ULID, gates on a
 // confirmation prompt (bypassed by --force/--yes), deletes, and reports the
 // resolved identifier. noun names the resource ("org"); ref is the user's
 // original argument, shown alongside the resolved ULID. resolve and del isolate
-// the per-resource API calls.
+// the per-resource API calls. `repo delete` has its own body (runRepoDelete):
+// a cascade can answer 202, which this one-shot flow cannot report.
 func runControlPlaneDelete(
 	cmd *cobra.Command,
 	noun, ref string,
-	resolve func(context.Context, *coreapi.Client) (string, error),
+	resolve func(context.Context, *coreapi.Client) (resolvedRef, error),
 	del func(context.Context, *coreapi.Client, string) error,
 ) error {
 	force := forceRequested(cmd)
 	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		id, err := resolve(ctx, c)
+		resolved, err := resolve(ctx, c)
 		if err != nil {
 			return err
 		}
-		label := noun + " " + resolvedRefLabel(ref, id)
+		label := noun + " " + resolvedRefLabel(ref, resolved)
 		proceed, err := confirmControlPlaneDeletion(ctx, cmd.OutOrStdout(), label, force, interactive.CanPromptInteractively())
 		if err != nil {
 			return err
@@ -106,7 +114,7 @@ func runControlPlaneDelete(
 		if !proceed {
 			return nil
 		}
-		if err := del(ctx, c, id); err != nil {
+		if err := del(ctx, c, resolved.ID); err != nil {
 			// Idempotent delete: a resource that's already gone (a 404 from the
 			// delete call — e.g. a ULID passed straight through, or a concurrent
 			// delete) is the desired end state, not an error.
@@ -169,19 +177,47 @@ func runCoreList[T any](cmd *cobra.Command, empty string, headers []string, row 
 	return runCore(cmd, renderCoreList(cmd, empty, headers, row, fn))
 }
 
-// runCoreListForCluster is runCoreList for a resource-provider command (see
-// runCoreForCluster): identical table/JSON/empty-state rendering, but dialing
-// the core that fronts clusterHost rather than the active context.
-func runCoreListForCluster[T any](cmd *cobra.Command, clusterHost, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
-	return runCoreForCluster(cmd, clusterHost, renderCoreList(cmd, empty, headers, row, fn))
+// listView is how a list renders once its items are known, for the command
+// whose output depends on what came back. table is required and picks the
+// headers and row function; toJSON is optional and, when set, replaces the
+// raw wire model on --json — it merges synthesized fields into the marshalled
+// objects (see mergeSynthesizedField) and never overrides a server value. It
+// may drop a server key only by renaming it: where a synthesized key carries
+// the very string the server sent under another name, printing both says one
+// value twice (see mirrorCollaboratorJSON, which renames `accountId` to the
+// `granteeId` its sibling listing uses). Dropping a value outright is not the
+// same thing, and is not allowed.
+type listView[T any] struct {
+	table  func(items []T) (headers []string, row func(T) []string)
+	toJSON func(items []T) (any, error)
 }
 
-// renderCoreList builds the run-function shared by runCoreList and
-// runCoreListForCluster: fetch via fn, then render as a table (default), the
-// empty sentence (no items), or raw JSON (--json). Kept separate from the
-// client-selection so the two list variants differ only in which core they
-// dial.
+// runCoreListShaped is runCoreList with the rendering decided after the fetch.
+// `cluster list` adds its DEFAULT column this way, only when the catalog holds
+// a non-default cluster, and merges a validated `host` into its --json.
+func runCoreListShaped[T any](cmd *cobra.Command, empty string, view listView[T], fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCore(cmd, renderCoreListShaped(cmd, empty, view, fn))
+}
+
+// runCoreListShapedForCluster is runCoreListShaped for a resource-provider
+// command (see runCoreForCluster): the same rendering decided after the fetch,
+// dialing the core that fronts clusterHost rather than the active context.
+func runCoreListShapedForCluster[T any](cmd *cobra.Command, clusterHost, empty string, view listView[T], fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreListShaped(cmd, empty, view, fn))
+}
+
+// renderCoreList builds the run-function runCoreList uses for a table with
+// fixed columns. Kept separate from the client-selection so a list variant
+// differs from another only in which core it dials.
 func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
+	view := listView[T]{table: func([]T) ([]string, func(T) []string) { return headers, row }}
+	return renderCoreListShaped(cmd, empty, view, fn)
+}
+
+// renderCoreListShaped is the rendering every list variant shares: fetch via
+// fn, then render as a table (default), the empty sentence (no items), or JSON
+// (--json) — the raw wire model unless the view supplies its own.
+func renderCoreListShaped[T any](cmd *cobra.Command, empty string, view listView[T], fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
 	return func(ctx context.Context, c *coreapi.Client) error {
 		items, err := fn(ctx, c)
 		if err != nil {
@@ -191,14 +227,79 @@ func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, r
 			if items == nil {
 				items = []T{} // a nil slice encodes as null; scripts expect []
 			}
-			return printJSON(cmd.OutOrStdout(), items)
+			if view.toJSON == nil {
+				return printJSON(cmd.OutOrStdout(), items)
+			}
+			out, err := view.toJSON(items)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), out)
 		}
 		if len(items) == 0 {
 			fmt.Fprintln(cmd.OutOrStdout(), empty)
 			return nil
 		}
+		headers, row := view.table(items)
 		return printTable(cmd.OutOrStdout(), headers, items, row)
 	}
+}
+
+// wireObject round-trips a generated wire type into a JSON object, so a command
+// can answer with the server's own description of a thing plus whatever it
+// computed alongside. The generated types carry custom marshalers and arbitrary
+// additional properties, so they cannot be embedded in a wrapper struct;
+// encoding through their own marshaler is what preserves both. Pass a pointer —
+// the marshalers have pointer receivers.
+func wireObject(v any) (map[string]json.RawMessage, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("encode %T: %w", v, err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("decode %T: %w", v, err)
+	}
+	return obj, nil
+}
+
+// putJSONField encodes one computed value into an object built by wireObject.
+func putJSONField(obj map[string]json.RawMessage, field string, v any) error {
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", field, err)
+	}
+	obj[field] = encoded
+	return nil
+}
+
+// mergeSynthesizedField renders a wire object as JSON with one synthesized
+// string field merged in. The generated types carry custom marshalers plus
+// arbitrary additional properties, so they can't be embedded in a wrapper
+// struct; instead v is round-tripped through its own encoder (pass a pointer —
+// the marshalers have pointer receivers) and the field is merged into the
+// resulting object. Additive-only: if the object already carries the field
+// (a future first-class field, or one arriving via additional properties) it
+// is left untouched, so the server value always wins, and an empty synth
+// result adds nothing rather than a half-formed placeholder.
+func mergeSynthesizedField(v any, field string, synth func() string) (map[string]json.RawMessage, error) {
+	obj, err := wireObject(v)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := obj[field]; ok {
+		return obj, nil
+	}
+	value := synth()
+	if value == "" {
+		return obj, nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode %s: %w", field, err)
+	}
+	obj[field] = encoded
+	return obj, nil
 }
 
 // coreListFetchBudget bounds how many entries a bounded list command fetches
@@ -340,24 +441,13 @@ func flushThroughPager(cmd *cobra.Command, noPager bool, run func() error) error
 // runCoreObject fetches a single value via fn and renders it as a vertical
 // field/value list (default) or raw JSON (--json), reusing the same column
 // definition as the matching list view.
+// The rendering is inline rather than split out as the list side is
+// (renderCoreListShaped, which runCoreListForCluster reuses): the object view
+// had such a caller and no longer does, so a layer whose only reason was
+// sharing now has one caller. Splitting it again is a two-line change if a
+// cluster-addressed object view returns.
 func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
-	return runCore(cmd, renderCoreObject(cmd, headers, row, fn))
-}
-
-// runCoreObjectForCluster is runCoreObject for a resource-provider command (see
-// runCoreForCluster): identical field/JSON rendering, but dialing the core that
-// fronts clusterHost rather than the active context.
-func runCoreObjectForCluster[T any](cmd *cobra.Command, clusterHost string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
-	return runCoreForCluster(cmd, clusterHost, renderCoreObject(cmd, headers, row, fn))
-}
-
-// renderCoreObject builds the run-function shared by runCoreObject and
-// runCoreObjectForCluster: fetch via fn, then render as a field/value list
-// (default) or raw JSON (--json). Kept separate from the client-selection so
-// the two object variants differ only in which core they dial (mirroring
-// renderCoreList).
-func renderCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) func(context.Context, *coreapi.Client) error {
-	return func(ctx context.Context, c *coreapi.Client) error {
+	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 		item, err := fn(ctx, c)
 		if err != nil {
 			return err
@@ -366,7 +456,7 @@ func renderCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) [
 			return printJSON(cmd.OutOrStdout(), item)
 		}
 		return printFields(cmd.OutOrStdout(), headers, row(*item))
-	}
+	})
 }
 
 // tableStyles holds the foreground styles for the human table/field views,
@@ -431,43 +521,6 @@ func printTable[T any](w io.Writer, headers []string, items []T, row func(T) []s
 		return fmt.Errorf("render table: %w", err)
 	}
 	return nil
-}
-
-// preStyleTable pre-colors table headers and a row function against w's color
-// capability, so a command that renders its table into a pager buffer keeps
-// its color. printTable/renderCoreListPage decide color from the writer they
-// render into; under flushThroughPager that writer is an in-memory buffer,
-// which never looks like a TTY, so a straight render there is always plain.
-// Pre-styling against the real output writer here and letting the buffered
-// render pass the ANSI through unchanged (its own color gate is off, so it
-// never re-styles) restores it — the same approach the mirror-list view takes.
-// Identity (no wrapping) when color is off, so pipes, tests, and NO_COLOR see
-// bare text byte for byte.
-func preStyleTable[T any](w io.Writer, headers []string, row func(T) []string) ([]string, func(T) []string) {
-	return styleTableWith(newTableStyles(w), headers, row)
-}
-
-// styleTableWith is the pure core of preStyleTable: it applies st's header and
-// per-column styles to the headers and row cells, matching how printTable
-// colors a direct render. Split out from the writer-facing wrapper so the
-// enabled path is unit-testable without a real terminal. Identity when st is
-// disabled, so plain output stays byte-for-byte unchanged.
-func styleTableWith[T any](st tableStyles, headers []string, row func(T) []string) ([]string, func(T) []string) {
-	if !st.enabled {
-		return headers, row
-	}
-	styledHeaders := make([]string, len(headers))
-	for i, h := range headers {
-		styledHeaders[i] = st.style(st.header, h)
-	}
-	styledRow := func(t T) []string {
-		cells := row(t)
-		for i := range cells {
-			cells[i] = st.style(st.columnStyle(i), cells[i])
-		}
-		return cells
-	}
-	return styledHeaders, styledRow
 }
 
 // printFields writes a single record as aligned "FIELD  value" lines: the
@@ -581,7 +634,7 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 }
 
 // runCoreForCluster is runCore for resource-provider commands addressed at a
-// specific cluster (mirror create/remove, mirror collaborators list):
+// specific cluster (mirror add/remove, `repo grant list` of a mirror ref):
 // it dials the core that fronts clusterHost — discovered from the cluster's
 // /.well-known/entire-cluster.json, authenticating with the matching local
 // context — instead of the active context. So the command works on a cluster in
@@ -591,6 +644,21 @@ func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx conte
 	return runCoreClient(cmd, func(ctx context.Context) (*coreapi.Client, error) {
 		return clusterCoreClient(ctx, clusterHost)
 	}, fn)
+}
+
+// coreRunnerFor picks which core a ref is resolved on. Most refs name no
+// cluster and resolve on the active context's; a clone URL names its own, and
+// is resolved on the core fronting it — that is the whole reason the URL form
+// exists, since a repo in another federation is invisible to the active
+// context's core. Shared by the two record views so both forges answer a clone
+// URL the same way.
+func coreRunnerFor(clusterHost string) func(*cobra.Command, func(context.Context, *coreapi.Client) error) error {
+	if clusterHost == "" {
+		return runCore
+	}
+	return func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
+		return runCoreForCluster(cmd, clusterHost, fn)
+	}
 }
 
 // runCoreClient owns the control-plane preamble shared by the active-context
@@ -611,6 +679,15 @@ func runCoreClient(cmd *cobra.Command, newClient func(context.Context) (*coreapi
 		return fmt.Errorf("connect to Entire control plane: %w", err)
 	}
 	if err := fn(cmd.Context(), client); err != nil {
+		// Commands that already reported a partial success own the rendering.
+		// renderCoreError extracts API problems through wrappers, discarding
+		// SilentError and causing main to print again. Guard here rather than
+		// changing that display helper: the mirror-add wizard needs its
+		// plain message before it prints.
+		var silent *SilentError
+		if errors.As(err, &silent) {
+			return err
+		}
 		return renderCoreError(err)
 	}
 	return nil
@@ -647,7 +724,7 @@ func renderCoreError(err error) error {
 	// generated security scaffolding. Redundant for the commands that return
 	// this error to main.go (which cleans it again — harmless, since the strip
 	// leaves the original chain intact to unwrap), and load-bearing for the
-	// mirror-create wizard, which prints renderCoreError's result itself and
+	// mirror-add wizard, which prints renderCoreError's result itself and
 	// returns a SilentError, so main.go never renders it.
 	return RenderUserFacingError(err)
 }

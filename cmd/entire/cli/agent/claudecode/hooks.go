@@ -28,6 +28,7 @@ const (
 	HookNameSessionStart     = "session-start"
 	HookNameSessionEnd       = "session-end"
 	HookNameStop             = "stop"
+	HookNameStopFailure      = "stop-failure"
 	HookNameUserPromptSubmit = "user-prompt-submit"
 	HookNamePreTask          = "pre-task"
 	HookNamePostTask         = "post-task"
@@ -184,6 +185,7 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 		{"SessionStart", agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)},
 		{"SessionEnd", agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")},
 		{"Stop", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")},
+		{"StopFailure", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop-failure")},
 		{"SubagentStop", agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")},
 		{"UserPromptSubmit", agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")},
 	}
@@ -349,10 +351,11 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	}
 
 	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, stop, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
+	var sessionStart, sessionEnd, stop, stopFailure, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
 	parseHookType(rawHooks, "SessionStart", &sessionStart)
 	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
 	parseHookType(rawHooks, "Stop", &stop)
+	parseHookType(rawHooks, "StopFailure", &stopFailure)
 	parseHookType(rawHooks, "SubagentStop", &subagentStop)
 	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
 	parseHookType(rawHooks, "PreToolUse", &preToolUse)
@@ -362,6 +365,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	sessionStart = removeEntireHooks(sessionStart)
 	sessionEnd = removeEntireHooks(sessionEnd)
 	stop = removeEntireHooks(stop)
+	stopFailure = removeEntireHooks(stopFailure)
 	subagentStop = removeEntireHooks(subagentStop)
 	userPromptSubmit = removeEntireHooks(userPromptSubmit)
 	preToolUse = removeEntireHooksFromMatchers(preToolUse)
@@ -371,6 +375,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	marshalHookType(rawHooks, "SessionStart", sessionStart)
 	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
 	marshalHookType(rawHooks, "Stop", stop)
+	marshalHookType(rawHooks, "StopFailure", stopFailure)
 	marshalHookType(rawHooks, "SubagentStop", subagentStop)
 	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
 	marshalHookType(rawHooks, "PreToolUse", preToolUse)
@@ -494,7 +499,7 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 // current, or outdated. It is a read-only diagnostic used by `entire status`
 // and `entire doctor`; it never modifies settings. Outdated is detected on the
 // positive spec: Entire is installed (Stop hook present) yet one of the current
-// tool-use matchers does not carry its Entire hook.
+// tool-use matchers, SubagentStop, or StopFailure does not carry its Entire hook.
 func CheckHookConfig(ctx context.Context) HookConfigState {
 	settings, err := loadClaudeSettings(ctx)
 	// An unreadable or malformed settings file collapses to HooksAbsent
@@ -511,7 +516,8 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) ||
-		!hasEntireHook(settings.Hooks.SubagentStop) {
+		!hasEntireHook(settings.Hooks.SubagentStop) ||
+		!hasEntireHook(settings.Hooks.StopFailure) {
 		return HooksOutdated
 	}
 	return HooksCurrent

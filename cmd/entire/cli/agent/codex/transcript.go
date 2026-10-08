@@ -3,10 +3,12 @@ package codex
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 	"sort"
@@ -14,30 +16,175 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // Compile-time interface assertions.
 var (
 	_ agent.TranscriptAnalyzer          = (*CodexAgent)(nil)
 	_ agent.TokenCalculator             = (*CodexAgent)(nil)
+	_ agent.InventoryAwareExtractor     = (*CodexAgent)(nil)
 	_ agent.PromptExtractor             = (*CodexAgent)(nil)
 	_ agent.RestoredSessionPathResolver = (*CodexAgent)(nil)
 	_ agent.TranscriptSanitizer         = (*CodexAgent)(nil)
 )
 
+func sessionMetaID(data []byte) (string, error) {
+	lines := splitJSONL(data)
+	if len(lines) == 0 {
+		return "", errors.New("rollout is empty")
+	}
+	var line rolloutLine
+	if err := json.Unmarshal(lines[0], &line); err != nil {
+		return "", fmt.Errorf("parse first rollout record: %w", err)
+	}
+	if line.Type != rolloutLineTypeSessionMeta {
+		return "", fmt.Errorf("first transcript line is %q, want session_meta", line.Type)
+	}
+	var meta sessionMetaPayload
+	if err := json.Unmarshal(line.Payload, &meta); err != nil {
+		return "", fmt.Errorf("parse session_meta payload: %w", err)
+	}
+	if meta.ID == "" {
+		return "", errors.New("session_meta id is empty")
+	}
+	return meta.ID, nil
+}
+
 // rolloutLine is the top-level JSONL line structure in Codex rollout files.
 type rolloutLine struct {
 	Timestamp string          `json:"timestamp"`
+	Ordinal   *int            `json:"ordinal,omitempty"`
 	Type      string          `json:"type"` // "session_meta", "response_item", "event_msg", "turn_context"
 	Payload   json.RawMessage `json:"payload"`
 }
 
-const rolloutLineTypeResponseItem = "response_item"
+const (
+	rolloutLineTypeResponseItem = "response_item"
+	rolloutLineTypeSessionMeta  = "session_meta"
+	rolloutLineTypeEventMsg     = "event_msg"
+	eventMsgTypeTokenCount      = "token_count"
+	// itemTypeAgentMessage is the type of a multi-agent message item, both as a
+	// rollout response_item payload and as a `codex exec --json` event item.
+	itemTypeAgentMessage = "agent_message"
+)
+
+// rolloutClassification identifies whether a rollout belongs to a root thread
+// or a child thread. Uncertainty remains distinct so callers can diagnose it;
+// root lifecycle hooks preserve their event unless the rollout is a confirmed child.
+type rolloutClassification uint8
+
+const (
+	rolloutUnknown rolloutClassification = iota
+	rolloutRoot
+	rolloutChild
+)
+
+type rolloutClassificationIssue string
+
+const (
+	rolloutIssueNullPath           rolloutClassificationIssue = "null_transcript_path"
+	rolloutIssueUnreadable         rolloutClassificationIssue = "unreadable_transcript"
+	rolloutIssueMalformedMetadata  rolloutClassificationIssue = "malformed_session_metadata"
+	rolloutIssueUnclassifiedSource rolloutClassificationIssue = "unclassified_source"
+)
+
+type rolloutClassificationResult struct {
+	Classification rolloutClassification
+	Issue          rolloutClassificationIssue
+	Detail         string
+}
 
 // sessionMetaPayload is the payload for type="session_meta" lines.
 type sessionMetaPayload struct {
-	ID        string `json:"id"`
-	Timestamp string `json:"timestamp"`
+	ID                          string          `json:"id"`
+	ForkedFromID                string          `json:"forked_from_id,omitempty"`
+	Timestamp                   string          `json:"timestamp"`
+	ThreadSource                string          `json:"thread_source"`
+	Source                      json.RawMessage `json:"source"`
+	SubagentHistoryStartOrdinal *int            `json:"subagent_history_start_ordinal,omitempty"`
+}
+
+// classifyRolloutDetailed reads only the rollout's session_meta record. Newer
+// Codex rollouts use thread_source; older rollouts use source.
+func classifyRolloutDetailed(path string, roots []string) rolloutClassificationResult {
+	if path == "" {
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueNullPath}
+	}
+
+	file, _, err := openScopedRollout(roots, path)
+	if err != nil {
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueUnreadable, Detail: "open"}
+	}
+	defer file.Close()
+	reader := &CodexAgent{}
+	lineData, err := reader.readFallbackMetadata(file, path, newRolloutScanBudget(context.Background(), defaultRolloutScanLimits))
+	if err != nil {
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueUnreadable, Detail: "read"}
+	}
+
+	var line rolloutLine
+	if json.Unmarshal(lineData, &line) != nil {
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueMalformedMetadata, Detail: "first_record_json"}
+	}
+	if line.Type != rolloutLineTypeSessionMeta {
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueMalformedMetadata, Detail: "first_record_type"}
+	}
+
+	var meta sessionMetaPayload
+	if json.Unmarshal(line.Payload, &meta) != nil {
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueMalformedMetadata, Detail: "session_meta_payload"}
+	}
+
+	switch meta.ThreadSource {
+	case "user":
+		return rolloutClassificationResult{Classification: rolloutRoot}
+	case "subagent":
+		return rolloutClassificationResult{Classification: rolloutChild}
+	case "":
+		// Fall through to the legacy source encoding.
+	default:
+		return rolloutClassificationResult{
+			Classification: rolloutUnknown,
+			Issue:          rolloutIssueUnclassifiedSource,
+			Detail:         safeRolloutSource(meta.ThreadSource),
+		}
+	}
+
+	var source string
+	if json.Unmarshal(meta.Source, &source) == nil {
+		switch source {
+		case "startup", "resume", "clear", "compact", "cli", codexExecCommand, "vscode", "mcp":
+			return rolloutClassificationResult{Classification: rolloutRoot}
+		default:
+			return rolloutClassificationResult{
+				Classification: rolloutUnknown,
+				Issue:          rolloutIssueUnclassifiedSource,
+				Detail:         safeRolloutSource(source),
+			}
+		}
+	}
+
+	var structuredSource struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	if json.Unmarshal(meta.Source, &structuredSource) == nil &&
+		len(structuredSource.Subagent) > 0 &&
+		!bytes.Equal(structuredSource.Subagent, []byte("null")) {
+		return rolloutClassificationResult{Classification: rolloutChild}
+	}
+
+	return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueUnclassifiedSource, Detail: "missing_or_structured_legacy_source"}
+}
+
+func safeRolloutSource(source string) string {
+	const maxSourceRunes = 128
+	runes := []rune(strings.ToValidUTF8(source, "�"))
+	if len(runes) > maxSourceRunes {
+		runes = runes[:maxSourceRunes]
+	}
+	return string(runes)
 }
 
 // responseItemPayload is the payload for type="response_item" lines.
@@ -57,8 +204,16 @@ type contentItem struct {
 
 // eventMsgPayload is the payload for type="event_msg" lines.
 type eventMsgPayload struct {
-	Type string          `json:"type"` // "token_count", "task_started", "user_message", "agent_message", "task_complete"
-	Info json.RawMessage `json:"info,omitempty"`
+	Type   string          `json:"type"` // "token_count", "task_started", "user_message", "agent_message", "task_complete", "turn_aborted"
+	TurnID *string         `json:"turn_id,omitempty"`
+	Info   json.RawMessage `json:"info,omitempty"`
+	Item   json.RawMessage `json:"item,omitempty"`
+}
+
+type fileChangeItem struct {
+	Type    string                     `json:"type"`
+	Status  string                     `json:"status"`
+	Changes map[string]json.RawMessage `json:"changes"`
 }
 
 // tokenCountInfo contains token usage data from event_msg.token_count.
@@ -73,6 +228,17 @@ type tokenUsageData struct {
 	OutputTokens          int `json:"output_tokens"`
 	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
 	TotalTokens           int `json:"total_tokens"`
+}
+
+// exactTokenUsageData uses pointers so a native zero is distinguishable from a
+// field Codex did not report. It is used for child cumulative snapshots, where
+// approximation would turn an incomplete inventory into a misleading total.
+type exactTokenUsageData struct {
+	InputTokens           *int `json:"input_tokens"`
+	CachedInputTokens     *int `json:"cached_input_tokens"`
+	OutputTokens          *int `json:"output_tokens"`
+	ReasoningOutputTokens *int `json:"reasoning_output_tokens"`
+	TotalTokens           *int `json:"total_tokens"`
 }
 
 // Apply-patch envelope verbs Codex uses in tool_input.command — see
@@ -123,7 +289,7 @@ func (c *CodexAgent) GetTranscriptPosition(path string) (int, error) {
 }
 
 // ExtractModifiedFilesFromOffset extracts files modified since a given line offset.
-func (c *CodexAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+func (c *CodexAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}
@@ -170,22 +336,7 @@ func extractFilesFromLine(lineData []byte) []string {
 	if json.Unmarshal(lineData, &line) != nil {
 		return nil
 	}
-
-	if line.Type != rolloutLineTypeResponseItem {
-		return nil
-	}
-
-	var payload responseItemPayload
-	if json.Unmarshal(line.Payload, &payload) != nil {
-		return nil
-	}
-
-	// apply_patch custom tool calls contain file paths in the input text
-	if payload.Type == "custom_tool_call" && payload.Name == "apply_patch" {
-		return extractFilesFromApplyPatch(payload.Input)
-	}
-
-	return nil
+	return extractFilesFromParsedLine(line)
 }
 
 // extractFilesFromApplyPatch returns every file path in an apply_patch envelope,
@@ -280,14 +431,14 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 		if json.Unmarshal(lineData, &line) != nil {
 			continue
 		}
-		if line.Type != "event_msg" {
+		if line.Type != rolloutLineTypeEventMsg {
 			continue
 		}
 		var evt eventMsgPayload
 		if json.Unmarshal(line.Payload, &evt) != nil {
 			continue
 		}
-		if evt.Type != "token_count" || len(evt.Info) == 0 {
+		if evt.Type != eventMsgTypeTokenCount || len(evt.Info) == 0 {
 			continue
 		}
 		var info tokenCountInfo
@@ -328,6 +479,288 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 		OutputTokens:    outputTokens,
 		APICallCount:    apiCalls,
 	}, nil
+}
+
+type rolloutAnalysis struct {
+	ModifiedFiles   []string
+	TerminalTurnIDs []string
+	ExactTokenUsage *agent.TokenUsage
+}
+
+// analyzeRollout extracts every piece of child evidence in one JSONL pass.
+// Each evidence channel keeps its own validity: malformed task boundaries
+// invalidate terminal turns without discarding file paths already observed,
+// while a malformed final token snapshot makes exact usage unavailable.
+func analyzeRollout(data []byte) rolloutAnalysis {
+	return analyzeRolloutForTurns(context.Background(), data, nil)
+}
+
+func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []string) rolloutAnalysis {
+	var result rolloutAnalysis
+	terminalValid := true
+	scopeValid := true
+	openTurn := ""
+	seenTurns := make(map[string]struct{})
+	seenFiles := make(map[string]struct{})
+	var lastTokenSnapshot *exactTokenUsageData
+	foundToken := false
+	// Every token_count event carrying a usage snapshot is one model turn —
+	// the same test CalculateTokenUsage applies when counting the parent's API
+	// calls. Counting them here keeps a child's APICallCount comparable with
+	// its parent's, and with the Claude Code and Droid subagent rollups, which
+	// both sum their children's counts.
+	tokenSnapshots := 0
+	lines := splitJSONL(data)
+	var localStartOrdinal *int
+	inherited := false
+	knownTurns := make(map[string]bool, len(observedTurns))
+	for _, turnID := range observedTurns {
+		knownTurns[turnID] = true
+	}
+	if len(lines) > 0 {
+		var first rolloutLine
+		if json.Unmarshal(lines[0], &first) == nil && first.Type == rolloutLineTypeSessionMeta {
+			var meta sessionMetaPayload
+			if json.Unmarshal(first.Payload, &meta) == nil {
+				inherited = meta.ForkedFromID != ""
+				if meta.SubagentHistoryStartOrdinal != nil && *meta.SubagentHistoryStartOrdinal >= 0 {
+					localStartOrdinal = meta.SubagentHistoryStartOrdinal
+				}
+			}
+		}
+	}
+
+	for _, lineData := range lines {
+		if ctx.Err() != nil {
+			return rolloutAnalysis{}
+		}
+		var line rolloutLine
+		if json.Unmarshal(lineData, &line) != nil {
+			terminalValid = false
+			if localStartOrdinal != nil {
+				scopeValid = false
+			}
+			continue
+		}
+		if localStartOrdinal != nil {
+			if line.Ordinal == nil {
+				scopeValid = false
+				continue
+			}
+			if *line.Ordinal < *localStartOrdinal {
+				continue
+			}
+		}
+		if !inherited || localStartOrdinal != nil || knownTurns[openTurn] {
+			for _, file := range extractFilesFromParsedLine(line) {
+				if _, seen := seenFiles[file]; !seen {
+					seenFiles[file] = struct{}{}
+					result.ModifiedFiles = append(result.ModifiedFiles, file)
+				}
+			}
+		}
+		if line.Type != rolloutLineTypeEventMsg {
+			continue
+		}
+
+		var header struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line.Payload, &header) != nil {
+			terminalValid = false
+			continue
+		}
+		if header.Type != eventMsgTypeTokenCount && header.Type != "task_started" && header.Type != "task_complete" && header.Type != "turn_aborted" {
+			continue
+		}
+		var event eventMsgPayload
+		if json.Unmarshal(line.Payload, &event) != nil {
+			if header.Type != eventMsgTypeTokenCount {
+				terminalValid = false
+			} else {
+				foundToken = true
+				lastTokenSnapshot = nil
+			}
+			continue
+		}
+		switch header.Type {
+		case eventMsgTypeTokenCount:
+			foundToken = true
+			lastTokenSnapshot = decodeTotalTokenUsage(event.Info)
+			if lastTokenSnapshot != nil {
+				tokenSnapshots++
+			}
+		case "task_started":
+			// Forks copy an unfinished parent turn. A later explicit turn start
+			// replaces that orphan; only balanced pairs can yield terminal IDs.
+			if inherited && localStartOrdinal == nil && event.TurnID != nil && *event.TurnID != openTurn {
+				openTurn = ""
+			}
+			if openTurn != "" || event.TurnID == nil || *event.TurnID == "" {
+				terminalValid = false
+				continue
+			}
+			if _, duplicate := seenTurns[*event.TurnID]; duplicate {
+				terminalValid = false
+				continue
+			}
+			openTurn = *event.TurnID
+		case "task_complete", "turn_aborted":
+			// An aborted turn (a user interrupt, or a daemon restart that
+			// resumes in a new turn) has ended as surely as a completed one.
+			if openTurn == "" || (event.TurnID != nil && (*event.TurnID == "" || *event.TurnID != openTurn)) {
+				terminalValid = false
+				continue
+			}
+			result.TerminalTurnIDs = append(result.TerminalTurnIDs, openTurn)
+			seenTurns[openTurn] = struct{}{}
+			openTurn = ""
+		}
+	}
+	if !scopeValid {
+		return rolloutAnalysis{}
+	}
+	if !terminalValid || openTurn != "" {
+		result.TerminalTurnIDs = nil
+	}
+	if foundToken && (!inherited || localStartOrdinal != nil) {
+		result.ExactTokenUsage = exactUsageFromSnapshot(lastTokenSnapshot)
+		if result.ExactTokenUsage != nil {
+			// Reported only alongside exact usage: an unusable final snapshot
+			// makes the child's whole total unavailable, and a bare call count
+			// with no tokens would read as a child that burned nothing.
+			result.ExactTokenUsage.APICallCount = tokenSnapshots
+		}
+	}
+	return result
+}
+
+func extractFilesFromParsedLine(line rolloutLine) []string {
+	switch line.Type {
+	case rolloutLineTypeResponseItem:
+		var payload responseItemPayload
+		if json.Unmarshal(line.Payload, &payload) != nil || payload.Type != "custom_tool_call" || payload.Name != "apply_patch" {
+			return nil
+		}
+		return extractFilesFromApplyPatch(payload.Input)
+	case rolloutLineTypeEventMsg:
+		var event eventMsgPayload
+		if json.Unmarshal(line.Payload, &event) != nil || event.Type != "item_completed" {
+			return nil
+		}
+		var item fileChangeItem
+		if json.Unmarshal(event.Item, &item) != nil || item.Type != "FileChange" || item.Status != "completed" {
+			return nil
+		}
+		files := make([]string, 0, len(item.Changes))
+		for path := range item.Changes {
+			if path != "" {
+				files = append(files, path)
+			}
+		}
+		sort.Strings(files)
+		return files
+	default:
+		return nil
+	}
+}
+
+// decodeTotalTokenUsage pulls the cumulative usage snapshot out of a
+// token_count event's info payload, or nil when it is absent or malformed.
+// The API-call count and the exact-usage read share it so both agree on what
+// counts as a usage-bearing event.
+func decodeTotalTokenUsage(info json.RawMessage) *exactTokenUsageData {
+	if len(info) == 0 {
+		return nil
+	}
+	var payload struct {
+		TotalTokenUsage *exactTokenUsageData `json:"total_token_usage"`
+	}
+	if json.Unmarshal(info, &payload) != nil {
+		return nil
+	}
+	return payload.TotalTokenUsage
+}
+
+// exactUsageFromSnapshot converts a decoded snapshot into usage, rejecting any
+// snapshot whose fields are absent or mutually inconsistent.
+func exactUsageFromSnapshot(usage *exactTokenUsageData) *agent.TokenUsage {
+	if usage == nil {
+		return nil
+	}
+	if usage.InputTokens == nil || usage.CachedInputTokens == nil || usage.OutputTokens == nil {
+		return nil
+	}
+	input, cached, output := *usage.InputTokens, *usage.CachedInputTokens, *usage.OutputTokens
+	if input < 0 || cached < 0 || output < 0 || cached > input {
+		return nil
+	}
+	if usage.ReasoningOutputTokens != nil && (*usage.ReasoningOutputTokens < 0 || *usage.ReasoningOutputTokens > output) {
+		return nil
+	}
+	if usage.TotalTokens != nil && (*usage.TotalTokens < 0 || *usage.TotalTokens != input+output) {
+		return nil
+	}
+	return &agent.TokenUsage{InputTokens: input - cached, CacheReadTokens: cached, OutputTokens: output}
+}
+
+// ExtractWithSubagentInventory gathers evidence only for refs supplied by the
+// caller's authoritative ledger. It never discovers children from transcript
+// text, filenames, timestamps, or token-count events.
+func (c *CodexAgent) ExtractWithSubagentInventory(ctx context.Context, parent []byte, fromOffset int, refs []agent.SubagentReference) (agent.InventoryExtraction, error) {
+	var result agent.InventoryExtraction
+	parentUsage, err := c.CalculateTokenUsage(parent, fromOffset)
+	if err != nil {
+		return result, err
+	}
+	complete := true
+	var childTotal *agent.TokenUsage
+	result.Children = make([]agent.SubagentAnalysis, len(refs))
+	unresolvedIDs := make(map[string]struct{})
+	for index, ref := range refs {
+		if loaded, ok := c.loadDirectRollout(ctx, ref); ok {
+			// Analyze and release each direct body before reading the next child.
+			result.Children[index] = analyzeLoadedChild(ctx, ref, loaded)
+		} else {
+			result.Children[index].AgentID = ref.AgentID
+			if ref.AgentID != "" {
+				unresolvedIDs[ref.AgentID] = struct{}{}
+			}
+		}
+	}
+	fallback, fallbackErr := c.scanFallbackRollouts(ctx, unresolvedIDs)
+	if fallbackErr != nil {
+		fallback = nil
+		logging.Debug(ctx, "codex: fallback rollout scan incomplete", slog.String("error", fallbackErr.Error()))
+	}
+	for index, ref := range refs {
+		if result.Children[index].ResolvedPath == "" {
+			result.Children[index] = analyzeLoadedChild(ctx, ref, fallback[ref.AgentID])
+		}
+		child := result.Children[index]
+		if child.TokenUsage == nil {
+			complete = false
+		} else {
+			childTotal = types.AddTokenUsage(childTotal, child.TokenUsage)
+		}
+	}
+	result.TokenUsage = types.WithClearedSubagentTokens(parentUsage, complete)
+	if complete && len(refs) > 0 {
+		result.TokenUsage.SubagentTokens = childTotal
+	}
+	return result, nil
+}
+
+func analyzeLoadedChild(ctx context.Context, ref agent.SubagentReference, loaded loadedRollout) agent.SubagentAnalysis {
+	analysis := agent.SubagentAnalysis{AgentID: ref.AgentID, ResolvedPath: loaded.Path}
+	if loaded.Path == "" {
+		return analysis
+	}
+	rollout := analyzeRolloutForTurns(ctx, loaded.Data, ref.ObservedTurnIDs)
+	analysis.ModifiedFiles = rollout.ModifiedFiles
+	analysis.TerminalTurnIDs = rollout.TerminalTurnIDs
+	analysis.TokenUsage = rollout.ExactTokenUsage
+	return analysis
 }
 
 // ExtractPrompts returns user prompts from the transcript starting at the given offset.
@@ -425,9 +858,10 @@ func SanitizePortableTranscript(data []byte) []byte {
 
 // sanitizeMarkers are the substrings that gate every transformation
 // sanitizeRolloutLine performs: dropping "compaction"/"compaction_summary" items,
-// rewriting "compacted" lines, and deleting "encrypted_content" from "reasoning"
-// items. A transcript containing none of them cannot be altered, so one scan lets
-// us skip unmarshalling every line.
+// rewriting "compacted" lines, deleting "encrypted_content" from "reasoning"
+// items, and dropping "encrypted_content" parts from "agent_message" items. A
+// transcript containing none of them cannot be altered, so one scan lets us skip
+// unmarshalling every line.
 //
 // Deliberately over-broad ("compact" covers compacted/compaction/
 // compaction_summary): a false positive just falls through to the full pass, while
@@ -489,6 +923,14 @@ func sanitizeRolloutLine(lineData []byte) ([]byte, bool) {
 		// are still removed outright (see sanitizeHistoryItems): those are array
 		// elements within a single line, so removing them cannot shift line numbers.
 		delete(payload, "encrypted_content")
+	case itemTypeAgentMessage:
+		// Multi-agent messages carry their plaintext as input_text parts and a
+		// session-bound Fernet ciphertext as an "encrypted_content" part. Drop
+		// only that part; the line and its readable parts stay, so line numbering
+		// is unchanged. Untouched lines keep their original bytes.
+		if !stripEncryptedContentParts(payload) {
+			return lineData, true
+		}
 	default:
 		return lineData, true
 	}
@@ -546,6 +988,8 @@ func sanitizeHistoryItems(items []any) []any {
 		switch itemType {
 		case "reasoning":
 			delete(itemMap, "encrypted_content")
+		case itemTypeAgentMessage:
+			stripEncryptedContentParts(itemMap)
 		case "compaction", "compaction_summary":
 			continue
 		}
@@ -553,6 +997,27 @@ func sanitizeHistoryItems(items []any) []any {
 		sanitized = append(sanitized, itemMap)
 	}
 	return sanitized
+}
+
+// stripEncryptedContentParts removes every {"type":"encrypted_content"} element
+// from item's "content" array and reports whether it removed any.
+func stripEncryptedContentParts(item map[string]any) bool {
+	parts, ok := item["content"].([]any)
+	if !ok {
+		return false
+	}
+	kept := make([]any, 0, len(parts))
+	for _, part := range parts {
+		if partMap, ok := part.(map[string]any); ok && partMap["type"] == "encrypted_content" {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if len(kept) == len(parts) {
+		return false
+	}
+	item["content"] = kept
+	return true
 }
 
 func mustMarshalRolloutLine(line rolloutLine) []byte {
@@ -585,7 +1050,7 @@ func parseSessionStartTime(data []byte) (time.Time, error) {
 	if err := json.Unmarshal(lines[0], &line); err != nil {
 		return time.Time{}, fmt.Errorf("parse first transcript line: %w", err)
 	}
-	if line.Type != "session_meta" {
+	if line.Type != rolloutLineTypeSessionMeta {
 		return time.Time{}, fmt.Errorf("first transcript line is %q, want session_meta", line.Type)
 	}
 

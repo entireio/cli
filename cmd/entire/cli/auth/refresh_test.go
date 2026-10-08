@@ -227,7 +227,7 @@ func TestNewRefreshingLoginProvider_UnreachableCore(t *testing.T) {
 	if want := fmt.Sprintf("cannot reach the login server for %q (%s)", "local", coreURL); !strings.Contains(got, want) {
 		t.Errorf("error %q missing %q", got, want)
 	}
-	if !strings.Contains(got, "entire login") || !strings.Contains(got, "entire auth use <context>") {
+	if !strings.Contains(got, "entire login") || !strings.Contains(got, "entire auth switch <context>") {
 		t.Errorf("error %q missing the re-login and switch-login hints", got)
 	}
 	// The transport cause survives for callers matching on it, and the message

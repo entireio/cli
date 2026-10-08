@@ -2,137 +2,128 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/spf13/cobra"
 )
 
-// boundRevokeFunc revokes login session(s) server-side — either just the
-// current session or every session on the core, depending on which the caller
-// selected (--everywhere). The caller resolves the active context's core URL +
-// bearer up-front and binds them into the closure, so the revocation hits the
-// same core that `auth status` lists.
-type boundRevokeFunc func(ctx context.Context) error
-
-// clearContextFunc removes the active contexts.json context (and its
-// keyring token) so logout actually logs out under the contexts model.
-// Injected so logout stays unit-testable without touching the real
-// config dir.
-type clearContextFunc func() error
+// logoutLoginTimeout bounds one login's server calls.
+//
+// Refresh and revoke run against a login server the user may no longer be
+// able to reach. api.Client sets no response deadline, so a core that
+// accepts the connection and never answers would otherwise hang the sweep
+// and leave every later login in place. Fifteen seconds covers a slow
+// refresh plus a revoke; a login that exceeds it is removed locally with a
+// warning, exactly like one whose core is down.
+const logoutLoginTimeout = 15 * time.Second
 
 func newLogoutCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 	var everywhere bool
-	var allContexts bool
 	cmd := &cobra.Command{
 		Use:   "logout",
 		Short: "Log out of Entire",
-		Long: "Log out of Entire.\n\n" +
-			"By default this ends the active session only (server-side) and removes the\n" +
-			"active login from this machine. Other saved logins (contexts) remain and can\n" +
-			"still authenticate `git clone entire://…` against clusters fronted by their\n" +
-			"login server.\n\n" +
-			"Pass --everywhere to revoke every session on the active login server\n" +
-			"(all your devices), not just the current one.\n\n" +
-			"Pass --all-contexts to log out of every saved login (context) at once: each\n" +
-			"context's session is revoked server-side and the login is removed from this\n" +
-			"machine. Combine with --everywhere to revoke every session on every context's\n" +
-			"login server.\n\n" +
-			"Without --all-contexts, logging out promotes the next saved login (if any) to\n" +
-			"active, so running `entire logout` repeatedly drains every saved login in turn.",
+		Long: "Log out of every saved login.\n\n" +
+			"For each saved login, this ends every CLI session on that login server,\n" +
+			"other machines included, and removes the login from this machine.\n" +
+			"Nothing narrows it: an explicit --context is refused rather than\n" +
+			"ignored, and $ENTIRE_CONTEXT is ignored. Browser and web sessions\n" +
+			"stay signed in.\n\n" +
+			"Pass --everywhere to also end browser and web sessions on each login\n" +
+			"server. A browser is signed out on its next request; the web app once\n" +
+			"its access token expires.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			outW, errW := cmd.OutOrStdout(), cmd.ErrOrStderr()
-
-			// Pick the per-target revocation: just the current session, or
-			// every session on that context's core when --everywhere is set.
-			revokeForTarget := revokeCurrentAuthSession
-			if everywhere {
-				revokeForTarget = revokeAllAuthSessions
-			}
-
-			if allContexts {
-				return runLogoutAll(cmd.Context(), outW, errW, auth.Contexts,
-					auth.LoginTokenForContext, revokeForTarget, auth.RemoveContext,
-					applyInsecureHTTPAuth(insecureHTTPAuth))
-			}
-
-			// Revoke against the active context's core, matching what
-			// `auth status` lists. The refreshing resolver means an
-			// expired-but-refreshable session still yields a bearer that can
-			// authenticate the revoke call.
-			target, err := resolveStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
-			if err != nil {
+			if err := rejectContextFlag(cmd); err != nil {
 				return err
 			}
-			if target.coreURL == "" {
-				fmt.Fprintln(outW, "Not logged in.")
-				return nil
+			deps := logoutDeps{
+				listContexts:     auth.StoredContexts,
+				tokenForContext:  loginBearer,
+				revoke:           revokeCLIAuthSessions,
+				removeContext:    auth.RemoveContext,
+				insecureHTTPAuth: applyInsecureHTTPAuth(insecureHTTPAuth),
 			}
-			if !applyInsecureHTTPAuth(insecureHTTPAuth) {
-				if err := api.RequireSecureURL(target.coreURL); err != nil {
-					return fmt.Errorf("context login server URL check: %w", err)
+			if everywhere {
+				deps.revoke = revokeAllAuthSessions
+			}
+			// Only names the file in a hint; nothing is created.
+			if dir, err := userdirs.ConfigDirChecked(); err == nil {
+				if path, err := contexts.FilePath(dir); err == nil {
+					deps.contextsFile = path
 				}
 			}
-			revoke := func(ctx context.Context) error {
-				return revokeForTarget(ctx, target.coreURL, target.token)
+			err := runLogout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), deps)
+			// An env token is per-process, not a saved login,
+			// so it still authenticates after the sweep.
+			if os.Getenv(auth.EnvTokenVar) != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Context provided by %s.\n", auth.EnvTokenVar)
 			}
-			if err := runLogout(cmd.Context(), outW, errW,
-				target.token, revoke, auth.RemoveCurrentContext); err != nil {
-				return err
-			}
-			promoteNextLogin(outW, errW)
-			return nil
+			return err
 		},
 	}
-	cmd.Flags().BoolVar(&everywhere, "everywhere", false, "Revoke every session server-side, not just the current one")
-	cmd.Flags().BoolVar(&allContexts, "all-contexts", false, "Log out of every saved login (context), not just the active one")
+	cmd.Flags().BoolVar(&everywhere, "everywhere", false, "Also end browser and web sessions")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
 
-// promoteNextLogin makes the first remaining saved context active after a
-// logout cleared the previous one. This is what lets `entire logout` drain
-// every login when run repeatedly: each call ends the active login and
-// promotes the next, until none remain. Best-effort and informational —
-// logout already succeeded by the time we get here.
+// errContextFlagOnLogout rejects `entire logout --context <name>`.
 //
-// It reads the STORED current_context (auth.StoredContexts), not the acting
-// identity: after `entire logout --context staging` the override still names
-// staging, which no longer exists, so resolving the acting identity would fail
-// and skip the promotion — leaving `logout --context X` and a plain `logout`
-// with different end states for the very same target.
-func promoteNextLogin(outW, errW io.Writer) {
-	all, current, err := auth.StoredContexts()
-	if err != nil || current != "" || len(all) == 0 {
-		return
+// --context is persistent on the root and shell-completes saved login names,
+// so the command reads as "log out of that one" — the opposite of what the
+// sweep does. Silently ignoring it would end the sessions the user did not
+// name, so a narrowing request is an error rather than a surprise.
+var errContextFlagOnLogout = errors.New(
+	"--context cannot narrow logout: it signs out of every saved login. " +
+		"Run `entire logout` on its own, or `entire auth contexts` to see what is saved")
+
+// rejectContextFlag fails when --context was passed explicitly.
+//
+// $ENTIRE_CONTEXT is deliberately not rejected: it is ambient, commonly
+// exported for a whole shell, and failing on it would leave those users
+// unable to log out at all. The flag is a per-invocation request; the
+// variable is inherited state.
+func rejectContextFlag(cmd *cobra.Command) error {
+	if cmd.Flags().Changed(contextFlagName) {
+		return errContextFlagOnLogout
 	}
-	next := all[0].Name
-	if err := auth.SetCurrentContext(next); err != nil {
-		fmt.Fprintf(errW, "Note: %d saved login(s) remain; run `entire auth use <context>` to switch.\n", len(all))
-		return
-	}
-	fmt.Fprintf(outW, "Now using %q (%d saved login(s) remain; run `entire logout` again to remove each).\n", next, len(all))
+	return nil
 }
 
-// revokeCurrentAuthSession revokes the active session on coreURL (the family the
-// bearer belongs to) — the default `entire logout`.
-func revokeCurrentAuthSession(ctx context.Context, coreURL, token string) error {
-	return newAuthSessionsClient(coreURL, token).RevokeCurrentAuthSession(ctx) //nolint:wrapcheck // RevokeCurrentAuthSession already wraps with action context
+// revokeCLIAuthSessions ends every CLI session on coreURL.
+//
+// One collection DELETE when the login server supports it. An older
+// server answers 404 or 405 and cannot tell CLI sessions from browser
+// ones, so only the bearer's own session is ended there.
+func revokeCLIAuthSessions(ctx context.Context, coreURL, token string) error {
+	client := newAuthSessionsClient(coreURL, token)
+	err := client.RevokeCLIAuthSessions(ctx)
+	if err == nil || !endpointMissing(err) {
+		return err //nolint:wrapcheck // RevokeCLIAuthSessions already wraps with "revoke cli sessions"
+	}
+	return client.RevokeCurrentAuthSession(ctx) //nolint:wrapcheck // RevokeCurrentAuthSession already wraps with action context
 }
 
-// revokeAllAuthSessions revokes every active login session on coreURL (the
-// `entire logout --everywhere` path): list the families, then delete each by id.
-// Best-effort across sessions — it attempts them all and returns the first
-// failure, so one stuck session doesn't strand the rest.
+// revokeAllAuthSessions ends every session on coreURL, browser and web
+// included.
+//
+// One collection DELETE with scope=all when the login server supports
+// it. An older server answers 404 or 405 to that; then each session is
+// ended by id, which ends the same set in more round trips.
 func revokeAllAuthSessions(ctx context.Context, coreURL, token string) error {
 	client := newAuthSessionsClient(coreURL, token)
-	// ListAuthSessions and RevokeAuthSession already wrap with their own action
-	// context (incl. the session id), so return their errors verbatim.
+	err := client.RevokeAllAuthSessions(ctx)
+	if err == nil || !endpointMissing(err) {
+		return err //nolint:wrapcheck // RevokeAllAuthSessions already wraps with "revoke all sessions"
+	}
 	sessions, err := client.ListAuthSessions(ctx)
 	if err != nil {
 		return err //nolint:wrapcheck // ListAuthSessions already wraps with "list sessions"
@@ -146,90 +137,189 @@ func revokeAllAuthSessions(ctx context.Context, coreURL, token string) error {
 	return firstErr
 }
 
-// runLogout ends the user's login. revoke is the caller-selected server-side
-// revocation — just the active session, or every session on the active core
-// when --everywhere is set. token is the resolved bearer for the revoke call
-// (empty skips it). The active context (and its keyring entry) is removed
-// either way, so the CLI reports logged-out even if the server call fails.
-func runLogout(ctx context.Context, outW, errW io.Writer, token string, revoke boundRevokeFunc, clearContext clearContextFunc) error {
-	if token != "" {
-		if err := revoke(ctx); err != nil && !api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
-			// Best-effort: a transient network error shouldn't block local
-			// logout. A 401 means the token is already invalid server-side,
-			// so the desired state is achieved — no warning needed.
-			fmt.Fprintf(errW, "Warning: server-side session revocation failed: %v\n", err)
-		}
-	}
-
-	if err := clearContext(); err != nil {
-		return fmt.Errorf("remove login: %w", err)
-	}
-
-	fmt.Fprintln(outW, "Logged out.")
-	return nil
+// endpointMissing reports a route the server lacks.
+func endpointMissing(err error) bool {
+	return api.IsHTTPErrorStatus(err, http.StatusNotFound) ||
+		api.IsHTTPErrorStatus(err, http.StatusMethodNotAllowed)
 }
 
-// revokeTargetFunc revokes sessions on a specific core. The two production
-// implementations are revokeCurrentAuthSession (just the bearer's own session)
-// and revokeAllAuthSessions (every session on that core); `logout --all-contexts` picks
-// one based on --everywhere and applies it to each saved context's core.
+// bearer is one login's revoke credential.
+//
+// stale is set when the refresh failed and token is the stored copy. A 401
+// on that token then proves nothing about the session, so runLogout warns
+// instead of treating it as already ended.
+type bearer struct {
+	token string
+	stale error
+}
+
+// loginBearer returns c's bearer, refreshed when possible.
+func loginBearer(ctx context.Context, c *contexts.Context) (bearer, error) {
+	tok, refreshErr := auth.RefreshedLoginToken(ctx, c)
+	if refreshErr == nil && tok != "" {
+		return bearer{token: tok}, nil
+	}
+	stored, err := auth.LoginTokenForContext(c)
+	if err != nil {
+		return bearer{}, err //nolint:wrapcheck // names the context already
+	}
+	return bearer{token: stored, stale: refreshErr}, nil
+}
+
+// revokeTargetFunc revokes sessions on one core.
 type revokeTargetFunc func(ctx context.Context, coreURL, token string) error
 
-// runLogoutAll drains every saved login. For each context it revokes the
-// session(s) on that context's own core (using its own bearer) and removes
-// the login locally. Per-context failures warn but never abort the sweep —
-// one stuck login can't strand the rest, and local removal always proceeds
-// so the CLI ends fully logged out.
+// logoutDeps is what runLogout needs, injected for tests.
+type logoutDeps struct {
+	listContexts    contextsProvider
+	tokenForContext func(context.Context, *contexts.Context) (bearer, error)
+	revoke          revokeTargetFunc
+	removeContext   func(name string) error
+	// insecureHTTPAuth skips the TLS check on each core.
+	insecureHTTPAuth bool
+	// contextsFile names contexts.json in the list-failure hint.
+	contextsFile string
+	// loginTimeout overrides logoutLoginTimeout; zero keeps it.
+	loginTimeout time.Duration
+}
+
+func (d logoutDeps) contextsFileOrDefault() string {
+	if d.contextsFile != "" {
+		return d.contextsFile
+	}
+	return "contexts.json"
+}
+
+// runLogout sweeps every stored login.
 //
-// Dependencies are injected so the sweep is unit-testable without the real
-// keyring or config dir: listContexts (auth.Contexts), tokenForContext
-// (auth.LoginTokenForContext), revoke (revokeCurrentAuthSession/revokeAllAuthSessions),
-// and removeContext (auth.RemoveContext).
-func runLogoutAll(ctx context.Context, outW, errW io.Writer,
-	listContexts contextsProvider,
-	tokenForContext func(*contexts.Context) (string, error),
-	revoke revokeTargetFunc,
-	removeContext func(name string) error,
-	insecureHTTPAuth bool,
-) error {
-	all, _, err := listContexts()
+// Each login gets its own deadline and is removed locally whatever its
+// server calls did, so one unreachable login server never strands the
+// rest. A cancelled ctx stops the sweep instead: the logins it never
+// reached keep their credentials. A local removal failure or an interrupt
+// makes the command fail.
+func runLogout(ctx context.Context, outW, errW io.Writer, deps logoutDeps) error {
+	all, _, err := deps.listContexts()
 	if err != nil {
+		if deps.contextsFile != "" {
+			fmt.Fprintf(errW, "Check the saved logins file: %s\n", deps.contextsFile)
+		}
 		return fmt.Errorf("list saved logins: %w", err)
 	}
+	if len(all) == 0 {
+		fmt.Fprintln(outW, "Not logged in.")
+		return nil
+	}
+	timeout := deps.loginTimeout
+	if timeout <= 0 {
+		timeout = logoutLoginTimeout
+	}
 
-	removed := 0
+	removed, failed := 0, 0
+	// interrupted is the cancellation that stopped the sweep, if any.
+	var interrupted error
 	for _, c := range all {
-		token, terr := tokenForContext(c)
-		if terr != nil {
-			// Can't read this context's bearer — skip the server revoke but
-			// still drop it locally so it stops being reported as a login.
-			fmt.Fprintf(errW, "Warning: couldn't read token for %q; removing locally only: %v\n", c.Name, terr)
-			token = ""
+		// Stop rather than delete the rest of the credentials without
+		// revoking them: a Ctrl-C would otherwise finish logout's
+		// destructive half and skip its protective half, faster than not
+		// interrupting at all.
+		if err := ctx.Err(); err != nil {
+			interrupted = err
+			break
 		}
-		if token != "" && c.CoreURL != "" && !insecureHTTPAuth {
-			if serr := api.RequireSecureURL(c.CoreURL); serr != nil {
-				// Never send a bearer over a non-TLS core; warn and skip the
-				// server revoke, but still remove the login locally.
-				fmt.Fprintf(errW, "Warning: skipping server-side revocation for %q: %v\n", c.Name, serr)
-				token = ""
-			}
+		if c == nil || c.Name == "" {
+			// Nothing to revoke or remove by name; the file needs a hand edit.
+			fmt.Fprintf(errW, "Warning: skipped a malformed saved login; check %s\n", deps.contextsFileOrDefault())
+			continue
 		}
-		if token != "" && c.CoreURL != "" {
-			if rerr := revoke(ctx, c.CoreURL, token); rerr != nil && !api.IsHTTPErrorStatus(rerr, http.StatusUnauthorized) {
-				fmt.Fprintf(errW, "Warning: server-side session revocation failed for %q: %v\n", c.Name, rerr)
-			}
+		ended := false
+		func() {
+			lctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			ended = revokeLogin(lctx, errW, deps, c)
+		}()
+		// Checked again after the revoke: a login whose revocation was cut
+		// short keeps its local credentials, so the surviving session stays
+		// visible to `auth status` and a re-run can finish the job. When the
+		// revoke is confirmed ended there is nothing left to protect, and
+		// stopping here would strand a context for a session that no longer
+		// exists — so that removal is finished and the next iteration's
+		// check ends the sweep. A per-login deadline does not cancel ctx, so
+		// a hung login server still gets removed locally.
+		if err := ctx.Err(); err != nil && !ended {
+			interrupted = err
+			break
 		}
-		if rerr := removeContext(c.Name); rerr != nil {
+		if rerr := deps.removeContext(c.Name); rerr != nil {
 			fmt.Fprintf(errW, "Warning: failed to remove saved login %q: %v\n", c.Name, rerr)
+			failed++
 			continue
 		}
 		removed++
 	}
 
-	if removed == 0 {
-		fmt.Fprintln(outW, "No saved logins to remove.")
-	} else {
+	if removed > 0 {
 		fmt.Fprintf(outW, "Logged out of %d saved login(s).\n", removed)
 	}
-	return nil
+
+	var errs []error
+	if failed > 0 {
+		errs = append(errs, fmt.Errorf("failed to remove %d saved login(s)", failed))
+	}
+	if interrupted != nil {
+		// Everything the sweep did not remove, not just the entries it never
+		// reached: a login whose removal failed and a malformed entry it
+		// skipped are both still on the machine and still a retry's problem.
+		fmt.Fprintf(errW, "Interrupted: %d saved login(s) still on this machine; run `entire logout` again.\n", len(all)-removed)
+		errs = append(errs, fmt.Errorf("logout interrupted: %w", interrupted))
+	}
+	// Joined rather than ranked: main.go re-raises the signal only while
+	// errors.Is(err, context.Canceled) holds, so a removal failure earlier in
+	// the sweep must not demote an interrupt to an ordinary exit 1 — and the
+	// failure still has to reach the user.
+	return errors.Join(errs...)
+}
+
+// revokeLogin ends c's session(s) server-side, warning on failure.
+//
+// It reports whether that session is known to be over: a clean revoke, a
+// family the server no longer has, or one it had already declared dead.
+// Every warning path reports false — the session may still be live, and
+// then c's local credentials are the only thing that can still revoke it.
+func revokeLogin(ctx context.Context, errW io.Writer, deps logoutDeps, c *contexts.Context) (ended bool) {
+	if c.CoreURL == "" {
+		// No login server recorded, so there is no session to strand.
+		return true
+	}
+	b, err := deps.tokenForContext(ctx, c)
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: couldn't read token for %q; removing locally only: %v\n", c.Name, err)
+		return false
+	}
+	if b.token == "" {
+		// Nothing to authenticate a revoke with; a later run may refresh one.
+		return false
+	}
+	if !deps.insecureHTTPAuth {
+		if err := api.RequireSecureURL(c.CoreURL); err != nil {
+			fmt.Fprintf(errW, "Warning: skipping server-side revocation for %q: %v\n", c.Name, err)
+			return false
+		}
+	}
+	err = deps.revoke(ctx, c.CoreURL, b.token)
+	switch {
+	case err == nil:
+		return true
+	case api.IsHTTPErrorStatus(err, http.StatusNotFound):
+		// The family is already gone: the desired state.
+		return true
+	case errors.Is(b.stale, auth.ErrReauthRequired) && api.IsHTTPErrorStatus(err, http.StatusUnauthorized):
+		// The login server already declared this session dead.
+		return true
+	case b.stale != nil && api.IsHTTPErrorStatus(err, http.StatusUnauthorized):
+		fmt.Fprintf(errW, "Warning: couldn't refresh the login for %q; its session on %s may still be active: %v\n", c.Name, c.CoreURL, b.stale)
+		return false
+	default:
+		fmt.Fprintf(errW, "Warning: server-side session revocation failed for %q: %v\n", c.Name, err)
+		return false
+	}
 }

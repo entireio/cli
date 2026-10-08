@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,14 +23,14 @@ func TestBetterleaksDoesNotPoisonGitEnvironment(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), ".."))
 
 	tmpDir := t.TempDir()
-	goMod := `module betterleaksenvcheck
+	goMod := fmt.Sprintf(`module betterleaksenvcheck
 
 go 1.26.2
 
 require github.com/entireio/cli v0.0.0
 
-replace github.com/entireio/cli => ` + filepath.ToSlash(repoRoot) + `
-`
+replace github.com/entireio/cli => %q
+`, filepath.ToSlash(repoRoot))
 	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
 	}
@@ -41,7 +42,10 @@ replace github.com/entireio/cli => ` + filepath.ToSlash(repoRoot) + `
 		t.Fatalf("write go.sum: %v", err)
 	}
 
-	mainGo := `package main
+	// The generated program cannot see this package's constant, so the fixture is
+	// substituted in at write time. A placeholder rather than fmt.Sprintf: the
+	// template contains its own %s verbs.
+	mainGo := strings.ReplaceAll(`package main
 
 import (
 	"fmt"
@@ -51,7 +55,7 @@ import (
 )
 
 func main() {
-	_ = redact.String("key=AKIAYRWQG5EJLPZLBYNP")
+	_ = redact.String("key=__AWS_KEY_FIXTURE__")
 	for _, name := range []string{
 		"GIT_CONFIG_GLOBAL",
 		"GIT_CONFIG_NOSYSTEM",
@@ -64,7 +68,7 @@ func main() {
 		}
 	}
 }
-`
+`, "__AWS_KEY_FIXTURE__", awsKeyFixture)
 	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(mainGo), 0o644); err != nil {
 		t.Fatalf("write main.go: %v", err)
 	}

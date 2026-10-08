@@ -35,6 +35,10 @@ const (
 	CleanupTypeRedactCache CleanupType = "redact-cache"
 )
 
+// cleanAllReason marks an item discovered by the unfiltered sweep, as opposed
+// to one selected by an orphan or staleness rule.
+const cleanAllReason = "clean all"
+
 // CleanupItem represents an item that can be cleaned up.
 type CleanupItem struct {
 	Type   CleanupType
@@ -501,7 +505,7 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 		cleanupItems = append(cleanupItems, CleanupItem{
 			Type:   CleanupTypeShadowBranch,
 			ID:     branch,
-			Reason: "clean all",
+			Reason: cleanAllReason,
 		})
 	}
 
@@ -520,7 +524,7 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 		cleanupItems = append(cleanupItems, CleanupItem{
 			Type:   CleanupTypeSessionState,
 			ID:     state.SessionID,
-			Reason: "clean all",
+			Reason: cleanAllReason,
 		})
 	}
 
@@ -531,7 +535,7 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 			cleanupItems = append(cleanupItems, CleanupItem{
 				Type:   CleanupTypeRedactCache,
 				ID:     checkpoint.RedactCacheDirName,
-				Reason: "clean all",
+				Reason: cleanAllReason,
 			})
 		}
 	}

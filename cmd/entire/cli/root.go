@@ -6,7 +6,6 @@ import (
 	"runtime"
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
-	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
@@ -51,6 +50,23 @@ func inGroup(c *cobra.Command, groupID string) *cobra.Command {
 	return c
 }
 
+// requireSubcommand makes a command group answer an unknown subcommand with an
+// error instead of printing help and reporting success, so a verb that no
+// longer exists fails the shell rather than silently doing nothing.
+//
+// Both halves are load-bearing, and NoArgs alone is a no-op. Cobra rejects an
+// unknown subcommand only on a parentless command; below the root it returns
+// flag.ErrHelp for any command with no RunE *before* it validates arguments, so
+// the leftover word is never examined. Giving the group a RunE is what gets
+// execution as far as NoArgs. The bare group still prints its help.
+func requireSubcommand(cmd *cobra.Command) *cobra.Command {
+	cmd.Args = cobra.NoArgs
+	cmd.RunE = func(c *cobra.Command, _ []string) error {
+		return c.Help()
+	}
+	return cmd
+}
+
 // Run every ancestor's persistent hook, root first, not only the closest one
 // cobra picks by default. Without this, the `checkpoint`, `session`, and `agent`
 // pre-runs shadow the root's and it never builds a logger — silently, since the
@@ -93,14 +109,20 @@ func NewRootCmd() *cobra.Command {
 			HiddenDefaultCmd: true,
 		},
 		// PersistentPreRunE, not PersistentPreRun, so the `.entire` check can
-		// stop the command. Every check below it reads or writes through
+		// stop the command. Everything below that check reads or writes through
 		// `.entire` — IsSetUpAny stats .entire/settings.json and ensureLogger
-		// opens .entire/logs/entire.log — so the guard has to come first.
+		// opens .entire/logs/entire.log — so it has to precede them. Only
+		// validateContextFlag is allowed above it, because it touches nothing
+		// under `.entire`: it reads the flag and the saved logins in the user's
+		// config dir.
 		// cobra.EnableTraverseRunHooks (set in init) runs parent hooks before
 		// child ones, so this fires ahead of the group pre-runs and every RunE.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if isShellCompletion(cmd) {
 				return nil
+			}
+			if err := validateContextFlag(cmd); err != nil {
+				return err
 			}
 			safe, err := checkEntireDirBeforeRun(cmd)
 			if err != nil {
@@ -130,9 +152,7 @@ func NewRootCmd() *cobra.Command {
 				telemetryEnabled = settings.Telemetry
 			}
 
-			// Check if telemetry is enabled
 			if telemetryEnabled != nil && *telemetryEnabled {
-				// Use detached tracking (non-blocking)
 				installedAgents := GetAgentsWithHooksInstalled(cmd.Context())
 				agentStr := JoinAgentNames(installedAgents)
 				telemetry.TrackCommandDetached(cmd, agentStr, settings.Enabled, versioninfo.Version)
@@ -175,14 +195,13 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(exemptFromEntireDirCheck(newLabsCmd()))                                // 'labs' (experimental workflow discovery)
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newPluginGroupCmd(), groupSetup)))    // 'plugin' (managed install/list/remove)
 	experimental.Register(cmd, newImportCmd())                                            // 'import' (experimental; import pre-existing agent history)
+	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newClusterCmd(), groupControlPlane))) // 'cluster' — control-plane cluster catalog
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newOrgCmd(), groupControlPlane)))     // 'org' — control-plane org management
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newProjectCmd(), groupControlPlane))) // 'project' — control-plane project management
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newRepoCmd(), groupControlPlane)))    // 'repo' — control-plane repo lifecycle
-	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newGrantCmd(), groupControlPlane)))   // 'grant' — control-plane access grants
 
 	// Top-level lifecycle and standalone commands.
-	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps()))        // `review` (experimental)
-	experimental.Register(cmd, investigate.NewCommand(buildInvestigateDeps())) // `investigate` (experimental); multi-agent investigation
+	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps())) // `review` (experimental)
 	cmd.AddCommand(inGroup(newCleanCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newSetupCmd(), groupSetup)) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(inGroup(newEnableCmd(), groupSetup))

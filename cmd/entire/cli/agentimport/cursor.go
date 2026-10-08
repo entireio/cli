@@ -64,7 +64,7 @@ func cursorSessionFile(dir string, e os.DirEntry) (sessionID, path string) {
 // turn key (as the Codex importer does), so each prompt yields a distinct
 // checkpoint ID instead of colliding on an empty UUID and dropping every turn
 // after the first. The timestamp falls back to the transcript file's modtime
-// (as the Factory/Gemini importers do).
+// (as the Factory importer does).
 func (cursorImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 	var createdAt time.Time
 	if info, statErr := os.Stat(sf.Path); statErr == nil {
@@ -82,7 +82,7 @@ func (cursorImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 			return &Turn{
 				UUID:      strconv.Itoa(start),
 				Prompt:    transcript.ExtractUserContent(rec.Message),
-				CreatedAt: createdAt,
+				CreatedAt: createdAt, CreatedAtFromModTime: true,
 			}, nil
 		})
 }

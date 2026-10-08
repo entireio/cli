@@ -8,9 +8,9 @@ import (
 
 	"github.com/entireio/auth-go/crossjuris"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
-	"github.com/entireio/cli/internal/entireclient/httputil"
 )
 
 // newCrossJurisHTTPClient builds the *http.Client the control-plane
@@ -42,7 +42,7 @@ func newCrossJurisHTTPClient(coreURL string) (*http.Client, error) {
 func newCrossJurisRoundTripper(base http.RoundTripper, allowInsecureHTTP bool) (http.RoundTripper, error) {
 	inner, err := crossjuris.New(crossjuris.Config{
 		Base:              base,
-		ClientID:          httputil.OAuthClientID,
+		ClientID:          auth.OAuthClientID,
 		AllowInsecureHTTP: allowInsecureHTTP,
 		Logf:              debugf,
 	})

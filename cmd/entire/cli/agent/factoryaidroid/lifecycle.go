@@ -22,6 +22,7 @@ var (
 	_ agent.SubagentSessionResolver = (*FactoryAIDroidAgent)(nil)
 	_ agent.HookResponseWriter      = (*FactoryAIDroidAgent)(nil)
 	_ agent.PromptExtractor         = (*FactoryAIDroidAgent)(nil)
+	_ agent.TaskTranscriptMatcher   = (*FactoryAIDroidAgent)(nil)
 )
 
 // WriteHookResponse outputs the hook response as plain text to stdout.
@@ -88,7 +89,7 @@ func (f *FactoryAIDroidAgent) GetTranscriptPosition(path string) (int, error) {
 }
 
 // ExtractModifiedFilesFromOffset extracts files modified since a given line offset.
-func (f *FactoryAIDroidAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
+func (f *FactoryAIDroidAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) ([]string, int, error) {
 	lines, currentPos, err := ParseDroidTranscript(path, startOffset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to parse transcript: %w", err)

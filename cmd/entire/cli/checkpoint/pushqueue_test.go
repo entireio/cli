@@ -196,3 +196,38 @@ func TestPushQueue_PeekIsReadOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []plumbing.ReferenceName{a, b}, refs)
 }
+
+func TestPushQueue_RotateMovesRefsToBack(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+
+	a := mustRefName(t, "a1b2c3d4e5f6")
+	b := mustRefName(t, "b2c3d4e5f6a1")
+	c := mustRefName(t, "c3d4e5f6a1b2")
+	for _, ref := range []plumbing.ReferenceName{a, b, c} {
+		require.NoError(t, q.Enqueue(ref))
+	}
+
+	require.NoError(t, q.Rotate([]plumbing.ReferenceName{a, b}))
+	refs, err := q.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{c, a, b}, refs,
+		"rotated refs go to the back, both groups keeping their relative order")
+
+	// A ref that is not queued is ignored rather than added.
+	require.NoError(t, q.Rotate([]plumbing.ReferenceName{mustRefName(t, "ffffffffffff")}))
+	refs, err = q.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{c, a, b}, refs, "an absent ref must not join the queue")
+
+	// Rotating everything is a no-op on order, and never drops a ref.
+	require.NoError(t, q.Rotate([]plumbing.ReferenceName{c, a, b}))
+	refs, err = q.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{c, a, b}, refs)
+
+	require.NoError(t, q.Rotate(nil))
+	refs, err = q.Drain()
+	require.NoError(t, err)
+	assert.Len(t, refs, 3, "rotation only reorders; it never removes")
+}

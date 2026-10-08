@@ -44,6 +44,11 @@ type Turn struct {
 	UUID               string
 	Prompt, Model      string
 	CreatedAt          time.Time
+	// CreatedAtFromModTime reports that CreatedAt is the transcript file's
+	// modtime because the transcript records no per-turn time (Cursor,
+	// Factory). It changes whenever the file grows, so it must not feed the
+	// turn's checkpoint ID.
+	CreatedAtFromModTime bool
 	// Tokens is this turn's token usage. Every field is a per-turn delta:
 	// main-agent fields are scoped to the turn's [LineStart, LineEnd) slice by
 	// the token helpers, and SubagentTokens is rescoped from the cumulative
@@ -88,7 +93,6 @@ var importers = []Importer{
 	factoryImporter{},
 	codexImporter{},
 	copilotImporter{},
-	geminiImporter{},
 }
 
 // All returns every supported importer, sorted by name.
@@ -106,12 +110,14 @@ type Options struct {
 	Now           time.Time
 	DryRun        bool
 
-	// LinkCommitSHA, when non-empty, is the fallback anchor written to each
-	// imported checkpoint's metadata as commit_sha — the commit the UI shows
-	// imported sessions against. The caller resolves it (default branch head
-	// when resolvable; see resolveImportLinkCommitSHA); Run does not. A turn
-	// whose transcript records a resolvable commit that is an ancestor of this
-	// fallback anchors to that real commit instead (see turnAnchorResolver).
+	// LinkCommitSHA is the required full hexadecimal fallback commit ID written
+	// to imported checkpoint metadata as commit_sha — the commit the UI shows
+	// imported sessions against. The caller resolves it (the default branch
+	// head; see resolveImportLinkCommitSHA); Run validates the exact
+	// commit object and canonicalizes its ID before any writes, even on dry-run
+	// or fully skipped imports. A turn whose transcript records a resolvable
+	// commit that is an ancestor of this fallback anchors to that real commit
+	// instead (see turnAnchorResolver).
 	LinkCommitSHA string
 
 	// Progress, when non-nil, receives session/turn progress notifications
@@ -125,6 +131,13 @@ type Options struct {
 	// origin's stale tracking ref get skipped. Callers resolve it via
 	// strategy.CheckpointReadRemotes.
 	ReadRemotes []string
+
+	// RemoteRefLister, when set, adds the checkpoint refs present only on the
+	// remote (names only, no fetch) to the idempotency listing, so a re-import
+	// from a fresh clone skips turns imported elsewhere instead of writing them
+	// again (under a new ID format, if the primary has since changed). Callers
+	// pass the CLI's ListCheckpointRefsOnRemote.
+	RemoteRefLister cp.RemoteRefListFunc
 }
 
 // Result summarizes an import run.
@@ -183,29 +196,76 @@ func (p *Progress) turnSkipped(sessionIndex, turnIndex, turnCount int) {
 }
 
 // DeriveCheckpointID produces a stable 12-hex checkpoint ID for an imported
-// turn. Re-importing the same (sessionID, turnUUID) yields the same ID, which
-// is how import stays idempotent.
+// turn: the git-branch format. Re-importing the same (sessionID, turnUUID)
+// yields the same ID, which is how import stays idempotent.
 func DeriveCheckpointID(sessionID, turnUUID string) id.CheckpointID {
 	sum := sha256.Sum256([]byte(sessionID + "/" + turnUUID))
 	return id.MustCheckpointID(hex.EncodeToString(sum[:6])) // 6 bytes = 12 lowercase hex chars
 }
 
+// DeriveULIDCheckpointID produces a stable ULID checkpoint ID for an imported
+// turn: the git-refs format, which a git-refs checkpoint must use (see
+// checkpoint.GenerateCheckpointID). Its timestamp is the turn's createdAt, so
+// imported IDs sort by when the turn happened; re-importing the same turn
+// yields the same ID.
+func DeriveULIDCheckpointID(sessionID, turnUUID string, createdAt time.Time) (id.CheckpointID, error) {
+	cid, err := id.DeriveULID(createdAt, []byte(sessionID+"/"+turnUUID))
+	if err != nil {
+		return id.EmptyCheckpointID, fmt.Errorf("derive checkpoint ID for turn %s: %w", turnUUID, err)
+	}
+	return cid, nil
+}
+
+// turnCheckpointID returns the ID a turn is stored under, in the format of the
+// store it is written to, and whether that checkpoint already exists. A turn
+// already imported in either format keeps that ID, so a re-import after the
+// primary changed (git-branch to git-refs or back) skips it rather than writing
+// a duplicate in the other format.
+func turnCheckpointID(sessionID string, turn Turn, ulids bool, existing map[string]bool) (id.CheckpointID, bool, error) {
+	legacy := DeriveCheckpointID(sessionID, turn.UUID)
+	if existing[legacy.String()] {
+		return legacy, true, nil
+	}
+	idTime := turn.CreatedAt
+	if turn.CreatedAtFromModTime {
+		idTime = time.Time{} // epoch: a growing file must not re-derive older turns' IDs
+	}
+	cid, err := DeriveULIDCheckpointID(sessionID, turn.UUID, idTime)
+	if err == nil && existing[cid.String()] {
+		return cid, true, nil
+	}
+	if !ulids {
+		return legacy, false, nil
+	}
+	if err != nil {
+		return id.EmptyCheckpointID, false, err
+	}
+	return cid, false, nil
+}
+
 // Run imports the given agent's transcripts (within the lookback window) as
-// read-only checkpoints on the v1 metadata branch (Kind "imported"). It is
-// idempotent: turns whose deterministic ID already exists are skipped.
+// read-only checkpoints (Kind "imported") in the configured checkpoint store,
+// with IDs in that store's format. It is idempotent: turns whose deterministic
+// ID already exists are skipped.
 func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) (Result, error) {
 	var res Result
+	validatedAnchor, err := ValidateAnchorCommit(repo, opts.LinkCommitSHA)
+	if err != nil {
+		return res, err
+	}
+	// opts is a value, so this cannot surprise a caller reusing its Options.
+	opts.LinkCommitSHA = validatedAnchor
 	files, err := imp.Discover(opts.RepoRoot, opts.OverridePath, opts.Now, opts.SessionFilter)
 	if err != nil {
 		return res, fmt.Errorf("discover %s sessions: %w", imp.Name(), err)
 	}
 
-	stores, err := cp.Open(ctx, repo, cp.OpenOptions{ReadRemotes: opts.ReadRemotes})
+	stores, err := cp.Open(ctx, repo, cp.OpenOptions{ReadRemotes: opts.ReadRemotes, RemoteRefLister: opts.RemoteRefLister})
 	if err != nil {
 		return res, fmt.Errorf("open checkpoint store: %w", err)
 	}
 	existing := make(map[string]bool)
-	if infos, listErr := stores.Persistent.List(ctx); listErr == nil {
+	if infos, listErr := stores.Persistent.List(cp.WithRemoteListDiscovery(ctx)); listErr == nil {
 		for _, in := range infos {
 			existing[in.CheckpointID.String()] = true
 		}
@@ -244,6 +304,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		// Computed lazily so a fully-skipped or dry-run file pays nothing.
 		var red redact.RedactedBytes
 		redacted := false
+		var lastCID id.CheckpointID
 		for turnIndex, turn := range turns {
 			// Ctrl-C must stop the import, and per turn rather than per session:
 			// one session can carry hundreds of turns, each a checkpoint write.
@@ -253,8 +314,12 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 			if err := ctx.Err(); err != nil {
 				return res, err //nolint:wrapcheck // propagate context cancellation
 			}
-			cid := DeriveCheckpointID(sf.SessionID, turn.UUID)
-			if existing[cid.String()] {
+			cid, exists, cidErr := turnCheckpointID(sf.SessionID, turn, stores.PrimaryIsRefs(), existing)
+			if cidErr != nil {
+				return res, cidErr
+			}
+			lastCID = cid
+			if exists {
 				res.TurnsSkipped++
 				opts.Progress.turnSkipped(sessionIndex, turnIndex, len(turns))
 				continue
@@ -294,7 +359,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 		// the read-only checkpoints above are the primary artifact, so a
 		// state-write failure must not abort the import.
 		if !opts.DryRun {
-			if serr := writeSessionState(ctx, imp, sf, turns, opts.RepoRoot); serr != nil {
+			if serr := writeSessionState(ctx, imp, sf, turns, lastCID, opts.RepoRoot); serr != nil {
 				// Warn, not Debug: the user-visible symptom is an imported
 				// session missing from `entire sessions list` after a
 				// successful-looking import. Not aborting is correct (the
@@ -314,7 +379,7 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 // later commit-SHA link purely additive. It never clobbers a live or
 // manually-attached session that happens to share the ID. The store is scoped
 // to repoRoot — the repo being imported into — never the process CWD.
-func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns []Turn, repoRoot string) error {
+func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns []Turn, lastCheckpointID id.CheckpointID, repoRoot string) error {
 	if len(turns) == 0 {
 		return nil
 	}
@@ -371,7 +436,7 @@ func writeSessionState(ctx context.Context, imp Importer, sf SessionFile, turns 
 		StepCount:           len(turns),
 		TokenUsage:          tokens,
 		LastPrompt:          session.TruncatePromptForStorage(turns[len(turns)-1].Prompt),
-		LastCheckpointID:    DeriveCheckpointID(sf.SessionID, turns[len(turns)-1].UUID),
+		LastCheckpointID:    lastCheckpointID,
 	}
 	if err := store.Save(ctx, state); err != nil {
 		return fmt.Errorf("save imported session state %s: %w", sf.SessionID, err)

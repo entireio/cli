@@ -304,6 +304,78 @@ func TestCheckpointSyncRemote_TrackedPushCapturesElection(t *testing.T) {
 	})
 }
 
+func TestCheckpointSyncRemote_IncludedForkCapturesElection(t *testing.T) {
+	t.Parallel()
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
+
+		bareOrigin := env.SetupBareRemote()
+		bareFork := env.SetupNamedBareRemote(forkRemote)
+		testutil.RunGit(t, env.RepoDir, "config", "--local", "--unset-all", "remote.fork.url")
+		includedConfigPath := filepath.Join(t.TempDir(), "remotes.cfg")
+		if err := os.WriteFile(includedConfigPath,
+			[]byte(fmt.Sprintf("[remote %q]\n\turl = %s\n", forkRemote, bareFork)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		testutil.RunGit(t, env.RepoDir, "config", "--local", "include.path", includedConfigPath)
+		env.setGitConfigBaseline()
+
+		checkpointID := createCheckpointedCommit(t, env, "Add included fork", "fork.go", "package fork", "Add included fork")
+		env.RunPrePush(forkRemote)
+
+		if !env.CheckpointExistsOnRemote(bareFork, checkpointID) {
+			t.Errorf("checkpoint %s should land on the included fork remote", checkpointID)
+		}
+		if env.CheckpointsPresentOnRemote(bareOrigin) {
+			t.Error("origin must not receive checkpoints from a push to the included fork")
+		}
+		if got := capturedSyncRemotesOnDisk(t, env); len(got) != 1 || got[0] != forkRemote {
+			t.Errorf("included fork push should capture the election, got %v", got)
+		}
+	})
+}
+
+// TestCheckpointSyncRemote_PushURLOnlyRemoteCannotCaptureElection verifies
+// that capture and election use the same fetch-URL eligibility rule. Git treats
+// a pushurl-only entry as a configured push target, but checkpoint sync cannot
+// read or reconcile from it, so a push there must carry no checkpoint data and
+// must not make the destination sticky.
+func TestCheckpointSyncRemote_PushURLOnlyRemoteCannotCaptureElection(t *testing.T) {
+	t.Parallel()
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
+
+		bareOrigin := env.SetupBareRemote()
+		barePushOnly := env.SetupNamedBareRemote("pushonly")
+		testutil.RunGit(t, env.RepoDir, "config", "remote.pushonly.pushurl", barePushOnly)
+		testutil.RunGit(t, env.RepoDir, "config", "--unset-all", "remote.pushonly.url")
+		env.setGitConfigBaseline()
+
+		checkpointID := createCheckpointedCommit(t, env, "Add capture guard", "guard.go", "package guard", "Add capture guard")
+
+		env.RunPrePush("pushonly")
+		if env.CheckpointsPresentOnRemote(barePushOnly) {
+			t.Error("a pushurl-only remote must not receive checkpoint data")
+		}
+		if got := capturedSyncRemotesOnDisk(t, env); got != nil {
+			t.Errorf("a pushurl-only remote must not capture the election, got %v", got)
+		}
+		if env.usingGitRefs() && queuedCheckpointRefCount(t, env) == 0 {
+			t.Error("push queue should be preserved after the ineligible push")
+		}
+
+		env.RunPrePush("origin")
+		if !env.CheckpointExistsOnRemote(bareOrigin, checkpointID) {
+			t.Errorf("checkpoint %s should remain available to the elected origin", checkpointID)
+		}
+		if env.usingGitRefs() && queuedCheckpointRefCount(t, env) != 0 {
+			t.Error("push queue should drain after pushing to origin")
+		}
+	})
+}
+
 // TestCheckpointSyncRemote_DeferredPushDoesNotCaptureElection covers the
 // gate-to-delivery gap on the most likely first push there is: the user adds a
 // brand-new empty fork and pushes their branch to it for the first time. That

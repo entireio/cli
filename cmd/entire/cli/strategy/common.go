@@ -756,7 +756,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	}
 
 	if localExists {
-		if remoteRef != nil && localRef.Hash() != remoteRef.Hash() {
+		if remoteRef != nil && !localRef.Hash().Equal(remoteRef.Hash()) {
 			// Local and remote exist but differ — determine relationship
 			hasData, checkErr := metadataBranchHasData(repo, localRef)
 			if checkErr != nil {
@@ -1177,7 +1177,7 @@ func ReadSessionPromptFromTree(tree *object.Tree, checkpointPath string) string 
 
 // ReadAgentTypeFromTree reads the agent type from a checkpoint's metadata.json file in a git tree.
 // If metadata.json doesn't exist (shadow branches), it falls back to detecting the agent
-// from the presence of agent-specific config files (.gemini/settings.json or .claude/).
+// from the presence of agent-specific config markers (.claude/, .codex/, .cursor/, etc.).
 // Returns agent.AgentTypeUnknown if the agent type cannot be determined.
 func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.AgentType {
 	// First, try to read from metadata.json (present in condensed/committed checkpoints)
@@ -1199,10 +1199,6 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 	var detected types.AgentType
 	detectedCount := 0
 
-	if _, err := tree.File(".gemini/settings.json"); err == nil {
-		detected = agent.AgentTypeGemini
-		detectedCount++
-	}
 	if _, err := tree.Tree(".claude"); err == nil {
 		detected = agent.AgentTypeClaudeCode
 		detectedCount++
@@ -1229,6 +1225,16 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 
 	if detectedCount == 1 {
 		return detected
+	}
+	// Gemini CLI support was removed, but a session still in flight when it
+	// was leaves a shadow branch until its next commit, and its JSON-document
+	// transcript cannot be read as anything else. Only a last resort: counted
+	// with the others, a leftover .gemini would make every later session in a
+	// repo that also has another agent's marker ambiguous.
+	if detectedCount == 0 {
+		if _, err := tree.File(".gemini/settings.json"); err == nil {
+			return agent.AgentTypeGemini
+		}
 	}
 	return agent.AgentTypeUnknown
 }
@@ -1618,12 +1624,42 @@ func DeleteBranchCLI(ctx context.Context, branchName string) error {
 	return nil
 }
 
-// branchExistsCLI checks if a branch exists using git CLI.
-// Returns nil if the branch exists, or an error if it does not.
-func branchExistsCLI(ctx context.Context, branchName string) error {
+// branchExists checks a branch through the caller's repository. Packed refs
+// are reread on lookup, so native deletions are visible through the same handle.
+// Like show-ref --verify, it also checks that the target object exists.
+//
+// When gitrepo.ReadsNeedNativeGit selects native Git, repo is ignored and
+// show-ref resolves the repository from the process CWD and Git's selectors,
+// so repo must be the CWD repository (as OpenRepository returns). Any non-nil
+// error means the branch is absent or unreadable; the wrapped cause differs by
+// path (plumbing.ErrReferenceNotFound or an *exec.ExitError), so callers must
+// not match a specific sentinel.
+func branchExists(ctx context.Context, repo *git.Repository, branchName string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("check branch %s: %w", branchName, err)
+	}
+	if gitrepo.ReadsNeedNativeGit(ctx) {
+		return branchExistsNative(ctx, branchName)
+	}
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		return fmt.Errorf("read branch %s: %w", branchName, err)
+	}
+	if err := repo.Storer.HasEncodedObject(ref.Hash()); err != nil {
+		return fmt.Errorf("read branch %s target: %w", branchName, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("check branch %s: %w", branchName, err)
+	}
+	return nil
+}
+
+// branchExistsNative retains native selection for explicit store overrides and
+// repositories outside the worktree-opening contract (for example bare repos).
+func branchExistsNative(ctx context.Context, branchName string) error {
 	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("branch %s not found: %w", branchName, err)
+		return fmt.Errorf("check branch %s: %w", branchName, err)
 	}
 	return nil
 }

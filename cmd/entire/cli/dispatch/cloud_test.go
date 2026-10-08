@@ -430,7 +430,8 @@ func TestCloudClient_CreateDispatch_RepoNotFoundNamesTargetJurisdiction(t *testi
 			defer srv.Close()
 
 			client := newTestCloudClient(t, srv.URL, "t")
-			_, err := client.CreateDispatch(context.Background(), CreateDispatchRequest{Repos: []string{"entirehq/ferrata", "entirehq/entire-plans", "entirehq/present"}}, "au")
+			// The request is forge-qualified; the gateway still echoes bare names.
+			_, err := client.CreateDispatch(context.Background(), CreateDispatchRequest{Repos: []string{"gh/entirehq/ferrata", "gh/entirehq/entire-plans", "gh/entirehq/present"}}, "au")
 			var notFound *RepoNotFoundError
 			if !errors.As(err, &notFound) {
 				t.Fatalf("expected *RepoNotFoundError, got %T: %v", err, err)
@@ -438,11 +439,11 @@ func TestCloudClient_CreateDispatch_RepoNotFoundNamesTargetJurisdiction(t *testi
 			if notFound.Jurisdiction != "au" {
 				t.Fatalf("expected jurisdiction au, got %q", notFound.Jurisdiction)
 			}
-			if len(notFound.Repos) != 2 || notFound.Repos[0] != "entirehq/ferrata" || notFound.Repos[1] != "entirehq/entire-plans" {
+			if len(notFound.Repos) != 2 || notFound.Repos[0] != "gh/entirehq/ferrata" || notFound.Repos[1] != "gh/entirehq/entire-plans" {
 				t.Fatalf("unexpected repos: %v", notFound.Repos)
 			}
 			msg := err.Error()
-			if !strings.HasPrefix(msg, "In AU: repository not found: entirehq/ferrata, entirehq/entire-plans. Pick a jurisdiction") {
+			if !strings.HasPrefix(msg, "In AU: repository not found: gh/entirehq/ferrata, gh/entirehq/entire-plans. Pick a jurisdiction") {
 				t.Fatalf("expected our own jurisdiction-prefixed sentence regardless of gateway wording, got %q", msg)
 			}
 			if !strings.Contains(msg, "--jurisdiction <slug>") || !strings.Contains(msg, "mirror it there") {
@@ -465,8 +466,8 @@ func TestCloudClient_CreateDispatch_RepoNotFoundIgnoresGatewayProse(t *testing.T
 	defer srv.Close()
 
 	client := newTestCloudClient(t, srv.URL, "t")
-	_, err := client.CreateDispatch(context.Background(), CreateDispatchRequest{Repos: []string{"entirehq/ferrata"}}, "us")
-	if err == nil || !strings.HasPrefix(err.Error(), "In US: repository not found: entirehq/ferrata. Pick a jurisdiction") {
+	_, err := client.CreateDispatch(context.Background(), CreateDispatchRequest{Repos: []string{"gh/entirehq/ferrata"}}, "us")
+	if err == nil || !strings.HasPrefix(err.Error(), "In US: repository not found: gh/entirehq/ferrata. Pick a jurisdiction") {
 		t.Fatalf("expected a single jurisdiction label, got %v", err)
 	}
 	// Unparseable message: fall back to the gateway's own sentence.
@@ -518,9 +519,9 @@ func TestCloudClient_CreateDispatch_Other404StaysGeneric(t *testing.T) {
 func TestParseNotFoundRepos(t *testing.T) {
 	t.Parallel()
 
-	requested := []string{"A/B", "c/d", "e/f", "g/h"}
-	got := parseNotFoundRepos("Repository not found or not available in its region: a/b, c/d ,, e/f, a/b, evil/injected", requested)
-	if len(got) != 3 || got[0] != "A/B" || got[1] != "c/d" || got[2] != "e/f" {
+	requested := []string{"gh/A/B", "gh/c/d", "gh/e/f", "gh/g/h"}
+	got := parseNotFoundRepos("Repository not found or not available in its region: gh/a/b, gh/c/d ,, gh/e/f, gh/a/b, gh/evil/injected", requested)
+	if len(got) != 3 || got[0] != "gh/A/B" || got[1] != "gh/c/d" || got[2] != "gh/e/f" {
 		t.Fatalf("expected only requested repos, in the request's spelling, got %v", got)
 	}
 	if got := parseNotFoundRepos("repository not found", requested); got != nil {
@@ -528,5 +529,21 @@ func TestParseNotFoundRepos(t *testing.T) {
 	}
 	if got := parseNotFoundRepos("repository not found: check the repo is onboarded", requested); got != nil {
 		t.Fatalf("prose after the colon must not become repo lookups, got %v", got)
+	}
+}
+
+func TestParseNotFoundRepos_MatchesAcrossForgeSpellings(t *testing.T) {
+	t.Parallel()
+
+	requested := []string{"gh/a/b", "gh/c/d", "et/e/f", "et/g/h"}
+	// A gateway may echo bare or prefixed; a bare echo is GitHub, never native.
+	got := parseNotFoundRepos("repository not found: a/b, gh/C/D, et/e/f, g/h", requested)
+	if len(got) != 3 || got[0] != "gh/a/b" || got[1] != "gh/c/d" || got[2] != "et/e/f" {
+		t.Fatalf("expected forge-aware matches in the request's spelling, got %v", got)
+	}
+
+	// A request never leaves the CLI bare, so a bare request matches nothing.
+	if got = parseNotFoundRepos("repository not found: gh/a/b, a/b", []string{"a/b"}); got != nil {
+		t.Fatalf("expected a bare request to match no echo, got %v", got)
 	}
 }

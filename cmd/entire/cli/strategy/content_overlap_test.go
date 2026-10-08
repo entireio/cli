@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -416,6 +418,108 @@ func TestFilesWithRemainingAgentChanges_ReplacedContent(t *testing.T) {
 	assert.Empty(t, remaining, "Replaced content with clean working tree should not be in remaining")
 }
 
+// TestFilesWithRemainingAgentChanges_AutocrlfNormalizedWorkingTree verifies that
+// line-ending normalization does not create phantom carry-forward files.
+func TestFilesWithRemainingAgentChanges_AutocrlfNormalizedWorkingTree(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	testutil.RunGit(t, dir, "config", "core.autocrlf", "true")
+
+	shadowContent := []byte("package main\r\n\r\nimport \"fmt\"\r\n\r\nfunc main() {\r\n\tfmt.Println(\"hello world\")\n\tfmt.Println(\"goodbye world\")\n}\n")
+	createShadowBranchWithContent(t, repo, "crlf123", "e3b0c4", map[string][]byte{
+		"src/main.go": shadowContent,
+	})
+
+	workingTreeContent := "package main\r\n\r\nimport \"fmt\"\r\n\r\nfunc main() {\r\n\tfmt.Println(\"hello world\")\r\n\tfmt.Println(\"goodbye world\")\r\n}\r\n"
+	testutil.WriteFile(t, dir, "src/main.go", workingTreeContent)
+	testutil.RunGit(t, dir, "add", "--", "src/main.go")
+	testutil.RunGit(t, dir, "commit", "-m", "Commit normalized content")
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	committedFile, err := commit.File("src/main.go")
+	require.NoError(t, err)
+	committedContent, err := committedFile.Contents()
+	require.NoError(t, err)
+	assert.NotContains(t, committedContent, "\r\n", "native git add must normalize the committed blob to LF")
+	diskContent, err := os.ReadFile(filepath.Join(dir, "src", "main.go"))
+	require.NoError(t, err)
+	assert.Equal(t, workingTreeContent, string(diskContent), "the working tree must retain CRLF bytes")
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("crlf123", "e3b0c4")
+	committedFiles := map[string]struct{}{"src/main.go": {}}
+
+	// Git reports no diff here even though the on-disk bytes are CRLF and the
+	// committed blob is LF-normalized under core.autocrlf=true.
+	testutil.RunGit(t, dir, "diff", "--exit-code", "--", "src/main.go")
+
+	remaining := filesWithRemainingAgentChanges(t.Context(), repo, shadowBranch, commit, []string{"src/main.go"}, committedFiles)
+	assert.Empty(t, remaining, "autocrlf-only working tree differences should not be carried forward")
+}
+
+// TestFilesWithRemainingAgentChanges_ComparesWorktreeToCommitNotIndex is a
+// design pin: it passes with the raw-hash fallback too, but fails if the native
+// Git check is simplified to an index-relative bare `git diff`.
+func TestFilesWithRemainingAgentChanges_ComparesWorktreeToCommitNotIndex(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	createShadowBranchWithContent(t, repo, "idx1234", "e3b0c4", map[string][]byte{
+		"config.go": []byte("agent content\n"),
+	})
+
+	testutil.WriteFile(t, dir, "config.go", "committed replacement\n")
+	testutil.GitAdd(t, dir, "config.go")
+	testutil.GitCommit(t, dir, "Replace config")
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+
+	// Move both the index and working tree past the commit. A plain `git diff`
+	// reports clean because it compares these two, but carry-forward must compare
+	// the working tree with the commit that was just created.
+	testutil.WriteFile(t, dir, "config.go", "next staged change\n")
+	testutil.GitAdd(t, dir, "config.go")
+	testutil.RunGit(t, dir, "diff", "--exit-code", "--", "config.go")
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("idx1234", "e3b0c4")
+	committedFiles := map[string]struct{}{"config.go": {}}
+	remaining := filesWithRemainingAgentChanges(t.Context(), repo, shadowBranch, commit, []string{"config.go"}, committedFiles)
+	assert.Equal(t, []string{"config.go"}, remaining)
+}
+
+func TestWorkingTreeMatchesBlobSymlinkHashesTheTargetPath(t *testing.T) {
+	testutil.SkipWithoutSymlinks(t)
+	t.Parallel()
+
+	dir := t.TempDir()
+	const target = "real.txt"
+	require.NoError(t, os.Symlink(target, filepath.Join(dir, "link.txt")))
+	h := plumbing.NewHasher(config.SHA1, plumbing.BlobObject, int64(len(target)))
+	_, err := h.Write([]byte(target))
+	require.NoError(t, err)
+
+	// Withholding a worktree symlink from hash-object is gitrepo's rule now
+	// (TestHashableWorktreeEntry_WorktreeSymlinkIsWithheld); what stays here is
+	// what this fallback must then answer for one.
+	assert.True(t, workingTreeMatchesBlob(dir, "link.txt", filemode.Symlink, h.Sum()))
+	assert.False(t, workingTreeMatchesBlob(dir, "link.txt", filemode.Regular, h.Sum()),
+		"a symlink must not compare clean against a regular-file commit")
+}
+
 // TestFilesWithRemainingAgentChanges_NoShadowBranch tests fallback to file-level subtraction.
 func TestFilesWithRemainingAgentChanges_NoShadowBranch(t *testing.T) {
 	t.Parallel()
@@ -668,7 +772,7 @@ func TestFilesWithRemainingAgentChanges_CacheEquivalence(t *testing.T) {
 // filesTouched but not present in the shadow branch tree are skipped. This
 // happens when an agent's transcript references a file path (e.g. via a
 // write_file tool call) that was never actually created on disk — for example
-// when Gemini tries to write src/types.go but creates src/types/types.go
+// when an agent tries to write src/types.go but creates src/types/types.go
 // instead. Without this check, phantom files cause infinite carry-forward.
 func TestFilesWithRemainingAgentChanges_PhantomFile(t *testing.T) {
 	t.Parallel()

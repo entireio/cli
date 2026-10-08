@@ -519,7 +519,7 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 
 	var unpushed []*object.Commit
 	if walkErr := iter.ForEach(func(c *object.Commit) error {
-		if !remoteTip.IsZero() && c.Hash == remoteTip {
+		if !remoteTip.IsZero() && c.Hash.Equal(remoteTip) {
 			return errStop
 		}
 		unpushed = append(unpushed, c)
@@ -814,7 +814,7 @@ func atomicSetV1Ref(ctx context.Context, repo *git.Repository, expectedOld, newH
 		return nil
 	}
 	if errors.Is(err, gitrepo.ErrRefCASConflict) {
-		if cur, refErr := repo.Reference(refName, true); refErr == nil && cur.Hash() != expectedOld {
+		if cur, refErr := repo.Reference(refName, true); refErr == nil && !cur.Hash().Equal(expectedOld) {
 			return &V1RefMovedError{Expected: expectedOld, Actual: cur.Hash()}
 		}
 	}

@@ -40,12 +40,6 @@ func TestCodexAgent_Description(t *testing.T) {
 	require.Contains(t, ag.Description(), "Codex")
 }
 
-func TestCodexAgent_IsPreview(t *testing.T) {
-	t.Parallel()
-	ag := &CodexAgent{}
-	require.True(t, ag.IsPreview())
-}
-
 func TestCodexAgent_ProtectedDirs(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}
@@ -123,6 +117,47 @@ func TestCodexAgent_ResolveSessionFile_FindsNestedRollout(t *testing.T) {
 
 	got := ag.ResolveSessionFile(dir, "019d24c3")
 	require.Equal(t, want, got)
+}
+
+func TestCodexAgent_ResolveSessionFile_LeavesArchivesToCandidates(t *testing.T) {
+	t.Parallel()
+
+	ag := &CodexAgent{}
+	home := t.TempDir()
+	sessionDir := filepath.Join(home, "sessions")
+	const sessionID = "019d24c3-1111-2222-3333-444444444444"
+	const name = "rollout-2026-03-25T11-31-10-" + sessionID + ".jsonl"
+	// Codex archives flat; the dated layout mirrors the live store.
+	flat := filepath.Join(home, "archived_sessions", name)
+	dated := filepath.Join(home, "archived_sessions", "2026", "03", "25", name)
+	for _, archived := range []string{flat, dated} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(archived), 0o755))
+		require.NoError(t, os.WriteFile(archived, []byte(sampleRollout), 0o600))
+	}
+
+	// The session store refuses a path outside sessionDir, so an archived
+	// rollout must not be the answer.
+	predicted := filepath.Join(sessionDir, sessionID+".jsonl")
+	require.Equal(t, predicted, ag.ResolveSessionFile(sessionDir, sessionID))
+	require.Equal(t, []string{flat, dated, predicted}, ag.ResolveSessionFileCandidates(sessionDir, sessionID))
+}
+
+func TestCodexAgent_ResolveSessionFileCandidates_NoArchivesOutsideASessionsStore(t *testing.T) {
+	t.Parallel()
+
+	ag := &CodexAgent{}
+	parent := t.TempDir()
+	// A relocated session directory, such as ENTIRE_TEST_CODEX_SESSION_DIR,
+	// is not the sessions store of a home, so its parent's archive is not
+	// one either.
+	sessionDir := filepath.Join(parent, "tmp")
+	const sessionID = "019d24c3-1111-2222-3333-444444444444"
+	archived := filepath.Join(parent, "archived_sessions", "rollout-2026-03-25T11-31-10-"+sessionID+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(archived), 0o755))
+	require.NoError(t, os.WriteFile(archived, []byte(sampleRollout), 0o600))
+
+	require.Equal(t, []string{filepath.Join(sessionDir, sessionID+".jsonl")},
+		ag.ResolveSessionFileCandidates(sessionDir, sessionID))
 }
 
 func TestCodexAgent_ReadSession(t *testing.T) {

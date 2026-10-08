@@ -315,12 +315,16 @@ func TestPostCommit_ReadOnlyActiveSessionNotCondensed(t *testing.T) {
 	assert.Equal(t, 0, idleState.StepCount,
 		"IDLE session StepCount should be reset after condensation")
 
-	// Shadow branch should be preserved because the ACTIVE session was NOT condensed
-	// (it had no files touched, and totalSessionCount > 1 triggered the gate)
+	// The shadow branch must be DELETED: the read-only ACTIVE session has no
+	// files and no checkpoints on it (nothing to lose), and PostCommit rebases
+	// its BaseCommit to the new HEAD anyway — future work goes to a NEW branch
+	// name, so preserving the old branch would leak it permanently. (This
+	// exact leak was observed live with Antigravity's headless subagent flow,
+	// where the parent conversation lingers as a files-less ACTIVE ghost.)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err = repo.Reference(refName, true)
-	assert.NoError(t, err,
-		"shadow branch should be preserved — uncondensed ACTIVE session still references it")
+	assert.Error(t, err,
+		"shadow branch must be deleted — the read-only ACTIVE session has nothing on it and was rebased to the new HEAD")
 }
 
 // TestPostCommit_CondensationFailure_PreservesShadowBranch verifies that when
@@ -1948,14 +1952,11 @@ func TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward(t *testing.T
 	// Clear FilesTouched to simulate the edge case
 	state.FilesTouched = nil
 	// Set transcript info so transcript extraction WOULD find files if called
-	state.AgentType = agent.AgentTypeGemini
-	transcriptPath := filepath.Join(dir, "idle-transcript.json")
-	transcript := `{
-  "messages": [
-    {"type": "user", "content": [{"text": "create file"}]},
-    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "` + filepath.Join(dir, "test.txt") + `"}}]}
-  ]
-}`
+	state.AgentType = agent.AgentTypeClaudeCode
+	transcriptPath := filepath.Join(dir, "idle-transcript.jsonl")
+	transcript := `{"type":"user","message":{"content":"create file"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` + filepath.Join(dir, "test.txt") + `","content":"committed"}}]}}
+`
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcript), 0o644))
 	state.TranscriptPath = transcriptPath
 	state.CheckpointTranscriptStart = 0
@@ -2528,7 +2529,7 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 }
 
 // TestPostCommit_TaskRecordCondensationScope pins both sides of
-// idleWithTaskContent's overlap-check bypass. Idle+fresh is the incident fix: a
+// idleWithLiveTaskRecord's overlap-check bypass. Idle+fresh is the incident fix: a
 // background subagent commits its own work mid-task, so the session never picks
 // up the FilesTouched overlap a non-active session normally needs, and only the
 // bypass lets the condensation run and materialize the record's
@@ -2666,4 +2667,45 @@ func runEndedLingeringRecordNotCondensed(t *testing.T, s *ManualCommitStrategy, 
 		"BaseCommit must not move for an ended session on an unrelated commit")
 	assert.Len(t, state.TaskRecords, 1,
 		"the lingering record must remain untouched by an unrelated commit")
+}
+
+// TestPostCommit_BeforeCondenseSeesTheCondensedSessions pins that the
+// before-condense hook runs for exactly the sessions PostCommit links to the
+// commit, before they are condensed, and not at all for a commit without a
+// trailer. The cli's Codex refresh relies on it to reconcile child records in
+// the same set PostCommit stores.
+func TestPostCommit_BeforeCondenseSeesTheCondensedSessions(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-before-condense"
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	var seen [][]string
+	SetBeforeCondense(func(_ context.Context, sessions []*SessionState) bool {
+		var ids []string
+		for _, st := range sessions {
+			ids = append(ids, st.SessionID)
+		}
+		seen = append(seen, ids)
+		return false
+	})
+	t.Cleanup(func() { SetBeforeCondense(nil) })
+
+	commitWithCheckpointTrailer(t, repo, dir, "b1c2d3e4f5a6")
+	require.NoError(t, s.PostCommit(context.Background()))
+	require.Equal(t, [][]string{{sessionID}}, seen, "the hook must see the session about to be condensed")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "plain.txt"), []byte("no trailer"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("plain.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("plain commit", &git.CommitOptions{Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()}})
+	require.NoError(t, err)
+	require.NoError(t, s.PostCommit(context.Background()))
+	require.Len(t, seen, 1, "a commit without a trailer condenses nothing, so the hook must not run")
 }

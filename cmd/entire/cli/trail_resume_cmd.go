@@ -201,6 +201,9 @@ func validateTrailResumeOptions(opts trailResumeOptions) error {
 }
 
 func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
+	// Restores and looks up agent transcripts from the user's shell, where a
+	// home an agent reads from its own settings is invisible to the environment.
+	agent.EnableHomeProbes()
 	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), "", func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
@@ -473,9 +476,7 @@ func resolveTrailCheckpointSessions(ctx context.Context, branch string) ([]trail
 	}
 	store := stores.Persistent
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromRemote() {
-		promoteRemoteTrackingPrimary(ctx, repo, refs)
-	}
+	promoteRemoteTrackingPrimary(ctx, repo, refs)
 
 	sessions := make([]trailResumeSessionContext, 0)
 	skipped := 0
@@ -633,14 +634,14 @@ func loadTrailResumeFindingsContext(ctx context.Context, client *api.Client, tra
 	if err != nil {
 		return trailResumeFindingsContext{}, err
 	}
-	top, hasMore, err := fetchTrailReviewComments(ctx, client, trailID, trailResumeTopFindingOptions())
+	top, nextCursor, err := fetchTrailReviewComments(ctx, client, trailID, trailResumeTopFindingOptions())
 	if err != nil {
 		return trailResumeFindingsContext{}, err
 	}
 	return trailResumeFindingsContext{
 		Counts:  countTrailReviewComments(summaryComments),
 		Top:     top,
-		HasMore: hasMore,
+		HasMore: nextCursor != "",
 	}, nil
 }
 
@@ -831,9 +832,9 @@ func printTrailResumeSkippedSessions(w io.Writer, skipped int) {
 	if skipped == 0 {
 		return
 	}
-	label := "session"
+	label := nounSession
 	if skipped != 1 {
-		label = "sessions"
+		label = nounSessions
 	}
 	fmt.Fprintf(w, "    skipped %d checkpoint %s due to read errors\n", skipped, label)
 }
@@ -888,7 +889,7 @@ func encodeTrailResumeContextJSON(w io.Writer, ctx trailResumeContext) error {
 		SessionsUnavailable string                      `json:"sessions_unavailable,omitempty"`
 		SessionsSkipped     int                         `json:"sessions_skipped,omitempty"`
 		FindingsSummary     *trailResumeFindingCounts   `json:"findings_summary,omitempty"`
-		Findings            []api.TrailReviewComment    `json:"findings"`
+		Findings            []trailReviewCommentJSON    `json:"findings"`
 		FindingsHasMore     bool                        `json:"findings_has_more,omitempty"`
 		FindingsUnavailable string                      `json:"findings_unavailable,omitempty"`
 		DefaultResume       *trailResumeDefaultContext  `json:"default_resume,omitempty"`
@@ -898,7 +899,7 @@ func encodeTrailResumeContextJSON(w io.Writer, ctx trailResumeContext) error {
 		Sessions:            ctx.Sessions,
 		SessionsUnavailable: ctx.SessionsUnavailable,
 		SessionsSkipped:     ctx.SessionsSkipped,
-		Findings:            ctx.Findings.Top,
+		Findings:            toTrailReviewCommentsJSON(ctx.Findings.Top),
 		FindingsHasMore:     ctx.Findings.HasMore,
 		FindingsUnavailable: ctx.Findings.Unavailable,
 		DefaultResume:       ctx.DefaultResume,
@@ -1000,7 +1001,7 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 func trailRestoredSessionKindLabel(kind string) string {
 	switch sessionpkg.Kind(kind) {
 	case sessionpkg.KindAgentReview:
-		return "review"
+		return sessionKindLabelReview
 	case sessionpkg.KindAgentInvestigate:
 		return "investigation"
 	case sessionpkg.KindImported:

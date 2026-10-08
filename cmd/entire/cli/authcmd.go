@@ -64,7 +64,7 @@ func renderDataAPIAuthError(ctx context.Context, errW io.Writer, ownerRepo strin
 // The wording deliberately stops short of asserting a missing mirror.
 // errRepoNotOnboarded covers three shapes and only one is really "not
 // onboarded": zero rows in the repos index also means the caller cannot SEE
-// the repo (where 'entire repo mirror create' would fail too), and a row whose
+// the repo (where 'entire repo mirror add' would fail too), and a row whose
 // primaries name no processing placement can be a repo mid-onboarding.
 func renderRepoNotOnboarded(errW io.Writer, ownerRepo string, err error) error {
 	if !errors.Is(err, errRepoNotOnboarded) {
@@ -74,6 +74,6 @@ func renderRepoNotOnboarded(errW io.Writer, ownerRepo string, err error) error {
 	if subject == "" {
 		subject = "This repository"
 	}
-	fmt.Fprintf(errW, "%s is not onboarded to Entire, or is not visible to your login. If it should be onboarded, run 'entire repo mirror create'.\n", subject)
+	fmt.Fprintf(errW, "%s is not onboarded to Entire, or is not visible to your login. If it should be onboarded, run 'entire repo mirror add'.\n", subject)
 	return NewSilentError(err)
 }

@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
@@ -19,8 +18,7 @@ type transcriptMetadata struct {
 }
 
 // extractTranscriptMetadata parses transcript bytes once and extracts the first user prompt,
-// user turn count, and model name. Supports both JSONL (Claude Code, Cursor, OpenCode) and
-// Gemini JSON format.
+// user turn count, and model name from JSONL transcripts (Claude Code, Cursor, OpenCode).
 func extractTranscriptMetadata(data []byte) transcriptMetadata {
 	var meta transcriptMetadata
 
@@ -63,19 +61,6 @@ func extractTranscriptMetadata(data []byte) transcriptMetadata {
 		if meta.FirstPrompt == "" {
 			meta.FirstPrompt = firstUserPrompt
 		}
-		if meta.TurnCount > 0 || meta.Model != "" || meta.FirstPrompt != "" {
-			return meta
-		}
-	}
-
-	// Fallback: try Gemini JSON format {"messages": [...]}
-	if prompts, gemErr := geminicli.ExtractAllUserPrompts(data); gemErr == nil && len(prompts) > 0 {
-		if first := strategy.FirstDisplayPrompt(prompts); first != "" {
-			meta.FirstPrompt = first
-		} else {
-			meta.FirstPrompt = prompts[0]
-		}
-		meta.TurnCount = countUserTurns(prompts)
 	}
 
 	return meta

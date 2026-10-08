@@ -15,6 +15,6 @@ func (c *ClaudeCodeAgent) ListModels(_ context.Context) ([]agent.ModelInfo, erro
 	return []agent.ModelInfo{
 		{ID: "opus", Note: "alias — latest Claude Opus"},
 		{ID: "sonnet", Note: "alias — latest Claude Sonnet"},
-		{ID: "haiku", Note: "alias — latest Claude Haiku (fast)"},
+		{ID: modelHaiku, Note: "alias — latest Claude Haiku (fast)"},
 	}, nil
 }

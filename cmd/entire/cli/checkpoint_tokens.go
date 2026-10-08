@@ -218,20 +218,20 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 		report.Tokens = tokens
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
-				Kind:       "subagents",
+				Kind:       tokensKindSubagents,
 				Label:      "Subagents",
 				Tokens:     tokens.SubagentTotal,
-				Confidence: "reported",
-				Signals:    []string{"subagent_tokens"},
+				Confidence: tokensConfidenceReported,
+				Signals:    []string{tokensSignalSubagentTokens},
 			})
 		}
 	} else {
 		report.Limitations = append(report.Limitations, "No token usage recorded for this checkpoint.")
 		report.Recommendations = append(report.Recommendations, sessionTokensRecommendation{
 			ID:       "no-token-data",
-			Severity: "low",
+			Severity: tokensSeverityLow,
 			Message:  "Token usage is unavailable for this checkpoint; the agent may not expose token data yet, or this checkpoint predates token tracking.",
-			Signals:  []string{"missing_token_usage"},
+			Signals:  []string{tokensSignalMissingUsage},
 		})
 	}
 	if metadataWarnings > 0 {
@@ -251,11 +251,11 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 			if contextInfo := buildSessionTokensContext(metrics.ContextTokens, metrics.ContextWindowSize); contextInfo != nil {
 				report.Context = contextInfo
 				report.Contributors = append(report.Contributors, sessionTokensContributor{
-					Kind:       "context_pressure",
+					Kind:       tokensKindContextPressure,
 					Label:      "Context pressure",
 					Percent:    contextInfo.Percent,
-					Confidence: "reported",
-					Signals:    []string{"context_tokens"},
+					Confidence: tokensConfidenceReported,
+					Signals:    []string{tokensSignalContextTokens},
 				})
 			}
 		}
@@ -275,7 +275,7 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 		report.Contributors = append(report.Contributors, sessionTokensContributor{
 			Kind:       "skills",
 			Label:      "Skills/slash commands: " + strings.Join(labels, ", "),
-			Confidence: "reported",
+			Confidence: tokensConfidenceReported,
 			Signals:    []string{"skill_events"},
 		})
 	}

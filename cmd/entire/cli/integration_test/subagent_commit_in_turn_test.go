@@ -3,9 +3,11 @@
 package integration
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
@@ -135,7 +137,7 @@ func shadowBranches(env *TestEnv) []string {
 // the link is backed by content — the commit's own condensation materializes the
 // task record's transcript-so-far under the checkpoint's tasks/ subtree, so the
 // trailer resolves to the subagent's real work rather than dangling. That is
-// reachable only because idleWithTaskContent bypasses
+// reachable only because idleWithLiveTaskRecord bypasses
 // shouldCondenseWithOverlapCheck's overlap requirement for this record-bearing
 // IDLE session, whose FilesTouched carries no evidence tying it to editedFile.
 func TestSubagentCheckpoints_CommitWhileIdleWithTaskRecord_LinksAndCondensesContent(t *testing.T) {
@@ -164,18 +166,18 @@ func TestSubagentCheckpoints_CommitWhileIdleWithTaskRecord_LinksAndCondensesCont
 	// Background launch: record created while the parent is still ACTIVE
 	// (mid-turn).
 	if err := env.SimulatePostTask(PostTaskInput{
-		SessionID:       sess.ID,
-		TranscriptPath:  sess.TranscriptPath,
-		ToolUseID:       taskToolUseID,
-		AgentID:         subagentID,
-		RunInBackground: true,
+		SessionID:      sess.ID,
+		TranscriptPath: sess.TranscriptPath,
+		ToolUseID:      taskToolUseID,
+		AgentID:        subagentID,
+		Background:     true,
 	}); err != nil {
 		t.Fatalf("SimulatePostTask (background stub) failed: %v", err)
 	}
 
 	// Turn ends: the parent goes IDLE while the background subagent keeps
 	// running. The record survives, still live. This is the shape
-	// idleWithTaskContent exists for: an IDLE session whose background task is
+	// idleWithLiveTaskRecord exists for: an IDLE session whose background task is
 	// still genuinely in flight.
 	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
@@ -232,5 +234,184 @@ func TestSubagentCheckpoints_CommitWhileIdleWithTaskRecord_LinksAndCondensesCont
 	}
 	if !hasLiveTaskRecord(state, taskToolUseID) {
 		t.Fatalf("expected live task record for %s to survive condensation, state=%+v", taskToolUseID, state)
+	}
+}
+
+// TestSubagentCheckpoints_CommitAfterBackgroundTaskCompletes_LinksViaFiles pins
+// that a completed task record still gets its work linked once it no longer
+// bypasses the overlap check. The background subagent finishes after the
+// parent's turn ended, leaving its edit uncommitted; completion merges the edit
+// into FilesTouched, and that — not the record's presence — is what links the
+// later commit and materializes the subagent's transcript.
+func TestSubagentCheckpoints_CommitAfterBackgroundTaskCompletes_LinksViaFiles(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		tty  bool
+	}{
+		{name: "agent commit", tty: false},
+		{name: "terminal commit", tty: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := NewFeatureBranchEnv(t)
+			sess := env.NewSession()
+			sess.CreateTranscript("delegate a background task", nil)
+
+			const (
+				taskToolUseID = "toolu_01CompletedThenCommit"
+				subagentID    = "e4444555566667777"
+				editedFile    = "docs/completed.md"
+				editedContent = "# Completed\n\nWritten by a background subagent that has since finished.\n"
+			)
+
+			if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+				t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+			}
+			if err := env.SimulatePreTask(sess.ID, sess.TranscriptPath, taskToolUseID); err != nil {
+				t.Fatalf("SimulatePreTask failed: %v", err)
+			}
+			if err := env.SimulatePostTask(PostTaskInput{
+				SessionID:      sess.ID,
+				TranscriptPath: sess.TranscriptPath,
+				ToolUseID:      taskToolUseID,
+				AgentID:        subagentID,
+				Background:     true,
+			}); err != nil {
+				t.Fatalf("SimulatePostTask (background stub) failed: %v", err)
+			}
+			if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+				t.Fatalf("SimulateStop failed: %v", err)
+			}
+
+			subagentTranscript := sess.CreateSubagentTranscript(subagentID, []FileChange{
+				{Path: editedFile, Content: editedContent},
+			})
+			env.WriteFile(editedFile, editedContent)
+			if err := env.SimulateSubagentStop(SubagentStopInput{
+				SessionID:           sess.ID,
+				TranscriptPath:      sess.TranscriptPath,
+				AgentID:             subagentID,
+				AgentTranscriptPath: subagentTranscript,
+			}); err != nil {
+				t.Fatalf("SimulateSubagentStop failed: %v", err)
+			}
+
+			state, err := env.GetSessionState(sess.ID)
+			if err != nil || state == nil {
+				t.Fatalf("GetSessionState failed: %v (state=%v)", err, state)
+			}
+			if state.Phase != session.PhaseIdle || len(state.LiveTaskRecords()) != 0 || !containsFile(state.FilesTouched, editedFile) {
+				t.Fatalf("precondition: want IDLE session with only a completed record and %s in FilesTouched, got phase=%s files=%v records=%+v",
+					editedFile, state.Phase, state.FilesTouched, state.TaskRecords)
+			}
+
+			if tt.tty {
+				env.GitCommitWithShadowHooks("Add completed doc", editedFile)
+			} else {
+				env.GitCommitWithShadowHooksAsAgent("Add completed doc", editedFile)
+			}
+
+			checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+			if checkpointID == "" {
+				t.Fatalf("commit of a completed subagent's files should carry an Entire-Checkpoint trailer")
+			}
+			storedTranscript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+				CheckpointTaskFilePath(checkpointID, taskToolUseID, "agent-"+subagentID+".jsonl"))
+			if !ok {
+				t.Fatalf("subagent transcript not materialized under the checkpoint's tasks/ subtree")
+			}
+			if !strings.Contains(storedTranscript, editedFile) {
+				t.Errorf("materialized subagent transcript does not reference %q", editedFile)
+			}
+		})
+	}
+}
+
+// TestSubagentCheckpoints_JointCommitWithRunningSubagent_KeepsBothSessions pins
+// that the read-only gate does not drop a co-author. A background subagent is
+// still running under an IDLE parent, so its edit is not in the parent's
+// FilesTouched yet; a second session commits mid-turn, and the one commit
+// carries both sessions' files. The second session's transcript claim arms the
+// read-only gate, which must find the running subagent's edit in its own
+// transcript before treating the parent as read-only.
+func TestSubagentCheckpoints_JointCommitWithRunningSubagent_KeepsBothSessions(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	const (
+		taskToolUseID = "toolu_01JointCommit"
+		subagentID    = "f4444555566667777"
+		subagentFile  = "docs/joint.md"
+		subagentBody  = "# Joint\n\nWritten by a background subagent that is still running.\n"
+		codingFile    = "feature.go"
+		codingBody    = "package main\n\nfunc Feature() {}\n"
+	)
+
+	parent := env.NewSession()
+	parent.CreateTranscript("delegate a background task", nil)
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(parent.ID, parent.TranscriptPath); err != nil {
+		t.Fatalf("parent user-prompt-submit failed: %v", err)
+	}
+	if err := env.SimulatePreTask(parent.ID, parent.TranscriptPath, taskToolUseID); err != nil {
+		t.Fatalf("parent pre-task failed: %v", err)
+	}
+	if err := env.SimulatePostTask(PostTaskInput{
+		SessionID:      parent.ID,
+		TranscriptPath: parent.TranscriptPath,
+		ToolUseID:      taskToolUseID,
+		AgentID:        subagentID,
+		Background:     true,
+	}); err != nil {
+		t.Fatalf("parent post-task (background stub) failed: %v", err)
+	}
+	if err := env.SimulateStop(parent.ID, parent.TranscriptPath); err != nil {
+		t.Fatalf("parent stop failed: %v", err)
+	}
+	// The subagent writes its file and keeps running: no SubagentStop.
+	parent.CreateSubagentTranscript(subagentID, []FileChange{{Path: subagentFile, Content: subagentBody}})
+	env.WriteFile(subagentFile, subagentBody)
+
+	parentState, err := env.GetSessionState(parent.ID)
+	if err != nil || parentState == nil {
+		t.Fatalf("GetSessionState for parent failed: %v (state=%v)", err, parentState)
+	}
+	if parentState.Phase != session.PhaseIdle || len(parentState.FilesTouched) != 0 || !hasLiveTaskRecord(parentState, taskToolUseID) {
+		t.Fatalf("precondition: want IDLE parent with a live record and empty FilesTouched, got phase=%s files=%v records=%+v",
+			parentState.Phase, parentState.FilesTouched, parentState.TaskRecords)
+	}
+
+	coding := env.NewSession()
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(coding.ID, coding.TranscriptPath); err != nil {
+		t.Fatalf("coding user-prompt-submit failed: %v", err)
+	}
+	env.WriteFile(codingFile, codingBody)
+	coding.CreateTranscript("Add the feature and commit everything", []FileChange{{Path: codingFile, Content: codingBody}})
+
+	env.GitCommitWithShadowHooksAsAgent("Add feature and joint doc", codingFile, subagentFile)
+
+	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	if checkpointID == "" {
+		t.Fatal("joint commit should carry an Entire-Checkpoint trailer")
+	}
+	summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointSummaryPath(checkpointID))
+	if !found {
+		t.Fatalf("CheckpointSummary not found for %s", checkpointID)
+	}
+	var summary checkpoint.CheckpointSummary
+	if err := json.Unmarshal([]byte(summaryContent), &summary); err != nil {
+		t.Fatalf("Failed to parse CheckpointSummary: %v", err)
+	}
+	env.AssertCheckpointContainsSession(t, summary, coding.ID)
+	env.AssertCheckpointContainsSession(t, summary, parent.ID)
+
+	storedTranscript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+		CheckpointTaskFilePath(checkpointID, taskToolUseID, "agent-"+subagentID+".jsonl"))
+	if !ok {
+		t.Fatalf("running subagent's transcript not materialized under the checkpoint's tasks/ subtree")
+	}
+	if !strings.Contains(storedTranscript, subagentFile) {
+		t.Errorf("materialized subagent transcript does not reference %q", subagentFile)
 	}
 }

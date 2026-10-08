@@ -1606,3 +1606,68 @@ func TestSearchModel_WarningShownInStatusRow(t *testing.T) {
 		t.Error("a warning-free search must clear the previous warning")
 	}
 }
+
+// TestSearchModel_NewSearchKeepsStartupScopeWithoutCurrentRepo pins the TUI
+// path for a search started with an explicit --repo from a clone whose origin
+// could not be resolved: searchCfg names no current repo, so a re-search
+// without an inline repo: override must fall back to the startup scope rather
+// than clearing Repos and leaving semantic search with no scope at all (code
+// search already keeps its startup scope the same way).
+func TestSearchModel_NewSearchKeepsStartupScopeWithoutCurrentRepo(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{
+		Limit: 25,
+		Repos: []string{"et/project/repo"},
+	}
+	m := newSearchModel(testResults(), "auth", 2, cfg, ss, nil)
+
+	// An inline override replaces the scope for that query...
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
+	m.input.SetValue("login repo:gh/acme/other")
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if got := m.searchCfg.Repos; len(got) != 1 || got[0] != "gh/acme/other" {
+		t.Fatalf("searchCfg.Repos = %v, want inline override", got)
+	}
+
+	// ...and a plain query afterwards returns to the startup scope.
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
+	m.input.SetValue("login")
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if got := m.searchCfg.Repos; len(got) != 1 || got[0] != "et/project/repo" {
+		t.Errorf("searchCfg.Repos = %v, want startup scope et/project/repo", got)
+	}
+	slugs, allRepos := m.searchCfg.ScopeSlugs()
+	if allRepos || len(slugs) != 1 || slugs[0] != "et/project/repo" {
+		t.Errorf("ScopeSlugs() = (%v, %v), want ([et/project/repo], false)", slugs, allRepos)
+	}
+}
+
+// TestSearchModel_NewSearchClearsExplicitRepoFiltersWithCurrentRepo pins
+// that the startup-scope fallback only applies when there is no current repo:
+// with one, a plain query still returns to the current-repo default.
+func TestSearchModel_NewSearchClearsExplicitRepoFiltersWithCurrentRepo(t *testing.T) {
+	t.Parallel()
+
+	ss := statusStyles{colorEnabled: false, width: 100}
+	cfg := search.Config{
+		Forge: "et",
+		Owner: "project",
+		Repo:  "repo",
+		Limit: 25,
+		Repos: []string{"gh/acme/other"},
+	}
+	m := newSearchModel(testResults(), "auth", 2, cfg, ss, nil)
+
+	m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
+	m.input.SetValue("login")
+	m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if got := m.searchCfg.Repos; len(got) != 0 {
+		t.Errorf("searchCfg.Repos = %v, want cleared so the current-repo default applies", got)
+	}
+	slugs, allRepos := m.searchCfg.ScopeSlugs()
+	if allRepos || len(slugs) != 1 || slugs[0] != "et/project/repo" {
+		t.Errorf("ScopeSlugs() = (%v, %v), want ([et/project/repo], false)", slugs, allRepos)
+	}
+}

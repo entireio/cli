@@ -569,8 +569,8 @@ func TestFanOutCells_EmptyAndFactoryError(t *testing.T) {
 }
 
 // TestFanOutCells_ClientPerCellFromOneBuilder asserts every cell's client
-// comes from the single shared builder (one subject, per-jurisdiction token
-// reuse lives behind it in auth.CellClientFactory).
+// comes from the single shared builder (one login subject, resolved once in
+// auth.CellClientFactory).
 func TestFanOutCells_ClientPerCellFromOneBuilder(t *testing.T) {
 	// Not parallel: swaps the package-level newCellClientBuilder seam.
 	builder := &fakeCellClientBuilder{}

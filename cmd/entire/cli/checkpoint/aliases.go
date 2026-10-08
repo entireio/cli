@@ -24,6 +24,8 @@ type (
 	SessionFilePaths = apicheckpoint.SessionFilePaths
 	TranscriptAsset  = apicheckpoint.TranscriptAsset
 	TaskPayload      = apicheckpoint.TaskPayload
+	TaskRecord       = apicheckpoint.TaskRecord
+	TaskEntry        = apicheckpoint.TaskEntry
 	SessionMetrics   = apicheckpoint.SessionMetrics
 	Summary          = apicheckpoint.Summary
 	LearningsSummary = apicheckpoint.LearningsSummary
@@ -41,6 +43,7 @@ type (
 	//nolint:revive // CheckpointReader stutter is accepted — marks the checkpoint (vs session) read tier.
 	CheckpointReader = apicheckpoint.CheckpointReader
 	SessionReader    = apicheckpoint.SessionReader
+	TaskReader       = apicheckpoint.TaskReader
 	PersistentStore  = apicheckpoint.PersistentStore
 	Writer           = apicheckpoint.Writer
 	WriteRequest     = apicheckpoint.WriteRequest
@@ -58,6 +61,9 @@ type (
 var (
 	ErrCheckpointNotFound = apicheckpoint.ErrCheckpointNotFound
 	ErrNoTranscript       = apicheckpoint.ErrNoTranscript
+	// ErrTaskNotFound and ErrTaskRecordsUnsupported are the TaskReader sentinels.
+	ErrTaskNotFound           = apicheckpoint.ErrTaskNotFound
+	ErrTaskRecordsUnsupported = apicheckpoint.ErrTaskRecordsUnsupported
 )
 
 // Contract helper functions, re-exported as thin wrappers rather than vars so

@@ -31,6 +31,10 @@ const currentRepoRefTimeout = 5 * time.Second
 // This keeps the migration transparent and non-regressive; non-obvious
 // fallbacks are logged for diagnosis. Both backends expose the same /me/* paths,
 // so fn is agnostic to which client it receives.
+//
+// Both paths act as the same login — auth.ResolveDataAPI applies the cell
+// path's precedence (ENTIRE_TOKEN, else the selected context) — so the
+// fallback never changes identity or environment.
 func runAuthenticatedActivityAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, fn func(context.Context, *api.Client) error) error {
 	client, err := auth.NewEntireAPICellClient(ctx, insecureHTTP, nil)
 	if err != nil {

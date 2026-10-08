@@ -780,3 +780,224 @@ func TestEmptySession_ActiveDuringCommit_NotCondensed(t *testing.T) {
 	env.AssertCheckpointContainsSession(t, summary, codingSess.ID)
 	env.AssertCheckpointExcludesSession(t, summary, emptySess.ID)
 }
+
+// TestReviewSession_CodingSessionCommitsMidTurn_NotCondensed reproduces a
+// review session being condensed into another session's commit.
+//
+// A second session reviews the branch: it touches no files, but runs a
+// background subagent, which leaves a task record on its state. A coding session
+// then commits mid-turn, before its Stop hook has run SaveStep, so its persisted
+// FilesTouched is still empty and its claim on the commit lives only in its live
+// transcript.
+//
+// Two gaps let the reviewer in, one per subtest:
+//   - finished reviewer: a completed record cannot be committing anything, so
+//     idleWithLiveTaskRecord must not let it bypass the overlap check.
+//   - running reviewer: an in-flight record legitimately bypasses the overlap
+//     check, so only the read-only gate can drop the reviewer, and that gate
+//     must count the coding session's transcript-only claim.
+func TestReviewSession_CodingSessionCommitsMidTurn_NotCondensed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		reviewerFinished bool
+	}{
+		{name: "finished reviewer", reviewerFinished: true},
+		{name: "running reviewer", reviewerFinished: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewFeatureBranchEnv(t)
+
+			t.Log("Phase 1: Review session launches a read-only background subagent, then ends its turn")
+
+			reviewSess := env.NewSession()
+			if err := env.SimulateUserPromptSubmitWithTranscriptPath(reviewSess.ID, reviewSess.TranscriptPath); err != nil {
+				t.Fatalf("review session user-prompt-submit failed: %v", err)
+			}
+			reviewSess.CreateTranscript("Can you review this branch?", nil)
+
+			const (
+				reviewToolUseID = "toolu_01ReviewBranch"
+				reviewAgentID   = "b1234567890abcdef"
+			)
+			if err := env.SimulatePreTask(reviewSess.ID, reviewSess.TranscriptPath, reviewToolUseID); err != nil {
+				t.Fatalf("review session pre-task failed: %v", err)
+			}
+			if err := env.SimulatePostTask(PostTaskInput{
+				SessionID:      reviewSess.ID,
+				TranscriptPath: reviewSess.TranscriptPath,
+				ToolUseID:      reviewToolUseID,
+				AgentID:        reviewAgentID,
+				Background:     true,
+			}); err != nil {
+				t.Fatalf("review session post-task failed: %v", err)
+			}
+			if tt.reviewerFinished {
+				// SubagentStop completes the record even though the subagent
+				// only read files.
+				reviewAgentTranscript := reviewSess.CreateSubagentTranscript(reviewAgentID, nil)
+				if err := env.SimulateSubagentStop(SubagentStopInput{
+					SessionID:           reviewSess.ID,
+					TranscriptPath:      reviewSess.TranscriptPath,
+					AgentID:             reviewAgentID,
+					AgentTranscriptPath: reviewAgentTranscript,
+				}); err != nil {
+					t.Fatalf("review session subagent-stop failed: %v", err)
+				}
+			}
+			if err := env.SimulateStop(reviewSess.ID, reviewSess.TranscriptPath); err != nil {
+				t.Fatalf("review session stop failed: %v", err)
+			}
+
+			reviewState, err := env.GetSessionState(reviewSess.ID)
+			if err != nil {
+				t.Fatalf("GetSessionState for review session failed: %v", err)
+			}
+			if reviewState.Phase != session.PhaseIdle {
+				t.Fatalf("precondition: review session should be IDLE, got %s", reviewState.Phase)
+			}
+			if len(reviewState.FilesTouched) != 0 {
+				t.Fatalf("precondition: review session should have empty FilesTouched, got %v", reviewState.FilesTouched)
+			}
+			if !reviewState.HasTaskContent() {
+				t.Fatalf("precondition: review session should carry its subagent's task record, got %+v", reviewState.TaskRecords)
+			}
+			if live := len(reviewState.LiveTaskRecords()) > 0; live == tt.reviewerFinished {
+				t.Fatalf("precondition: review record in flight = %t, want %t", live, !tt.reviewerFinished)
+			}
+
+			t.Log("Phase 2: Coding session edits a file and commits it mid-turn")
+
+			codingSess := env.NewSession()
+			if err := env.SimulateUserPromptSubmitWithTranscriptPath(codingSess.ID, codingSess.TranscriptPath); err != nil {
+				t.Fatalf("coding session user-prompt-submit failed: %v", err)
+			}
+			env.WriteFile("feature.go", "package main\n\nfunc Feature() {}\n")
+			codingSess.CreateTranscript("Address the review findings and commit", []FileChange{
+				{Path: "feature.go", Content: "package main\n\nfunc Feature() {}\n"},
+			})
+
+			codingState, err := env.GetSessionState(codingSess.ID)
+			if err != nil {
+				t.Fatalf("GetSessionState for coding session failed: %v", err)
+			}
+			if codingState.Phase != session.PhaseActive {
+				t.Fatalf("precondition: coding session should be ACTIVE, got %s", codingState.Phase)
+			}
+			if len(codingState.FilesTouched) != 0 {
+				t.Fatalf("precondition: coding session's persisted FilesTouched should be empty before Stop, got %v", codingState.FilesTouched)
+			}
+
+			env.GitCommitWithShadowHooksAsAgent("Add feature", "feature.go")
+
+			cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+			if cpID == "" {
+				t.Fatal("Commit should have an Entire-Checkpoint trailer")
+			}
+
+			t.Log("Phase 3: Verify checkpoint contains only the coding session")
+
+			summaryPath := CheckpointSummaryPath(cpID)
+			summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, summaryPath)
+			if !found {
+				t.Fatalf("CheckpointSummary not found at %s", summaryPath)
+			}
+			var summary checkpoint.CheckpointSummary
+			if err := json.Unmarshal([]byte(summaryContent), &summary); err != nil {
+				t.Fatalf("Failed to parse CheckpointSummary: %v", err)
+			}
+
+			if len(summary.Sessions) != 1 {
+				t.Errorf("Checkpoint should contain exactly 1 session (the coding session), got %d sessions", len(summary.Sessions))
+				for i, s := range summary.Sessions {
+					t.Logf("  Session %d: %s", i, s.Metadata)
+				}
+			}
+			env.AssertCheckpointContainsSession(t, summary, codingSess.ID)
+			env.AssertCheckpointExcludesSession(t, summary, reviewSess.ID)
+
+			// The skipped reviewer keeps its record for its own next condensation.
+			reviewAfter, err := env.GetSessionState(reviewSess.ID)
+			if err != nil {
+				t.Fatalf("GetSessionState for review session after commit failed: %v", err)
+			}
+			if !reviewAfter.HasTaskContent() {
+				t.Errorf("review session lost its task record to a commit it was excluded from")
+			}
+		})
+	}
+}
+
+// TestReviewSession_FinishedReviewer_UnrelatedCommitNotLinked pins the completed
+// record's loss of trust on its own: with no other session to claim the commit,
+// the read-only gate never fires, so only idleWithLiveTaskRecord declining a
+// completed record keeps a finished reviewer out of a commit the user makes by
+// hand.
+func TestReviewSession_FinishedReviewer_UnrelatedCommitNotLinked(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+
+	reviewSess := env.NewSession()
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(reviewSess.ID, reviewSess.TranscriptPath); err != nil {
+		t.Fatalf("review session user-prompt-submit failed: %v", err)
+	}
+	reviewSess.CreateTranscript("Can you review this branch?", nil)
+
+	const (
+		reviewToolUseID = "toolu_01ReviewUnrelated"
+		reviewAgentID   = "c1234567890abcdef"
+	)
+	if err := env.SimulatePreTask(reviewSess.ID, reviewSess.TranscriptPath, reviewToolUseID); err != nil {
+		t.Fatalf("review session pre-task failed: %v", err)
+	}
+	if err := env.SimulatePostTask(PostTaskInput{
+		SessionID:      reviewSess.ID,
+		TranscriptPath: reviewSess.TranscriptPath,
+		ToolUseID:      reviewToolUseID,
+		AgentID:        reviewAgentID,
+		Background:     true,
+	}); err != nil {
+		t.Fatalf("review session post-task failed: %v", err)
+	}
+	reviewAgentTranscript := reviewSess.CreateSubagentTranscript(reviewAgentID, nil)
+	if err := env.SimulateSubagentStop(SubagentStopInput{
+		SessionID:           reviewSess.ID,
+		TranscriptPath:      reviewSess.TranscriptPath,
+		AgentID:             reviewAgentID,
+		AgentTranscriptPath: reviewAgentTranscript,
+	}); err != nil {
+		t.Fatalf("review session subagent-stop failed: %v", err)
+	}
+	if err := env.SimulateStop(reviewSess.ID, reviewSess.TranscriptPath); err != nil {
+		t.Fatalf("review session stop failed: %v", err)
+	}
+
+	reviewState, err := env.GetSessionState(reviewSess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState for review session failed: %v", err)
+	}
+	if reviewState.Phase != session.PhaseIdle || !reviewState.HasTaskContent() || len(reviewState.LiveTaskRecords()) != 0 {
+		t.Fatalf("precondition: want IDLE review session with only a completed record, got phase=%s records=%+v",
+			reviewState.Phase, reviewState.TaskRecords)
+	}
+
+	// No agent session touched this file; the user writes and commits it.
+	env.WriteFile("notes.md", "# Notes\n")
+	env.GitCommitWithShadowHooksAsAgent("Add notes", "notes.md")
+
+	if cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); cpID != "" {
+		t.Errorf("unrelated commit was linked to the finished review session (checkpoint %s)", cpID)
+	}
+	reviewAfter, err := env.GetSessionState(reviewSess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState for review session after commit failed: %v", err)
+	}
+	if !reviewAfter.HasTaskContent() {
+		t.Errorf("review session lost its task record to a commit it does not own")
+	}
+}

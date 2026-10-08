@@ -26,8 +26,7 @@ const (
 	// has no query-serve route (search.ErrCellUnavailable). Distinct from
 	// SearchErrClassCellSkip — these are the two "region" failure variants.
 	SearchErrClassRegionUnavailable = "region_unavailable"
-	// SearchErrClassRepoUnavailable: cells answered but the repo is not
-	// searchable (not indexed, or not enabled for semantic search).
+	// SearchErrClassRepoUnavailable: cells answered but the repo is not indexed.
 	SearchErrClassRepoUnavailable = "repo_unavailable"
 	// SearchErrClassNetwork: network failure or timeout.
 	SearchErrClassNetwork = "network"

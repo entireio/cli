@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 
 	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
@@ -78,6 +79,9 @@ most recent commit with a checkpoint.  You'll be prompted to confirm resuming in
 }
 
 func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force bool) error {
+	// Restores and looks up agent transcripts from the user's shell, where a
+	// home an agent reads from its own settings is invisible to the environment.
+	agent.EnableHomeProbes()
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
@@ -201,9 +205,7 @@ func restoreByCheckpointID(ctx context.Context, w, errW io.Writer, checkpointID 
 	}
 	store := stores.Persistent
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromRemote() {
-		promoteRemoteTrackingPrimary(ctx, repo, refs)
-	}
+	promoteRemoteTrackingPrimary(ctx, repo, refs)
 
 	metadata, err := readCheckpointInfoFromStore(ctx, store, checkpointID)
 	if err != nil {
@@ -287,9 +289,7 @@ func restoreFromCurrentBranch(ctx context.Context, w, errW io.Writer, branchName
 	store := stores.Persistent
 
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromRemote() {
-		promoteRemoteTrackingPrimary(ctx, repo, refs)
-	}
+	promoteRemoteTrackingPrimary(ctx, repo, refs)
 
 	// Multiple checkpoints (squash merge): resolve latest by CreatedAt timestamp.
 	if len(result.checkpointIDs) > 1 {
@@ -680,7 +680,7 @@ func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branc
 	current := start
 	for current != nil && totalChecked < maxCommits {
 		// Stop if we've reached the boundary
-		if stopAt != nil && current.Hash == *stopAt {
+		if stopAt != nil && current.Hash.Equal(*stopAt) {
 			break
 		}
 
@@ -741,7 +741,7 @@ func promptResumeFromOlderCheckpoint() (bool, error) {
 }
 
 // checkRemoteMetadata checks if checkpoint metadata exists on a remote and
-// fetches it if available. Skips when reads don't target a remote-tracked ref.
+// fetches it if available.
 func checkRemoteMetadata(
 	ctx context.Context,
 	w, errW io.Writer,
@@ -749,12 +749,6 @@ func checkRemoteMetadata(
 	refs checkpoint.PersistentRefs,
 ) ([]strategy.RestoredSession, error) {
 	logCtx := logging.WithComponent(ctx, "resume.checkRemoteMetadata")
-
-	if !refs.ReadBootstrappableFromRemote() {
-		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but metadata is not available in %s.\n", checkpointID, refs.Read)
-		fmt.Fprintf(errW, "This ref is local-only. Try: entire checkpoint explain %s\n", checkpointID)
-		return nil, nil
-	}
 
 	// Open a fresh repo to avoid stale packfile index issues
 	repo, repoErr := openRepository(ctx)
@@ -774,7 +768,9 @@ func checkRemoteMetadata(
 	var checkpointURL string
 	var resolveErr error
 	if hasCheckpointRemote {
-		checkpointURL, resolveErr = remote.FetchURL(ctx)
+		// The elected remote joins FetchURL's ownership vote (see
+		// strategy.LeadCheckpointReadRemote); guarded by hasCheckpointRemote.
+		checkpointURL, resolveErr = remote.FetchURL(ctx, remote.FetchURLOptions{LeadReadRemote: strategy.LeadCheckpointReadRemote(ctx)})
 		if resolveErr == nil {
 			if fetchErr := strategy.FetchMetadataBranch(ctx, checkpointURL); fetchErr == nil {
 				freshRepo, freshErr := openRepository(ctx)
@@ -847,14 +843,20 @@ func checkRemoteMetadata(
 		}
 		fmt.Fprintf(errW, "Ensure you have access to the checkpoint remote configured in .entire/settings.json.\n")
 	} else {
-		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but the %s branch is not available locally or on the remote.\n", checkpointID, paths.MetadataBranchName)
-		fmt.Fprintf(errW, "This can happen if the metadata branch was not pushed.\n")
+		// Name where this checkpoint actually lives: a git-refs checkpoint is
+		// its own ref, and the v1 branch existing says nothing about it.
+		storage := checkpointStorageRefs(ctx, checkpointID)
+		fmt.Fprintf(errW, "Checkpoint '%s' found in commit but its metadata is not in the local or remote %s.\n", checkpointID, describeCheckpointStorage(storage, "or"))
+		fmt.Fprintf(errW, "This can happen if the checkpoint metadata was not pushed.\n")
 		// The pasteable hint names the first read candidate — the elected
 		// sync remote, or the fail-open origin when the election errored
 		// (then origin is also the only place left to fetch from). A
 		// remoteless repo has nothing to fetch from, so no hint is printed.
 		if candidates := strategy.CheckpointReadRemotes(ctx); len(candidates) > 0 {
-			fmt.Fprintf(errW, "Try:\n  git fetch %s %s:%s\n", candidates[0], paths.MetadataBranchName, paths.MetadataBranchName)
+			fmt.Fprintf(errW, "Try:\n")
+			for _, ref := range storage {
+				fmt.Fprintf(errW, "  git fetch %s %s:%s\n", candidates[0], ref, ref)
+			}
 		}
 	}
 	return nil, nil
@@ -898,37 +900,12 @@ func restoreResumeSessions(ctx context.Context, w, errW io.Writer, metadata *str
 	checkpointID := metadata.CheckpointID
 	sessionID := metadata.SessionID
 
-	// Resolve agent from checkpoint metadata
-	ag, err := strategy.ResolveAgentForResume(metadata.Agent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve agent: %w", err)
-	}
-
-	// Initialize logging context with agent
-	logCtx := logging.WithAgent(logging.WithComponent(ctx, "resume"), ag.Name())
+	logCtx := logging.WithComponent(ctx, "resume")
 
 	logging.Debug(logCtx, "resume session started",
 		slog.String("checkpoint_id", checkpointID.String()),
 		slog.String("session_id", sessionID),
 	)
-
-	// Get worktree root for session directory lookup
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get worktree root: %w", err)
-	}
-
-	sessionDir, err := ag.GetSessionDir(repoRoot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine session directory: %w", err)
-	}
-
-	// Create the agent's session directory. This is the one place it is created
-	// from the outside — agent.OpenSessionStore requires it to exist, because a
-	// store for a directory that is not there has nothing to resolve.
-	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-		return nil, fmt.Errorf("failed to create session directory: %w", err)
-	}
 
 	// Get strategy and restore sessions using full checkpoint data
 	strat := GetStrategy(ctx)
@@ -942,13 +919,58 @@ func restoreResumeSessions(ctx context.Context, w, errW io.Writer, metadata *str
 	}
 
 	sessions, restoreErr := strat.RestoreLogsOnly(ctx, w, errW, point, force)
-	if restoreErr != nil || len(sessions) == 0 {
-		// Fall back to single-session restore (e.g., old checkpoints without agent metadata)
+	sessionIDErr := validation.ValidateSessionID(sessionID)
+
+	// Nothing was restored. Two different situations reach this point and only
+	// one of them may fall back, so they are told apart here rather than by the
+	// session count, which says nothing about either.
+	//
+	// A checkpoint carrying an unsafe session ID was tampered with, and falling
+	// back would quietly restore the top-level session instead of reporting
+	// that. An ordinary skip — an unreadable shard, an empty transcript, no
+	// per-session agent metadata — is the case the fallback has always existed
+	// for, and suppressing it for every multi-session checkpoint made `entire
+	// resume` exit 0 having printed "Restoring N sessions from checkpoint:" and
+	// nothing else.
+	if restoreErr == nil && len(sessions) == 0 {
+		for _, storedSessionID := range metadata.SessionIDs {
+			// An absent ID is an ordinary skip, not evidence of tampering.
+			// readCheckpointInfoFromStore appends every session's ID and guards
+			// `!= ""` on the next line, and fsstore does the same, so an empty
+			// entry is a shape legacy checkpoints actually have. Treating it as
+			// unsafe accused an untouched checkpoint of tampering and killed the
+			// very fallback this scan exists to protect.
+			if storedSessionID == "" {
+				continue
+			}
+			if err := validation.ValidateSessionID(storedSessionID); err != nil {
+				return nil, fmt.Errorf("unsafe checkpoint session ID %q: %w", storedSessionID, err)
+			}
+		}
+		if sessionIDErr != nil {
+			return nil, fmt.Errorf("unsafe checkpoint session ID %q: %w", sessionID, sessionIDErr)
+		}
+	}
+
+	if sessionIDErr == nil && (restoreErr != nil || len(sessions) == 0) {
+		// The single-session fallback, for missing logs and for older
+		// checkpoints without per-session agent metadata.
+		ag, err := strategy.ResolveAgentForResume(metadata.Agent)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve agent: %w", err)
+		}
+		repoRoot, err := paths.WorktreeRoot(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get worktree root: %w", err)
+		}
 		session, ok, err := restoreSingleSession(ctx, w, ag, sessionID, checkpointID, repoRoot, force)
 		if err != nil || !ok {
 			return nil, err
 		}
 		return []strategy.RestoredSession{session}, nil
+	}
+	if restoreErr != nil {
+		return nil, fmt.Errorf("failed to restore session logs: %w", restoreErr)
 	}
 
 	logging.Debug(logCtx, "resume session completed",

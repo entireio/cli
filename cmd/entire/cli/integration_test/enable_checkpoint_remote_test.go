@@ -133,6 +133,25 @@ func setupGitRefsCheckpointRemoteRepo(t *testing.T, checkpointBareDir string) st
 	gitOutput(t, originBare, "init", "--bare")
 	gitOutput(t, dir, "remote", "add", "origin", "file://"+originBare)
 
+	// FetchURL applies the same checkpoint_remote ownership rule as PushURL,
+	// and a file:// origin under the temp root can never share an owner with
+	// org/checkpoints, so the committed setting alone would read as inherited
+	// and be ignored. Declaring the same checkpoint_remote in the untracked
+	// local layer is the documented escape hatch for exactly this: a checkpoint
+	// repo that is genuinely this clone's own even though the remotes cannot
+	// prove it.
+	localSettings := map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoint_remote": map[string]any{
+				"provider": "github",
+				"repo":     checkpointRemoteRepoSlug,
+			},
+		},
+	}
+	localData, err := jsonutil.MarshalIndentWithNewline(localSettings, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.local.json"), localData, 0o644))
+
 	// Redirect both URL shapes the checkpoint_remote can derive to (HTTPS from
 	// the provider's canonical host, or SSH) at the local bare.
 	fileURL := "file://" + checkpointBareDir

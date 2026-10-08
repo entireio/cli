@@ -28,10 +28,6 @@ const (
 	// later, and a resource that genuinely advertises nothing still caches
 	// normally afterwards.
 	//
-	// Do NOT reach for this when the absence is itself meaningful and
-	// self-correcting; JurisdictionAudience has its own rule in
-	// resolveCachedCores because only some callers require it.
-	//
 	// 1: login_url.
 	CoresSchemaVersion = 1
 )
@@ -52,15 +48,6 @@ type ClusterCoresCache map[string]*CoresEntry
 // change re-interprets existing entries without a migration.
 type CoresEntry struct {
 	CoreURLs []string `json:"core_urls"`
-	// JurisdictionAudience is the cluster's jurisdiction-token audience as
-	// advertised by its /.well-known/entire-cluster.json. Empty when the
-	// cluster does not accept jurisdiction access tokens (or predates
-	// the field) — git-remote-entire treats that as an error; other
-	// callers decide their own fallback.
-	JurisdictionAudience string `json:"jurisdiction_audience,omitempty"`
-	// JurisdictionCoreURL is the advertised core that mints for
-	// JurisdictionAudience — the cross-jurisdiction exchange endpoint.
-	JurisdictionCoreURL string `json:"jurisdiction_core_url,omitempty"`
 	// LoginURL is the resource's advertised login server: the apex auth
 	// router, which dispatches an authorization request to whichever
 	// regional core owns the caller's account. Empty when the resource

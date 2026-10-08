@@ -40,6 +40,41 @@ remains available through `entire review --findings` even after target cleanup.
 Positive integer targets always mean trail numbers rather than numeric branch
 names; this avoids a local branch silently shadowing a trail selector.
 
+## Reviewer isolation
+
+A reviewer runs inside the checkout it reviews, which for `--target` is a
+branch someone else may control. Reviewers therefore do not load
+execution-capable agent configuration from that checkout:
+
+- claude-code runs with `--setting-sources user` and `--strict-mcp-config`, so
+  the checkout's `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.mcp.json` are not loaded; Entire's lifecycle hooks are passed from the
+  binary via `--settings`. The user's own MCP servers are not loaded either.
+  The same flags keep the checkout's `.claude/commands`, `.claude/skills`, and
+  `.claude/agents` from being discovered, so a branch cannot shadow `/review`
+  with a command whose `!` lines run shell commands; the user's own commands
+  and skills still resolve. Checked on Claude Code 2.0.0 through 2.1.286. A
+  Claude Code older than `--setting-sources` (e.g. 1.0.x) rejects the flag and
+  exits before loading anything, and the review fails with a message to update
+  Claude Code.
+- pi runs with `--no-approve` and `--no-extensions`, so `.pi/settings.json`,
+  `.pi/extensions/`, `.pi/SYSTEM.md`, and extensions or packages named in
+  project settings are not loaded, even when the repository is trusted (pi
+  inherits trust from the nearest trusted ancestor, which covers review
+  worktrees). Entire's extension is loaded with `--extension` from a copy the
+  binary writes to the per-user cache directory.
+- codex, on a `--target` run, runs with the checkout marked untrusted
+  (`-c projects={"<checkout>"={trust_level="untrusted"}}`), so the checkout's
+  `.codex/config.toml`, `mcp_servers` and `hooks.json` included, is not
+  loaded. Without it, a review worktree inside a repository the user trusts in
+  codex is trusted too. A plain `entire review` in the user's own checkout
+  keeps codex's normal trust, so Entire's codex hooks still tag the session.
+
+The user's own agent settings still apply. For claude-code, the checkout's
+`CLAUDE.md` is not preloaded as project instructions and its project skills
+are not available, so a profile that names a project-level skill does not
+resolve it; the reviewer can still read `CLAUDE.md` with its file tools.
+
 ## Profiles
 
 Profiles live in:
@@ -74,7 +109,7 @@ Minimal example:
 }
 ```
 
-`entire review --models` lists the models each review-runner agent advertises via the optional `agent.ModelLister` capability (`cmd/entire/cli/agent/model_lister.go`). claude-code returns a curated list of real aliases (opus/sonnet/haiku); Pi enumerates live by shelling out to `pi --list-models`. Agents whose CLI has no enumeration command (codex, gemini) do not implement `ListModels`, so the picker offers only Default + Custom. The `--model` flag still forwards any value the agent CLI accepts.
+`entire review --models` lists the models each review-runner agent advertises via the optional `agent.ModelLister` capability (`cmd/entire/cli/agent/model_lister.go`). claude-code returns a curated list of real aliases (opus/sonnet/haiku); Pi enumerates live by shelling out to `pi --list-models`. An agent whose CLI has no enumeration command (codex) does not implement `ListModels`, so the picker offers only Default + Custom. The `--model` flag still forwards any value the agent CLI accepts.
 
 The profile-level `task` is the shared work item. Each `agents` map entry is a worker id. For simple entries the worker id is also the agent name; to run the same agent more than once, use aliases and set `agent` plus `model`. Per-worker `skills`, `prompt`, and `model` adapt that task to agent-specific mechanics. Pi is a prompt/model-driven worker (`pi --mode json --print [--model ...]`) rather than a slash-command worker. Settings fields: `EntireSettings.ReviewProfiles` and `EntireSettings.ReviewDefaultProfile` in `cmd/entire/cli/settings/settings.go`. The old top-level `review` map is parse-tolerated and can be exposed as a legacy `general` profile when no `review_profiles` are configured.
 
@@ -91,7 +126,7 @@ The profile-level `task` is the shared work item. Each `agents` map entry is a w
 1. With `--target`, `entire review` resolves the branch directly or through its trail, prepares a worktree, and re-runs the command there without `--target`.
 2. It selects a profile. If no profiles exist, it runs guided setup in an interactive terminal or writes an opinionated clone-local default profile in non-interactive mode.
 3. It composes worker prompts via `review.ComposeReviewPrompt` and computes scope (mainline base ref via `review.ComputeScopeStats`, overridable with `--base`).
-4. Adapter-backed review workers (claude-code, codex, gemini-cli, pi) are spawned with `ENTIRE_REVIEW_{SESSION,AGENT,SKILLS,PROMPT,STARTING_SHA}` env vars. Their lifecycle hooks use those values to tag sessions as `Kind = "agent_review"`.
+4. Adapter-backed review workers (claude-code, codex, pi) are spawned with `ENTIRE_REVIEW_{SESSION,AGENT,SKILLS,PROMPT,STARTING_SHA}` env vars. Their lifecycle hooks use those values to tag sessions as `Kind = "agent_review"`.
 5. Each spawned process has its own env, so multiple worktrees and multi-agent runs do not need a shared marker file.
 6. In multi-worker profiles, the configured judge receives all worker reports and produces one final verdict. The judge prompt asks it to reject unsupported claims, resolve contradictions, merge duplicates, and prioritize evidence-backed findings.
 7. On the next `git commit`, the PostCommit hook condenses worker review sessions into the checkpoint on `entire/checkpoints/v1`, with `Kind`, `ReviewSkills`, and `ReviewPrompt` recorded in `CommittedMetadata`.
@@ -124,7 +159,7 @@ When `RunMulti` is dispatched in a TTY, sink composition includes a live Bubble 
 
 ## Skill Discovery (Claude Code)
 
-`DiscoverReviewSkills` (`cmd/entire/cli/agent/claudecode/discovery.go`) walks three roots: plugin cache (`~/.claude/plugins/cache/<market>/<plugin>/<version>/{skills,commands,agents}`), user skills (`~/.claude/skills`), and user commands/agents (`~/.claude/commands`, `~/.claude/agents`).
+`DiscoverReviewSkills` (`cmd/entire/cli/agent/claudecode/discovery.go`) walks three roots under Claude Code's config directory (`$CLAUDE_CONFIG_DIR`, default `~/.claude`): plugin cache (`plugins/cache/<market>/<plugin>/<version>/{skills,commands,agents}`), user skills (`skills`), and user commands/agents (`commands`, `agents`).
 
 For the plugin cache, `pickLatestVersion` picks one version directory per plugin: highest valid semver wins; if no entries parse as semver, the lexicographic max is picked.
 
@@ -151,7 +186,7 @@ The redesign eliminated several constructs from the prior implementation. None s
 - `cmd/entire/cli/review/synthesis_sink.go` / `synthesis_prompt.go` — judge adjudication
 - `cmd/entire/cli/review/types/{reviewer,sink,template}.go` — interface contracts and shared review template
 - `cmd/entire/cli/review/env.go` — `ENTIRE_REVIEW_*` constants + `EncodeSkills`/`DecodeSkills` + `AppendReviewEnv`
-- `cmd/entire/cli/agent/{claudecode,codex,geminicli,pi}/reviewer.go` — per-agent `AgentReviewer` implementations
+- `cmd/entire/cli/agent/{claudecode,codex,pi}/reviewer.go` — per-agent `AgentReviewer` implementations
 - `cmd/entire/cli/agent/claudecode/discovery.go` — skill discovery + plugin-cache dedupe
 - `cmd/entire/cli/lifecycle.go` — `adoptReviewEnv` reads `ENTIRE_REVIEW_*` from process env
 - `cmd/entire/cli/review_bridge.go` / `review_target.go` — bridge code for cycle-bound functions, trail posting, and target worktree preparation

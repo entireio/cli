@@ -12,7 +12,7 @@ import (
 var _ agent.ModelLister = (*PiAgent)(nil)
 
 // ListModels returns Pi's live model catalog by shelling out to
-// `pi --list-models`. Unlike the curated lists for claude-code/codex/gemini,
+// `pi --list-models`. Unlike the curated lists for claude-code/codex,
 // Pi has a real enumeration command spanning every configured provider, so the
 // result reflects what this machine/account can actually use.
 func (a *PiAgent) ListModels(ctx context.Context) ([]agent.ModelInfo, error) {

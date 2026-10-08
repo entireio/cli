@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -93,11 +95,11 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	}
 
 	var adopted *session.State
-	var filesTouched []string
+	var changes adoptChanges
 	if sameSessionStore {
-		adopted, filesTouched, err = adoptFromSameSessionStore(ctx, sourceWorktree, sourceState, opts)
+		adopted, changes, err = adoptFromSameSessionStore(ctx, sourceWorktree, sourceState, opts)
 	} else {
-		adopted, filesTouched, err = adoptFromExternalSessionStore(
+		adopted, changes, err = adoptFromExternalSessionStore(
 			ctx,
 			sourceStore,
 			sourceWorktree,
@@ -113,6 +115,11 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	}
 
 	fmt.Fprintf(w, "Adopted session %s from %s\n", shortSessionID(adopted.SessionID), sourceWorktree)
+	if changes.clearedTranscriptPaths > 0 {
+		fmt.Fprintf(w, "Dropped %d subagent transcript path(s) that do not belong to this session's agent; see the Entire log for details.\n",
+			changes.clearedTranscriptPaths)
+	}
+	filesTouched := changes.filesTouched
 	if len(filesTouched) == 0 {
 		fmt.Fprintln(w, "No current file changes were detected, so the next commit may not link until hooks record changes.")
 		return nil
@@ -131,14 +138,14 @@ func adoptFromExternalSessionStore(
 	targetCommonDir string,
 	sessionID string,
 	opts adoptOptions,
-) (*session.State, []string, error) {
+) (*session.State, adoptChanges, error) {
 	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
 	if worktreeIDErr != nil {
 		sourceWorktreeID = ""
 	}
 
 	var adopted *session.State
-	var filesTouched []string
+	var changes adoptChanges
 	err := strategy.WithSessionStateLocks(ctx, sessionID, []string{sourceCommonDir, targetCommonDir}, func() error {
 		sourceState, err := sourceStore.Load(ctx, sessionID)
 		if err != nil {
@@ -158,7 +165,7 @@ func adoptFromExternalSessionStore(
 			return err
 		}
 
-		next, touched, err := buildAdoptedSessionState(ctx, sourceState)
+		next, nextChanges, err := buildAdoptedSessionState(ctx, sourceState, sourceWorktree)
 		if err != nil {
 			return err
 		}
@@ -180,13 +187,13 @@ func adoptFromExternalSessionStore(
 			return fmt.Errorf("retire source session state: %w", err)
 		}
 		adopted = next
-		filesTouched = touched
+		changes = nextChanges
 		return nil
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("adopt external session state: %w", err)
+		return nil, adoptChanges{}, fmt.Errorf("adopt external session state: %w", err)
 	}
-	return adopted, filesTouched, nil
+	return adopted, changes, nil
 }
 
 func rollbackExternalAdoptTarget(ctx context.Context, targetStore *session.StateStore, sessionID string, previous *session.State) error {
@@ -217,9 +224,9 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	return retired
 }
 
-func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourceState *session.State, opts adoptOptions) (*session.State, []string, error) {
+func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourceState *session.State, opts adoptOptions) (*session.State, adoptChanges, error) {
 	if !opts.Force {
-		return nil, nil, fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", sourceState.SessionID)
+		return nil, adoptChanges{}, fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", sourceState.SessionID)
 	}
 
 	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
@@ -228,7 +235,7 @@ func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourc
 	}
 
 	var adopted *session.State
-	var filesTouched []string
+	var changes adoptChanges
 	err := strategy.MutateSessionState(ctx, sourceState.SessionID, func(current *strategy.SessionState) error {
 		if !isAdoptableSourceSession(current) {
 			return fmt.Errorf("session %s is ended or fully condensed and cannot be adopted", sourceState.SessionID)
@@ -241,30 +248,34 @@ func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourc
 			return err
 		}
 
-		next, touched, err := buildAdoptedSessionState(ctx, current)
+		next, nextChanges, err := buildAdoptedSessionState(ctx, current, sourceWorktree)
 		if err != nil {
 			return err
 		}
 		*current = *next
 		snapshot := cloneAdoptSourceState(next)
 		adopted = &snapshot
-		filesTouched = touched
+		changes = nextChanges
 		return nil
 	})
 	if errors.Is(err, strategy.ErrStateNotFound) {
-		return nil, nil, fmt.Errorf("session %s was not found in %s", sourceState.SessionID, sourceWorktree)
+		return nil, adoptChanges{}, fmt.Errorf("session %s was not found in %s", sourceState.SessionID, sourceWorktree)
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("adopt same-store session state: %w", err)
+		return nil, adoptChanges{}, fmt.Errorf("adopt same-store session state: %w", err)
 	}
-	return adopted, filesTouched, nil
+	return adopted, changes, nil
 }
 
 func validateAdoptSourceTranscript(source *session.State, sourceWorktree string) error {
-	if source == nil || strings.TrimSpace(source.TranscriptPath) == "" {
+	if source == nil || source.TranscriptPath == "" {
 		return nil
 	}
 
+	if !filepath.IsAbs(source.TranscriptPath) {
+		return fmt.Errorf("unexpected transcript path for session %s: %s is not absolute",
+			source.SessionID, source.TranscriptPath)
+	}
 	owner, ok := agent.AgentForTranscriptPath(source.TranscriptPath, sourceWorktree)
 	if !ok {
 		return fmt.Errorf("unexpected transcript path for session %s: %s is not owned by a registered agent for %s",
@@ -273,6 +284,84 @@ func validateAdoptSourceTranscript(source *session.State, sourceWorktree string)
 	if source.AgentType != "" && owner.Type() != source.AgentType {
 		return fmt.Errorf("unexpected transcript path for session %s: %s belongs to %s, but source state says %s",
 			source.SessionID, source.TranscriptPath, owner.Type(), source.AgentType)
+	}
+	return nil
+}
+
+// dropInvalidAdoptTaskTranscripts clears each declared task transcript path in
+// state that validateAdoptTaskTranscript rejects, logs a warning for it, and
+// rewrites each accepted path in clean form. It applies the same check to the
+// declared paths in state.SubagentInventory, and returns the number of
+// declared paths it cleared across both. It modifies state in place.
+//
+// It also clears every inventory entry's resolved path: a resolved path
+// records that the rollout was verified in the source repository, and the
+// inventory refresh verifies it again before use.
+func dropInvalidAdoptTaskTranscripts(ctx context.Context, state *session.State, sourceWorktree string) int {
+	logCtx := logging.WithSessionID(logging.WithComponent(ctx, "session"), state.SessionID)
+	cleared := 0
+	for i := range state.TaskRecords {
+		record := &state.TaskRecords[i]
+		if !keepAdoptTaskTranscript(logCtx, state, record.AgentID, &record.DeclaredTranscriptPath, sourceWorktree) {
+			cleared++
+		}
+	}
+	for i := range state.SubagentInventory {
+		entry := &state.SubagentInventory[i]
+		if !keepAdoptTaskTranscript(logCtx, state, entry.AgentID, &entry.DeclaredTranscriptPath, sourceWorktree) {
+			cleared++
+		}
+		entry.ResolvedTranscriptPath = ""
+	}
+	return cleared
+}
+
+// keepAdoptTaskTranscript validates the task transcript path *path and reports
+// whether it was kept. An empty path is kept. A rejected path is logged and
+// set to "".
+func keepAdoptTaskTranscript(logCtx context.Context, state *session.State, agentID string, path *string, sourceWorktree string) bool {
+	if *path == "" {
+		return true
+	}
+	clean := filepath.Clean(*path)
+	if err := validateAdoptTaskTranscript(state, agentID, clean, sourceWorktree); err != nil {
+		logging.Warn(logCtx, "cleared adopted task transcript path",
+			slog.String("agent_id", agentID),
+			slog.String("error", err.Error()))
+		*path = ""
+		return false
+	}
+	*path = clean
+	return true
+}
+
+// validateAdoptTaskTranscript returns an error if path may not be carried into
+// an adopted session as the transcript of its task agentID. The caller passes
+// path in clean form; it must be absolute and lie in the session directory, for
+// sourceWorktree, of the agent named by state.AgentType. When that agent implements
+// agent.TaskTranscriptMatcher, path must also name the task's transcript in the
+// agent's layout relative to state.TranscriptPath. The checks are lexical; they
+// do not resolve symbolic links.
+func validateAdoptTaskTranscript(state *session.State, agentID, path, sourceWorktree string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%s is not absolute", path)
+	}
+	if state.AgentType == "" {
+		return fmt.Errorf("%s cannot be checked: the session has no agent type", path)
+	}
+	owner, ok := agent.AgentForTranscriptPath(path, sourceWorktree)
+	if !ok {
+		return fmt.Errorf("%s is not owned by a registered agent for %s", path, sourceWorktree)
+	}
+	if owner.Type() != state.AgentType {
+		return fmt.Errorf("%s belongs to %s, but the session state says %s", path, owner.Type(), state.AgentType)
+	}
+	matcher, ok := agent.AsTaskTranscriptMatcher(owner)
+	if !ok {
+		return nil
+	}
+	if !matcher.TaskTranscriptMatches(state.TranscriptPath, state.SessionID, agentID, path) {
+		return fmt.Errorf("%s is not the transcript of task %q in %s's layout", path, agentID, owner.Type())
 	}
 	return nil
 }
@@ -412,25 +501,36 @@ func sessionLastSeen(state *session.State) time.Time {
 	return state.StartedAt
 }
 
-func buildAdoptedSessionState(ctx context.Context, source *session.State) (*session.State, []string, error) {
+// adoptChanges reports what adoption changed or found beyond the session state
+// it writes.
+type adoptChanges struct {
+	// filesTouched lists the target worktree's current file changes, which the
+	// adopted session now tracks.
+	filesTouched []string
+	// clearedTranscriptPaths counts the declared task and subagent inventory
+	// transcript paths dropped by dropInvalidAdoptTaskTranscripts.
+	clearedTranscriptPaths int
+}
+
+func buildAdoptedSessionState(ctx context.Context, source *session.State, sourceWorktree string) (*session.State, adoptChanges, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open current repository: %w", err)
+		return nil, adoptChanges{}, fmt.Errorf("open current repository: %w", err)
 	}
 	defer repo.Close()
 
 	head, err := repo.Head()
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve current HEAD: %w", err)
+		return nil, adoptChanges{}, fmt.Errorf("resolve current HEAD: %w", err)
 	}
 
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve current worktree root: %w", err)
+		return nil, adoptChanges{}, fmt.Errorf("resolve current worktree root: %w", err)
 	}
 	worktreeID, err := paths.GetWorktreeID(worktreeRoot)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve current worktree ID: %w", err)
+		return nil, adoptChanges{}, fmt.Errorf("resolve current worktree ID: %w", err)
 	}
 
 	branch, branchErr := GetCurrentBranch(ctx)
@@ -439,7 +539,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	}
 	filesTouched, err := currentFilesTouched(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, adoptChanges{}, err
 	}
 	untrackedFiles, err := strategy.CollectUntrackedFiles(ctx)
 	if err != nil {
@@ -453,7 +553,19 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	// belongs to the continuing agent session, not the target repository; clearing
 	// or recomputing it from the target repo would drop live transcript capture.
 	adopted.CLIVersion = versioninfo.Version
+	// The path is stored clean so later reads open the file that was validated.
+	// A session recorded without an agent type takes the type of the agent that
+	// owns its transcript, which validateAdoptSourceTranscript established.
 	adopted.TranscriptPath = source.TranscriptPath
+	if adopted.TranscriptPath != "" {
+		adopted.TranscriptPath = filepath.Clean(adopted.TranscriptPath)
+		if adopted.AgentType == "" {
+			if owner, ok := agent.AgentForTranscriptPath(adopted.TranscriptPath, sourceWorktree); ok {
+				adopted.AgentType = owner.Type()
+			}
+		}
+	}
+	cleared := dropInvalidAdoptTaskTranscripts(ctx, &adopted, sourceWorktree)
 	adopted.BaseCommit = head.Hash().String()
 	adopted.RealignAttributionBase(head.Hash().String())
 	adopted.WorktreePath = worktreeRoot
@@ -504,7 +616,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	// current owner, and until then liveness should fall back to the timeout.
 	adopted.Owner = nil
 
-	return &adopted, filesTouched, nil
+	return &adopted, adoptChanges{filesTouched: filesTouched, clearedTranscriptPaths: cleared}, nil
 }
 
 func cloneAdoptSourceState(source *session.State) session.State {
@@ -515,6 +627,8 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	adopted.TurnCheckpointIDs = slices.Clone(source.TurnCheckpointIDs)
 	adopted.UntrackedFilesAtStart = slices.Clone(source.UntrackedFilesAtStart)
 	adopted.FilesTouched = slices.Clone(source.FilesTouched)
+	adopted.TaskRecords = cloneTaskRecords(source.TaskRecords)
+	adopted.SubagentInventory = cloneSubagentInventory(source.SubagentInventory)
 	adopted.TokenUsage = cloneTokenUsage(source.TokenUsage)
 	adopted.SkillEvents = cloneSkillEvents(source.SkillEvents)
 	adopted.PromptAttributions = clonePromptAttributions(source.PromptAttributions)
@@ -540,6 +654,24 @@ func cloneTokenUsage(usage *agent.TokenUsage) *agent.TokenUsage {
 	cloned := *usage
 	cloned.SubagentTokens = cloneTokenUsage(usage.SubagentTokens)
 	return &cloned
+}
+
+func cloneTaskRecords(records []session.TaskRecord) []session.TaskRecord {
+	cloned := slices.Clone(records)
+	for i := range cloned {
+		cloned[i].Files = slices.Clone(records[i].Files)
+		cloned[i].TokenUsage = cloneTokenUsage(records[i].TokenUsage)
+	}
+	return cloned
+}
+
+func cloneSubagentInventory(entries []session.SubagentInventoryEntry) []session.SubagentInventoryEntry {
+	cloned := slices.Clone(entries)
+	for i := range cloned {
+		cloned[i].ObservedTurnIDs = slices.Clone(entries[i].ObservedTurnIDs)
+		cloned[i].FinalizedTurnIDs = slices.Clone(entries[i].FinalizedTurnIDs)
+	}
+	return cloned
 }
 
 func cloneSkillEvents(events []agent.SkillEvent) []agent.SkillEvent {

@@ -1,4 +1,3 @@
-//nolint:govet // Test file with struct field assignments for completeness
 package agent
 
 import (

@@ -7,9 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"charm.land/huh/v2"
+	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
@@ -27,6 +30,10 @@ func NewAccessibleForm(groups ...*huh.Group) *huh.Form {
 	return uiform.New(groups...)
 }
 
+// selectOptionIndent aligns text placed above a select's options with the
+// option text. See uiform.SelectOptionIndent.
+const selectOptionIndent = uiform.SelectOptionIndent
+
 // handleFormCancellation handles cancellation from huh form prompts.
 // User abort (Ctrl+C), timeout, and a cancelled/expired context (when the form
 // ran via RunWithContext and the command's context was cancelled) all print a
@@ -39,6 +46,87 @@ func handleFormCancellation(w io.Writer, action string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("%s prompt failed: %w", action, err)
+}
+
+// promptTerminal is the controlling terminal a prompt falls back to when the
+// command's own stderr is not one: in is the terminal rather than os.Stdin, out
+// is its output handle, close releases both. All three are nil in tests that
+// replace the opener.
+type promptTerminal struct {
+	in    io.Reader
+	out   io.Writer
+	close func() error
+}
+
+// openPromptTerminal is a var so tests can drive an interactive path without a
+// real terminal. Prompt routing is otherwise unreachable under `go test`, where
+// CanPromptInteractively() is false.
+var openPromptTerminal = func() (promptTerminal, error) {
+	tty, err := interactive.OpenPromptTTY()
+	if err != nil {
+		return promptTerminal{}, fmt.Errorf("open prompt terminal: %w", err)
+	}
+	return promptTerminal{in: tty.Input(), out: tty.Output(), close: tty.Close}, nil
+}
+
+// runPromptForm runs form somewhere the user can actually see it, and returns
+// the writer it rendered on so the caller's own message about the outcome lands
+// on the same stream.
+//
+// Neither of a command's streams is guaranteed to be a terminal: stdout is
+// captured by design in places (a `--json` read piped into a parser) and
+// stderr is redirected often enough (`... 2>log`) that picking either
+// unconditionally just moves which redirect breaks the prompt. Bubble Tea makes
+// that failure silent rather than loud — it sets ttyOutput only when the writer
+// is a terminal and then cannot query the window size, so it renders into a 0x0
+// viewport while stdin is still in raw mode: an invisible prompt on an
+// apparently hung command. Its /dev/tty fallback covers input only.
+//
+// So prefer stderr when it IS a terminal, which keeps the escape sequences off
+// a captured stdout, and otherwise fall back to the controlling terminal for
+// both halves. interactive.OpenPromptTTY rather than tea.OpenTTY because its
+// Close releases the read Bubble Tea leaves pending, which otherwise costs a
+// second keypress on Windows.
+//
+// The render writer matters as much as the form: in the fallback branch stderr
+// is by definition not visible, so a cancellation message sent there would
+// explain a prompt the user watched disappear, into a stream they are not
+// reading.
+func runPromptForm(cmd *cobra.Command, form *huh.Form) (render io.Writer, err error) {
+	return runPromptFormWithPreamble(cmd, form, nil)
+}
+
+// runPromptFormWithPreamble is runPromptForm that first writes preamble, when
+// set, on the writer the form renders on: what the question asks about follows
+// the prompt rather than the command's output.
+func runPromptFormWithPreamble(cmd *cobra.Command, form *huh.Form, preamble func(io.Writer) error) (render io.Writer, err error) {
+	render = cmd.ErrOrStderr()
+	if !interactive.IsTerminalWriter(render) {
+		term, terr := openPromptTerminal()
+		if terr != nil {
+			return render, terr
+		}
+		if term.close != nil {
+			defer func() {
+				_ = term.close() //nolint:errcheck // best-effort cleanup after terminal interaction, as plugin_confirm.go does
+			}()
+		}
+		if term.out != nil {
+			render = term.out
+		}
+		if term.in != nil {
+			form = form.WithInput(term.in)
+		}
+	}
+	if preamble != nil {
+		if err := preamble(render); err != nil {
+			return render, err
+		}
+	}
+	// Returned unwrapped: every caller classifies it, matching huh's own
+	// sentinels through handleFormCancellation, and wraps whatever survives
+	// with the name of the thing being prompted for.
+	return render, form.WithOutput(render).RunWithContext(cmd.Context()) //nolint:wrapcheck // classified and wrapped by the caller
 }
 
 // printSessionCommand writes a single session resume command line to w.
@@ -165,4 +253,50 @@ func appendResolved(dirs []string, dir string) []string {
 		return append(dirs, resolved)
 	}
 	return append(dirs, dir)
+}
+
+// confirmPrompt asks one yes/no question through runPromptFormWithPreamble.
+// action names the operation in its messages ("Revocation", "Detach").
+// A decline, or an abort inside the form, is an answer: (false, nil), with
+// "<action> cancelled." on the prompt's writer. A context cancelled out from
+// under it is an interruption, not an answer: it comes back as an error
+// wrapping ctx.Err(), which main matches to exit the way every other Ctrl+C
+// does (quietly, 130, breaking an enclosing shell loop) rather than exiting 0
+// having done nothing. plugin_confirm.go has the same shape;
+// confirmControlPlaneDeletion's nilerr skip is the outlier. That is checked on both sides of the form, because huh opens the TTY
+// regardless of context state, and before the form error is classified,
+// because handleFormCancellation would read context.Canceled as an abort.
+func confirmPrompt(cmd *cobra.Command, action, title, description string, preamble func(io.Writer) error) (bool, error) {
+	if err := promptInterrupted(cmd, action); err != nil {
+		return false, err
+	}
+	confirmed := false
+	prompt := huh.NewConfirm().Title(title).Value(&confirmed)
+	if description != "" {
+		prompt = prompt.Description(description)
+	}
+	render, err := runPromptFormWithPreamble(cmd, NewAccessibleForm(huh.NewGroup(prompt)), preamble)
+	if ierr := promptInterrupted(cmd, action); ierr != nil {
+		return false, ierr
+	}
+	if err != nil {
+		if cerr := handleFormCancellation(render, action, err); cerr != nil {
+			return false, cerr
+		}
+		return false, nil
+	}
+	if !confirmed {
+		fmt.Fprintf(render, "%s cancelled.\n", action)
+		return false, nil
+	}
+	return true, nil
+}
+
+// promptInterrupted reports a command context cancelled out from under a
+// confirmation (see confirmPrompt).
+func promptInterrupted(cmd *cobra.Command, action string) error {
+	if err := cmd.Context().Err(); err != nil {
+		return fmt.Errorf("%s cancelled: %w", strings.ToLower(action), err)
+	}
+	return nil
 }

@@ -178,3 +178,32 @@ func TestEnable_RejectedInvocationLeavesRepoUntouched(t *testing.T) {
 			"%s: a rejected enable must not create .entire/; got: %s", tc.name, out)
 	}
 }
+
+// TestEnableOffersImport_AnchorlessRepoSkipsWithoutFailingEnable is the
+// end-to-end half of the optional-import contract: every imported checkpoint
+// needs a validated anchor commit, and a repo with no commit cannot produce
+// one, so the import is skipped — but enable itself must still succeed.
+//
+// This has to drive the real binary. The unit-level cousin calls
+// runSelectedImports directly, and that function returns nothing, so it is
+// structurally incapable of showing whether enable would have survived. Only
+// an exit code can say that.
+func TestEnableOffersImport_AnchorlessRepoSkipsWithoutFailingEnable(t *testing.T) {
+	t.Parallel()
+	env := NewTestEnv(t)
+	env.InitRepo() // Deliberately no commit: nothing to anchor an import to.
+	writeClaudeHistory(t, env)
+
+	// --import-history is set to make the intent explicit, not because the
+	// branch depends on it: the anchor gate runs above the opt-in check, so an
+	// anchorless repo prints the same thing either way. What this pins is that
+	// enable SURVIVES, which no unit test can show — its cousin calls a
+	// function returning nothing.
+	out, err := env.RunCLIWithError("enable", "--agent", agentClaudeCode, "--import-history", "--telemetry=false")
+	require.NoError(t, err, "an unanchorable import must not fail enable; got: %s", out)
+	require.Contains(t, out, "Ready.", "enable should still complete; got: %s", out)
+	require.Contains(t, out, "skipping agent history import", "the skip must be reported; got: %s", out)
+	require.Contains(t, out, "entire import <agent>", "the skip must name the way back in; got: %s", out)
+	require.NotContains(t, out, "Imported ", "nothing was imported; got: %s", out)
+	require.False(t, env.CheckpointsPresentLocally(), "a skipped import must write no checkpoints")
+}

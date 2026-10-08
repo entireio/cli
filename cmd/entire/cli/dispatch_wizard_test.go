@@ -64,7 +64,7 @@ func TestDispatchWizardState_CloudIgnoresLocalBranchMode(t *testing.T) {
 	state := newDispatchWizardState()
 	state.modeChoice = dispatchWizardModeServer
 	state.currentBranch = testDispatchPreviewBranch
-	state.selectedRepos = []string{"entireio/cli"}
+	state.selectedRepos = []string{"gh/entireio/cli"}
 	state.localBranchMode = dispatchWizardBranchAll
 
 	opts, err := state.resolve()
@@ -103,13 +103,13 @@ func TestDispatchWizardState_CloudResolvesSelectedRepos(t *testing.T) {
 	state := newDispatchWizardState()
 	state.modeChoice = dispatchWizardModeServer
 	state.currentBranch = testDispatchPreviewBranch
-	state.selectedRepos = []string{"entireio/cli"}
+	state.selectedRepos = []string{"gh/entireio/cli"}
 
 	opts, err := state.resolve()
 	if err != nil {
 		t.Fatalf("expected cloud mode to resolve selected repos, got %v", err)
 	}
-	if got := strings.Join(opts.RepoPaths, ","); got != "entireio/cli" {
+	if got := strings.Join(opts.RepoPaths, ","); got != "gh/entireio/cli" {
 		t.Fatalf("expected selected repo path to propagate, got %q", got)
 	}
 }
@@ -246,7 +246,7 @@ func TestBuildDispatchCommand(t *testing.T) {
 		Since:       "7d",
 		Branches:    nil,
 		Voice:       testDispatchVoicePresetMarvin,
-		RepoPaths:   []string{"entireio/cli"},
+		RepoPaths:   []string{"gh/entireio/cli"},
 		AllBranches: false,
 	})
 	if !strings.Contains(command, "entire dispatch") {
@@ -255,7 +255,7 @@ func TestBuildDispatchCommand(t *testing.T) {
 	if !strings.Contains(command, "--voice marvin") {
 		t.Fatalf("expected preset voice flag, got %q", command)
 	}
-	if !strings.Contains(command, "--repos entireio/cli") {
+	if !strings.Contains(command, "--repos gh/entireio/cli") {
 		t.Fatalf("expected cloud repos flag, got %q", command)
 	}
 	if strings.Contains(command, "--local") {
@@ -364,7 +364,7 @@ func TestRunDispatchWizard_ProceedsWhenCurrentBranchCannotBeResolved(t *testing.
 		runDispatchWizardForm = oldRunForm
 	})
 	// Keep the wizard's cloud catalogue off the network.
-	stubDispatchWizardScopeSources(t, []string{"entireio/cli"}, nil, "")
+	stubDispatchWizardScopeSources(t, []string{"gh/entireio/cli"}, nil, "")
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -381,13 +381,13 @@ func TestDispatchWizardState_CloudIgnoresCurrentBranchResolutionError(t *testing
 	state := newDispatchWizardState()
 	state.modeChoice = dispatchWizardModeServer
 	state.currentBranchErr = errors.New("not on a branch (detached HEAD)")
-	state.selectedRepos = []string{"entireio/cli"}
+	state.selectedRepos = []string{"gh/entireio/cli"}
 
 	opts, err := state.resolve()
 	if err != nil {
 		t.Fatalf("expected cloud mode to ignore current branch resolution error, got %v", err)
 	}
-	if got := strings.Join(opts.RepoPaths, ","); got != "entireio/cli" {
+	if got := strings.Join(opts.RepoPaths, ","); got != "gh/entireio/cli" {
 		t.Fatalf("expected selected repo path to propagate, got %q", got)
 	}
 }
@@ -412,8 +412,9 @@ func TestDiscoverAuthenticatedDispatchWizardRepos_FiltersEmptyCheckpointsAndPres
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(slugs, ","); got != "entireio/most-recent,entireio/older" {
-		t.Fatalf("expected recent-first order with empty-checkpoint and blank repos filtered, got %q", got)
+	// The index lists GitHub mirrors bare; the picker names the forge.
+	if got := strings.Join(slugs, ","); got != "gh/entireio/most-recent,gh/entireio/older" {
+		t.Fatalf("expected recent-first, forge-qualified slugs with empty-checkpoint and blank repos filtered, got %q", got)
 	}
 }
 
@@ -447,7 +448,7 @@ func TestDispatchWizardState_JurisdictionIsCloudOnly(t *testing.T) {
 	}
 
 	state.modeChoice = dispatchWizardModeServer
-	state.selectedRepos = []string{"entireio/cli"}
+	state.selectedRepos = []string{"gh/entireio/cli"}
 	opts, err = state.resolve()
 	if err != nil {
 		t.Fatal(err)
@@ -505,5 +506,38 @@ func TestBuildDispatchWizardSummary_Jurisdiction(t *testing.T) {
 	summary = buildDispatchWizardSummary(dispatchpkg.Options{Mode: dispatchpkg.ModeLocal}, "")
 	if strings.Contains(summary, "Jurisdiction") {
 		t.Fatalf("local summary must not mention a jurisdiction, got %q", summary)
+	}
+}
+
+// TestDiscoverRepoSlug_NamesItsForge pins that the wizard's on-disk repo
+// discovery offers an Entire-native checkout as et/<project>/<repo> rather
+// than dropping it, while GitHub checkouts (direct or mirrored) stay gh/ and
+// repos on hosts Entire does not serve are skipped.
+func TestDiscoverRepoSlug_NamesItsForge(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		origin string // empty: no origin remote
+		want   string
+	}{
+		{name: "native origin", origin: "entire://aws-us-east-2.entire.io/et/entirehq/entire-api", want: "et/entirehq/entire-api"},
+		{name: "github origin", origin: "https://github.com/acme/thing.git", want: "gh/acme/thing"},
+		{name: "mirror origin", origin: "entire://cell1.entire.io/gh/acme/thing", want: "gh/acme/thing"},
+		{name: "other host is skipped", origin: "https://gitlab.com/acme/thing.git", want: ""},
+		{name: "no origin is skipped", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			if tt.origin != "" {
+				runExpertsGit(t, dir, "remote", "add", "origin", tt.origin)
+			}
+			if got := discoverRepoSlug(dir); got != tt.want {
+				t.Fatalf("discoverRepoSlug() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

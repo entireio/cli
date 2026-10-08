@@ -220,6 +220,22 @@ func AssertCheckpointExists(t *testing.T, dir string, checkpointID string) {
 		"checkpoint %s metadata not found at %s", checkpointID, path)
 }
 
+// AssertCheckpointHasTaskRecord verifies that a checkpoint materialized at
+// least one durable subagent task metadata file.
+func AssertCheckpointHasTaskRecord(t *testing.T, dir string, checkpointID string) {
+	t.Helper()
+	ref, prefix := checkpointReadRef(), CheckpointPath(checkpointID)+"/"
+	if UsingGitRefs() {
+		ref, prefix = checkpointRefName(checkpointID), ""
+	}
+	for _, path := range strings.Split(GitOutput(t, dir, "ls-tree", "-r", "--name-only", ref), "\n") {
+		if strings.HasPrefix(path, prefix+"tasks/") && strings.HasSuffix(path, "/task.json") {
+			return
+		}
+	}
+	t.Errorf("checkpoint %s has no durable subagent task record", checkpointID)
+}
+
 // WaitForCheckpointExists polls until the checkpoint ID appears on the
 // checkpoint branch and its metadata.json is readable, or fails after timeout.
 func WaitForCheckpointExists(t *testing.T, dir string, checkpointID string, timeout time.Duration) {

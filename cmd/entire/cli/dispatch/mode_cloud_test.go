@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -19,16 +20,19 @@ import (
 // itself should not call this helper.
 func stubCloudDispatchAuth(t *testing.T) {
 	t.Helper()
-	oldResource := lookupResourceToken
+	oldResolve := resolveDataAPI
 	oldRequire := requireSecureDispatchURL
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return testCloudDispatchToken, nil
-	}
+	resolveDataAPI = stubDataAPI
 	requireSecureDispatchURL = func(string) error { return nil }
 	t.Cleanup(func() {
-		lookupResourceToken = oldResource
+		resolveDataAPI = oldResolve
 		requireSecureDispatchURL = oldRequire
 	})
+}
+
+// stubDataAPI returns the test token for the configured data host.
+func stubDataAPI(context.Context) (auth.DataAPI, error) {
+	return auth.DataAPI{BaseURL: api.BaseURL(), Token: testCloudDispatchToken}, nil
 }
 
 func TestServerMode_HappyPath(t *testing.T) {
@@ -49,8 +53,9 @@ func TestServerMode_HappyPath(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
+		// The origin-derived default names its forge.
 		repos, ok := body["repos"].([]any)
-		if !ok || len(repos) != 1 || repos[0] != testRepoFullName {
+		if !ok || len(repos) != 1 || repos[0] != testRepoSlug {
 			t.Fatalf("unexpected repos payload: %v", body)
 		}
 		if _, ok := body["repo"]; ok {
@@ -193,16 +198,24 @@ func TestAPIToDispatch_DerivesRepoURLs(t *testing.T) {
 		Repos: []APIRepo{
 			{FullName: testRepoFullName},
 			{FullName: "bad/repo)"},
+			{FullName: testRepoSlug},
+			{FullName: "et/myproject/service"},
 		},
 	})
-	if len(got.Repos) != 2 {
-		t.Fatalf("expected two repos, got %+v", got.Repos)
+	if len(got.Repos) != 4 {
+		t.Fatalf("expected four repos, got %+v", got.Repos)
 	}
 	if got.Repos[0].URL != testRepoURL {
 		t.Fatalf("unexpected valid repo URL: %q", got.Repos[0].URL)
 	}
 	if got.Repos[1].URL != "" {
 		t.Fatalf("expected unsafe repo URL to be omitted, got %q", got.Repos[1].URL)
+	}
+	if got.Repos[2].FullName != testRepoSlug || got.Repos[2].URL != testRepoURL {
+		t.Fatalf("a gh/-prefixed echo keeps its name and links to github.com, got %+v", got.Repos[2])
+	}
+	if got.Repos[3].FullName != "et/myproject/service" || got.Repos[3].URL != "" {
+		t.Fatalf("a native repo keeps its name and gets no github.com link, got %+v", got.Repos[3])
 	}
 }
 
@@ -369,14 +382,12 @@ func TestServerMode_InsecureHTTPAuthBypassesSecureURLCheck(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	oldResource := lookupResourceToken
+	oldResolve := resolveDataAPI
 	oldNow := nowUTC
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return testCloudDispatchToken, nil
-	}
+	resolveDataAPI = stubDataAPI
 	nowUTC = func() time.Time { return time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC) }
 	t.Cleanup(func() {
-		lookupResourceToken = oldResource
+		resolveDataAPI = oldResolve
 		nowUTC = oldNow
 	})
 
@@ -402,11 +413,9 @@ func TestServerMode_InsecureHTTPAuthBypassesSecureURLCheck(t *testing.T) {
 // fire. If a future refactor drops the check, this test breaks before the
 // leak reaches users.
 func TestServerMode_RejectsPlainHTTPBaseURL(t *testing.T) {
-	oldResource := lookupResourceToken
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return testCloudDispatchToken, nil
-	}
-	t.Cleanup(func() { lookupResourceToken = oldResource })
+	oldResolve := resolveDataAPI
+	resolveDataAPI = stubDataAPI
+	t.Cleanup(func() { resolveDataAPI = oldResolve })
 
 	t.Setenv("ENTIRE_API_BASE_URL", "http://dispatch.example.invalid")
 
@@ -487,5 +496,77 @@ func TestCheckDispatchJurisdiction(t *testing.T) {
 	err = checkDispatchJurisdiction("eu", "us")
 	if err == nil || err.Error() != "dispatch was generated in jurisdiction US, not the requested EU" {
 		t.Fatalf("a wrong-region result must fail, got %v", err)
+	}
+}
+
+// TestServerMode_NativeOriginNamesItsForge pins the fix for `entire dispatch`
+// in an Entire-native checkout: with no --repos, the origin remote
+// entire://<cell>/et/<project>/<repo> must become the et/ slug the server
+// already accepts, not an error claiming dispatch supports GitHub only.
+func TestServerMode_NativeOriginNamesItsForge(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "a.txt", "x")
+	testutil.GitAdd(t, dir, "a.txt")
+	testutil.GitCommit(t, dir, "initial")
+	addOriginRemoteURL(t, dir, "entire://aws-us-east-2.entire.io/et/entirehq/entire-api")
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testDispatchEndpoint {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		repos, ok := body["repos"].([]any)
+		if !ok || len(repos) != 1 || repos[0] != "et/entirehq/entire-api" {
+			t.Fatalf("expected the native origin to dispatch as its et/ slug, got repos payload: %v", body["repos"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"window":             map[string]any{"normalized_since": "2026-04-09T00:00:00Z", "normalized_until": "2026-04-16T00:00:00Z"},
+			"covered_repos":      []string{"entirehq/entire-api"},
+			"repos":              []any{},
+			"generated_markdown": testDispatchGeneratedHello,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer mock.Close()
+
+	stubCloudDispatchAuth(t)
+	t.Setenv("ENTIRE_API_BASE_URL", mock.URL)
+	t.Chdir(dir)
+
+	got, err := Run(context.Background(), Options{Mode: ModeServer, Since: "7d"})
+	if err != nil {
+		t.Fatalf("native checkout should dispatch via its et/ slug, got %v", err)
+	}
+	if got.GeneratedText != testDispatchGeneratedHello {
+		t.Fatalf("unexpected generated text: %q", got.GeneratedText)
+	}
+}
+
+// TestServerMode_UnknownOriginHostIsAnError: an origin on a forge Entire does
+// not host is still refused, and the error names both shapes --repos takes so
+// the user can address the repo explicitly.
+func TestServerMode_UnknownOriginHostIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "a.txt", "x")
+	testutil.GitAdd(t, dir, "a.txt")
+	testutil.GitCommit(t, dir, "initial")
+	addOriginRemoteURL(t, dir, "https://gitlab.com/acme/thing.git")
+
+	stubCloudDispatchAuth(t)
+	t.Setenv("ENTIRE_API_BASE_URL", "http://127.0.0.1:9") // must never be dialed
+	t.Chdir(dir)
+
+	_, err := Run(context.Background(), Options{Mode: ModeServer, Since: "7d"})
+	if err == nil || !strings.Contains(err.Error(), "gitlab.com") || !strings.Contains(err.Error(), "--repos") {
+		t.Fatalf("expected an error naming the host and the --repos escape hatch, got %v", err)
 	}
 }

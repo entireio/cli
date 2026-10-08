@@ -2,6 +2,7 @@ package copilotcli
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,10 +129,10 @@ func TestParseHookEvent_SessionStart_VSCodePayload(t *testing.T) {
 }
 
 func TestParseHookEvent_AgentStop(t *testing.T) {
-	t.Parallel()
-
+	sessionDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_COPILOT_SESSION_DIR", sessionDir)
 	ag := &CopilotCLIAgent{}
-	transcriptPath := "/home/user/.copilot/session-state/" + testSessionID + "/events.jsonl"
+	transcriptPath := filepath.Join(sessionDir, testSessionID, "events.jsonl")
 	input := `{"timestamp":1771480085412,"cwd":"/path/to/repo","sessionId":"` + testSessionID + `","transcriptPath":"` + transcriptPath + `","stopReason":"end_turn"}`
 
 	event, err := ag.ParseHookEvent(context.Background(), HookNameAgentStop, strings.NewReader(input))
@@ -149,6 +150,24 @@ func TestParseHookEvent_AgentStop(t *testing.T) {
 	if event.SessionRef != transcriptPath {
 		t.Errorf("expected transcript path in SessionRef, got %q", event.SessionRef)
 	}
+}
+
+func TestParseHookEvent_SubagentAgentStopEndsPhantomSession(t *testing.T) {
+	sessionDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_COPILOT_SESSION_DIR", sessionDir)
+	const (
+		parentID = testSessionID
+		childID  = "24d8773a-06e8-435c-9257-8ccb89a54f33"
+	)
+	parentTranscript := filepath.Join(sessionDir, parentID, "events.jsonl")
+	input := `{"timestamp":1771480085412,"cwd":"/repo","sessionId":"` + childID + `","transcriptPath":"` + parentTranscript + `","stopReason":"end_turn"}`
+
+	event, err := (&CopilotCLIAgent{}).ParseHookEvent(context.Background(), HookNameAgentStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.SessionEnd, event.Type)
+	require.Equal(t, childID, event.SessionID)
+	require.Empty(t, event.SessionRef)
 }
 
 func TestParseHookEvent_AgentStop_VSCodePayload(t *testing.T) {
@@ -203,6 +222,55 @@ func TestParseHookEvent_AgentStop_ExtractsModel(t *testing.T) {
 	if event.Model != "claude-sonnet-4.6" {
 		t.Errorf("expected model 'claude-sonnet-4.6', got %q", event.Model)
 	}
+}
+
+func TestParseHookEvent_UnsafeSessionIDSkipsTranscriptReads(t *testing.T) {
+	sessionDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_COPILOT_SESSION_DIR", sessionDir)
+	const (
+		unsafeSessionID = "session. "
+		childID         = "24d8773a-06e8-435c-9257-8ccb89a54f33"
+	)
+	transcriptPath := filepath.Join(sessionDir, unsafeSessionID, "events.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o750))
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(strings.Join([]string{
+		`{"type":"session.model_change","data":{"newModel":"claude-sonnet-5"}}`,
+		`{"type":"subagent.started","agentId":"` + childID + `","data":{"toolCallId":"toolu_unsafe","agentType":"general-purpose"}}`,
+	}, "\n")), 0o600))
+	hookInput := func(fields map[string]any) string {
+		raw, err := json.Marshal(fields)
+		require.NoError(t, err)
+		return string(raw)
+	}
+
+	// Model extraction reads transcriptPath and never touches the session ID, so
+	// an unsafe ID does not suppress it — gating it on the ID only dropped model
+	// attribution for an odd-looking session, while anyone able to set a hostile
+	// transcriptPath sends a UUID-shaped sessionId beside it. The unsafe ID is
+	// refused by DispatchLifecycleEvent before any handler runs.
+	t.Run("agent stop reads the model regardless of the session ID", func(t *testing.T) {
+		input := hookInput(map[string]any{
+			"timestamp": 1771480085412, "cwd": "/repo", "sessionId": unsafeSessionID,
+			"transcriptPath": transcriptPath, "stopReason": "end_turn",
+		})
+		event, err := (&CopilotCLIAgent{}).ParseHookEvent(context.Background(), HookNameAgentStop, strings.NewReader(input))
+		require.NoError(t, err)
+		require.NotNil(t, event)
+		require.Equal(t, agent.TurnEnd, event.Type)
+		require.Equal(t, "claude-sonnet-5", event.Model)
+	})
+
+	// Subagent evidence is the real case: it resolves the parent transcript
+	// through the store, so an unsafe ID stops it.
+	t.Run("subagent stop", func(t *testing.T) {
+		input := hookInput(map[string]any{
+			"timestamp": 1771480085412, "cwd": "/repo", "sessionId": unsafeSessionID,
+			"transcriptPath": transcriptPath, "agentId": childID,
+		})
+		event, err := (&CopilotCLIAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+		require.NoError(t, err)
+		require.Nil(t, event)
+	})
 }
 
 func TestParseHookEvent_AgentStop_NoTranscript_EmptyModel(t *testing.T) {
@@ -339,10 +407,17 @@ func TestParseHookEvent_PassthroughHooks_VSCodePayload_ReturnNil(t *testing.T) {
 }
 
 func TestParseHookEvent_SubagentStop(t *testing.T) {
-	t.Parallel()
-
+	sessionDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_COPILOT_SESSION_DIR", sessionDir)
 	ag := &CopilotCLIAgent{}
-	input := `{"timestamp":1771480085412,"cwd":"/path/to/repo","sessionId":"` + testSessionID + `"}`
+	const childID = "24d8773a-06e8-435c-9257-8ccb89a54f33"
+	transcriptPath := filepath.Join(sessionDir, testSessionID, "events.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o750))
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(strings.Join([]string{
+		`{"type":"subagent.started","agentId":"` + childID + `","data":{"toolCallId":"toolu_01PW9oL1QTxu6LbkdKRfuYwX","agentType":"general-purpose","agentDescription":"Check file existence"}}`,
+		`{"type":"tool.execution_complete","agentId":"` + childID + `","data":{"parentToolCallId":"toolu_01PW9oL1QTxu6LbkdKRfuYwX","toolTelemetry":{"restrictedProperties":{"filePaths":"[\"/path/to/repo/child.txt\"]"}}}}`,
+	}, "\n")), 0o600))
+	input := `{"timestamp":1771480085412,"cwd":"/path/to/repo","sessionId":"` + testSessionID + `","transcriptPath":"` + transcriptPath + `","agentId":"` + childID + `","agentType":"general-purpose","agentName":"general-purpose"}`
 
 	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
 
@@ -355,6 +430,43 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	}
 	if event.SessionID != testSessionID {
 		t.Errorf("expected session_id %q, got %q", testSessionID, event.SessionID)
+	}
+	require.Equal(t, "toolu_01PW9oL1QTxu6LbkdKRfuYwX", event.ToolUseID)
+	require.Equal(t, childID, event.SubagentID)
+	require.Equal(t, "general-purpose", event.SubagentType)
+	require.Equal(t, "Check file existence", event.TaskDescription)
+	require.Equal(t, []string{"/path/to/repo/child.txt"}, event.ModifiedFiles)
+	require.True(t, event.Final)
+	require.True(t, event.CompletionWithoutLaunch)
+	require.True(t, event.SubagentTranscriptUnavailable)
+}
+
+func TestParseHookEvent_SubagentStart_NoCorrelationIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	event, err := (&CopilotCLIAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStart,
+		strings.NewReader(`{"timestamp":1771480085412,"cwd":"/repo","sessionId":"`+testSessionID+`","agentName":"general-purpose"}`))
+	require.NoError(t, err)
+	require.Nil(t, event)
+}
+
+func TestParseHookEvent_SubagentStop_RejectsUnsafeParentTranscript(t *testing.T) {
+	sessionDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_COPILOT_SESSION_DIR", sessionDir)
+	ag := &CopilotCLIAgent{}
+	const childID = "24d8773a-06e8-435c-9257-8ccb89a54f33"
+
+	outside := filepath.Join(t.TempDir(), "events.jsonl")
+	require.NoError(t, os.WriteFile(outside, []byte(`{"type":"subagent.started"}`), 0o600))
+	for _, transcriptPath := range []string{outside, filepath.Join(sessionDir, testSessionID, "events.jsonl")} {
+		if strings.HasPrefix(transcriptPath, sessionDir) {
+			require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o750))
+			require.NoError(t, os.Symlink(outside, transcriptPath))
+		}
+		input := `{"timestamp":1771480085412,"cwd":"/repo","sessionId":"` + testSessionID + `","transcriptPath":"` + transcriptPath + `","agentId":"` + childID + `"}`
+		event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+		require.NoError(t, err)
+		require.Nil(t, event)
 	}
 }
 
@@ -389,10 +501,9 @@ func TestParseHookEvent_SubagentSession_LifecycleHooksReturnNil(t *testing.T) {
 	}
 }
 
-// TestParseHookEvent_SubagentSession_SubagentStopStillFires verifies the
-// subagent-stop hook is NOT dropped — it always carries the main session id and
-// drives the task-checkpoint path.
-func TestParseHookEvent_SubagentSession_SubagentStopStillFires(t *testing.T) {
+// TestParseHookEvent_SubagentStopWithoutIdentityIsNoOp verifies a malformed or
+// legacy stop cannot fall through to the old shared empty-key task record.
+func TestParseHookEvent_SubagentStopWithoutIdentityIsNoOp(t *testing.T) {
 	t.Parallel()
 
 	ag := &CopilotCLIAgent{}
@@ -401,8 +512,7 @@ func TestParseHookEvent_SubagentSession_SubagentStopStillFires(t *testing.T) {
 	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
 
 	require.NoError(t, err)
-	require.NotNil(t, event, "subagent-stop must still produce an event")
-	require.Equal(t, agent.SubagentEnd, event.Type)
+	require.Nil(t, event)
 }
 
 func TestParseHookEvent_PassthroughHooks_ReturnNil(t *testing.T) {
@@ -502,8 +612,13 @@ func TestParseHookEvent_AllHookTypes(t *testing.T) {
 			inputTemplate: `{"timestamp":1,"cwd":"/repo","sessionId":"s4","reason":"complete"}`,
 		},
 		{
+			hookName:      HookNameSubagentStart,
+			expectNil:     true,
+			inputTemplate: `{"timestamp":1,"cwd":"/repo","sessionId":"s5","agentName":"general-purpose"}`,
+		},
+		{
 			hookName:      HookNameSubagentStop,
-			expectedType:  agent.SubagentEnd,
+			expectNil:     true,
 			inputTemplate: `{"timestamp":1,"cwd":"/repo","sessionId":"s5"}`,
 		},
 		{
@@ -555,8 +670,8 @@ func TestHookNames_ReturnsAllHooks(t *testing.T) {
 	ag := &CopilotCLIAgent{}
 	names := ag.HookNames()
 
-	if len(names) != 8 {
-		t.Errorf("HookNames() returned %d hooks, want 8", len(names))
+	if len(names) != 9 {
+		t.Errorf("HookNames() returned %d hooks, want 9", len(names))
 	}
 
 	expected := map[string]bool{
@@ -564,6 +679,7 @@ func TestHookNames_ReturnsAllHooks(t *testing.T) {
 		HookNameSessionStart:        false,
 		HookNameAgentStop:           false,
 		HookNameSessionEnd:          false,
+		HookNameSubagentStart:       false,
 		HookNameSubagentStop:        false,
 		HookNamePreToolUse:          false,
 		HookNamePostToolUse:         false,

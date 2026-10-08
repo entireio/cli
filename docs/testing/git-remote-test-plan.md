@@ -125,9 +125,8 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 | F1 | Protected v1 branch (GH013 emulation via bare-remote `pre-receive` hook): loud banner, no retry loop, user push unaffected (regression #1033 — currently unit-only on output classification) | integration | gb |
 | F2 | Hook time bounds: unreachable/hanging remote (HTTPS server that accepts then stalls) → pre-push respects the shared push budget, no per-attempt timeout stacking (regressions #1282, `2e2c1b73a`) | integration (HTTPS) | both |
 | F3 | 401→token-retry over HTTPS for git-refs batch push (v1 version exists: `TestHTTPS_PushFailsWithoutToken`) | integration (HTTPS) | gr |
-| F4 | Checkpoint policy sync in the git-refs pre-push path (regression `7bbdad09c` — policy check was skipped): blocked policy skips checkpoint refs but not the user push | integration | gr |
-| F5 | Detached HEAD: session + checkpoint while detached; `git push origin HEAD:branch`; resume from detached clone (today detach is only setup plumbing) | integration | both |
-| F6 | `entire://` origin with checkpoint_remote configured → checkpoints follow the mirror on the same cluster when the forge matches the provider; provider-host routing only for forge-mismatched mirrors and `file://` (supersedes the #1279 behavior) — currently unit-only; needs a fake provider mapping or injectable host table | integration | gb |
+| F4 | Detached HEAD: session + checkpoint while detached; `git push origin HEAD:branch`; resume from detached clone (today detach is only setup plumbing) | integration | both |
+| F5 | `entire://` origin with checkpoint_remote configured → checkpoints follow the mirror on the same cluster when the forge matches the provider; provider-host routing only for forge-mismatched mirrors and `file://` (supersedes the #1279 behavior) — currently unit-only; needs a fake provider mapping or injectable host table | integration | gb |
 
 ### G. E2E additions (real agents optional, vogon default) — P1
 
@@ -147,14 +146,14 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 
 - **D-1 non-origin reads**: pushing checkpoints to `upstream` (hook `$1`) while every read path fetches from `origin` is incoherent. Decide: teach reads to use the checkpoint-bearing remote (e.g. remember last push remote, or consult `branch.<name>.remote`), or document origin-only support and warn on non-origin pushes. B1/B2/B4 pin whichever is chosen.
 - **D-2 multi-remote queue clearing** (git-refs): queue entries are deleted after a successful push to *any* remote — second remote permanently misses refs. Probably needs per-remote tracking or "delete only when pushed to the fetch-resolution target". D7 pins current behavior until then.
-- **D-3 forge map / provider table**: only `github.com`→`gh` and github/gitlab provider hosts exist; GHE/self-hosted silently degrade (`{repo_id}`, trails). Decide config story before writing tests beyond pinning.
+- **D-3 forge map / provider table**: `checkpoint_remote` accepts github and gitlab (per-feature gates in `docs/development/checkpoint-implementation.md`). Still open: `gitremote.hostToForge` only maps `github.com`→`gh`, so the `entire://` push-through mirror and trails remain github-only; `--issue-link` hard-codes github.com; repo protection keys off the control-plane `provider` enum; and GHE/self-hosted gitlab silently degrade (`{repo_id}`, trails). Decide config story before writing tests beyond pinning.
 
 ## 5. Suggested sequencing
 
-1. **PR 1 — infrastructure**: I-1 (backend matrix for integration), I-2 (real-hook push helpers + RunPrePush stdin), I-4 (hermeticity tripwire). Immediately re-run the existing remote suites under git-refs; expect it to surface real bugs the same way the e2e matrix did (`refs-v1` policy, explain-clone fetch).
+1. **PR 1 — infrastructure**: I-1 (backend matrix for integration), I-2 (real-hook push helpers + RunPrePush stdin), I-4 (hermeticity tripwire). Immediately re-run the existing remote suites under git-refs; expect it to surface real bugs the same way the e2e matrix did (explain-clone fetch).
 2. **PR 2 — P0 hook & cross-machine**: A1–A6, C1–C4, plus e2e G1.
 3. **PR 3 — divergence matrix**: D1–D7 (D4/D5 fill known untested regressions).
 4. **PR 4 — remote-name/upstream pinning**: B1–B7 after a decision on D-1 (or with explicit "pins current behavior" markers).
-5. **PR 5 — OPF + degraded**: E1–E5, F1–F6, G2–G3, C5–C6.
+5. **PR 5 — OPF + degraded**: E1–E5, F1–F5, G2–G3, C5–C6.
 
 Rough sizing: PRs 1–3 are the high-value core (~2/3 of the risk reduction, all P0); 4–5 can trail.

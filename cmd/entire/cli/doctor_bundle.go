@@ -311,9 +311,24 @@ func addCommandOutput(ctx context.Context, zw *zip.Writer, archivePath, dir stri
 func redactBundleEntry(entryName string, contents []byte) []byte {
 	ext := strings.ToLower(path.Ext(entryName))
 	if ext == ".json" || ext == ".jsonl" {
-		out, err := redact.JSONLContent(string(contents))
+		// JSONLBytes, not JSONLContent, and the choice is load-bearing: only
+		// JSONLBytes converts scanner degradation into ErrScannerDegraded, so
+		// with JSONLContent the degradation branch below could never fire and
+		// a bundle built while the sole configured scanner was down would
+		// export under-scanned entries.
+		redacted, err := redact.JSONLBytes(contents)
 		if err == nil {
-			return []byte(out)
+			return redacted.Bytes()
+		}
+		// ErrRedactionIncomplete is not malformed input: the content parsed and
+		// redaction flagged a leaf it could not rewrite. The byte-level
+		// fallback below would ship exactly that leaf (a \uXXXX-escaped secret
+		// survives a byte-level scan verbatim), and the bundle leaves the
+		// machine, so the entry's content is withheld instead.
+		// ErrScannerDegraded is the same do-not-ship condition: the configured
+		// scanner did not run.
+		if errors.Is(err, redact.ErrRedactionIncomplete) || errors.Is(err, redact.ErrScannerDegraded) {
+			return []byte("[entry withheld: redaction could not certify this content: " + err.Error() + "]\n")
 		}
 		// Fall through to plain redaction if the JSON redactor refuses (malformed input, etc.)
 	}

@@ -65,14 +65,6 @@
    ]
   },
   {
-   "name": "cmd:checkpoint-policy",
-   "area": "command",
-   "paths": [
-    "cmd/entire/cli/checkpoint_policy*.go",
-    "cmd/entire/cli/checkpointpolicy/"
-   ]
-  },
-  {
    "name": "cmd:explain",
    "area": "command",
    "paths": [

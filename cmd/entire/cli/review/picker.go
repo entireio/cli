@@ -102,7 +102,7 @@ func RunReviewGuidedSetup(
 
 	launchable := launchableInstalledAgentNames(installed, reviewerFor)
 	if len(launchable) == 0 {
-		return "", settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, `entire configure --agent gemini`, or `entire configure --agent pi`")
+		return "", settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, or `entire configure --agent pi`")
 	}
 
 	profileName = strings.TrimSpace(profileName)
@@ -204,8 +204,8 @@ func promptForReviewFocus(ctx context.Context, current string) (string, string, 
 	picked := DefaultProfileName
 	presets := []struct{ label, value string }{
 		{"General - correctness, regressions, tests", DefaultProfileName},
-		{"Security - auth, injection, secrets", "security"},
-		{"Accessibility - keyboard, screen readers, contrast", "accessibility"},
+		{"Security - auth, injection, secrets", SecurityProfileName},
+		{"Accessibility - keyboard, screen readers, contrast", AccessibilityProfileName},
 	}
 	options := make([]huh.Option[string], 0, len(presets)+1)
 	for _, p := range presets {

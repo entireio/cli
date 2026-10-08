@@ -46,6 +46,12 @@ type fileStore struct {
 	// itself: chmod-ing it is a side effect nobody asked for when it works,
 	// and takes down every Get/Set/Delete when it doesn't.
 	ownsDir bool
+	// pathErr is a rejected ENTIRE_CONFIG_DIR override, carried from
+	// resolveBackendLocked because that function cannot return one. Reported by
+	// ensureDir and dir, both of which run before any filesystem access, so a
+	// relative config dir never gets as far as creating a directory or a lock
+	// file. See userdirs.RequireAbsoluteOverride.
+	pathErr error
 	mu      sync.Mutex
 	// warnedLoosePerms dedupes the loose-permissions warning to once per
 	// store instance — effectively once per CLI invocation, since
@@ -78,6 +84,9 @@ type fileStore struct {
 // lock file below is likewise path-based, since gofrs/flock takes a path and its
 // name is a fixed suffix rather than anything derived.
 func (f *fileStore) dir() (*os.Root, string, error) {
+	if f.pathErr != nil {
+		return nil, "", f.pathErr
+	}
 	abs, err := filepath.Abs(f.path)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolving token store path: %w", err)
@@ -125,6 +134,11 @@ func (f *fileStore) withFileLock(fn func() error) error {
 // directory created here is private either way, since it is new and nothing
 // else was using it.
 func (f *fileStore) ensureDir() error {
+	// Before the MkdirAll below, which would otherwise create the rejected
+	// directory on the way to reporting it.
+	if f.pathErr != nil {
+		return f.pathErr
+	}
 	dir := filepath.Dir(f.path)
 	if f.ownsDir {
 		if err := userdirs.EnsurePrivateDir(dir); err != nil {

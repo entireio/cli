@@ -37,7 +37,7 @@ type activityStyles struct {
 // used by other commands. Activity benefits from wide output for bar charts.
 func getFullTerminalWidth(w io.Writer) int {
 	if f, ok := w.(*os.File); ok {
-		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 { //nolint:gosec // G115: uintptr->int is safe for fd
+		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 {
 			return width
 		}
 	}
@@ -45,7 +45,7 @@ func getFullTerminalWidth(w io.Writer) int {
 		if f == nil {
 			continue
 		}
-		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 { //nolint:gosec // G115: uintptr->int is safe for fd
+		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 {
 			return width
 		}
 	}
@@ -108,22 +108,22 @@ type agentDisplay struct {
 // recognizable; lipgloss resolves them to the best representation for the
 // terminal's color profile. The non-brand "unknown" fallback uses muted gray.
 var agentDisplayMap = map[string]agentDisplay{
-	"claude":   {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
-	"gemini":   {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
-	"amp":      {Label: "Amp", Color: "#f87171", Char: '▓'},         // red-400
-	"codex":    {Label: "Codex", Color: "#818cf8", Char: '▓'},       // indigo-400
-	"opencode": {Label: "OpenCode", Color: "#22d3ee", Char: '▓'},    // cyan-400
-	"copilot":  {Label: "Copilot", Color: "#a78bfa", Char: '▓'},     // violet-400
-	"pi":       {Label: "Pi", Color: "#fbbf24", Char: '▓'},          // amber-400
-	"cursor":   {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
-	"droid":    {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
-	"kiro":     {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
-	"unknown":  {Label: "Unknown", Color: palette.Muted, Char: '░'},
+	activityAgentClaude:   {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
+	activityAgentGemini:   {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
+	activityAgentAmp:      {Label: "Amp", Color: "#f87171", Char: '▓'},         // red-400
+	activityAgentCodex:    {Label: "Codex", Color: "#818cf8", Char: '▓'},       // indigo-400
+	activityAgentOpencode: {Label: "OpenCode", Color: "#22d3ee", Char: '▓'},    // cyan-400
+	activityAgentCopilot:  {Label: "Copilot", Color: "#a78bfa", Char: '▓'},     // violet-400
+	activityAgentPi:       {Label: "Pi", Color: "#fbbf24", Char: '▓'},          // amber-400
+	activityAgentCursor:   {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
+	activityAgentDroid:    {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
+	activityAgentKiro:     {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
+	activityAgentUnknown:  {Label: "Unknown", Color: palette.Muted, Char: '░'},
 }
 
 var agentOrder = []string{
-	"claude", "codex", "gemini", "amp", "opencode",
-	"copilot", "pi", "cursor", "droid", "kiro", "unknown",
+	activityAgentClaude, activityAgentCodex, activityAgentGemini, activityAgentAmp, activityAgentOpencode,
+	activityAgentCopilot, activityAgentPi, activityAgentCursor, activityAgentDroid, activityAgentKiro, activityAgentUnknown,
 }
 
 // renderActivityHeader renders the stat cards, contribution heatmap, and repo
@@ -556,7 +556,7 @@ func renderSessionListN(w io.Writer, sty activityStyles, days []sessionDay, maxD
 
 	for _, day := range days[:maxDays] {
 		displayDate := formatCommitDate(day.Date)
-		sessionWord := "sessions"
+		sessionWord := nounSessions
 		if len(day.Sessions) == 1 {
 			sessionWord = strings.TrimSuffix(sessionWord, "s")
 		}
@@ -664,18 +664,22 @@ func uniqueCommitAgents(c userCommit) []string {
 }
 
 func formatCommitDate(dateStr string) string {
-	t, err := time.ParseInLocation("2006-01-02", dateStr, time.Local)
+	return formatCommitDateAt(dateStr, time.Now(), time.Local)
+}
+
+func formatCommitDateAt(dateStr string, now time.Time, loc *time.Location) string {
+	t, err := time.Parse("2006-01-02", dateStr)
 	if err != nil {
 		return dateStr
 	}
-	now := time.Now().Local()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	days := int(today.Sub(t).Hours() / 24)
-
-	switch days {
-	case 0:
+	now = now.In(loc)
+	// Represent calendar dates in UTC: local days can span 23 or 25 hours,
+	// and DST can even skip local midnight.
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	switch {
+	case t.Equal(today):
 		return t.Format("Monday 2 Jan") + " (today)"
-	case 1:
+	case t.Equal(today.AddDate(0, 0, -1)):
 		return t.Format("Monday 2 Jan") + " (yesterday)"
 	default:
 		return t.Format("Monday 2 Jan")

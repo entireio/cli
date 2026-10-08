@@ -23,13 +23,33 @@ type SessionReader interface {
 	ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, string, error)
 }
 
+// TaskReader provides read access to the subagent task records a checkpoint
+// carries at tasks/<tool_use_id>/ (task.json plus an optional
+// agent-<agent_id>.jsonl transcript).
+type TaskReader interface {
+	// ListTasks returns every task record in the checkpoint, ordered by
+	// StartedAt then ToolUseID. A checkpoint without task records yields an
+	// empty list. A record that cannot be read is reported in its entry's Err
+	// rather than failing the list. Returns ErrCheckpointNotFound when the
+	// checkpoint does not exist.
+	ListTasks(ctx context.Context, checkpointID id.CheckpointID) ([]TaskEntry, error)
+
+	// ReadTaskTranscript returns the stored subagent transcript for
+	// toolUseID. Returns ErrTaskNotFound when the checkpoint has no such
+	// record, and an ErrNoTranscript-wrapped error naming the recorded reason
+	// when the record exists without a transcript.
+	ReadTaskTranscript(ctx context.Context, checkpointID id.CheckpointID, toolUseID string) ([]byte, error)
+}
+
 // PersistentStore provides the production persistent checkpoint storage surface:
-// checkpoint-level reads, session-level reads, and the unified Write. Writes go
-// through Writer.Write(ctx, WriteRequest); the concrete per-operation methods
-// live on the git implementation as the methods Write dispatches to.
+// checkpoint-level reads, session-level reads, subagent task reads, and the
+// unified Write. Writes go through Writer.Write(ctx, WriteRequest); the
+// concrete per-operation methods live on the git implementation as the methods
+// Write dispatches to.
 type PersistentStore interface {
 	CheckpointReader
 	SessionReader
+	TaskReader
 	Writer
 }
 

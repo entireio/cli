@@ -75,6 +75,47 @@ type TaskPayload struct {
 	TranscriptUnavailableReason string
 }
 
+// TaskRecord is the persisted task.json of one materialized subagent task
+// record: tasks/<tool_use_id>/task.json at the checkpoint root. The writer
+// builds it from a TaskPayload (see its fields for semantics); readers get it
+// back through TaskReader.ListTasks.
+type TaskRecord struct {
+	ToolUseID       string            `json:"tool_use_id"`
+	AgentID         string            `json:"agent_id,omitempty"`
+	SubagentType    string            `json:"subagent_type,omitempty"`
+	TaskDescription string            `json:"task_description,omitempty"`
+	Files           []string          `json:"files,omitempty"`
+	TokenUsage      *types.TokenUsage `json:"token_usage,omitempty"`
+	// StartedAt/CompletedAt use omitzero (not omitempty, which classic
+	// encoding/json never treats a struct as "empty" for): CompletedAt's
+	// absence from the JSON is exactly what marks the task in flight when
+	// this checkpoint was materialized, so a zero time.Time must actually be
+	// omitted, not serialized as "0001-01-01T00:00:00Z".
+	StartedAt                   time.Time `json:"started_at,omitzero"`
+	CompletedAt                 time.Time `json:"completed_at,omitzero"`
+	TranscriptUnavailableReason string    `json:"transcript_unavailable_reason,omitempty"`
+}
+
+// TaskEntry is one tasks/<tool_use_id>/ directory of a committed checkpoint,
+// as TaskReader.ListTasks reports it.
+type TaskEntry struct {
+	// ToolUseID is the directory name. It is set even when Err is, so a
+	// caller can name the record it could not read.
+	ToolUseID string
+
+	// Record is the parsed task.json. Zero when Err is non-nil.
+	Record TaskRecord
+
+	// TranscriptStored reports whether the record's agent-<agent_id>.jsonl
+	// transcript is present in the checkpoint. It is derived from the stored
+	// tree, not from task.json.
+	TranscriptStored bool
+
+	// Err is set when this record could not be read or failed validation.
+	// The rest of the list is still returned.
+	Err error
+}
+
 // WriteOptions contains options for writing a persistent checkpoint.
 type WriteOptions struct {
 	// CheckpointID is the stable 12-hex-char identifier
@@ -95,12 +136,19 @@ type WriteOptions struct {
 
 	// CommitSHA links this checkpoint to an existing commit without a trailer.
 	// It is an anchor — "imported at this point in time" — not attribution.
-	// Currently set only by `entire import`: imported history has no
+	// Set only on the import path — the `entire import` command and `entire
+	// enable`'s optional history import: imported history has no
 	// Entire-Checkpoint trailer (we never rewrite existing commits), so import
-	// stamps the resolved anchor commit here (the default branch head when
-	// resolvable; see resolveImportLinkCommitSHA for the fallback order).
-	// Empty for all other writers. This comment is the canonical description;
-	// Metadata.CommitSHA and CheckpointSummary.CommitSHA point back here.
+	// stamps the resolved anchor commit here. Per turn that is the commit the
+	// transcript recorded when one resolves and is reachable (see
+	// turnAnchorResolver), otherwise the resolved head fallback (see
+	// resolveImportLinkCommitSHA for the order). An import that can resolve no
+	// anchor at all is refused before it writes, so an import written by a
+	// current CLI always carries one; imports predating that enforcement may
+	// not, so readers must still handle empty.
+	// Empty for all other writers, which is why the field is omitempty. This
+	// comment is the canonical description; Metadata.CommitSHA and
+	// CheckpointSummary.CommitSHA point back here.
 	CommitSHA string
 
 	// Transcript is the session transcript content (full.jsonl).

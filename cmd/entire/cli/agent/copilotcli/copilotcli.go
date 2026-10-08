@@ -45,9 +45,6 @@ func (c *CopilotCLIAgent) Description() string {
 	return "Copilot CLI - GitHub's AI-powered coding agent"
 }
 
-// IsPreview returns true because this is a new integration.
-func (c *CopilotCLIAgent) IsPreview() bool { return true }
-
 // DetectPresence checks if Entire hooks are installed in the Copilot CLI config.
 // Delegates to AreHooksInstalled which checks .github/hooks/entire.json for Entire hook entries.
 func (c *CopilotCLIAgent) DetectPresence(ctx context.Context) (bool, error) {
@@ -65,22 +62,31 @@ func (c *CopilotCLIAgent) GetSessionDir(_ string) (string, error) {
 		return override, nil
 	}
 
-	// Copilot stores its config and state under COPILOT_HOME when that is set,
-	// falling back to ~/.copilot. Honouring it points transcript resolution at
-	// wherever the agent actually wrote, rather than at a directory it never
-	// used — which is what a user with COPILOT_HOME set, or a harness that
-	// isolates Copilot state per session, would otherwise get.
-	if copilotHome := os.Getenv("COPILOT_HOME"); copilotHome != "" {
-		return filepath.Join(copilotHome, "session-state"), nil
-	}
-
-	homeDir, err := os.UserHomeDir()
+	copilotHome, err := c.SessionHome()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
-
-	return filepath.Join(homeDir, ".copilot", "session-state"), nil
+	return filepath.Join(copilotHome, "session-state"), nil
 }
+
+// SessionHome returns Copilot CLI's home directory: $COPILOT_HOME or ~/.copilot.
+//
+// Copilot stores its config and state under COPILOT_HOME when that is set.
+// Honouring it points transcript resolution at wherever the agent actually
+// wrote, rather than at a directory it never used — which is what a user with
+// COPILOT_HOME set, or a harness that isolates Copilot state per session,
+// would otherwise get.
+func (c *CopilotCLIAgent) SessionHome() (string, error) {
+	return agent.ResolveHome("COPILOT_HOME", ".copilot") //nolint:wrapcheck // the error already names the override and its value
+}
+
+// HomeLayout reports that Copilot CLI keeps one directory per session under
+// session-state.
+func (c *CopilotCLIAgent) HomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"session-state"}}
+}
+
+var _ agent.HomeLayoutProvider = (*CopilotCLIAgent)(nil)
 
 // ResolveSessionFile returns the path to a Copilot CLI session transcript file.
 // Copilot CLI stores transcripts at <sessionDir>/<sessionId>/events.jsonl.
@@ -176,3 +182,8 @@ func (c *CopilotCLIAgent) ChunkTranscript(_ context.Context, content []byte, max
 func (c *CopilotCLIAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return agent.ReassembleJSONL(chunks), nil
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Copilot CLI
+// publishes into the environment of the processes it spawns — the same ID that
+// names the session's directory under Copilot's session-state store.
+func (c *CopilotCLIAgent) CallerSessionEnvVar() string { return "COPILOT_AGENT_SESSION_ID" }

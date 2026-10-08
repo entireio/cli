@@ -43,20 +43,25 @@ var vsCodeEventToHookNames = map[string][]string{
 	VSCodeEventPreToolUse:       {HookNamePreToolUse},
 	VSCodeEventPostToolUse:      {HookNamePostToolUse},
 	VSCodeEventPreCompact:       {},
-	VSCodeEventSubagentStart:    {},
+	VSCodeEventSubagentStart:    {HookNameSubagentStart},
 }
 
 type hookEnvelope struct {
-	Host           HookHost
-	SessionID      string
-	Prompt         string
-	TranscriptPath string
-	HookEventName  string
-	Source         string
-	InitialPrompt  string
-	StopReason     string
-	Reason         string
-	Timestamp      time.Time
+	Host             HookHost
+	SessionID        string
+	Prompt           string
+	TranscriptPath   string
+	CWD              string
+	AgentID          string
+	AgentType        string
+	AgentName        string
+	AgentDescription string
+	HookEventName    string
+	Source           string
+	InitialPrompt    string
+	StopReason       string
+	Reason           string
+	Timestamp        time.Time
 }
 
 func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
@@ -70,15 +75,20 @@ func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
 	}
 
 	env := &hookEnvelope{
-		Host:           detectHookHost(raw),
-		SessionID:      firstString(raw, "sessionId", "session_id"),
-		Prompt:         firstString(raw, "prompt"),
-		TranscriptPath: firstString(raw, "transcriptPath", "transcript_path"),
-		HookEventName:  firstString(raw, "hookEventName"),
-		Source:         firstString(raw, "source"),
-		InitialPrompt:  firstString(raw, "initialPrompt"),
-		StopReason:     firstString(raw, "stopReason"),
-		Reason:         firstString(raw, "reason"),
+		Host:             detectHookHost(raw),
+		SessionID:        firstString(raw, "sessionId", "session_id"),
+		Prompt:           firstString(raw, "prompt"),
+		TranscriptPath:   firstString(raw, "transcriptPath", "transcript_path"),
+		CWD:              firstString(raw, "cwd"),
+		AgentID:          firstString(raw, "agentId", "agent_id"),
+		AgentType:        firstString(raw, "agentType", "agent_type"),
+		AgentName:        firstString(raw, "agentName", "agent_name"),
+		AgentDescription: firstString(raw, "agentDescription", "agent_description"),
+		HookEventName:    firstString(raw, "hookEventName"),
+		Source:           firstString(raw, "source"),
+		InitialPrompt:    firstString(raw, "initialPrompt"),
+		StopReason:       firstString(raw, "stopReason"),
+		Reason:           firstString(raw, "reason"),
 	}
 
 	ts, err := ParseTimestamp(raw["timestamp"])

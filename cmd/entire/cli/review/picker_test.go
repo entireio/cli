@@ -184,10 +184,10 @@ func TestBuildReviewPickerFields_StructureWithDiscovery(t *testing.T) {
 func TestBuildReviewPickerFields_EmptyBuiltinsRendersNote(t *testing.T) {
 	t.Parallel()
 	fields := review.BuildReviewPickerFields(
-		"gemini",
+		"codex",
 		nil,
 		nil,
-		[]skilldiscovery.InstallHint{{Message: "install gemini-code-review"}},
+		[]skilldiscovery.InstallHint{{Message: "install codex-review-pack"}},
 		"",
 		nil, nil, nil,
 	)

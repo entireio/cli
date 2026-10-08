@@ -32,30 +32,7 @@ func mustRefName(t *testing.T, cid id.CheckpointID) plumbing.ReferenceName {
 // pointing at HEAD, plus a fresh bare remote. Returns (workDir, bareDir, refs).
 func setupRepoWithCheckpointRefs(t *testing.T) (string, string, []plumbing.ReferenceName) {
 	t.Helper()
-
-	workDir := t.TempDir()
-	testutil.InitRepo(t, workDir)
-	testutil.WriteFile(t, workDir, "README.md", "# test")
-	testutil.GitAdd(t, workDir, "README.md")
-	testutil.GitCommit(t, workDir, "init")
-
-	repo, err := git.PlainOpen(workDir)
-	require.NoError(t, err)
-	head, err := repo.Head()
-	require.NoError(t, err)
-
-	refs := []plumbing.ReferenceName{
-		mustRefName(t, id.MustCheckpointID("a1b2c3d4e5f6")),
-		mustRefName(t, id.MustCheckpointID("b2c3d4e5f6a1")),
-	}
-	for _, ref := range refs {
-		require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, head.Hash())))
-	}
-
-	bareDir := t.TempDir()
-	testutil.RunGit(t, bareDir, "init", "--bare")
-
-	return workDir, bareDir, refs
+	return setupRepoWithNCheckpointRefs(t, 2)
 }
 
 func TestPartitionLocalRefs(t *testing.T) {
@@ -185,10 +162,18 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	testutil.GitCommit(t, workDir, "add c")
 	setRef(head())
 
-	// C3 is not a descendant of the remote's C2 → the plain push is rejected and
-	// recovery replays C3's delta onto C2.
-	require.NoError(t, pushCheckpointRefWithRecovery(ctx, bareDir, ref),
-		"diverged ref should be recovered by fetch+replay, not rejected")
+	// C3 is not a descendant of the remote's C2 → the batch and individual
+	// pushes are rejected, then recovery replays C3's delta onto C2.
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
+	restore := captureStderr(t)
+	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	output := restore()
+	require.NoError(t, pushErr, "diverged ref should be recovered by fetch+replay, not rejected")
+	assert.Equal(t, 1, pushed)
+	assert.NotContains(t, output, "Warning:", "plain divergence should recover quietly")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "recovered ref landed and must leave the queue")
 
 	files := remoteRefFiles(t, bareDir, ref)
 	assert.Contains(t, files, "b.txt", "remote-only change must be preserved (not overwritten)")
@@ -254,27 +239,6 @@ func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, refs, remaining, "disabled push leaves refs queued")
-}
-
-func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
-	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
-	t.Chdir(workDir)
-	paths.ClearWorktreeRootCache()
-
-	repo, err := git.PlainOpen(workDir)
-	require.NoError(t, err)
-	writeUnsupportedCheckpointPolicy(t, repo)
-	queue := enqueueRefs(t, repo, refs)
-
-	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
-	require.ErrorContains(t, err, "checkpoint policy")
-	assert.Equal(t, 0, pushed)
-
-	remaining, err := queue.Drain()
-	require.NoError(t, err)
-	assert.ElementsMatch(t, refs, remaining, "blocked push leaves refs queued")
-
-	assertRefsAbsentFromRemote(t, bareDir, refs, "blocked push must not reach the remote")
 }
 
 func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {

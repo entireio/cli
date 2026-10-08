@@ -190,6 +190,45 @@ func (s *kindRoutingStore) ReadSessionMetadataAndPrompts(ctx context.Context, ch
 	return mp.meta, mp.prompts, err
 }
 
+// ListTasks routes like the session reads: a checkpoint that is absent from
+// (or errors in) a non-final store falls through to the next.
+func (s *kindRoutingStore) ListTasks(ctx context.Context, checkpointID id.CheckpointID) ([]TaskEntry, error) {
+	return firstResolved(s.readOrder(checkpointID),
+		func(st PersistentStore) ([]TaskEntry, error) {
+			return st.ListTasks(ctx, checkpointID)
+		},
+		sessionNotFound[[]TaskEntry],
+	)
+}
+
+// taskTranscriptResult carries a definitive per-store answer through
+// firstResolved, which otherwise falls through on any error.
+type taskTranscriptResult struct {
+	transcript []byte
+	err        error
+}
+
+// ReadTaskTranscript routes like ListTasks, except that a store which holds the
+// checkpoint answers definitively: "no such task" or "no transcript stored"
+// from the store that has the checkpoint must not fall through and be
+// reported by the next store as "checkpoint not found".
+func (s *kindRoutingStore) ReadTaskTranscript(ctx context.Context, checkpointID id.CheckpointID, toolUseID string) ([]byte, error) {
+	res, err := firstResolved(s.readOrder(checkpointID),
+		func(st PersistentStore) (taskTranscriptResult, error) {
+			transcript, readErr := st.ReadTaskTranscript(ctx, checkpointID, toolUseID)
+			if errors.Is(readErr, ErrTaskNotFound) || errors.Is(readErr, ErrNoTranscript) {
+				return taskTranscriptResult{err: readErr}, nil
+			}
+			return taskTranscriptResult{transcript: transcript}, readErr //nolint:wrapcheck // in-package store error surfaced verbatim
+		},
+		func(taskTranscriptResult, error) bool { return false },
+	)
+	if err != nil {
+		return nil, err
+	}
+	return res.transcript, res.err
+}
+
 // Write routes a create (Session) to the configured primary (+ mirrors): a new
 // checkpoint's ID is already minted to match the primary's format (see
 // checkpoint.GenerateCheckpointID). Backfills target an EXISTING checkpoint,

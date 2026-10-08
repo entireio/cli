@@ -156,11 +156,16 @@ type StepContext struct {
 	AgentType types.AgentType
 
 	// Transcript position at step/turn start - tracks what was added during this step
-	StepTranscriptIdentifier string // Last identifier when step started (UUID for Claude, message ID for Gemini)
+	StepTranscriptIdentifier string // Last identifier when step started (e.g., message UUID for Claude Code)
 	StepTranscriptStart      int    // Transcript line count when this step/turn started
 
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage
+
+	// SubagentLedgerVersion is the authoritative inventory version observed
+	// while token evidence was extracted. nil means no inventory snapshot;
+	// a pointer to zero is a valid snapshot before the first child is observed.
+	SubagentLedgerVersion *uint64
 }
 
 // TaskStepContext contains all information needed for saving a task step checkpoint.

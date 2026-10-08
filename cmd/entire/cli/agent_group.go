@@ -16,7 +16,7 @@ import (
 // newAgentGroupCmd builds `entire agent`. Replaces `entire configure`.
 func newAgentGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "agent",
+		Use:   cmdAgent,
 		Short: "Manage agent integrations (add, remove, list)",
 		Long: `Manage agent integrations in this repository.
 
@@ -57,7 +57,7 @@ func runAgentMenu(ctx context.Context, w io.Writer) error {
 
 func newAgentListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List installed and available agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAgentList(cmd.Context(), cmd.OutOrStdout())
@@ -100,7 +100,7 @@ func newAgentAddCmd() *cobra.Command {
 
 Examples:
   entire agent add claude-code
-  entire agent add gemini`,
+  entire agent add codex`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]

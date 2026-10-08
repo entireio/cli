@@ -70,9 +70,10 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 }
 
 // pushCheckpointRefWithRecovery pushes a single checkpoint ref fast-forward-only;
-// on rejection — typically the ref diverged on the remote (the same checkpoint
-// re-written elsewhere) — it fetches the remote ref and replays the local-only
-// commits on top via fetchAndRebaseRefCommon, then retries. The retry is still
+// confirmed remote policy/hook rejections return immediately. Other failures —
+// typically the ref diverged on the remote (the same checkpoint re-written
+// elsewhere) — fetch the remote ref and replay the local-only commits on top via
+// fetchAndRebaseRefCommon, then retry. The retry is still
 // non-force: after the replay the local ref is a fast-forward over the remote, so
 // the remote commit is preserved as an ancestor rather than overwritten. The
 // cherry-pick is delta-based, so non-overlapping changes merge; a genuine overlap
@@ -85,13 +86,58 @@ func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumb
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
 
-	if err := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref}); err == nil {
+	pushErr := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+	if pushErr == nil {
 		return nil
 	}
+	if checkpointRefRejectionReason(pushErr) != "" {
+		// Fetch+replay cannot fix a remote policy/hook rejection. If the ref
+		// already exists remotely, replay would needlessly rewrite local
+		// commits (including their committer timestamps) on every push.
+		return pushErr
+	}
 	if err := fetchAndRebaseRefCommon(ctx, target, ref); err != nil {
-		return fmt.Errorf("sync diverged checkpoint ref %s: %w", ref, err)
+		// Recovery is speculative: a missing remote ref may mean the push was
+		// blocked, not that it diverged. Keep the push failure primary.
+		return &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
 	}
 	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+}
+
+// checkpointRefRecoveryError keeps both failures inspectable, while allowing the
+// terminal to show just the bounded push reason, not the speculative fetch error.
+type checkpointRefRecoveryError struct {
+	pushErr     error
+	recoveryErr error
+}
+
+func (e *checkpointRefRecoveryError) Error() string {
+	return fmt.Sprintf("%v (checkpoint ref recovery failed: %v)", e.pushErr, e.recoveryErr)
+}
+
+func (e *checkpointRefRecoveryError) Unwrap() []error {
+	return []error{e.pushErr, e.recoveryErr}
+}
+
+// checkpointRefRejectionReason reports only confirmed remote rejections. Network
+// failures must not be described as rejections, and plain divergence stays quiet.
+func checkpointRefRejectionReason(err error) string {
+	var recoveryErr *checkpointRefRecoveryError
+	if errors.As(err, &recoveryErr) {
+		err = recoveryErr.pushErr
+	}
+	if err == nil {
+		return ""
+	}
+	detail := err.Error() // Already collapsed and elided by remote.PushWithOptions.
+	if strings.Contains(detail, "[remote rejected]") || isProtectedRefRejection(detail) {
+		var pushErr *remote.PushError
+		if errors.As(err, &pushErr) {
+			return pushErr.Output() // Keep line breaks for the terminal, not log formatting.
+		}
+		return detail
+	}
+	return ""
 }
 
 // pushRefIfNeeded pushes a ref to the given target if it has unpushed changes.
@@ -140,7 +186,7 @@ func hasUnpushedBranchRef(repo *git.Repository, remoteName string, localHash plu
 
 	// If local and remote point to same commit, nothing to sync
 	// This is the only case where we skip - any difference needs handling
-	return localHash != remoteRef.Hash()
+	return !localHash.Equal(remoteRef.Hash())
 }
 
 func displayPushTarget(target string) string {
@@ -154,6 +200,51 @@ func displayPushTarget(target string) string {
 // fetch+rebase, and retry — per-attempt timeouts can stack to ~3x. var so tests
 // can shrink it.
 var checkpointPushBudget = 2 * time.Minute
+
+// checkpointFlushBudget bounds the individual-retry fallback in
+// flushCheckpointRefsQueue as a whole, which checkpointPushBudget cannot: that
+// one caps a single ref, and the fallback walks the queue serially, so a backlog
+// multiplies it. A healthy push costs roughly one SSH round-trip per ref, so a
+// few hundred queued refs is already tens of minutes of a `git push` that looks
+// hung; when the destination is unreachable every ref instead pays the full
+// per-ref budget and the same queue runs for hours. Refs that do not fit stay
+// queued and go out on the next push, so this bounds progress, never data.
+//
+// Applied as a context deadline, not a wall-clock check between refs, so it can
+// cut a ref that is already hung rather than waiting out its own budget first.
+// context.WithTimeout keeps the earlier of parent and child deadlines, so the
+// per-ref checkpointPushBudget automatically shrinks to whatever is left.
+//
+// Declared as a var so tests can shrink it.
+var checkpointFlushBudget = 2 * time.Minute
+
+// maxConsecutiveRefPushFailures stops the individual-retry fallback once this
+// many refs in a row have failed. The fallback exists to isolate the odd
+// diverged or blocked ref from an otherwise pushable queue; once several fail in
+// a row the cause is the destination rather than the refs, and walking the rest
+// of the queue only repeats it. A success resets the count, so one poisoned ref
+// — say a single checkpoint tripping push protection — does not strand the refs
+// queued behind it.
+const maxConsecutiveRefPushFailures = 5
+
+// flushAbortReason reports why the individual-retry fallback should stop before
+// the end of the queue, or "" to continue.
+//
+// The reason is a bare phrase: it is printed inside the user's `git push` and
+// names what stopped the retry, never a diagnosis of the underlying failure —
+// the same discipline flushCheckpointRefsQueue's retry line follows, and for the
+// same reason. A stalled remote and a rejecting one abort identically here.
+func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Sprintf("budget (%s) exhausted", checkpointFlushBudget)
+	case ctx.Err() != nil:
+		return "interrupted"
+	case consecutiveFailures >= maxConsecutiveRefPushFailures:
+		return fmt.Sprintf("%d consecutive failures", consecutiveFailures)
+	}
+	return ""
+}
 
 // doPushRef pushes the given ref to the target with fetch+rebase recovery.
 // The target can be a remote name or a URL.
@@ -499,7 +590,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// Span the fetch separately so a slow sync can be attributed to the network
 	// fetch versus the local reconcile/rebase that follows it.
 	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	fetchOutput, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
@@ -507,7 +598,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	fetchSpan.RecordError(fetchErr)
 	fetchSpan.End()
 	if fetchErr != nil {
-		return fmt.Errorf("fetch failed: %s", fetchOutput)
+		return fmt.Errorf("fetch failed: %w", fetchErr)
 	}
 
 	repo, err := OpenRepository(ctx)
@@ -549,7 +640,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	}
 
 	// If local is already at or behind remote, fast-forward
-	if localRef.Hash() == remoteRef.Hash() {
+	if localRef.Hash().Equal(remoteRef.Hash()) {
 		return advance(remoteRef.Hash())
 	}
 
@@ -564,7 +655,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	}
 
 	// If local is ancestor of remote (merge base == local), fast-forward to remote
-	if mergeBase == localRef.Hash() {
+	if mergeBase.Equal(localRef.Hash()) {
 		if err := advance(remoteRef.Hash()); err != nil {
 			return fmt.Errorf("failed to fast-forward ref: %w", err)
 		}

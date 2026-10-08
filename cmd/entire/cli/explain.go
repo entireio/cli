@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -34,6 +33,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/redact"
 
 	"charm.land/lipgloss/v2"
@@ -235,6 +236,7 @@ func newExplainCmd() *cobra.Command {
 	var searchAllFlag bool
 	var jsonFlag bool
 	var transcriptFlag bool
+	var taskFlag string
 	var repoFlag string
 	var insecureHTTPFlag bool
 	var summaryTimeoutSecondsFlag int
@@ -258,7 +260,8 @@ Viewing specific items:
   entire checkpoint explain --commit <ref>        Force interpretation as commit ref
 
 Checkpoints in another repo:
-  entire checkpoint explain <id> --repo owner/name
+  entire checkpoint explain <id> --repo gh/owner/name
+  entire checkpoint explain <id> --repo et/project/repo
                  Explain a checkpoint owned by another repository — the
                  drill-down for a cross-repo 'entire search' hit. Reads it from
                  that repo's Entire API; nothing is written to this repo.
@@ -276,7 +279,8 @@ Output verbosity levels (when explaining a specific item):
 
 Machine-readable export modes (additive surface for external consumers):
   --json           Metadata-only JSON. Lists checkpoints when no target is given;
-                   emits a single checkpoint envelope when a target is supplied.
+                   emits a single checkpoint envelope when a target is supplied,
+                   including its subagent task records under "tasks".
                    Transcript bytes are NEVER embedded in the JSON envelope.
   --transcript     Stream stored checkpoint transcript bytes (JSONL) to stdout
                    for the selected session. Same bytes as --raw-transcript
@@ -284,12 +288,18 @@ Machine-readable export modes (additive surface for external consumers):
   --session-index  Pick a session within a multi-session checkpoint (0-based).
                    Defaults to the latest session. Only meaningful with
                    --transcript or --raw-transcript.
+  --task           With --transcript, stream a subagent's stored transcript
+                   instead, selected by tool_use_id or agent_id (as listed
+                   under "tasks" in --json).
   --limit          Cap the number of checkpoints returned by the list view.
                    Defaults to 100. When the cap is hit, a stderr note
                    says how many were skipped. Only meaningful with --json.
 
 Summary generation:
-  --generate    Generate an AI summary for the checkpoint
+  --generate    Generate an AI summary for the checkpoint. This is the only
+                part of this command that writes: it stores the summary on the
+                checkpoint and spends tokens with the configured summary
+                provider. Every other mode only reads.
   --force       Regenerate even if a summary already exists (requires --generate)
 
 Performance options:
@@ -331,6 +341,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 				rawTranscript:         rawTranscriptFlag,
 				transcript:            transcriptFlag,
 				json:                  jsonFlag,
+				task:                  taskFlag,
 				sessionIndex:          sessionIndex,
 				listLimit:             listLimit,
 				summaryTimeoutSeconds: summaryTimeoutSecondsFlag,
@@ -359,6 +370,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 						json:          jsonFlag,
 						transcript:    transcriptFlag,
 						rawTranscript: rawTranscriptFlag,
+						task:          taskFlag,
 						sessionIndex:  crossRepoExplainSessionIndex(cmd.Flags().Changed("session-index"), sessionIndex),
 						verbose:       !shortFlag,
 						full:          fullFlag,
@@ -385,6 +397,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 					transcript:     transcriptFlag,
 					rawTranscript:  rawTranscriptFlag,
 					sessionIndex:   sessionIndex,
+					task:           taskFlag,
 					listLimit:      listLimit,
 				})
 			}
@@ -406,15 +419,18 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Regenerate summary even if one already exists (requires --generate)")
 	cmd.Flags().BoolVar(&searchAllFlag, "search-all", false, "Search all commits (no branch/depth limit, may be slow)")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output metadata as JSON (no transcript bytes)")
-	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream stored checkpoint transcript bytes to stdout")
+	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream stored checkpoint transcript bytes to stdout (a session's, or a subagent's with --task)")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
+	cmd.Flags().StringVar(&taskFlag, "task", "", "Subagent task (tool_use_id or agent_id) whose stored transcript --transcript streams")
 	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
-	cmd.Flags().StringVar(&repoFlag, "repo", "", "Explain a checkpoint owned by another repo (owner/name or gh/owner/name), read from that repo's Entire API")
+	cmd.Flags().StringVar(&repoFlag, "repo", "", "Explain a checkpoint owned by another repo ("+explainRepoFlagShapes+"), read from that repo's Entire API")
 	cmd.Flags().BoolVar(&insecureHTTPFlag, "insecure-http-auth", false, "Allow plain-HTTP auth for --repo (local dev only)")
 	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies.")
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
+	// --task replaces the session as the transcript's source.
+	cmd.MarkFlagsMutuallyExclusive("task", "session-index")
 	// --repo reads another repo over HTTP: --commit resolves against local
 	// history, --session filters the local list view, --search-all walks local
 	// commits, and --generate would write a summary the foreign repo never
@@ -436,7 +452,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 // combination rules, so validateExplainFlagCombinations can enforce them
 // outside the already-large newExplainCmd closure.
 type explainFlagValues struct {
-	checkpoint, commit, repo                         string
+	checkpoint, commit, repo, task                   string
 	generate, force, rawTranscript, transcript, json bool
 	sessionIndex, listLimit, summaryTimeoutSeconds   int
 }
@@ -468,6 +484,14 @@ func validateExplainFlagCombinations(cmd *cobra.Command, v explainFlagValues, po
 	}
 	if v.transcript && !hasCheckpointTarget {
 		return errors.New("--transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+	}
+	if cmd.Flags().Changed("task") {
+		if !v.transcript {
+			return errors.New("--task only applies with --transcript")
+		}
+		if v.task == "" {
+			return errors.New("--task requires a tool_use_id or agent_id")
+		}
 	}
 	if cmd.Flags().Changed("session-index") {
 		if !v.transcript && !v.rawTranscript {
@@ -794,10 +818,6 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// Handle summary generation — uses raw transcript. Imported history was
 	// already rejected above, before the content load.
 	if generate {
-		if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, lookup.repo); err != nil {
-			stopLoad(false)
-			return err
-		}
 		stopLoad(false) // generation prints its own progress to w/errW
 		// RefFetcher: the summary backfill's absence probe fetches a ref that
 		// exists remotely but not locally (written/migrated on another
@@ -1036,7 +1056,7 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
 			{Label: "id", Value: checkpointID.String()},
-			{Label: "try", Value: fmt.Sprintf("entire checkpoint explain --generate --force %s", checkpointID)},
+			{Label: explainLabelTry, Value: fmt.Sprintf("entire checkpoint explain --generate --force %s", checkpointID)},
 		}, fmt.Errorf("checkpoint %s already has a summary", checkpointID))
 	}
 
@@ -1252,37 +1272,39 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 	var claudeErr *claudecode.ClaudeError
 	switch {
 	case errors.As(err, &claudeErr):
-		switch claudeErr.Kind { //nolint:exhaustive // ClaudeErrorUnknown handled by default
+		switch claudeErr.Kind {
 		case claudecode.ClaudeErrorAuth:
 			label := "Claude authentication failed"
 			rows := []explainRow{
-				{Label: "try", Value: "run `claude login` and retry"},
+				{Label: explainLabelTry, Value: "run `claude login` and retry"},
 			}
 			if claudeErr.Message != "" {
-				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+				rows = append([]explainRow{{Label: explainLabelMessage, Value: claudeErr.Message}}, rows...)
 			}
 			return label, rows, fmt.Errorf("Claude authentication failed%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005: Claude is a proper noun
 		case claudecode.ClaudeErrorRateLimit:
 			label := "Claude rejected the summary request due to rate limits or quota"
 			rows := []explainRow{
-				{Label: "try", Value: "wait and retry"},
+				{Label: explainLabelTry, Value: "wait and retry"},
 			}
 			if claudeErr.Message != "" {
-				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+				rows = append([]explainRow{{Label: explainLabelMessage, Value: claudeErr.Message}}, rows...)
 			}
 			return label, rows, fmt.Errorf("Claude rejected the summary request due to rate limits or quota%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
 		case claudecode.ClaudeErrorConfig:
 			label := "Claude rejected the summary request"
 			rows := []explainRow{
-				{Label: "try", Value: "check your Claude CLI config and selected model"},
+				{Label: explainLabelTry, Value: "check your Claude CLI config and selected model"},
 			}
 			if claudeErr.Message != "" {
-				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+				rows = append([]explainRow{{Label: explainLabelMessage, Value: claudeErr.Message}}, rows...)
 			}
 			return label, rows, fmt.Errorf("Claude rejected the summary request%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
 		case claudecode.ClaudeErrorCLIMissing:
 			label := "Claude CLI is not installed or not on PATH"
 			return label, nil, errors.New("Claude CLI is not installed or not on PATH") //nolint:staticcheck // ST1005
+		case claudecode.ClaudeErrorUnknown:
+			fallthrough
 		default:
 			label := "Claude failed to generate the summary"
 			suffix := formatClaudeErrorSuffix(claudeErr)
@@ -1355,33 +1377,33 @@ func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) 
 		case attempt.phasesReached[agent.PhaseDone]:
 			label = "model finished but the result was not delivered in time"
 			rows = []explainRow{
-				{Label: "cause", Value: "the deadline fired while the finished result was being read"},
-				{Label: "try", Value: "raise --summary-timeout-seconds and retry"},
+				{Label: explainLabelCause, Value: "the deadline fired while the finished result was being read"},
+				{Label: explainLabelTry, Value: "raise --summary-timeout-seconds and retry"},
 			}
 		case attempt.phasesReached[agent.PhaseGenerating], attempt.phasesReached[agent.PhaseFirstToken]:
 			label = "model responded but did not finish"
 			rows = []explainRow{
-				{Label: "cause", Value: "transcript may be too large for the chosen cap, or model is slow"},
-				{Label: "try", Value: "raise --summary-timeout-seconds or pick a faster model"},
+				{Label: explainLabelCause, Value: "transcript may be too large for the chosen cap, or model is slow"},
+				{Label: explainLabelTry, Value: "raise --summary-timeout-seconds or pick a faster model"},
 			}
 		case attempt.phasesReached[agent.PhaseConnecting]:
 			label = "provider sent request but received no response"
 			rows = []explainRow{
-				{Label: "cause", Value: "network/firewall, provider API degraded, or auth check stuck"},
-				{Label: "try", Value: "check connectivity to the provider, then retry"},
+				{Label: explainLabelCause, Value: "network/firewall, provider API degraded, or auth check stuck"},
+				{Label: explainLabelTry, Value: "check connectivity to the provider, then retry"},
 			}
 		default:
 			label = "provider never sent its request"
 			rows = []explainRow{
-				{Label: "cause", Value: "the provider CLI may be stalled before subprocess startup"},
-				{Label: "try", Value: tryRunCLI},
+				{Label: explainLabelCause, Value: "the provider CLI may be stalled before subprocess startup"},
+				{Label: explainLabelTry, Value: tryRunCLI},
 			}
 		}
 		// attempt.streaming is set eagerly when a streaming-capable provider
 		// is selected, so a provider that stalls before its first event lands
 		// here — surface the captured stderr rather than dropping it.
 		if stderr != "" {
-			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+			rows = append(rows, explainRow{Label: explainLabelStderr, Value: stderr})
 		}
 		return prefix + label, rows
 	}
@@ -1390,21 +1412,21 @@ func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) 
 
 	if stdoutBytes == 0 {
 		rows := []explainRow{
-			{Label: "cause", Value: "provider CLI produced no output (likely network/auth/CLI path issue)"},
-			{Label: "try", Value: tryRunCLI},
+			{Label: explainLabelCause, Value: "provider CLI produced no output (likely network/auth/CLI path issue)"},
+			{Label: explainLabelTry, Value: tryRunCLI},
 		}
 		if stderr != "" {
-			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+			rows = append(rows, explainRow{Label: explainLabelStderr, Value: stderr})
 		}
 		return prefix + "provider produced no output", rows
 	}
 
 	rows := []explainRow{
-		{Label: "cause", Value: "provider was generating output but did not finish before cap"},
-		{Label: "try", Value: "raise --summary-timeout-seconds"},
+		{Label: explainLabelCause, Value: "provider was generating output but did not finish before cap"},
+		{Label: explainLabelTry, Value: "raise --summary-timeout-seconds"},
 	}
 	if stderr != "" {
-		rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+		rows = append(rows, explainRow{Label: explainLabelStderr, Value: stderr})
 	}
 	return prefix + "provider was generating output when killed", rows
 }
@@ -1727,7 +1749,7 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 
 	label := fmt.Sprintf("Checkpoint %s [temporary]", shortID)
 	rows := []explainRow{
-		{Label: "session", Value: tc.SessionID},
+		{Label: explainLabelSession, Value: tc.SessionID},
 		{Label: "created", Value: tc.Timestamp.Format("2006-01-02 15:04:05")},
 	}
 	sb.WriteString(styles.renderIdentity(label, "", rows))
@@ -1861,11 +1883,11 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 // scopeTranscriptForCheckpoint slices a transcript to include only the portion
 // relevant to a specific checkpoint, starting from the given offset.
 // For Claude Code (JSONL), the offset is a line number and we slice by line.
-// For Gemini (single JSON blob), the offset is a message index and we slice by message.
+// For historical Gemini CLI checkpoints (single JSON blob), the offset is a message index and we slice by message.
 func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentType types.AgentType) []byte {
 	switch agentType {
 	case agent.AgentTypeGemini:
-		scoped, err := geminicli.SliceFromMessage(fullTranscript, startOffset)
+		scoped, err := geminilegacy.SliceFromMessage(fullTranscript, startOffset)
 		if err != nil {
 			return nil
 		}
@@ -2040,9 +2062,17 @@ func buildAmbiguousCheckpointMatches(ids []id.CheckpointID, committed []checkpoi
 }
 
 // renderExplainBody routes a markdown body through the brand renderer when
-// the writer supports color, and returns the markdown source verbatim
-// otherwise. Single point of policy for every explain body section.
+// the writer supports color, and returns the markdown source otherwise.
+// Single point of policy for every explain body section.
+//
+// The body is built from stored checkpoint content (AI summaries, extracted
+// prompts, file lists), which is agent and user influenced, so it passes
+// through the shared terminal sanitizer here regardless of path: the
+// non-color return would otherwise hand raw escape sequences to the
+// terminal, and sanitizing before the markdown renderer means its output
+// cannot re-carry them either.
 func renderExplainBody(w io.Writer, md string) string {
+	md = tuiutil.SanitizeTerminalText(md)
 	if !shouldUseColor(w) {
 		return md
 	}
@@ -2086,17 +2116,10 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 		if verbose || full {
 			md += buildFilesMarkdown(meta.FilesTouched)
 		}
-		if shouldUseColor(w) {
-			rendered, err := defaultRenderTerminalMarkdown(w, md)
-			if err != nil {
-				logging.Debug(context.Background(), "explain markdown render failed", slog.String("error", err.Error()))
-				sb.WriteString(md)
-			} else {
-				sb.WriteString(rendered)
-			}
-		} else {
-			sb.WriteString(md)
-		}
+		// renderExplainBody rather than an inline color branch: it is the single
+		// point of policy for explain bodies, including the terminal sanitizer
+		// the stored (agent-authored) summary must pass through.
+		sb.WriteString(renderExplainBody(w, md))
 	} else {
 		intent := extractIntent(scopedPrompts, content.Prompts)
 
@@ -2159,12 +2182,12 @@ func appendTranscriptSection(sb *strings.Builder, verbose, full bool, fullTransc
 }
 
 // formatTranscriptBytes formats transcript bytes into a human-readable string.
-// It parses the transcript (JSONL for Claude, JSON for Gemini) and formats it using the condensed format.
+// It parses the transcript (JSONL for Claude, JSON for historical Gemini CLI checkpoints) and formats it using the condensed format.
 // The fallback is used for backwards compatibility when transcript parsing fails or is empty.
 func formatTranscriptBytes(transcriptBytes []byte, fallback string, agentType types.AgentType) string {
 	if len(transcriptBytes) == 0 {
 		if fallback != "" {
-			return fallback + "\n"
+			return tuiutil.SanitizeTerminalText(fallback) + "\n"
 		}
 		return "  (none)\n"
 	}
@@ -2176,9 +2199,19 @@ func formatTranscriptBytes(transcriptBytes []byte, fallback string, agentType ty
 	}
 	if err != nil || len(condensed) == 0 {
 		if fallback != "" {
-			return fallback + "\n"
+			return tuiutil.SanitizeTerminalText(fallback) + "\n"
 		}
 		return "  (failed to parse transcript)\n"
+	}
+
+	// Transcript content is agent and user influenced, so it goes through the
+	// shared terminal sanitizer at this display boundary. The sanitization is
+	// deliberately not inside FormatCondensedTranscript, which also builds LLM
+	// prompt input where mutation is unwanted.
+	for i := range condensed {
+		condensed[i].Content = tuiutil.SanitizeTerminalText(condensed[i].Content)
+		condensed[i].ToolName = tuiutil.SanitizeTerminalText(condensed[i].ToolName)
+		condensed[i].ToolDetail = tuiutil.SanitizeTerminalText(condensed[i].ToolDetail)
 	}
 
 	input := summarize.Input{Transcript: condensed}
@@ -3071,7 +3104,7 @@ func outputWithPager(w io.Writer, content string) {
 	// Check if we're writing to stdout and it's a terminal
 	if f, ok := w.(*os.File); ok && f == os.Stdout && interactive.IsTerminalWriter(w) {
 		// Get terminal height
-		_, height, err := term.GetSize(int(f.Fd())) //nolint:gosec // G115: same as above
+		_, height, err := term.GetSize(int(f.Fd()))
 		if err != nil {
 			height = 24 // Default fallback
 		}
@@ -3141,9 +3174,9 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.P
 		{Label: "branch", Value: branchName},
 	}
 	if sessionFilter != "" {
-		branchRows = append(branchRows, explainRow{Label: "session", Value: sessionFilter})
+		branchRows = append(branchRows, explainRow{Label: explainLabelSession, Value: sessionFilter})
 	}
-	branchRows = append(branchRows, explainRow{Label: "checkpoints", Value: strconv.Itoa(len(groups))})
+	branchRows = append(branchRows, explainRow{Label: explainLabelCheckpoints, Value: strconv.Itoa(len(groups))})
 
 	sb.WriteString(styles.metadataRows(branchRows))
 	sb.WriteString("\n")
@@ -3339,11 +3372,11 @@ func countLines(content []byte) int {
 }
 
 // transcriptOffset returns the appropriate offset for scoping a transcript.
-// For Claude Code (JSONL), this is the line count. For Gemini (JSON), this is the message count.
+// For Claude Code (JSONL), this is the line count. For historical Gemini CLI checkpoints (JSON), this is the message count.
 func transcriptOffset(transcriptBytes []byte, agentType types.AgentType) int {
 	switch agentType {
 	case agent.AgentTypeGemini:
-		t, err := geminicli.ParseTranscript(transcriptBytes)
+		t, err := geminilegacy.ParseTranscript(transcriptBytes)
 		if err != nil {
 			return 0
 		}

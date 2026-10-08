@@ -34,7 +34,6 @@ func TestSHA256Repository_EnableAndFirstCheckpoint(t *testing.T) {
 	// git-refs.
 	output := env.RunCLI(
 		"enable",
-		"--no-github",
 		"--agent", agentClaudeCode,
 		"--telemetry=false",
 		"--checkpoint-backend", "branch",

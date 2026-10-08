@@ -213,7 +213,7 @@ func assertSubagentTurns(t *testing.T, imp Importer, sf SessionFile, turns []Tur
 
 	// Session-total proof: the imported session.State.TokenUsage folds the
 	// turns via writeSessionState the same way production Run does.
-	if err := writeSessionState(ctx, imp, sf, turns, repoDir); err != nil {
+	if err := writeSessionState(ctx, imp, sf, turns, DeriveCheckpointID(sf.SessionID, turns[len(turns)-1].UUID), repoDir); err != nil {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 	st := loadState(t, sf.SessionID)

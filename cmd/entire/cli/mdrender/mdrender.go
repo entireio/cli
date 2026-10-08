@@ -93,7 +93,7 @@ func shouldRender(w io.Writer) bool {
 // Falls back to stdout/stderr probing, then DefaultTerminalWidth.
 func terminalWidth(w io.Writer) int {
 	if f, ok := w.(*os.File); ok {
-		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 { //nolint:gosec // G115: uintptr->int is safe for fd
+		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 {
 			return min(width, DefaultTerminalWidth)
 		}
 	}
@@ -101,7 +101,7 @@ func terminalWidth(w io.Writer) int {
 		if f == nil {
 			continue
 		}
-		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 { //nolint:gosec // G115: uintptr->int is safe for fd
+		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 {
 			return min(width, DefaultTerminalWidth)
 		}
 	}

@@ -21,8 +21,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // PrePromptState stores the state captured before a user prompt
@@ -59,6 +62,13 @@ type PrePromptState struct {
 	// Deprecated: LastTranscriptLineCount is the oldest name for transcript position.
 	// Migrated to TranscriptOffset on load.
 	LastTranscriptLineCount int `json:"last_transcript_line_count,omitempty"`
+
+	// TokenBaseline is an opaque, agent-defined token position captured at turn
+	// start for OutOfBandTokenSource agents (currently Antigravity). At TurnEnd
+	// the lifecycle passes it back to CalculateTokenUsageSince to compute the
+	// checkpoint-scoped token delta. Empty for agents with transcript-embedded
+	// token data.
+	TokenBaseline json.RawMessage `json:"token_baseline,omitempty"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -147,6 +157,18 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		UntrackedFiles:       untrackedFiles,
 		UntrackedScanSkipped: scanSkipped,
 		TranscriptOffset:     transcriptOffset,
+	}
+
+	// Out-of-band token baseline: agents whose token usage lives outside the
+	// transcript (Antigravity) snapshot their cumulative token position now so
+	// TurnEnd can compute the per-checkpoint delta.
+	if src, ok := agent.AsOutOfBandTokenSource(ag); ok {
+		baseline, blErr := src.SnapshotTokenBaseline(ctx, sessionID)
+		if blErr != nil {
+			logging.Warn(logging.WithComponent(ctx, "state"), "failed to snapshot out-of-band token baseline", "error", blErr.Error())
+		} else {
+			state.TokenBaseline = baseline
+		}
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
@@ -329,6 +351,17 @@ func detectFileChanges(ctx context.Context, previouslyUntracked []string, status
 // (already condensed by PostCommit) back to FilesTouched via SaveStep. Files not in
 // HEAD or with different content in the working tree are kept. Fails open: if any git
 // operation errors, returns the original list unchanged.
+//
+// "Same content" is decided by Git's own clean filters, via
+// gitrepo.HashWorktreeFiles (git hash-object), not by comparing the working
+// tree's raw bytes against the blob. Under core.autocrlf — the Git for Windows
+// default, and what e2e/testutil/repo.go sets — the working tree holds CRLF
+// while the blob holds LF, so a byte comparison reports every committed text
+// file as still modified. That defeats the caller's "no changes, skip" gate and
+// mints a fresh shadow branch on the new HEAD *after* PostCommit condensed and
+// deleted the old one; nothing condenses that one away, so it outlives the
+// session. The same reasoning applies to .gitattributes eol/text rules and to
+// clean filters such as Git LFS, which a byte comparison also gets wrong.
 func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot string) []string {
 	if len(files) == 0 {
 		return files
@@ -357,7 +390,14 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 
 	logCtx := logging.WithComponent(ctx, "filter-uncommitted")
 
+	// Pass 1: split into "not in HEAD" (uncommitted by definition) and
+	// candidates that need a content comparison.
+	type candidate struct {
+		path     string
+		headFile *object.File
+	}
 	var result []string
+	var candidates []candidate
 	for _, relPath := range files {
 		headFile, err := headTree.File(relPath)
 		if err != nil {
@@ -368,26 +408,68 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 			result = append(result, relPath)
 			continue
 		}
+		candidates = append(candidates, candidate{path: relPath, headFile: headFile})
+	}
+	if len(candidates) == 0 {
+		return result
+	}
 
-		// File is in HEAD — compare content with working tree, through the
-		// worktree's shared root. relPath comes from git, so it is already the
-		// coordinate the root reads in.
-		workingContent, ok := readWorktreeFileSafely(repoRoot, relPath)
-		if !ok {
-			// Can't read working tree file (deleted?) — keep it
-			result = append(result, relPath)
+	// Hash the regular files through native Git so the comparison sees the
+	// same clean-filtered bytes Git would have committed. HashableWorktreeEntry
+	// withholds the paths hash-object would answer wrongly or block on — a
+	// symlink on either side, a FIFO, a tracked file replaced by another type —
+	// and those take the raw fallback below instead.
+	hashPaths := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if !worktreedir.HashableEntry(repoRoot, c.path, c.headFile.Mode) {
+			continue
+		}
+		hashPaths = append(hashPaths, c.path)
+	}
+	var worktreeHashes map[string]plumbing.Hash
+	if len(hashPaths) > 0 {
+		var hashErr error
+		worktreeHashes, hashErr = gitrepo.HashWorktreeFiles(ctx, repoRoot, hashPaths)
+		if hashErr != nil {
+			// Partial results are still usable; only the paths Git could not
+			// hash fall back to the raw comparison below.
+			logging.Debug(logCtx, "native git could not hash every candidate; falling back to raw comparison for those paths",
+				slog.String("error", hashErr.Error()))
+		}
+	}
+
+	// Pass 2: decide each candidate, preserving the input order.
+	for _, c := range candidates {
+		if worktreeHash, ok := worktreeHashes[c.path]; ok {
+			// Equal, not ==: plumbing.Hash carries an object-format field
+			// alongside its bytes and == compares that field too, which the
+			// tree decoder and FromHex do not always agree on.
+			if !worktreeHash.Equal(c.headFile.Hash) {
+				result = append(result, c.path)
+			}
 			continue
 		}
 
-		headContent, err := headFile.Contents()
+		// Fallback for every path withheld above and for anything native Git
+		// could not hash: compare the raw working-tree bytes. Filter-unaware,
+		// so it can report a clean file as modified, which keeps a file rather
+		// than dropping one — the same direction this function already fails.
+		workingContent, ok := readWorktreeFileSafely(repoRoot, c.path)
+		if !ok {
+			// Can't read working tree file (deleted?) — keep it
+			result = append(result, c.path)
+			continue
+		}
+
+		headContent, err := c.headFile.Contents()
 		if err != nil {
-			result = append(result, relPath)
+			result = append(result, c.path)
 			continue
 		}
 
 		if string(workingContent) != headContent {
 			// Working tree differs from HEAD — uncommitted changes
-			result = append(result, relPath)
+			result = append(result, c.path)
 		}
 		// else: content matches HEAD — already committed, skip
 	}

@@ -1,0 +1,39 @@
+#!/bin/bash
+#MISE description="Generate Windows PE VERSIONINFO resources (.syso) for entire and git-remote-entire"
+#MISE quiet=true
+
+set -euo pipefail
+
+version="${1:?usage: mise run winversion <version>}"
+
+base="${version%%-*}"
+IFS='.' read -r major minor patch <<<"$base"
+major="${major:-0}"
+minor="${minor:-0}"
+patch="${patch:-0}"
+
+generate() {
+    local pkg="$1" desc="$2" original_name="$3"
+    local common_flags=(
+        # No versioninfo.json: every field this task sets has a flag. The two
+        # below are decimal for 0x0409 / 0x04B0 — omit them and the binary
+        # ships an empty translation block and Windows shows no Language.
+        -skip-versioninfo
+        -translation 1033 -charset 1200
+        -company "Entire"
+        -copyright "Copyright (c) 2026 Entire Inc."
+        -description "$desc"
+        -product-name "Entire CLI"
+        -internal-name "$original_name"
+        -original-name "$original_name"
+        -ver-major "$major" -ver-minor "$minor" -ver-patch "$patch"
+        -product-ver-major "$major" -product-ver-minor "$minor" -product-ver-patch "$patch"
+        -file-version "$version"
+        -product-version "$version"
+    )
+    goversioninfo -64 -o "${pkg}/rsrc_windows_amd64.syso" "${common_flags[@]}"
+    goversioninfo -64 -arm -o "${pkg}/rsrc_windows_arm64.syso" "${common_flags[@]}"
+}
+
+generate "cmd/entire" "Entire CLI" "entire.exe"
+generate "cmd/git-remote-entire" "Git remote helper for entire:// URLs" "git-remote-entire.exe"

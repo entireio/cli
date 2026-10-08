@@ -171,3 +171,42 @@ func TestStore_FactoryRequiresPath(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "config.path is required")
 }
+
+func TestStore_TaskRecordsRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := New(t.TempDir())
+	cid := id.MustCheckpointID("a1b2c3d4e5f7")
+	started := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+
+	require.NoError(t, store.Write(ctx, cp.Session{
+		CheckpointID: cid,
+		SessionID:    "sess-tasks",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("parent")),
+		Tasks: []cp.TaskPayload{
+			{ToolUseID: "toolu_b", AgentID: "agentb", StartedAt: started.Add(time.Minute), Transcript: redact.AlreadyRedacted([]byte("child-b"))},
+			{ToolUseID: "toolu_a", AgentID: "agenta", StartedAt: started, TranscriptUnavailableReason: "transcript empty"},
+		},
+	}))
+
+	entries, err := store.ListTasks(ctx, cid)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, "toolu_a", entries[0].ToolUseID)
+	assert.False(t, entries[0].TranscriptStored)
+	assert.Equal(t, "toolu_b", entries[1].ToolUseID)
+	assert.True(t, entries[1].TranscriptStored)
+	assert.Equal(t, "agentb", entries[1].Record.AgentID)
+
+	transcript, err := store.ReadTaskTranscript(ctx, cid, "toolu_b")
+	require.NoError(t, err)
+	assert.Equal(t, "child-b", string(transcript))
+
+	_, err = store.ReadTaskTranscript(ctx, cid, "toolu_a")
+	require.ErrorIs(t, err, cp.ErrNoTranscript)
+	_, err = store.ReadTaskTranscript(ctx, cid, "toolu_c")
+	require.ErrorIs(t, err, cp.ErrTaskNotFound)
+	_, err = store.ListTasks(ctx, id.MustCheckpointID("ffffffffffff"))
+	require.ErrorIs(t, err, cp.ErrCheckpointNotFound)
+}

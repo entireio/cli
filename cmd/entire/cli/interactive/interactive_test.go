@@ -40,20 +40,37 @@ func TestCanPromptInteractively_CIFalseOverride(t *testing.T) {
 	}
 }
 
+// Every name in agentSubprocessEnvVars must be honored. Driving the table off
+// the slice rather than a hand-copied list is what makes adding a sentinel a
+// one-line change that is still covered.
 func TestIsAgentSubprocessEnv(t *testing.T) {
-	cases := []struct {
-		name, key, val string
-	}{
-		{"gemini", "GEMINI_CLI", "1"},
-		{"copilot", "COPILOT_CLI", "1"},
-		{"pi", "PI_CODING_AGENT", "true"},
-		{"git-terminal-prompt-off", "GIT_TERMINAL_PROMPT", "0"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Setenv(c.key, c.val)
+	for _, name := range agentSubprocessEnvVars {
+		t.Run(name, func(t *testing.T) {
+			clearAgentSubprocessEnv(t)
+			t.Setenv(name, "1")
 			if !isAgentSubprocessEnv() {
-				t.Errorf("isAgentSubprocessEnv() = false; want true when %s=%s", c.key, c.val)
+				t.Errorf("isAgentSubprocessEnv() = false; want true when %s=1", name)
+			}
+		})
+	}
+	t.Run("git-terminal-prompt-off", func(t *testing.T) {
+		clearAgentSubprocessEnv(t)
+		t.Setenv("GIT_TERMINAL_PROMPT", "0")
+		if !isAgentSubprocessEnv() {
+			t.Error("isAgentSubprocessEnv() = false; want true when GIT_TERMINAL_PROMPT=0")
+		}
+	})
+}
+
+// A vendor may spell the value however it likes — pi uses "true", the rest use
+// "1" — so presence is the whole test. Only the git tri-state reads its value.
+func TestIsAgentSubprocessEnv_AnyNonEmptyValueCounts(t *testing.T) {
+	for _, val := range []string{"1", "true", "0", "no"} {
+		t.Run(val, func(t *testing.T) {
+			clearAgentSubprocessEnv(t)
+			t.Setenv("PI_CODING_AGENT", val)
+			if !isAgentSubprocessEnv() {
+				t.Errorf("isAgentSubprocessEnv() = false; want true when PI_CODING_AGENT=%s", val)
 			}
 		})
 	}
@@ -62,15 +79,24 @@ func TestIsAgentSubprocessEnv(t *testing.T) {
 // GIT_TERMINAL_PROMPT only counts when explicitly set to "0". Other values
 // (or absence) shouldn't trigger the guard.
 func TestIsAgentSubprocessEnv_GitTerminalPromptOnIsNotAgent(t *testing.T) {
-	// Clear sibling agent-detection vars so the test is hermetic regardless of
-	// parent environment (e.g. running inside pi, gemini-cli, copilot-cli).
-	t.Setenv("GEMINI_CLI", "")
-	t.Setenv("COPILOT_CLI", "")
-	t.Setenv("PI_CODING_AGENT", "")
+	clearAgentSubprocessEnv(t)
 	t.Setenv("GIT_TERMINAL_PROMPT", "1")
 	if isAgentSubprocessEnv() {
 		t.Error("isAgentSubprocessEnv() = true; want false when GIT_TERMINAL_PROMPT=1")
 	}
+}
+
+// clearAgentSubprocessEnv unsets every sentinel so a test states its own
+// preconditions rather than inheriting them. `mise run test` is routinely run
+// from inside one of these agents, and a sentinel left set by the parent turns
+// the negative assertions into false failures — the reason this clears the
+// slice instead of a hand-listed subset that would rot on the next addition.
+func clearAgentSubprocessEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range agentSubprocessEnvVars {
+		t.Setenv(name, "")
+	}
+	t.Setenv("GIT_TERMINAL_PROMPT", "")
 }
 
 func TestUnderTest_TrueByTestingHarness(t *testing.T) {

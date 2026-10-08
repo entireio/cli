@@ -37,13 +37,13 @@ const requiredCellResolveTimeout = 15 * time.Second
 // An interface (with a swappable constructor) so the resolver is unit-testable
 // against a fake control plane; *coreapi.Client satisfies it.
 type cellCoreClient interface {
-	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error)
+	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.RepoHeaders, error)
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
 	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
 }
 
 type nativeRepoCellCoreClient interface {
-	nativeRepoResolverClient
+	repoRefClient
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
 	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
 }
@@ -91,7 +91,7 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) (*auth.Ce
 		if err != nil {
 			return nil, cellPlacementError(ctx, ulid, fmt.Errorf("resolve the Entire cell for %s: %w", ulid, err))
 		}
-		clusterHost := strings.TrimSpace(repo.ClusterHost.Or(""))
+		clusterHost := strings.TrimSpace(repo.Response.ClusterHost.Or(""))
 		if clusterHost == "" {
 			return nil, fmt.Errorf("resolve the Entire cell for %s: repo has no cluster host", ulid)
 		}
@@ -298,21 +298,25 @@ type repoCellPlacement struct {
 	Target *auth.CellTarget
 }
 
-// resolveTrailRepoCellPlacement keeps the forge namespace in repository
+// resolveForgeRepoCellPlacement keeps the forge namespace in repository
 // identity resolution. A native /et/<project>/<repo> and a legacy
 // /gh/<owner>/<repo> can have the same two trailing path segments but are
 // different repositories with different repo IDs and, potentially, cells.
-func resolveTrailRepoCellPlacement(ctx context.Context, forge, owner, repo string) (repoCellPlacement, error) {
-	if forge == nativeCloneForge {
+func resolveForgeRepoCellPlacement(ctx context.Context, forge, owner, repo string) (repoCellPlacement, error) {
+	switch forge {
+	case nativeCloneForge:
 		return resolveNativeRepoCellPlacement(ctx, owner, repo)
+	case mirrorCloneForge:
+		return resolveRepoCellPlacement(ctx, owner, repo)
+	default:
+		return repoCellPlacement{}, fmt.Errorf("resolve repo %s/%s: unsupported forge %q (supported: %s, %s)", owner, repo, forge, mirrorCloneForge, nativeCloneForge)
 	}
-	return resolveRepoCellPlacement(ctx, owner, repo)
 }
 
 // resolveNativeRepoCellPlacement resolves /et/<project>/<repo> through the
-// native project-scoped repo lookup, then maps the repo's home cluster to its
-// entire-api cell. It deliberately never consults the forge-blind repos index:
-// that index can select a same-named /gh/ mirror instead.
+// native path lookup, then maps the repo's home cluster to its entire-api
+// cell. It deliberately never consults the forge-blind repos index: that index
+// can select a same-named /gh/ mirror instead.
 func resolveNativeRepoCellPlacement(ctx context.Context, project, repoName string) (repoCellPlacement, error) {
 	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
 	defer cancel()

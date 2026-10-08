@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -23,13 +24,37 @@ AAEAGZmFrZS1rZXktZm9yLXJlZGFjdGlvbi1iZW5jaG1hcmstb25seQECAwQF`)
 func BenchmarkRedactStringRepeatedSecret(b *testing.B) {
 	for _, repeats := range []int{1, 10, 100, 1000} {
 		b.Run(fmt.Sprintf("Occurrences%d", repeats), func(b *testing.B) {
-			input := strings.Repeat("request key=AKIAYRWQG5EJLPZLBYNP completed\n", repeats)
+			input := strings.Repeat("request key="+awsKeyFixture+" completed\n", repeats)
 			want := strings.Repeat("request key=REDACTED completed\n", repeats)
 			b.ReportAllocs()
 			b.SetBytes(int64(len(input)))
 			for b.Loop() {
 				if got := String(input); got != want {
 					b.Fatal("redacted output did not match expected request log")
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkJSONLContent_WideObject pins duplicate-key scanning across object
+// widths. Wide objects occur in tool results such as npm ls output, coverage
+// reports, and flattened configuration dumps. Null values deliberately isolate
+// key scanning from the per-string regex layers; the existing JSONL benchmarks
+// cover realistic string-heavy redaction throughput.
+func BenchmarkJSONLContent_WideObject(b *testing.B) {
+	for _, keys := range []int{200, 2_000, 8_000} {
+		b.Run(fmt.Sprintf("Keys%d", keys), func(b *testing.B) {
+			input := generateBenchmarkWideObject(keys)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(input)))
+			for b.Loop() {
+				got, err := JSONLContent(input)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if got != input {
+					b.Fatal("redaction changed secret-free input")
 				}
 			}
 		})
@@ -92,6 +117,22 @@ func BenchmarkRedactJSONLBytes(b *testing.B) {
 			}
 		})
 	}
+}
+
+func generateBenchmarkWideObject(keys int) string {
+	var out strings.Builder
+	out.Grow(keys * 20)
+	out.WriteByte('{')
+	for i := range keys {
+		if i > 0 {
+			out.WriteByte(',')
+		}
+		out.WriteString(`"key_`)
+		out.WriteString(strconv.Itoa(i))
+		out.WriteString(`":null`)
+	}
+	out.WriteByte('}')
+	return out.String()
 }
 
 func readBenchmarkFixture(b *testing.B, path string) []byte {

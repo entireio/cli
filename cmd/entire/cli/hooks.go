@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -53,28 +55,54 @@ func ParseSubagentTypeAndDescription(toolInput json.RawMessage) (agentType, desc
 }
 
 // backgroundTaskToolInput represents the tool_input structure for the Task
-// tool, used to detect a background subagent launch.
+// tool, used to detect a background subagent launch. RunInBackground stays
+// raw because models send it as a JSON boolean or as a string ("true").
 type backgroundTaskToolInput struct {
-	RunInBackground bool `json:"run_in_background"`
+	RunInBackground json.RawMessage `json:"run_in_background"`
 }
 
-// isBackgroundLaunch reports whether a Task tool invocation requested
-// run_in_background: true. Mirrors ParseSubagentTypeAndDescription's
-// ToolInput parsing. Returns false (foreground) when toolInput is empty or
-// invalid — defaulting to the existing foreground behavior is always safe.
-func isBackgroundLaunch(ctx context.Context, toolInput json.RawMessage) bool {
-	if len(toolInput) == 0 {
+// isBackgroundLaunch reports whether a launch-time SubagentEnd event is a
+// background launch. A launch mode the agent reported wins; otherwise it
+// falls back to tool_input.run_in_background, accepting a boolean or a
+// boolean string. Returns false (foreground) when neither says background.
+func isBackgroundLaunch(ctx context.Context, event *agent.Event) bool {
+	switch event.SubagentLaunch {
+	case agent.SubagentLaunchBackground:
+		return true
+	case agent.SubagentLaunchForeground:
 		return false
+	case agent.SubagentLaunchUnknown:
 	}
 
+	if len(event.ToolInput) == 0 {
+		return false
+	}
 	var input backgroundTaskToolInput
-	if err := json.Unmarshal(toolInput, &input); err != nil {
+	if err := json.Unmarshal(event.ToolInput, &input); err != nil {
 		logging.Debug(ctx, "failed to parse tool_input for background-launch detection; treating as foreground",
 			slog.String("error", err.Error()))
 		return false
 	}
-
-	return input.RunInBackground
+	if len(input.RunInBackground) == 0 {
+		return false
+	}
+	var flag bool
+	if err := json.Unmarshal(input.RunInBackground, &flag); err == nil {
+		return flag
+	}
+	var text string
+	if err := json.Unmarshal(input.RunInBackground, &text); err == nil {
+		if flag, err := strconv.ParseBool(text); err == nil {
+			return flag
+		}
+	}
+	// Log only the decoded value's type: the value is model-provided and may
+	// hold anything.
+	var value any
+	_ = json.Unmarshal(input.RunInBackground, &value) //nolint:errcheck // already valid JSON; a nil value still logs a type
+	logging.Warn(ctx, "unrecognized run_in_background value; treating as foreground",
+		slog.String("type", fmt.Sprintf("%T", value)))
+	return false
 }
 
 // todoWriteToolInput represents the tool_input structure for the TodoWrite tool.

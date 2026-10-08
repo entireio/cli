@@ -203,8 +203,8 @@ func TestAgentNameConstants(t *testing.T) {
 	if AgentNameClaudeCode != "claude-code" {
 		t.Errorf("expected AgentNameClaudeCode %q, got %q", "claude-code", AgentNameClaudeCode)
 	}
-	if AgentNameGemini != "gemini" {
-		t.Errorf("expected AgentNameGemini %q, got %q", "gemini", AgentNameGemini)
+	if AgentTypeGemini != "Gemini CLI" {
+		t.Errorf("expected AgentTypeGemini %q, got %q; stored checkpoints carry this value", "Gemini CLI", AgentTypeGemini)
 	}
 }
 

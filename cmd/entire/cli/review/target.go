@@ -18,6 +18,13 @@ import (
 
 const envReviewFindingsWorktree = "ENTIRE_REVIEW_FINDINGS_WORKTREE"
 
+// IsTargetReview reports whether this process is the review that
+// runTargetReview started inside a managed worktree for `--target`, which is
+// the only thing that sets envReviewFindingsWorktree.
+func IsTargetReview() bool {
+	return strings.TrimSpace(os.Getenv(envReviewFindingsWorktree)) != ""
+}
+
 // TargetWorktree describes the checkout prepared for a targeted review.
 // Created is false when the branch was already checked out and that existing
 // worktree is being reused.

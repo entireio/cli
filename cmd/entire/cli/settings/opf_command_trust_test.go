@@ -561,3 +561,33 @@ func TestPathIsVersioned_Win32TrailingCharVariantsAreTracked(t *testing.T) {
 		})
 	}
 }
+
+const localCheckpointRemoteJSON = `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"me/checkpoints"}}}`
+
+// Not parallel: uses t.Chdir().
+func TestCheckpointRemoteIsLocalOnly_UntrackedLocalIsOwn(t *testing.T) {
+	root, _, local := newOPFRepo(t)
+	writeSettingsFile(t, local, localCheckpointRemoteJSON)
+	t.Chdir(root)
+
+	assert.True(t, CheckpointRemoteIsLocalOnly(t.Context()),
+		"an untracked local checkpoint_remote is this developer's own choice")
+}
+
+// Not parallel: uses t.Chdir().
+// CheckpointRemoteIsLocalOnly overrides the checkpoint-remote ownership check
+// on both directions of checkpoint traffic, so it uses the deep (index AND
+// HEAD) verification like the OPF command: content still reachable from HEAD
+// after a git rm --cached must not read as developer-owned.
+func TestCheckpointRemoteIsLocalOnly_CommittedThenUnstagedIsNotOwn(t *testing.T) {
+	root, _, local := newOPFRepo(t)
+	writeSettingsFile(t, local, localCheckpointRemoteJSON)
+
+	testutil.RunGit(t, root, "add", "-f", EntireSettingsLocalFile)
+	testutil.RunGit(t, root, "commit", "-m", "carry local settings")
+	testutil.RunGit(t, root, "rm", "--cached", EntireSettingsLocalFile)
+	t.Chdir(root)
+
+	assert.False(t, CheckpointRemoteIsLocalOnly(t.Context()),
+		"content still reachable from HEAD must not read as developer-owned")
+}

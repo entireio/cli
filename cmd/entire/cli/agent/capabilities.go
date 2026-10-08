@@ -5,7 +5,7 @@ package agent
 // below use this interface to gate capability access: an agent must both implement
 // the optional interface AND declare the capability as true.
 //
-// Built-in agents (Claude Code, Gemini CLI, etc.) do NOT implement this interface.
+// Built-in agents (Claude Code, Codex, etc.) do NOT implement this interface.
 // For those agents, the As* helpers fall through to a direct type assertion,
 // preserving existing behavior.
 type CapabilityDeclarer interface {
@@ -18,7 +18,8 @@ type CapabilityDeclarer interface {
 //
 // Not every optional interface appears here: built-in-only capabilities that
 // have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
-// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher) are intentionally
+// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher,
+// InventoryAwareExtractor) are intentionally
 // excluded — their As* helpers resolve by type assertion alone (see
 // builtinCapability), with no DeclaredCaps gate.
 type DeclaredCaps struct {
@@ -148,6 +149,50 @@ func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
 	return declaredCapability[TokenCalculator](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
 }
 
+// AsLateTranscriptWriter returns the agent as LateTranscriptWriter if supported.
+// External (CapabilityDeclarer) agents are excluded: the late-transcript trait
+// is wire-format knowledge the external protocol does not currently express,
+// and DeclaredCaps has no field for this capability to opt into.
+func AsLateTranscriptWriter(ag Agent) (LateTranscriptWriter, bool) {
+	if ag == nil {
+		return nil, false
+	}
+	lw, ok := ag.(LateTranscriptWriter)
+	if !ok {
+		return nil, false
+	}
+	if _, isDeclarer := ag.(CapabilityDeclarer); isDeclarer {
+		return nil, false
+	}
+	return lw, true
+}
+
+// AsOutOfBandTokenSource returns the agent as OutOfBandTokenSource if supported.
+// External (CapabilityDeclarer) agents are excluded because the out-of-band
+// store is fed by a built-in shim subcommand they cannot provide, and
+// DeclaredCaps has no field for this capability to opt into.
+func AsOutOfBandTokenSource(ag Agent) (OutOfBandTokenSource, bool) {
+	if ag == nil {
+		return nil, false
+	}
+	src, ok := ag.(OutOfBandTokenSource)
+	if !ok {
+		return nil, false
+	}
+	if _, isDeclarer := ag.(CapabilityDeclarer); isDeclarer {
+		return nil, false
+	}
+	return src, true
+}
+
+// AsInventoryAwareExtractor returns the agent as InventoryAwareExtractor when
+// it implements the built-in-only inventory protocol. External agents cannot
+// declare this capability because its authoritative child ledger is internal to
+// Entire rather than the external-agent protocol.
+func AsInventoryAwareExtractor(ag Agent) (InventoryAwareExtractor, bool) {
+	return builtinCapability[InventoryAwareExtractor](ag)
+}
+
 // AsTextGenerator returns the agent as TextGenerator if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTextGenerator(ag Agent) (TextGenerator, bool) {
@@ -189,6 +234,13 @@ func AsHookResponseWriter(ag Agent) (HookResponseWriter, bool) {
 // that never declared transcript_analyzer support.
 func AsPromptExtractor(ag Agent) (PromptExtractor, bool) {
 	return declaredCapability[PromptExtractor](ag, func(c DeclaredCaps) bool { return c.TranscriptAnalyzer })
+}
+
+// AsTranscriptPromptExtractor returns the agent as TranscriptPromptExtractor
+// under the same capability gate as AsPromptExtractor: it is transcript
+// analysis over bytes instead of a path.
+func AsTranscriptPromptExtractor(ag Agent) (TranscriptPromptExtractor, bool) {
+	return declaredCapability[TranscriptPromptExtractor](ag, func(c DeclaredCaps) bool { return c.TranscriptAnalyzer })
 }
 
 // AsSubagentAwareExtractor returns the agent as SubagentAwareExtractor if it both
