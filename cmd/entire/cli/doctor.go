@@ -77,7 +77,8 @@ Checks performed:
   7. Legacy shadow branches: report entire/<commit>-<worktree> branches older
      versions wrote at every turn. They hold full snapshots of the working
      tree and nothing reads them anymore. Fix with 'entire doctor --force',
-     which deletes only the branches (then 'git gc' frees the space); a branch
+     which deletes only the branches (then 'git gc --prune=now' frees the
+     space; plain 'git gc' keeps unreachable objects for two weeks); a branch
      checked out in a worktree is left alone. Bare entire/<commit> branches
      are only pointed at ('entire clean --all --dry-run'), never deleted.
 
@@ -712,8 +713,9 @@ func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
 	fmt.Fprintln(w, "  hold full snapshots of your working tree.")
 	printCappedList(w, branches, func(name string) string { return name })
 	fmt.Fprintln(w, "  Fix: run `entire doctor --force` to delete them (only the branches; pending")
-	fmt.Fprintln(w, "  agent work in session state is kept), then `git gc` to reclaim the space:")
-	fmt.Fprintln(w, "  deleting the refs alone frees nothing until git prunes their objects.")
+	fmt.Fprintln(w, "  agent work in session state is kept), then `git gc --prune=now` to reclaim the")
+	fmt.Fprintln(w, "  space: deleting the refs alone frees nothing, and plain `git gc` keeps")
+	fmt.Fprintln(w, "  unreachable objects for two weeks.")
 
 	if !force {
 		if !interactive.CanPromptInteractively() {
@@ -732,7 +734,7 @@ func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
 	deleted, failed := strategy.DeleteLegacyShadowBranches(ctx, branches)
 	if len(deleted) > 0 {
 		fmt.Fprintf(w, "  ✓ Fixed: deleted %d legacy shadow branch(es)\n", len(deleted))
-		fmt.Fprintln(w, "  Their objects still take space until git prunes them; run `git gc` to reclaim it.")
+		fmt.Fprintln(w, "  Their objects still take space until git prunes them; run `git gc --prune=now` to reclaim it.")
 	}
 	if len(failed) > 0 {
 		fmt.Fprintf(w, "  Kept %d branch(es) git refused to delete (checked out in a worktree?):\n", len(failed))

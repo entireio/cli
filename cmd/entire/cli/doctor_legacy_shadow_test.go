@@ -110,8 +110,8 @@ func TestCheckLegacyShadowBranches_MentionsGitGC(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	testutil.RunGit(t, dir, "branch", "entire/1234567-abcdef")
 
-	assert.Contains(t, runLegacyShadowCheck(t, false), "git gc")
-	assert.Contains(t, runLegacyShadowCheck(t, true), "git gc")
+	assert.Contains(t, runLegacyShadowCheck(t, false), "git gc --prune=now")
+	assert.Contains(t, runLegacyShadowCheck(t, true), "git gc --prune=now")
 }
 
 // `entire status` shows a warning row (and --json a count) for legacy shadow
