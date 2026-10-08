@@ -207,7 +207,7 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 	// and index pollution, in an empty directory rather than the shared temp
 	// dir (matches agent.RunIsolatedTextGeneratorCLI behavior).
 	cmd.Dir = workDir
-	cmd.Env = agent.StripGitEnv(os.Environ())
+	cmd.Env = agent.TextGenerationEnv(workDir, os.Environ())
 	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr bytes.Buffer

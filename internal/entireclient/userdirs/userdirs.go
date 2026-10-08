@@ -2,8 +2,9 @@
 // keep global state. It is the single implementation of that resolution —
 // don't derive ~/.config/entire or ~/.cache/entire paths anywhere else.
 //
-//   - Config: contexts.json, version_check.json, the file-backed token
-//     store. $ENTIRE_CONFIG_DIR if set, else ~/.config/entire.
+//   - Config: contexts.json, version_check.json, agent_homes.json, the
+//     file-backed token store. $ENTIRE_CONFIG_DIR if set, else
+//     ~/.config/entire.
 //   - Cache: discovery caches (nodes.json, cluster_cores.json,
 //     api_discovery.json). $XDG_CACHE_HOME/entire if set, else
 //     ~/.cache/entire.
@@ -220,13 +221,13 @@ func EnsurePrivateDir(dir string) error {
 // creating the directory if it does not exist. ConfigRootForRead is the same
 // without creation.
 //
-// Every read and write of contexts.json, version_check.json, and the
-// file-backed token store goes through this rather than through a path joined
-// onto Config(). The names inside are fixed today, but the point of the root is
-// that they do not have to stay that way: a future context name, cluster slug,
-// or token key that reaches a filename cannot escape the directory, and a
-// symlink swapped in between resolution and open surfaces as an error rather
-// than a redirected write to somewhere in the user's home.
+// Every read and write of contexts.json, version_check.json, agent_homes.json,
+// and the file-backed token store goes through this rather than through a path
+// joined onto Config(). The names inside are fixed today, but the point of the
+// root is that they do not have to stay that way: a future context name,
+// cluster slug, or token key that reaches a filename cannot escape the
+// directory, and a symlink swapped in between resolution and open surfaces as
+// an error rather than a redirected write to somewhere in the user's home.
 //
 // The create/no-create split matters here for the same reason it does for
 // .entire: a command that only looks for a saved login must not leave an

@@ -224,6 +224,37 @@ redaction settings from `.entire/settings.json`, and ahead of `doctor logs` /
 `doctor bundle`, which read `.entire/logs` — prints the diagnosis, and stops. It
 does not auto-fix: what occupies the path may be someone's data.
 
+### Recorded agent homes
+
+Agents with a relocatable home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`COPILOT_HOME`, `FACTORY_HOME_OVERRIDE`, `PI_CODING_AGENT_DIR`) implement
+`agent.HomeLayoutProvider`. Session initialization and every turn start set
+`session.State.AgentHome` to the active home when one of its session stores
+holds the transcript, spelled as the environment sets it or in canonical form,
+whichever contains the transcript path. They keep a home set by an earlier turn
+while it still holds the transcript, and clear it otherwise
+(`strategy.updateSessionAgentHome`). Correcting a session's agent type or
+attaching a different transcript clears it too.
+
+The active home is also recorded in the per-user registry `agent_homes.json`
+in the user config directory (`agent.RememberAgentHome`), after the session
+state is saved and its lock released. Only a home resolved from the user's
+environment is recorded, never one read from session state. The registry
+lists each agent's homes most recently used first, at most 32 per agent, in
+canonical form; a home must exist to be recorded, and entries that are no
+longer directories are dropped when it is next rewritten. An unreadable or
+unsupported registry is never overwritten.
+
+`AgentHome` grants no trust on its own. Session state can come from another
+repository (`entire session adopt --from`), so a reader uses `AgentHome` only
+after `agent.ResolveTrustedHome` matches it against the active home or a
+recorded one. That keeps a home named by foreign state to the homes the user's
+own environment has resolved. It does not defend against code running as the
+user: such code can write the registry, the agent's home, and the
+repository's git hooks alike. Codex child rollouts of a session from another
+trusted home are looked up in that home's stores
+(`agent.HomeScopedInventoryExtractor`).
+
 ### The Root Anchors
 
 Entire does filesystem I/O in eight trees, and each has one package that owns a

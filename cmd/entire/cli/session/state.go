@@ -411,6 +411,16 @@ type State struct {
 	// TranscriptPath is the path to the live transcript file (for mid-session commit detection)
 	TranscriptPath string `json:"transcript_path,omitempty"`
 
+	// AgentHome is the agent's home directory (for example CLAUDE_CONFIG_DIR or
+	// CODEX_HOME) whose session stores held TranscriptPath when it was last set
+	// at session initialization or turn start, in whichever spelling (as the
+	// environment sets it, or canonical) contains TranscriptPath. A home set by
+	// an earlier turn is kept while its stores still hold TranscriptPath. It is
+	// "" when the agent has no home layout or the transcript lies in none of
+	// the home's stores. It grants no trust: readers pass it to
+	// agent.ResolveTrustedHome before relying on it.
+	AgentHome string `json:"agent_home,omitempty"`
+
 	// LastPrompt is the most recent user prompt for this session (truncated for display).
 	// Updated on every turn start (UserPromptSubmit). JSON tag kept as "first_prompt"
 	// for backward compatibility with existing state files.
