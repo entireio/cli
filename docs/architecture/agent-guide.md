@@ -531,10 +531,12 @@ A launch-time `SubagentEnd` needs `ToolUseID`, and should carry `SubagentID` whe
 
 **Without it:** The framework reads the transcript immediately, which may be incomplete if the agent writes asynchronously.
 
-**Implement when:** Your agent writes transcripts asynchronously (e.g., Claude Code uses an async writer and needs to wait for a flush sentinel before reading).
+**Implement when:** Your agent writes transcripts asynchronously (e.g., Claude Code uses an async writer, so turn end waits until the turn's final message is on disk before reading).
 
 **Method:**
 - `PrepareTranscript(sessionRef) error` - Wait until the transcript is fully written. Called before `ReadTranscript`.
+
+**Turn-end refinement (built-in only):** an agent can also implement `TurnEndTranscriptPreparer.PrepareTurnEndTranscript(ctx, event)`, which the framework calls instead of `PrepareTranscript` on `TurnEnd`. It receives the event, so a hook payload that names the turn's final message (`Event.FinalAssistantText`, from Claude Code's `last_assistant_message`) can end the wait as soon as that message is written.
 
 ### `TokenCalculator`
 
@@ -984,7 +986,7 @@ absPath := filepath.Join(repoRoot, file)
 
 ### Transcript Flush Timing
 
-Some agents write transcripts asynchronously. If `ReadTranscript` is called before the write completes, the transcript will be incomplete. Implement `TranscriptPreparer` if your agent has this behavior. Claude Code solves this by writing a sentinel entry and polling for it (see `waitForTranscriptFlush` in `claudecode/lifecycle.go`).
+Some agents write transcripts asynchronously. If `ReadTranscript` is called before the write completes, the transcript will be incomplete. Implement `TranscriptPreparer` if your agent has this behavior. Claude Code polls until the transcript holds the turn's final assistant message from the Stop payload, falling back to waiting for the file size to settle (see `waitForTranscriptFlush` in `claudecode/lifecycle.go`).
 
 ### Antigravity (agy) Wire-Format Quirks
 

@@ -14,20 +14,22 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // Compile-time interface assertions for new interfaces.
 var (
-	_ agent.TranscriptAnalyzer     = (*ClaudeCodeAgent)(nil)
-	_ agent.TranscriptPreparer     = (*ClaudeCodeAgent)(nil)
-	_ agent.TokenCalculator        = (*ClaudeCodeAgent)(nil)
-	_ agent.ModelExtractor         = (*ClaudeCodeAgent)(nil)
-	_ agent.SkillEventExtractor    = (*ClaudeCodeAgent)(nil)
-	_ agent.SubagentAwareExtractor = (*ClaudeCodeAgent)(nil)
-	_ agent.ToolInvocationScanner  = (*ClaudeCodeAgent)(nil)
-	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)
-	_ agent.ContextInjector        = (*ClaudeCodeAgent)(nil)
-	_ agent.TaskTranscriptMatcher  = (*ClaudeCodeAgent)(nil)
+	_ agent.TranscriptAnalyzer        = (*ClaudeCodeAgent)(nil)
+	_ agent.TranscriptPreparer        = (*ClaudeCodeAgent)(nil)
+	_ agent.TurnEndTranscriptPreparer = (*ClaudeCodeAgent)(nil)
+	_ agent.TokenCalculator           = (*ClaudeCodeAgent)(nil)
+	_ agent.ModelExtractor            = (*ClaudeCodeAgent)(nil)
+	_ agent.SkillEventExtractor       = (*ClaudeCodeAgent)(nil)
+	_ agent.SubagentAwareExtractor    = (*ClaudeCodeAgent)(nil)
+	_ agent.ToolInvocationScanner     = (*ClaudeCodeAgent)(nil)
+	_ agent.HookResponseWriter        = (*ClaudeCodeAgent)(nil)
+	_ agent.ContextInjector           = (*ClaudeCodeAgent)(nil)
+	_ agent.TaskTranscriptMatcher     = (*ClaudeCodeAgent)(nil)
 )
 
 // WriteHookResponse outputs a JSON hook response to stdout.
@@ -113,10 +115,18 @@ func (c *ClaudeCodeAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	return data, nil
 }
 
-// PrepareTranscript waits for Claude Code's async transcript flush to complete.
-// Claude writes a hook_progress sentinel entry after flushing all pending writes.
+// PrepareTranscript waits for Claude Code's async transcript writes to settle.
+// Outside the Stop hook there is no final message to wait for, so it relies on
+// the file size settling; see waitForTranscriptFlush.
 func (c *ClaudeCodeAgent) PrepareTranscript(ctx context.Context, sessionRef string) error {
-	waitForTranscriptFlush(ctx, sessionRef, time.Now())
+	waitForTranscriptFlush(ctx, sessionRef, time.Now(), "")
+	return nil
+}
+
+// PrepareTurnEndTranscript waits like PrepareTranscript, but returns as soon as
+// the turn's final assistant message (from the Stop payload) is on disk.
+func (c *ClaudeCodeAgent) PrepareTurnEndTranscript(ctx context.Context, event *agent.Event) error {
+	waitForTranscriptFlush(ctx, event.SessionRef, time.Now(), event.FinalAssistantText)
 	return nil
 }
 
@@ -134,12 +144,18 @@ func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent
 	if err != nil {
 		return nil, err
 	}
+	var finalText string
+	if len(raw.LastAssistantMessage) > 0 {
+		//nolint:errcheck // a non-string payload just leaves the wait on its size fallback
+		_ = json.Unmarshal(raw.LastAssistantMessage, &finalText)
+	}
 	return &agent.Event{
-		Type:       eventType,
-		SessionID:  raw.SessionID,
-		SessionRef: raw.TranscriptPath,
-		Model:      raw.Model,
-		Timestamp:  time.Now(),
+		Type:               eventType,
+		SessionID:          raw.SessionID,
+		SessionRef:         raw.TranscriptPath,
+		Model:              raw.Model,
+		FinalAssistantText: finalText,
+		Timestamp:          time.Now(),
 	}, nil
 }
 
@@ -269,41 +285,39 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 	}, nil
 }
 
-// --- Transcript flush sentinel ---
-
-// stopHookSentinel is the string that appears in Claude Code's hook_progress
-// entry when the stop hook has been invoked, indicating the transcript is fully flushed.
-// It is a prefix of "hooks claude-code stop-failure" on purpose: a turn ending
-// on an API error flushes the same way, so both turn-end verbs must match.
-const stopHookSentinel = "hooks claude-code stop"
+// --- Transcript flush wait ---
 
 // waitForTranscriptFlush waits until Claude Code's async transcript writes have
-// settled before turn-end reads the file. It returns as soon as EITHER the stop
-// hook sentinel appears OR the file size has held steady for a full quiet
-// window, and gives up after maxWait as a safety bound.
+// settled before turn-end reads the file. It returns as soon as EITHER the
+// turn's final assistant message is on disk OR the file size has held steady
+// for a full quiet window, and gives up after maxWait as a safety bound.
 //
-// The stop-hook sentinel ("hooks claude-code stop" hook_progress entry) is the
-// authoritative completion signal and the primary fast-path — when present it
-// means the transcript is fully flushed and we return at once. But it is not
-// reliably present while this hook runs: Claude persists it around the hook
-// boundary, so a poll loop inside the stop hook often never observes it and
-// would otherwise burn the full maxWait on every healthy turn-end.
+// The final-message check is the completion signal. Claude Code's Stop payload
+// carries the turn's last assistant text (last_assistant_message), and the
+// transcript entry holding it is written just before Stop hooks run, so it is
+// usually already there on the first poll. Claude Code documents that the
+// transcript may lag the in-memory conversation when hooks fire, which is why
+// the check polls rather than reads once. finalText is empty when the payload
+// has no final message (StopFailure, or callers outside the Stop hook).
 //
-// Settle-on-stability is therefore the fallback. It is only a heuristic proxy
-// for completion, not a completion signal, so we require the size to hold steady
-// across a wall-clock quietWindow (not just a poll or two) before trusting it.
-// A shorter window risks a brief mid-write pause — a GC pause, disk contention,
-// or a large tool-result flushed as several writes — being mistaken for a
-// finished transcript, causing turn-end to read a TRUNCATED transcript that then
-// gets condensed and pushed. Any observed growth resets the window, so a
-// transcript still being written with sub-second pauses keeps waiting up to
-// maxWait, while a genuinely settled file still returns well under it.
-func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStartTime time.Time) {
+// Settle-on-stability is the fallback for those cases and for a final entry the
+// check cannot find. It is only a heuristic proxy for completion, so we require
+// the size to hold steady across a wall-clock quietWindow (not just a poll or
+// two) before trusting it. A shorter window risks a brief mid-write pause — a GC
+// pause, disk contention, or a large tool-result flushed as several writes —
+// being mistaken for a finished transcript, causing turn-end to read a TRUNCATED
+// transcript that then gets condensed and pushed. Any observed growth resets the
+// window, so a transcript still being written with sub-second pauses keeps
+// waiting up to maxWait, while a genuinely settled file still returns well under it.
+//
+// Claude Code once wrote a hook_progress entry naming the stop hook when it
+// launched, and this wait used it as its signal. Current releases record hooks
+// only after they finish (stop_hook_summary), which a wait inside the hook can
+// never see, so that check was removed.
+func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStartTime time.Time, finalText string) {
 	const (
 		maxWait      = 3 * time.Second
 		pollInterval = 50 * time.Millisecond
-		tailBytes    = 4096
-		maxSkew      = 2 * time.Second
 		// quietWindow is how long the transcript size must hold steady before
 		// settle-on-stability is trusted. It must comfortably exceed a plausible
 		// mid-write pause so a brief stall is not mistaken for completion, while
@@ -313,7 +327,7 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 
 	logCtx := logging.WithComponent(ctx, "agent.claudecode")
 
-	// Fast path: skip the poll loop when the sentinel can't possibly appear.
+	// Fast path: skip the poll loop when nothing more can arrive.
 	// - File doesn't exist: nothing to poll.
 	// - File is stale (unmodified for 2+ min): agent isn't running anymore.
 	//   This avoids 3s timeouts per stale "active" session (e.g., agent crashed
@@ -327,7 +341,7 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 	}
 	fileAge := time.Since(info.ModTime())
 	if fileAge > staleThreshold {
-		logging.Debug(logCtx, "transcript file is stale, skipping sentinel wait",
+		logging.Debug(logCtx, "transcript file is stale, skipping flush wait",
 			slog.Duration("file_age", fileAge),
 		)
 		return
@@ -337,10 +351,8 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 	lastSize := int64(-1)
 	var stableSince time.Time
 	for time.Now().Before(deadline) {
-		// Authoritative fast-path: the stop-hook sentinel means the transcript is
-		// fully flushed, so return immediately without waiting out the window.
-		if checkStopSentinel(transcriptPath, tailBytes, hookStartTime, maxSkew) {
-			logging.Debug(logCtx, "transcript flush sentinel found",
+		if finalText != "" && finalMessageWritten(transcriptPath, finalText) {
+			logging.Debug(logCtx, "transcript holds the final assistant message, proceeding",
 				slog.Duration("wait", time.Since(hookStartTime)),
 			)
 			return
@@ -360,6 +372,7 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 					slog.Duration("wait", time.Since(hookStartTime)),
 					slog.Duration("quiet_window", quietWindow),
 					slog.Int64("size", fi.Size()),
+					slog.Bool("had_final_text", finalText != ""),
 				)
 				return
 			}
@@ -372,8 +385,18 @@ func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStar
 	)
 }
 
-// checkStopSentinel reads the tail of the transcript file and looks for the sentinel.
-func checkStopSentinel(path string, tailBytes int64, hookStartTime time.Time, maxSkew time.Duration) bool {
+// finalMessageTailBytes bounds how much of the transcript finalMessageWritten
+// reads. Final assistant entries are a few KB; one larger than this is simply
+// not found, and the wait falls back to size stability.
+const finalMessageTailBytes = 256 << 10
+
+// finalMessageWritten reports whether the transcript's tail holds the turn's
+// final assistant message: the latest end_turn text block ends finalText (all
+// of it, or its last block when the message has several), with no user entry
+// and no entry of a later assistant message after it. Any user entry — a prompt or a tool result — means a later
+// step followed, so an earlier turn that ended with the same words never
+// matches.
+func finalMessageWritten(path, finalText string) bool {
 	f, err := os.Open(path) //nolint:gosec // path comes from agent hook input
 	if err != nil {
 		return false
@@ -384,43 +407,53 @@ func checkStopSentinel(path string, tailBytes int64, hookStartTime time.Time, ma
 	if err != nil {
 		return false
 	}
-	offset := info.Size() - tailBytes
-	if offset < 0 {
-		offset = 0
-	}
+	offset := max(info.Size()-finalMessageTailBytes, 0)
 	buf := make([]byte, info.Size()-offset)
 	if _, err := f.ReadAt(buf, offset); err != nil {
 		return false
 	}
 
-	lines := strings.Split(string(buf), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.Contains(line, stopHookSentinel) {
+	want := strings.TrimSpace(finalText)
+	found := false
+	matchedID := ""
+	for _, line := range strings.Split(string(buf), "\n") {
+		var entry transcript.Line
+		// A partial first line (cut by the tail window) or a line still being
+		// written fails to parse and is skipped.
+		if json.Unmarshal([]byte(line), &entry) != nil {
 			continue
 		}
-
-		var entry struct {
-			Timestamp string `json:"timestamp"`
-		}
-		if json.Unmarshal([]byte(line), &entry) != nil || entry.Timestamp == "" {
-			continue
-		}
-		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
-		if err != nil {
-			ts, err = time.Parse(time.RFC3339, entry.Timestamp)
-			if err != nil {
+		switch entry.Type {
+		case transcript.TypeUser:
+			found = false
+		case transcript.TypeAssistant:
+			var msg struct {
+				ID         string                    `json:"id"`
+				StopReason string                    `json:"stop_reason"`
+				Content    []transcript.ContentBlock `json:"content"`
+			}
+			if json.Unmarshal(entry.Message, &msg) != nil {
 				continue
 			}
-		}
-		// Validate timestamp is within acceptable range:
-		// - Not too far in the past (before hook started minus skew)
-		// - Not too far in the future (after hook started plus skew)
-		lowerBound := hookStartTime.Add(-maxSkew)
-		upperBound := hookStartTime.Add(maxSkew)
-		if ts.After(lowerBound) && ts.Before(upperBound) {
-			return true
+			last := ""
+			for _, block := range msg.Content {
+				if text := strings.TrimSpace(block.Text); block.Type == transcript.ContentTypeText && text != "" {
+					last = text
+				}
+			}
+			switch {
+			case msg.StopReason == "end_turn" && last != "":
+				// The latest final text block decides: an earlier block that
+				// happens to match must not stand once a later one is written.
+				found = strings.HasSuffix(want, last)
+				matchedID = msg.ID
+			case msg.ID == "" || msg.ID != matchedID:
+				// Any entry of a later message (thinking, tool use) means the
+				// matched one was not the turn's last. Further blocks of the
+				// matched message itself keep the match.
+				found = false
+			}
 		}
 	}
-	return false
+	return found
 }

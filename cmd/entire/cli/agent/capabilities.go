@@ -94,6 +94,12 @@ func AsTranscriptPreparer(ag Agent) (TranscriptPreparer, bool) {
 	return declaredCapability[TranscriptPreparer](ag, func(c DeclaredCaps) bool { return c.TranscriptPreparer })
 }
 
+// AsTurnEndTranscriptPreparer returns the agent as TurnEndTranscriptPreparer if
+// it implements the interface. Built-in only, like AsHookFreshness.
+func AsTurnEndTranscriptPreparer(ag Agent) (TurnEndTranscriptPreparer, bool) {
+	return builtinCapability[TurnEndTranscriptPreparer](ag)
+}
+
 // AsSidecarImageProvider returns the agent as SidecarImageProvider if it
 // implements the interface. This is a best-effort, optional capability (image
 // capture from a store outside the transcript, e.g. Cursor's SQLite blob store),

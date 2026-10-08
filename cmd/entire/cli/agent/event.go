@@ -204,6 +204,12 @@ type Event struct {
 	// The lifecycle layer persists these to session state and later checkpoint metadata.
 	SkillEvents []SkillEvent
 
+	// FinalAssistantText is the text of the turn's last assistant message, for
+	// TurnEnd events whose hook payload carries it (Claude Code's Stop hook
+	// last_assistant_message). TurnEndTranscriptPreparer uses it to wait until
+	// that message is on disk. Empty when the hook does not report it.
+	FinalAssistantText string
+
 	// Metadata holds agent-specific state that the framework stores and makes available
 	// on subsequent events. Examples: Pi's activeLeafId, Cursor's is_background_agent.
 	Metadata map[string]string

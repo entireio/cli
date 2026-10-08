@@ -3,7 +3,6 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,6 +153,30 @@ func TestParseHookEvent_StopFailure_EndsTurn(t *testing.T) {
 	require.Equal(t, agent.TurnEnd, event.Type)
 	require.Equal(t, "sess-fail", event.SessionID)
 	require.Equal(t, "/tmp/fail.jsonl", event.SessionRef)
+}
+
+func TestParseHookEvent_TurnEnd_FinalAssistantText(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"string payload (Claude Code 2.1.291)", `{"session_id":"s","transcript_path":"/t","last_assistant_message":"All done."}`, "All done."},
+		{"absent", `{"session_id":"s","transcript_path":"/t"}`, ""},
+		{"object payload is ignored, not an error", `{"session_id":"s","transcript_path":"/t","last_assistant_message":{"id":"msg_1"}}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(tt.input))
+			require.NoError(t, err)
+			require.NotNil(t, event)
+			require.Equal(t, tt.want, event.FinalAssistantText)
+		})
+	}
 }
 
 func TestParseHookEvent_TurnEnd_IncludesModel(t *testing.T) {
@@ -672,7 +695,7 @@ func TestWaitForTranscriptFlush_StaleFile_SkipsWait(t *testing.T) {
 	// waitForTranscriptFlush should return almost instantly for stale files
 	// (not wait the full 3 seconds)
 	start := time.Now()
-	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now(), "")
 	elapsed := time.Since(start)
 
 	if elapsed > 500*time.Millisecond {
@@ -680,23 +703,87 @@ func TestWaitForTranscriptFlush_StaleFile_SkipsWait(t *testing.T) {
 	}
 }
 
-// TestCheckStopSentinel_MatchesBothTurnEndHooks pins that the flush sentinel
-// recognizes the StopFailure hook as well as Stop. Tightening the match to the
-// exact stop command would make API-error turns fall back to the slower
-// size-stability wait.
-func TestCheckStopSentinel_MatchesBothTurnEndHooks(t *testing.T) {
+// Transcript lines shaped like Claude Code 2.1.291 writes them: one entry per
+// content block, the final ones carrying stop_reason end_turn.
+const (
+	userPromptLine    = `{"type":"user","promptId":"p1","message":{"role":"user","content":"Reply with ok"}}`
+	toolResultLine    = `{"type":"user","promptId":"p1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}`
+	toolUseLine       = `{"type":"assistant","message":{"id":"msg_a","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}`
+	thinkingFinalLine = `{"type":"assistant","message":{"id":"msg_b","stop_reason":"end_turn","content":[{"type":"thinking","thinking":""}]}}`
+	textFinalLine     = `{"type":"assistant","message":{"id":"msg_b","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}`
+	stopSummaryLine   = `{"type":"system","subtype":"stop_hook_summary","hookInfos":[{"command":"entire hooks claude-code stop"}]}`
+)
+
+func TestFinalMessageWritten(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now()
-	for _, verb := range []string{HookNameStop, HookNameStopFailure} {
-		t.Run(verb, func(t *testing.T) {
+	tests := []struct {
+		name      string
+		lines     []string
+		finalText string
+		want      bool
+	}{
+		{"final text written", []string{userPromptLine, toolUseLine, toolResultLine, thinkingFinalLine, textFinalLine}, "ok", true},
+		{"followed by non-user entries", []string{userPromptLine, textFinalLine, stopSummaryLine}, "ok", true},
+		{"only thinking block written", []string{userPromptLine, thinkingFinalLine}, "ok", false},
+		{"turn still on tool calls", []string{userPromptLine, toolUseLine, toolResultLine}, "ok", false},
+		{"same words ended the previous turn", []string{textFinalLine, userPromptLine, toolUseLine}, "ok", false},
+		{"different final text", []string{userPromptLine, textFinalLine}, "not ok at all", false},
+		{"last of several text blocks", []string{userPromptLine, textFinalLine}, "Here is the answer.\n\nok", true},
+		{"later text block differs (one entry)", []string{userPromptLine, `{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"},{"type":"text","text":"done"}]}}`}, "ok", false},
+		{"later text entry differs", []string{userPromptLine, textFinalLine, `{"type":"assistant","message":{"id":"msg_b","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}`}, "ok", false},
+		{"later message started with thinking", []string{userPromptLine, textFinalLine, `{"type":"assistant","message":{"id":"msg_c","stop_reason":"end_turn","content":[{"type":"thinking","thinking":""}]}}`}, "ok", false},
+		{"later message is a tool call", []string{userPromptLine, textFinalLine, `{"type":"assistant","message":{"id":"msg_c","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{}}]}}`}, "ok", false},
+		{"trailing block of the matched message", []string{userPromptLine, textFinalLine, `{"type":"assistant","message":{"id":"msg_b","stop_reason":"end_turn","content":[{"type":"thinking","thinking":""}]}}`}, "ok", true},
+		{"final line still being written", []string{userPromptLine, textFinalLine[:40]}, "ok", false},
+		{"no stop_reason (older streaming placeholder)", []string{userPromptLine, `{"type":"assistant","message":{"stop_reason":null,"content":[{"type":"text","text":"ok"}]}}`}, "ok", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
-			line := fmt.Sprintf(`{"type":"progress","data":{"type":"hook_progress","command":"entire hooks claude-code %s"},"timestamp":%q}`,
-				verb, now.UTC().Format(time.RFC3339Nano))
-			require.NoError(t, os.WriteFile(transcriptFile, []byte(line+"\n"), 0o600))
-			require.True(t, checkStopSentinel(transcriptFile, 4096, now, 2*time.Second))
+			path := filepath.Join(t.TempDir(), "transcript.jsonl")
+			require.NoError(t, os.WriteFile(path, []byte(strings.Join(tt.lines, "\n")), 0o600))
+			require.Equal(t, tt.want, finalMessageWritten(path, tt.finalText))
 		})
+	}
+}
+
+// TestWaitForTranscriptFlush_FinalMessageEndsWaitWhileFileGrows verifies the
+// final-message check is the completion signal: once the final entry is on
+// disk the wait returns even though later writes keep the size changing, where
+// the size fallback alone would keep waiting.
+func TestWaitForTranscriptFlush_FinalMessageEndsWaitWhileFileGrows(t *testing.T) {
+	t.Parallel()
+
+	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptFile, []byte(userPromptLine+"\n"+textFinalLine+"\n"), 0o600))
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		f, err := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		ticker := time.NewTicker(40 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if _, werr := f.WriteString(stopSummaryLine + "\n"); werr != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	start := time.Now()
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now(), "ok")
+	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
+		t.Errorf("expected the final message to end the wait at once, took %v", elapsed)
 	}
 }
 
@@ -713,7 +800,7 @@ func TestWaitForTranscriptFlush_RecentStableFile_ReturnsFast(t *testing.T) {
 	}
 
 	start := time.Now()
-	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now(), "")
 	elapsed := time.Since(start)
 
 	// A stable file settles once its size has held steady for the quiet window
@@ -761,7 +848,7 @@ func TestWaitForTranscriptFlush_GrowingFile_WaitsUntilSettled(t *testing.T) {
 	}()
 
 	start := time.Now()
-	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now(), "")
 	elapsed := time.Since(start)
 	close(stop)
 
@@ -822,7 +909,7 @@ func TestWaitForTranscriptFlush_BriefMidWritePause_NotDeclaredDoneEarly(t *testi
 	}()
 
 	start := time.Now()
-	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now(), "")
 	returnedAt := time.Now()
 	elapsed := returnedAt.Sub(start)
 
@@ -848,7 +935,7 @@ func TestWaitForTranscriptFlush_NonexistentFile_ReturnsImmediately(t *testing.T)
 
 	// File doesn't exist — os.Stat fails, return immediately (nothing to poll).
 	start := time.Now()
-	waitForTranscriptFlush(context.Background(), "/nonexistent/transcript.jsonl", time.Now())
+	waitForTranscriptFlush(context.Background(), "/nonexistent/transcript.jsonl", time.Now(), "")
 	elapsed := time.Since(start)
 
 	if elapsed > 500*time.Millisecond {

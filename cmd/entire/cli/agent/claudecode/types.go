@@ -40,6 +40,10 @@ type sessionInfoRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Model          string `json:"model,omitempty"`
+	// LastAssistantMessage is the Stop hook's final assistant text. Kept raw:
+	// it is a string on current Claude Code, and a payload of another shape
+	// must not fail the whole hook parse.
+	LastAssistantMessage json.RawMessage `json:"last_assistant_message,omitempty"`
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.

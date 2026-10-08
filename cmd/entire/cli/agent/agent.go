@@ -257,6 +257,18 @@ type TranscriptPreparer interface {
 	PrepareTranscript(ctx context.Context, sessionRef string) error
 }
 
+// TurnEndTranscriptPreparer refines TranscriptPreparer for the TurnEnd path,
+// where the hook payload can say what the transcript must contain before it is
+// read (e.g. Claude Code's last_assistant_message). The framework prefers it
+// over PrepareTranscript at turn end. Built-in only: it has no DeclaredCaps gate.
+type TurnEndTranscriptPreparer interface {
+	Agent
+
+	// PrepareTurnEndTranscript ensures the transcript named by event.SessionRef
+	// holds the turn that event ends.
+	PrepareTurnEndTranscript(ctx context.Context, event *Event) error
+}
+
 // LateTranscriptWriter marks agents whose transcript file is written only
 // AFTER the Stop hook rather than streamed during the turn (e.g. Antigravity).
 // Implementing this interface is the trait signal the strategy layer keys off

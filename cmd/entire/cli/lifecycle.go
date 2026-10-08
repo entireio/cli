@@ -757,7 +757,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Claude Code's PrepareTranscript just flushes (always succeeds). Agents without
 	// TranscriptPreparer (e.g. Droid) are unaffected.
 	_, prepareSpan := perf.Start(ctx, "prepare_and_validate_transcript")
-	if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
+	if preparer, ok := agent.AsTurnEndTranscriptPreparer(ag); ok {
+		if err := preparer.PrepareTurnEndTranscript(ctx, event); err != nil {
+			logging.Warn(logCtx, "failed to prepare transcript",
+				slog.String("error", err.Error()))
+		}
+	} else if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
 		if err := preparer.PrepareTranscript(ctx, transcriptRef); err != nil {
 			logging.Warn(logCtx, "failed to prepare transcript",
 				slog.String("error", err.Error()))
