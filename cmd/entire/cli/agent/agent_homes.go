@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -120,6 +121,21 @@ func KnownAgentHomes(agentType types.AgentType) ([]string, error) {
 	return homes, nil
 }
 
+// KnownAgentHomesExcept is KnownAgentHomes without exclude, compared in
+// canonical form; an empty exclude, or one that cannot be resolved, leaves
+// nothing out.
+func KnownAgentHomesExcept(agentType types.AgentType, exclude string) ([]string, error) {
+	homes, err := KnownAgentHomes(agentType)
+	if err != nil || exclude == "" {
+		return homes, err
+	}
+	canonical, err := filepath.EvalSymlinks(filepath.Clean(exclude))
+	if err != nil {
+		return homes, nil //nolint:nilerr // an exclude that cannot be resolved matches no recorded home
+	}
+	return slices.DeleteFunc(homes, func(home string) bool { return sameDir(home, canonical) }), nil
+}
+
 // ResolveTrustedHome checks that home is provider's active home or a home
 // recorded for provider.Type() that is still a directory, comparing canonical
 // forms, and returns filepath.Clean(home): the spelling it checked, which a
@@ -158,6 +174,31 @@ func ResolveTrustedHome(provider HomeLayoutProvider, home string) (string, error
 		}
 	}
 	return "", fmt.Errorf("%q: %w", home, ErrUntrustedAgentHome)
+}
+
+// ActiveHomeHolding reports whether one of the session stores of provider's
+// active home holds transcript, and if so returns that home spelled the way
+// that holds filepath.Clean(transcript): as the environment sets it, cleaned,
+// or else in canonical form (see filepath.EvalSymlinks), since an agent may
+// report transcript paths through either. It returns "", false and an error
+// only when the active home cannot be resolved.
+func ActiveHomeHolding(provider HomeLayoutProvider, transcript string) (string, bool, error) {
+	active, err := provider.SessionHome()
+	if err != nil {
+		return "", false, fmt.Errorf("resolve %s home: %w", provider.Type(), err)
+	}
+	layout := provider.HomeLayout()
+	transcript = filepath.Clean(transcript)
+	active = filepath.Clean(active)
+	if layout.Holds(active, transcript) {
+		return active, true, nil
+	}
+	if canonical, err := filepath.EvalSymlinks(active); err == nil && canonical != active {
+		if layout.Holds(canonical, transcript) {
+			return canonical, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // recordedAgentHomes returns the registry's entries for agentType as recorded.
@@ -204,19 +245,20 @@ func requireAbsoluteHome(home string) error {
 // empty: an unreadable or unsupported one is an error, so it is never
 // overwritten.
 func readAgentHomesFile(root *os.Root) (agentHomesFile, error) {
+	path := filepath.Join(root.Name(), agentHomesFileName)
 	data, err := osroot.ReadFileNoFollow(root, agentHomesFileName)
 	if errors.Is(err, os.ErrNotExist) {
 		return agentHomesFile{}, nil
 	}
 	if err != nil {
-		return agentHomesFile{}, fmt.Errorf("read agent homes: %w", err)
+		return agentHomesFile{}, fmt.Errorf("read %s: %w", path, err)
 	}
 	var file agentHomesFile
 	if err := json.Unmarshal(data, &file); err != nil {
-		return agentHomesFile{}, fmt.Errorf("parse agent homes: %w", err)
+		return agentHomesFile{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if file.Version != agentHomesVersion {
-		return agentHomesFile{}, fmt.Errorf("unsupported agent homes version %d", file.Version)
+		return agentHomesFile{}, fmt.Errorf("%s: unsupported version %d", path, file.Version)
 	}
 	return file, nil
 }

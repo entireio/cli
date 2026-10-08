@@ -794,44 +794,24 @@ func updateSessionAgentHome(ctx context.Context, state *SessionState) (remember 
 	if state.TranscriptPath == "" {
 		return ""
 	}
-	layout := provider.HomeLayout()
-	transcript := filepath.Clean(state.TranscriptPath)
-	if active, ok := activeHomeHolding(ctx, provider, transcript); ok {
+	active, ok, err := agent.ActiveHomeHolding(provider, state.TranscriptPath)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "session"), "agent home unavailable",
+			slog.String("agent", string(state.AgentType)),
+			slog.String("error", err.Error()))
+	}
+	if ok {
 		state.AgentHome = active
 		return active
 	}
 	if state.AgentHome != "" {
-		if _, ok := layout.StoreContaining(filepath.Clean(state.AgentHome), transcript); ok {
+		transcript := filepath.Clean(state.TranscriptPath)
+		if provider.HomeLayout().Holds(filepath.Clean(state.AgentHome), transcript) {
 			return ""
 		}
 	}
 	state.AgentHome = ""
 	return ""
-}
-
-// activeHomeHolding returns provider's active home if one of its session
-// stores holds transcript, a clean path. The home is returned as the
-// environment sets it or in its canonical form, whichever contains transcript,
-// since an agent may report transcript paths through either.
-func activeHomeHolding(ctx context.Context, provider agent.HomeLayoutProvider, transcript string) (string, bool) {
-	active, err := provider.SessionHome()
-	if err != nil {
-		logging.Debug(logging.WithComponent(ctx, "session"), "agent home unavailable",
-			slog.String("agent", string(provider.Type())),
-			slog.String("error", err.Error()))
-		return "", false
-	}
-	layout := provider.HomeLayout()
-	active = filepath.Clean(active)
-	if _, ok := layout.StoreContaining(active, transcript); ok {
-		return active, true
-	}
-	if canonical, err := filepath.EvalSymlinks(active); err == nil && canonical != active {
-		if _, ok := layout.StoreContaining(canonical, transcript); ok {
-			return canonical, true
-		}
-	}
-	return "", false
 }
 
 // rememberAgentHome records home, as returned by updateSessionAgentHome, in the

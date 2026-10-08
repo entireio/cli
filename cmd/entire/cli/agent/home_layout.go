@@ -21,16 +21,15 @@ func (l HomeLayout) StoresUnder(home string) []string {
 	return stores
 }
 
-// StoreContaining returns the store beneath home that contains path, and
-// reports whether there is one. The comparison is lexical and folds case on
-// Windows.
-func (l HomeLayout) StoreContaining(home, path string) (string, bool) {
+// Holds reports whether path is one of the stores beneath home or lies in one.
+// The comparison is lexical and folds case on Windows.
+func (l HomeLayout) Holds(home, path string) bool {
 	for _, store := range l.StoresUnder(home) {
 		if pathHasDirPrefix(path, store) {
-			return store, true
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 // HomeLayoutProvider is implemented by built-in agents that keep session
