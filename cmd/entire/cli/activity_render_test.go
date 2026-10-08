@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"unicode/utf8"
@@ -115,15 +116,50 @@ func TestAgentDisplayFor_TruncatesLongExternalName(t *testing.T) {
 	if w := lipgloss.Width(label); w > maxExternalAgentLabelWidth {
 		t.Errorf("label width = %d, want <= %d (%q)", w, maxExternalAgentLabelWidth, label)
 	}
+	if !strings.HasPrefix(label, "界界") || !strings.HasSuffix(label, "…") {
+		t.Errorf("label = %q, want the name's start cut with …", label)
+	}
+}
+
+// A huge self-reported name is capped before it is measured, so rendering
+// stays fast and the label stays within its width.
+func TestAgentDisplayFor_HugeNameIsCappedBeforeMeasuring(t *testing.T) {
+	t.Parallel()
+	name := strings.Repeat("a", 23) + strings.Repeat("\u0301", 100_000) + "bb"
+	start := time.Now()
+	label := agentDisplayFor(agentKey(name)).Label
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("label took %v, want under 2s", elapsed)
+	}
+	if label == "" || lipgloss.Width(label) > maxExternalAgentLabelWidth {
+		t.Errorf("label = %q (width %d), want non-empty and <= %d", label, lipgloss.Width(label), maxExternalAgentLabelWidth)
+	}
+}
+
+// Invisible format characters are stripped, as on the web and in the API, so
+// a name cannot pass as another one.
+func TestAgentKey_StripsInvisibleFormatCharacters(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{
+		"Foo\u200b":                      "Foo",
+		"\ufeffGrok\u2060 Bot":           "Grok Bot",
+		"Ro\u00adger":                    "Roger",
+		"\u200dFoo\u200d":                "Foo",
+		"\U0001F469\u200d\U0001F4BB Dev": "\U0001F469\u200d\U0001F4BB Dev",
+	} {
+		if got := agentKey(raw); got != want {
+			t.Errorf("agentKey(%q) = %q, want %q", raw, got, want)
+		}
+	}
 }
 
 // Goose and Antigravity are built-in agents in entire-api, so they get their
 // own label rather than being shown as an external agent's raw id.
 func TestAgentKey_GooseAndAntigravityAreBuiltIn(t *testing.T) {
 	t.Parallel()
-	for raw, want := range map[string]string{"goose": "Goose", "Antigravity": "Antigravity"} {
-		if got := agentDisplayFor(agentKey(raw)).Label; got != want {
-			t.Errorf("label for %q = %q, want %q", raw, got, want)
+	for raw, want := range map[string]string{"goose": activityAgentGoose, "Antigravity": activityAgentAntigravity} {
+		if got := agentKey(raw); got != want {
+			t.Errorf("agentKey(%q) = %q, want built-in %q", raw, got, want)
 		}
 	}
 }
@@ -134,7 +170,7 @@ func TestRenderSessionRow_AgentLabel(t *testing.T) {
 		agent *string
 		want  string
 	}{
-		"built-in": {strPtr("Claude Code"), "Claude Code"},
+		"built-in": {strPtr("claude_code"), "Claude Code"},
 		"external": {strPtr("Grok Bot"), "Grok Bot"},
 		"missing":  {nil, "Unknown"},
 	} {
@@ -174,6 +210,33 @@ func TestRenderDotChart_LegendNamesExternalAgent(t *testing.T) {
 	renderDotChart(&buf, activityStyles{width: 200}, hourly, repos)
 	if !strings.Contains(buf.String(), "Grok Bot 75%") {
 		t.Errorf("legend missing external agent:\n%s", buf.String())
+	}
+}
+
+// Raw names that clean to the same agent are one legend entry, and an empty
+// name is Unknown.
+func TestRenderDotChart_LegendMergesCleanedNames(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	repos := []repoContribution{{Repo: "r", Total: 12, Agents: map[string]int{"Grok": 5, "Grok\x1b": 5, "": 2}}}
+	hourly := []hourlyPoint{{Date: "2026-04-01", Hour: 12, Value: 12, AgentID: "Grok"}}
+	renderDotChart(&buf, activityStyles{width: 200}, hourly, repos)
+	out := buf.String()
+	if strings.Count(out, "Grok") != 1 || !strings.Contains(out, "Grok 83%") || !strings.Contains(out, "Unknown 17%") {
+		t.Errorf("legend should list Grok once at 83%% and Unknown at 17%%:\n%s", out)
+	}
+}
+
+// Without colour, an external agent's share must not look like the empty
+// track.
+func TestRenderAgentBar_ExternalAgentDiffersFromEmptyTrack(t *testing.T) {
+	t.Parallel()
+	bar := renderAgentBar(activityStyles{width: 120}, map[string]int{"Grok": 5, activityTestAgentClaude: 3}, 10, 20)
+	if got := strings.Count(bar, string(externalAgentBarChar)); got != 10 {
+		t.Errorf("bar = %q, want 10 external cells", bar)
+	}
+	if got := strings.Count(bar, "░"); got != 4 {
+		t.Errorf("bar = %q, want 4 empty-track cells", bar)
 	}
 }
 

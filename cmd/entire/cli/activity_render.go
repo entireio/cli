@@ -122,7 +122,7 @@ var agentDisplayMap = map[string]agentDisplay{
 	activityAgentKiro:        {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
 	activityAgentAntigravity: {Label: "Antigravity", Color: "#2dd4bf", Char: '▓'}, // teal-400
 	activityAgentGoose:       {Label: "Goose", Color: "#a3e635", Char: '▓'},       // lime-400
-	activityAgentUnknown:     {Label: "Unknown", Color: palette.Muted, Char: '░'},
+	activityAgentUnknown:     {Label: "Unknown", Color: palette.Muted, Char: externalAgentBarChar},
 }
 
 // agentKey is the built-in agent ID for raw, or raw itself for an agent Entire
@@ -137,16 +137,45 @@ func agentKey(raw string) string {
 	return agentUnknown
 }
 
-// externalAgentName is raw trimmed and without control or bidi characters.
-// External agent names are self-reported, so escape sequences must not reach
-// the terminal.
+// externalAgentBarChar fills the bar segment of an agent without its own
+// colour (external agents and Unknown). It differs from the bar's empty track
+// ('░') so their share stays visible without colour.
+const externalAgentBarChar = '▒'
+
+// maxExternalAgentNameRunes caps a self-reported name before it is cleaned and
+// measured, so an absurdly long one cannot stall rendering.
+const maxExternalAgentNameRunes = 256
+
+// zeroWidthJoiner joins emoji sequences, so it is kept inside a name.
+const zeroWidthJoiner = '\u200d'
+
+// externalAgentName is raw without control or invisible format characters
+// (bidi controls, zero-width spaces, BOM, soft hyphens), trimmed. External
+// agent names are self-reported, so escape sequences must not reach the
+// terminal, and the web and API clean names the same way.
 func externalAgentName(raw string) string {
-	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+	if runes := []rune(raw); len(runes) > maxExternalAgentNameRunes {
+		raw = string(runes[:maxExternalAgentNameRunes])
+	}
+	cleaned := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && r != zeroWidthJoiner) {
 			return -1
 		}
 		return r
-	}, raw))
+	}, raw)
+	return strings.TrimFunc(cleaned, func(r rune) bool {
+		return unicode.IsSpace(r) || r == zeroWidthJoiner
+	})
+}
+
+// agentCounts re-keys counts by agentKey, so raw names that clean to the same
+// agent (or to a built-in) are counted once.
+func agentCounts(counts map[string]int) map[string]int {
+	out := make(map[string]int, len(counts))
+	for raw, count := range counts {
+		out[agentKey(raw)] += count
+	}
+	return out
 }
 
 // maxExternalAgentLabelWidth bounds an external agent's self-reported name so
@@ -160,7 +189,7 @@ func agentDisplayFor(key string) agentDisplay {
 		return d
 	}
 	if name := externalAgentName(key); name != "" {
-		return agentDisplay{Label: truncateDisplayWidth(name, maxExternalAgentLabelWidth, "…"), Color: palette.Muted, Char: '░'}
+		return agentDisplay{Label: truncateDisplayWidth(name, maxExternalAgentLabelWidth, "…"), Color: palette.Muted, Char: externalAgentBarChar}
 	}
 	return agentDisplayMap[activityAgentUnknown]
 }
@@ -254,7 +283,7 @@ func renderDotChart(w io.Writer, sty activityStyles, hourly []hourlyPoint, repos
 	total := 0
 	for _, r := range repos {
 		total += r.Total
-		for agent, count := range r.Agents {
+		for agent, count := range agentCounts(r.Agents) {
 			agentTotals[agent] += count
 		}
 	}
@@ -448,6 +477,7 @@ func renderAgentBar(sty activityStyles, agents map[string]int, maxCount, barWidt
 
 	var b strings.Builder
 
+	agents = agentCounts(agents)
 	filled := 0
 	for _, id := range agentRenderOrder(agents) {
 		count := agents[id]
