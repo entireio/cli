@@ -268,6 +268,27 @@ repository's git hooks alike. Codex child rollouts of a session from another
 trusted home are looked up in that home's stores
 (`agent.HomeScopedInventoryExtractor`).
 
+`entire session adopt` accepts the source session's transcript, and each
+declared task transcript, when it lies where the session's `AgentHome` keeps
+the source worktree's sessions and `ResolveTrustedHome` accepts that home.
+`agent.RepoHomeLayout` narrows the agent's stores to the source worktree the
+way its session directory is narrowed under the active home: Claude Code's
+project directory, or every store for an agent without per-project
+directories such as Codex. A trusted home therefore admits no other project's
+files. Paths are compared against the spelling `ResolveTrustedHome` returns,
+and task transcripts must still match the agent's task layout
+(`agent.TaskTranscriptMatcher`). Otherwise, including for a session with no
+`AgentHome` or an untrusted one, the path must lie in the session directory of
+an agent's active home (`agent.AgentForTranscriptPath`). When neither holds
+the transcript, the error names the session's home if it was trusted, since
+then the path is at fault; otherwise it names the relocation variables
+(`agent.RelocationEnvVars`) and why the recorded home was refused.
+
+The adopted state keeps `AgentHome`, in the checked spelling, only while that
+home holds the transcript, and only that home vouches for task transcripts.
+Any other home is cleared, and the next turn start records the home the agent
+runs under.
+
 ### The Root Anchors
 
 Entire does filesystem I/O in eight trees, and each has one package that owns a

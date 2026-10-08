@@ -144,7 +144,10 @@ changes so the next commit can link to the adopted session.
 
 Condensation reads a declared task transcript path whole into the checkpoint, so
 adoption validates each one (`validateAdoptTaskTranscript`). The path must be
-absolute and lie in the session directory of the session's agent; a session
+absolute and lie in the session directory of the session's agent, under its
+active home or under the session's trusted `AgentHome` (see
+[Recorded agent homes](../development/filesystem-safety.md#recorded-agent-homes));
+a session
 recorded without an agent type takes it from the agent that owns its
 transcript. Agents implementing `agent.TaskTranscriptMatcher` (Claude Code,
 Codex, Droid) also require the path to name that task's transcript in their
