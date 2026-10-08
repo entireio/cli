@@ -135,3 +135,35 @@ func TestRunStatus_WarnsAboutLegacyShadowBranches(t *testing.T) {
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
 	assert.Equal(t, 1, got.LegacyShadowBranches)
 }
+
+// Uninstall handles a legacy branch git refuses to delete like doctor does: it
+// reports the deleted count, lists the kept branch, and does not fail.
+// Not parallel: t.Chdir.
+func TestUninstallShadowBranches_KeepsRefusedBranchWithoutFailing(t *testing.T) {
+	setupStopTestRepo(t)
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	for _, branch := range []string{"entire/1234567-abcdef", "entire/89abcde0-123456"} {
+		testutil.RunGit(t, dir, "branch", branch)
+	}
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, dir, "worktree", "add", "-q", linked, "entire/89abcde0-123456")
+
+	var out, errOut bytes.Buffer
+	ok := uninstallShadowBranches(context.Background(), newUninstallPrinter(&out, &errOut))
+	assert.True(t, ok, "a refused delete must not fail the uninstall")
+	assert.Contains(t, out.String(), "Removed 1 legacy shadow branches")
+	assert.Contains(t, errOut.String(), "Kept 1 legacy shadow branch(es)")
+	assert.Contains(t, errOut.String(), "entire/89abcde0-123456")
+	assert.Contains(t, localBranchList(t, dir), "entire/89abcde0-123456")
+}
+
+// Not parallel: t.Chdir.
+func TestUninstallShadowBranches_NoneSaysLegacy(t *testing.T) {
+	setupStopTestRepo(t)
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	var out, errOut bytes.Buffer
+	assert.True(t, uninstallShadowBranches(context.Background(), newUninstallPrinter(&out, &errOut)))
+	assert.Contains(t, out.String(), "No legacy shadow branches to remove")
+}
