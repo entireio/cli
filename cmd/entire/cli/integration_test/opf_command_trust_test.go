@@ -183,3 +183,43 @@ func TestOPFCommandTrust_CommittedLocalFileIsNotExecuted(t *testing.T) {
 		t.Fatal("payload from a COMMITTED settings.local.json was EXECUTED during push")
 	}
 }
+
+// A user push that sends entire/checkpoints/v1 itself (`git push --all`) while
+// its checkpoints wait for the background scan must fail: holding back
+// Entire's own v1 push does not stop git from sending the unscanned branch.
+// A push of the user's branch alone still goes through.
+func TestOPFPrePush_PushAllRefusesUnscannedV1(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	bareDir := env.SetupBareRemote()
+	// A local opf that always fails: the background worker this push starts
+	// cannot scan anything, so v1 stays unscanned for the whole test.
+	env.WriteFile(".entire/opf-broken", "#!/bin/sh\nexit 1\n")
+	if err := os.Chmod(filepath.Join(env.RepoDir, ".entire", "opf-broken"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env.WriteFile(".entire/settings.local.json",
+		`{"redaction":{"openai_privacy_filter":{"enabled":true,"prompt_default":"always",`+
+			`"categories":{"private_person":true},"command":"./.entire/opf-broken"}}}`)
+	env.GitAdd(".entire/opf-broken")
+	env.GitCommit("Add local opf shim")
+
+	_ = createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
+
+	err := env.GitPushWithHooksAllowError("origin", "--all")
+	if err == nil {
+		t.Fatal("git push --all must fail while entire/checkpoints/v1 is unscanned")
+	}
+	if !strings.Contains(err.Error(), "exit status") {
+		t.Fatalf("unexpected push error: %v", err)
+	}
+	if out := testutil.RunGit(t, bareDir, "for-each-ref", "refs/heads/entire/checkpoints/v1"); strings.TrimSpace(out) != "" {
+		t.Fatalf("the unscanned v1 reached the remote: %s", out)
+	}
+
+	if err := env.GitPushWithHooksAllowError("origin", "HEAD"); err != nil {
+		t.Fatalf("pushing only the user's branch must still succeed: %v", err)
+	}
+	waitForOPFScanWorker(t, env)
+}

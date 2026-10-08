@@ -338,6 +338,36 @@ func TestPrePushFromGitHook_UnscannedV1IsHeldForTheWorker(t *testing.T) {
 	require.Equal(t, originalTip, ref.Hash(), "a held v1 must not be rewritten by the hook")
 }
 
+// A pre-push line that does not pass the refs being pushed (an old script, or
+// an old Husky line) cannot refuse a `git push --all`, so a held v1 warns the
+// user to update it. A line that passes them stays quiet.
+func TestPrePushFromGitHook_HeldV1WarnsWhenRefsAreUnknown(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	dir, repo, _ := setupV1RepoInDir(t)
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteDir}})
+	require.NoError(t, err)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	swapOPFScanSpawn(t)
+
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = oldWriter })
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	require.Contains(t, buf.String(), "does not pass the refs being pushed")
+
+	buf.Reset()
+	main := []PrePushRef{{LocalRef: "refs/heads/main", LocalSHA: strings.Repeat("1", 40), RemoteRef: "refs/heads/main"}}
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(WithPrePushRefs(t.Context(), main), "origin"))
+	require.NotContains(t, buf.String(), "does not pass the refs being pushed")
+}
+
 // git-branch users whose checkpoints are held get one pointer to git-refs, not
 // one on every push.
 func TestPrePushFromGitHook_HintsGitRefsOnceForHeldV1(t *testing.T) {

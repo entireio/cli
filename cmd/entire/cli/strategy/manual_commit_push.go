@@ -165,16 +165,24 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			openSpan.End()
 			defer repo.Close()
 			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")
-			_, rewriteErr := rewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget(), opfApplyCachedOnly)
+			verified, rewriteErr := rewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget(), opfApplyCachedOnly)
 			var pending *OPFScanPendingError
 			if errors.As(rewriteErr, &pending) {
 				// Not scanned yet: hold v1 back rather than make the user's push
 				// wait on the model. The worker scans and then pushes it.
 				opfSpan.End()
-				fmt.Fprintln(stderrWriter, opfScanPendingNotice)
-				maybeHintGitRefsForOPF(ctx)
 				maybeSpawnOPFScan(ctx, ps.remote)
 				cleanupPushedShadowBranches(ctx)
+				// Holding back Entire's own push is not enough when the user's
+				// push sends v1 itself (`--all`, `--mirror`, an explicit refspec).
+				if err := checkOuterPushV1(ctx, plumbing.ZeroHash); err != nil {
+					return err
+				}
+				fmt.Fprintln(stderrWriter, opfScanPendingNotice)
+				if !inOPFScanWorker(ctx) {
+					warnPrePushRefsUnknown(ctx, stderrWriter)
+				}
+				maybeHintGitRefsForOPF(ctx)
 				return nil
 			}
 			if rewriteErr != nil {
@@ -186,6 +194,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 				return rewriteErr
 			}
 			opfSpan.End()
+			// git chose what the user's push sends before this hook ran, so a
+			// push that carries v1 sends the pre-rewrite commit unless it
+			// already was the verified tip.
+			if err := checkOuterPushV1(ctx, verified); err != nil {
+				return err
+			}
 		}
 	}
 

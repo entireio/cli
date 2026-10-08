@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -227,7 +228,7 @@ func newHooksGitPostRewriteCmd() *cobra.Command {
 }
 
 func newHooksGitPrePushCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "pre-push <remote>",
 		Short: "Handle pre-push git hook",
 		Args:  cobra.ExactArgs(1),
@@ -249,7 +250,20 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked(slog.String("remote", remote))
 
-			hookErr := g.strategy.PrePushFromGitHook(g.ctx, remote)
+			ctx := g.ctx
+			// Only scripts that replay stdin to whatever runs after them set
+			// this (see strategy.PrePushStdinRefsEnv).
+			if os.Getenv(strategy.PrePushStdinRefsEnv) == "1" {
+				// The ref list git passes on stdin is what lets OPF refuse a
+				// push that sends unverified checkpoint content itself.
+				refs, err := strategy.ParsePrePushRefs(cmd.InOrStdin())
+				if err != nil {
+					return fmt.Errorf("pre-push: %w", err)
+				}
+				ctx = strategy.WithPrePushRefs(ctx, refs)
+			}
+
+			hookErr := g.strategy.PrePushFromGitHook(ctx, remote)
 			g.logCompleted(hookErr)
 
 			// Propagate the error so the hook script exits non-zero and
@@ -269,4 +283,5 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			return fmt.Errorf("pre-push: %w", hookErr)
 		},
 	}
+	return cmd
 }

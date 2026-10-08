@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -664,7 +665,7 @@ func TestCheckGitHookState_UserAdditionsAreNotDrift(t *testing.T) {
 		dir := t.TempDir()
 		for _, hook := range gitHookNames {
 			content := "#!/bin/sh\n# " + entireHookMarker + "\n" +
-				"if command -v entire >/dev/null 2>&1; then entire hooks git " + hook + "; else :; fi\n" +
+				"if command -v entire >/dev/null 2>&1; then " + currentHookCommand(hook) + "; else :; fi\n" +
 				userLine + "\n"
 			if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
 				t.Fatal(err)
@@ -701,11 +702,19 @@ func TestCheckGitHookState_LegacyEntireLineIsStillDrift(t *testing.T) {
 func writeCurrentManagedHooks(t *testing.T, dir string) {
 	t.Helper()
 	for _, hook := range gitHookNames {
-		content := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git " + hook + "\n"
+		content := "#!/bin/sh\n# " + entireHookMarker + "\n" + currentHookCommand(hook) + "\n"
 		if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+}
+
+// currentHookCommand is the hook's Entire invocation in the current script shape.
+func currentHookCommand(hook string) string {
+	if hook == prePushHook {
+		return PrePushStdinRefsEnv + `=1 entire hooks git pre-push "$1"`
+	}
+	return "entire hooks git " + hook
 }
 
 func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
@@ -1624,8 +1633,8 @@ func TestRemoveGitHook_RestoresBackupWhenHookAlreadyGone(t *testing.T) {
 func TestGenerateChainedContent(t *testing.T) {
 	t.Parallel()
 
-	base := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git pre-push \"$1\" || true\n"
-	result := generateChainedContent(base, "pre-push")
+	base := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git post-commit || true\n"
+	result := generateChainedContent(base, "post-commit")
 
 	// Should start with the base content
 	if !strings.HasPrefix(result, base) {
@@ -1643,16 +1652,115 @@ func TestGenerateChainedContent(t *testing.T) {
 	}
 
 	// Should check executable permission on backup
-	expectedCheck := `[ -x "$_entire_hook_dir/pre-push` + backupSuffix + `" ]`
+	expectedCheck := `[ -x "$_entire_hook_dir/post-commit` + backupSuffix + `" ]`
 	if !strings.Contains(result, expectedCheck) {
 		t.Errorf("chained content should check -x on backup, got:\n%s", result)
 	}
 
 	// Should forward all arguments with "$@"
-	expectedExec := `"$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
+	expectedExec := `"$_entire_hook_dir/post-commit` + backupSuffix + `" "$@"`
 	if !strings.Contains(result, expectedExec) {
 		t.Errorf("chained content should execute backup with $@, got:\n%s", result)
 	}
+}
+
+// Whatever runs after Entire's pre-push line (a hook Entire chains to, or the
+// next line of a Husky script, typically `git lfs pre-push`) must still receive
+// git's ref list on stdin after Entire has read it, and Entire's failure must
+// end the script there: otherwise a later command's status decides the push
+// and an OPF abort is lost.
+func TestPrePushHookLine_ReplaysStdinAndPropagatesFailure(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs the generated POSIX sh script")
+	}
+
+	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n"
+	var installed string
+	for _, spec := range buildHookSpecs(bareEntireHookCmd) {
+		if spec.name == prePushHook {
+			installed = spec.content
+		}
+	}
+	require.NotEmpty(t, installed)
+
+	for _, shape := range []struct {
+		name   string
+		script func(dir string) string
+		after  func(dir string) string // where the command after Entire records its stdin
+	}{
+		{
+			name:   "installed script chaining to a backed-up hook",
+			script: func(string) string { return generateChainedContent(installed, prePushHook) },
+			after:  func(dir string) string { return filepath.Join(dir, "chained.stdin") },
+		},
+		{
+			name: "Husky script with the printed line followed by another command",
+			script: func(dir string) string {
+				return "#!/bin/sh\n" + extractCommandLine(installed) + "\ncat > " + filepath.Join(dir, "chained.stdin") + "\n"
+			},
+			after: func(dir string) string { return filepath.Join(dir, "chained.stdin") },
+		},
+	} {
+		for _, tc := range []struct {
+			name       string
+			entireExit int
+			wantAfter  bool
+		}{
+			{name: "entire succeeds", entireExit: 0, wantAfter: true},
+			{name: "entire fails", entireExit: 3, wantAfter: false},
+		} {
+			t.Run(shape.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				binDir := filepath.Join(dir, "bin")
+				require.NoError(t, os.MkdirAll(binDir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(binDir, "entire"),
+					[]byte(fmt.Sprintf("#!/bin/sh\ncat > %q\nexit %d\n", filepath.Join(dir, "entire.stdin"), tc.entireExit)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook), []byte(shape.script(dir)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook+backupSuffix),
+					[]byte(fmt.Sprintf("#!/bin/sh\ncat > %q\n", filepath.Join(dir, "chained.stdin"))), 0o755))
+
+				cmd := exec.CommandContext(t.Context(), "sh", filepath.Join(dir, prePushHook), "origin", "url")
+				cmd.Stdin = strings.NewReader(refs)
+				cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "TMPDIR="+dir)
+				err := cmd.Run()
+				exit := 0
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
+					exit = exitErr.ExitCode()
+				} else {
+					require.NoError(t, err)
+				}
+				require.Equal(t, tc.entireExit, exit, "the script's status must be Entire's")
+
+				got, readErr := os.ReadFile(filepath.Join(dir, "entire.stdin"))
+				require.NoError(t, readErr)
+				require.Equal(t, refs, string(got), "entire must read git's ref list")
+				after, afterErr := os.ReadFile(shape.after(dir))
+				if tc.wantAfter {
+					require.NoError(t, afterErr)
+					require.Equal(t, refs, string(after), "the command after Entire must get the same ref list")
+				} else {
+					require.ErrorIs(t, afterErr, os.ErrNotExist, "nothing may run after Entire fails")
+				}
+				leftovers, globErr := filepath.Glob(filepath.Join(dir, "entire-pre-push.*"))
+				require.NoError(t, globErr)
+				require.Empty(t, leftovers, "the saved ref list must be removed")
+			})
+		}
+	}
+}
+
+// A pre-push script that does not read git's ref list cannot stop a push that
+// sends unverified checkpoint content itself, so it is reinstalled.
+func TestCheckGitHookState_PrePushWithoutStdinRefsIsOutdated(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeCurrentManagedHooks(t, dir)
+	content := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git pre-push \"$1\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook), []byte(content), 0o755))
+	require.Equal(t, GitHooksOutdated, gitHookStateInHooksDir(dir))
 }
 
 func TestGenerateChainedContent_PostRewritePreservesStdinForBackup(t *testing.T) {
