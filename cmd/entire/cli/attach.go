@@ -938,13 +938,22 @@ func confirmCheckpointDelivered(ctx context.Context, target string, checkpointID
 	if err != nil {
 		return fmt.Errorf("resolve checkpoints config: %w", err)
 	}
-	ref := checkpointStorageRefsFor(cfg, checkpointID)[0]
-	if !isCheckpointRef(ref) {
-		ref = "refs/heads/" + ref
+	// The checkpoint lives in the first of its storage refs that exists here:
+	// a hex checkpoint on the git-refs primary may be on its own ref or on the
+	// metadata branch.
+	var ref string
+	var local []byte
+	for _, candidate := range checkpointStorageRefsFor(cfg, checkpointID) {
+		if !isCheckpointRef(candidate) {
+			candidate = "refs/heads/" + candidate
+		}
+		if out, revErr := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", candidate).Output(); revErr == nil {
+			ref, local = candidate, out
+			break
+		}
 	}
-	local, err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", ref).Output()
-	if err != nil {
-		return fmt.Errorf("read local %s: %w", ref, err)
+	if ref == "" {
+		return fmt.Errorf("checkpoint %s is in none of its storage refs locally", checkpointID)
 	}
 	out, err := remote.LsRemoteInDir(ctx, "", target, ref)
 	if err != nil {
