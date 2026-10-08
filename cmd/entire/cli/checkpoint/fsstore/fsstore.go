@@ -122,6 +122,8 @@ func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
 		return s.writeSessionSummary(r)
 	case cp.CheckpointAttribution:
 		return s.writeAttribution(r)
+	case cp.CheckpointCommitLinks:
+		return s.writeCommitLinks(r)
 	default:
 		return fmt.Errorf("fsstore: unsupported write request %T", req)
 	}
@@ -188,6 +190,22 @@ func (s *Store) writeSessionSummary(r cp.SessionSummary) error {
 		return fmt.Errorf("fsstore: cannot set summary for unknown checkpoint %s", r.CheckpointID)
 	}
 	sc.Sessions[len(sc.Sessions)-1].Metadata.Summary = checkpoint.RedactSummary(r.Summary)
+	return s.save(sc)
+}
+
+func (s *Store) writeCommitLinks(r cp.CheckpointCommitLinks) error {
+	sc, err := s.load(r.CheckpointID)
+	if err != nil {
+		return err
+	}
+	if sc == nil {
+		return cp.ErrCheckpointNotFound
+	}
+	links, err := cp.MergeCommitLinks(sc.Summary.LinkedCommits, r.Links)
+	if err != nil {
+		return fmt.Errorf("fsstore: merge commit links: %w", err)
+	}
+	sc.Summary.LinkedCommits = links
 	return s.save(sc)
 }
 
@@ -397,6 +415,7 @@ func recomputeSummary(sc *storedCheckpoint) {
 
 func infoFromStored(sc *storedCheckpoint) cp.CheckpointInfo {
 	info := cp.CheckpointInfo{
+		LinkedCommits:    sc.Summary.LinkedCommits,
 		CheckpointID:     sc.Summary.CheckpointID,
 		CheckpointsCount: sc.Summary.CheckpointsCount,
 		FilesTouched:     sc.Summary.FilesTouched,

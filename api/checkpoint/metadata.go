@@ -329,6 +329,7 @@ func (p *PrecomputedTranscriptBlobs) IsUsable() bool {
 //
 //nolint:revive // Named CheckpointInfo to avoid conflict with the generic Info type; the checkpoint.CheckpointInfo stutter is accepted (matches CheckpointSummary).
 type CheckpointInfo struct {
+	LinkedCommits []LinkedCommit
 	// CheckpointID is the stable 12-hex-char identifier
 	CheckpointID id.CheckpointID
 
@@ -535,6 +536,14 @@ type SessionFilePaths struct {
 	AssetsManifest string `json:"assets_manifest,omitempty"`
 }
 
+// LinkedCommit links a checkpoint to an immutable code commit without a trailer.
+// Repo is a forge-qualified repository hint, or empty when unknown. Hosted
+// readers must verify the association before treating it as attribution.
+type LinkedCommit struct {
+	SHA  string `json:"sha"`
+	Repo string `json:"repo,omitempty"`
+}
+
 // CheckpointSummary is the root-level metadata.json for a checkpoint.
 // It contains aggregated statistics from all sessions and a map of session IDs
 // to their file paths. Session-specific data (including initial_attribution)
@@ -560,7 +569,9 @@ type CheckpointSummary struct {
 	Strategy     string          `json:"strategy"`
 	Branch       string          `json:"branch,omitempty"`
 	// CommitSHA: import-only anchor; see WriteOptions.CommitSHA.
-	CommitSHA           string             `json:"commit_sha,omitempty"`
+	CommitSHA string `json:"commit_sha,omitempty"`
+	// LinkedCommits are attributing links to commits without checkpoint trailers.
+	LinkedCommits       []LinkedCommit     `json:"linked_commits,omitempty"`
 	CheckpointsCount    int                `json:"checkpoints_count"`
 	FilesTouched        []string           `json:"files_touched"`
 	Sessions            []SessionFilePaths `json:"sessions"`

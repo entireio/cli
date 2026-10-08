@@ -29,6 +29,9 @@ type (
 	LearningsSummary = apicheckpoint.LearningsSummary
 	CodeLearning     = apicheckpoint.CodeLearning
 	Attribution      = apicheckpoint.Attribution
+	LinkedCommit     = apicheckpoint.LinkedCommit
+	//nolint:revive // Checkpoint-level write request.
+	CheckpointCommitLinks = apicheckpoint.CheckpointCommitLinks
 
 	// Operation option types.
 	WriteOptions               = apicheckpoint.WriteOptions
