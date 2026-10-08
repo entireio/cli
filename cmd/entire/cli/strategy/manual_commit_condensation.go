@@ -19,6 +19,7 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1267,7 +1268,11 @@ func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionS
 			}
 		}
 	}
-	return readStoredTranscript(ctx, state.SessionID), ""
+	root, err := storedSessionRoot(ctx, state)
+	if err != nil {
+		return nil, ""
+	}
+	return readStoredTranscriptIn(root, state.SessionID), ""
 }
 
 // extractSessionData extracts what a condensation stores for a session: its
@@ -1324,7 +1329,9 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, ag agent.
 	}
 
 	promptSource := "filesystem prompt.txt"
-	data.Prompts = readPromptsFromFilesystem(ctx, state.SessionID)
+	if root, rootErr := storedSessionRoot(ctx, state); rootErr == nil {
+		data.Prompts = readPromptsIn(root, state.SessionID)
+	}
 	// Late-flush fallback: re-extract from the transcript bytes being
 	// checkpointed when prompt.txt is still empty (e.g. Antigravity writes the
 	// transcript after the Stop hook).
@@ -1616,7 +1623,17 @@ func readPromptsFromFilesystem(ctx context.Context, sessionID string) []string {
 	if err != nil {
 		return nil
 	}
-	data, err := entiredir.ReadFile(root, sessionMetadataFileName(sessionID, paths.PromptFileName))
+	return readPromptsIn(root, sessionID)
+}
+
+// readPromptsIn is readPromptsFromFilesystem against an already-opened .entire
+// root (storedSessionRoot for a condensation).
+func readPromptsIn(root *os.Root, sessionID string) []string {
+	name, err := storedSessionFileName(sessionID, paths.PromptFileName)
+	if err != nil {
+		return nil
+	}
+	data, err := entiredir.ReadFile(root, name)
 	if err != nil || len(data) == 0 {
 		return nil
 	}
@@ -1638,14 +1655,28 @@ func resolveStoredTranscript(ctx context.Context, sessionID string) (root *os.Ro
 	if err != nil {
 		return nil, "", nil, false
 	}
+	name, info, ok = resolveStoredTranscriptIn(root, sessionID)
+	if !ok {
+		return nil, "", nil, false
+	}
+	return root, name, info, true
+}
+
+// resolveStoredTranscriptIn is resolveStoredTranscript against an
+// already-opened .entire root. Every component is Lstat'ed without following a
+// symlink, so a symlinked metadata directory or transcript is not found.
+func resolveStoredTranscriptIn(root *os.Root, sessionID string) (name string, info fs.FileInfo, ok bool) {
 	for _, base := range storedTranscriptFileNames {
-		name = sessionMetadataFileName(sessionID, base)
-		info, statErr := osroot.LstatNoSymlinks(root, name)
-		if statErr == nil && info.Mode().IsRegular() {
-			return root, name, info, true
+		candidate, err := storedSessionFileName(sessionID, base)
+		if err != nil {
+			return "", nil, false
+		}
+		stat, statErr := osroot.LstatNoSymlinks(root, candidate)
+		if statErr == nil && stat.Mode().IsRegular() {
+			return candidate, stat, true
 		}
 	}
-	return nil, "", nil, false
+	return "", nil, false
 }
 
 // storedTranscriptSize returns the size of the session's stored turn-end
@@ -1665,7 +1696,17 @@ func storedTranscriptSize(ctx context.Context, sessionID string) (size int64, ok
 // readStoredTranscript returns the session's stored turn-end transcript (see
 // resolveStoredTranscript), or nil when there is none or it is empty.
 func readStoredTranscript(ctx context.Context, sessionID string) []byte {
-	root, name, _, ok := resolveStoredTranscript(ctx, sessionID)
+	root, err := entiredir.OpenForRead(ctx)
+	if err != nil {
+		return nil
+	}
+	return readStoredTranscriptIn(root, sessionID)
+}
+
+// readStoredTranscriptIn is readStoredTranscript against an already-opened
+// .entire root (storedSessionRoot for a condensation).
+func readStoredTranscriptIn(root *os.Root, sessionID string) []byte {
+	name, _, ok := resolveStoredTranscriptIn(root, sessionID)
 	if !ok {
 		return nil
 	}
@@ -1682,6 +1723,97 @@ func readStoredTranscript(ctx context.Context, sessionID string) []byte {
 // arithmetic should exist once.
 func sessionMetadataFileName(sessionID, name string) string {
 	return entiredir.MustName(paths.SessionMetadataDirFromSessionID(sessionID)) + "/" + name
+}
+
+// storedSessionFileName is sessionMetadataFileName for the stored-copy readers:
+// it validates sessionID before the name is built, so an ID carrying a path
+// separator or traversal cannot name a file outside the session's own metadata
+// directory, and builds the name through entiredir.Name rather than joining
+// strings.
+func storedSessionFileName(sessionID, base string) (string, error) {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return "", fmt.Errorf("stored session file: %w", err)
+	}
+	return entiredir.Name(filepath.Join(paths.SessionMetadataDirFromSessionID(sessionID), base)) //nolint:wrapcheck // Name names the path
+}
+
+// storedSessionRoot returns the .entire root a condensation reads state's
+// stored transcript and prompt copy from.
+//
+// The copy is written by the session's own turn-end hooks, so it lives in the
+// worktree the session ran in (state.WorktreePath). That is usually the current
+// worktree, but the sweep and doctor condense sessions recorded in other
+// worktrees of the same repository, and reading the current worktree's .entire
+// for those finds nothing — the checkpoint then loses its transcript when the
+// agent's live file is gone. foreignWorktreeEntireRoot handles that one case;
+// anything it does not positively accept falls back to the current worktree,
+// which is the behaviour before it existed.
+//
+// This is deliberately narrow: only the stored transcript and prompts reads of
+// a condensation go through it. Nothing else follows WorktreePath.
+func storedSessionRoot(ctx context.Context, state *SessionState) (*os.Root, error) {
+	if root, ok := foreignWorktreeEntireRoot(ctx, state.WorktreePath); ok {
+		return root, nil
+	}
+	return entiredir.OpenForRead(ctx) //nolint:wrapcheck // callers treat any failure as "no stored copy"
+}
+
+// foreignWorktreeEntireRoot opens the .entire directory of recorded, a
+// worktree path read from a session-state file, when and only when that path
+// is a different worktree registered for THIS repository. ok is false for an
+// empty or relative path, the current worktree itself, a path git does not
+// list for this repository, and a .entire that is missing, a symlink, or
+// otherwise fails paths.ValidateEntireDirAt. Refusals are logged at debug and
+// never returned as errors.
+//
+// recorded arrived as data, so it is never used as a root base. It only
+// selects an entry from `git worktree list`, and the path git printed is what
+// the root is opened on. The comparison is lexical on cleaned paths: resolving
+// symlinks in recorded to make it match would let the state file pick the
+// directory.
+func foreignWorktreeEntireRoot(ctx context.Context, recorded string) (*os.Root, bool) {
+	if recorded == "" {
+		return nil, false
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	refuse := func(reason string, attrs ...any) (*os.Root, bool) {
+		logging.Debug(logCtx, "stored session copy: not reading from recorded worktree, using the current one",
+			append([]any{slog.String("reason", reason), slog.String("recorded_worktree", recorded)}, attrs...)...)
+		return nil, false
+	}
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return refuse("current worktree unresolved", slog.String("error", err.Error()))
+	}
+	if filepath.Clean(recorded) == filepath.Clean(current) {
+		return nil, false
+	}
+	if !filepath.IsAbs(recorded) {
+		return refuse("recorded worktree path is not absolute")
+	}
+	registered, err := gitrepo.ListWorktreePaths(ctx, current)
+	if err != nil {
+		return refuse("git worktree list failed", slog.String("error", err.Error()))
+	}
+	want := filepath.Clean(recorded)
+	var match string
+	for _, p := range registered {
+		if filepath.Clean(p) == want {
+			match = p
+			break
+		}
+	}
+	if match == "" || !filepath.IsAbs(match) {
+		return refuse("recorded worktree is not registered for this repository")
+	}
+	if err := paths.ValidateEntireDirAt(match); err != nil {
+		return refuse("recorded worktree's .entire failed validation", slog.String("error", err.Error()))
+	}
+	root, err := entiredir.OpenAtForRead(match)
+	if err != nil {
+		return refuse("recorded worktree's .entire could not be opened", slog.String("error", err.Error()))
+	}
+	return root, true
 }
 
 // stagedSessionFiles are the files Entire writes into

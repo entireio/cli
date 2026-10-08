@@ -1,6 +1,10 @@
 package gitrepo
 
-import "strings"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 // WorktreeBranch is one worktree from `git worktree list --porcelain` that has
 // a branch checked out.
@@ -36,4 +40,45 @@ func ParseWorktreeBranches(porcelain string) []WorktreeBranch {
 		}
 	}
 	return out
+}
+
+// ParseWorktreePaths returns the path of every non-bare worktree in `git
+// worktree list --porcelain` output, detached ones included, exactly as git
+// printed it and in output order. A bare repository's block is skipped: it has
+// no working tree and so no .entire.
+func ParseWorktreePaths(porcelain string) []string {
+	var out []string
+	var curPath string
+	var bare bool
+	flush := func() {
+		if curPath != "" && !bare {
+			out = append(out, curPath)
+		}
+		curPath, bare = "", false
+	}
+	for _, line := range strings.Split(porcelain, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		switch {
+		case line == "":
+			flush() // block boundary
+		case strings.HasPrefix(line, "worktree "):
+			flush() // tolerate a missing blank line between blocks
+			curPath = strings.TrimPrefix(line, "worktree ")
+		case line == "bare":
+			bare = true
+		}
+	}
+	flush()
+	return out
+}
+
+// ListWorktreePaths returns the worktrees git has registered for the
+// repository worktreeRoot belongs to (ParseWorktreePaths), via `git worktree
+// list --porcelain` run with -C worktreeRoot.
+func ListWorktreePaths(ctx context.Context, worktreeRoot string) ([]string, error) {
+	out, err := worktreeGitCommand(ctx, worktreeRoot, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git worktree list: %w", err)
+	}
+	return ParseWorktreePaths(string(out)), nil
 }
