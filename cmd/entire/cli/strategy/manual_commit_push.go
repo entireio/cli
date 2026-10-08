@@ -552,6 +552,11 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		var pending *OPFScanPendingError
 		if errors.As(opfErr, &pending) {
 			maybeSpawnOPFScan(ctx, ps.remote)
+			// checkOuterPushCheckpointRefs above cannot see an outer push the
+			// hook did not describe; say so, as the v1 path does.
+			if !inOPFScanWorker(ctx) {
+				warnPrePushRefsUnknown(ctx, stderrWriter)
+			}
 		}
 	}
 	flushed, withheld, flushErr := flushCheckpointRefsQueue(ctx, repo, ps, deliveryRequiresOPFTrailer(opfDecision))

@@ -69,14 +69,14 @@ func prePushRefsKnown(ctx context.Context) bool {
 }
 
 // warnPrePushRefsUnknown tells a user whose pre-push line predates the ref list
-// that a push sending entire/checkpoints/v1 itself cannot be checked, at the one
-// moment it matters: v1 is holding checkpoints OPF has not verified.
+// that a push sending checkpoint refs itself cannot be checked, at the one
+// moment it matters: checkpoints OPF has not verified are being held back.
 func warnPrePushRefsUnknown(ctx context.Context, w io.Writer) {
 	if prePushRefsKnown(ctx) {
 		return
 	}
 	fmt.Fprintln(w, "[entire] Warning: this pre-push hook does not pass the refs being pushed, so a push that "+
-		"includes entire/checkpoints/v1 itself (e.g. `git push --all`) would send it unscanned. If you use a hook "+
+		"includes Entire's checkpoint refs itself (e.g. `git push --all`) would send them unscanned. If you use a hook "+
 		"manager such as Husky, replace its Entire pre-push line with the one `entire enable` prints; otherwise run "+
 		"`entire enable` to update the hook.")
 }

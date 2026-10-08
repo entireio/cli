@@ -199,6 +199,26 @@ func TestPrePushCheckpointRefs_RefusesOuterPushOfUnverifiedRefs(t *testing.T) {
 		"a ref that carries the trailer may be pushed")
 }
 
+// On git-refs too, a held checkpoint ref tells a user whose hook does not pass
+// the ref list that an outer push carrying it cannot be checked.
+func TestPrePushCheckpointRefs_HeldRefWarnsWhenRefsAreUnknown(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	swapOPFScanSpawn(t)
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = oldWriter })
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	require.Contains(t, buf.String(), "does not pass the refs being pushed")
+
+	buf.Reset()
+	main := []PrePushRef{{LocalRef: "refs/heads/main", LocalSHA: strings.Repeat("1", 40), RemoteRef: "refs/heads/main"}}
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(WithPrePushRefs(t.Context(), main), "origin"))
+	require.NotContains(t, buf.String(), "does not pass the refs being pushed")
+}
+
 // A worker already running owns the work: a second one must leave it alone
 // rather than repeat the same model calls.
 func TestRunOPFScan_SkipsWhileAnotherWorkerHoldsTheLock(t *testing.T) {
