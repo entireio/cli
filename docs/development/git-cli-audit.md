@@ -181,10 +181,10 @@ and `pushInsteadOf`. Keep native `remote get-url` / `remote -v` here.
 
 ### Ignore/status/worktree content
 
-- `checkpoint/ephemeral.go:1223` — `check-ignore --no-index -z --stdin`.
+- `gitrepo/ignore.go` — `check-ignore -z --stdin` (touched-file filter); `gitrepo/gitlink.go` — pathspec-limited `ls-files -s` / `ls-tree HEAD`.
 - `trail_checkout_worktree.go:97,226` — ignore directory probe / ignored-file listing.
 - `strategy/common.go:1643` — nonignored untracked files.
-- `checkpoint/ephemeral.go:1383`, `git_operations.go:216`, `review/scope.go:238`,
+- `git_operations.go:216`, `review/scope.go:238`,
   `setup_bootstrap.go:381` — porcelain status.
 - `gitrepo/worktree_hash.go:79` — path-specific clean-filtered `hash-object`.
 

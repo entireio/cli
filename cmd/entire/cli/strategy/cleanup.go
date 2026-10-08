@@ -27,8 +27,9 @@ type CleanupType string
 const (
 	// CleanupTypeShadowBranch is a legacy shadow branch: older CLIs kept each
 	// session's in-progress work on a local "entire/<commit>-<worktree>" branch.
-	// Nothing writes them anymore; `entire clean` and a one-time pass at session
-	// start remove what upgraded repositories still carry.
+	// Nothing writes them anymore, and nothing removes them automatically:
+	// `entire doctor` reports them, and `entire doctor --force`, `entire clean`
+	// and uninstall delete what upgraded repositories still carry.
 	CleanupTypeShadowBranch CleanupType = "shadow-branch"
 	CleanupTypeSessionState CleanupType = "session-state"
 	CleanupTypeCheckpoint   CleanupType = "checkpoint"

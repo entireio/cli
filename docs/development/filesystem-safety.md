@@ -302,8 +302,7 @@ of having them.
 one of those directories is walked wholesale into every checkpoint tree.**
 `jsonutil.CreateTempIn` writes `<base>.<16 hex>.tmp` beside the file it is
 replacing; `.entire/metadata/<session>` holds `full.jsonl` and is copied into
-the tree by `addDirectoryToChanges` (ephemeral) and `copyMetadataDir`
-(persistent). A hook killed between the create and the rename — an agent hook
+the tree by `copyMetadataDir` when a commit writes the checkpoint. A hook killed between the create and the rename — an agent hook
 timeout, Codex's session-end process-tree kill, a crash — leaves the temp
 behind, and without a filter it is redacted, committed, and pushed on every
 later checkpoint. Both walks therefore skip `jsonutil.IsTempName`. Keep that

@@ -11,7 +11,7 @@ catalogs, implementation histories, or subsystem specifications.
   use `<noun>_group.go` and `<noun>_<verb>.go`.
 - `cmd/entire/cli/agent/`: built-in agent integrations and external-agent protocol.
 - `cmd/entire/cli/strategy/`: manual-commit strategy and lifecycle/git hooks.
-- `cmd/entire/cli/checkpoint/`: ephemeral and persistent checkpoint storage.
+- `cmd/entire/cli/checkpoint/`: persistent checkpoint storage (written at commit).
 - `cmd/entire/cli/session/`: session state shared across worktrees.
 - `cmd/entire/cli/integration_test/`: simulated-hook integration tests.
 - `e2e/`: real-agent tests and deterministic Vogon canary.
