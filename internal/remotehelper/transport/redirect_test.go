@@ -3,6 +3,7 @@ package transport
 import (
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -103,6 +104,62 @@ func TestProxy_LocalHTTPDoesNotResumeAfterHTTPS(t *testing.T) {
 	_, err := p.ServiceRPC(t.Context(), "git-upload-pack", strings.NewReader("body"))
 	require.Error(t, err)
 	require.Equal(t, 1, calls)
+}
+
+func TestProxy_FailoverSkipsNewlyInsecureReplicas(t *testing.T) {
+	t.Parallel()
+	const failed = "https://127.0.0.1:444"
+	const local = "http://127.0.0.1:445"
+	const healthy = "https://127.0.0.1:446"
+	var rejected []string
+	p := New(Config{
+		Nodes:        replicas.NodeConfig{EntryURL: local, InitialNodes: []string{failed, local, healthy}},
+		OnNodeFailed: func(node string) { rejected = append(rejected, node) },
+		SetAuth: func(r *http.Request) error {
+			require.Equal(t, "https", r.URL.Scheme, "skip HTTP before invoking the auth provider")
+			return nil
+		},
+	})
+	p.stickyNode = failed // deterministically visit failed HTTPS, HTTP, healthy HTTPS
+	var dialed []string
+	p.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		node := r.URL.Scheme + "://" + r.URL.Host
+		dialed = append(dialed, node)
+		code := http.StatusOK
+		if node == failed {
+			code = http.StatusServiceUnavailable
+		}
+		return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header), Request: r}, nil
+	})
+	body, err := p.ServiceRPC(t.Context(), "git-upload-pack", strings.NewReader("body"))
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	require.Equal(t, []string{failed, healthy}, dialed)
+	require.Equal(t, []string{failed}, rejected, "a policy rejection is not a node health failure")
+}
+
+func TestLoopbackHTTP(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		raw     string
+		allowed bool
+	}{
+		{"http://cluster.example", false}, // ParseIP returns nil: IsLoopback must safely return false.
+		{"http://localhost.example", false},
+		{"http://192.0.2.1", false},
+		{"http://localhost", true},
+		{"http://LOCALHOST:8080", true},
+		{"http://127.0.0.1", true},
+		{"http://[::1]", true},
+		{"https://127.0.0.1", false},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Parallel()
+			u, err := url.Parse(tc.raw)
+			require.NoError(t, err)
+			require.Equal(t, tc.allowed, loopbackHTTP(u))
+		})
+	}
 }
 
 func TestProxy_RejectsHTTPReplicas(t *testing.T) {

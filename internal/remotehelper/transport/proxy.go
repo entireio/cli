@@ -416,6 +416,13 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 
 	for i := range nodes {
 		node := nodes[(start+i)%len(nodes)]
+		// The TLS floor can rise during this loop, making an HTTP loopback
+		// replica in the snapshot ineligible. Skip it before auth stamping,
+		// without treating it as unhealthy or abandoning later HTTPS nodes.
+		if !p.replicaInCluster(node) {
+			lastErr = fmt.Errorf("skipping insecure or out-of-cluster replica %q", node)
+			continue
+		}
 		reqURL := p.nodeURL(node, makeSuffix)
 
 		// build (re)constructs the request: rewind the body, mint/attach the
