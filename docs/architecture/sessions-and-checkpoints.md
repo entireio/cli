@@ -710,12 +710,16 @@ link from two facts about the target commit, the same for HEAD and `--commit`
   and index are untouched and no commit hooks run; session state naming the
   old commits is remapped through `PostRewrite`. Merges after the target, a
   target off the current branch, and an operation in progress (rebase, merge,
-  cherry-pick, revert, bisect) are refused. "No remote holds it" is checked
-  against the remotes the branch pushes to (its upstream and push remotes,
-  else `origin`, else every remote): attach fetches them and asks each whether
-  a branch contains the commit, fetching only branches whose tips aren't local
+  cherry-pick, revert, bisect) are refused, as is a commit with a non-UTF-8
+  encoding or extra headers, which `commit-tree` can't reproduce. "No remote
+  holds it" means no remote-tracking ref of any remote contains the commit,
+  and none of the remotes the branch pushes to (its upstream and push remotes,
+  else `origin`, else every remote) has a branch containing it: attach fetches
+  those and asks each directly, fetching only branches whose tips aren't local
   (single-branch clones don't track every branch). If one can't be reached it
-  refuses rather than rewrite a commit it couldn't check.
+  refuses rather than rewrite a commit it couldn't check. The checkpoint of a
+  pushed commit goes to the branch's remote even when only another remote
+  (upstream in a fork) holds the commit.
 
 Before writing anything attach prints what it will do (`attachWarning`): the
 commits it rewrites, or the remote that holds the commit and that the

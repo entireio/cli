@@ -99,7 +99,19 @@ func attachRewriteChain(ctx context.Context, repo *git.Repository, target, head 
 		}
 		chain = append(chain, c)
 	}
+	for _, c := range chain {
+		if !replayable(c) {
+			return nil, fmt.Errorf("commit %s has a non-UTF-8 encoding or extra headers that attach can't carry over when it rewrites it; push %s first, or add the trailer yourself", c.Hash.String()[:12], target.Hash.String()[:12])
+		}
+	}
 	return chain, nil
+}
+
+// replayable reports whether rewriteWithTrailer reproduces c faithfully apart
+// from its signature: git commit-tree writes a UTF-8 commit with no extra
+// headers.
+func replayable(c *object.Commit) bool {
+	return (c.Encoding == "" || strings.EqualFold(string(c.Encoding), "UTF-8")) && len(c.ExtraHeaders) == 0
 }
 
 // rewriteWarning describes adding a trailer to chain[0], for confirmAttach.

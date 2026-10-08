@@ -453,7 +453,7 @@ func attachWriteOptions(ctx context.Context, plan attachLinkPlan, checkpointID i
 		TokenUsage:                tokenUsage,
 	}
 	if plan.mode == attachRecordLink && !isExistingCheckpoint {
-		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: plan.target.Hash.String(), Repo: attachLinkRepo(ctx, plan.remote)}}
+		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: plan.target.Hash.String(), Repo: attachLinkRepo(ctx, plan.holder)}}
 	}
 	if opts.Review {
 		writeOpts.Kind = string(session.KindAgentReview)
@@ -506,7 +506,7 @@ func attachWarning(ctx context.Context, plan attachLinkPlan, sessionID string, c
 		lines = append(lines, fmt.Sprintf("Adds session %s to checkpoint %s, which commit %s already has. Git history is not changed.", sessionID, checkpointID, describeCommit(target)))
 	case plan.mode == attachRecordLink:
 		lines = append(lines,
-			fmt.Sprintf("Commit %s is already pushed to %s, so it won't be changed.", describeCommit(target), plan.remote),
+			fmt.Sprintf("Commit %s is already pushed to %s, so it won't be changed.", describeCommit(target), plan.holder),
 			fmt.Sprintf("A new checkpoint with session %s records a link to it instead. The link names this exact commit: if the commit is later rebased or amended, attach the session to the new one.", sessionID))
 		if author, err := GetGitAuthor(ctx); err == nil && !strings.EqualFold(author.Email, target.Author.Email) {
 			lines = append(lines, fmt.Sprintf("The commit was authored by %s. A recorded link counts only when the commit's author attaches it.", target.Author.Email))
@@ -516,7 +516,7 @@ func attachWarning(ctx context.Context, plan attachLinkPlan, sessionID string, c
 		lines = append(lines, fmt.Sprintf("Session %s goes into a new checkpoint linked by that trailer.", sessionID))
 	}
 	if plan.remote != "" {
-		lines = append(lines, "The checkpoint, including the session transcript, is pushed now.")
+		lines = append(lines, "The checkpoint, including the session transcript, is pushed to "+plan.remote+" now.")
 	} else {
 		lines = append(lines, "The checkpoint, including the session transcript, is pushed with your next git push.")
 	}
@@ -579,8 +579,11 @@ const (
 type attachLinkPlan struct {
 	target *object.Commit
 	mode   attachLinkMode
-	// remote is a remote whose branches hold target, empty when none does (or,
-	// when joining, none could be reached). The checkpoint is pushed to it now.
+	// holder is a remote whose branches hold target, empty when none does (or,
+	// when joining, none could be reached).
+	holder string
+	// remote is where the checkpoint is pushed now: holder, or the branch's own
+	// remote when holder is an unrelated one. Empty when holder is.
 	remote string
 	// rewrite is target and the commits after it up to HEAD, oldest first
 	// (attachAddTrailer only).
@@ -605,18 +608,18 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 		// decides when the checkpoint goes out: now if it is, since there may be
 		// no later push of it, else with the next git push. A remote that can't
 		// be reached leaves it for that push.
-		remote, _, err := remoteHoldingPushedCommit(ctx, target, remotes)
+		holder, pushTo, _, err := remoteHoldingPushedCommit(ctx, target, remotes)
 		if err != nil {
 			return attachLinkPlan{}, err
 		}
-		return attachLinkPlan{target: target, mode: attachJoinExisting, remote: remote, checkedRemotes: remotes}, nil
+		return attachLinkPlan{target: target, mode: attachJoinExisting, remote: pushTo, holder: holder, checkedRemotes: remotes}, nil
 	}
-	remote, unreachable, err := remoteHoldingPushedCommit(ctx, target, remotes)
+	holder, pushTo, unreachable, err := remoteHoldingPushedCommit(ctx, target, remotes)
 	if err != nil {
 		return attachLinkPlan{}, err
 	}
-	if remote != "" {
-		return attachLinkPlan{target: target, mode: attachRecordLink, remote: remote, checkedRemotes: remotes}, nil
+	if holder != "" {
+		return attachLinkPlan{target: target, mode: attachRecordLink, remote: pushTo, holder: holder, checkedRemotes: remotes}, nil
 	}
 	if len(unreachable) > 0 {
 		// Absence from a remote we couldn't reach proves nothing; rewriting a
@@ -631,19 +634,20 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 	return attachLinkPlan{target: target, mode: attachAddTrailer, rewrite: chain, checkedRemotes: remotes}, nil
 }
 
-// remoteHoldingPushedCommit returns a remote whose branches contain target, or
-// "" when none does, plus the remotes it could not reach. Remote-tracking refs
+// remoteHoldingPushedCommit returns a remote whose branches contain target
+// (holder) and the remote to push its checkpoint to, both "" when none does,
+// plus the remotes it could not reach. Remote-tracking refs
 // can be stale — someone may have pushed this commit from another clone — and
 // rewriting a shared commit is what attach must avoid, so remotes are
 // refreshed first, then asked directly: tracking refs may not cover every
 // branch (single-branch clones, narrowed refspecs).
-func remoteHoldingPushedCommit(ctx context.Context, target *object.Commit, remotes []string) (remote string, unreachable []string, err error) {
+func remoteHoldingPushedCommit(ctx context.Context, target *object.Commit, remotes []string) (holder, pushTo string, unreachable []string, err error) {
 	fetchRemotesForAttach(ctx, remotes)
-	if remote, err = remoteHoldingCommit(ctx, target, remotes); err != nil || remote != "" {
-		return remote, nil, err
+	if holder, pushTo, err = remoteHoldingCommit(ctx, target, remotes); err != nil || holder != "" {
+		return holder, pushTo, nil, err
 	}
-	remote, unreachable = remoteContainingCommit(ctx, target, remotes)
-	return remote, unreachable, nil
+	holder, unreachable = remoteContainingCommit(ctx, target, remotes)
+	return holder, holder, unreachable, nil
 }
 
 // checkpointLinkedTo finds the most recent checkpoint whose recorded links
@@ -800,22 +804,37 @@ func remoteBranchTips(ctx context.Context, remote string) (branches, tips []stri
 	return branches, tips, nil
 }
 
-// remoteHoldingCommit returns one of remotes whose tracking branches contain
-// target, or "" when none does. Other remotes' tracking refs are ignored, as
-// an unrelated remote's would name a remote attach then pushes to.
-func remoteHoldingCommit(ctx context.Context, target *object.Commit, remotes []string) (string, error) {
+// remoteHoldingCommit returns a remote whose tracking branches contain target
+// (holder), and the remote to push its checkpoint to; both are "" when none
+// does. Any remote's tracking ref counts as proof the commit is shared — say
+// upstream in a fork, where the fork hasn't caught up — so it is never
+// rewritten. The checkpoint still goes to one of remotes, the branch's own,
+// rather than to an unrelated remote that happens to hold the commit; the
+// holder is preferred when it is one of them.
+func remoteHoldingCommit(ctx context.Context, target *object.Commit, remotes []string) (holder, pushTo string, err error) {
 	out, err := exec.CommandContext(ctx, "git", "branch", "-r", "--contains", target.Hash.String(), "--format=%(refname)").Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to check which remote branches contain %s: %w", target.Hash.String()[:12], err)
+		return "", "", fmt.Errorf("failed to check which remote branches contain %s: %w", target.Hash.String()[:12], err)
 	}
-	for _, ref := range strings.Fields(string(out)) {
-		for _, remote := range remotes {
-			if strings.HasPrefix(ref, "refs/remotes/"+remote+"/") {
-				return remote, nil
-			}
+	refs := strings.Fields(string(out))
+	holds := func(remote string) bool {
+		return slices.ContainsFunc(refs, func(ref string) bool { return strings.HasPrefix(ref, "refs/remotes/"+remote+"/") })
+	}
+	for _, remote := range remotes {
+		if holds(remote) {
+			return remote, remote, nil
 		}
 	}
-	return "", nil
+	for _, remote := range attachRemotes(ctx) {
+		if holds(remote) {
+			pushTo = remote
+			if len(remotes) > 0 {
+				pushTo = remotes[0]
+			}
+			return remote, pushTo, nil
+		}
+	}
+	return "", "", nil
 }
 
 // reportLinkedCommit tells the user the commit was linked in the checkpoint,

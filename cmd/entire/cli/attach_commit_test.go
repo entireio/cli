@@ -626,23 +626,47 @@ func TestAttachCommit_IgnoresAnUnreachableUnrelatedRemote(t *testing.T) {
 	}
 }
 
-// A stale tracking ref from an unrelated remote doesn't make the commit
-// "pushed": only the remotes the branch pushes to count.
-func TestAttachCommit_IgnoresAnUnrelatedRemotesTrackingRef(t *testing.T) {
+// Any remote's tracking ref holding the commit means it is shared — upstream
+// in a fork, say — so it is never rewritten. The checkpoint still goes to the
+// branch's own remote, not to the unrelated one.
+func TestAttachCommit_TrackingRefOfAnotherRemoteBlocksTheRewrite(t *testing.T) {
 	setupAttachTestRepo(t)
 	commitAt(t, "work.txt")
 	pushToOrigin(t)
 	dir := mustGetwd(t)
-	commitAt(t, "more.txt")
-	testutil.RunGit(t, dir, "remote", "add", "oldfork", filepath.Join(t.TempDir(), "missing.git"))
-	testutil.RunGit(t, dir, "update-ref", "refs/remotes/oldfork/main", "HEAD")
+	head := commitAt(t, "more.txt")
+	testutil.RunGit(t, dir, "remote", "add", "upstream", filepath.Join(t.TempDir(), "missing.git"))
+	testutil.RunGit(t, dir, "update-ref", "refs/remotes/upstream/main", "HEAD")
 
-	out, err := attachHeadless(t, "attach-unrelated-tracking-ref", attachOptions{})
+	out, err := attachHeadless(t, "attach-upstream-tracking-ref", attachOptions{})
 	if err != nil {
 		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
-	if _, ok := trailers.ParseCheckpoint(headCommitOf(t).Message); !ok {
-		t.Fatalf("unpushed HEAD was not amended:\n%s", out)
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("a commit upstream holds was rewritten: %s\n%s", got.Hash, out)
+	}
+	if !strings.Contains(out, "already pushed to upstream") || !strings.Contains(out, "Pushed checkpoint metadata to origin") {
+		t.Fatalf("want the link recorded against upstream and pushed to origin:\n%s", out)
+	}
+}
+
+// commit-tree writes UTF-8 with no extra headers, so a commit it can't
+// reproduce is refused rather than silently changed.
+func TestAttachCommit_RefusesToRewriteANonUTF8Commit(t *testing.T) {
+	setupAttachTestRepo(t)
+	dir := mustGetwd(t)
+	testutil.WriteFile(t, dir, "work.txt", "work")
+	testutil.GitAdd(t, dir, "work.txt")
+	testutil.RunGit(t, dir, "-c", "i18n.commitEncoding=ISO-8859-1", "commit", "-q", "-m", "add work.txt")
+	target := headCommitOf(t)
+	head := commitAt(t, "later.txt")
+
+	out, err := attachHeadless(t, "attach-non-utf8", attachOptions{Commit: target.Hash.String()})
+	if err == nil || !strings.Contains(err.Error(), "non-UTF-8") {
+		t.Fatalf("err = %v, want a refusal naming the encoding\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("HEAD changed: %s", got.Hash)
 	}
 }
 
@@ -733,7 +757,7 @@ func TestAttachCommit_PushedCommitNeedsConfirmation(t *testing.T) {
 	if err == nil {
 		t.Fatalf("attach without confirmation succeeded:\n%s", out.String())
 	}
-	if !strings.Contains(errOut.String(), "already pushed") || !strings.Contains(errOut.String(), "pushed now") {
+	if !strings.Contains(errOut.String(), "already pushed") || !strings.Contains(errOut.String(), "pushed to origin now") {
 		t.Errorf("expected the pushed-commit warning, got:\n%s", errOut.String())
 	}
 	if state, err := loadAttachState(t, sessionID); err != nil || state != nil {
