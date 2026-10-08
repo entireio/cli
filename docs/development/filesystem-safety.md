@@ -233,12 +233,25 @@ Agents with a relocatable home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 holds the transcript, spelled as the environment sets it or in canonical form,
 whichever contains the transcript path. They keep a home set by an earlier turn
 while it still holds the transcript, and clear it otherwise
-(`strategy.updateSessionAgentHome`). Correcting a session's agent type or
-attaching a different transcript clears it too.
+(`strategy.updateSessionAgentHome`). Correcting a session's agent type clears
+it too.
+
+`entire attach` searches every agent's active home before any agent's other
+recorded homes, which it searches last, most recently used first, starting
+with the agent it resolved; it skips an active home only when the active
+search already covered it. Per-project agents have each recorded store
+searched one level deep, where a session's own transcript lives. Attach says
+when it found the transcript under a recorded home, and sets `AgentHome` to
+that home, or to the active home when one of its stores holds the transcript,
+and clears it otherwise. A registry that cannot be read is named in attach's
+not-found error. Pi sessions kept in a store relocated with
+`PI_CODING_AGENT_SESSION_DIR` lie outside every home, so they are never
+recorded or found this way.
 
 The active home is also recorded in the per-user registry `agent_homes.json`
-in the user config directory (`agent.RememberAgentHome`), after the session
-state is saved and its lock released. Only a home resolved from the user's
+in the user config directory (`agent.RememberAgentHome`): by session
+initialization after the session state is saved and its lock released, and by
+`entire attach` after it saves the state. Only a home resolved from the user's
 environment is recorded, never one read from session state. The registry
 lists each agent's homes most recently used first, at most 32 per agent, in
 canonical form; a home must exist to be recorded, and entries that are no
