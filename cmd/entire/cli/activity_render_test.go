@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 	"unicode/utf8"
 )
 
@@ -104,6 +106,25 @@ func TestAgentKey_StripsControlCharacters(t *testing.T) {
 	}
 	if got := agentDisplayFor("Grok\x1b[2J Bot").Label; got != "Grok[2J Bot" {
 		t.Errorf("agentDisplayFor label = %q, want %q", got, "Grok[2J Bot")
+	}
+}
+
+func TestAgentDisplayFor_TruncatesLongExternalName(t *testing.T) {
+	t.Parallel()
+	label := agentDisplayFor(strings.Repeat("界", 40)).Label
+	if w := lipgloss.Width(label); w > maxExternalAgentLabelWidth {
+		t.Errorf("label width = %d, want <= %d (%q)", w, maxExternalAgentLabelWidth, label)
+	}
+}
+
+// Goose and Antigravity are built-in agents in entire-api, so they get their
+// own label rather than being shown as an external agent's raw id.
+func TestAgentKey_GooseAndAntigravityAreBuiltIn(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{"goose": "Goose", "Antigravity": "Antigravity"} {
+		if got := agentDisplayFor(agentKey(raw)).Label; got != want {
+			t.Errorf("label for %q = %q, want %q", raw, got, want)
+		}
 	}
 }
 

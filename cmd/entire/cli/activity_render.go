@@ -110,17 +110,19 @@ type agentDisplay struct {
 // recognizable; lipgloss resolves them to the best representation for the
 // terminal's color profile. The non-brand "unknown" fallback uses muted gray.
 var agentDisplayMap = map[string]agentDisplay{
-	activityAgentClaude:   {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
-	activityAgentGemini:   {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
-	activityAgentAmp:      {Label: "Amp", Color: "#f87171", Char: '▓'},         // red-400
-	activityAgentCodex:    {Label: "Codex", Color: "#818cf8", Char: '▓'},       // indigo-400
-	activityAgentOpencode: {Label: "OpenCode", Color: "#22d3ee", Char: '▓'},    // cyan-400
-	activityAgentCopilot:  {Label: "Copilot", Color: "#a78bfa", Char: '▓'},     // violet-400
-	activityAgentPi:       {Label: "Pi", Color: "#fbbf24", Char: '▓'},          // amber-400
-	activityAgentCursor:   {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
-	activityAgentDroid:    {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
-	activityAgentKiro:     {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
-	activityAgentUnknown:  {Label: "Unknown", Color: palette.Muted, Char: '░'},
+	activityAgentClaude:      {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
+	activityAgentGemini:      {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
+	activityAgentAmp:         {Label: "Amp", Color: "#f87171", Char: '▓'},         // red-400
+	activityAgentCodex:       {Label: "Codex", Color: "#818cf8", Char: '▓'},       // indigo-400
+	activityAgentOpencode:    {Label: "OpenCode", Color: "#22d3ee", Char: '▓'},    // cyan-400
+	activityAgentCopilot:     {Label: "Copilot", Color: "#a78bfa", Char: '▓'},     // violet-400
+	activityAgentPi:          {Label: "Pi", Color: "#fbbf24", Char: '▓'},          // amber-400
+	activityAgentCursor:      {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
+	activityAgentDroid:       {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
+	activityAgentKiro:        {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
+	activityAgentAntigravity: {Label: "Antigravity", Color: "#2dd4bf", Char: '▓'}, // teal-400
+	activityAgentGoose:       {Label: "Goose", Color: "#a3e635", Char: '▓'},       // lime-400
+	activityAgentUnknown:     {Label: "Unknown", Color: palette.Muted, Char: '░'},
 }
 
 // agentKey is the built-in agent ID for raw, or raw itself for an agent Entire
@@ -147,6 +149,10 @@ func externalAgentName(raw string) string {
 	}, raw))
 }
 
+// maxExternalAgentLabelWidth bounds an external agent's self-reported name so
+// a long one cannot push session and commit rows past the terminal width.
+const maxExternalAgentLabelWidth = 24
+
 // agentDisplayFor is agentDisplayMap[key], or a plain entry labelled with the
 // key for an external agent.
 func agentDisplayFor(key string) agentDisplay {
@@ -154,14 +160,15 @@ func agentDisplayFor(key string) agentDisplay {
 		return d
 	}
 	if name := externalAgentName(key); name != "" {
-		return agentDisplay{Label: name, Color: palette.Muted, Char: '░'}
+		return agentDisplay{Label: truncateDisplayWidth(name, maxExternalAgentLabelWidth, "…"), Color: palette.Muted, Char: '░'}
 	}
 	return agentDisplayMap[activityAgentUnknown]
 }
 
 var agentOrder = []string{
 	activityAgentClaude, activityAgentCodex, activityAgentGemini, activityAgentAmp, activityAgentOpencode,
-	activityAgentCopilot, activityAgentPi, activityAgentCursor, activityAgentDroid, activityAgentKiro, activityAgentUnknown,
+	activityAgentCopilot, activityAgentPi, activityAgentCursor, activityAgentDroid, activityAgentKiro,
+	activityAgentAntigravity, activityAgentGoose, activityAgentUnknown,
 }
 
 // agentRenderOrder is the keys of counts in display order: built-in agents in
