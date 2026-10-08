@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // Compile-time interface check.
@@ -284,7 +285,7 @@ func TestCursorAgent_RealSessionContainsToolUseBlocks(t *testing.T) {
 	// Tool name -> the input keys observed for it in the real session.
 	got := map[string]map[string]bool{}
 	for i := range lines {
-		if lines[i].Type != transcript.TypeAssistant {
+		if lines[i].Type != transcriptlib.TypeAssistant {
 			continue
 		}
 		var msg transcript.AssistantMessage
@@ -292,7 +293,7 @@ func TestCursorAgent_RealSessionContainsToolUseBlocks(t *testing.T) {
 			t.Fatalf("unmarshal assistant message: %v", err)
 		}
 		for _, block := range msg.Content {
-			if block.Type != transcript.ContentTypeToolUse {
+			if block.Type != transcriptlib.ContentTypeToolUse {
 				continue
 			}
 			var input map[string]json.RawMessage

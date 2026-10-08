@@ -1,9 +1,7 @@
-package compact
+package transcript
 
 import (
 	"testing"
-
-	"github.com/entireio/cli/redact"
 )
 
 func TestCompact_GeminiFixture(t *testing.T) {
@@ -25,12 +23,12 @@ func TestCompact_GeminiStartLine(t *testing.T) {
 
 	t.Run("skip first message", func(t *testing.T) {
 		t.Parallel()
-		opts := MetadataFields{Agent: "gemini-cli", CLIVersion: "0.5.1", StartLine: 1}
+		opts := Options{Agent: "gemini-cli", CLIVersion: "0.5.1", StartLine: 1}
 		expected := []string{
 			`{"v":1,"agent":"gemini-cli","cli_version":"0.5.1","type":"assistant","ts":"2026-01-01T00:00:01Z","id":"m2","input_tokens":10,"output_tokens":5,"content":[{"type":"text","text":"hi there"}]}`,
 			`{"v":1,"agent":"gemini-cli","cli_version":"0.5.1","type":"user","ts":"2026-01-01T00:00:02Z","content":[{"text":"bye"}]}`,
 		}
-		result, err := Compact(redact.AlreadyRedacted(input), opts)
+		result, err := Convert(input, opts)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -39,8 +37,8 @@ func TestCompact_GeminiStartLine(t *testing.T) {
 
 	t.Run("skip all messages", func(t *testing.T) {
 		t.Parallel()
-		opts := MetadataFields{Agent: "gemini-cli", CLIVersion: "0.5.1", StartLine: 100}
-		result, err := Compact(redact.AlreadyRedacted(input), opts)
+		opts := Options{Agent: "gemini-cli", CLIVersion: "0.5.1", StartLine: 100}
+		result, err := Convert(input, opts)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -49,8 +47,8 @@ func TestCompact_GeminiStartLine(t *testing.T) {
 
 	t.Run("no truncation", func(t *testing.T) {
 		t.Parallel()
-		opts := MetadataFields{Agent: "gemini-cli", CLIVersion: "0.5.1", StartLine: 0}
-		result, err := Compact(redact.AlreadyRedacted(input), opts)
+		opts := Options{Agent: "gemini-cli", CLIVersion: "0.5.1", StartLine: 0}
+		result, err := Convert(input, opts)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

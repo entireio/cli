@@ -73,7 +73,7 @@ func BenchmarkRedactJSONLBytes(b *testing.B) {
 	}{
 		{
 			name: "Fixture/ClaudeFull2",
-			data: readBenchmarkFixture(b, "../cmd/entire/cli/transcript/compact/testdata/claude_full2.jsonl"),
+			data: readBenchmarkFixture(b, "../transcript/testdata/claude_full2.jsonl"),
 		},
 		{
 			name: "Synthetic/CheckpointLog",

@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/transcript/compact"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/redact"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // GenerateFromTranscript generates a summary from pre-redacted transcript bytes.
@@ -377,7 +378,7 @@ func buildCondensedTranscriptFromCodex(content redact.RedactedBytes) ([]Entry, e
 		}
 
 		switch line.Type {
-		case transcript.TypeUser:
+		case transcriptlib.TypeUser:
 			var blocks []compactUserTextBlock
 			if err := json.Unmarshal(line.Content, &blocks); err != nil {
 				continue
@@ -390,21 +391,21 @@ func buildCondensedTranscriptFromCodex(content redact.RedactedBytes) ([]Entry, e
 					})
 				}
 			}
-		case transcript.TypeAssistant:
+		case transcriptlib.TypeAssistant:
 			var blocks []compactAssistantBlock
 			if err := json.Unmarshal(line.Content, &blocks); err != nil {
 				continue
 			}
 			for _, block := range blocks {
 				switch block.Type {
-				case transcript.ContentTypeText:
+				case transcriptlib.ContentTypeText:
 					if block.Text != "" {
 						entries = append(entries, Entry{
 							Type:    EntryTypeAssistant,
 							Content: block.Text,
 						})
 					}
-				case transcript.ContentTypeToolUse:
+				case transcriptlib.ContentTypeToolUse:
 					var input map[string]interface{}
 					if err := json.Unmarshal(block.Input, &input); err != nil {
 						input = nil
@@ -475,11 +476,11 @@ func BuildCondensedTranscript(lines []transcript.Line) []Entry {
 
 	for _, line := range lines {
 		switch line.Type {
-		case transcript.TypeUser:
+		case transcriptlib.TypeUser:
 			if entry := extractUserEntry(line); entry != nil {
 				entries = append(entries, *entry)
 			}
-		case transcript.TypeAssistant:
+		case transcriptlib.TypeAssistant:
 			assistantEntries := extractAssistantEntries(line)
 			entries = append(entries, assistantEntries...)
 		}
@@ -526,14 +527,14 @@ func extractAssistantEntries(line transcript.Line) []Entry {
 
 	for _, block := range msg.Content {
 		switch block.Type {
-		case transcript.ContentTypeText:
+		case transcriptlib.ContentTypeText:
 			if block.Text != "" {
 				entries = append(entries, Entry{
 					Type:    EntryTypeAssistant,
 					Content: block.Text,
 				})
 			}
-		case transcript.ContentTypeToolUse:
+		case transcriptlib.ContentTypeToolUse:
 			var input transcript.ToolInput
 			_ = json.Unmarshal(block.Input, &input) //nolint:errcheck // Best-effort parsing
 

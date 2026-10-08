@@ -1,4 +1,4 @@
-package textutil
+package transcript
 
 import (
 	"regexp"

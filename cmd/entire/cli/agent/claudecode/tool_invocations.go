@@ -6,6 +6,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // toolUseToken is the literal that must appear in a raw transcript line for it
@@ -86,7 +87,7 @@ func scanLineInvocations(line []byte, visit func(agent.ToolInvocation) bool) boo
 		return false
 	}
 	for _, block := range msg.Content {
-		if block.Type != transcript.ContentTypeToolUse || len(block.Input) == 0 {
+		if block.Type != transcriptlib.ContentTypeToolUse || len(block.Input) == 0 {
 			continue
 		}
 		var input toolInput

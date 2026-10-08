@@ -1,4 +1,4 @@
-package compact
+package transcript
 
 import (
 	"bufio"
@@ -7,9 +7,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 const (
@@ -70,9 +67,9 @@ type codexPayload struct {
 }
 
 // compactCodex converts a Codex JSONL transcript into the compact format.
-func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
+func compactCodex(content []byte, opts Options) ([]byte, error) {
 	if opts.StartLine > 0 {
-		content = transcript.SliceFromLine(content, opts.StartLine)
+		content = SliceFromLine(content, opts.StartLine)
 		if content == nil {
 			return []byte{}, nil
 		}
@@ -107,7 +104,7 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 		}
 
 		switch {
-		case p.Type == transcriptTypeMessage && p.Role == transcript.TypeUser:
+		case p.Type == transcriptTypeMessage && p.Role == TypeUser:
 			text := codexUserText(p.Content)
 			if text == "" {
 				continue
@@ -117,12 +114,12 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 				continue
 			}
 			line := base
-			line.Type = transcript.TypeUser
+			line.Type = TypeUser
 			line.TS = ts
 			line.Content = contentJSON
 			appendLine(&result, line)
 
-		case p.Type == transcriptTypeMessage && p.Role == transcript.TypeAssistant:
+		case p.Type == transcriptTypeMessage && p.Role == TypeAssistant:
 			text := codexAssistantText(p.Content)
 			if text == "" {
 				continue
@@ -159,7 +156,7 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 
 			contentArr := codexBuildContent(text, toolBlocks)
 			line := base
-			line.Type = transcript.TypeAssistant
+			line.Type = TypeAssistant
 			line.TS = ts
 			line.InputTokens = inTok
 			line.OutputTokens = outTok
@@ -181,7 +178,7 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 				continue
 			}
 			line := base
-			line.Type = transcript.TypeAssistant
+			line.Type = TypeAssistant
 			line.TS = ts
 			line.InputTokens = inTok
 			line.OutputTokens = outTok
@@ -265,7 +262,7 @@ func codexUserText(raw json.RawMessage) string {
 		if isCodexSystemContent(b.Text) {
 			continue
 		}
-		stripped := textutil.StripIDEContextTags(b.Text)
+		stripped := StripIDEContextTags(b.Text)
 		if stripped != "" {
 			texts = append(texts, stripped)
 		}
@@ -276,9 +273,9 @@ func codexUserText(raw json.RawMessage) string {
 
 // isCodexSystemContent returns true for content blocks that are system-injected
 // rather than user-authored. The prefix list is shared with the session-title and
-// turn-counting paths (textutil.IsInjectedPrompt) so the two cannot drift.
+// turn-counting paths (IsInjectedPrompt) so the two cannot drift.
 func isCodexSystemContent(text string) bool {
-	return textutil.IsInjectedPrompt(text)
+	return IsInjectedPrompt(text)
 }
 
 // codexAssistantText extracts text from a Codex assistant message content array.
@@ -302,7 +299,7 @@ func codexAssistantText(raw json.RawMessage) string {
 // codexToolUseBlock builds a compact tool_use content block from a function_call.
 func codexToolUseBlock(p codexPayload) map[string]json.RawMessage {
 	block := map[string]json.RawMessage{
-		"type": mustJSON(transcript.ContentTypeToolUse),
+		"type": mustJSON(ContentTypeToolUse),
 		"name": mustJSON(p.Name),
 	}
 	if p.CallID != "" {
@@ -387,7 +384,7 @@ func codexCallIDAndType(payload json.RawMessage) (callID, typ string) {
 // than a JSON arguments string.
 func codexCustomToolUseBlock(p codexPayload) map[string]json.RawMessage {
 	block := map[string]json.RawMessage{
-		"type": mustJSON(transcript.ContentTypeToolUse),
+		"type": mustJSON(ContentTypeToolUse),
 		"name": mustJSON(p.Name),
 	}
 	if p.CallID != "" {
@@ -441,7 +438,7 @@ func codexBuildContent(text string, toolBlocks []map[string]json.RawMessage) jso
 
 	if text != "" {
 		content = append(content, map[string]json.RawMessage{
-			"type": mustJSON(transcript.ContentTypeText),
+			"type": mustJSON(ContentTypeText),
 			"text": mustJSON(text),
 		})
 	}

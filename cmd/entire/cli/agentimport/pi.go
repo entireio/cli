@@ -8,8 +8,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
-	"github.com/entireio/cli/cmd/entire/cli/agent/pi/pijsonl"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/transcript/pijsonl"
 )
 
 // piImporter imports Pi transcripts (~/.pi/agent/sessions/<repo>/<ts>_<uuid>.jsonl).

@@ -1,10 +1,8 @@
-package compact
+package transcript
 
 import (
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/redact"
 )
 
 func TestCompact_CodexFixture(t *testing.T) {
@@ -107,7 +105,7 @@ func TestCompact_CodexInlineCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			result, err := Compact(redact.AlreadyRedacted(tc.input), codexOpts)
+			result, err := Convert(tc.input, codexOpts)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -167,7 +165,7 @@ func TestCompact_CodexStartLine(t *testing.T) {
 	// StartLine skips raw JSONL lines to match Codex CheckpointTranscriptStart.
 	// StartLine=4 skips session_meta, developer, AGENTS.md user, and first prompt,
 	// leaving the first assistant response and everything after it.
-	opts := MetadataFields{Agent: "codex", CLIVersion: "0.5.1", StartLine: 4}
+	opts := Options{Agent: "codex", CLIVersion: "0.5.1", StartLine: 4}
 
 	input := []byte(`{"timestamp":"t1","type":"session_meta","payload":{"id":"s1"}}
 {"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions>sandbox</permissions>"}]}}
@@ -184,7 +182,7 @@ func TestCompact_CodexStartLine(t *testing.T) {
 		`{"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"t7","content":[{"type":"text","text":"response to second"}]}`,
 	}
 
-	result, err := Compact(redact.AlreadyRedacted(input), opts)
+	result, err := Convert(input, opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -196,7 +194,7 @@ func TestCompact_CodexStartLine_IgnoresTokenCountEvents(t *testing.T) {
 
 	// StartLine counts raw JSONL lines, so StartLine=2 skips session_meta and the
 	// first user line, leaving the token_count event to attach to the assistant.
-	opts := MetadataFields{Agent: "codex", CLIVersion: "0.5.1", StartLine: 2}
+	opts := Options{Agent: "codex", CLIVersion: "0.5.1", StartLine: 2}
 
 	input := []byte(`{"timestamp":"t1","type":"session_meta","payload":{"id":"s1"}}
 {"timestamp":"t2","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first prompt"}]}}
@@ -208,7 +206,7 @@ func TestCompact_CodexStartLine_IgnoresTokenCountEvents(t *testing.T) {
 		`{"v":1,"agent":"codex","cli_version":"0.5.1","type":"assistant","ts":"t4","input_tokens":10,"content":[{"type":"text","text":"second entry"}]}`,
 	}
 
-	result, err := Compact(redact.AlreadyRedacted(input), opts)
+	result, err := Convert(input, opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -24,12 +24,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
+	"github.com/entireio/cli/transcript"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"

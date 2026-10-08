@@ -1,13 +1,10 @@
-package compact
+package transcript
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // --- Gemini CLI format support ---
@@ -89,7 +86,7 @@ type geminiToolResult struct {
 // compactGemini converts a full Gemini session JSON into transcript lines.
 // opts.StartLine is treated as a message-index offset (not a newline offset)
 // because the Gemini transcript is a single JSON object.
-func compactGemini(content []byte, opts MetadataFields) ([]byte, error) {
+func compactGemini(content []byte, opts Options) ([]byte, error) {
 	var session struct {
 		Messages []geminiMessage `json:"messages"`
 	}
@@ -119,7 +116,7 @@ func compactGemini(content []byte, opts MetadataFields) ([]byte, error) {
 		}
 
 		switch msg.Type {
-		case transcript.TypeUser:
+		case TypeUser:
 			emitGeminiUser(&result, base, msg, ts)
 		case "gemini":
 			emitGeminiAssistant(&result, base, msg, ts)
@@ -132,7 +129,7 @@ func compactGemini(content []byte, opts MetadataFields) ([]byte, error) {
 // emitGeminiUser produces a single user line. Gemini user messages may have
 // content as a plain string or an array of content parts.
 func emitGeminiUser(result *[]byte, base transcriptLine, msg geminiMessage, ts json.RawMessage) {
-	text := textutil.StripIDEContextTags(geminiContentText(msg.Content))
+	text := StripIDEContextTags(geminiContentText(msg.Content))
 	if text == "" {
 		return
 	}
@@ -143,7 +140,7 @@ func emitGeminiUser(result *[]byte, base transcriptLine, msg geminiMessage, ts j
 	}
 
 	line := base
-	line.Type = transcript.TypeUser
+	line.Type = TypeUser
 	line.TS = ts
 	line.Content = b
 	appendLine(result, line)
@@ -158,7 +155,7 @@ func emitGeminiAssistant(result *[]byte, base transcriptLine, msg geminiMessage,
 	content := make([]map[string]json.RawMessage, 0, 1+len(msg.ToolCalls))
 
 	if contentText := geminiContentText(msg.Content); contentText != "" {
-		b, err := json.Marshal(transcript.ContentTypeText)
+		b, err := json.Marshal(ContentTypeText)
 		if err == nil {
 			text, err := json.Marshal(contentText)
 			if err == nil {
@@ -171,7 +168,7 @@ func emitGeminiAssistant(result *[]byte, base transcriptLine, msg geminiMessage,
 	}
 
 	for _, tc := range msg.ToolCalls {
-		b, err := json.Marshal(transcript.ContentTypeToolUse)
+		b, err := json.Marshal(ContentTypeToolUse)
 		if err != nil {
 			continue
 		}
@@ -206,7 +203,7 @@ func emitGeminiAssistant(result *[]byte, base transcriptLine, msg geminiMessage,
 	}
 
 	line := base
-	line.Type = transcript.TypeAssistant
+	line.Type = TypeAssistant
 	line.TS = ts
 	line.ID = msg.ID
 	line.Content = contentJSON

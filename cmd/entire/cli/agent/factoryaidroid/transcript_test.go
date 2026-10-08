@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/transcript"
 )
 
 func TestParseDroidTranscript_NormalizesEnvelope(t *testing.T) {

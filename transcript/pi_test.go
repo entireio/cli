@@ -1,10 +1,8 @@
-package compact
+package transcript
 
 import (
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/redact"
 )
 
 const piTestSessionJSONL = `{"type":"session","version":3,"id":"test-uuid-123","timestamp":"2026-03-27T21:00:00.000Z","cwd":"/tmp/test"}
@@ -35,9 +33,9 @@ func TestCompact_Pi_LinearTranscript(t *testing.T) {
 		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"assistant","ts":"2026-03-27T21:00:04.000Z","id":"m4","input_tokens":200,"output_tokens":30,"content":[{"type":"text","text":"Created hello.txt with the content hello world."}]}`,
 	}
 
-	result, err := Compact(redact.AlreadyRedacted([]byte(piTestSessionJSONL)), agentOpts("pi"))
+	result, err := Convert([]byte(piTestSessionJSONL), agentOpts("pi"))
 	if err != nil {
-		t.Fatalf("Compact: %v", err)
+		t.Fatalf("Convert: %v", err)
 	}
 	assertJSONLines(t, result, expected)
 }
@@ -45,9 +43,9 @@ func TestCompact_Pi_LinearTranscript(t *testing.T) {
 func TestCompact_Pi_FiltersAbandonedBranches(t *testing.T) {
 	t.Parallel()
 
-	result, err := Compact(redact.AlreadyRedacted([]byte(piTestBranchingJSONL)), agentOpts("pi"))
+	result, err := Convert([]byte(piTestBranchingJSONL), agentOpts("pi"))
 	if err != nil {
-		t.Fatalf("Compact: %v", err)
+		t.Fatalf("Convert: %v", err)
 	}
 	got := string(result)
 	if strings.Contains(got, "old.txt") || strings.Contains(got, "Created old.txt") {
@@ -65,9 +63,9 @@ func TestCompact_Pi_NormalizesToolNamesAndErrors(t *testing.T) {
 {"type":"message","id":"m2","parentId":"m1","timestamp":"2026-03-27T21:00:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc1","name":"edit","arguments":{"path":"app.go"}}]}}
 {"type":"message","id":"m3","parentId":"m2","timestamp":"2026-03-27T21:00:03.000Z","message":{"role":"toolResult","toolCallId":"tc1","toolName":"edit","content":[{"type":"text","text":"file not found"}],"isError":true}}
 `)
-	result, err := Compact(redact.AlreadyRedacted(body), agentOpts("pi"))
+	result, err := Convert(body, agentOpts("pi"))
 	if err != nil {
-		t.Fatalf("Compact: %v", err)
+		t.Fatalf("Convert: %v", err)
 	}
 	got := string(result)
 	if !strings.Contains(got, `"name":"Edit"`) {
@@ -88,9 +86,9 @@ func TestCompact_Pi_FlatTranscriptNoTreeFiltering(t *testing.T) {
 		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"user","ts":"2026-03-27T21:00:01.000Z","content":[{"text":"hello"}]}`,
 		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"assistant","ts":"2026-03-27T21:00:02.000Z","id":"m2","input_tokens":10,"output_tokens":5,"content":[{"type":"text","text":"hi"}]}`,
 	}
-	result, err := Compact(redact.AlreadyRedacted(body), agentOpts("pi"))
+	result, err := Convert(body, agentOpts("pi"))
 	if err != nil {
-		t.Fatalf("Compact: %v", err)
+		t.Fatalf("Convert: %v", err)
 	}
 	assertJSONLines(t, result, expected)
 }
@@ -106,10 +104,10 @@ func TestCompact_Pi_StartLineDoesNotLeakAbandonedBranches(t *testing.T) {
 	// Same shape as piTestBranchingJSONL, but bump StartLine past the
 	// session header + model_change + m1 (fork point) — so that, on the
 	// truncated buffer, ResolveActiveBranch cannot anchor to a root.
-	opts := MetadataFields{Agent: "pi", CLIVersion: "0.5.1", StartLine: 3}
-	result, err := Compact(redact.AlreadyRedacted([]byte(piTestBranchingJSONL)), opts)
+	opts := Options{Agent: "pi", CLIVersion: "0.5.1", StartLine: 3}
+	result, err := Convert([]byte(piTestBranchingJSONL), opts)
 	if err != nil {
-		t.Fatalf("Compact: %v", err)
+		t.Fatalf("Convert: %v", err)
 	}
 	got := string(result)
 	if strings.Contains(got, "old.txt") || strings.Contains(got, "Created old.txt") {
@@ -123,10 +121,10 @@ func TestCompact_Pi_StartLineDoesNotLeakAbandonedBranches(t *testing.T) {
 func TestCompact_Pi_StartLine(t *testing.T) {
 	t.Parallel()
 	// Skip header + model_change + first user → start scanning from m2.
-	opts := MetadataFields{Agent: "pi", CLIVersion: "0.5.1", StartLine: 3}
-	result, err := Compact(redact.AlreadyRedacted([]byte(piTestSessionJSONL)), opts)
+	opts := Options{Agent: "pi", CLIVersion: "0.5.1", StartLine: 3}
+	result, err := Convert([]byte(piTestSessionJSONL), opts)
 	if err != nil {
-		t.Fatalf("Compact: %v", err)
+		t.Fatalf("Convert: %v", err)
 	}
 	got := string(result)
 	if strings.Contains(got, "Create hello.txt") {

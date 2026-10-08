@@ -1,11 +1,9 @@
-package compact
+package transcript
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // isDroidFormat checks whether JSONL content uses Factory AI Droid's envelope
@@ -31,7 +29,7 @@ func isDroidFormat(content []byte) bool {
 			return true
 		}
 		// If we hit a known Claude Code/Cursor type, it's not Droid.
-		if userAliases[probe.Type] || probe.Type == transcript.TypeAssistant || droppedTypes[probe.Type] {
+		if userAliases[probe.Type] || probe.Type == TypeAssistant || droppedTypes[probe.Type] {
 			return false
 		}
 	}
@@ -44,7 +42,7 @@ func isDroidFormat(content []byte) bool {
 // compactDroid converts Factory AI Droid JSONL transcripts into the compact
 // format. Droid uses the same Anthropic Messages API structure as Claude Code
 // and Cursor, but wraps each message in an envelope that must be unwrapped first.
-func compactDroid(content []byte, opts MetadataFields) ([]byte, error) {
+func compactDroid(content []byte, opts Options) ([]byte, error) {
 	return compactJSONLWith(content, opts, unwrapDroidEnvelope)
 }
 
@@ -71,7 +69,7 @@ func unwrapDroidEnvelope(raw map[string]json.RawMessage) map[string]json.RawMess
 	}
 
 	role := unquote(inner["role"])
-	if !userAliases[role] && role != transcript.TypeAssistant {
+	if !userAliases[role] && role != TypeAssistant {
 		return raw
 	}
 

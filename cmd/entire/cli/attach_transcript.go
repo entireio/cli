@@ -6,8 +6,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // transcriptMetadata holds metadata extracted from a single transcript parse pass.
@@ -30,14 +30,14 @@ func extractTranscriptMetadata(data []byte) transcriptMetadata {
 	lines, err := transcript.ParseFromBytes(data)
 	if err == nil {
 		for _, line := range lines {
-			if line.Type == transcript.TypeUser {
+			if line.Type == transcriptlib.TypeUser {
 				if prompt := transcript.ExtractUserContent(line.Message); prompt != "" {
 					if firstUserPrompt == "" {
 						firstUserPrompt = prompt
 					}
 					// An injected preamble is not a user turn: counting it
 					// inflates the step count attach reports.
-					if textutil.IsInjectedPrompt(prompt) {
+					if transcriptlib.IsInjectedPrompt(prompt) {
 						continue
 					}
 					meta.TurnCount++
@@ -46,7 +46,7 @@ func extractTranscriptMetadata(data []byte) transcriptMetadata {
 					}
 				}
 			}
-			if line.Type == transcript.TypeAssistant && meta.Model == "" {
+			if line.Type == transcriptlib.TypeAssistant && meta.Model == "" {
 				var msg struct {
 					Model string `json:"model"`
 				}
@@ -73,7 +73,7 @@ func extractTranscriptMetadata(data []byte) transcriptMetadata {
 func countUserTurns(prompts []string) int {
 	turns := 0
 	for _, prompt := range prompts {
-		if strings.TrimSpace(prompt) == "" || textutil.IsInjectedPrompt(prompt) {
+		if strings.TrimSpace(prompt) == "" || transcriptlib.IsInjectedPrompt(prompt) {
 			continue
 		}
 		turns++

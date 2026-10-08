@@ -1,13 +1,10 @@
-package compact
+package transcript
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // --- OpenCode format support ---
@@ -63,7 +60,7 @@ type openCodeMsgToken struct {
 // compactOpenCode converts a full OpenCode session JSON into transcript lines.
 // opts.StartLine is treated as a message-index offset (not a newline offset)
 // because the OpenCode transcript is a single JSON object.
-func compactOpenCode(content []byte, opts MetadataFields) ([]byte, error) {
+func compactOpenCode(content []byte, opts Options) ([]byte, error) {
 	var session struct {
 		Messages []openCodeMessage `json:"messages"`
 	}
@@ -86,9 +83,9 @@ func compactOpenCode(content []byte, opts MetadataFields) ([]byte, error) {
 		ts := msToTimestamp(msg.Info.Time.Created)
 
 		switch msg.Info.Role {
-		case transcript.TypeUser:
+		case TypeUser:
 			emitOpenCodeUser(&result, base, msg, ts)
-		case transcript.TypeAssistant:
+		case TypeAssistant:
 			emitOpenCodeAssistant(&result, base, msg, ts)
 		}
 	}
@@ -100,10 +97,10 @@ func emitOpenCodeUser(result *[]byte, base transcriptLine, msg openCodeMessage, 
 	var blocks []json.RawMessage
 
 	for _, part := range msg.Parts {
-		if unquote(part["type"]) != transcript.ContentTypeText {
+		if unquote(part["type"]) != ContentTypeText {
 			continue
 		}
-		text := textutil.StripIDEContextTags(unquote(part[transcript.ContentTypeText]))
+		text := StripIDEContextTags(unquote(part[ContentTypeText]))
 		if text == "" {
 			continue
 		}
@@ -124,7 +121,7 @@ func emitOpenCodeUser(result *[]byte, base transcriptLine, msg openCodeMessage, 
 	}
 
 	line := base
-	line.Type = transcript.TypeUser
+	line.Type = TypeUser
 	line.TS = ts
 	line.Content = contentJSON
 	appendLine(result, line)
@@ -137,18 +134,18 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 		partType := unquote(part["type"])
 
 		switch partType {
-		case transcript.ContentTypeText:
-			b, err := json.Marshal(transcript.ContentTypeText)
+		case ContentTypeText:
+			b, err := json.Marshal(ContentTypeText)
 			if err != nil {
 				continue
 			}
 			content = append(content, map[string]json.RawMessage{
 				"type": b,
-				"text": part[transcript.ContentTypeText],
+				"text": part[ContentTypeText],
 			})
 		case "tool":
 			toolBlock := make(map[string]json.RawMessage)
-			b, err := json.Marshal(transcript.ContentTypeToolUse)
+			b, err := json.Marshal(ContentTypeToolUse)
 			if err != nil {
 				continue
 			}
@@ -178,7 +175,7 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 	}
 
 	line := base
-	line.Type = transcript.TypeAssistant
+	line.Type = TypeAssistant
 	line.TS = ts
 	line.ID = msg.Info.ID
 	line.Content = contentJSON

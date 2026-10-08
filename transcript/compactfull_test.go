@@ -1,10 +1,8 @@
-package compact
+package transcript
 
 import (
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/redact"
 )
 
 // assertSliceMatchesDelta asserts that nonEmptyLines(full)[boundary:] equals the
@@ -25,10 +23,10 @@ func assertSliceMatchesDelta(t *testing.T, full []byte, boundary int, delta []by
 func TestCompactFull_ClaudeJSONL_FullPlusBoundary(t *testing.T) {
 	t.Parallel()
 
-	input := redact.AlreadyRedacted([]byte(fixtureFullJSONL))
-	opts := MetadataFields{Agent: "claude-code", CLIVersion: "0.5.1", StartLine: 3}
+	input := []byte(fixtureFullJSONL)
+	opts := Options{Agent: "claude-code", CLIVersion: "0.5.1", StartLine: 3}
 
-	full, boundary, err := FullWithBoundary(input, opts)
+	full, boundary, err := ConvertWithBoundary(input, opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -48,7 +46,7 @@ func TestCompactFull_ClaudeJSONL_FullPlusBoundary(t *testing.T) {
 		t.Fatalf("boundary: got %d, want 2", boundary)
 	}
 
-	delta, err := Compact(input, opts)
+	delta, err := Convert(input, opts)
 	if err != nil {
 		t.Fatalf("delta compact error: %v", err)
 	}
@@ -58,9 +56,9 @@ func TestCompactFull_ClaudeJSONL_FullPlusBoundary(t *testing.T) {
 func TestCompactFull_StartLineZero_BoundaryZero(t *testing.T) {
 	t.Parallel()
 
-	input := redact.AlreadyRedacted([]byte(fixtureFullJSONL))
+	input := []byte(fixtureFullJSONL)
 
-	full, boundary, err := FullWithBoundary(input, defaultOpts)
+	full, boundary, err := ConvertWithBoundary(input, defaultOpts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -68,8 +66,8 @@ func TestCompactFull_StartLineZero_BoundaryZero(t *testing.T) {
 		t.Fatalf("boundary: got %d, want 0", boundary)
 	}
 
-	// With StartLine=0, the full output is identical to a plain Compact.
-	plain, err := Compact(input, defaultOpts)
+	// With StartLine=0, the full output is identical to a plain Convert.
+	plain, err := Convert(input, defaultOpts)
 	if err != nil {
 		t.Fatalf("plain compact error: %v", err)
 	}
@@ -79,10 +77,10 @@ func TestCompactFull_StartLineZero_BoundaryZero(t *testing.T) {
 func TestCompactFull_StartLineBeyondEnd_BoundaryAtEnd(t *testing.T) {
 	t.Parallel()
 
-	input := redact.AlreadyRedacted([]byte(fixtureFullJSONL))
-	opts := MetadataFields{Agent: "claude-code", CLIVersion: "0.5.1", StartLine: 1000}
+	input := []byte(fixtureFullJSONL)
+	opts := Options{Agent: "claude-code", CLIVersion: "0.5.1", StartLine: 1000}
 
-	full, boundary, err := FullWithBoundary(input, opts)
+	full, boundary, err := ConvertWithBoundary(input, opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -108,14 +106,14 @@ func TestCompactFull_StartLineBeyondEnd_BoundaryAtEnd(t *testing.T) {
 func TestFullWithBoundary_StraddlingAssistantFragments_RoundsToInclusion(t *testing.T) {
 	t.Parallel()
 
-	input := redact.AlreadyRedacted([]byte(
+	input := []byte(
 		`{"type":"assistant","timestamp":"t0","message":{"id":"msg_1","content":[{"type":"text","text":"FRAG_A"}]}}
 {"type":"assistant","timestamp":"t1","message":{"id":"msg_1","content":[{"type":"text","text":"FRAG_B"}]}}
-`))
+`)
 	// StartLine=1 lands between the two fragments of the same streaming message.
-	opts := MetadataFields{Agent: "claude-code", CLIVersion: "0.5.1", StartLine: 1}
+	opts := Options{Agent: "claude-code", CLIVersion: "0.5.1", StartLine: 1}
 
-	full, boundary, err := FullWithBoundary(input, opts)
+	full, boundary, err := ConvertWithBoundary(input, opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,18 +141,18 @@ func TestFullWithBoundary_StraddlingAssistantFragments_RoundsToInclusion(t *test
 func TestCompactFull_GeminiIndexFormat_Boundary(t *testing.T) {
 	t.Parallel()
 
-	input := redact.AlreadyRedacted([]byte(`{
+	input := []byte(`{
 		"sessionId": "s1",
 		"messages": [
 			{"id":"m1","timestamp":"2026-01-01T00:00:00Z","type":"user","content":"hello"},
 			{"id":"m2","timestamp":"2026-01-01T00:00:01Z","type":"gemini","content":"hi there","tokens":{"input":10,"output":5}},
 			{"id":"m3","timestamp":"2026-01-01T00:00:02Z","type":"user","content":"bye"}
 		]
-	}`))
+	}`)
 	// Gemini treats StartLine as a message-index offset; skipping 1 message.
-	opts := MetadataFields{Agent: "gemini-cli", CLIVersion: "0.5.1", StartLine: 1}
+	opts := Options{Agent: "gemini-cli", CLIVersion: "0.5.1", StartLine: 1}
 
-	full, boundary, err := FullWithBoundary(input, opts)
+	full, boundary, err := ConvertWithBoundary(input, opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -167,7 +165,7 @@ func TestCompactFull_GeminiIndexFormat_Boundary(t *testing.T) {
 		t.Fatalf("boundary: got %d, want 1", boundary)
 	}
 
-	delta, err := Compact(input, opts)
+	delta, err := Convert(input, opts)
 	if err != nil {
 		t.Fatalf("delta compact error: %v", err)
 	}

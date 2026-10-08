@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // factoryImporter imports Factory AI Droid transcripts
@@ -84,7 +85,7 @@ func factoryPromptText(raw []byte) (string, bool) {
 	var role struct {
 		Role string `json:"role"`
 	}
-	if err := json.Unmarshal(env.Message, &role); err != nil || role.Role != transcript.TypeUser {
+	if err := json.Unmarshal(env.Message, &role); err != nil || role.Role != transcriptlib.TypeUser {
 		return "", false
 	}
 	text := transcript.ExtractUserContent(env.Message)

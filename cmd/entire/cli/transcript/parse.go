@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // ParseFromBytes parses transcript content from a byte slice.
@@ -123,41 +123,6 @@ func normalizeLineType(line *Line) {
 	}
 }
 
-// SliceFromLine returns the content starting from line number `startLine` (0-indexed).
-// This is used to extract only the checkpoint-specific portion of a cumulative transcript.
-// For example, if startLine is 2, lines 0 and 1 are skipped and the result starts at line 2.
-// Returns empty slice if startLine exceeds the number of lines.
-func SliceFromLine(content []byte, startLine int) []byte {
-	if len(content) == 0 || startLine <= 0 {
-		return content
-	}
-
-	// Find the byte offset where startLine begins
-	lineCount := 0
-	offset := 0
-	for i, b := range content {
-		if b == '\n' {
-			lineCount++
-			if lineCount == startLine {
-				offset = i + 1
-				break
-			}
-		}
-	}
-
-	// If we didn't find enough lines, return empty
-	if lineCount < startLine {
-		return nil
-	}
-
-	// If offset is beyond content, return empty
-	if offset >= len(content) {
-		return nil
-	}
-
-	return content[offset:]
-}
-
 // ExtractUserContent extracts user content from a raw message.
 // Handles both string and array content formats.
 // IDE-injected context tags (like <ide_opened_file>) are stripped from the result.
@@ -170,7 +135,7 @@ func ExtractUserContent(message json.RawMessage) string {
 
 	// Handle string content
 	if str, ok := msg.Content.(string); ok {
-		return textutil.StripIDEContextTags(str)
+		return transcriptlib.StripIDEContextTags(str)
 	}
 
 	// Handle array content (only if it contains text blocks)
@@ -178,7 +143,7 @@ func ExtractUserContent(message json.RawMessage) string {
 		var texts []string
 		for _, item := range arr {
 			if m, ok := item.(map[string]interface{}); ok {
-				if m["type"] == ContentTypeText {
+				if m["type"] == transcriptlib.ContentTypeText {
 					if text, ok := m["text"].(string); ok {
 						texts = append(texts, text)
 					}
@@ -186,7 +151,7 @@ func ExtractUserContent(message json.RawMessage) string {
 			}
 		}
 		if len(texts) > 0 {
-			return textutil.StripIDEContextTags(strings.Join(texts, "\n\n"))
+			return transcriptlib.StripIDEContextTags(strings.Join(texts, "\n\n"))
 		}
 	}
 

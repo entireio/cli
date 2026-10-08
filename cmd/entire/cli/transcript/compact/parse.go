@@ -6,8 +6,21 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/transcript"
 )
+
+// Retain every original wire field so the CLI reader's validation is unchanged.
+type transcriptLine struct {
+	V            int             `json:"v"`
+	Agent        string          `json:"agent"`
+	CLIVersion   string          `json:"cli_version"`
+	Type         string          `json:"type"`
+	TS           json.RawMessage `json:"ts,omitempty"`
+	ID           string          `json:"id,omitempty"`
+	InputTokens  int             `json:"input_tokens,omitempty"`
+	OutputTokens int             `json:"output_tokens,omitempty"`
+	Content      json.RawMessage `json:"content"`
+}
 
 type CondensedEntry struct {
 	Type       string

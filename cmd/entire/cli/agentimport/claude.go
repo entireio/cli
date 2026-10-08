@@ -147,9 +147,8 @@ func isUserPromptLine(raw []byte) bool {
 	return transcript.ExtractUserContent(line.Message) != ""
 }
 
-// splitRawLines splits content into raw lines in the same index space as
-// transcript.SliceFromLine (newline-counted). Trailing empty segment from a
-// final newline is dropped.
+// splitRawLines splits content into raw lines using the same newline-counted
+// indices as transcript.SliceFromLine. A trailing empty segment is dropped.
 func splitRawLines(content []byte) [][]byte {
 	if len(content) == 0 {
 		return nil

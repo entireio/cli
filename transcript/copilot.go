@@ -1,4 +1,4 @@
-package compact
+package transcript
 
 import (
 	"bufio"
@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 func isCopilotFormat(content []byte) bool {
@@ -27,7 +25,7 @@ func isCopilotFormat(content []byte) bool {
 		switch probe.Type {
 		case "session.start", "user.message", "assistant.message", "tool.execution_complete":
 			return true
-		case transcript.TypeUser, transcript.TypeAssistant, "human", transcriptTypeMessage:
+		case TypeUser, TypeAssistant, "human", transcriptTypeMessage:
 			return false
 		}
 	}
@@ -65,7 +63,7 @@ type copilotToolResultData struct {
 	} `json:"result"`
 }
 
-func compactCopilot(content []byte, opts MetadataFields) ([]byte, error) {
+func compactCopilot(content []byte, opts Options) ([]byte, error) {
 	base := newTranscriptLine(opts)
 	var result []byte
 	var pending *transcriptLine
@@ -137,7 +135,7 @@ func copilotUserLine(base transcriptLine, line copilotLine) *transcriptLine {
 	}
 
 	out := base
-	out.Type = transcript.TypeUser
+	out.Type = TypeUser
 	out.TS = ts
 	out.Content = contentJSON
 	return &out
@@ -155,7 +153,7 @@ func copilotAssistantLine(base transcriptLine, line copilotLine) *transcriptLine
 	// unreachable.
 	content := make([]map[string]json.RawMessage, 0, 1+len(data.ToolReqs))
 	if data.Content != "" {
-		tb, err := json.Marshal(transcript.ContentTypeText)
+		tb, err := json.Marshal(ContentTypeText)
 		if err == nil {
 			txt, err := json.Marshal(data.Content)
 			if err == nil {
@@ -168,7 +166,7 @@ func copilotAssistantLine(base transcriptLine, line copilotLine) *transcriptLine
 	}
 
 	for _, tr := range data.ToolReqs {
-		kind, err := json.Marshal(transcript.ContentTypeToolUse)
+		kind, err := json.Marshal(ContentTypeToolUse)
 		if err != nil {
 			continue
 		}
@@ -208,7 +206,7 @@ func copilotAssistantLine(base transcriptLine, line copilotLine) *transcriptLine
 	}
 
 	out := base
-	out.Type = transcript.TypeAssistant
+	out.Type = TypeAssistant
 	out.TS = ts
 	out.ID = data.MessageID
 	out.OutputTokens = data.OutputTokens
@@ -233,7 +231,7 @@ func copilotInlineToolResult(pending *transcriptLine, line copilotLine) {
 	}
 
 	for i := len(blocks) - 1; i >= 0; i-- {
-		if unquote(blocks[i]["type"]) != transcript.ContentTypeToolUse {
+		if unquote(blocks[i]["type"]) != ContentTypeToolUse {
 			continue
 		}
 		if unquote(blocks[i]["id"]) != data.ToolCallID {

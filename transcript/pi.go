@@ -1,4 +1,4 @@
-package compact
+package transcript
 
 import (
 	"bytes"
@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent/pi/pijsonl"
+	"github.com/entireio/cli/transcript/pijsonl"
 )
 
 // --- pi format support ---
@@ -23,7 +23,7 @@ import (
 //
 // Parsing primitives (Entry/Message/ContentItem types, ResolveActiveBranch,
 // SkipLines, NewScanner) are shared with the pi agent package via
-// cmd/entire/cli/agent/pi/pijsonl so a fix applied here also lands there.
+// transcript/pijsonl so a fix applied here also lands there.
 
 // piToolNameMap normalises Pi's lowercase tool names to the title-cased names
 // used elsewhere in Entire's compact format (matching Claude's "Read"/"Write"/"Edit").
@@ -87,7 +87,7 @@ type piCompactToolResult struct {
 // the original (untruncated) content. A truncated buffer breaks parentId
 // chains and toolCallId references, which would let abandoned-branch entries
 // and orphaned tool results leak into the compact output.
-func compactPi(content []byte, opts MetadataFields) ([]byte, error) {
+func compactPi(content []byte, opts Options) ([]byte, error) {
 	active := pijsonl.ResolveActiveBranch(content)
 	results, err := piCollectToolResults(content, active)
 	if err != nil {

@@ -1,10 +1,8 @@
-package compact
+package transcript
 
 import (
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/redact"
 )
 
 // --- Factory AI Droid tests ---
@@ -62,7 +60,7 @@ func TestCompact_FactoryDroidInlineCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			result, err := Compact(redact.AlreadyRedacted(tc.input), droidOpts)
+			result, err := Convert(tc.input, droidOpts)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -123,7 +121,7 @@ func TestIsDroidFormat_LargeLeadingLine(t *testing.T) {
 func TestCompact_DroidStartLine(t *testing.T) {
 	t.Parallel()
 
-	opts := MetadataFields{Agent: "factoryai-droid", CLIVersion: "0.5.1", StartLine: 2}
+	opts := Options{Agent: "factoryai-droid", CLIVersion: "0.5.1", StartLine: 2}
 
 	input := []byte(`{"type":"session_start","id":"sess-1","title":"test"}
 {"type":"message","id":"m1","timestamp":"t1","message":{"role":"user","content":"first prompt"}}
@@ -136,7 +134,7 @@ func TestCompact_DroidStartLine(t *testing.T) {
 		`{"v":1,"agent":"factoryai-droid","cli_version":"0.5.1","type":"assistant","ts":"t3","id":"m3","content":[{"type":"text","text":"response"}]}`,
 	}
 
-	result, err := Compact(redact.AlreadyRedacted(input), opts)
+	result, err := Convert(input, opts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

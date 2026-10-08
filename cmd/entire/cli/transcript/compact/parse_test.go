@@ -59,6 +59,24 @@ func TestParseLines_RejectsNonCompactLine(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestParseLines_RejectsMalformedWireFields(t *testing.T) {
+	t.Parallel()
+
+	for _, field := range []string{
+		`"agent":42`,
+		`"id":42`,
+		`"input_tokens":"invalid"`,
+		`"output_tokens":"invalid"`,
+	} {
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+			input := []byte(`{"v":1,"cli_version":"0.5.1","type":"assistant","content":[{"type":"text","text":"hi"}],` + field + "}\n")
+			_, err := parseLines(input)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestBuildCondensedEntries_ParsesCompactTranscript(t *testing.T) {
 	t.Parallel()
 

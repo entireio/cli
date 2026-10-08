@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 func TestParseTranscript(t *testing.T) {
@@ -26,11 +27,11 @@ func TestParseTranscript(t *testing.T) {
 		t.Errorf("ParseFromBytes() got %d lines, want 2", len(lines))
 	}
 
-	if lines[0].Type != transcript.TypeUser || lines[0].UUID != "u1" {
+	if lines[0].Type != transcriptlib.TypeUser || lines[0].UUID != "u1" {
 		t.Errorf("First line = %+v, want type=user, uuid=u1", lines[0])
 	}
 
-	if lines[1].Type != transcript.TypeAssistant || lines[1].UUID != "a1" {
+	if lines[1].Type != transcriptlib.TypeAssistant || lines[1].UUID != "a1" {
 		t.Errorf("Second line = %+v, want type=assistant, uuid=a1", lines[1])
 	}
 }

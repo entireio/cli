@@ -31,11 +31,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/redact"
+	"github.com/entireio/cli/transcript"
 
 	"charm.land/lipgloss/v2"
 	"github.com/go-git/go-git/v6"
