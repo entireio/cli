@@ -2321,8 +2321,11 @@ func decodeDeleteProjectResponse(resp *http.Response) (res *DeleteProjectNoConte
 	return res, errors.Wrap(defRes, "error")
 }
 
-func decodeDeleteRepoResponse(resp *http.Response) (res *DeleteRepoNoContent, _ error) {
+func decodeDeleteRepoResponse(resp *http.Response) (res DeleteRepoRes, _ error) {
 	switch resp.StatusCode {
+	case 202:
+		// Code 202.
+		return &DeleteRepoAccepted{}, nil
 	case 204:
 		// Code 204.
 		var wrapper DeleteRepoNoContent

@@ -88,11 +88,12 @@ func forceRequested(cmd *cobra.Command) bool {
 }
 
 // runControlPlaneDelete is the shared body of the destructive `delete` verbs
-// (org/project/repo). It resolves the target ref to a ULID, gates on a
+// (org/project). It resolves the target ref to a ULID, gates on a
 // confirmation prompt (bypassed by --force/--yes), deletes, and reports the
 // resolved identifier. noun names the resource ("org"); ref is the user's
 // original argument, shown alongside the resolved ULID. resolve and del isolate
-// the per-resource API calls.
+// the per-resource API calls. `repo delete` has its own body (runRepoDelete):
+// a cascade can answer 202, which this one-shot flow cannot report.
 func runControlPlaneDelete(
 	cmd *cobra.Command,
 	noun, ref string,

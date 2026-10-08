@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -80,7 +81,7 @@ func RunIsolatedTextGeneratorCLIIn(ctx context.Context, runner TextCommandRunner
 
 	cmd := runner(ctx, binary, args...)
 	cmd.Dir = dir
-	cmd.Env = StripGitEnv(append(os.Environ(), envOverrides...))
+	cmd.Env = TextGenerationEnv(dir, append(os.Environ(), envOverrides...))
 	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
 	// output pipe open, which blocks cmd.Run past the ctx deadline. Bound it.
 	execx.TerminateOnCancel(cmd)
@@ -172,12 +173,27 @@ func IsSummaryCLIAvailable(name types.AgentName) bool {
 	return err == nil
 }
 
+// StripGitEnv removes every GIT_* variable. The match ignores case because
+// Windows environment names do, so git_dir names the same variable there.
 func StripGitEnv(env []string) []string {
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {
-		if !strings.HasPrefix(e, "GIT_") {
+		if len(e) < len("GIT_") || !strings.EqualFold(e[:len("GIT_")], "GIT_") {
 			filtered = append(filtered, e)
 		}
 	}
 	return filtered
+}
+
+// TextGenerationEnv is the environment for a text generator running in dir:
+// env without GIT_* variables (StripGitEnv) and without the caller's PWD and
+// OLDPWD, plus PWD=dir. The caller usually runs from the repository, and
+// exec.Cmd does not rewrite PWD when Env is set explicitly, so the inherited
+// value would tell the generator where the repository is.
+func TextGenerationEnv(dir string, env []string) []string {
+	filtered := slices.DeleteFunc(StripGitEnv(env), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return strings.EqualFold(name, "PWD") || strings.EqualFold(name, "OLDPWD")
+	})
+	return append(filtered, "PWD="+dir)
 }

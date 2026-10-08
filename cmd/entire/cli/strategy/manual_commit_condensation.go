@@ -344,7 +344,7 @@ func resolveInventoryTaskTranscripts(ctx context.Context, ag agent.Agent, state 
 	if len(refs) == 0 {
 		return nil
 	}
-	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, nil, 0, refs)
+	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, nil, 0, refs, state.AgentHome)
 	if !ok {
 		return nil
 	}
