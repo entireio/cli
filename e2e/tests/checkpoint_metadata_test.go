@@ -35,6 +35,5 @@ func TestCheckpointMetadataDeepValidation(t *testing.T) {
 			Strategy:     "manual-commit",
 			FilesTouched: []string{"validated.go"},
 		})
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

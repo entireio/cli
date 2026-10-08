@@ -19,7 +19,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -358,9 +357,8 @@ func detectFileChanges(ctx context.Context, previouslyUntracked []string, status
 // default, and what e2e/testutil/repo.go sets — the working tree holds CRLF
 // while the blob holds LF, so a byte comparison reports every committed text
 // file as still modified. That defeats the caller's "no changes, skip" gate and
-// mints a fresh shadow branch on the new HEAD *after* PostCommit condensed and
-// deleted the old one; nothing condenses that one away, so it outlives the
-// session. The same reasoning applies to .gitattributes eol/text rules and to
+// records a fresh turn-end step for files PostCommit already condensed; no
+// commit ever claims them, so the session stays pending for nothing. The same reasoning applies to .gitattributes eol/text rules and to
 // clean filters such as Git LFS, which a byte comparison also gets wrong.
 func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot string) []string {
 	if len(files) == 0 {
@@ -758,42 +756,4 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 	toolUseID := strings.TrimPrefix(latestFile, preTaskFilePrefix)
 	toolUseID = strings.TrimSuffix(toolUseID, ".json")
 	return toolUseID, true
-}
-
-// GetNextCheckpointSequence returns the next sequence number for incremental checkpoints.
-// It counts existing checkpoint files in the task metadata checkpoints directory.
-// Returns 1 if no checkpoints exist yet.
-func GetNextCheckpointSequence(ctx context.Context, sessionID, taskToolUseID string) int {
-	// sessionID/taskToolUseID arrive from agent hook input and are used as path
-	// components below. Reject unsafe values so a crafted "../.." cannot redirect
-	// the os.ReadDir to an arbitrary directory; an invalid ID just starts at 1.
-	if validation.ValidateSessionID(sessionID) != nil || validation.ValidateToolUseID(taskToolUseID) != nil {
-		return 1
-	}
-
-	root, err := entiredir.OpenForRead(ctx)
-	if err != nil {
-		// No .entire yet - start at 1
-		return 1
-	}
-
-	// Use the session ID directly as the metadata directory name
-	sessionMetadataDir := sessionMetadataName(sessionID)
-	taskMetadataDir := strategy.TaskMetadataDir(sessionMetadataDir, taskToolUseID)
-
-	entries, err := osroot.ReadDirNoSymlinks(root, taskMetadataDir+"/checkpoints")
-	if err != nil {
-		// Directory doesn't exist or can't be read - start at 1
-		return 1
-	}
-
-	// Count JSON files (checkpoints)
-	count := 0
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
-			count++
-		}
-	}
-
-	return count + 1
 }

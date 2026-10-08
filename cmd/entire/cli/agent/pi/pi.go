@@ -176,6 +176,20 @@ func (a *PiAgent) GetSessionBaseDir() (string, error) {
 	return filepath.Join(home, "sessions"), nil
 }
 
+// SessionHome returns Pi's home directory: $PI_CODING_AGENT_DIR or ~/.pi/agent.
+// A session store relocated with PI_CODING_AGENT_SESSION_DIR lies outside it.
+func (a *PiAgent) SessionHome() (string, error) {
+	return resolvePiHome()
+}
+
+// HomeLayout reports that Pi keeps per-project session directories under
+// sessions.
+func (a *PiAgent) HomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"sessions"}}
+}
+
+var _ agent.HomeLayoutProvider = (*PiAgent)(nil)
+
 // ResolveSessionFile returns the path to the Pi session file for
 // agentSessionID in sessionDir. Pi names files <timestamp>_<id>.jsonl,
 // so glob for the matching ID; on multiple matches the lexicographically
@@ -229,15 +243,37 @@ func encodeRepoPathForPi(repoPath string) string {
 // the lexicographically latest match (most recent timestamp) or "" when
 // no match exists or sessionDir/sessionID is empty.
 func findPiSessionByID(sessionDir, sessionID string) string {
+	if matches := piSessionsByID(sessionDir, sessionID); len(matches) > 0 {
+		return matches[0]
+	}
+	return ""
+}
+
+// ResolveSessionFileCandidates returns every <timestamp>_<id>.jsonl file for
+// agentSessionID in sessionDir, latest first, followed by the <id>.jsonl path
+// ResolveSessionFile predicts when there is none.
+func (a *PiAgent) ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string {
+	candidates := piSessionsByID(sessionDir, agentSessionID)
+	if sessionDir != "" {
+		candidates = append(candidates, filepath.Join(sessionDir, agentSessionID+".jsonl"))
+	}
+	return candidates
+}
+
+var _ agent.SessionFileCandidatesProvider = (*PiAgent)(nil)
+
+// piSessionsByID returns the session files for sessionID in sessionDir,
+// lexicographically latest (most recent timestamp) first.
+func piSessionsByID(sessionDir, sessionID string) []string {
 	if sessionDir == "" || sessionID == "" {
-		return ""
+		return nil
 	}
 	matches, err := filepath.Glob(filepath.Join(sessionDir, "*_"+sessionID+".jsonl"))
-	if err != nil || len(matches) == 0 {
-		return ""
+	if err != nil {
+		return nil
 	}
-	sort.Strings(matches)
-	return matches[len(matches)-1]
+	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+	return matches
 }
 
 // ReadSession loads a captured Pi transcript and returns it as an AgentSession.

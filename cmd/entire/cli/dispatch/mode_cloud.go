@@ -75,7 +75,7 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 		// repo on the other forge cannot answer for this checkout.
 		repoSlug, err := resolveOriginRepoSlug(ctx, repo)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w (or pass --repos %s to name the repo)", err, RepoSlugShapes)
 		}
 		repos = []string{repoSlug}
 	}

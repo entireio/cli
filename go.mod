@@ -39,6 +39,7 @@ require (
 	github.com/mxschmitt/playwright-go v0.6201.1
 	github.com/ogen-go/ogen v1.24.0
 	github.com/oklog/ulid/v2 v2.1.2
+	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/posthog/posthog-go v1.25.3
 	github.com/sergi/go-diff v1.4.0
 	github.com/spf13/cobra v1.10.2
@@ -123,7 +124,6 @@ require (
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/nwaples/rardecode/v2 v2.2.2 // indirect
-	github.com/pelletier/go-toml/v2 v2.3.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/pkoukk/tiktoken-go v0.1.8 // indirect

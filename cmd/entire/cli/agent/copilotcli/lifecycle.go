@@ -90,9 +90,9 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 	// using the Task tool-use id (e.g. "toolu_…") as the sessionId.
 	// Those must NOT spin up a top-level Entire session: the subagent never gets
 	// a matching stop for that id, so the phantom session would stay "active"
-	// forever and pin its shadow branch open after the user commits. The
-	// subagent's work is still captured via the main session's subagentStop →
-	// task checkpoint path, so we drop only the session-lifecycle hooks here and
+	// forever after the user commits. The subagent's work is still captured via
+	// the main session's subagentStop → task record path, so we drop only the
+	// session-lifecycle hooks here and
 	// leave subagentStop itself to run.
 	if hookName != HookNameSubagentStop && hookName != HookNameSubagentStart && isSubagentSessionID(env.SessionID) {
 		logging.Debug(ctx, "copilot-cli: skipping lifecycle event for subagent session",

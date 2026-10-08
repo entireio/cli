@@ -145,3 +145,40 @@ func TestClaudeSplitTurns_ToolResultIsNotATurn(t *testing.T) {
 		t.Fatalf("tool_result must not start a turn; want 1 turn, got %d", len(turns))
 	}
 }
+
+// TestClaudeSplitTurns_WorkflowAgentTokensLandOnTheLaunchingTurn: a Workflow
+// run's agents are counted from the turn whose transcript launches the run,
+// not from the first turn (#2685).
+func TestClaudeSplitTurns_WorkflowAgentTokensLandOnTheLaunchingTurn(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, "s", "subagents", "workflows", "wf_1")
+	if err := os.MkdirAll(runDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "agent-a6d78754c07df829a.jsonl"),
+		[]byte(`{"type":"assistant","message":{"id":"wm1","usage":{"input_tokens":30,"output_tokens":40}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	full := []byte(strings.Join([]string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"run the workflow"}}`,
+		`{"type":"assistant","uuid":"a2","message":{"id":"m2","content":[{"type":"tool_use","id":"toolu_wf","name":"Workflow","input":{}}],"usage":{"input_tokens":20,"output_tokens":7}}}`,
+		`{"type":"user","uuid":"r2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_wf","content":"Workflow launched in background.\nRun ID: wf_1\n"}]}}`,
+	}, "\n") + "\n")
+
+	turns, err := claudeImporter{}.SplitTurns(SessionFile{Path: filepath.Join(dir, "s.jsonl"), SessionID: "s"}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("want 2 turns, got %d", len(turns))
+	}
+	if turns[0].Tokens != nil && turns[0].Tokens.SubagentTokens != nil {
+		t.Errorf("turn0 must carry no workflow tokens, got %+v", turns[0].Tokens.SubagentTokens)
+	}
+	if turns[1].Tokens == nil || turns[1].Tokens.SubagentTokens == nil || turns[1].Tokens.SubagentTokens.OutputTokens != 40 {
+		t.Errorf("turn1 must carry the workflow agent's tokens, got %+v", turns[1].Tokens)
+	}
+}

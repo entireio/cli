@@ -45,6 +45,5 @@ func TestDeletedFilesCommitDeletion(t *testing.T) {
 
 		// git add . already staged the deletion of to_delete.go above,
 		// so no separate git rm + commit is needed.
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

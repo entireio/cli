@@ -793,3 +793,16 @@ func removeEntireHooks(groups []MatcherGroup) []MatcherGroup {
 
 // HookConfigRelPath implements agent.HookConfigLocator.
 func (c *CodexAgent) HookConfigRelPath() string { return ".codex/" + HooksFileName }
+
+// EntireHookCommands returns the exact commands Entire installs, by event, in
+// both the sh and Windows wrappers. Callers must match whole commands.
+func EntireHookCommands() map[string][]string {
+	const cmdPrefix = "entire hooks codex "
+	out := make(map[string][]string)
+	for _, hook := range managedHooks {
+		for _, windows := range []bool{false, true} {
+			out[hook.event] = append(out[hook.event], hook.wrap(cmdPrefix+hook.verb, windows))
+		}
+	}
+	return out
+}

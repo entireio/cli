@@ -67,21 +67,6 @@ func TestWrite_DispatchesEachRequest(t *testing.T) {
 	if meta := readLatestSessionMetadata(t, repo, cpID); meta.Summary == nil || meta.Summary.Intent != "why" {
 		t.Errorf("SessionSummary not applied: %+v", meta.Summary)
 	}
-
-	// CheckpointAttribution rewrites the checkpoint root combined attribution.
-	if err := store.Write(ctx, CheckpointAttribution{
-		CheckpointID: cpID,
-		Attribution:  &Attribution{AgentLines: 42},
-	}); err != nil {
-		t.Fatalf("Write(CheckpointAttribution) error = %v", err)
-	}
-	rootSummary, err := store.Read(ctx, cpID)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if rootSummary.CombinedAttribution == nil || rootSummary.CombinedAttribution.AgentLines != 42 {
-		t.Errorf("CheckpointAttribution not applied: %+v", rootSummary.CombinedAttribution)
-	}
 }
 
 // TestWrite_BackfillSummaryNotFound verifies error propagation through dispatch.

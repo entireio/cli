@@ -255,6 +255,14 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			b.WriteString("\n")
 			b.WriteString(sty.render(sty.yellow, "  ! "+warning))
 		}
+		// Shadow branches older versions left behind hold raw working-tree
+		// snapshots and are no longer removed automatically; surface them so
+		// they are not pushed or kept by accident.
+		if n := legacyShadowBranchCount(ctx); n > 0 {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! "+pluralCount(n, "legacy shadow branch", "legacy shadow branches")))
+			b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
+		}
 	}
 
 	// Where checkpoint data syncs (the single elected remote), and how many
@@ -1060,9 +1068,6 @@ func computeSessionDivergenceWarnings(
 		}
 
 		if st.BaseCommit == head.commitHash {
-			if st.AttributionBaseCommit != "" && st.AttributionBaseCommit != st.BaseCommit {
-				warnings[st.SessionID] = "attribution base diverged after history movement; figures may be off until next checkpoint"
-			}
 			continue
 		}
 
@@ -1100,6 +1105,10 @@ type statusJSON struct {
 	// HooksOutdated lists agents whose installed hook config is out of date and
 	// should be refreshed with `entire enable --force`.
 	HooksOutdated []string `json:"hooks_outdated,omitempty"`
+	// LegacyShadowBranches counts the strict-shape entire/<commit>-<worktree>
+	// shadow branches older versions left behind; `entire doctor` reports and
+	// deletes them.
+	LegacyShadowBranches int `json:"legacy_shadow_branches,omitempty"`
 	// RefusedAgentHomes lists agent relocation variables (CLAUDE_CONFIG_DIR,
 	// CODEX_HOME, ...) set to a value Entire refuses, one message per variable.
 	// Resume and attach fail for that agent until it is fixed.
@@ -1245,6 +1254,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		for _, name := range OutdatedHookAgents(ctx) {
 			result.HooksOutdated = append(result.HooksOutdated, string(name))
 		}
+		result.LegacyShadowBranches = legacyShadowBranchCount(ctx)
 		result.CodexHooks = codexHooksStatusFromIssue(inspectCodexHookIssue(ctx))
 
 		// Same computation as the text path (writeCheckpointSyncLines);
@@ -1319,4 +1329,14 @@ func sessionStatusLabel(s *session.State) string {
 		return string(s.Phase)
 	}
 	return string(session.PhaseIdle)
+}
+
+// legacyShadowBranchCount returns how many strict-shape legacy shadow branches
+// exist (the ones `entire doctor` reports), or 0 when they cannot be listed.
+func legacyShadowBranchCount(ctx context.Context) int {
+	branches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
+	if err != nil {
+		return 0
+	}
+	return len(branches)
 }

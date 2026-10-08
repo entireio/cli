@@ -460,6 +460,80 @@ func TestListOrgInvitations_UnknownEnumValuesPassThrough(t *testing.T) {
 	}
 }
 
+// rawJSONClient is a client whose server answers every request with body.
+func rawJSONClient(t *testing.T, body string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return c
+}
+
+// TestDetachRepo_UnknownEnumValuesPassThrough: the detach result's precondition
+// slugs, access source/subject type, and status are documented as growing sets
+// that `entire repo mirror detach` prints, so a new value must decode.
+func TestDetachRepo_UnknownEnumValuesPassThrough(t *testing.T) {
+	t.Parallel()
+
+	c := rawJSONClient(t, `{"dryRun":false,"eligible":true,"requestedBy":"01H0000000000000000000000A","targetProject":"01H000000000000000000000P1","name":"web","preconditions":[{"precondition":"no-open-trails","passed":true}],"access":[{"subjectType":"bot","subjectId":"x","role":"reader","source":"plugin","coveredByTargetProject":true}],"status":"queued"}`)
+
+	out, err := c.DetachRepo(context.Background(), &DetachRepoBody{TargetProject: "01H000000000000000000000P1"}, DetachRepoParams{RepoId: "01H0000000000000000000000R"})
+	if err != nil {
+		t.Fatalf("DetachRepo with unknown enum values must not fail (forward-compat), got: %v", err)
+	}
+	if got := out.Preconditions[0].Precondition; got != "no-open-trails" {
+		t.Errorf("Precondition = %q, want the unknown value passed through", got)
+	}
+	if got := out.Access[0]; got.SubjectType != "bot" || got.Source != "plugin" {
+		t.Errorf("Access = %+v, want the unknown values passed through", got)
+	}
+	if got := out.Status.Or(""); got != "queued" {
+		t.Errorf("Status = %q, want the unknown value passed through", got)
+	}
+}
+
+// TestGetRepoDetach_UnknownStatusPassesThrough is the same contract for the
+// state the detach wait polls.
+func TestGetRepoDetach_UnknownStatusPassesThrough(t *testing.T) {
+	t.Parallel()
+
+	c := rawJSONClient(t, `{"status":"rolling_back","releasedAddresses":[],"resumable":false,"frozen":true}`)
+	out, err := c.GetRepoDetach(context.Background(), GetRepoDetachParams{RepoId: "01H0000000000000000000000R"})
+	if err != nil {
+		t.Fatalf("GetRepoDetach with an unknown status must not fail (forward-compat), got: %v", err)
+	}
+	if out.Status != "rolling_back" {
+		t.Errorf("Status = %q, want the unknown value passed through", out.Status)
+	}
+}
+
+// TestListRepoPeople_NullDirectGrantDecodes pins the shape production sends for
+// a mirror's GitHub collaborators: no direct grant is JSON null.
+func TestListRepoPeople_NullDirectGrantDecodes(t *testing.T) {
+	t.Parallel()
+
+	c := rawJSONClient(t, `{"items":[{"accountId":"01H0000000000000000000000A","handle":"github:alice","provider":"github","displayName":"Alice","role":"mirror_source_admin","directGrant":null,"sources":[{"source":"github","role":"mirror_source_admin"}]}],"totalCount":1}`)
+	out, err := c.ListRepoPeople(context.Background(), ListRepoPeopleParams{RepoId: "01H0000000000000000000000R"})
+	if err != nil {
+		t.Fatalf("ListRepoPeople with a null directGrant must decode, got: %v", err)
+	}
+	if len(out.Items) != 1 || out.Items[0].Handle.Or("") != "github:alice" {
+		t.Fatalf("Items = %+v, want github:alice", out.Items)
+	}
+	if !out.Items[0].DirectGrant.IsNull() {
+		t.Errorf("DirectGrant = %+v, want null", out.Items[0].DirectGrant)
+	}
+}
+
 // TestListOrgMembers_UnknownEnumValuesPassThrough is the same contract for
 // Membership, which `entire org grant list` prints the same way.
 func TestListOrgMembers_UnknownEnumValuesPassThrough(t *testing.T) {

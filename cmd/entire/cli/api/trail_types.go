@@ -220,3 +220,47 @@ type TrailApprovalResponse struct {
 type TrailApprovalsResponse struct {
 	Approvals []TrailApproval `json:"approvals"`
 }
+
+// TrailMergeabilityResponse is the full mergeability snapshot the detail
+// resource serves (TrailMergeability, as `trail show` reads it) plus the
+// fields the merge command needs to decide on and explain a bypass.
+type TrailMergeabilityResponse struct {
+	TrailMergeability
+
+	BypassPolicy     string `json:"bypass_policy"`
+	BehindBy         int    `json:"behind_by"`
+	ComparisonStatus string `json:"comparison_status"`
+}
+
+// TrailMergeDetail is the part of GET .../trails/{number} the merge command
+// reads: the mergeability snapshot and the caller's merge actions, both from
+// the same server read.
+type TrailMergeDetail struct {
+	Actions      *TrailActions              `json:"actions"`
+	Mergeability *TrailMergeabilityResponse `json:"mergeability"`
+}
+
+// TrailActions is the detail's per-caller availability of each operation;
+// only the merge operations are decoded. The server revalidates on submit.
+type TrailActions struct {
+	Merge           TrailActionAvailability `json:"merge"`
+	MergeWithBypass TrailActionAvailability `json:"merge_with_bypass"`
+}
+
+// TrailActionAvailability.State is enabled, blocked, or unavailable; Reason
+// says why when it is not enabled.
+type TrailActionAvailability struct {
+	State  string  `json:"state"`
+	Reason *string `json:"reason"`
+}
+
+type TrailMergeRequest struct {
+	ExpectedHeadSha string `json:"expectedHeadSha,omitempty"`
+	Bypass          bool   `json:"bypass,omitempty"`
+}
+
+type TrailMergeResponse struct {
+	OK bool `json:"ok"`
+	// Empty when the merge fast-forwarded or the base was already up to date.
+	MergeCommitSha string `json:"mergeCommitSha"`
+}

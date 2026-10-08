@@ -59,10 +59,12 @@ snippet, and a truncated title instead of the full prompt (repo hits add
 description and checkpoint count). Fetch full detail
 for a single result with 'entire checkpoint explain <id>', or add --full to
 that command to pull the checkpoint's entire session transcript. For a
-checkpoint hit from another repo, add --repo gh/<owner>/<repo> for a GitHub
-mirror or --repo et/<project>/<repo> for an Entire-native repo. The forge
-prefix and full checkpoint ID are required; this is unrelated to this
-command's --repo filter below.
+checkpoint or commit hit from another repo, add --repo gh/<owner>/<repo> for
+a GitHub mirror or --repo et/<project>/<repo> for an Entire-native repo. The
+forge prefix is required, and the hit's id must be ` + explainRepoTargetShapes + `
+(a SHA is resolved to its checkpoint by that repo's Entire API). Prefixes
+cannot be resolved in another repo. This is unrelated to this command's
+--repo filter below.
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
 branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,

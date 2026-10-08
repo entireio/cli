@@ -92,6 +92,65 @@ func TestSessionStore_SessionFileRejectsLayoutOutsideTheStore(t *testing.T) {
 	require.ErrorIs(t, err, agent.ErrOutsideSessionStore)
 }
 
+// candidatesStubAgent is a storeStubAgent that lists several session files.
+type candidatesStubAgent struct {
+	storeStubAgent
+
+	candidates func(dir, id string) []string
+}
+
+func (s *candidatesStubAgent) ResolveSessionFileCandidates(dir, id string) []string {
+	return s.candidates(dir, id)
+}
+
+func TestSessionStore_SessionFileCandidatesInKeepsOrderAndDropsOutsidePaths(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	sessions := filepath.Join(home, "sessions")
+	outside := filepath.Join(t.TempDir(), "id.jsonl")
+	ag := &candidatesStubAgent{
+		storeStubAgent: storeStubAgent{dir: sessions, resolve: joinResolve},
+		candidates: func(dir, id string) []string {
+			return []string{
+				filepath.Join(dir, "new-"+id+".jsonl"),
+				outside,
+				"relative-" + id + ".jsonl",
+				filepath.Join(home, "archived_sessions", "old-"+id+".jsonl"),
+			}
+		},
+	}
+	store, err := agent.OpenSessionStoreAt(ag, home)
+	require.NoError(t, err)
+
+	got, err := store.SessionFileCandidatesIn(sessions, "id")
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		filepath.Join(sessions, "new-id.jsonl"),
+		filepath.Join(home, "archived_sessions", "old-id.jsonl"),
+	}, got)
+}
+
+func TestSessionStore_SessionFileCandidatesInFallsBackToResolveSessionFile(t *testing.T) {
+	t.Parallel()
+
+	store, dir := newStore(t, joinResolve)
+	got, err := store.SessionFileCandidatesIn(dir, "id")
+	require.NoError(t, err)
+	assert.Equal(t, []string{filepath.Join(dir, "id.jsonl")}, got)
+}
+
+func TestSessionStore_SessionFileCandidatesInRejectsUnsafeIDAndOutsideDir(t *testing.T) {
+	t.Parallel()
+
+	store, dir := newStore(t, joinResolve)
+	_, err := store.SessionFileCandidatesIn(dir, "../escape")
+	require.ErrorIs(t, err, agent.ErrUnsafeSessionName)
+
+	_, err = store.SessionFileCandidatesIn(t.TempDir(), "id")
+	require.ErrorIs(t, err, agent.ErrOutsideSessionStore)
+}
+
 func TestSessionStore_WriteFileCreatesNestedParents(t *testing.T) {
 	t.Parallel()
 
