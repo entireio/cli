@@ -1809,8 +1809,12 @@ func storedSessionRootOrNil(ctx context.Context, state *SessionState) *os.Root {
 // is a different worktree registered for THIS repository. ok is false for an
 // empty or relative path, the current worktree itself, a path git does not
 // list for this repository, and a .entire that is missing, a symlink, or
-// otherwise fails paths.ValidateEntireDirAt. Refusals are logged at debug and
-// never returned as errors.
+// otherwise fails paths.ValidateEntireDirAt. A refusal is never returned as
+// an error, but it is logged at Warn naming the reason: the caller is a
+// condensation, which then reads the current worktree's copy instead, and a
+// transcript-less or stale checkpoint should be explainable from the log. The
+// common cases (no recorded path, or the current worktree) return without
+// logging.
 //
 // recorded arrived as data, so it is never used as a root base. It only
 // selects an entry from `git worktree list`, and the path git printed is what
@@ -1823,7 +1827,7 @@ func foreignWorktreeEntireRoot(ctx context.Context, recorded string) (*os.Root, 
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	refuse := func(reason string, attrs ...any) (*os.Root, bool) {
-		logging.Debug(logCtx, "stored session copy: not reading from recorded worktree, using the current one",
+		logging.Warn(logCtx, "stored session copy: not reading from the session's recorded worktree; condensation uses the current worktree's copy instead",
 			append([]any{slog.String("reason", reason), slog.String("recorded_worktree", recorded)}, attrs...)...)
 		return nil, false
 	}
@@ -1911,9 +1915,25 @@ var stagedSessionFiles = []string{
 // session's own linked worktree rather than the committing one; releasing
 // anywhere else would leave the consumed copy behind. Removal goes through that
 // anchored root without following a symlinked metadata or session directory,
-// never through an assembled path. A nil root releases nothing.
-func clearStagedFilesIn(root *os.Root, sessionID string) {
-	if root == nil || validation.ValidateSessionID(sessionID) != nil {
+// never through an assembled path.
+//
+// Callers pass the root they resolved and the session's recorded worktree
+// (for the log only). A nil root means the .entire the copy was read from could
+// not be opened, so nothing is released; that is logged at Warn with where the
+// copy lives, since it otherwise stays behind indefinitely.
+func clearStagedFilesIn(ctx context.Context, root *os.Root, sessionID, worktreePath string) {
+	if validation.ValidateSessionID(sessionID) != nil {
+		return
+	}
+	if root == nil {
+		where := worktreePath
+		if where == "" {
+			where = "the current worktree"
+		}
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"), "stored session copy not released after condensation: its .entire could not be opened",
+			slog.String("session_id", sessionID),
+			slog.String("worktree", where),
+			slog.String("metadata_dir", paths.SessionMetadataDirFromSessionID(sessionID)))
 		return
 	}
 	// Open the session directory once and remove leaves from it. The obvious
@@ -1922,12 +1942,25 @@ func clearStagedFilesIn(root *os.Root, sessionID string) {
 	// on the PostCommit hook path.
 	dir, closeDir, err := osroot.OpenDirNoSymlinks(root, entiredir.MustName(paths.SessionMetadataDirFromSessionID(sessionID)))
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			logging.Warn(logging.WithComponent(ctx, "checkpoint"), "stored session copy not released after condensation",
+				slog.String("session_id", sessionID),
+				slog.String("error", err.Error()))
+		}
 		return
 	}
 	defer closeDir()
 	for _, name := range stagedSessionFiles {
 		_ = osroot.Remove(dir, name) //nolint:errcheck // best-effort; absence is the normal case for the legacy name
 	}
+}
+
+// storedCopyRelease is what a successful commit-less condensation needs to
+// release the stored copy it read: the resolved root and, for the log, the
+// session's recorded worktree.
+type storedCopyRelease struct {
+	root         *os.Root
+	worktreePath string
 }
 
 func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.CheckpointID, bool, error) {
@@ -1995,9 +2028,11 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 
 	var cleared bool
 	var newSkillEvents []agent.SkillEvent
-	// releaseRoot is set once a condensation succeeded: the root its stored
-	// copy was read from, released after the state is saved.
-	var releaseRoot *os.Root
+	// release is set once a condensation succeeded, with the root its stored
+	// copy was read from (nil when that .entire could not be opened) and the
+	// session's recorded worktree; the copy is released after the state is
+	// saved.
+	var release *storedCopyRelease
 	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.PendingCondensationID() != checkpointID {
 			return ErrMutationSkip
@@ -2068,7 +2103,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// and a resumed turn starts a fresh window.
 		state.FilesTouched = nil
 		state.TouchedFileHashes = nil
-		releaseRoot = storedRoot
+		release = &storedCopyRelease{root: storedRoot, worktreePath: state.WorktreePath}
 		return nil
 	}, func() {
 		// Skill telemetry only. commitCondensedEmitter.emit is deliberately NOT
@@ -2091,7 +2126,9 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	// as the commit path does once every file is committed; otherwise they stay
 	// in the worktree indefinitely. Only after the state is saved, so a failed
 	// save leaves the copy for the retry. The next Stop recreates them.
-	clearStagedFilesIn(releaseRoot, sessionID)
+	if release != nil {
+		clearStagedFilesIn(ctx, release.root, sessionID, release.worktreePath)
+	}
 
 	if cleared {
 		// Already cleared inside the locked mutation closure above -- see

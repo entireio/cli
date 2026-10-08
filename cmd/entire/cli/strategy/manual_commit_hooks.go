@@ -1668,7 +1668,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		// next condensation (triggered by the next commit) can still read them.
 		// Released through the root the condensation read them from.
 		if len(state.FilesTouched) == 0 {
-			clearStagedFilesIn(handler.storedRoot, state.SessionID)
+			clearStagedFilesIn(ctx, handler.storedRoot, state.SessionID, state.WorktreePath)
 		}
 	}
 	carryForwardSpan.End()

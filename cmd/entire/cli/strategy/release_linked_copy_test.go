@@ -16,7 +16,7 @@ import (
 // path does, for a session recorded in the current worktree.
 func releaseStoredCopyForTest(ctx context.Context, sessionID string) {
 	state := &SessionState{SessionID: sessionID}
-	clearStagedFilesIn(storedSessionRootOrNil(ctx, state), sessionID)
+	clearStagedFilesIn(ctx, storedSessionRootOrNil(ctx, state), sessionID, "")
 }
 
 // Condensation reads a linked-worktree session's stored copy from that
@@ -34,7 +34,7 @@ func TestClearStagedFiles_ReleasesLinkedWorktreeCopy(t *testing.T) { //nolint:pa
 	t.Chdir(mainDir) // the commit (and its PostCommit) happens in the main worktree
 	paths.ClearWorktreeRootCache()
 	state := &SessionState{SessionID: sessionID, WorktreePath: worktreeDir}
-	clearStagedFilesIn(storedSessionRootOrNil(t.Context(), state), sessionID)
+	clearStagedFilesIn(t.Context(), storedSessionRootOrNil(t.Context(), state), sessionID, worktreeDir)
 
 	metadataDir := filepath.Join(worktreeDir, paths.SessionMetadataDirFromSessionID(sessionID))
 	assert.NoFileExists(t, filepath.Join(metadataDir, paths.TranscriptFileName),

@@ -408,8 +408,11 @@ func filesWithRemainingAgentChanges(
 // worktree,
 // so the next commit adds the staged blob, which is the agent's content;
 // dropping it would stop that commit linking the session. The rest were
-// untracked files the agent removed and drop. When the index cannot be read,
-// every vanished path is kept rather than dropped on a guess.
+// untracked files the agent removed and drop. When git cannot answer, every
+// vanished path is kept rather than dropped on a guess. That is the intended
+// fail-safe: the paths stay in FilesTouched with their hashes, and the next
+// commit's carry-forward asks again and drops them once the check succeeds,
+// so a transient failure costs one extra pending cycle, not a permanent one.
 func keepStagedVanished(ctx, logCtx context.Context, worktreeRoot string, filesTouched []string, vanished []int, keep []bool) {
 	if len(vanished) == 0 {
 		return
@@ -424,6 +427,11 @@ func keepStagedVanished(ctx, logCtx context.Context, worktreeRoot string, filesT
 		err = errors.New("no worktree root")
 	} else {
 		stagedNew, err = gitrepo.PathsStagedAsNew(ctx, worktreeRoot, paths)
+	}
+	if err != nil {
+		logging.Warn(logCtx, "carry-forward: could not check staged blobs for files missing from the worktree; keeping them pending until the next commit's check succeeds",
+			slog.Int("files", len(paths)),
+			slog.String("error", err.Error()))
 	}
 	for _, i := range vanished {
 		filePath := filesTouched[i]
