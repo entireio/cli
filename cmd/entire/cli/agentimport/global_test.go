@@ -23,5 +23,15 @@ func TestMain(m *testing.M) {
 		panic(fmt.Errorf("failed to register config storers: %w", err))
 	}
 
-	os.Exit(m.Run())
+	// Cursor discovery consults ~/.cursor/chats; point it at an empty
+	// location so no test reads the developer's real Cursor sessions. Tests
+	// that need a chats store set their own with t.Setenv.
+	chats, err := os.MkdirTemp("", "entire-agentimport-cursor-chats-*")
+	if err != nil {
+		panic(fmt.Errorf("failed to create cursor chats dir: %w", err))
+	}
+	os.Setenv("ENTIRE_TEST_CURSOR_CHATS_DIR", chats)
+	code := m.Run()
+	os.RemoveAll(chats)
+	os.Exit(code)
 }

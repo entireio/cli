@@ -33,10 +33,11 @@ func (cursorImporter) AgentType() types.AgentType { return agent.AgentTypeCursor
 // nested (<dir>/<id>/<id>.jsonl, the IDE layout); both are discovered.
 //
 // Cursor's project directory name is a lossy encoding of the repo path, and
-// Cursor transcripts record no cwd, so unlike the Claude importer this cannot
-// filter per transcript. Instead, when the directory was derived from repoRoot
-// (no overridePath), Discover refuses to import if the directory may also
-// belong to another path; see cursorProjectOtherPath.
+// Cursor transcripts record no cwd. Sessions the Cursor CLI filed in its chats
+// store are attributed one by one (cursorSessionWorkspaces). For the rest,
+// when the directory was derived from repoRoot (no overridePath), Discover
+// refuses to import if the directory may also belong to another path; see
+// cursorProjectOtherPath.
 func (cursorImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
 	dir, err := resolveDir(repoRoot, overridePath, "cursor", (&cursor.CursorAgent{}).GetSessionDir)
 	if err != nil {
@@ -46,16 +47,41 @@ func (cursorImporter) Discover(repoRoot, overridePath string, now time.Time, ses
 		id, path := cursorSessionFile(dir, e)
 		return id, path, path != ""
 	}, nil)
-	if err != nil || len(files) == 0 || overridePath != "" {
+	if err != nil || len(files) == 0 {
 		return files, err
+	}
+	// Sessions the Cursor CLI recorded a workspace for are settled one by one,
+	// with or without --path: kept when it is this repository, dropped when it
+	// is another, as a recorded cwd is for the other agents.
+	ids := make([]string, len(files))
+	for i, f := range files {
+		ids[i] = f.SessionID
+	}
+	workspaces := cursorSessionWorkspaces(repoRoot, ids)
+	var kept []SessionFile
+	unverified := 0
+	for _, f := range files {
+		switch workspaces[f.SessionID] {
+		case cursorWorkspaceOther:
+			continue
+		case cursorWorkspaceUnknown:
+			unverified++
+		case cursorWorkspaceThisRepo:
+		}
+		kept = append(kept, f)
+	}
+	// The rest (IDE sessions, older stores) record nothing, so only the
+	// directory as a whole can vouch for them; --path is the user doing so.
+	if unverified == 0 || overridePath != "" {
+		return kept, nil
 	}
 	if other, shared := cursorProjectOtherPath(repoRoot, filepath.Dir(dir), cursorCollisionReadLimit); shared {
 		return nil, fmt.Errorf("cursor project directory %s may also hold sessions from %s; "+
-			"Cursor transcripts do not record their workspace, so none were imported. "+
+			"%d of its sessions record no workspace, so none were imported. "+
 			"If every session there belongs to this repository, rerun with: entire import cursor --path %s",
-			filepath.Dir(dir), other, dir)
+			filepath.Dir(dir), other, unverified, dir)
 	}
-	return files, nil
+	return kept, nil
 }
 
 // cursorCollisionReadLimit bounds the directory reads cursorProjectOtherPath
