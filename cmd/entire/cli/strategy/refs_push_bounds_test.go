@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -558,4 +559,28 @@ func TestPushQueuedCheckpointRefs_FallbackGetsFreshBudget(t *testing.T) {
 	require.Error(t, err, "the blocked ref still fails")
 	assert.Equal(t, refHashOf(t, repo, refs[1]), remoteRefHash(t, bareDir, refs[1]),
 		"the blocked ref's healthy chunk-mate lands through the fallback despite the slow batch")
+}
+
+// TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered: a chunked
+// flush can land chunks and then fail (here, SSH auth on a later chunk). The
+// landed chunks reached the remote, so the pre-push acts on them — capture,
+// misdirection warning — rather than reading the error as "nothing synced".
+func TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 4)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\ngrep -q '" + refs[2].String() + "' && { echo 'git@github.com: Permission denied (publickey).' >&2; exit 1; }\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	pushed, err := flushCheckpointRefsQueue(checkpointremote.WithNonInteractiveSSH(t.Context()), repo, pushSettings{remote: bareDir}, true)
+	output := restore()
+	require.Error(t, err)
+	assert.Equal(t, 2, pushed, "the first chunk landed before the auth failure and is reported as pushed")
+	assert.Contains(t, output, "SSH authentication failed")
 }

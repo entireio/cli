@@ -421,22 +421,24 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if flushed, err := flushCheckpointRefsQueue(ctx, repo, ps, true); err == nil {
-		// Delivered, and only if something actually was: an empty queue pushed
-		// nothing, so it must not move the election or announce that it had.
-		if pendingCapture != "" && flushed > 0 {
-			commitCapturedSyncRemote(ctx, pendingCapture)
-		}
-		// An empty queue carried no checkpoints, so there is nothing to warn
-		// was misdirected — see warnIgnoredCheckpointRemote.
-		if flushed > 0 {
-			warnIgnoredCheckpointRemote(ctx, ps)
-		}
-	} else {
+	flushed, err := flushCheckpointRefsQueue(ctx, repo, ps, true)
+	if err != nil {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
 		// git push. The refs stay queued for the next pre-push.
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",
 			slog.String("error", err.Error()))
+	}
+	// Delivered, and only if something actually was — counted, not inferred
+	// from the error: a chunked flush can land chunks and still fail later
+	// ones, and those checkpoints reached the remote all the same. An empty
+	// queue pushed nothing, so it must not move the election or announce that
+	// it had, nor warn that checkpoints were misdirected (see
+	// warnIgnoredCheckpointRemote).
+	if flushed > 0 {
+		if pendingCapture != "" {
+			commitCapturedSyncRemote(ctx, pendingCapture)
+		}
+		warnIgnoredCheckpointRemote(ctx, ps)
 	}
 	return nil
 }
