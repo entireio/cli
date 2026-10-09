@@ -28,6 +28,9 @@ func SpawnDetached(dir string, args ...string) {
 	}
 
 	cmd := detachedCommand(executable, dir, args...)
+	// The child outlives this process; nothing else this process inherited may
+	// outlive it with the child (see markInheritedFDsCloseOnExec).
+	markInheritedFDsCloseOnExec()
 	if err := cmd.Start(); err != nil {
 		return
 	}
