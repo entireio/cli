@@ -1,7 +1,6 @@
 package redact
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -182,41 +181,37 @@ func isJSONLikeName(name string) bool {
 	return strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".json")
 }
 
-// SumProseLeafBytes returns the cumulative byte size of prose-shaped
-// (has-space) leaves across inputs — the upper bound on what
-// BatchBytesWithPrivacyFilter would send to OPF inference.
+// SumProseLeafBytes returns the deduplicated byte size of unique
+// prose-shaped (has-space) leaves across inputs — exactly what
+// BatchBytesWithPrivacyFilter will send to OPF inference.
 //
 // Callers use this to enforce a cap before paying the OPF cost: a
 // push with 100MB of mostly-structural JSON has tens of KB of actual
 // leaves; a push with 100MB of dense prose has hundreds of MB. The
 // blob-byte size doesn't tell you which without looking inside.
 //
-// Returns a CONSERVATIVE UPPER BOUND on what would go to OPF — same
-// has-space gate and JSONL/JSON parse with whole-content fallback as
-// the collector inside BatchBytesWithPrivacyFilter, BUT this function
-// does NOT deduplicate identical leaves across blobs. The actual batch
-// sent to OPF dedups by leaf-text, so a push with many repeated leaves
-// will report higher byte counts here than OPF actually sees. Callers
-// using this for cap enforcement get an over-strict bound, which is
-// safe (false positives possible, false negatives impossible).
+// Uses the same has-space gate, JSONL/JSON leaf extraction, and
+// leaf-text dedup as Pass 1 of BatchBytesWithPrivacyFilter, so this is
+// not a conservative bound — it is the actual count OPF will process.
+// A checkpoint ref's ancestry can repeat the same blob (e.g. an
+// unchanged full.jsonl carried across several commits); counting it
+// once here matches the single inference result the batch call reuses
+// for every repeat.
 func SumProseLeafBytes(inputs []NamedBlob) int {
+	seen := make(map[string]struct{})
 	var total int
+	addLeaf := func(v string) {
+		if !strings.ContainsRune(v, ' ') {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		total += len(v)
+	}
 	for _, in := range inputs {
-		if isJSONLikeName(in.Name) {
-			if _, err := jsonlContentImpl(string(in.Content), func(v string) string {
-				if strings.ContainsRune(v, ' ') {
-					total += len(v)
-				}
-				return v
-			}, concurrencyUnsafeRedactor); err == nil {
-				continue
-			}
-			// JSON parse failed — fall through to whole-content (matches
-			// the collector's fallback in BatchBytesWithPrivacyFilter).
-		}
-		if bytes.ContainsRune(in.Content, ' ') {
-			total += len(in.Content)
-		}
+		collectLeaves(in, addLeaf)
 	}
 	return total
 }

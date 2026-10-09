@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/require"
 )
@@ -101,6 +103,42 @@ func TestOPFCheckpointRefRewriteDoesNotLoseConcurrentCheckpointUpdate(t *testing
 	require.Equal(t, nativeTip, finalRef.Hash())
 	require.ErrorIs(t, opfErr, gitrepo.ErrRefLocked,
 		"the OPF rewrite must report ref contention while a native update owns the ref lock")
+}
+
+func TestUpdateOPFRewrittenRefQueuesTheGenerationInstalledByCAS(t *testing.T) {
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	refName := refs[0]
+	oldRef, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	oldCommit, err := repo.CommitObject(oldRef.Hash())
+	require.NoError(t, err)
+	rewrittenTip := makeOrphanCommit(t, repo, oldCommit.TreeHash, []plumbing.Hash{oldRef.Hash()}, "OPF rewrite")
+	concurrentTip := makeOrphanCommit(t, repo, oldCommit.TreeHash, []plumbing.Hash{rewrittenTip}, "concurrent checkpoint write")
+	queue := &advancingOPFQueue{repo: repo, refName: refName, concurrentTip: concurrentTip}
+
+	err = updateOPFRewrittenRef(t.Context(), repo, queue, refName, rewrittenTip, oldRef.Hash())
+
+	require.NoError(t, err)
+	finalRef, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	require.Equal(t, concurrentTip, finalRef.Hash(), "the concurrent checkpoint generation remains current")
+	require.Equal(t, checkpoint.PushQueueEntry{Ref: refName, Hash: rewrittenTip}, queue.entry,
+		"the queue records the generation installed by CAS, not the later ref tip")
+}
+
+type advancingOPFQueue struct {
+	repo          *git.Repository
+	refName       plumbing.ReferenceName
+	concurrentTip plumbing.Hash
+	entry         checkpoint.PushQueueEntry
+}
+
+func (q *advancingOPFQueue) EnqueueEntry(entry checkpoint.PushQueueEntry) error {
+	if err := q.repo.Storer.SetReference(plumbing.NewHashReference(q.refName, q.concurrentTip)); err != nil {
+		return err
+	}
+	q.entry = entry
+	return nil
 }
 
 func prepareNativeRefUpdate(
