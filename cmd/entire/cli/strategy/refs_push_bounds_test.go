@@ -520,9 +520,9 @@ func TestFlushCheckpointRefs_ChunkTooSlowForBudgetShrinks(t *testing.T) {
 	output := restore()
 	assert.Contains(t, output, "Stopped pushing: budget (2s) exhausted; 4 checkpoint ref(s) stay queued")
 	assert.NotContains(t, output, "retrying", "a budget cut is not a push failure to retry")
-	assert.Equal(t, 2, queue.ChunkSizeHint(checkpointRefPushChunkSize), "the cut chunk halves the next one")
+	assert.Equal(t, 1, queue.ChunkSizeHint(checkpointRefPushChunkSize), "the cut chunk quarters the next one")
 
-	for range 2 { // 2 per push is still too slow; then single refs land.
+	for range 2 { // single refs land; the next push finds nothing queued.
 		restore = captureStderr(t)
 		require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
 		restore()

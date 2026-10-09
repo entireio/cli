@@ -313,15 +313,20 @@ var checkpointPushBudget = 2 * time.Minute
 var checkpointFlushBudget = 2 * time.Minute
 
 // checkpointRefPushChunkSize is the most queued refs one batch push carries.
-// A link too slow to finish that many within the flush budget would otherwise
-// never land the chunk at the head of the queue, on any push, so the size
-// actually used adapts (see PushQueue.ChunkSizeHint): a chunk cut by the budget
-// halves it, down to one ref, and a flush that lands everything doubles it back.
+// Large on purpose: every push pays a fixed cost — the connection and the
+// remote advertising every ref it holds, one per checkpoint — so a healthy
+// link is fastest with the fewest pushes. Against GitHub and Entire, 200
+// checkpoints (~20MB) went out in 3-7s as one push, and took 11-20s in chunks
+// of 25. A link too slow to finish a chunk within the flush budget would
+// otherwise never land the chunk at the head of the queue, on any push, so the
+// size actually used adapts (see PushQueue.ChunkSizeHint): a chunk cut by the
+// budget quarters it, down to one ref, and a flush that lands everything
+// doubles it back.
 // Chunks are what make the flush budget bound progress rather than discard it:
 // each chunk that lands leaves the queue at once, so a backlog too large for one
 // budget drains over several pushes instead of being cut at the same point by
 // every one of them. Declared as a var so tests can shrink it.
-var checkpointRefPushChunkSize = 25
+var checkpointRefPushChunkSize = 200
 
 // maxConsecutiveChunkPushFailures stops the batch phase once this many chunks in
 // a row have failed. A rejection fails only its own chunk, so batching carries on

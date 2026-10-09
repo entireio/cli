@@ -705,15 +705,16 @@ func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 	}
 }
 
-// adaptChunkSize updates the remembered chunk size after a batch: halved when
-// the budget cut a chunk in flight (a link too slow for that many refs per
+// adaptChunkSize updates the remembered chunk size after a batch: quartered
+// when the budget cut a chunk in flight — steeply, since each cut costs a whole
+// budget with nothing landed — (a link too slow for that many refs per
 // budget would otherwise never land the head of the queue), doubled back toward
 // checkpointRefPushChunkSize after a batch that landed everything.
 func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, batch chunkPushResult, budgetCut bool) {
 	next := size
 	switch {
 	case budgetCut && len(batch.failed) > 0:
-		next = max(1, size/2)
+		next = max(1, size/4)
 	case len(batch.failed) == 0 && len(batch.untried) == 0:
 		next = min(checkpointRefPushChunkSize, size*2)
 	}
