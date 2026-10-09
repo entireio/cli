@@ -22,8 +22,7 @@
    "area": "command",
    "paths": [
     "cmd/entire/cli/setup*.go",
-    "cmd/entire/cli/uninstall_output.go",
-    "cmd/entire/cli/dogfood_hooks.go"
+    "cmd/entire/cli/uninstall_output.go"
    ]
   },
   {
@@ -110,8 +109,7 @@
    "area": "command",
    "paths": [
     "cmd/entire/cli/dispatch*.go",
-    "cmd/entire/cli/dispatch/",
-    "cmd/entire/cli/agentlaunch/"
+    "cmd/entire/cli/dispatch/"
    ]
   },
   {
@@ -120,14 +118,6 @@
    "paths": [
     "cmd/entire/cli/review_*.go",
     "cmd/entire/cli/review/"
-   ]
-  },
-  {
-   "name": "cmd:investigate",
-   "area": "command",
-   "paths": [
-    "cmd/entire/cli/investigate_bridge.go",
-    "cmd/entire/cli/investigate/"
    ]
   },
   {
@@ -203,9 +193,7 @@
     "cmd/entire/cli/resolveref.go",
     "cmd/entire/cli/context_flag.go",
     "cmd/entire/cli/remote_topology.go",
-    "cmd/entire/cli/corecmd_*.go",
-    "cmd/entire/cli/grant_wiring.go",
-    "cmd/entire/cli/list_pagination.go"
+    "cmd/entire/cli/corecmd_*.go"
    ]
   },
   {
@@ -240,17 +228,13 @@
     "cmd/entire/cli/help.go",
     "cmd/entire/cli/root.go",
     "cmd/entire/cli/errors.go",
-    "cmd/entire/cli/types.go",
     "cmd/entire/cli/utils.go",
     "cmd/entire/cli/progress.go",
     "cmd/entire/cli/flaggroups.go",
     "cmd/entire/cli/model_label.go",
     "cmd/entire/cli/keys.go",
-    "cmd/entire/cli/deprecated_strings.go",
     "cmd/entire/cli/experimental/",
-    "cmd/entire/*.go",
-    "cmd/entire/cli/experimental_wiring.go",
-    "cmd/entire/cli/root_logging.go"
+    "cmd/entire/*.go"
    ]
   },
   {
@@ -267,8 +251,7 @@
     "cmd/entire/cli/entiredir_guard.go",
     "cmd/entire/cli/checkpoint_backend.go",
     "cmd/entire/cli/fetch_*.go",
-    "cmd/entire/cli/treeless_*.go",
-    "cmd/entire/cli/phase_wiring.go"
+    "cmd/entire/cli/treeless_*.go"
    ]
   },
   {
@@ -361,13 +344,6 @@
    "area": "agents",
    "paths": [
     "cmd/entire/cli/agent/factoryaidroid/"
-   ]
-  },
-  {
-   "name": "agent:geminicli",
-   "area": "agents",
-   "paths": [
-    "cmd/entire/cli/agent/geminicli/"
    ]
   },
   {
@@ -476,8 +452,7 @@
     "cmd/entire/cli/global_test.go",
     "cmd/entire/cli/dogfood_hooks_test.go",
     "e2e/",
-    "internal/testdirs/",
-    "cmd/entire/cli/pr_binary_size.go"
+    "internal/testdirs/"
    ],
    "norank": true
   }

@@ -16,9 +16,9 @@ import (
 )
 
 // pendingCheckpointJSON is the machine-readable shape emitted by
-// `entire checkpoint list --pending --json` (and the deprecated `rewind --list`
-// bridge). Rows that existed before the next-checkpoint preview keep the JSON
-// `rewind --list` historically produced byte-for-byte, so downstream consumers
+// `entire checkpoint list --pending --json`. Rows that existed before the
+// next-checkpoint preview keep the JSON the removed `rewind --list`
+// historically produced byte-for-byte, so downstream consumers
 // (integration and e2e test harnesses, external scripts) that parsed
 // `rewind --list` keep working after repointing to
 // `checkpoint list --pending --json`.
@@ -108,7 +108,6 @@ func loadPendingListing(ctx context.Context) (pendingListing, error) {
 
 // runCheckpointPendingListJSON emits the pending dataset as a JSON array:
 // next-checkpoint preview rows first, then the task-record and logs-only rows.
-// This is also the implementation behind the deprecated `rewind --list` bridge.
 func runCheckpointPendingListJSON(ctx context.Context, w io.Writer) error {
 	listing, err := loadPendingListing(ctx)
 	if err != nil {

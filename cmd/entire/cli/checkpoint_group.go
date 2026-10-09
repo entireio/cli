@@ -65,8 +65,8 @@ func newCheckpointSearchCmd() *cobra.Command {
 //	--json               condensed checkpoints as JSON (branchCheckpointJSON shape)
 //	--pending            next-checkpoint preview + task records + logs-only
 //	                     points, human list
-//	--pending --json     the same as a JSON array — the drop-in replacement
-//	                     for the deprecated `rewind --list` bridge
+//	--pending --json     the same as a JSON array, in the shape the removed
+//	                     `rewind --list` produced
 //
 // The condensed dataset (entire/checkpoints/v1 for the branch) and the pending
 // dataset (strategy.PreviewNextCheckpoint plus strategy.ListPendingCheckpoints;

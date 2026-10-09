@@ -1605,7 +1605,7 @@ func TestDispatchLifecycleEvent_RoutesToCorrectHandler(t *testing.T) {
 	// NOT parallel: uses t.Chdir to isolate from real repo state.
 	// Without this, the SubagentEnd case creates .git/entire-sessions/test.json
 	// in the real repo whenever untracked files exist, because DetectFileChanges
-	// reports them as new files and SaveTaskStep falls back to initializeSession.
+	// reports them as new files and EnsureSessionExists creates the state.
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
 	testutil.WriteFile(t, tmpDir, "init.txt", "init")
@@ -3690,11 +3690,11 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabe
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect
-// pins Step 2.4b's late-arrival guard: SaveTaskStep's ensureSessionInitialized
-// re-creates session state unconditionally, so a late SubagentStop for a
-// session that was already ended and swept must never call it — that would
-// resurrect a zombie session that nothing condenses,
-// exactly the class of bug the session sweep feature exists to prevent.
+// pins Step 2.4b's late-arrival guard: EnsureSessionExists re-creates missing
+// session state unconditionally, so a late SubagentStop for a session that was
+// already ended and swept must never call it — that would resurrect a zombie
+// session that nothing condenses, exactly the class of bug the session sweep
+// feature exists to prevent.
 func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t *testing.T) {
 	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
 	setupSubagentEndTestRepo(t)

@@ -6,18 +6,16 @@
 // still worth having, because the paths that reach these reads and writes are
 // not Entire's own:
 //
-//   - Checkpoint writes read working files named by `git status` output, on the
-//     hook path, to turn them into blobs.
-//   - Rewind writes working files named by git TREE ENTRIES out of a checkpoint,
-//     which may have been fetched from a remote. Its restore half already opened
-//     a root for exactly this reason; the reads beside it did not.
-//   - Diff-stat and gather read working files named from status output too.
+//   - Turn ends hash working files named by `git status` output, on the hook
+//     path, so session state records the blob each touched file would commit as.
+//   - Carry-forward reads the working files a session touched to find which
+//     of its changes a commit left behind.
+//   - Runner gather lists and reads files at the worktree root.
 //
 // A root makes "cannot leave the repository" a property of the handle rather
-// than of each caller remembering to validate. It is not a substitute for the
-// tree-path validation those callers do — normalizeRepoRelativeTreePath still
-// rejects names that are not repo-relative before they are used as git paths —
-// it is the layer underneath it.
+// than of each caller remembering to validate. It is not a substitute for path
+// validation — Name still rejects a path that does not name something inside
+// the worktree before it is used — it is the layer underneath it.
 package worktreedir
 
 import (
