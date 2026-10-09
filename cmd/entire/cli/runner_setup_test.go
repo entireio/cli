@@ -326,12 +326,11 @@ func newRunnerSetupRepo(t *testing.T) string {
 func stubUnavailableSummaryProvider(t *testing.T) {
 	t.Helper()
 	originalLoad, originalGet := loadSummarySettings, getSummaryAgent
-	originalDiscover, originalDiscoverAlways := discoverSummaryProviders, discoverSummaryProvidersAlways
+	originalDiscoverAlways, originalDiscoverNamed := discoverSummaryProvidersAlways, discoverNamedSummaryProvider
 	t.Cleanup(func() {
 		loadSummarySettings = originalLoad
 		getSummaryAgent = originalGet
-		discoverSummaryProviders = originalDiscover
-		discoverSummaryProvidersAlways = originalDiscoverAlways
+		discoverSummaryProvidersAlways, discoverNamedSummaryProvider = originalDiscoverAlways, originalDiscoverNamed
 	})
 	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
 		return &settings.EntireSettings{
@@ -342,10 +341,11 @@ func stubUnavailableSummaryProvider(t *testing.T) {
 		return nil, fmt.Errorf("stub: no agent %s", name)
 	}
 	// No-ops, not assertions: an unresolvable provider name legitimately reaches
-	// discovery (discoverSummaryProviderIfMissing calls it when the agent lookup
-	// fails). Replacing it is what keeps the test off the real $PATH.
-	discoverSummaryProviders = func(context.Context) {}
+	// discovery (discoverSummaryProviderIfMissing calls the named lookup when the
+	// agent lookup fails; the picker path sweeps). Replacing both is what keeps
+	// the test off the real $PATH.
 	discoverSummaryProvidersAlways = func(context.Context) {}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error { return nil }
 }
 
 // runnerFiles lists the runner configs on disk, for the several tests whose

@@ -126,43 +126,6 @@ func TestCursorAgent_ExtractPrompts_EmptyFile(t *testing.T) {
 	}
 }
 
-// --- ExtractSummary ---
-
-func TestCursorAgent_ExtractSummary(t *testing.T) {
-	t.Parallel()
-	ag := &CursorAgent{}
-
-	tmpDir := t.TempDir()
-	path := writeSampleTranscript(t, tmpDir)
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("ExtractSummary() error = %v", err)
-	}
-	if summary != "Created one.txt with one and committed." {
-		t.Errorf("ExtractSummary() = %q, want %q", summary, "Created one.txt with one and committed.")
-	}
-}
-
-func TestCursorAgent_ExtractSummary_EmptyFile(t *testing.T) {
-	t.Parallel()
-	ag := &CursorAgent{}
-
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "empty.jsonl")
-	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
-		t.Fatalf("failed to write empty file: %v", err)
-	}
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("ExtractSummary() error = %v", err)
-	}
-	if summary != "" {
-		t.Errorf("ExtractSummary() = %q, want empty string", summary)
-	}
-}
-
 // --- ExtractModifiedFilesFromOffset ---
 
 func TestCursorAgent_ExtractModifiedFilesFromOffset(t *testing.T) {

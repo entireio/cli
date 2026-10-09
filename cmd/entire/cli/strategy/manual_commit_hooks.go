@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,9 +23,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -42,7 +43,6 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/go-git/go-git/v6/utils/binary"
 )
 
 // ttyResult represents the outcome of a TTY confirmation prompt.
@@ -188,30 +188,28 @@ func (s *ManualCommitStrategy) PostRewrite(ctx context.Context, rewriteType stri
 		return nil
 	}
 
+	// Best-effort: a hook must not fail the user's amend or rebase.
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	if err != nil {
+		logging.Debug(logCtx, "post-rewrite: no worktree root, skipping",
+			slog.String("error", err.Error()))
 		return nil
 	}
 
 	sessions, err := s.findSessionsForWorktree(ctx, worktreePath)
-	if err != nil || len(sessions) == 0 {
-		return nil
-	}
-
-	repo, err := OpenRepository(ctx)
 	if err != nil {
+		logging.Debug(logCtx, "post-rewrite: could not list sessions, skipping",
+			slog.String("error", err.Error()))
 		return nil
 	}
-	defer repo.Close()
+	if len(sessions) == 0 {
+		return nil
+	}
 
 	for _, sess := range sessions {
 		sessionID := sess.SessionID
 		mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-			changed, err := s.remapSessionForRewrite(ctx, repo, state, rewrites)
-			if err != nil {
-				return err
-			}
-			if !changed {
+			if !remapSessionForRewrite(state, rewrites) {
 				return ErrMutationSkip
 			}
 			logging.Info(logCtx, "post-rewrite: remapped session linkage",
@@ -322,6 +320,35 @@ func isGitSequenceOperation(ctx context.Context) bool {
 	return false
 }
 
+// GitOperationInProgress names the git operation the worktree is in the middle
+// of (rebase or am, cherry-pick, revert, merge, bisect), or returns "" when
+// none is. A command about to move a branch must not do so mid-operation. A
+// git dir that can't be read reports none, as isGitSequenceOperation does.
+func GitOperationInProgress(ctx context.Context) string {
+	gitDir, err := GetGitDir(ctx)
+	if err != nil {
+		return ""
+	}
+	// Per-worktree markers; see isGitSequenceOperation.
+	root, err := gitdir.OpenAt(gitDir)
+	if err != nil {
+		return ""
+	}
+	for _, m := range []struct{ marker, op string }{
+		{"rebase-merge", "a rebase"},
+		{"rebase-apply", "a rebase or am"},
+		{"CHERRY_PICK_HEAD", "a cherry-pick"},
+		{"REVERT_HEAD", "a revert"},
+		{"MERGE_HEAD", "a merge"},
+		{"BISECT_LOG", "a bisect"},
+	} {
+		if _, err := root.Lstat(m.marker); err == nil {
+			return m.op
+		}
+	}
+	return ""
+}
+
 // PrepareCommitMsg is called by the git prepare-commit-msg hook.
 // Adds an Entire-Checkpoint trailer to the commit message with a stable checkpoint ID.
 // Only adds a trailer if there's actually new session content to condense.
@@ -350,6 +377,10 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 
+	// A trailer naming a checkpoint deleted from this clone goes first: kept,
+	// post-commit would condense into the dead ID and re-create it.
+	strippedDeleted := stripDeletedCheckpointTrailers(ctx, commitMsgFile)
+
 	// Inherited trailers link the squashed commits' checkpoints; matching still
 	// runs so work the session holds gets a checkpoint of its own.
 	inherited := s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source)
@@ -366,7 +397,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	// Handle amend (source="commit") separately: preserve or restore trailer
 	if source == "commit" {
-		return s.prepareAmendCommitMsg(ctx, commitMsgFile)
+		return s.prepareAmendCommitMsg(ctx, commitMsgFile, strippedDeleted)
 	}
 
 	_, openRepoSpan := perf.Start(ctx, "open_repository")
@@ -407,8 +438,6 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	findSessionsSpan.End()
 
-	s.warnIfAttributionDiverged(ctx, sessions)
-
 	// Fast path: skip content detection for mid-turn agent commits.
 	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source, inherited) {
 		return nil
@@ -441,7 +470,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	message := string(content)
 
 	// A trailer prepare already stamped is kept (e.g. amend); inherited ones are links
-	if existingCpID, found := stampedTrailer(message, inherited); found {
+	if existingCpID, found := stampedTrailer(ctx, message, inherited); found {
 		readCommitMessageSpan.End()
 		// Trailer already exists (e.g., amend) - keep it
 		logging.Debug(logCtx, "prepare-commit-msg: trailer already exists",
@@ -470,7 +499,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		if firstSession.AgentType != "" {
 			agentType = firstSession.AgentType
 		}
-		lastPrompt = s.getLastPrompt(ctx, repo, firstSession)
+		lastPrompt = s.getLastPrompt(ctx, firstSession)
 	}
 
 	// Prepare prompt for display: collapse newlines/whitespace, then truncate (rune-safe)
@@ -573,7 +602,7 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 		return nil // no squash in progress (or unreadable: fall through to normal matching)
 	}
 
-	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
+	inherited := withoutDeletedCheckpoints(ctx, trailers.ParseAllCheckpoints(string(squashMsg)))
 	if len(inherited) == 0 {
 		return nil
 	}
@@ -701,7 +730,7 @@ func stripInheritedCheckpointTrailers(commitMsgFile string, inherited []id.Check
 
 // handleAmendCommitMsg handles the prepare-commit-msg hook for amend operations
 // (source="commit"). It preserves existing trailers or restores from LastCheckpointID.
-func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitMsgFile string) error {
+func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitMsgFile string, strippedDeleted bool) error {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	// Read current commit message
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
@@ -711,13 +740,18 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 
 	message := string(content)
 
-	// If message already has a trailer, keep it unchanged
-	if existingCpID, found := trailers.ParseCheckpoint(message); found {
+	// If message already has a live trailer, keep it unchanged. A deleted ID
+	// still mentioned somewhere (not as a whole trailer line, so not stripped)
+	// does not count: preserving on it would keep the dead checkpoint linked.
+	mentioned := trailers.ParseAllCheckpoints(message)
+	if live := withoutDeletedCheckpoints(ctx, mentioned); len(live) > 0 {
 		logging.Debug(logCtx, "prepare-commit-msg: amend preserves existing trailer",
 			slog.String("strategy", "manual-commit"),
-			slog.String("checkpoint_id", existingCpID.String()),
+			slog.String("checkpoint_id", live[0].String()),
 		)
 		return nil
+	} else if len(mentioned) > 0 {
+		strippedDeleted = true
 	}
 
 	// No trailer in message — check if any session has LastCheckpointID to restore
@@ -755,6 +789,11 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 		if state.LastCheckpointID.IsEmpty() {
 			continue
 		}
+		// A delete lists the ID before clearing it from session state, so an
+		// amend racing that window must not restore it.
+		if len(withoutDeletedCheckpoints(ctx, []id.CheckpointID{state.LastCheckpointID})) == 0 {
+			continue
+		}
 		cpID := state.LastCheckpointID
 		source := "LastCheckpointID"
 
@@ -773,11 +812,112 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 		return nil
 	}
 
+	if strippedDeleted {
+		// The amended commit's checkpoint was deleted. Work a session still
+		// holds gets a fresh checkpoint (see stampFreshCheckpointForAmend for
+		// how this differs from an ordinary commit's linking).
+		s.stampFreshCheckpointForAmend(ctx, repo, worktreePath, commitMsgFile)
+		return nil
+	}
+
 	// No checkpoint ID found - leave message unchanged
 	logging.Debug(logCtx, "prepare-commit-msg: amend with no checkpoint to restore",
 		slog.String("strategy", "manual-commit"),
 	)
 	return nil
+}
+
+// stampFreshCheckpointForAmend links an amend whose deleted checkpoint trailer
+// was removed to a new checkpoint when a session has new content for it. With
+// nothing new, the amend simply carries no trailer.
+//
+// It runs only the core of ordinary linking: find the linkable sessions, keep
+// those with new content, pick their checkpoint ID, and append a plain
+// trailer. It deliberately skips the rest of PrepareCommitMsg's path: no
+// mid-turn agent fast path, no TTY link prompt, and no explanatory editor
+// comment beside the trailer. An amend's
+// source is always "commit", and the old trailer it replaces carried no
+// comment either.
+func (s *ManualCommitStrategy) stampFreshCheckpointForAmend(ctx context.Context, repo *git.Repository, worktreePath, commitMsgFile string) {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
+	if err != nil || len(sessions) == 0 {
+		return
+	}
+	withContent := s.filterSessionsWithNewContent(ctx, repo, sessions)
+	if len(withContent) == 0 {
+		return
+	}
+	cpID, err := checkpointIDForSessions(ctx, withContent)
+	if err != nil {
+		return
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(addCheckpointTrailer(string(content), cpID)), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return
+	}
+	logging.Info(logCtx, "prepare-commit-msg: amend of a deleted checkpoint linked to a new one",
+		slog.String("strategy", "manual-commit"),
+		slog.String("checkpoint_id", cpID.String()),
+	)
+}
+
+// withoutDeletedCheckpoints drops IDs deleted from this clone, so inheriting
+// trailers (squash, redo) cannot put back one stripDeletedCheckpointTrailers
+// removed. An unreadable list filters nothing: hooks fail open.
+func withoutDeletedCheckpoints(ctx context.Context, ids []id.CheckpointID) []id.CheckpointID {
+	if len(ids) == 0 {
+		return ids
+	}
+	deleted, err := checkpoint.LoadDeletedCheckpoints(ctx)
+	if err != nil || len(deleted) == 0 {
+		return ids
+	}
+	kept := make([]id.CheckpointID, 0, len(ids))
+	for _, cpID := range ids {
+		if !deleted.Contains(cpID) {
+			kept = append(kept, cpID)
+		}
+	}
+	return kept
+}
+
+// stripDeletedCheckpointTrailers removes Entire-Checkpoint trailers naming
+// checkpoints deleted from this clone, reporting whether the message file was
+// actually rewritten. Every whole (possibly indented) trailer line after the
+// subject and above any scissors line is considered, by the same matcher that
+// decides what to remove (see trailers.RemoveCheckpointTrailers). A list that
+// cannot be read strips nothing: hooks fail open.
+func stripDeletedCheckpointTrailers(ctx context.Context, commitMsgFile string) bool {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	deleted, err := checkpoint.LoadDeletedCheckpoints(ctx)
+	if err != nil {
+		logging.Debug(logCtx, "prepare-commit-msg: deleted checkpoints list unavailable",
+			slog.String("error", err.Error()))
+		return false
+	}
+	if len(deleted) == 0 {
+		return false
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return false
+	}
+	stripped, removed := trailers.RemoveCheckpointTrailers(string(content), deleted.Contains)
+	if len(removed) == 0 {
+		return false
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(stripped), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		logging.Debug(logCtx, "prepare-commit-msg: could not rewrite message without deleted trailers",
+			slog.String("error", err.Error()))
+		return false
+	}
+	logging.Info(logCtx, "prepare-commit-msg: removed trailers of deleted checkpoints",
+		slog.Int("removed", len(removed)))
+	return true
 }
 
 // PostCommit is called by the git post-commit hook after a commit is created.
@@ -786,11 +926,8 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 //   - IDLE → condense immediately
 //   - ENDED → condense if files touched, discard if empty
 //
-// After condensation for ACTIVE sessions, remaining uncommitted files are
-// carried forward to a new shadow branch so the next commit gets its own checkpoint.
-//
-// Shadow branches are only deleted when ALL sessions sharing the branch are non-active
-// and were condensed during this PostCommit.
+// After condensation, remaining uncommitted files are carried forward in
+// session state (FilesTouched) so the next commit gets its own checkpoint.
 
 // postCommitActionHandler implements session.ActionHandler for PostCommit.
 // Each session in the loop gets its own handler with per-session context.
@@ -805,12 +942,11 @@ type postCommitActionHandler struct {
 	commit                     *object.Commit
 	newHead                    string
 	repoDir                    string
-	shadowBranchName           string
-	shadowBranchesToDelete     map[string]struct{}
 	committedFileSet           map[string]struct{}
 	hasNew                     bool
 	filesTouchedBefore         []string
-	sessionsWithCommittedFiles int // number of processable sessions that have tracked files
+	touchedFileHashes          map[string]string // TouchedFileHashes before condensation cleared them
+	sessionsWithCommittedFiles int               // number of processable sessions that have tracked files
 	// liveTaskClaimsCommit reports whether the session's in-flight subagents
 	// modified a committed file. Evaluated lazily: only the read-only gate
 	// needs it, and only for a session it would otherwise drop.
@@ -818,17 +954,14 @@ type postCommitActionHandler struct {
 
 	// Cached git objects — resolved once per PostCommit invocation to avoid
 	// redundant reads across filesOverlapWithContent, filesWithRemainingAgentChanges,
-	// CondenseSession, and calculateSessionAttributions.
-	headTree      *object.Tree        // HEAD commit tree (shared across all sessions)
-	parentTree    *object.Tree        // HEAD's first parent tree (shared, nil for initial commits)
-	shadowRef     *plumbing.Reference // Per-session shadow branch ref (nil if branch doesn't exist)
-	shadowTree    *object.Tree        // Per-session shadow commit tree (nil if branch doesn't exist)
-	allAgentFiles map[string]struct{} // Union of all sessions' FilesTouched for cross-session attribution
+	// and CondenseSession.
+	headTree   *object.Tree // HEAD commit tree (shared across all sessions)
+	parentTree *object.Tree // HEAD's first parent tree (shared, nil for initial commits)
 
 	// Output: set by handler methods, read by caller after TransitionAndLog.
 	// condensed is true only when CondenseSession wrote data to the metadata branch.
 	// Both failures and skips (no transcript/files) leave condensed=false, which
-	// correctly preserves shadow branches and defers FullyCondensed marking.
+	// keeps the session's pending work and defers FullyCondensed marking.
 	condensed bool
 	// newSkillEvents are the skill events condensation appended to session
 	// state; the PostCommit loop forwards them to telemetry after the
@@ -842,6 +975,10 @@ type postCommitActionHandler struct {
 	// memoized gate into condensation so the search-usage transcript scan is
 	// skipped entirely when telemetry is opted out or not opted in.
 	condensedTelemetry *commitCondensedEmitter
+	// storedRoot is the .entire root condensation read the session's stored
+	// transcript and prompt copy from (storedSessionRoot), resolved once and
+	// reused by the release after carry-forward so both act on the same copy.
+	storedRoot *os.Root
 }
 
 // searchProbeGate adapts the emitter's memoized telemetry gate to the
@@ -852,14 +989,6 @@ func (h *postCommitActionHandler) searchProbeGate() func() bool {
 		return nil
 	}
 	return func() bool { return h.condensedTelemetry.searchProbeAllowed(h.ctx) }
-}
-
-// parentCommitHash returns the first parent's hash as a string, or empty for initial commits.
-func (h *postCommitActionHandler) parentCommitHash() string {
-	if h.commit.NumParents() > 0 && len(h.commit.ParentHashes) > 0 {
-		return h.commit.ParentHashes[0].String()
-	}
-	return ""
 }
 
 func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
@@ -874,19 +1003,14 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 		slog.Bool("idle_with_live_task", hasLiveTask),
 		slog.Int("task_records", len(state.TaskRecords)),
 		slog.Bool("should_condense", shouldCondense),
-		slog.String("shadow_branch", h.shadowBranchName),
 	)
 
 	if shouldCondense {
-		h.condensed, h.newSkillEvents, h.condensedSignal = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet, condenseOpts{
-			shadowRef:          h.shadowRef,
-			headTree:           h.headTree,
-			parentTree:         h.parentTree,
+		h.storedRoot = storedSessionRootOrNil(h.ctx, state)
+		h.condensed, h.newSkillEvents, h.condensedSignal = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.committedFileSet, condenseOpts{
 			repoDir:            h.repoDir,
-			parentCommitHash:   h.parentCommitHash(),
-			headCommitHash:     h.newHead,
-			allAgentFiles:      h.allAgentFiles,
 			searchProbeAllowed: h.searchProbeGate(),
+			storedRoot:         h.storedRoot,
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead, h.repoDir)
@@ -904,19 +1028,14 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 		slog.Bool("has_new", h.hasNew),
 		slog.Int("files_touched", len(state.FilesTouched)),
 		slog.Bool("should_condense", shouldCondense),
-		slog.String("shadow_branch", h.shadowBranchName),
 	)
 
 	if shouldCondense {
-		h.condensed, h.newSkillEvents, h.condensedSignal = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.shadowBranchName, h.shadowBranchesToDelete, h.committedFileSet, condenseOpts{
-			shadowRef:          h.shadowRef,
-			headTree:           h.headTree,
-			parentTree:         h.parentTree,
+		h.storedRoot = storedSessionRootOrNil(h.ctx, state)
+		h.condensed, h.newSkillEvents, h.condensedSignal = h.s.condenseAndUpdateState(h.ctx, h.repo, h.checkpointID, state, h.head, h.committedFileSet, condenseOpts{
 			repoDir:            h.repoDir,
-			parentCommitHash:   h.parentCommitHash(),
-			headCommitHash:     h.newHead,
-			allAgentFiles:      h.allAgentFiles,
 			searchProbeAllowed: h.searchProbeGate(),
+			storedRoot:         h.storedRoot,
 		})
 	} else {
 		h.s.updateBaseCommitIfChanged(h.ctx, state, h.newHead, h.repoDir)
@@ -967,9 +1086,8 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	if len(committedTouchedFiles) == 0 {
 		return false
 	}
-	return filesOverlapWithContent(h.ctx, h.repo, h.shadowBranchName, h.commit, committedTouchedFiles, overlapOpts{
+	return filesOverlapWithContent(h.ctx, h.touchedFileHashes, h.commit, committedTouchedFiles, overlapOpts{
 		headTree:      h.headTree,
-		shadowTree:    h.shadowTree,
 		parentTree:    h.parentTree,
 		hasParentTree: true,
 	})
@@ -1181,17 +1299,11 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		)
 	}
 
-	// Track shadow branch names and whether they can be deleted
-	shadowBranchesToDelete := make(map[string]struct{})
-	// Track active sessions that were NOT condensed — their shadow branches must be preserved
-	uncondensedActiveOnBranch := make(map[string]bool)
-
 	newHead := head.Hash().String()
 
 	// Pre-resolve HEAD tree and parent tree once for the entire PostCommit.
 	// These are immutable within this hook invocation and used by multiple
-	// per-session functions (filesOverlapWithContent, filesWithRemainingAgentChanges,
-	// calculateSessionAttributions).
+	// per-session functions (filesOverlapWithContent, filesWithRemainingAgentChanges).
 	_, resolveTreesSpan := perf.Start(ctx, "resolve_commit_trees")
 	var headTree *object.Tree
 	if t, err := commit.Tree(); err == nil {
@@ -1209,7 +1321,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	committedFileSet := filesChangedInCommit(ctx, worktreePath, commit, headTree, parentTree)
 	resolveTreesSpan.End()
 
-	allAgentFiles, sessionsWithCommittedFiles := s.collectCommittedFileClaims(ctx, sessions, committedFileSet)
+	sessionsWithCommittedFiles := s.collectCommittedFileClaims(ctx, sessions, committedFileSet)
 
 	// One emitter per commit: the prior-history git-log scan and the settings
 	// load are commit-scoped, not session-scoped. Nothing resolves until a
@@ -1219,6 +1331,11 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	condensedTelemetry := newCommitCondensedEmitter(worktreePath, newHead)
 
 	trailerOwned := anySessionOwnsCheckpoint(sessions, checkpointID)
+
+	// Stale ENDED sessions still holding pending work once this commit has
+	// processed them, judged on the post-processing state: counting the
+	// pre-loop snapshot would warn about sessions this commit just condensed.
+	staleEnded := 0
 
 	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
 	for _, sess := range sessions {
@@ -1233,9 +1350,11 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 			var condensed bool
 			newSkillEvents, condensedSignal, condensed = s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
-				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
-				sessionsWithCommittedFiles, condensedTelemetry)
+				committedFileSet, sessionsWithCommittedFiles, condensedTelemetry)
 			trailerOwned = trailerOwned || condensed
+			if IsCondensableEndedSession(state) {
+				staleEnded++
+			}
 			return nil
 		}, func() {
 			EmitSkillInvocationTelemetry(iterCtx, newSkillEvents)
@@ -1252,37 +1371,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	logUnclaimedCheckpointTrailer(logCtx, checkpointID, sessions, trailerOwned, isRebase)
 
-	if err := s.updateCombinedAttributionForCheckpoint(ctx, repo, checkpointID, headTree, parentTree, worktreePath); err != nil {
-		logging.Warn(logCtx, "failed to update combined checkpoint attribution",
-			slog.String("checkpoint_id", checkpointID.String()),
-			slog.String("error", err.Error()))
-	}
-
-	// Clean up shadow branches — only delete when ALL sessions on the branch are non-active
-	// or were condensed during this PostCommit.
-	_, cleanupBranchesSpan := perf.Start(ctx, "cleanup_shadow_branches")
-	for shadowBranchName := range shadowBranchesToDelete {
-		if uncondensedActiveOnBranch[shadowBranchName] {
-			logging.Debug(logCtx, "post-commit: preserving shadow branch (active session exists)",
-				slog.String("shadow_branch", shadowBranchName),
-			)
-			continue
-		}
-		if err := deleteShadowBranch(ctx, repo, shadowBranchName); err != nil {
-			logging.Warn(logCtx, "failed to clean up shadow branch",
-				slog.String("shadow_branch", shadowBranchName),
-				slog.String("error", err.Error()))
-		} else {
-			logging.Info(logCtx, "shadow branch deleted",
-				slog.String("strategy", "manual-commit"),
-				slog.String("shadow_branch", shadowBranchName),
-			)
-		}
-	}
-	cleanupBranchesSpan.End()
-
-	if stale := countWarnableStaleEndedSessions(repo, sessions); stale >= staleEndedSessionWarnThreshold {
-		warnStaleEndedSessions(ctx, stale)
+	if staleEnded >= staleEndedSessionWarnThreshold {
+		warnStaleEndedSessions(ctx, staleEnded)
 	}
 
 	return nil
@@ -1356,129 +1446,6 @@ func logUnclaimedCheckpointTrailer(logCtx context.Context, checkpointID id.Check
 	)
 }
 
-// updateCombinedAttributionForCheckpoint computes holistic attribution across all sessions.
-// Instead of summing per-session numbers (which inflates totals because each session
-// independently counts the full commit), this diffs parent→HEAD once and classifies
-// lines as agent or human based on the union of all sessions' files_touched.
-func (s *ManualCommitStrategy) updateCombinedAttributionForCheckpoint(
-	ctx context.Context,
-	repo *git.Repository,
-	checkpointID id.CheckpointID,
-	headTree, parentTree *object.Tree,
-	repoDir string,
-) error {
-	logCtx := logging.WithComponent(ctx, "attribution")
-	// The hook store envelope (see hookCheckpointStoreOptions): the attribution
-	// backfill's absence probe fetches a ref that exists remotely but not
-	// locally, and on a partial clone the checkpoint's own blobs need fetching
-	// too. Bounded budgets keep a dead network from stalling the post-commit
-	// hook: the ref store memoizes a failed ref fetch (gitRefsStore.fetchFailure)
-	// and hookBlobFetcher memoizes an exhausted blob fetch, so the two paths are
-	// bounded independently.
-	stores, err := checkpoint.Open(ctx, repo, s.hookCheckpointStoreOptions(ctx))
-	if err != nil {
-		return fmt.Errorf("open checkpoint store: %w", err)
-	}
-	store := stores.Persistent
-
-	summary, err := store.Read(ctx, checkpointID)
-	if err != nil {
-		return fmt.Errorf("reading checkpoint summary: %w", err)
-	}
-	if summary == nil || len(summary.Sessions) <= 1 {
-		return nil
-	}
-
-	// Collect union of files_touched from sessions that had real checkpoints (SaveStep ran).
-	// Sessions with no SaveStep steps (e.g., commit-only sessions) use a fallback that
-	// includes ALL committed files, which would incorrectly classify human-created files as agent work.
-	// Gate on SaveStepCount (the honest "SaveStep ran" signal), not CheckpointsCount —
-	// CheckpointsCount is now a prompt count floored at 1, so it's no longer 0 for these sessions.
-	// Old metadata lacks SaveStepCount → 0 → conservatively skipped, matching prior behavior.
-	agentFiles := make(map[string]struct{})
-	for i := range len(summary.Sessions) {
-		metadata, readErr := store.ReadSessionMetadata(ctx, checkpointID, i)
-		if readErr != nil || metadata == nil {
-			continue
-		}
-		if metadata.SaveStepCount == 0 {
-			continue // Skip sessions that used the filesTouched fallback
-		}
-		for _, f := range metadata.FilesTouched {
-			agentFiles[f] = struct{}{}
-		}
-	}
-
-	if len(agentFiles) == 0 {
-		return nil
-	}
-
-	// Get all files changed in this commit (parent → HEAD)
-	allChangedFiles, err := getAllChangedFiles(ctx, parentTree, headTree, repoDir, "", "")
-	if err != nil {
-		logging.Warn(logCtx, "combined attribution: failed to enumerate changed files",
-			slog.String("error", err.Error()))
-		return nil
-	}
-
-	// Classify each changed file as agent or human and count lines
-	var agentAdded, agentRemoved, humanAdded, humanRemoved int
-	for _, filePath := range allChangedFiles {
-		// Skip CLI/agent config metadata — not human or agent code work
-		if strings.HasPrefix(filePath, ".entire/") || strings.HasPrefix(filePath, paths.EntireMetadataDir+"/") ||
-			strings.HasPrefix(filePath, ".claude/") {
-			continue
-		}
-
-		parentContent := getFileContent(parentTree, filePath)
-		headContent := getFileContent(headTree, filePath)
-		_, added, removed := diffLines(parentContent, headContent)
-
-		if _, isAgent := agentFiles[filePath]; isAgent {
-			agentAdded += added
-			agentRemoved += removed
-		} else {
-			humanAdded += added
-			humanRemoved += removed
-		}
-	}
-
-	totalLinesChanged := agentAdded + agentRemoved + humanAdded + humanRemoved
-	totalCommitted := agentAdded + humanAdded
-
-	var agentPercentage float64
-	if totalLinesChanged > 0 {
-		agentPercentage = float64(agentAdded+agentRemoved) / float64(totalLinesChanged) * 100
-	}
-
-	combined := &checkpoint.Attribution{
-		CalculatedAt:      time.Now().UTC(),
-		AgentLines:        agentAdded,
-		AgentRemoved:      agentRemoved,
-		HumanAdded:        humanAdded,
-		HumanRemoved:      humanRemoved,
-		TotalCommitted:    totalCommitted,
-		TotalLinesChanged: totalLinesChanged,
-		AgentPercentage:   agentPercentage,
-		MetricVersion:     2,
-	}
-
-	logging.Info(logCtx, "combined attribution calculated",
-		slog.String("checkpoint_id", checkpointID.String()),
-		slog.Int("sessions", len(summary.Sessions)),
-		slog.Int("agent_files", len(agentFiles)),
-		slog.Int("agent_lines", agentAdded),
-		slog.Int("human_added", humanAdded),
-		slog.Float64("agent_percentage", agentPercentage),
-	)
-
-	if err := store.Write(ctx, checkpoint.CheckpointAttribution{CheckpointID: checkpointID, Attribution: combined}); err != nil {
-		return fmt.Errorf("persisting combined attribution: %w", err)
-	}
-
-	return nil
-}
-
 // liveTaskFilesInCommit reports whether any of state's in-flight task records
 // modified a committed file, per the subagent's own transcript. A running
 // subagent's edits reach FilesTouched only at completion, so this is the only
@@ -1518,20 +1485,17 @@ func (s *ManualCommitStrategy) liveTaskFilesInCommit(ctx context.Context, state 
 	return false
 }
 
-// collectCommittedFileClaims computes the union of all sessions' FilesTouched
-// for cross-session attribution, and counts sessions whose tracked files
-// overlap with committed files. When no persisted FilesTouched claims the
+// collectCommittedFileClaims counts sessions whose tracked files overlap with
+// committed files. When no persisted FilesTouched claims the
 // commit, it falls back to hasMidTurnClaimant; the read-only gate only asks
 // whether any claimant exists, so that fallback reports at most one.
-func (s *ManualCommitStrategy) collectCommittedFileClaims(ctx context.Context, sessions []*SessionState, committedFileSet map[string]struct{}) (map[string]struct{}, int) {
-	allAgentFiles := make(map[string]struct{})
+func (s *ManualCommitStrategy) collectCommittedFileClaims(ctx context.Context, sessions []*SessionState, committedFileSet map[string]struct{}) int {
 	claimants := 0
 	for _, state := range sessions {
 		if state.FullyCondensed && state.Phase == session.PhaseEnded {
 			continue
 		}
 		for _, f := range state.FilesTouched {
-			allAgentFiles[f] = struct{}{}
 			if _, ok := committedFileSet[f]; ok {
 				claimants++
 				break // count each session at most once
@@ -1541,7 +1505,7 @@ func (s *ManualCommitStrategy) collectCommittedFileClaims(ctx context.Context, s
 	if claimants == 0 && s.hasMidTurnClaimant(ctx, sessions, committedFileSet) {
 		claimants = 1
 	}
-	return allAgentFiles, claimants
+	return claimants
 }
 
 // hasMidTurnClaimant reports whether any ACTIVE session's live transcript
@@ -1568,29 +1532,8 @@ func (s *ManualCommitStrategy) hasMidTurnClaimant(ctx context.Context, sessions 
 	return false
 }
 
-// resolveShadowRefAndTree pre-resolves a session's shadow branch ref and tree.
-// These are read 4+ times across sessionHasNewContent, filesOverlapWithContent,
-// CondenseSession, filesWithRemainingAgentChanges, and
-// calculateSessionAttributions. Both are nil when the branch does not exist.
-func resolveShadowRefAndTree(ctx context.Context, repo *git.Repository, shadowBranchName string) (*plumbing.Reference, *object.Tree) {
-	_, span := perf.Start(ctx, "resolve_shadow_branch")
-	defer span.End()
-	var shadowRef *plumbing.Reference
-	var shadowTree *object.Tree
-	if ref, refErr := repo.Reference(plumbing.NewBranchReferenceName(shadowBranchName), true); refErr == nil {
-		shadowRef = ref
-		if sc, scErr := repo.CommitObject(ref.Hash()); scErr == nil {
-			if st, stErr := sc.Tree(); stErr == nil {
-				shadowTree = st
-			}
-		}
-	}
-	return shadowRef, shadowTree
-}
-
 // postCommitProcessSessionLocked handles a single session within the PostCommit loop.
-// Pre-resolved git objects (headTree, parentTree) are shared across all sessions;
-// per-session shadow ref/tree are resolved once here and threaded through sub-calls.
+// Pre-resolved git objects (headTree, parentTree) are shared across all sessions.
 //
 // The third result reports whether this session condensed into checkpointID.
 // It is distinct from the second (the telemetry signal, which is nil for an
@@ -1615,25 +1558,18 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	repoDir string,
 	headTree, parentTree *object.Tree,
 	committedFileSet map[string]struct{},
-	shadowBranchesToDelete map[string]struct{},
-	uncondensedActiveOnBranch map[string]bool,
-	allAgentFiles map[string]struct{},
 	sessionsWithCommittedFiles int,
 	condensedTelemetry *commitCondensedEmitter,
 ) (newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal, condensed bool) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	reservedCheckpointID := state.PendingCondensationID()
 	if reservedCheckpointID != id.EmptyCheckpointID && reservedCheckpointID != checkpointID {
 		logging.Warn(logCtx, "post-commit: preserving interrupted condensation with a different checkpoint ID",
 			slog.String("session_id", state.SessionID),
 			slog.String("reserved_checkpoint_id", reservedCheckpointID.String()),
 			slog.String("commit_checkpoint_id", checkpointID.String()))
-		uncondensedActiveOnBranch[shadowBranchName] = true
 		return newSkillEvents, condensedSignal, false
 	}
-
-	shadowRef, shadowTree := resolveShadowRefAndTree(ctx, repo, shadowBranchName)
 
 	// Check for new content (needed for TransitionContext and condensation).
 	// Fail-open: if content check errors, assume new content exists so we
@@ -1653,7 +1589,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		hasNew = true
 	} else {
 		var contentErr error
-		hasNew, contentErr = s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{shadowTree: shadowTree})
+		hasNew, contentErr = s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{})
 		if contentErr != nil {
 			hasNew = true
 			logging.Debug(logCtx, "post-commit: error checking session content, assuming new content",
@@ -1675,6 +1611,9 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		filesTouchedBefore = make([]string, len(state.FilesTouched))
 		copy(filesTouchedBefore, state.FilesTouched)
 	}
+	// Like FilesTouched, the recorded hashes are cleared by condensation but
+	// needed afterwards for the carry-forward decision.
+	touchedFileHashesBefore := maps.Clone(state.TouchedFileHashes)
 	checkContentSpan.End()
 
 	logging.Debug(logCtx, "post-commit: carry-forward prep",
@@ -1696,16 +1635,12 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		commit:                     commit,
 		newHead:                    newHead,
 		repoDir:                    repoDir,
-		shadowBranchName:           shadowBranchName,
-		shadowBranchesToDelete:     shadowBranchesToDelete,
 		committedFileSet:           committedFileSet,
 		hasNew:                     hasNew,
 		filesTouchedBefore:         filesTouchedBefore,
+		touchedFileHashes:          touchedFileHashesBefore,
 		headTree:                   headTree,
 		parentTree:                 parentTree,
-		shadowRef:                  shadowRef,
-		shadowTree:                 shadowTree,
-		allAgentFiles:              allAgentFiles,
 		sessionsWithCommittedFiles: sessionsWithCommittedFiles,
 		liveTaskClaimsCommit: func() bool {
 			return s.liveTaskFilesInCommit(ctx, state, committedFileSet)
@@ -1733,17 +1668,18 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	// commit across two `git commit` invocations, each gets a 1:1 checkpoint.
 	// Uses content-aware comparison: if user did `git add -p` and committed
 	// partial changes, the file still has remaining agent changes to carry forward.
-	// Guest-linked sessions are excluded: remaining-files would diff the home
-	// worktree's shadow tree against THIS worktree's commit, and carry-forward
-	// reads file content from THIS worktree — both would rewrite the home
-	// worktree's shadow state with foreign data (see condenseAndUpdateState).
+	// Guest-linked sessions are excluded: the remaining-files decision compares
+	// THIS worktree's files with hashes recorded in the home worktree, and
+	// would rewrite the home worktree's pending files with foreign data (see
+	// condenseAndUpdateState).
 	_, carryForwardSpan := perf.Start(ctx, "carry_forward_files")
 	if handler.condensed && isSessionHomeWorktree(repoDir, state) {
-		remainingFiles := filesWithRemainingAgentChanges(ctx, repo, shadowBranchName, commit, filesTouchedBefore, committedFileSet, overlapOpts{
-			headTree:   headTree,
-			shadowTree: shadowTree,
+		remainingFiles := filesWithRemainingAgentChanges(ctx, repo, touchedFileHashesBefore, commit, filesTouchedBefore, committedFileSet, overlapOpts{
+			headTree: headTree,
 		})
 		state.FilesTouched = remainingFiles
+		state.TouchedFileHashes = touchedFileHashesBefore
+		pruneTouchedFileHashes(state)
 		logging.Debug(logCtx, "post-commit: carry-forward decision (content-aware)",
 			slog.String("session_id", state.SessionID),
 			slog.Int("files_touched_before", len(filesTouchedBefore)),
@@ -1753,14 +1689,15 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 			slog.Any("committed_files", committedFileSet),
 		)
 		if len(remainingFiles) > 0 {
-			s.carryForwardToNewShadowBranch(ctx, repo, state, remainingFiles)
+			carryForwardRemainingFiles(logCtx, state)
 		}
 
 		// Release the staged prompt.txt and full.jsonl only when ALL files are
 		// committed. If carry-forward files remain they must persist, so the
 		// next condensation (triggered by the next commit) can still read them.
+		// Released through the root the condensation read them from.
 		if len(state.FilesTouched) == 0 {
-			clearFilesystemStagedFiles(ctx, state.SessionID)
+			clearStagedFilesIn(ctx, handler.storedRoot, state.SessionID, state.WorktreePath)
 		}
 	}
 	carryForwardSpan.End()
@@ -1775,7 +1712,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 
 	// Pin a review session to the single checkpoint it was just condensed into.
 	// A review is a read-only one-shot: it touches no files, so it never accrues
-	// shadow-branch content and the FullyCondensed branch above never fires for
+	// pending files and the FullyCondensed branch above never fires for
 	// it. Left active, it stays in this worktree's session set and gets
 	// re-condensed into every subsequent commit — which is how one review ends
 	// up attributed to many unrelated checkpoints (its prompt rendering once per
@@ -1795,22 +1732,6 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 
 	// State is saved by the outer MutateSessionState in PostCommit.
 
-	// Only preserve the shadow branch for active sessions that were NOT
-	// condensed AND still have content on it — their uncondensed checkpoints
-	// are the only copy of that work. An active session with nothing on the
-	// branch has nothing to lose (SaveStep recreates shadow branches on
-	// demand), so it must not pin the branch. Observed with Antigravity:
-	// a subagent runs as its own conversation and does all the work, while
-	// the parent conversation's final fullyIdle Stop never arrives in
-	// headless mode — leaving a "ghost" session that is ACTIVE forever with
-	// zero files and zero steps, which would otherwise preserve the branch
-	// indefinitely. Content is judged the same way condensation judges it
-	// (sessionHasShadowContent): a session whose first checkpoint captured a
-	// transcript but no file edits yet still has a commit to lose.
-	if state.Phase.IsActive() && !handler.condensed && sessionHasShadowContent(handler.filesTouchedBefore, state) {
-		uncondensedActiveOnBranch[shadowBranchName] = true
-	}
-
 	return handler.newSkillEvents, handler.condensedSignal, handler.condensed
 }
 
@@ -1823,8 +1744,6 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	checkpointID id.CheckpointID,
 	state *SessionState,
 	head *plumbing.Reference,
-	shadowBranchName string,
-	shadowBranchesToDelete map[string]struct{},
 	committedFiles map[string]struct{},
 	opts condenseOpts,
 ) (condensed bool, newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal) {
@@ -1866,25 +1785,23 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// Guest-linked commit (identity-matched from a sibling worktree): the
 	// transcript is condensed and the trailer stamped, but every mutation of
 	// worktree-coupled state below is skipped. The session's BaseCommit
-	// tracks the HEAD of ITS worktree, which this commit did not move —
-	// rewriting it would orphan the shadow branch (keyed by BaseCommit +
-	// WorktreeID). The shadow branch itself must survive too: deleting it
-	// (or letting the caller rebuild it via carry-forward, which reads file
-	// CONTENT from the current — wrong — worktree) would replace the home
+	// tracks the HEAD of ITS worktree, which this commit did not move. The
+	// pending files and their recorded hashes must survive too: clearing them
+	// (or letting the caller recompute them via carry-forward, which compares
+	// files in the current — wrong — worktree) would replace the home
 	// worktree's in-flight state with the committing worktree's files.
 	isHome := isSessionHomeWorktree(opts.repoDir, state)
 	if !isHome {
 		state.LastCheckpointID = result.CheckpointID
-		state.LastCheckpointCommitHash = head.Hash().String()
 		pendingStepCount := state.StepCount
 		resetCheckpointWindow(state)
-		// The checkpoint window was consumed, but the home worktree's shadow
-		// content was not. Keep its existing SaveStep count as the ownership
-		// pin used by cleanup and doctor until a home commit consumes it.
+		// The checkpoint window was consumed, but the home worktree's pending
+		// work was not. Keep its existing SaveStep count, which keeps the
+		// session pending (State.HasPendingWork) until a home commit consumes it.
 		state.StepCount = pendingStepCount
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
-		logging.Info(logCtx, "session guest-condensed from a sibling worktree; shadow state untouched",
+		logging.Info(logCtx, "session guest-condensed from a sibling worktree; home worktree state untouched",
 			slog.String("strategy", "manual-commit"),
 			slog.String("session_id", state.SessionID),
 			slog.String("checkpoint_id", result.CheckpointID.String()),
@@ -1893,31 +1810,21 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		return true, result.NewSkillEvents, condensedSignal
 	}
 
-	// Track this shadow branch for cleanup
-	shadowBranchesToDelete[shadowBranchName] = struct{}{}
-
 	// Update session state for the new base commit
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
-	state.RealignAttributionBase(newHead)
 	resetCheckpointWindow(state)
 	state.CheckpointTranscriptStart = result.TotalTranscriptLines
 	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
-
-	// Clear attribution tracking — condensation already used these values
-	state.PromptAttributions = nil
-	state.PendingPromptAttribution = nil
 	state.FilesTouched = nil
+	state.TouchedFileHashes = nil
 
 	// NOTE: filesystem prompt.txt is NOT cleared here. The caller (PostCommit handler)
 	// decides whether to clear it based on carry-forward: if remaining files exist,
 	// the prompt must persist so the next condensation can read it.
 
 	// Save checkpoint ID so subsequent commits can reuse it (e.g., amend restores trailer).
-	// LastCheckpointCommitHash records the exact commit SHA so the reconcile path can
-	// distinguish a true reset (same SHA) from cherry-pick/rebase (same trailer, new SHA).
 	state.LastCheckpointID = result.CheckpointID
-	state.LastCheckpointCommitHash = newHead
 
 	logging.Info(logCtx, "session condensed",
 		slog.String("strategy", "manual-commit"),
@@ -1933,7 +1840,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 // updateBaseCommitIfChanged updates BaseCommit to newHead if it changed.
 // Only updates ACTIVE sessions. IDLE/ENDED sessions should NOT have their
 // BaseCommit updated, as this would cause them to be incorrectly associated
-// with a new shadow branch and potentially condensed on future commits.
+// with a new base commit and potentially condensed on future commits.
 func (s *ManualCommitStrategy) updateBaseCommitIfChanged(ctx context.Context, state *SessionState, newHead, worktreePath string) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	// Only update ACTIVE sessions. IDLE/ENDED sessions are kept around for
@@ -1947,17 +1854,13 @@ func (s *ManualCommitStrategy) updateBaseCommitIfChanged(ctx context.Context, st
 	}
 	// Guest-linked sessions (identity-matched from a sibling worktree) keep
 	// their BaseCommit on their home worktree's HEAD — see
-	// condenseAndUpdateState for the shadow-branch rationale.
+	// condenseAndUpdateState for the rationale.
 	if !isSessionHomeWorktree(worktreePath, state) {
 		return
 	}
 	if state.BaseCommit != newHead {
 		state.BaseCommit = newHead
-		// Keep AttributionBaseCommit in sync to prevent stale base drift.
-		// Without this, a subsequent condensation would diff from the old base,
-		// inflating human_added with lines from unrelated prior commits.
-		state.RealignAttributionBase(newHead)
-		logging.Debug(logCtx, "post-commit: updated BaseCommit and AttributionBaseCommit",
+		logging.Debug(logCtx, "post-commit: updated BaseCommit",
 			slog.String("session_id", state.SessionID),
 			slog.String("new_head", truncateHash(newHead)),
 		)
@@ -1980,9 +1883,8 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 
 	// Exact matches only: this path rewrites BaseCommit, which must track the
 	// HEAD of the session's own worktree. A trailer-less commit here says
-	// nothing about HEAD movement in a sibling worktree, and rewriting a
-	// fallback-matched session's base would orphan its shadow branch
-	// (shadow branches are keyed by BaseCommit + WorktreeID).
+	// nothing about HEAD movement in a sibling worktree, so a
+	// fallback-matched session's base must not follow it.
 	sessions, err := s.findExactSessionsForWorktree(ctx, worktreePath)
 	if err != nil || len(sessions) == 0 {
 		return
@@ -1999,16 +1901,12 @@ func (s *ManualCommitStrategy) postCommitUpdateBaseCommitOnly(ctx context.Contex
 			if !state.Phase.IsActive() || state.BaseCommit == newHead {
 				return ErrMutationSkip
 			}
-			logging.Debug(logCtx, "post-commit (no trailer): updating BaseCommit and AttributionBaseCommit",
+			logging.Debug(logCtx, "post-commit (no trailer): updating BaseCommit",
 				slog.String("session_id", state.SessionID),
 				slog.String("old_base", truncateHash(oldBase)),
 				slog.String("new_head", truncateHash(newHead)),
 			)
 			state.BaseCommit = newHead
-			// Keep AttributionBaseCommit in sync to prevent stale base drift.
-			// Without this, a subsequent condensation would diff from the old base,
-			// inflating human_added with lines from unrelated prior commits.
-			state.RealignAttributionBase(newHead)
 			return nil
 		})
 		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
@@ -2120,10 +2018,6 @@ type contentCheckOpts struct {
 	// to other heuristics (e.g., transcript growth).
 	// Non-nil empty means successfully resolved but no files are staged.
 	stagedFiles []string
-
-	// shadowTree, when non-nil, is used directly to avoid redundant shadow branch
-	// resolution (the shadow ref/commit/tree were already resolved by the caller).
-	shadowTree *object.Tree
 }
 
 // sessionHasNewContent checks if a session has new transcript content
@@ -2132,7 +2026,7 @@ type contentCheckOpts struct {
 func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *git.Repository, state *SessionState, opts contentCheckOpts) (bool, error) {
 	logCtx := logging.WithComponent(ctx, "manual-commit")
 
-	// Task records are pending checkpoint content that registers on neither the shadow branch nor transcript growth.
+	// Task records are pending checkpoint content that registers on neither turn-end steps nor transcript growth.
 	if state.HasTaskContent() {
 		logging.Debug(logCtx, "sessionHasNewContent: session has task records",
 			slog.String("session_id", state.SessionID),
@@ -2141,58 +2035,30 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 		return true, nil
 	}
 
-	// Use cached shadow tree if provided
-	var tree *object.Tree
-	if opts.shadowTree != nil {
-		tree = opts.shadowTree
-	} else {
-		// Resolve shadow branch from repo
-		shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		refName := plumbing.NewBranchReferenceName(shadowBranchName)
-		ref, err := repo.Reference(refName, true)
-		if err != nil {
-			logging.Debug(logCtx, "sessionHasNewContent: no shadow branch, checking live transcript",
-				slog.String("session_id", state.SessionID),
-				slog.String("shadow_branch", shadowBranchName),
-			)
-			return s.sessionHasNewContentFromLiveTranscript(ctx, state, opts.stagedFiles)
-		}
-
-		commit, err := repo.CommitObject(ref.Hash())
-		if err != nil {
-			return false, fmt.Errorf("failed to get commit object: %w", err)
-		}
-
-		tree, err = commit.Tree()
-		if err != nil {
-			return false, fmt.Errorf("failed to get commit tree: %w", err)
-		}
+	// No turn-end step since the last condensation (and no carry-forward):
+	// any new work lives only in the live transcript.
+	if state.StepCount == 0 {
+		logging.Debug(logCtx, "sessionHasNewContent: no turn-end step, checking live transcript",
+			slog.String("session_id", state.SessionID),
+		)
+		return s.sessionHasNewContentFromLiveTranscript(ctx, state, opts.stagedFiles)
 	}
 
-	// Look for transcript file — use blob size for fast growth check when possible.
-	// This avoids reading the full transcript content (potentially tens of MB) just
-	// to count lines, which was the main source of PostCommit latency with many sessions.
-	metadataDir := paths.EntireMetadataDir + "/" + state.SessionID
-	var hasTranscriptFile bool
-	var transcriptBlobSize int64
+	// Use the size of the stored turn-end transcript (sanitized, written by
+	// every Stop) for a fast growth check, rather than reading the content
+	// (potentially tens of MB) just to count lines. That size is in the same
+	// coordinate as CheckpointTranscriptSize; see storedTranscriptSize.
+	transcriptBlobSize, hasTranscriptFile := storedTranscriptSize(ctx, state.SessionID)
 
-	if size, sizeErr := tree.Size(metadataDir + "/" + paths.TranscriptFileName); sizeErr == nil {
-		hasTranscriptFile = true
-		transcriptBlobSize = size
-	} else if size, sizeErr := tree.Size(metadataDir + "/" + paths.TranscriptFileNameLegacy); sizeErr == nil {
-		hasTranscriptFile = true
-		transcriptBlobSize = size
-	}
-
-	// If shadow branch exists but has no transcript (e.g., carry-forward from mid-session commit),
-	// check if the session has FilesTouched. Carry-forward sets FilesTouched with remaining files.
+	// No stored transcript (e.g. released after a condensation that left
+	// carry-forward files): check if the session has FilesTouched.
 	if !hasTranscriptFile {
 		if len(state.FilesTouched) > 0 {
-			// Shadow branch has files from carry-forward - check if staged files overlap
-			// AND have matching content (content-aware check).
+			// Carry-forward files - check if staged files overlap AND have
+			// matching content (content-aware check).
 			if len(opts.stagedFiles) > 0 {
 				// PrepareCommitMsg context: check staged files overlap with content
-				result := stagedFilesOverlapWithContent(ctx, repo, tree, opts.stagedFiles, state.FilesTouched)
+				result := stagedFilesOverlapWithContent(ctx, repo, state.TouchedFileHashes, opts.stagedFiles, state.FilesTouched)
 				logging.Debug(logCtx, "sessionHasNewContent: no transcript, carry-forward with staged files",
 					slog.String("session_id", state.SessionID),
 					slog.Int("files_touched", len(state.FilesTouched)),
@@ -2258,7 +2124,7 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 	// Check if staged files overlap with session's files with content-aware matching.
 	// This is primarily for PrepareCommitMsg; in PostCommit, stagedFiles is nil/empty.
 	if len(opts.stagedFiles) > 0 {
-		result := stagedFilesOverlapWithContent(ctx, repo, tree, opts.stagedFiles, state.FilesTouched)
+		result := stagedFilesOverlapWithContent(ctx, repo, state.TouchedFileHashes, opts.stagedFiles, state.FilesTouched)
 		logging.Debug(logCtx, "sessionHasNewContent: staged files overlap check",
 			slog.String("session_id", state.SessionID),
 			slog.Int("staged_files", len(opts.stagedFiles)),
@@ -2299,8 +2165,9 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 }
 
 // sessionHasNewContentFromLiveTranscript checks if a session has new content
-// by examining the live transcript file. This is used when no shadow branch exists
-// (i.e., no Stop has happened yet) but the agent may have done work.
+// by examining the live transcript file. This is used when no turn-end step
+// has been recorded since the last condensation (no Stop with file changes
+// yet) but the agent may have done work.
 //
 // Returns true if:
 //  1. The transcript has grown since the last condensation, AND
@@ -2532,7 +2399,19 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 		return nil
 	}
 
-	return normalizeTranscriptFilePaths(ctx, state, modifiedFiles)
+	// Transcript output reaches FilesTouched through mid-turn carry-forward
+	// and condensation, so it gets the same filter as every capture route.
+	normalized := normalizeTranscriptFilePaths(ctx, state, modifiedFiles)
+	repoRoot := state.WorktreePath
+	if repoRoot == "" {
+		if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
+			repoRoot = root
+		}
+	}
+	if repoRoot == "" {
+		return normalized
+	}
+	return filterTrackableFiles(ctx, repoRoot, normalized)
 }
 
 // normalizeTranscriptFilePaths converts transcript file paths to repo-relative
@@ -2565,49 +2444,6 @@ func normalizeTranscriptFilePaths(ctx context.Context, state *SessionState, modi
 	return modifiedFiles
 }
 
-// warnIfAttributionDiverged prints at most one stderr warning per call and
-// marks every divergent session as notified so subsequent invocations stay
-// silent until the next successful condensation (or reconcile) realigns
-// attribution and clears the flag via State.RealignAttributionBase.
-//
-// Divergence arises when the migrate path advances BaseCommit to a new HEAD
-// but intentionally leaves AttributionBaseCommit pinned (e.g., after a pull
-// or git reset to an unrelated commit). Writing to stderrWriter surfaces the
-// message in the user's terminal during prepare-commit-msg, not the agent's
-// transcript — stderr from the hook is TTY-bound to the invoking process.
-func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, sessions []*SessionState) {
-	logCtx := logging.WithComponent(ctx, "checkpoint")
-	printed := false
-	for _, sess := range sessions {
-		if sess.AttributionBaseCommit == "" ||
-			sess.AttributionBaseCommit == sess.BaseCommit ||
-			sess.DivergenceNoticeShown {
-			continue
-		}
-		if !printed {
-			fmt.Fprintln(stderrWriter, "entire: session attribution diverged after recent history movement; figures may be off until next checkpoint")
-			printed = true
-		}
-		sessionID := sess.SessionID
-		mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-			if state.DivergenceNoticeShown {
-				return ErrMutationSkip
-			}
-			state.DivergenceNoticeShown = true
-			return nil
-		})
-		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
-			logging.Warn(logCtx, "failed to save divergence notice flag",
-				slog.String("session_id", sessionID),
-				slog.String("error", mutErr.Error()))
-			continue
-		}
-		// Reflect the persisted change on the caller's slice so a same-call
-		// second pass observes the flag without reloading.
-		sess.DivergenceNoticeShown = true
-	}
-}
-
 // tryAgentCommitFastPath skips content detection for mid-turn agent commits.
 // Returns true if the fast path was taken (trailer added or attempt made),
 // false if the caller should continue with normal content detection.
@@ -2617,7 +2453,7 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 //   - commit_linking="always" (user opted into auto-linking — needed because
 //     some agents' subagents commit mid-turn from processes that
 //     have /dev/tty but can't respond to prompts, and content detection fails
-//     since the shadow branch doesn't exist yet).
+//     since no turn-end step has been recorded yet).
 //
 // A session is eligible when it is ACTIVE, or IDLE with a fresh task record
 // (a background subagent committing between the parent's turns; the widened
@@ -2679,22 +2515,10 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 	return false
 }
 
-// sessionHasShadowContent reports whether a session has checkpoints on its
-// shadow branch that a later condensation still needs: tracked files, at least
-// one written step, or task checkpoints. StepCount only counts checkpoint
-// commits that were actually written (a dedup-skipped step returns before the
-// increment) and is reset to zero when the session is condensed, so a non-zero
-// value means an uncondensed commit exists even when no file has been edited
-// yet — a read-only first turn, or a question answered without touching the
-// tree. filesTouched is passed separately because the post-commit handler
-// judges the snapshot it took before mutating state.
-func sessionHasShadowContent(filesTouched []string, state *SessionState) bool {
-	return len(filesTouched) > 0 || state.StepCount > 0 || state.HasTaskContent()
-}
-
 // sessionLacksCondensableContent reports whether an ACTIVE session has nothing
-// CondenseSession could turn into a checkpoint: no tracked files, no shadow
-// branch data (StepCount == 0), no task records, and no transcript content. Stamping a trailer
+// CondenseSession could turn into a checkpoint: no pending work
+// (State.HasPendingWork: tracked files, turn-end steps, task records) and no
+// transcript content. Stamping a trailer
 // for such a session would leave the commit permanently referencing a
 // checkpoint the condensation skip gate never writes (dangling trailer).
 //
@@ -2710,7 +2534,7 @@ func sessionHasShadowContent(filesTouched []string, state *SessionState) bool {
 // NOTE: conservative approximation of the skip gate in CondenseSession (which
 // checks extracted data, not raw state). Keep aligned.
 func sessionLacksCondensableContent(state *SessionState) bool {
-	if sessionHasShadowContent(state.FilesTouched, state) {
+	if state.HasPendingWork() {
 		return false
 	}
 	if state.TranscriptPath == "" {
@@ -2781,7 +2605,7 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	message := string(content)
 
 	// Don't add if prepare already stamped one (inherited trailers are links)
-	if _, found := stampedTrailer(message, inherited); found {
+	if _, found := stampedTrailer(logCtx, message, inherited); found {
 		return nil
 	}
 
@@ -2989,10 +2813,7 @@ func explicitlyIncomplete(complete *bool) bool {
 // Called during UserPromptSubmit to allow git hooks to detect active sessions.
 //
 // If the session already exists and HEAD has moved (e.g., user committed), updates
-// BaseCommit to the new HEAD so future checkpoints go to the correct shadow branch.
-//
-// If there's an existing shadow branch with commits from a different session ID,
-// returns a SessionIDConflictError to prevent orphaning existing session work.
+// BaseCommit to the new HEAD.
 //
 // agentType is the human-readable name of the agent (e.g., "Claude Code").
 // transcriptPath is the path to the live transcript file (for mid-session commit detection).
@@ -3019,7 +2840,9 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	// the state is missing (or the loaded state has an empty BaseCommit, a
 	// partial-state remnant from a concurrent warning), fall through to
 	// the initialize-new-session branch.
-	turnStartErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+	var remember string
+	var homeAgentType types.AgentType
+	turnStartErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.BaseCommit == "" {
 			return errPartialState
 		}
@@ -3055,6 +2878,8 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 				transitionSessionToCodex(state)
 			}
 			state.AgentType = corrected
+			// The recorded home belonged to the previous agent's layout.
+			state.AgentHome = ""
 		} else if state.AgentType == "" && resolvedAgentType != "" {
 			state.AgentType = resolvedAgentType
 		}
@@ -3067,30 +2892,20 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
 			state.TranscriptPath = transcriptPath
 		}
+		remember = updateSessionAgentHome(ctx, state)
+		homeAgentType = state.AgentType
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
 		reconcileWorktreePathForResumedTurn(ctx, state)
 
-		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
-		// BaseCommit as the base tree (preserving correct agent-line counts
-		// when HEAD moved between turns via pull/rebase). Migrate runs BEFORE
-		// the LastCheckpointID clear so the reconcile guard can read it.
-		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
-		state.PendingPromptAttribution = &promptAttr
-
-		_, reconciled, err := s.migrateShadowBranchIfNeeded(ctx, repo, state)
-		if err != nil {
-			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
-		}
-		if reconciled {
-			recomputed := s.calculatePromptAttributionAtStart(ctx, repo, state)
-			state.PendingPromptAttribution = &recomputed
+		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
+			return err
 		}
 
 		state.LastCheckpointID = ""
 		state.TurnCheckpointIDs = nil
 		return nil
-	})
+	}, func() { rememberAgentHome(ctx, homeAgentType, remember) })
 	if turnStartErr == nil {
 		return nil
 	}
@@ -3111,17 +2926,15 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 				slog.String("session_id", sessionID),
 				slog.String("error", transErr.Error()))
 		}
-		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
-		state.PendingPromptAttribution = &promptAttr
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
-		return fmt.Errorf("failed to save attribution: %w", mutErr)
+		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 
-	logging.Info(logging.WithComponent(ctx, "hooks"), "initialized shadow session",
+	logging.Info(logging.WithComponent(ctx, "hooks"), "initialized session",
 		slog.String("session_id", sessionID))
 	return nil
 }
@@ -3165,130 +2978,16 @@ func captureSessionOwner(state *SessionState) {
 	}
 }
 
-// calculatePromptAttributionAtStart calculates attribution at prompt start (before agent runs).
-// This captures user changes since the last checkpoint - no filtering needed since
-// the agent hasn't made any changes yet.
-//
-// IMPORTANT: This reads from the worktree (not staging area) to match what WriteTemporary
-// captures in checkpoints. If we read staged content but checkpoints capture worktree content,
-// unstaged changes would be in the checkpoint but not counted in PromptAttribution, causing
-// them to be incorrectly attributed to the agent later.
-func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
-	ctx context.Context,
-	repo *git.Repository,
-	state *SessionState,
-) PromptAttribution {
-	logCtx := logging.WithComponent(ctx, "attribution")
-	nextCheckpointNum := state.StepCount + 1
-	result := PromptAttribution{CheckpointNumber: nextCheckpointNum}
-
-	// Get last checkpoint tree from shadow branch (if it exists).
-	// For a new session (StepCount == 0), always use baseTree as the reference.
-	// The shadow branch may contain checkpoints from OTHER concurrent sessions,
-	// and using that tree would miss pre-session worktree dirt (e.g., .claude/settings.json)
-	// because it appears unchanged when compared to another session's snapshot.
-	var lastCheckpointTree *object.Tree
-	if state.StepCount > 0 {
-		// Existing session with prior checkpoints — use shadow branch as reference.
-		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		refName := plumbing.NewBranchReferenceName(shadowBranchName)
-		if ref, err := repo.Reference(refName, true); err != nil {
-			logging.Debug(logCtx, "prompt attribution: no shadow branch",
-				slog.String("shadow_branch", shadowBranchName))
-		} else if shadowCommit, err := repo.CommitObject(ref.Hash()); err != nil {
-			logging.Debug(logCtx, "prompt attribution: failed to get shadow commit",
-				slog.String("shadow_ref", ref.Hash().String()),
-				slog.String("error", err.Error()))
-		} else if tree, err := shadowCommit.Tree(); err != nil {
-			logging.Debug(logCtx, "prompt attribution: failed to get shadow tree",
-				slog.String("error", err.Error()))
-		} else {
-			lastCheckpointTree = tree
-		}
-	}
-	// For new sessions (StepCount == 0), lastCheckpointTree stays nil.
-	// CalculatePromptAttribution falls back to baseTree, ensuring pre-session
-	// worktree dirt is captured even when the shadow branch has other sessions' data.
-
-	// Get base tree for agent lines calculation
-	var baseTree *object.Tree
-	if baseCommit, err := repo.CommitObject(plumbing.NewHash(state.BaseCommit)); err == nil {
-		if tree, treeErr := baseCommit.Tree(); treeErr == nil {
-			baseTree = tree
-		} else {
-			logging.Debug(logCtx, "prompt attribution: base tree unavailable",
-				slog.String("error", treeErr.Error()))
-		}
-	} else {
-		logging.Debug(logCtx, "prompt attribution: base commit unavailable",
-			slog.String("base_commit", state.BaseCommit),
-			slog.String("error", err.Error()))
-	}
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree",
-			slog.String("error", err.Error()))
-		return result
-	}
-
-	// Get worktree status to find ALL changed files. This is a second full
-	// worktree walk in the turn-start hook — the pre-prompt capture in
-	// cli/state.go does its own. They are not shared, but they share the
-	// budget wrapper's process-local breach latch: if the pre-prompt walk
-	// breached, this call fails fast instead of re-entering the walk.
-	status, err := gitrepo.StatusWithBudget(ctx, repo)
-	if err != nil {
-		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
-			slog.String("error", err.Error()))
-		return result
-	}
-
-	worktreeRoot := worktree.Filesystem().Root()
-
-	// Build map of changed files with their worktree content
-	// IMPORTANT: We read from worktree (not staging area) to match what WriteTemporary
-	// captures in checkpoints. This ensures attribution is consistent.
-	changedFiles := make(map[string]string)
-	for filePath, fileStatus := range status {
-		// Skip unmodified files
-		if fileStatus.Worktree == git.Unmodified && fileStatus.Staging == git.Unmodified {
-			continue
-		}
-		// Skip .entire metadata directory (session data, not user code)
-		if strings.HasPrefix(filePath, paths.EntireMetadataDir+"/") || strings.HasPrefix(filePath, ".entire/") {
-			continue
-		}
-
-		// Always read from worktree to match checkpoint behavior, and through the
-		// worktree's shared root: filePath comes straight out of git status, so
-		// it is already the coordinate the root reads in. Joining it onto
-		// worktreeRoot and reading the result is what put a name Entire did not
-		// choose in front of an unconfined open, on the hook path.
-		var content string
-		if data, err := readWorktreeFile(worktreeRoot, filePath); err == nil {
-			// Use git's binary detection algorithm (matches getFileContent behavior).
-			// Binary files are excluded from line-based attribution calculations.
-			isBinary, binErr := binary.IsBinary(bytes.NewReader(data))
-			if binErr == nil && !isBinary {
-				content = string(data)
-			}
-		}
-		// else: file deleted, unreadable, or binary - content remains empty string
-
-		changedFiles[filePath] = content
-	}
-
-	// Use CalculatePromptAttribution from manual_commit_attribution.go
-	result = CalculatePromptAttribution(baseTree, lastCheckpointTree, changedFiles, nextCheckpointNum)
-
-	return result
-}
-
 // getStagedFiles returns a list of files staged for commit using native git CLI.
 // This is much faster than go-git's worktree.Status() which scans the entire
-// working tree. `git diff --cached --name-only` uses native git's optimized index
+// working tree. `git diff --cached --raw` uses native git's optimized index
 // and filesystem monitors.
+//
+// Submodule gitlinks (mode 160000 on the staged side, or on the HEAD side of a
+// staged removal) are skipped: a submodule pointer is not a file of the
+// session's work, and treating one as a staged new file would stamp a trailer
+// no condensation can claim. A rename or copy reports its new path, as
+// `--name-only` did.
 //
 // Returns (non-nil empty slice, nil) when no files are staged — callers can
 // distinguish "no staged files" from "error resolving staged files" (nil, err).
@@ -3298,59 +2997,64 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z")
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--raw", "-z")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git diff --cached: %w", err)
 	}
-
-	staged := []string{}
-	for _, name := range bytes.Split(output, []byte{0}) {
-		if len(name) != 0 {
-			staged = append(staged, filepath.ToSlash(string(name)))
-		}
-	}
-	return staged, nil
+	return parseStagedRaw(output), nil
 }
 
-// getLastPrompt retrieves the most recent user prompt from a session's shadow branch.
-// Reads prompt.txt directly from the shadow branch tree instead of parsing the full
-// transcript (which involves token counting, context generation, etc.).
-// Returns empty string if no prompt can be retrieved.
-func (s *ManualCommitStrategy) getLastPrompt(_ context.Context, repo *git.Repository, state *SessionState) string {
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return ""
-	}
+// gitlinkMode is the tree-entry mode git uses for a submodule commit pointer.
+const gitlinkMode = "160000"
 
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return ""
+// parseStagedRaw parses `git diff --raw -z` output into the staged paths,
+// skipping submodule gitlinks. Each record is
+// ":<src mode> <dst mode> <src sha> <dst sha> <status>\0<path>\0", with a
+// second path for renames and copies (status R or C).
+func parseStagedRaw(output []byte) []string {
+	staged := []string{}
+	fields := bytes.Split(output, []byte{0})
+	for i := 0; i < len(fields); i++ {
+		header := string(fields[i])
+		if !strings.HasPrefix(header, ":") {
+			continue
+		}
+		meta := strings.Fields(strings.TrimPrefix(header, ":"))
+		if len(meta) < 5 || i+1 >= len(fields) {
+			break
+		}
+		status := meta[4]
+		path := string(fields[i+1])
+		i++
+		if (status[0] == 'R' || status[0] == 'C') && i+1 < len(fields) {
+			path = string(fields[i+1])
+			i++
+		}
+		srcMode, dstMode := meta[0], meta[1]
+		if dstMode == gitlinkMode || (status == "D" && srcMode == gitlinkMode) {
+			continue
+		}
+		if path != "" {
+			staged = append(staged, filepath.ToSlash(path))
+		}
 	}
+	return staged
+}
 
-	tree, err := commit.Tree()
-	if err != nil {
-		return ""
+// getLastPrompt retrieves the most recent user prompt of a session from its
+// staged .entire/metadata/<session>/prompt.txt, falling back to the truncated
+// LastPrompt in session state. Returns empty string if neither is available.
+func (s *ManualCommitStrategy) getLastPrompt(ctx context.Context, state *SessionState) string {
+	if root, err := entiredir.OpenForRead(ctx); err == nil {
+		if data, readErr := entiredir.ReadFile(root, sessionMetadataFileName(state.SessionID, paths.PromptFileName)); readErr == nil {
+			if prompt := extractLastPrompt(string(data)); prompt != "" {
+				return prompt
+			}
+		}
 	}
-
-	// Read prompt.txt directly from the shadow branch tree.
-	// Prompts are separated by "\n\n---\n\n" — extract the last one.
-	metadataDir := paths.EntireMetadataDir + "/" + state.SessionID
-	promptPath := metadataDir + "/" + paths.PromptFileName
-	file, err := tree.File(promptPath)
-	if err != nil {
-		return ""
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return ""
-	}
-
-	return extractLastPrompt(content)
+	return state.LastPrompt
 }
 
 // extractLastPrompt returns the last non-empty prompt from prompt.txt content.
@@ -3369,42 +3073,6 @@ func extractLastPrompt(content string) string {
 		}
 	}
 	return ""
-}
-
-// TODO: check if its duplicated
-// readPromptsFromShadowBranch reads prompt.txt from the shadow branch tree.
-// Returns all prompts split on "\n\n---\n\n", or nil if prompt.txt is not available.
-func readPromptsFromShadowBranch(_ context.Context, repo *git.Repository, state *SessionState) []string {
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil
-	}
-
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil
-	}
-
-	metadataDir := paths.EntireMetadataDir + "/" + state.SessionID
-	promptPath := metadataDir + "/" + paths.PromptFileName
-	file, err := tree.File(promptPath)
-	if err != nil {
-		return nil
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return nil
-	}
-
-	return splitPromptContent(content)
 }
 
 // errPartialState signals InitializeSession's mutation callback that the
@@ -3446,7 +3114,7 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 	// Without this fix, the next checkpoint's scoped transcript starts mid-turn,
 	// including a tail of already-condensed content.
 	//
-	// Skip this when carry-forward is active. carryForwardToNewShadowBranch
+	// Skip this when carry-forward is active. carryForwardRemainingFiles
 	// intentionally resets CheckpointTranscriptStart to 0 so the next checkpoint
 	// remains self-contained with the full transcript.
 	if hadMidTurnCommits && state.TranscriptPath != "" && len(state.FilesTouched) == 0 {
@@ -3645,7 +3313,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		return 1 // Count as error - all checkpoints will be skipped
 	}
 
-	// Open repository (needed for shadow branch prompt reading and checkpoint store)
+	// Open repository (needed for the checkpoint store)
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		logging.Warn(logCtx, "finalize: failed to open repository",
@@ -3656,10 +3324,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	}
 	defer repo.Close()
 
-	prompts := readPromptsFromShadowBranch(ctx, repo, state)
-	if len(prompts) == 0 {
-		prompts = readPromptsFromFilesystem(ctx, state.SessionID)
-	}
+	prompts := readPromptsFromFilesystem(ctx, state.SessionID)
 
 	// Persist newly extracted events into state (the caller's MutateSessionState
 	// saves them); telemetry for them is emitted by the lifecycle turn-end
@@ -3678,7 +3343,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	// here before anything is persisted to the metadata branch.
 	//
 	// On failure: drop the transcript but continue writing checkpoint metadata
-	// (attribution, files touched, prompts). Hooks run without user interaction
+	// (files touched, prompts). Hooks run without user interaction
 	// so there is no retry path — preserving partial metadata is better than
 	// losing everything. Persisting an unredacted transcript would be worse.
 	// Run the regex-only pipeline over the transcript — OPF runs later in
@@ -3792,7 +3457,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 
 	// Clear turn checkpoint IDs. Do NOT update CheckpointTranscriptStart here — it was
 	// already set correctly by PostCommit: condenseAndUpdateState sets it to the total
-	// transcript lines when condensing, and carryForwardToNewShadowBranch resets it to 0
+	// transcript lines when condensing, and carryForwardRemainingFiles resets it to 0
 	// when carry-forward is active. Overwriting here would break carry-forward by making
 	// sessionHasNewContent think the transcript is fully consumed (no growth).
 	state.TurnCheckpointIDs = nil
@@ -3837,67 +3502,24 @@ func filesChangedInCommitFallback(ctx context.Context, headTree, parentTree *obj
 	return result
 }
 
-// carryForwardToNewShadowBranch creates a new shadow branch at the current HEAD
-// containing the remaining uncommitted files and all session metadata.
-// This enables the next commit to get its own unique checkpoint.
-func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
-	ctx context.Context,
-	repo *git.Repository,
-	state *SessionState,
-	remainingFiles []string,
-) {
-	logCtx := logging.WithComponent(ctx, "checkpoint")
-	start := time.Now()
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: CheckpointReadRemotes(ctx)})
-	if err != nil {
-		logging.Warn(logCtx, "post-commit: carry-forward failed to open checkpoint store",
-			slog.String("session_id", state.SessionID),
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-
-	// Don't include metadata directory in carry-forward. The carry-forward branch
-	// only needs to preserve file content for comparison - not the transcript.
-	// Including the transcript would cause sessionHasNewContent to always return true
-	// because CheckpointTranscriptStart is reset to 0 for carry-forward.
-	writeCtx, carryForwardWriteSpan := perf.Start(ctx, "write_carry_forward_shadow")
-	result, err := stores.Ephemeral().Write(writeCtx, checkpoint.Step{
-		SessionID:         state.SessionID,
-		BaseCommit:        state.BaseCommit,
-		WorktreeID:        state.WorktreeID,
-		ModifiedFiles:     remainingFiles,
-		MetadataDir:       "",
-		CommitMessage:     "carry forward: uncommitted session files",
-		IsFirstCheckpoint: false,
-	})
-	if err != nil {
-		carryForwardWriteSpan.RecordError(err)
-		carryForwardWriteSpan.End()
-		logging.Warn(logCtx, "post-commit: carry-forward failed",
-			slog.String("session_id", state.SessionID),
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-	carryForwardWriteSpan.End()
-	duration := time.Since(start)
-	if result.Skipped {
-		logging.Debug(logCtx, "post-commit: carry-forward skipped (no changes)",
-			slog.String("session_id", state.SessionID),
-		)
-		return
-	}
-
-	// Update state for the carry-forward checkpoint.
-	// CheckpointTranscriptStart = 0 is intentional: each checkpoint is self-contained with
-	// the full transcript. This trades storage efficiency for simplicity:
-	// - Pro: Each checkpoint is independently readable without needing to stitch together
-	//   multiple checkpoints to understand the session history
-	// - Con: For long sessions with multiple partial commits, each checkpoint includes
-	//   the full transcript, which could be large
-	// An alternative would be incremental checkpoints (only new content since last condensation),
-	// but this would complicate checkpoint retrieval and require careful tracking of dependencies.
+// carryForwardRemainingFiles starts a fresh checkpoint window for files a
+// partial commit left uncommitted (already in state.FilesTouched), so the next
+// commit gets its own checkpoint. Nothing is written to git: the files stay in
+// the worktree and their recorded hashes in state.TouchedFileHashes.
+//
+// CheckpointTranscriptStart = 0 is intentional: each checkpoint is self-contained with
+// the full transcript. This trades storage efficiency for simplicity:
+//   - Pro: Each checkpoint is independently readable without needing to stitch together
+//     multiple checkpoints to understand the session history
+//   - Con: For long sessions with multiple partial commits, each checkpoint includes
+//     the full transcript, which could be large
+//
+// An alternative would be incremental checkpoints (only new content since last condensation),
+// but this would complicate checkpoint retrieval and require careful tracking of dependencies.
+//
+// StepCount = 1 keeps the session pending (State.HasPendingWork) and routes
+// sessionHasNewContent through the stored-transcript check.
+func carryForwardRemainingFiles(logCtx context.Context, state *SessionState) {
 	state.StepCount = 1
 	state.CheckpointTranscriptStart = 0
 	state.CheckpointTranscriptSize = 0
@@ -3911,11 +3533,58 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 
 	logging.Info(logCtx, "post-commit: carried forward remaining files",
 		slog.String("session_id", state.SessionID),
-		slog.Int("remaining_files", len(remainingFiles)),
+		slog.Int("remaining_files", len(state.FilesTouched)),
 	)
-	logging.Debug(logCtx, "carry-forward timings",
-		slog.String("session_id", state.SessionID),
-		slog.Int64("write_carry_forward_shadow_ms", duration.Milliseconds()),
-		slog.Int("remaining_files", len(remainingFiles)),
-	)
+}
+
+// getAllChangedFilesBetweenTreesSlow returns a list of all files that differ between two trees.
+// This is the slow go-git tree-walk fallback for filesChangedInCommit when
+// `git diff-tree` fails.
+func getAllChangedFilesBetweenTreesSlow(ctx context.Context, tree1, tree2 *object.Tree) ([]string, error) {
+	if tree1 == nil && tree2 == nil {
+		return nil, nil
+	}
+
+	tree1Hashes := make(map[string]string)
+	tree2Hashes := make(map[string]string)
+
+	if tree1 != nil {
+		if err := tree1.Files().ForEach(func(f *object.File) error {
+			if err := ctx.Err(); err != nil {
+				return err //nolint:wrapcheck // Propagating context cancellation
+			}
+			tree1Hashes[f.Name] = f.Hash.String()
+			return nil
+		}); err != nil {
+			return nil, err //nolint:wrapcheck // Propagating context/iteration error
+		}
+	}
+
+	if tree2 != nil {
+		if err := tree2.Files().ForEach(func(f *object.File) error {
+			if err := ctx.Err(); err != nil {
+				return err //nolint:wrapcheck // Propagating context cancellation
+			}
+			tree2Hashes[f.Name] = f.Hash.String()
+			return nil
+		}); err != nil {
+			return nil, err //nolint:wrapcheck // Propagating context/iteration error
+		}
+	}
+
+	var changed []string
+
+	for path, hash1 := range tree1Hashes {
+		if hash2, exists := tree2Hashes[path]; !exists || hash1 != hash2 {
+			changed = append(changed, path)
+		}
+	}
+
+	for path := range tree2Hashes {
+		if _, exists := tree1Hashes[path]; !exists {
+			changed = append(changed, path)
+		}
+	}
+
+	return changed, nil
 }

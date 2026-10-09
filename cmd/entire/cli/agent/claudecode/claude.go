@@ -144,6 +144,19 @@ func (c *ClaudeCodeAgent) GetSessionBaseDir() (string, error) {
 	return filepath.Join(configDir, "projects"), nil
 }
 
+// SessionHome returns Claude Code's configuration directory.
+func (c *ClaudeCodeAgent) SessionHome() (string, error) {
+	return resolveClaudeConfigDir()
+}
+
+// HomeLayout reports that Claude Code keeps per-project session directories
+// under projects.
+func (c *ClaudeCodeAgent) HomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"projects"}}
+}
+
+var _ agent.HomeLayoutProvider = (*ClaudeCodeAgent)(nil)
+
 // ReadSession reads a session from Claude's storage (JSONL transcript file).
 // The session data is stored in NativeData as raw JSONL bytes.
 // ModifiedFiles is computed by parsing the transcript.
@@ -320,23 +333,6 @@ func (c *ClaudeCodeAgent) ChunkTranscript(_ context.Context, content []byte, max
 
 func (c *ClaudeCodeAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return agent.ReassembleJSONL(chunks), nil
-}
-
-// LaunchCmd builds an exec.Cmd for `claude "<initialPrompt>"`. Stdio is wired
-// to the caller's TTY so the agent runs foreground and the user interacts
-// normally. The call site is expected to Run() and wait. Hooks inherit the
-// parent environment.
-func (c *ClaudeCodeAgent) LaunchCmd(ctx context.Context, initialPrompt string) (*exec.Cmd, error) {
-	bin, err := exec.LookPath("claude")
-	if err != nil {
-		return nil, fmt.Errorf("claude binary not on PATH: %w", err)
-	}
-	cmd := exec.CommandContext(ctx, bin, initialPrompt)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-	return cmd, nil
 }
 
 // CallerSessionEnvVar names the variable holding the session ID Claude Code

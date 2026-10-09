@@ -151,6 +151,14 @@ type WriteOptions struct {
 	// CheckpointSummary.CommitSHA point back here.
 	CommitSHA string
 
+	// LinkedCommits links this checkpoint to existing commits without a
+	// trailer, as `entire session attach --commit` writes when the commit
+	// cannot be amended. Unlike the import anchor (CommitSHA) it is an
+	// attributing link: readers treat each entry exactly like a commit
+	// carrying this checkpoint's Entire-Checkpoint trailer. A rewrite of the
+	// same checkpoint keeps the existing entries and adds new ones.
+	LinkedCommits []LinkedCommit
+
 	// Transcript is the session transcript content (full.jsonl).
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
@@ -173,14 +181,11 @@ type WriteOptions struct {
 	// historical name/JSON tag, it is no longer a count of checkpoints.
 	CheckpointsCount int
 
-	// SaveStepCount is the number of SaveStep-recorded steps (shadow-branch
-	// commits) for this session. Distinct from CheckpointsCount (the displayed
-	// prompt count): this is the honest "did real checkpoint work happen" signal
-	// used to gate combined attribution. 0 means a commit-only / fallback session.
+	// SaveStepCount is the number of SaveStep-recorded turn-end steps for this
+	// session. Distinct from CheckpointsCount (the displayed prompt count): this
+	// is the honest "did real checkpoint work happen" signal. 0 means a
+	// commit-only / fallback session.
 	SaveStepCount int
-
-	// EphemeralBranch is the shadow branch name (for manual-commit strategy)
-	EphemeralBranch string
 
 	// AuthorName is the name to use for commits
 	AuthorName string
@@ -232,21 +237,6 @@ type WriteOptions struct {
 
 	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage)
 	SessionMetrics *SessionMetrics
-
-	// Attribution is line-level attribution calculated at commit time
-	// comparing checkpoint tree (agent work) to committed tree (may include human edits)
-	Attribution *Attribution
-
-	// PromptAttributionsJSON is the raw PromptAttributions data, JSON-encoded.
-	// Persisted for diagnostic purposes — shows exactly which prompt recorded
-	// which "user" lines, enabling root cause analysis of attribution bugs.
-	// Uses json.RawMessage to avoid importing session package.
-	PromptAttributionsJSON json.RawMessage
-
-	// CombinedAttribution is holistic attribution across all sessions.
-	// Used during migration to preserve v1 root summary attribution.
-	// During normal condensation this is nil (computed post-commit via a CheckpointAttribution write).
-	CombinedAttribution *Attribution
 
 	// Summary is an optional AI-generated summary for this checkpoint.
 	// This field may be nil when:
@@ -372,6 +362,10 @@ func (p *PrecomputedTranscriptBlobs) IsUsable() bool {
 type CheckpointInfo struct {
 	// CheckpointID is the stable 12-hex-char identifier
 	CheckpointID id.CheckpointID
+
+	// LinkedCommits are the checkpoint's trailer-less commit links; see
+	// WriteOptions.LinkedCommits.
+	LinkedCommits []LinkedCommit
 
 	// SessionID is the session identifier (most recent session for multi-session checkpoints)
 	SessionID string
@@ -505,12 +499,15 @@ type Metadata struct {
 	// AI-generated summary of the checkpoint
 	Summary *Summary `json:"summary,omitempty"`
 
-	// Attribution is line-level attribution calculated at commit time
-	Attribution *Attribution `json:"initial_attribution,omitempty"`
-
-	// PromptAttributions is the raw per-prompt attribution data used to compute Attribution.
-	// Diagnostic field — shows which prompt recorded which "user" lines.
-	PromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
+	// LegacyInitialAttribution and LegacyPromptAttributions carry the line
+	// attribution older CLIs wrote (initial_attribution, prompt_attributions)
+	// through a rewrite of an existing checkpoint, byte for byte. The CLI no
+	// longer computes, reads or sets them: they are opaque, and absent on
+	// checkpoints this version creates. Without them, decoding and re-encoding
+	// an old checkpoint (a summary backfill, a transcript finalize, an attached
+	// session) would strip data entire.io still reads.
+	LegacyInitialAttribution json.RawMessage `json:"initial_attribution,omitempty"`
+	LegacyPromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
 
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
 	Kind string `json:"kind,omitempty"`
@@ -578,8 +575,8 @@ type SessionFilePaths struct {
 
 // CheckpointSummary is the root-level metadata.json for a checkpoint.
 // It contains aggregated statistics from all sessions and a map of session IDs
-// to their file paths. Session-specific data (including initial_attribution)
-// is stored in the session's subdirectory metadata.json.
+// to their file paths. Session-specific data is stored in the session's
+// subdirectory metadata.json.
 //
 // Structure on entire/checkpoints/v1 branch:
 //
@@ -601,12 +598,18 @@ type CheckpointSummary struct {
 	Strategy     string          `json:"strategy"`
 	Branch       string          `json:"branch,omitempty"`
 	// CommitSHA: import-only anchor; see WriteOptions.CommitSHA.
-	CommitSHA           string             `json:"commit_sha,omitempty"`
-	CheckpointsCount    int                `json:"checkpoints_count"`
-	FilesTouched        []string           `json:"files_touched"`
-	Sessions            []SessionFilePaths `json:"sessions"`
-	TokenUsage          *types.TokenUsage  `json:"token_usage,omitempty"`
-	CombinedAttribution *Attribution       `json:"combined_attribution,omitempty"`
+	CommitSHA        string             `json:"commit_sha,omitempty"`
+	CheckpointsCount int                `json:"checkpoints_count"`
+	FilesTouched     []string           `json:"files_touched"`
+	Sessions         []SessionFilePaths `json:"sessions"`
+	TokenUsage       *types.TokenUsage  `json:"token_usage,omitempty"`
+	// LinkedCommits: attributing trailer-less links; see WriteOptions.LinkedCommits.
+	LinkedCommits []LinkedCommit `json:"linked_commits,omitempty"`
+
+	// LegacyCombinedAttribution carries the combined_attribution older CLIs
+	// wrote into the root summary through rewrites, byte for byte; see
+	// Metadata.LegacyInitialAttribution. Never computed, read or set here.
+	LegacyCombinedAttribution json.RawMessage `json:"combined_attribution,omitempty"`
 
 	// HasReview is the umbrella "any review happened" flag: true when at least
 	// one session in this checkpoint has a review-kind Kind (currently
@@ -663,24 +666,15 @@ type CodeLearning struct {
 	Finding string `json:"finding"`            // What was learned
 }
 
-// Attribution captures line-level attribution metrics at commit time.
-// This is a point-in-time snapshot comparing the checkpoint tree (agent work)
-// against the committed tree (may include human edits).
-//
-// Attribution Metrics:
-//   - TotalCommitted keeps the historical "net additions" view for compatibility
-//   - TotalLinesChanged measures total committed line changes (adds + modifies + removes)
-//   - AgentPercentage represents "of the lines changed in this commit, what percentage came from the agent"
-//   - AgentRemoved tracks committed deletions performed by the agent
-type Attribution struct {
-	CalculatedAt      time.Time `json:"calculated_at"`
-	AgentLines        int       `json:"agent_lines"`              // Lines added by agent that remain in the commit
-	AgentRemoved      int       `json:"agent_removed"`            // Lines removed by agent that remain removed in the commit
-	HumanAdded        int       `json:"human_added"`              // Lines added by human (excluding modifications)
-	HumanModified     int       `json:"human_modified"`           // Lines modified by human (estimate: min(added, removed))
-	HumanRemoved      int       `json:"human_removed"`            // Lines removed by human (excluding modifications)
-	TotalCommitted    int       `json:"total_committed"`          // Net additions in commit (legacy additions-focused metric)
-	TotalLinesChanged int       `json:"total_lines_changed"`      // Total committed line changes (adds + modifies + removes)
-	AgentPercentage   float64   `json:"agent_percentage"`         // (agent_lines + agent_removed) / total_lines_changed * 100
-	MetricVersion     int       `json:"metric_version,omitempty"` // 0/absent = legacy (additions-only %), 2 = changed-lines %
+// LinkedCommit is one trailer-less link from a checkpoint to a commit; see
+// WriteOptions.LinkedCommits. The server links it only after verifying the
+// commit, so Repo is a hint for finding which code repository holds SHA when
+// one checkpoint store serves several.
+type LinkedCommit struct {
+	// SHA is the full lowercase commit hash.
+	SHA string `json:"sha"`
+	// Repo is the code repository as <forge>/<owner>/<repo> (e.g.
+	// gh/entireio/cli), resolved from the git remote that holds the commit.
+	// Empty when it could not be resolved.
+	Repo string `json:"repo,omitempty"`
 }

@@ -102,7 +102,7 @@ func newTrailCmdForMode(project bool) *cobra.Command {
 		// Advertised to agents only when trails are enabled for the repo, so
 		// we never point agents at trails they can't use.
 		cmd.Annotations[agentHelpRequiresTrailsAnnotation] = agentHelpAnnotationEnabled
-		cmd.AddCommand(newTrailShowCmd(), newTrailListCmd(), newTrailCreateCmd(), newTrailUpdateCmd(), newTrailDeleteCmd(), newTrailCommentCmd())
+		cmd.AddCommand(newTrailShowCmd(), newTrailListCmd(), newTrailCreateCmd(), newTrailUpdateCmd(), newTrailDeleteCmd(), newTrailCommentCmd(), newTrailMergeCmd())
 	}
 	cmd.AddCommand(newTrailCheckoutCmd(mode), newTrailResumeCmd(mode), newTrailFindingCmd(mode), newTrailWatchCmd(mode))
 	cmd.AddCommand(newTrailApproveCmd(mode), newTrailRequestChangesCmd(mode), newTrailApprovalsCmd(mode))
@@ -1887,20 +1887,6 @@ func describeTrailRef(t *api.TrailResource) string {
 		return "trail"
 	}
 	return fmt.Sprintf("trail %q", title)
-}
-
-// parseTrailNumberArg parses an optional positional trail-number argument.
-// It returns 0 when no argument is supplied; a supplied value must be a
-// positive integer (the server keys single-trail endpoints by number).
-func parseTrailNumberArg(args []string) (int, error) {
-	if len(args) == 0 {
-		return 0, nil
-	}
-	n, err := strconv.Atoi(args[0])
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("invalid trail number %q: expected a positive integer (see 'entire trail list')", args[0])
-	}
-	return n, nil
 }
 
 // Trail deletion was removed server-side (owned trails always 409). The command

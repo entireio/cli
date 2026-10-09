@@ -1338,3 +1338,154 @@ func TestRepoClone_GitHubWithoutTheDefaultClusterStillAsks(t *testing.T) {
 	require.ErrorContains(t, err, "none of them is "+defaultClusterHost)
 	require.ErrorContains(t, err, clusterSelectorFlag)
 }
+
+// testDetachedDetail is the answer for a /gh/ address a detach released, in
+// the wording `repo clone` prints, which core may adopt; the parsing table
+// also pins the wording core sends today.
+const testDetachedDetail = `gh/owner/repo was detached and moved to et/acme/repo. Clone using "entire repo clone /et/acme/repo" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/repo"`
+
+// detachedMessage is what `repo clone` prints for testGitHubRef detached into
+// et/<project>/<repo> on aws-us-east-2, telling the user to clone cloneArg.
+func detachedMessage(projectRepo, cloneArg string) string {
+	return "gh/owner/repo was detached and moved to et/" + projectRepo + `. Clone using "entire repo clone ` + cloneArg +
+		`" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/` + projectRepo + `"`
+}
+
+// servePlacementsNotFound answers the placements endpoint with a 404 RFC 7807
+// problem, the shape core uses for every refusal.
+func servePlacementsNotFound(t *testing.T, detail string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/mirrors/placements", r.URL.Path)
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		assert.NoError(t, printJSON(w, &coreapi.ErrorModel{
+			Status: coreapi.NewOptInt64(http.StatusNotFound),
+			Title:  coreapi.NewOptString("Not Found"),
+			Detail: coreapi.NewOptString(detail),
+		}))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestRepoClone_DetachedAddressNamesTheNativeRepo covers a /gh/ address a
+// detach released: core answers 404 naming the et/ repo, and the user is told
+// how to clone it or repoint a clone — not offered to mirror the address again.
+//
+// Not parallel: swaps the package-global activeCoreClient.
+func TestRepoClone_DetachedAddressNamesTheNativeRepo(t *testing.T) {
+	// The wording core sends today.
+	srvURL := servePlacementsNotFound(t, "gh/owner/repo moved to et/acme/repo. Update your remote: git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/repo")
+
+	_, err := resolveCloneURLAgainst(t, srvURL, "")
+	require.EqualError(t, err, testDetachedDetail)
+	require.NotContains(t, err.Error(), "mirror add", "a released address must not be onboarded again")
+}
+
+// An address nothing mirrors still answers the empty list, and the user is
+// still offered to onboard it.
+//
+// Not parallel: swaps the package-global activeCoreClient.
+func TestRepoClone_UnmirroredAddressOffersOnboarding(t *testing.T) {
+	srvURL := servePlacements(t, nil)
+
+	_, err := resolveCloneURLAgainst(t, srvURL, "")
+	require.EqualError(t, err, "no mirror found for /gh/owner/repo; run 'entire repo mirror add /gh/owner/repo' to onboard it")
+}
+
+// The message is rebuilt from core's prose, so the cases that prose can take
+// are pinned: a dotted repo name keeps its dot, both wordings are answered
+// the same way, and a 404 that is not a detached
+// answer — or names a path the native grammar refuses — is rendered as core
+// sent it, with no command made up from it.
+//
+// Not parallel: swaps the package-global activeCoreClient.
+func TestRepoClone_DetachedAnswerParsing(t *testing.T) {
+	for _, tc := range []struct {
+		name, detail, want string
+	}{
+		{
+			name:   "dotted repo name",
+			detail: `gh/owner/repo was detached and moved to et/acme/entire-trails.el. Clone using "entire repo clone /et/acme/entire-trails.el" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/entire-trails.el"`,
+			want:   detachedMessage("acme/entire-trails.el", "/et/acme/entire-trails.el"),
+		},
+		{
+			name:   "the wording core sends today",
+			detail: "gh/owner/repo moved to et/acme/repo. Update your remote: git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/repo",
+			want:   detachedMessage("acme/repo", "/et/acme/repo"),
+		},
+		{
+			name:   "uppercase names, as the grammar admits",
+			detail: `gh/owner/repo was detached and moved to et/Acme/Repo. Clone using "entire repo clone /et/Acme/Repo" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/Acme/Repo"`,
+			want:   detachedMessage("Acme/Repo", "/et/Acme/Repo"),
+		},
+		{
+			name:   "a .git suffix is not part of the name",
+			detail: "gh/owner/repo moved to et/acme/repo.git. Update your remote: git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/repo.git",
+			want:   detachedMessage("acme/repo", "/et/acme/repo"),
+		},
+		{name: "plain not found", detail: "repo not found"},
+		{name: "trailing text", detail: testDetachedDetail + " (since 2026-10-01)"},
+		{name: "control characters in the path", detail: `gh/owner/repo was detached and moved to et/acme/re` + "\x1b" + `po. Clone using "entire repo clone /et/acme/re` + "\x1b" + `po" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/re` + "\x1b" + `po"`},
+		{name: "path the grammar refuses", detail: `gh/owner/repo was detached and moved to et/a/b. Clone using "entire repo clone /et/a/b" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/a/b"`},
+		{name: "not an et/ path", detail: `gh/owner/repo was detached and moved to gh/other/repo. Clone using "entire repo clone /gh/other/repo" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/gh/other/repo"`},
+		{name: "remote names another repo", detail: `gh/owner/repo was detached and moved to et/acme/repo. Clone using "entire repo clone /et/acme/repo" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/other"`},
+		{name: "remote host refused", detail: `gh/owner/repo was detached and moved to et/acme/repo. Clone using "entire repo clone /et/acme/repo" or update your remote using "git remote set-url origin entire://localhost:1/et/acme/repo"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srvURL := servePlacementsNotFound(t, tc.detail)
+
+			_, err := resolveCloneURLAgainst(t, srvURL, "")
+			if tc.want == "" {
+				require.EqualError(t, err, tc.detail)
+				return
+			}
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
+// --cluster resolves on the core fronting that cluster, and a released address
+// there gets the same answer.
+//
+// Not parallel: swaps the package-global clusterCoreClient.
+func TestRepoClone_DetachedAddressOnAnotherCluster(t *testing.T) {
+	srvURL := servePlacementsNotFound(t, testDetachedDetail)
+	prev := clusterCoreClient
+	clusterCoreClient = func(context.Context, string) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srvURL, "tok")
+	}
+	t.Cleanup(func() { clusterCoreClient = prev })
+
+	_, err := resolveRepoRemoteURL(cloneTestCmdWithContext(t), testGitHubRef, "aws-us-east-2.entire.io", clonePlacementPicker())
+	// The full URL, not the /et/ shorthand: a shorthand resolves on the active
+	// context, which need not be the federation that answered.
+	require.EqualError(t, err, detachedMessage("acme/repo", "entire://aws-us-east-2.entire.io/et/acme/repo"))
+}
+
+// A --cluster that does not resolve falls back to the active context, and a
+// detached answer from there is the answer: the DNS failure stays a debug detail,
+// as it does when the fallback lists placements.
+//
+// Not parallel: swaps package-global client seams.
+func TestRepoClone_DetachedAddressThroughTheUnknownClusterFallback(t *testing.T) {
+	srvURL := servePlacementsNotFound(t, testDetachedDetail)
+	unreachableCluster(t, true)
+
+	_, err := resolveCloneURLAgainst(t, srvURL, "wrongcluster")
+	require.EqualError(t, err, testDetachedDetail)
+}
+
+// The placement resolver is shared by remote, mirror remove/detach and grant
+// routing, so the message is rebuilt by `repo clone` alone: the shared
+// resolver keeps core's answer as the plain API error it always was.
+func TestResolvePullablePlacements_DetachedAnswerStaysCoreError(t *testing.T) {
+	t.Parallel()
+	c, err := coreapi.NewWithBearer(servePlacementsNotFound(t, testDetachedDetail), "tok")
+	require.NoError(t, err)
+
+	_, err = resolvePullablePlacements(t.Context(), c, "owner", "repo")
+	require.Error(t, err)
+	require.Equal(t, testDetachedDetail, coreapi.APIError(err))
+}

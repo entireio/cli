@@ -7,38 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
-
-func TestClaudeCodeAgent_LaunchCmd(t *testing.T) {
-	t.Parallel()
-	a := NewClaudeCodeAgent()
-	launcher, ok := a.(agent.Launcher)
-	if !ok {
-		t.Fatal("ClaudeCodeAgent does not implement agent.Launcher")
-	}
-	// Binary may not be on PATH in CI; ErrNotFound is acceptable for this test.
-	cmd, err := launcher.LaunchCmd(context.Background(), "hello world")
-	if err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			t.Skip("claude binary not on PATH; skipping cmd shape check")
-		}
-		t.Fatalf("LaunchCmd: %v", err)
-	}
-	if cmd == nil {
-		t.Fatal("nil cmd")
-	}
-	if cmd.Path == "" {
-		t.Error("cmd.Path empty")
-	}
-	joined := strings.Join(cmd.Args, " ")
-	if !strings.Contains(joined, "hello world") {
-		t.Errorf("args missing prompt: %v", cmd.Args)
-	}
-}
 
 func TestResolveSessionFile(t *testing.T) {
 	t.Parallel()
@@ -84,6 +56,31 @@ func TestBuildGenerateArgs_IsolatesSettingSources(t *testing.T) {
 	// With no settings path, we inject nothing extra.
 	if _, ok := flagValue(args, "--settings"); ok {
 		t.Fatalf("--settings must be absent when there is no settings path: %v", args)
+	}
+}
+
+// Settings isolation leaves the built-in tools available, and Read runs
+// without approval inside the working directory, so an injected instruction
+// could copy a file into the summary. Both argv builders must remove them.
+func TestBuildGenerateArgs_RemovesAllTools(t *testing.T) {
+	t.Parallel()
+	for name, args := range map[string][]string{
+		"buildGenerateArgs":          buildGenerateArgs("haiku", ""),
+		"buildStreamingGenerateArgs": buildStreamingGenerateArgs("haiku", ""),
+	} {
+		got, ok := flagValue(args, "--tools")
+		if !ok {
+			t.Errorf("%s: --tools missing; the model keeps every built-in tool: %v", name, args)
+			continue
+		}
+		if got != "" {
+			t.Errorf("%s: --tools = %q, want %q (no tools)", name, got, "")
+		}
+		// --tools covers built-in tools only; MCP servers from the user's
+		// config would keep theirs.
+		if !slices.Contains(args, "--strict-mcp-config") {
+			t.Errorf("%s: --strict-mcp-config missing; user MCP servers keep their tools: %v", name, args)
+		}
 	}
 }
 

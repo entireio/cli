@@ -26,6 +26,10 @@ type InfoResponse struct {
 	ProtectedFiles  []string           `json:"protected_files"`
 	HookNames       []string           `json:"hook_names"`
 	Capabilities    agent.DeclaredCaps `json:"capabilities"`
+	// CallerEnvVars are environment variables the agent sets for the commands
+	// it runs, so Entire can tell when the agent (not a person) is the caller.
+	// Optional.
+	CallerEnvVars []string `json:"caller_env_vars,omitempty"`
 }
 
 // DetectResponse is the JSON returned by the "detect" subcommand.
@@ -82,12 +86,6 @@ type ExtractFilesResponse struct {
 // ExtractPromptsResponse is the JSON returned by the "extract-prompts" subcommand.
 type ExtractPromptsResponse struct {
 	Prompts []string `json:"prompts"`
-}
-
-// ExtractSummaryResponse is the JSON returned by the "extract-summary" subcommand.
-type ExtractSummaryResponse struct {
-	Summary    string `json:"summary"`
-	HasSummary bool   `json:"has_summary"`
 }
 
 // TokenUsageResponse is the JSON returned by token calculation subcommands.

@@ -37,8 +37,10 @@ const (
 	colHeaderRegion   = "REGION"
 	colHeaderRepo     = "REPO"
 	colHeaderRole     = "ROLE"
+	colHeaderSource   = "SOURCE"
 	colHeaderStatus   = "STATUS"
 	colHeaderTitle    = "TITLE"
+	colHeaderType     = "TYPE"
 )
 
 // Display nouns selected by a count. Spelled here rather than inline because

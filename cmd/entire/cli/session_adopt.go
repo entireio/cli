@@ -90,7 +90,7 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	if err != nil {
 		return err
 	}
-	if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
+	if _, err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
 		return err
 	}
 
@@ -161,11 +161,12 @@ func adoptFromExternalSessionStore(
 			return fmt.Errorf("session %s belongs to %s, not %s",
 				sessionID, adoptSessionWorktreeLabel(sourceState), sourceWorktree)
 		}
-		if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
+		home, err := validateAdoptSourceTranscript(sourceState, sourceWorktree)
+		if err != nil {
 			return err
 		}
 
-		next, nextChanges, err := buildAdoptedSessionState(ctx, sourceState, sourceWorktree)
+		next, nextChanges, err := buildAdoptedSessionState(ctx, sourceState, home, sourceWorktree)
 		if err != nil {
 			return err
 		}
@@ -217,6 +218,7 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	retired.FullyCondensed = true
 	retired.Owner = nil
 	retired.FilesTouched = nil
+	retired.TouchedFileHashes = nil
 	retired.TurnID = ""
 	retired.TurnCheckpointIDs = nil
 	retired.AdoptedIntoWorktreePath = target.WorktreePath
@@ -244,11 +246,12 @@ func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourc
 			return fmt.Errorf("session %s belongs to %s, not %s",
 				sourceState.SessionID, adoptSessionWorktreeLabel(current), sourceWorktree)
 		}
-		if err := validateAdoptSourceTranscript(current, sourceWorktree); err != nil {
+		home, err := validateAdoptSourceTranscript(current, sourceWorktree)
+		if err != nil {
 			return err
 		}
 
-		next, nextChanges, err := buildAdoptedSessionState(ctx, current, sourceWorktree)
+		next, nextChanges, err := buildAdoptedSessionState(ctx, current, home, sourceWorktree)
 		if err != nil {
 			return err
 		}
@@ -267,25 +270,124 @@ func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourc
 	return adopted, changes, nil
 }
 
-func validateAdoptSourceTranscript(source *session.State, sourceWorktree string) error {
+// adoptAgentHome is a source session's AgentHome once agent.ResolveTrustedHome
+// has accepted it, with where the session's agent keeps the source worktree's
+// sessions beneath it. The zero value represents no trusted home; its holds
+// method reports false for every path.
+type adoptAgentHome struct {
+	// path is the home spelled as ResolveTrustedHome checked it.
+	path string
+	// agent is the session's agent.
+	agent agent.HomeLayoutProvider
+	// layout is agent's home layout narrowed to the source worktree.
+	layout agent.HomeLayout
+}
+
+// holds reports whether path, which must be clean, lies where h's agent keeps
+// the source worktree's sessions beneath h.
+func (h adoptAgentHome) holds(path string) bool {
+	return h.path != "" && h.layout.Holds(h.path, path)
+}
+
+// resolveAdoptAgentHome returns state.AgentHome as an adoptAgentHome if
+// agent.ResolveTrustedHome accepts it for the agent named by state.AgentType,
+// with that agent's layout narrowed to sourceWorktree by
+// agent.RepoHomeLayout. It returns the zero value and a nil error when state
+// names no home or no agent, or when that agent is unknown or has no home
+// layout, and the zero value and a non-nil error when the home is refused or
+// when the agent keeps sourceWorktree's sessions outside its active home (an
+// error wrapping errAdoptHomeUnscoped).
+func resolveAdoptAgentHome(state *session.State, sourceWorktree string) (adoptAgentHome, error) {
+	if state.AgentHome == "" || state.AgentType == "" {
+		return adoptAgentHome{}, nil
+	}
+	ag, err := agent.GetByAgentType(state.AgentType)
+	if err != nil {
+		return adoptAgentHome{}, nil //nolint:nilerr // an unknown agent has no home to trust; AgentForTranscriptPath decides instead
+	}
+	provider, ok := agent.AsHomeLayoutProvider(ag)
+	if !ok {
+		return adoptAgentHome{}, nil
+	}
+	home, err := agent.ResolveTrustedHome(provider, state.AgentHome)
+	if err != nil {
+		return adoptAgentHome{}, err //nolint:wrapcheck // the error already names the home
+	}
+	layout, ok, err := agent.RepoHomeLayout(provider, sourceWorktree)
+	if err != nil {
+		return adoptAgentHome{}, err //nolint:wrapcheck // the error already names the agent and what it could not resolve
+	}
+	if !ok {
+		return adoptAgentHome{}, fmt.Errorf("%s %w", provider.Type(), errAdoptHomeUnscoped)
+	}
+	return adoptAgentHome{path: home, agent: provider, layout: layout}, nil
+}
+
+// errAdoptHomeUnscoped is returned, wrapped, by resolveAdoptAgentHome when the
+// session's agent keeps the source worktree's sessions outside its active home
+// (see agent.RepoHomeLayout), as Pi does with PI_CODING_AGENT_SESSION_DIR set.
+// The session's home is then neither trusted nor refused: there is no place
+// beneath it to check the transcript against.
+var errAdoptHomeUnscoped = errors.New("keeps this worktree's sessions outside its active home")
+
+// validateAdoptSourceTranscript returns an error if source's transcript may
+// not be carried into an adopted session. The transcript must be absolute and
+// lie either where source's trusted agent home keeps the sessions of
+// sourceWorktree, or in the session directory, for sourceWorktree, of the
+// agent named by source.AgentType (of any agent when that is empty).
+//
+// It also returns source's trusted agent home when that home holds the
+// transcript, and the zero value otherwise, including when source has no
+// transcript: a home vouches for task transcripts only alongside the session's
+// own.
+func validateAdoptSourceTranscript(source *session.State, sourceWorktree string) (adoptAgentHome, error) {
 	if source == nil || source.TranscriptPath == "" {
-		return nil
+		return adoptAgentHome{}, nil
+	}
+	if !filepath.IsAbs(source.TranscriptPath) {
+		return adoptAgentHome{}, fmt.Errorf("unexpected transcript path for session %s: %s is not absolute",
+			source.SessionID, source.TranscriptPath)
 	}
 
-	if !filepath.IsAbs(source.TranscriptPath) {
-		return fmt.Errorf("unexpected transcript path for session %s: %s is not absolute",
-			source.SessionID, source.TranscriptPath)
+	home, homeErr := resolveAdoptAgentHome(source, sourceWorktree)
+	if home.holds(filepath.Clean(source.TranscriptPath)) {
+		return home, nil
 	}
 	owner, ok := agent.AgentForTranscriptPath(source.TranscriptPath, sourceWorktree)
 	if !ok {
-		return fmt.Errorf("unexpected transcript path for session %s: %s is not owned by a registered agent for %s",
-			source.SessionID, source.TranscriptPath, sourceWorktree)
+		return adoptAgentHome{}, fmt.Errorf("unexpected transcript path for session %s: %w",
+			source.SessionID, adoptTranscriptNotOwned(source, home, homeErr, sourceWorktree))
 	}
 	if source.AgentType != "" && owner.Type() != source.AgentType {
-		return fmt.Errorf("unexpected transcript path for session %s: %s belongs to %s, but source state says %s",
+		return adoptAgentHome{}, fmt.Errorf("unexpected transcript path for session %s: %s belongs to %s, but source state says %s",
 			source.SessionID, source.TranscriptPath, owner.Type(), source.AgentType)
 	}
-	return nil
+	return adoptAgentHome{}, nil
+}
+
+// adoptTranscriptNotOwned explains why neither home, the session's agent home
+// as resolveAdoptAgentHome returned it with homeErr, nor any agent's session
+// directory for sourceWorktree holds source's transcript. It suggests a
+// relocation variable only when one could help: not when the session's home
+// was trusted, since then the path is at fault, nor when the agent keeps the
+// worktree's sessions outside its home, since then the variable is already set.
+func adoptTranscriptNotOwned(source *session.State, home adoptAgentHome, homeErr error, sourceWorktree string) error {
+	path := source.TranscriptPath
+	switch {
+	case home.path != "":
+		return fmt.Errorf("%s is outside the session directory for %s, under both the session's agent home %s and the active home",
+			path, sourceWorktree, home.path)
+	case errors.Is(homeErr, errAdoptHomeUnscoped):
+		return fmt.Errorf("%s is not owned by a registered agent for %s, and the session's agent home %s cannot be checked: %w",
+			path, sourceWorktree, source.AgentHome, homeErr)
+	}
+	hint := "if the agent ran with a relocated home, rerun adopt with the same setting of the variable it used (" +
+		strings.Join(agent.RelocationEnvVars(), ", ") + ")"
+	if homeErr != nil {
+		return fmt.Errorf("%s is not owned by a registered agent for %s, and the session's recorded agent home was refused (%w); %s",
+			path, sourceWorktree, homeErr, hint)
+	}
+	return fmt.Errorf("%s is not owned by a registered agent for %s; %s", path, sourceWorktree, hint)
 }
 
 // dropInvalidAdoptTaskTranscripts clears each declared task transcript path in
@@ -297,18 +399,18 @@ func validateAdoptSourceTranscript(source *session.State, sourceWorktree string)
 // It also clears every inventory entry's resolved path: a resolved path
 // records that the rollout was verified in the source repository, and the
 // inventory refresh verifies it again before use.
-func dropInvalidAdoptTaskTranscripts(ctx context.Context, state *session.State, sourceWorktree string) int {
+func dropInvalidAdoptTaskTranscripts(ctx context.Context, state *session.State, home adoptAgentHome, sourceWorktree string) int {
 	logCtx := logging.WithSessionID(logging.WithComponent(ctx, "session"), state.SessionID)
 	cleared := 0
 	for i := range state.TaskRecords {
 		record := &state.TaskRecords[i]
-		if !keepAdoptTaskTranscript(logCtx, state, record.AgentID, &record.DeclaredTranscriptPath, sourceWorktree) {
+		if !keepAdoptTaskTranscript(logCtx, state, home, record.AgentID, &record.DeclaredTranscriptPath, sourceWorktree) {
 			cleared++
 		}
 	}
 	for i := range state.SubagentInventory {
 		entry := &state.SubagentInventory[i]
-		if !keepAdoptTaskTranscript(logCtx, state, entry.AgentID, &entry.DeclaredTranscriptPath, sourceWorktree) {
+		if !keepAdoptTaskTranscript(logCtx, state, home, entry.AgentID, &entry.DeclaredTranscriptPath, sourceWorktree) {
 			cleared++
 		}
 		entry.ResolvedTranscriptPath = ""
@@ -319,12 +421,12 @@ func dropInvalidAdoptTaskTranscripts(ctx context.Context, state *session.State, 
 // keepAdoptTaskTranscript validates the task transcript path *path and reports
 // whether it was kept. An empty path is kept. A rejected path is logged and
 // set to "".
-func keepAdoptTaskTranscript(logCtx context.Context, state *session.State, agentID string, path *string, sourceWorktree string) bool {
+func keepAdoptTaskTranscript(logCtx context.Context, state *session.State, home adoptAgentHome, agentID string, path *string, sourceWorktree string) bool {
 	if *path == "" {
 		return true
 	}
 	clean := filepath.Clean(*path)
-	if err := validateAdoptTaskTranscript(state, agentID, clean, sourceWorktree); err != nil {
+	if err := validateAdoptTaskTranscript(state, home, agentID, clean, sourceWorktree); err != nil {
 		logging.Warn(logCtx, "cleared adopted task transcript path",
 			slog.String("agent_id", agentID),
 			slog.String("error", err.Error()))
@@ -337,24 +439,22 @@ func keepAdoptTaskTranscript(logCtx context.Context, state *session.State, agent
 
 // validateAdoptTaskTranscript returns an error if path may not be carried into
 // an adopted session as the transcript of its task agentID. The caller passes
-// path in clean form; it must be absolute and lie in the session directory, for
-// sourceWorktree, of the agent named by state.AgentType. When that agent implements
-// agent.TaskTranscriptMatcher, path must also name the task's transcript in the
-// agent's layout relative to state.TranscriptPath. The checks are lexical; they
-// do not resolve symbolic links.
-func validateAdoptTaskTranscript(state *session.State, agentID, path, sourceWorktree string) error {
+// path in clean form; it must be absolute and lie either where home, the
+// session's trusted agent home, keeps the sessions of sourceWorktree, or in the
+// session directory, for sourceWorktree, of the agent named by state.AgentType.
+// When that agent implements agent.TaskTranscriptMatcher, path must also name
+// the task's transcript in the agent's layout relative to state.TranscriptPath.
+// The checks are lexical; they do not resolve symbolic links.
+func validateAdoptTaskTranscript(state *session.State, home adoptAgentHome, agentID, path, sourceWorktree string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("%s is not absolute", path)
 	}
 	if state.AgentType == "" {
 		return fmt.Errorf("%s cannot be checked: the session has no agent type", path)
 	}
-	owner, ok := agent.AgentForTranscriptPath(path, sourceWorktree)
-	if !ok {
-		return fmt.Errorf("%s is not owned by a registered agent for %s", path, sourceWorktree)
-	}
-	if owner.Type() != state.AgentType {
-		return fmt.Errorf("%s belongs to %s, but the session state says %s", path, owner.Type(), state.AgentType)
+	owner, err := adoptTaskTranscriptOwner(state, home, path, sourceWorktree)
+	if err != nil {
+		return err
 	}
 	matcher, ok := agent.AsTaskTranscriptMatcher(owner)
 	if !ok {
@@ -364,6 +464,24 @@ func validateAdoptTaskTranscript(state *session.State, agentID, path, sourceWork
 		return fmt.Errorf("%s is not the transcript of task %q in %s's layout", path, agentID, owner.Type())
 	}
 	return nil
+}
+
+// adoptTaskTranscriptOwner returns the agent that owns the clean task
+// transcript path: home's agent when home holds it, and otherwise the agent
+// whose session directory for sourceWorktree holds it, which must be the agent
+// named by state.AgentType.
+func adoptTaskTranscriptOwner(state *session.State, home adoptAgentHome, path, sourceWorktree string) (agent.Agent, error) {
+	if home.holds(path) {
+		return home.agent, nil
+	}
+	owner, ok := agent.AgentForTranscriptPath(path, sourceWorktree)
+	if !ok {
+		return nil, fmt.Errorf("%s is not owned by a registered agent for %s", path, sourceWorktree)
+	}
+	if owner.Type() != state.AgentType {
+		return nil, fmt.Errorf("%s belongs to %s, but the session state says %s", path, owner.Type(), state.AgentType)
+	}
+	return owner, nil
 }
 
 func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.StateStore, string, string, error) {
@@ -512,7 +630,7 @@ type adoptChanges struct {
 	clearedTranscriptPaths int
 }
 
-func buildAdoptedSessionState(ctx context.Context, source *session.State, sourceWorktree string) (*session.State, adoptChanges, error) {
+func buildAdoptedSessionState(ctx context.Context, source *session.State, home adoptAgentHome, sourceWorktree string) (*session.State, adoptChanges, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return nil, adoptChanges{}, fmt.Errorf("open current repository: %w", err)
@@ -565,9 +683,13 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, source
 			}
 		}
 	}
-	cleared := dropInvalidAdoptTaskTranscripts(ctx, &adopted, sourceWorktree)
+	// Carry AgentHome over only in the spelling ResolveTrustedHome checked, and
+	// only while that home holds the transcript, as validateAdoptSourceTranscript
+	// established. Any other home is dropped; the next turn start records the
+	// home the agent runs under.
+	adopted.AgentHome = home.path
+	cleared := dropInvalidAdoptTaskTranscripts(ctx, &adopted, home, sourceWorktree)
 	adopted.BaseCommit = head.Hash().String()
-	adopted.RealignAttributionBase(head.Hash().String())
 	adopted.WorktreePath = worktreeRoot
 	adopted.WorktreeID = worktreeID
 	adopted.AdoptedIntoWorktreePath = ""
@@ -577,6 +699,9 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, source
 	adopted.Phase = session.PhaseActive
 	adopted.EndedAt = nil
 	adopted.FilesTouched = filesTouched
+	// Recorded hashes describe the source worktree's files; the target's
+	// FilesTouched is recomputed from its own status, so none of them apply.
+	adopted.TouchedFileHashes = nil
 
 	// Reset target-local checkpoint bookkeeping. Source checkpoint IDs can point
 	// at metadata in another repository or checkpoint branch; carrying them into
@@ -591,7 +716,6 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, source
 	adopted.TurnCheckpointIDs = nil
 	adopted.LastCheckpointID = id.EmptyCheckpointID
 	adopted.ClearCondensationAttempt()
-	adopted.LastCheckpointCommitHash = ""
 	adopted.CheckpointTokenUsage = nil
 	// Re-baseline the subagent cumulative for the fresh target-local window. The
 	// cloned TokenUsage carries the SOURCE session's full cumulative subagent
@@ -604,8 +728,6 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, source
 
 	adopted.FullyCondensed = false
 	adopted.UntrackedFilesAtStart = untrackedFiles
-	adopted.PromptAttributions = nil
-	adopted.PendingPromptAttribution = nil
 	// Preserve cumulative turn/context metrics for the continuing agent session,
 	// but start the target checkpoint prompt window at the current turn count so
 	// the first adopted checkpoint only counts target-side turns.
@@ -627,15 +749,11 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	adopted.TurnCheckpointIDs = slices.Clone(source.TurnCheckpointIDs)
 	adopted.UntrackedFilesAtStart = slices.Clone(source.UntrackedFilesAtStart)
 	adopted.FilesTouched = slices.Clone(source.FilesTouched)
+	adopted.TouchedFileHashes = maps.Clone(source.TouchedFileHashes)
 	adopted.TaskRecords = cloneTaskRecords(source.TaskRecords)
 	adopted.SubagentInventory = cloneSubagentInventory(source.SubagentInventory)
 	adopted.TokenUsage = cloneTokenUsage(source.TokenUsage)
 	adopted.SkillEvents = cloneSkillEvents(source.SkillEvents)
-	adopted.PromptAttributions = clonePromptAttributions(source.PromptAttributions)
-	if source.PendingPromptAttribution != nil {
-		pending := clonePromptAttribution(*source.PendingPromptAttribution)
-		adopted.PendingPromptAttribution = &pending
-	}
 	return adopted
 }
 
@@ -685,20 +803,6 @@ func cloneSkillEvents(events []agent.SkillEvent) []agent.SkillEvent {
 		cloned[i].Native = maps.Clone(events[i].Native)
 	}
 	return cloned
-}
-
-func clonePromptAttributions(attrs []session.PromptAttribution) []session.PromptAttribution {
-	cloned := slices.Clone(attrs)
-	for i := range cloned {
-		cloned[i] = clonePromptAttribution(attrs[i])
-	}
-	return cloned
-}
-
-func clonePromptAttribution(attr session.PromptAttribution) session.PromptAttribution {
-	attr.UserAddedPerFile = maps.Clone(attr.UserAddedPerFile)
-	attr.UserRemovedPerFile = maps.Clone(attr.UserRemovedPerFile)
-	return attr
 }
 
 func sameAdoptPath(a, b string) bool {

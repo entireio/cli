@@ -562,6 +562,12 @@ func TestRepoCreateReadinessFlags(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var creates atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+testProjectULID {
+					// The one lookup made when nothing else names the new repo.
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"id":%q,"name":"acme","ownerType":"org","ownerId":"o","region":"us","createdAt":"2026-01-01T00:00:00Z","capabilities":{"canCreateRepository":true,"canDelete":false,"canManageAccess":false,"canManageTrails":false}}`, testProjectULID)
+					return
+				}
 				if r.Method != http.MethodPost {
 					t.Errorf("unexpected %s", r.Method)
 				}
@@ -707,7 +713,13 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 				} else {
 					require.NoError(t, err)
 				}
-				require.Contains(t, out, testDeleteULID)
+				// The JSON object carries the id; the human line names the repo
+				// by the server's path instead.
+				if asJSON {
+					require.Contains(t, out, testDeleteULID)
+				} else {
+					require.Contains(t, out, "✓ Created repo /et/project/web")
+				}
 				require.Contains(t, out, "entire://cell.example/et/project/web")
 				require.EqualValues(t, 1, posts.Load())
 				require.EqualValues(t, tc.polls, gets.Load())
@@ -885,7 +897,7 @@ func TestReportRepoCreationNoWaitReason(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&stderr)
 	result := &coreapi.Repo{ID: testDeleteULID, State: coreapi.NewOptString("failed"), ProvisionReason: coreapi.NewOptString("max retries exhausted")}
-	require.NoError(t, reportRepoCreation(cmd, result, true, nil))
+	require.NoError(t, reportRepoCreation(cmd, result, "", true, nil))
 	require.Contains(t, out.String(), "max retries exhausted")
 	require.Contains(t, stderr.String(), "unconfirmed")
 }
@@ -923,7 +935,7 @@ func TestReportRepoCreationWithoutAPath(t *testing.T) {
 			result := &coreapi.Repo{ID: testDeleteULID, Name: "web",
 				State: coreapi.NewOptString("provisioning")}
 
-			err := reportRepoCreation(cmd, result, tc.noWait, tc.waitErr)
+			err := reportRepoCreation(cmd, result, "", tc.noWait, tc.waitErr)
 			if tc.wantErr {
 				require.Error(t, err)
 			} else {
@@ -948,7 +960,7 @@ func TestReportRepoCreationWithoutAPath(t *testing.T) {
 		result := &coreapi.Repo{ID: testDeleteULID, Name: "web",
 			Path: coreapi.NewOptString("/et/acme/web"), State: coreapi.NewOptString("provisioning")}
 
-		require.Error(t, reportRepoCreation(cmd, result, false, errors.New("readiness unconfirmed")))
+		require.Error(t, reportRepoCreation(cmd, result, "", false, errors.New("readiness unconfirmed")))
 
 		require.Contains(t, stderr.String(), "entire repo view /et/acme/web",
 			"the path is a ref the verb takes, so the hint is worth printing")

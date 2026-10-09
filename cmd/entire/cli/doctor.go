@@ -31,7 +31,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
-	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 )
@@ -75,15 +74,25 @@ Checks performed:
      'entire checkpoint explain --generate', 'entire dispatch' and
      'entire runner setup' fail. Reports the file to change; does not rewrite it.
 
-  7. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  7. Legacy shadow branches: report entire/<commit>-<worktree> branches older
+     versions wrote at every turn. They hold full snapshots of the working
+     tree and nothing reads them anymore. Fix with 'entire doctor --force',
+     which deletes only the branches; a later 'git gc' frees the space once
+     the unreachable objects are two weeks old ('git gc --prune=now' frees it
+     at once but drops every unreachable object, so run it only when no other
+     git process is active); a branch
+     checked out in a worktree is left alone. Bare entire/<commit> branches
+     are only pointed at ('entire clean --all --dry-run'), never deleted.
+
+  8. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
-  - It is in ENDED phase with uncondensed checkpoint data on a shadow branch
+  - It is in ENDED phase with uncondensed checkpoint data
 
 For each stuck session, you can choose to:
   - Condense: Save session data to permanent storage
-  - Discard: Remove the session state and shadow branch data
+  - Discard: Remove the session state
   - Skip: Leave the session as-is
 
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
@@ -129,8 +138,6 @@ points at --force instead of prompting.`,
 type stuckSession struct {
 	State             *strategy.SessionState
 	Reason            string
-	ShadowBranch      string
-	HasShadowBranch   bool
 	CheckpointCount   int
 	FilesTouchedCount int
 }
@@ -198,6 +205,12 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
 
+	// Shadow branches older versions left behind: storage only, never read.
+	if legacyErr := checkLegacyShadowBranches(cmd, force); legacyErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: legacy shadow branch check failed: %v\n", legacyErr)
+		finalErr = NewSilentError(fmt.Errorf("legacy shadow branch check failed: %w", legacyErr))
+	}
+
 	// Stuck sessions
 	// Load all session states
 	states, err := strategy.ListSessionStates(ctx)
@@ -213,13 +226,6 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		return nil
 	}
 
-	// Open repository to check shadow branches (uses worktree-aware helper)
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
 	// Finalize any non-ended session whose agent process has exited (no SessionStop
 	// hook fired). A gone process is unambiguous, so these are condensed on the
 	// spot rather than left for the interactive prompt below; the sweep marks
@@ -233,7 +239,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	var stuck []stuckSession
 
 	for _, state := range states {
-		ss := classifySession(state, repo, now)
+		ss := classifySession(state, now)
 		if ss != nil {
 			stuck = append(stuck, *ss)
 		}
@@ -266,7 +272,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 				}
 			} else {
 				// Discard if we can't condense
-				if err := discardSession(ctx, ss, repo, cmd.ErrOrStderr()); err != nil {
+				if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
 				} else {
 					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
@@ -307,7 +313,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", ss.State.SessionID)
 			}
 		case "discard":
-			if err := discardSession(ctx, ss, repo, cmd.ErrOrStderr()); err != nil {
+			if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
@@ -326,19 +332,11 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 // classifySession determines if a session is stuck and returns diagnostic info.
 // Returns nil if the session is healthy.
-func classifySession(state *strategy.SessionState, repo *git.Repository, now time.Time) *stuckSession {
-	// Determine shadow branch info
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, refErr := repo.Reference(refName, true)
-	hasShadowBranch := refErr == nil
-
+func classifySession(state *strategy.SessionState, now time.Time) *stuckSession {
 	stuck := func(reason string) *stuckSession {
 		return &stuckSession{
 			State:             state,
 			Reason:            reason,
-			ShadowBranch:      shadowBranch,
-			HasShadowBranch:   hasShadowBranch,
 			CheckpointCount:   state.StepCount + len(state.TaskRecords),
 			FilesTouchedCount: len(state.FilesTouched),
 		}
@@ -370,15 +368,9 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 
 	case state.Phase == session.PhaseEnded:
 		// FullyCondensed = everything worth keeping is materialized; a leftover
-		// live record can never complete (owner gone) and must not re-flag forever.
-		if state.FullyCondensed {
-			return nil
-		}
-		// Task records never live on the shadow branch, so branch absence must not hide them.
-		if state.HasTaskContent() {
-			return stuck("ended with uncondensed checkpoint data")
-		}
-		if state.StepCount <= 0 || !hasShadowBranch {
+		// live record can never complete (owner gone) and must not re-flag
+		// forever.
+		if state.FullyCondensed || !state.HasPendingWork() {
 			return nil
 		}
 		return stuck("ended with uncondensed checkpoint data")
@@ -404,20 +396,15 @@ func displayStuckSession(cmd *cobra.Command, ss stuckSession) {
 		fmt.Fprintf(w, "  Last interaction: %s\n", ss.State.LastInteractionTime.Format(time.RFC3339))
 	}
 
-	shadowStatus := "not found"
-	if ss.HasShadowBranch {
-		shadowStatus = fmt.Sprintf("exists (%s)", ss.ShadowBranch)
-	}
-	fmt.Fprintf(w, "  Shadow branch: %s\n", shadowStatus)
-	fmt.Fprintf(w, "  Checkpoints: %d, Files touched: %d\n", ss.CheckpointCount, ss.FilesTouchedCount)
+	fmt.Fprintf(w, "  Pending turns: %d, Task records: %d, Files touched: %d\n",
+		ss.State.StepCount, len(ss.State.TaskRecords), ss.FilesTouchedCount)
 }
 
 // canCondenseStuckSession reports whether a stuck session has content the
-// condense path can save: shadow-branch checkpoints, or task records — which
-// never live on the shadow branch, so a record-bearing dead-owner session
-// must be condensed (materialized), never discarded.
+// condense path can save (State.HasPendingWork). A record-bearing dead-owner
+// session must be condensed (materialized), never discarded.
 func canCondenseStuckSession(ss stuckSession) bool {
-	return (ss.HasShadowBranch && ss.CheckpointCount > 0) || ss.State.HasTaskContent()
+	return ss.State.HasPendingWork()
 }
 
 // promptSessionAction asks the user what to do with a stuck session.
@@ -449,27 +436,11 @@ func promptSessionAction(ss stuckSession) (string, error) {
 	return action, nil
 }
 
-// discardSession removes session state and cleans up the shadow branch.
-func discardSession(ctx context.Context, ss stuckSession, _ *git.Repository, errW io.Writer) error {
-	// Clear session state file
+// discardSession removes session state.
+func discardSession(ctx context.Context, ss stuckSession, errW io.Writer) error {
 	if err := strategy.ClearSessionStateWithProgress(ctx, ss.State.SessionID, errW, strategy.SessionLockNoticeDelay); err != nil {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
-
-	// Delete shadow branch if it exists and no other sessions need it
-	if ss.HasShadowBranch {
-		if shouldDelete, err := canDeleteShadowBranch(ctx, ss.ShadowBranch, ss.State.SessionID); err != nil {
-			fmt.Fprintf(errW, "Warning: could not check other sessions for shadow branch: %v\n", err)
-		} else if shouldDelete {
-			if err := strategy.DeleteBranchCLI(ctx, ss.ShadowBranch); err != nil {
-				// Branch already gone is not an error — keeps discard idempotent
-				if !errors.Is(err, strategy.ErrBranchNotFound) {
-					return fmt.Errorf("failed to delete shadow branch: %w", err)
-				}
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -703,6 +674,100 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	}
 	fmt.Fprintln(w, "  ✓ Fixed: git hooks reinstalled")
 	return nil
+}
+
+// checkLegacyShadowBranches reports the strict-shape entire/<7+hex>-<6hex>
+// shadow branches older versions wrote at every agent turn. Nothing reads them
+// anymore, they hold full snapshots of the working tree, and they are never
+// removed automatically. The remedy is `entire doctor --force`, not plain
+// `entire clean`: clean also clears the session state of every session based on
+// HEAD, and session state is now the only record of pending agent work. Under
+// --force (or a confirmed prompt) doctor deletes the branches through
+// `git branch -D`, which
+// refuses a branch checked out in any worktree; such a branch is reported and
+// kept. The bare entire/<hex> form is counted and pointed at
+// `entire clean --all --dry-run` but never deleted here, because a human
+// short-SHA branch looks the same.
+func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	branches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
+	if err != nil {
+		return fmt.Errorf("list legacy shadow branches: %w", err)
+	}
+	// The bare entire/<hex> form is never deleted here (a human short-SHA
+	// branch looks the same), but it is always surfaced, alongside the strict
+	// form or on its own: saying "none" while `entire clean --all` lists some
+	// would mislead.
+	bareCount := 0
+	if all, allErr := strategy.ListLegacyShadowBranches(ctx); allErr == nil {
+		bareCount = max(len(all)-len(branches), 0)
+	}
+	if len(branches) == 0 {
+		if bareCount > 0 {
+			fmt.Fprintf(w, "Legacy shadow branches: %d in the oldest entire/<commit> form\n", bareCount)
+			printBareLegacyBranchNote(w)
+			return nil
+		}
+		fmt.Fprintln(w, "✓ Legacy shadow branches: none")
+		return nil
+	}
+
+	fmt.Fprintf(w, "Legacy shadow branches: %d FOUND\n", len(branches))
+	fmt.Fprintln(w, "  Older versions wrote these at every turn; nothing reads them now, and they")
+	fmt.Fprintln(w, "  hold full snapshots of your working tree.")
+	printCappedList(w, branches, func(name string) string { return name })
+	if bareCount > 0 {
+		fmt.Fprintf(w, "  Also %s in the oldest entire/<commit> form.\n", pluralCount(bareCount, "branch", "branches"))
+		printBareLegacyBranchNote(w)
+	}
+
+	if !force {
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, "  Fix: run `entire doctor --force` to delete them (only the branches; pending")
+			fmt.Fprintln(w, "  agent work in session state is kept).")
+			printLegacyBranchSpaceNote(w)
+			return nil
+		}
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Delete these legacy shadow branches? (Only the branches; pending agent work in session state is kept.)")
+		if promptErr != nil {
+			return promptErr
+		}
+		if !proceed {
+			return nil
+		}
+	}
+
+	deleted, failed := strategy.DeleteLegacyShadowBranches(ctx, branches)
+	if len(deleted) > 0 {
+		fmt.Fprintf(w, "  ✓ Fixed: deleted %s\n", pluralCount(len(deleted), "legacy shadow branch", "legacy shadow branches"))
+		printLegacyBranchSpaceNote(w)
+	}
+	if len(failed) > 0 {
+		fmt.Fprintf(w, "  Kept %d branch(es) git refused to delete (checked out in a worktree?):\n", len(failed))
+		printCappedList(w, failed, func(name string) string { return name })
+	}
+	return nil
+}
+
+// printLegacyBranchSpaceNote explains when deleting legacy shadow branches
+// actually frees their space. Plain `git gc` is the advice: it prunes the
+// unreachable objects once they are older than gc.pruneExpire (two weeks by
+// default). `--prune=now` is only mentioned with its caveat, because it drops
+// every unreachable object at once (recently dropped stashes included) and
+// can corrupt the repository if another git process is writing.
+func printLegacyBranchSpaceNote(w io.Writer) {
+	fmt.Fprintln(w, "  Deleting the branches frees no space by itself: `git gc` reclaims it once their")
+	fmt.Fprintln(w, "  objects are two weeks old. `git gc --prune=now` frees it at once but drops every")
+	fmt.Fprintln(w, "  unreachable object (recent stashes too); run it only when no other git process is active.")
+}
+
+// printBareLegacyBranchNote explains why doctor leaves the bare entire/<hex>
+// legacy shadow branches alone and where to review them.
+func printBareLegacyBranchNote(w io.Writer) {
+	fmt.Fprintln(w, "  These may be yours (a branch named after a short SHA looks the same), so doctor")
+	fmt.Fprintln(w, "  does not delete them. Review them with `entire clean --all --dry-run`.")
 }
 
 // symlinkReportLimit bounds the list checkEntireDirSymlinks prints. A repo with
@@ -1748,27 +1813,4 @@ func writeCodexPrimaryCheckoutRemedy(w io.Writer) {
 func writeCodexTrackedHooksRemedy(w io.Writer) {
 	fmt.Fprintln(w, "  .codex/hooks.json is tracked — commit it and make sure the root worktree has it")
 	fmt.Fprintln(w, "  (merge to the default branch, or check that branch out there).")
-}
-
-// canDeleteShadowBranch checks if a shadow branch can be safely deleted.
-// Returns true if no other sessions (besides excludeSessionID) need this branch.
-func canDeleteShadowBranch(ctx context.Context, shadowBranch, excludeSessionID string) (bool, error) {
-	states, err := strategy.ListSessionStates(ctx)
-	if err != nil {
-		return false, fmt.Errorf("failed to list session states: %w", err)
-	}
-
-	for _, state := range states {
-		if state.SessionID == excludeSessionID {
-			continue
-		}
-		// Task records never live on the shadow branch, so only SaveStep
-		// checkpoints pin it alive.
-		otherShadow := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		if otherShadow == shadowBranch && state.StepCount > 0 {
-			return false, nil
-		}
-	}
-
-	return true, nil
 }

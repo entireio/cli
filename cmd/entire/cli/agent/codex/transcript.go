@@ -487,14 +487,6 @@ type rolloutAnalysis struct {
 	ExactTokenUsage *agent.TokenUsage
 }
 
-// analyzeRollout extracts every piece of child evidence in one JSONL pass.
-// Each evidence channel keeps its own validity: malformed task boundaries
-// invalidate terminal turns without discarding file paths already observed,
-// while a malformed final token snapshot makes exact usage unavailable.
-func analyzeRollout(data []byte) rolloutAnalysis {
-	return analyzeRolloutForTurns(context.Background(), data, nil)
-}
-
 func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []string) rolloutAnalysis {
 	var result rolloutAnalysis
 	terminalValid := true
@@ -703,6 +695,18 @@ func exactUsageFromSnapshot(usage *exactTokenUsageData) *agent.TokenUsage {
 	}
 	return &agent.TokenUsage{InputTokens: input - cached, CacheReadTokens: cached, OutputTokens: output}
 }
+
+// ExtractWithSubagentInventoryUnderHome is ExtractWithSubagentInventory with
+// child rollouts looked up in the live and archived session stores beneath
+// home, replacing any RolloutRoots override. home must have passed
+// agent.ResolveTrustedHome.
+func (c *CodexAgent) ExtractWithSubagentInventoryUnderHome(ctx context.Context, parent []byte, fromOffset int, refs []agent.SubagentReference, home string) (agent.InventoryExtraction, error) {
+	scoped := *c // a shallow copy: CodexAgent holds no locks
+	scoped.RolloutRoots = codexHomeLayout().StoresUnder(home)
+	return scoped.ExtractWithSubagentInventory(ctx, parent, fromOffset, refs)
+}
+
+var _ agent.HomeScopedInventoryExtractor = (*CodexAgent)(nil)
 
 // ExtractWithSubagentInventory gathers evidence only for refs supplied by the
 // caller's authoritative ledger. It never discovers children from transcript

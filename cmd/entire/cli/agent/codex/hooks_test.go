@@ -3,16 +3,17 @@ package codex
 import (
 	"context"
 	"encoding/json"
-	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
-	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/stretchr/testify/require"
 )
 
 // setupTestEnv creates a temp dir, sets CWD and CODEX_HOME for test isolation.
@@ -405,7 +406,7 @@ func TestAreHooksInstalled_PartialHooks(t *testing.T) {
 // SessionEnd and the subagent hooks joined the install set still counts as
 // installed, so Codex keeps
 // appearing in `entire status` and the agent pickers instead of vanishing until
-// they re-run enable. The gap is drift, and MissingEntireHooks reports it.
+// they re-run enable. The gap is drift, and missingEntireHooks reports it.
 func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
@@ -424,7 +425,7 @@ func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 	installed, hooksErr := ag.AreHooksInstalled(context.Background())
 	require.NoError(t, hooksErr)
 	require.True(t, installed)
-	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, MissingEntireHooks(tempDir))
+	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, missingEntireHooks(tempDir))
 }
 
 func TestInstallHooks_PreservesExistingHooksJSON(t *testing.T) {
@@ -706,4 +707,24 @@ func TestReadHooksFileForMutation(t *testing.T) {
 		require.NoError(t, readErr)
 		require.Equal(t, `{"keep":true}`, string(data), "the link target must not be read as ours")
 	})
+}
+
+// missingEntireHooks reports the managed Codex events that are not present in
+// a repository-local hooks file.
+func missingEntireHooks(repoRoot string) []string {
+	document, err := readHooksDocument(filepath.Join(repoRoot, ".codex", HooksFileName))
+	if err != nil || !document.exists {
+		return nil
+	}
+	var missing []string
+	for _, hook := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(document.rawHooks, hook.event, &groups); err != nil {
+			return nil
+		}
+		if !hasEntireHook(groups) {
+			missing = append(missing, hook.label)
+		}
+	}
+	return missing
 }

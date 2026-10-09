@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -741,9 +743,13 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 				if err := root.Rename(spec.name, backupName); err != nil {
 					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
 				}
-				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
+				fmt.Fprintf(stderrWriter, "[entire] Your %s hook still runs, after Entire's (moved to %s).\n",
+					spec.name, filepath.Join(hooksDir, backupName))
+				logging.Info(ctx, "git hook backed up", slog.String("hook", spec.name))
 			} else {
-				fmt.Fprintf(os.Stderr, "[entire] Warning: replacing %s (backup %s%s already exists from a previous install)\n", spec.name, spec.name, backupSuffix)
+				fmt.Fprintf(stderrWriter, "[entire] Warning: replacing %s: %s already exists from a previous install and is the hook that keeps running; the current %s is not kept.\n",
+					spec.name, filepath.Join(hooksDir, backupName), spec.name)
+				logging.Warn(ctx, "git hook replaced; existing backup kept", slog.String("hook", spec.name))
 			}
 			backupExists = true
 		}
@@ -764,7 +770,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 	}
 
 	if !silent {
-		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
+		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push)")
 		fmt.Println("  Hooks delegate to the current strategy at runtime")
 	}
 
@@ -798,9 +804,24 @@ func writeHookFile(root *os.Root, name, content string) (bool, error) {
 // If a .pre-entire backup exists, it is restored.
 // Returns the number of hooks removed.
 func RemoveGitHook(ctx context.Context) (int, error) {
+	res, err := RemoveGitHookDetailed(ctx)
+	return res.Removed, err
+}
+
+// GitHookRemoval reports what RemoveGitHookDetailed did.
+type GitHookRemoval struct {
+	// Removed is the number of Entire hooks removed.
+	Removed int
+	// Restored names the hooks whose .pre-entire backup was put back.
+	Restored []string
+}
+
+// RemoveGitHookDetailed is RemoveGitHook, also reporting which backups were
+// restored, for the caller to show the user.
+func RemoveGitHookDetailed(ctx context.Context) (GitHookRemoval, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
-		return 0, err
+		return GitHookRemoval{}, err
 	}
 
 	// ForRemoval: uninstall must be able to finish on a repo install refused.
@@ -809,12 +830,12 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 	root, err := hooksRootForRemoval(hooksDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil // no hooks directory, so nothing of ours in it
+			return GitHookRemoval{}, nil // no hooks directory, so nothing of ours in it
 		}
-		return 0, fmt.Errorf("failed to open hooks directory %s: %w", hooksDir, err)
+		return GitHookRemoval{}, fmt.Errorf("failed to open hooks directory %s: %w", hooksDir, err)
 	}
 
-	removed := 0
+	var res GitHookRemoval
 	var removeErrors []string
 
 	for _, hook := range gitHookNames {
@@ -843,26 +864,28 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 				removeErrors = append(removeErrors, fmt.Sprintf("%s: %v", hook, err))
 				continue
 			}
-			removed++
+			res.Removed++
 		}
 
 		// Restore .pre-entire backup if it exists
 		if hookFileExists(root, backupName) {
 			if hookExists && !hookIsOurs {
 				// A non-Entire hook is present — don't overwrite it with the backup
-				fmt.Fprintf(os.Stderr, "[entire] Warning: %s was modified since install; backup %s%s left in place\n", hook, hook, backupSuffix)
+				fmt.Fprintf(stderrWriter, "[entire] Warning: %s was modified since install; backup %s%s left in place\n", hook, hook, backupSuffix)
 			} else {
 				if err := root.Rename(backupName, hook); err != nil {
 					removeErrors = append(removeErrors, fmt.Sprintf("restore %s%s: %v", hook, backupSuffix, err))
+				} else {
+					res.Restored = append(res.Restored, hook)
 				}
 			}
 		}
 	}
 
 	if len(removeErrors) > 0 {
-		return removed, fmt.Errorf("failed to remove hooks: %s", strings.Join(removeErrors, "; "))
+		return res, fmt.Errorf("failed to remove hooks: %s", strings.Join(removeErrors, "; "))
 	}
-	return removed, nil
+	return res, nil
 }
 
 // generateChainedContent appends a chain call to the base hook content,

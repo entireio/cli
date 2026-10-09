@@ -29,6 +29,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/spf13/cobra"
 )
 
 // Note: Tests for hook manipulation functions (addHookToMatcher, hookCommandExists, etc.)
@@ -5669,4 +5670,12 @@ func linkTo(t *testing.T, dir, target string) {
 	if err := os.Symlink(target, filepath.Join(dir, "vercel.json")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// runEnableOnConfiguredRepo handles `entire enable` when the repo is already set
+// up. Setup-mutating flags (strategy options, checkpoint backend, agent
+// management) behave like `configure`; a bare re-enable just flips the enabled
+// flag or reports current status.
+func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
+	return runEnableOnConfiguredRepoWithPreflight(ctx, cmd, opts, nil)
 }

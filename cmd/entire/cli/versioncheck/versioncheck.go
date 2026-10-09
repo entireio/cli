@@ -85,13 +85,6 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 	}
 }
 
-// globalConfigDirPath returns the CLI's global config directory. Resolution
-// lives in userdirs.Config — the single implementation shared by all
-// config-dir consumers (contexts.json, the file token store, this cache).
-func globalConfigDirPath() string {
-	return userdirs.Config()
-}
-
 // ensureGlobalConfigDir creates the global config directory if it doesn't exist.
 //
 // It goes through userdirs.ConfigRoot, whose create path is

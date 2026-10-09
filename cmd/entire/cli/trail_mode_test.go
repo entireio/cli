@@ -47,7 +47,9 @@ func TestTrailModeCommandSurface(t *testing.T) {
 			for _, name := range []string{"link", "unlink"} {
 				require.Equal(t, project, contains(names, name))
 			}
-			require.Equal(t, !project, contains(names, "delete"))
+			for _, name := range []string{"delete", "merge"} {
+				require.Equal(t, !project, contains(names, name))
+			}
 			list, _, err := cmd.Find([]string{"list"})
 			require.NoError(t, err)
 			require.Equal(t, project, list.Flags().Lookup("page-token") != nil)

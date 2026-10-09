@@ -10,7 +10,7 @@ The model is chosen in one place, `newTrailCmdForMode` (`trail_cmd.go`), and
 by the first-turn injection, both through `projectTrailsEnabled`.
 
 - Commands whose meaning differs are separate trees: legacy `show`, `list`,
-  `create`, `update`, `delete`, `comment` in `trail_*.go`; project `show`,
+  `create`, `update`, `delete`, `merge`, `comment` in `trail_*.go`; project `show`,
   `list`, `create`, `update`, `link`, `unlink`, `comment` in
   `project_trail_*.go`.
 - Commands that act on one repository branch in both models (`checkout`,
@@ -40,7 +40,7 @@ entire trail finding list cli/1503 --project gh/entireio
 entire trail comment add --trail 42 --body 'Cross-repository plan'
 ```
 
-Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one repository's branch work, the form a change's web URL ends in (`…/trails/2074/changes/cli/1503` → `cli/1503`). The repository is looked up in `--project`, or origin's owner without it; the work's parent names the trail, so no collection lookup is needed, and merged work whose branch is gone still resolves. Branch-level commands act on that work; `show`, `update`, and `comment` act on its trail. It cannot be combined with `--branch`, and an explicit `--repo` must name the same repository. Legacy mode does not accept it: there a slash-containing selector is a branch name and a bare number is already repository-local work. Without a selector, commands follow the current branch's parent. `--branch` selects branch work; ambiguous matches require it. Checkout and resume operate on the local clone. Findings, approvals, and watch apply to the selected branch; comments apply to the whole trail. Project mode has `link`/`unlink`, not `delete` or a `change` subgroup.
+Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one repository's branch work, the form a change's web URL ends in (`…/trails/2074/changes/cli/1503` → `cli/1503`). The repository is looked up in `--project`, or origin's owner without it; the work's parent names the trail, so no collection lookup is needed, and merged work whose branch is gone still resolves. Branch-level commands act on that work; `show`, `update`, and `comment` act on its trail. It cannot be combined with `--branch`, and an explicit `--repo` must name the same repository. Legacy mode does not accept it: there a slash-containing selector is a branch name and a bare number is already repository-local work. Without a selector, commands follow the current branch's parent. `--branch` selects branch work; ambiguous matches require it. Checkout and resume operate on the local clone. Findings, approvals, and watch apply to the selected branch; comments apply to the whole trail. Project mode has `link`/`unlink`, not `delete`, `merge`, or a `change` subgroup. Server-side `merge` remains a legacy-only command until it uses project-aware branch selection.
 
 ## API and safety
 
