@@ -706,6 +706,13 @@ func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 		flushAbortReason(flushCtx, 0), queued-batch.landed)
 	logging.Warn(ctx, "git-refs push: batch push cut by the flush budget; remaining refs stay queued",
 		slog.Int("pushed", batch.landed), slog.Int("queued", queued))
+	// An earlier chunk may have been refused outright before the clock ran
+	// out. The fallback that would show why does not run on a spent budget,
+	// so show the remote's reason here: a ref blocked for its content would
+	// otherwise ride along with every budget cut without ever saying so.
+	if reason := checkpointRefRejectionReason(batch.firstErr); reason != "" {
+		fmt.Fprintf(os.Stderr, "[entire] Warning: the remote declined a checkpoint ref batch (showing one rejection):\n%s\n", reason)
+	}
 	// Fair scheduling, as after a fallback abort: a slow remote cuts the
 	// budget at the same place every push, so the cut chunk goes to the
 	// back rather than holding the head of the queue.

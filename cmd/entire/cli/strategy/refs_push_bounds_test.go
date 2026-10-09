@@ -683,3 +683,31 @@ func TestFlushCheckpointRefs_SplitIsolatesRejectedRef(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []plumbing.ReferenceName{refs[11]}, remaining, "only the rejected ref stays queued")
 }
+
+// TestFlushCheckpointRefs_BudgetCutStillShowsEarlierRejection: a chunk the
+// remote refused before the budget ran out never reaches the per-ref fallback
+// in that flush, so the budget stop itself must surface the refusal.
+func TestFlushCheckpointRefs_BudgetCutStillShowsEarlierRejection(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\nblocked=0\nwhile read -r old new ref; do\n" +
+		"  [ \"$ref\" = '" + refs[0].String() + "' ] && blocked=1\ndone\n" +
+		"if [ \"$blocked\" = 1 ]; then echo '" + checkpointRejectReason + "' >&2; exit 1; fi\nsleep 30\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = 3 * time.Second
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+
+	require.Contains(t, output, "Stopped pushing", "precondition: the budget cut the flush")
+	assert.Contains(t, output, checkpointRejectReason, "the earlier refusal is still shown")
+}
