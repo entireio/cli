@@ -97,6 +97,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
 
       - name: Install agent CLI
+        env:
+          CODEX_NON_INTERACTIVE: "1"
         run: |
           set -euo pipefail
 
@@ -164,10 +166,10 @@ jobs:
               # that job exists to report agy drift.
               retry 'curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash'
               ;;
-            codex)       retry 'npm install -g @openai/codex' ;;
+            codex)       retry 'curl -fsSL --compressed https://chatgpt.com/codex/install.sh | sh' ;;
             cursor-cli)  retry 'curl https://cursor.com/install -fsS --compressed | bash' ;;
             factoryai-droid) retry 'curl -fsSL --compressed https://app.factory.ai/cli | sh' ;;
-            copilot-cli) retry 'npm install -g @github/copilot' ;;
+            copilot-cli) retry 'curl -fsSL --compressed https://gh.io/copilot-install | bash' ;;
             roger-roger) ;; # installed by mise (see mise.toml)
           esac
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
