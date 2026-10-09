@@ -130,8 +130,9 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 			res.untried = refs[start+len(chunk):]
 			return res
 		}
-		// A remote that already answered this flush — took a chunk, or
-		// rejected one — was reachable; a later connect failure is transient,
+		// A remote that already answered this flush — took a chunk, or failed
+		// one any way other than a connect failure — was reachable; a later
+		// connect failure is transient,
 		// and the per-ref fallback may still land or recover those refs. Only a
 		// connect failure on the first chunk the remote saw means unreachable.
 		if line, ok := remote.UnreachableRemoteLine(err); ok && res.landed == 0 && len(res.failed) == len(chunk) {
@@ -139,6 +140,68 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 			res.untried = refs[start+len(chunk):]
 			return res
 		}
+	}
+	return res
+}
+
+// splitFloor is the smallest failed batch splitFailedChunks halves; smaller
+// ones go straight to the per-ref fallback, which retries each ref anyway.
+const splitFloor = 4
+
+// splitResult is what splitFailedChunks left for the per-ref fallback.
+type splitResult struct {
+	landed     int
+	unresolved []plumbing.ReferenceName
+}
+
+// splitFailedChunks re-pushes each failed chunk of refs (chunkSize apart) in
+// halves, recursing into a half only while its sibling landed: a single bad
+// ref is then isolated in about 2·log2(chunk) pushes. When both halves fail
+// the cause is not one ref (several diverged, or the destination), so both go
+// to the per-ref fallback whole, as does everything once the budget is spent
+// or the destination refuses the key or the connection. onLanded is called
+// with each half that lands.
+func splitFailedChunks(ctx, flushCtx context.Context, target string, refs []plumbing.ReferenceName, chunkSize int,
+	onLanded func([]plumbing.ReferenceName),
+) splitResult {
+	var res splitResult
+	halt := false
+	var walk func([]plumbing.ReferenceName)
+	walk = func(batch []plumbing.ReferenceName) {
+		if halt || len(batch) <= splitFloor || flushCtx.Err() != nil {
+			res.unresolved = append(res.unresolved, batch...)
+			return
+		}
+		mid := len(batch) / 2
+		var failedHalves [][]plumbing.ReferenceName
+		for _, half := range [][]plumbing.ReferenceName{batch[:mid], batch[mid:]} {
+			if halt || flushCtx.Err() != nil {
+				failedHalves = append(failedHalves, half)
+				continue
+			}
+			err := batchPushRefs(flushCtx, target, half)
+			if err == nil {
+				res.landed += len(half)
+				onLanded(half)
+				continue
+			}
+			if _, unreachable := remote.UnreachableRemoteLine(err); unreachable || nonInteractiveSSHAuthFailure(flushCtx, err) {
+				halt = true
+			}
+			logging.Debug(ctx, "git-refs push: split checkpoint ref batch failed",
+				slog.Int("refs", len(half)), slog.String("error", err.Error()))
+			failedHalves = append(failedHalves, half)
+		}
+		if len(failedHalves) == 1 && !halt {
+			walk(failedHalves[0])
+			return
+		}
+		for _, half := range failedHalves {
+			res.unresolved = append(res.unresolved, half...)
+		}
+	}
+	for start := 0; start < len(refs); start += chunkSize {
+		walk(refs[start:min(start+chunkSize, len(refs))])
 	}
 	return res
 }

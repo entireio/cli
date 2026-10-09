@@ -92,8 +92,9 @@ func TestFlushCheckpointRefs_StopsAfterConsecutiveFailures(t *testing.T) {
 	output := restore()
 	require.NoError(t, err, "a bounded flush must still never block the user's push")
 
-	// One batch attempt, then the fallback stops after the cap.
-	assert.Equal(t, 1+maxConsecutiveRefPushFailures, countedAttempts(t, countFile),
+	// One batch attempt, one split (both halves refused, so no deeper), then
+	// the fallback stops after the cap.
+	assert.Equal(t, 1+2+maxConsecutiveRefPushFailures, countedAttempts(t, countFile),
 		"the fallback must not walk the whole queue against a refusing remote")
 	assert.Contains(t, output, "Stopped retrying")
 	assert.Contains(t, output, fmt.Sprintf("%d consecutive failures", maxConsecutiveRefPushFailures))
@@ -562,9 +563,10 @@ func TestPushQueuedCheckpointRefs_FallbackGetsFreshBudget(t *testing.T) {
 }
 
 // TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered: a chunked
-// flush can land chunks and then fail (here, SSH auth on a later chunk). The
-// landed chunks reached the remote, so the pre-push acts on them — capture,
-// misdirection warning — rather than reading the error as "nothing synced".
+// flush can land chunks and then fail (here, SSH auth on a later chunk); it
+// reports the landed count alongside the error. That the pre-push then acts on
+// the count is pinned end to end by
+// TestCheckpointSyncRemote_PartialDeliveryCapturesElection.
 func TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered(t *testing.T) {
 	shrinkRefPushChunkSize(t, 2)
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 4)
@@ -618,4 +620,66 @@ func TestFlushCheckpointRefs_RejectionProvesRemoteReachable(t *testing.T) {
 	assert.NotContains(t, output, "Couldn't reach", "the remote answered the first chunk")
 	assert.Equal(t, refHashOf(t, repo, refs[1]), remoteRefHash(t, bareDir, refs[1]),
 		"the rejected chunk's healthy ref lands through the fallback")
+}
+
+// TestFlushCheckpointRefs_CutAfterProgressKeepsChunkSize: a budget cut after
+// chunks landed is a backlog draining as intended, not a chunk too large for
+// the link, so it must not shrink the chunk size — at one ref per push every
+// push would pay the remote's whole ref advertisement.
+func TestFlushCheckpointRefs_CutAfterProgressKeepsChunkSize(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	installCountingHook(t, bareDir, countFile, 1) // first chunk lands, the rest stall
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = 3 * time.Second
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+	require.Contains(t, output, "exhausted", "precondition: the budget cut the flush")
+	assert.Equal(t, 2, queue.ChunkSizeHint(checkpointRefPushChunkSize), "progress was made, so the size stays")
+}
+
+// TestFlushCheckpointRefs_SplitIsolatesRejectedRef: a forge declines a whole
+// push for one bad ref, failing its chunk. Halving finds that ref in a few
+// pushes and lands the rest, instead of retrying the chunk one ref at a time.
+func TestFlushCheckpointRefs_SplitIsolatesRejectedRef(t *testing.T) {
+	shrinkRefPushChunkSize(t, 16)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 16)
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\necho attempt >> '" + countFile + "'\nblocked=0\nwhile read -r old new ref; do\n" +
+		"  [ \"$ref\" = '" + refs[11].String() + "' ] && blocked=1\ndone\n" +
+		"if [ \"$blocked\" = 1 ]; then echo '" + checkpointRejectReason + "' >&2; exit 1; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	restore()
+
+	// 1 chunk, then 16 -> 8 -> 4 (floor): 2 pushes per level, then the 4
+	// unresolved refs one at a time.
+	assert.Equal(t, 1+2+2+4, countedAttempts(t, countFile), "halving, not 16 single-ref retries")
+	for i, ref := range refs {
+		if i == 11 {
+			continue
+		}
+		assert.Equal(t, refHashOf(t, repo, ref), remoteRefHash(t, bareDir, ref))
+	}
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{refs[11]}, remaining, "only the rejected ref stays queued")
 }

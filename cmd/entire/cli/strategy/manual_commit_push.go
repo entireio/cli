@@ -589,10 +589,20 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	// implies the remote answered — sends them after the wrong problem.
 	fmt.Fprintf(os.Stderr, "[entire] Checkpoint ref push failed; retrying %d ref(s) individually...", len(batch.failed))
 	stop = startProgressDots(os.Stderr)
-	retry := retryRefsIndividually(ctx, flushCtx, dest.target, batch.failed, len(existing))
+	// A forge that declines a push declines all of it (a ruleset, push
+	// protection), so one bad ref fails its whole chunk. Halving the chunk
+	// isolates it in a handful of pushes, where walking a 200-ref chunk one ref
+	// at a time would spend several budgets to reach it.
+	split := splitFailedChunks(ctx, flushCtx, dest.target, batch.failed, chunkSize, func(landed []plumbing.ReferenceName) {
+		if removeErr := queue.Remove(landed); removeErr != nil {
+			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
+				slog.String("error", removeErr.Error()))
+		}
+	})
+	retry := retryRefsIndividually(ctx, flushCtx, dest.target, split.unresolved, len(existing))
 	pushed, failed, firstErr, abortReason := retry.pushed, retry.failed, retry.firstErr, retry.abortReason
 	attempted := len(pushed) + len(failed)
-	totalPushed := batch.landed + len(pushed)
+	totalPushed := batch.landed + split.landed + len(pushed)
 	stop(fmt.Sprintf(" pushed %d of %d", totalPushed, len(existing)))
 	// The fallback reached every failed ref, but the batch stopped before
 	// trying the rest of the queue: report that stop instead.
@@ -705,15 +715,17 @@ func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 	}
 }
 
-// adaptChunkSize updates the remembered chunk size after a batch: quartered
-// when the budget cut a chunk in flight — steeply, since each cut costs a whole
-// budget with nothing landed — (a link too slow for that many refs per
-// budget would otherwise never land the head of the queue), doubled back toward
-// checkpointRefPushChunkSize after a batch that landed everything.
+// adaptChunkSize updates the remembered chunk size after a batch. It is
+// quartered when the budget cut a chunk in flight and nothing landed — a link
+// too slow to land one chunk per budget would otherwise never move the head of
+// the queue, and each such cut costs a whole budget, hence the steep step. A
+// cut after chunks landed is a backlog draining as intended, not a chunk too
+// large, so the size is kept. It doubles back toward checkpointRefPushChunkSize
+// after a batch that landed everything.
 func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, batch chunkPushResult, budgetCut bool) {
 	next := size
 	switch {
-	case budgetCut && len(batch.failed) > 0:
+	case budgetCut && batch.landed == 0 && len(batch.failed) > 0:
 		next = max(1, size/4)
 	case len(batch.failed) == 0 && len(batch.untried) == 0:
 		next = min(checkpointRefPushChunkSize, size*2)
