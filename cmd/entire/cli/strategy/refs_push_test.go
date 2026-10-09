@@ -261,6 +261,30 @@ func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	assert.ElementsMatch(t, refs, remaining, "failed push leaves refs queued")
 }
 
+// TestPushQueuedCheckpointRefs_InterruptIsAnError: the explicit push reports
+// success on a nil error, so an interrupted flush must return one that wraps
+// the caller's cancellation (`doctor migrate` handles that on its own) and
+// leave the refs queued.
+func TestPushQueuedCheckpointRefs_InterruptIsAnError(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	pushed, _, err := PushQueuedCheckpointRefs(ctx, repo, bareDir)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 0, pushed)
+
+	remaining, drainErr := queue.Drain()
+	require.NoError(t, drainErr)
+	assert.ElementsMatch(t, refs, remaining, "unpushed refs stay queued")
+}
+
 // remoteRefFiles lists the files in the tree a ref points at on the bare remote.
 func remoteRefFiles(t *testing.T, bareDir string, ref plumbing.ReferenceName) string {
 	t.Helper()

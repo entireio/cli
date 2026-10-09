@@ -587,6 +587,15 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", opfErr)
 	}
 	res, err := flushCheckpointRefsQueue(ctx, repo, ps, flushOptions{})
+	if err == nil && res.remaining > 0 {
+		// The flush is fail-soft about an early stop, but this caller reports
+		// success on a nil error, so refs left behind must surface. A caller's
+		// cancellation stays recognisable through the wrap.
+		err = fmt.Errorf("%d checkpoint ref(s) stay queued: %s", res.remaining, res.failureLine(nil))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = fmt.Errorf("%w: %w", err, ctxErr)
+		}
+	}
 	return res.pushed, false, err
 }
 
