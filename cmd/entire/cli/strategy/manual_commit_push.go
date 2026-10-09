@@ -648,7 +648,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 
 	// Fast path: push the refs a chunk per round-trip (fast-forward-only).
 	chunkSize := queue.ChunkSizeHint(checkpointRefPushChunkSize)
-	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, func(landed []plumbing.ReferenceName) {
+	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, opts.chunkTimeout, func(landed []plumbing.ReferenceName) {
 		if removeErr := queue.Remove(landed); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
@@ -660,6 +660,18 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	defer cancelFlush()
 	budgetCut := budgetExhausted()
 	adaptChunkSize(ctx, queue, chunkSize, batch, budgetCut)
+	// Stalled chunks stay queued like refs never tried, behind the rest of the
+	// queue so the next pass starts with refs that may move.
+	if len(batch.stalled) > 0 {
+		if err := queue.Rotate(batch.stalled); err != nil {
+			logging.Warn(ctx, "git-refs push: rotate stalled refs to queue back failed",
+				slog.String("error", err.Error()))
+		}
+		batch.untried = append(batch.untried, batch.stalled...)
+		if batch.stopReason == "" {
+			batch.stopReason = fmt.Sprintf("%d checkpoint ref(s) stalled", len(batch.stalled))
+		}
+	}
 	if res, done, err := settleBatchOnly(ctx, flushCtx, queue, batch, len(existing), dest, opts, stop, budgetCut); done {
 		return res, err
 	}
@@ -816,6 +828,9 @@ type flushOptions struct {
 	// set; 0 means checkpointFlushBudget.
 	budget     time.Duration
 	boundBatch bool
+	// chunkTimeout bounds each chunk push on its own (see pushRefChunks); 0
+	// leaves chunks bounded only by budget.
+	chunkTimeout time.Duration
 	// handoff marks a flush whose budget stop the caller continues in the
 	// background: that stop is reported by the caller, not as "stay queued".
 	handoff bool
@@ -915,7 +930,7 @@ func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, batch chunkPushResult, budgetCut bool) {
 	next := size
 	switch {
-	case budgetCut && batch.landed == 0 && len(batch.failed) > 0:
+	case batch.landed == 0 && (budgetCut && len(batch.failed) > 0 || len(batch.stalled) > 0):
 		next = max(1, size/4)
 	case len(batch.failed) == 0 && len(batch.untried) == 0:
 		next = min(checkpointRefPushChunkSize, size*2)

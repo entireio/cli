@@ -74,6 +74,7 @@ type chunkPushResult struct {
 	landed        int                      // refs in chunks that pushed cleanly
 	failed        []plumbing.ReferenceName // refs of chunks that failed, for the per-ref fallback
 	untried       []plumbing.ReferenceName // refs never attempted because the phase stopped
+	stalled       []plumbing.ReferenceName // refs of chunks cut by the per-chunk timeout
 	stopReason    string                   // why untried is non-empty
 	firstErr      error
 	sshAuthFailed bool
@@ -91,7 +92,14 @@ type chunkPushResult struct {
 // row does, and so does an unreachable remote before any chunk landed: per-ref
 // retries cannot reach it either, and each would wait out its own connect
 // timeout. The first chunk is always attempted, matching the per-ref fallback.
-func pushRefChunks(ctx context.Context, target string, refs []plumbing.ReferenceName, size int, onLanded func([]plumbing.ReferenceName)) chunkPushResult {
+//
+// chunkTimeout, when positive, bounds each chunk on its own: a chunk that
+// outlasts it is recorded as stalled and the phase moves on to the next, so one
+// stalled upload does not hold every chunk behind it. A stall is slowness, not
+// a refusal, so it does not count toward the consecutive-failure stop.
+func pushRefChunks(ctx context.Context, target string, refs []plumbing.ReferenceName, size int,
+	chunkTimeout time.Duration, onLanded func([]plumbing.ReferenceName),
+) chunkPushResult {
 	var res chunkPushResult
 	consecutive := 0
 	for start := 0; start < len(refs); start += size {
@@ -105,7 +113,20 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 			}
 		}
 		chunk := refs[start:min(start+size, len(refs))]
-		err := batchPushRefs(ctx, target, chunk)
+		chunkCtx, cancel := ctx, context.CancelFunc(func() {})
+		if chunkTimeout > 0 {
+			chunkCtx, cancel = context.WithTimeout(ctx, chunkTimeout)
+		}
+		err := batchPushRefs(chunkCtx, target, chunk)
+		stalled := err != nil && chunkTimeout > 0 &&
+			errors.Is(chunkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+		cancel()
+		if stalled {
+			res.stalled = append(res.stalled, chunk...)
+			logging.Warn(ctx, "git-refs push: checkpoint ref chunk stalled; moving on",
+				slog.Int("refs", len(chunk)), slog.Duration("timeout", chunkTimeout))
+			continue
+		}
 		if err == nil {
 			consecutive = 0
 			res.landed += len(chunk)

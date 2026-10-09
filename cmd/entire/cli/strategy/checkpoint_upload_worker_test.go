@@ -333,3 +333,40 @@ func TestRunCheckpointUploadWorker_WithholdsWhenRequiredOPFIsOff(t *testing.T) {
 	require.NotNil(t, st.Last)
 	assert.Contains(t, st.Last.Error, "privacy filter")
 }
+
+// TestRunCheckpointUploadWorker_StalledChunkDoesNotHoldTheRest: a chunk that
+// outlasts the per-chunk timeout moves to the back of the queue and the pass
+// carries on, instead of one stalled upload holding every chunk behind it.
+func TestRunCheckpointUploadWorker_StalledChunkDoesNotHoldTheRest(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\ngrep -q '" + refs[0].String() + "' && sleep 30\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+	restoreTimeout := checkpointUploadChunkTimeout
+	checkpointUploadChunkTimeout = 2 * time.Second
+	t.Cleanup(func() { checkpointUploadChunkTimeout = restoreTimeout })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+	coord := uploadCoordinator(t, repo)
+	require.NoError(t, coord.Request(checkpoint.UploadRequest{Remote: "origin"}))
+
+	start := time.Now()
+	RunCheckpointUploadWorker(t.Context())
+	assert.Less(t, time.Since(start), 20*time.Second, "the stalled chunk is cut, not waited out")
+
+	for _, ref := range refs[2:] {
+		assert.Equal(t, refHashOf(t, repo, ref), remoteRefHash(t, bareDir, ref), "chunks behind the stall still land")
+	}
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs[:2], remaining, "the stalled chunk stays queued")
+	assert.Equal(t, 1, queue.ChunkSizeHint(checkpointRefPushChunkSize), "a stall halves the next chunk size")
+	st, err := coord.State()
+	require.NoError(t, err)
+	require.NotNil(t, st.Last)
+	assert.Contains(t, st.Last.Error, "stalled")
+}
