@@ -123,7 +123,11 @@ func resolveProjectTrailCollection(cmd *cobra.Command) (*projectTrailTarget, err
 	if err != nil {
 		return nil, err
 	}
-	return resolveProjectTrailCollectionFor(cmd.Context(), host, project, trailInsecureHTTP(cmd))
+	target, err := resolveProjectTrailCollectionFor(cmd.Context(), host, project, trailInsecureHTTP(cmd))
+	if err != nil {
+		return nil, renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", err)
+	}
+	return target, nil
 }
 
 func resolveProjectTrailCollectionFor(ctx context.Context, host, project string, insecure bool) (*projectTrailTarget, error) {
@@ -216,7 +220,7 @@ func validateProjectTrailSelector(selector string) error {
 		return nil
 	}
 	if _, ok := parseTrailNumberSelector(selector); !ok {
-		return errors.New("use a project trail ID or number, or <repo>/<number> for one repository's work; select a branch with --branch")
+		return errors.New("use a project trail ID or number; select a branch with --branch")
 	}
 	return nil
 }
@@ -300,7 +304,7 @@ func (t *projectTrailTarget) resolveSelector(ctx context.Context, selector strin
 	return t, nil
 }
 
-func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (*projectTrailTarget, error) {
+func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (_ *projectTrailTarget, err error) {
 	if err := ensureTrailRepoHasTarget(cmd, branch != "", "pass --branch or a project trail ID"); err != nil {
 		return nil, err
 	}
@@ -315,7 +319,10 @@ func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (*projectTrail
 	}
 	client, repoID, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), forge, owner, repo)
 	if err != nil {
-		return nil, err
+		return nil, renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repo, err)
+	}
+	if trailRepoFlag(cmd) == "" {
+		defer func() { noteTrailCommandEnablement(ctx, client, err) }()
 	}
 	base, err := trailRepoBasePath(forge, owner, repo, repoID)
 	if err != nil {
@@ -348,11 +355,15 @@ func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, subjec
 	}
 	core, err := newProjectTrailCoreClient()
 	if err != nil {
-		return nil, fmt.Errorf("project control plane: %w", err)
+		return nil, renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", fmt.Errorf("project control plane: %w", err))
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), requiredCellResolveTimeout)
 	defer cancel()
-	return openProjectTrailTarget(ctx, core, parent, trailInsecureHTTP(cmd))
+	target, err := openProjectTrailTarget(ctx, core, parent, trailInsecureHTTP(cmd))
+	if err != nil {
+		return nil, renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", err)
+	}
+	return target, nil
 }
 
 // label names the trail for people: its project number when the resolution

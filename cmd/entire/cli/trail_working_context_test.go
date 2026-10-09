@@ -106,6 +106,9 @@ func TestWorkingTrailCommandsKeepProjectAndRepoNumbersSeparate(t *testing.T) {
 			out, _, err := executeProjectTrailTest(t, args...)
 			require.NoError(t, err)
 			require.Equal(t, 1, calls)
+			if tt.args[0] == "approvals" {
+				require.Contains(t, out, "No approvals on trail #42")
+			}
 			if tt.args[0] != "finding" {
 				require.Contains(t, out, "trail #42")
 				require.Contains(t, out, "feature/work")

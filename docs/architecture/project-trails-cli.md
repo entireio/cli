@@ -54,6 +54,10 @@ Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one
   legacy semantics or another cell on failure.
 - Branch operations verify project membership before using repository-local
   IDs for subresource requests. Permission-filtered detail may be incomplete.
+- Project commands retain the standard login and repository-onboarding hints.
+  Branch reads refresh the local trails-enablement cache only when their
+  repository is known to be this clone; foreign change selectors never do.
+  `link` takes a project trail number or ULID, not `<repo>/<number>`.
 - Updates require the resource's ETag; a 412 never triggers an unconditional
   retry. Create/link print an idempotency key for retries with identical inputs.
 - Local create publishes the branch but never commits, force-pushes, or deletes

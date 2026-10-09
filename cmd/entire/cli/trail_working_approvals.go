@@ -51,7 +51,8 @@ func listWorkingTrailApprovals(cmd *cobra.Command, mode *trailMode, selector, br
 	}
 	if selected.Target != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "Approvals for %s\n", selected.description())
-	} else if len(out.Approvals) == 0 {
+	}
+	if len(out.Approvals) == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "No approvals on %s\n", selected.description())
 	}
 	renderTrailApprovals(cmd.OutOrStdout(), out.Approvals)

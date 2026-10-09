@@ -30,7 +30,7 @@ func listProjectTrails(cmd *cobra.Command, status string, size int, cursor strin
 	}
 	target, err := resolveProjectTrailCollectionFor(cmd.Context(), host, project, trailInsecureHTTP(cmd))
 	if err != nil {
-		return out, err
+		return out, renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", err)
 	}
 	repoID := ""
 	if repo := trailRepoFlag(cmd); repo != "" {

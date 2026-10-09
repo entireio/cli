@@ -64,9 +64,10 @@ type projectTrailChange struct {
 // number, in the project named by --project or, without it, origin's owner.
 // localOnly callers (checkout, resume) act on this clone, so the change must
 // belong to origin's repository. An explicit --repo must name the same one.
-func resolveProjectTrailChange(cmd *cobra.Command, sel projectTrailChangeSelector, localOnly bool) (*projectTrailChange, error) {
+func resolveProjectTrailChange(cmd *cobra.Command, sel projectTrailChangeSelector, localOnly bool) (_ *projectTrailChange, err error) {
 	ctx := cmd.Context()
 	var host, owner string
+	cacheLocal := localOnly
 	if ref := projectTrailProjectFlag(cmd); ref != "" {
 		var err error
 		if host, owner, err = parseTrailProjectRef(ref); err != nil {
@@ -82,6 +83,7 @@ func resolveProjectTrailChange(cmd *cobra.Command, sel projectTrailChangeSelecto
 			return nil, fmt.Errorf("%s is not in this clone's repository (%s/%s/%s); run this from a clone of %s", sel, originHost, originOwner, originRepo, sel.Repo)
 		}
 		host, owner = originHost, originOwner
+		cacheLocal = strings.EqualFold(originRepo, sel.Repo)
 	}
 	if repoFlag := trailRepoFlag(cmd); repoFlag != "" && !localOnly {
 		flagHost, flagOwner, flagRepo, err := parseTrailRepoArg(repoFlag)
@@ -94,7 +96,12 @@ func resolveProjectTrailChange(cmd *cobra.Command, sel projectTrailChangeSelecto
 	}
 	client, repoID, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), host, owner, sel.Repo)
 	if err != nil {
-		return nil, err
+		return nil, renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+sel.Repo, err)
+	}
+	// A change selector can name another repository even without --repo.
+	// Only a lookup proven to target this clone may update its enablement.
+	if localOnly || (cacheLocal && trailRepoFlag(cmd) == "") {
+		defer func() { noteTrailCommandEnablement(ctx, client, err) }()
 	}
 	base, err := trailRepoBasePath(host, owner, sel.Repo, repoID)
 	if err != nil {

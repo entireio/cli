@@ -108,6 +108,13 @@ func TestProjectTrailLinkRequiresParentAndRetryHeaders(t *testing.T) {
 	require.Equal(t, []string{http.MethodGet, http.MethodPost}, methods)
 }
 
+func TestProjectTrailLinkSelectorGuidanceMatchesAcceptedForms(t *testing.T) {
+	t.Parallel()
+	_, _, err := executeProjectTrailTest(t, "link", "widget/7", "--project", "gh/acme", "--repo", "gh/acme/widget", "--branch", "feature/work")
+	require.ErrorContains(t, err, "use a project trail ID or number")
+	require.NotContains(t, err.Error(), "<repo>/<number>")
+}
+
 func TestProjectTrailHasNoChangeEntityCommands(t *testing.T) {
 	t.Parallel()
 	for _, verb := range []string{"change", "attach", "detach", "delete"} {

@@ -93,6 +93,7 @@ func executeProjectTrailTest(t *testing.T, args ...string) (string, string, erro
 	t.Helper()
 	cmd := newTrailCmdForMode(true)
 	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true // Match root.go: main prints only errors not already rendered.
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)

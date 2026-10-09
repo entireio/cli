@@ -36,7 +36,7 @@ func (t *trailWorkingContext) description() string {
 // resolveProjectTrailWorkingContext is projectTrailMode.workingContext.
 // localOnly is used by checkout/resume: --repo may assert a local repository,
 // but must never cause these commands to check out a foreign branch here.
-func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch string, localOnly bool) (*trailWorkingContext, error) {
+func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch string, localOnly bool) (_ *trailWorkingContext, err error) {
 	if change, ok := parseProjectTrailChangeSelector(selector); ok {
 		if strings.TrimSpace(branch) != "" {
 			return nil, errChangeSelectorWithBranch
@@ -61,7 +61,10 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 	}
 	client, repoID, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), host, owner, repo)
 	if err != nil {
-		return nil, err
+		return nil, renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repo, err)
+	}
+	if repoOverride == "" {
+		defer func() { noteTrailCommandEnablement(ctx, client, err) }()
 	}
 	base, err := trailRepoBasePath(host, owner, repo, repoID)
 	if err != nil {
@@ -89,7 +92,7 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 		}
 		target, err = resolveProjectTrailCollectionFor(ctx, forge, project, trailInsecureHTTP(cmd))
 		if err != nil {
-			return nil, err
+			return nil, renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), "", err)
 		}
 		target, err = target.resolveSelector(ctx, selector)
 		if err != nil {
