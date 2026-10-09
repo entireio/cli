@@ -132,8 +132,9 @@ func (c *UploadCoordinator) LockWorker(ctx context.Context) (func(), error) {
 }
 
 // Request records req for the worker, merged with any request not yet taken:
-// the latest push's destination wins, and so does a decision to run OPF — a
-// later push that resolved nothing must not drop an earlier push's "run".
+// the latest push's destination wins, and so does a decision to run OPF. The
+// queue holds the earlier push's refs too, so a later push that resolved skip
+// or nothing must not let them upload unscanned.
 func (c *UploadCoordinator) Request(req UploadRequest) error {
 	return c.update(func(st *UploadState) {
 		if st.Request != nil && st.Request.OPFDecision == UploadOPFRun {

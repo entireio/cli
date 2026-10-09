@@ -941,13 +941,14 @@ func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 // the queue, and each such cut costs a whole budget, hence the steep step. A
 // cut after chunks landed is a backlog draining as intended, not a chunk too
 // large, so the size is kept. It doubles back toward checkpointRefPushChunkSize
-// after a batch that landed everything.
+// after a batch that landed everything; a stalled chunk did not land, so it
+// keeps the size too.
 func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, batch chunkPushResult, budgetCut bool) {
 	next := size
 	switch {
 	case batch.landed == 0 && (budgetCut && len(batch.failed) > 0 || len(batch.stalled) > 0):
 		next = max(1, size/4)
-	case len(batch.failed) == 0 && len(batch.untried) == 0:
+	case len(batch.failed) == 0 && len(batch.untried) == 0 && len(batch.stalled) == 0:
 		next = min(checkpointRefPushChunkSize, size*2)
 	}
 	if next == size {

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -648,6 +649,20 @@ func TestFlushCheckpointRefs_CutAfterProgressKeepsChunkSize(t *testing.T) {
 	output := restore()
 	require.Contains(t, output, "exhausted", "precondition: the budget cut the flush")
 	assert.Equal(t, 2, queue.ChunkSizeHint(checkpointRefPushChunkSize), "progress was made, so the size stays")
+}
+
+// TestAdaptChunkSize_StallAfterProgressKeepsSize: a batch whose other chunks
+// landed but one stalled did not land everything, so the size must not grow
+// back toward the cap the link just proved too slow for.
+func TestAdaptChunkSize_StallAfterProgressKeepsSize(t *testing.T) {
+	t.Parallel()
+	queue := checkpoint.NewPushQueue(t.TempDir())
+	require.NoError(t, queue.SetChunkSizeHint(50))
+
+	batch := chunkPushResult{landed: 100, stalled: []plumbing.ReferenceName{"refs/entire/checkpoints/aa/x"}}
+	adaptChunkSize(t.Context(), queue, 50, batch, false)
+
+	assert.Equal(t, 50, queue.ChunkSizeHint(checkpointRefPushChunkSize))
 }
 
 // TestFlushCheckpointRefs_SplitIsolatesRejectedRef: a forge declines a whole
