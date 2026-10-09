@@ -1818,6 +1818,7 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
 		bypassNoChangesSkip:     true,
 		analyzerFilesOnly:       true,
+		background:              true,
 		claimUnrecordedNewFiles: !event.CompletionWithoutLaunch,
 		eventFilesOnly:          event.CompletionWithoutLaunch,
 	})
@@ -1924,6 +1925,12 @@ type subagentCaptureOptions struct {
 	// rationale. Never set for the foreground launch-time path, which keeps
 	// its original (correct, worktree-scan-based) behavior unchanged.
 	analyzerFilesOnly bool
+
+	// background marks the record as a background task's
+	// (session.TaskRecord.Background), including one this capture creates
+	// because no launch marker exists (a resumed run under a new key, or a
+	// completion without a launch), so overlapping tasks still see it.
+	background bool
 
 	// claimUnrecordedNewFiles, with analyzerFilesOnly, also captures untracked
 	// files created since the task launched that no session in the worktree
@@ -2155,6 +2162,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		ToolUseID:                event.ToolUseID,
 		AgentID:                  event.SubagentID,
 		StartedAt:                time.Now(),
+		Background:               opts.background,
 		SubagentType:             event.SubagentType,
 		TaskDescription:          event.TaskDescription,
 		DeclaredTranscriptPath:   subagentTranscriptPath,

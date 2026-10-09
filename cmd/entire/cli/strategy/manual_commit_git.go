@@ -232,6 +232,7 @@ func launchStubTaskRecord(rec session.TaskRecord) session.TaskRecord {
 		ToolUseID:             rec.ToolUseID,
 		AgentID:               rec.AgentID,
 		StartedAt:             rec.StartedAt,
+		Background:            rec.Background,
 		SubagentType:          rec.SubagentType,
 		TaskDescription:       rec.TaskDescription,
 		TranscriptUnavailable: rec.TranscriptUnavailable,
@@ -265,6 +266,9 @@ func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) erro
 	}
 	if rec.TokenUsageFromTranscript {
 		live.TokenUsageFromTranscript = true
+	}
+	if rec.Background {
+		live.Background = true
 	}
 	if live.AgentID == "" {
 		live.AgentID = rec.AgentID
