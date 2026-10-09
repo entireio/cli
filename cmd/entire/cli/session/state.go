@@ -490,6 +490,12 @@ type TaskRecord struct {
 	// StartedAt is when the background launch was observed.
 	StartedAt time.Time `json:"started_at"`
 
+	// Background marks a record created at a background launch, which runs
+	// until a later SubagentStop instead of completing at launch. Its stop
+	// captures no worktree scan, so another background task overlapping its
+	// run makes new untracked files ambiguous between the two.
+	Background bool `json:"background,omitempty"`
+
 	// SubagentType and TaskDescription are captured at launch time because
 	// SubagentStop payloads carry no tool_input — a Final-path capture has no
 	// way to derive them from the event itself (ParseSubagentTypeAndDescription

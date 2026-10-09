@@ -1673,6 +1673,7 @@ func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error 
 			ToolUseID:       event.ToolUseID,
 			AgentID:         event.SubagentID,
 			StartedAt:       time.Now(),
+			Background:      true,
 			SubagentType:    event.SubagentType,
 			TaskDescription: event.TaskDescription,
 		}
@@ -2203,8 +2204,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 // to the commit that carries them, the same as a turn end claiming a user's
 // edit made during an active turn.
 //
-// Returns nil when there is no launch baseline or the scan cannot tell which
-// files other sessions own.
+// Returns nil when there is no launch baseline, when the scan cannot tell
+// which files other sessions own, or when another background task in the
+// worktree ran during this one: a new file could then be either task's, and
+// the first to stop would claim both.
 func unrecordedNewFilesSinceLaunch(ctx context.Context, event *agent.Event, repoRoot string) []string {
 	preState, err := LoadPreTaskState(ctx, event.ToolUseID)
 	if err != nil {
@@ -2223,16 +2226,21 @@ func unrecordedNewFilesSinceLaunch(ctx context.Context, event *agent.Event, repo
 	if len(created) == 0 {
 		return nil
 	}
-	recorded, ok, err := strategy.FilesTouchedInSessionWorktree(ctx, event.SessionID)
+	claims, ok, err := strategy.LoadBackgroundClaimContext(ctx, event.SessionID, event.ToolUseID)
 	if err != nil || !ok {
 		if err != nil {
 			logging.Warn(ctx, "failed to list files recorded by sessions", slog.String("error", err.Error()))
 		}
 		return nil
 	}
+	if claims.Overlapped {
+		logging.Info(ctx, "not claiming new untracked files: another background task overlapped this one",
+			slog.Int("candidates", len(created)))
+		return nil
+	}
 	unrecorded := make([]string, 0, len(created))
 	for _, file := range created {
-		if _, seen := recorded[file]; !seen {
+		if _, seen := claims.Recorded[file]; !seen {
 			unrecorded = append(unrecorded, file)
 		}
 	}

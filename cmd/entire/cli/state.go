@@ -95,10 +95,14 @@ func (s *PrePromptState) PreUntrackedFiles() []string {
 }
 
 // UntrackedFileStat is enough of an untracked file's metadata to tell whether
-// it changed, without hashing its content on every prompt.
+// it changed, without hashing its content on every prompt: the stat fields
+// git's index compares for the same purpose. Inode and ChangeTime are zero
+// where the platform does not expose them (see fileChangeStamp).
 type UntrackedFileStat struct {
-	Size    int64 `json:"size"`
-	ModTime int64 `json:"mod_time_ns"`
+	Size       int64  `json:"size"`
+	ModTime    int64  `json:"mod_time_ns"`
+	Inode      uint64 `json:"ino,omitempty"`
+	ChangeTime int64  `json:"ctime_ns,omitempty"`
 }
 
 // statUntrackedFiles records an UntrackedFileStat for each of files that is a
@@ -123,8 +127,8 @@ func statUntrackedFiles(ctx context.Context, files []string) map[string]Untracke
 	return stats
 }
 
-// ChangedUntrackedFiles returns the files in UntrackedFileStats whose size or
-// modification time no longer matches: pre-existing untracked files changed
+// ChangedUntrackedFiles returns the files in UntrackedFileStats whose stat
+// fields no longer match: pre-existing untracked files changed
 // since the prompt started. A file that is gone or no longer a regular file is
 // not reported; one that was committed since is reported, and turn-end's
 // filterToUncommittedFiles drops it.
@@ -157,7 +161,8 @@ func statWorktreeFile(repoRoot, file string) (UntrackedFileStat, bool) {
 	if err != nil || !info.Mode().IsRegular() {
 		return UntrackedFileStat{}, false
 	}
-	return UntrackedFileStat{Size: info.Size(), ModTime: info.ModTime().UnixNano()}, true
+	inode, changeTime := fileChangeStamp(info)
+	return UntrackedFileStat{Size: info.Size(), ModTime: info.ModTime().UnixNano(), Inode: inode, ChangeTime: changeTime}, true
 }
 
 // normalizePrePromptState migrates deprecated fields after loading from JSON.

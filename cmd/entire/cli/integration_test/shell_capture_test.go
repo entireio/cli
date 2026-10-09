@@ -3,6 +3,9 @@
 package integration
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -53,6 +56,47 @@ func TestShellEditToPreExistingUntrackedFile_LinksCommit(t *testing.T) {
 	env.GitCommitWithHooks("Add plan", editedFile)
 	if env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()) == "" {
 		t.Errorf("commit of the agent's shell edit to %s should carry an Entire-Checkpoint trailer", editedFile)
+	}
+}
+
+// TestShellRewriteKeepingSizeAndMtime_IsRecorded covers a rewrite that keeps
+// the file's length and restores its modification time (as cp -p or touch -r
+// would). Only the status-change time shows the edit.
+func TestShellRewriteKeepingSizeAndMtime_IsRecorded(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows exposes no status-change time; size and mtime are all that is compared there")
+	}
+	env := NewFeatureBranchEnv(t)
+
+	const editedFile = "scratch/config.ini"
+	env.WriteFile(editedFile, "mode=aaaa\n")
+	fullPath := filepath.Join(env.RepoDir, editedFile)
+	before, err := os.Stat(fullPath)
+	if err != nil {
+		t.Fatalf("stat %s: %v", editedFile, err)
+	}
+
+	sess := env.NewSession()
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	sess.CreateTranscript("switch the mode with a shell command", nil)
+	env.WriteFile(editedFile, "mode=bbbb\n")
+	if err := os.Chtimes(fullPath, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatalf("restore mtime: %v", err)
+	}
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	state, err := env.GetSessionState(sess.ID)
+	if err != nil || state == nil {
+		t.Fatalf("GetSessionState failed: %v (state=%v)", err, state)
+	}
+	if !containsFile(state.FilesTouched, editedFile) {
+		t.Errorf("turn end missed a same-size rewrite of %s that restored its mtime: FilesTouched=%v",
+			editedFile, state.FilesTouched)
 	}
 }
 
@@ -165,6 +209,54 @@ func TestBackgroundSubagentStop_ClaimsOnlyUnrecordedNewFiles(t *testing.T) {
 	want := []string{userFile, subagentFile}
 	if !slices.Equal(taskFiles, want) {
 		t.Errorf("task record files = %v, want %v", taskFiles, want)
+	}
+}
+
+// TestOverlappingBackgroundTasks_ClaimNoNewFiles covers two background tasks,
+// from different sessions, running at the same time and each creating a file
+// through a shell command. Nothing tells the two files apart, so neither stop
+// claims new untracked files: the first to stop would otherwise take both.
+func TestOverlappingBackgroundTasks_ClaimNoNewFiles(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	const (
+		firstToolUseID  = "toolu_01OverlapFirst"
+		firstSubagentID = "c1111222233334444"
+		firstFile       = "reports/first.txt"
+		secondToolUseID = "toolu_01OverlapSecond"
+		secondAgentID   = "c5555666677778888"
+		secondFile      = "reports/second.txt"
+	)
+
+	first := env.NewSession()
+	first.CreateTranscript("delegate the first report", nil)
+	launchBackgroundTask(t, env, first, firstToolUseID, firstSubagentID)
+	if err := env.SimulateStop(first.ID, first.TranscriptPath); err != nil {
+		t.Fatalf("first Stop failed: %v", err)
+	}
+
+	second := env.NewSession()
+	second.CreateTranscript("delegate the second report", nil)
+	launchBackgroundTask(t, env, second, secondToolUseID, secondAgentID)
+	if err := env.SimulateStop(second.ID, second.TranscriptPath); err != nil {
+		t.Fatalf("second Stop failed: %v", err)
+	}
+
+	env.WriteFile(firstFile, "first subagent's shell output\n")
+	env.WriteFile(secondFile, "second subagent's shell output\n")
+	stopBackgroundTask(t, env, first, firstSubagentID)
+	stopBackgroundTask(t, env, second, secondAgentID)
+
+	for _, sess := range []*Session{first, second} {
+		state, err := env.GetSessionState(sess.ID)
+		if err != nil || state == nil {
+			t.Fatalf("GetSessionState(%s) failed: %v (state=%v)", sess.ID, err, state)
+		}
+		if containsFile(state.FilesTouched, firstFile) || containsFile(state.FilesTouched, secondFile) {
+			t.Errorf("session %s claimed a file that could belong to either overlapping task: FilesTouched=%v",
+				sess.ID, state.FilesTouched)
+		}
 	}
 }
 
