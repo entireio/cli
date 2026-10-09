@@ -1463,33 +1463,6 @@ func (s *GitStore) ReadLatestSessionContent(ctx context.Context, checkpointID id
 	return s.ReadSessionContent(ctx, checkpointID, latestIndex)
 }
 
-// ReadSessionContentByID reads a session's content by its session ID.
-// This is useful when you have the session ID but don't know its index within the checkpoint.
-// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
-// Returns an error if no session with the given ID exists in the checkpoint.
-func (s *GitStore) ReadSessionContentByID(ctx context.Context, checkpointID id.CheckpointID, sessionID string) (*SessionContent, error) {
-	summary, err := s.Read(ctx, checkpointID)
-	if err != nil {
-		return nil, err
-	}
-	if summary == nil {
-		return nil, ErrCheckpointNotFound
-	}
-
-	// Iterate through sessions to find the one with matching session ID
-	for i := range len(summary.Sessions) {
-		content, readErr := s.ReadSessionContent(ctx, checkpointID, i)
-		if readErr != nil {
-			continue
-		}
-		if content != nil && content.Metadata.SessionID == sessionID {
-			return content, nil
-		}
-	}
-
-	return nil, fmt.Errorf("session %q not found in checkpoint %s", sessionID, checkpointID)
-}
-
 // List lists all committed checkpoints from the entire/checkpoints/v1 branch.
 // Scans sharded paths: <id[:2]>/<id[2:]>/ directories containing metadata.json.
 //
@@ -1601,31 +1574,6 @@ func readCommittedMetadataFromCheckpointTree(checkpointTree *object.Tree, sessio
 		return Metadata{}, false
 	}
 	return sessionMetadata, true
-}
-
-// GetTranscript retrieves the transcript for a specific checkpoint ID.
-// Returns the latest session's transcript.
-func (s *GitStore) GetTranscript(ctx context.Context, checkpointID id.CheckpointID) ([]byte, error) {
-	content, err := s.ReadLatestSessionContent(ctx, checkpointID)
-	if err != nil {
-		return nil, err
-	}
-	if len(content.Transcript) == 0 {
-		return nil, fmt.Errorf("no transcript found for checkpoint: %s", checkpointID)
-	}
-	return content.Transcript, nil
-}
-
-// GetSessionLog retrieves the session transcript and session ID for a checkpoint.
-// This is the primary method for looking up session logs by checkpoint ID.
-// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
-// Returns ErrNoTranscript if the checkpoint exists but has no transcript.
-func (s *GitStore) GetSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string, error) {
-	content, err := s.ReadLatestSessionContent(ctx, cpID)
-	if err != nil {
-		return nil, "", err
-	}
-	return content.Transcript, content.Metadata.SessionID, nil
 }
 
 // backfillSummary updates the summary field in the latest session's metadata.

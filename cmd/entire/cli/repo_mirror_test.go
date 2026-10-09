@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,18 +23,6 @@ import (
 
 	"github.com/entireio/cli/internal/coreapi"
 )
-
-func TestExplainSuspendedMirror(t *testing.T) {
-	t.Parallel()
-	const id = "01KS6KFJR2XS6PZ188MVYE07AN"
-	var buf bytes.Buffer
-	explainSuspendedMirror(&buf, id)
-	out := buf.String()
-	require.Contains(t, out, id, "message must name the mirror")
-	require.Contains(t, out, "suspended")
-	require.Contains(t, out, "Contact support", "must point at support, not an internal admin command")
-	require.NotContains(t, out, "entire-core", "must not leak internal terminology")
-}
 
 // fakeMirrorGetter feeds awaitMirrorReady a scripted sequence of statuses (the
 // last entry repeats) or a fixed error, standing in for *coreapi.Client.GetMirror.
@@ -2326,4 +2315,13 @@ func TestRepoView_NamesARepoOneWay(t *testing.T) {
 		require.NotContains(t, filters, "my-project/my-repo",
 			"the GitHub directory filter is not how a native repo is found")
 	})
+}
+
+func regionSlugs(regions []regionChoice) []string {
+	out := make([]string, 0, len(regions))
+	for _, r := range regions {
+		out = append(out, r.slug)
+	}
+	slices.Sort(out)
+	return out
 }

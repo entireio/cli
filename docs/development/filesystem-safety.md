@@ -552,9 +552,9 @@ comments at each site say which case applies:
   one pointing elsewhere inside it, so `.claude -> vendor/x` was previously read
   by `Read`/`GeneratedState`, reported present by `Exists`, and had `Remove`
   delete the file at the far end; only `Write` checked, because
-  `MkdirAllNoSymlink` was the only check there was. `osroot.NoSymlinkedParent` is
-  that function's read-only counterpart, and every `HookConfigFile` method calls
-  it. `HookConfigFile.Root()` hands over the raw primitives, so its one caller
+  `MkdirAllNoSymlink` was the only check there was. Every `HookConfigFile`
+  method now resolves through the read-only no-symlink primitives
+  (`osroot.LstatNoSymlinks`, `RemoveNoSymlinks`, ...). `HookConfigFile.Root()` hands over the raw primitives, so its one caller
   (Codex's `hooksDocumentRoot`) makes the check itself.
 
   **`writeManagedScaffold` is the same rule for the skill scaffolds** —

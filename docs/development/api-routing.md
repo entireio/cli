@@ -45,13 +45,14 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   suspended processing placement, control-plane error, timeout) returns an
   error instead of falling back to home-jurisdiction routing — a wrong-region
   "success" is worse than a command failure for repo-scoped data. Used by
-  trails (`NewAuthenticatedEntireAPICellClient` in `api_client.go`) and by
   `experts --repo <ulid>`. `resolveRepoCellPlacement` performs the same lookup
   for callers that also need the placement's id (repo_id) alongside its cell —
-  used by cross-repo checkpoint reads (`explain --repo`, `explain_repo.go`;
-  the same placement id keys both `/checkpoints/{id}` and the commit→checkpoint
-  resolution at `/commits/{sha}/checkpoints`) and
-  by `experts --repo owner/repo`, which sends that placement id to entire-api
+  used by trails (`newTrailAPIClient` in `api_client.go`, through the
+  forge-qualified `resolveForgeRepoCellPlacement`), by cross-repo checkpoint
+  reads (`explain --repo`, `explain_repo.go`; the same placement id keys both
+  `/checkpoints/{id}` and the commit→checkpoint resolution at
+  `/commits/{sha}/checkpoints`) and by `experts --repo owner/repo`, which sends
+  that placement id to entire-api
   instead of re-deriving it from a data-plane repo listing.
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the

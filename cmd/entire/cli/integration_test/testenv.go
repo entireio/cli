@@ -436,17 +436,6 @@ func (env *TestEnv) ReadFile(path string) string {
 	return string(data)
 }
 
-// ReadFileAbsolute reads a file using an absolute path.
-func (env *TestEnv) ReadFileAbsolute(path string) string {
-	env.T.Helper()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		env.T.Fatalf("failed to read file %s: %v", path, err)
-	}
-	return string(data)
-}
-
 // FileExists checks if a file exists in the test repo.
 func (env *TestEnv) FileExists(path string) bool {
 	env.T.Helper()
@@ -708,9 +697,9 @@ type PendingCheckpoint struct {
 func (env *TestEnv) ListPendingCheckpoints() []PendingCheckpoint {
 	env.T.Helper()
 
-	// Run `checkpoint list --pending --json` using the shared binary. This is
-	// the drop-in replacement for the deprecated `rewind --list` bridge; the JSON shape is
-	// identical. Parse stdout only — any notice goes to stderr.
+	// Run `checkpoint list --pending --json` using the shared binary; its JSON
+	// keeps the shape the removed `rewind --list` produced. Parse stdout only —
+	// any notice goes to stderr.
 	cmd := exec.CommandContext(env.T.Context(), getTestBinary(), "checkpoint", "list", "--pending", "--json")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
@@ -1399,11 +1388,6 @@ func (env *TestEnv) TryGetLatestCheckpointID() string {
 	}
 
 	return ""
-}
-
-// GetLatestCondensationID is an alias for GetLatestCheckpointID for backwards compatibility.
-func (env *TestEnv) GetLatestCondensationID() string {
-	return env.GetLatestCheckpointID()
 }
 
 // GetCheckpointIDFromCommitMessage extracts the Entire-Checkpoint trailer from a commit message.

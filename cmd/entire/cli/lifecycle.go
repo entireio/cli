@@ -987,8 +987,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// relNewFiles (untracked ⇒ never in HEAD) and relDeletedFiles (git status
 	// cannot report a committed deletion) are uncommitted by construction —
 	// filtering them against HEAD would wrongly drop deletions of files
-	// created-then-deleted within the session (absent from HEAD) and make
-	// checkpoint rewind resurrect them.
+	// created-then-deleted within the session (absent from HEAD) from the
+	// session's record.
 	relModifiedFiles = filterToUncommittedFiles(ctx, relModifiedFiles, repoRoot)
 	// Drop paths no commit can carry (see strategy.FilterTrackableChanges).
 	relModifiedFiles, relNewFiles, relDeletedFiles = strategy.FilterTrackableChanges(ctx, repoRoot, relModifiedFiles, relNewFiles, relDeletedFiles)

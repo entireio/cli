@@ -66,16 +66,6 @@ func sessionLockDeadlineFromContext(ctx context.Context) (time.Time, bool) {
 // Session state management functions shared across all strategies.
 // SessionState is stored in .git/entire-sessions/{session_id}.json
 
-// getSessionStateDir returns the path to the session state directory.
-// This is stored in the git common dir so it's shared across all worktrees.
-func getSessionStateDir(ctx context.Context) (string, error) {
-	commonDir, err := GetGitCommonDir(ctx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(commonDir, session.SessionStateDirName), nil
-}
-
 // openSessionStateRoot creates the session state directory if needed and returns
 // an os.Root scoped to it. Hint/marker files are named from the (already
 // validated) session ID; routing their writes through os.Root makes escaping

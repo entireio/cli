@@ -73,19 +73,9 @@ func (s *GitStore) SetMetadataBranchFetcher(f MetadataBranchFetchFunc) {
 	s.metadataBranchFetcher = f
 }
 
-// Repository returns the underlying git repository.
-func (s *GitStore) Repository() *git.Repository {
-	return s.repo
-}
-
 // Refs returns the committed-metadata topology the store was constructed with.
 func (s *GitStore) Refs() PersistentRefs {
 	return s.refs
-}
-
-// PersistentReadRef returns the ref that committed-checkpoint reads resolve against.
-func (s *GitStore) PersistentReadRef() plumbing.ReferenceName {
-	return s.refs.Read
 }
 
 func (s *GitStore) updatePrimaryRef(ctx context.Context, build func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error)) error {

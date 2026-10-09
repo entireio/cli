@@ -191,3 +191,15 @@ func TestCallerSessionCandidates_TrimsSurroundingWhitespace(t *testing.T) {
 		t.Errorf("SessionID = %q, want it trimmed", got[0].SessionID)
 	}
 }
+
+// callerSessionEnvVarsFromRegistry enumerates the variable names of the agents
+// registered in THIS binary. Only the guard test uses it — production and test
+// isolation want the complete set above, not this binary's subset.
+func callerSessionEnvVarsFromRegistry() []string {
+	agents := callerSessionAgents()
+	names := make([]string, 0, len(agents))
+	for _, a := range agents {
+		names = append(names, a.ident.CallerSessionEnvVar())
+	}
+	return names
+}

@@ -1567,59 +1567,6 @@ func TestReadLatestSessionContent(t *testing.T) {
 	}
 }
 
-// TestReadSessionContentByID verifies that ReadSessionContentByID can find
-// a session by its session ID rather than by index.
-func TestReadSessionContentByID(t *testing.T) {
-	repo, _ := setupBranchTestRepo(t)
-	store := NewGitStore(repo, DefaultV1Refs())
-	checkpointID := id.MustCheckpointID("010203040506")
-
-	// Write two sessions with distinct IDs
-	sessionIDs := []string{"unique-id-alpha", "unique-id-beta"}
-	for i, sid := range sessionIDs {
-		err := store.Write(context.Background(), Session{
-			CheckpointID:     checkpointID,
-			SessionID:        sid,
-			Strategy:         "manual-commit",
-			Transcript:       redact.AlreadyRedacted([]byte(fmt.Sprintf(`{"session_name": "%s"}`, sid))),
-			CheckpointsCount: 1,
-			AuthorName:       "Test Author",
-			AuthorEmail:      "test@example.com",
-		})
-		if err != nil {
-			t.Fatalf("WriteCommitted() session %d error = %v", i, err)
-		}
-	}
-
-	// Read by session ID
-	content, err := store.ReadSessionContentByID(context.Background(), checkpointID, "unique-id-beta")
-	if err != nil {
-		t.Fatalf("ReadSessionContentByID() error = %v", err)
-	}
-
-	if content.Metadata.SessionID != "unique-id-beta" {
-		t.Errorf("SessionID = %q, want %q", content.Metadata.SessionID, "unique-id-beta")
-	}
-	if !strings.Contains(string(content.Transcript), "unique-id-beta") {
-		t.Errorf("transcript should contain session name, got %s", string(content.Transcript))
-	}
-}
-
-// TestReadSessionContentByID_NotFound verifies that ReadSessionContentByID
-// returns an error when the session ID doesn't exist in the checkpoint.
-func TestReadSessionContentByID_NotFound(t *testing.T) {
-	store, checkpointID := writeSingleSession(t, "111213141516", "existing-session", `{"exists": true}`)
-
-	// Try to read non-existent session ID
-	_, err := store.ReadSessionContentByID(context.Background(), checkpointID, "nonexistent-session")
-	if err == nil {
-		t.Error("ReadSessionContentByID() should return error for non-existent session ID")
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("error should mention 'not found', got: %v", err)
-	}
-}
-
 // TestListCommitted_MultiSessionInfo verifies that List returns correct
 // information for checkpoints with multiple sessions.
 func TestListCommitted_MultiSessionInfo(t *testing.T) {

@@ -387,15 +387,6 @@ func managedHookSpecs(ctx context.Context) []managedHookSpec {
 	return specs
 }
 
-// InspectHookConfig resolves and parses the hooks file Codex discovers.
-func InspectHookConfig(ctx context.Context) HookConfigInspection {
-	discovery := ResolveHookDiscovery(ctx)
-	if discovery.State != HookDiscoveryResolved {
-		return HookConfigInspection{State: HookFileUnavailable, Err: discovery.Diagnostic}
-	}
-	return inspectDiscoveredHookConfig(ctx, discovery.DiscoveredHooks)
-}
-
 func inspectWorktreeHookConfig(ctx context.Context, hooks WorktreeHooksPath) HookConfigInspection {
 	projectDir, err := validateWorktreeHookTarget(hooks)
 	if err != nil {

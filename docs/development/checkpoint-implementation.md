@@ -14,7 +14,6 @@ The CLI uses a manual-commit strategy for managing session data and checkpoints.
 
 - `SaveStep()` - Record a turn-end step in session state (files touched, their blob hashes, step count); writes no git objects
 - `ListPendingCheckpoints()` - List pending checkpoints (see the note below: there is no restore path)
-- `GetSessionLog()` - Retrieve session data
 
 **There is no restore path.** `Rewind()`, `PreviewRewind()`, `CanRewind()` and
 their helpers were removed once the `rewind` commands went and nothing outside
@@ -137,7 +136,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 
 #### Key Files
 
-- `strategy.go` - Shared types only, no behaviour: the sentinel errors (`ErrNoMetadata`, `ErrNoSession`, `ErrNotTaskCheckpoint`, `ErrEmptyRepository`), the argument and result structs (`SessionInfo`, `PendingCheckpoint`, `StepContext`, `TaskStepContext`, `TaskCheckpoint`, `SubagentCheckpoint`, `RestoredSession`), and `TaskMetadataDir()`. The strategy type itself and its constructor live in `manual_commit.go`.
+- `strategy.go` - Shared types only, no behaviour: the argument and result structs (`PendingCheckpoint`, `StepContext`, `RestoredSession`), and `TaskMetadataDir()`. The strategy type itself and its constructor live in `manual_commit.go`.
 - `common.go` - Helpers for metadata extraction, tree building, `ListCheckpoints()`
 - `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, pending-checkpoint listing + log restore (`manual_commit_pending.go`), git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
 - `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`, `OPFBatchTooLargeError`, `OPFRawBytesTooLargeError`, `OPFNoCategoriesError` (OPF enabled with zero effective categories — the pre-push decision and the rewrite both fail closed instead of stamping the trailer without a scan).

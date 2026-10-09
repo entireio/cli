@@ -819,36 +819,6 @@ func TestResolveCreateBranch(t *testing.T) {
 	}
 }
 
-func TestParseTrailNumberArg(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		args    []string
-		want    int
-		wantErr bool
-	}{
-		{"no arg", nil, 0, false},
-		{"empty slice", []string{}, 0, false},
-		{"valid number", []string{"575"}, 575, false},
-		{"zero rejected", []string{"0"}, 0, true},
-		{"negative rejected", []string{"-3"}, 0, true},
-		{"non-numeric rejected", []string{"abc"}, 0, true},
-		{"uuid rejected", []string{"019ed3c9-7fd9-72d6-bd29-1130d2b2eec4"}, 0, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := parseTrailNumberArg(tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseTrailNumberArg(%v) err = %v, wantErr %v", tt.args, err, tt.wantErr)
-			}
-			if !tt.wantErr && got != tt.want {
-				t.Fatalf("parseTrailNumberArg(%v) = %d, want %d", tt.args, got, tt.want)
-			}
-		})
-	}
-}
-
 // Trail deletion was removed; the command must fail and point at closing,
 // whichever legacy flags a script still passes.
 func TestTrailDeleteRemoved(t *testing.T) {

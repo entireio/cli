@@ -243,14 +243,9 @@ func ConfigRootForRead() (*os.Root, error) {
 }
 
 // CacheRoot returns the shared *os.Root over the per-user cache directory,
-// creating it. CacheRootForRead is the same without creation.
+// creating it.
 func CacheRoot() (*os.Root, error) {
 	return resolveUserRoot(cacheDir, true)
-}
-
-// CacheRootForRead is CacheRoot without creating the directory.
-func CacheRootForRead() (*os.Root, error) {
-	return resolveUserRoot(cacheDir, false)
 }
 
 // resolveUserRoot fails on a rejected override before any directory is created:

@@ -274,12 +274,6 @@ func OutdatedHookAgents(ctx context.Context) []types.AgentName {
 	return outdated
 }
 
-// OutdatedHookAgentDisplayNames returns user-facing display names for agents
-// whose hook config is out of date.
-func OutdatedHookAgentDisplayNames(ctx context.Context) []string {
-	return agentDisplayNames(OutdatedHookAgents(ctx))
-}
-
 // agentDisplayNames maps agent names to their user-facing display names,
 // skipping names that aren't registered.
 func agentDisplayNames(names []types.AgentName) []string {

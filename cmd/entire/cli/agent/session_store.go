@@ -493,7 +493,7 @@ func (s *SessionStore) CreateExclusive(name string, perm os.FileMode) error {
 
 // Exists reports whether name is present in the store. Lstat, not Stat: a
 // dangling symlink is still a file that exists and must not be overwritten
-// silently (see the rewind restore path, which distinguishes the two).
+// silently (resume's session-log restore relies on that distinction).
 func (s *SessionStore) Exists(name string) bool {
 	_, err := s.Lstat(name)
 	return err == nil

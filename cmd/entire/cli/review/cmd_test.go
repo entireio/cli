@@ -260,28 +260,22 @@ func TestRunReview_MissingHooksAborts(t *testing.T) {
 	}
 }
 
-// TestRunReview_NonLaunchableAgentPreservesMarker verifies that the pending
-// marker is NOT cleared when a non-launchable agent is selected. Uses cursor
-// because it has HookSupport but no Launcher.
+// TestRunReview_HandOffPreservesMarker verifies that the pending marker is NOT
+// cleared once review hands off to the agent: the agent's next session reads
+// it. Uses cursor because it has HookSupport.
 //
 // Regression: previously the cleanup defer was registered before the
-// LauncherFor check, so the marker was wiped on the !ok path, breaking
-// the hand-off message.
-func TestRunReview_NonLaunchableAgentPreservesMarker(t *testing.T) {
+// hand-off, so the marker was wiped, breaking the hand-off message.
+func TestRunReview_HandOffPreservesMarker(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	const nonLaunchableAgent = "cursor"
-	installHooksForCmdTest(t, types.AgentName(nonLaunchableAgent))
-
-	// Confirm cursor has no Launcher; skip if a future change adds one.
-	if _, hasLauncher := agent.LauncherFor(types.AgentName(nonLaunchableAgent)); hasLauncher {
-		t.Skipf("%s now implements Launcher; pick another non-launchable agent", nonLaunchableAgent)
-	}
+	const handOffAgent = "cursor"
+	installHooksForCmdTest(t, types.AgentName(handOffAgent))
 
 	// Use prompt-only config: cursor has no curated built-ins, so a Skills
 	// value would trip the installed-skill guard before reaching this path.
 	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		nonLaunchableAgent: {Prompt: "review the diff"},
+		handOffAgent: {Prompt: "review the diff"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -306,8 +300,8 @@ func TestRunReview_NonLaunchableAgentPreservesMarker(t *testing.T) {
 	if !ok {
 		t.Fatal("marker was cleared — hand-off is broken")
 	}
-	if m.AgentName != nonLaunchableAgent {
-		t.Errorf("AgentName = %q, want %s", m.AgentName, nonLaunchableAgent)
+	if m.AgentName != handOffAgent {
+		t.Errorf("AgentName = %q, want %s", m.AgentName, handOffAgent)
 	}
 }
 

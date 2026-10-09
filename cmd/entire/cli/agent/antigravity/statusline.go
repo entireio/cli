@@ -132,16 +132,6 @@ func (st statusStore) fileName(conversationID string) string {
 	return path.Join(st.dir, filepath.Base(conversationID)+".jsonl")
 }
 
-// statusFilePath returns the absolute path of a conversation's snapshot file.
-// Diagnostics and tests only: production I/O goes through the root by name.
-func statusFilePath(conversationID string) (string, error) {
-	st, err := openStatusStore()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(st.root.Name(), filepath.FromSlash(st.fileName(conversationID))), nil
-}
-
 // AppendStatusSnapshot parses an agy state-JSON payload and appends a snapshot
 // to the per-conversation JSONL file. The hot path never returns an error for
 // malformed input — only for genuine I/O failures.
