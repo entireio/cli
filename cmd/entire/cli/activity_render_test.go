@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
-	"unicode/utf8"
 )
 
 const activityTestAgentClaude = "claude"
@@ -539,5 +539,38 @@ func TestRunStatsTUI_NoColorStyleFlag(t *testing.T) {
 	}
 	if m.sty.colorEnabled {
 		t.Fatal("expected stats TUI styles to disable colors")
+	}
+}
+
+// The CLI records an unidentified agent as "Unknown" (agent.AgentTypeUnknown);
+// it must share the canonical unknown bucket, not become an external agent.
+func TestAgentKey_CapitalizedUnknownIsUnknown(t *testing.T) {
+	t.Parallel()
+	if got := agentKey("Unknown"); got != activityAgentUnknown {
+		t.Errorf("agentKey(%q) = %q, want %q", "Unknown", got, activityAgentUnknown)
+	}
+	counts := agentCounts(map[string]int{"unknown": 2, "Unknown": 3, "UNKNOWN": 1})
+	if len(counts) != 1 || counts[activityAgentUnknown] != 6 {
+		t.Errorf("agentCounts = %v, want {%s:6}", counts, activityAgentUnknown)
+	}
+	c := userCommit{Checkpoints: []userCommitCheckpoint{{Agents: []string{"Unknown"}}, {Agents: []string{"unknown"}}}}
+	if got := uniqueCommitAgents(c); len(got) != 1 || got[0] != activityAgentUnknown {
+		t.Errorf("uniqueCommitAgents = %v, want a single unknown badge", got)
+	}
+}
+
+func TestAgentCounts_MergesExternalCaseVariants(t *testing.T) {
+	t.Parallel()
+	counts := agentCounts(map[string]int{"Grok Bot": 3, "grok bot": 1, activityTestAgentClaude: 2})
+	if len(counts) != 2 || counts["Grok Bot"] != 4 || counts[activityTestAgentClaude] != 2 {
+		t.Errorf("agentCounts = %v, want {Grok Bot:4 claude:2}", counts)
+	}
+	tied := agentCounts(map[string]int{"grok bot": 1, "Grok Bot": 1})
+	if len(tied) != 1 || tied["Grok Bot"] != 2 {
+		t.Errorf("tied spellings = %v, want the smaller spelling {Grok Bot:2}", tied)
+	}
+	c := userCommit{Checkpoints: []userCommitCheckpoint{{Agents: []string{"grok bot"}}, {Agents: []string{"Grok Bot", "Grok Bot"}}}}
+	if got := uniqueCommitAgents(c); len(got) != 1 || got[0] != "Grok Bot" {
+		t.Errorf("uniqueCommitAgents = %v, want one Grok Bot badge", got)
 	}
 }

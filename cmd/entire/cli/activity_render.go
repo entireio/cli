@@ -131,7 +131,9 @@ func agentKey(raw string) string {
 	if id := normalizeAgentString(raw); id != agentUnknown {
 		return id
 	}
-	if name := externalAgentName(raw); name != "" {
+	// The CLI itself records an unidentified agent as "Unknown"
+	// (agent.AgentTypeUnknown); any casing of it is the unknown bucket.
+	if name := externalAgentName(raw); name != "" && !strings.EqualFold(name, agentUnknown) {
 		return name
 	}
 	return agentUnknown
@@ -169,11 +171,41 @@ func externalAgentName(raw string) string {
 }
 
 // agentCounts re-keys counts by agentKey, so raw names that clean to the same
-// agent (or to a built-in) are counted once.
+// agent (or to a built-in) are counted once, and merges external names that
+// differ only in case.
 func agentCounts(counts map[string]int) map[string]int {
 	out := make(map[string]int, len(counts))
 	for raw, count := range counts {
 		out[agentKey(raw)] += count
+	}
+	return mergeCaseVariants(out)
+}
+
+// mergeCaseVariants folds agent keys that differ only in case into one key,
+// spelled the way most of the counts spell it (ties go to the smaller
+// spelling), as entire-api does for its chart series. Built-in IDs are
+// lowercase, so only external names are affected.
+func mergeCaseVariants(counts map[string]int) map[string]int {
+	type variants struct {
+		total, bestCount int
+		best             string
+	}
+	groups := make(map[string]*variants, len(counts))
+	for key, count := range counts {
+		folded := strings.ToLower(key)
+		g, ok := groups[folded]
+		if !ok {
+			g = &variants{}
+			groups[folded] = g
+		}
+		g.total += count
+		if g.best == "" || count > g.bestCount || (count == g.bestCount && key < g.best) {
+			g.best, g.bestCount = key, count
+		}
+	}
+	out := make(map[string]int, len(groups))
+	for _, g := range groups {
+		out[g.best] = g.total
 	}
 	return out
 }
@@ -736,8 +768,7 @@ func renderSessionRow(w io.Writer, sty activityStyles, s userSession) {
 }
 
 func uniqueCommitAgents(c userCommit) []string {
-	seen := make(map[string]struct{})
-	var result []string
+	seen := make(map[string]int)
 	for _, cp := range c.Checkpoints {
 		agents := cp.Agents
 		// Fall back to singular Agent field when Agents slice is empty
@@ -745,12 +776,13 @@ func uniqueCommitAgents(c userCommit) []string {
 			agents = []string{cp.Agent}
 		}
 		for _, a := range agents {
-			id := agentKey(a)
-			if _, ok := seen[id]; !ok {
-				seen[id] = struct{}{}
-				result = append(result, id)
-			}
+			seen[agentKey(a)]++
 		}
+	}
+	merged := mergeCaseVariants(seen)
+	result := make([]string, 0, len(merged))
+	for id := range merged {
+		result = append(result, id)
 	}
 	sort.Strings(result)
 	return result
