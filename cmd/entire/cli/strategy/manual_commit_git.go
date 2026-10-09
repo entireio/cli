@@ -66,8 +66,10 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		invalidateStaleSubagentSnapshot(&step, state)
-		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
-			return err
+		if hookInSessionHome(worktreeRoot, state) {
+			if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
+				return err
+			}
 		}
 
 		// A step whose every changed path is a phantom (named by the transcript
@@ -89,9 +91,14 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		// LastCheckpointID is intentionally NOT cleared here. It is set during
 		// condensation and used by handleAmendCommitMsg to restore checkpoint
 		// trailers on amend operations.
+		// Decided against the paths recorded before this step merges its own.
+		stepHashes, stepDeletions := stepFileHashes, recordedDeletions
+		if !hookInSessionHome(worktreeRoot, state) {
+			stepHashes, stepDeletions = guestStepHashes(state, stepFileHashes, recordedDeletions)
+		}
 		state.StepCount++
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
-		applyTouchedFileHashes(state, changedFiles, stepFileHashes, recordedDeletions)
+		applyTouchedFileHashes(state, changedFiles, stepHashes, stepDeletions)
 		recordUntrackedDeletions(worktreeRoot, state, untrackedGone)
 		dropPhantomFilesTouched(worktreeRoot, state, changedFiles)
 		if state.StepCount == 1 {

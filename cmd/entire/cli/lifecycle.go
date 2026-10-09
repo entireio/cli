@@ -629,11 +629,12 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	captureSpan.End()
 
 	// Append prompt to prompt.txt on filesystem so it's available for
-	// mid-turn commits and condensation.
+	// mid-turn commits and condensation. It goes to the session's home
+	// worktree, where its other prompts are (see OpenSessionEntireDir).
 	// Prompts are separated by "\n\n---\n\n" to support multiple turns.
 	if event.Prompt != "" {
 		sessionName := sessionMetadataName(sessionID)
-		if root, rootErr := entiredir.Open(ctx); rootErr == nil {
+		if root, rootErr := strategy.OpenSessionEntireDir(ctx, sessionID); rootErr == nil {
 			if mkErr := osroot.MkdirAllNoSymlink(root, sessionName, 0o750); mkErr == nil {
 				promptName := sessionName + "/" + paths.PromptFileName
 				existing, readErr := entiredir.ReadFile(root, promptName)
@@ -791,7 +792,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// the .entire root, which is what every read and write below uses.
 	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	sessionName := sessionMetadataName(sessionID)
-	entireRoot, err := entiredir.Open(ctx)
+	// The session's home worktree holds its stored copy, even when this turn
+	// ended in another worktree (see strategy.OpenSessionEntireDir).
+	entireRoot, err := strategy.OpenSessionEntireDir(ctx, sessionID)
 	if err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()

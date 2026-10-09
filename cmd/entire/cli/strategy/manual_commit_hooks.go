@@ -2019,7 +2019,7 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 	// every Stop) for a fast growth check, rather than reading the content
 	// (potentially tens of MB) just to count lines. That size is in the same
 	// coordinate as CheckpointTranscriptSize; see storedTranscriptSize.
-	transcriptBlobSize, hasTranscriptFile := storedTranscriptSize(ctx, state.SessionID)
+	transcriptBlobSize, hasTranscriptFile := storedTranscriptSize(ctx, state)
 
 	// No stored transcript (e.g. released after a condensation that left
 	// carry-forward files): check if the session has FilesTouched.
@@ -2865,12 +2865,17 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		remember = updateSessionAgentHome(ctx, state)
 		homeAgentType = state.AgentType
-		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
 		reconcileWorktreePathForResumedTurn(ctx, state)
 
-		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
-			return err
+		// A turn resumed in another worktree leaves the session's branch and
+		// base where its home has them (see hookInSessionHome).
+		// An unresolvable worktree counts as home, as before this check.
+		if worktreeRoot, wtErr := paths.WorktreeRoot(ctx); wtErr != nil || hookInSessionHome(worktreeRoot, state) {
+			captureSessionBranch(repo, state)
+			if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
+				return err
+			}
 		}
 
 		state.LastCheckpointID = ""
@@ -3015,10 +3020,11 @@ func parseStagedRaw(output []byte) []string {
 }
 
 // getLastPrompt retrieves the most recent user prompt of a session from its
-// staged .entire/metadata/<session>/prompt.txt, falling back to the truncated
+// staged .entire/metadata/<session>/prompt.txt in the session's home worktree
+// (storedSessionRoot), falling back to the truncated
 // LastPrompt in session state. Returns empty string if neither is available.
 func (s *ManualCommitStrategy) getLastPrompt(ctx context.Context, state *SessionState) string {
-	if root, err := entiredir.OpenForRead(ctx); err == nil {
+	if root := storedSessionRootOrNil(ctx, state); root != nil {
 		if data, readErr := entiredir.ReadFile(root, sessionMetadataFileName(state.SessionID, paths.PromptFileName)); readErr == nil {
 			if prompt := extractLastPrompt(string(data)); prompt != "" {
 				return prompt
@@ -3295,7 +3301,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	}
 	defer repo.Close()
 
-	prompts := readPromptsFromFilesystem(ctx, state.SessionID)
+	prompts := readPromptsFromFilesystem(ctx, state)
 
 	// Persist newly extracted events into state (the caller's MutateSessionState
 	// saves them); telemetry for them is emitted by the lifecycle turn-end

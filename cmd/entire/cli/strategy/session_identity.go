@@ -163,6 +163,17 @@ func isSessionHomeWorktree(worktreePath string, state *SessionState) bool {
 	return worktreePath != "" && state.WorktreePath != "" && filepath.Clean(state.WorktreePath) == filepath.Clean(worktreePath)
 }
 
+// hookInSessionHome is isSessionHomeWorktree for an agent hook running in
+// worktreeRoot: a turn can end in another worktree of the repository (the
+// agent resumed there). Such a turn still records its own changes and tokens,
+// but nothing that reads the worktree to update what the session did at home:
+// that tree's absence of the home's untracked files is not a deletion, and its
+// HEAD and branch are not the session's. A state with no recorded worktree
+// (written before WorktreePath existed) counts as home, as before.
+func hookInSessionHome(worktreeRoot string, state *SessionState) bool {
+	return state.WorktreePath == "" || isSessionHomeWorktree(worktreeRoot, state)
+}
+
 func interactedAfter(a, b *SessionState) bool {
 	if a.LastInteractionTime == nil {
 		return false

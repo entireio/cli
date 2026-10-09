@@ -1569,7 +1569,7 @@ func setupSessionWithCheckpointAndFile(t *testing.T, s *ManualCommitStrategy, di
 // CheckpointTranscriptSize is compared in.
 func mustStoredTranscriptSize(t *testing.T, sessionID string) int64 {
 	t.Helper()
-	size, ok := storedTranscriptSize(context.Background(), sessionID)
+	size, ok := storedTranscriptSize(context.Background(), &SessionState{SessionID: sessionID})
 	require.True(t, ok, "stored transcript missing for %s", sessionID)
 	return size
 }

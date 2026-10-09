@@ -117,6 +117,28 @@ func applyTouchedFileHashes(state *SessionState, changed []string, hashes map[st
 	}
 }
 
+// guestStepHashes adjusts a step that ended outside the session's home
+// worktree (see hookInSessionHome) before applyTouchedFileHashes records it.
+// A path the session already recorded is its home's: the guest tree's
+// content may differ, so the path keeps no hash (it links by name from either
+// tree) rather than one tree's hash shutting the other's commit out, and a
+// guest-tree deletion leaves the home's record alone. Paths new to the session
+// are recorded as usual.
+func guestStepHashes(state *SessionState, hashes map[string]string, deleted []string) (map[string]string, []string) {
+	known := func(path string) bool {
+		path = filepath.ToSlash(path)
+		_, ok := state.TouchedFileHashes[path]
+		return ok || slices.Contains(state.FilesTouched, path)
+	}
+	guestHashes := make(map[string]string, len(hashes))
+	for path, hash := range hashes {
+		if !known(path) {
+			guestHashes[path] = hash
+		}
+	}
+	return guestHashes, slices.DeleteFunc(slices.Clone(deleted), known)
+}
+
 // stagedOnlyDeletions returns the step's deleted paths that are absent from
 // HEAD but whose blob is still staged as a new file (gitrepo.PathsStagedAsNew).
 // An intent-to-add entry (`git add -N`) is in the index but holds no blob and is
@@ -295,11 +317,13 @@ func dropPhantomFilesTouched(worktreeRoot string, state *SessionState, stepPaths
 // its hash.
 //
 // Paths the current step names (changed or deleted) are left to the step.
+// Only the session's home worktree is probed: a file missing from another
+// worktree says nothing about the home's (see hookInSessionHome).
 // Reads session state without the lock; recordUntrackedDeletions re-checks
 // under it. Any error yields no candidates.
 func (s *ManualCommitStrategy) untrackedDeletionCandidates(ctx context.Context, worktreeRoot, sessionID string, stepChanged, stepDeleted []string) []string {
 	state, err := s.loadSessionState(ctx, sessionID)
-	if err != nil || state == nil || len(state.TouchedFileHashes) == 0 {
+	if err != nil || state == nil || len(state.TouchedFileHashes) == 0 || !hookInSessionHome(worktreeRoot, state) {
 		return nil
 	}
 	root, err := worktreedir.OpenAt(worktreeRoot)
@@ -389,7 +413,7 @@ func (s *ManualCommitStrategy) RecordVanishedUntrackedFiles(ctx context.Context,
 // session lock that it still has a recorded content hash and is still absent
 // from the worktree.
 func recordUntrackedDeletions(worktreeRoot string, state *SessionState, candidates []string) {
-	if len(candidates) == 0 || len(state.TouchedFileHashes) == 0 {
+	if len(candidates) == 0 || len(state.TouchedFileHashes) == 0 || !hookInSessionHome(worktreeRoot, state) {
 		return
 	}
 	root, err := worktreedir.OpenAt(worktreeRoot)
