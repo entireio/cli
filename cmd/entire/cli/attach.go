@@ -1400,6 +1400,9 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 			StartedAt: now,
 		}
 	}
+	// Read before the display offset below moves: TokenStart falls back to it
+	// for state written before the token offset existed.
+	tokenStartOnDisk := state.TokenStart()
 
 	// Populate BaseCommit from HEAD if not already set, so the session becomes
 	// active and future commits in the same session receive Entire-Checkpoint trailers.
@@ -1436,27 +1439,30 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	if meta.FirstPrompt != "" {
 		state.LastPrompt = meta.FirstPrompt
 	}
-	if sessionUsage != nil {
-		// Without a cumulative subagent total of its own, keep the one hooks
-		// recorded so the re-baseline below doesn't drop it.
-		if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {
-			sessionUsage.SubagentTokens = state.TokenUsage.SubagentTokens
-			sessionUsage.SubagentTokensComplete = state.TokenUsage.SubagentTokensComplete
-		}
-		state.TokenUsage = sessionUsage
-	}
 	// A hook that checkpointed while attach waited at its prompt has already
-	// moved the token offset past what attach counted from; consuming from the
-	// stale position would move it back and have the next checkpoint recount.
+	// moved the token offset past what attach counted from, and recorded newer
+	// totals. Attach's figures are older than the hook's, so they are left out:
+	// consuming from the stale position would move the offset back and have
+	// the next checkpoint recount.
 	countedFrom := 0
 	if existingState != nil {
 		countedFrom = existingState.TokenStart()
 	}
-	if state.TokenStart() == countedFrom {
+	switch {
+	case tokenStartOnDisk != countedFrom:
+		logging.Warn(ctx, "attach: session tokens were checkpointed while attach was waiting; leaving token state as the hooks set it",
+			slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))
+	default:
+		if sessionUsage != nil {
+			// Without a cumulative subagent total of its own, keep the one hooks
+			// recorded so the re-baseline doesn't drop it.
+			if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {
+				sessionUsage.SubagentTokens = state.TokenUsage.SubagentTokens
+				sessionUsage.SubagentTokensComplete = state.TokenUsage.SubagentTokensComplete
+			}
+			state.TokenUsage = sessionUsage
+		}
 		strategy.ConsumeAttachTokenWindow(state, tokenPos)
-	} else {
-		logging.Warn(ctx, "attach: session tokens were checkpointed while attach was waiting; leaving the token offset as the hooks set it",
-			slog.Int("counted_from", countedFrom), slog.Int("token_start", state.TokenStart()))
 	}
 	if opts.Review {
 		state.Kind = session.KindAgentReview
