@@ -1,12 +1,9 @@
 package dispatch
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,94 +12,66 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
-type CloudConfig struct {
-	BaseURL string
-	Token   string
-	HTTP    *http.Client
-	Timeout time.Duration
-}
-
+// CloudClient generates dispatches on an entire-api cell: the caller's home
+// cell, or the cell of the jurisdiction runServer was asked for.
 type CloudClient struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	api          *api.Client
+	pollInterval time.Duration
 }
 
-const defaultCloudHTTPTimeout = 120 * time.Second
-
-// The gateway's one-shot dispatch route (generated in-request, nothing
-// persisted). `?jurisdiction=` is the gateway-only selector for which
-// jurisdiction's cell generates it — see Options.Jurisdiction.
+// The cell generates asynchronously: POST /me/dispatches answers 202 with a
+// run still "generating", and GET /me/dispatches/{id} reports it until the
+// run completes or fails.
 const (
-	dispatchGeneratePath   = "/api/v1/dispatches/generate"
-	jurisdictionQueryParam = "jurisdiction"
+	dispatchesPath = "/api/v1/me/dispatches"
+
+	dispatchStatusGenerating = "generating"
+	dispatchStatusComplete   = "complete"
+	dispatchStatusFailed     = "failed"
+
+	defaultDispatchPollInterval = 2 * time.Second
+	// dispatchPollBudget outlasts the cell's two-minute stale threshold, after
+	// which it reports a stuck run as failed, so the budget only fires when
+	// the cell stops answering with a terminal status at all.
+	dispatchPollBudget = 3 * time.Minute
 )
 
-func NewCloudClient(cfg CloudConfig) *CloudClient {
-	baseURL := cfg.BaseURL
-
-	httpClient := cfg.HTTP
-	if httpClient == nil {
-		timeout := cfg.Timeout
-		if timeout <= 0 {
-			timeout = defaultCloudHTTPTimeout
-		}
-		httpClient = &http.Client{Timeout: timeout}
-	} else if cfg.Timeout > 0 && httpClient.Timeout == 0 {
-		httpClient.Timeout = cfg.Timeout
-	}
-
-	return &CloudClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   cfg.Token,
-		http:    httpClient,
-	}
+func NewCloudClient(client *api.Client) *CloudClient {
+	return &CloudClient{api: client, pollInterval: defaultDispatchPollInterval}
 }
 
+// CreateDispatchRequest is the body of POST /me/dispatches. Repos must be
+// forge-qualified (gh/owner/repo or et/project/repo).
 type CreateDispatchRequest struct {
-	Repos    []string `json:"repos,omitempty"`
-	Since    string   `json:"since"`
-	Until    string   `json:"until"`
-	Generate bool     `json:"generate"`
-	Voice    string   `json:"voice,omitempty"`
+	Repos []string `json:"repos,omitempty"`
+	Since string   `json:"since"`
+	Until string   `json:"until"`
+	Voice string   `json:"voice,omitempty"`
 }
 
-type CreateDispatchResponse struct {
-	// Jurisdiction is the slug the gateway stamps onto the response: the
-	// jurisdiction whose cell the dispatch was generated from. Empty from a
-	// gateway that predates the selector — see runServer for how a sent
-	// selector is checked against it.
-	Jurisdiction      string      `json:"jurisdiction,omitempty"`
-	Window            APIWindow   `json:"window"`
-	Title             string      `json:"title,omitempty"`
-	CoveredRepos      []string    `json:"covered_repos,omitempty"`
-	Branches          APIBranches `json:"branches,omitempty"`
-	Voice             *string     `json:"voice"`
-	Repos             []APIRepo   `json:"repos,omitempty"`
-	Totals            APITotals   `json:"totals"`
-	Warnings          APIWarnings `json:"warnings"`
-	GeneratedText     string      `json:"generated_text,omitempty"`
-	GeneratedMarkdown string      `json:"generated_markdown,omitempty"`
-}
-
-type APIBranches struct {
-	Values []string
-	All    bool
+// APIRun is the cell's dispatch shape, served by both the create and the
+// read route; only the fields the CLI renders are decoded.
+type APIRun struct {
+	ID                string    `json:"id"`
+	Status            string    `json:"status"`
+	CoveredRepos      []string  `json:"coveredRepos"`
+	Window            APIWindow `json:"window"`
+	Repos             []APIRepo `json:"repos"`
+	GeneratedMarkdown string    `json:"generatedMarkdown"`
+	ErrorMessage      *string   `json:"errorMessage"`
 }
 
 type APIWindow struct {
-	NormalizedSince          string `json:"normalized_since"`
-	NormalizedUntil          string `json:"normalized_until"`
-	FirstCheckpointCreatedAt string `json:"first_checkpoint_created_at,omitempty"`
-	LastCheckpointCreatedAt  string `json:"last_checkpoint_created_at,omitempty"`
+	NormalizedSince          string `json:"normalizedSince"`
+	NormalizedUntil          string `json:"normalizedUntil"`
+	FirstCheckpointCreatedAt string `json:"firstCheckpointCreatedAt"`
+	LastCheckpointCreatedAt  string `json:"lastCheckpointCreatedAt"`
 }
 
 type APIRepo struct {
-	FullName string       `json:"full_name"`
-	URL      string       `json:"url,omitempty"`
+	FullName string       `json:"fullName"`
 	Sections []APISection `json:"sections"`
 }
 
@@ -112,59 +81,20 @@ type APISection struct {
 }
 
 type APIBullet struct {
-	CheckpointID string   `json:"checkpoint_id"`
+	CheckpointID string   `json:"checkpointId"`
 	Text         string   `json:"text"`
 	Source       string   `json:"source"`
 	Branch       string   `json:"branch"`
-	CreatedAt    string   `json:"created_at"`
+	CreatedAt    string   `json:"createdAt"`
 	Labels       []string `json:"labels"`
 }
 
-type APITotals struct {
-	Checkpoints         int `json:"checkpoints"`
-	UsedCheckpointCount int `json:"used_checkpoint_count"`
-	Branches            int `json:"branches"`
-	FilesTouched        int `json:"files_touched"`
-}
-
-type APIWarnings struct {
-	AccessDeniedCount  int `json:"access_denied_count"`
-	PendingCount       int `json:"pending_count"`
-	FailedCount        int `json:"failed_count"`
-	UnknownCount       int `json:"unknown_count"`
-	UncategorizedCount int `json:"uncategorized_count"`
-	TruncatedCount     int `json:"truncated_count"`
-}
-
-func (b *APIBranches) UnmarshalJSON(data []byte) error {
-	if bytes.Equal(data, []byte("null")) {
-		*b = APIBranches{}
-		return nil
-	}
-
-	var values []string
-	if err := json.Unmarshal(data, &values); err == nil {
-		*b = APIBranches{Values: values}
-		return nil
-	}
-
-	var sentinel string
-	if err := json.Unmarshal(data, &sentinel); err != nil {
-		return fmt.Errorf("decode branches: %w", err)
-	}
-	if sentinel != "all" {
-		return fmt.Errorf("decode branches: unexpected sentinel %q", sentinel)
-	}
-	*b = APIBranches{All: true}
-	return nil
-}
-
-// RepoNotFoundError is the gateway's 404 for a repo that is not placed in (or
+// RepoNotFoundError is the cell's 404 for a repo that is not placed in (or
 // not visible in) the jurisdiction the request was routed to — a repo mirrored
 // only in US, requested from an AU home, is simply unknown to the AU cell.
 // Jurisdiction is the selector the caller sent ("" = home) and Home the
 // caller's home jurisdiction when known (so callers know which cell answered
-// when no selector was sent); Repos are the requested slugs the gateway's
+// when no selector was sent); Repos are the requested slugs the cell's
 // message named; Message is its sentence; Cause is the underlying
 // *api.HTTPError.
 type RepoNotFoundError struct {
@@ -192,7 +122,7 @@ func (e *RepoNotFoundError) Error() string {
 		scope = strings.ToUpper(j)
 	}
 	// Render our own sentence when the repos were parsed, so the wording does
-	// not depend on (or double up with) the gateway's prose; fall back to its
+	// not depend on (or double up with) the cell's prose; fall back to its
 	// message only when parsing found nothing.
 	sentence := e.Message
 	if len(e.Repos) > 0 {
@@ -219,16 +149,12 @@ func (e *statusError) Error() string {
 
 func (e *statusError) Unwrap() error { return e.HTTPError }
 
-// CreateDispatch generates a one-off dispatch from the cell of `jurisdiction`
-// ("" = the caller's home jurisdiction).
-func (c *CloudClient) CreateDispatch(ctx context.Context, reqBody CreateDispatchRequest, jurisdiction string) (*CreateDispatchResponse, error) {
-	path := dispatchGeneratePath
-	if j := strings.TrimSpace(jurisdiction); j != "" {
-		path += "?" + jurisdictionQueryParam + "=" + url.QueryEscape(j)
-	}
-
-	var out CreateDispatchResponse
-	if err := c.doJSON(ctx, http.MethodPost, path, reqBody, &out); err != nil {
+// CreateDispatch starts a dispatch on the client's cell and waits for it to
+// finish. jurisdiction is the --jurisdiction selector the cell was picked by
+// ("" = home); it only labels a repo-not-found error.
+func (c *CloudClient) CreateDispatch(ctx context.Context, reqBody CreateDispatchRequest, jurisdiction string) (*APIRun, error) {
+	var run APIRun
+	if err := c.doJSON(ctx, http.MethodPost, dispatchesPath, reqBody, &run); err != nil {
 		var httpErr *api.HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound &&
 			strings.HasPrefix(strings.ToLower(httpErr.Message), repoNotFoundPrefix) {
@@ -241,13 +167,48 @@ func (c *CloudClient) CreateDispatch(ctx context.Context, reqBody CreateDispatch
 		}
 		return nil, err
 	}
-	return &out, nil
+	return c.waitForDispatch(ctx, &run)
+}
+
+// waitForDispatch polls a generating run until the cell reports it complete
+// or failed.
+func (c *CloudClient) waitForDispatch(ctx context.Context, run *APIRun) (*APIRun, error) {
+	ctx, cancel := context.WithTimeout(ctx, dispatchPollBudget)
+	defer cancel()
+	for run.Status == dispatchStatusGenerating {
+		if run.ID == "" {
+			return nil, errors.New("dispatch service returned a generating dispatch without an id")
+		}
+		timer := time.NewTimer(c.pollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("dispatch %s is still generating: %w", run.ID, ctx.Err())
+		case <-timer.C:
+		}
+		var next APIRun
+		if err := c.doJSON(ctx, http.MethodGet, dispatchesPath+"/"+url.PathEscape(run.ID), nil, &next); err != nil {
+			return nil, err
+		}
+		run = &next
+	}
+	switch run.Status {
+	case dispatchStatusComplete:
+		return run, nil
+	case dispatchStatusFailed:
+		if run.ErrorMessage != nil && strings.TrimSpace(*run.ErrorMessage) != "" {
+			return nil, fmt.Errorf("dispatch generation failed: %s", strconv.Quote(*run.ErrorMessage))
+		}
+		return nil, errors.New("dispatch generation failed")
+	default:
+		return nil, fmt.Errorf("dispatch service returned unknown status %s", strconv.Quote(run.Status))
+	}
 }
 
 // parseNotFoundRepos pulls the slugs out of a "repository not found: a/b, c/d"
 // message, keeping only the repos this request asked for (in the request's
 // spelling) so downstream lookups are bounded by CloudRepoLimit and never fan
-// out over arbitrary prose. The gateway may echo a slug bare or forge-prefixed;
+// out over arbitrary prose. The cell may echo a slug bare or forge-prefixed;
 // both match. Best-effort: an unexpected format yields nil and the caller
 // still has the message.
 func parseNotFoundRepos(message string, requested []string) []string {
@@ -269,31 +230,17 @@ func parseNotFoundRepos(message string, requested []string) []string {
 }
 
 func (c *CloudClient) doJSON(ctx context.Context, method, path string, reqBody, out any) error {
-	var body io.Reader
+	var (
+		resp *http.Response
+		err  error
+	)
 	if reqBody != nil {
-		data, err := json.Marshal(reqBody)
-		if err != nil {
-			return fmt.Errorf("marshal request body: %w", err)
-		}
-		body = bytes.NewReader(data)
+		resp, err = c.api.Post(ctx, path, reqBody)
+	} else {
+		resp, err = c.api.Get(ctx, path)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", versioninfo.UserAgent())
-	if reqBody != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		return err //nolint:wrapcheck // api.Client already names the method and path
 	}
 	defer resp.Body.Close()
 
@@ -308,10 +255,7 @@ func (c *CloudClient) doJSON(ctx context.Context, method, path string, reqBody, 
 		}
 		return &statusError{HTTPError: httpErr}
 	}
-	if out == nil {
-		return nil
-	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	if err := api.DecodeJSON(resp, out); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil

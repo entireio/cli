@@ -28,7 +28,7 @@ var (
 // Everything is precomputed once by newDispatchWizardScope; the form reads it
 // on every render. A repo the control plane does not place (or, with no
 // placement data at all, every repo) is attributed to home, which is where the
-// gateway routes when no selector is sent — under the "" key when home is
+// dispatch routes when no --jurisdiction is given — under the "" key when home is
 // unknown, offered as a plain "Home" choice so the repo stays selectable. Only
 // READY placements count — a cell cannot generate from a copy still syncing —
 // which deliberately differs from routedRepoPlacement's single elected primary
@@ -177,16 +177,16 @@ func dispatchWizardPlacements(entries []coreapi.RepoIndexEntry) map[string][]str
 	return out
 }
 
-// defaultResolveDispatchWizardHome reads home_jurisdiction from the same
-// account access token the dispatch itself will send, so the picker's default
-// and the request's routing agree on which login they mean.
+// defaultResolveDispatchWizardHome reads home_jurisdiction from the login the
+// dispatch itself is generated with (the cell client factory), so the picker's
+// default and the request's routing agree on which login they mean.
 func defaultResolveDispatchWizardHome(ctx context.Context) string {
-	target, err := auth.ResolveDataAPI(ctx)
+	factory, err := auth.NewEntireAPICellClientFactory(ctx, false)
 	if err != nil {
 		logging.Debug(ctx, "dispatch wizard: home jurisdiction unavailable", "error", err)
 		return ""
 	}
-	home, err := auth.HomeJurisdictionFromLoginJWT(target.Token)
+	home, err := factory.HomeJurisdiction()
 	if err != nil {
 		logging.Debug(ctx, "dispatch wizard: home jurisdiction unavailable", "error", err)
 		return ""

@@ -36,7 +36,7 @@ const (
 	dispatchWizardVoiceCustom = "custom"
 
 	// dispatchWizardJurisdictionHome is the jurisdiction select's value for
-	// "send no selector" (the gateway then routes to the caller's home) and
+	// "no --jurisdiction" (dispatch then dials the caller's home cell) and
 	// the summary label for it. A sentinel rather than "" because huh
 	// pre-selects the option matching the field's initial "" value.
 	dispatchWizardJurisdictionHome = "home"

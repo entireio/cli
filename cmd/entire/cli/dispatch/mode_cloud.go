@@ -13,34 +13,30 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// requireSecureDispatchURL is the secure-base-URL guard used before the cloud
-// client sends a bearer token. Tests swap it to allow httptest.NewServer
-// (http://127.0.0.1:...) endpoints; production always routes through
-// api.RequireSecureURL and rejects plain HTTP.
-var requireSecureDispatchURL = api.RequireSecureURL
+// newDispatchCellClient builds the client for the entire-api cell that
+// generates the dispatch — jurisdiction's, or the caller's home cell when it is
+// empty — and reports the caller's home jurisdiction. Tests swap in a client
+// for an httptest server.
+var newDispatchCellClient = defaultNewDispatchCellClient
+
+func defaultNewDispatchCellClient(ctx context.Context, insecureHTTP bool, jurisdiction string) (*api.Client, string, error) {
+	factory, err := auth.NewEntireAPICellClientFactory(ctx, insecureHTTP)
+	if err != nil {
+		return nil, "", err //nolint:wrapcheck // runServer wraps; ErrNotLoggedIn must stay matchable
+	}
+	var target *auth.CellTarget
+	if j := strings.TrimSpace(jurisdiction); j != "" {
+		target = &auth.CellTarget{Jurisdiction: j}
+	}
+	client, err := factory.ClientFor(ctx, target)
+	if err != nil {
+		return nil, "", err //nolint:wrapcheck // runServer wraps
+	}
+	home, _ := factory.HomeJurisdiction() //nolint:errcheck // best-effort label for a repo-not-found error
+	return client, home, nil
+}
 
 func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
-	if opts.InsecureHTTPAuth {
-		auth.EnableInsecureHTTP()
-	} else if override, ok := api.BaseURLOverride(); ok {
-		if err := requireSecureDispatchURL(override); err != nil {
-			return nil, fmt.Errorf("dispatch base URL: %w", err)
-		}
-	}
-	target, err := resolveDataAPI(ctx)
-	if errors.Is(err, auth.ErrNotLoggedIn) {
-		return nil, errors.New("dispatch requires login — run `entire login`")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("reading credentials: %w", err)
-	}
-	baseURL, token := target.BaseURL, target.Token
-	if !opts.InsecureHTTPAuth {
-		if err := requireSecureDispatchURL(baseURL); err != nil {
-			return nil, fmt.Errorf("dispatch base URL: %w", err)
-		}
-	}
-
 	now := nowUTC()
 	sinceInput := strings.TrimSpace(opts.Since)
 	if sinceInput == "" {
@@ -80,25 +76,30 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 		repos = []string{repoSlug}
 	}
 
-	cloud := NewCloudClient(CloudConfig{BaseURL: baseURL, Token: token})
-	reqBody := CreateDispatchRequest{
-		Repos:    repos,
-		Since:    normalizedSince.Format(time.RFC3339),
-		Until:    normalizedUntil.Format(time.RFC3339),
-		Generate: true,
-		Voice:    resolvedDispatchVoicePreference(opts.Voice),
+	// Local inputs are settled first: building the client already dials (login
+	// refresh, cell catalog).
+	client, home, err := newDispatchCellClient(ctx, opts.InsecureHTTPAuth, opts.Jurisdiction)
+	if errors.Is(err, auth.ErrNotLoggedIn) {
+		return nil, errors.New("dispatch requires login — run `entire login`")
 	}
-	response, err := cloud.CreateDispatch(ctx, reqBody, opts.Jurisdiction)
 	if err != nil {
-		// With no selector the home cell answered; say which one, from the
-		// token already in hand, so the hint can exclude it.
+		return nil, fmt.Errorf("dispatch service: %w", err)
+	}
+
+	reqBody := CreateDispatchRequest{
+		Repos: repos,
+		Since: normalizedSince.Format(time.RFC3339),
+		Until: normalizedUntil.Format(time.RFC3339),
+		Voice: resolvedDispatchVoicePreference(opts.Voice),
+	}
+	response, err := NewCloudClient(client).CreateDispatch(ctx, reqBody, opts.Jurisdiction)
+	if err != nil {
+		// With no selector the home cell answered; say which one so the hint
+		// can exclude it.
 		var notFound *RepoNotFoundError
 		if errors.As(err, &notFound) && notFound.Jurisdiction == "" {
-			notFound.Home, _ = auth.HomeJurisdictionFromLoginJWT(token) //nolint:errcheck // best-effort label on an error already being returned
+			notFound.Home = home
 		}
-		return nil, err
-	}
-	if err := checkDispatchJurisdiction(opts.Jurisdiction, response.Jurisdiction); err != nil {
 		return nil, err
 	}
 
@@ -109,28 +110,7 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 	return dispatch, nil
 }
 
-// checkDispatchJurisdiction verifies the gateway generated the dispatch where
-// --jurisdiction asked. The gateway echoes `jurisdiction` whenever the caller
-// named one, so a missing echo means a gateway that ignored the selector and
-// routed home — and a different echo means another region entirely. Both fail:
-// a wrong-region result would be rendered labelled with a jurisdiction it did
-// not come from, which is worse than no result. No selector, no check.
-func checkDispatchJurisdiction(requested, stamped string) error {
-	requested = strings.TrimSpace(requested)
-	if requested == "" {
-		return nil
-	}
-	stamped = strings.ToLower(strings.TrimSpace(stamped))
-	switch {
-	case stamped == "":
-		return fmt.Errorf("the dispatch service ignored --jurisdiction %s (no jurisdiction in its response); it may predate jurisdiction-scoped dispatches — retry without the flag for a home dispatch", requested)
-	case stamped != requested:
-		return fmt.Errorf("dispatch was generated in jurisdiction %s, not the requested %s", strings.ToUpper(stamped), strings.ToUpper(requested))
-	}
-	return nil
-}
-
-func apiToDispatch(response *CreateDispatchResponse) *Dispatch {
+func apiToDispatch(response *APIRun) *Dispatch {
 	if response == nil {
 		return &Dispatch{}
 	}
@@ -163,9 +143,6 @@ func apiToDispatch(response *CreateDispatchResponse) *Dispatch {
 	}
 
 	generatedText := strings.TrimSpace(response.GeneratedMarkdown)
-	if generatedText == "" {
-		generatedText = strings.TrimSpace(response.GeneratedText)
-	}
 
 	return &Dispatch{
 		Window: Window{

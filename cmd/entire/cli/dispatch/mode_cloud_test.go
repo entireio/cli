@@ -3,8 +3,10 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,25 +16,17 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// stubCloudDispatchAuth swaps the package-level auth/secure-URL hooks to
-// produce a test token and bypass the HTTPS guard so tests can talk to a
-// plain-HTTP httptest.NewServer. Tests that need to verify the HTTPS guard
-// itself should not call this helper.
+// stubCloudDispatchAuth swaps the cell-client seam for a client aimed at
+// ENTIRE_API_BASE_URL (read when Run builds the client, so tests may set it
+// after stubbing) with the test token and "us" as the home jurisdiction. Tests
+// that exercise the real cell routing should not call this helper.
 func stubCloudDispatchAuth(t *testing.T) {
 	t.Helper()
-	oldResolve := resolveDataAPI
-	oldRequire := requireSecureDispatchURL
-	resolveDataAPI = stubDataAPI
-	requireSecureDispatchURL = func(string) error { return nil }
-	t.Cleanup(func() {
-		resolveDataAPI = oldResolve
-		requireSecureDispatchURL = oldRequire
-	})
-}
-
-// stubDataAPI returns the test token for the configured data host.
-func stubDataAPI(context.Context) (auth.DataAPI, error) {
-	return auth.DataAPI{BaseURL: api.BaseURL(), Token: testCloudDispatchToken}, nil
+	old := newDispatchCellClient
+	newDispatchCellClient = func(context.Context, bool, string) (*api.Client, string, error) {
+		return api.NewClientWithBaseURL(testCloudDispatchToken, api.BaseURL()), "us", nil
+	}
+	t.Cleanup(func() { newDispatchCellClient = old })
 }
 
 func TestServerMode_HappyPath(t *testing.T) {
@@ -64,33 +58,21 @@ func TestServerMode_HappyPath(t *testing.T) {
 		if body["until"] != "2026-04-15T18:30:00Z" {
 			t.Fatalf("unexpected until payload: %v", body["until"])
 		}
-		if body["generate"] != true {
-			t.Fatalf("expected generate=true payload, got %v", body["generate"])
+		if _, ok := body["generate"]; ok {
+			t.Fatalf("did not expect generate payload: %v", body)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusAccepted)
 		if err := json.NewEncoder(w).Encode(map[string]any{
+			"status": dispatchStatusComplete,
 			"window": map[string]any{
-				"normalized_since": "2026-04-09T00:00:00Z",
-				"normalized_until": "2026-04-16T00:00:00Z",
+				"normalizedSince": "2026-04-09T00:00:00Z",
+				"normalizedUntil": "2026-04-16T00:00:00Z",
 			},
-			"covered_repos": []string{testRepoFullName},
-			"repos":         []any{},
-			"totals": map[string]any{
-				"checkpoints":           0,
-				"used_checkpoint_count": 0,
-				"branches":              0,
-				"files_touched":         0,
-			},
-			"warnings": map[string]any{
-				"access_denied_count": 0,
-				"pending_count":       0,
-				"failed_count":        0,
-				"unknown_count":       0,
-				"uncategorized_count": 0,
-			},
-			"generated_markdown": testDispatchGeneratedHello,
+			"coveredRepos":      []string{testRepoFullName},
+			"repos":             []any{},
+			"generatedMarkdown": testDispatchGeneratedHello,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -140,28 +122,16 @@ func TestServerMode_ExplicitReposDoNotRequireCurrentRepo(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusAccepted)
 		if err := json.NewEncoder(w).Encode(map[string]any{
+			"status": dispatchStatusComplete,
 			"window": map[string]any{
-				"normalized_since": "2026-04-09T00:00:00Z",
-				"normalized_until": "2026-04-16T00:00:00Z",
+				"normalizedSince": "2026-04-09T00:00:00Z",
+				"normalizedUntil": "2026-04-16T00:00:00Z",
 			},
-			"covered_repos":      []string{testRepoFullName, "entireio/entire.io"},
-			"repos":              []any{},
-			"generated_markdown": testDispatchGeneratedHello,
-			"totals": map[string]any{
-				"checkpoints":           0,
-				"used_checkpoint_count": 0,
-				"branches":              0,
-				"files_touched":         0,
-			},
-			"warnings": map[string]any{
-				"access_denied_count": 0,
-				"pending_count":       0,
-				"failed_count":        0,
-				"unknown_count":       0,
-				"uncategorized_count": 0,
-			},
+			"coveredRepos":      []string{testRepoFullName, "entireio/entire.io"},
+			"repos":             []any{},
+			"generatedMarkdown": testDispatchGeneratedHello,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -194,7 +164,7 @@ func TestServerMode_ExplicitReposDoNotRequireCurrentRepo(t *testing.T) {
 func TestAPIToDispatch_DerivesRepoURLs(t *testing.T) {
 	t.Parallel()
 
-	got := apiToDispatch(&CreateDispatchResponse{
+	got := apiToDispatch(&APIRun{
 		Repos: []APIRepo{
 			{FullName: testRepoFullName},
 			{FullName: "bad/repo)"},
@@ -234,27 +204,15 @@ func TestServerMode_RequiresGeneratedMarkdown(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusAccepted)
 		if err := json.NewEncoder(w).Encode(map[string]any{
+			"status": dispatchStatusComplete,
 			"window": map[string]any{
-				"normalized_since": "2026-04-09T00:00:00Z",
-				"normalized_until": "2026-04-16T00:00:00Z",
+				"normalizedSince": "2026-04-09T00:00:00Z",
+				"normalizedUntil": "2026-04-16T00:00:00Z",
 			},
-			"covered_repos": []string{testRepoFullName},
-			"repos":         []any{},
-			"totals": map[string]any{
-				"checkpoints":           0,
-				"used_checkpoint_count": 0,
-				"branches":              0,
-				"files_touched":         0,
-			},
-			"warnings": map[string]any{
-				"access_denied_count": 0,
-				"pending_count":       0,
-				"failed_count":        0,
-				"unknown_count":       0,
-				"uncategorized_count": 0,
-			},
+			"coveredRepos": []string{testRepoFullName},
+			"repos":        []any{},
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -307,28 +265,16 @@ func TestServerMode_NormalizesWindowAndSanitizesVoice(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusAccepted)
 		if err := json.NewEncoder(w).Encode(map[string]any{
+			"status": dispatchStatusComplete,
 			"window": map[string]any{
-				"normalized_since": "2026-04-09T00:00:00Z",
-				"normalized_until": "2026-04-16T00:01:00Z",
+				"normalizedSince": "2026-04-09T00:00:00Z",
+				"normalizedUntil": "2026-04-16T00:01:00Z",
 			},
-			"covered_repos":      []string{testRepoFullName},
-			"repos":              []any{},
-			"generated_markdown": testDispatchGeneratedHello,
-			"totals": map[string]any{
-				"checkpoints":           0,
-				"used_checkpoint_count": 0,
-				"branches":              0,
-				"files_touched":         0,
-			},
-			"warnings": map[string]any{
-				"access_denied_count": 0,
-				"pending_count":       0,
-				"failed_count":        0,
-				"unknown_count":       0,
-				"uncategorized_count": 0,
-			},
+			"coveredRepos":      []string{testRepoFullName},
+			"repos":             []any{},
+			"generatedMarkdown": testDispatchGeneratedHello,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -351,151 +297,6 @@ func TestServerMode_NormalizesWindowAndSanitizesVoice(t *testing.T) {
 	}
 	if got.GeneratedText != testDispatchGeneratedHello {
 		t.Fatalf("unexpected generated text: %q", got.GeneratedText)
-	}
-}
-
-// TestServerMode_InsecureHTTPAuthBypassesSecureURLCheck confirms that setting
-// Options.InsecureHTTPAuth=true skips the real requireSecureDispatchURL check
-// and lets dispatch talk to an http:// base URL. This is the local-dev escape
-// hatch that matches the --insecure-http-auth flag on login/trail. The test
-// deliberately does not stub requireSecureDispatchURL — the flag alone must
-// bypass the guard.
-func TestServerMode_InsecureHTTPAuthBypassesSecureURLCheck(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != testDispatchEndpoint {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		if err := json.NewEncoder(w).Encode(map[string]any{
-			"window": map[string]any{
-				"normalized_since": "2026-04-09T00:00:00Z",
-				"normalized_until": "2026-04-16T00:00:00Z",
-			},
-			"covered_repos":      []string{testRepoFullName},
-			"repos":              []any{},
-			"generated_markdown": testDispatchGeneratedHello,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}))
-	defer mock.Close()
-
-	oldResolve := resolveDataAPI
-	oldNow := nowUTC
-	resolveDataAPI = stubDataAPI
-	nowUTC = func() time.Time { return time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC) }
-	t.Cleanup(func() {
-		resolveDataAPI = oldResolve
-		nowUTC = oldNow
-	})
-
-	t.Setenv("ENTIRE_API_BASE_URL", mock.URL)
-
-	got, err := Run(context.Background(), Options{
-		Mode:             ModeServer,
-		RepoPaths:        []string{testRepoFullName},
-		Since:            "7d",
-		InsecureHTTPAuth: true,
-	})
-	if err != nil {
-		t.Fatalf("expected insecure override to bypass the HTTPS guard, got %v", err)
-	}
-	if got.GeneratedText != testDispatchGeneratedHello {
-		t.Fatalf("unexpected generated text: %q", got.GeneratedText)
-	}
-}
-
-// TestServerMode_RejectsPlainHTTPBaseURL pins the production guarantee that
-// bearer tokens are never sent to an http:// base URL. It deliberately does
-// not call stubCloudDispatchAuth — the real requireSecureDispatchURL must
-// fire. If a future refactor drops the check, this test breaks before the
-// leak reaches users.
-func TestServerMode_RejectsPlainHTTPBaseURL(t *testing.T) {
-	oldResolve := resolveDataAPI
-	resolveDataAPI = stubDataAPI
-	t.Cleanup(func() { resolveDataAPI = oldResolve })
-
-	t.Setenv("ENTIRE_API_BASE_URL", "http://dispatch.example.invalid")
-
-	_, err := Run(context.Background(), Options{
-		Mode:      ModeServer,
-		RepoPaths: []string{testRepoFullName},
-		Since:     "7d",
-	})
-	if err == nil {
-		t.Fatal("expected error when dispatch base URL is http://")
-	}
-	if !strings.Contains(err.Error(), api.ErrInsecureHTTP.Error()) {
-		t.Fatalf("expected ErrInsecureHTTP, got %v", err)
-	}
-}
-
-func TestServerMode_JurisdictionIsSentAsQuerySelector(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != testDispatchEndpoint {
-			http.NotFound(w, r)
-			return
-		}
-		if got := r.URL.Query().Get("jurisdiction"); got != "eu" {
-			t.Errorf("expected ?jurisdiction=eu, got query %q", r.URL.RawQuery)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		if err := json.NewEncoder(w).Encode(map[string]any{
-			// The gateway echoes the jurisdiction whenever the caller named
-			// one; runServer fails closed without it.
-			"jurisdiction":       "eu",
-			"window":             map[string]any{"normalized_since": "2026-04-09T00:00:00Z", "normalized_until": "2026-04-16T00:00:00Z"},
-			"covered_repos":      []string{testRepoFullName},
-			"repos":              []any{},
-			"generated_markdown": testDispatchGeneratedHello,
-		}); err != nil {
-			t.Error(err)
-		}
-	}))
-	defer mock.Close()
-
-	stubCloudDispatchAuth(t)
-	oldNow := nowUTC
-	nowUTC = func() time.Time { return time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC) }
-	t.Cleanup(func() { nowUTC = oldNow })
-	t.Setenv("ENTIRE_API_BASE_URL", mock.URL)
-
-	got, err := Run(context.Background(), Options{
-		Mode:         ModeServer,
-		RepoPaths:    []string{testRepoFullName},
-		Since:        "7d",
-		Jurisdiction: "eu",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.GeneratedText != testDispatchGeneratedHello {
-		t.Fatalf("bad text: %q", got.GeneratedText)
-	}
-}
-
-func TestCheckDispatchJurisdiction(t *testing.T) {
-	t.Parallel()
-
-	if err := checkDispatchJurisdiction("", "us"); err != nil {
-		t.Fatalf("no selector sent: any stamp is fine, got %v", err)
-	}
-	if err := checkDispatchJurisdiction("", ""); err != nil {
-		t.Fatalf("no selector, no stamp: fine, got %v", err)
-	}
-	if err := checkDispatchJurisdiction("eu", " EU "); err != nil {
-		t.Fatalf("matching stamp must pass, got %v", err)
-	}
-	err := checkDispatchJurisdiction("eu", "")
-	if err == nil || !strings.Contains(err.Error(), "ignored --jurisdiction eu") {
-		t.Fatalf("an unconfirmed selector must fail (the gateway echoes it whenever sent), got %v", err)
-	}
-	err = checkDispatchJurisdiction("eu", "us")
-	if err == nil || err.Error() != "dispatch was generated in jurisdiction US, not the requested EU" {
-		t.Fatalf("a wrong-region result must fail, got %v", err)
 	}
 }
 
@@ -525,12 +326,13 @@ func TestServerMode_NativeOriginNamesItsForge(t *testing.T) {
 			t.Fatalf("expected the native origin to dispatch as its et/ slug, got repos payload: %v", body["repos"])
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusAccepted)
 		if err := json.NewEncoder(w).Encode(map[string]any{
-			"window":             map[string]any{"normalized_since": "2026-04-09T00:00:00Z", "normalized_until": "2026-04-16T00:00:00Z"},
-			"covered_repos":      []string{"entirehq/entire-api"},
-			"repos":              []any{},
-			"generated_markdown": testDispatchGeneratedHello,
+			"status":            dispatchStatusComplete,
+			"window":            map[string]any{"normalizedSince": "2026-04-09T00:00:00Z", "normalizedUntil": "2026-04-16T00:00:00Z"},
+			"coveredRepos":      []string{"entirehq/entire-api"},
+			"repos":             []any{},
+			"generatedMarkdown": testDispatchGeneratedHello,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -568,5 +370,93 @@ func TestServerMode_UnknownOriginHostIsAnError(t *testing.T) {
 	_, err := Run(context.Background(), Options{Mode: ModeServer, Since: "7d"})
 	if err == nil || !strings.Contains(err.Error(), "gitlab.com") || !strings.Contains(err.Error(), "--repos") {
 		t.Fatalf("expected an error naming the host and the --repos escape hatch, got %v", err)
+	}
+}
+
+// TestServerMode_RoutesToTheRequestedCell: --jurisdiction picks the cell the
+// client dials, and --insecure-http-auth reaches the cell client; neither
+// travels as a query or body field.
+func TestServerMode_RoutesToTheRequestedCell(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testDispatchEndpoint {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.RawQuery != "" {
+			t.Errorf("did not expect a query, got %q", r.URL.RawQuery)
+		}
+		writeDispatchRun(t, w, http.StatusAccepted, testDispatchRun(testDispatchGeneratedHello))
+	}))
+	defer mock.Close()
+
+	var gotJurisdiction string
+	var gotInsecure bool
+	old := newDispatchCellClient
+	newDispatchCellClient = func(_ context.Context, insecure bool, jurisdiction string) (*api.Client, string, error) {
+		gotJurisdiction, gotInsecure = jurisdiction, insecure
+		return api.NewClientWithBaseURL(testCloudDispatchToken, mock.URL), "us", nil
+	}
+	t.Cleanup(func() { newDispatchCellClient = old })
+
+	got, err := Run(context.Background(), Options{
+		Mode:             ModeServer,
+		RepoPaths:        []string{testRepoSlug},
+		Since:            "7d",
+		Jurisdiction:     "eu",
+		InsecureHTTPAuth: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotJurisdiction != "eu" || !gotInsecure {
+		t.Fatalf("expected the eu cell with insecure auth, got jurisdiction %q insecure %v", gotJurisdiction, gotInsecure)
+	}
+	if got.GeneratedText != testDispatchGeneratedHello {
+		t.Fatalf("bad text: %q", got.GeneratedText)
+	}
+}
+
+// TestServerMode_RepoNotFoundAtHomeNamesHome: with no --jurisdiction the
+// home cell answered, so the error carries the home jurisdiction.
+func TestServerMode_RepoNotFoundAtHomeNamesHome(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"detail":"repository not found: gh/entireio/cli"}`)) //nolint:errcheck // test fixture response
+	}))
+	defer mock.Close()
+
+	stubCloudDispatchAuth(t)
+	t.Setenv("ENTIRE_API_BASE_URL", mock.URL)
+
+	_, err := Run(context.Background(), Options{Mode: ModeServer, RepoPaths: []string{testRepoSlug}, Since: "7d"})
+	var notFound *RepoNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("expected *RepoNotFoundError, got %T: %v", err, err)
+	}
+	if notFound.FailedJurisdiction() != "us" {
+		t.Fatalf("expected the home jurisdiction us, got %q", notFound.FailedJurisdiction())
+	}
+}
+
+// TestServerMode_RejectsPlainHTTPBaseURL pins that the bearer is never sent to
+// an http:// data host. It runs the real cell routing (no stub): with no
+// ENTIRE_TOKEN and an http override, the cell client refuses before dialing.
+func TestServerMode_RejectsPlainHTTPBaseURL(t *testing.T) {
+	t.Setenv(auth.EnvTokenVar, "")
+	if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENTIRE_API_BASE_URL", "http://dispatch.example.invalid")
+
+	_, err := Run(context.Background(), Options{
+		Mode:      ModeServer,
+		RepoPaths: []string{testRepoSlug},
+		Since:     "7d",
+	})
+	if err == nil {
+		t.Fatal("expected error when dispatch base URL is http://")
+	}
+	if !strings.Contains(err.Error(), api.ErrInsecureHTTP.Error()) {
+		t.Fatalf("expected ErrInsecureHTTP, got %v", err)
 	}
 }

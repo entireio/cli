@@ -134,6 +134,12 @@ func (f *CellClientFactory) ClientFor(ctx context.Context, target *CellTarget) (
 	return api.NewClientWithBaseURL(f.subject.loginJWT, cellBaseURL), nil
 }
 
+// HomeJurisdiction is the home_jurisdiction claim of the login this factory
+// dials with — the cell a nil target routes to. "" when the claim is absent.
+func (f *CellClientFactory) HomeJurisdiction() (string, error) {
+	return HomeJurisdictionFromLoginJWT(f.subject.loginJWT)
+}
+
 // cellBaseURLFor resolves the cell origin ClientFor dials for target, checked
 // safe to send the login JWT to.
 func (f *CellClientFactory) cellBaseURLFor(ctx context.Context, target *CellTarget) (string, error) {
