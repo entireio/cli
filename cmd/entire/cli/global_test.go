@@ -42,6 +42,9 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(isolationDir, "auth-tokens.json"))
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(isolationDir, "config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(isolationDir, "cache"))
+	// Cursor import discovery reads ~/.cursor/chats; keep it off the
+	// developer's real sessions.
+	os.Setenv("ENTIRE_TEST_CURSOR_CHATS_DIR", filepath.Join(isolationDir, "cursor-chats"))
 	// A developer running `go test` inside `ENTIRE_CONTEXT=… ` would otherwise
 	// have every File.Active() in the package resolve their shell's selection
 	// (and fail with UnknownContextError against the empty isolated config).
