@@ -94,7 +94,7 @@ func TestValidateAdoptTaskTranscript(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			state := &session.State{SessionID: sessionID, AgentType: tt.agentType, TranscriptPath: tt.parent}
 
-			err := validateAdoptTaskTranscript(state, tt.agentID, tt.path, sourceRepo)
+			err := validateAdoptTaskTranscript(state, adoptAgentHome{}, tt.agentID, tt.path, sourceRepo)
 
 			switch {
 			case tt.wantErr == "" && err != nil:
@@ -125,7 +125,7 @@ func TestDropInvalidAdoptTaskTranscripts(t *testing.T) {
 			},
 		}
 
-		if got := dropInvalidAdoptTaskTranscripts(context.Background(), state, sourceRepo); got != 1 {
+		if got := dropInvalidAdoptTaskTranscripts(context.Background(), state, adoptAgentHome{}, sourceRepo); got != 1 {
 			t.Fatalf("cleared = %d, want 1", got)
 		}
 		want := []string{nested, "", ""}
@@ -146,7 +146,7 @@ func TestDropInvalidAdoptTaskTranscripts(t *testing.T) {
 			},
 		}
 
-		if got := dropInvalidAdoptTaskTranscripts(context.Background(), state, sourceRepo); got != 1 {
+		if got := dropInvalidAdoptTaskTranscripts(context.Background(), state, adoptAgentHome{}, sourceRepo); got != 1 {
 			t.Fatalf("cleared = %d, want 1 for the forged inventory path", got)
 		}
 		if got := state.SubagentInventory[0].DeclaredTranscriptPath; got != codexChild {
@@ -168,7 +168,7 @@ func TestValidateAdoptSourceTranscript_RejectsRelativePath(t *testing.T) {
 
 	for _, path := range []string{filepath.Join("projects", "relative.jsonl"), "   "} {
 		source := &session.State{SessionID: "relative", TranscriptPath: path}
-		err := validateAdoptSourceTranscript(source, t.TempDir())
+		_, err := validateAdoptSourceTranscript(source, t.TempDir())
 		if err == nil || !strings.Contains(err.Error(), "not absolute") {
 			t.Fatalf("validateAdoptSourceTranscript(%q) = %v, want relative-path refusal", path, err)
 		}
