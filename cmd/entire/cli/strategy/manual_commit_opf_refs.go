@@ -141,21 +141,26 @@ func rewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 			}
 			break
 		}
+		// Pending is kept apart from the other errors so neither can hide the
+		// other, in either queue order: the pending signal is what starts the
+		// scan worker, and a cap error is what tells the user a ref is stuck.
 		var pendingErr *OPFScanPendingError
 		if errors.As(rewriteErr, &pendingErr) {
 			scanPending = pendingErr
+			continue
 		}
 		if firstErr == nil {
 			firstErr = rewriteErr
 		}
 	}
-	// A capped ref ahead of an unscanned one would otherwise hide the pending
-	// signal, and with it the worker the unscanned ref is waiting for.
-	var firstPending *OPFScanPendingError
-	if scanPending != nil && !errors.As(firstErr, &firstPending) {
+	switch {
+	case scanPending == nil:
+		return firstErr
+	case firstErr == nil:
+		return scanPending
+	default:
 		return errors.Join(firstErr, scanPending)
 	}
-	return firstErr
 }
 
 type pendingOPFCommit struct {
