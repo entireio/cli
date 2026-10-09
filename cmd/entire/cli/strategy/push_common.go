@@ -130,9 +130,11 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 			res.untried = refs[start+len(chunk):]
 			return res
 		}
-		// A remote that already took a chunk this flush was reachable; a later
-		// connect failure is transient, and the per-ref fallback may still land.
-		if line, ok := remote.UnreachableRemoteLine(err); ok && res.landed == 0 {
+		// A remote that already answered this flush — took a chunk, or
+		// rejected one — was reachable; a later connect failure is transient,
+		// and the per-ref fallback may still land or recover those refs. Only a
+		// connect failure on the first chunk the remote saw means unreachable.
+		if line, ok := remote.UnreachableRemoteLine(err); ok && res.landed == 0 && len(res.failed) == len(chunk) {
 			res.unreachable = line
 			res.untried = refs[start+len(chunk):]
 			return res

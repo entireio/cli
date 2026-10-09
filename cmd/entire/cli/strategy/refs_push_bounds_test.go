@@ -584,3 +584,38 @@ func TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered(t *testing.T)
 	assert.Equal(t, 2, pushed, "the first chunk landed before the auth failure and is reported as pushed")
 	assert.Contains(t, output, "SSH authentication failed")
 }
+
+// TestFlushCheckpointRefs_RejectionProvesRemoteReachable: once the remote has
+// answered a chunk — even with a rejection — a later connect error is
+// transient, not "unreachable": the flush carries on to the per-ref fallback
+// instead of abandoning refs it could still land.
+func TestFlushCheckpointRefs_RejectionProvesRemoteReachable(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 4)
+	prepareGitRefsPrePush(t, workDir, "ssh://git@example.invalid"+bareDir)
+	installBlockRefHook(t, bareDir, refs[0].String())
+
+	// A fake ssh that runs the remote command locally, except the second
+	// connection, which fails the way an unreachable host does.
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	fakeSSH := filepath.Join(t.TempDir(), "ssh")
+	script := "#!/bin/sh\necho attempt >> '" + countFile + "'\n" +
+		"n=$(wc -l < '" + countFile + "' | tr -d ' ')\n" +
+		"if [ \"$n\" = 2 ]; then echo 'ssh: connect to host example.invalid port 22: Connection refused' >&2; exit 255; fi\n" +
+		"for last; do :; done\nexec sh -c \"$last\"\n"
+	require.NoError(t, os.WriteFile(fakeSSH, []byte(script), 0o755))
+	t.Setenv("GIT_SSH_COMMAND", fakeSSH)
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+
+	assert.NotContains(t, output, "Couldn't reach", "the remote answered the first chunk")
+	assert.Equal(t, refHashOf(t, repo, refs[1]), remoteRefHash(t, bareDir, refs[1]),
+		"the rejected chunk's healthy ref lands through the fallback")
+}
