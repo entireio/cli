@@ -191,6 +191,14 @@ var agentHelpClassification = map[string]agentHelpFacts{
 // true for both audiences (e.g. "these endpoints are internal and can change")
 // belongs in Long instead, where both see it.
 var agentHelpGuidance = map[string]string{
+	"session attach": "Commits made during a session are linked to it automatically. Use this\n" +
+		"only when one was missed: `entire session attach <session-id> --commit <sha>`\n" +
+		"(default HEAD). Run it without --force first: it prints what it would do\n" +
+		"(rewrite unpushed commits to add the trailer, or record a link to a pushed\n" +
+		"commit and push the session transcript) and exits non-zero without changing\n" +
+		"anything. Show the user that output and ask them; pass --force only after\n" +
+		"they agree to that exact change, never pre-emptively. A link to a pushed\n" +
+		"commit counts only when its author attaches it.",
 	"api": "LAST RESORT. Right in two cases: you are developing against Entire's own\n" +
 		"APIs and want a raw response, or no first-class command covers your need.\n" +
 		"Otherwise prefer the command built for the job (checkpoint, session, trail,\n" +

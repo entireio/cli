@@ -273,17 +273,6 @@ func TestAttach_Success(t *testing.T) {
 func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 	setupAttachTestRepo(t)
 
-	repoRoot := mustGetwd(t)
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	headRef, err := repo.Head()
-	if err != nil {
-		t.Fatal(err)
-	}
-	headHash := headRef.Hash().String()
-
 	sessionID := "test-attach-empty-base-commit"
 	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
 {"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
@@ -310,6 +299,8 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 		t.Fatalf("runAttach failed: %v", err)
 	}
 
+	// Attach added the trailer to HEAD, so the base is the rewritten HEAD.
+	headHash := headCommitOf(t).Hash.String()
 	state, err := store.Load(context.Background(), sessionID)
 	if err != nil {
 		t.Fatal(err)
@@ -856,7 +847,7 @@ func TestExtractTranscriptMetadataForAgent_Pi(t *testing.T) {
 		t.Fatalf("generic parser unexpectedly understood native Pi transcript: %+v", generic)
 	}
 
-	got := extractTranscriptMetadataForAgent(piagent.NewPiAgent(), path, data)
+	got := extractTranscriptMetadataForAgent(piagent.NewPiAgent(), path, data, 0)
 	if got.FirstPrompt != "Review this trail" {
 		t.Errorf("FirstPrompt = %q, want %q", got.FirstPrompt, "Review this trail")
 	}
@@ -889,7 +880,7 @@ func TestExtractTranscriptMetadataForAgent_CodexSkipsEnvironmentContext(t *testi
 		t.Fatal(err)
 	}
 
-	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data)
+	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data, 0)
 	if got.FirstPrompt != "Review this trail for correctness" {
 		t.Errorf("FirstPrompt = %q, want the genuine user prompt, not the injected environment context", got.FirstPrompt)
 	}
@@ -916,7 +907,7 @@ func TestExtractTranscriptMetadata_CodexOnlyEnvironmentContext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data)
+	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data, 0)
 	if got.FirstPrompt != envContext {
 		t.Errorf("FirstPrompt = %q, want the raw environment context as fallback", got.FirstPrompt)
 	}
@@ -1280,8 +1271,8 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when review-attaching a session that already has a checkpoint")
 	}
-	if !strings.Contains(err.Error(), "already has checkpoint") {
-		t.Errorf("error should mention 'already has checkpoint'; got: %v", err)
+	if !strings.Contains(err.Error(), "already recorded in checkpoint") {
+		t.Errorf("error should mention 'already recorded in checkpoint'; got: %v", err)
 	}
 }
 
@@ -1834,11 +1825,11 @@ func TestAttachSummaryLine(t *testing.T) {
 	}
 }
 
-// TestAttach_NonInteractivePrintsTrailerForManualPaste: with --force unset and
-// no TTY (the test default), attach cannot prompt to amend, so it prints the
-// Entire-Checkpoint trailer for manual paste instead of failing.
-func TestAttach_NonInteractivePrintsTrailerForManualPaste(t *testing.T) {
+// Without a terminal, attach describes the change and makes none until the
+// caller reruns with --force; with it, the trailer is added to the unpushed HEAD.
+func TestAttach_NonInteractiveNeedsForce(t *testing.T) {
 	setupAttachTestRepo(t)
+	head := headCommitOf(t)
 
 	sessionID := "test-attach-noninteractive"
 	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
@@ -1846,14 +1837,28 @@ func TestAttach_NonInteractivePrintsTrailerForManualPaste(t *testing.T) {
 `)
 
 	var out, errOut bytes.Buffer
-	// Force:false — exercise the non-interactive fallback branch.
-	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{}); err != nil {
-		t.Fatalf("runAttach failed: %v", err)
+	err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil {
+		t.Fatalf("attach without --force and without a terminal succeeded:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "This rewrites git history") || !strings.Contains(errOut.String(), "rerun with --force") {
+		t.Errorf("expected the rewrite warning and the --force instruction, got:\n%s", errOut.String())
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("HEAD changed without confirmation: %s", got.Hash)
+	}
+	if state, err := loadAttachState(t, sessionID); err != nil || state != nil {
+		t.Fatalf("session state written without confirmation: %+v (%v)", state, err)
 	}
 
-	re := regexp.MustCompile(`Entire-Checkpoint: ` + id.CheckpointPattern)
+	out.Reset()
+	errOut.Reset()
+	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("runAttach --force: %v\n%s", err, errOut.String())
+	}
+	re := regexp.MustCompile(`Added Entire-Checkpoint: ` + id.CheckpointPattern + ` to commit [0-9a-f]+ \(was ` + head.Hash.String()[:12] + `\)`)
 	if !re.MatchString(out.String()) {
-		t.Errorf("expected Entire-Checkpoint trailer for manual paste, got:\n%s", out.String())
+		t.Errorf("expected HEAD to get the trailer, got:\n%s", out.String())
 	}
 }
 
