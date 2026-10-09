@@ -219,6 +219,26 @@ func TestPrePushCheckpointRefs_HeldRefWarnsWhenRefsAreUnknown(t *testing.T) {
 	require.NotContains(t, buf.String(), "does not pass the refs being pushed")
 }
 
+// A user who sets OPF to "never" after a worker was spawned has withdrawn the
+// decision it was spawned under: it must stop scanning and delivering.
+func TestRunOPFScan_StopsWhenSettingsNowSayNever(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+	// Configured as the spawning push left it, before the settings change.
+	require.NoError(t, EnsureRedactionConfigured(t.Context()))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	testutil.WriteFile(t, wt.Filesystem().Root(), ".entire/settings.local.json",
+		`{"redaction":{"openai_privacy_filter":{"enabled":true,"prompt_default":"never"}}}`)
+
+	require.NoError(t, RunOPFScan(t.Context(), "origin"))
+	require.Zero(t, fake.batchCallCount(), "a withdrawn worker must not call the model")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "a withdrawn worker must not deliver")
+}
+
 // A worker already running owns the work: a second one must leave it alone
 // rather than repeat the same model calls.
 func TestRunOPFScan_SkipsWhileAnotherWorkerHoldsTheLock(t *testing.T) {

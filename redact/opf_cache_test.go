@@ -250,3 +250,16 @@ func FuzzApplyCachedPrivacyFilter(f *testing.F) {
 		}
 	})
 }
+
+// Pointing Entire at a different OPF runtime must not reuse the old one's spans.
+func TestOPFBlobCacheKey_FollowsTheOPFCommand(t *testing.T) {
+	resetOPFConfig()
+	t.Cleanup(resetOPFConfig)
+	cats := []string{"private_person"}
+	ConfigurePrivacyFilterWithRuntime(OPFConfig{Enabled: true, Command: "/opt/opf-a/bin/opf"}, &fakeRuntime{})
+	first := opfBlobCacheKey("blob-a", cats)
+	ConfigurePrivacyFilterWithRuntime(OPFConfig{Enabled: true, Command: "/opt/opf-b/bin/opf"}, &fakeRuntime{})
+	if second := opfBlobCacheKey("blob-a", cats); second == first {
+		t.Fatal("a different OPF command must produce a different cache key")
+	}
+}

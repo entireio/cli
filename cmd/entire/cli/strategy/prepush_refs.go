@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -79,6 +81,20 @@ func warnPrePushRefsUnknown(ctx context.Context, w io.Writer) {
 		"includes Entire's checkpoint refs itself (e.g. `git push --all`) would send them unscanned. If you use a hook "+
 		"manager such as Husky, replace its Entire pre-push line with the one `entire enable` prints; otherwise run "+
 		"`entire enable` to update the hook.")
+}
+
+// WithPrePushRefsFrom parses git's pre-push ref list from r and records it. A
+// list that cannot be read leaves the refs unknown, as with an old hook: OPF
+// still applies to Entire's own push and warns that an outer push cannot be
+// checked, and the user's push is not blocked over it.
+func WithPrePushRefsFrom(ctx context.Context, r io.Reader) context.Context {
+	refs, err := ParsePrePushRefs(r)
+	if err != nil {
+		logging.Warn(ctx, "pre-push: could not read the ref list; treating it as unknown",
+			slog.String("error", err.Error()))
+		return ctx
+	}
+	return WithPrePushRefs(ctx, refs)
 }
 
 // WithPrePushRefs records the refs the user's own push is about to update, so

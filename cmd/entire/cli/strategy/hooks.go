@@ -950,14 +950,21 @@ const PrePushStdinRefsEnv = "ENTIRE_PRE_PUSH_STDIN_REFS"
 // gives Entire the copy, and points the script's stdin back at the copy for
 // the commands after it. Entire's failure ends the script there: a later
 // command's exit status must not decide the push and lose a privacy abort.
+//
+// Saving the list must never be what blocks a push. When the temp file cannot
+// be created or written, Entire runs without the list, as an old hook would:
+// it still applies OPF to its own push and warns when an outer push cannot be
+// checked.
 func prePushHookLine(cmdPrefix string) string {
-	invocation := fmt.Sprintf(`%s=1 %s hooks git pre-push "$1"`, PrePushStdinRefsEnv, cmdPrefix)
+	withRefs := fmt.Sprintf(`%s=1 %s hooks git pre-push "$1" < "$_entire_refs"`, PrePushStdinRefsEnv, cmdPrefix)
+	withoutRefs := cmdPrefix + ` hooks git pre-push "$1" < /dev/null`
 	// Without Entire installed the line does nothing, stdin included.
 	return fmt.Sprintf(`if %s; then `, gitHookCommandAvailableTest(cmdPrefix)) +
-		`_entire_refs="$(mktemp "${TMPDIR:-/tmp}/entire-pre-push.XXXXXX")" || exit 1; ` +
-		`cat > "$_entire_refs"; ` +
-		invocation + ` < "$_entire_refs" || { _entire_status=$?; rm -f "$_entire_refs"; exit "$_entire_status"; }; ` +
-		`exec < "$_entire_refs"; rm -f "$_entire_refs"; fi`
+		`if _entire_refs="$(mktemp "${TMPDIR:-/tmp}/entire-pre-push.XXXXXX" 2>/dev/null)"; then ` +
+		`if cat > "$_entire_refs"; then ` + withRefs + `; else ` + withoutRefs + `; fi ` +
+		`|| { _entire_status=$?; rm -f "$_entire_refs"; exit "$_entire_status"; }; ` +
+		`exec < "$_entire_refs"; rm -f "$_entire_refs"; ` +
+		`else ` + withoutRefs + ` || exit $?; fi; fi`
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.

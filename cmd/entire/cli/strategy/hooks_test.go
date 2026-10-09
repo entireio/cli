@@ -1722,6 +1722,53 @@ func TestGenerateChainedContent(t *testing.T) {
 // git's ref list on stdin after Entire has read it, and Entire's failure must
 // end the script there: otherwise a later command's status decides the push
 // and an OPF abort is lost.
+// Saving the ref list must never be what blocks a push: when the temp file
+// cannot be created, Entire runs without the list (as an old hook would) and
+// the commands after it still get git's stdin.
+func TestPrePushHookLine_UnwritableTMPDIRFallsBack(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs the generated POSIX sh script")
+	}
+	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n"
+	for _, entireExit := range []int{0, 3} {
+		t.Run(fmt.Sprintf("entire exits %d", entireExit), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			binDir := filepath.Join(dir, "bin")
+			require.NoError(t, os.MkdirAll(binDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(binDir, "entire"),
+				[]byte(fmt.Sprintf("#!/bin/sh\nenv > %q\nexit %d\n", filepath.Join(dir, "entire.env"), entireExit)), 0o755))
+			script := "#!/bin/sh\n" + prePushHookLine(bareEntireHookCmd) + "\ncat > " + filepath.Join(dir, "after.stdin") + "\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook), []byte(script), 0o755))
+
+			cmd := exec.CommandContext(t.Context(), "sh", filepath.Join(dir, prePushHook), "origin", "url")
+			cmd.Stdin = strings.NewReader(refs)
+			cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"TMPDIR="+filepath.Join(dir, "missing"))
+			err := cmd.Run()
+			exit := 0
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				exit = exitErr.ExitCode()
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, entireExit, exit, "the script's status must be Entire's")
+			env, readErr := os.ReadFile(filepath.Join(dir, "entire.env"))
+			require.NoError(t, readErr, "Entire must still run")
+			require.NotContains(t, string(env), PrePushStdinRefsEnv+"=1", "without a saved list Entire runs as an old hook")
+			after, afterErr := os.ReadFile(filepath.Join(dir, "after.stdin"))
+			if entireExit == 0 {
+				require.NoError(t, afterErr)
+				require.Equal(t, refs, string(after), "the command after Entire must still get git's stdin")
+			} else {
+				require.ErrorIs(t, afterErr, os.ErrNotExist, "nothing may run after Entire fails")
+			}
+		})
+	}
+}
+
 func TestPrePushHookLine_ReplaysStdinAndPropagatesFailure(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {

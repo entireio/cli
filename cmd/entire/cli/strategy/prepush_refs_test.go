@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -83,4 +84,17 @@ func TestCheckOuterPushV1(t *testing.T) {
 			}
 		})
 	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("stdin went away") }
+
+// A ref list that cannot be read leaves the refs unknown, as an old hook does,
+// rather than failing the user's push over it.
+func TestWithPrePushRefsFrom_UnreadableListIsUnknown(t *testing.T) {
+	t.Parallel()
+	require.False(t, prePushRefsKnown(WithPrePushRefsFrom(context.Background(), failingReader{})))
+	require.True(t, prePushRefsKnown(WithPrePushRefsFrom(context.Background(),
+		strings.NewReader("refs/heads/main "+testSHA1+" refs/heads/main "+testSHA2+"\n"))))
 }

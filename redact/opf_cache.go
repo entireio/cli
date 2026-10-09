@@ -35,16 +35,19 @@ var ErrOPFUnavailable = errors.New("OpenAI Privacy Filter is unavailable for the
 // opfCacheVersion is part of every cache key. Bump it when the entry format or
 // the meaning of a stored span changes, so older entries are never read.
 //
-// The key does not identify the model: bump this whenever the opf model or
-// its output changes in a way that should invalidate stored results, or old
-// entries keep being applied for up to the cache's max age.
+// The key includes the configured OPF command, so pointing Entire at a
+// different runtime rescans. It cannot see a model upgraded in place behind the
+// same command: bump this whenever the opf model or its output changes in a way
+// that should invalidate stored results, or old entries keep being applied for
+// up to the cache's max age.
 const opfCacheVersion = "1"
 
 // opfBlobCacheKey names one blob's entry. OPF's output depends only on the leaf
-// text and the categories it was asked for, so the key is the blob's object
-// hash plus the sorted category set; enabling a category rescans everything.
+// text, the runtime and the categories it was asked for, so the key is the
+// blob's object hash plus the OPF command and the sorted category set; enabling
+// a category or changing the command rescans everything.
 func opfBlobCacheKey(blobID string, cats []string) string {
-	sum := sha256.Sum256([]byte(opfCacheVersion + "\x00" + strings.Join(cats, ",") + "\x00" + blobID))
+	sum := sha256.Sum256([]byte(opfCacheVersion + "\x00" + OPFCommand() + "\x00" + strings.Join(cats, ",") + "\x00" + blobID))
 	return hex.EncodeToString(sum[:])
 }
 

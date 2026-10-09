@@ -36,6 +36,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/spawnmarker"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
@@ -175,7 +176,7 @@ func RunOPFScan(ctx context.Context, remote string) error {
 		// held and spawned nothing, so look once more now that it is free. Only
 		// work this process has not already tried brings it back, so units it
 		// could not scan or deliver do not make it spin.
-		if w.passes >= opfScanMaxPasses || !w.hasUnseenWork(ctx) {
+		if w.withdrawn || w.passes >= opfScanMaxPasses || !w.hasUnseenWork(ctx) {
 			return nil
 		}
 		if release, held = acquireOPFScanWorkerLock(ctx); held {
@@ -197,6 +198,8 @@ type opfScanWorker struct {
 	// seen holds the IDs of every commit a pass has already worked on.
 	seen   map[string]struct{}
 	passes int
+	// withdrawn ends the worker: the settings no longer allow OPF to run.
+	withdrawn bool
 }
 
 // runPasses collects, scans and delivers until nothing new is pending, a pass
@@ -206,6 +209,11 @@ type opfScanWorker struct {
 func (w *opfScanWorker) runPasses(ctx context.Context) {
 	logCtx := logging.WithComponent(ctx, opfScanComponent)
 	for ; w.passes < opfScanMaxPasses; w.passes++ {
+		if opfWorkerWithdrawn(ctx) {
+			w.withdrawn = true
+			logging.Info(logCtx, "opf scan stopped: OPF is now set to never run")
+			return
+		}
 		units, collectErr := collectOPFScanUnits(ctx, w.repo, w.remote)
 		if collectErr != nil {
 			logging.Warn(logCtx, "opf scan: could not collect pending checkpoints",
@@ -577,4 +585,17 @@ func maybeHintGitRefsForOPF(ctx context.Context) {
 		return
 	}
 	fmt.Fprintln(stderrWriter, opfGitRefsHint)
+}
+
+// opfWorkerWithdrawn reports that the settings now say OPF should never run.
+// The push that spawned the worker resolved OPFRun, but a user who has since
+// chosen "never" has withdrawn that decision, and a worker must not keep
+// scanning and delivering on it. Read per pass, so a change applies from the
+// next pass.
+func opfWorkerWithdrawn(ctx context.Context) bool {
+	cfg, err := settings.Load(ctx)
+	if err != nil || cfg == nil || cfg.Redaction == nil || cfg.Redaction.OpenAIPrivacyFilter == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(cfg.Redaction.OpenAIPrivacyFilter.PromptDefault), settings.OPFPromptNever)
 }
