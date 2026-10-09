@@ -38,7 +38,6 @@ var ErrNotFound = keyring.ErrNotFound
 // at "entire-core:<base-url>" regardless of which CLI wrote it. Two CLIs
 // sharing this prefix on the same machine read each other's writes.
 const (
-	ClusterKeyringPrefix      = "entire:"              // entiredb cluster-issued tokens
 	CoreKeyringPrefix         = "entire-core:"         // entire-core control-plane tokens
 	JurisdictionKeyringPrefix = "entire-jurisdiction:" // jurisdiction (data-plane) access tokens
 )

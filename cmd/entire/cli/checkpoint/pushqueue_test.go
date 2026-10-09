@@ -231,3 +231,5 @@ func TestPushQueue_RotateMovesRefsToBack(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, refs, 3, "rotation only reorders; it never removes")
 }
+
+func (q *PushQueue) queuePath() string { return filepath.Join(q.dir, pushQueueFileName) }

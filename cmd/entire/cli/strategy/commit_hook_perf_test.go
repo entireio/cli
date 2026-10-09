@@ -373,7 +373,7 @@ var perfLargeFileSets = func() [][]string {
 	return sets
 }()
 
-// Sample prompts for varied FirstPrompt per session.
+// Sample prompts for varied LastPrompt per session.
 var perfPrompts = []string{
 	"implement the login feature",
 	"fix the bug in checkout flow",

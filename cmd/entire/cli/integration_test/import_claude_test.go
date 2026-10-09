@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,17 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
 )
 
+// claudeFixtureCwdJSON returns cwd as a JSON string literal for splicing a
+// "cwd" field into hand-written Claude transcript fixtures. Import discovery
+// keeps only transcripts whose recorded cwd is inside the repo, and
+// json.Marshal escapes Windows backslashes that concatenation would not.
+func claudeFixtureCwdJSON(t *testing.T, cwd string) string {
+	t.Helper()
+	b, err := json.Marshal(cwd)
+	require.NoError(t, err)
+	return string(b)
+}
+
 func TestImportClaudeCode_EndToEnd(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -20,7 +32,7 @@ func TestImportClaudeCode_EndToEnd(t *testing.T) {
 	// Write a two-turn Claude transcript into the (overridden) Claude project dir.
 	sessionID := "sess1"
 	content := strings.Join([]string{
-		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"user","uuid":"u1","cwd":` + claudeFixtureCwdJSON(t, env.RepoDir) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
 		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
 		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
 	}, "\n") + "\n"

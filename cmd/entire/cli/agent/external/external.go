@@ -368,18 +368,6 @@ func (e *Agent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, err
 	return resp.Prompts, nil
 }
 
-func (e *Agent) ExtractSummary(sessionRef string) (string, error) {
-	stdout, err := e.run(context.Background(), nil, "extract-summary", "--session-ref", sessionRef)
-	if err != nil {
-		return "", fmt.Errorf("extract-summary: %w", err)
-	}
-	var resp ExtractSummaryResponse
-	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return "", fmt.Errorf("extract-summary: invalid JSON: %w", err)
-	}
-	return resp.Summary, nil
-}
-
 // --- TranscriptPreparer methods ---
 
 func (e *Agent) PrepareTranscript(ctx context.Context, sessionRef string) error {

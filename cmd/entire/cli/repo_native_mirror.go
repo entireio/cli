@@ -379,15 +379,6 @@ func nativeMirrorDetail(p coreapi.NativeMirrorPlacement, fallback string) error 
 	return errors.New(fallback)
 }
 
-func regionSlugs(regions []regionChoice) []string {
-	out := make([]string, 0, len(regions))
-	for _, r := range regions {
-		out = append(out, r.slug)
-	}
-	slices.Sort(out)
-	return out
-}
-
 // regionHosts is the same list in the spelling --cluster takes, for the
 // "available: ..." half of a refusal — a reader must be able to paste one back.
 func regionHosts(regions []regionChoice) []string {

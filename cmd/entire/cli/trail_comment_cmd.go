@@ -108,7 +108,7 @@ func newTrailCommentListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return printTrailDiscussions(cmd.OutOrStdout(), items, found.Number, jsonOut, all)
+				return printTrailDiscussions(cmd.OutOrStdout(), items, fmt.Sprintf("trail #%d", found.Number), jsonOut, all)
 			})
 		},
 	}
@@ -157,7 +157,8 @@ func fetchAllTrailDiscussions(ctx context.Context, client *api.Client, path stri
 	return items, nil
 }
 
-func printTrailDiscussions(w io.Writer, items []api.TrailDiscussionSummary, number int, jsonOut, all bool) error {
+// subject names the trail in the empty-list message, e.g. "trail #42".
+func printTrailDiscussions(w io.Writer, items []api.TrailDiscussionSummary, subject string, jsonOut, all bool) error {
 	filtered := items
 	if !all {
 		filtered = make([]api.TrailDiscussionSummary, 0, len(items))
@@ -176,7 +177,7 @@ func printTrailDiscussions(w io.Writer, items []api.TrailDiscussionSummary, numb
 		return nil
 	}
 	if len(filtered) == 0 {
-		fmt.Fprintf(w, "No discussions on trail #%d\n", number)
+		fmt.Fprintf(w, "No discussions on %s\n", subject)
 		return nil
 	}
 	for _, it := range filtered {

@@ -158,7 +158,6 @@ func discoverAgentPackages(t *testing.T, agentDir string) []string {
 		"testutil":       true, // shared test utilities
 		"external":       true, // external agent adapter, not a self-registering agent
 		"skilldiscovery": true, // shared capability helper (registries, match), not an agent
-		"spawn":          true, // shared Spawner interface for review/investigate, not an agent
 	}
 
 	entries, err := os.ReadDir(agentDir)
@@ -190,9 +189,9 @@ func extractImports(t *testing.T, dir string) []string {
 	t.Helper()
 
 	fset := token.NewFileSet()
-	//nolint:staticcheck // ParseDir is deprecated in favor of go/packages, but we intentionally
+	// ParseDir is deprecated in favor of go/packages, but we intentionally
 	// scan all files regardless of build tags to catch forbidden imports in test files too.
-	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ImportsOnly)
+	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ImportsOnly) //nolint:staticcheck // Intentionally scan files regardless of build tags.
 	if err != nil {
 		t.Fatalf("parser.ParseDir(%s): %v", dir, err)
 	}
@@ -247,8 +246,8 @@ func hasInitWithRegister(t *testing.T, dir string) bool {
 	t.Helper()
 
 	fset := token.NewFileSet()
-	//nolint:staticcheck // See extractImports for rationale.
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
+	// See extractImports for why this scan uses ParseDir.
+	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool { //nolint:staticcheck // Intentionally scan files regardless of build tags.
 		return !strings.HasSuffix(fi.Name(), "_test.go")
 	}, 0)
 	if err != nil {

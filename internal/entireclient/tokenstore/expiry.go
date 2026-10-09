@@ -10,9 +10,6 @@ import (
 // Format: "token|expires_at_unix"
 const TokenExpirationSeparator = "|"
 
-// TokenExpirationBuffer is how long before expiration we should refresh.
-const TokenExpirationBuffer = 5 * time.Minute
-
 // EncodeTokenWithExpiration encodes a token with its expiration time as a
 // "token|expires_at_unix" suffix. Callers must pass a positive expiresIn —
 // the encoded suffix is the contract that tells future readers when to
@@ -38,13 +35,4 @@ func DecodeTokenWithExpiration(encoded string) (token string, expiresAt time.Tim
 		return encoded, time.Time{}
 	}
 	return token, time.Unix(expiresAtUnix, 0)
-}
-
-// IsTokenExpiredOrExpiring checks if a token is expired or will expire soon.
-// A zero expiresAt is treated as "unknown, assume expired".
-func IsTokenExpiredOrExpiring(expiresAt time.Time) bool {
-	if expiresAt.IsZero() {
-		return true
-	}
-	return time.Now().Add(TokenExpirationBuffer).After(expiresAt)
 }

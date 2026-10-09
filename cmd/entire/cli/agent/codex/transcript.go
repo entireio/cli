@@ -487,14 +487,6 @@ type rolloutAnalysis struct {
 	ExactTokenUsage *agent.TokenUsage
 }
 
-// analyzeRollout extracts every piece of child evidence in one JSONL pass.
-// Each evidence channel keeps its own validity: malformed task boundaries
-// invalidate terminal turns without discarding file paths already observed,
-// while a malformed final token snapshot makes exact usage unavailable.
-func analyzeRollout(data []byte) rolloutAnalysis {
-	return analyzeRolloutForTurns(context.Background(), data, nil)
-}
-
 func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []string) rolloutAnalysis {
 	var result rolloutAnalysis
 	terminalValid := true

@@ -30,7 +30,4 @@ const (
 
 	// cacheFileName is the name of the cache file stored in the global config directory.
 	cacheFileName = "version_check.json"
-
-	// globalConfigDirName is the name of the global config directory in the user's home.
-	globalConfigDirName = ".config/entire"
 )

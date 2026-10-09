@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,7 +18,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
@@ -28,17 +32,15 @@ import (
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 
-	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/spf13/cobra"
 )
 
-// attachOptions carries optional flags for runAttach. Force is the original
-// flag; Review opts the attach into recording the session as an
-// agent_review in the checkpoint metadata.
+// attachOptions carries optional flags for runAttach. Review opts the attach
+// into recording the session as an agent_review in the checkpoint metadata.
 type attachOptions struct {
-	Force bool
 	// Review, when true, tags the attached session as a review. Skills are
 	// resolved inside runAttach after the real agent is known (via session
 	// state or transcript auto-detection), not at the cobra layer — the
@@ -53,6 +55,13 @@ type attachOptions struct {
 	// transcript's first user prompt. Set from a pending-review marker when
 	// `entire session attach --review` adopts the prompt the user was asked to run.
 	ReviewPromptOverride string
+	// Commit, when set, names the commit to link instead of HEAD. How the link
+	// is written follows from the commit, never from a flag: see
+	// attachLinkMode.
+	Commit string
+	// Force skips the confirmation, after the user has agreed to what attach
+	// printed. Without it and without a terminal, attach changes nothing.
+	Force bool
 }
 
 // committedRefs resolves the committed metadata topology.
@@ -77,6 +86,7 @@ func openAttachStore(ctx context.Context, repo *git.Repository, refs cpkg.Persis
 func newAttachCmd() *cobra.Command {
 	var (
 		force      bool
+		commitFlag string
 		agentFlag  string
 		reviewFlag bool
 		skillsFlag []string
@@ -87,11 +97,31 @@ func newAttachCmd() *cobra.Command {
 		Long: `Attach an existing agent session that wasn't captured by hooks.
 
 This creates a checkpoint from the session's transcript and links it to the
-last commit. Use this when hooks failed to fire or weren't installed when
-the session started, or to attach a research session.
+last commit, or to the commit named by --commit. Use this when hooks failed
+to fire or weren't installed when the session started, or to attach a
+research session.
 
-If the last commit already has a checkpoint, the session is added to it.
-Otherwise a new checkpoint is created.
+How the session is linked follows from two facts about the commit — does it
+already have a checkpoint, and is it pushed — the same for HEAD and --commit:
+  - It already has a checkpoint: the session is added to it. Git history is
+    not changed.
+  - It is already pushed: the commit is left unchanged and the link is
+    recorded in a new checkpoint, which is pushed right away. The link counts
+    once the commit's author attaches it, and names that exact commit: after
+    a rebase or amend, attach the session to the new commit.
+  - It isn't pushed: the Entire-Checkpoint trailer is added to it, which
+    rewrites it and any commits after it on the current branch (their content
+    is unchanged). A trailer survives a later rebase. Merges after the commit,
+    or a rebase or merge in progress, are refused. If a remote can't be
+    reached to confirm the commit isn't pushed, attach refuses rather than
+    risk rewriting a shared commit.
+
+attach prints what it is about to do and asks before doing it. Without a
+terminal (an agent or a script) it changes nothing and exits non-zero; show
+the user what it printed, and once they agree, rerun with --force.
+
+A session can be attached to more than one commit. Each checkpoint records the
+turns since the session's previous checkpoint.
 
 Use --review to tag the attached session as an agent review. The
 first user prompt in the transcript is recorded as the review prompt.
@@ -115,6 +145,7 @@ the transcript and prints the detected agent name.`,
 			// and so auto-detection can find transcripts from external agents.
 			external.DiscoverAndRegister(cmd.Context())
 			opts := attachOptions{
+				Commit:               commitFlag,
 				Force:                force,
 				Review:               reviewFlag,
 				ReviewSkillsOverride: skillsFlag,
@@ -149,7 +180,8 @@ the transcript and prints the detected agent name.`,
 			return err
 		},
 	}
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation and amend the last commit with the checkpoint trailer (best-effort; if the amend fails the checkpoint is still created and the trailer is printed for manual paste)")
+	cmd.Flags().StringVar(&commitFlag, "commit", "", "Link the session to this commit (hash, ref, or HEAD~n) instead of the last one")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip the confirmation. Only after the user has agreed to what attach describes")
 	cmd.Flags().StringVarP(&agentFlag, "agent", "a", string(agent.DefaultAgentName), "Agent that created the session (see 'entire agent list' for registered agents, including external)")
 	cmd.Flags().BoolVar(&reviewFlag, "review", false, "Tag the attached session as an agent review")
 	cmd.Flags().StringSliceVar(&skillsFlag, "skills", nil, "Optional: declare which review skills were run in this session. Only used with --review")
@@ -237,25 +269,13 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	if err != nil {
 		return err
 	}
-
-	// If session already has a checkpoint, just offer to link it.
-	if existingState != nil && !existingState.LastCheckpointID.IsEmpty() {
-		// Review-upgrade isn't supported yet: the existing checkpoint's
-		// metadata tree would need to be rewritten with Kind/ReviewSkills/
-		// ReviewPrompt set, and a new commit pushed onto entire/checkpoints/v1.
-		// Error out with a concrete message rather than silently linking the
-		// checkpoint without the review metadata.
-		if opts.Review {
-			return fmt.Errorf(
-				"session %s already has checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
-				sessionID, existingState.LastCheckpointID.String(),
-			)
-		}
-		cpID := existingState.LastCheckpointID.String()
-		fmt.Fprintf(w, "Session %s already has checkpoint %s\n", sessionID, cpID)
-		amendOrPrintTrailer(logCtx, w, errW, headCommit, cpID, opts.Force)
-		return nil
+	// Decide how to link before writing anything, so a commit that can't be
+	// linked is refused with nothing left behind.
+	plan, err := planAttachLink(ctx, repo, headCommit, opts)
+	if err != nil {
+		return err
 	}
+	target := plan.target
 
 	// Resolve agent and transcript path.
 	ag, found, err := resolveAgentAndTranscript(logCtx, w, sessionID, agentName, existingState)
@@ -275,20 +295,16 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return fmt.Errorf("failed to read transcript: %w", err)
 	}
 
-	meta := extractTranscriptMetadataForAgent(ag, transcriptPath, transcriptData)
-	warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)
+	// A session can be attached to several commits. Each checkpoint holds the
+	// turns since the session's previous one, as hook-made checkpoints do.
+	window := attachTranscriptWindowFor(errW, ag, transcriptPath, transcriptData, existingState)
+	meta := extractTranscriptMetadataForAgent(ag, transcriptPath, transcriptData, window.start)
 
-	// Determine checkpoint ID: reuse from HEAD if one exists, otherwise generate new.
-	checkpointID, isExistingCheckpoint := resolveCheckpointID(ctx, headCommit)
-
-	// If HEAD references an existing checkpoint, make sure we have it locally
-	// before writing — otherwise we'd create a fresh session 0 under the same
-	// ID and overwrite the original on push.
 	refs := opts.committedRefs(ctx)
-	refreshedRepo, err := ensureCheckpointAvailable(ctx, logCtx, repo, refs, checkpointID, isExistingCheckpoint)
-	if refreshedRepo != nil && refreshedRepo != repo {
+	cp, err := resolveAttachCheckpoint(ctx, logCtx, repo, refs, plan, sessionID, opts)
+	if cp.repo != nil && cp.repo != repo {
 		oldRepo := repo
-		repo = refreshedRepo
+		repo = cp.repo
 		if closeErr := oldRepo.Close(); closeErr != nil {
 			logging.Warn(logCtx, "failed to close stale repository handle after checkpoint refresh",
 				slog.String("error", closeErr.Error()))
@@ -297,17 +313,51 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	if err != nil {
 		return err
 	}
-
-	store, err := openAttachStore(ctx, repo, refs)
-	if err != nil {
-		return err
+	if cp.holdsSession {
+		fmt.Fprintf(w, "Session %s is already in checkpoint %s on commit %s.\n", sessionID, cp.id, target.Hash.String()[:12])
+		// An earlier attach may have written it but failed to push it; for a
+		// pushed commit, push it now — after the same confirmation as any
+		// other attach, since that sends the transcript.
+		if plan.remote == "" || checkpointOnRemote(ctx, plan.remote, cp.id) {
+			return nil
+		}
+		warning := []string{
+			fmt.Sprintf("Checkpoint %s, which holds session %s, isn't on %s yet.", cp.id, sessionID, plan.remote),
+			"Pending checkpoints, including this one with the session transcript, are pushed to " + plan.remote + " now.",
+		}
+		if err := confirmAttach(w, errW, warning, opts.Force); err != nil {
+			if errors.Is(err, errAttachDeclined) {
+				return nil
+			}
+			return err
+		}
+		return redeliverAttachedCheckpoint(ctx, w, errW, plan, cp.id)
+	}
+	checkpointID, isExistingCheckpoint := cp.id, cp.existing
+	if window.start > 0 && meta.TurnCount == 0 {
+		fmt.Fprintf(errW, "warning: the session has no new turns since checkpoint %s.\n", window.since)
+	} else {
+		warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)
 	}
 
-	var replacedUsage *agent.TokenUsage
-	if isExistingCheckpoint {
-		replacedUsage, err = attachReplacedEntryTokens(ctx, logCtx, repo, refs, checkpointID, sessionID, opts.Review)
-		if err != nil {
-			return err
+	if err := confirmAttach(w, errW, attachWarning(ctx, plan, sessionID, checkpointID, isExistingCheckpoint, window), opts.Force); err != nil {
+		if errors.Is(err, errAttachDeclined) {
+			return nil
+		}
+		return err
+	}
+	// The prompt can stay open for a while, and the commit may have been
+	// pushed meanwhile, from here or another clone. Ask the remotes again,
+	// directly, before rewriting it.
+	if plan.mode == attachAddTrailer {
+		holder, _, unreachable, err := remoteHoldingPushedCommit(ctx, target, plan.checkedRemotes)
+		switch {
+		case err != nil:
+			return fmt.Errorf("couldn't check again whether commit %s was pushed while attach was waiting, so it won't be rewritten; nothing was changed: %w", target.Hash.String()[:12], err)
+		case holder != "":
+			return fmt.Errorf("commit %s was pushed to %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], holder)
+		case len(unreachable) > 0:
+			return fmt.Errorf("couldn't reach %s to check again whether commit %s was pushed while attach was waiting, so it won't be rewritten; nothing was changed", strings.Join(unreachable, ", "), target.Hash.String()[:12])
 		}
 	}
 
@@ -317,8 +367,11 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 
 	// The checkpoint stores only tokens no earlier checkpoint of this session
-	// counted; session state keeps the whole-transcript total.
-	tokenUsage, tokenPos := strategy.AttachTokenUsage(logCtx, ag, existingState, transcriptData, replacedUsage)
+	// counted, from the token offset rather than the displayed window: carry-
+	// forward leaves the window at the session start while the tokens before
+	// it are already in a checkpoint. Session state keeps the whole-transcript
+	// total.
+	tokenUsage, tokenPos := strategy.AttachTokenUsage(logCtx, ag, existingState, transcriptData)
 	sessionUsage := tokenUsage
 	if existingState != nil {
 		sessionUsage = agent.CalculateTokenUsage(logCtx, ag, transcriptData, 0, "")
@@ -337,36 +390,25 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return fmt.Errorf("failed to redact transcript: %w", redactErr)
 	}
 
-	writeOpts := cpkg.WriteOptions{
-		CheckpointID:     checkpointID,
-		SessionID:        sessionID,
-		Strategy:         strategy.StrategyNameManualCommit,
-		Transcript:       redactedTranscript,
-		Prompts:          attachPrompts(meta),
-		CheckpointsCount: attachStepCount(meta.TurnCount),
-		AuthorName:       author.Name,
-		AuthorEmail:      author.Email,
-		Agent:            ag.Type(),
-		Model:            meta.Model,
-		TokenUsage:       tokenUsage,
-	}
-	if opts.Review {
-		writeOpts.Kind = string(session.KindAgentReview)
-		writeOpts.ReviewSkills = reviewSkills
-		writeOpts.ReviewPrompt = reviewPromptForAttach(meta, opts)
-		writeOpts.HasReview = true
-	}
+	writeOpts := attachWriteOptions(ctx, plan, checkpointID, isExistingCheckpoint, sessionID, ag, redactedTranscript, meta, window, author, tokenUsage, opts, reviewSkills)
 
 	// ReservedSession routes by the checkpoint ID's backend, as condensation
 	// does: appending to an existing ULID checkpoint under the git-branch
 	// primary must land in its ref, not on the v1 branch where reads never
 	// look for a ULID. A freshly minted ID already matches the primary.
-	if err := store.Write(ctx, cpkg.ReservedSession(writeOpts)); err != nil {
+	if err := cp.store.Write(ctx, cpkg.ReservedSession(writeOpts)); err != nil {
 		return fmt.Errorf("failed to write checkpoint: %w", err)
 	}
 
-	// Create or update session state.
-	if err := saveAttachSessionState(logCtx, repo, existingState, sessionID, ag.Type(), transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, opts, reviewSkills); err != nil {
+	fmt.Fprintf(w, "Attached session %s\n", sessionID)
+	printAttachFooter(w, meta, tokenUsage)
+	linkErr := finishAttachLink(ctx, w, errW, plan, checkpointID, isExistingCheckpoint)
+
+	// Create or update session state, after any rewrite so a seeded base is
+	// the new HEAD. Seeding BaseCommit makes the session link future commits
+	// on HEAD; an attach to an older commit is about that commit only.
+	seedBase := target.Hash.Equal(headCommit.Hash)
+	if err := saveAttachSessionState(logCtx, repo, existingState, sessionID, ag.Type(), transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, window.end, opts, reviewSkills, seedBase); err != nil {
 		logging.Warn(logCtx, "failed to save session state", "error", err)
 	} else if activeHome {
 		// The active home was resolved from the user's environment, so it may
@@ -375,34 +417,664 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 			logging.Warn(logCtx, "failed to record agent home", "error", err)
 		}
 	}
+	return linkErr
+}
 
-	fmt.Fprintf(w, "Attached session %s\n", sessionID)
-	printAttachFooter(w, meta, tokenUsage)
+// attachCheckpoint is the checkpoint an attach writes into.
+type attachCheckpoint struct {
+	// repo replaces the caller's handle when fetching the checkpoint refreshed it.
+	repo     *git.Repository
+	store    cpkg.PersistentStore
+	id       id.CheckpointID
+	existing bool
+	// holdsSession: the existing checkpoint already records this session.
+	holdsSession bool
+}
+
+// resolveAttachCheckpoint picks the checkpoint for plan's commit: the one its
+// trailer names, the one an earlier attach recorded a link to, or a new one.
+// An existing checkpoint is fetched and verified first, so it is never rebuilt
+// from scratch under its ID. Nothing is written.
+func resolveAttachCheckpoint(ctx, logCtx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, plan attachLinkPlan, sessionID string, opts attachOptions) (attachCheckpoint, error) {
+	checkpointID, isExistingCheckpoint := resolveCheckpointID(ctx, plan.target)
+	// A pushed commit an earlier attach already linked has no trailer to find
+	// its checkpoint by; its checkpoint names it instead. Join that one, as the
+	// trailer paths do, rather than start a second checkpoint for the commit.
+	// The lookup reads every copy, remote-tracking included, so a fresh clone
+	// joins the commit's checkpoint instead of starting a duplicate.
+	if plan.mode == attachRecordLink && !isExistingCheckpoint {
+		if readStore, openErr := openAttachStore(ctx, repo, refs); openErr == nil {
+			if linkedID, ok := checkpointLinkedTo(ctx, readStore, plan.target); ok {
+				checkpointID, isExistingCheckpoint = linkedID, true
+			}
+		}
+	}
+	cp := attachCheckpoint{id: checkpointID, existing: isExistingCheckpoint}
+	refreshedRepo, err := ensureCheckpointAvailable(ctx, logCtx, repo, refs, checkpointID, isExistingCheckpoint)
+	if refreshedRepo != nil {
+		cp.repo, repo = refreshedRepo, refreshedRepo
+	}
+	if err != nil {
+		return cp, err
+	}
+	if cp.store, err = openAttachStore(ctx, repo, refs); err != nil {
+		return cp, err
+	}
+	if !isExistingCheckpoint {
+		return cp, nil
+	}
+	exists, err := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
+	if err != nil {
+		return cp, fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, err)
+	}
+	// Rewriting an existing checkpoint as a review isn't supported, and
+	// re-adding the same session would only overwrite its own entry.
+	if exists && opts.Review {
+		return cp, fmt.Errorf(
+			"session %s is already recorded in checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
+			sessionID, checkpointID.String(),
+		)
+	}
+	cp.holdsSession = exists
+	return cp, nil
+}
+
+// attachWriteOptions is the checkpoint write for one attach: the session's
+// turns in window, and a recorded link when plan names a pushed commit.
+func attachWriteOptions(ctx context.Context, plan attachLinkPlan, checkpointID id.CheckpointID, isExistingCheckpoint bool, sessionID string, ag agent.Agent, transcript redact.RedactedBytes, meta transcriptMetadata, window attachTranscriptWindow, author *GitAuthor, tokenUsage *agent.TokenUsage, opts attachOptions, reviewSkills []string) cpkg.WriteOptions {
+	writeOpts := cpkg.WriteOptions{
+		CheckpointID:              checkpointID,
+		SessionID:                 sessionID,
+		Strategy:                  strategy.StrategyNameManualCommit,
+		Transcript:                transcript,
+		Prompts:                   attachPrompts(meta),
+		CheckpointsCount:          attachStepCount(meta.TurnCount),
+		CheckpointTranscriptStart: window.start,
+		AuthorName:                author.Name,
+		AuthorEmail:               author.Email,
+		Agent:                     ag.Type(),
+		Model:                     meta.Model,
+		TokenUsage:                tokenUsage,
+	}
+	if plan.mode == attachRecordLink && !isExistingCheckpoint {
+		writeOpts.LinkedCommits = []cpkg.LinkedCommit{{SHA: plan.target.Hash.String(), Repo: attachLinkRepo(ctx, plan.holder)}}
+	}
+	if opts.Review {
+		writeOpts.Kind = string(session.KindAgentReview)
+		writeOpts.ReviewSkills = reviewSkills
+		writeOpts.ReviewPrompt = reviewPromptForAttach(meta, opts)
+		writeOpts.HasReview = true
+	}
+	return writeOpts
+}
+
+// attachTranscriptWindow is the part of a session's transcript one attach
+// records, in the agent's own position metric. end is -1 when the agent can't
+// report a position.
+type attachTranscriptWindow struct {
+	start, end int
+	// since is the session's previous checkpoint when start > 0.
+	since id.CheckpointID
+}
+
+// attachTranscriptWindowFor starts after the session's previous checkpoint, so
+// attaching a session to a second commit records only its newer turns. A
+// session with no state here (another machine, cleaned) starts from the top.
+// A start past the transcript's end (rotated or rewritten) is reset to the top
+// with a warning rather than recording nothing.
+func attachTranscriptWindowFor(errW io.Writer, ag agent.Agent, transcriptPath string, transcriptData []byte, existingState *session.State) attachTranscriptWindow {
+	// Without the agent's own position, the end is the line count, the
+	// coordinate transcript.SliceFromLine slices the window by; an unknown end
+	// would leave the session's offset where it was, and the next attach would
+	// record these turns again.
+	window := attachTranscriptWindow{end: bytes.Count(transcriptData, []byte("\n"))}
+	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
+		if pos, err := analyzer.GetTranscriptPosition(transcriptPath); err == nil {
+			window.end = pos
+		}
+	}
+	if existingState == nil || existingState.LastCheckpointID.IsEmpty() || existingState.CheckpointTranscriptStart <= 0 {
+		return window
+	}
+	if window.end >= 0 && existingState.CheckpointTranscriptStart > window.end {
+		fmt.Fprintf(errW, "warning: the transcript is shorter than when checkpoint %s was made, so the whole session is recorded again\n", existingState.LastCheckpointID)
+		return window
+	}
+	window.start = existingState.CheckpointTranscriptStart
+	window.since = existingState.LastCheckpointID
+	return window
+}
+
+// attachWarning describes what attach is about to do, for confirmAttach.
+func attachWarning(ctx context.Context, plan attachLinkPlan, sessionID string, checkpointID id.CheckpointID, isExistingCheckpoint bool, window attachTranscriptWindow) []string {
+	target := plan.target
+	var lines []string
+	switch {
+	case isExistingCheckpoint:
+		lines = append(lines, fmt.Sprintf("Adds session %s to checkpoint %s, which commit %s already has. Git history is not changed.", sessionID, checkpointID, describeCommit(target)))
+		if plan.mode == attachRecordLink {
+			lines = append(lines, "That checkpoint names the commit in a recorded link, not a trailer. The CLI can't verify who recorded it: anyone who can push checkpoints can name any commit.")
+		}
+	case plan.mode == attachRecordLink:
+		lines = append(lines,
+			fmt.Sprintf("Commit %s is already pushed to %s, so it won't be changed.", describeCommit(target), plan.holder),
+			fmt.Sprintf("A new checkpoint with session %s records a link to it instead. The link names this exact commit: if the commit is later rebased or amended, attach the session to the new one.", sessionID))
+		if author, err := GetGitAuthor(ctx); err == nil && !strings.EqualFold(author.Email, target.Author.Email) {
+			lines = append(lines, fmt.Sprintf("The commit was authored by %s. A recorded link counts only when the commit's author attaches it.", target.Author.Email))
+		}
+	default:
+		lines = append(lines, rewriteWarning(ctx, plan.rewrite, plan.checkedRemotes)...)
+		lines = append(lines, fmt.Sprintf("Session %s goes into a new checkpoint linked by that trailer.", sessionID))
+	}
+	if plan.remote != "" {
+		lines = append(lines, "Pending checkpoints, including this one with the session transcript, are pushed to "+plan.remote+" now.")
+	} else {
+		lines = append(lines, "The checkpoint, including the session transcript, is pushed with your next git push.")
+	}
+	if window.start > 0 {
+		lines = append(lines, fmt.Sprintf("Only the turns since checkpoint %s are recorded.", window.since))
+	}
+	return lines
+}
+
+// finishAttachLink reports the checkpoint and completes its link to the target
+// commit: adding the trailer to an unpushed commit, or reporting and pushing a
+// recorded link. A checkpoint joined on a pushed commit is pushed too.
+func finishAttachLink(ctx context.Context, w, errW io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID, isExistingCheckpoint bool) error {
 	if isExistingCheckpoint {
 		fmt.Fprintf(w, "  Added to existing checkpoint %s\n", checkpointID)
-		return nil
+		return redeliverAttachedCheckpoint(ctx, w, errW, plan, checkpointID)
 	}
-
 	fmt.Fprintf(w, "  Created checkpoint %s\n", checkpointID)
-	amendOrPrintTrailer(logCtx, w, errW, headCommit, checkpointID.String(), opts.Force)
-
+	if plan.mode == attachRecordLink {
+		return reportLinkedCommit(ctx, w, errW, plan, checkpointID)
+	}
+	if err := rewriteWithTrailer(ctx, w, plan.rewrite, checkpointID); err != nil {
+		return fmt.Errorf("checkpoint %s was created, but the trailer couldn't be added to commit %s (%w); add this line to its message to link it:\n\n  Entire-Checkpoint: %s",
+			checkpointID, plan.target.Hash.String()[:12], err, checkpointID)
+	}
 	return nil
 }
 
-// amendOrPrintTrailer amends HEAD with the checkpoint trailer (best-effort).
-// If the amend fails, it logs the full error, prints a brief reason to stderr
-// so the user knows the amend was attempted, and falls back to printing the
-// trailer for manual paste. The recovery path is non-fatal: attach still
-// succeeds.
-func amendOrPrintTrailer(logCtx context.Context, w, errW io.Writer, headCommit *object.Commit, checkpointIDStr string, force bool) {
-	if err := promptAmendCommit(logCtx, w, headCommit, checkpointIDStr, force); err != nil {
-		logging.Warn(logCtx, "failed to amend commit", "error", err)
-		// promptAmendCommit wraps the full multi-line `git commit --amend`
-		// output into the error; keep the stderr note to the first line so it
-		// stays brief. The full error is preserved in the debug log above.
-		fmt.Fprintf(errW, "Could not amend the commit automatically (%s).\n", firstLine(err.Error()))
-		fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", checkpointIDStr)
+// checkpointOnRemote reports whether remote's push target already has
+// checkpointID as written locally. Anything it can't confirm reads as not
+// there.
+func checkpointOnRemote(ctx context.Context, remote string, checkpointID id.CheckpointID) bool {
+	target, disabled := strategy.CheckpointPushTarget(ctx, remote)
+	return !disabled && confirmCheckpointDelivered(ctx, target, checkpointID) == nil
+}
+
+// redeliverAttachedCheckpoint pushes an existing checkpoint now when its
+// commit is pushed: after a session joins it, or on a rerun, retrying a push
+// an earlier attach couldn't complete. A recorded link exists only in the checkpoint, so
+// failing to deliver it is an error; a trailer-linked one goes out with a
+// later push, so that is only a warning.
+func redeliverAttachedCheckpoint(ctx context.Context, w, errW io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID) error {
+	if plan.remote == "" {
+		return nil
 	}
+	err := pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID)
+	if err != nil && plan.mode != attachRecordLink {
+		fmt.Fprintf(errW, "warning: %v\n", err)
+		return nil
+	}
+	return err
+}
+
+// attachLinkMode is how attach links a checkpoint to its target commit. It
+// follows from two facts about the commit — does it already have a checkpoint,
+// and is it pushed — never from a flag or from whether it is HEAD.
+type attachLinkMode int
+
+const (
+	// attachJoinExisting: the commit already carries an Entire-Checkpoint
+	// trailer; the session joins that checkpoint and history is unchanged.
+	attachJoinExisting attachLinkMode = iota
+	// attachAddTrailer: no remote branch holds the commit. The trailer is
+	// added, rewriting the commit and any after it: nobody else has them, and
+	// a trailer survives a later rebase, where a recorded link wouldn't.
+	attachAddTrailer
+	// attachRecordLink: a remote branch already holds the commit, so rewriting
+	// it would mean a force-push. The link is recorded in the checkpoint
+	// (LinkedCommits) and the commit is left alone.
+	attachRecordLink
+)
+
+// attachLinkPlan is the commit an attach links to and how.
+type attachLinkPlan struct {
+	target *object.Commit
+	mode   attachLinkMode
+	// holder is a remote whose branches hold target, empty when none does (or,
+	// when joining, none could be reached).
+	holder string
+	// remote is where the checkpoint is pushed now: holder, or the branch's own
+	// remote when holder is an unrelated one. Empty when holder is.
+	remote string
+	// rewrite is target and the commits after it up to HEAD, oldest first
+	// (attachAddTrailer only).
+	rewrite []*object.Commit
+	// checkedRemotes are the remotes asked whether they hold target.
+	checkedRemotes []string
+}
+
+// planAttachLink resolves the target (HEAD unless --commit names another) and
+// decides how to link it.
+func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *object.Commit, opts attachOptions) (attachLinkPlan, error) {
+	target := headCommit
+	if opts.Commit != "" {
+		var err error
+		if target, err = resolveAttachCommit(repo, opts.Commit); err != nil {
+			return attachLinkPlan{}, err
+		}
+	}
+	remotes := attachRemotesToCheck(ctx)
+	if len(trailers.ParseAllCheckpoints(target.Message)) > 0 {
+		// Joining changes no history, so whether the commit is pushed only
+		// decides when the checkpoint goes out: now if it is, since there may be
+		// no later push of it, else with the next git push. A remote that can't
+		// be reached leaves it for that push.
+		holder, pushTo, _, err := remoteHoldingPushedCommit(ctx, target, remotes)
+		if err != nil {
+			return attachLinkPlan{}, err
+		}
+		return attachLinkPlan{target: target, mode: attachJoinExisting, remote: pushTo, holder: holder, checkedRemotes: remotes}, nil
+	}
+	holder, pushTo, unreachable, err := remoteHoldingPushedCommit(ctx, target, remotes)
+	if err != nil {
+		return attachLinkPlan{}, err
+	}
+	if holder != "" {
+		return attachLinkPlan{target: target, mode: attachRecordLink, remote: pushTo, holder: holder, checkedRemotes: remotes}, nil
+	}
+	if len(unreachable) > 0 {
+		// Absence from a remote we couldn't reach proves nothing; rewriting a
+		// commit someone already pushed is what this rule exists to prevent.
+		return attachLinkPlan{}, fmt.Errorf("couldn't confirm that commit %s isn't already pushed (could not reach %s), so it won't be rewritten; retry when the remote is reachable",
+			target.Hash.String()[:12], strings.Join(unreachable, ", "))
+	}
+	chain, err := attachRewriteChain(ctx, repo, target, headCommit)
+	if err != nil {
+		return attachLinkPlan{}, err
+	}
+	return attachLinkPlan{target: target, mode: attachAddTrailer, rewrite: chain, checkedRemotes: remotes}, nil
+}
+
+// remoteHoldingPushedCommit returns a remote whose branches contain target
+// (holder) and the remote to push its checkpoint to, both "" when none does,
+// plus the remotes it could not reach. Remote-tracking refs
+// can be stale — someone may have pushed this commit from another clone — and
+// rewriting a shared commit is what attach must avoid, so remotes are
+// refreshed first, then asked directly: tracking refs may not cover every
+// branch (single-branch clones, narrowed refspecs).
+func remoteHoldingPushedCommit(ctx context.Context, target *object.Commit, remotes []string) (holder, pushTo string, unreachable []string, err error) {
+	fetchRemotesForAttach(ctx, remotes)
+	if holder, pushTo, err = remoteHoldingCommit(ctx, target, remotes); err != nil || holder != "" {
+		return holder, pushTo, nil, err
+	}
+	holder, unreachable = remoteContainingCommit(ctx, target, remotes)
+	return holder, holder, unreachable, nil
+}
+
+// checkpointLinkedTo finds the most recent checkpoint whose recorded links
+// name target, reading remote-discovered stubs for theirs. A listing failure
+// finds none.
+func checkpointLinkedTo(ctx context.Context, store cpkg.PersistentStore, target *object.Commit) (id.CheckpointID, bool) {
+	infos, err := store.List(ctx)
+	if err != nil {
+		logging.Debug(ctx, "attach: listing checkpoints for a recorded link failed", slog.String("error", err.Error()))
+		return id.EmptyCheckpointID, false
+	}
+	linked := cpkg.CheckpointsLinkedToWithStubs(ctx, store, infos, target.Hash.String(), target.Committer.When)
+	if len(linked) == 0 {
+		return id.EmptyCheckpointID, false
+	}
+	return linked[0], true
+}
+
+// attachFetchTimeout bounds the remote refresh attach does before deciding
+// whether a commit is pushed.
+const attachFetchTimeout = 30 * time.Second
+
+// attachRemotes lists the repository's remotes.
+func attachRemotes(ctx context.Context) []string {
+	out, err := exec.CommandContext(ctx, "git", "remote").Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(out))
+}
+
+// attachRemotesToCheck lists the remotes a commit on the current branch would
+// have been pushed to: the branch's upstream and push remotes, else origin, else
+// every remote (detached HEAD, or no origin). Unrelated remotes, like an old
+// fork's, are left alone, so one that is unreachable doesn't block attach.
+func attachRemotesToCheck(ctx context.Context) []string {
+	all := attachRemotes(ctx)
+	var remotes []string
+	if branch, err := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD").Output(); err == nil {
+		out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:remotename)%0a%(push:remotename)", "--", strings.TrimSpace(string(branch))).Output()
+		if err == nil {
+			for _, name := range strings.Fields(string(out)) {
+				if slices.Contains(all, name) && !slices.Contains(remotes, name) {
+					remotes = append(remotes, name)
+				}
+			}
+		}
+	}
+	switch {
+	case len(remotes) > 0:
+		return remotes
+	case slices.Contains(all, defaultMirrorRemote):
+		return []string{defaultMirrorRemote}
+	default:
+		return all
+	}
+}
+
+// attachGitCommand runs git against a remote without credential prompts. SSH
+// keeps the user's own configuration: attach is a foreground command, and
+// without a terminal ssh can't prompt anyway.
+func attachGitCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd
+}
+
+// fetchRemotesForAttach refreshes remotes' tracking refs, best-effort: a
+// configured refspec can fail without the remote being unreachable, so
+// reachability is decided by remoteContainingCommit instead.
+func fetchRemotesForAttach(ctx context.Context, remotes []string) {
+	for _, remote := range remotes {
+		fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+		_ = attachGitCommand(fetchCtx, "fetch", "--quiet", "--no-tags", "--", remote).Run() //nolint:errcheck // best-effort; see doc comment
+		cancel()
+	}
+}
+
+// remoteContainingCommit asks each of remotes directly whether any of its
+// branches contains target, and returns the first that does plus the remotes it
+// could not reach. Branch tips come from ls-remote; when target is not a tip,
+// the branches whose tips aren't already local are fetched without writing any
+// ref, so a commit someone pushed and then built on is still found.
+func remoteContainingCommit(ctx context.Context, target *object.Commit, remotes []string) (holder string, unreachable []string) {
+	sha := target.Hash.String()
+	for _, remote := range remotes {
+		branches, tips, err := remoteBranchTips(ctx, remote)
+		if err != nil {
+			unreachable = append(unreachable, remote)
+			continue
+		}
+		if slices.Contains(tips, sha) {
+			return remote, unreachable
+		}
+		if missing := branchesWithMissingTips(ctx, branches, tips); len(missing) > 0 {
+			// Fetch the branches by name (a source-only glob refspec is
+			// invalid), writing no ref, only to get their objects for the
+			// ancestry check: an empty --refmap stops git updating the
+			// remote-tracking refs the configured refspec maps them to.
+			fetchArgs := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--", remote}, missing...)
+			fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+			err = attachGitCommand(fetchCtx, fetchArgs...).Run()
+			cancel()
+			if err != nil {
+				unreachable = append(unreachable, remote)
+				continue
+			}
+		}
+		reachable, err := reachableFromAny(ctx, target, untrackedTips(ctx, tips))
+		if err != nil {
+			// Not knowing is not "pushed": recording a link to a commit the
+			// remote may not have would be wrong, and so would rewriting one it
+			// may have. Treat it like a remote that couldn't be reached.
+			unreachable = append(unreachable, remote)
+			continue
+		}
+		if reachable {
+			return remote, unreachable
+		}
+	}
+	return "", unreachable
+}
+
+// untrackedTips drops the tips a local remote-tracking ref already points at:
+// remoteHoldingCommit has checked those.
+func untrackedTips(ctx context.Context, tips []string) []string {
+	out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(objectname)", "refs/remotes").Output()
+	if err != nil {
+		return tips
+	}
+	tracked := strings.Fields(string(out))
+	return slices.DeleteFunc(slices.Clone(tips), func(tip string) bool { return slices.Contains(tracked, tip) })
+}
+
+// reachableFromAny reports whether target is an ancestor of (or is) any of
+// tips, in one walk: the commits reachable from tips but not from target's
+// parents include target exactly when one of tips reaches it, and the walk
+// stops at history older than target. A walk that fails or times out returns
+// an error: the answer is unknown.
+func reachableFromAny(ctx context.Context, target *object.Commit, tips []string) (bool, error) {
+	if len(tips) == 0 {
+		return false, nil
+	}
+	var in strings.Builder
+	for _, tip := range tips {
+		in.WriteString(tip + "\n")
+	}
+	for _, p := range target.ParentHashes {
+		in.WriteString("^" + p.String() + "\n")
+	}
+	walkCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(walkCtx, "git", "rev-list", "--stdin")
+	cmd.Stdin = strings.NewReader(in.String())
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("walk history from the remote's branches: %w", err)
+	}
+	return slices.Contains(strings.Fields(string(out)), target.Hash.String()), nil
+}
+
+// branchesWithMissingTips returns the branches whose tip commit isn't in the
+// local object store. After a default refresh that is usually none, so nothing
+// is fetched twice.
+func branchesWithMissingTips(ctx context.Context, branches, tips []string) []string {
+	if len(tips) == 0 {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "cat-file", "--batch-check=%(objectname)")
+	cmd.Stdin = strings.NewReader(strings.Join(tips, "\n") + "\n")
+	out, err := cmd.Output()
+	if err != nil {
+		return branches
+	}
+	var missing []string
+	for i, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if i < len(branches) && strings.HasSuffix(line, " missing") {
+			missing = append(missing, branches[i])
+		}
+	}
+	return missing
+}
+
+// remoteBranchTips lists remote's branches and the commit at each tip.
+func remoteBranchTips(ctx context.Context, remote string) (branches, tips []string, err error) {
+	lsCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+	defer cancel()
+	out, err := attachGitCommand(lsCtx, "ls-remote", "--heads", "--", remote).Output()
+	if err != nil {
+		return nil, nil, fmt.Errorf("ls-remote %s: %w", remote, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 && isRemoteBranchName(fields[1]) {
+			tips = append(tips, fields[0])
+			branches = append(branches, fields[1])
+		}
+	}
+	return branches, tips, nil
+}
+
+// isRemoteBranchName reports whether name, as a remote advertised it, is a
+// well-formed branch ref that is safe to fetch by name. The names become
+// fetch refspecs, so a hostile remote's "refs/heads/a:refs/heads/main" would
+// otherwise write a local ref; ":" and the other refspec characters are
+// invalid in ref names, which Validate refuses.
+func isRemoteBranchName(name string) bool {
+	return strings.HasPrefix(name, "refs/heads/") && plumbing.ReferenceName(name).Validate() == nil
+}
+
+// remoteHoldingCommit returns a remote whose tracking branches contain target
+// (holder), and the remote to push its checkpoint to; both are "" when none
+// does. Any remote's tracking ref counts as proof the commit is shared — say
+// upstream in a fork, where the fork hasn't caught up — so it is never
+// rewritten. The checkpoint still goes to one of remotes, the branch's own,
+// rather than to an unrelated remote that happens to hold the commit; the
+// holder is preferred when it is one of them.
+func remoteHoldingCommit(ctx context.Context, target *object.Commit, remotes []string) (holder, pushTo string, err error) {
+	out, err := exec.CommandContext(ctx, "git", "branch", "-r", "--contains", target.Hash.String(), "--format=%(refname)").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to check which remote branches contain %s: %w", target.Hash.String()[:12], err)
+	}
+	all := attachRemotes(ctx)
+	owners := map[string]bool{}
+	for _, ref := range strings.Fields(string(out)) {
+		if owner := trackingRefRemote(ref, all); owner != "" {
+			owners[owner] = true
+		}
+	}
+	holds := func(remote string) bool { return owners[remote] }
+	for _, remote := range remotes {
+		if holds(remote) {
+			return remote, remote, nil
+		}
+	}
+	for _, remote := range all {
+		if holds(remote) {
+			pushTo = remote
+			if len(remotes) > 0 {
+				pushTo = remotes[0]
+			}
+			return remote, pushTo, nil
+		}
+	}
+	return "", "", nil
+}
+
+// trackingRefRemote returns which of remotes a remote-tracking ref belongs to:
+// the longest name it starts with, so with remotes "a" and "a/b",
+// refs/remotes/a/b/main is a/b's main, not a's b/main. "" when none.
+func trackingRefRemote(ref string, remotes []string) string {
+	owner := ""
+	for _, remote := range remotes {
+		if strings.HasPrefix(ref, "refs/remotes/"+remote+"/") && len(remote) > len(owner) {
+			owner = remote
+		}
+	}
+	return owner
+}
+
+// reportLinkedCommit tells the user the commit was linked in the checkpoint,
+// warns when the link won't count because they didn't author the commit, and
+// pushes the checkpoint.
+func reportLinkedCommit(ctx context.Context, w, errW io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID) error {
+	fmt.Fprintf(w, "  Linked to commit %s in the checkpoint; the commit is unchanged (already pushed)\n", plan.target.Hash.String()[:12])
+	// Finding 4 (rebase): a recorded link names this exact commit and does not
+	// follow it through a later rebase or amend, unlike a trailer.
+	fmt.Fprintf(errW, "Note: this link names commit %s. If the commit is later rebased or amended, attach the session to the new commit.\n", plan.target.Hash.String()[:12])
+	if author, err := GetGitAuthor(ctx); err == nil && !strings.EqualFold(author.Email, plan.target.Author.Email) {
+		fmt.Fprintf(errW, "Note: commit %s was authored by %s. A link recorded in the checkpoint counts only when the commit's author attaches it.\n",
+			plan.target.Hash.String()[:12], plan.target.Author.Email)
+	}
+	return pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID)
+}
+
+// attachLinkRepo names the code repository for a link as
+// <forge>/<owner>/<repo>, from remote. Empty when it cannot be resolved; the
+// server then finds the repository from the commit alone.
+func attachLinkRepo(ctx context.Context, remote string) string {
+	if remote == "" {
+		return ""
+	}
+	forge, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, remote)
+	if err != nil || forge == "" || owner == "" || repo == "" {
+		return ""
+	}
+	return forge + "/" + owner + "/" + repo
+}
+
+// pushAttachedCheckpoint pushes the checkpoint metadata now and confirms it
+// arrived. For a pushed commit the checkpoint is the only record of the link,
+// and no later git push of that commit will carry it, so an undelivered push is
+// an error rather than a note. Uses the pre-push path, which honors
+// push_sessions, checkpoint_remote and the privacy filter; that path is
+// fail-soft, so delivery is checked against the remote afterwards.
+func pushAttachedCheckpoint(ctx context.Context, w io.Writer, remote string, checkpointID id.CheckpointID) error {
+	target, disabled := strategy.CheckpointPushTarget(ctx, remote)
+	if disabled {
+		return fmt.Errorf("checkpoint %s was written locally but not pushed: push_sessions is turned off in settings, so the link stays invisible to others until the checkpoint is pushed", checkpointID)
+	}
+	if err := strategy.NewManualCommitStrategy().PrePush(ctx, remote); err != nil {
+		return fmt.Errorf("checkpoint %s was written locally but could not be pushed to %s: %w", checkpointID, remote, err)
+	}
+	if err := confirmCheckpointDelivered(ctx, target, checkpointID); err != nil {
+		return fmt.Errorf("checkpoint %s was written locally but did not reach %s: %w", checkpointID, remote, err)
+	}
+	fmt.Fprintf(w, "  Pushed checkpoint metadata to %s\n", remote)
+	return nil
+}
+
+// confirmCheckpointDelivered checks that the ref holding checkpointID points at
+// the same commit on target as locally.
+func confirmCheckpointDelivered(ctx context.Context, target string, checkpointID id.CheckpointID) error {
+	cfg, err := settings.LoadCheckpointsConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve checkpoints config: %w", err)
+	}
+	// The checkpoint lives in the first of its storage refs that exists here:
+	// a hex checkpoint on the git-refs primary may be on its own ref or on the
+	// metadata branch.
+	var ref string
+	var local []byte
+	for _, candidate := range checkpointStorageRefsFor(cfg, checkpointID) {
+		if !isCheckpointRef(candidate) {
+			candidate = "refs/heads/" + candidate
+		}
+		if out, revErr := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", candidate).Output(); revErr == nil {
+			ref, local = candidate, out
+			break
+		}
+	}
+	if ref == "" {
+		return fmt.Errorf("checkpoint %s is in none of its storage refs locally", checkpointID)
+	}
+	out, err := remote.LsRemoteInDir(ctx, "", target, ref)
+	if err != nil {
+		return err //nolint:wrapcheck // already names ls-remote and the target
+	}
+	remoteHash := ""
+	if fields := strings.Fields(string(out)); len(fields) > 0 {
+		remoteHash = fields[0]
+	}
+	if remoteHash != strings.TrimSpace(string(local)) {
+		return fmt.Errorf("the remote's %s is not the checkpoint just written (push skipped or rejected)", ref)
+	}
+	return nil
+}
+
+// resolveAttachCommit resolves --commit to a commit in this repository,
+// refusing an ambiguous short hash rather than picking one.
+func resolveAttachCommit(repo *git.Repository, rev string) (*object.Commit, error) {
+	hash, matches, err := resolveCommitUnambiguous(repo, rev)
+	if errors.Is(err, errAmbiguousCommitPrefix) {
+		return nil, fmt.Errorf("--commit %q matches %d commits; use a longer hash", rev, len(matches))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("--commit %q does not name a commit in this repository: %w", rev, err)
+	}
+	commit, err := repo.CommitObject(hash)
+	if err != nil {
+		return nil, fmt.Errorf("--commit %q does not name a commit in this repository: %w", rev, err)
+	}
+	return commit, nil
 }
 
 // warnEmptyTranscriptMetadata warns (without failing) when nothing parsed out
@@ -453,67 +1125,31 @@ func attachSummaryLine(meta transcriptMetadata, tokenUsage *agent.TokenUsage) st
 	return strings.Join(parts, " · ")
 }
 
-// attachReplacedEntryTokens checks the HEAD checkpoint attach is about to write
-// into for an entry this session already has, and returns that entry's stored
-// tokens (nil when there is none).
-//
-// Defense-in-depth guard: the existingState.LastCheckpointID check only fires
-// when the session's state file records its checkpoint. A session already
-// stored in the HEAD checkpoint but whose state is missing/stale (state file
-// deleted, never written, condensed without LastCheckpointID update, or pulled
-// from a remote that wasn't reflected locally) would bypass that guard.
-// findSessionIndex matches by SessionID — without this check, a review-attach
-// on such a session silently overwrites the existing session's metadata in the
-// checkpoint.
-//
-// A plain attach overwrites that entry too, so the tokens it already stores
-// must carry over or no checkpoint would count them.
-func attachReplacedEntryTokens(ctx, logCtx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, sessionID string, review bool) (*agent.TokenUsage, error) {
-	existing, found, err := checkpointSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
-	switch {
-	case err != nil && review:
-		return nil, fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, err)
-	case err != nil:
-		logging.Warn(logCtx, "attach: could not read the checkpoint entry it replaces; its stored tokens are not carried over",
-			slog.String("checkpoint_id", checkpointID.String()),
-			slog.String("error", err.Error()))
-		return nil, nil //nolint:nilnil // no carried-over tokens is the documented fallback
-	case found && review:
-		return nil, fmt.Errorf(
-			"session %s is already recorded in checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
-			sessionID, checkpointID.String(),
-		)
-	case found:
-		return existing.TokenUsage, nil
-	}
-	return nil, nil //nolint:nilnil // nil means the checkpoint has no entry for this session
-}
-
-// checkpointSessionMetadata returns sessionID's existing metadata at Primary.
-// Reads target Primary directly, not refs.Read, because callers must see what
-// the next write would replace.
-func checkpointSessionMetadata(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, sessionID string) (*cpkg.Metadata, bool, error) {
+// checkpointHasSessionMetadata reports whether sessionID has existing metadata
+// at Primary. Reads target Primary directly, not refs.Read, because this guard
+// must reflect what the next write would target.
+func checkpointHasSessionMetadata(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, sessionID string) (bool, error) {
 	store, err := openAttachStore(ctx, repo, refs.PrimaryAsLocalRead())
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 	summary, err := store.Read(ctx, checkpointID)
 	if err != nil {
-		return nil, false, fmt.Errorf("read checkpoint summary: %w", err)
+		return false, fmt.Errorf("read checkpoint summary: %w", err)
 	}
 	if summary == nil {
-		return nil, false, nil
+		return false, nil
 	}
 	for i := range summary.Sessions {
 		metadata, err := store.ReadSessionMetadata(ctx, checkpointID, i)
 		if err != nil {
-			return nil, false, fmt.Errorf("read session %d metadata: %w", i, err)
+			return false, fmt.Errorf("read session %d metadata: %w", i, err)
 		}
 		if metadata != nil && metadata.SessionID == sessionID {
-			return metadata, true, nil
+			return true, nil
 		}
 	}
-	return nil, false, nil
+	return false, nil
 }
 
 // getHeadCommit returns the HEAD commit object.
@@ -529,7 +1165,7 @@ func getHeadCommit(repo *git.Repository) (*object.Commit, error) {
 	return commit, nil
 }
 
-// ensureCheckpointAvailable makes sure the checkpoint referenced by HEAD is
+// ensureCheckpointAvailable makes sure the checkpoint referenced by the target commit is
 // present locally before the attach writes to it. Without this guard, attach
 // would create a fresh session 0 under the same ID and overwrite the original
 // session data on push.
@@ -582,7 +1218,7 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	return repo, missingCheckpointError(logCtx, checkpointID)
 }
 
-// refreshCheckpoint fetches the checkpoint referenced by HEAD from the remote and
+// refreshCheckpoint fetches the checkpoint referenced by the target commit from the remote and
 // returns a freshly-opened repo so go-git sees the newly-fetched refs/packfiles.
 // The fetch follows where the checkpoint is stored: a ref-stored checkpoint
 // fetches just its ref, while a branch-stored one fetches the whole v1 metadata
@@ -612,7 +1248,7 @@ func refreshCheckpoint(ctx context.Context, checkpointID id.CheckpointID, stored
 //
 // For a branch-stored checkpoint the data lives in the v1 branch tree, and the
 // store would bootstrap a missing local branch from origin's remote-tracking ref
-// (PrimaryAsRead makes reads origin-bootstrappable). Counting that would let a
+// (a Read == Primary topology is origin-bootstrappable). Counting that would let a
 // WriteCommitted create a fresh orphan local branch and clobber the remote on
 // push, so gate on the local Primary ref existing first. A ref-stored checkpoint
 // lives at its own ref (the v1 branch is irrelevant) and the store
@@ -635,12 +1271,12 @@ func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cp
 	return summary != nil, nil
 }
 
-// missingCheckpointError builds the refuse error shown when a HEAD-referenced
+// missingCheckpointError builds the refuse error shown when a commit-referenced
 // checkpoint is still absent locally after a refresh attempt. The storage it
 // names and the fetch commands it suggests follow checkpointStorageRefs.
 func missingCheckpointError(ctx context.Context, checkpointID id.CheckpointID) error {
 	return fmt.Errorf(
-		"checkpoint %s referenced by HEAD is missing from the local %s after a refresh attempt. Creating a fresh checkpoint here would overwrite the original session data on push. Run:\n\n    %s\n\nthen re-run attach. If the colleague who made this commit hasn't pushed their checkpoint metadata yet, ask them to do so first",
+		"checkpoint %s referenced by the commit is missing from the local %s after a refresh attempt. Creating a fresh checkpoint here would overwrite the original session data on push. Run:\n\n    %s\n\nthen re-run attach. If the colleague who made this commit hasn't pushed their checkpoint metadata yet, ask them to do so first",
 		checkpointID.String(),
 		describeCheckpointStorage(checkpointStorageRefs(ctx, checkpointID), "and"),
 		strings.Join(suggestCheckpointStorageFetchCommands(ctx, checkpointID), "\n    "),
@@ -734,7 +1370,7 @@ func resolveCheckpointID(ctx context.Context, headCommit *object.Commit) (id.Che
 // If existingState is non-nil, it is updated in place (avoids a redundant disk load).
 // reviewSkills is the resolved skills list when opts.Review is true; ignored otherwise.
 // agentHome replaces State.AgentHome; "" clears it.
-func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath, agentHome string, checkpointID id.CheckpointID, meta transcriptMetadata, sessionUsage *agent.TokenUsage, tokenPos int, opts attachOptions, reviewSkills []string) error {
+func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath, agentHome string, checkpointID id.CheckpointID, meta transcriptMetadata, sessionUsage *agent.TokenUsage, tokenPos, transcriptEnd int, opts attachOptions, reviewSkills []string, seedBase bool) error {
 	stateStore, err := session.NewStateStore(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open session store: %w", err)
@@ -742,6 +1378,11 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 
 	now := time.Now()
 	state := existingState
+	// A trailer rewrite remaps stored state to the new commits; start from
+	// that rather than the copy loaded before it.
+	if fresh, loadErr := stateStore.Load(ctx, sessionID); loadErr == nil && fresh != nil {
+		state = fresh
+	}
 	if state == nil {
 		state = &session.State{
 			SessionID: sessionID,
@@ -751,7 +1392,7 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 
 	// Populate BaseCommit from HEAD if not already set, so the session becomes
 	// active and future commits in the same session receive Entire-Checkpoint trailers.
-	if state.BaseCommit == "" {
+	if seedBase && state.BaseCommit == "" {
 		if head, headErr := repo.Head(); headErr == nil {
 			state.BaseCommit = head.Hash().String()
 		}
@@ -765,8 +1406,14 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	state.LastCheckpointID = checkpointID
 	// Only transition to Ended if the session is not already active — avoid
 	// breaking an ongoing session whose BaseCommit has just been restored above.
+	// An ended session's next attach starts after these turns. A running
+	// session's offset belongs to its hooks: moving it would take turns from
+	// the checkpoint its next commit makes.
 	if !state.Phase.IsActive() {
 		state.Phase = session.PhaseEnded
+		if transcriptEnd >= 0 {
+			state.CheckpointTranscriptStart = transcriptEnd
+		}
 	}
 	state.LastInteractionTime = &now
 	if meta.TurnCount > 0 {
@@ -1079,57 +1726,4 @@ func detectAgentByTranscript(ctx context.Context, sessionID string, skip types.A
 		return ag, path, nil
 	}
 	return nil, "", errors.New("transcript not found for any registered agent")
-}
-
-// promptAmendCommit shows the last commit and asks whether to amend it with the checkpoint trailer.
-// When force is true, it amends without prompting.
-func promptAmendCommit(ctx context.Context, w io.Writer, headCommit *object.Commit, checkpointIDStr string, force bool) error {
-	shortHash := headCommit.Hash.String()[:7]
-	subject := strings.SplitN(headCommit.Message, "\n", 2)[0]
-
-	// Skip amending if this exact checkpoint ID is already in the commit.
-	for _, existing := range trailers.ParseAllCheckpoints(headCommit.Message) {
-		if existing.String() == checkpointIDStr {
-			fmt.Fprintf(w, "Commit %s already has Entire-Checkpoint: %s\n", shortHash, checkpointIDStr)
-			return nil
-		}
-	}
-
-	fmt.Fprintf(w, "\nLast commit: %s %s\n", shortHash, subject)
-
-	amend := true
-	if !force {
-		if !interactive.CanPromptInteractively() {
-			// Non-interactive: can't prompt, print trailer for manual use.
-			fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", checkpointIDStr)
-			return nil
-		}
-		form := NewAccessibleForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title("Amend the last commit in this branch?").
-					Affirmative("Y").
-					Negative("n").
-					Value(&amend),
-			),
-		)
-		if err := form.Run(); err != nil {
-			return fmt.Errorf("prompt failed: %w", err)
-		}
-	}
-
-	if !amend {
-		fmt.Fprintf(w, "\nCopy to your commit message to attach:\n\n  Entire-Checkpoint: %s\n", checkpointIDStr)
-		return nil
-	}
-
-	newMessage := trailers.AppendCheckpointTrailer(headCommit.Message, checkpointIDStr)
-
-	cmd := exec.CommandContext(ctx, "git", "commit", "--amend", "--only", "-m", newMessage)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to amend commit: %w\n%s", err, output)
-	}
-
-	fmt.Fprintf(w, "Amended commit %s with Entire-Checkpoint: %s\n", shortHash, checkpointIDStr)
-	return nil
 }

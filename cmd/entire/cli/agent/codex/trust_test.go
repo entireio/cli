@@ -12,7 +12,7 @@ import (
 )
 
 // writeTrustFixture sets up the .codex/hooks.json fixture and points
-// CODEX_HOME at an isolated temp directory so HookTrustGaps resolves
+// CODEX_HOME at an isolated temp directory so inspectHookTrust resolves
 // the user config without touching ~/.codex on the dev machine. Tests
 // that need a config.toml write it themselves into CODEX_HOME after
 // the call.
@@ -37,12 +37,12 @@ func tomlBasicEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s)
 }
 
-// TestHookTrustGaps_FlagsMissingEvent is the primary case: the user
+// TestInspectHookTrust_FlagsMissingEvent is the primary case: the user
 // trusted three hooks last month, then entire shipped a fourth. The
 // state.toml has three entries; the new event has no key. Detection
 // must surface the missing event so the SessionStart banner can prompt
 // the user to /hooks.
-func TestHookTrustGaps_FlagsMissingEvent(t *testing.T) {
+func TestInspectHookTrust_FlagsMissingEvent(t *testing.T) {
 	hooksJSON := `{
   "hooks": {
     "SessionStart": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}],
@@ -68,12 +68,12 @@ trusted_hash = "sha256:ccc"
 	require.Equal(t, []string{"post_tool_use"}, gaps)
 }
 
-// TestHookTrustGaps_FlagsUntrustedSessionEnd is the live instance of the case
+// TestInspectHookTrust_FlagsUntrustedSessionEnd is the live instance of the case
 // above: SessionEnd shipped after users had already trusted the other four, so
 // every existing repo has an untrusted session_end entry. Codex silently skips
 // untrusted hooks and `codex exec` can never prompt, so without this the new
 // hook would do nothing and nothing would say why.
-func TestHookTrustGaps_FlagsUntrustedSessionEnd(t *testing.T) {
+func TestInspectHookTrust_FlagsUntrustedSessionEnd(t *testing.T) {
 	hooksJSON := `{
   "hooks": {
     "SessionStart": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}],
@@ -121,9 +121,9 @@ func TestInspectHookConfig_FlagsAbsentSessionEnd(t *testing.T) {
 	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, inspectHookConfigAt(context.Background(), hooksPath).Missing)
 }
 
-// TestHookTrustGaps_NoGapsWhenAllTrusted returns nil when every declared
+// TestInspectHookTrust_NoGapsWhenAllTrusted returns nil when every declared
 // event has a state entry, even if extra entries exist for other paths.
-func TestHookTrustGaps_NoGapsWhenAllTrusted(t *testing.T) {
+func TestInspectHookTrust_NoGapsWhenAllTrusted(t *testing.T) {
 	hooksJSON := `{
   "hooks": {
     "SessionStart": [{"matcher": null, "hooks": [{"type":"command","command":"x","timeout":30}]}],
@@ -149,19 +149,19 @@ trusted_hash = "sha256:ccc"
 	require.Empty(t, gaps)
 }
 
-// TestHookTrustGaps_NilWhenHooksJSONMissing — Codex isn't enabled in
+// TestInspectHookTrust_NilWhenHooksJSONMissing — Codex isn't enabled in
 // this repo. Stay silent rather than mid-flow noise.
-func TestHookTrustGaps_NilWhenHooksJSONMissing(t *testing.T) {
+func TestInspectHookTrust_NilWhenHooksJSONMissing(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CODEX_HOME", tmp)
 	require.Empty(t, inspectHookTrust(filepath.Join(tmp, "hooks.json")).Gaps)
 }
 
-// TestHookTrustGaps_NilWhenConfigUnreadable — first-run users have no
+// TestInspectHookTrust_NilWhenConfigUnreadable — first-run users have no
 // config.toml yet. Codex's own startup warning still fires for them, so
 // our partial detection staying quiet is the right behavior; we'd
 // otherwise duplicate the warning.
-func TestHookTrustGaps_NilWhenConfigUnreadable(t *testing.T) {
+func TestInspectHookTrust_NilWhenConfigUnreadable(t *testing.T) {
 	hooksJSON := `{"hooks":{"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"x","timeout":30}]}]}}`
 	tmp := t.TempDir()
 	codexHome := filepath.Join(tmp, "codex-home")
@@ -235,11 +235,11 @@ func TestInspectHookConfig_UserOnlyFileIsNotEntireDrift(t *testing.T) {
 	require.Nil(t, inspectHookConfigAt(context.Background(), hooksPath).Missing)
 }
 
-// TestHookTrustGaps_HandlesNonzeroHandlerIndex — the state-key prefix
+// TestInspectHookTrust_HandlesNonzeroHandlerIndex — the state-key prefix
 // match uses "<path>:<event>:" so any group/handler index counts as
 // trust. Pin that explicitly: a non-default index of `0:1` (second
 // handler in first group) should still satisfy the gap check.
-func TestHookTrustGaps_HandlesNonzeroHandlerIndex(t *testing.T) {
+func TestInspectHookTrust_HandlesNonzeroHandlerIndex(t *testing.T) {
 	hooksJSON := `{"hooks":{"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"x","timeout":30}]}]}}`
 	hooksPath := writeTrustFixture(t, hooksJSON)
 	configTOML := `[hooks.state."` + tomlBasicEscape(hooksPath) + `:post_tool_use:0:1"]
@@ -249,7 +249,7 @@ trusted_hash = "sha256:aaa"
 	require.Empty(t, inspectHookTrust(hooksPath).Gaps)
 }
 
-func TestHookTrustGaps_MatchesLogicalSymlinkPath(t *testing.T) {
+func TestInspectHookTrust_MatchesLogicalSymlinkPath(t *testing.T) {
 	if runtime.GOOS == testWindowsOS {
 		t.Skip("directory symlinks require privileges on Windows")
 	}
@@ -288,10 +288,10 @@ var codexTrustQuoteStyles = []struct {
 	{"single-quoted", func(key string) string { return `[hooks.state.'` + key + `']` }},
 }
 
-// TestHookTrustGaps_EitherQuoteStyle runs the trust check with every approval
+// TestInspectHookTrust_EitherQuoteStyle runs the trust check with every approval
 // record written in each quoting style Codex uses, alongside an unrelated
 // Windows-style record. Both styles must resolve to the same keys.
-func TestHookTrustGaps_EitherQuoteStyle(t *testing.T) {
+func TestInspectHookTrust_EitherQuoteStyle(t *testing.T) {
 	hooksJSON := `{"hooks":{
 		"SessionStart":[{"matcher":null,"hooks":[{"type":"command","command":"x","timeout":30}]}],
 		"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"x","timeout":30}]}]
@@ -324,10 +324,10 @@ func TestHookTrustGaps_EitherQuoteStyle(t *testing.T) {
 	}
 }
 
-// TestHookTrustGaps_UnescapesDoubleQuotedKeys — a double-quoted key is a TOML
+// TestInspectHookTrust_UnescapesDoubleQuotedKeys — a double-quoted key is a TOML
 // basic string, so a Windows path in one has escaped backslashes that must be
 // decoded before comparing with the hooks.json path.
-func TestHookTrustGaps_UnescapesDoubleQuotedKeys(t *testing.T) {
+func TestInspectHookTrust_UnescapesDoubleQuotedKeys(t *testing.T) {
 	hooksJSON := `{"hooks":{"PostToolUse":[{"matcher":null,"hooks":[{"type":"command","command":"x","timeout":30}]}]}}`
 	hooksPath := writeTrustFixture(t, hooksJSON)
 	// A symlink-free alias of hooksPath that contains a backslash on every OS:
@@ -375,4 +375,26 @@ func TestReadCodexTrustedKeys_DecodesQuotedKeys(t *testing.T) {
 		`/repo/say "hi"/.codex/hooks.json:stop:0:0`:                {},
 		`/repo/café/.codex/hooks.json:stop:0:0`:                    {},
 	}, keys)
+}
+
+// inspectHookTrust inspects trust for every event declared in hooksJSONPath.
+func inspectHookTrust(hooksJSONPath string) HookTrustInspection {
+	declared, ok := declaredCodexEvents(hooksJSONPath)
+	if !ok || len(declared) == 0 {
+		return HookTrustInspection{}
+	}
+	return inspectHookTrustForDeclared(hooksJSONPath, declared)
+}
+
+// declaredCodexEvents reads hooks.json and returns the snake_case labels
+// of every event that has at least one handler declared. The bool reports
+// whether the read+parse succeeded — false on missing/malformed file so
+// callers can stay silent rather than mid-flow noise.
+func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
+	document, err := readHooksDocument(hooksJSONPath)
+	if err != nil || !document.exists {
+		return nil, false
+	}
+	events, err := declaredCodexEventsFromDocument(document)
+	return events, err == nil
 }

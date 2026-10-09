@@ -2,33 +2,22 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
-	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// dispatchWizardScopeTimeout bounds the control-plane repo index walk behind
-// the wizard's jurisdiction picker (the budget code search gives the same
-// call); dispatchWizardScopeBudget caps how many index entries it follows.
-const (
-	dispatchWizardScopeTimeout = 10 * time.Second
-	dispatchWizardScopeBudget  = 5000
-)
-
 // Seams for the wizard's cloud catalogue, swapped in tests.
 var (
-	listDispatchWizardPlacements = defaultListDispatchWizardPlacements
-	resolveDispatchWizardHome    = defaultResolveDispatchWizardHome
+	listDispatchWizardIndex   = listCheckpointRepoIndex
+	resolveDispatchWizardHome = defaultResolveDispatchWizardHome
 )
 
 // dispatchWizardScope is the wizard's view of where the caller's repos live,
@@ -147,10 +136,9 @@ func (a *dispatchJurisdictionAccessor) Snapshot() string {
 	return ""
 }
 
-// loadDispatchWizardScope fetches the three independent sources concurrently:
-// the authenticated repo listing (falling back to sibling repos on disk, as
-// before), the control-plane placements, and the home jurisdiction. Each is
-// best-effort; a missing one degrades to the pre-picker behaviour.
+// loadDispatchWizardScope fetches the repo index and home concurrently. One
+// index walk supplies both picker contents and placements; an unavailable or
+// empty catalogue falls back to sibling repos on disk.
 func loadDispatchWizardScope(ctx context.Context, currentRepo string) *dispatchWizardScope {
 	var (
 		repos      []string
@@ -159,16 +147,14 @@ func loadDispatchWizardScope(ctx context.Context, currentRepo string) *dispatchW
 		wg         sync.WaitGroup
 	)
 	wg.Go(func() {
-		slugs, err := listDispatchWizardRepos(ctx)
-		if err != nil || len(slugs) == 0 {
-			slugs = discoverLocalRepoSlugs(ctx, currentRepo)
+		entries, err := listDispatchWizardIndex(ctx)
+		if err != nil {
+			logging.Warn(ctx, "dispatch wizard repo index unavailable; offering local repos", "error", err)
 		}
-		repos = slugs
-	})
-	wg.Go(func() {
-		var err error
-		if placements, err = listDispatchWizardPlacements(ctx); err != nil {
-			logging.Warn(ctx, "dispatch wizard placements unavailable; offering repos unscoped", "error", err)
+		repos = checkpointRepoSlugs(entries)
+		placements = dispatchWizardPlacements(entries)
+		if err != nil || len(repos) == 0 {
+			repos = discoverLocalRepoSlugs(ctx, currentRepo)
 		}
 	})
 	wg.Go(func() { home = resolveDispatchWizardHome(ctx) })
@@ -176,51 +162,19 @@ func loadDispatchWizardScope(ctx context.Context, currentRepo string) *dispatchW
 	return newDispatchWizardScope(repos, placements, home)
 }
 
-// defaultListDispatchWizardPlacements walks the caller's repo index from the
-// control plane, keeping per repo the jurisdictions of its READY placements.
-func defaultListDispatchWizardPlacements(ctx context.Context) (map[string][]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, dispatchWizardScopeTimeout)
-	defer cancel()
-
-	client, err := newCellCoreClient()
-	if err != nil {
-		return nil, fmt.Errorf("control plane unavailable: %w", err)
-	}
-	truncated := false
-	entries, partial, err := fetchPagesBounded(ctx, dispatchWizardScopeBudget, func(ctx context.Context, cursor string) ([]coreapi.RepoIndexEntry, string, error) {
-		params := coreapi.ListReposParams{}
-		if cursor != "" {
-			params.PageToken = coreapi.NewOptString(cursor)
-		}
-		out, err := client.ListRepos(ctx, params)
-		if err != nil {
-			return nil, "", err //nolint:wrapcheck // the caller logs and degrades; no extra context to add
-		}
-		next := out.NextPageToken.Or("")
-		// Truncated with a cursor is just "more pages"; without one the server
-		// itself could not reach every repo.
-		if out.Truncated && next == "" {
-			truncated = true
-		}
-		return out.Repos, next, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if partial || truncated {
-		// Repos beyond the walk are attributed to home; the --jurisdiction
-		// flag still reaches them.
-		logging.Warn(ctx, "repo index truncated; dispatch wizard may attribute some repos to home")
-	}
+// dispatchWizardPlacements keeps the READY jurisdictions keyed by picker slug.
+func dispatchWizardPlacements(entries []coreapi.RepoIndexEntry) map[string][]string {
 	out := make(map[string][]string, len(entries))
 	for _, entry := range entries {
-		// The index names GitHub mirrors bare; key by the gh/ slug the
-		// picker offers so the join in newDispatchWizardScope holds.
-		if name := strings.ToLower(strings.TrimSpace(entry.FullName)); name != "" {
-			out[dispatchpkg.GitHubForge+"/"+name] = readyPlacementJurisdictions(entry.Placements)
+		if slug := checkpointRepoSlug(entry); slug != "" {
+			key := strings.ToLower(slug)
+			jurisdictions := out[key]
+			jurisdictions = append(jurisdictions, readyPlacementJurisdictions(entry.Placements)...)
+			slices.Sort(jurisdictions)
+			out[key] = slices.Compact(jurisdictions)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // defaultResolveDispatchWizardHome reads home_jurisdiction from the same

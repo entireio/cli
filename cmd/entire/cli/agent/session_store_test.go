@@ -231,8 +231,8 @@ func TestSessionStore_CreatesMissingStoreBelowSymlinkedAncestor(t *testing.T) {
 	assert.FileExists(t, filepath.Join(outside, "missing-store", "session.jsonl"))
 }
 
-// Lstat, not Stat: a dangling session log still exists, and both the rewind and
-// resume paths must keep it rather than silently overwrite it.
+// Lstat, not Stat: a dangling session log still exists, and the resume path
+// must keep it rather than silently overwrite it.
 func TestSessionStore_ExistsReportsDanglingSymlink(t *testing.T) {
 	t.Parallel()
 

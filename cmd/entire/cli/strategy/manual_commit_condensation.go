@@ -63,38 +63,6 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 	return checkpointInfosFromCommitted(committed), nil
 }
 
-// getCheckpointLog returns the transcript for a specific checkpoint ID.
-func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointID id.CheckpointID) ([]byte, error) {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	WarnIfMetadataDisconnected(ctx)
-	store, err := s.getPersistentStore(ctx, repo)
-	if err != nil {
-		return nil, err
-	}
-
-	summary, err := cpkg.ReadCheckpoint(ctx, store, checkpointID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-	content, err := cpkg.ReadLatestSessionContent(ctx, store, checkpointID, summary)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-	if content == nil {
-		return nil, fmt.Errorf("checkpoint not found: %s", checkpointID)
-	}
-	if len(content.Transcript) == 0 {
-		return nil, fmt.Errorf("no transcript found for checkpoint: %s", checkpointID)
-	}
-
-	return content.Transcript, nil
-}
-
 // condenseOpts provides pre-resolved git objects to avoid redundant reads.
 type condenseOpts struct {
 	repoDir string // Worktree root of the committing worktree (home-worktree check)
@@ -1155,13 +1123,7 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 // (from TokenStart), falling back to the pending hook-reported usage the way
 // condensation does; without state it counts the whole transcript. The caller
 // records pos with ConsumeAttachTokenWindow once the checkpoint is written.
-// replaced is the usage already stored in the checkpoint entry this attach
-// overwrites (same checkpoint, same session), or nil. When the state shows
-// tokens were already checkpointed (TokenStart > 0), that usage lies before
-// TokenStart, so it is kept and the new tokens are added to it. Otherwise
-// (no state, or a state recreated from scratch after cleanup or resume) the
-// whole transcript is counted, which already includes it.
-func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, replaced *agent.TokenUsage) (*agent.TokenUsage, int) {
+func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte) (*agent.TokenUsage, int) {
 	start := 0
 	if state != nil {
 		start = state.TokenStart()
@@ -1175,10 +1137,6 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 			// pending window's subagent total, as condensation does.
 			usage = fillMissingSubagentTokensFrom(usage, state.CheckpointTokenUsage)
 		}
-	}
-	if state != nil && start > 0 && hasTokenUsageData(replaced) {
-		// Both sides are window deltas, so subagent totals add too.
-		usage = types.AddTokenUsage(replaced, usage)
 	}
 	return usage, countTranscriptItems(ag.Type(), string(transcript))
 }

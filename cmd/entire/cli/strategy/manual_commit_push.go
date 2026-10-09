@@ -189,7 +189,8 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// has to deliver, and at least one has to actually do so. Delivery must come
 	// from pushRefIfNeeded's delivered return and NOT from err, which is
 	// fail-soft and nil even when the remote refused the ref.
-	deliveredCount, anyFailed := 0, false
+	var deliveredRefs []plumbing.ReferenceName
+	anyFailed := false
 	refs := checkpoint.ResolveRefs(ctx)
 	for _, ref := range refs.Push {
 		delivered, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
@@ -199,12 +200,13 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			return err
 		}
 		if delivered {
-			deliveredCount++
+			deliveredRefs = append(deliveredRefs, ref)
 		} else {
 			anyFailed = true
 		}
 	}
 	pushCheckpointsSpan.End()
+	deliveredCount := len(deliveredRefs)
 
 	// Delivered: the election may now follow the push that carried it. A push that
 	// carried nothing — an empty ref set, or a v1 ref that does not exist locally
@@ -214,6 +216,13 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// making. The next push that carries a checkpoint captures instead.
 	if pendingCapture != "" && deliveredCount > 0 && !anyFailed {
 		commitCapturedSyncRemote(ctx, pendingCapture)
+	}
+	// After capture, so the election this compares against is final. A dedicated
+	// checkpoint_remote URL is not a remote name and has no tracking refs.
+	if !ps.hasCheckpointURL() {
+		for _, ref := range deliveredRefs {
+			advanceSyncRemoteTrackingRef(ctx, ps.remote, ref)
+		}
 	}
 	// Only a push that carried checkpoints can say "they are going somewhere
 	// other than where you said"; the gate and every early return above carry

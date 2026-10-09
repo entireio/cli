@@ -51,7 +51,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
       - name: Install latest Codex CLI
-        run: npm install --global @openai/codex
+        shell: bash
+        env:
+          CODEX_NON_INTERACTIVE: "1"
+        run: |
+          curl -fsSL --compressed https://chatgpt.com/codex/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Codex app-server integration tests
         env:
           ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER: "1"

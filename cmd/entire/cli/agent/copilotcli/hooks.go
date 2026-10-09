@@ -334,23 +334,6 @@ func (c *CopilotCLIAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 	return agent.HooksOutdated
 }
 
-// GetSupportedHooks returns the normalized lifecycle events this agent supports.
-// Note: HookNames() returns 9 hooks but GetSupportedHooks() returns only 6.
-// The three not listed here are:
-//   - subagentStart/subagentStop: native child hooks have no HookType constant
-//     (they use EventType instead).
-//   - errorOccurred: pass-through hook with no lifecycle action (ParseHookEvent returns nil).
-func (c *CopilotCLIAgent) GetSupportedHooks() []agent.HookType {
-	return []agent.HookType{
-		agent.HookSessionStart,
-		agent.HookSessionEnd,
-		agent.HookUserPromptSubmit,
-		agent.HookStop,
-		agent.HookPreToolUse,
-		agent.HookPostToolUse,
-	}
-}
-
 // parseCopilotHookType parses a specific hook type from rawHooks into the target slice.
 func parseCopilotHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]CopilotHookEntry) error {
 	if data, ok := rawHooks[hookType]; ok {

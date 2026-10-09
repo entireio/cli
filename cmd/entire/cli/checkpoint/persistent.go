@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -763,6 +764,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	// session package imports checkpoint, so we can't reference its constant.
 	imported := opts.Kind == "imported"
 	commitSHA := opts.CommitSHA
+	linkedCommits := opts.LinkedCommits
 	var legacyCombinedAttribution json.RawMessage
 	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
@@ -785,6 +787,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 			if commitSHA == "" {
 				commitSHA = existingSummary.CommitSHA
 			}
+			linkedCommits = unionLinkedCommits(existingSummary.LinkedCommits, linkedCommits)
 		}
 	}
 
@@ -794,6 +797,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		Strategy:         opts.Strategy,
 		Branch:           opts.Branch,
 		CommitSHA:        commitSHA,
+		LinkedCommits:    linkedCommits,
 		CheckpointsCount: checkpointsCount,
 		FilesTouched:     filesTouched,
 		Sessions:         sessions,
@@ -1459,33 +1463,6 @@ func (s *GitStore) ReadLatestSessionContent(ctx context.Context, checkpointID id
 	return s.ReadSessionContent(ctx, checkpointID, latestIndex)
 }
 
-// ReadSessionContentByID reads a session's content by its session ID.
-// This is useful when you have the session ID but don't know its index within the checkpoint.
-// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
-// Returns an error if no session with the given ID exists in the checkpoint.
-func (s *GitStore) ReadSessionContentByID(ctx context.Context, checkpointID id.CheckpointID, sessionID string) (*SessionContent, error) {
-	summary, err := s.Read(ctx, checkpointID)
-	if err != nil {
-		return nil, err
-	}
-	if summary == nil {
-		return nil, ErrCheckpointNotFound
-	}
-
-	// Iterate through sessions to find the one with matching session ID
-	for i := range len(summary.Sessions) {
-		content, readErr := s.ReadSessionContent(ctx, checkpointID, i)
-		if readErr != nil {
-			continue
-		}
-		if content != nil && content.Metadata.SessionID == sessionID {
-			return content, nil
-		}
-	}
-
-	return nil, fmt.Errorf("session %q not found in checkpoint %s", sessionID, checkpointID)
-}
-
 // List lists all committed checkpoints from the entire/checkpoints/v1 branch.
 // Scans sharded paths: <id[:2]>/<id[2:]>/ directories containing metadata.json.
 //
@@ -1557,6 +1534,7 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 	info.FilesTouched = summary.FilesTouched
 	info.SessionCount = len(summary.Sessions)
 	info.Imported = summary.Imported
+	info.LinkedCommits = summary.LinkedCommits
 
 	for i := range summary.Sessions {
 		sessionMetadata, ok := readCommittedMetadataFromCheckpointTree(checkpointTree, i)
@@ -1596,31 +1574,6 @@ func readCommittedMetadataFromCheckpointTree(checkpointTree *object.Tree, sessio
 		return Metadata{}, false
 	}
 	return sessionMetadata, true
-}
-
-// GetTranscript retrieves the transcript for a specific checkpoint ID.
-// Returns the latest session's transcript.
-func (s *GitStore) GetTranscript(ctx context.Context, checkpointID id.CheckpointID) ([]byte, error) {
-	content, err := s.ReadLatestSessionContent(ctx, checkpointID)
-	if err != nil {
-		return nil, err
-	}
-	if len(content.Transcript) == 0 {
-		return nil, fmt.Errorf("no transcript found for checkpoint: %s", checkpointID)
-	}
-	return content.Transcript, nil
-}
-
-// GetSessionLog retrieves the session transcript and session ID for a checkpoint.
-// This is the primary method for looking up session logs by checkpoint ID.
-// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
-// Returns ErrNoTranscript if the checkpoint exists but has no transcript.
-func (s *GitStore) GetSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string, error) {
-	content, err := s.ReadLatestSessionContent(ctx, cpID)
-	if err != nil {
-		return nil, "", err
-	}
-	return content.Transcript, content.Metadata.SessionID, nil
 }
 
 // backfillSummary updates the summary field in the latest session's metadata.
@@ -2883,4 +2836,75 @@ func getCheckpointAuthorFromRef(ctx context.Context, repo *git.Repository, refNa
 	}
 
 	return author, nil
+}
+
+// unionLinkedCommits returns existing followed by the entries of added whose
+// commit it does not already hold, so rewriting a checkpoint never drops a
+// link.
+func unionLinkedCommits(existing, added []LinkedCommit) []LinkedCommit {
+	out := slices.Clone(existing)
+	for _, link := range added {
+		if !slices.ContainsFunc(out, func(l LinkedCommit) bool { return l.SHA == link.SHA }) {
+			out = append(out, link)
+		}
+	}
+	return out
+}
+
+// CheckpointsLinkedTo returns the IDs of the listed checkpoints whose
+// trailer-less links (LinkedCommits) name commitSHA, in listing order (most
+// recent first for List results). It is the reverse of an Entire-Checkpoint
+// trailer for commits linked by `entire session attach --commit`; callers
+// consult trailers first.
+func CheckpointsLinkedTo(infos []CheckpointInfo, commitSHA string) []id.CheckpointID {
+	var ids []id.CheckpointID
+	for _, info := range infos {
+		if linksCommit(info.LinkedCommits, commitSHA) {
+			ids = append(ids, info.CheckpointID)
+		}
+	}
+	return ids
+}
+
+// linkedStubSkew is how far before a commit a checkpoint linking it may claim
+// to have been minted, allowing for clock skew between machines.
+const linkedStubSkew = 24 * time.Hour
+
+// CheckpointsLinkedToWithStubs is CheckpointsLinkedTo for a listing that may
+// hold names-only stubs (git-refs checkpoints discovered on a remote), whose
+// links are unknown until read. A stub minted no earlier than committedAt
+// (less linkedStubSkew) is read for its links; an older one predates the commit
+// and can't link it. Reads share ListHydrationPassTimeout, and a stub that
+// can't be read links nothing.
+func CheckpointsLinkedToWithStubs(ctx context.Context, reader interface {
+	Read(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error)
+}, infos []CheckpointInfo, commitSHA string, committedAt time.Time) []id.CheckpointID {
+	passCtx, cancel := context.WithTimeout(ctx, ListHydrationPassTimeout)
+	defer cancel()
+	since := committedAt.Add(-linkedStubSkew)
+	// A checkpoint ID dated in the future can't be a real attach; its ID is
+	// chosen by whoever pushed it, and as "most recent" it would always win.
+	latest := time.Now().Add(linkedStubSkew)
+	var ids []id.CheckpointID
+	for _, info := range infos {
+		if info.CreatedAt.After(latest) {
+			continue
+		}
+		links := info.LinkedCommits
+		if info.ListedStub && !info.CreatedAt.Before(since) && passCtx.Err() == nil {
+			readCtx, readCancel := context.WithTimeout(passCtx, ListHydrationTimeout)
+			if summary, err := reader.Read(readCtx, info.CheckpointID); err == nil && summary != nil {
+				links = summary.LinkedCommits
+			}
+			readCancel()
+		}
+		if linksCommit(links, commitSHA) {
+			ids = append(ids, info.CheckpointID)
+		}
+	}
+	return ids
+}
+
+func linksCommit(links []LinkedCommit, commitSHA string) bool {
+	return slices.ContainsFunc(links, func(l LinkedCommit) bool { return l.SHA == commitSHA })
 }

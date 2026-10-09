@@ -1584,12 +1584,12 @@ func TestRunExplainCheckpoint_GenerateV1OnlyReloadsFromV1(t *testing.T) {
 
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
-	originalDiscover := discoverSummaryProviders
+	originalDiscover := discoverSummaryProvidersAlways
 	originalGenerate := generateTranscriptSummary
 	t.Cleanup(func() {
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
-		discoverSummaryProviders = originalDiscover
+		discoverSummaryProvidersAlways = originalDiscover
 		generateTranscriptSummary = originalGenerate
 	})
 
@@ -1597,7 +1597,7 @@ func TestRunExplainCheckpoint_GenerateV1OnlyReloadsFromV1(t *testing.T) {
 		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	discoverSummaryProviders = func(context.Context) {}
+	discoverSummaryProvidersAlways = func(context.Context) {}
 
 	var sawV1Transcript bool
 	generateTranscriptSummary = func(
@@ -1654,12 +1654,12 @@ func TestRunExplainCheckpoint_GenerateV1ModeUsesSelectedStore(t *testing.T) {
 
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
-	originalDiscover := discoverSummaryProviders
+	originalDiscover := discoverSummaryProvidersAlways
 	originalGenerate := generateTranscriptSummary
 	t.Cleanup(func() {
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
-		discoverSummaryProviders = originalDiscover
+		discoverSummaryProvidersAlways = originalDiscover
 		generateTranscriptSummary = originalGenerate
 	})
 
@@ -1667,7 +1667,7 @@ func TestRunExplainCheckpoint_GenerateV1ModeUsesSelectedStore(t *testing.T) {
 		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	discoverSummaryProviders = func(context.Context) {}
+	discoverSummaryProvidersAlways = func(context.Context) {}
 
 	var sawV1Transcript bool
 	generateTranscriptSummary = func(
@@ -1733,12 +1733,12 @@ func TestRunExplainCheckpoint_GenerateWritesV1Store(t *testing.T) {
 
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
-	originalDiscover := discoverSummaryProviders
+	originalDiscover := discoverSummaryProvidersAlways
 	originalGenerate := generateTranscriptSummary
 	t.Cleanup(func() {
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
-		discoverSummaryProviders = originalDiscover
+		discoverSummaryProvidersAlways = originalDiscover
 		generateTranscriptSummary = originalGenerate
 	})
 
@@ -1746,7 +1746,7 @@ func TestRunExplainCheckpoint_GenerateWritesV1Store(t *testing.T) {
 		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	discoverSummaryProviders = func(context.Context) {}
+	discoverSummaryProvidersAlways = func(context.Context) {}
 	generateTranscriptSummary = func(
 		_ context.Context,
 		_ redact.RedactedBytes,
@@ -1821,12 +1821,12 @@ func TestRunExplainAuto_GeneratePersistsHexOnBranchUnderRefsPrimary(t *testing.T
 
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
-	originalDiscover := discoverSummaryProviders
+	originalDiscover := discoverSummaryProvidersAlways
 	originalGenerate := generateTranscriptSummary
 	t.Cleanup(func() {
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
-		discoverSummaryProviders = originalDiscover
+		discoverSummaryProvidersAlways = originalDiscover
 		generateTranscriptSummary = originalGenerate
 	})
 
@@ -1834,7 +1834,7 @@ func TestRunExplainAuto_GeneratePersistsHexOnBranchUnderRefsPrimary(t *testing.T
 		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	discoverSummaryProviders = func(context.Context) {}
+	discoverSummaryProvidersAlways = func(context.Context) {}
 	generateTranscriptSummary = func(
 		_ context.Context,
 		_ redact.RedactedBytes,
@@ -1903,12 +1903,12 @@ func TestRunExplainCheckpoint_GenerateReloadsAfterV1Write(t *testing.T) {
 
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
-	originalDiscover := discoverSummaryProviders
+	originalDiscover := discoverSummaryProvidersAlways
 	originalGenerate := generateTranscriptSummary
 	t.Cleanup(func() {
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
-		discoverSummaryProviders = originalDiscover
+		discoverSummaryProvidersAlways = originalDiscover
 		generateTranscriptSummary = originalGenerate
 	})
 
@@ -1916,7 +1916,7 @@ func TestRunExplainCheckpoint_GenerateReloadsAfterV1Write(t *testing.T) {
 		return &stubTextAgent{name: name, kind: agent.AgentTypeClaudeCode}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	discoverSummaryProviders = func(context.Context) {}
+	discoverSummaryProvidersAlways = func(context.Context) {}
 	generateTranscriptSummary = func(
 		_ context.Context,
 		_ redact.RedactedBytes,
@@ -5818,3 +5818,5 @@ func TestTimeoutDiagnostic_NonStreamingWithOutput(t *testing.T) {
 		t.Errorf("rows should surface stderr, got: %v", rows)
 	}
 }
+
+const lessRawControlEnv = "LESS=-R"

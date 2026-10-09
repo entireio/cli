@@ -204,8 +204,9 @@ func TestTokenScope_MidTurnCommitTailCountsInNextCheckpoint(t *testing.T) {
 }
 
 // TestTokenScope_AttachIntoOwnCheckpointKeepsItsTokens: when HEAD's trailer
-// already names a checkpoint holding this session, attach rewrites that
-// session's entry. The entry's stored tokens must survive, plus the new turn.
+// already names a checkpoint holding this session, attach leaves that entry
+// alone. The entry keeps its tokens, and the turn attach didn't record is
+// counted by the session's next checkpoint, so nothing is lost or counted twice.
 func TestTokenScope_AttachIntoOwnCheckpointKeepsItsTokens(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -221,7 +222,7 @@ func TestTokenScope_AttachIntoOwnCheckpointKeepsItsTokens(t *testing.T) {
 	require.NotEmpty(t, cp1)
 
 	// Turn 2 (7 tokens) changes no files; turn start clears LastCheckpointID,
-	// so attach writes into cp1 instead of returning early.
+	// so only the checkpoint's own contents show it already holds the session.
 	require.NoError(t, env.SimulateUserPromptSubmit(s.ID))
 	appendUsageMessage(s, "msg-2", 7)
 	s.CreateTranscript("explain", nil)
@@ -234,10 +235,88 @@ func TestTokenScope_AttachIntoOwnCheckpointKeepsItsTokens(t *testing.T) {
 	env.ExtraEnv = append(env.ExtraEnv,
 		"PATH="+filepath.Dir(getTestBinary())+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output := env.RunCLI("session", "attach", s.ID, "-a", agentClaudeCode, "-f")
-	require.Contains(t, output, "Attached session")
-	require.Equal(t, cp1, env.TryGetLatestCheckpointID(), "attach should write into HEAD's checkpoint")
+	require.Contains(t, output, "is already in checkpoint")
+	require.Equal(t, cp1, env.TryGetLatestCheckpointID())
 
 	usage := readCommittedTokenUsage(t, env, cp1)
 	require.NotNil(t, usage)
-	require.Equal(t, 107, usage.OutputTokens, "cp1 keeps its 100 tokens and adds turn 2's 7")
+	require.Equal(t, 100, usage.OutputTokens, "cp1 keeps its 100 tokens")
+
+	// Turn 3 (3 tokens) writes c; its checkpoint also carries turn 2's 7.
+	require.NoError(t, env.SimulateUserPromptSubmit(s.ID))
+	env.WriteFile("c.txt", "c")
+	appendUsageMessage(s, "msg-3", 3)
+	s.CreateTranscript("make c", []FileChange{{Path: "c.txt", Content: "c"}})
+	require.NoError(t, env.SimulateStop(s.ID, s.TranscriptPath))
+	env.GitCommitWithHooks("c", "c.txt")
+	cp3 := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, cp3)
+	require.NotEqual(t, cp1, cp3)
+	u3 := readCommittedTokenUsage(t, env, cp3)
+	require.NotNil(t, u3)
+	require.Equal(t, 10, u3.OutputTokens, "the next checkpoint counts turn 2 (7) and turn 3 (3)")
+}
+
+// TestTokenScope_AttachDuringActiveTurnConsumesTokensOnly: attaching a session
+// mid-turn stores the turn's tokens so far and marks them counted, so the
+// turn's own checkpoint doesn't count them again. The displayed window belongs
+// to the running session's hooks and stays where it was.
+func TestTokenScope_AttachDuringActiveTurnConsumesTokensOnly(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	s := env.NewSession()
+
+	require.NoError(t, env.SimulateUserPromptSubmit(s.ID))
+	env.WriteFile("a.txt", "a")
+	appendUsageMessage(s, "msg-1", 100)
+	s.CreateTranscript("make a", []FileChange{{Path: "a.txt", Content: "a"}})
+	require.NoError(t, env.SimulateStop(s.ID, s.TranscriptPath))
+	env.GitCommitWithHooks("a", "a.txt")
+	cp1 := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, cp1)
+
+	// Turn 2 starts and spends 7 tokens; Stop hasn't fired, so it's active.
+	require.NoError(t, env.SimulateUserPromptSubmit(s.ID))
+	appendUsageMessage(s, "msg-2", 7)
+	s.CreateTranscript("make c", nil)
+	transcriptData, err := os.ReadFile(s.TranscriptPath)
+	require.NoError(t, err)
+	s.TranscriptPath = filepath.Join(env.ClaudeProjectDir, s.ID+".jsonl")
+	require.NoError(t, os.WriteFile(s.TranscriptPath, transcriptData, 0o600))
+
+	before, err := env.GetSessionState(s.ID)
+	require.NoError(t, err)
+	require.True(t, before.Phase.IsActive())
+
+	env.WriteFile("notes.txt", "notes")
+	env.GitAdd("notes.txt")
+	env.GitCommit("notes")
+	env.ExtraEnv = append(env.ExtraEnv,
+		"PATH="+filepath.Dir(getTestBinary())+string(os.PathListSeparator)+os.Getenv("PATH"))
+	output := env.RunCLI("session", "attach", s.ID, "-a", agentClaudeCode, "-f")
+	require.Contains(t, output, "Attached session")
+	attached := env.TryGetLatestCheckpointID()
+	require.NotEqual(t, cp1, attached)
+	ua := readCommittedTokenUsage(t, env, attached)
+	require.NotNil(t, ua)
+	require.Equal(t, 7, ua.OutputTokens, "attach stores turn 2's tokens so far")
+
+	after, err := env.GetSessionState(s.ID)
+	require.NoError(t, err)
+	require.True(t, after.Phase.IsActive(), "attach must not end a running session")
+	require.Equal(t, before.CheckpointTranscriptStart, after.CheckpointTranscriptStart,
+		"a running session's displayed window belongs to its hooks")
+
+	// The turn continues (3 tokens), writes c, and is committed through hooks.
+	env.WriteFile("c.txt", "c")
+	appendUsageMessage(s, "msg-3", 3)
+	s.CreateTranscript("make c", []FileChange{{Path: "c.txt", Content: "c"}})
+	require.NoError(t, env.SimulateStop(s.ID, s.TranscriptPath))
+	env.GitCommitWithHooks("c", "c.txt")
+	cp3 := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, cp3)
+	require.NotEqual(t, attached, cp3)
+	u3 := readCommittedTokenUsage(t, env, cp3)
+	require.NotNil(t, u3)
+	require.Equal(t, 3, u3.OutputTokens, "the turn's checkpoint counts only what attach didn't store")
 }

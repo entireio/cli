@@ -10,29 +10,43 @@ This document covers the domain model shared by both checkpoint storage backends
 
 ### Session
 
-A **Session** is a unit of work. Defined in `strategy/session.go`:
+A **Session** is a unit of work: one agent conversation, from its first hook
+to session end. Its live state is `session.State` (`session/state.go`),
+persisted per session at `.git/entire-sessions/<id>.json` and shared across
+worktrees:
 
 ```go
-type Session struct {
-    ID          string       // e.g., "2025-12-01-8f76b0e8-b8f1-4a87-9186-848bdd83d62e"
-    Description string       // Human-readable summary (first prompt or derived)
-    Strategy    string       // Strategy that created this session
-    StartTime   time.Time
-    Checkpoints []Checkpoint
+type State struct {
+    SessionID        string          // agent-provided session identifier
+    BaseCommit       string          // commit the pending work sits on; moves with HEAD
+    WorktreeID       string          // internal git worktree name; empty for the main worktree
+    Phase            Phase           // lifecycle phase (see Session State below)
+    StartedAt        time.Time
+    StepCount        int             // steps recorded in this session
+    FilesTouched     []string        // files modified, created, or deleted by the session
+    LastCheckpointID id.CheckpointID // checkpoint from the most recent condensation
+    AgentType        types.AgentType
+    // ...
 }
 ```
 
 ### Checkpoint
 
-A **Checkpoint** captures a point-in-time within a session. Defined in `strategy/session.go`:
+A **Checkpoint** is the permanent record of a session's work, linked to a code
+commit by its `Entire-Checkpoint` trailer. Its root metadata is
+`checkpoint.CheckpointSummary` (an alias of `api/checkpoint`), stored at
+`<id[:2]>/<id[2:]>/metadata.json`; per-session content sits beside it:
 
 ```go
-type Checkpoint struct {
-    CheckpointID     id.CheckpointID // Stable identifier (12-hex or ULID; see Checkpoint ID Linking)
-    Message          string          // Commit message or checkpoint description
-    Timestamp        time.Time
-    IsTaskCheckpoint bool            // Task checkpoint (subagent) vs session checkpoint
-    ToolUseID        string          // Tool use ID for task checkpoints (empty for session)
+type CheckpointSummary struct {
+    CheckpointID     id.CheckpointID    // stable identifier (12-hex or ULID; see Checkpoint ID Linking)
+    Strategy         string
+    Branch           string
+    CommitSHA        string
+    CheckpointsCount int
+    FilesTouched     []string
+    Sessions         []SessionFilePaths // one entry per session in the checkpoint
+    // ...
 }
 ```
 
@@ -51,11 +65,10 @@ Most persistent checkpoints are written when a commit condenses a session, but s
 
 ### Session Access
 
-`strategy/session.go` keeps the `Session` and `Checkpoint` data types used by
-status/explain formatting. Active session state is read from `.git/entire-sessions/`
-through `session.StateStore`; committed checkpoint/session content is read
-through the checkpoint facade (`checkpoint.Open(ctx, repo, opts)`, which resolves
-the ref topology and wires the blob fetcher).
+Active session state is read from `.git/entire-sessions/` through
+`session.StateStore`; committed checkpoint/session content is read through the
+checkpoint facade (`checkpoint.Open(ctx, repo, opts)`, which resolves the ref
+topology and wires the blob fetcher).
 
 ### Checkpoint Storage (Low-Level)
 
@@ -144,8 +157,10 @@ changes so the next commit can link to the adopted session.
 
 Condensation reads a declared task transcript path whole into the checkpoint, so
 adoption validates each one (`validateAdoptTaskTranscript`). The path must be
-absolute and lie in the session directory of the session's agent; a session
-recorded without an agent type takes it from the agent that owns its
+absolute and lie in the session directory of the session's agent, under its
+active home or under the session's trusted `AgentHome` (see
+[Recorded agent homes](../development/filesystem-safety.md#recorded-agent-homes));
+a session recorded without an agent type takes it from the agent that owns its
 transcript. Agents implementing `agent.TaskTranscriptMatcher` (Claude Code,
 Codex, Droid) also require the path to name that task's transcript in their
 layout. A path that fails is cleared, logged, and counted in adopt's output.
@@ -656,6 +671,77 @@ When condensing multiple concurrent sessions:
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
+`entire session attach <id> [--commit <rev>]` (default HEAD) picks how to
+link from two facts about the target commit, the same for HEAD and `--commit`
+(`planAttachLink`):
+- the commit already carries an `Entire-Checkpoint` trailer: the session joins
+  that checkpoint, and history is unchanged. If a remote branch holds the
+  commit, the checkpoint is pushed now (there may be no later push of the
+  commit to carry it); otherwise it goes with the next git push;
+- a remote branch already holds the commit: the link is recorded in a new
+  checkpoint (or joins one an earlier attach recorded for it) and the commit
+  is left unchanged, so nothing needs a force-push;
+- no remote holds it: the trailer is added, rewriting the commit and every
+  commit after it up to HEAD (`attachRewriteChain`, `rewriteWithTrailer`).
+  The replay reuses each tree, author and message through `git commit-tree`
+  and moves the branch with a compare-and-swap `update-ref`, so the worktree
+  and index are untouched and no commit hooks run; session state naming the
+  old commits is remapped through `PostRewrite`. Merges after the target, a
+  target off the current branch, and an operation in progress (rebase, merge,
+  cherry-pick, revert, bisect) are refused, as is a commit with a non-UTF-8
+  encoding or extra headers, which `commit-tree` can't reproduce. "No remote
+  holds it" means no remote-tracking ref of any remote contains the commit,
+  and none of the remotes the branch pushes to (its upstream and push remotes,
+  else `origin`, else every remote) has a branch containing it: attach fetches
+  those and asks each directly, fetching only branches whose tips aren't local
+  (single-branch clones don't track every branch). If one can't be reached it
+  refuses rather than rewrite a commit it couldn't check. The checkpoint of a
+  pushed commit goes to the branch's remote even when only another remote
+  (upstream in a fork) holds the commit.
+
+Before writing anything attach prints what it will do (`attachWarning`): the
+commits it rewrites, or the remote that holds the commit and that the
+transcript is pushed now, plus author and rebase caveats. It asks on a
+terminal; without one (an agent, a script) it changes nothing and exits
+non-zero unless `--force` is passed, and agent-help tells agents to show the
+user that output and pass `--force` only once they agree.
+
+A session can be attached to several commits. Each checkpoint records the
+turns since the session's previous checkpoint: the window starts at the
+state's `CheckpointTranscriptStart` (recorded as the checkpoint's
+`checkpoint_transcript_start`, with prompts, turn count and token usage
+scoped to it), and an ended session's offset then advances to the transcript
+end in the agent's own position metric. A running session's offset belongs to
+its hooks and is left alone. The state's `TokenUsage` stays the whole
+session's. Re-attaching a session to the checkpoint that already holds it is a
+no-op.
+
+A recorded link is `linked_commits` on the root `CheckpointSummary`: a list of
+`{sha, repo}` objects (`repo` is `<forge>/<owner>/<repo>` from the remote that
+holds the commit, possibly empty). Unlike the import anchor below it is an
+**attributing** link: the server credits a verified entry as it would a
+trailer. The CLI can't verify who recorded a link (anyone who can push checkpoints
+can name any commit), so `explain` and `blame`/`why` label commits and lines
+found through one as unverified recorded links, and lookups ignore checkpoints
+dated in the future. Unlike a trailer it names one exact commit, so it does not follow a
+later rebase or amend of that commit; attach says so, and the remedy is to
+attach the session to the new commit. The server
+verifies it only when the authenticated checkpoint pusher is the commit's
+author (otherwise it is stored as an unverified attachment; attach warns when
+the local git author differs). Rewrites of the checkpoint keep existing entries
+(`unionLinkedCommits`). Readers consult trailers first and fall back to
+`checkpoint.CheckpointsLinkedToWithStubs` (`explain <commit>`, `blame`/`why`,
+and attach itself), which also reads git-refs stubs discovered on a remote
+that were minted no earlier than a day before the commit. Attach
+pushes the checkpoint itself through the pre-push path, since no later push may
+carry it, and confirms the remote's ref now matches before reporting success:
+for a pushed commit the checkpoint is the only record of the link, so a skipped
+or rejected push (push_sessions off, remote gating) is an error. A second
+attach to a linked commit finds the checkpoint through every copy, fetches it
+into the local store through the availability guard, and joins it. Git hooks keep writing trailers while a commit is made; nothing in
+Entire rewrites a commit that a remote already holds. A CLI that predates the
+field drops it if it rewrites that checkpoint's root metadata.
+
 Checkpoints written by the import path — `entire import <agent>` and `entire
 enable`'s optional history import — additionally carry a `commit_sha`
 (omitempty) on both the session `Metadata` and the root `CheckpointSummary`,
@@ -852,7 +938,8 @@ What it means for the domain model:
 
 ```
 strategy/
-├── session.go           # Session and Checkpoint types
+├── strategy.go          # Shared argument/result types (PendingCheckpoint, StepContext, ...)
+├── manual_commit.go     # ManualCommitStrategy and its constructor
 
 session/
 ├── state.go             # Active session state (StateStore, .git/entire-sessions/)
