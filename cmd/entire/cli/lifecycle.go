@@ -975,6 +975,10 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// Git status catches any tracked file with working-tree changes.
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
 	}
+	// Pre-existing untracked files the turn changed: git status lists them as
+	// untracked both before and after, so neither New nor Modified carries
+	// them, and a shell edit leaves no trace in the transcript.
+	relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(preState.ChangedUntrackedFiles(repoRoot), repoRoot))
 
 	// Filter detected changes to exclude state already committed to HEAD.
 	// When an agent commits files mid-turn, those changes are condensed by
@@ -1811,9 +1815,10 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	// would risk sweeping in the parent's or another agent's later edits. See
 	// subagentCaptureOptions.analyzerFilesOnly.
 	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
-		bypassNoChangesSkip: true,
-		analyzerFilesOnly:   true,
-		eventFilesOnly:      event.CompletionWithoutLaunch,
+		bypassNoChangesSkip:     true,
+		analyzerFilesOnly:       true,
+		claimUnrecordedNewFiles: !event.CompletionWithoutLaunch,
+		eventFilesOnly:          event.CompletionWithoutLaunch,
 	})
 	if captureErr != nil {
 		return captureErr
@@ -1918,6 +1923,11 @@ type subagentCaptureOptions struct {
 	// rationale. Never set for the foreground launch-time path, which keeps
 	// its original (correct, worktree-scan-based) behavior unchanged.
 	analyzerFilesOnly bool
+
+	// claimUnrecordedNewFiles, with analyzerFilesOnly, also captures untracked
+	// files created since the task launched that no session in the worktree
+	// has recorded. See unrecordedNewFilesSinceLaunch.
+	claimUnrecordedNewFiles bool
 
 	// eventFilesOnly means the adapter already derived child-scoped files from
 	// a shared parent transcript. Do not resolve or scan a child transcript.
@@ -2059,7 +2069,8 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// deletions by the subagent are also uncapturable in analyzer-only mode
 	// (only the worktree scan detects them), but those are the lesser
 	// failures: over-capture steals attribution from someone else's work,
-	// which is worse and harder to notice.
+	// which is worse and harder to notice. claimUnrecordedNewFiles narrows the
+	// shell side-effect gap for new files; see unrecordedNewFilesSinceLaunch.
 	var changes *FileChanges
 	if !opts.analyzerFilesOnly {
 		preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
@@ -2107,6 +2118,9 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
+	}
+	if opts.analyzerFilesOnly && opts.claimUnrecordedNewFiles {
+		relNewFiles = mergeUnique(relNewFiles, unrecordedNewFilesSinceLaunch(logCtx, event, repoRoot))
 	}
 	relModifiedFiles, relNewFiles, relDeletedFiles = strategy.FilterTrackableChanges(logCtx, repoRoot, relModifiedFiles, relNewFiles, relDeletedFiles)
 
@@ -2174,6 +2188,55 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 
 	_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 	return nil
+}
+
+// unrecordedNewFilesSinceLaunch returns the untracked files created since a
+// background task launched that no session in the worktree has recorded. A
+// subagent's shell command can create files its transcript never names, and
+// once the parent's next prompt starts they sit in that prompt's untracked
+// baseline, so no later turn end claims them either.
+//
+// Files the parent created during its own turns are excluded: its turn ends
+// recorded them. So are files another session has recorded. What remains can
+// still include a file the user created while the parent was idle, or one an
+// agent mid-turn has not recorded yet; claiming those only adds a session link
+// to the commit that carries them, the same as a turn end claiming a user's
+// edit made during an active turn.
+//
+// Returns nil when there is no launch baseline or the scan cannot tell which
+// files other sessions own.
+func unrecordedNewFilesSinceLaunch(ctx context.Context, event *agent.Event, repoRoot string) []string {
+	preState, err := LoadPreTaskState(ctx, event.ToolUseID)
+	if err != nil {
+		logging.Warn(ctx, "failed to load pre-task state", slog.String("error", err.Error()))
+		return nil
+	}
+	if preState == nil || preState.UntrackedScanSkipped {
+		return nil
+	}
+	changes, err := DetectFileChanges(ctx, preState.PreUntrackedFiles())
+	if err != nil {
+		logStatusDegrade(ctx, "failed to compute files created since task launch", err)
+		return nil
+	}
+	created := FilterAndNormalizePaths(changes.New, repoRoot)
+	if len(created) == 0 {
+		return nil
+	}
+	recorded, ok, err := strategy.FilesTouchedInSessionWorktree(ctx, event.SessionID)
+	if err != nil || !ok {
+		if err != nil {
+			logging.Warn(ctx, "failed to list files recorded by sessions", slog.String("error", err.Error()))
+		}
+		return nil
+	}
+	unrecorded := make([]string, 0, len(created))
+	for _, file := range created {
+		if _, seen := recorded[file]; !seen {
+			unrecorded = append(unrecorded, file)
+		}
+	}
+	return unrecorded
 }
 
 // loadLiveTaskRecords returns sessionID's still-in-flight task records, or nil

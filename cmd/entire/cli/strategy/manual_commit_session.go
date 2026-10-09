@@ -206,6 +206,34 @@ func exactWorktreeMatches(states []*SessionState, worktreePath string) []*Sessio
 	return exact
 }
 
+// FilesTouchedInSessionWorktree returns every path that sessionID or another
+// session in the same worktree has recorded in FilesTouched. ok is false when
+// sessionID has no state or no recorded worktree, so callers cannot tell which
+// files other sessions own.
+func FilesTouchedInSessionWorktree(ctx context.Context, sessionID string) (touched map[string]struct{}, ok bool, err error) {
+	states, err := ListSessionStates(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	worktreePath := ""
+	for _, state := range states {
+		if state.SessionID == sessionID {
+			worktreePath = state.WorktreePath
+			break
+		}
+	}
+	if worktreePath == "" {
+		return nil, false, nil
+	}
+	touched = make(map[string]struct{})
+	for _, state := range exactWorktreeMatches(states, worktreePath) {
+		for _, file := range state.FilesTouched {
+			touched[file] = struct{}{}
+		}
+	}
+	return touched, true, nil
+}
+
 // findSessionsForWorktree finds all sessions for the given worktree path.
 // Exact WorktreePath matches win; otherwise sessions recorded in another
 // worktree of the same repository (shared git common dir) are matched, as long
