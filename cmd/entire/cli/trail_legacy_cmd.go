@@ -29,7 +29,9 @@ func newTrailListCmd() *cobra.Command {
 // resolveLegacyTrailContext is legacyTrailMode.workingContext: selectors are
 // repository-local numbers, IDs, or branches.
 func resolveLegacyTrailContext(cmd *cobra.Command, selector, branch string, localOnly bool) (*trailWorkingContext, error) {
-	if selector != "" && strings.TrimSpace(branch) != "" && !localOnly {
+	// Resume checks --branch as an expected-branch assertion after resolving
+	// the selector. Other commands must not silently discard that branch.
+	if selector != "" && strings.TrimSpace(branch) != "" && (!localOnly || cmd.Name() != "resume") {
 		return nil, errors.New("pass a trail selector or --branch, not both")
 	}
 	repoOverride := trailRepoFlag(cmd)
