@@ -183,15 +183,22 @@ func agentCounts(counts map[string]int) map[string]int {
 
 // mergeCaseVariants folds agent keys that differ only in case into one key,
 // spelled the way most of the counts spell it (ties go to the smaller
-// spelling), as entire-api does for its chart series. Built-in IDs are
-// lowercase, so only external names are affected.
+// spelling), as entire-api does for its chart series. Built-in IDs are left
+// alone: Unicode case folding maps names such as "\u212airo" (Kelvin sign) onto
+// a built-in ID, and a self-reported name must not take over that agent's
+// share.
 func mergeCaseVariants(counts map[string]int) map[string]int {
 	type variants struct {
 		total, bestCount int
 		best             string
 	}
+	out := make(map[string]int, len(counts))
 	groups := make(map[string]*variants, len(counts))
 	for key, count := range counts {
+		if _, builtIn := agentDisplayMap[key]; builtIn {
+			out[key] += count
+			continue
+		}
 		folded := strings.ToLower(key)
 		g, ok := groups[folded]
 		if !ok {
@@ -203,9 +210,8 @@ func mergeCaseVariants(counts map[string]int) map[string]int {
 			g.best, g.bestCount = key, count
 		}
 	}
-	out := make(map[string]int, len(groups))
 	for _, g := range groups {
-		out[g.best] = g.total
+		out[g.best] += g.total
 	}
 	return out
 }
@@ -311,14 +317,17 @@ func renderContributionChart(w io.Writer, sty activityStyles, hourly []hourlyPoi
 }
 
 func renderDotChart(w io.Writer, sty activityStyles, hourly []hourlyPoint, repos []repoContribution) {
-	agentTotals := make(map[string]int)
+	// Sum raw names before normalizing, so one agent spelled differently in
+	// two repos is still one legend entry.
+	rawTotals := make(map[string]int)
 	total := 0
 	for _, r := range repos {
 		total += r.Total
-		for agent, count := range agentCounts(r.Agents) {
-			agentTotals[agent] += count
+		for agent, count := range r.Agents {
+			rawTotals[agent] += count
 		}
 	}
+	agentTotals := agentCounts(rawTotals)
 
 	totalLabel := ""
 	if total > 0 {

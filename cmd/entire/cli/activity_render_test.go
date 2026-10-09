@@ -225,6 +225,16 @@ func TestRenderDotChart_LegendMergesCleanedNames(t *testing.T) {
 	if strings.Count(out, "Grok") != 1 || !strings.Contains(out, "Grok 83%") || !strings.Contains(out, "Unknown 17%") {
 		t.Errorf("legend should list Grok once at 83%% and Unknown at 17%%:\n%s", out)
 	}
+
+	buf.Reset()
+	repos = []repoContribution{
+		{Repo: "a", Total: 3, Agents: map[string]int{"Grok Bot": 3}},
+		{Repo: "b", Total: 1, Agents: map[string]int{"grok bot": 1}},
+	}
+	renderDotChart(&buf, activityStyles{width: 200}, hourly, repos)
+	if out := buf.String(); !strings.Contains(out, "Grok Bot 100%") || strings.Contains(out, "grok bot") {
+		t.Errorf("legend should merge one agent's spellings across repos:\n%s", out)
+	}
 }
 
 // Without colour, an external agent's share must not look like the empty
@@ -568,6 +578,10 @@ func TestAgentCounts_MergesExternalCaseVariants(t *testing.T) {
 	tied := agentCounts(map[string]int{"grok bot": 1, "Grok Bot": 1})
 	if len(tied) != 1 || tied["Grok Bot"] != 2 {
 		t.Errorf("tied spellings = %v, want the smaller spelling {Grok Bot:2}", tied)
+	}
+	kelvin := agentCounts(map[string]int{"\u212airo": 5, activityAgentKiro: 2})
+	if len(kelvin) != 2 || kelvin[activityAgentKiro] != 2 || kelvin["\u212airo"] != 5 {
+		t.Errorf("Kelvin-sign Kiro = %v, want it kept apart from the built-in kiro", kelvin)
 	}
 	c := userCommit{Checkpoints: []userCommitCheckpoint{{Agents: []string{"grok bot"}}, {Agents: []string{"Grok Bot", "Grok Bot"}}}}
 	if got := uniqueCommitAgents(c); len(got) != 1 || got[0] != "Grok Bot" {
