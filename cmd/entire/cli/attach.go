@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -1403,6 +1404,8 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	// Read before the display offset below moves: TokenStart falls back to it
 	// for state written before the token offset existed.
 	tokenStartOnDisk := state.TokenStart()
+	pendingOnDisk := state.CheckpointTokenUsage
+	lastCheckpointOnDisk := state.LastCheckpointID
 
 	// Populate BaseCommit from HEAD if not already set, so the session becomes
 	// active and future commits in the same session receive Entire-Checkpoint trailers.
@@ -1439,18 +1442,27 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	if meta.FirstPrompt != "" {
 		state.LastPrompt = meta.FirstPrompt
 	}
-	// A hook that checkpointed while attach waited at its prompt has already
-	// moved the token offset past what attach counted from, and recorded newer
-	// totals. Attach's figures are older than the hook's, so they are left out:
-	// consuming from the stale position would move the offset back and have
-	// the next checkpoint recount.
+	// A hook that ran while attach waited at its prompt recorded newer token
+	// state than attach read: a condensation moved the offset or stored the
+	// pending total (a new checkpoint ID), or a Stop added a turn to the
+	// pending total. Attach's figures are older than the hook's, so they are
+	// left out: consuming from the stale position would move the offset back
+	// and have the next checkpoint recount, and clearing the pending total
+	// would drop a hook-only agent's turn. Turn start clears LastCheckpointID,
+	// which is not a checkpoint, so only a new non-empty ID counts.
 	countedFrom := 0
+	var pendingRead *agent.TokenUsage
+	var lastCheckpointRead id.CheckpointID
 	if existingState != nil {
 		countedFrom = existingState.TokenStart()
+		pendingRead = existingState.CheckpointTokenUsage
+		lastCheckpointRead = existingState.LastCheckpointID
 	}
 	switch {
-	case tokenStartOnDisk != countedFrom:
-		logging.Warn(ctx, "attach: session tokens were checkpointed while attach was waiting; leaving token state as the hooks set it",
+	case tokenStartOnDisk != countedFrom,
+		!reflect.DeepEqual(pendingOnDisk, pendingRead),
+		lastCheckpointOnDisk != "" && lastCheckpointOnDisk != lastCheckpointRead:
+		logging.Warn(ctx, "attach: session tokens changed while attach was waiting; leaving token state as the hooks set it",
 			slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))
 	default:
 		if sessionUsage != nil {

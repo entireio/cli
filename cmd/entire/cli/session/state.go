@@ -224,8 +224,10 @@ type State struct {
 	// TokenTranscriptStart is the transcript position up to which this
 	// session's tokens are already stored in a checkpoint. Carry-forward and
 	// adopt move CheckpointTranscriptStart back to 0 so the next checkpoint
-	// shows the whole conversation; this offset never moves back, so that
-	// checkpoint still counts only new tokens. Nil in state written before the
+	// shows the whole conversation; they never reset this offset, so that
+	// checkpoint still counts only new tokens. It moves back only when a
+	// condensation or attach finds the transcript shorter (rewritten or
+	// compacted) and records its new end. Nil in state written before the
 	// field existed; NormalizeAfterLoad fills it. Read it through TokenStart.
 	TokenTranscriptStart *int `json:"token_transcript_start,omitempty"`
 

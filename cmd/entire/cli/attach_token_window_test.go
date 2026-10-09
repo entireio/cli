@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,19 +33,29 @@ func TestSaveAttachSessionState_KeepsTokenOffsetMovedMeanwhile(t *testing.T) {
 		name string
 		// hookMovedTo is the token offset on disk when attach saves; -1 means
 		// the session had no state at all.
-		hookMovedTo   int
-		wantStart     int
-		wantPendingOK bool
-		wantTotal     int
+		hookMovedTo int
+		// pendingOnDisk is the pending total on disk; attach read 3.
+		pendingOnDisk int
+		// checkpointOnDisk is LastCheckpointID on disk; attach read none.
+		checkpointOnDisk id.CheckpointID
+		wantStart        int
+		wantPendingOK    bool
+		wantTotal        int
 	}{
-		{name: "unchanged", hookMovedTo: 2, wantStart: 4, wantTotal: 9},
-		{name: "moved by a hook", hookMovedTo: 6, wantStart: 6, wantPendingOK: true, wantTotal: 12},
+		{name: "unchanged", hookMovedTo: 2, pendingOnDisk: 3, wantStart: 4, wantTotal: 9},
+		{name: "moved by a hook", hookMovedTo: 6, pendingOnDisk: 3, wantStart: 6, wantPendingOK: true, wantTotal: 12},
+		{name: "turn added by a stop", hookMovedTo: 2, pendingOnDisk: 5, wantStart: 2, wantPendingOK: true, wantTotal: 12},
+		{name: "condensed in place", hookMovedTo: 2, pendingOnDisk: 3, checkpointOnDisk: id.MustCheckpointID("b1b2c3d4e5f6"), wantStart: 2, wantPendingOK: true, wantTotal: 12},
 		{name: "no earlier state", hookMovedTo: -1, wantStart: 4, wantTotal: 9},
 	} {
-		sessionID := "attach-window-" + map[int]string{2: "unchanged", 6: "moved", -1: "new"}[tc.hookMovedTo]
+		sessionID := "attach-window-" + strings.ReplaceAll(tc.name, " ", "-")
 		var loaded *session.State
 		if tc.hookMovedTo >= 0 {
-			loaded = &session.State{SessionID: sessionID, AgentType: agent.AgentTypeClaudeCode}
+			loaded = &session.State{
+				SessionID:            sessionID,
+				AgentType:            agent.AgentTypeClaudeCode,
+				CheckpointTokenUsage: &agent.TokenUsage{OutputTokens: 3},
+			}
 			loaded.SetTokenStart(2)
 
 			now := time.Now()
@@ -55,7 +66,8 @@ func TestSaveAttachSessionState_KeepsTokenOffsetMovedMeanwhile(t *testing.T) {
 				StartedAt:            now,
 				LastInteractionTime:  &now,
 				TokenUsage:           &agent.TokenUsage{OutputTokens: 12},
-				CheckpointTokenUsage: &agent.TokenUsage{OutputTokens: 3},
+				CheckpointTokenUsage: &agent.TokenUsage{OutputTokens: tc.pendingOnDisk},
+				LastCheckpointID:     tc.checkpointOnDisk,
 			}
 			onDisk.SetTokenStart(tc.hookMovedTo)
 			require.NoError(t, store.Save(ctx, onDisk))
