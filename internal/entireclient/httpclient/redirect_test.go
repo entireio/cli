@@ -90,6 +90,60 @@ func TestWithSecureRedirects_HopCap(t *testing.T) {
 	}
 }
 
+type redirectRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f redirectRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestWithSecureRedirects_RechecksCallbackURL(t *testing.T) {
+	t.Parallel()
+	denied := errors.New("custom redirect refusal")
+	for _, tc := range []struct {
+		name        string
+		callbackErr error
+	}{
+		{"callback allows modified URL", nil},
+		{"callback stops redirect", http.ErrUseLastResponse},
+		{"callback rejects redirect", denied},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			calls, callbacks := 0, 0
+			c := WithSecureRedirects(&http.Client{
+				Transport: redirectRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					code := http.StatusTemporaryRedirect
+					if calls > 1 {
+						code = http.StatusOK
+					}
+					return &http.Response{StatusCode: code, Header: http.Header{"Location": {"https://service.example/redirect"}}, Body: http.NoBody, Request: req}, nil
+				}),
+				CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+					callbacks++
+					req.URL.Scheme = "http"
+					return tc.callbackErr
+				},
+			})
+			req := redirectRequest(t, "https://service.example/start")
+			req.Header.Set("Authorization", "Bearer test-token")
+			resp, err := c.Do(req)
+			if resp != nil {
+				require.NoError(t, resp.Body.Close())
+			}
+			switch {
+			case tc.callbackErr == nil:
+				require.ErrorContains(t, err, "insecure scheme")
+			case errors.Is(tc.callbackErr, http.ErrUseLastResponse):
+				require.NoError(t, err, "ErrUseLastResponse must retain its identity")
+				require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+			default:
+				require.ErrorIs(t, err, tc.callbackErr)
+			}
+			require.Equal(t, 1, callbacks)
+			require.Equal(t, 1, calls, "callback-rewritten HTTP destination must receive no request")
+		})
+	}
+}
+
 func TestWithSecureRedirects_CustomRejection(t *testing.T) {
 	t.Parallel()
 	denied := errors.New("custom redirect refusal")

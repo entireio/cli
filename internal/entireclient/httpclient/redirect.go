@@ -22,8 +22,8 @@ func CheckSecureRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-// WithSecureRedirects copies a client and adds the mandatory TLS floor before
-// its existing redirect policy. Transport, timeout and jar are preserved; the
+// WithSecureRedirects copies a client and enforces the mandatory TLS floor
+// before and after its existing redirect policy. Transport, timeout and jar are preserved; the
 // caller's client is not mutated. A nil policy retains Go's default host/header
 // handling and our usual ten-hop cap.
 func WithSecureRedirects(client *http.Client) *http.Client {
@@ -34,8 +34,13 @@ func WithSecureRedirects(client *http.Client) *http.Client {
 			return err
 		}
 		if policy != nil {
-			// net/http compares ErrUseLastResponse by identity; do not wrap.
-			return policy(req, via)
+			if err := policy(req, via); err != nil {
+				// net/http compares ErrUseLastResponse by identity; do not wrap.
+				return err
+			}
+			// A callback can rewrite the destination. Validate the URL that
+			// will actually be sent, not just the server's original Location.
+			return CheckSecureRedirect(req, via)
 		}
 		return nil
 	}

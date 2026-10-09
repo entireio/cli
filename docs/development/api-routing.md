@@ -6,17 +6,22 @@ Repository paths in code spans are relative to the repository root unless stated
 
 ### Credential-bearing redirects and replicas
 
-The API client, cloud dispatch client, cell catalog resolver, and git remote
-helper apply `internal/entireclient/httpclient.CheckSecureRedirect`: redirects
+The API client, control-plane client, cloud dispatch client, cell catalog
+resolver, and git remote helper apply `internal/entireclient/httpclient.CheckSecureRedirect`: redirects
 must never leave HTTPS once reached, including HTTP → HTTPS → HTTP chains and
 HTTPS → loopback HTTP. This floor supplements, rather than replaces, each
 client's host policy. `WithSecureRedirects` copies injected clients and preserves
-their transport, timeout, cookie jar, and stricter redirect callbacks.
+their transport, timeout, cookie jar, and stricter redirect callbacks. The floor
+runs both before a callback and after it returns nil, because callbacks can
+rewrite the destination. Callback errors are returned unchanged, including
+`http.ErrUseLastResponse`.
 
 The API client's bearer transport reattaches Authorization on each hop, so its
 cross-host guard must remain. Absolute API paths cannot downgrade an HTTPS base
 either. OAuth request protection lives separately in auth-go; using that library
-for token exchange does not protect these CLI-owned HTTP clients.
+for token exchange does not protect these CLI-owned HTTP clients. In particular,
+auth-go's 421 routing and exchange URL checks do not cover ordinary HTTP 3xx
+redirects followed by the outer control-plane client.
 
 Remote-helper replica URLs are validated at cache/header/Location ingress and
 again before requests: HTTPS plus the existing cluster trust boundary. HTTP is

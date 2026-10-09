@@ -20,9 +20,9 @@ import (
 // home jurisdiction is another region. Inert for same-jurisdiction calls.
 //
 // coreURL is the origin the client is built against. An http:// loopback
-// core (local dev, httptest) unlocks http:// loopback redirect and
-// exchange targets; anything else demands https, so a production core
-// can never re-target the login JWT over plaintext.
+// core (local dev, httptest) unlocks http:// loopback 421 and exchange
+// targets; anything else demands https. Ordinary HTTP redirects are handled
+// by the outer client, which independently forbids downgrades from HTTPS.
 func newCrossJurisHTTPClient(coreURL string) (*http.Client, error) {
 	// The User-Agent wrapper goes *under* the cross-juris round tripper,
 	// not over it. That transport sends requests it builds itself — the
@@ -33,7 +33,7 @@ func newCrossJurisHTTPClient(coreURL string) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &http.Client{Transport: rt}, nil
+	return &http.Client{Transport: rt, CheckRedirect: httpclient.CheckSecureRedirect}, nil
 }
 
 // newCrossJurisRoundTripper stacks the coreapi transport chain over base:
