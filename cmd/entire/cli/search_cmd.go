@@ -358,21 +358,16 @@ func resolveDefaultSearchRepo(ctx context.Context, explicitScope bool) (forge, o
 // regardless of auth state. Errors are swallowed (rather than surfaced via
 // ShellCompDirectiveError) because completion runs on every TAB press and
 // must never pollute the user's prompt with error output.
-func completeRepoFlag(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+func completeRepoFlag(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	suggestions := []string{"*"}
-	client, err := NewAuthenticatedAPIClient(cmd.Context(), false)
+	repos, err := listCompletionRepoIndex(cmd.Context(), toComplete)
 	if err != nil {
 		return suggestions, cobra.ShellCompDirectiveNoFileComp
 	}
-	repos, err := client.ListRepositories(cmd.Context(), api.RepositorySortRecent)
-	if err != nil {
-		return suggestions, cobra.ShellCompDirectiveNoFileComp
-	}
-	for _, r := range repos {
-		if r.CheckpointCount == 0 {
-			continue // searching a repo with no checkpoints would always be empty
+	for _, slug := range checkpointRepoSlugs(repos) {
+		if strings.HasPrefix(strings.ToLower(slug), strings.ToLower(toComplete)) {
+			suggestions = append(suggestions, slug)
 		}
-		suggestions = append(suggestions, r.FullName)
 	}
 	return suggestions, cobra.ShellCompDirectiveNoFileComp
 }
@@ -623,45 +618,52 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (resp *codesearch.
 // returning the ULID list for peregrine and the subset of index entries whose
 // repos matched (for cell grouping).
 //
-// Matching mirrors the BFF (code-search.ts lines 315-319):
-//
-//	slug = filter starts with "gh/" ? strip prefix : filter unchanged
-//	match = id === filter || full_name === slug || full_name === filter
-//
-// Accepted filter formats:
-//   - ULID            — matched directly on repo ID (raw filter)
-//   - gh/owner/repo   — GitHub repo, stripped to owner/repo for FullName match
-//   - owner/repo      — bare slug, matched on FullName directly
+// IDs match directly; bare names match FullName. Forge-qualified names match
+// the same provider-aware slugs offered by completion, never another forge.
+// Old index entries with no forge signal retain their legacy GitHub spelling
+// (or their explicit three-component forge prefix).
 func resolveRepoFilters(filters []string, repos []coreapi.RepoIndexEntry) (repoIDs []string, matched []coreapi.RepoIndexEntry) {
-	byName := make(map[string]coreapi.RepoIndexEntry, len(repos))
+	byName := make(map[string][]coreapi.RepoIndexEntry, len(repos))
+	bySlug := make(map[string][]coreapi.RepoIndexEntry, len(repos))
 	byID := make(map[string]coreapi.RepoIndexEntry, len(repos))
 	for _, r := range repos {
-		byName[strings.ToLower(r.FullName)] = r
+		name := strings.ToLower(strings.Trim(strings.TrimSpace(r.FullName), "/"))
+		byName[name] = append(byName[name], r)
 		byID[r.ID] = r
+		slug := checkpointRepoSlug(r)
+		if forge, _ := forgeOfEntry(r); forge == "" && !r.Provider.IsSet() {
+			// Legacy rows omit provider and placements; their names were
+			// bare GitHub names or explicitly forge-qualified native names.
+			if strings.Count(name, "/") == 2 && (strings.HasPrefix(name, "gh/") || strings.HasPrefix(name, "et/")) {
+				slug = name
+			} else if strings.Count(name, "/") == 1 {
+				slug = "gh/" + name
+			}
+		}
+		if slug != "" {
+			key := strings.ToLower(slug)
+			bySlug[key] = append(bySlug[key], r)
+		}
 	}
 	seen := make(map[string]bool) // dedup by ID
 	for _, f := range filters {
-		// BFF only strips gh/ prefix; other prefixes are left as-is.
-		slug := f
-		if strings.HasPrefix(f, "gh/") {
-			slug = f[3:]
+		filter := strings.TrimSpace(f)
+		name := strings.ToLower(strings.Trim(filter, "/"))
+		qualified := strings.Count(name, "/") == 2 && (strings.HasPrefix(name, "gh/") || strings.HasPrefix(name, "et/"))
+		var candidates []coreapi.RepoIndexEntry
+		if r, ok := byID[filter]; ok {
+			candidates = []coreapi.RepoIndexEntry{r}
+		} else if qualified {
+			candidates = bySlug[name]
+		} else {
+			candidates = byName[name]
 		}
-
-		// Match order mirrors the BFF: id === filter || full_name === slug || full_name === filter
-		// FullName comparison is case-insensitive so casing differences between
-		// the git remote (e.g. entireio/CLI) and the repo index (entireio/cli)
-		// don't cause a "no matching repositories found" failure.
-		var r coreapi.RepoIndexEntry
-		var ok bool
-		if r, ok = byID[f]; !ok {
-			if r, ok = byName[strings.ToLower(slug)]; !ok {
-				r, ok = byName[strings.ToLower(f)]
+		for _, r := range candidates {
+			if !seen[r.ID] {
+				repoIDs = append(repoIDs, r.ID)
+				matched = append(matched, r)
+				seen[r.ID] = true
 			}
-		}
-		if ok && !seen[r.ID] {
-			repoIDs = append(repoIDs, r.ID)
-			matched = append(matched, r)
-			seen[r.ID] = true
 		}
 	}
 	return repoIDs, matched

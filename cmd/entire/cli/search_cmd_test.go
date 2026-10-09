@@ -842,12 +842,10 @@ func TestResolveRepoFilters_GhPrefix(t *testing.T) {
 	}
 }
 
-func TestResolveRepoFilters_EtPrefixNoStrip(t *testing.T) {
+func TestResolveRepoFilters_EtPrefixLegacyRows(t *testing.T) {
 	t.Parallel()
 
-	// BFF only strips gh/, not et/. "et/myproj/backend" is tried as-is
-	// against full_name. It won't match "myproj/backend" — this aligns
-	// with the BFF behavior.
+	// A legacy bare row with no provider signal is GitHub, not native.
 	repos := []coreapi.RepoIndexEntry{
 		{ID: testRepoID2, FullName: "myproj/backend"},
 	}
@@ -856,8 +854,7 @@ func TestResolveRepoFilters_EtPrefixNoStrip(t *testing.T) {
 		t.Fatalf("et/ prefix should not match stripped FullName: ids = %v, want empty", ids)
 	}
 
-	// But if FullName is stored with the et/ prefix, it matches via the
-	// unstripped fallback (full_name === filter).
+	// A legacy native row explicitly names its forge in FullName.
 	repos2 := []coreapi.RepoIndexEntry{
 		{ID: testRepoID2, FullName: "et/myproj/backend"},
 	}
