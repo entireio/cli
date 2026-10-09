@@ -114,11 +114,14 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 		}
 		chunk := refs[start:min(start+size, len(refs))]
 		chunkCtx, cancel := ctx, context.CancelFunc(func() {})
-		if chunkTimeout > 0 {
+		// A single ref is as small as a chunk gets: timing it out would only
+		// re-send the same partial upload on every pass, never landing it, so
+		// it gets the rest of the budget instead.
+		if chunkTimeout > 0 && len(chunk) > 1 {
 			chunkCtx, cancel = context.WithTimeout(ctx, chunkTimeout)
 		}
 		err := batchPushRefs(chunkCtx, target, chunk)
-		stalled := err != nil && chunkTimeout > 0 &&
+		stalled := err != nil && chunkTimeout > 0 && len(chunk) > 1 &&
 			errors.Is(chunkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 		cancel()
 		if stalled {

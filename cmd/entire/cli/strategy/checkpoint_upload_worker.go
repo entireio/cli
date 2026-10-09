@@ -52,8 +52,9 @@ const CheckpointUploadForegroundEnv = "ENTIRE_CHECKPOINT_UPLOAD_FOREGROUND"
 var checkpointInlineUploadBudget = 5 * time.Second
 
 // foregroundUploadLockWait bounds how long a foreground flush (hand-off
-// disabled) waits for a running worker before leaving its refs queued.
-const foregroundUploadLockWait = 30 * time.Second
+// disabled) waits for a running worker before leaving its refs queued. Var for
+// tests.
+var foregroundUploadLockWait = 30 * time.Second
 
 const (
 	// checkpointUploadDeliveryBudget bounds one worker pass's flush.
@@ -201,20 +202,23 @@ func handOffCheckpointUpload(ctx context.Context, coord *checkpoint.UploadCoordi
 			slog.String("error", err.Error()))
 		return false
 	}
-	spawnCheckpointUploadWorker(ctx)
+	if !spawnCheckpointUploadWorker(ctx) {
+		return false
+	}
 	logging.Info(logging.WithComponent(ctx, checkpointUploadComponent),
 		"handed checkpoint upload to background worker", slog.String("remote", req.Remote))
 	return true
 }
 
-func spawnCheckpointUploadWorker(ctx context.Context) {
+func spawnCheckpointUploadWorker(ctx context.Context) bool {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		logging.Debug(ctx, "skipping background checkpoint upload spawn: no worktree root",
 			slog.String("error", err.Error()))
-		return
+		return false
 	}
 	checkpointUploadSpawn(root)
+	return true
 }
 
 // releaseUploadLock releases a flush's hold on the upload lock and, if a push
@@ -223,7 +227,7 @@ func spawnCheckpointUploadWorker(ctx context.Context) {
 // it spawned exited at once, since the lock was taken.
 func releaseUploadLock(ctx context.Context, coord *checkpoint.UploadCoordinator, release func()) {
 	release()
-	if coord != nil && !inUploadWorker(ctx) && coord.HasRequest() {
+	if coord != nil && !inUploadWorker(ctx) && coord.HasRequest() && backgroundCheckpointUploadEnabled(ctx) {
 		spawnCheckpointUploadWorker(ctx)
 	}
 }
@@ -392,6 +396,14 @@ func CheckpointUploadStatus(ctx context.Context) (running bool, lastError string
 		return false, ""
 	}
 	running = st.Last.Running(time.Now(), checkpointUploadWorkerDeadline)
+	// A worker that was killed leaves a record that still reads as running,
+	// but the kernel freed its lock: a lock we can take means nobody uploads.
+	if running {
+		if release, ok, lockErr := coord.TryLockWorker(ctx); lockErr == nil && ok {
+			release()
+			running = false
+		}
+	}
 	if running {
 		return true, ""
 	}

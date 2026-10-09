@@ -116,6 +116,8 @@ func TestKillProcessGroupOnCancel_TerminatesLeader(t *testing.T) {
 // TestMarkInheritedFDsCloseOnExec: a descriptor this process holds without
 // close-on-exec — as a git hook holds git's pipes — must not reach a child
 // started afterwards, or a detached child keeps the pipe open for its lifetime.
+//
+// Not parallel: it changes descriptor flags process-wide.
 func TestMarkInheritedFDsCloseOnExec(t *testing.T) {
 	var fds [2]int
 	if err := syscall.Pipe(fds[:]); err != nil {

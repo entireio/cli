@@ -450,9 +450,15 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// a request instead of pushing the same refs alongside it.
 	release, locked := lockQueueForFlush(ctx, coord, background)
 	if !locked {
+		// Uploads kept inline (CI, trail create, the setting) never leave work
+		// for a background process: they stay queued for the next push.
+		if !background {
+			fmt.Fprintln(os.Stderr, "[entire] Another checkpoint upload is in progress; checkpoints stay queued for the next push.")
+			return nil
+		}
 		if handOffCheckpointUpload(ctx, coord, checkpoint.UploadRequest{Remote: ps.remote,
 			OPFDecision: decision, PendingCapture: pendingCapture}) {
-			fmt.Fprintln(os.Stderr, "[entire] A checkpoint upload is already running in the background; these checkpoints will follow it.")
+			fmt.Fprintln(os.Stderr, "[entire] Another checkpoint upload is in progress; these checkpoints will follow it in the background.")
 		}
 		return nil
 	}

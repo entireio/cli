@@ -47,6 +47,10 @@ func killProcessGroupOnCancel(cmd *exec.Cmd) {
 // remote helper's stdin among them — and a detached child holding one keeps
 // the helper from seeing EOF, so the user's `git push` cannot finish until the
 // child exits. Descriptors Go opened itself are already close-on-exec.
+//
+// It runs in the hook process, so later children of the hook lose those
+// descriptors too; the one legitimate use, a user's GIT_TRACE=<fd>, makes git
+// warn and carry on.
 func markInheritedFDsCloseOnExec() {
 	dir := "/dev/fd"
 	if runtime.GOOS == "linux" {
@@ -54,6 +58,17 @@ func markInheritedFDsCloseOnExec() {
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		// No fd directory (no /proc in a container, BSD without fdescfs):
+		// mark every possible descriptor instead. CloseOnExec on a closed
+		// one is a harmless EBADF.
+		var lim syscall.Rlimit
+		maxFD := uint64(4096)
+		if syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim) == nil && lim.Cur < maxFD {
+			maxFD = lim.Cur
+		}
+		for fd := 3; uint64(fd) < maxFD; fd++ {
+			syscall.CloseOnExec(fd)
+		}
 		return
 	}
 	for _, e := range entries {
