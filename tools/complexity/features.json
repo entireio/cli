@@ -240,7 +240,6 @@
     "cmd/entire/cli/help.go",
     "cmd/entire/cli/root.go",
     "cmd/entire/cli/errors.go",
-    "cmd/entire/cli/constants.go",
     "cmd/entire/cli/types.go",
     "cmd/entire/cli/utils.go",
     "cmd/entire/cli/progress.go",
@@ -325,7 +324,6 @@
    "paths": [
     "cmd/entire/cli/agent/*.go",
     "cmd/entire/cli/agent/types/",
-    "cmd/entire/cli/agent/spawn/",
     "cmd/entire/cli/agent/external/",
     "cmd/entire/cli/agent/testutil/"
    ]

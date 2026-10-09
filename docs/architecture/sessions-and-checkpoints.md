@@ -10,29 +10,43 @@ This document covers the domain model shared by both checkpoint storage backends
 
 ### Session
 
-A **Session** is a unit of work. Defined in `strategy/session.go`:
+A **Session** is a unit of work: one agent conversation, from its first hook
+to session end. Its live state is `session.State` (`session/state.go`),
+persisted per session at `.git/entire-sessions/<id>.json` and shared across
+worktrees:
 
 ```go
-type Session struct {
-    ID          string       // e.g., "2025-12-01-8f76b0e8-b8f1-4a87-9186-848bdd83d62e"
-    Description string       // Human-readable summary (first prompt or derived)
-    Strategy    string       // Strategy that created this session
-    StartTime   time.Time
-    Checkpoints []Checkpoint
+type State struct {
+    SessionID        string          // agent-provided session identifier
+    BaseCommit       string          // commit the pending work sits on; moves with HEAD
+    WorktreeID       string          // internal git worktree name; empty for the main worktree
+    Phase            Phase           // lifecycle phase (see Session State below)
+    StartedAt        time.Time
+    StepCount        int             // steps recorded in this session
+    FilesTouched     []string        // files modified, created, or deleted by the session
+    LastCheckpointID id.CheckpointID // checkpoint from the most recent condensation
+    AgentType        types.AgentType
+    // ...
 }
 ```
 
 ### Checkpoint
 
-A **Checkpoint** captures a point-in-time within a session. Defined in `strategy/session.go`:
+A **Checkpoint** is the permanent record of a session's work, linked to a code
+commit by its `Entire-Checkpoint` trailer. Its root metadata is
+`checkpoint.CheckpointSummary` (an alias of `api/checkpoint`), stored at
+`<id[:2]>/<id[2:]>/metadata.json`; per-session content sits beside it:
 
 ```go
-type Checkpoint struct {
-    CheckpointID     id.CheckpointID // Stable identifier (12-hex or ULID; see Checkpoint ID Linking)
-    Message          string          // Commit message or checkpoint description
-    Timestamp        time.Time
-    IsTaskCheckpoint bool            // Task checkpoint (subagent) vs session checkpoint
-    ToolUseID        string          // Tool use ID for task checkpoints (empty for session)
+type CheckpointSummary struct {
+    CheckpointID     id.CheckpointID    // stable identifier (12-hex or ULID; see Checkpoint ID Linking)
+    Strategy         string
+    Branch           string
+    CommitSHA        string
+    CheckpointsCount int
+    FilesTouched     []string
+    Sessions         []SessionFilePaths // one entry per session in the checkpoint
+    // ...
 }
 ```
 
@@ -851,7 +865,8 @@ What it means for the domain model:
 
 ```
 strategy/
-├── session.go           # Session and Checkpoint types
+├── strategy.go          # Shared argument/result types (PendingCheckpoint, StepContext, ...)
+├── manual_commit.go     # ManualCommitStrategy and its constructor
 
 session/
 ├── state.go             # Active session state (StateStore, .git/entire-sessions/)

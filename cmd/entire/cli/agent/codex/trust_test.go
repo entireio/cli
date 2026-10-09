@@ -12,7 +12,7 @@ import (
 )
 
 // writeTrustFixture sets up the .codex/hooks.json fixture and points
-// CODEX_HOME at an isolated temp directory so HookTrustGaps resolves
+// CODEX_HOME at an isolated temp directory so inspectHookTrust resolves
 // the user config without touching ~/.codex on the dev machine. Tests
 // that need a config.toml write it themselves into CODEX_HOME after
 // the call.
