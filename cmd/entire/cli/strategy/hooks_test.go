@@ -1723,29 +1723,44 @@ func TestGenerateChainedContent(t *testing.T) {
 // end the script there: otherwise a later command's status decides the push
 // and an OPF abort is lost.
 // Saving the ref list must never be what blocks a push: when the temp file
-// cannot be created, Entire runs without the list (as an old hook would) and
-// the commands after it still get git's stdin.
+// cannot be created or written, Entire runs without the list (as an old hook
+// would) and the commands after it still get git's stdin, not a partial copy.
 func TestPrePushHookLine_UnwritableTMPDIRFallsBack(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("runs the generated POSIX sh script")
 	}
 	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n"
-	for _, entireExit := range []int{0, 3} {
-		t.Run(fmt.Sprintf("entire exits %d", entireExit), func(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		catFails   bool
+		entireExit int
+	}{
+		{name: "mktemp fails, entire succeeds", entireExit: 0},
+		{name: "mktemp fails, entire fails", entireExit: 3},
+		{name: "saving the list fails", catFails: true, entireExit: 0},
+	} {
+		entireExit := tc.entireExit
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			binDir := filepath.Join(dir, "bin")
 			require.NoError(t, os.MkdirAll(binDir, 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(binDir, "entire"),
 				[]byte(fmt.Sprintf("#!/bin/sh\nenv > %q\nexit %d\n", filepath.Join(dir, "entire.env"), entireExit)), 0o755))
-			script := "#!/bin/sh\n" + prePushHookLine(bareEntireHookCmd) + "\ncat > " + filepath.Join(dir, "after.stdin") + "\n"
+			tmpDir := filepath.Join(dir, "missing")
+			if tc.catFails {
+				// A cat that fails before reading anything, as a full disk would.
+				require.NoError(t, os.WriteFile(filepath.Join(binDir, "cat"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+				tmpDir = dir
+			}
+			script := "#!/bin/sh\n" + prePushHookLine(bareEntireHookCmd) + "\n/bin/cat > " + filepath.Join(dir, "after.stdin") + "\n"
 			require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook), []byte(script), 0o755))
 
 			cmd := exec.CommandContext(t.Context(), "sh", filepath.Join(dir, prePushHook), "origin", "url")
 			cmd.Stdin = strings.NewReader(refs)
 			cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-				"TMPDIR="+filepath.Join(dir, "missing"))
+				"TMPDIR="+tmpDir)
 			err := cmd.Run()
 			exit := 0
 			var exitErr *exec.ExitError
@@ -1765,6 +1780,9 @@ func TestPrePushHookLine_UnwritableTMPDIRFallsBack(t *testing.T) {
 			} else {
 				require.ErrorIs(t, afterErr, os.ErrNotExist, "nothing may run after Entire fails")
 			}
+			leftovers, globErr := filepath.Glob(filepath.Join(dir, "entire-pre-push.*"))
+			require.NoError(t, globErr)
+			require.Empty(t, leftovers, "a failed copy must be removed")
 		})
 	}
 }

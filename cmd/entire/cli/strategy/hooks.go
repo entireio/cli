@@ -954,16 +954,18 @@ const PrePushStdinRefsEnv = "ENTIRE_PRE_PUSH_STDIN_REFS"
 // Saving the list must never be what blocks a push. When the temp file cannot
 // be created or written, Entire runs without the list, as an old hook would:
 // it still applies OPF to its own push and warns when an outer push cannot be
-// checked.
+// checked. A partly written copy is discarded, not replayed: the commands
+// after Entire then read whatever git's stdin still holds.
 func prePushHookLine(cmdPrefix string) string {
 	withRefs := fmt.Sprintf(`%s=1 %s hooks git pre-push "$1" < "$_entire_refs"`, PrePushStdinRefsEnv, cmdPrefix)
 	withoutRefs := cmdPrefix + ` hooks git pre-push "$1" < /dev/null`
 	// Without Entire installed the line does nothing, stdin included.
 	return fmt.Sprintf(`if %s; then `, gitHookCommandAvailableTest(cmdPrefix)) +
 		`if _entire_refs="$(mktemp "${TMPDIR:-/tmp}/entire-pre-push.XXXXXX" 2>/dev/null)"; then ` +
-		`if cat > "$_entire_refs"; then ` + withRefs + `; else ` + withoutRefs + `; fi ` +
-		`|| { _entire_status=$?; rm -f "$_entire_refs"; exit "$_entire_status"; }; ` +
+		`if cat > "$_entire_refs"; then ` +
+		withRefs + ` || { _entire_status=$?; rm -f "$_entire_refs"; exit "$_entire_status"; }; ` +
 		`exec < "$_entire_refs"; rm -f "$_entire_refs"; ` +
+		`else rm -f "$_entire_refs"; ` + withoutRefs + ` || exit $?; fi; ` +
 		`else ` + withoutRefs + ` || exit $?; fi; fi`
 }
 
