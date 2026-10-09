@@ -1434,7 +1434,19 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		}
 		state.TokenUsage = sessionUsage
 	}
-	strategy.ConsumeAttachTokenWindow(state, tokenPos)
+	// A hook that checkpointed while attach waited at its prompt has already
+	// moved the token offset past what attach counted from; consuming from the
+	// stale position would move it back and have the next checkpoint recount.
+	countedFrom := 0
+	if existingState != nil {
+		countedFrom = existingState.TokenStart()
+	}
+	if state.TokenStart() == countedFrom {
+		strategy.ConsumeAttachTokenWindow(state, tokenPos)
+	} else {
+		logging.Warn(ctx, "attach: session tokens were checkpointed while attach was waiting; leaving the token offset as the hooks set it",
+			slog.Int("counted_from", countedFrom), slog.Int("token_start", state.TokenStart()))
+	}
 	if opts.Review {
 		state.Kind = session.KindAgentReview
 		state.ReviewSkills = reviewSkills
