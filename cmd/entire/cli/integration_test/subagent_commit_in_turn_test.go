@@ -320,6 +320,108 @@ func TestSubagentCheckpoints_CommitAfterBackgroundTaskCompletes_LinksViaFiles(t 
 	}
 }
 
+// TestSubagentCheckpoints_BackgroundTaskCompletesMidTurn_ParentCommitLinks pins
+// the ordering from issue #2653: a background subagent appends to a tracked
+// file and its completion arrives while the parent is still mid-turn, and the
+// parent commits in that same turn, before any Stop. The commit must link to the
+// session through the subagent's file and carry the subagent's transcript.
+func TestSubagentCheckpoints_BackgroundTaskCompletesMidTurn_ParentCommitLinks(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	const (
+		taskToolUseID = "toolu_01CompletesMidTurn"
+		subagentID    = "f5555666677778888"
+		editedFile    = "notes.txt"
+		baseContent   = "base\n"
+		editedContent = "base\nadded by the background subagent\n"
+	)
+	env.WriteFile(editedFile, baseContent)
+	env.GitAdd(editedFile)
+	env.GitCommit("Add notes")
+
+	sess := env.NewSession()
+	sess.CreateTranscript("delegate a background task, then commit", nil)
+
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	if err := env.SimulatePreTask(sess.ID, sess.TranscriptPath, taskToolUseID); err != nil {
+		t.Fatalf("SimulatePreTask failed: %v", err)
+	}
+	if err := env.SimulatePostTask(PostTaskInput{
+		SessionID:      sess.ID,
+		TranscriptPath: sess.TranscriptPath,
+		ToolUseID:      taskToolUseID,
+		AgentID:        subagentID,
+		Background:     true,
+	}); err != nil {
+		t.Fatalf("SimulatePostTask (background stub) failed: %v", err)
+	}
+
+	subagentTranscript := sess.CreateSubagentTranscript(subagentID, []FileChange{
+		{Path: editedFile, Content: editedContent},
+	})
+	env.WriteFile(editedFile, editedContent)
+	if err := env.SimulateSubagentStop(SubagentStopInput{
+		SessionID:           sess.ID,
+		TranscriptPath:      sess.TranscriptPath,
+		AgentID:             subagentID,
+		AgentTranscriptPath: subagentTranscript,
+	}); err != nil {
+		t.Fatalf("SimulateSubagentStop failed: %v", err)
+	}
+
+	state, err := env.GetSessionState(sess.ID)
+	if err != nil || state == nil {
+		t.Fatalf("GetSessionState failed: %v (state=%v)", err, state)
+	}
+	if !state.Phase.IsActive() || len(state.LiveTaskRecords()) != 0 {
+		t.Fatalf("precondition: want an ACTIVE parent with only a completed record, got phase=%s records=%+v",
+			state.Phase, state.TaskRecords)
+	}
+
+	env.GitCommitWithHooksAsAgent("Update notes", editedFile)
+
+	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	if checkpointID == "" {
+		t.Fatalf("parent's mid-turn commit of the subagent's file should carry an Entire-Checkpoint trailer")
+	}
+	metadataContent, ok := env.ReadFileFromBranch(paths.MetadataBranchName, SessionMetadataPath(checkpointID))
+	if !ok {
+		t.Fatalf("session metadata missing for checkpoint %s", checkpointID)
+	}
+	var metadata checkpoint.Metadata
+	if err := json.Unmarshal([]byte(metadataContent), &metadata); err != nil {
+		t.Fatalf("parse session metadata: %v", err)
+	}
+	if metadata.SessionID != sess.ID {
+		t.Errorf("checkpoint session = %q, want %q", metadata.SessionID, sess.ID)
+	}
+	if !containsFile(metadata.FilesTouched, editedFile) {
+		t.Errorf("checkpoint files_touched = %v, want it to contain %s", metadata.FilesTouched, editedFile)
+	}
+	storedTranscript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+		CheckpointTaskFilePath(checkpointID, taskToolUseID, "agent-"+subagentID+".jsonl"))
+	if !ok {
+		t.Fatalf("subagent transcript not materialized under the checkpoint's tasks/ subtree")
+	}
+	if !strings.Contains(storedTranscript, editedFile) {
+		t.Errorf("materialized subagent transcript does not reference %q", editedFile)
+	}
+
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	state, err = env.GetSessionState(sess.ID)
+	if err != nil || state == nil {
+		t.Fatalf("GetSessionState failed: %v (state=%v)", err, state)
+	}
+	if containsFile(state.FilesTouched, editedFile) {
+		t.Errorf("%s still pending after it was committed: %v", editedFile, state.FilesTouched)
+	}
+}
+
 // TestSubagentCheckpoints_JointCommitWithRunningSubagent_KeepsBothSessions pins
 // that the read-only gate does not drop a co-author. A background subagent is
 // still running under an IDLE parent, so its edit is not in the parent's
