@@ -206,6 +206,59 @@ func exactWorktreeMatches(states []*SessionState, worktreePath string) []*Sessio
 	return exact
 }
 
+// BackgroundClaimContext is what a background task's SubagentStop needs to
+// decide which new untracked files it may claim.
+type BackgroundClaimContext struct {
+	// Recorded holds every path a session in the task's worktree has in
+	// FilesTouched.
+	Recorded map[string]struct{}
+
+	// Overlapped reports that another background task in the worktree was
+	// running at some point since this task launched: still running, or
+	// completed after this task's launch.
+	Overlapped bool
+}
+
+// LoadBackgroundClaimContext loads the BackgroundClaimContext for the task
+// toolUseID of sessionID. ok is false when the session has no state, no
+// recorded worktree, or no record for the task, so its launch time and the
+// files other sessions own are unknown.
+func LoadBackgroundClaimContext(ctx context.Context, sessionID, toolUseID string) (claims BackgroundClaimContext, ok bool, err error) {
+	states, err := ListSessionStates(ctx)
+	if err != nil {
+		return BackgroundClaimContext{}, false, err
+	}
+	var own *SessionState
+	for _, state := range states {
+		if state.SessionID == sessionID {
+			own = state
+			break
+		}
+	}
+	if own == nil || own.WorktreePath == "" {
+		return BackgroundClaimContext{}, false, nil
+	}
+	task := own.FindTaskRecord(toolUseID)
+	if task == nil {
+		return BackgroundClaimContext{}, false, nil
+	}
+	claims.Recorded = make(map[string]struct{})
+	for _, state := range exactWorktreeMatches(states, own.WorktreePath) {
+		for _, file := range state.FilesTouched {
+			claims.Recorded[file] = struct{}{}
+		}
+		for _, rec := range state.TaskRecords {
+			if !rec.Background || (state.SessionID == sessionID && rec.ToolUseID == toolUseID) {
+				continue
+			}
+			if rec.CompletedAt.IsZero() || rec.CompletedAt.After(task.StartedAt) {
+				claims.Overlapped = true
+			}
+		}
+	}
+	return claims, true, nil
+}
+
 // findSessionsForWorktree finds all sessions for the given worktree path.
 // Exact WorktreePath matches win; otherwise sessions recorded in another
 // worktree of the same repository (shared git common dir) are matched, as long

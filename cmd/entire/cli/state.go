@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,6 +40,14 @@ type PrePromptState struct {
 	// untracked file in the worktree would be misreported as created by this
 	// turn.
 	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
+
+	// UntrackedFileStats records the size and modification time of each
+	// regular file in UntrackedFiles. Turn-end compares them to find
+	// pre-existing untracked files the turn changed: git status reports those
+	// as untracked both before and after, and an edit made through a shell
+	// command is never named in the transcript. Absent in state written by
+	// older versions, which then detect no such changes.
+	UntrackedFileStats map[string]UntrackedFileStat `json:"untracked_file_stats,omitempty"`
 
 	// TranscriptOffset is the unified transcript position when this state was captured.
 	// For Claude Code (JSONL), this is the line count.
@@ -83,6 +92,77 @@ func (s *PrePromptState) PreUntrackedFiles() []string {
 		return []string{}
 	}
 	return s.UntrackedFiles
+}
+
+// UntrackedFileStat is enough of an untracked file's metadata to tell whether
+// it changed, without hashing its content on every prompt: the stat fields
+// git's index compares for the same purpose. Inode and ChangeTime are zero
+// where the platform does not expose them (see fileChangeStamp).
+type UntrackedFileStat struct {
+	Size       int64  `json:"size"`
+	ModTime    int64  `json:"mod_time_ns"`
+	Inode      uint64 `json:"ino,omitempty"`
+	ChangeTime int64  `json:"ctime_ns,omitempty"`
+}
+
+// statUntrackedFiles records an UntrackedFileStat for each of files that is a
+// regular file in the worktree. Fails open: a file it cannot stat is left out
+// and simply never reports a change.
+func statUntrackedFiles(ctx context.Context, files []string) map[string]UntrackedFileStat {
+	if len(files) == 0 {
+		return nil
+	}
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "state"), "skipping untracked file stats: no worktree root",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	stats := make(map[string]UntrackedFileStat, len(files))
+	for _, file := range files {
+		if stat, ok := statWorktreeFile(repoRoot, file); ok {
+			stats[file] = stat
+		}
+	}
+	return stats
+}
+
+// ChangedUntrackedFiles returns the files in UntrackedFileStats whose stat
+// fields no longer match: pre-existing untracked files changed
+// since the prompt started. A file that is gone or no longer a regular file is
+// not reported; one that was committed since is reported, and turn-end's
+// filterToUncommittedFiles drops it.
+func (s *PrePromptState) ChangedUntrackedFiles(repoRoot string) []string {
+	if s == nil || len(s.UntrackedFileStats) == 0 {
+		return nil
+	}
+	var changed []string
+	for file, before := range s.UntrackedFileStats {
+		if now, ok := statWorktreeFile(repoRoot, file); ok && now != before {
+			changed = append(changed, file)
+		}
+	}
+	slices.Sort(changed)
+	return changed
+}
+
+// statWorktreeFile stats file, a repo-relative path, through the worktree root
+// without following a final symlink. ok is false unless it is a regular file.
+func statWorktreeFile(repoRoot, file string) (UntrackedFileStat, bool) {
+	root, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return UntrackedFileStat{}, false
+	}
+	name, err := worktreedir.Name(repoRoot, file)
+	if err != nil {
+		return UntrackedFileStat{}, false
+	}
+	info, err := root.Lstat(name)
+	if err != nil || !info.Mode().IsRegular() {
+		return UntrackedFileStat{}, false
+	}
+	inode, changeTime := fileChangeStamp(info)
+	return UntrackedFileStat{Size: info.Size(), ModTime: info.ModTime().UnixNano(), Inode: inode, ChangeTime: changeTime}, true
 }
 
 // normalizePrePromptState migrates deprecated fields after loading from JSON.
@@ -155,6 +235,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		Timestamp:            time.Now().UTC().Format(time.RFC3339),
 		UntrackedFiles:       untrackedFiles,
 		UntrackedScanSkipped: scanSkipped,
+		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
 		TranscriptOffset:     transcriptOffset,
 	}
 
