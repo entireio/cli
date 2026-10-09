@@ -335,3 +335,28 @@ func TestPrePushCheckpointRefs_UnusableCacheIsReportedNotPending(t *testing.T) {
 	require.Equal(t, refs, queuedRefs(t, repo))
 	assertRefsAbsentFromRemote(t, bareDir, refs, "nothing may ship without a scan")
 }
+
+// A ref that hits a cap must not hide its unscanned siblings: the rewrite
+// reports the cap ref's error, and if that suppressed the worker the siblings
+// would stay held on every push while the capped ref sits first in the queue.
+func TestPrePushCheckpointRefs_CapErrorStillStartsWorkerForPendingSiblings(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
+	require.Equal(t, refs[0], queuedRefs(t, repo)[0], "the capped ref must be first in the queue")
+	t.Setenv("ENTIRE_OPF_BOOTSTRAP_LIMIT", "1")
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+	spawns := swapOPFScanSpawn(t)
+
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = oldWriter })
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+
+	require.Equal(t, []string{"origin"}, *spawns, "the pending sibling needs the worker")
+	require.Contains(t, buf.String(), opfScanPendingNotice)
+	require.Contains(t, buf.String(), "bootstrap", "the cap must still be reported")
+}

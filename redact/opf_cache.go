@@ -15,8 +15,10 @@ import (
 //
 // An entry maps the hash of each prose leaf in one blob to the spans OPF found
 // in it. It holds no text: a leaf is identified only by its SHA-256, and a span
-// only by offsets and a label. Implementations must be safe to call from one
-// process at a time; a missing or unreadable entry reports ok=false.
+// only by offsets and a label. Implementations must be safe across processes:
+// the background scan worker stores and prunes entries while a pre-push reads
+// them, so a store must replace an entry atomically, and a missing, partial,
+// or unreadable entry reports ok=false rather than an error.
 type OPFSpanCache interface {
 	LoadOPFSpans(key string) (spans map[string][]Span, ok bool)
 	StoreOPFSpans(key string, spans map[string][]Span) error

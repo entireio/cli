@@ -381,13 +381,36 @@ func warnOPFCheckpointRefsWithheld(ctx context.Context, err error, withheld int)
 	if withheld == 0 {
 		return
 	}
-	var pending *OPFScanPendingError
-	if errors.As(err, &pending) {
+	if pending, rest := splitOPFScanPending(err); pending {
 		fmt.Fprintln(stderrWriter, opfScanPendingNotice)
-		return
+		if rest == nil {
+			return
+		}
+		err = rest
 	}
 	fmt.Fprintf(stderrWriter,
 		"[entire] %d checkpoint ref(s) were not pushed and stay queued for the next push: %v\n", withheld, err)
+}
+
+// splitOPFScanPending separates the scan-pending signal from any other error
+// the rewrite reported alongside it: a capped ref and an unscanned sibling
+// arrive joined, and the user needs to hear about both.
+func splitOPFScanPending(err error) (bool, error) {
+	var pending *OPFScanPendingError
+	if !errors.As(err, &pending) {
+		return false, err
+	}
+	var joined interface{ Unwrap() []error }
+	if !errors.As(err, &joined) {
+		return true, nil
+	}
+	var rest []error
+	for _, e := range joined.Unwrap() {
+		if !errors.As(e, &pending) {
+			rest = append(rest, e)
+		}
+	}
+	return true, errors.Join(rest...)
 }
 
 // opfScanPendingNotice is what the user sees when checkpoints are held for the

@@ -9,7 +9,7 @@ import (
 // it. Nil streams are opened as the null device instead.
 func TestDetachedCommand_StdioIsNullDevice(t *testing.T) {
 	t.Parallel()
-	cmd := detachedCommand("/bin/entire", "", "__opf_flush")
+	cmd := detachedCommand("/bin/entire", "", "__opf_scan")
 	if cmd.Stdout != nil {
 		t.Errorf("Stdout = %T; want nil so the child writes to the null device, not a pipe", cmd.Stdout)
 	}

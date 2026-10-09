@@ -93,6 +93,7 @@ func rewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	// the queue belongs to the flush.
 	existing, _ := partitionLocalRefs(repo, queued)
 	var firstErr error
+	var scanPending *OPFScanPendingError
 	for _, refName := range existing {
 		// Whole-flush stop, alongside ErrOPFNoEnabledCategories below: a
 		// tripped process-wide breaker (this loop's own prior ref, or anything
@@ -140,9 +141,19 @@ func rewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 			}
 			break
 		}
+		var pendingErr *OPFScanPendingError
+		if errors.As(rewriteErr, &pendingErr) {
+			scanPending = pendingErr
+		}
 		if firstErr == nil {
 			firstErr = rewriteErr
 		}
+	}
+	// A capped ref ahead of an unscanned one would otherwise hide the pending
+	// signal, and with it the worker the unscanned ref is waiting for.
+	var firstPending *OPFScanPendingError
+	if scanPending != nil && !errors.As(firstErr, &firstPending) {
+		return errors.Join(firstErr, scanPending)
 	}
 	return firstErr
 }

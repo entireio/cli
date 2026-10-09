@@ -42,8 +42,9 @@ func SpawnDetached(dir string, args ...string) {
 // Stdout and stderr stay nil, which os/exec opens as the null device. A
 // non-*os.File writer such as io.Discard would instead hand the child a pipe
 // drained by a goroutine in this process; once this process exits, the child's
-// next write to that pipe raises SIGPIPE and kills it. A child that reports
-// progress on stderr (`__opf_flush` does) would die on its first line.
+// next write to that pipe raises SIGPIPE and kills it. A child that writes
+// anything to stderr, such as a warning from the `__opf_scan` worker, would die
+// on its first line.
 func detachedCommand(executable, dir string, args ...string) *exec.Cmd {
 	// context.Background(): the child must outlive the parent, so it is never
 	// tied to a cancellable context.
