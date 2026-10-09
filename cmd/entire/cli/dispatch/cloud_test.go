@@ -172,6 +172,31 @@ func TestCloudClient_CreateDispatch_StopsPollingWhenContextEnds(t *testing.T) {
 	}
 }
 
+// TestCloudClient_CreateDispatch_ContextEndsMidPoll: a deadline that lands
+// while a poll is in flight still reports the run as generating, not a raw
+// transport error.
+func TestCloudClient_CreateDispatch_ContextEndsMidPoll(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			<-r.Context().Done()
+			return
+		}
+		run := testDispatchRun("")
+		run["status"] = dispatchStatusGenerating
+		writeDispatchRun(t, w, http.StatusAccepted, run)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := newTestCloudClient(t, srv.URL, "t").CreateDispatch(ctx, CreateDispatchRequest{Repos: []string{testRepoSlug}}, "")
+	if err == nil || !strings.Contains(err.Error(), "dispatch "+testDispatchRunID+" is still generating") {
+		t.Fatalf("expected a still-generating error, got %v", err)
+	}
+}
+
 // TestCloudClient_CreateDispatch_BudgetCoversTheCreateRequest: api.Client has
 // no timeout, so a cell that accepts the POST but never answers must still be
 // cut off by the operation budget.

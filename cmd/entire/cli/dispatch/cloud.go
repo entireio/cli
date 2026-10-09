@@ -185,11 +185,15 @@ func (c *CloudClient) waitForDispatch(ctx context.Context, run *APIRun) (*APIRun
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, fmt.Errorf("dispatch %s is still generating: %w", run.ID, ctx.Err())
+			return nil, stillGeneratingError(ctx, run.ID)
 		case <-timer.C:
 		}
 		var next APIRun
 		if err := c.doJSON(ctx, http.MethodGet, dispatchesPath+"/"+url.PathEscape(run.ID), nil, &next); err != nil {
+			// The budget can run out mid-poll as well as between polls.
+			if ctx.Err() != nil {
+				return nil, stillGeneratingError(ctx, run.ID)
+			}
 			return nil, err
 		}
 		run = &next
@@ -205,6 +209,10 @@ func (c *CloudClient) waitForDispatch(ctx context.Context, run *APIRun) (*APIRun
 	default:
 		return nil, fmt.Errorf("dispatch service returned unknown status %s", strconv.Quote(run.Status))
 	}
+}
+
+func stillGeneratingError(ctx context.Context, id string) error {
+	return fmt.Errorf("dispatch %s is still generating: %w", id, ctx.Err())
 }
 
 // parseNotFoundRepos pulls the slugs out of a "repository not found: a/b, c/d"
