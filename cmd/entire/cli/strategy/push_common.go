@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -25,23 +26,84 @@ import (
 // partitionLocalRefs splits refs into those that exist locally (pushable) and
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
 // cleanup). Stale refs can never push, so callers drop them from the queue
-// rather than retrying them forever.
+// rather than retrying them forever. A queued canonical checkpoint ref may
+// name a packed ref stored under its case-folded shard spelling; return the
+// spelling that resolves locally so callers push and rewrite the real ref.
 func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (existing, stale []plumbing.ReferenceName) {
 	for _, ref := range refs {
-		_, err := repo.Reference(ref, false)
+		resolved := resolveQueuedCheckpointRef(repo, ref)
+		_, err := repo.Reference(resolved, false)
 		switch {
 		case err == nil:
-			existing = append(existing, ref)
+			existing = append(existing, resolved)
 		case errors.Is(err, plumbing.ErrReferenceNotFound):
 			// Genuinely gone (e.g. deleted by cleanup) — never pushable, drop it.
 			stale = append(stale, ref)
 		default:
 			// A transient/IO lookup error: keep the ref as pushable so a real
 			// entry isn't dropped from the queue forever over a flaky read.
-			existing = append(existing, ref)
+			existing = append(existing, resolved)
 		}
 	}
 	return existing, stale
+}
+
+// resolveQueuedCheckpointRef returns ref's case-folded spelling when the
+// queued spelling is absent but that alternate exists locally. Queues created
+// before folded-ref handling stored the canonical spelling, which no longer
+// resolves after git packs the ref under its filesystem-selected directory.
+func resolveQueuedCheckpointRef(repo *git.Repository, ref plumbing.ReferenceName) plumbing.ReferenceName {
+	if _, err := repo.Reference(ref, false); !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return ref
+	}
+	cid, ok := checkpoint.ParseRef(ref)
+	if !ok {
+		return ref
+	}
+	folded, ok := checkpoint.FoldedRefName(cid)
+	if !ok {
+		return ref
+	}
+	if _, err := repo.Reference(folded, false); err == nil {
+		return folded
+	}
+	return ref
+}
+
+// normalizeQueuedCheckpointRefs replaces stale canonical queue entries with
+// their locally-resolving folded spelling. Enqueue before removing so an
+// interrupted normalization leaves the checkpoint queued, possibly twice, but
+// never drops it. The returned names are deduplicated for the current flush.
+func normalizeQueuedCheckpointRefs(repo *git.Repository, queue *checkpoint.PushQueue, refs []plumbing.ReferenceName) ([]plumbing.ReferenceName, error) {
+	original := make(map[plumbing.ReferenceName]struct{}, len(refs))
+	for _, ref := range refs {
+		original[ref] = struct{}{}
+	}
+
+	normalized := make([]plumbing.ReferenceName, 0, len(refs))
+	seen := make(map[plumbing.ReferenceName]struct{}, len(refs))
+	var replaced []plumbing.ReferenceName
+	for _, ref := range refs {
+		resolved := resolveQueuedCheckpointRef(repo, ref)
+		if resolved != ref {
+			replaced = append(replaced, ref)
+			if _, alreadyQueued := original[resolved]; !alreadyQueued {
+				if err := queue.Enqueue(resolved); err != nil {
+					return nil, fmt.Errorf("enqueue normalized checkpoint ref %s: %w", resolved, err)
+				}
+			}
+		}
+		if _, duplicate := seen[resolved]; !duplicate {
+			seen[resolved] = struct{}{}
+			normalized = append(normalized, resolved)
+		}
+	}
+	if len(replaced) > 0 {
+		if err := queue.Remove(replaced); err != nil {
+			return nil, fmt.Errorf("remove stale checkpoint ref spellings: %w", err)
+		}
+	}
+	return normalized, nil
 }
 
 // batchPushRefs pushes all of refs to target in a single git push,

@@ -204,6 +204,47 @@ func TestMigrateBranchToRefs(t *testing.T) {
 	assert.Equal(t, before[cid2.String()], refHash(t, repo, cid2))
 }
 
+func TestMigrateBranchToRefs_AdvancesPackedFoldedRef(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo, _ := setupBranchTestRepo(t)
+	cid := foldableULID
+	branch := NewGitStore(repo, DefaultV1Refs())
+	seedBranchCheckpoint(t, branch, cid, "s1")
+
+	_, err := MigrateBranchToRefs(ctx, repo, false)
+	require.NoError(t, err)
+	queue, err := PushQueueForRepo(ctx, repo)
+	require.NoError(t, err)
+	queued, err := queue.Drain()
+	require.NoError(t, err)
+	require.NoError(t, queue.Remove(queued))
+
+	// A case-insensitive filesystem can leave the migrated ref under the other
+	// shard spelling after packing. A later migration must extend and enqueue
+	// that ref rather than CASing the absent canonical spelling.
+	foldedStore, foldedName := foldShardRefAndPack(t, newGitRefsStore(repo), cid)
+	before, err := foldedStore.repo.Reference(foldedName, true)
+	require.NoError(t, err)
+	branch = NewGitStore(foldedStore.repo, DefaultV1Refs())
+	seedBranchCheckpoint(t, branch, cid, "s2")
+
+	result, err := MigrateBranchToRefs(ctx, foldedStore.repo, false)
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{cid}, result.Migrated)
+	after, err := foldedStore.repo.Reference(foldedName, true)
+	require.NoError(t, err)
+	commit, err := foldedStore.repo.CommitObject(after.Hash())
+	require.NoError(t, err)
+	require.Equal(t, []plumbing.Hash{before.Hash()}, commit.ParentHashes)
+
+	queue, err = PushQueueForRepo(ctx, foldedStore.repo)
+	require.NoError(t, err)
+	queued, err = queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{foldedName}, queued)
+}
+
 func TestMigrateBranchToRefs_IdempotentRerunDoesNotUpdateRef(t *testing.T) {
 	t.Parallel()
 
