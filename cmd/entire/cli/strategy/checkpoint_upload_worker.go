@@ -49,7 +49,7 @@ const CheckpointUploadForegroundEnv = "ENTIRE_CHECKPOINT_UPLOAD_FOREGROUND"
 // off — its checkpoints are on the remote when the push returns, which
 // entire.io, `entire trail create`, and short-lived environments rely on — and
 // short enough that a backlog no longer holds the user's push. Var for tests.
-var checkpointInlineUploadBudget = 5 * time.Second
+var checkpointInlineUploadBudget = 10 * time.Second
 
 // foregroundUploadLockWait bounds how long a foreground flush (hand-off
 // disabled) waits for a running worker before leaving its refs queued. Var for
