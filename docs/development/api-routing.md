@@ -33,10 +33,13 @@ env token has none of, so it stays on the active context.
 The dispatch wizard and `search --repo` completion use the control plane's
 `ListRepos` index, sorted by `last_activity_at` descending, through
 `listCheckpointRepoIndex` for the wizard. Its walk is bounded to 5,000 entries
-and ten seconds; truncation logs a warning and keeps the partial catalogue.
+and ten seconds, with `hasCheckpoints=true` so empty repos do not consume the
+budget; truncation logs a warning and keeps the partial catalogue.
 Completion instead uses `listCompletionRepoIndex`: one page of up to 100 entries,
 a one-second request timeout, and server-side checkpoint/name filters. It never
-follows the cursor and filters returned slugs by the typed prefix. Both omit
+follows the cursor and filters returned slugs by the typed prefix. The server's
+name filter is sent only for text after a complete `gh/` or `et/` prefix, so
+partial forge prefixes do not hide valid suggestions. Both omit
 repos with no checkpoints and qualify names by provider. The wizard derives READY
 placement jurisdictions from the same walk and retains its local-repo fallback;
 completion silently falls back to `*` on errors. Code-search filters resolve these qualified

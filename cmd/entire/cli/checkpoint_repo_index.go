@@ -23,7 +23,11 @@ func listCheckpointRepoIndex(ctx context.Context) ([]coreapi.RepoIndexEntry, err
 	}
 	truncated := false
 	entries, partial, err := fetchPagesBounded(ctx, checkpointRepoIndexBudget, func(ctx context.Context, cursor string) ([]coreapi.RepoIndexEntry, string, error) {
-		params := coreapi.ListReposParams{Sort: coreapi.NewOptString("last_activity_at"), Order: coreapi.NewOptListReposOrder(coreapi.ListReposOrderDesc)}
+		params := coreapi.ListReposParams{
+			Sort:           coreapi.NewOptString("last_activity_at"),
+			Order:          coreapi.NewOptListReposOrder(coreapi.ListReposOrderDesc),
+			HasCheckpoints: coreapi.NewOptListReposHasCheckpoints(coreapi.ListReposHasCheckpointsTrue),
+		}
 		if cursor != "" {
 			params.PageToken = coreapi.NewOptString(cursor)
 		}
@@ -80,13 +84,11 @@ func listCompletionRepoIndex(ctx context.Context, prefix string) ([]coreapi.Repo
 		PageSize:       coreapi.NewOptInt32(100),
 		HasCheckpoints: coreapi.NewOptListReposHasCheckpoints(coreapi.ListReposHasCheckpointsTrue),
 	}
-	// Q searches the index's owner/repo name, not the CLI's forge prefix.
+	// Q searches owner/repo, not the forge. Partial forge prefixes must
+	// remain local filters or they would exclude unrelated repo names.
 	query := strings.ToLower(prefix)
-	if strings.HasPrefix(query, "gh/") || strings.HasPrefix(query, "et/") {
-		query = query[3:]
-	}
-	if query != "" {
-		params.Q = coreapi.NewOptString(query)
+	if (strings.HasPrefix(query, "gh/") || strings.HasPrefix(query, "et/")) && len(query) > 3 {
+		params.Q = coreapi.NewOptString(query[3:])
 	}
 	out, err := client.ListRepos(ctx, params)
 	if err != nil {

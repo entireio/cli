@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -109,6 +110,9 @@ func TestCheckpointRepoIndex_PagesAndTruncation(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		if r.URL.Query().Get("hasCheckpoints") != "true" {
+			t.Errorf("wizard page includes empty repos: %s", r.URL)
+		}
 		if r.URL.Query().Get("sort") != "last_activity_at" || r.URL.Query().Get("order") != "desc" {
 			t.Errorf("not recent-first: %s", r.URL)
 		}
@@ -207,6 +211,48 @@ func TestCompleteRepoFlag_OnePageAndPrefix(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("calls = %d", calls.Load())
+	}
+}
+
+func TestCompleteRepoFlag_PartialForgePrefix(t *testing.T) {
+	entries := []coreapi.RepoIndexEntry{
+		{ID: "github", Name: "web", FullName: "acme/web", Provider: coreapi.NewOptString("github"), CheckpointCount: coreapi.NewOptInt64(1)},
+		{ID: "native", Name: "native", FullName: "proj/native", Provider: coreapi.NewOptString("entire"), CheckpointCount: coreapi.NewOptInt64(1)},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("q")
+		if query != "" {
+			t.Errorf("forge prefix used as name filter: %q", query)
+		}
+		out := coreapi.ListReposOutputBody{Repos: []coreapi.RepoIndexEntry{}}
+		for _, entry := range entries {
+			if strings.Contains(strings.ToLower(entry.FullName), query) {
+				out.Repos = append(out.Repos, entry)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(&out); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer srv.Close()
+	old := newCellCoreClient
+	newCellCoreClient = func() (cellCoreClient, error) { return coreapi.NewWithBearer(srv.URL, "test") }
+	t.Cleanup(func() { newCellCoreClient = old })
+	for _, tc := range []struct{ prefix, want string }{
+		{"g", "*,gh/acme/web"}, {"gh", "*,gh/acme/web"}, {"gh/", "*,gh/acme/web"},
+		{"e", "*,et/proj/native"}, {"et", "*,et/proj/native"}, {"et/", "*,et/proj/native"},
+		{"G", "*,gh/acme/web"},
+	} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			// This parent replaces the process-global core-client constructor.
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			got, directive := completeRepoFlag(cmd, nil, tc.prefix)
+			if strings.Join(got, ",") != tc.want || directive != cobra.ShellCompDirectiveNoFileComp {
+				t.Fatalf("completion %q = %v, %v; want %s", tc.prefix, got, directive, tc.want)
+			}
+		})
 	}
 }
 
