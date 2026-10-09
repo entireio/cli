@@ -295,7 +295,8 @@ func (h adoptAgentHome) holds(path string) bool {
 // agent.RepoHomeLayout. It returns the zero value and a nil error when state
 // names no home or no agent, or when that agent is unknown or has no home
 // layout, and the zero value and a non-nil error when the home is refused or
-// holds no sessions for sourceWorktree.
+// when the agent keeps sourceWorktree's sessions outside its active home (an
+// error wrapping errAdoptHomeUnscoped).
 func resolveAdoptAgentHome(state *session.State, sourceWorktree string) (adoptAgentHome, error) {
 	if state.AgentHome == "" || state.AgentType == "" {
 		return adoptAgentHome{}, nil
@@ -317,10 +318,17 @@ func resolveAdoptAgentHome(state *session.State, sourceWorktree string) (adoptAg
 		return adoptAgentHome{}, err //nolint:wrapcheck // the error already names the agent and what it could not resolve
 	}
 	if !ok {
-		return adoptAgentHome{}, fmt.Errorf("%s keeps no sessions for %s beneath its home", provider.Type(), sourceWorktree)
+		return adoptAgentHome{}, fmt.Errorf("%s %w", provider.Type(), errAdoptHomeUnscoped)
 	}
 	return adoptAgentHome{path: home, agent: provider, layout: layout}, nil
 }
+
+// errAdoptHomeUnscoped is returned, wrapped, by resolveAdoptAgentHome when the
+// session's agent keeps the source worktree's sessions outside its active home
+// (see agent.RepoHomeLayout), as Pi does with PI_CODING_AGENT_SESSION_DIR set.
+// The session's home is then neither trusted nor refused: there is no place
+// beneath it to check the transcript against.
+var errAdoptHomeUnscoped = errors.New("keeps this worktree's sessions outside its active home")
 
 // validateAdoptSourceTranscript returns an error if source's transcript may
 // not be carried into an adopted session. The transcript must be absolute and
@@ -329,44 +337,57 @@ func resolveAdoptAgentHome(state *session.State, sourceWorktree string) (adoptAg
 // agent named by source.AgentType (of any agent when that is empty).
 //
 // It also returns source's trusted agent home when that home holds the
-// transcript, or when source has no transcript, and the zero value otherwise.
+// transcript, and the zero value otherwise, including when source has no
+// transcript: a home vouches for task transcripts only alongside the session's
+// own.
 func validateAdoptSourceTranscript(source *session.State, sourceWorktree string) (adoptAgentHome, error) {
-	if source == nil {
+	if source == nil || source.TranscriptPath == "" {
 		return adoptAgentHome{}, nil
 	}
-	home, homeErr := resolveAdoptAgentHome(source, sourceWorktree)
-	if source.TranscriptPath == "" {
-		return home, nil
-	}
-
 	if !filepath.IsAbs(source.TranscriptPath) {
 		return adoptAgentHome{}, fmt.Errorf("unexpected transcript path for session %s: %s is not absolute",
 			source.SessionID, source.TranscriptPath)
 	}
+
+	home, homeErr := resolveAdoptAgentHome(source, sourceWorktree)
 	if home.holds(filepath.Clean(source.TranscriptPath)) {
 		return home, nil
 	}
 	owner, ok := agent.AgentForTranscriptPath(source.TranscriptPath, sourceWorktree)
-	if !ok && home.path != "" {
-		// The session's home is trusted; the path, not the environment, is wrong.
-		return adoptAgentHome{}, fmt.Errorf("unexpected transcript path for session %s: %s is outside the session directory for %s, under both the session's agent home %s and the active home",
-			source.SessionID, source.TranscriptPath, sourceWorktree, home.path)
-	}
 	if !ok {
-		hint := "if the agent ran with a relocated home, rerun adopt with the same setting of the variable it used (" +
-			strings.Join(agent.RelocationEnvVars(), ", ") + ")"
-		if homeErr != nil {
-			return adoptAgentHome{}, fmt.Errorf("unexpected transcript path for session %s: %s is not owned by a registered agent for %s, and the session's recorded agent home was refused (%w); %s",
-				source.SessionID, source.TranscriptPath, sourceWorktree, homeErr, hint)
-		}
-		return adoptAgentHome{}, fmt.Errorf("unexpected transcript path for session %s: %s is not owned by a registered agent for %s; %s",
-			source.SessionID, source.TranscriptPath, sourceWorktree, hint)
+		return adoptAgentHome{}, fmt.Errorf("unexpected transcript path for session %s: %w",
+			source.SessionID, adoptTranscriptNotOwned(source, home, homeErr, sourceWorktree))
 	}
 	if source.AgentType != "" && owner.Type() != source.AgentType {
 		return adoptAgentHome{}, fmt.Errorf("unexpected transcript path for session %s: %s belongs to %s, but source state says %s",
 			source.SessionID, source.TranscriptPath, owner.Type(), source.AgentType)
 	}
 	return adoptAgentHome{}, nil
+}
+
+// adoptTranscriptNotOwned explains why neither home, the session's agent home
+// as resolveAdoptAgentHome returned it with homeErr, nor any agent's session
+// directory for sourceWorktree holds source's transcript. It suggests a
+// relocation variable only when one could help: not when the session's home
+// was trusted, since then the path is at fault, nor when the agent keeps the
+// worktree's sessions outside its home, since then the variable is already set.
+func adoptTranscriptNotOwned(source *session.State, home adoptAgentHome, homeErr error, sourceWorktree string) error {
+	path := source.TranscriptPath
+	switch {
+	case home.path != "":
+		return fmt.Errorf("%s is outside the session directory for %s, under both the session's agent home %s and the active home",
+			path, sourceWorktree, home.path)
+	case errors.Is(homeErr, errAdoptHomeUnscoped):
+		return fmt.Errorf("%s is not owned by a registered agent for %s, and the session's agent home %s cannot be checked: %w",
+			path, sourceWorktree, source.AgentHome, homeErr)
+	}
+	hint := "if the agent ran with a relocated home, rerun adopt with the same setting of the variable it used (" +
+		strings.Join(agent.RelocationEnvVars(), ", ") + ")"
+	if homeErr != nil {
+		return fmt.Errorf("%s is not owned by a registered agent for %s, and the session's recorded agent home was refused (%w); %s",
+			path, sourceWorktree, homeErr, hint)
+	}
+	return fmt.Errorf("%s is not owned by a registered agent for %s; %s", path, sourceWorktree, hint)
 }
 
 // dropInvalidAdoptTaskTranscripts clears each declared task transcript path in

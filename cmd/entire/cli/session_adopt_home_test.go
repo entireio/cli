@@ -276,3 +276,42 @@ func TestValidateAdoptSourceTranscript_HomeNotHoldingTheTranscriptVouchesForNoTa
 	assert.Empty(t, got.path, "a home that does not hold the transcript is not returned")
 	assert.ErrorContains(t, validateAdoptTaskTranscript(state, got, "child", staleChild, sourceRepo), "not owned by a registered agent")
 }
+
+func TestValidateAdoptSourceTranscript_NoTranscriptKeepsNoHome(t *testing.T) {
+	attachHomesEnv(t)
+	home := canonicalDir(t)
+	require.NoError(t, agent.RememberAgentHome(agent.AgentTypeCodex, home))
+	sourceRepo := t.TempDir()
+	state := &session.State{SessionID: attachHomeCodexSessionID, AgentType: agent.AgentTypeCodex, AgentHome: home}
+	child := filepath.Join(home, "sessions", "2026", "04", "08", "rollout-2026-04-08T10-44-00-child.jsonl")
+
+	got, err := validateAdoptSourceTranscript(state, sourceRepo)
+
+	require.NoError(t, err)
+	assert.Empty(t, got.path, "a home with no transcript behind it is not returned")
+	assert.ErrorContains(t, validateAdoptTaskTranscript(state, got, "child", child, sourceRepo), "not owned by a registered agent")
+}
+
+func TestValidateAdoptSourceTranscript_HomeWithoutTheWorktreesSessions(t *testing.T) {
+	attachHomesEnv(t)
+	t.Setenv("ENTIRE_TEST_PI_SESSION_DIR", "")
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	// Pi keeps its sessions outside its home: there is nowhere beneath a home
+	// to check a transcript against.
+	t.Setenv("PI_CODING_AGENT_SESSION_DIR", canonicalDir(t))
+	home := canonicalDir(t)
+	require.NoError(t, agent.RememberAgentHome(agent.AgentTypePi, home))
+	state := &session.State{
+		SessionID:      "pi-session",
+		AgentType:      agent.AgentTypePi,
+		AgentHome:      home,
+		TranscriptPath: filepath.Join(home, "sessions", "--repo--", "pi-session.jsonl"),
+	}
+
+	_, err := validateAdoptSourceTranscript(state, t.TempDir())
+
+	require.ErrorIs(t, err, errAdoptHomeUnscoped)
+	require.ErrorContains(t, err, "the session's agent home "+home+" cannot be checked: Pi keeps this worktree's sessions outside its active home")
+	assert.NotContains(t, err.Error(), "refused")
+	assert.NotContains(t, err.Error(), "rerun adopt", "the relocation variable is already set")
+}

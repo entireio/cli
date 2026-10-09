@@ -281,13 +281,17 @@ and task transcripts must still match the agent's task layout
 `AgentHome` or an untrusted one, the path must lie in the session directory of
 an agent's active home (`agent.AgentForTranscriptPath`). When neither holds
 the transcript, the error names the session's home if it was trusted, since
-then the path is at fault; otherwise it names the relocation variables
-(`agent.RelocationEnvVars`) and why the recorded home was refused.
+then the path is at fault. If the agent keeps the worktree's sessions outside
+its active home, as Pi does with `PI_CODING_AGENT_SESSION_DIR`, there is
+nowhere beneath the session's home to check, and the error says so; such a
+session can be adopted only where that store is active. Otherwise the error
+names the relocation variables (`agent.RelocationEnvVars`) and why the
+recorded home was refused.
 
 The adopted state keeps `AgentHome`, in the checked spelling, only while that
-home holds the transcript, and only that home vouches for task transcripts.
-Any other home is cleared, and the next turn start records the home the agent
-runs under.
+home holds the transcript, and only that home vouches for task transcripts. A
+session without a transcript keeps no home. Any other home is cleared, and
+the next turn start records the home the agent runs under.
 
 ### The Root Anchors
 
