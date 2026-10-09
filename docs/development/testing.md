@@ -116,7 +116,7 @@ unsafe in parallel tests. Prefer the `t.*` helpers for enforcement and cleanup.
 
 **Tests that touch git state must use an isolated temp repo — never the real repo CWD.**
 
-Many handlers (lifecycle, strategy, hooks) resolve the git repo from CWD via `OpenRepository`, `GetGitCommonDir`, `DetectFileChanges`, etc. Without isolation, tests can create session state files, shadow branches, or other artifacts in the real `.git/` directory.
+Many handlers (lifecycle, strategy, hooks) resolve the git repo from CWD via `OpenRepository`, `GetGitCommonDir`, `DetectFileChanges`, etc. Without isolation, tests can create session state files, checkpoint refs, or other artifacts in the real `.git/` directory.
 
 Use the `testutil` helpers:
 
@@ -182,6 +182,12 @@ using `entire` for real while tests run.
   `ENTIRE_TEST_AUTH_STORE_FILE` process-wide so every spawned `entire` (and
   every agent-invoked hook) inherits isolation. Any new harness that spawns
   the real binary must do the same.
+- **Agent credential preparation**: mocking a subprocess runner does not
+  isolate code that discovers credentials before executing it. Antigravity
+  generation tests use `newTestTextGenerator` with explicit temporary
+  authentication sources; production-resolver tests replace HOME/USERPROFILE,
+  agy's config override, and the ADC credential variable before discovery.
+  Keychain/file-token carryover tests use fake files, never the real home.
 - **OS keyring**: packages whose tests can reach the zalando keyring need
   `keyring.MockInit()` in `TestMain` (see `cmd/entire/cli/global_test.go`) —
   the `testdirs` fallback does not isolate keyring access in-process.

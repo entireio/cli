@@ -49,8 +49,10 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   for callers that also need the placement's id (repo_id) alongside its cell —
   used by trails (`newTrailAPIClient` in `api_client.go`, through the
   forge-qualified `resolveForgeRepoCellPlacement`), by cross-repo checkpoint
-  reads (`explain --repo`, `explain_repo.go`) and by
-  `experts --repo owner/repo`, which sends that placement id to entire-api
+  reads (`explain --repo`, `explain_repo.go`; the same placement id keys both
+  `/checkpoints/{id}` and the commit→checkpoint resolution at
+  `/commits/{sha}/checkpoints`) and by `experts --repo owner/repo`, which sends
+  that placement id to entire-api
   instead of re-deriving it from a data-plane repo listing.
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the

@@ -75,8 +75,8 @@ func TestHomeLayout_GetSessionDirLiesInTheFirstStore(t *testing.T) {
 				t.Fatalf("GetSessionDir: %v", err)
 			}
 			layout := provider.HomeLayout()
-			store, ok := layout.StoreContaining(home, dir)
-			if !ok || store != layout.StoresUnder(home)[0] {
+			first := agent.HomeLayout{Stores: layout.Stores[:1]}
+			if !first.Holds(home, dir) {
 				t.Fatalf("GetSessionDir = %q, want it in the first store of %v", dir, layout.StoresUnder(home))
 			}
 		})

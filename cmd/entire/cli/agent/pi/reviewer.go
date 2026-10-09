@@ -4,89 +4,37 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path"
-	"path/filepath"
-	"regexp"
-	"slices"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
-	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // NewReviewer returns the AgentReviewer for Pi.
 //
-// Argv shape: pi --mode json --print --no-approve --no-extensions
-// --extension <Entire extension>
-// [--model <model>] <prompt> (see buildPiReviewCmd).
+// Argv shape: pi --mode json --print --append-system-prompt <guardrail>
+// [--model <model>] <prompt>.
 // The prompt is passed as a positional message because Pi's CLI accepts prompts
 // as message arguments in non-interactive mode. Stdout is newline-delimited JSON
 // session events; the parser maps Pi's AgentSessionEvent stream into Entire's
 // review Event stream.
 func NewReviewer() *reviewtypes.ReviewerTemplate {
 	return &reviewtypes.ReviewerTemplate{
-		AgentName:    string(agent.AgentNamePi),
-		Prepare:      writeReviewExtension,
-		BuildCmd:     buildPiReviewCmd,
-		Parser:       parsePiReviewOutput,
-		ClassifyExit: classifyPiReviewExit,
+		AgentName: string(agent.AgentNamePi),
+		BuildCmd:  buildPiReviewCmd,
+		Parser:    parsePiReviewOutput,
 	}
 }
 
-// reviewExtensionName is where the review copy of Entire's extension lives,
-// as a name inside the per-user cache directory.
-const reviewExtensionName = "pi-review/entire-extension.ts"
-
-// piUnknownOptionPattern matches pi's error for a flag it does not know, e.g.
-// "Error: Unknown option: --no-approve".
-var piUnknownOptionPattern = regexp.MustCompile(`Unknown option: (-[^\s=]+)`)
-
-// piIsolationFlags are the flags buildPiReviewCmd relies on to keep the
-// reviewed checkout's configuration out of the reviewer.
-var piIsolationFlags = []string{"--no-approve", "--no-extensions", "--extension"}
-
-// classifyPiReviewExit reports a pi too old for one of the isolation flags as
-// such, instead of a bare "Unknown option".
-func classifyPiReviewExit(stderr string, err error) error {
-	for _, m := range piUnknownOptionPattern.FindAllStringSubmatch(stderr, -1) {
-		if slices.Contains(piIsolationFlags, m[1]) {
-			return fmt.Errorf("pi: this pi does not support %s, which isolated reviews need to keep the reviewed checkout's configuration out of the reviewer; update pi and retry: %w", m[1], err)
-		}
-	}
-	return nil
-}
-
-// buildPiReviewCmd builds the exec.Cmd for a pi review run.
-//
-// The reviewer runs inside the checkout under review, and pi loads every
-// project extension under .pi/extensions as code at startup, so a branch
-// could run anything as the reviewing user just by being reviewed. Project
-// trust is inherited from the nearest trusted ancestor, so a review worktree
-// inside a trusted repo would also load the branch's .pi/settings.json
-// (shellCommandPrefix, shellPath) and SYSTEM.md. --no-approve ignores all
-// project-local files for the run. --no-extensions also stops extension and
-// package discovery on its own. A pi that predates --no-approve (0.70.2 is one)
-// rejects it and exits before loading anything, so the review fails closed;
-// classifyPiReviewExit turns that into a message to update pi, since dropping
-// the flag would load the branch's .pi/settings.json. Entire's own extension,
-// which normally comes from that same project directory, is loaded from a copy
-// the binary writes (writeReviewExtension) so the review is still captured.
 func buildPiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
-	extPath, err := reviewExtensionPath()
-	if err != nil {
-		// writeReviewExtension resolves the same directory and already failed
-		// the run; a nil command stops Start.
-		return nil
-	}
-	args := []string{"--mode", "json", "--print", "--no-approve", "--no-extensions", "--extension", extPath}
+	args := []string{"--mode", "json", "--print", "--append-system-prompt", review.ReviewerGuardrail}
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
@@ -94,34 +42,6 @@ func buildPiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd 
 	cmd := exec.CommandContext(ctx, "pi", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), string(agent.AgentNamePi), cfg, prompt)
 	return cmd
-}
-
-// writeReviewExtension writes the extension buildPiReviewCmd loads, rendered
-// from the binary. Rewritten on every run so it always matches this binary.
-func writeReviewExtension(context.Context) error {
-	root, err := userdirs.CacheRoot()
-	if err != nil {
-		return fmt.Errorf("resolve cache dir: %w", err)
-	}
-	if err := osroot.MkdirAllNoSymlink(root, path.Dir(reviewExtensionName), 0o700); err != nil {
-		return fmt.Errorf("create pi review extension dir: %w", err)
-	}
-	// 0644 because pi reads the extension itself.
-	if err := jsonutil.WriteFileAtomicIn(root, reviewExtensionName, []byte(renderExtension()), 0o644); err != nil {
-		return fmt.Errorf("write pi review extension: %w", err)
-	}
-	return nil
-}
-
-// reviewExtensionPath is the absolute path of the file writeReviewExtension
-// writes, for pi's argv. It only resolves the path; building argv must not
-// create or open anything.
-func reviewExtensionPath() (string, error) {
-	dir, err := userdirs.CacheDirChecked()
-	if err != nil {
-		return "", fmt.Errorf("resolve cache dir: %w", err)
-	}
-	return filepath.Join(dir, filepath.FromSlash(reviewExtensionName)), nil
 }
 
 func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
@@ -133,6 +53,10 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, min(1024*1024, piReviewMaxScannerBuf)), piReviewMaxScannerBuf)
 		messageIDsWithTextDelta := map[string]struct{}{}
+		// pendingErr is the latest failure reason. It is reported only if the
+		// run still fails at the end: Pi auto-retries errors such as
+		// "overloaded", and a recovered error is not a failure.
+		pendingErr := ""
 		messageIDsWithUsage := map[string]struct{}{}
 		messageUsageByTurn := map[int]map[piReviewUsageKey]struct{}{}
 		turnNumber := 0
@@ -154,7 +78,11 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			switch env.Type {
 			case "turn_start":
 				turnNumber++
-			case "session", "agent_start", "queue_update", "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end":
+			case "auto_retry_start":
+				// Pi is retrying the failed attempt; judge the retry instead.
+				success = true
+				pendingErr = ""
+			case "session", "agent_start", "queue_update", "compaction_start", "compaction_end", "auto_retry_end":
 				// Session/control events do not map to user-visible review output.
 			case "message_update":
 				if text := env.AssistantMessageEvent.TextDelta(); text != "" {
@@ -165,6 +93,7 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 				if env.Message.Role == "assistant" {
 					if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
 						success = false
+						pendingErr = piReviewFailureReason(env.Message)
 					}
 					if env.Message.Usage != nil {
 						emitPiReviewTokens(out, env, &tokens, messageIDsWithUsage, messageUsageByTurn, turnNumber)
@@ -184,12 +113,20 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			case "turn_end":
 				if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
 					success = false
+					pendingErr = piReviewFailureReason(env.Message)
 				}
 				if env.Message.Usage != nil {
 					emitPiReviewTokens(out, env, &tokens, messageIDsWithUsage, messageUsageByTurn, turnNumber)
 				}
 			case "agent_end":
+				if env.WillRetry {
+					// The retry continues in this stream and ends in its own agent_end.
+					continue
+				}
 				finished = true
+				if !success && pendingErr != "" {
+					out <- reviewtypes.RunError{Err: errors.New(pendingErr)}
+				}
 				out <- reviewtypes.Finished{Success: success}
 			default:
 				// Unknown future events are ignored; Pi's event stream is additive.
@@ -202,6 +139,9 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			return
 		}
 		if !finished {
+			if pendingErr != "" {
+				out <- reviewtypes.RunError{Err: errors.New(pendingErr)}
+			}
 			out <- reviewtypes.Finished{Success: false}
 		}
 	}()
@@ -217,6 +157,8 @@ type piReviewEnvelope struct {
 	AssistantMessageEvent piAssistantMessageEvent `json:"assistantMessageEvent"`
 	ToolName              string                  `json:"toolName"`
 	Args                  json.RawMessage         `json:"args"`
+	// WillRetry marks an agent_end Pi follows with an automatic retry.
+	WillRetry bool `json:"willRetry"`
 }
 
 func (e piReviewEnvelope) MessageID() string {
@@ -232,6 +174,18 @@ type piReviewMessage struct {
 	Content    json.RawMessage `json:"content"`
 	Usage      *piReviewUsage  `json:"usage"`
 	StopReason string          `json:"stopReason"`
+	// ErrorMessage explains an "error" or "aborted" stop, e.g. a provider
+	// rejecting the request; without it a failed review shows an empty report.
+	ErrorMessage string `json:"errorMessage"`
+}
+
+// piReviewFailureReason explains a failed message: Pi's errorMessage, or the
+// stop reason when Pi gave none.
+func piReviewFailureReason(msg piReviewMessage) string {
+	if reason := strings.TrimSpace(msg.ErrorMessage); reason != "" {
+		return "pi: " + reason
+	}
+	return "pi: stopped with " + msg.StopReason
 }
 
 type piAssistantMessageEvent struct {

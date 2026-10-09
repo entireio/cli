@@ -166,6 +166,19 @@ type HookFreshness interface {
 	CheckHookConfig(ctx context.Context) HookConfigState
 }
 
+// StaleHookReporter is implemented by hook-supporting agents whose install
+// also prunes Entire hooks that older CLIs wrote and this one no longer does
+// (for Claude Code, the retired post-todo hook). `entire enable` asks before
+// installing, so it can say it removed them instead of reporting the hooks as
+// already installed. Implementations must be read-only.
+type StaleHookReporter interface {
+	Agent
+
+	// HasStaleManagedHooks reports whether the agent's hook config holds
+	// Entire hooks the next install will remove.
+	HasStaleManagedHooks(ctx context.Context) bool
+}
+
 // EffectiveHookDiagnostics marks agents whose effective hook state is reported
 // by an agent-owned diagnostic surface rather than generic freshness output.
 type EffectiveHookDiagnostics interface {
@@ -232,7 +245,8 @@ type PromptExtractor interface {
 
 // TranscriptPromptExtractor extracts user prompts from transcript CONTENT the
 // caller already holds. Condensation reads the transcript once — from the live
-// path, or from the shadow-branch copy when the live path cannot be read — and
+// path, or from the copy stored at the last Stop when the live path cannot be
+// read — and
 // stores those bytes in the checkpoint; the prompts it records must come from
 // the same bytes, not from a second read of the path that can see a different
 // (missing, shorter, or later) file. Optional: agents that only implement
@@ -406,6 +420,19 @@ type InventoryAwareExtractor interface {
 	Agent
 
 	ExtractWithSubagentInventory(ctx context.Context, parent []byte, fromOffset int, refs []SubagentReference) (InventoryExtraction, error)
+}
+
+// HomeScopedInventoryExtractor is implemented by InventoryAwareExtractors that
+// can look up child transcripts in the session stores beneath a given agent
+// home instead of the active home.
+type HomeScopedInventoryExtractor interface {
+	InventoryAwareExtractor
+
+	// ExtractWithSubagentInventoryUnderHome is like
+	// ExtractWithSubagentInventory but looks up child transcripts in the
+	// stores beneath home. home must have passed ResolveTrustedHome; the
+	// method does not check it.
+	ExtractWithSubagentInventoryUnderHome(ctx context.Context, parent []byte, fromOffset int, refs []SubagentReference, home string) (InventoryExtraction, error)
 }
 
 // ModelExtractor extracts the LLM model identifier from a transcript for agents

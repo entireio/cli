@@ -19,7 +19,7 @@ Two rules bound that scan, both because discovery *executes* what it finds (it c
 
 ## Environment
 
-Every subcommand invocation sets:
+Every subcommand invocation except `generate-text` sets:
 
 | Variable | Description |
 |---|---|
@@ -27,6 +27,13 @@ Every subcommand invocation sets:
 | `ENTIRE_PROTOCOL_VERSION` | Protocol version (`1`) |
 
 The working directory is set to the repository root.
+
+`generate-text` is the exception. Its stdin is a summary prompt carrying
+untrusted transcript content, so it runs from a fresh empty temporary
+directory, without `ENTIRE_REPO_ROOT` and without `GIT_*` variables, the same
+isolation Entire gives its built-in summary generators. A plugin should not
+need the repository to generate text; if its model has tools, it should run
+them with none enabled, as the built-in generators do where their CLI allows.
 
 ## Communication Model
 
@@ -68,6 +75,8 @@ Returns agent metadata and declared capabilities.
 ```
 
 The `capabilities` object determines which optional subcommands the CLI will call. If a capability is `false` or missing, the CLI will never invoke the corresponding subcommands.
+
+Optional: `"caller_env_vars": ["MYAGENT_SESSION_ID"]` lists environment variables the agent sets for the commands it runs (uppercase names only). `entire review` uses them to recognise the agent as the caller, so it refuses to approve reviews of someone else's code on the user's behalf and names the agent when one passes `--trust-target`. Agents that set the cross-tool `AI_AGENT` variable are recognised without declaring it.
 
 #### `detect`
 

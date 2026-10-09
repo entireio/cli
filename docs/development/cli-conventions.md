@@ -33,16 +33,24 @@ the commands are always runnable in every build.
   `current` and a bare `tokens` answer "which session is running this command?"
   through `strategy.ResolveCallerSession`, not "which state file moved last" —
   see [Resolving the calling session](caller-session-resolution.md#resolving-the-calling-session).
-- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`.
+- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, `delete`.
+  `delete` is user-owned in `agent-help` (agents must not run it unprompted) and
+  confirms through `confirmControlPlaneDeletion`; see
+  [Deleting a Checkpoint](../architecture/sessions-and-checkpoints.md#deleting-a-checkpoint).
   `explain` also takes a forge-qualified `--repo` (`gh/<owner>/<name>` or
   `et/<project>/<name>`), the drill-down for a cross-repo `search` hit: it
   reads the checkpoint from that repo's entire-api cell over
   HTTP (`/repos/{repo_id}/checkpoints/{id}` plus `.../transcript/raw`) rather
   than fetching git objects, so a foreign checkpoint never enters this repo's
-  object store, ref namespace, or `tokens profile`. It needs a full checkpoint
-  ID and a pushed checkpoint; `--commit`, `--session`, `--search-all`, and
-  `--generate` are rejected with it, and naming the current repo is a no-op
-  that falls through to the local path. See `checkpoint_api_reader.go`
+  object store, ref namespace, or `tokens profile`. It takes a full checkpoint
+  ID or a full commit SHA — the SHA is resolved through
+  `/repos/{repo_id}/commits/{sha}/checkpoints`, the cross-repo stand-in for the
+  local `Entire-Checkpoint` trailer read; zero linked checkpoints is an error,
+  and several is an error that names them, unlike the local path which reads
+  the first trailer — and a pushed checkpoint; prefixes are rejected. `--commit`
+  is accepted with a full SHA only; `--session`, `--search-all`, and `--generate`
+  are rejected with it, and naming the current repo is a no-op that falls
+  through to the local path. See `checkpoint_api_reader.go`
   (`apiCheckpointReader`, which implements the two checkpoint reader tiers and
   deliberately not `Writer`) and `explain_repo.go`.
   For a local checkpoint, `explain --json` also lists the subagent task records

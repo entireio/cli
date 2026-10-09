@@ -766,8 +766,8 @@ func voteEnv(opt FetchURLOptions) []string {
 	return gitrepo.EnvWithoutRepoOverrides()
 }
 
-// getRemoteURLInDirForVote is GetRemoteURLInDir under voteEnv, the origin half.
-// The exported GetRemoteURLInDir is left alone: its remaining callers are
+// getRemoteURLInDirForVote is gitremote.GetRemoteURLInDir under voteEnv, the
+// origin half. Plain gitremote.GetRemoteURLInDir is left alone: its callers are
 // user-invoked commands acting on the current directory, where a GIT_DIR the
 // user exported is an instruction rather than contamination.
 func getRemoteURLInDirForVote(ctx context.Context, opt FetchURLOptions, remoteName string) (string, error) {

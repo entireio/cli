@@ -6,6 +6,7 @@ package interactive
 import (
 	"io"
 	"os"
+	"slices"
 	"testing"
 
 	"golang.org/x/term"
@@ -109,6 +110,21 @@ func isAgentSubprocessEnv() bool {
 		}
 	}
 	return os.Getenv("GIT_TERMINAL_PROMPT") == "0"
+}
+
+// AgentSubprocessEnvVars returns the sentinel names, for tests to clear.
+func AgentSubprocessEnvVars() []string {
+	return slices.Clone(agentSubprocessEnvVars)
+}
+
+// AgentSubprocessEnvVar returns the first sentinel set in the environment, or "".
+func AgentSubprocessEnvVar() string {
+	for _, name := range agentSubprocessEnvVars {
+		if os.Getenv(name) != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // IsTerminalReader reports whether r is an *os.File backed by a terminal.

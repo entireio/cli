@@ -16,7 +16,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -48,41 +47,8 @@ func newTestCmd(t *testing.T) (*cobra.Command, *bytes.Buffer) {
 // testBaseCommit is a fake commit hash used across classifySession tests.
 const testBaseCommit = "abcdef1234567890abcdef1234567890abcdef12"
 
-// createShadowBranchRef creates a shadow branch reference in the repo for
-// the given base commit and worktree ID. Uses an empty tree commit.
-func createShadowBranchRef(t *testing.T, repo *git.Repository, baseCommit, worktreeID string) {
-	t.Helper()
-
-	// Create empty tree
-	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
-	treeObj := repo.Storer.NewEncodedObject()
-	require.NoError(t, emptyTree.Encode(treeObj))
-	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
-	require.NoError(t, err)
-
-	// Create commit
-	commitObj := &object.Commit{
-		Author:    object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
-		Committer: object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
-		Message:   "shadow checkpoint",
-		TreeHash:  treeHash,
-	}
-	enc := repo.Storer.NewEncodedObject()
-	require.NoError(t, commitObj.Encode(enc))
-	commitHash, err := repo.Storer.SetEncodedObject(enc)
-	require.NoError(t, err)
-
-	// Create branch reference
-	branchName := checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
-	refName := plumbing.NewBranchReferenceName(branchName)
-	ref := plumbing.NewHashReference(refName, commitHash)
-	require.NoError(t, repo.Storer.SetReference(ref))
-}
-
 func TestClassifySession_ActiveStale_NilInteractionTime(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:           "test-active-nil-time",
@@ -92,18 +58,15 @@ func TestClassifySession_ActiveStale_NilInteractionTime(t *testing.T) {
 		LastInteractionTime: nil,
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 
 	require.NotNil(t, result, "active session with nil LastInteractionTime should be stuck")
 	assert.Contains(t, result.Reason, "active, started")
 	assert.Equal(t, 3, result.CheckpointCount)
-	assert.False(t, result.HasShadowBranch)
 }
 
 func TestClassifySession_ActiveStale_OldInteractionTime(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	twoHoursAgo := time.Now().Add(-2 * time.Hour)
 	state := &strategy.SessionState{
@@ -116,7 +79,7 @@ func TestClassifySession_ActiveStale_OldInteractionTime(t *testing.T) {
 	}
 
 	now := time.Now()
-	result := classifySession(state, repo, now)
+	result := classifySession(state, now)
 
 	require.NotNil(t, result, "active session with old interaction time should be stuck")
 	assert.Contains(t, result.Reason, "active, last interaction")
@@ -125,9 +88,7 @@ func TestClassifySession_ActiveStale_OldInteractionTime(t *testing.T) {
 }
 
 func TestClassifySession_ActiveRecent_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	fiveMinutesAgo := time.Now().Add(-5 * time.Minute)
 	state := &strategy.SessionState{
@@ -138,106 +99,72 @@ func TestClassifySession_ActiveRecent_Healthy(t *testing.T) {
 		LastInteractionTime: &fiveMinutesAgo,
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 	assert.Nil(t, result, "active session with recent interaction should be healthy")
 }
 
 func TestClassifySession_EndedWithUncondensedData(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseCommit := testBaseCommit
-	createShadowBranchRef(t, repo, baseCommit, "")
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:    "test-ended-uncondensed",
-		BaseCommit:   baseCommit,
+		BaseCommit:   testBaseCommit,
 		Phase:        session.PhaseEnded,
 		StepCount:    3,
 		FilesTouched: []string{"main.go"},
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 
-	require.NotNil(t, result, "ended session with checkpoints and shadow branch should be stuck")
+	require.NotNil(t, result, "ended session with uncondensed steps should be stuck")
 	assert.Equal(t, "ended with uncondensed checkpoint data", result.Reason)
-	assert.True(t, result.HasShadowBranch)
 	assert.Equal(t, 3, result.CheckpointCount)
 	assert.Equal(t, 1, result.FilesTouchedCount)
 }
 
-func TestClassifySession_EndedNoShadowBranch_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	state := &strategy.SessionState{
-		SessionID:  "test-ended-no-shadow",
-		BaseCommit: testBaseCommit,
-		Phase:      session.PhaseEnded,
-		StepCount:  3,
-	}
-
-	result := classifySession(state, repo, time.Now())
-	assert.Nil(t, result, "ended session without shadow branch should be healthy")
-}
-
-// An ENDED record-bearing session has condensable task content that never
-// lives on the shadow branch, so branch absence must not classify it healthy.
-func TestClassifySession_EndedRecordsOnlyNoShadowBranch_Stuck(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+// An ENDED record-bearing session with no steps has condensable task content.
+func TestClassifySession_EndedRecordsOnly_Stuck(t *testing.T) {
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID: "test-ended-records-only", BaseCommit: testBaseCommit, Phase: session.PhaseEnded,
 		TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now(), CompletedAt: time.Now()}},
 	}
 
-	result := classifySession(state, repo, time.Now())
-	require.NotNil(t, result, "ended record-bearing session must be reported even without a shadow branch")
+	result := classifySession(state, time.Now())
+	require.NotNil(t, result, "ended record-bearing session must be reported")
 	assert.Equal(t, "ended with uncondensed checkpoint data", result.Reason)
 	assert.Equal(t, 1, result.CheckpointCount)
 }
 
 // FullyCondensed + leftover live record (pre-fix state or failed sweep capture) is healthy: everything worth keeping is materialized.
 func TestClassifySession_EndedFullyCondensedLeftoverRecord_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID: "test-ended-condensed-leftover", BaseCommit: testBaseCommit, Phase: session.PhaseEnded,
 		FullyCondensed: true, TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_left", StartedAt: time.Now()}},
 	}
-	assert.Nil(t, classifySession(state, repo, time.Now()),
+	assert.Nil(t, classifySession(state, time.Now()),
 		"a FullyCondensed ended session must not be re-flagged for a leftover live record")
 }
 
 func TestClassifySession_EndedZeroStepCount_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseCommit := "1234567890abcdef1234567890abcdef12345678"
-	createShadowBranchRef(t, repo, baseCommit, "")
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:  "test-ended-zero-steps",
-		BaseCommit: baseCommit,
+		BaseCommit: "1234567890abcdef1234567890abcdef12345678",
 		Phase:      session.PhaseEnded,
 		StepCount:  0,
 	}
 
-	result := classifySession(state, repo, time.Now())
-	assert.Nil(t, result, "ended session with zero steps should be healthy even with shadow branch")
+	result := classifySession(state, time.Now())
+	assert.Nil(t, result, "ended session with no pending work should be healthy")
 }
 
 func TestClassifySession_IdlePhase_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:  "test-idle",
@@ -246,14 +173,12 @@ func TestClassifySession_IdlePhase_Healthy(t *testing.T) {
 		StepCount:  1,
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 	assert.Nil(t, result, "IDLE session should be healthy")
 }
 
 func TestClassifySession_EmptyPhase_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:  "test-empty-phase",
@@ -262,14 +187,12 @@ func TestClassifySession_EmptyPhase_Healthy(t *testing.T) {
 		StepCount:  1,
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 	assert.Nil(t, result, "empty phase (backward compat) should be healthy")
 }
 
 func TestClassifySession_StalenessThresholdBoundary(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	now := time.Now()
 
@@ -283,7 +206,7 @@ func TestClassifySession_StalenessThresholdBoundary(t *testing.T) {
 		LastInteractionTime: &justOverThreshold,
 	}
 
-	result := classifySession(state, repo, now)
+	result := classifySession(state, now)
 	require.NotNil(t, result, "session just over staleness threshold should be stuck")
 
 	// Just under the threshold — should be healthy
@@ -296,57 +219,8 @@ func TestClassifySession_StalenessThresholdBoundary(t *testing.T) {
 		LastInteractionTime: &justUnderThreshold,
 	}
 
-	result2 := classifySession(state2, repo, now)
+	result2 := classifySession(state2, now)
 	assert.Nil(t, result2, "session just under staleness threshold should be healthy")
-}
-
-func TestClassifySession_ActiveWithShadowBranch(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseCommit := testBaseCommit
-	createShadowBranchRef(t, repo, baseCommit, "")
-
-	state := &strategy.SessionState{
-		SessionID:           "test-active-shadow",
-		BaseCommit:          baseCommit,
-		Phase:               session.PhaseActive,
-		StepCount:           2,
-		LastInteractionTime: nil,
-	}
-
-	result := classifySession(state, repo, time.Now())
-
-	require.NotNil(t, result)
-	assert.True(t, result.HasShadowBranch, "should detect existing shadow branch")
-	assert.NotEmpty(t, result.ShadowBranch)
-}
-
-func TestClassifySession_WorktreeIDInShadowBranch(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseCommit := testBaseCommit
-	worktreeID := "my-worktree"
-	createShadowBranchRef(t, repo, baseCommit, worktreeID)
-
-	state := &strategy.SessionState{
-		SessionID:    "test-worktree-shadow",
-		BaseCommit:   baseCommit,
-		WorktreeID:   worktreeID,
-		Phase:        session.PhaseEnded,
-		StepCount:    1,
-		FilesTouched: []string{"a.go"},
-	}
-
-	result := classifySession(state, repo, time.Now())
-
-	require.NotNil(t, result, "ended session with worktree shadow branch should be stuck")
-	assert.True(t, result.HasShadowBranch)
-	expectedBranch := checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
-	assert.Equal(t, expectedBranch, result.ShadowBranch)
 }
 
 // Distinct parentless commits have no common ancestor.
@@ -544,7 +418,7 @@ func TestRunSessionsFix_NonInteractive_HintsForceInsteadOfPrompting(t *testing.T
 	assert.Contains(t, output, "Found 2 stuck session(s):")
 	assert.Contains(t, output, "  Session: 2026-08-17-doctor-no-tty")
 	assert.Contains(t, output, "  Session: 2026-08-17-doctor-no-tty-2")
-	// No shadow branch exists, so --force would discard — the hint must say so.
+	// No pending work exists, so --force would discard — the hint must say so.
 	assert.Contains(t, output, "  Fix: discard (no condensable checkpoint data).")
 	assert.Contains(t, output, "entire doctor --force")
 	assert.NotContains(t, output, "Discarded session")
@@ -602,9 +476,6 @@ func TestRunSessionsFix_NonInteractive_TaskContentHintMatchesForceCondense(t *te
 func TestRunSessionsFix_HandlerLogsStayOffTheTerminal(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-	createShadowBranchRef(t, repo, testBaseCommit, "")
 
 	// Already ended, so never a candidate for the exited-owner sweep, but stuck
 	// with uncondensed data — which sends --force down the condensing path, and

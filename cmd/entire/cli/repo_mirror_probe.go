@@ -108,7 +108,7 @@ var (
 	// terminal "failed" status — the server gave up cloning the upstream.
 	errMirrorCloneFailed = errors.New("initial clone failed")
 	// errMirrorSuspended reports the placement is suspended: registered, but the
-	// cluster won't serve it. Recovery is operator-side (explainSuspendedMirror).
+	// cluster won't serve it. Recovery is operator-side.
 	errMirrorSuspended = errors.New("mirror is suspended")
 )
 

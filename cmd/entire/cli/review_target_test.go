@@ -2,7 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestNormalizeReviewTargetSelector(t *testing.T) {
@@ -37,18 +45,95 @@ func TestNormalizeReviewTargetSelector(t *testing.T) {
 	}
 }
 
-func TestPrepareReviewTargetLocalBranchDoesNotRequireRemote(t *testing.T) {
+func TestResolveReviewTargetLocalBranchDoesNotRequireRemote(t *testing.T) {
 	repoDir := newTrailWorktreeTestRepo(t)
 	t.Chdir(repoDir)
 
 	var out, errOut bytes.Buffer
-	target, err := prepareReviewTarget(t.Context(), &out, &errOut, currentBranchInDir(t, repoDir))
+	resolved, err := resolveReviewTarget(t.Context(), &out, &errOut, currentBranchInDir(t, repoDir))
 	if err != nil {
-		t.Fatalf("prepareReviewTarget: %v; stderr: %s", err, errOut.String())
+		t.Fatalf("resolveReviewTarget: %v; stderr: %s", err, errOut.String())
+	}
+	if normalizeWorktreePath(resolved.ExistingWorktree) != normalizeWorktreePath(repoDir) {
+		t.Fatalf("resolved = %+v, want reused main worktree %s", resolved, repoDir)
+	}
+	if want := gitOutputInDir(t, repoDir, "rev-parse", "HEAD"); resolved.HeadSHA != want {
+		t.Fatalf("HeadSHA = %q, want %q", resolved.HeadSHA, want)
+	}
+	target, err := checkoutReviewTarget(t.Context(), &out, &errOut, resolved, true)
+	if err != nil {
+		t.Fatalf("checkoutReviewTarget: %v", err)
 	}
 	if normalizeWorktreePath(target.Path) != normalizeWorktreePath(repoDir) || target.Created {
 		t.Fatalf("target = %+v, want reused main worktree %s", target, repoDir)
 	}
+}
+
+// An untrusted checkout must not run the branch's git hooks or copy
+// .worktreeinclude files; a trusted one keeps today's behavior.
+func TestCheckoutReviewTargetUntrustedSkipsHooksAndIncludes(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/untrusted")
+	runGit(t, repoDir, "branch", "feature/trusted")
+	testutil.WriteFile(t, repoDir, ".worktreeinclude", ".env\n")
+	testutil.WriteFile(t, repoDir, ".env", "SECRET=1\n")
+	testutil.WriteFile(t, repoDir, ".gitignore", ".env\n.entire/\n")
+	testutil.GitAdd(t, repoDir, ".worktreeinclude", ".gitignore")
+	testutil.GitCommit(t, repoDir, "add include config")
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	hooksDir := filepath.Join(repoDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	hook := "#!/bin/sh\necho ran >> " + marker + "\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "post-checkout"), []byte(hook), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repoDir)
+
+	var out, errOut bytes.Buffer
+	resolved, err := resolveReviewTarget(t.Context(), &out, &errOut, "feature/untrusted")
+	if err != nil {
+		t.Fatalf("resolveReviewTarget: %v; stderr: %s", err, errOut.String())
+	}
+	if resolved.ExistingWorktree != "" {
+		t.Fatalf("ExistingWorktree = %q, want none", resolved.ExistingWorktree)
+	}
+	target, err := checkoutReviewTarget(t.Context(), &out, &errOut, resolved, true)
+	if err != nil {
+		t.Fatalf("checkoutReviewTarget: %v; stderr: %s", err, errOut.String())
+	}
+	if !target.Created {
+		t.Fatalf("target = %+v, want a new worktree", target)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("post-checkout hook ran for an untrusted checkout (stat err %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(target.Path, ".env")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf(".worktreeinclude file was copied into an untrusted checkout (stat err %v)", err)
+	}
+
+	resolved, err = resolveReviewTarget(t.Context(), &out, &errOut, "feature/trusted")
+	if err != nil {
+		t.Fatalf("resolveReviewTarget: %v", err)
+	}
+	if _, err := checkoutReviewTarget(t.Context(), &out, &errOut, resolved, false); err != nil {
+		t.Fatalf("checkoutReviewTarget trusted: %v; stderr: %s", err, errOut.String())
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("post-checkout hook did not run for a trusted checkout: %v", err)
+	}
+}
+
+func gitOutputInDir(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestReviewTargetMayBeBranch(t *testing.T) {

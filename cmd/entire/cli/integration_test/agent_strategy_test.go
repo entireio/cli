@@ -14,7 +14,7 @@ import (
 )
 
 // TestAgentStrategyComposition verifies that agent and strategy work together correctly.
-// This tests the full flow: agent parses session → strategy saves checkpoint on the shadow branch.
+// This tests the full flow: agent parses session → strategy records the turn end in session state.
 func TestAgentStrategyComposition(t *testing.T) {
 	t.Parallel()
 
@@ -59,14 +59,8 @@ func TestAgentStrategyComposition(t *testing.T) {
 		t.Fatalf("SimulateStop error = %v", err)
 	}
 
-	// Verify checkpoint was created (manual-commit stores checkpoint data on the shadow branch)
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after Stop hook", shadowBranch)
-	}
-	if !env.FileExistsInBranch(shadowBranch, "feature.go") {
-		t.Errorf("feature.go should be captured on shadow branch %s", shadowBranch)
-	}
+	// Verify the turn end was recorded in session state
+	env.AssertTurnEndRecorded(session.ID, "feature.go")
 }
 
 // TestAgentGetSessionDir verifies session directory resolution.
@@ -187,12 +181,6 @@ func TestFactoryAIDroidAgentStrategyComposition(t *testing.T) {
 		t.Fatalf("SimulateFactoryDroidStop error = %v", err)
 	}
 
-	// Verify checkpoint was created (manual-commit stores checkpoint data on the shadow branch)
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after Stop hook", shadowBranch)
-	}
-	if !env.FileExistsInBranch(shadowBranch, "feature.go") {
-		t.Errorf("feature.go should be captured on shadow branch %s", shadowBranch)
-	}
+	// Verify the turn end was recorded in session state
+	env.AssertTurnEndRecorded(session.ID, "feature.go")
 }

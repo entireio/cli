@@ -59,7 +59,7 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 	cmd := commandRunner(ctx, "claude", buildStreamingGenerateArgs(model, settingsPath)...)
 
 	cmd.Dir = workDir
-	cmd.Env = agent.StripGitEnv(os.Environ())
+	cmd.Env = agent.TextGenerationEnv(workDir, os.Environ())
 	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()
