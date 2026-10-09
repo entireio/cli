@@ -7,22 +7,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
-
-// runAuthenticatedDataAPI centralizes the auth gate for commands that must
-// call the Entire data API as the current user. Keep intentionally anonymous
-// flows (for example recap's server-rendered 401 path) out of this helper.
-func runAuthenticatedDataAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, fn func(context.Context, *api.Client) error) error {
-	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
-	if err != nil {
-		// No repo to name: this gate builds the generic data-API client, which
-		// resolves no repo and so can never produce errRepoNotOnboarded.
-		return renderDataAPIAuthError(ctx, errW, "", err)
-	}
-	return fn(ctx, client)
-}
 
 // renderDataAPIAuthError decides whether err should print or stay silent.
 // Silence is reserved for the caller's own context actually firing (checked
