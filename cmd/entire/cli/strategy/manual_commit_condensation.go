@@ -1123,12 +1123,17 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 // (from TokenStart), falling back to the pending hook-reported usage the way
 // condensation does; without state it counts the whole transcript. The caller
 // records pos with ConsumeAttachTokenWindow once the checkpoint is written.
-func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte) (*agent.TokenUsage, int) {
-	start := 0
-	if state != nil {
-		start = state.TokenStart()
+// While a turn runs, its subagents' tokens aren't in the pending usage yet
+// (Stop records them), so they are read live as a mid-turn condensation does;
+// that also moves state.TokenUsage's cumulative subagent total, which the
+// caller must keep so the re-baseline covers what this checkpoint stored.
+func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, transcriptPath string) (*agent.TokenUsage, int) {
+	var usage *agent.TokenUsage
+	if state == nil {
+		usage = agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
+	} else {
+		usage = calculateLiveTranscriptTokenUsage(ctx, ag, transcript, state, transcriptPath)
 	}
-	usage := agent.CalculateTokenUsage(ctx, ag, transcript, start, "")
 	if state != nil {
 		if !hasTokenUsageData(usage) && hasTokenUsageData(state.CheckpointTokenUsage) {
 			usage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)

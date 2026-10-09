@@ -24,7 +24,7 @@ func TestAttachTokenUsage_KeepsPendingSubagentTokens(t *testing.T) {
 		TokenUsage:           &agent.TokenUsage{OutputTokens: 10, SubagentTokens: &agent.TokenUsage{OutputTokens: 50}},
 		CheckpointTokenUsage: &agent.TokenUsage{OutputTokens: 10, SubagentTokens: &agent.TokenUsage{OutputTokens: 50}},
 	}
-	usage, pos := AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, state, []byte(attachTestTranscript))
+	usage, pos := AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, state, []byte(attachTestTranscript), "")
 	require.NotNil(t, usage.SubagentTokens, "the attach checkpoint must carry the pending subagent tokens")
 	require.Equal(t, 50, usage.SubagentTokens.OutputTokens)
 
@@ -37,15 +37,15 @@ func TestAttachTokenUsage_CountsFromTokenStart(t *testing.T) {
 	t.Parallel()
 	withState := &SessionState{SessionID: "s", AgentType: agent.AgentTypeClaudeCode}
 	withState.SetTokenStart(1)
-	usage, pos := AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, withState, []byte(attachTwoTurnTranscript))
+	usage, pos := AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, withState, []byte(attachTwoTurnTranscript), "")
 	require.Equal(t, 10, usage.OutputTokens, "tokens before TokenStart are in an earlier checkpoint")
 	require.Equal(t, 2, pos)
 
-	usage, _ = AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, nil, []byte(attachTwoTurnTranscript))
+	usage, _ = AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, nil, []byte(attachTwoTurnTranscript), "")
 	require.Equal(t, 110, usage.OutputTokens, "without state the whole transcript is counted")
 
 	// A state recreated from scratch (cleanup, resume) has counted nothing.
 	fresh := &SessionState{SessionID: "s", AgentType: agent.AgentTypeClaudeCode}
-	usage, _ = AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, fresh, []byte(attachTwoTurnTranscript))
+	usage, _ = AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, fresh, []byte(attachTwoTurnTranscript), "")
 	require.Equal(t, 110, usage.OutputTokens)
 }

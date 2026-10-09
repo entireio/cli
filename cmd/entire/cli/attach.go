@@ -366,16 +366,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return fmt.Errorf("failed to get git author: %w", err)
 	}
 
-	// The checkpoint stores only tokens no earlier checkpoint of this session
-	// counted, from the token offset rather than the displayed window: carry-
-	// forward leaves the window at the session start while the tokens before
-	// it are already in a checkpoint. Session state keeps the whole-transcript
-	// total.
-	tokenUsage, tokenPos := strategy.AttachTokenUsage(logCtx, ag, existingState, transcriptData)
-	sessionUsage := tokenUsage
-	if existingState != nil {
-		sessionUsage = agent.CalculateTokenUsage(logCtx, ag, transcriptData, 0, "")
-	}
+	tokenUsage, sessionUsage, tokenPos := attachTokens(logCtx, ag, existingState, transcriptData, transcriptPath)
 
 	// attach writes checkpoints and historically never configured
 	// redaction; a scanner-config failure must fail the attach.
@@ -418,6 +409,26 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		}
 	}
 	return linkErr
+}
+
+// attachTokens returns the tokens the attach checkpoint stores, the session's
+// whole-transcript total for its state, and the token position to consume.
+// The checkpoint counts from the token offset rather than the displayed
+// window: carry-forward leaves the window at the session start while the
+// tokens before it are already in a checkpoint.
+func attachTokens(ctx context.Context, ag agent.Agent, existingState *session.State, transcriptData []byte, transcriptPath string) (checkpointUsage, sessionUsage *agent.TokenUsage, tokenPos int) {
+	checkpointUsage, tokenPos = strategy.AttachTokenUsage(ctx, ag, existingState, transcriptData, transcriptPath)
+	if existingState == nil {
+		return checkpointUsage, checkpointUsage, tokenPos
+	}
+	sessionUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, 0, "")
+	if sessionUsage != nil && existingState.TokenUsage != nil && existingState.TokenUsage.SubagentTokens != nil {
+		// The cumulative subagent total, including subagents of a running
+		// turn that AttachTokenUsage just read.
+		sessionUsage.SubagentTokens = existingState.TokenUsage.SubagentTokens
+		sessionUsage.SubagentTokensComplete = existingState.TokenUsage.SubagentTokensComplete
+	}
+	return checkpointUsage, sessionUsage, tokenPos
 }
 
 // attachCheckpoint is the checkpoint an attach writes into.
@@ -1426,9 +1437,9 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		state.LastPrompt = meta.FirstPrompt
 	}
 	if sessionUsage != nil {
-		// Attach reads no subagent transcripts; keep the cumulative subagent
-		// total hooks recorded so the re-baseline below doesn't drop it.
-		if state.TokenUsage != nil {
+		// Without a cumulative subagent total of its own, keep the one hooks
+		// recorded so the re-baseline below doesn't drop it.
+		if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {
 			sessionUsage.SubagentTokens = state.TokenUsage.SubagentTokens
 			sessionUsage.SubagentTokensComplete = state.TokenUsage.SubagentTokensComplete
 		}
