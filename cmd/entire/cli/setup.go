@@ -2951,6 +2951,9 @@ func uninstallGitHooks(ctx context.Context, p *uninstallPrinter) bool {
 	for _, hook := range res.Restored {
 		p.step("Restored your original %s hook", hook)
 	}
+	if len(res.Older) > 0 {
+		p.warn("Older copies of your hooks were left in place and do not run: %s", strings.Join(res.Older, ", "))
+	}
 	return true
 }
 

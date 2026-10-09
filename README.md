@@ -166,8 +166,8 @@ The hooks capture session data as you work. Checkpoints are created when you or 
 
 If your repository already has git hooks (your own scripts, git-lfs, lefthook, pre-commit), `entire enable` keeps them: each one is moved to `<hook>.pre-entire` in the hooks directory, and Entire's hook runs first, then yours.
 
-- If a hook manager reinstalls its hooks later, Entire's hooks come back on the next agent turn or `entire enable`, chained to the hook manager's version. The exception is a hook that already has a `<hook>.pre-entire` copy: that copy is the one that keeps running, and the hook manager's version is replaced, with a warning naming the file.
-- `entire disable --uninstall` removes Entire's hooks and puts yours back.
+- If a hook manager reinstalls its hooks later, Entire's hooks come back on the next agent turn or `entire enable`, chained to the hook manager's version. If the hook already had a `<hook>.pre-entire` copy, the hook manager's version takes its place and runs after Entire's; the older copy is kept as `<hook>.pre-entire.<timestamp>` and no longer runs, with a warning naming the file.
+- `entire disable --uninstall` removes Entire's hooks and puts yours back. Older `<hook>.pre-entire.<timestamp>` copies are left in place and listed.
 
 ### 2. Work with Your AI Agent
 
