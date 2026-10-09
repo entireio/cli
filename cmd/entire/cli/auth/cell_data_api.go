@@ -531,11 +531,10 @@ type clusterListingRow struct {
 
 // ErrNoCellForJurisdiction signals that the requested jurisdiction — the
 // caller's home, or an explicit --jurisdiction — has no entire-api cell in the
-// login core's cluster catalog (or its row carries no apiUrl). It is not fatal:
-// callers that also have a data-API path (e.g. activity/recap) treat it as
-// "entire-api isn't serving this region yet" and fall back rather than failing
-// the command. errors.Is unwraps it from the contextual message, which names
-// the core consulted and the jurisdictions it does serve.
+// login core's cluster catalog (or its row carries no apiUrl). Search treats it
+// as a skipped cell rather than a failed query; single-cell callers such as
+// activity and recap surface it. errors.Is unwraps it from the contextual
+// message, which names the core consulted and the jurisdictions it does serve.
 var ErrNoCellForJurisdiction = errors.New("no entire-api cell configured for jurisdiction")
 
 // resolveCellAPIBaseURL is the catalog cell resolver: it lists the clusters of
