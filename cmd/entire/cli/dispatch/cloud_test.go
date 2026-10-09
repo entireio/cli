@@ -172,6 +172,36 @@ func TestCloudClient_CreateDispatch_StopsPollingWhenContextEnds(t *testing.T) {
 	}
 }
 
+// TestCloudClient_CreateDispatch_BudgetCoversTheCreateRequest: api.Client has
+// no timeout, so a cell that accepts the POST but never answers must still be
+// cut off by the operation budget.
+func TestCloudClient_CreateDispatch_BudgetCoversTheCreateRequest(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release) // runs first, so Close is not left waiting on the handler
+
+	client := newTestCloudClient(t, srv.URL, "t")
+	client.budget = 50 * time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.CreateDispatch(context.Background(), CreateDispatchRequest{Repos: []string{testRepoSlug}}, "")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected the budget to end a stalled create, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled create outlived the budget")
+	}
+}
+
 func TestCloudClient_CreateDispatch_UnknownStatusIsAnError(t *testing.T) {
 	t.Parallel()
 

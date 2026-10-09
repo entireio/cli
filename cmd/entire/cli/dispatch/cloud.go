@@ -19,6 +19,7 @@ import (
 type CloudClient struct {
 	api          *api.Client
 	pollInterval time.Duration
+	budget       time.Duration
 }
 
 // The cell generates asynchronously: POST /me/dispatches answers 202 with a
@@ -32,14 +33,15 @@ const (
 	dispatchStatusFailed     = "failed"
 
 	defaultDispatchPollInterval = 2 * time.Second
-	// dispatchPollBudget outlasts the cell's two-minute stale threshold, after
-	// which it reports a stuck run as failed, so the budget only fires when
-	// the cell stops answering with a terminal status at all.
-	dispatchPollBudget = 3 * time.Minute
+	// dispatchBudget bounds the whole create-and-poll operation; api.Client
+	// sets no timeout of its own. It outlasts the cell's two-minute stale
+	// threshold, after which the cell reports a stuck run as failed, so it only
+	// fires when the cell stops answering with a terminal status at all.
+	dispatchBudget = 3 * time.Minute
 )
 
 func NewCloudClient(client *api.Client) *CloudClient {
-	return &CloudClient{api: client, pollInterval: defaultDispatchPollInterval}
+	return &CloudClient{api: client, pollInterval: defaultDispatchPollInterval, budget: dispatchBudget}
 }
 
 // CreateDispatchRequest is the body of POST /me/dispatches. Repos must be
@@ -153,6 +155,8 @@ func (e *statusError) Unwrap() error { return e.HTTPError }
 // finish. jurisdiction is the --jurisdiction selector the cell was picked by
 // ("" = home); it only labels a repo-not-found error.
 func (c *CloudClient) CreateDispatch(ctx context.Context, reqBody CreateDispatchRequest, jurisdiction string) (*APIRun, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.budget)
+	defer cancel()
 	var run APIRun
 	if err := c.doJSON(ctx, http.MethodPost, dispatchesPath, reqBody, &run); err != nil {
 		var httpErr *api.HTTPError
@@ -173,8 +177,6 @@ func (c *CloudClient) CreateDispatch(ctx context.Context, reqBody CreateDispatch
 // waitForDispatch polls a generating run until the cell reports it complete
 // or failed.
 func (c *CloudClient) waitForDispatch(ctx context.Context, run *APIRun) (*APIRun, error) {
-	ctx, cancel := context.WithTimeout(ctx, dispatchPollBudget)
-	defer cancel()
 	for run.Status == dispatchStatusGenerating {
 		if run.ID == "" {
 			return nil, errors.New("dispatch service returned a generating dispatch without an id")
