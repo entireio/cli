@@ -230,6 +230,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 	cmd.AddCommand(newRefreshTrailEnablementCmd())
 	cmd.AddCommand(newSweepSessionsCmd())
+	cmd.AddCommand(newOPFScanCmd())
 
 	// Experimental command (developer-only visibility; setup/tune runners).
 	experimental.Register(cmd, newRunnerCmd()) // 'runner' (experimental)

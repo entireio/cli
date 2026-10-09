@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -575,4 +576,91 @@ func TestBatchBytesWithPrivacyFilter_NilRuntimeFailsClosed(t *testing.T) {
 	if out != nil {
 		t.Errorf("want nil output on fail-closed error, got %d blobs", len(out))
 	}
+}
+
+func TestChunkOPFBatchInputs(t *testing.T) {
+	t.Parallel()
+	sep := len(opfBatchSeparator)
+	tests := []struct {
+		name   string
+		inputs []string
+		limit  int
+		want   [][]string
+	}{
+		{name: "empty", inputs: nil, limit: 10, want: nil},
+		{name: "all fit", inputs: []string{"ab", "cd"}, limit: 2 * (2 + sep), want: [][]string{{"ab", "cd"}}},
+		{name: "splits at limit", inputs: []string{"ab", "cd", "ef"}, limit: 2 * (2 + sep), want: [][]string{{"ab", "cd"}, {"ef"}}},
+		{name: "oversized input alone", inputs: []string{"a", "0123456789", "b"}, limit: 4, want: [][]string{{"a"}, {"0123456789"}, {"b"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := chunkOPFBatchInputs(tt.inputs, tt.limit)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d chunks %q, want %d %q", len(got), got, len(tt.want), tt.want)
+			}
+			for i := range got {
+				if strings.Join(got[i], "|") != strings.Join(tt.want[i], "|") {
+					t.Errorf("chunk %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// Leaf text past opfBatchChunkBytes is split across several calls, each within
+// the bound, and every leaf still receives its spans. One oversized call would
+// run into opfTimeoutCeiling on a large checkpoint ref.
+func TestBatchBytesWithPrivacyFilter_SplitsLargeBatchesIntoBoundedCalls(t *testing.T) {
+	rt := &recordingSizesRuntime{spans: []Span{{Start: 0, End: 5, Label: "private_person"}}}
+	resetOPFConfig()
+	t.Cleanup(resetOPFConfig)
+	ConfigurePrivacyFilterWithRuntime(OPFConfig{
+		Enabled:    true,
+		Categories: map[string]bool{"private_person": true},
+	}, rt)
+
+	leaf := strings.Repeat("x", opfBatchChunkBytes/2)
+	inputs := []NamedBlob{
+		{Name: "a.txt", Content: []byte("Alice " + leaf)},
+		{Name: "b.txt", Content: []byte("Bobby " + leaf)},
+		{Name: "c.txt", Content: []byte("Carol " + leaf)},
+	}
+	out, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("BatchBytesWithPrivacyFilter: %v", err)
+	}
+	if len(rt.callBytes) < 2 {
+		t.Fatalf("want the batch split across several calls, got %d", len(rt.callBytes))
+	}
+	for i, n := range rt.callBytes {
+		if n > opfBatchChunkBytes {
+			t.Errorf("call %d carried %d bytes, want at most %d", i, n, opfBatchChunkBytes)
+		}
+	}
+	for i, o := range out {
+		if bytes.HasPrefix(o, inputs[i].Content[:5]) {
+			t.Errorf("blob %d: leading name not redacted, spans were lost across chunks", i)
+		}
+	}
+}
+
+type recordingSizesRuntime struct {
+	spans     []Span
+	callBytes []int
+}
+
+func (r *recordingSizesRuntime) Redact(_ context.Context, _ string, _ []string) ([]Span, error) {
+	return r.spans, nil
+}
+
+func (r *recordingSizesRuntime) RedactBatch(_ context.Context, inputs []string, _ []string) ([][]Span, error) {
+	n := 0
+	out := make([][]Span, len(inputs))
+	for i, in := range inputs {
+		n += len(in) + len(opfBatchSeparator)
+		out[i] = r.spans
+	}
+	r.callBytes = append(r.callBytes, n)
+	return out, nil
 }

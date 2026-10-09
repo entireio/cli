@@ -49,6 +49,14 @@ import (
 // the same error taxonomy as RewriteUnpushedV1WithOPF; delivery fails closed by
 // withholding any ref whose current generation still lacks the trailer.
 func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repository) error {
+	return rewriteQueuedCheckpointRefsWithOPF(ctx, repo, opfScanThenApply)
+}
+
+// rewriteQueuedCheckpointRefsWithOPF is RewriteQueuedCheckpointRefsWithOPF with
+// an explicit mode. Under opfApplyCachedOnly it never runs the model: a ref
+// whose content the scan worker has not covered yet is left untouched and
+// reported as *OPFScanPendingError, while its covered siblings are rewritten.
+func rewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repository, mode opfRewriteMode) error {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("resolve push queue: %w", err)
@@ -74,7 +82,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	if redact.OPFMisconfiguredNoCategories() {
 		return &OPFNoCategoriesError{}
 	}
-	if redact.OPFBreakerTripped() {
+	if mode == opfScanThenApply && redact.OPFBreakerTripped() {
 		return &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
 	}
 
@@ -85,6 +93,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	// the queue belongs to the flush.
 	existing, _ := partitionLocalRefs(repo, queued)
 	var firstErr error
+	var scanPending *OPFScanPendingError
 	for _, refName := range existing {
 		// Whole-flush stop, alongside ErrOPFNoEnabledCategories below: a
 		// tripped process-wide breaker (this loop's own prior ref, or anything
@@ -94,7 +103,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		// and stamp Entire-OPF-Applied on it. Per-ref isolation covers per-ref
 		// conditions (the size cap); a broken runtime is broken for the whole
 		// process. Refs already rewritten above were scanned before the trip.
-		if redact.OPFBreakerTripped() {
+		if mode == opfScanThenApply && redact.OPFBreakerTripped() {
 			// Replaces any earlier per-ref error: a broken runtime is what
 			// withholds every remaining ref, so it is the error to report.
 			firstErr = &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
@@ -111,7 +120,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 			}
 			continue
 		}
-		rewriteErr := rewriteCollectedCheckpointRefWithOPF(ctx, repo, queue, pending, batchLimit)
+		rewriteErr := rewriteCollectedCheckpointRefWithOPF(ctx, repo, queue, pending, batchLimit, mode)
 		if rewriteErr == nil {
 			continue
 		}
@@ -132,11 +141,26 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 			}
 			break
 		}
+		// Pending is kept apart from the other errors so neither can hide the
+		// other, in either queue order: the pending signal is what starts the
+		// scan worker, and a cap error is what tells the user a ref is stuck.
+		var pendingErr *OPFScanPendingError
+		if errors.As(rewriteErr, &pendingErr) {
+			scanPending = pendingErr
+			continue
+		}
 		if firstErr == nil {
 			firstErr = rewriteErr
 		}
 	}
-	return firstErr
+	switch {
+	case scanPending == nil:
+		return firstErr
+	case firstErr == nil:
+		return scanPending
+	default:
+		return errors.Join(firstErr, scanPending)
+	}
 }
 
 type pendingOPFCommit struct {
@@ -201,6 +225,7 @@ func rewriteCollectedCheckpointRefWithOPF(
 	queue *checkpoint.PushQueue,
 	pending *pendingOPFRef,
 	batchLimit int,
+	mode opfRewriteMode,
 ) error {
 	var blobs []redact.NamedBlob
 	for _, commit := range pending.commits {
@@ -213,12 +238,12 @@ func rewriteCollectedCheckpointRefWithOPF(
 	var redacted [][]byte
 	if len(blobs) > 0 {
 		var err error
-		redacted, err = redact.BatchBytesWithPrivacyFilter(ctx, blobs)
+		redacted, err = redactBlobsForOPFRewrite(ctx, repo, blobs, mode)
 		if err != nil {
 			if errors.Is(err, redact.ErrOPFNoEnabledCategories) {
 				return fmt.Errorf("scan checkpoint ref %s: %w", pending.ref, err)
 			}
-			return &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: err}
+			return err
 		}
 	}
 

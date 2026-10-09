@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/require"
@@ -63,6 +64,33 @@ func TestDeleteRedactCache_AbsentDirIsNotAnError(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	require.NoError(t, deleteRedactCache(context.Background()))
+}
+
+// The OPF span cache is pruned only by a scan worker, which never runs again
+// once OPF is off, so clean all must reclaim it too.
+//
+// Not parallel: t.Chdir sets process-global state.
+func TestOPFSpanCache_ListedAndDeletedByCleanAll(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "f.txt", "init")
+	testutil.GitAdd(t, tmpDir, "f.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	ctx := context.Background()
+
+	dir, err := derivedCacheDir(ctx, checkpoint.OPFSpanCacheDirName)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "deadbeef.json"), []byte(`{}`), 0o600))
+
+	items, err := ListAllItems(ctx)
+	require.NoError(t, err)
+	result, err := DeleteAllCleanupItems(ctx, items)
+	require.NoError(t, err)
+	require.Contains(t, result.RedactCaches, checkpoint.OPFSpanCacheDirName)
+	require.Empty(t, result.FailedRedactCache)
+	require.NoDirExists(t, dir, "clean all must reclaim the OPF span cache")
 }
 
 func cleanupItemTypes(items []CleanupItem) []CleanupType {

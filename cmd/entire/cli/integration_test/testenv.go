@@ -1909,7 +1909,7 @@ func (env *TestEnv) InstallRealPrePushHook() {
 		env.T.Fatalf("failed to create hooks dir: %v", err)
 	}
 	// Quote the binary path so a temp path containing spaces still execs.
-	script := fmt.Sprintf("#!/bin/sh\nexec %q hooks git pre-push \"$1\"\n", getTestBinary())
+	script := fmt.Sprintf("#!/bin/sh\n%s=1 exec %q hooks git pre-push \"$1\"\n", strategy.PrePushStdinRefsEnv, getTestBinary())
 	hookPath := filepath.Join(hooksDir, "pre-push")
 	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil {
 		env.T.Fatalf("failed to write pre-push hook: %v", err)

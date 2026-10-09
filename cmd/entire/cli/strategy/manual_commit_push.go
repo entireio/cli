@@ -165,7 +165,26 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			openSpan.End()
 			defer repo.Close()
 			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")
-			if _, rewriteErr := RewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget()); rewriteErr != nil {
+			verified, rewriteErr := rewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget(), opfApplyCachedOnly)
+			var pending *OPFScanPendingError
+			if errors.As(rewriteErr, &pending) {
+				// Not scanned yet: hold v1 back rather than make the user's push
+				// wait on the model. The worker scans and then pushes it.
+				opfSpan.End()
+				maybeSpawnOPFScan(ctx, ps.remote)
+				// Holding back Entire's own push is not enough when the user's
+				// push sends v1 itself (`--all`, `--mirror`, an explicit refspec).
+				if err := checkOuterPushV1(ctx, plumbing.ZeroHash); err != nil {
+					return err
+				}
+				fmt.Fprintln(stderrWriter, opfScanPendingNotice)
+				if !inOPFScanWorker(ctx) {
+					warnPrePushRefsUnknown(ctx, stderrWriter)
+				}
+				maybeHintGitRefsForOPF(ctx)
+				return nil
+			}
+			if rewriteErr != nil {
 				opfSpan.RecordError(rewriteErr)
 				opfSpan.End()
 				logging.Warn(ctx, "OPF pre-push rewrite failed; aborting push",
@@ -174,6 +193,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 				return rewriteErr
 			}
 			opfSpan.End()
+			// git chose what the user's push sends before this hook ran, so a
+			// push that carries v1 sends the pre-rewrite commit unless it
+			// already was the verified tip.
+			if err := checkOuterPushV1(ctx, verified); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -233,6 +258,11 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 // settings > prompt > non-TTY auto-run). Shared by both checkpoint backends so
 // the precedence cannot drift between them.
 func opfPrePushDecision(ctx context.Context) (OPFDecision, error) {
+	if inOPFScanWorker(ctx) {
+		// The worker exists only because the push that spawned it resolved
+		// OPFRun; it must not re-ask or fall back to a different default.
+		return OPFRun, nil
+	}
 	cfg, _ := settings.Load(ctx) //nolint:errcheck // Load already failed at hook init; fall back to nil
 	var opfCfg *settings.OPFSettings
 	if cfg != nil && cfg.Redaction != nil {
@@ -292,10 +322,10 @@ func opfDecisionForCheckpointRefs(ctx context.Context) (OPFDecision, error) {
 	return decision, nil
 }
 
-func rewriteCheckpointRefsForPush(ctx context.Context, repo *git.Repository) error {
+func rewriteCheckpointRefsForPush(ctx context.Context, repo *git.Repository, mode opfRewriteMode) error {
 	_, opfSpan := perf.Start(ctx, "opf_rewrite_refs")
 	defer opfSpan.End()
-	if err := RewriteQueuedCheckpointRefsWithOPF(ctx, repo); err != nil {
+	if err := rewriteQueuedCheckpointRefsWithOPF(ctx, repo, mode); err != nil {
 		opfSpan.RecordError(err)
 		return err
 	}
@@ -351,9 +381,41 @@ func warnOPFCheckpointRefsWithheld(ctx context.Context, err error, withheld int)
 	if withheld == 0 {
 		return
 	}
+	if pending, rest := splitOPFScanPending(err); pending {
+		fmt.Fprintln(stderrWriter, opfScanPendingNotice)
+		if rest == nil {
+			return
+		}
+		err = rest
+	}
 	fmt.Fprintf(stderrWriter,
 		"[entire] %d checkpoint ref(s) were not pushed and stay queued for the next push: %v\n", withheld, err)
 }
+
+// splitOPFScanPending separates the scan-pending signal from any other error
+// the rewrite reported alongside it: a capped ref and an unscanned sibling
+// arrive joined, and the user needs to hear about both.
+func splitOPFScanPending(err error) (bool, error) {
+	var pending *OPFScanPendingError
+	if !errors.As(err, &pending) {
+		return false, err
+	}
+	var joined interface{ Unwrap() []error }
+	if !errors.As(err, &joined) {
+		return true, nil
+	}
+	var rest []error
+	for _, e := range joined.Unwrap() {
+		if !errors.As(e, &pending) {
+			rest = append(rest, e)
+		}
+	}
+	return true, errors.Join(rest...)
+}
+
+// opfScanPendingNotice is what the user sees when checkpoints are held for the
+// background scan. It is not an error: nothing is lost and no action is needed.
+const opfScanPendingNotice = "[entire] Checkpoints are being scanned by the OpenAI Privacy Filter in the background and will be pushed when it finishes."
 
 // opfCancelledCheckpointRefs reports whether the user explicitly cancelled OPF
 // at the prompt. That withholds the whole flush, already-trailered refs
@@ -491,16 +553,34 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// nothing un-OPF'd ships, those refs stay queued, and the user's push
 	// proceeds.
 	opfDecision, opfErr := opfDecisionForCheckpointRefs(ctx)
+	// Withholding Entire's own push is not enough when the user's push sends
+	// checkpoint refs itself (`--all`, `--mirror`, an explicit refspec). Unlike
+	// a checkpoint-ref failure, that must abort the user's push. Only an
+	// explicit OPF skip for this push lets it through.
+	var outerErr error
+	if redact.OPFEnabled() && opfDecision != OPFSkip {
+		outerErr = checkOuterPushCheckpointRefs(ctx, repo)
+	}
 	if opfCancelledCheckpointRefs(opfErr) {
 		warnOPFCheckpointRefsWithheld(ctx, opfErr, queuedCheckpointRefCount(ctx, repo))
-		return nil
+		return outerErr
 	}
 	if opfDecision == OPFRun && opfErr == nil {
-		// Each queued ref is rewritten and capped on its own, so a ref OPF
-		// cannot finish stays untrailered while its siblings are rewritten.
-		// Delivery below reads each ref's own tip trailer, and exact queue-token
-		// cleanup preserves any generation that advanced during this push.
-		opfErr = rewriteCheckpointRefsForPush(ctx, repo)
+		// Each queued ref is rewritten from the OPF span cache on its own; a
+		// ref the scan worker has not covered yet stays untrailered while its
+		// covered siblings are rewritten. Delivery below reads each ref's own
+		// tip trailer, and exact queue-token cleanup preserves any generation
+		// that advanced during this push.
+		opfErr = rewriteCheckpointRefsForPush(ctx, repo, opfApplyCachedOnly)
+		var pending *OPFScanPendingError
+		if errors.As(opfErr, &pending) {
+			maybeSpawnOPFScan(ctx, ps.remote)
+			// checkOuterPushCheckpointRefs above cannot see an outer push the
+			// hook did not describe; say so, as the v1 path does.
+			if !inOPFScanWorker(ctx) {
+				warnPrePushRefsUnknown(ctx, stderrWriter)
+			}
+		}
 	}
 	flushed, withheld, flushErr := flushCheckpointRefsQueue(ctx, repo, ps, deliveryRequiresOPFTrailer(opfDecision))
 	if opfErr != nil {
@@ -526,7 +606,7 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",
 			slog.String("error", flushErr.Error()))
 	}
-	return nil
+	return outerErr
 }
 
 // PushQueuedCheckpointRefs pushes any queued checkpoint refs to the configured
@@ -551,7 +631,9 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		return 0, false, opfErr
 	}
 	if opfDecision == OPFRun && opfErr == nil {
-		opfErr = rewriteCheckpointRefsForPush(ctx, repo)
+		// The migration push promises an immediate push, so it waits for the
+		// scan here instead of handing it to the background worker.
+		opfErr = rewriteCheckpointRefsForPush(ctx, repo, opfScanThenApply)
 	}
 	var withheld int
 	pushed, withheld, err = flushCheckpointRefsQueue(ctx, repo, ps, deliveryRequiresOPFTrailer(opfDecision))

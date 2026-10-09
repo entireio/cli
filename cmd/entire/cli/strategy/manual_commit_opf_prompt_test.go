@@ -200,7 +200,7 @@ func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
 	withOPFPrePushProgressWriterForTest(t, &out)
 
 	require.NoError(t, (&ManualCommitStrategy{}).PrePush(t.Context(), "origin"))
-	require.Contains(t, out.String(), "OpenAI Privacy Filter: scanning checkpoints before push")
+	require.Contains(t, out.String(), "OpenAI Privacy Filter: enabled for checkpoint processing")
 }
 
 func withOPFPrePushProgressWriterForTest(t testing.TB, w io.Writer) {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -33,9 +34,10 @@ const (
 	CleanupTypeShadowBranch CleanupType = "shadow-branch"
 	CleanupTypeSessionState CleanupType = "session-state"
 	CleanupTypeCheckpoint   CleanupType = "checkpoint"
-	// CleanupTypeRedactCache is the redaction prefix cache in the git common dir.
-	// Purely derived data -- it is rebuilt on the next checkpoint -- so it is
-	// removed wholesale rather than per entry.
+	// CleanupTypeRedactCache is a derived cache in the git common dir: the
+	// redaction prefix cache or the OPF span cache (the item ID names which).
+	// Purely derived data -- rebuilt on the next checkpoint or scan -- so each
+	// is removed wholesale rather than per entry.
 	CleanupTypeRedactCache CleanupType = "redact-cache"
 )
 
@@ -342,28 +344,40 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 	}
 
 	// The redaction prefix cache accumulates one small entry per session and is
-	// never superseded, so without this it would survive every `entire clean`.
-	if dir, err := redactCacheDir(ctx); err == nil && dir != "" {
-		if _, statErr := os.Stat(dir); statErr == nil {
-			cleanupItems = append(cleanupItems, CleanupItem{
-				Type:   CleanupTypeRedactCache,
-				ID:     checkpoint.RedactCacheDirName,
-				Reason: cleanAllReason,
-			})
+	// never superseded, and the OPF span cache is pruned only by a scan worker,
+	// which never runs once OPF is off. Without this both would survive every
+	// `entire clean`.
+	for _, name := range derivedCacheDirNames {
+		if dir, err := derivedCacheDir(ctx, name); err == nil && dir != "" {
+			if _, statErr := os.Stat(dir); statErr == nil {
+				cleanupItems = append(cleanupItems, CleanupItem{
+					Type:   CleanupTypeRedactCache,
+					ID:     name,
+					Reason: cleanAllReason,
+				})
+			}
 		}
 	}
 
 	return cleanupItems, nil
 }
 
+// derivedCacheDirNames are the git-common-dir caches `entire clean --all`
+// reclaims; deletion accepts no other name.
+var derivedCacheDirNames = []string{checkpoint.RedactCacheDirName, checkpoint.OPFSpanCacheDirName}
+
 // redactCacheDir resolves the redaction prefix cache directory, or "" when the
 // git common dir cannot be resolved.
 func redactCacheDir(ctx context.Context) (string, error) {
+	return derivedCacheDir(ctx, checkpoint.RedactCacheDirName)
+}
+
+func derivedCacheDir(ctx context.Context, name string) (string, error) {
 	commonDir, err := session.GetGitCommonDir(ctx)
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
-	return filepath.Join(commonDir, checkpoint.RedactCacheDirName), nil
+	return filepath.Join(commonDir, name), nil
 }
 
 // DeleteAllCleanupItems deletes all specified cleanup items.
@@ -393,18 +407,20 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 		}
 	}
 
-	// Remove the redaction prefix cache. Derived data, so a failure is recorded
-	// but never blocks the rest of the cleanup.
-	if len(redactCaches) > 0 {
-		if err := deleteRedactCache(ctx); err != nil {
-			result.FailedRedactCache = redactCaches
-			logging.Warn(logCtx, "failed to delete redaction cache",
+	// Remove the derived caches. Derived data, so a failure is recorded but
+	// never blocks the rest of the cleanup.
+	for _, name := range redactCaches {
+		if err := deleteDerivedCache(ctx, name); err != nil {
+			result.FailedRedactCache = append(result.FailedRedactCache, name)
+			logging.Warn(logCtx, "failed to delete derived cache",
 				slog.String("type", string(CleanupTypeRedactCache)),
+				slog.String("cache", name),
 				slog.String("error", err.Error()))
 		} else {
-			result.RedactCaches = redactCaches
-			logging.Info(logCtx, "deleted redaction cache",
-				slog.String("type", string(CleanupTypeRedactCache)))
+			result.RedactCaches = append(result.RedactCaches, name)
+			logging.Info(logCtx, "deleted derived cache",
+				slog.String("type", string(CleanupTypeRedactCache)),
+				slog.String("cache", name))
 		}
 	}
 
@@ -507,7 +523,16 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 // derived data rebuilt on the next checkpoint, so removing the whole directory is
 // always safe; a missing directory is not an error.
 func deleteRedactCache(ctx context.Context) error {
-	dir, err := redactCacheDir(ctx)
+	return deleteDerivedCache(ctx, checkpoint.RedactCacheDirName)
+}
+
+// deleteDerivedCache removes one of derivedCacheDirNames. A missing directory
+// is not an error.
+func deleteDerivedCache(ctx context.Context, name string) error {
+	if !slices.Contains(derivedCacheDirNames, name) {
+		return fmt.Errorf("not a derived cache: %q", name)
+	}
+	dir, err := derivedCacheDir(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -515,8 +540,8 @@ func deleteRedactCache(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open git common dir: %w", err)
 	}
-	if err := root.RemoveAll(checkpoint.RedactCacheDirName); err != nil {
-		return fmt.Errorf("remove redaction cache %s: %w", dir, err)
+	if err := root.RemoveAll(name); err != nil {
+		return fmt.Errorf("remove derived cache %s: %w", dir, err)
 	}
 	return nil
 }

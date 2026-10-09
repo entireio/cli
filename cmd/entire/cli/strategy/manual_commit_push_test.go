@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"github.com/entireio/cli/redact"
 	"os/exec"
 	"testing"
 
@@ -60,29 +61,32 @@ func TestDeferCheckpointPushOnEmptyRemote_UsesLocalTrackingRefs(t *testing.T) {
 		"a dedicated checkpoint remote is exempt from the guard")
 }
 
-// TestPrePushCheckpointRefs_RedactedRefShipsWhileFailedSiblingStaysQueued pins
-// per-ref delivery on the pre-push path: a ref OPF finished ships in the same
-// push even though a sibling could not be redacted, and that sibling stays
-// queued without reaching the remote.
-func TestPrePushCheckpointRefs_RedactedRefShipsWhileFailedSiblingStaysQueued(t *testing.T) {
+// TestPrePushCheckpointRefs_ScannedRefShipsWhileUnscannedSiblingIsHeld pins
+// per-ref delivery on the pre-push path: a ref the scan worker already covered
+// is rewritten from the cache and ships in the same push, while an unscanned
+// sibling stays queued, never reaches the remote, and starts the worker.
+func TestPrePushCheckpointRefs_ScannedRefShipsWhileUnscannedSiblingIsHeld(t *testing.T) {
 	// No t.Parallel: the fixture uses t.Chdir.
-	const okID, failID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
-	const failSentinel = "OPFBOOM"
-	configureFakeOPF(t, &fakeRuntimeFailsOnSentinel{sentinel: failSentinel})
-	bareDir, repo, refs := setupGitRefsOPFRepo(t, okID)
-	addGitRefsSessionWithTranscript(t, repo, failID, "sess-fail",
-		"Hello, PERSONABC asked about "+failSentinel)
-	refs = append(refs, mustRefName(t, id.MustCheckpointID(failID)))
+	const scannedID, heldID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, scannedID, heldID)
+	cache, err := checkpoint.OPFSpanCacheForRepo(repo)
+	require.NoError(t, err)
+	require.NoError(t, redact.ScanBlobsWithPrivacyFilter(t.Context(), checkpointRefBlobsForTest(t, repo, refs[:1]), cache))
+	scanCalls := fake.batchCallCount()
+	spawns := swapOPFScanSpawn(t)
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"),
-		"a ref OPF could not finish must not block the user's git push")
+		"an unscanned ref must not block the user's git push")
 
-	require.NotEmpty(t, remoteRefHash(t, bareDir, refs[0]),
-		"the redacted ref must reach the remote")
+	require.Equal(t, scanCalls, fake.batchCallCount(), "pre-push must not call the model")
+	require.NotEmpty(t, remoteRefHash(t, bareDir, refs[0]), "the scanned ref must reach the remote")
 	assertRefsAbsentFromRemote(t, bareDir, []plumbing.ReferenceName{refs[1]},
-		"the ref OPF could not finish must not reach the remote")
+		"the unscanned ref must not reach the remote")
 	require.Equal(t, []plumbing.ReferenceName{refs[1]}, queuedRefs(t, repo),
-		"only the ref OPF could not finish stays queued")
+		"only the unscanned ref stays queued")
+	require.Equal(t, []string{"origin"}, *spawns)
 }
 
 // TestPushQueuedCheckpointRefs_ShipsReadyRefsAndReportsTheRest is the explicit
