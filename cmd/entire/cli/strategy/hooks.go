@@ -38,12 +38,15 @@ const goosWindows = "windows"
 const chainComment = "# Chain: run pre-existing hook"
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 
-// postRewriteHook is named on its own because the rewrite hook is the one
-// Entire branches on by name (see below).
-const postRewriteHook = "post-rewrite"
+// postRewriteHook and prePushHook are named on their own because they are the
+// hooks Entire branches on by name (see below).
+const (
+	postRewriteHook = "post-rewrite"
+	prePushHook     = "pre-push"
+)
 
 // gitHookNames are the git hooks managed by Entire CLI
-var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", postRewriteHook, "pre-push"}
+var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", postRewriteHook, prePushHook}
 
 // ManagedGitHookNames returns the list of git hooks managed by Entire CLI.
 // This is useful for tests that need to manipulate hooks.
@@ -617,7 +620,7 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 `, entireHookMarker, postRewriteCmd),
 		},
 		{
-			name: "pre-push",
+			name: prePushHook,
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Pre-push hook: push session logs alongside user's push
@@ -995,6 +998,12 @@ func removeHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, 
 func generateChainedContent(baseContent, hookName string) string {
 	if hookName == postRewriteHook {
 		return generatePostRewriteChainedContent(baseContent)
+	}
+	if hookName == prePushHook {
+		// pre-push is the one hook whose failure must stop git (an OPF decline;
+		// see buildHookSpecs). The script's exit status is its last command's,
+		// so without this a succeeding chained hook would let the push through.
+		baseContent += "_entire_status=$?\nif [ \"$_entire_status\" -ne 0 ]; then exit \"$_entire_status\"; fi\n"
 	}
 
 	return baseContent + chainCall(hookName, "")

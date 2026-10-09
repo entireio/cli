@@ -456,7 +456,7 @@ func assertHooks(t *testing.T, f *hooksFixture, want map[string]string) {
 	}
 }
 
-// Entire's hook, pre-commit's checks and the user's hook each run once, in that
+// Entire's hook, the user's hook and pre-commit's checks each run once, in that
 // order, through the real wrapper template and a stand-in for pre-commit's
 // hook-impl.
 func TestInstallHooks_ReclaimedChainRunsEachHookOnce(t *testing.T) { //nolint:tparallel // subtests run in turn; see below
@@ -528,6 +528,58 @@ echo pre-commit >> `+log+"\n")
 	}
 	if got := strings.Join(strings.Fields(string(data)), ","); got != "entire,user,pre-commit" {
 		t.Errorf("ran %s, want entire,user,pre-commit", got)
+	}
+}
+
+// A failed `entire hooks git pre-push` (an OPF decline) must abort the push
+// even when a chained hook follows and succeeds: the script's exit status was
+// the chained hook's, so the decline was lost.
+func TestChainedPrePush_EntireFailureAbortsPush(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs POSIX shell hooks")
+	}
+	for name, tc := range map[string]struct {
+		entireExit string
+		backupExit string
+		wantCode   int
+		wantLog    string
+	}{
+		"entire declines":      {"1", "0", 1, "entire"},
+		"entire ok, chain ok":  {"0", "0", 0, "entire,user"},
+		"entire ok, chain bad": {"0", "3", 3, "entire,user"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newHooksFixture(t)
+			bin := t.TempDir()
+			log := filepath.Join(t.TempDir(), "log")
+			writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\necho entire >> "+log+"\nexit "+tc.entireExit+"\n")
+			spec := specFor(t, "pre-push")
+			f.write("pre-push", generateChainedContent(spec.content, spec.name))
+			f.write("pre-push"+backupSuffix, "#!/bin/sh\necho user >> "+log+"\nexit "+tc.backupExit+"\n")
+
+			cmd := exec.CommandContext(t.Context(), filepath.Join(f.dir, "pre-push"), "origin", "url")
+			cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			err := cmd.Run()
+			code := 0
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if code != tc.wantCode {
+				t.Errorf("exit code = %d, want %d", code, tc.wantCode)
+			}
+			data, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(strings.Fields(string(data)), ","); got != tc.wantLog {
+				t.Errorf("ran %s, want %s", got, tc.wantLog)
+			}
+		})
 	}
 }
 
