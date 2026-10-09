@@ -26,7 +26,6 @@ var (
 	getSummaryAgent                = agent.Get
 	listRegisteredAgents           = agent.List
 	isSummaryCLIAvailable          = agent.IsSummaryCLIAvailable
-	discoverSummaryProviders       = external.DiscoverAndRegister
 	discoverSummaryProvidersAlways = external.DiscoverAndRegisterAlways
 	discoverNamedSummaryProvider   = external.DiscoverAndRegisterNamedAlways
 	canPromptForSummaryProvider    = interactive.CanPromptInteractively

@@ -35,7 +35,7 @@ const (
 	reconnectBackoffCap     = 30 * time.Second
 )
 
-func newTrailWatchCmd() *cobra.Command {
+func newTrailWatchCmd(mode *trailMode) *cobra.Command {
 	var (
 		jsonOutput bool
 		showPings  bool
@@ -45,13 +45,19 @@ func newTrailWatchCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "watch [<trail>]",
-		Short: "Tail a trail's events live",
-		Long: `Subscribe to the trail-wide SSE stream and print events as they arrive.
+		Short: mode.help("Tail a trail's events live", "Tail events for a trail's selected repository branch"),
+		Long: mode.help(`Subscribe to the trail-wide SSE stream and print events as they arrive.
 Reconnects automatically when the server caps the connection (~50s) and on
 transient network errors.
 
 <trail> may be a number, id, or branch name. If omitted, the trail for the
-current branch is used.
+current branch is used.`, `Subscribe to the selected repository/branch's SSE stream and print events as they arrive.
+Reconnects automatically when the server caps the connection (~50s) and on
+transient network errors.
+
+<trail> is a project trail number, ID, or <repo>/<number>. If omitted, the current branch's
+parent is used. --repo and --branch select the working context; this does not
+aggregate streams from every repository.`) + `
 
 This command resolves the trail's id internally and streams
 GET /api/v1/trails/<id>/events with Accept: text/event-stream.
@@ -70,25 +76,37 @@ Events emitted by the server:
 			}
 			// Delegates to the shared trail-review resolver so number/id/branch
 			// selectors and insecure-HTTP handling stay in one place.
-			return runTrailReviewWatch(cmd, selector, jsonOutput, showPings, once)
+			return runTrailReviewWatch(cmd, mode, selector, jsonOutput, showPings, once)
 		},
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print each event as a single JSON line")
 	cmd.Flags().BoolVar(&showPings, "show-pings", false, "Print SSE keepalive pings (otherwise suppressed)")
 	cmd.Flags().BoolVar(&once, "once", false, "Open one SSE connection then exit instead of reconnecting")
-	cmd.Flags().StringVar(&branch, "branch", "", "Watch the trail for this branch instead of the current branch; cannot be combined with a trail selector")
+	cmd.Flags().StringVar(&branch, "branch", "", mode.help(
+		"Watch the trail for this branch instead of the current branch; cannot be combined with a trail selector",
+		"Select a repository branch within the trail"))
 
 	return cmd
 }
 
-func runTrailReviewWatch(cmd *cobra.Command, selector string, jsonOutput, showPings, once bool) error {
-	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+func runTrailReviewWatch(cmd *cobra.Command, mode *trailMode, selector string, jsonOutput, showPings, once bool) error {
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
-	description := trailWatchDescription(target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.ID)
-	return runTrailWatchResolved(cmd, client, target.Trail.ID, description, jsonOutput, showPings, once)
+	return runTrailWatchResolved(cmd, client, target.Trail.ID, trailWatchTargetDescription(target), jsonOutput, showPings, once)
+}
+
+// trailWatchTargetDescription labels the stream: the trail, plus the branch
+// for a project change (a merged change keeps its name in original_branch).
+func trailWatchTargetDescription(target trailReviewTarget) string {
+	display := trailForDisplay(target.Trail)
+	description := trailWatchDescription(target.Host, target.Owner, target.Repo, display.Number, display.ID)
+	if target.Trail.Parent != nil {
+		description += " / " + changeBranchName(target.Trail)
+	}
+	return description
 }
 
 func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, description string, jsonOutput, showPings, once bool) error {

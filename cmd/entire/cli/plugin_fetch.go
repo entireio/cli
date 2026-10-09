@@ -525,27 +525,6 @@ func safeArchiveEntry(entryName string) bool {
 	return !strings.HasPrefix(clean, "../") && !path.IsAbs(clean) && !strings.Contains(entryName, "\x00")
 }
 
-// preferredArchiveEntry picks among entries whose basename matches the plugin
-// binary. Shallowest path wins, then lexicographic order.
-//
-// Selection has to be deterministic and independent of archive order. Matching
-// is by basename, so an archive can legitimately hold more than one candidate —
-// goreleaser writes the binary at the root by default but nests it under a
-// versioned directory with wrap_in_directory, and archives also ship things like
-// completions/entire-<name>. Taking whichever came first meant the installed
-// binary depended on the order the author's tar happened to be built in.
-//
-// Shallowest-first encodes the convention: the real binary sits at the root, or
-// at worst one directory down; a same-named file deeper in the tree is a
-// completion script or a doc, not the command.
-func preferredArchiveEntry(names []string, binName string) string {
-	p := archiveEntryPicker{binName: binName}
-	for _, name := range names {
-		p.consider(name)
-	}
-	return p.best
-}
-
 // archiveEntryPicker keeps only the best candidate seen so far, so an archive
 // can be scanned without materializing every entry name.
 //

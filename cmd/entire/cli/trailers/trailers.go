@@ -23,13 +23,6 @@ const (
 	// SessionTrailerKey identifies which session created a commit.
 	SessionTrailerKey = "Entire-Session"
 
-	// CondensationTrailerKey identifies the condensation ID for a commit (legacy).
-	CondensationTrailerKey = "Entire-Condensation"
-
-	// SourceRefTrailerKey links code commits to their metadata on the metadata branch.
-	// Format: "<branch>@<commit-hash>" e.g. "entire/metadata@abc123def456"
-	SourceRefTrailerKey = "Entire-Source-Ref"
-
 	// CheckpointTrailerKey links commits to their checkpoint metadata on entire/checkpoints/v1.
 	// Format: a checkpoint ID — either a legacy 12-hex ID (e.g. "a3b2c4d5e6f7")
 	// or a 26-char ULID (see checkpoint/id.CheckpointPattern).
@@ -223,16 +216,6 @@ func keepLines(lines []string, removeLine []bool, trimTrailing, endsWithNewline 
 
 func isBlankLine(line string) bool {
 	return strings.TrimSpace(line) == ""
-}
-
-// FormatSourceRef creates a formatted source ref string for the trailer.
-// Format: "<branch>@<commit-hash-prefix>" (hash truncated to ShortIDLength chars)
-func FormatSourceRef(branch, commitHash string) string {
-	shortHash := commitHash
-	if len(shortHash) > checkpointID.ShortIDLength {
-		shortHash = shortHash[:checkpointID.ShortIDLength]
-	}
-	return fmt.Sprintf("%s@%s", branch, shortHash)
 }
 
 // FormatCheckpoint creates a commit message with a checkpoint trailer.

@@ -93,30 +93,6 @@ func TestCodexInventoryInitialization(t *testing.T) {
 // testTranscriptPromptResponse is a minimal transcript used across strategy tests.
 const testTranscriptPromptResponse = "{\"type\":\"human\",\"message\":{\"content\":\"test prompt\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":\"test response\"}}\n"
 
-func TestManualCommit_ValidateRepository(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	s := NewManualCommitStrategy()
-	err := s.ValidateRepository()
-	if err != nil {
-		t.Errorf("ValidateRepository() error = %v, want nil", err)
-	}
-}
-
-func TestManualCommit_ValidateRepository_NotGitRepo(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-
-	s := NewManualCommitStrategy()
-	err := s.ValidateRepository()
-	if err == nil {
-		t.Error("ValidateRepository() error = nil, want error for non-git directory")
-	}
-}
-
 func TestManualCommit_SessionState_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -938,64 +914,6 @@ func TestAddCheckpointTrailer_ExistingTrailers(t *testing.T) {
 	}
 	if !strings.Contains(result, trailers.CheckpointTrailerKey+":") {
 		t.Errorf("addCheckpointTrailer() missing our trailer.\ngot: %q", result)
-	}
-}
-
-func TestManualCommit_GetCheckpointLog_WithCheckpointID(t *testing.T) {
-	// This test verifies that GetCheckpointLog correctly uses the checkpoint ID
-	// to look up the log. Since getCheckpointLog requires a full git setup
-	// with entire/checkpoints/v1 branch, we test the lookup logic by checking error behavior.
-
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	s := NewManualCommitStrategy()
-
-	// Checkpoint with checkpoint ID (12 hex chars)
-	checkpoint := Checkpoint{
-		CheckpointID: "a1b2c3d4e5f6",
-		Message:      "Checkpoint: a1b2c3d4e5f6",
-		Timestamp:    time.Now(),
-	}
-
-	// This should attempt to call getCheckpointLog (which will fail because
-	// there's no entire/checkpoints/v1 branch), but the important thing is it uses
-	// the checkpoint ID to look up metadata
-	_, err := s.GetCheckpointLog(context.Background(), checkpoint)
-	if err == nil {
-		t.Error("GetCheckpointLog() expected error (no sessions branch), got nil")
-	}
-	// The error should be about sessions branch, not about parsing
-	if err != nil && err.Error() != "sessions branch not found" {
-		t.Logf("GetCheckpointLog() error = %v (expected sessions branch error)", err)
-	}
-}
-
-func TestManualCommit_GetCheckpointLog_NoCheckpointID(t *testing.T) {
-	// Test that checkpoints without checkpoint ID return ErrNoMetadata
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	s := NewManualCommitStrategy()
-
-	// Checkpoint without checkpoint ID
-	checkpoint := Checkpoint{
-		CheckpointID: "",
-		Message:      "Some other message",
-		Timestamp:    time.Now(),
-	}
-
-	// This should return ErrNoMetadata since there's no checkpoint ID
-	_, err := s.GetCheckpointLog(context.Background(), checkpoint)
-	if err == nil {
-		t.Error("GetCheckpointLog() expected error for missing checkpoint ID, got nil")
-	}
-	if !errors.Is(err, ErrNoMetadata) {
-		t.Errorf("GetCheckpointLog() expected ErrNoMetadata, got %v", err)
 	}
 }
 

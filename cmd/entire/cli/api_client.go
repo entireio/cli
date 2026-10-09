@@ -76,29 +76,6 @@ func requireSecureDataOverride() error {
 	return nil
 }
 
-// NewAuthenticatedEntireAPICellClient creates an API client for repo-scoped
-// entire-api routes (e.g. trails). It sends the login JWT as the bearer and
-// dials the entire-api cell directly, because the BFF does not proxy these
-// routes for bearer callers.
-//
-// fullName (owner/repo) identifies the repo whose cell to reach. The repo's
-// PROCESSING cell + jurisdiction are resolved from the control plane
-// (mirroring the BFF's per-repo cell selection) so the call lands in the
-// region that actually holds the repo's data. This is NOT best-effort: a
-// resolution failure fails the command instead of falling back to the
-// caller's home cell, because for repo-scoped data a silent wrong-region
-// "success" is worse than an error.
-func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
-	target, err := resolveRepoCellTarget(ctx, fullName, "")
-	if err != nil {
-		return nil, err
-	}
-	// NewEntireAPICellClient already returns user-facing, context-rich errors
-	// (login hint, discovery-unavailable, region guidance); re-wrapping here
-	// would bury them, so surface them verbatim.
-	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target) //nolint:wrapcheck // pass through contextual auth errors
-}
-
 // newTrailAPIClient dials the entire-api cell that owns the forge-qualified
 // repository and returns its repo_id for repo-addressed trail reads. It is a
 // package seam so tests can substitute a client pointed at a stub server.

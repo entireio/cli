@@ -151,7 +151,7 @@ func TestImportClaudeCode_AnchorlessRepoRefusesImport(t *testing.T) {
 		env.CheckpointStore = backend
 		env.InitRepo()
 		testutil.WriteFile(t, env.ClaudeProjectDir, "anchorless.jsonl",
-			`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`+"\n")
+			`{"type":"user","uuid":"u1","cwd":`+claudeFixtureCwdJSON(t, env.RepoDir)+`,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`+"\n")
 		for _, extra := range [][]string{nil, {"--dry-run"}} {
 			out, err := env.RunCLIWithError(append([]string{"import", agentClaudeCode}, extra...)...)
 			require.Error(t, err, "output: %s", out)
@@ -163,7 +163,7 @@ func TestImportClaudeCode_AnchorlessRepoRefusesImport(t *testing.T) {
 
 func importAnchorFixture(t *testing.T, env *TestEnv, recorded, fallback string) string {
 	t.Helper()
-	lines := []string{`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`}
+	lines := []string{`{"type":"user","uuid":"u1","cwd":` + claudeFixtureCwdJSON(t, env.RepoDir) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`}
 	if recorded != "" {
 		lines = append(lines, fmt.Sprintf(`{"type":"user","toolUseResult":{"gitOperation":{"commit":{"sha":%q,"kind":"committed"}}},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"committed"}]}}`, recorded))
 	}

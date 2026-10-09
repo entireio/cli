@@ -67,22 +67,6 @@ func readFileLimitedIn(root *os.Root, name string, limit int64) ([]byte, error) 
 	return readWithinLimit(f, limit)
 }
 
-func readFileLimited(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // paths here are inside the managed plugin tree or our cache
-	if err != nil {
-		// Returned bare so callers can still test it with errors.Is against
-		// os.ErrNotExist — LoadPluginManifest depends on that to report an
-		// absent manifest as (nil, nil) rather than a failure.
-		return nil, err //nolint:wrapcheck // see above
-	}
-	defer f.Close()
-	data, err := readWithinLimit(f, limit)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
-	}
-	return data, nil
-}
-
 // pluginBinaryName returns the on-disk executable name for a bare plugin
 // name: entire-<name>, plus the Windows extension where the host needs it.
 func pluginBinaryName(name string) string {

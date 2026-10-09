@@ -233,12 +233,25 @@ Agents with a relocatable home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 holds the transcript, spelled as the environment sets it or in canonical form,
 whichever contains the transcript path. They keep a home set by an earlier turn
 while it still holds the transcript, and clear it otherwise
-(`strategy.updateSessionAgentHome`). Correcting a session's agent type or
-attaching a different transcript clears it too.
+(`strategy.updateSessionAgentHome`). Correcting a session's agent type clears
+it too.
+
+`entire attach` searches every agent's active home before any agent's other
+recorded homes, which it searches last, most recently used first, starting
+with the agent it resolved; it skips an active home only when the active
+search already covered it. Per-project agents have each recorded store
+searched one level deep, where a session's own transcript lives. Attach says
+when it found the transcript under a recorded home, and sets `AgentHome` to
+that home, or to the active home when one of its stores holds the transcript,
+and clears it otherwise. A registry that cannot be read is named in attach's
+not-found error. Pi sessions kept in a store relocated with
+`PI_CODING_AGENT_SESSION_DIR` lie outside every home, so they are never
+recorded or found this way.
 
 The active home is also recorded in the per-user registry `agent_homes.json`
-in the user config directory (`agent.RememberAgentHome`), after the session
-state is saved and its lock released. Only a home resolved from the user's
+in the user config directory (`agent.RememberAgentHome`): by session
+initialization after the session state is saved and its lock released, and by
+`entire attach` after it saves the state. Only a home resolved from the user's
 environment is recorded, never one read from session state. The registry
 lists each agent's homes most recently used first, at most 32 per agent, in
 canonical form; a home must exist to be recorded, and entries that are no
@@ -254,6 +267,31 @@ user: such code can write the registry, the agent's home, and the
 repository's git hooks alike. Codex child rollouts of a session from another
 trusted home are looked up in that home's stores
 (`agent.HomeScopedInventoryExtractor`).
+
+`entire session adopt` accepts the source session's transcript, and each
+declared task transcript, when it lies where the session's `AgentHome` keeps
+the source worktree's sessions and `ResolveTrustedHome` accepts that home.
+`agent.RepoHomeLayout` narrows the agent's stores to the source worktree the
+way its session directory is narrowed under the active home: Claude Code's
+project directory, or every store for an agent without per-project
+directories such as Codex. A trusted home therefore admits no other project's
+files. Paths are compared against the spelling `ResolveTrustedHome` returns,
+and task transcripts must still match the agent's task layout
+(`agent.TaskTranscriptMatcher`). Otherwise, including for a session with no
+`AgentHome` or an untrusted one, the path must lie in the session directory of
+an agent's active home (`agent.AgentForTranscriptPath`). When neither holds
+the transcript, the error names the session's home if it was trusted, since
+then the path is at fault. If the agent keeps the worktree's sessions outside
+its active home, as Pi does with `PI_CODING_AGENT_SESSION_DIR`, there is
+nowhere beneath the session's home to check, and the error says so; such a
+session can be adopted only where that store is active. Otherwise the error
+names the relocation variables (`agent.RelocationEnvVars`) and why the
+recorded home was refused.
+
+The adopted state keeps `AgentHome`, in the checked spelling, only while that
+home holds the transcript, and only that home vouches for task transcripts. A
+session without a transcript keeps no home. Any other home is cleared, and
+the next turn start records the home the agent runs under.
 
 ### The Root Anchors
 
@@ -539,9 +577,9 @@ comments at each site say which case applies:
   one pointing elsewhere inside it, so `.claude -> vendor/x` was previously read
   by `Read`/`GeneratedState`, reported present by `Exists`, and had `Remove`
   delete the file at the far end; only `Write` checked, because
-  `MkdirAllNoSymlink` was the only check there was. `osroot.NoSymlinkedParent` is
-  that function's read-only counterpart, and every `HookConfigFile` method calls
-  it. `HookConfigFile.Root()` hands over the raw primitives, so its one caller
+  `MkdirAllNoSymlink` was the only check there was. Every `HookConfigFile`
+  method now resolves through the read-only no-symlink primitives
+  (`osroot.LstatNoSymlinks`, `RemoveNoSymlinks`, ...). `HookConfigFile.Root()` hands over the raw primitives, so its one caller
   (Codex's `hooksDocumentRoot`) makes the check itself.
 
   **`writeManagedScaffold` is the same rule for the skill scaffolds** —

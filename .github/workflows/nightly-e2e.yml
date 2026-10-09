@@ -239,6 +239,8 @@ jobs:
       # shipped agents).
       - name: Install agent CLIs (Unix)
         if: matrix.os != 'windows-latest'
+        env:
+          CODEX_NON_INTERACTIVE: "1"
         run: |
           set -euo pipefail
           # Third-party install endpoints fail for reasons this repo can neither
@@ -269,7 +271,9 @@ jobs:
           # opencode by npm: its install script resolves its version through an
           # unauthenticated api.github.com call it gives no way to authenticate,
           # so it is rate-limited at random.
-          retry 'npm install -g @openai/codex @github/copilot opencode-ai'
+          retry 'npm install -g opencode-ai'
+          retry 'curl -fsSL --compressed https://chatgpt.com/codex/install.sh | sh'
+          retry 'curl -fsSL --compressed https://gh.io/copilot-install | bash'
           # agy's official installer: it resolves OS and architecture itself,
           # verifies a SHA-512 from the release manifest, and installs latest
           # into ~/.local/bin, which the line below puts on PATH.

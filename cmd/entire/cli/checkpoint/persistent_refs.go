@@ -50,15 +50,10 @@ func (r PersistentRefs) ReadBootstrappableFromRemote() bool {
 	return !r.localReadOnly && r.Read == r.Primary && r.PrimaryFetchableFromRemote()
 }
 
-// PrimaryAsRead returns a copy of r with Read pinned to Primary.
-func (r PersistentRefs) PrimaryAsRead() PersistentRefs {
-	r.Read = r.Primary
-	return r
-}
-
 // PrimaryAsLocalRead returns a copy of r with Read pinned to Primary and
 // every remote read tier disabled — see the localReadOnly field for when a
-// caller needs this instead of PrimaryAsRead.
+// caller needs this rather than a plain Read == Primary topology, which stays
+// bootstrappable from the remote (ReadBootstrappableFromRemote).
 func (r PersistentRefs) PrimaryAsLocalRead() PersistentRefs {
 	r.Read = r.Primary
 	r.localReadOnly = true

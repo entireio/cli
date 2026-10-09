@@ -108,7 +108,7 @@ func TestListLegacyShadowBranches(t *testing.T) {
 		}
 	}
 
-	// Test ListShadowBranches
+	// Test ListLegacyShadowBranches
 	shadowBranches, err := ListLegacyShadowBranches(context.Background())
 	if err != nil {
 		t.Fatalf("ListLegacyShadowBranches(context.Background()) error = %v", err)
@@ -164,7 +164,7 @@ func TestListLegacyShadowBranches_Empty(t *testing.T) {
 		t.Fatalf("failed to set master: %v", err)
 	}
 
-	// Test ListShadowBranches returns empty slice (not nil)
+	// Test ListLegacyShadowBranches returns empty slice (not nil)
 	shadowBranches, err := ListLegacyShadowBranches(context.Background())
 	if err != nil {
 		t.Fatalf("ListLegacyShadowBranches(context.Background()) error = %v", err)

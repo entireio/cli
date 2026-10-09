@@ -29,9 +29,7 @@ type ClusterCache map[string]*ClusterEntry
 
 // ClusterEntry holds cached data for a single cluster.
 type ClusterEntry struct {
-	Nodes          []string              `json:"nodes"`
-	NodesExpiresAt time.Time             `json:"nodes_expires_at"`
-	Repos          map[string]*RepoEntry `json:"repos,omitempty"`
+	Repos map[string]*RepoEntry `json:"repos,omitempty"`
 }
 
 // RepoEntry caches the hosting nodes for a single repository.
@@ -228,27 +226,6 @@ func writeCacheBytesAtomic(f cacheFile, data []byte) error {
 	return nil
 }
 
-// GetClusterNodes returns the cached cluster nodes. The second return value
-// indicates whether the cache entry is fresh (not expired).
-func (c ClusterCache) GetClusterNodes(cluster string) ([]string, bool) {
-	entry := c[cluster]
-	if entry == nil || len(entry.Nodes) == 0 {
-		return nil, false
-	}
-	return entry.Nodes, time.Now().Before(entry.NodesExpiresAt)
-}
-
-// SetClusterNodes stores cluster nodes with the given TTL.
-func (c ClusterCache) SetClusterNodes(cluster string, nodes []string, ttl time.Duration) {
-	entry := c[cluster]
-	if entry == nil {
-		entry = &ClusterEntry{}
-		c[cluster] = entry
-	}
-	entry.Nodes = nodes
-	entry.NodesExpiresAt = time.Now().Add(ttl)
-}
-
 // GetRepoNodes returns cached hosting nodes for a repo. The second return
 // value indicates freshness.
 func (c ClusterCache) GetRepoNodes(cluster, repoPath string) ([]string, bool) {
@@ -284,9 +261,4 @@ func (c ClusterCache) InvalidateRepo(cluster, repoPath string) {
 	if entry := c[cluster]; entry != nil && entry.Repos != nil {
 		delete(entry.Repos, repoPath)
 	}
-}
-
-// InvalidateCluster removes all cached data for a cluster.
-func (c ClusterCache) InvalidateCluster(cluster string) {
-	delete(c, cluster)
 }

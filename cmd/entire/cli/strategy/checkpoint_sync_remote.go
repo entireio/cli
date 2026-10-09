@@ -9,8 +9,12 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // CheckpointSyncRemoteSource identifies which precedence rule elected the
@@ -118,8 +122,9 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 
 // checkpointSyncAllowedForRemote reports whether a push to pushRemote may
 // carry checkpoint data. False for every remote except the elected
-// checkpoint sync remote — including raw-URL pushes (git passes the URL as
-// the hook arg) and the fail-closed misconfigured case. Callers exempt the
+// checkpoint sync remote and remotes that push to the same forge repository
+// (see pushesToSameForgeRepository) — false for raw-URL pushes (git passes the
+// URL as the hook arg) and the fail-closed misconfigured case. Callers exempt the
 // dedicated checkpoint_remote URL mode before calling.
 // pendingCapture, when non-empty, is the remote this push is about to elect but
 // has not persisted yet — the gate must let the electing push carry the
@@ -137,13 +142,147 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote, pendingCapt
 			slog.String("error", err.Error()))
 		return false
 	}
-	if syncRemote.Name == "" || syncRemote.Name != pushRemote {
-		logging.Debug(ctx, "checkpoint sync skipped: push remote is not the checkpoint sync remote",
+	if syncRemote.Name != "" && syncRemote.Name == pushRemote {
+		return true
+	}
+	if syncRemote.Name != "" && pushesToSameForgeRepository(ctx, pushRemote, syncRemote.Name) {
+		logging.Debug(ctx, "checkpoint sync admitted: push remote reaches the same forge repository as the checkpoint sync remote",
 			slog.String("push_remote", pushRemote),
 			slog.String("checkpoint_sync_remote", syncRemote.Name))
+		return true
+	}
+	logging.Debug(ctx, "checkpoint sync skipped: push remote is not the checkpoint sync remote",
+		slog.String("push_remote", pushRemote),
+		slog.String("checkpoint_sync_remote", syncRemote.Name))
+	return false
+}
+
+// pushesToSameForgeRepository reports whether pushes to pushRemote and the
+// elected remote land in the same forge repository — e.g. `git@github.com:o/r`
+// and its Entire mirror `entire://<cluster>/gh/o/r`. Mirrors push through to
+// the forge and sync every ref back from it, so checkpoints pushed via either
+// remote end up in the same place, and the single-remote gate has no audience
+// to protect.
+//
+// Push-through covering checkpoint refs is a verified external contract, not
+// an assumption: the mirror forwards every pushed ref to the forge, including
+// entire/checkpoints/v1 and the git-refs backend's refs/entire/* (confirmed
+// with the server side, 2026-10-06). CI does not exercise it — no test talks
+// to a real mirror — so a server change that stops forwarding non-branch refs
+// would strand git-refs checkpoints in the mirror silently: the push queue
+// drains on the mirror's acceptance. Revisit this function if that changes.
+//
+// Conservative by construction: both must be configured remotes with a fetch
+// URL (raw-URL pushes never match), and every push URL of both must resolve to
+// one known-forge repository over a direct or entire:// transport
+// (gitremote.ResolveRepository, which also follows SSH host aliases when git
+// runs plain ssh). Unknown hosts, remote-helper schemes, file:// paths,
+// Entire-native repos, and multi-URL remotes that fan out to different
+// repositories all fail the match, leaving the gate as strict as before.
+func pushesToSameForgeRepository(ctx context.Context, pushRemote, elected string) bool {
+	if !isCheckpointSyncRemoteEligible(ctx, pushRemote) || !isCheckpointSyncRemoteEligible(ctx, elected) {
 		return false
 	}
-	return true
+	// The elected remote first, and stop when it resolves to nothing: it is
+	// usually a plain GitHub URL that resolves without a subprocess, while
+	// pushRemote may be any remote the user pushes to. Resolving pushRemote
+	// unconditionally would run `ssh -G` inside every pre-push to a self-hosted
+	// or deploy SSH remote even when no match is possible.
+	electedRepo, ok := remotePushForgeRepository(ctx, elected)
+	if !ok {
+		return false
+	}
+	pushRepo, ok := remotePushForgeRepository(ctx, pushRemote)
+	return ok && pushRepo == electedRepo
+}
+
+// remotePushForgeRepository resolves the single forge repository every push
+// URL of the named remote reaches. ok is false when any URL does not resolve
+// to a known-forge repository or disagrees with another.
+func remotePushForgeRepository(ctx context.Context, name string) (gitremote.Repository, bool) {
+	dir, env := gitHookSafeDirEnv(ctx)
+	urls, err := gitremote.GetPushURLsInDir(ctx, dir, env, name)
+	if err != nil {
+		return gitremote.Repository{}, false
+	}
+	var found gitremote.Repository
+	for i, rawURL := range urls {
+		r, ok := gitremote.ResolveRepository(ctx, dir, env, rawURL)
+		if !ok || (i > 0 && r != found) {
+			return gitremote.Repository{}, false
+		}
+		found = r
+	}
+	return found, true
+}
+
+// gitHookSafeDirEnv returns the worktree root and an environment without git's
+// repo overrides, for a git subprocess that may run inside a hook; "" and nil
+// when no worktree root is known, leaving the ambient repository in charge.
+func gitHookSafeDirEnv(ctx context.Context) (string, []string) {
+	if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
+		return worktreeRoot, gitrepo.EnvWithoutRepoOverrides()
+	}
+	return "", nil
+}
+
+// advanceSyncRemoteTrackingRef records, after pushRemote accepted a branch
+// ref, that the elected sync remote has it too when both push to the same
+// forge repository. Without it the elected remote's tracking ref stays where
+// its last fetch or push left it, so `entire status` and the gated-sync hint
+// count checkpoints as unpushed that are already there, and the next push to
+// the elected remote re-sends a ref the forge already has.
+//
+// Only a fast-forward is recorded. The remote's history only moves forward
+// (checkpoint pushes never force), so pushRemote's fresh tracking ref always
+// descends from any earlier state of the elected one; anything else means the
+// tracking state is not what this reasoning assumes, and it is left alone for
+// the next fetch to correct. Best-effort: every failure logs and returns.
+func advanceSyncRemoteTrackingRef(ctx context.Context, pushRemote string, ref plumbing.ReferenceName) {
+	if !ref.IsBranch() {
+		return
+	}
+	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
+	if err != nil || syncRemote.Name == "" || syncRemote.Name == pushRemote {
+		return
+	}
+	if !pushesToSameForgeRepository(ctx, pushRemote, syncRemote.Name) {
+		return
+	}
+	dir, env := gitHookSafeDirEnv(ctx)
+	git := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir, cmd.Env = dir, env
+		out, err := cmd.Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	pushed := plumbing.NewRemoteReferenceName(pushRemote, ref.Short()).String()
+	target := plumbing.NewRemoteReferenceName(syncRemote.Name, ref.Short()).String()
+	newHash, err := git("rev-parse", "--verify", "--quiet", pushed+"^{commit}")
+	if err != nil {
+		return
+	}
+	// Absent target: "" as update-ref's old value means "must not exist yet".
+	oldHash, _ := git("rev-parse", "--verify", "--quiet", target+"^{commit}") //nolint:errcheck // absent reads as ""
+	if oldHash == newHash {
+		return
+	}
+	if oldHash != "" {
+		if _, err := git("merge-base", "--is-ancestor", oldHash, newHash); err != nil {
+			logging.Debug(ctx, "sync remote tracking ref not advanced: not a fast-forward",
+				slog.String("tracking_ref", target))
+			return
+		}
+	}
+	if _, err := git("update-ref", "-m", "entire: pushed via "+pushRemote, target, newHash, oldHash); err != nil {
+		logging.Debug(ctx, "sync remote tracking ref not advanced",
+			slog.String("tracking_ref", target),
+			slog.String("error", err.Error()))
+		return
+	}
+	logging.Debug(ctx, "sync remote tracking ref advanced: push went to the same forge repository",
+		slog.String("push_remote", pushRemote),
+		slog.String("tracking_ref", target))
 }
 
 // hintGatedCheckpointSync tells the user, on a gated pre-push, that

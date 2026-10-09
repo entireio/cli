@@ -151,6 +151,14 @@ type WriteOptions struct {
 	// CheckpointSummary.CommitSHA point back here.
 	CommitSHA string
 
+	// LinkedCommits links this checkpoint to existing commits without a
+	// trailer, as `entire session attach --commit` writes when the commit
+	// cannot be amended. Unlike the import anchor (CommitSHA) it is an
+	// attributing link: readers treat each entry exactly like a commit
+	// carrying this checkpoint's Entire-Checkpoint trailer. A rewrite of the
+	// same checkpoint keeps the existing entries and adds new ones.
+	LinkedCommits []LinkedCommit
+
 	// Transcript is the session transcript content (full.jsonl).
 	// Must be pre-redacted (via redact.JSONLBytes or redact.AlreadyRedacted for trusted sources).
 	Transcript redact.RedactedBytes
@@ -354,6 +362,10 @@ func (p *PrecomputedTranscriptBlobs) IsUsable() bool {
 type CheckpointInfo struct {
 	// CheckpointID is the stable 12-hex-char identifier
 	CheckpointID id.CheckpointID
+
+	// LinkedCommits are the checkpoint's trailer-less commit links; see
+	// WriteOptions.LinkedCommits.
+	LinkedCommits []LinkedCommit
 
 	// SessionID is the session identifier (most recent session for multi-session checkpoints)
 	SessionID string
@@ -591,6 +603,8 @@ type CheckpointSummary struct {
 	FilesTouched     []string           `json:"files_touched"`
 	Sessions         []SessionFilePaths `json:"sessions"`
 	TokenUsage       *types.TokenUsage  `json:"token_usage,omitempty"`
+	// LinkedCommits: attributing trailer-less links; see WriteOptions.LinkedCommits.
+	LinkedCommits []LinkedCommit `json:"linked_commits,omitempty"`
 
 	// LegacyCombinedAttribution carries the combined_attribution older CLIs
 	// wrote into the root summary through rewrites, byte for byte; see
@@ -650,4 +664,17 @@ type CodeLearning struct {
 	Line    int    `json:"line,omitempty"`     // Start line number
 	EndLine int    `json:"end_line,omitempty"` // End line for ranges (optional)
 	Finding string `json:"finding"`            // What was learned
+}
+
+// LinkedCommit is one trailer-less link from a checkpoint to a commit; see
+// WriteOptions.LinkedCommits. The server links it only after verifying the
+// commit, so Repo is a hint for finding which code repository holds SHA when
+// one checkpoint store serves several.
+type LinkedCommit struct {
+	// SHA is the full lowercase commit hash.
+	SHA string `json:"sha"`
+	// Repo is the code repository as <forge>/<owner>/<repo> (e.g.
+	// gh/entireio/cli), resolved from the git remote that holds the commit.
+	// Empty when it could not be resolved.
+	Repo string `json:"repo,omitempty"`
 }

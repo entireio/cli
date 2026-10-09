@@ -82,12 +82,6 @@ func (s *ManualCommitStrategy) SetBlobFetcher(f checkpoint.BlobFetchFunc) {
 	s.blobFetcher = f
 }
 
-// HasBlobFetcher reports whether a blob fetcher is configured.
-// Used in tests to verify the strategy is properly wired for treeless fetch support.
-func (s *ManualCommitStrategy) HasBlobFetcher() bool {
-	return s.blobFetcher != nil
-}
-
 // hookCheckpointStoreOptions is the store envelope for a git-hook read: the
 // bounded ref probe, the bounded blob fetch, and the read-candidate chain. The
 // two bounds live together because a hook that has one and not the other still
@@ -172,20 +166,4 @@ func (s *ManualCommitStrategy) hookBlobFetcher() checkpoint.BlobFetchFunc {
 		}
 		return err
 	}
-}
-
-// ValidateRepository validates that the repository is suitable for this strategy.
-func (s *ManualCommitStrategy) ValidateRepository() error {
-	repo, err := OpenRepository(context.Background())
-	if err != nil {
-		return fmt.Errorf("not a git repository: %w", err)
-	}
-	defer repo.Close()
-
-	_, err = repo.Worktree()
-	if err != nil {
-		return fmt.Errorf("failed to access worktree: %w", err)
-	}
-
-	return nil
 }

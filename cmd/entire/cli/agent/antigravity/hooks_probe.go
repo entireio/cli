@@ -124,13 +124,6 @@ func ProbeLoadedHooks(ctx context.Context, repoRoot string) (HooksProbe, error) 
 	return probe, nil
 }
 
-// HooksProbeSupported reports whether an agy version string answers /hooks
-// locally in print mode. Unparseable versions are treated as unsupported —
-// the failure mode of a wrong guess is a real model turn on the user's quota.
-func HooksProbeSupported(version string) bool {
-	return classifyProbeVersion(version) == nil
-}
-
 // classifyProbeVersion returns nil for a version that answers /hooks locally,
 // ErrHooksProbeVersionUnknown for one semver cannot parse, and
 // ErrHooksProbeUnsupported for one that is too old.

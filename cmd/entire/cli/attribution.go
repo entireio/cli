@@ -78,9 +78,14 @@ type attributionLine struct {
 	// specific checkpoint. `why` labels these differently and points at
 	// `checkpoint explain`, since the prompt may not appear in this checkpoint's
 	// own transcript slice.
-	PromptSessionLevel bool                   `json:"prompt_session_level,omitempty"`
-	Content            string                 `json:"content"`
-	Candidates         []attributionCandidate `json:"candidates,omitempty"`
+	PromptSessionLevel bool `json:"prompt_session_level,omitempty"`
+	// RecordedLink is set when the commit has no Entire-Checkpoint trailer and
+	// its checkpoint was found through a link recorded in checkpoint metadata
+	// (entire session attach on a pushed commit). The CLI can't verify who
+	// recorded it: anyone who can push checkpoints can name any commit.
+	RecordedLink bool                   `json:"recorded_link,omitempty"`
+	Content      string                 `json:"content"`
+	Candidates   []attributionCandidate `json:"candidates,omitempty"`
 }
 
 // attributionCheckpointContext is the resolved metadata for one checkpoint as
@@ -142,6 +147,35 @@ type attributionResolver struct {
 
 	commitCache     map[string]*object.Commit
 	checkpointCache map[string]attributionCheckpointContext
+	// linked lists checkpoints once, for commits linked without a trailer
+	// (`entire session attach --commit`). nil until first needed.
+	linked []checkpoint.CheckpointInfo
+	// linkedByCommit caches linkedCheckpoints per commit, since reading a
+	// remote-discovered stub for its links can fetch.
+	linkedByCommit map[string][]id.CheckpointID
+	// linkedStubs reads each remote-discovered stub at most once per run, and
+	// linkedDeadline gives every such read in the run one shared budget.
+	linkedStubs    *stubSummaryCache
+	linkedDeadline time.Time
+}
+
+// stubSummaryCache remembers each checkpoint summary it reads, failures
+// included, so a blame run reads a stub at most once.
+type stubSummaryCache struct {
+	reader    attributionCheckpointReader
+	summaries map[id.CheckpointID]*checkpoint.CheckpointSummary
+}
+
+func (c *stubSummaryCache) Read(ctx context.Context, cpID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	if summary, ok := c.summaries[cpID]; ok {
+		return summary, nil
+	}
+	summary, err := c.reader.Read(ctx, cpID)
+	if err != nil {
+		summary = nil
+	}
+	c.summaries[cpID] = summary
+	return summary, err //nolint:wrapcheck // callers treat a failed read as no links
 }
 
 func newBlameCmd() *cobra.Command {
@@ -408,6 +442,10 @@ func (r *attributionResolver) resolveLine(raw rawBlameLine, file string) attribu
 
 	cpIDs := trailers.ParseAllCheckpoints(commit.Message)
 	if len(cpIDs) == 0 {
+		cpIDs = r.linkedCheckpoints(commit)
+		line.RecordedLink = len(cpIDs) > 0
+	}
+	if len(cpIDs) == 0 {
 		return line
 	}
 
@@ -432,6 +470,36 @@ func (r *attributionResolver) commit(sha string) (*object.Commit, error) {
 	}
 	r.commitCache[sha] = commit
 	return commit, nil
+}
+
+// linkedCheckpoints returns the checkpoints that link commit without a
+// trailer. The store is listed once per blame run; a store that cannot list
+// contributes none.
+func (r *attributionResolver) linkedCheckpoints(commit *object.Commit) []id.CheckpointID {
+	sha := commit.Hash.String()
+	if ids, ok := r.linkedByCommit[sha]; ok {
+		return ids
+	}
+	if r.linked == nil {
+		r.linked = []checkpoint.CheckpointInfo{}
+		r.linkedStubs = &stubSummaryCache{reader: r.store, summaries: make(map[id.CheckpointID]*checkpoint.CheckpointSummary)}
+		r.linkedDeadline = time.Now().Add(checkpoint.ListHydrationPassTimeout)
+		if lister, ok := r.store.(interface {
+			List(ctx context.Context) ([]checkpoint.CheckpointInfo, error)
+		}); ok {
+			if infos, err := lister.List(r.ctx); err == nil {
+				r.linked = infos
+			}
+		}
+	}
+	ctx, cancel := context.WithDeadline(r.ctx, r.linkedDeadline)
+	ids := checkpoint.CheckpointsLinkedToWithStubs(ctx, r.linkedStubs, r.linked, sha, commit.Committer.When)
+	cancel()
+	if r.linkedByCommit == nil {
+		r.linkedByCommit = make(map[string][]id.CheckpointID)
+	}
+	r.linkedByCommit[sha] = ids
+	return ids
 }
 
 func (r *attributionResolver) checkpointContext(cpID id.CheckpointID, file string) attributionCheckpointContext {
@@ -889,14 +957,21 @@ func largestRemainderPercent(counts []int, total int) []int {
 	return pct
 }
 
+// recordedLinkNote explains a checkpoint found through a recorded link.
+const recordedLinkNote = "The commit has no Entire-Checkpoint trailer; this checkpoint names it in a link recorded by entire session attach. The CLI can't verify who recorded the link: anyone who can push checkpoints can name any commit."
+
 // attributionLineMarker returns a one-character flag for the blame tables:
 // "~" when the agent/checkpoint shown is a best-effort guess (the file is not in
 // the checkpoint session's recorded paths, or only trailer-level metadata was
 // found), "?" when more than one checkpoint is a candidate for the line, and a
-// space otherwise. `entire why` surfaces the same information in prose; this
-// closes the gap where the blame table looked equally confident on every line.
+// space otherwise; "!" when the checkpoint was found through an unverified
+// recorded link rather than a trailer. `entire why` surfaces the same
+// information in prose; this closes the gap where the blame table looked
+// equally confident on every line.
 func attributionLineMarker(line attributionLine) string {
 	switch {
+	case line.RecordedLink:
+		return "!"
 	case line.SessionFallback || line.MetadataMissing:
 		return "~"
 	case len(line.Candidates) > 1:
@@ -909,19 +984,24 @@ func attributionLineMarker(line attributionLine) string {
 // renderAttributionMarkerLegend prints a one-line legend explaining the blame
 // markers, but only for the markers actually present in the table.
 func renderAttributionMarkerLegend(w io.Writer, sty statusStyles, lines []attributionLine) {
-	approximate, ambiguous := false, false
+	approximate, ambiguous, recorded := false, false, false
 	for _, line := range lines {
 		switch attributionLineMarker(line) {
 		case "~":
 			approximate = true
 		case "?":
 			ambiguous = true
+		case "!":
+			recorded = true
 		}
 	}
-	if !approximate && !ambiguous {
+	if !approximate && !ambiguous && !recorded {
 		return
 	}
 	var parts []string
+	if recorded {
+		parts = append(parts, "! from a recorded link, not a trailer (unverified)")
+	}
 	if approximate {
 		parts = append(parts, "~ best-effort session match (file not in the checkpoint's recorded paths)")
 	}
@@ -1133,6 +1213,9 @@ func renderAttributionLineWhy(w io.Writer, file string, line attributionLine) {
 				message = line.MetadataMissingReason
 			}
 			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, message))
+		}
+		if line.RecordedLink {
+			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, recordedLinkNote))
 		}
 		if line.SessionFallback {
 			fmt.Fprintf(w, "  %s\n", sty.render(sty.yellow, "This file is not in the checkpoint session's recorded paths (it may have been renamed); the agent and prompt shown are a best-effort guess, not necessarily the session that produced this line."))

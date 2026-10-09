@@ -4,19 +4,12 @@
 package strategy
 
 import (
-	"errors"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
-
-// ErrNoMetadata is returned when a commit does not have an Entire metadata trailer.
-var ErrNoMetadata = errors.New("commit has no entire metadata")
-
-// ErrEmptyRepository is returned when the repository has no commits yet.
-var ErrEmptyRepository = errors.New("repository has no commits yet")
 
 // PendingCheckpoint is one row of `checkpoint list --pending`, which is the
 // resume view of the current branch rather than a single kind of thing. A row is

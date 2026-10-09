@@ -242,3 +242,55 @@ func TestResolveTrustedHome_ComparesTheActiveHomeAsCleaned(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, base, got)
 }
+
+// repoStubAgent is a HomeLayoutProvider whose active home is home, with the
+// given stores beneath it, and whose session directory for every repository
+// is sessionDir.
+type repoStubAgent struct {
+	mockBaseAgent
+
+	home, sessionDir string
+	stores           []string
+}
+
+func (r *repoStubAgent) SessionHome() (string, error)         { return r.home, nil }
+func (r *repoStubAgent) HomeLayout() HomeLayout               { return HomeLayout{Stores: r.stores} }
+func (r *repoStubAgent) GetSessionDir(string) (string, error) { return r.sessionDir, nil }
+
+func TestRepoHomeLayout(t *testing.T) {
+	t.Parallel()
+
+	home := filepath.Join(t.TempDir(), "home")
+	tests := []struct {
+		name       string
+		stores     []string
+		sessionDir string
+		want       []string // nil when the session directory lies outside every store
+	}{
+		{name: "project directory in the first store", stores: []string{"projects"},
+			sessionDir: filepath.Join(home, "projects", "-repo"), want: []string{"projects/-repo"}},
+		{name: "store itself applies to every store", stores: []string{"sessions", "archived_sessions"},
+			sessionDir: filepath.Join(home, "sessions"), want: []string{"sessions", "archived_sessions"}},
+		{name: "project directory in a later store", stores: []string{"a", "b/c"},
+			sessionDir: filepath.Join(home, "b", "c", "-repo"), want: []string{"a/-repo", "b/c/-repo"}},
+		{name: "unclean session directory", stores: []string{"projects"},
+			sessionDir: filepath.Join(home, "projects", "x") + string(filepath.Separator) + filepath.Join("..", "-repo"), want: []string{"projects/-repo"}},
+		{name: "sibling of a store", stores: []string{"projects"},
+			sessionDir: filepath.Join(home, "projects-other", "-repo")},
+		{name: "outside the home", stores: []string{"sessions"},
+			sessionDir: filepath.Join(t.TempDir(), "sessions")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			provider := &repoStubAgent{home: home, sessionDir: tt.sessionDir, stores: tt.stores}
+
+			got, ok, err := RepoHomeLayout(provider, "/repo")
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want != nil, ok)
+			assert.Equal(t, tt.want, got.Stores)
+		})
+	}
+}

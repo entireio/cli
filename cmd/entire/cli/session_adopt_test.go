@@ -1069,7 +1069,7 @@ func TestSessionAdopt_ClearsLegacyTranscriptOffsets(t *testing.T) {
 		CheckpointTranscriptStart: 9,
 		CondensedTranscriptLines:  9, //nolint:staticcheck // legacy field, asserted so migration keeps working
 		TranscriptLinesAtStart:    9, //nolint:staticcheck // legacy field, asserted so migration keeps working
-	}, "")
+	}, adoptAgentHome{}, "")
 	if err != nil {
 		t.Fatalf("buildAdoptedSessionState failed: %v", err)
 	}
@@ -1126,7 +1126,7 @@ func TestSessionAdopt_RebaselinesSubagentTokens(t *testing.T) {
 					SubagentTokens: &agent.TokenUsage{InputTokens: 500, OutputTokens: 250, APICallCount: 5},
 				},
 				SubagentTokensBaseline: tc.sourceBaseline,
-			}, "")
+			}, adoptAgentHome{}, "")
 			if err != nil {
 				t.Fatalf("buildAdoptedSessionState failed: %v", err)
 			}
@@ -1179,7 +1179,7 @@ func TestSessionAdopt_PreservesReviewAndInvestigateMetadata(t *testing.T) {
 				PromptWindowBase:  3,
 				SessionTurnCount:  7,
 				AttachedManually:  true,
-			}, "")
+			}, adoptAgentHome{}, "")
 			if err != nil {
 				t.Fatalf("buildAdoptedSessionState failed: %v", err)
 			}

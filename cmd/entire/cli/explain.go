@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,12 +48,11 @@ import (
 )
 
 const (
-	pagerEnvVar       = "PAGER"
-	lessEnvVar        = "LESS"
-	lessPagerName     = "less"
-	lessRawControlEnv = "LESS=-R"
-	windowsGOOS       = "windows"
-	darwinGOOS        = "darwin"
+	pagerEnvVar   = "PAGER"
+	lessEnvVar    = "LESS"
+	lessPagerName = "less"
+	windowsGOOS   = "windows"
+	darwinGOOS    = "darwin"
 )
 
 var generateTranscriptSummary = summarize.GenerateFromTranscript
@@ -214,6 +214,9 @@ type associatedCommit struct {
 	Author   string
 	Email    string
 	Date     time.Time
+	// RecordedLink: listed from the checkpoint's recorded links, not found by
+	// its trailer; unverified (see recordedLinkNote).
+	RecordedLink bool
 }
 
 func newExplainCmd() *cobra.Command {
@@ -632,6 +635,16 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		return fmt.Errorf("failed to get commit %s: %w", abbreviateCommitHash(lookup.repo, hash), commitErr)
 	}
 	cpID, hasCheckpoint := trailers.ParseCheckpoint(commit.Message)
+	linkVia := "its Entire-Checkpoint trailer"
+	if !hasCheckpoint {
+		// A commit linked by `entire session attach --commit` carries no
+		// trailer; its checkpoint names it instead. Most recent wins.
+		if linked := checkpoint.CheckpointsLinkedToWithStubs(ctx, lookup.store, lookup.committed, hash.String(), commit.Committer.When); len(linked) > 0 {
+			cpID, hasCheckpoint = linked[0], true
+			linkVia = "a link recorded by entire session attach"
+			fmt.Fprintf(errW, "Note: commit %s has no Entire-Checkpoint trailer; checkpoint %s names it in a link recorded by entire session attach. The CLI can't verify who recorded the link: anyone who can push checkpoints can name any commit.\n", abbreviateCommitHash(lookup.repo, hash), cpID)
+		}
+	}
 	if !hasCheckpoint {
 		// Side-effect modes must error — silently succeeding would leave
 		// scripts unable to distinguish "done" from "didn't happen".
@@ -646,7 +659,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		slog.String("commit", abbreviateCommitHash(lookup.repo, hash)),
 		slog.String("checkpoint_id", cpID.String()))
 	if err := runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds); err != nil {
-		return trailerCheckpointError(ctx, lookup.repo, hash, cpID, err)
+		return trailerCheckpointError(ctx, lookup.repo, hash, cpID, linkVia, err)
 	}
 	return nil
 }
@@ -830,6 +843,9 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 
 	// Find associated commits (git commits with matching Entire-Checkpoint trailer)
 	associatedCommits, _ := getAssociatedCommits(ctx, lookup.repo, fullCheckpointID, searchAll) //nolint:errcheck // Best-effort
+	if summary != nil {
+		associatedCommits = withLinkedCommits(lookup.repo, associatedCommits, summary.LinkedCommits)
+	}
 
 	// Derive author from the first associated commit (the user who made the commit).
 	// Fall back to the committed checkpoint store for checkpoints
@@ -1614,6 +1630,47 @@ func (s *summaryProgressWriter) updateLine(line string) {
 	s.lastLine = line
 }
 
+// recordedLinkSuffix marks a commit listed from a recorded link.
+func recordedLinkSuffix(c associatedCommit) string {
+	if c.RecordedLink {
+		return " (recorded link, unverified)"
+	}
+	return ""
+}
+
+func newAssociatedCommit(c *object.Commit) associatedCommit {
+	fullSHA := c.Hash.String()
+	shortSHA := fullSHA
+	if len(fullSHA) >= 7 {
+		shortSHA = fullSHA[:7]
+	}
+	return associatedCommit{
+		SHA:      fullSHA,
+		ShortSHA: shortSHA,
+		Message:  strings.Split(c.Message, "\n")[0],
+		Author:   c.Author.Name,
+		Email:    c.Author.Email,
+		Date:     c.Author.When,
+	}
+}
+
+// withLinkedCommits adds the commits a checkpoint records links to (`entire
+// session attach` on a pushed commit), which carry no trailer for
+// getAssociatedCommits to find. A linked commit not in this clone is skipped.
+func withLinkedCommits(repo *git.Repository, commits []associatedCommit, links []checkpoint.LinkedCommit) []associatedCommit {
+	for _, link := range links {
+		if slices.ContainsFunc(commits, func(c associatedCommit) bool { return c.SHA == link.SHA }) {
+			continue
+		}
+		if c, err := repo.CommitObject(plumbing.NewHash(link.SHA)); err == nil {
+			linked := newAssociatedCommit(c)
+			linked.RecordedLink = true
+			commits = append(commits, linked)
+		}
+	}
+	return commits
+}
+
 // getAssociatedCommits finds git commits that reference the given checkpoint ID.
 // Searches commits on the current branch for Entire-Checkpoint trailer matches.
 // When searchAll is true, uses full DAG walk with no depth limit (may be slow).
@@ -1628,19 +1685,7 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 	targetID := checkpointID.String()
 
 	collectCommit := func(c *object.Commit) {
-		fullSHA := c.Hash.String()
-		shortSHA := fullSHA
-		if len(fullSHA) >= 7 {
-			shortSHA = fullSHA[:7]
-		}
-		commits = append(commits, associatedCommit{
-			SHA:      fullSHA,
-			ShortSHA: shortSHA,
-			Message:  strings.Split(c.Message, "\n")[0],
-			Author:   c.Author.Name,
-			Email:    c.Author.Email,
-			Date:     c.Author.When,
-		})
+		commits = append(commits, newAssociatedCommit(c))
 	}
 
 	if searchAll {
@@ -2119,12 +2164,12 @@ func formatCheckpointHeader(
 		writeRow("commits", "(none on this branch)")
 	case len(commits) == 1:
 		c := commits[0]
-		writeRow("commits", fmt.Sprintf("%s %s", c.ShortSHA, c.Message))
+		writeRow("commits", fmt.Sprintf("%s %s%s", c.ShortSHA, c.Message, recordedLinkSuffix(c)))
 	default:
 		writeRow("commits", fmt.Sprintf("(%d)", len(commits)))
 		for _, c := range commits {
-			fmt.Fprintf(&sb, "           %s %s %s\n",
-				c.ShortSHA, c.Date.Format("2006-01-02"), c.Message)
+			fmt.Fprintf(&sb, "           %s %s %s%s\n",
+				c.ShortSHA, c.Date.Format("2006-01-02"), c.Message, recordedLinkSuffix(c))
 		}
 	}
 
@@ -2731,7 +2776,7 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 	// Delegate to checkpoint detail view, forwarding the full flag set so
 	// --generate / --raw-transcript / --force work via --commit as well.
 	if err := runExplainCheckpoint(ctx, w, errW, checkpointID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds); err != nil {
-		return trailerCheckpointError(ctx, repo, hash, checkpointID, err)
+		return trailerCheckpointError(ctx, repo, hash, checkpointID, "its Entire-Checkpoint trailer", err)
 	}
 	return nil
 }
@@ -2740,13 +2785,13 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 // Entire-Checkpoint trailer named it. Commits keep their trailers when
 // `entire checkpoint delete` removes a checkpoint, so a miss on an ID this
 // clone deleted says so; any other miss stays a plain not-found.
-func trailerCheckpointError(ctx context.Context, repo *git.Repository, hash plumbing.Hash, cpID id.CheckpointID, err error) error {
+func trailerCheckpointError(ctx context.Context, repo *git.Repository, hash plumbing.Hash, cpID id.CheckpointID, linkVia string, err error) error {
 	if errors.Is(err, checkpoint.ErrCheckpointNotFound) && shouldFallBackToCommitResolution(err) && deletedFromThisClone(ctx, cpID) {
-		return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w (deleted with `entire checkpoint delete`)", abbreviateCommitHash(repo, hash), cpID, checkpoint.ErrCheckpointNotFound)
+		return fmt.Errorf("commit %s references checkpoint %s via %s: %w (deleted with `entire checkpoint delete`)", abbreviateCommitHash(repo, hash), cpID, linkVia, checkpoint.ErrCheckpointNotFound)
 	}
 	// The user typed a commit, not this checkpoint ID — without the trailer
 	// linkage the error reads as if they asked for an unknown ID.
-	return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w", abbreviateCommitHash(repo, hash), cpID, err)
+	return fmt.Errorf("commit %s references checkpoint %s via %s: %w", abbreviateCommitHash(repo, hash), cpID, linkVia, err)
 }
 
 // deletedFromThisClone reports whether cpID is on the local deleted list. An

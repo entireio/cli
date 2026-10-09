@@ -28,12 +28,36 @@ env-token-first precedence itself — see `resolveAuthStatusTarget` /
 deliberate exception: it manages a *stored* login session, which an ephemeral
 env token has none of, so it stays on the active context.
 
+### Repository discovery
+
+The dispatch wizard and `search --repo` completion use the control plane's
+`ListRepos` index, sorted by `last_activity_at` descending, through
+`listCheckpointRepoIndex` for the wizard. Its walk is bounded to 5,000 entries
+and ten seconds, with `hasCheckpoints=true` so empty repos do not consume the
+budget; truncation logs a warning and keeps the partial catalogue.
+Completion instead uses `listCompletionRepoIndex`: one page of up to 100 entries,
+a one-second request timeout, and server-side checkpoint/name filters. It never
+follows the cursor and filters returned slugs by the typed prefix. The server's
+name filter is sent only for text after a complete `gh/` or `et/` prefix, so
+partial forge prefixes do not hide valid suggestions. Both omit
+repos with no checkpoints and qualify names by provider. The wizard derives READY
+placement jurisdictions from the same walk and retains its local-repo fallback;
+completion silently falls back to `*` on errors. Code-search filters resolve these qualified
+slugs against the entry's provider, accepting bare or already-qualified index
+names without crossing forge namespaces. Two-component names whose owner/project
+is `gh` or `et` retain that segment. ID filters trim surrounding whitespace and
+retain precedence over name matching. Duplicate normalized slugs preserve all
+matching search entries (deduplicated by ID); wizard jurisdictions are merged
+and picker suggestions deduplicated, preserving the first spelling/order.
+Do not use the removed BFF
+`GET /api/v1/repositories` route. Dispatch generation still uses the BFF.
+
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)
 
 The data plane (entire-api) is deployed per jurisdiction; a repo placement
 lives in exactly one cell, user `/me/*` activity is consolidated in the
 caller's home cell, and no server-side cross-cell aggregator exists. The CLI
-therefore has exactly three routing shapes, mirroring the entire.io BFF:
+uses the following routing shapes, mirroring the entire.io BFF:
 
 - **Repo-scoped → one cell**: `resolveRepoCellTarget` (`cell_target.go`) maps
   a repo (ULID or owner/repo) to the cell hosting it — via `GetRepo`'s
@@ -45,14 +69,21 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   suspended processing placement, control-plane error, timeout) returns an
   error instead of falling back to home-jurisdiction routing — a wrong-region
   "success" is worse than a command failure for repo-scoped data. Used by
-  trails (`NewAuthenticatedEntireAPICellClient` in `api_client.go`) and by
   `experts --repo <ulid>`. `resolveRepoCellPlacement` performs the same lookup
   for callers that also need the placement's id (repo_id) alongside its cell —
-  used by cross-repo checkpoint reads (`explain --repo`, `explain_repo.go`;
-  the same placement id keys both `/checkpoints/{id}` and the commit→checkpoint
-  resolution at `/commits/{sha}/checkpoints`) and
-  by `experts --repo owner/repo`, which sends that placement id to entire-api
+  used by trails (`newTrailAPIClient` in `api_client.go`, through the
+  forge-qualified `resolveForgeRepoCellPlacement`), by cross-repo checkpoint
+  reads (`explain --repo`, `explain_repo.go`; the same placement id keys both
+  `/checkpoints/{id}` and the commit→checkpoint resolution at
+  `/commits/{sha}/checkpoints`) and by `experts --repo owner/repo`, which sends
+  that placement id to entire-api
   instead of re-deriving it from a data-plane repo listing.
+- **Project-scoped trails → assigned project cell** (`ENTIRE_PROJECT_TRAILS=1`):
+  Core resolves the required `--project`; list uses
+  `GET /api/v1/trails?projectId=<ID>` at its assigned API URL, and a numeric
+  selector is one `GET /api/v1/{host}/{project}/trails/{number}` there. `--repo` only
+  filters within that project. No fanout or fallback; server cursors pass through.
+  See [Project trails CLI](../architecture/project-trails-cli.md).
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim; activity/recap use it with a data-API

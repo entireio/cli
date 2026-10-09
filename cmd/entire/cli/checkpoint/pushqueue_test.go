@@ -342,7 +342,7 @@ func TestPushQueue_CorruptHashKeepsTheRef(t *testing.T) {
 	t.Parallel()
 	q := NewPushQueue(t.TempDir())
 	a := mustRefName(t, "a1b2c3d4e5f6")
-	require.NoError(t, os.WriteFile(filepath.Join(q.dir, pushQueueFileName),
+	require.NoError(t, os.WriteFile(q.queuePath(),
 		[]byte(`{"ref":"`+a.String()+`","hash":"not-a-hash"}`+"\n"), 0o600))
 
 	entries, err := q.DrainEntries()
@@ -352,3 +352,5 @@ func TestPushQueue_CorruptHashKeepsTheRef(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []PushQueueEntry{{Ref: a}}, entries, "compaction must not erase the ref")
 }
+
+func (q *PushQueue) queuePath() string { return filepath.Join(q.dir, pushQueueFileName) }
