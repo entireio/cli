@@ -177,17 +177,19 @@ func (c *CloudClient) CreateDispatch(ctx context.Context, reqBody CreateDispatch
 // waitForDispatch polls a generating run until the cell reports it complete
 // or failed.
 func (c *CloudClient) waitForDispatch(ctx context.Context, run *APIRun) (*APIRun, error) {
+	timer := time.NewTimer(c.pollInterval)
+	defer timer.Stop()
 	for run.Status == dispatchStatusGenerating {
 		if run.ID == "" {
 			return nil, errors.New("dispatch service returned a generating dispatch without an id")
 		}
-		timer := time.NewTimer(c.pollInterval)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return nil, stillGeneratingError(ctx, run.ID)
 		case <-timer.C:
 		}
+		// Go 1.23+ timers: Reset after a receive needs no drain.
+		timer.Reset(c.pollInterval)
 		var next APIRun
 		if err := c.doJSON(ctx, http.MethodGet, dispatchesPath+"/"+url.PathEscape(run.ID), nil, &next); err != nil {
 			// The budget can run out mid-poll as well as between polls.
