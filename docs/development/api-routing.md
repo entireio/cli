@@ -57,7 +57,7 @@ Do not use the removed BFF
 The data plane (entire-api) is deployed per jurisdiction; a repo placement
 lives in exactly one cell, user `/me/*` activity is consolidated in the
 caller's home cell, and no server-side cross-cell aggregator exists. The CLI
-therefore has exactly three routing shapes, mirroring the entire.io BFF:
+uses the following routing shapes, mirroring the entire.io BFF:
 
 - **Repo-scoped → one cell**: `resolveRepoCellTarget` (`cell_target.go`) maps
   a repo (ULID or owner/repo) to the cell hosting it — via `GetRepo`'s
@@ -78,6 +78,12 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   `/commits/{sha}/checkpoints`) and by `experts --repo owner/repo`, which sends
   that placement id to entire-api
   instead of re-deriving it from a data-plane repo listing.
+- **Project-scoped trails → assigned project cell** (`ENTIRE_PROJECT_TRAILS=1`):
+  Core resolves the required `--project`; list uses
+  `GET /api/v1/trails?projectId=<ID>` at its assigned API URL, and a numeric
+  selector is one `GET /api/v1/{host}/{project}/trails/{number}` there. `--repo` only
+  filters within that project. No fanout or fallback; server cursors pass through.
+  See [Project trails CLI](../architecture/project-trails-cli.md).
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim; activity/recap use it with a data-API

@@ -122,19 +122,22 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	// trail is the highest-traffic family by a wide margin, so its read-only
 	// subcommands must not disappear behind the group's write-capable label.
 	"trail":                 {agentHelpAudienceTaskDriven, true},
-	"trail approvals":       {agentHelpAudienceReadOnly, false},
 	"trail list":            {agentHelpAudienceReadOnly, false},
 	"trail show":            {agentHelpAudienceReadOnly, false},
+	"trail create":          {agentHelpAudienceTaskDriven, false},
+	"trail delete":          {agentHelpAudienceTaskDriven, false},
+	"trail update":          {agentHelpAudienceTaskDriven, false},
+	"trail approvals":       {agentHelpAudienceReadOnly, false},
 	"trail watch":           {agentHelpAudienceReadOnly, false},
 	"trail approve":         {agentHelpAudienceTaskDriven, false},
 	"trail checkout":        {agentHelpAudienceTaskDriven, false},
 	"trail comment":         {agentHelpAudienceTaskDriven, false},
-	"trail create":          {agentHelpAudienceTaskDriven, false},
 	"trail finding":         {agentHelpAudienceTaskDriven, false},
 	"trail merge":           {agentHelpAudienceUserOwned, false},
 	"trail request-changes": {agentHelpAudienceTaskDriven, false},
 	"trail resume":          {agentHelpAudienceTaskDriven, false},
-	"trail update":          {agentHelpAudienceTaskDriven, false},
+	"trail link":            {agentHelpAudienceUserOwned, false},
+	"trail unlink":          {agentHelpAudienceUserOwned, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
@@ -713,7 +716,11 @@ func renderAgentHelpCommand(cmd *cobra.Command, repoLine string, trailsEnabled b
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(agentHelpRepoBlock(repoLine))
+	if agentHelpPath(cmd) == "trail list" && usesProjectTrails(cmd) {
+		b.WriteString("Scope: one project; --project is required, even inside a clone. --repo only filters within that project.\n")
+	} else {
+		b.WriteString(agentHelpRepoBlock(repoLine))
+	}
 
 	// LocalFlags()/InheritedFlags() trigger cobra's persistent-flag merge (plain
 	// Flags() does not without Execute) and skip hidden flags in FlagUsages.
@@ -757,6 +764,9 @@ func renderAgentHelpCommand(cmd *cobra.Command, repoLine string, trailsEnabled b
 func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled bool) string {
 	var b strings.Builder
 	b.WriteString(agentHelpOverview)
+	if trailCmd, _, err := rootCmd.Find([]string{"trail"}); err == nil && usesProjectTrails(trailCmd) {
+		b.WriteString("\nProject trails are enabled by ENTIRE_PROJECT_TRAILS=1. Trail listing requires an explicit --project; --repo only filters within it.")
+	}
 	b.WriteString("\n\n")
 	b.WriteString(agentHelpRepoBlock(repoLine))
 

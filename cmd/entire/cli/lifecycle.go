@@ -456,8 +456,6 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 	return FilterAndNormalizePaths(resolved, repoRoot)
 }
 
-// handleLifecycleTurnStart handles turn start: captures pre-prompt state,
-// ensures strategy setup, initializes session.
 // entireTrailContextInjection is the one-time, model-facing pointer Entire
 // injects on the first turn of a session. It points at `entire agent-help` for
 // the full flag/subcommand surface — fetched on demand so that surface never goes
@@ -476,8 +474,10 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // sometimes-appropriate query as an always-do step. Which commands suit a given
 // task is agent-help's job, where it is pulled on demand and grouped by who
 // should initiate the command (see agentHelpAudience); this string carries only
-// invariants that hold on every turn of every session.
-func entireTrailContextInjection(scope trailEnablementScope) string {
+// invariants that hold on every turn of every session. The one model-dependent
+// invariant is what a trail is: under project trails (ENTIRE_PROJECT_TRAILS=1)
+// a trail number names project intent, not one branch, so say so once.
+func entireTrailContextInjection(scope trailEnablementScope, projectTrails bool) string {
 	repo := ""
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
 		repo = trailEnablementRepoKey(scope.Forge, scope.Owner, scope.Repo)
@@ -485,6 +485,9 @@ func entireTrailContextInjection(scope trailEnablementScope) string {
 	var b strings.Builder
 	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
 	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Leave setup and destructive commands (enable, disable, clean, auth) to the user. ")
+	if projectTrails {
+		b.WriteString("Trails here are project-scoped: one trail spans repositories and branches, and its number is project-wide; see `entire agent-help trail`. ")
+	}
 	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
 	// into the agent's model context (no escaping), so a repo key carrying control
 	// characters (e.g. an <sessionID>.trail-scope.json cache written by a pre-fix
@@ -554,7 +557,7 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		return
 	}
 
-	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection(scope)})
+	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection(scope, projectTrailsEnabled())})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection",
 			slog.String("error", err.Error()))

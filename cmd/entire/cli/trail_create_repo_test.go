@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,7 +66,12 @@ func newTrailCreateRepoFixture(t *testing.T, presence trailBranchPresence, check
 
 func runTrailCmd(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	cmd := newTrailCmd()
+	// These upstream tests cover the retained repository-scoped constructor,
+	// not the project-create command exposed by this branch's root.
+	cmd := &cobra.Command{Use: "trail"}
+	cmd.PersistentFlags().String("repo", "", "Repository override")
+	cmd.PersistentFlags().Bool("insecure-http-auth", false, "Allow HTTP in tests")
+	cmd.AddCommand(newTrailCreateCmd())
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)

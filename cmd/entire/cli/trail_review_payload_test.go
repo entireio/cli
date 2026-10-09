@@ -122,7 +122,7 @@ func TestFindingJSONPreservesKeysAndReturnsNextCursor(t *testing.T) {
 
 func TestFindingCommandsAcceptCursor(t *testing.T) {
 	t.Parallel()
-	for _, cmd := range []*cobra.Command{newTrailFindingCmd(), newTrailFindingListCmd(&trailReviewTargetOptions{})} {
+	for _, cmd := range []*cobra.Command{newTrailFindingCmd(legacyTrailMode), newTrailFindingListCmd(&trailReviewTargetOptions{})} {
 		require.NotNil(t, cmd.Flags().Lookup("cursor"))
 		require.NoError(t, cmd.ParseFlags([]string{"--cursor", "opaque+/=page", "--limit", "1"}))
 	}

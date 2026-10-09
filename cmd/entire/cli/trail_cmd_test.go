@@ -483,7 +483,7 @@ func TestRunTrailListAll_ValidatesOptionsBeforeAuth(t *testing.T) {
 
 func TestTrailRootPrintsHelp(t *testing.T) {
 	t.Parallel()
-	cmd := newTrailCmd()
+	cmd := newTrailCmdForMode(true)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(io.Discard)
@@ -492,7 +492,7 @@ func TestTrailRootPrintsHelp(t *testing.T) {
 		t.Fatalf("execute trail root: %v", err)
 	}
 	text := out.String()
-	for _, want := range []string{"A trail ties together the context for a branch", "`entire trail finding`", "show", "list", "create", "finding"} {
+	for _, want := range []string{"A trail captures project intent", "--repo and --branch", "show", "list", "create", "link", "unlink"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help output missing %q, got:\n%s", want, text)
 		}

@@ -204,7 +204,7 @@ type trailDiscussionReplyJSON struct {
 }
 
 func toTrailDiscussionReplyJSON(v api.TrailDiscussionReply) trailDiscussionReplyJSON {
-	return trailDiscussionReplyJSON(v)
+	return trailDiscussionReplyJSON{ID: v.ID, Author: v.Author, CreatedAt: v.CreatedAt, Body: v.Body}
 }
 
 type trailDiscussionCreateResponseJSON struct {

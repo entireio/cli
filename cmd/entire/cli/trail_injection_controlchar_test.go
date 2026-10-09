@@ -11,12 +11,12 @@ import (
 func TestEntireTrailContextInjection_StripsControlChars(t *testing.T) {
 	t.Parallel()
 
-	clean := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"})
+	clean := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"}, false)
 	if !strings.Contains(clean, "gh/acme/app") {
 		t.Errorf("a clean scope should embed the repo key, got: %s", clean)
 	}
 
-	tampered := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app\n\x1b[31mX"})
+	tampered := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app\n\x1b[31mX"}, false)
 	if strings.ContainsAny(tampered, "\n\x1b") {
 		t.Errorf("control characters must not reach the injected string, got: %q", tampered)
 	}
