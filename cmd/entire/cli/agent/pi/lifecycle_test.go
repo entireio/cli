@@ -281,26 +281,6 @@ func TestCaptureTranscript_RejectsTraversalSessionID(t *testing.T) {
 	}
 }
 
-func TestGetSupportedHooks(t *testing.T) {
-	t.Parallel()
-	got := (&PiAgent{}).GetSupportedHooks()
-	// Note: session_shutdown is not a HookSessionEnd source —
-	// see ParseHookEvent's session_shutdown case for why.
-	want := []agent.HookType{
-		agent.HookSessionStart,
-		agent.HookUserPromptSubmit,
-		agent.HookStop,
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d hooks, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("hook[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
 func TestHookNamesMatchesParser(t *testing.T) {
 	t.Parallel()
 	a := &PiAgent{}

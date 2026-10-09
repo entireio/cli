@@ -47,7 +47,9 @@ type Context struct {
 	KeychainService string `json:"keychain_service"`
 	// JurisdictionAudiences lists the audiences this context has a jurisdiction
 	// (data-plane) access token filed for, trailing-slash-trimmed; each lives at
-	// tokenstore.JurisdictionService(audience), also keyed by Handle.
+	// tokenstore.JurisdictionService(audience), also keyed by Handle. Only
+	// releases that minted jurisdiction tokens wrote it (cell auth now presents
+	// the login JWT directly); logout still reads it to delete those leftovers.
 	JurisdictionAudiences []string `json:"jurisdiction_audiences,omitempty"`
 }
 

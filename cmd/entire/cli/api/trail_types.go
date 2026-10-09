@@ -19,31 +19,32 @@ type TrailListResponse struct {
 // snake_case and nullable branch fields. Branch is empty when the trail is
 // currently unlinked; OriginalBranch separately preserves its last link.
 type TrailResource struct {
-	ID                 string             `json:"id,omitempty"`
-	Number             int                `json:"number,omitempty"`
-	URL                string             `json:"url,omitempty"`
-	Branch             string             `json:"branch"`
-	OriginalBranch     string             `json:"original_branch,omitempty"`
-	Base               string             `json:"base"`
-	Title              string             `json:"title"`
-	Body               string             `json:"body,omitempty"`
-	Status             string             `json:"status"`
-	Phase              string             `json:"phase,omitempty"`
-	Author             *trail.Author      `json:"author"`
-	Assignees          []string           `json:"assignees"`
-	Labels             []string           `json:"labels,omitempty"`
-	Priority           string             `json:"priority,omitempty"`
-	Type               string             `json:"type,omitempty"`
-	Reviewers          []trail.Reviewer   `json:"reviewers,omitempty"`
-	RequestedReviewers []string           `json:"requested_reviewers,omitempty"`
-	CreatedAt          time.Time          `json:"created_at"`
-	UpdatedAt          time.Time          `json:"updated_at"`
-	MergedAt           *time.Time         `json:"merged_at,omitempty"`
-	CommentCount       int                `json:"comment_count,omitempty"`
-	UnresolvedCount    int                `json:"unresolved_count,omitempty"`
-	CheckpointCount    int                `json:"checkpoint_count,omitempty"`
-	CommitsAhead       int                `json:"commits_ahead,omitempty"`
-	BodyDocument       *TrailBodyDocument `json:"body_document,omitempty"`
+	ID                 string                `json:"id,omitempty"`
+	Number             int                   `json:"number,omitempty"`
+	URL                string                `json:"url,omitempty"`
+	Branch             string                `json:"branch"`
+	OriginalBranch     string                `json:"original_branch,omitempty"`
+	Base               string                `json:"base"`
+	Title              string                `json:"title"`
+	Body               string                `json:"body,omitempty"`
+	Status             string                `json:"status"`
+	Phase              string                `json:"phase,omitempty"`
+	Author             *trail.Author         `json:"author"`
+	Assignees          []string              `json:"assignees"`
+	Labels             []string              `json:"labels,omitempty"`
+	Priority           string                `json:"priority,omitempty"`
+	Type               string                `json:"type,omitempty"`
+	Reviewers          []trail.Reviewer      `json:"reviewers,omitempty"`
+	RequestedReviewers []string              `json:"requested_reviewers,omitempty"`
+	CreatedAt          time.Time             `json:"created_at"`
+	UpdatedAt          time.Time             `json:"updated_at"`
+	MergedAt           *time.Time            `json:"merged_at,omitempty"`
+	CommentCount       int                   `json:"comment_count,omitempty"`
+	UnresolvedCount    int                   `json:"unresolved_count,omitempty"`
+	CheckpointCount    int                   `json:"checkpoint_count,omitempty"`
+	CommitsAhead       int                   `json:"commits_ahead,omitempty"`
+	BodyDocument       *TrailBodyDocument    `json:"body_document,omitempty"`
+	Parent             *TrailParentReference `json:"parent,omitempty"`
 	// Mergeability is served on the detail resource only; list items omit it.
 	// It stays raw so that every detail-route decode (approve, update, resume,
 	// review-target resolution, ...) does not depend on the snapshot's shape;

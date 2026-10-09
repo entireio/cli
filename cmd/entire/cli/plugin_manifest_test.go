@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,4 +232,18 @@ func TestReadFileLimited(t *testing.T) {
 	if _, err := readFileLimited(filepath.Join(dir, "absent"), 100); err == nil {
 		t.Error("missing file should still error")
 	}
+}
+
+// readFileLimited reads path through readWithinLimit.
+func readFileLimited(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := readWithinLimit(f, limit)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
+	}
+	return data, nil
 }

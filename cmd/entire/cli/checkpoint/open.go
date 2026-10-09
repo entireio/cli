@@ -39,7 +39,7 @@ type OpenOptions struct {
 	RemoteRefLister RemoteRefListFunc
 
 	// Refs overrides the default committed-ref topology. A non-nil value wins,
-	// e.g. attach pins reads to Primary via PrimaryAsRead().
+	// e.g. attach pins reads to Primary via PrimaryAsLocalRead().
 	Refs *PersistentRefs
 
 	// ReadRemotes is the ordered checkpoint read-candidate chain (elected sync

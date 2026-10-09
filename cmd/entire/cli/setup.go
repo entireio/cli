@@ -1345,16 +1345,6 @@ was not fully uninstalled.`,
 	return cmd
 }
 
-// runEnableInteractive runs the interactive enable flow.
-// agents must be provided by the caller (via detectOrSelectAgent).
-// runEnableOnConfiguredRepo handles `entire enable` when the repo is already set
-// up. Setup-mutating flags (strategy options, checkpoint backend, agent
-// management) behave like `configure`; a bare re-enable just flips the enabled
-// flag or reports current status.
-func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
-	return runEnableOnConfiguredRepoWithPreflight(ctx, cmd, opts, nil)
-}
-
 func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Command, opts EnableOptions, preflight func() error) error {
 	w := cmd.OutOrStdout()
 	runPreflight := func() error {
@@ -1478,6 +1468,8 @@ func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
 	return !enabled
 }
 
+// runEnableInteractive runs the interactive enable flow.
+// agents must be provided by the caller (via detectOrSelectAgent).
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
 	// Agents have been chosen, but no setup settings or hooks have been changed.
 	if err := opts.checkpointRemoteChoice.selectAfterAgents(ctx, opts, nil); err != nil {
@@ -2958,6 +2950,9 @@ func uninstallGitHooks(ctx context.Context, p *uninstallPrinter) bool {
 	}
 	for _, hook := range res.Restored {
 		p.step("Restored your original %s hook", hook)
+	}
+	if len(res.Older) > 0 {
+		p.warn("Older copies of your hooks were left in place and do not run: %s", strings.Join(res.Older, ", "))
 	}
 	return true
 }

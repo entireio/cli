@@ -176,4 +176,11 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 - For debugging a single test, dispatch **`.github/workflows/e2e.yml`** with an agent and the optional `test` regex. An empty regex keeps the normal suite. The filter also reaches Windows when running Claude; selecting another agent skips the Windows Claude job.
 - **`.github/workflows/e2e-controlplane.yml`** runs the control-plane tests on pushes to main and on manual dispatch. Runs are serialized and never cancelled mid-flight, because the shared test account's resources are cleaned up by the test itself.
 
+Unix workflows install Codex and Copilot using their official shell installers;
+Codex prompts are disabled with `CODEX_NON_INTERACTIVE=1`. Installer downloads
+use `--compressed`, and E2E installs retain retries with `pipefail`. Nightly
+OpenCode installs deliberately keep npm to avoid the shell installer's
+unauthenticated GitHub API rate limits. Windows also keeps npm for Codex,
+Copilot, and OpenCode rather than using Unix shell installers.
+
 The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary; `nightly-e2e.yml` checks the published nightly installation.

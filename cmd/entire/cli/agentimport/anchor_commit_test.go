@@ -189,7 +189,7 @@ func TestRun_RejectsInvalidAnchorBeforeWrites(t *testing.T) {
 						"hex-ref": "does not resolve to a commit object",
 					}
 					transcripts := t.TempDir()
-					writeFixtureSession(t, transcripts, "anchor.jsonl")
+					writeFixtureSession(t, transcripts, "anchor.jsonl", dir)
 					opts := Options{RepoRoot: dir, OverridePath: transcripts, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC), LinkCommitSHA: sha}
 					if mode == "already-imported" {
 						// Assert the seeding run actually imported: without

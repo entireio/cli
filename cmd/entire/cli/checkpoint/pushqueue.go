@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -78,8 +77,6 @@ func PushQueueForRepo(_ context.Context, repo *git.Repository) (*PushQueue, erro
 	}
 	return NewPushQueue(dir), nil
 }
-
-func (q *PushQueue) queuePath() string { return filepath.Join(q.dir, pushQueueFileName) }
 
 // Enqueue appends a ref to the queue. It is safe to enqueue a ref already
 // present (or already pushed): Drain collapses duplicates and the batch push is

@@ -13,32 +13,16 @@ import (
 	"sync"
 
 	"charm.land/huh/v2"
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/spf13/cobra"
 )
 
 var errDispatchCancelled = errors.New("dispatch cancelled")
-var listDispatchWizardRepos = discoverAuthenticatedDispatchWizardRepos
-var listDispatchWizardRepoResources = defaultListDispatchWizardRepoResources
 var resolveDispatchWizardTopLevel = resolveGitTopLevel
 var getDispatchWizardCurrentBranch = GetCurrentBranch
 var runDispatchWizardForm = func(form *huh.Form) error { return form.Run() }
-
-func defaultListDispatchWizardRepoResources(ctx context.Context) ([]api.Repository, error) {
-	client, err := NewAuthenticatedAPIClient(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	repos, err := client.ListRepositories(ctx, api.RepositorySortRecent)
-	if err != nil {
-		return nil, fmt.Errorf("list dispatch repos: %w", err)
-	}
-	return repos, nil
-}
 
 const (
 	dispatchWizardRepoDiscoveryConcurrencyLimit = 8
@@ -540,32 +524,6 @@ func resolveGitTopLevel(ctx context.Context, path string) (string, error) {
 		return "", fmt.Errorf("git rev-parse --show-toplevel: %w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
-}
-
-// discoverAuthenticatedDispatchWizardRepos drops repos with zero checkpoints —
-// dispatching them would produce nothing. Server order (recent-first) is
-// preserved.
-func discoverAuthenticatedDispatchWizardRepos(ctx context.Context) ([]string, error) {
-	repos, err := listDispatchWizardRepoResources(ctx)
-	if err != nil {
-		logging.Warn(ctx, "dispatch wizard repo list failed", "error", err)
-		return nil, err
-	}
-
-	slugs := make([]string, 0, len(repos))
-	for _, repo := range repos {
-		if repo.CheckpointCount <= 0 {
-			continue
-		}
-		slug := strings.TrimSpace(repo.FullName)
-		if slug == "" {
-			continue
-		}
-		// The repo index lists GitHub mirrors by bare name; the picker
-		// must offer slugs --repos accepts, so name the forge here.
-		slugs = append(slugs, dispatchpkg.GitHubForge+"/"+slug)
-	}
-	return slugs, nil
 }
 
 func discoverRepoSlug(repoRoot string) string {

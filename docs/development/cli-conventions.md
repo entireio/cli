@@ -836,6 +836,13 @@ current flags; `--json` emits structured output. It is the single source of
 truth the first-turn context injection and the `--agent-help-skill` skill point
 agents at, instead of enumerating a surface that goes stale.
 
+When trails are enabled, the first-turn injection introduces a trail as
+project-level intent across repositories and branches. It asks agents to inspect
+the current branch's trail, reuse intent where appropriate, and keep the trail's
+description current. Command details come from `entire agent-help trail`; the
+injection retains auto-detected repository context without listing unrelated
+checkpoint or setup workflows.
+
 #### Where agent-facing text goes
 
 | What you have | Where it goes |
@@ -843,7 +850,7 @@ agents at, instead of enumerating a surface that goes stale.
 | A new command | `agentHelpClassification` in `agent_help_cmd.go` — one entry, keyed by command path, carrying `audience` and `listed` |
 | "When to use this at all" advice for agents | `agentHelpGuidance` — **never** cobra `Short`/`Long` |
 | A fact humans need too (e.g. "this output is not stable") | cobra `Long`. Human help is a reference, not a lecture: whoever typed `--help` already chose the command |
-| A per-task command recommendation | `agent-help`, which is pulled on demand. **Never** the first-turn injection, which carries only invariants true on every turn |
+| A per-task command recommendation | `agent-help`, which is pulled on demand. The first-turn injection stays focused on the project-trail workflow below |
 
 **Flag it; don't decide it.** Whether a command is `listed`, and whether it is
 read-only / task-driven / user-owned, are product judgment calls — they change
