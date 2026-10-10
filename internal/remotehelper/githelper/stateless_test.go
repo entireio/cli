@@ -100,6 +100,35 @@ func TestHandleStatelessConnect_AmendsClientAgent(t *testing.T) {
 	}
 }
 
+// The helper must hide ref-in-want from native git whatever the server
+// advertises, since it proxies each fetch to a replica of its own.
+func TestHandleStatelessConnect_StripsRefInWant(t *testing.T) {
+	t.Parallel()
+	advertisement := pktLine("version 2\n") + pktLine("agent=test\n") + pktLine("ls-refs=unborn\n") +
+		pktLine("fetch=shallow wait-for-done ref-in-want filter\n") + "0000"
+	wantAdvertisement := pktLine("version 2\n") + pktLine("agent=test\n") + pktLine("ls-refs=unborn\n") +
+		pktLine("fetch=shallow wait-for-done filter\n") + "0000"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "info/refs") {
+			w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+			fmt.Fprint(w, advertisement)
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	if err := handleStatelessConnect(context.Background(), testTransport(server), serviceUploadPack, strings.NewReader(""), &stdout); err != nil {
+		t.Fatalf("handleStatelessConnect failed: %v", err)
+	}
+	if want := "\n" + wantAdvertisement; stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
 func TestHandleStatelessConnect_EmptyBundleURIResponseSynthesizesFlush(t *testing.T) {
 	t.Parallel()
 	advertisement := pktLine("version 2\n") + pktLine("agent=test\n") + pktLine("bundle-uri\n") + "0000"

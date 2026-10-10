@@ -152,12 +152,14 @@ func TestProxy_SetsUserAgentHeader(t *testing.T) {
 	}
 }
 
-func TestProxy_OmitsUserAgentWrapperWhenEmpty(t *testing.T) {
+// An empty UserAgent must send no header, as git does for
+// GIT_HTTP_USER_AGENT="" — not fall back to Go's default.
+func TestProxy_EmptyUserAgentSendsNoHeader(t *testing.T) {
 	t.Parallel()
 
-	var got string
+	var got []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header.Get("User-Agent")
+		got = r.Header.Values("User-Agent")
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(server.Close)
@@ -178,8 +180,8 @@ func TestProxy_OmitsUserAgentWrapperWhenEmpty(t *testing.T) {
 	}
 	_ = resp.Close()
 
-	if !strings.HasPrefix(got, "Go-http-client/") {
-		t.Errorf("User-Agent = %q, want Go's default when wrapper omitted", got)
+	if len(got) != 0 {
+		t.Errorf("User-Agent = %q, want no header for empty UserAgent", got)
 	}
 }
 

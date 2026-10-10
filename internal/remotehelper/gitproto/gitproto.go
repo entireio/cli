@@ -41,6 +41,57 @@ func IsV2Advertisement(p []byte) bool {
 	return string(p[pktline.LenSize:n]) == "version 2\n"
 }
 
+// RemoveV2FetchFeature drops feature from the fetch= capability in a
+// v2 advertisement and leaves every other byte intact. A fetch line
+// with no feature left becomes the bare key "fetch", which
+// gitprotocol-v2(5) permits: capability = PKT-LINE(key[=value] LF).
+// Advertisements without the feature come back unchanged. A server
+// sends each capability key once, so a second fetch= line is an error.
+func RemoveV2FetchFeature(advertisement []byte, feature string) ([]byte, error) {
+	fetchOff := -1
+	for off := 0; off < len(advertisement); {
+		line, err := parseRawPktLine(advertisement, off)
+		if err != nil {
+			return nil, err
+		}
+		if !line.special() && bytes.HasPrefix(line.payload, []byte("fetch=")) {
+			if fetchOff >= 0 {
+				return nil, errors.New("v2 advertisement has more than one fetch= line")
+			}
+			fetchOff = off
+		}
+		off = line.next
+	}
+	if fetchOff < 0 {
+		return advertisement, nil
+	}
+
+	line, err := parseRawPktLine(advertisement, fetchOff)
+	if err != nil {
+		return nil, err
+	}
+	value := bytes.TrimPrefix(line.payload, []byte("fetch="))
+	value, eol := splitTrailingLF(value)
+	features := bytes.Split(value, []byte{' '})
+	kept := make([][]byte, 0, len(features))
+	for _, f := range features {
+		if string(f) != feature {
+			kept = append(kept, f)
+		}
+	}
+	if len(kept) == len(features) {
+		return advertisement, nil
+	}
+
+	payload := []byte("fetch")
+	if len(kept) > 0 {
+		payload = append(payload, '=')
+		payload = append(payload, bytes.Join(kept, []byte{' '})...)
+	}
+	payload = append(payload, eol...)
+	return replacePktLine(advertisement, line, payload)
+}
+
 // V2Command extracts the "command=" value from a v2 fetch / ls-refs /
 // bundle-uri request message. The message is the bytes between two
 // flushes (callers typically pass the buffer returned by
