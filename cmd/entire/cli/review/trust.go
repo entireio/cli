@@ -404,7 +404,7 @@ func printTrustRefusal(errOut io.Writer, what string, isolated bool, command, he
 	fmt.Fprintln(errOut, "Not run: this review needs the user's approval.")
 	switch {
 	case isolated && what != trustWhatNothing:
-		fmt.Fprintf(errOut, "The code is by someone else; the review agent uses the profile's config but would still load the branch's skills and commands (%s --show-config lists them).\n", command)
+		fmt.Fprintf(errOut, "The code is by someone else; the review agent uses the profile's config but would still load the branch's skills and commands, and Pi's settings (%s --show-config lists them).\n", command)
 	case what == trustWhatNothing:
 		fmt.Fprintf(errOut, "The code is by someone else (%s --show-config shows what the review reads).\n", command)
 	default:

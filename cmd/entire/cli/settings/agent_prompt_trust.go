@@ -219,7 +219,8 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 				rawHasKey(localRaw, "review_profiles", name, "agents", worker, "prompt"), prefsOwnProfile)
 			hadConfig := cfg.Config != nil
 			cfg.Config = decideConfig("review_profiles."+name+".agents."+worker+".config", cfg.Config,
-				rawHasKey(localRaw, "review_profiles", name, "agents", worker, "config"), prefsOwnProfile)
+				rawHasKey(localRaw, "review_profiles", name, "agents", worker, "config"),
+				prefsOwnProfile || (!localSetsProfile && prefs != nil && prefs.ReviewAgentConfigs[name][worker] != nil))
 			keepWorkerPresent(&cfg, worker, hadPrompt || hadConfig)
 			profile.Agents[worker] = cfg
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -35,9 +36,7 @@ func prepareCodexReviewConfig(ctx context.Context, cfg reviewtypes.RunConfig) (r
 	if mainRoot != run.CheckoutRoot {
 		roots = append(roots, mainRoot)
 	}
-	for _, root := range roots {
-		cfg.ExtraArgs = append(cfg.ExtraArgs, "-c", untrustedProjectOverride(root))
-	}
+	cfg.ExtraArgs = append(cfg.ExtraArgs, "-c", untrustedProjectOverride(roots))
 	servers, err := codexMCPOverrides(cfg.AgentConfig.MCPServers)
 	if err != nil {
 		return cfg, nil, err
@@ -47,13 +46,19 @@ func prepareCodexReviewConfig(ctx context.Context, cfg reviewtypes.RunConfig) (r
 	return cfg, nil, nil
 }
 
-// untrustedProjectOverride marks root untrusted for one codex run.
-func untrustedProjectOverride(root string) string {
-	quoted, err := json.Marshal(root)
-	if err != nil {
-		quoted = []byte(`""`)
+// untrustedProjectOverride marks roots untrusted for one codex run. It is one
+// override: each -c projects=... replaces the whole table, so a second would
+// drop the first.
+func untrustedProjectOverride(roots []string) string {
+	entries := make([]string, 0, len(roots))
+	for _, root := range roots {
+		quoted, err := json.Marshal(root)
+		if err != nil {
+			quoted = []byte(`""`)
+		}
+		entries = append(entries, string(quoted)+`={trust_level="untrusted"}`)
 	}
-	return "projects={" + string(quoted) + `={trust_level="untrusted"}}`
+	return "projects={" + strings.Join(entries, ",") + "}"
 }
 
 // codexMCPOverrides turns profile MCP servers into -c overrides. Values are

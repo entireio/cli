@@ -36,10 +36,8 @@ func TestPrepareCodexReviewConfigLinkedWorktree(t *testing.T) {
 	args := strings.Join(got.ExtraArgs, "\n")
 	mainResolved, _ := filepath.EvalSymlinks(main) //nolint:errcheck // a temp dir always resolves
 	wtResolved, _ := filepath.EvalSymlinks(wt)     //nolint:errcheck // a temp dir always resolves
-	for _, root := range []string{wtResolved, mainResolved} {
-		if !strings.Contains(args, untrustedProjectOverride(root)) {
-			t.Errorf("ExtraArgs missing untrusted override for %s:\n%s", root, args)
-		}
+	if want := untrustedProjectOverride([]string{wtResolved, mainResolved}); strings.Count(args, "projects=") != 1 || !slices.Contains(got.ExtraArgs, want) {
+		t.Errorf("ExtraArgs want one override %s:\n%s", want, args)
 	}
 	for _, want := range []string{`mcp_servers.docs.command="/opt/mcp/docs"`, `mcp_servers.docs.args=["--stdio"]`} {
 		if !slices.Contains(got.ExtraArgs, want) {

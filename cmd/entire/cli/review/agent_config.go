@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -100,11 +101,15 @@ func ValidateAgentConfig(agentName string, cfg *reviewtypes.AgentConfig, forbidd
 
 func validateMCPServer(name string, raw json.RawMessage, forbiddenRoots []string) error {
 	var server struct {
-		Command string   `json:"command"`
-		Args    []string `json:"args"`
-		URL     string   `json:"url"`
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		URL     string            `json:"url"`
+		Env     map[string]string `json:"env"`
 	}
 	if err := json.Unmarshal(raw, &server); err != nil {
+		return fmt.Errorf("MCP server %q: %w", name, err)
+	}
+	if err := validateEnv(server.Env, forbiddenRoots); err != nil {
 		return fmt.Errorf("MCP server %q: %w", name, err)
 	}
 	switch {
@@ -138,6 +143,15 @@ func validateClaudeSettings(raw json.RawMessage, forbiddenRoots []string) error 
 	if err := json.Unmarshal(raw, &settingsObj); err != nil {
 		return fmt.Errorf("settings: %w", err)
 	}
+	var env map[string]string
+	if rawEnv, ok := settingsObj["env"]; ok {
+		if err := json.Unmarshal(rawEnv, &env); err != nil {
+			return fmt.Errorf("settings env: %w", err)
+		}
+	}
+	if err := validateEnv(env, forbiddenRoots); err != nil {
+		return fmt.Errorf("settings %w", err)
+	}
 	for _, key := range agentConfigCommandKeys {
 		var command string
 		if json.Unmarshal(settingsObj[key], &command) == nil && command != "" {
@@ -165,6 +179,30 @@ func validateClaudeSettings(raw json.RawMessage, forbiddenRoots []string) error 
 				if err := validateCommand(hook.Command, forbiddenRoots); err != nil {
 					return fmt.Errorf("settings hook %s: %w", event, err)
 				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateEnv keeps environment values from pointing a program back into the
+// checkout: no absolute path inside it, and search-path variables (PATH,
+// NODE_PATH, ...) list only absolute directories or inherited variables.
+func validateEnv(env map[string]string, forbiddenRoots []string) error {
+	for _, key := range sortedStringKeys(env) {
+		value := env[key]
+		if strings.Contains(value, "CLAUDE_PROJECT_DIR") {
+			return fmt.Errorf("env %s refers to the project directory, which is the reviewed checkout", key)
+		}
+		searchPath := strings.HasSuffix(strings.ToUpper(key), "PATH")
+		for _, part := range filepath.SplitList(value) {
+			switch {
+			case filepath.IsAbs(part):
+				if under(part, forbiddenRoots) {
+					return fmt.Errorf("env %s: %q is inside a checkout", key, part)
+				}
+			case searchPath && part != "" && !strings.HasPrefix(part, "$"):
+				return fmt.Errorf("env %s: %q is a relative directory, which resolves inside the reviewed checkout; use an absolute path", key, part)
 			}
 		}
 	}
@@ -222,18 +260,28 @@ func validateCommandWord(word string, forbiddenRoots []string) error {
 	return nil
 }
 
+// under reports whether path, or what it resolves to through symlinks, is
+// inside one of roots. Windows paths compare case-insensitively.
 func under(path string, roots []string) bool {
-	clean := filepath.Clean(path)
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		root = filepath.Clean(root)
-		if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
-			return true
+	candidates := []string{filepath.Clean(path)}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		candidates = append(candidates, resolved)
+	}
+	for _, candidate := range candidates {
+		for _, root := range roots {
+			if root != "" && pathWithin(candidate, filepath.Clean(root)) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func pathWithin(path, root string) bool {
+	if runtime.GOOS == "windows" {
+		path, root = strings.ToLower(path), strings.ToLower(root)
+	}
+	return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator))
 }
 
 func sortedStringKeys[V any](m map[string]V) []string {

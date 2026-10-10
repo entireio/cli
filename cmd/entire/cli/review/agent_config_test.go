@@ -2,11 +2,14 @@ package review
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestValidateAgentConfig(t *testing.T) {
@@ -61,6 +64,10 @@ func TestValidateAgentConfig(t *testing.T) {
 		{"pi MCP unsupported", "pi", reviewtypes.AgentConfig{MCPServers: mcp(`{"url":"x"}`)}, `does not support "mcp_servers"`},
 		{"pi extension relative", "pi", reviewtypes.AgentConfig{Extensions: []string{"ext.ts"}}, "absolute path"},
 		{"pi extension in checkout", "pi", reviewtypes.AgentConfig{Extensions: []string{"/repo/.pi/x.ts"}}, "inside a checkout"},
+		{"MCP env PATH into checkout", "claude-code", reviewtypes.AgentConfig{MCPServers: mcp(`{"command":"tool","env":{"PATH":"/repo/bin:/usr/bin"}}`)}, "inside a checkout"},
+		{"MCP env relative PATH", "claude-code", reviewtypes.AgentConfig{MCPServers: mcp(`{"command":"tool","env":{"NODE_PATH":"node_modules"}}`)}, "relative directory"},
+		{"MCP env token and inherited PATH", "claude-code", reviewtypes.AgentConfig{MCPServers: mcp(`{"command":"tool","env":{"TOKEN":"a/b+c","PATH":"$PATH:/opt/bin"}}`)}, ""},
+		{"settings env into checkout", "claude-code", reviewtypes.AgentConfig{Settings: json.RawMessage(`{"env":{"TOOL_HOME":"/repo/.tool"}}`)}, "inside a checkout"},
 		{"unknown agent", "cursor", reviewtypes.AgentConfig{}, "does not support a review profile config"},
 	}
 	for _, tt := range tests {
@@ -78,6 +85,26 @@ func TestValidateAgentConfig(t *testing.T) {
 				t.Fatalf("ValidateAgentConfig() = %v, want error containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// A path outside the checkout that links into it is inside it.
+func TestValidateAgentConfigFollowsSymlinks(t *testing.T) {
+	t.Parallel()
+
+	checkout := t.TempDir()
+	testutil.WriteFile(t, checkout, ".pi/ext.ts", "x")
+	link := filepath.Join(t.TempDir(), "ext.ts")
+	if err := os.Symlink(filepath.Join(checkout, ".pi", "ext.ts"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ValidateAgentConfig("pi", &reviewtypes.AgentConfig{Extensions: []string{link}}, []string{resolved})
+	if err == nil || !strings.Contains(err.Error(), "inside a checkout") {
+		t.Fatalf("ValidateAgentConfig() = %v, want inside a checkout", err)
 	}
 }
 

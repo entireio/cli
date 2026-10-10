@@ -174,6 +174,26 @@ func TestConfigure_SetConfigSavesToClonePreferences(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(".entire", "settings.json")); err == nil && strings.Contains(string(data), `"config"`) {
 		t.Fatalf("config written to the committed settings file:\n%s", data)
 	}
+	// Only the config is stored clone-locally, so a later change to the
+	// profile in its own layer still takes effect.
+	if err := settings.ModifyClonePreferences(context.Background(), func(p *settings.ClonePreferences) error {
+		worker := p.ReviewProfiles["general"].Agents["claude-code"]
+		if worker.Config != nil {
+			t.Error("the config was copied into the stored profile")
+		}
+		worker.Model = "sonnet"
+		p.ReviewProfiles["general"].Agents["claude-code"] = worker
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err = settings.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ReviewProfiles["general"].Agents["claude-code"]; got.Model != "sonnet" || got.Config == nil {
+		t.Fatalf("after editing the profile: model %q, config %v; want sonnet with the config kept", got.Model, got.Config)
+	}
 
 	bad := filepath.Join(t.TempDir(), "bad.json")
 	if err := os.WriteFile(bad, []byte(`{"settings":{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"./hook.sh"}]}]}}}`), 0o600); err != nil {

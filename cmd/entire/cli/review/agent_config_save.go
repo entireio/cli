@@ -77,9 +77,9 @@ func stripAgentConfigs(profile settings.ReviewProfileConfig) settings.ReviewProf
 
 // saveReviewAgentConfigs stores reviewer configs on profileName in a
 // developer-owned layer: .entire/settings.local.json when it already defines
-// the profile, otherwise clone-local preferences. Profiles merge whole per
-// layer, so the effective profile is copied there with the configs applied.
-// A nil config removes it. It returns the file written.
+// the profile, otherwise clone-local preferences, which keep only the configs
+// so the rest of the profile still comes from its own layer. A nil config
+// removes it. It returns the file written.
 func saveReviewAgentConfigs(ctx context.Context, profileName string, configs map[string]*settings.ReviewAgentConfig) (string, error) {
 	s, err := settings.Load(reviewSettingsContext(ctx))
 	if err != nil {
@@ -121,10 +121,25 @@ func saveReviewAgentConfigs(ctx context.Context, profileName string, configs map
 		return reviewScopeLocal.file(), nil
 	}
 	err = settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
-		if p.ReviewProfiles == nil {
-			p.ReviewProfiles = map[string]settings.ReviewProfileConfig{}
+		workers := p.ReviewAgentConfigs[profileName]
+		if workers == nil {
+			workers = map[string]*settings.ReviewAgentConfig{}
 		}
-		p.ReviewProfiles[profileName] = profile
+		for worker, cfg := range configs {
+			if cfg == nil {
+				delete(workers, worker)
+			} else {
+				workers[worker] = cfg
+			}
+		}
+		if p.ReviewAgentConfigs == nil {
+			p.ReviewAgentConfigs = map[string]map[string]*settings.ReviewAgentConfig{}
+		}
+		if len(workers) == 0 {
+			delete(p.ReviewAgentConfigs, profileName)
+		} else {
+			p.ReviewAgentConfigs[profileName] = workers
+		}
 		return nil
 	})
 	if err != nil {

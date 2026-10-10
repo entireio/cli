@@ -247,6 +247,11 @@ type ClonePreferences struct {
 	ReviewProfiles       map[string]ReviewProfileConfig `json:"review_profiles,omitempty"`
 	ReviewDefaultProfile string                         `json:"review_default_profile,omitempty"`
 
+	// ReviewAgentConfigs holds reviewer agent configs by profile, then
+	// reviewer. They overlay the effective profile at load, so the profile's
+	// other fields keep coming from whichever layer defines them.
+	ReviewAgentConfigs map[string]map[string]*ReviewAgentConfig `json:"review_agent_configs,omitempty"`
+
 	// Deprecated: legacy pre-profile review settings. Kept so old preference
 	// files parse. New review setup writes ReviewProfiles instead, while
 	// `entire review` may read Review as a fallback when profiles are absent.
@@ -1302,6 +1307,21 @@ func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
 	}
 	if prefs.ReviewProfiles != nil {
 		settings.ReviewProfiles = mergeReviewProfiles(settings.ReviewProfiles, prefs.ReviewProfiles)
+	}
+	for name, workers := range prefs.ReviewAgentConfigs {
+		profile, ok := settings.ReviewProfiles[name]
+		if !ok {
+			continue
+		}
+		agents := make(map[string]ReviewConfig, len(profile.Agents))
+		for worker, cfg := range profile.Agents {
+			if agentCfg, ok := workers[worker]; ok {
+				cfg.Config = agentCfg
+			}
+			agents[worker] = cfg
+		}
+		profile.Agents = agents
+		settings.ReviewProfiles[name] = profile
 	}
 	if prefs.ReviewDefaultProfile != "" {
 		settings.ReviewDefaultProfile = prefs.ReviewDefaultProfile

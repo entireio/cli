@@ -28,16 +28,19 @@ func TestAgentConfigTrust_ProjectConfigIsDropped(t *testing.T) {
 	assert.False(t, AgentConfigRejectionUnverified(rejections[0]))
 }
 
+// Clone-local configs overlay a profile defined in the project file, which
+// keeps supplying the profile's other fields.
 func TestAgentConfigTrust_ClonePreferencesConfigIsHonored(t *testing.T) {
 	t.Parallel()
 	_, project, local := newOPFRepo(t)
-	writeSettingsFile(t, project, `{"enabled":true}`)
-	prefs := writePreferences(t, `{"review_profiles":{"general":{"agents":{"claude-code":{"config":`+configWithHook+`}}}}}`)
+	writeSettingsFile(t, project, `{"enabled":true,"review_profiles":{"general":{"agents":{"claude-code":{"model":"sonnet"}}}}}`)
+	prefs := writePreferences(t, `{"review_agent_configs":{"general":{"claude-code":`+configWithHook+`}}}`)
 
 	s := loadedForPromptTrust(t, project, prefs, local)
-	cfg := s.ReviewProfiles["general"].Agents["claude-code"].Config
-	require.NotNil(t, cfg)
-	assert.Contains(t, string(cfg.Settings), "/usr/bin/true")
+	worker := s.ReviewProfiles["general"].Agents["claude-code"]
+	require.NotNil(t, worker.Config)
+	assert.Contains(t, string(worker.Config.Settings), "/usr/bin/true")
+	assert.Equal(t, "sonnet", worker.Model)
 	assert.Empty(t, s.AgentPromptRejections())
 }
 

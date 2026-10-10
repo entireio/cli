@@ -981,8 +981,10 @@ func saveReviewProfileConfig(ctx context.Context, profileName string, agents map
 	// clobbered with built-in defaults.
 	profile := profiles[profileName]
 	profile.Agents = agents
-	// Reviewer configs are saved separately, to a developer-owned layer.
-	profile = stripAgentConfigs(profile)
+	// The shared file never holds reviewer configs; the local file keeps them.
+	if scope == reviewScopeProject {
+		profile = stripAgentConfigs(profile)
+	}
 	if strings.TrimSpace(judgeAgent) != "" {
 		profile.Judge = &settings.ReviewConfig{Agent: strings.TrimSpace(judgeAgent)}
 	} else {

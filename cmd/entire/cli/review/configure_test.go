@@ -786,3 +786,33 @@ func TestReviewConfigureOptionsScripted_LocalOnlyDoesNotSkipInteractive(t *testi
 		t.Fatal("--local with --set-* flags should still use scripted configure")
 	}
 }
+
+// Re-saving a local profile from --edit keeps its reviewer configs; only the
+// shared file drops them.
+func TestSaveReviewProfileConfigKeepsLocalAgentConfig(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.InitRepo(t, tmp)
+	t.Chdir(tmp)
+	ctx := context.Background()
+
+	agents := map[string]settings.ReviewConfig{
+		tAgentClaude: {Agent: tAgentClaude, Config: &settings.ReviewAgentConfig{Extensions: []string{"/opt/x"}}},
+	}
+	for _, scope := range []reviewSettingsScope{reviewScopeLocal, reviewScopeProject} {
+		if err := saveReviewProfileConfig(ctx, "security", agents, "", scope); err != nil {
+			t.Fatalf("saveReviewProfileConfig %s: %v", scope.file(), err)
+		}
+		_, raw, err := loadReviewSettingsRaw(ctx, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		profiles, err := decodeRawReviewProfiles(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kept := profiles["security"].Agents[tAgentClaude].Config != nil
+		if want := scope == reviewScopeLocal; kept != want {
+			t.Errorf("%s: config kept = %v, want %v", scope.file(), kept, want)
+		}
+	}
+}
