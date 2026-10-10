@@ -94,6 +94,8 @@ func NewDiscoveryTransport(skipTLSVerify bool) *http.Transport {
 
 func newTransport(skipTLSVerify bool, dialTimeout time.Duration) *http.Transport {
 	return &http.Transport{
+		// A composite literal must set Proxy explicitly so HTTP_PROXY, HTTPS_PROXY, and NO_PROXY are honored.
+		Proxy:       http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{Timeout: dialTimeout}).DialContext,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
