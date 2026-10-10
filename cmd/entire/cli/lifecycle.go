@@ -1021,25 +1021,21 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 				slog.String("error", recErr.Error()))
 		}
 		recordCaptureDegraded(ctx, sessionID, captureDegraded)
-		// SaveStep is skipped, but the turn's token usage must still be
-		// recorded when no transcript can reproduce it later. Two sources,
-		// in the same precedence as the SaveStep path below:
-		//   - Hook-reported usage (Cursor's stop payload). Cursor's transcript
-		//     has no usage fields, so condensation falls back to
-		//     CheckpointTokenUsage; dropping the event here loses the turn
-		//     from both the session total and the next checkpoint.
-		//   - Out-of-band usage (Antigravity). A turn that commits ALL its
-		//     work mid-turn (its normal flow) ends with a clean tree, and the
-		//     mid-turn condensation ran with a zero delta (the baseline only
-		//     re-snapshots at TurnStart). Without this, CleanupPrePromptState
-		//     deletes the baseline and the turn's tokens are lost permanently.
-		// Only one is used, so a turn is never counted twice.
-		turnUsage := event.TokenUsage
-		if turnUsage == nil {
-			turnUsage = computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
+		// SaveStep is skipped, but the turn's tokens must still be recorded,
+		// resolved and accounted exactly as SaveStep would. Otherwise the
+		// session total misses the turn, and so does the next checkpoint for
+		// agents whose transcript carries no usage (Cursor's stop payload,
+		// Antigravity's out-of-band pipe). An Antigravity turn that commits ALL
+		// its work mid-turn (its normal flow) lands here with a clean tree.
+		// A subagent's own session (Factory AI Droid's Workers) is skipped:
+		// with changes it never reaches SaveStep either, because its work is
+		// the parent's task, so recording here would count it twice.
+		var turnUsage *agent.TokenUsage
+		if _, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); !isSubagent {
+			turnUsage = resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
 		}
 		if turnUsage != nil {
-			if accErr := strategy.AccumulateSessionTokenUsage(ctx, sessionID, turnUsage); accErr != nil {
+			if accErr := strategy.AccumulateSessionTokenUsage(ctx, sessionID, turnUsage, codexLedgerVersion); accErr != nil {
 				// This is the only path that records a checkpoint-less turn's
 				// tokens, so a swallowed failure here is a permanent loss. Name
 				// the two causes apart: a session whose state was removed
@@ -1105,27 +1101,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
-	// Resolve token usage. Hook-provided counts (e.g., Cursor's stop hook,
-	// which is the only authoritative source for Cursor sessions because the
-	// JSONL transcript has no usage fields) take precedence; otherwise fall
-	// back to transcript-based computation, preferring SubagentAwareExtractor
-	// to include subagent tokens.
-	tokenUsage := event.TokenUsage
-	if tokenUsage == nil {
-		if codexInventoryUsage != nil {
-			tokenUsage = codexInventoryUsage
-		} else {
-			tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
-		}
-	}
-
-	// Out-of-band fallback: Antigravity exposes token usage only via its
-	// title/statusline pipe (captured by the title-tee shim), never in the
-	// transcript. Delta = current cumulative totals minus the TurnStart
-	// baseline stored in PrePromptState.
-	if tokenUsage == nil {
-		tokenUsage = computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
-	}
+	tokenUsage := resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
@@ -1172,6 +1148,34 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			slog.String("error", cleanupErr.Error()))
 	}
 	return nil
+}
+
+// resolveTurnTokenUsage returns the token usage of the turn ending now.
+// Hook-provided counts (e.g., Cursor's stop hook, which is the only
+// authoritative source for Cursor sessions because the JSONL transcript has no
+// usage fields) take precedence; otherwise fall back to Codex's child ledger,
+// then to transcript-based computation from the turn's start offset (preferring
+// SubagentAwareExtractor to include subagent tokens), and last to the
+// out-of-band source: Antigravity exposes token usage only via its
+// title/statusline pipe (captured by the title-tee shim), never in the
+// transcript, so its delta is the current cumulative totals minus the
+// TurnStart baseline stored in PrePromptState. Only one source is used, so a
+// turn is never counted twice.
+func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) *agent.TokenUsage {
+	if event.TokenUsage != nil {
+		return event.TokenUsage
+	}
+	if codexInventoryUsage != nil {
+		return codexInventoryUsage
+	}
+	turnStart := 0
+	if preState != nil {
+		turnStart = preState.TranscriptOffset
+	}
+	if usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, subagentsDir); usage != nil {
+		return usage
+	}
+	return computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
 }
 
 // handleLifecycleCompaction handles context compaction: saves current progress

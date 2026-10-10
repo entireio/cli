@@ -1022,21 +1022,21 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// AccumulateSessionTokenUsage adds a token-usage delta to both the
-// session-cumulative total and the checkpoint-scoped accumulator, mirroring
-// SaveStep's accounting (manual_commit_git.go). It exists for turns that end
-// with no uncommitted changes — e.g. Antigravity committing all its work
-// mid-turn, its normal flow — where the TurnEnd handler skips SaveStep
-// entirely but the turn's out-of-band token delta must still be recorded so
-// the next condensation (or `entire status`) attributes it. A nil or empty
-// delta is a no-op.
-func AccumulateSessionTokenUsage(ctx context.Context, sessionID string, delta *agent.TokenUsage) error {
+// AccumulateSessionTokenUsage records a turn's token usage exactly as SaveStep
+// does (applyTurnTokenUsage): into the session total and the pending
+// checkpoint window, with SubagentTokens rescoped against the baseline. It
+// exists for turns that end with no uncommitted changes, where the TurnEnd
+// handler skips SaveStep but the turn's tokens must still be recorded so
+// `entire status` and the next condensation attribute them. ledgerVersion is
+// the subagent ledger version the usage was computed against (Codex), or nil;
+// a stale one drops the child aggregate, as it does for a step. A nil delta is
+// a no-op.
+func AccumulateSessionTokenUsage(ctx context.Context, sessionID string, delta *agent.TokenUsage, ledgerVersion *uint64) error {
 	if delta == nil {
 		return nil
 	}
 	return MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		state.TokenUsage = accumulateTokenUsage(state.TokenUsage, delta)
-		state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, delta)
+		applyTurnTokenUsage(state, withoutStaleSubagentSnapshot(delta, ledgerVersion, state))
 		return nil
 	})
 }
