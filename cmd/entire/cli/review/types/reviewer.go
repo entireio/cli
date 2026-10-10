@@ -20,6 +20,7 @@ package types
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -80,6 +81,17 @@ type Process interface {
 // invocations (e.g., "/pr-review-toolkit:review-pr") the configured agent
 // should run.
 type RunConfig struct {
+	// AgentConfig, when set, replaces the reviewed checkout's agent config
+	// (hooks, MCP servers, extensions) with the review profile's.
+	AgentConfig *AgentConfig
+
+	// ExtraArgs are agent arguments a reviewer's Prepare produced (files it
+	// wrote for AgentConfig); BuildCmd places them.
+	ExtraArgs []string
+
+	// WorkDir, when set by Prepare, is the directory the agent runs in.
+	WorkDir string
+
 	// PromptOverride, when non-empty, is the exact prompt sent to the agent.
 	// It preserves settings.ReviewConfig.Prompt's existing verbatim-override
 	// contract: configured skills are still recorded as structured metadata,
@@ -236,3 +248,11 @@ type RunError struct {
 }
 
 func (RunError) isEvent() {}
+
+// AgentConfig is a reviewer's own agent config from a review profile, in each
+// agent's native shape. It mirrors settings.ReviewAgentConfig.
+type AgentConfig struct {
+	Settings   json.RawMessage
+	MCPServers map[string]json.RawMessage
+	Extensions []string
+}

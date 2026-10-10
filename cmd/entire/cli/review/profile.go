@@ -503,6 +503,9 @@ func saveReviewProfile(ctx context.Context, profileName string, profile settings
 		return err
 	}
 	hadProfiles := len(profiles) > 0
+	if scope == reviewScopeProject {
+		profile = stripAgentConfigs(profile)
+	}
 	profiles[profileName] = profile
 	defaultName := decodeRawReviewDefault(raw)
 	switch {

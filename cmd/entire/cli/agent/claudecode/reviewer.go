@@ -31,6 +31,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 		AgentName: "claude-code",
 		BuildCmd:  buildReviewCmd,
 		Parser:    parseClaudeOutput,
+		Prepare:   prepareReviewAgentConfig,
 	}
 }
 
@@ -39,6 +40,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
 	args := []string{"-p", prompt, flagOutputFormat, "stream-json", "--verbose", "--append-system-prompt", review.ReviewerGuardrail}
+	args = append(args, cfg.ExtraArgs...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)

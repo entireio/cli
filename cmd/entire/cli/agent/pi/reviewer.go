@@ -29,6 +29,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 		AgentName: string(agent.AgentNamePi),
 		BuildCmd:  buildPiReviewCmd,
 		Parser:    parsePiReviewOutput,
+		Prepare:   preparePiReviewConfig,
 	}
 }
 
@@ -38,6 +39,7 @@ func buildPiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd 
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
+	args = append(args, cfg.ExtraArgs...)
 	args = append(args, prompt)
 	cmd := exec.CommandContext(ctx, "pi", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), string(agent.AgentNamePi), cfg, prompt)

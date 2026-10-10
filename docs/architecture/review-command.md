@@ -147,6 +147,60 @@ approval first.
   prompt for agents without a runner). The judge runs from a temp directory
   and does not load the checkout's configuration.
 
+## Reviewer agent config in profiles
+
+A review profile can give each reviewer its own agent config, which replaces
+the reviewed checkout's hooks, MCP servers and extensions for that reviewer.
+Set it with `entire review --edit` (per reviewer: keep, use the checkout's,
+own config with nothing extra, or load a JSON file) or
+`entire review --configure <profile> --set-config <reviewer>=<file|isolated|none>`.
+
+```json
+{"settings": {"hooks": {...}, "permissions": {...}, "env": {...}},
+ "mcp_servers": {"docs": {"command": "/opt/mcp/docs", "args": ["--stdio"]}},
+ "extensions": ["/opt/pi/review.ts"]}
+```
+
+| Agent | Checkout config dropped | Profile config applied | Still loaded from the checkout |
+|---|---|---|---|
+| Claude Code | `--setting-sources user`, `--strict-mcp-config` | `settings` (with Entire's tracking hooks added) via `--settings`; `mcp_servers` via `--mcp-config` | CLAUDE.md; `.claude/skills` and `.claude/commands`, copied from the committed tree as the `project` plugin (`/review` becomes `/project:review`) |
+| Codex | checkout and main repo marked untrusted for the run (project config, hooks, rules) | `mcp_servers` via `-c` (no literal `env` values yet) | AGENTS.md; skills |
+| Pi | `--no-extensions` | `extensions` via `--extension`, plus Entire's own | AGENTS.md/CLAUDE.md, skills, prompt templates, `.pi/settings.json` |
+
+Rules:
+
+- **Developer-owned only.** A reviewer config is honored only from clone-local
+  preferences or an untracked `.entire/settings.local.json`, never from the
+  committed settings file (dropped with a note), the judge, or the legacy
+  `review` map. A local file that can't be verified as untracked fails the
+  review instead of running it with the checkout's config. Saves go to the
+  local file when it defines the profile, else clone-local preferences
+  (`review_agent_configs`, by profile and reviewer), which overlay only the
+  config so the rest of the profile still comes from its own layer.
+- **Commands stay outside the checkout.** Every hook, MCP and helper command
+  must be a plain command: an absolute program outside the reviewed and the
+  user's checkout (or a bare tool name) with plain arguments. Shell syntax
+  (`;`, `&`, `|`, redirects, `$`, backticks, quotes) is refused, so splitting
+  on whitespace is exact and every word is checked; hooks that need a shell go
+  in a script at an absolute path. Relative paths, `$CLAUDE_PROJECT_DIR`, and
+  launchers that resolve tools from the project (`npx`, `uvx`, `bunx`, …, even
+  by absolute path) are refused, at save time and again before each run. `env`
+  values (MCP servers and Claude settings) may not name a path inside a
+  checkout, and `*PATH` variables list only absolute directories or inherited
+  variables. Containment follows symlinks and ignores case on Windows.
+- **Fail, don't fall back.** An agent that can't apply a field (Codex
+  `settings`, Pi `mcp_servers`, …) fails the review with an explanation.
+- **Gate.** Skills and commands can run their own commands, so reviewing
+  someone else's code still needs approval; for reviewers with their own
+  config the warning lists only what still loads from the branch, and
+  `--show-config` names them (`isolated_agents` in `--json`). Each run prints
+  which reviewers use their own config.
+- Files the run needs (settings, MCP config, the skills plugin) are written
+  0600 to a per-run directory under the user cache and removed when the
+  reviewer exits. An older `entire` binary rejects settings files containing
+  `config`.
+- Team-shared reviewer config and Codex hooks are follow-ups.
+
 ## Flow
 
 1. With `--target`, `entire review` selects the profile in the caller's checkout, resolves the branch directly or through its trail, pins its head, runs the trust gate, prepares a worktree, and re-runs the command there without `--target`.

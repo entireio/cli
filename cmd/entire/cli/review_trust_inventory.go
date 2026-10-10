@@ -76,7 +76,7 @@ var errTrustTooLarge = errors.New("too large to inspect")
 var trustRoots = []string{".claude", ".codex", ".pi", ".agents", ".mcp.json", trustClaudeMD, "CLAUDE.local.md", trustAgentsMD, "AGENTS.override.md"}
 
 // inspectReviewTrust implements review.Deps.InspectTrust.
-func inspectReviewTrust(ctx context.Context, source cliReview.TrustSource, agents []string) (cliReview.TrustInventory, error) {
+func inspectReviewTrust(ctx context.Context, source cliReview.TrustSource, agents []cliReview.TrustAgent) (cliReview.TrustInventory, error) {
 	var files trustFiles
 	if source.Commit != "" {
 		tree, err := loadGitTrustTree(ctx, source.RepoRoot, source.Commit)
@@ -94,20 +94,40 @@ func inspectReviewTrust(ctx context.Context, source cliReview.TrustSource, agent
 	return buildTrustInventory(files, agents)
 }
 
-func buildTrustInventory(files trustFiles, agents []string) (cliReview.TrustInventory, error) {
+func buildTrustInventory(files trustFiles, agents []cliReview.TrustAgent) (cliReview.TrustInventory, error) {
 	var inv cliReview.TrustInventory
-	for _, name := range agents {
+	inv.Isolated = len(agents) > 0
+	for _, a := range agents {
 		var (
 			entries []cliReview.TrustEntry
 			err     error
 		)
-		switch name {
-		case string(agent.AgentNameClaudeCode):
+		inv.Isolated = inv.Isolated && a.Isolated
+		if a.Isolated {
+			inv.IsolatedAgents = append(inv.IsolatedAgents, a.Name)
+		}
+		switch {
+		case a.Name == string(agent.AgentNameClaudeCode) && a.Isolated:
+			// The profile's config replaces the checkout's settings and MCP
+			// servers; its skills and commands still load as a plugin.
+			entries = instructionDirEntries(files, a.Name, []string{".claude/skills", ".claude/commands"})
+		case a.Name == string(agent.AgentNameClaudeCode):
 			entries, err = claudeTrustEntries(files)
-		case string(agent.AgentNameCodex):
+		case a.Name == string(agent.AgentNameCodex) && a.Isolated:
+			// The checkout is untrusted for the run, which drops its config
+			// layer; skills may still be discovered.
+			entries = instructionDirEntries(files, a.Name, codexInstructionDirs)
+		case a.Name == string(agent.AgentNameCodex):
 			entries, err = codexTrustEntries(files)
-		case string(agent.AgentNamePi):
+		case a.Name == string(agent.AgentNamePi):
 			entries, err = piTrustEntries(files)
+			if a.Isolated {
+				// --no-extensions drops the checkout's extensions; its
+				// settings, skills and prompt templates still load.
+				entries = slices.DeleteFunc(entries, func(e cliReview.TrustEntry) bool {
+					return e.Kind == cliReview.TrustKindExtension
+				})
+			}
 		default:
 			// Other agents have no reviewer runner and run nothing.
 			continue
