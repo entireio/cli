@@ -29,13 +29,7 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      # Stamp the commit into Version. Without it, versioninfo.Load()
-      # reads the workflow's throwaway v0.0.0 tag from build info and
-      # every per-commit build reports "git-remote-entire/0.0.0".
-      # Must stay a single token: it rides in the HTTP User-Agent and
-      # the git agent= capability. "+sha" is semver build metadata, so
-      # versioncheck treats it as a dev build.
-      - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version=0.0.0+{{.ShortCommit}}
+      - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Version=0.0.0+{{.FullCommit}}
       - -X github.com/entireio/cli/cmd/entire/cli/versioninfo.Commit={{.ShortCommit}}
 
 archives:
