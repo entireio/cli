@@ -312,6 +312,49 @@ func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
 	require.Equal(t, 1, fake.batchCallCount())
 }
 
+// A checkpoint another session appends to v1 after the OPF rewrite but before
+// the push has not been scanned. The push ships the commit the rewrite verified
+// and leaves the newer one local for the next push to rewrite.
+func TestPrePush_V1PushesTheVerifiedCommitNotALaterAppend(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+
+	dir, repo, _ := setupV1RepoInDir(t)
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteDir}})
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	var verified, appended plumbing.Hash
+	old := rewriteUnpushedV1ForPush
+	rewriteUnpushedV1ForPush = func(ctx context.Context, r *git.Repository, target string) (plumbing.Hash, error) {
+		h, rewriteErr := old(ctx, r, target)
+		verified = h
+		appended = addV1Checkpoint(t, repo, "b2c3d4e5f6a1", "sess-late", "PERSONABC arrived late", "late prompt")
+		return h, rewriteErr
+	}
+	t.Cleanup(func() { rewriteUnpushedV1ForPush = old })
+
+	// PrePush, not the hook entry point: the empty-remote deferral would
+	// otherwise skip the automatic v1 push this test is about.
+	require.NoError(t, NewManualCommitStrategy().PrePush(t.Context(), "origin"))
+
+	require.False(t, verified.IsZero())
+	require.NotEqual(t, verified, appended)
+	assert.Equal(t, verified.String(), remoteRefHash(t, remoteDir, plumbing.NewBranchReferenceName(paths.MetadataBranchName)),
+		"the remote must receive the verified commit, not the later unscanned append")
+	local, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	assert.Equal(t, appended, local.Hash(), "the unscanned append stays local")
+	late, err := repo.CommitObject(appended)
+	require.NoError(t, err)
+	assert.False(t, trailers.HasOPFApplied(late.Message))
+}
+
 // Regression: the no-categories abort must reach the git hook boundary.
 // PrePush deliberately swallows transient checkpoint-push failures, so
 // without this pin a refactor could downgrade the rewrite's fail-closed
