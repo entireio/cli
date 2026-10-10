@@ -1034,8 +1034,13 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 	if adopted.CondensationAttempt != nil {
 		t.Fatalf("CondensationAttempt = %#v, want nil", adopted.CondensationAttempt)
 	}
-	if adopted.CheckpointTokenUsage != nil {
-		t.Fatalf("CheckpointTokenUsage = %#v, want nil for first target checkpoint", adopted.CheckpointTokenUsage)
+	// Token accounting continues from the source's last checkpoint: the
+	// retired source never condenses its pending tokens, so the target does.
+	if adopted.CheckpointTokenUsage == nil || adopted.CheckpointTokenUsage.InputTokens != 100 || adopted.CheckpointTokenUsage.OutputTokens != 25 {
+		t.Fatalf("CheckpointTokenUsage = %#v, want the source's pending 100/25", adopted.CheckpointTokenUsage)
+	}
+	if adopted.TokenStart() != 2 {
+		t.Fatalf("TokenStart = %d, want the source's 2 so checkpointed turns are not recounted", adopted.TokenStart())
 	}
 
 	commitMsgFile := filepath.Join(targetRepo, "COMMIT_EDITMSG")
@@ -1089,23 +1094,23 @@ func TestSessionAdopt_ClearsLegacyTranscriptOffsets(t *testing.T) {
 	}
 }
 
-// TestSessionAdopt_RebaselinesSubagentTokens pins finding 019f5ebf-dc42: cross-repo
-// adoption opens a fresh target-local checkpoint window (StepCount=0,
-// CheckpointTokenUsage=nil), but the cloned TokenUsage carries the SOURCE
-// session's full cumulative subagent total. If SubagentTokensBaseline is not
-// re-baselined to that cumulative, the first post-adopt checkpoint subtracts a
-// stale/nil baseline and over-reports the source session's subagent usage.
-func TestSessionAdopt_RebaselinesSubagentTokens(t *testing.T) {
+// TestSessionAdopt_KeepsSourceSubagentBaseline: adoption retires the source
+// session, which never condenses again, so subagent tokens it used after its
+// last checkpoint must be counted by the first adopted checkpoint. The adopted
+// state keeps the source's baseline (its last checkpoint) rather than
+// re-baselining to the current cumulative, which would drop them.
+func TestSessionAdopt_KeepsSourceSubagentBaseline(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		sourceBaseline *agent.TokenUsage
+		wantIn         int
+		wantOut        int
 	}{
-		// Source never condensed: baseline is nil, so the first adopted
-		// checkpoint would report the entire cumulative subagent total.
-		{name: "never-condensed-source", sourceBaseline: nil},
-		// Source condensed at an earlier window: its baseline is stale relative
-		// to the current cumulative and must not carry into the target window.
-		{name: "previously-condensed-source", sourceBaseline: &agent.TokenUsage{InputTokens: 200, OutputTokens: 100, APICallCount: 2}},
+		// Source never condensed: no subagent tokens are checkpointed yet, so
+		// the first adopted checkpoint counts all of them.
+		{name: "never-condensed-source", sourceBaseline: nil, wantIn: 500, wantOut: 250},
+		// Source condensed earlier: only growth since that checkpoint counts.
+		{name: "previously-condensed-source", sourceBaseline: &agent.TokenUsage{InputTokens: 200, OutputTokens: 100, APICallCount: 2}, wantIn: 300, wantOut: 150},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			targetRepo := setupAdoptRepo(t)
@@ -1131,19 +1136,9 @@ func TestSessionAdopt_RebaselinesSubagentTokens(t *testing.T) {
 				t.Fatalf("buildAdoptedSessionState failed: %v", err)
 			}
 
-			if adopted.SubagentTokensBaseline == nil {
-				t.Fatal("adopted SubagentTokensBaseline = nil, want re-baselined to the cumulative subagent total")
-			}
-			if adopted.SubagentTokensBaseline.InputTokens != 500 || adopted.SubagentTokensBaseline.OutputTokens != 250 {
-				t.Fatalf("adopted SubagentTokensBaseline = %#v, want cumulative subagent total 500/250",
-					adopted.SubagentTokensBaseline)
-			}
-
-			// The first post-adopt checkpoint delta (cumulative - baseline) must be
-			// zero: adoption should count only target-side subagent growth.
 			delta := types.SubtractTokenUsage(adopted.TokenUsage.SubagentTokens, adopted.SubagentTokensBaseline)
-			if delta.InputTokens != 0 || delta.OutputTokens != 0 || delta.APICallCount != 0 {
-				t.Fatalf("first post-adopt subagent delta = %#v, want zero", delta)
+			if delta.InputTokens != tc.wantIn || delta.OutputTokens != tc.wantOut {
+				t.Fatalf("first post-adopt subagent delta = %#v, want %d/%d", delta, tc.wantIn, tc.wantOut)
 			}
 		})
 	}

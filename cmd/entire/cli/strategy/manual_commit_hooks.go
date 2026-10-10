@@ -1799,7 +1799,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		// work was not. Keep its existing SaveStep count, which keeps the
 		// session pending (State.HasPendingWork) until a home commit consumes it.
 		state.StepCount = pendingStepCount
-		state.CheckpointTranscriptStart = result.TotalTranscriptLines
+		state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		logging.Info(logCtx, "session guest-condensed from a sibling worktree; home worktree state untouched",
 			slog.String("strategy", "manual-commit"),
@@ -1814,7 +1814,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	newHead := head.Hash().String()
 	state.BaseCommit = newHead
 	resetCheckpointWindow(state)
-	state.CheckpointTranscriptStart = result.TotalTranscriptLines
+	state.AdvanceCheckpointWindow(result.TotalTranscriptLines)
 	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 	state.FilesTouched = nil
 	state.TouchedFileHashes = nil
@@ -3154,7 +3154,7 @@ func advanceCheckpointTranscriptStartToTurnEnd(ctx context.Context, state *Sessi
 					slog.Int("old_offset", state.CheckpointTranscriptStart),
 					slog.Int("new_offset", pos),
 				)
-				state.CheckpointTranscriptStart = pos
+				state.AdvanceDisplayWindow(pos)
 				advanced = true
 			}
 		}
@@ -3521,7 +3521,9 @@ func filesChangedInCommitFallback(ctx context.Context, headTree, parentTree *obj
 // sessionHasNewContent through the stored-transcript check.
 func carryForwardRemainingFiles(logCtx context.Context, state *SessionState) {
 	state.StepCount = 1
-	state.CheckpointTranscriptStart = 0
+	// Only the displayed window restarts; the token offset stays where the
+	// last condensation left it so this checkpoint counts only new tokens.
+	state.AdvanceDisplayWindow(0)
 	state.CheckpointTranscriptSize = 0
 	// Carry-forward deliberately restarts the offset at 0; a pending turn-end
 	// advance from before the carry-forward must not re-apply on top of it.

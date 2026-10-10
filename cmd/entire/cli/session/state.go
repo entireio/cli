@@ -221,6 +221,16 @@ type State struct {
 	// for checkpoint condensation: "everything since last checkpoint".
 	CheckpointTranscriptStart int `json:"checkpoint_transcript_start,omitempty"`
 
+	// TokenTranscriptStart is the transcript position up to which this
+	// session's tokens are already stored in a checkpoint. Carry-forward and
+	// adopt move CheckpointTranscriptStart back to 0 so the next checkpoint
+	// shows the whole conversation; they never reset this offset, so that
+	// checkpoint still counts only new tokens. It moves back only when a
+	// condensation or attach finds the transcript shorter (rewritten or
+	// compacted) and records its new end. Nil in state written before the
+	// field existed; NormalizeAfterLoad fills it. Read it through TokenStart.
+	TokenTranscriptStart *int `json:"token_transcript_start,omitempty"`
+
 	// CheckpointTranscriptSize is the byte size of the transcript at last condensation.
 	// Used for fast "has new content?" checks in PostCommit: compare the git blob size
 	// against this value without reading the full transcript content.
@@ -821,6 +831,12 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 			s.CheckpointTranscriptStart = s.TranscriptLinesAtStart
 		}
 	}
+	// State written before TokenTranscriptStart existed counted tokens from
+	// CheckpointTranscriptStart, so start there. An older CLI saving a shared
+	// state drops the field again; the next load lands here the same way.
+	if s.TokenTranscriptStart == nil {
+		s.SetTokenStart(s.CheckpointTranscriptStart)
+	}
 	// Clear deprecated fields so they aren't re-persisted.
 	// Note: this is a one-way migration. If the state is re-saved, older CLI versions
 	// will see 0 for these fields and fall back to scoping from the transcript start.
@@ -891,6 +907,45 @@ func (s *State) ClearCondensationAttempt() {
 	s.CondensationAttempt = nil
 }
 
+// TokenStart returns the transcript position the next checkpoint counts tokens
+// from. See TokenTranscriptStart.
+func (s *State) TokenStart() int {
+	if s.TokenTranscriptStart == nil {
+		return s.CheckpointTranscriptStart
+	}
+	return *s.TokenTranscriptStart
+}
+
+// SetTokenStart records that tokens up to pos are stored in a checkpoint. It
+// always assigns a fresh pointer so shallow copies of a state never share it.
+func (s *State) SetTokenStart(pos int) {
+	s.TokenTranscriptStart = &pos
+}
+
+// AdvanceCheckpointWindow moves both transcript offsets to pos after a
+// condensation stored the transcript and its tokens up to pos. A condensation
+// that could not read the transcript reports pos 0 and stored no transcript
+// tokens, so the token offset stays put rather than moving back and letting
+// the next checkpoint count everything again.
+func (s *State) AdvanceCheckpointWindow(pos int) {
+	tokenStart := pos
+	if pos == 0 {
+		tokenStart = s.TokenStart()
+	}
+	s.CheckpointTranscriptStart = pos
+	s.SetTokenStart(tokenStart)
+}
+
+// AdvanceDisplayWindow moves only CheckpointTranscriptStart to pos, for paths
+// that change what a checkpoint shows without storing tokens: the turn-end
+// advances past already-condensed content, and carry-forward's restart at 0.
+// The token offset is pinned first so an unset one cannot follow
+// CheckpointTranscriptStart through TokenStart's fallback.
+func (s *State) AdvanceDisplayWindow(pos int) {
+	s.SetTokenStart(s.TokenStart())
+	s.CheckpointTranscriptStart = pos
+}
+
 // RebaselineSubagentTokens snapshots the current cumulative subagent total
 // (TokenUsage.SubagentTokens) into SubagentTokensBaseline so the next checkpoint
 // window's CheckpointTokenUsage.SubagentTokens is rescoped to "since this
@@ -898,8 +953,8 @@ func (s *State) ClearCondensationAttempt() {
 //
 // The invariant is: every site that starts a fresh checkpoint window by clearing
 // CheckpointTokenUsage MUST also re-baseline. Callers: the condensation reset
-// helper (resetCheckpointWindow) and cross-repo session adoption, which likewise
-// opens a fresh target-local window. Sharing this here keeps the two in step.
+// helper (resetCheckpointWindow) and attach. Session adoption deliberately does
+// not: it continues the source's token window.
 func (s *State) RebaselineSubagentTokens() {
 	// Legacy agents without a snapshot retain their existing window baseline.
 	if s.TokenUsage == nil && s.AgentType != agent.AgentTypeCodex {
