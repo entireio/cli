@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -141,6 +142,103 @@ func TestPushQueue_RemovePreservesLaterEntries(t *testing.T) {
 	refs, err := q.Drain()
 	require.NoError(t, err)
 	assert.Equal(t, []plumbing.ReferenceName{b}, refs)
+}
+
+func TestPushQueue_RemoveIfUnchangedPreservesNewerSameRefEntry(t *testing.T) {
+	t.Parallel()
+	repo, err := git.PlainInit(t.TempDir(), false)
+	require.NoError(t, err)
+	q := NewPushQueue(t.TempDir())
+	q.repo = repo
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	firstHash := plumbing.NewHash(strings.Repeat("a", 40))
+	secondHash := plumbing.NewHash(strings.Repeat("b", 40))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, firstHash)))
+
+	// Simulate the same ref advancing and being enqueued during the push.
+	require.NoError(t, q.Enqueue(ref))
+	drained, err := q.Drain()
+	require.NoError(t, err)
+	require.Equal(t, []plumbing.ReferenceName{ref}, drained)
+	expected := map[string]plumbing.Hash{ref.String(): firstHash}
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, secondHash)))
+	require.NoError(t, q.Enqueue(ref))
+	require.NoError(t, q.RemoveIfUnchanged(drained, expected))
+
+	remaining, err := q.Peek()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{ref}, remaining)
+}
+
+func TestPushQueue_RemoveIfUnchangedPreservesNewerSameRefAcrossConcurrentFlushes(t *testing.T) {
+	t.Parallel()
+	repo, err := git.PlainInit(t.TempDir(), false)
+	require.NoError(t, err)
+	q := NewPushQueue(t.TempDir())
+	q.repo = repo
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	firstHash := plumbing.NewHash(strings.Repeat("a", 40))
+	secondHash := plumbing.NewHash(strings.Repeat("b", 40))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, firstHash)))
+	require.NoError(t, q.Enqueue(ref))
+	drained, err := q.Drain()
+	require.NoError(t, err)
+	expected := map[string]plumbing.Hash{ref.String(): firstHash}
+
+	// Concurrent flushes may publish the same snapshot. Once the shared ref
+	// advances, neither acknowledgment may clear its newer enqueue.
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, secondHash)))
+	require.NoError(t, q.Enqueue(ref))
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			errs <- q.RemoveIfUnchanged(drained, expected)
+		}()
+	}
+	close(start)
+	for range 2 {
+		require.NoError(t, <-errs)
+	}
+
+	remaining, err := q.Peek()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{ref}, remaining)
+}
+
+func TestPushQueue_RemoveIfUnchangedRemovesMissingRef(t *testing.T) {
+	t.Parallel()
+	repo, err := git.PlainInit(t.TempDir(), false)
+	require.NoError(t, err)
+	q := NewPushQueue(t.TempDir())
+	q.repo = repo
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	require.NoError(t, q.Enqueue(ref))
+
+	expected := map[string]plumbing.Hash{ref.String(): plumbing.ZeroHash}
+	require.NoError(t, q.RemoveIfUnchanged([]plumbing.ReferenceName{ref}, expected))
+	remaining, err := q.Peek()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+func TestPushQueue_RemoveIfUnchangedKeepsRecreatedRef(t *testing.T) {
+	t.Parallel()
+	repo, err := git.PlainInit(t.TempDir(), false)
+	require.NoError(t, err)
+	q := NewPushQueue(t.TempDir())
+	q.repo = repo
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	require.NoError(t, q.Enqueue(ref))
+
+	expected := map[string]plumbing.Hash{ref.String(): plumbing.ZeroHash}
+	recreatedHash := plumbing.NewHash(strings.Repeat("b", 40))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, recreatedHash)))
+	require.NoError(t, q.RemoveIfUnchanged([]plumbing.ReferenceName{ref}, expected))
+	remaining, err := q.Peek()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{ref}, remaining)
 }
 
 func TestPushQueue_SkipsMalformedLines(t *testing.T) {
