@@ -51,6 +51,8 @@ func TestValidateAgentConfig(t *testing.T) {
 		{"absolute launcher as MCP command", "codex", reviewtypes.AgentConfig{MCPServers: mcp(`{"command":"/opt/homebrew/bin/pnpm","args":["dlx","server"]}`)}, "resolves from the reviewed project"},
 		{"windows launcher", "claude-code", reviewtypes.AgentConfig{Settings: hook(`C:/node/npx.cmd tool`)}, "resolves tools from the reviewed project"},
 		{"flag with absolute value", "claude-code", reviewtypes.AgentConfig{Settings: hook("/usr/bin/tool --config=/opt/tool/config.json")}, ""},
+		{"assignment with path", "claude-code", reviewtypes.AgentConfig{Settings: hook("/usr/bin/env PATH=/opt/bin:/repo/bin tool")}, "relative path"},
+		{"assignment without path", "claude-code", reviewtypes.AgentConfig{Settings: hook("/usr/bin/env MODE=fast /opt/tool")}, ""},
 		{"flag with value in checkout", "claude-code", reviewtypes.AgentConfig{Settings: hook("/usr/bin/tool --config=/repo/x.json")}, "inside a checkout"},
 		{"MCP absolute", "codex", reviewtypes.AgentConfig{MCPServers: mcp(`{"command":"/opt/mcp/bin/docs","args":["--stdio"]}`)}, ""},
 		{"MCP url", "claude-code", reviewtypes.AgentConfig{MCPServers: mcp(`{"url":"https://mcp.example"}`)}, ""},
