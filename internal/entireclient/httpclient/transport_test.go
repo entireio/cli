@@ -1,6 +1,7 @@
 package httpclient
 
 import (
+	"net/http"
 	"testing"
 	"time"
 )
@@ -49,5 +50,29 @@ func TestDiscoveryDialTimeout(t *testing.T) {
 				t.Fatalf("DiscoveryDialTimeout()=%s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNewTransportHonorsHTTPSProxy(t *testing.T) {
+	const proxyURL = "http://proxy.example:8443"
+	t.Setenv("HTTPS_PROXY", proxyURL)
+	t.Setenv("https_proxy", "")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://region.auth.entire.io/api/v1/repos/resolve", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	tr := NewTransport(false)
+	if tr.Proxy == nil {
+		t.Fatal("Proxy is nil")
+	}
+	got, err := tr.Proxy(req)
+	if err != nil {
+		t.Fatalf("Proxy: %v", err)
+	}
+	if got == nil || got.String() != proxyURL {
+		t.Fatalf("Proxy()=%v, want %s", got, proxyURL)
 	}
 }
