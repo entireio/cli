@@ -365,7 +365,8 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 		return files
 	}
 
-	repo, err := openRepository(ctx)
+	// repoRoot's own HEAD: the turn's worktree may not be the hook's.
+	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		return files // fail open
 	}

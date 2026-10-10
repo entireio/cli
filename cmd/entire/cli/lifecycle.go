@@ -785,6 +785,19 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 	prepareSpan.End()
 
+	// Where this turn's work is. An agent launched in one worktree fires its
+	// hooks there even when it edits another by absolute path; measure the
+	// turn where its edits are, and move the session there first so the stored
+	// copy written below lands in its home (strategy.SettleTurnWorktree).
+	hookRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get worktree root: %w", err)
+	}
+	workRoot := hookRoot
+	if sessionID != unknownSessionID {
+		workRoot = strategy.SettleTurnWorktree(ctx, sessionID, hookRoot, turnEditedPaths(logCtx, ag, transcriptRef, sessionID))
+	}
+
 	// Create session metadata directory
 	_, copySpan := perf.Start(ctx, "copy_transcript")
 	// sessionDir is the repo-relative path that ends up in commit trailers and
@@ -932,12 +945,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Get worktree root for path normalization
 	_, detectSpan := perf.Start(ctx, "detect_file_changes")
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		detectSpan.RecordError(err)
-		detectSpan.End()
-		return fmt.Errorf("failed to get worktree root: %w", err)
-	}
+	repoRoot := workRoot
 
 	var preUntrackedFiles []string
 	if preState != nil {
@@ -950,10 +958,19 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// status scan feeding this turn breached its budget, so the marker
 	// persisted at turn end reflects the whole turn, not just this walk.
 	captureDegraded := preState != nil && preState.UntrackedScanSkipped
-	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
-	if err != nil {
-		captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
-		logStatusDegrade(logCtx, "failed to compute file changes", err)
+	var changes *FileChanges
+	if repoRoot == hookRoot {
+		changes, err = DetectFileChanges(ctx, preUntrackedFiles)
+		if err != nil {
+			captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
+			logStatusDegrade(logCtx, "failed to compute file changes", err)
+		}
+	} else {
+		// The turn's work is in another worktree, whose status this hook's
+		// pre-prompt baseline doesn't describe: record the files the
+		// transcript names there, nothing status-based.
+		logging.Debug(logCtx, "turn worked in another worktree; using transcript-named files only",
+			slog.String("worktree", repoRoot))
 	}
 	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
 		// The turn-start untracked scan was skipped (e.g. status-walk budget
@@ -1119,6 +1136,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
 		SessionID:                sessionID,
+		WorktreeRoot:             stepWorktreeRoot(repoRoot, hookRoot),
 		ModifiedFiles:            relModifiedFiles,
 		NewFiles:                 relNewFiles,
 		DeletedFiles:             relDeletedFiles,
@@ -2789,4 +2807,33 @@ func adoptInvestigateEnv(ctx context.Context, state *session.State, expectedAgen
 				slog.String("run_id", state.InvestigateRunID))
 		},
 	})
+}
+
+// stepWorktreeRoot is the StepContext.WorktreeRoot for a turn measured in
+// repoRoot: empty when that is the hook's own worktree.
+func stepWorktreeRoot(repoRoot, hookRoot string) string {
+	if repoRoot == hookRoot {
+		return ""
+	}
+	return repoRoot
+}
+
+// turnEditedPaths returns the files this turn's main transcript says the
+// agent edited, as recorded (usually absolute). Subagent transcripts are left
+// out: a subagent's edits in its own throwaway worktree must not move the
+// parent session (see strategy.SettleTurnWorktree). Failures yield none.
+func turnEditedPaths(ctx context.Context, ag agent.Agent, transcriptRef, sessionID string) []string {
+	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
+	if !ok {
+		return nil
+	}
+	preState, err := LoadPrePromptState(ctx, sessionID)
+	if err != nil {
+		preState = nil
+	}
+	files, _, err := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptRef, resolveTranscriptOffset(ctx, preState, sessionID))
+	if err != nil {
+		return nil
+	}
+	return files
 }

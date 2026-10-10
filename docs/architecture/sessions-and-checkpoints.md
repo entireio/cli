@@ -187,6 +187,23 @@ identity matching or the pre-existing single-worktree fallback below: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`)
 — that follows only the session's own worktree HEAD.
 
+**A session's home follows its agent's edits** (`SettleTurnWorktree`). An
+agent launched in one worktree fires its hooks there even when it edits
+another by absolute path, so the hook's tree is not where the work is. At
+turn end the files the main transcript says the agent edited decide: when
+they all sit in one registered worktree (the deepest, for nested ones;
+edits outside every worktree don't count), the turn is recorded there, and
+the session moves there if it isn't home already, taking that worktree's
+HEAD and branch as its base and moving its stored prompts along. It stays
+put when it has work pending at its home, when the edits span worktrees,
+when the target has no valid `.entire`, or when only a subagent edited
+there. A later turn whose edits are back in the first worktree moves it
+back. Turns that end outside the home otherwise record only their own work
+(`hookInSessionHome`): no deletions of the home's files, no base or branch
+moves, and no hash for a path the home already recorded. Files written
+only through shell commands never appear in the transcript, so they don't
+move a session.
+
 **Squashes inherit their trailers** (`inheritSquashedCheckpointTrailers`). A
 commit made while `git merge --squash` is in progress (SQUASH_MSG present in
 the per-worktree git dir) contains the squashed commits' work, so every

@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -46,9 +47,19 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 
 	// Hash the step's files before taking the session lock: it is a git
 	// subprocess, and the lock serializes every hook of this session.
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get worktree root: %w", err)
+	worktreeRoot := step.WorktreeRoot
+	if worktreeRoot == "" {
+		if worktreeRoot, err = paths.WorktreeRoot(ctx); err != nil {
+			return fmt.Errorf("failed to get worktree root: %w", err)
+		}
+	} else {
+		// The base comes from that worktree's HEAD, not the hook's.
+		stepRepo, openErr := gitrepo.OpenPath(worktreeRoot)
+		if openErr != nil {
+			return fmt.Errorf("failed to open the step's worktree: %w", openErr)
+		}
+		defer stepRepo.Close()
+		repo = stepRepo
 	}
 	changedFiles := make([]string, 0, len(step.ModifiedFiles)+len(step.NewFiles))
 	changedFiles = append(changedFiles, step.ModifiedFiles...)
