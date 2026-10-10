@@ -185,9 +185,9 @@ func TestRemoveV2FetchFeature(t *testing.T) {
 			head + pktLine("fetch\n") + tail,
 		},
 		{
-			"first_and_last_positions",
-			head + pktLine("fetch=ref-in-want shallow\n") + pktLine("fetch=shallow ref-in-want\n") + tail,
-			head + pktLine("fetch=shallow\n") + pktLine("fetch=shallow ref-in-want\n") + tail,
+			"first_position",
+			head + pktLine("fetch=ref-in-want shallow\n") + tail,
+			head + pktLine("fetch=shallow\n") + tail,
 		},
 		{
 			"prefix_match_is_not_the_token",
@@ -217,6 +217,14 @@ func TestRemoveV2FetchFeature(t *testing.T) {
 		t.Parallel()
 		if _, err := RemoveV2FetchFeature([]byte(pktLine("version 2\n")+"zzzzfetch=ref-in-want\n"), "ref-in-want"); err == nil {
 			t.Error("expected error on bad pkt-line length")
+		}
+	})
+
+	t.Run("second_fetch_line_errors", func(t *testing.T) {
+		t.Parallel()
+		in := head + pktLine("fetch=shallow\n") + pktLine("fetch=ref-in-want\n") + tail
+		if _, err := RemoveV2FetchFeature([]byte(in), "ref-in-want"); err == nil {
+			t.Error("expected error on a second fetch= line")
 		}
 	})
 }
