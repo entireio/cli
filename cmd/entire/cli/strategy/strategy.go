@@ -96,6 +96,11 @@ type StepContext struct {
 	// SessionID is the Claude Code session identifier
 	SessionID string
 
+	// WorktreeRoot is the worktree the step's files are in, when that is not
+	// the one the hook runs in (see SettleTurnWorktree). Empty means the
+	// hook's own worktree.
+	WorktreeRoot string
+
 	// ModifiedFiles is the list of files modified during the session
 	// (extracted from the transcript, already filtered and relative)
 	ModifiedFiles []string

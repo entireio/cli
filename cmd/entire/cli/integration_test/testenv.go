@@ -976,7 +976,7 @@ func (env *TestEnv) gitCommitWithHooks(message string, simulateTTY bool, files .
 	}
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgFile()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1053,7 +1053,7 @@ func (env *TestEnv) GitCommitAmendWithHooks(message string, files ...string) {
 	}
 
 	// Write commit message to temp file
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgFile()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1140,7 +1140,7 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	}
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgFile()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1237,7 +1237,7 @@ func (env *TestEnv) gitCommitStagedWithHooks(message string, simulateTTY bool) {
 	env.T.Helper()
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgFile()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -2108,4 +2108,11 @@ func (env *TestEnv) AssertTurnEndRecorded(sessionID string, files ...string) *st
 	}
 	env.AssertNoShadowBranches()
 	return state
+}
+
+// commitMsgFile is where a commit's message is staged for the hooks: in the
+// git dir, which in a linked worktree is not RepoDir/.git (a file there).
+func (env *TestEnv) commitMsgFile() string {
+	env.T.Helper()
+	return filepath.Join(strings.TrimSpace(testutil.RunGit(env.T, env.RepoDir, "rev-parse", "--absolute-git-dir")), "COMMIT_EDITMSG")
 }

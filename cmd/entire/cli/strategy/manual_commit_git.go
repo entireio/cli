@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -46,9 +47,19 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 
 	// Hash the step's files before taking the session lock: it is a git
 	// subprocess, and the lock serializes every hook of this session.
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get worktree root: %w", err)
+	worktreeRoot := step.WorktreeRoot
+	if worktreeRoot == "" {
+		if worktreeRoot, err = paths.WorktreeRoot(ctx); err != nil {
+			return fmt.Errorf("failed to get worktree root: %w", err)
+		}
+	} else {
+		// The base comes from that worktree's HEAD, not the hook's.
+		stepRepo, openErr := gitrepo.OpenPath(worktreeRoot)
+		if openErr != nil {
+			return fmt.Errorf("failed to open the step's worktree: %w", openErr)
+		}
+		defer stepRepo.Close()
+		repo = stepRepo
 	}
 	changedFiles := make([]string, 0, len(step.ModifiedFiles)+len(step.NewFiles))
 	changedFiles = append(changedFiles, step.ModifiedFiles...)
@@ -66,8 +77,10 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		invalidateStaleSubagentSnapshot(&step, state)
-		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
-			return err
+		if hookInSessionHome(worktreeRoot, state) {
+			if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
+				return err
+			}
 		}
 
 		// A step whose every changed path is a phantom (named by the transcript
@@ -89,9 +102,14 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		// LastCheckpointID is intentionally NOT cleared here. It is set during
 		// condensation and used by handleAmendCommitMsg to restore checkpoint
 		// trailers on amend operations.
+		// Decided against the paths recorded before this step merges its own.
+		stepHashes, stepDeletions := stepFileHashes, recordedDeletions
+		if !hookInSessionHome(worktreeRoot, state) {
+			stepHashes, stepDeletions = guestStepHashes(state, stepFileHashes, recordedDeletions)
+		}
 		state.StepCount++
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
-		applyTouchedFileHashes(state, changedFiles, stepFileHashes, recordedDeletions)
+		applyTouchedFileHashes(state, changedFiles, stepHashes, stepDeletions)
 		recordUntrackedDeletions(worktreeRoot, state, untrackedGone)
 		dropPhantomFilesTouched(worktreeRoot, state, changedFiles)
 		if state.StepCount == 1 {
