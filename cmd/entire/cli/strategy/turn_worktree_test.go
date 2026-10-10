@@ -153,3 +153,30 @@ func TestSettleTurnWorktree_KeepsPromptsItCannotRead(t *testing.T) {
 	_, err := os.Lstat(prompt)
 	assert.NoError(t, err, "unreadable prompts were released without being moved")
 }
+
+// A state with no recorded worktree is homed where its hooks run: a turn
+// editing that worktree keeps the session and its prompts as they are, and
+// one editing another worktree moves them there.
+func TestSettleTurnWorktree_StateWithoutAWorktree(t *testing.T) {
+	s, mainDir, linkedDir := homedSession(t, "settle-legacy")
+	require.NoError(t, MutateSessionState(t.Context(), "settle-legacy", func(state *SessionState) error {
+		state.StepCount, state.FilesTouched, state.TouchedFileHashes = 0, nil, nil
+		state.WorktreePath = ""
+		return nil
+	}))
+	writeStoredCopy(t, mainDir, "settle-legacy", "home")
+	prompt := filepath.Join(mainDir, filepath.FromSlash(paths.SessionMetadataDirFromSessionID("settle-legacy")), paths.PromptFileName)
+
+	got := SettleTurnWorktree(t.Context(), "settle-legacy", mainDir, []string{filepath.Join(mainDir, "m.go")})
+	assert.Equal(t, mustEvalSymlinks(t, mainDir), mustEvalSymlinks(t, got))
+	data, err := os.ReadFile(prompt)
+	require.NoError(t, err, "the stored prompts were released by a move onto the same worktree")
+	assert.Equal(t, "prompt from home", string(data))
+	assert.Empty(t, mustLoad(t, s, "settle-legacy").WorktreePath)
+
+	got = SettleTurnWorktree(t.Context(), "settle-legacy", mainDir, []string{filepath.Join(linkedDir, "w.go")})
+	assert.Equal(t, mustEvalSymlinks(t, linkedDir), mustEvalSymlinks(t, got))
+	moved, err := os.ReadFile(filepath.Join(linkedDir, filepath.FromSlash(paths.SessionMetadataDirFromSessionID("settle-legacy")), paths.PromptFileName))
+	require.NoError(t, err)
+	assert.Equal(t, "prompt from home", string(moved))
+}

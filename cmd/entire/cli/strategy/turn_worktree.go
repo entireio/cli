@@ -46,7 +46,7 @@ func SettleTurnWorktree(ctx context.Context, sessionID, hookRoot string, edited 
 	if err != nil || state == nil {
 		return hookRoot
 	}
-	if isSessionHomeWorktree(target, state) {
+	if homedIn(target, hookRoot, state) {
 		return target
 	}
 	if paths.ValidateEntireDirAt(target) != nil {
@@ -56,7 +56,7 @@ func SettleTurnWorktree(ctx context.Context, sessionID, hookRoot string, edited 
 	}
 	moved := false
 	err = MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		if isSessionHomeWorktree(target, state) {
+		if homedIn(target, hookRoot, state) {
 			moved = true
 			return ErrMutationSkip
 		}
@@ -80,6 +80,22 @@ func SettleTurnWorktree(ctx context.Context, sessionID, hookRoot string, edited 
 		return hookRoot
 	}
 	return target
+}
+
+// homedIn reports whether state's home is worktreeRoot. A state with no
+// recorded worktree (written before WorktreePath existed) is homed where the
+// hook runs, as hookInSessionHome treats it.
+func homedIn(worktreeRoot, hookRoot string, state *SessionState) bool {
+	if state.WorktreePath == "" {
+		return sameDir(worktreeRoot, hookRoot)
+	}
+	return isSessionHomeWorktree(worktreeRoot, state) || sameDir(worktreeRoot, state.WorktreePath)
+}
+
+// sameDir reports whether a and b name the same directory once symlinks are
+// resolved.
+func sameDir(a, b string) bool {
+	return resolveExisting(a) == resolveExisting(b)
 }
 
 // rehomeSession points state at worktreeRoot: its path and ID, and that
@@ -137,6 +153,18 @@ func moveStoredPrompts(ctx context.Context, state *SessionState, worktreeRoot st
 	case len(moving) == 0:
 		// Nothing to move; release the rest of the old copy.
 		clearStagedFilesIn(ctx, from, state.SessionID, state.WorktreePath)
+		return
+	}
+	// The copy is read from the current worktree when no home is recorded.
+	fromDir := state.WorktreePath
+	if fromDir == "" {
+		if fromDir, err = paths.WorktreeRoot(ctx); err != nil {
+			return
+		}
+	}
+	if sameDir(worktreeRoot, fromDir) {
+		// Already there: moving a copy onto itself would duplicate it and
+		// then release it.
 		return
 	}
 	to, err := entiredir.OpenAt(worktreeRoot)
