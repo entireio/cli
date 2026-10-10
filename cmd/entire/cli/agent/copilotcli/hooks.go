@@ -11,7 +11,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 var _ agent.HookFreshness = (*CopilotCLIAgent)(nil)
@@ -41,22 +40,25 @@ var hookConfigKey = map[string]string{
 // `.github/hooks` must not be something Entire creates directories under and
 // writes through. See agent.HookConfigFile.
 func copilotHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		// Not a repository (tests, and `enable` before `git init`): the process
-		// directory is the only candidate, and it is a directory the caller
-		// chose rather than one derived from anything read off disk.
-		worktreeRoot = "."
-	}
-	return agent.OpenHookConfig(worktreeRoot, (&CopilotCLIAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	return agent.OpenHookConfig(copilotWorktreeRoot(ctx), (&CopilotCLIAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
-// InstallHooks installs Copilot CLI hooks in .github/hooks/entire.json.
+// InstallHooks installs Copilot CLI hooks in .github/hooks/entire.json and the
+// VS Code-native hook file .github/hooks/entire-vscode.json (see vscode_hooks.go).
 // If force is true, removes existing Entire hooks before installing.
-// Returns the number of hooks installed.
+// Returns the total number of hooks installed across both files.
 // Unknown top-level fields and hook types are preserved on round-trip.
 func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	cfg, err := copilotHookConfig(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	// Install the VS Code-native hook file alongside the Copilot CLI file so
+	// Copilot sessions run from VS Code's agent hooks (Preview) are captured.
+	// Its additions count toward the total so a fresh VS Code-file write is
+	// reported as an install rather than "already installed".
+	vsCodeCount, err := c.installVSCodeHooks(copilotWorktreeRoot(ctx), force)
 	if err != nil {
 		return 0, err
 	}
@@ -148,7 +150,8 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, er
 	// both a stale and a current hook adds nothing, and returning early here
 	// would leave the stale hook on disk.
 	if count == 0 && !staleDropped {
-		return 0, nil
+		// No Copilot CLI changes, but the VS Code file may have been updated.
+		return vsCodeCount, nil
 	}
 
 	// Marshal modified hook types back into rawHooks
@@ -176,7 +179,7 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, er
 		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 
-	return count, nil
+	return count + vsCodeCount, nil
 }
 
 // UninstallHooks removes Entire hooks from Copilot CLI's entire.json.
@@ -186,6 +189,12 @@ func (c *CopilotCLIAgent) UninstallHooks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	// Remove the VS Code-native hook file's Entire entries too.
+	if err := c.uninstallVSCodeHooks(copilotWorktreeRoot(ctx)); err != nil {
+		return err
+	}
+
 	data, err := cfg.Read()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -256,6 +265,17 @@ func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// The VS Code-native file is checked first: either file holding an Entire
+	// hook means Entire is wired up, and the Copilot CLI file may be absent
+	// while the VS Code one is present.
+	vsCodeInstalled, err := c.areVSCodeHooksInstalled(copilotWorktreeRoot(ctx))
+	if err != nil {
+		return false, err
+	}
+	if vsCodeInstalled {
+		return true, nil
+	}
+
 	data, err := cfg.Read()
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
