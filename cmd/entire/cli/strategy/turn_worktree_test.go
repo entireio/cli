@@ -132,3 +132,24 @@ func TestSaveStep_InTheTurnsWorktree(t *testing.T) {
 	assert.NotEmpty(t, state.TouchedFileHashes["w.go"])
 	assert.Equal(t, testutil.GetHeadHash(t, linkedDir), state.BaseCommit)
 }
+
+// Prompts that can't be read stay at the old home rather than being released
+// unmoved.
+func TestSettleTurnWorktree_KeepsPromptsItCannotRead(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads files regardless of permissions")
+	}
+	_, mainDir, linkedDir := homedSession(t, "settle-unreadable")
+	require.NoError(t, MutateSessionState(t.Context(), "settle-unreadable", func(state *SessionState) error {
+		state.StepCount, state.FilesTouched, state.TouchedFileHashes = 0, nil, nil
+		return nil
+	}))
+	writeStoredCopy(t, mainDir, "settle-unreadable", "home")
+	prompt := filepath.Join(mainDir, filepath.FromSlash(paths.SessionMetadataDirFromSessionID("settle-unreadable")), paths.PromptFileName)
+	require.NoError(t, os.Chmod(prompt, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(prompt, 0o600) }) //nolint:errcheck // cleanup
+
+	SettleTurnWorktree(t.Context(), "settle-unreadable", mainDir, []string{filepath.Join(linkedDir, "w.go")})
+	_, err := os.Lstat(prompt)
+	assert.NoError(t, err, "unreadable prompts were released without being moved")
+}

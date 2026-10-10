@@ -128,7 +128,14 @@ func moveStoredPrompts(ctx context.Context, state *SessionState, worktreeRoot st
 		return
 	}
 	moving, err := entiredir.ReadFile(from, name)
-	if err != nil || len(moving) == 0 {
+	switch {
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		// Couldn't read what would move: keep it where it is.
+		logging.Warn(logging.WithComponent(ctx, "session"), "stored prompts left at the session's old worktree: could not read them",
+			slog.String("session_id", state.SessionID), slog.String("error", err.Error()))
+		return
+	case len(moving) == 0:
+		// Nothing to move; release the rest of the old copy.
 		clearStagedFilesIn(ctx, from, state.SessionID, state.WorktreePath)
 		return
 	}
