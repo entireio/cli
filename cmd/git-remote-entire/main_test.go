@@ -14,8 +14,6 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
-	"github.com/entireio/cli/internal/entireclient/httpclient"
-	"github.com/entireio/cli/internal/remotehelper/httpdebug"
 )
 
 func TestInfoFlagText(t *testing.T) {
@@ -103,28 +101,38 @@ func TestResolveHTTPUserAgent(t *testing.T) {
 	t.Parallel()
 	const def = "git-remote-entire/1.2.3"
 	tests := []struct {
-		name string
-		env  map[string]string
-		want string
+		name    string
+		env     map[string]string
+		want    string
+		wantErr string
 	}{
-		{"unset_keeps_default", nil, def},
-		{"set_replaces_verbatim", map[string]string{"GIT_HTTP_USER_AGENT": "git-remote-entire/abc1234 entire-runners/0.1.0"}, "git-remote-entire/abc1234 entire-runners/0.1.0"},
-		{"set_any_shape", map[string]string{"GIT_HTTP_USER_AGENT": "Mozilla/4.0"}, "Mozilla/4.0"},
-		{"empty_sends_nothing", map[string]string{"GIT_HTTP_USER_AGENT": ""}, ""},
-		{"other_vars_ignored", map[string]string{"HTTP_USER_AGENT": "x/1"}, def},
+		{"unset_keeps_default", nil, def, ""},
+		{"set_replaces_verbatim", map[string]string{"GIT_HTTP_USER_AGENT": "git-remote-entire/abc1234 entire-runners/0.1.0"}, "git-remote-entire/abc1234 entire-runners/0.1.0", ""},
+		{"set_any_shape", map[string]string{"GIT_HTTP_USER_AGENT": "Mozilla/4.0"}, "Mozilla/4.0", ""},
+		{"empty_sends_nothing", map[string]string{"GIT_HTTP_USER_AGENT": ""}, "", ""},
+		{"other_vars_ignored", map[string]string{"HTTP_USER_AGENT": "x/1"}, def, ""},
+		{"crlf_names_the_variable", map[string]string{"GIT_HTTP_USER_AGENT": "x/1\r\nX-Injected: y"}, "", "GIT_HTTP_USER_AGENT holds an invalid header character"},
+		{"nul_names_the_variable", map[string]string{"GIT_HTTP_USER_AGENT": "x/1\x00"}, "", "GIT_HTTP_USER_AGENT holds an invalid header character"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := resolveHTTPUserAgent(def, fakeEnv(tc.env)); got != tc.want {
+			got, err := resolveHTTPUserAgent(def, fakeEnv(tc.env))
+			if got != tc.want {
 				t.Errorf("resolveHTTPUserAgent(%v) = %q, want %q", tc.env, got, tc.want)
+			}
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr):
+				t.Errorf("error = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}
 }
 
-// Builds the auth-path client exactly as run() does and checks what the
-// server receives: the override verbatim, or no header at all for "".
+// Uses the auth-path client run() ships and checks what the server
+// receives: the override verbatim, or no header at all for "".
 func TestHTTPUserAgent_ReachesServer(t *testing.T) {
 	t.Parallel()
 	const def = "git-remote-entire/1.2.3"
@@ -147,15 +155,11 @@ func TestHTTPUserAgent_ReachesServer(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 
-			client := &http.Client{
-				Transport: &httpclient.UserAgentTransport{
-					Next: &httpdebug.TimingRoundTripper{
-						Next:  httpclient.NewDiscoveryTransport(false),
-						Label: "auth",
-					},
-					UA: resolveHTTPUserAgent(def, fakeEnv(tc.env)),
-				},
+			ua, err := resolveHTTPUserAgent(def, fakeEnv(tc.env))
+			if err != nil {
+				t.Fatalf("resolveHTTPUserAgent: %v", err)
 			}
+			client := newAuthHTTPClient(false, ua)
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/.well-known/entire-cluster.json", nil)
 			if err != nil {
 				t.Fatalf("NewRequest: %v", err)
