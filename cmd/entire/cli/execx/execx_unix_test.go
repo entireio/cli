@@ -7,7 +7,9 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -108,5 +110,35 @@ func TestKillProcessGroupOnCancel_TerminatesLeader(t *testing.T) {
 		}
 	case <-time.After(KillWaitDelay):
 		t.Fatal("Wait did not return after Cancel; the group-kill handler may have regressed")
+	}
+}
+
+// TestMarkInheritedFDsCloseOnExec: a descriptor this process holds without
+// close-on-exec — as a git hook holds git's pipes — must not reach a child
+// started afterwards, or a detached child keeps the pipe open for its lifetime.
+//
+// Not parallel: it changes descriptor flags process-wide.
+func TestMarkInheritedFDsCloseOnExec(t *testing.T) {
+	var fds [2]int
+	if err := syscall.Pipe(fds[:]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syscall.Close(fds[0]); syscall.Close(fds[1]) })
+	leaked := strconv.Itoa(fds[1])
+	childFDs := func() string {
+		out, err := exec.CommandContext(t.Context(), "sh", "-c", "ls /dev/fd").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return " " + strings.Join(strings.Fields(string(out)), " ") + " "
+	}
+	if !strings.Contains(childFDs(), " "+leaked+" ") {
+		t.Skip("precondition: this platform already keeps inherited descriptors from children")
+	}
+
+	markInheritedFDsCloseOnExec()
+
+	if got := childFDs(); strings.Contains(got, " "+leaked+" ") {
+		t.Errorf("child still inherited fd %s: %s", leaked, got)
 	}
 }

@@ -45,7 +45,7 @@ func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (ex
 }
 
 // batchPushRefs pushes all of refs to target in a single git push,
-// fast-forward-only (NOT a force push). Batching keeps a backfill of many refs to
+// fast-forward-only (NOT a force push). Batching keeps a chunk of many refs to
 // one network round-trip. Per-checkpoint refs normally advance by fast-forward
 // (each write parents on the prior tip), so the common case succeeds; a
 // non-fast-forward update — genuine divergence, e.g. the same checkpoint written
@@ -67,6 +67,179 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
 	}
 	return nil
+}
+
+// chunkPushResult is what the chunked batch phase of a flush left behind.
+type chunkPushResult struct {
+	landed        int                      // refs in chunks that pushed cleanly
+	failed        []plumbing.ReferenceName // refs of chunks that failed, for the per-ref fallback
+	untried       []plumbing.ReferenceName // refs never attempted because the phase stopped
+	stalled       []plumbing.ReferenceName // refs of chunks cut by the per-chunk timeout
+	stopReason    string                   // why untried is non-empty
+	firstErr      error
+	sshAuthFailed bool
+	// unreachable is the line of git output showing the remote could not be
+	// reached at all; set only when no chunk had landed. See
+	// remote.UnreachableRemoteLine.
+	unreachable string
+}
+
+// pushRefChunks batch-pushes refs size at a time (see
+// checkpointRefPushChunkSize), calling onLanded with each chunk that lands so
+// the caller can dequeue it before a later chunk is cut. A failed chunk does not
+// stop the phase — a rejection fails only its own chunk — but an SSH auth
+// failure, an expired or cancelled ctx, or maxConsecutiveChunkPushFailures in a
+// row does, and so does an unreachable remote before any chunk landed: per-ref
+// retries cannot reach it either, and each would wait out its own connect
+// timeout. The first chunk is always attempted, matching the per-ref fallback.
+//
+// chunkTimeout, when positive, bounds each chunk on its own: a chunk that
+// outlasts it is recorded as stalled and the phase moves on to the next, so one
+// stalled upload does not hold every chunk behind it. A stall is slowness, not
+// a refusal, so it does not count toward the consecutive-failure stop.
+func pushRefChunks(ctx context.Context, target string, refs []plumbing.ReferenceName, size int,
+	chunkTimeout time.Duration, onLanded func([]plumbing.ReferenceName),
+) chunkPushResult {
+	var res chunkPushResult
+	consecutive := 0
+	for start := 0; start < len(refs); start += size {
+		if start > 0 {
+			if reason := chunkStopReason(ctx, consecutive); reason != "" {
+				res.untried = refs[start:]
+				res.stopReason = reason
+				logging.Warn(ctx, "git-refs push: batch push stopped early",
+					slog.String("reason", reason), slog.Int("untried", len(res.untried)))
+				return res
+			}
+		}
+		chunk := refs[start:min(start+size, len(refs))]
+		chunkCtx, cancel := ctx, context.CancelFunc(func() {})
+		// A single ref is as small as a chunk gets: timing it out would only
+		// re-send the same partial upload on every pass, never landing it, so
+		// it gets the rest of the budget instead.
+		if chunkTimeout > 0 && len(chunk) > 1 {
+			chunkCtx, cancel = context.WithTimeout(ctx, chunkTimeout)
+		}
+		err := batchPushRefs(chunkCtx, target, chunk)
+		stalled := err != nil && chunkTimeout > 0 && len(chunk) > 1 &&
+			errors.Is(chunkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+		cancel()
+		if stalled {
+			res.stalled = append(res.stalled, chunk...)
+			logging.Warn(ctx, "git-refs push: checkpoint ref chunk stalled; moving on",
+				slog.Int("refs", len(chunk)), slog.Duration("timeout", chunkTimeout))
+			continue
+		}
+		if err == nil {
+			consecutive = 0
+			res.landed += len(chunk)
+			onLanded(chunk)
+			continue
+		}
+		consecutive++
+		// The only account of a wholesale failure. The per-ref retries re-derive
+		// a *rejection* reason, but a transport failure — an unreachable remote,
+		// a stalled SSH connection — matches nothing in
+		// checkpointRefRejectionReason, so without this line its cause reached
+		// neither the terminal nor .entire/logs. Logged, not printed: the
+		// caller's one actionable line is the useful part.
+		logging.Warn(ctx, "git-refs push: batch checkpoint ref push failed; retrying individually",
+			slog.Int("refs", len(chunk)), slog.String("error", err.Error()))
+		if res.firstErr == nil {
+			res.firstErr = err
+		}
+		res.failed = append(res.failed, chunk...)
+		if nonInteractiveSSHAuthFailure(ctx, err) {
+			res.sshAuthFailed = true
+			res.untried = refs[start+len(chunk):]
+			return res
+		}
+		// A remote that already answered this flush — took a chunk, or failed
+		// one any way other than a connect failure — was reachable; a later
+		// connect failure is transient,
+		// and the per-ref fallback may still land or recover those refs. Only a
+		// connect failure on the first chunk the remote saw means unreachable.
+		if line, ok := remote.UnreachableRemoteLine(err); ok && res.landed == 0 && len(res.failed) == len(chunk) {
+			res.unreachable = line
+			res.untried = refs[start+len(chunk):]
+			return res
+		}
+	}
+	return res
+}
+
+// splitFloor is the smallest failed batch splitFailedChunks halves; smaller
+// ones go straight to the per-ref fallback, which retries each ref anyway.
+const splitFloor = 4
+
+// splitResult is what splitFailedChunks left for the per-ref fallback.
+type splitResult struct {
+	landed     int
+	unresolved []plumbing.ReferenceName
+}
+
+// splitFailedChunks re-pushes each failed chunk of refs (chunkSize apart) in
+// halves, recursing into a half only while its sibling landed: a single bad
+// ref is then isolated in about 2·log2(chunk) pushes. When both halves fail
+// the cause is not one ref (several diverged, or the destination), so both go
+// to the per-ref fallback whole, as does everything once the budget is spent
+// or the destination refuses the key or the connection. onLanded is called
+// with each half that lands.
+func splitFailedChunks(ctx, flushCtx context.Context, target string, refs []plumbing.ReferenceName, chunkSize int,
+	onLanded func([]plumbing.ReferenceName),
+) splitResult {
+	var res splitResult
+	halt := false
+	var walk func([]plumbing.ReferenceName)
+	walk = func(batch []plumbing.ReferenceName) {
+		if halt || len(batch) <= splitFloor || flushCtx.Err() != nil {
+			res.unresolved = append(res.unresolved, batch...)
+			return
+		}
+		mid := len(batch) / 2
+		var failedHalves [][]plumbing.ReferenceName
+		for _, half := range [][]plumbing.ReferenceName{batch[:mid], batch[mid:]} {
+			if halt || flushCtx.Err() != nil {
+				failedHalves = append(failedHalves, half)
+				continue
+			}
+			err := batchPushRefs(flushCtx, target, half)
+			if err == nil {
+				res.landed += len(half)
+				onLanded(half)
+				continue
+			}
+			if _, unreachable := remote.UnreachableRemoteLine(err); unreachable || nonInteractiveSSHAuthFailure(flushCtx, err) {
+				halt = true
+			}
+			logging.Debug(ctx, "git-refs push: split checkpoint ref batch failed",
+				slog.Int("refs", len(half)), slog.String("error", err.Error()))
+			failedHalves = append(failedHalves, half)
+		}
+		if len(failedHalves) == 1 && !halt {
+			walk(failedHalves[0])
+			return
+		}
+		for _, half := range failedHalves {
+			res.unresolved = append(res.unresolved, half...)
+		}
+	}
+	for start := 0; start < len(refs); start += chunkSize {
+		walk(refs[start:min(start+chunkSize, len(refs))])
+	}
+	return res
+}
+
+// chunkStopReason reports why the batch phase should stop before its next
+// chunk, or "" to continue. Same bare phrasing as flushAbortReason.
+func chunkStopReason(ctx context.Context, consecutiveFailures int) string {
+	if reason := flushAbortReason(ctx, 0); reason != "" {
+		return reason
+	}
+	if consecutiveFailures >= maxConsecutiveChunkPushFailures {
+		return fmt.Sprintf("%d consecutive failed batches", consecutiveFailures)
+	}
+	return ""
 }
 
 // pushCheckpointRefWithRecovery pushes a single checkpoint ref fast-forward-only;
@@ -201,11 +374,14 @@ func displayPushTarget(target string) string {
 // can shrink it.
 var checkpointPushBudget = 2 * time.Minute
 
-// checkpointFlushBudget bounds the individual-retry fallback in
-// flushCheckpointRefsQueue as a whole, which checkpointPushBudget cannot: that
-// one caps a single ref, and the fallback walks the queue serially, so a backlog
-// multiplies it. A healthy push costs roughly one SSH round-trip per ref, so a
-// few hundred queued refs is already tens of minutes of a `git push` that looks
+// checkpointFlushBudget bounds a pre-push flushCheckpointRefsQueue as a whole —
+// the chunked batch push and the individual-retry fallback share it — which
+// checkpointPushBudget cannot: that one caps a single ref, and the fallback walks
+// the queue serially, so a backlog multiplies it. The batch needs the bound too:
+// it carries the whole backlog, so a slow uplink or a stalled connection would
+// otherwise hold the user's git push for as long as the upload takes. A
+// healthy push costs roughly one SSH round-trip per ref, so a few hundred
+// queued refs is already tens of minutes of a `git push` that looks
 // hung; when the destination is unreachable every ref instead pays the full
 // per-ref budget and the same queue runs for hours. Refs that do not fit stay
 // queued and go out on the next push, so this bounds progress, never data.
@@ -215,8 +391,52 @@ var checkpointPushBudget = 2 * time.Minute
 // context.WithTimeout keeps the earlier of parent and child deadlines, so the
 // per-ref checkpointPushBudget automatically shrinks to whatever is left.
 //
+// Shared, so a batch that spends the budget leaves the fallback none: its one
+// guaranteed attempt then fails at once, and the refs stay queued for the next
+// push. The explicit migration push (PushQueuedCheckpointRefs) leaves the batch
+// unbounded; the user asked for that upload and is waiting on it.
+//
 // Declared as a var so tests can shrink it.
 var checkpointFlushBudget = 2 * time.Minute
+
+type flushBudgetKey struct{}
+
+// withFlushBudget records the budget a flush runs under, so its stop reason
+// names that budget rather than the pre-push default.
+func withFlushBudget(ctx context.Context, budget time.Duration) context.Context {
+	return context.WithValue(ctx, flushBudgetKey{}, budget)
+}
+
+// flushBudgetFrom returns the budget withFlushBudget recorded, or
+// checkpointFlushBudget.
+func flushBudgetFrom(ctx context.Context) time.Duration {
+	if d, ok := ctx.Value(flushBudgetKey{}).(time.Duration); ok {
+		return d
+	}
+	return checkpointFlushBudget
+}
+
+// checkpointRefPushChunkSize is the most queued refs one batch push carries.
+// Large on purpose: every push pays a fixed cost — the connection and the
+// remote advertising every ref it holds, one per checkpoint — so a healthy
+// link is fastest with the fewest pushes. Against GitHub and Entire, 200
+// checkpoints (~20MB) went out in 3-7s as one push, and took 11-20s in chunks
+// of 25. A link too slow to finish a chunk within the flush budget would
+// otherwise never land the chunk at the head of the queue, on any push, so the
+// size actually used adapts (see PushQueue.ChunkSizeHint): a chunk cut by the
+// budget quarters it, down to one ref, and a flush that lands everything
+// doubles it back.
+// Chunks are what make the flush budget bound progress rather than discard it:
+// each chunk that lands leaves the queue at once, so a backlog too large for one
+// budget drains over several pushes instead of being cut at the same point by
+// every one of them. Declared as a var so tests can shrink it.
+var checkpointRefPushChunkSize = 200
+
+// maxConsecutiveChunkPushFailures stops the batch phase once this many chunks in
+// a row have failed. A rejection fails only its own chunk, so batching carries on
+// past one; several in a row point at the destination, and the per-ref fallback
+// already probes that with its own cap.
+const maxConsecutiveChunkPushFailures = 2
 
 // maxConsecutiveRefPushFailures stops the individual-retry fallback once this
 // many refs in a row have failed. The fallback exists to isolate the odd
@@ -237,7 +457,7 @@ const maxConsecutiveRefPushFailures = 5
 func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return fmt.Sprintf("budget (%s) exhausted", checkpointFlushBudget)
+		return fmt.Sprintf("budget (%s) exhausted", flushBudgetFrom(ctx))
 	case ctx.Err() != nil:
 		return "interrupted"
 	case consecutiveFailures >= maxConsecutiveRefPushFailures:

@@ -173,10 +173,8 @@ func redactURL(raw string) string {
 
 // redactCredentials removes userinfo from any URL appearing in free text, for
 // git's stderr where we do not know which URL was echoed.
-var credentialInURL = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]*@`)
-
 func redactCredentials(text string) string {
-	return credentialInURL.ReplaceAllString(text, "${1}")
+	return gitremote.RedactCredentialsInText(text)
 }
 
 // gitURLSchemes are the transports a plugin or index repository URL may use in
