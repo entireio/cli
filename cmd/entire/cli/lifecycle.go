@@ -1021,14 +1021,25 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 				slog.String("error", recErr.Error()))
 		}
 		recordCaptureDegraded(ctx, sessionID, captureDegraded)
-		// SaveStep is skipped, but out-of-band token usage must still be
-		// recorded: an Antigravity turn that commits ALL its work mid-turn
-		// (its normal flow) ends with a clean tree, and the mid-turn
-		// condensation ran with a zero delta (the baseline only re-snapshots
-		// at TurnStart). Without this, CleanupPrePromptState deletes the
-		// baseline and the turn's tokens are lost permanently.
-		if oobUsage := computeOutOfBandTokenUsage(ctx, ag, sessionID, preState); oobUsage != nil {
-			if accErr := strategy.AccumulateSessionTokenUsage(ctx, sessionID, oobUsage); accErr != nil {
+		// SaveStep is skipped, but the turn's token usage must still be
+		// recorded when no transcript can reproduce it later. Two sources,
+		// in the same precedence as the SaveStep path below:
+		//   - Hook-reported usage (Cursor's stop payload). Cursor's transcript
+		//     has no usage fields, so condensation falls back to
+		//     CheckpointTokenUsage; dropping the event here loses the turn
+		//     from both the session total and the next checkpoint.
+		//   - Out-of-band usage (Antigravity). A turn that commits ALL its
+		//     work mid-turn (its normal flow) ends with a clean tree, and the
+		//     mid-turn condensation ran with a zero delta (the baseline only
+		//     re-snapshots at TurnStart). Without this, CleanupPrePromptState
+		//     deletes the baseline and the turn's tokens are lost permanently.
+		// Only one is used, so a turn is never counted twice.
+		turnUsage := event.TokenUsage
+		if turnUsage == nil {
+			turnUsage = computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
+		}
+		if turnUsage != nil {
+			if accErr := strategy.AccumulateSessionTokenUsage(ctx, sessionID, turnUsage); accErr != nil {
 				// This is the only path that records a checkpoint-less turn's
 				// tokens, so a swallowed failure here is a permanent loss. Name
 				// the two causes apart: a session whose state was removed
@@ -1036,12 +1047,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 				// left to attribute to) versus an I/O or lock failure on state
 				// that still exists.
 				if errors.Is(accErr, strategy.ErrStateNotFound) {
-					logging.Warn(logCtx, "session state already removed; out-of-band token usage for checkpoint-less turn not recorded",
+					logging.Warn(logCtx, "session state already removed; token usage for checkpoint-less turn not recorded",
 						slog.String("session_id", sessionID),
-						slog.Int("input_tokens", oobUsage.InputTokens),
-						slog.Int("output_tokens", oobUsage.OutputTokens))
+						slog.Int("input_tokens", turnUsage.InputTokens),
+						slog.Int("output_tokens", turnUsage.OutputTokens))
 				} else {
-					logging.Warn(logCtx, "failed to record out-of-band token usage for checkpoint-less turn",
+					logging.Warn(logCtx, "failed to record token usage for checkpoint-less turn",
 						slog.String("session_id", sessionID),
 						slog.String("error", accErr.Error()))
 				}
