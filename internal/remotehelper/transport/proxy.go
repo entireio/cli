@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -90,6 +91,8 @@ type Proxy struct {
 	discoveryTransport http.RoundTripper
 	setAuth            SetAuthFunc
 	onNodeFailed       func(failedNode string)
+	// Sticky across manual replica failover as well as HTTP redirects.
+	requireHTTPS bool
 
 	// stickyNode is the URL (matching one of nodes) of the replica
 	// that served the most recent successful request, post-redirects.
@@ -187,8 +190,11 @@ func (p *Proxy) ErrorBaseURL() string {
 // otherwise carry Authorization through. We'd rather drop the header
 // than leak it.
 func (p *Proxy) checkRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return errors.New("stopped after 10 redirects")
+	if err := httpclient.CheckSecureRedirect(req, via); err != nil {
+		return fmt.Errorf("replica redirect: %w", err)
+	}
+	if err := p.checkReplicaScheme(req.URL); err != nil {
+		return err
 	}
 	if len(via) == 0 {
 		return nil
@@ -218,8 +224,8 @@ func (p *Proxy) hostInCluster(host string) bool {
 
 // replicaInCluster reports whether a replica base URL is safe to dial with
 // the repo-scoped token attached: it must parse and resolve to a host
-// inside the cluster trust domain. Replica sets arrive from
-// attacker-influenceable sources — the X-Entire-Replicas response header, a
+// inside the cluster trust domain and use a safe transport scheme. Replica
+// sets arrive from attacker-influenceable sources — the X-Entire-Replicas response header, a
 // redirect Location, and the on-disk node cache — so a malicious or poisoned
 // entry pointing off-cluster would otherwise receive a core-minted bearer
 // token. Dropping it here keeps credentials scoped to the cluster the user
@@ -229,23 +235,43 @@ func (p *Proxy) replicaInCluster(rawURL string) bool {
 	if err != nil || u.Host == "" {
 		return false
 	}
-	return p.hostInCluster(u.Hostname())
+	return p.safeReplicaScheme(u) && p.hostInCluster(u.Hostname())
 }
 
-// filterReplicas drops replica URLs that fall outside the cluster trust
-// domain, logging each rejection. A no-op when clusterHost is unset. See
-// replicaInCluster.
-func (p *Proxy) filterReplicas(urls []string) []string {
-	if p.clusterHost == "" {
-		return urls
+// safeReplicaScheme requires HTTPS, except for an explicitly HTTP loopback
+// entry dialing HTTP loopback replicas. SkipTLS is not permission to use HTTP.
+func (p *Proxy) safeReplicaScheme(u *url.URL) bool {
+	if u.Scheme == "https" {
+		return true
 	}
+	entry, err := url.Parse(p.entryURL)
+	return !p.requireHTTPS && err == nil && loopbackHTTP(entry) && loopbackHTTP(u)
+}
+
+func (p *Proxy) checkReplicaScheme(u *url.URL) error {
+	if !p.safeReplicaScheme(u) {
+		return errors.New("refusing insecure replica request: HTTPS required except for HTTP loopback development entries")
+	}
+	if u.Scheme == "https" {
+		p.requireHTTPS = true
+	}
+	return nil
+}
+
+func loopbackHTTP(u *url.URL) bool {
+	return u.Scheme == "http" && (strings.EqualFold(u.Hostname(), "localhost") || net.ParseIP(u.Hostname()).IsLoopback())
+}
+
+// filterReplicas drops insecure or off-cluster URLs at every ingress, including
+// the node cache, response headers, and response-URL fallback.
+func (p *Proxy) filterReplicas(urls []string) []string {
 	kept := make([]string, 0, len(urls))
 	for _, u := range urls {
 		if p.replicaInCluster(u) {
 			kept = append(kept, u)
 			continue
 		}
-		debuglog.Printf("dropping out-of-cluster replica %q (cluster=%s): refusing to carry credentials off-cluster", u, p.clusterHost)
+		debuglog.Printf("dropping insecure or out-of-cluster replica %q (cluster=%s)", u, p.clusterHost)
 	}
 	return kept
 }
@@ -277,9 +303,12 @@ func (p *Proxy) markNodeFailed(node string) {
 }
 
 // setAuthOrError applies the configured SetAuthFunc (if any) to the
-// request. Errors come from the auth provider (core), not the data
-// plane, so they short-circuit failover.
+// request. Policy and auth-provider errors short-circuit failover rather than
+// treating an unsafe target or failed mint as an unhealthy data-plane node.
 func (p *Proxy) setAuthOrError(req *http.Request) error {
+	if err := p.checkReplicaScheme(req.URL); err != nil {
+		return err
+	}
 	if p.setAuth == nil {
 		return nil
 	}
@@ -387,6 +416,13 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 
 	for i := range nodes {
 		node := nodes[(start+i)%len(nodes)]
+		// The TLS floor can rise during this loop, making an HTTP loopback
+		// replica in the snapshot ineligible. Skip it before auth stamping,
+		// without treating it as unhealthy or abandoning later HTTPS nodes.
+		if !p.replicaInCluster(node) {
+			lastErr = fmt.Errorf("skipping insecure or out-of-cluster replica %q", node)
+			continue
+		}
 		reqURL := p.nodeURL(node, makeSuffix)
 
 		// build (re)constructs the request: rewind the body, mint/attach the

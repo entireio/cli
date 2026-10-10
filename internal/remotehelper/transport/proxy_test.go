@@ -38,6 +38,10 @@ func testProxy(server *httptest.Server) *Proxy {
 }
 
 func proxyWithClient(nodes []string, path, entryURL, clusterHost string, client *http.Client) *Proxy {
+	// HTTP fixtures explicitly opt into the loopback development entry.
+	if entryURL == "" && len(nodes) > 0 {
+		entryURL = nodes[0]
+	}
 	p := New(Config{
 		Nodes: replicas.NodeConfig{
 			InitialNodes: nodes,
@@ -368,6 +372,7 @@ func TestOnNodeFailedCalledOnConnectionError(t *testing.T) {
 	p := New(Config{
 		Nodes: replicas.NodeConfig{
 			InitialNodes: []string{down},
+			EntryURL:     down,
 			ClusterHost:  mustHost(t, down),
 		},
 		Path:         "/et/alice/repo",
@@ -394,6 +399,7 @@ func TestOnNodeFailedCalledOn5xx(t *testing.T) {
 	p := New(Config{
 		Nodes: replicas.NodeConfig{
 			InitialNodes: []string{bad.URL},
+			EntryURL:     bad.URL,
 			ClusterHost:  mustHost(t, bad.URL),
 		},
 		Path:         "/et/alice/repo",
@@ -458,14 +464,8 @@ func TestNoFailoverOn401(t *testing.T) {
 	defer server.Close()
 
 	var failedCalled bool
-	p := New(Config{
-		Nodes: replicas.NodeConfig{
-			InitialNodes: []string{server.URL},
-			ClusterHost:  mustHost(t, server.URL),
-		},
-		Path:         "/et/alice/repo",
-		OnNodeFailed: func(string) { failedCalled = true },
-	})
+	p := testProxy(server)
+	p.onNodeFailed = func(string) { failedCalled = true }
 
 	_, err := p.InfoRefs(context.Background(), "git-upload-pack")
 	if err == nil {
@@ -488,14 +488,8 @@ func TestNoFailoverOn404(t *testing.T) {
 	defer server.Close()
 
 	var failedCalled bool
-	p := New(Config{
-		Nodes: replicas.NodeConfig{
-			InitialNodes: []string{server.URL},
-			ClusterHost:  mustHost(t, server.URL),
-		},
-		Path:         "/et/alice/repo",
-		OnNodeFailed: func(string) { failedCalled = true },
-	})
+	p := testProxy(server)
+	p.onNodeFailed = func(string) { failedCalled = true }
 
 	_, err := p.InfoRefs(context.Background(), "git-upload-pack")
 	if err == nil {
@@ -680,7 +674,7 @@ func TestInfoRefsWarmPathRefreshesCache(t *testing.T) {
 	newReplica = brandNew.URL
 
 	entryHost := mustHost(t, old.URL)
-	p := proxyWithClient([]string{old.URL}, "/et/alice/repo", "http://unused.example", entryHost, old.Client())
+	p := proxyWithClient([]string{old.URL}, "/et/alice/repo", "http://127.0.0.1:1", entryHost, old.Client())
 
 	body, err := p.InfoRefs(context.Background(), "git-upload-pack")
 	if err != nil {
@@ -1525,6 +1519,7 @@ func authRetryProxy(t *testing.T, serverURL string, src *fakeTokenSource) *Proxy
 	return New(Config{
 		Nodes: replicas.NodeConfig{
 			InitialNodes: []string{serverURL},
+			EntryURL:     serverURL,
 			ClusterHost:  mustHost(t, serverURL),
 		},
 		Path: "/et/alice/repo",

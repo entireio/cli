@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 const (
@@ -72,10 +73,10 @@ func NewClientWithBaseURL(token, baseURL string) *Client {
 
 // rejectCrossHostRedirect stops a redirect chain from leaving the origin the
 // client was built for. Same-host redirects (e.g. a trailing-slash normalize)
-// still follow, up to Go's usual 10-hop cap.
+// still follow, up to Go's usual 10-hop cap, but never downgrade from HTTPS.
 func rejectCrossHostRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return errors.New("stopped after 10 redirects")
+	if err := httpclient.CheckSecureRedirect(req, via); err != nil {
+		return fmt.Errorf("API redirect: %w", err)
 	}
 	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
 		return fmt.Errorf("refusing redirect to a different host (%s → %s): the Entire bearer must not leave its origin", via[0].URL.Host, req.URL.Host)
@@ -83,8 +84,8 @@ func rejectCrossHostRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-// requireSameHost rejects an endpoint whose host differs from the base URL's.
-// It guards the direct case (a path that resolved to another host); redirects
+// requireSameHost rejects off-host endpoints and downgrades from an HTTPS base.
+// It guards direct absolute paths as well as relative paths; redirects
 // are handled by rejectCrossHostRedirect.
 func requireSameHost(baseURL, endpoint string) error {
 	b, err := url.Parse(baseURL)
@@ -94,6 +95,9 @@ func requireSameHost(baseURL, endpoint string) error {
 	e, err := url.Parse(endpoint)
 	if err != nil {
 		return fmt.Errorf("parse endpoint URL: %w", err)
+	}
+	if b.Scheme == schemeHTTPS && e.Scheme != schemeHTTPS {
+		return errors.New("refusing an insecure endpoint for an HTTPS API base URL")
 	}
 	if !strings.EqualFold(b.Host, e.Host) {
 		return fmt.Errorf("refusing to send an authenticated request to %q, which is not the API host %q", e.Host, b.Host)

@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 type CloudConfig struct {
@@ -51,7 +52,9 @@ func NewCloudClient(cfg CloudConfig) *CloudClient {
 			timeout = defaultCloudHTTPTimeout
 		}
 		httpClient = &http.Client{Timeout: timeout}
-	} else if cfg.Timeout > 0 && httpClient.Timeout == 0 {
+	}
+	httpClient = httpclient.WithSecureRedirects(httpClient)
+	if cfg.Timeout > 0 && httpClient.Timeout == 0 {
 		httpClient.Timeout = cfg.Timeout
 	}
 
