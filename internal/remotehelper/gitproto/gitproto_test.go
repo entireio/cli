@@ -154,6 +154,73 @@ func TestV2Command(t *testing.T) {
 	})
 }
 
+func TestRemoveV2FetchFeature(t *testing.T) {
+	t.Parallel()
+
+	head := pktLine("version 2\n") + pktLine("agent=git/2.55.0\n") + pktLine("ls-refs=unborn\n")
+	tail := pktLine("server-option\n") + pktLine("object-format=sha1\n") + "0000"
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			"drops_only_that_token",
+			head + pktLine("fetch=shallow sideband-all packfile-uris wait-for-done ref-in-want filter\n") + tail,
+			head + pktLine("fetch=shallow sideband-all packfile-uris wait-for-done filter\n") + tail,
+		},
+		{
+			"absent_is_unchanged",
+			head + pktLine("fetch=shallow filter\n") + tail,
+			head + pktLine("fetch=shallow filter\n") + tail,
+		},
+		{
+			"no_fetch_line_is_unchanged",
+			head + tail,
+			head + tail,
+		},
+		{
+			"sole_feature_leaves_bare_key",
+			head + pktLine("fetch=ref-in-want\n") + tail,
+			head + pktLine("fetch\n") + tail,
+		},
+		{
+			"first_and_last_positions",
+			head + pktLine("fetch=ref-in-want shallow\n") + pktLine("fetch=shallow ref-in-want\n") + tail,
+			head + pktLine("fetch=shallow\n") + pktLine("fetch=shallow ref-in-want\n") + tail,
+		},
+		{
+			"prefix_match_is_not_the_token",
+			head + pktLine("fetch=ref-in-want-v3 shallow\n") + tail,
+			head + pktLine("fetch=ref-in-want-v3 shallow\n") + tail,
+		},
+		{
+			"no_trailing_lf",
+			head + pktLine("fetch=ref-in-want shallow") + tail,
+			head + pktLine("fetch=shallow") + tail,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := RemoveV2FetchFeature([]byte(tc.in), "ref-in-want")
+			if err != nil {
+				t.Fatalf("RemoveV2FetchFeature: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("malformed_length_errors", func(t *testing.T) {
+		t.Parallel()
+		if _, err := RemoveV2FetchFeature([]byte(pktLine("version 2\n")+"zzzzfetch=ref-in-want\n"), "ref-in-want"); err == nil {
+			t.Error("expected error on bad pkt-line length")
+		}
+	})
+}
+
 func TestAppendAgentToV2Request(t *testing.T) {
 	t.Parallel()
 
