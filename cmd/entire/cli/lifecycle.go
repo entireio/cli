@@ -966,11 +966,15 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			logStatusDegrade(logCtx, "failed to compute file changes", err)
 		}
 	} else {
-		// The turn's work is in another worktree, whose status this hook's
-		// pre-prompt baseline doesn't describe: record the files the
-		// transcript names there, nothing status-based.
-		logging.Debug(logCtx, "turn worked in another worktree; using transcript-named files only",
-			slog.String("worktree", repoRoot))
+		// The turn's work is in another worktree: its status there, without
+		// new files (this hook's pre-prompt baseline doesn't describe that
+		// worktree's untracked files; files the agent wrote are in the
+		// transcript).
+		changes, err = DetectFileChangesAt(ctx, repoRoot)
+		if err != nil {
+			captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
+			logStatusDegrade(logCtx, "failed to compute file changes in the turn's worktree", err)
+		}
 	}
 	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
 		// The turn-start untracked scan was skipped (e.g. status-walk budget

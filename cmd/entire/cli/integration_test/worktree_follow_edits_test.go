@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // An agent launched in the main checkout fires every hook there, but may edit
@@ -49,6 +51,31 @@ func TestTurnEditingALinkedWorktree_MovesTheSessionThere(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, resolved(t, parent.RepoDir), resolved(t, state.WorktreePath), "a turn back at home should move the session back")
 	assert.Contains(t, state.FilesTouched, "home2.txt")
+}
+
+// A turn recorded in the linked worktree also records what git status shows
+// there: a tracked file the agent deleted without the transcript naming it.
+func TestTurnInALinkedWorktree_RecordsItsDeletions(t *testing.T) {
+	t.Parallel()
+	parent := NewRepoWithCommit(t)
+	linked := worktreeEnv(t, parent, "deletes")
+	writeFileAt(t, filepath.Join(linked.RepoDir, "old.txt"), "tracked\n")
+	testutil.RunGit(t, linked.RepoDir, "add", "old.txt")
+	testutil.RunGit(t, linked.RepoDir, "commit", "-q", "--no-verify", "-m", "add old.txt")
+	sess := parent.NewSession()
+
+	require.NoError(t, parent.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "replace old", sess.TranscriptPath))
+	path := filepath.Join(linked.RepoDir, "new.txt")
+	writeFileAt(t, path, "new\n")
+	require.NoError(t, os.Remove(filepath.Join(linked.RepoDir, "old.txt")))
+	sess.CreateTranscript("replace old", []FileChange{{Path: path, Content: "new"}})
+	require.NoError(t, parent.SimulateStop(sess.ID, sess.TranscriptPath))
+
+	state, err := parent.GetSessionState(sess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, resolved(t, linked.RepoDir), resolved(t, state.WorktreePath))
+	assert.Contains(t, state.FilesTouched, "new.txt")
+	assert.Contains(t, state.FilesTouched, "old.txt", "the deletion in the turn's worktree was not recorded")
 }
 
 // A turn that edits both worktrees leaves the session where it is.

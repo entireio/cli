@@ -298,13 +298,33 @@ func detectFileChangesUnbounded(ctx context.Context) (*FileChanges, error) {
 	return detectFileChanges(ctx, nil, gitrepo.Status)
 }
 
+// DetectFileChangesAt is DetectFileChanges for worktreeRoot, a worktree
+// other than the one the hook runs in (see strategy.SettleTurnWorktree). The
+// hook's pre-prompt baseline doesn't describe that worktree's untracked files,
+// so none are reported as new; tracked modifications and deletions are.
+func DetectFileChangesAt(ctx context.Context, worktreeRoot string) (*FileChanges, error) {
+	repo, err := gitrepo.OpenPath(worktreeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open repository: %w", err)
+	}
+	defer repo.Close()
+	changes, err := detectFileChangesIn(ctx, repo, nil, gitrepo.StatusWithBudget)
+	if changes != nil {
+		changes.New = nil
+	}
+	return changes, err
+}
+
 func detectFileChanges(ctx context.Context, previouslyUntracked []string, statusFn func(context.Context, *git.Repository) (git.Status, error)) (*FileChanges, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 	defer repo.Close()
+	return detectFileChangesIn(ctx, repo, previouslyUntracked, statusFn)
+}
 
+func detectFileChangesIn(ctx context.Context, repo *git.Repository, previouslyUntracked []string, statusFn func(context.Context, *git.Repository) (git.Status, error)) (*FileChanges, error) {
 	status, err := statusFn(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status: %w", err)
