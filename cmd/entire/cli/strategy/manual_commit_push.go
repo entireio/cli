@@ -32,6 +32,10 @@ import (
 // prompt does, rather than an error.
 var ErrOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled")
 
+// ErrCheckpointRefsStayQueued is PushQueuedCheckpointRefs stopping early with
+// refs still queued. The flush has already printed why.
+var ErrCheckpointRefsStayQueued = errors.New("checkpoint refs stay queued")
+
 var opfPrePushProgressWriter io.Writer = os.Stderr
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
@@ -591,7 +595,7 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		// The flush is fail-soft about an early stop, but this caller reports
 		// success on a nil error, so refs left behind must surface. A caller's
 		// cancellation stays recognisable through the wrap.
-		err = fmt.Errorf("%d checkpoint ref(s) stay queued: %s", res.remaining, res.failureLine(nil))
+		err = fmt.Errorf("%w (%d): %s", ErrCheckpointRefsStayQueued, res.remaining, res.failureLine(nil))
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			err = fmt.Errorf("%w: %w", err, ctxErr)
 		}

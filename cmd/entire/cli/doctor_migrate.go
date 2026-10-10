@@ -126,7 +126,8 @@ func pushMigratedRefs(ctx context.Context, out io.Writer, repo *git.Repository, 
 
 	pushed, pushDisabled, err := strategy.PushQueuedCheckpointRefs(ctx, repo, pushRemote)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		// The flush printed why it stopped and what stays queued.
+		if errors.Is(err, context.Canceled) || errors.Is(err, strategy.ErrCheckpointRefsStayQueued) {
 			return NewSilentError(err)
 		}
 		// Ctrl-C at the OPF prompt is the same gesture as declining the push
