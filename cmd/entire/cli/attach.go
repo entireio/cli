@@ -1465,7 +1465,21 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		logging.Warn(ctx, "attach: session tokens changed while attach was waiting; leaving token state as the hooks set it",
 			slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))
 	default:
-		if sessionUsage != nil {
+		if state.Phase.IsActive() {
+			// The running turn's Stop adds its tokens from turn start, including
+			// those before this attach, so the whole-transcript total would count
+			// them twice. Keep the hooks' total; take only the cumulative subagent
+			// total, which the re-baseline below must cover.
+			if sessionUsage != nil && sessionUsage.SubagentTokens != nil {
+				total := agent.TokenUsage{}
+				if state.TokenUsage != nil {
+					total = *state.TokenUsage
+				}
+				total.SubagentTokens = sessionUsage.SubagentTokens
+				total.SubagentTokensComplete = sessionUsage.SubagentTokensComplete
+				state.TokenUsage = &total
+			}
+		} else if sessionUsage != nil {
 			// Without a cumulative subagent total of its own, keep the one hooks
 			// recorded so the re-baseline doesn't drop it.
 			if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {

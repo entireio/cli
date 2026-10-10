@@ -51,7 +51,7 @@ func newTokenTurnRun(t *testing.T) *tokenTurnRun {
 func (r *tokenTurnRun) start(tokens, sub int, files ...string) {
 	r.t.Helper()
 	r.turn++
-	require.NoError(r.t, r.env.SimulateUserPromptSubmit(r.s.ID))
+	require.NoError(r.t, r.env.SimulateUserPromptSubmitWithTranscriptPath(r.s.ID, r.s.TranscriptPath))
 	changes := make([]FileChange, 0, len(files))
 	for _, f := range files {
 		content := fmt.Sprintf("turn %d\n", r.turn)
@@ -111,6 +111,17 @@ func (r *tokenTurnRun) more(tokens int) {
 func (r *tokenTurnRun) stop() {
 	r.t.Helper()
 	require.NoError(r.t, r.env.SimulateStop(r.s.ID, r.s.TranscriptPath))
+}
+
+// checkTotal asserts the session total counts every turn once. A turn with no
+// file changes skips SaveStep and adds nothing, so call it only after turns
+// that changed files.
+func (r *tokenTurnRun) checkTotal() {
+	r.t.Helper()
+	state, err := r.env.GetSessionState(r.s.ID)
+	require.NoError(r.t, err)
+	require.NotNil(r.t, state.TokenUsage)
+	assert.Equal(r.t, r.total, state.TokenUsage.OutputTokens, "session total after turn %d", r.turn)
 }
 
 func (r *tokenTurnRun) add(out, sub int) {
@@ -208,17 +219,19 @@ func TestTokenScope_EachTurnCountedOnce(t *testing.T) {
 				r.start(20, 0, "b.txt", "c.txt")
 				r.stop()
 				r.commit("b.txt")
-				r.start(30, 0)
+				r.start(30, 0, "e.txt")
 				r.attach() // running: stores 30
 				r.more(3)
 				r.stop()
+				r.checkTotal() // the Stop adds 33 to the total, not on top of attach's 30
 				r.start(40, 5)
 				r.attach() // running: stores the 3-token tail, 40 and the subagent's 5
 				r.more(4)
 				r.stop()
+				r.checkTotal()
 				r.start(50, 0, "d.txt")
 				r.stop()
-				r.commit("c.txt", "d.txt", "sub1.txt") // 4-token tail + 50
+				r.commit("c.txt", "d.txt", "e.txt", "sub1.txt") // 4-token tail + 50
 			},
 		},
 	} {

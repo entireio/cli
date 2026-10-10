@@ -42,7 +42,8 @@ func TestSaveAttachSessionState_KeepsTokenOffsetMovedMeanwhile(t *testing.T) {
 		wantPendingOK    bool
 		wantTotal        int
 	}{
-		{name: "unchanged", hookMovedTo: 2, pendingOnDisk: 3, wantStart: 4, wantTotal: 9},
+		// The session is running: its Stop adds the turn, so attach keeps the hooks' total.
+		{name: "unchanged", hookMovedTo: 2, pendingOnDisk: 3, wantStart: 4, wantTotal: 12},
 		{name: "moved by a hook", hookMovedTo: 6, pendingOnDisk: 3, wantStart: 6, wantPendingOK: true, wantTotal: 12},
 		{name: "turn added by a stop", hookMovedTo: 2, pendingOnDisk: 5, wantStart: 2, wantPendingOK: true, wantTotal: 12},
 		{name: "condensed in place", hookMovedTo: 2, pendingOnDisk: 3, checkpointOnDisk: id.MustCheckpointID("b1b2c3d4e5f6"), wantStart: 2, wantPendingOK: true, wantTotal: 12},
