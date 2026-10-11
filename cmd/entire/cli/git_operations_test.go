@@ -984,3 +984,67 @@ func TestFetchBlobsByHash_ChainBudgetBoundsTheWholeOperation(t *testing.T) {
 	assert.Less(t, elapsed, loopWorstCase,
 		"a ceiling at or above the loop's worst case (%s) cannot bind — that was the original defect", loopWorstCase)
 }
+
+// TestResolveLocalBranchName_UnicodeNormalizationInsensitive covers cli #2551:
+// a branch whose on-disk ref differs from the supplied name only by Unicode
+// normalization (NFC "é" U+00E9 vs NFD "e"+U+0301) must still resolve, since git
+// treats the two spellings as the same branch (core.precomposeUnicode) while a
+// byte-exact go-git lookup does not — especially once refs are packed, where the
+// packed-refs match is byte-exact on every platform.
+func TestResolveLocalBranchName_UnicodeNormalizationInsensitive(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	const (
+		nfc = "feature/café"  // precomposed é
+		nfd = "feature/café" // decomposed e + combining acute
+	)
+	require.NotEqual(t, nfc, nfd, "the two spellings must differ byte-for-byte for this test to mean anything")
+
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	// Store refs exactly as given, the way non-precomposing platforms (Linux) do,
+	// so the branch lands on disk in NFD regardless of the host running the test.
+	gitRun(t, dir, "config", "core.precomposeUnicode", "false")
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	defaultBranch := gitDefaultBranch(t, dir)
+	gitRun(t, dir, "checkout", "-b", nfd)
+	gitRun(t, dir, "checkout", defaultBranch)
+	// Pack the refs: go-git matches packed-refs byte-exact, so the NFD ref is no
+	// longer resolvable by its NFC spelling via an exact lookup — the regression.
+	gitRun(t, dir, "pack-refs", "--all")
+	t.Chdir(dir)
+
+	ctx := context.Background()
+
+	// Exact spelling still resolves via the fast path.
+	got, found, err := ResolveLocalBranchName(ctx, nfd)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, nfd, got)
+
+	// The NFC spelling of the same branch resolves to the canonical on-disk (NFD)
+	// ref name, rather than being reported as a nonexistent branch.
+	got, found, err = ResolveLocalBranchName(ctx, nfc)
+	require.NoError(t, err)
+	require.True(t, found, "NFC spelling of an NFD-stored branch must resolve (cli #2551)")
+	require.Equal(t, nfd, got, "must return the on-disk ref name so the checkout targets the real branch")
+
+	// A genuinely different name still does not resolve.
+	_, found, err = ResolveLocalBranchName(ctx, "feature/other")
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestBranchNamesEquivalent_NFCvsNFD(t *testing.T) {
+	t.Parallel()
+	const (
+		nfc = "feature/café"
+		nfd = "feature/café"
+	)
+	require.NotEqual(t, nfc, nfd, "the two spellings must differ byte-for-byte")
+	assert.True(t, branchNamesEquivalent(nfc, nfd), "NFC and NFD spellings denote the same branch")
+	assert.True(t, branchNamesEquivalent(nfd, nfc), "comparison is symmetric")
+	assert.True(t, branchNamesEquivalent("main", "main"), "identical ASCII names are equivalent")
+	assert.False(t, branchNamesEquivalent("feature/a", "feature/b"), "distinct names are not equivalent")
+}
