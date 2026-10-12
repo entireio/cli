@@ -3,8 +3,12 @@
 package execx
 
 import (
+	"context"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -19,6 +23,23 @@ func detachFromTTY(cmd *exec.Cmd) {
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS
 }
 
-// killProcessGroupOnCancel is a no-op on Windows: reliable tree-kill needs a Job
-// Object. The WaitDelay backstop still bounds the wait on a hung subprocess.
-func killProcessGroupOnCancel(_ *exec.Cmd) {}
+// killProcessGroupOnCancel uses the system taskkill to terminate the process
+// tree. If tree termination fails, still kill the direct child; WaitDelay
+// bounds inherited pipes. Resolve the system binary without consulting PATH.
+func killProcessGroupOnCancel(cmd *exec.Cmd) {
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if systemDir, err := windows.GetSystemDirectory(); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			kill := exec.CommandContext(ctx, filepath.Join(systemDir, "taskkill.exe"), "/F", "/T", "/PID", strconv.Itoa(cmd.Process.Pid))
+			kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			if err := kill.Run(); err == nil {
+				return nil
+			}
+		}
+		return cmd.Process.Kill()
+	}
+}

@@ -41,43 +41,51 @@ func TestTerminateOnCancel_SetsWaitDelayAndGroupKill(t *testing.T) {
 func TestTerminateOnCancel_KillsProcessGroup(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	for name, command := range map[string]func(context.Context, string, ...string) *exec.Cmd{
+		"interactive": exec.CommandContext,
+		"detached":    NonInteractive,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-	// `sleep 60 &` backgrounds a grandchild that holds stdout; "ready" prints after
-	// it backgrounds so we cancel strictly after it exists (no race). `wait` keeps
-	// the shell alive as group leader so only a group-wide kill ends both.
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 60 & echo ready; wait")
-	TerminateOnCancel(cmd)
+			// `sleep 60 &` backgrounds a grandchild that holds stdout; "ready" prints after
+			// it backgrounds so we cancel strictly after it exists (no race). `wait` keeps
+			// the shell alive as group leader so only a group-wide kill ends both.
+			cmd := command(ctx, "/bin/sh", "-c", "sleep 60 & echo ready; wait")
+			TerminateOnCancel(cmd)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatalf("stdout pipe: %v", err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start: %v", err)
+			}
 
-	// Wait for "ready" so the grandchild is up and holding the pipe.
-	br := bufio.NewReader(stdout)
-	if line, err := br.ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
-		t.Fatalf("did not observe ready marker: line=%q err=%v", line, err)
-	}
+			// Wait for "ready" so the grandchild is up and holding the pipe.
+			br := bufio.NewReader(stdout)
+			if line, err := br.ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
+				t.Fatalf("did not observe ready marker: line=%q err=%v", line, err)
+			}
 
-	done := make(chan error, 1)
-	go func() {
-		_, _ = io.Copy(io.Discard, br) //nolint:errcheck // draining to block until the pipe closes; copy errors are irrelevant
-		done <- cmd.Wait()
-	}()
+			done := make(chan error, 1)
+			go func() {
+				_, _ = io.Copy(io.Discard, br) //nolint:errcheck // draining to block until the pipe closes; copy errors are irrelevant
+				done <- cmd.Wait()
+			}()
 
-	cancel()
+			cancel()
 
-	// Deadline must stay strictly below KillWaitDelay: that backstop would force
-	// the pipe closed on its own, letting this test pass even if group-kill regressed.
-	select {
-	case <-done:
-	case <-time.After(KillWaitDelay / 2):
-		t.Fatal("read did not return after cancellation; the pipe-holding grandchild outlived the group-kill")
+			// Deadline must stay strictly below KillWaitDelay: that backstop would force
+			// the pipe closed on its own, letting this test pass even if group-kill regressed.
+			select {
+			case <-done:
+			case <-time.After(KillWaitDelay / 2):
+				t.Fatal("read did not return after cancellation; the pipe-holding grandchild outlived the group-kill")
+			}
+		})
 	}
 }
 

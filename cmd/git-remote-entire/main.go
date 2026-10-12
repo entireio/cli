@@ -427,7 +427,7 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 }
 
 func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
-	username := "x-access-token"
+	username := ""
 	if repoURL.User != nil {
 		username = repoURL.User.Username()
 	}
@@ -439,10 +439,17 @@ func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := execx.NonInteractive(ctx, "git", "-c", "core.askPass=", "credential", "fill")
-	cmd.WaitDelay = execx.KillWaitDelay
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=")
-	cmd.Stdin = strings.NewReader(fmt.Sprintf("protocol=entire\nhost=%s\npath=%s\nusername=%s\n\n",
-		repoURL.Host, strings.TrimPrefix(repoURL.Path, "/"), username))
+	execx.TerminateOnCancel(cmd)
+	// Git uses the same exit status for unavailable credentials and explicit
+	// refusal. Pin its diagnostic language so only the non-interactive prompt
+	// failure permits saved-login fallback. Never expose helper stderr: it may
+	// contain tokens or the configured helper command.
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "LC_ALL=C")
+	input := fmt.Sprintf("protocol=entire\nhost=%s\npath=%s\n", repoURL.Host, strings.TrimPrefix(repoURL.Path, "/"))
+	if repoURL.User != nil {
+		input += "username=" + username + "\n"
+	}
+	cmd.Stdin = strings.NewReader(input + "\n")
 	output, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -450,8 +457,14 @@ func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			debuglog.Printf("Git credential lookup returned no credential; trying saved login")
-			return "", nil
+			diagnostic := strings.TrimSpace(string(exitErr.Stderr))
+			if (strings.HasPrefix(diagnostic, "fatal: could not read Username for '") ||
+				strings.HasPrefix(diagnostic, "fatal: could not read Password for '")) &&
+				strings.HasSuffix(diagnostic, "': terminal prompts disabled") && !strings.ContainsAny(diagnostic, "\r\n") {
+				debuglog.Printf("Git credential lookup returned no credential; trying saved login")
+				return "", nil
+			}
+			return "", fmt.Errorf("git credential lookup failed (exit %d)", exitErr.ExitCode())
 		}
 		return "", fmt.Errorf("run Git credential lookup: %w", err)
 	}
