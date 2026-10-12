@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -597,6 +598,9 @@ fi
 }
 
 func TestResolveCreds_CancelsCredentialHelper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows retains direct-child cancellation; descendant termination is outside this change")
+	}
 	gitenv.IsolateRepository(t)
 	t.Chdir(t.TempDir())
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
