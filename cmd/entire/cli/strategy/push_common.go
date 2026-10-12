@@ -173,6 +173,29 @@ func pushRefIfNeeded(ctx context.Context, target string, ref plumbing.ReferenceN
 	return doPushRef(ctx, target, ref)
 }
 
+// pushVerifiedRefIfNeeded is pushRefIfNeeded for content OPF has verified: it
+// pushes exactly verified and never re-reads ref, because anything appended to
+// the local ref since verification has not been scanned. A zero verified hash
+// means nothing was verified, so nothing is pushed.
+func pushVerifiedRefIfNeeded(ctx context.Context, target string, ref plumbing.ReferenceName, verified plumbing.Hash) (delivered bool, err error) {
+	if verified.IsZero() {
+		return false, nil
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		logging.Debug(ctx, "push skipped: open repository failed",
+			slog.String("ref", ref.String()),
+			slog.String("error", err.Error()))
+		return false, nil
+	}
+	defer repo.Close()
+
+	if ref.IsBranch() && !remote.IsURL(target) && !hasUnpushedBranchRef(repo, target, verified, ref.Short()) {
+		return true, nil
+	}
+	return doPushRefAt(ctx, target, ref, verified)
+}
+
 // hasUnpushedBranchRef checks if the local branch differs from the remote.
 // Returns true if there's any difference that needs syncing (local ahead, remote ahead, or diverged).
 func hasUnpushedBranchRef(repo *git.Repository, remoteName string, localHash plumbing.Hash, branchName string) bool {
@@ -257,6 +280,15 @@ func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
 // delivery, such as latching the captured checkpoint sync remote, must read
 // delivered and not err.
 func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (delivered bool, err error) {
+	return doPushRefAt(ctx, target, ref, plumbing.ZeroHash)
+}
+
+// doPushRefAt is doPushRef pushing src instead of ref's current local tip when
+// src is non-zero. A pinned push still syncs ref after a rejection, so the
+// next push starts from the remote's tip, but does not retry: the rebased tip
+// holds whatever the local ref held at sync time, which src was chosen to
+// exclude.
+func doPushRefAt(ctx context.Context, target string, ref plumbing.ReferenceName, src plumbing.Hash) (delivered bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
 
@@ -267,7 +299,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 	stop := startProgressDots(os.Stderr)
 
 	// Try pushing first
-	result, err := tryPushRefCommon(ctx, target, ref)
+	result, err := tryPushRefAt(ctx, target, ref, src)
 	if err == nil {
 		finishPush(ctx, stop, result, target)
 		return true, nil
@@ -311,6 +343,11 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 		return false, nil // Don't fail the main push
 	}
 	stop(" done")
+
+	if !src.IsZero() {
+		fmt.Fprintf(os.Stderr, "[entire] %s will be pushed on your next push\n", refLabel)
+		return false, nil
+	}
 
 	// Try pushing again after rebase
 	fmt.Fprintf(os.Stderr, "[entire] Pushing %s to %s...", refLabel, displayTarget)
@@ -453,8 +490,17 @@ func finishPush(ctx context.Context, stop func(string), result pushResult, targe
 // server-side ref protection). This keeps one consistent non-force policy for
 // every checkpoint ref, branch or per-checkpoint.
 func tryPushRefCommon(ctx context.Context, remoteName string, ref plumbing.ReferenceName) (pushResult, error) {
+	return tryPushRefAt(ctx, remoteName, ref, plumbing.ZeroHash)
+}
+
+// tryPushRefAt is tryPushRefCommon pushing src to ref when src is non-zero.
+// git still updates the remote-tracking ref for a "<sha>:refs/heads/..." push.
+func tryPushRefAt(ctx context.Context, remoteName string, ref plumbing.ReferenceName, src plumbing.Hash) (pushResult, error) {
 	refSpec := ref.Short()
-	if !ref.IsBranch() {
+	switch {
+	case !src.IsZero():
+		refSpec = src.String() + ":" + ref.String()
+	case !ref.IsBranch():
 		refSpec = ref.String() + ":" + ref.String()
 	}
 

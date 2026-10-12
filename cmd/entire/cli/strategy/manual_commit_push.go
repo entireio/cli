@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
@@ -32,6 +33,10 @@ import (
 var ErrOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled")
 
 var opfPrePushProgressWriter io.Writer = os.Stderr
+
+// rewriteUnpushedV1ForPush lets a test append to v1 between the rewrite and
+// the push.
+var rewriteUnpushedV1ForPush = RewriteUnpushedV1WithOPF //nolint:gochecknoglobals // concurrent-append test seam
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
 // It pushes each ref in refs.Push alongside the user's push.
@@ -126,6 +131,11 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// re-redact unpushed v1 commits with OPF (producing the OPF-applied,
 	// 9-layer pipeline) before pushing. Skipped entirely when OPF is off,
 	// so the common-case fast path is unchanged.
+	//
+	// After a rewrite, v1 ships as the exact commit the rewrite verified
+	// (opfVerifiedV1), never by name: a checkpoint another session appends to
+	// the local branch before the push runs has not been scanned.
+	opfPinnedV1, opfVerifiedV1 := false, plumbing.ZeroHash
 	if redact.OPFEnabled() {
 		decision, decisionErr := opfPrePushDecision(ctx)
 		if decisionErr != nil {
@@ -160,7 +170,8 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			openSpan.End()
 			defer repo.Close()
 			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")
-			if _, rewriteErr := RewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget()); rewriteErr != nil {
+			verified, rewriteErr := rewriteUnpushedV1ForPush(ctx, repo, ps.pushTarget())
+			if rewriteErr != nil {
 				opfSpan.RecordError(rewriteErr)
 				opfSpan.End()
 				logging.Warn(ctx, "OPF pre-push rewrite failed; aborting push",
@@ -169,6 +180,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 				return rewriteErr
 			}
 			opfSpan.End()
+			opfPinnedV1, opfVerifiedV1 = true, verified
 		}
 	}
 
@@ -192,8 +204,15 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	var deliveredRefs []plumbing.ReferenceName
 	anyFailed := false
 	refs := checkpoint.ResolveRefs(ctx)
+	v1Ref := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
 	for _, ref := range refs.Push {
-		delivered, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
+		var delivered bool
+		var err error
+		if opfPinnedV1 && ref == v1Ref {
+			delivered, err = pushVerifiedRefIfNeeded(pushCtx, ps.pushTarget(), ref, opfVerifiedV1)
+		} else {
+			delivered, err = pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
+		}
 		if err != nil {
 			pushCheckpointsSpan.RecordError(err)
 			pushCheckpointsSpan.End()

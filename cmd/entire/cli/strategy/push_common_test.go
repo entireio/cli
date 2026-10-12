@@ -336,19 +336,15 @@ func TestFetchAndRebase_NonBranchRefDisconnected(t *testing.T) {
 	assert.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "non-branch reconciliation must not create the primary ref")
 }
 
-// TestFetchAndRebase_DivergedBranches verifies that when local and remote
-// metadata branches have diverged (shared ancestor, different commits on each),
-// fetchAndRebaseRefCommon produces a linear history (no merge commits)
-// with all data from both sides preserved.
-//
-// Not parallel: uses t.Chdir() (required for OpenRepository).
-func TestFetchAndRebase_DivergedBranches(t *testing.T) {
-	ctx := context.Background()
+// setupDivergedMetadataClones returns a bare origin and clone A, whose local
+// metadata branch holds checkpoint bb while origin's holds cc on the same base.
+func setupDivergedMetadataClones(t *testing.T) (bareDir, cloneA string) {
+	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
 	branchName := paths.MetadataBranchName
 
 	// 1. Create bare origin with a metadata branch containing a base checkpoint
-	bareDir := t.TempDir()
+	bareDir = t.TempDir()
 	workDir := t.TempDir()
 	gitRun := func(dir string, args ...string) {
 		testutil.RunGit(t, dir, args...)
@@ -378,7 +374,7 @@ func TestFetchAndRebase_DivergedBranches(t *testing.T) {
 	gitRun(workDir, "checkout", "main")
 
 	// 2. Clone into two separate working directories
-	cloneA := filepath.Join(t.TempDir(), "cloneA")
+	cloneA = filepath.Join(t.TempDir(), "cloneA")
 	cloneB := filepath.Join(t.TempDir(), "cloneB")
 	require.NoError(t, os.MkdirAll(cloneA, 0o755))
 	require.NoError(t, os.MkdirAll(cloneB, 0o755))
@@ -419,6 +415,20 @@ func TestFetchAndRebase_DivergedBranches(t *testing.T) {
 	gitRun(cloneB, "push", "origin", branchName)
 	gitRun(cloneB, "checkout", "main")
 
+	return bareDir, cloneA
+}
+
+// TestFetchAndRebase_DivergedBranches verifies that when local and remote
+// metadata branches have diverged (shared ancestor, different commits on each),
+// fetchAndRebaseRefCommon produces a linear history (no merge commits)
+// with all data from both sides preserved.
+//
+// Not parallel: uses t.Chdir() (required for OpenRepository).
+func TestFetchAndRebase_DivergedBranches(t *testing.T) {
+	ctx := context.Background()
+	branchName := paths.MetadataBranchName
+	_, cloneA := setupDivergedMetadataClones(t)
+
 	// 5. Run fetchAndRebaseRefCommon on clone A (diverged: local has bb, remote has cc)
 	t.Chdir(cloneA)
 
@@ -457,6 +467,34 @@ func TestFetchAndRebase_DivergedBranches(t *testing.T) {
 	assert.Contains(t, entries, "aa/aaaaaaaaaa/metadata.json", "base checkpoint should be preserved")
 	assert.Contains(t, entries, "bb/bbbbbbbbbb/metadata.json", "local checkpoint should be preserved")
 	assert.Contains(t, entries, "cc/cccccccccc/metadata.json", "remote checkpoint should be preserved")
+}
+
+// TestDoPushRefAt_PinnedRejectionSyncsWithoutRetry pins the pinned-push
+// recovery: after a rejection the ref is still synced, so the next push starts
+// from the remote's tip, but the rebased tip is not pushed, because it holds
+// whatever the local ref held at sync time rather than the verified commit.
+//
+// Not parallel: uses t.Chdir() (required for OpenRepository).
+func TestDoPushRefAt_PinnedRejectionSyncsWithoutRetry(t *testing.T) {
+	ctx := context.Background()
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	bareDir, cloneA := setupDivergedMetadataClones(t)
+	t.Chdir(cloneA)
+
+	repo, err := git.PlainOpen(cloneA)
+	require.NoError(t, err)
+	verified, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	remoteBefore := remoteRefHash(t, bareDir, refName)
+
+	delivered, err := doPushRefAt(ctx, "origin", refName, verified.Hash())
+	require.NoError(t, err)
+	assert.False(t, delivered, "a pinned push that was rejected must not report delivery")
+	assert.Equal(t, remoteBefore, remoteRefHash(t, bareDir, refName), "the rebased tip must not be pushed")
+
+	synced, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	assert.NotEqual(t, verified.Hash(), synced.Hash(), "the local ref is still synced onto the remote")
 }
 
 // TestFetchAndRebase_SharedCloneLocalCommitInAlternate verifies that the
