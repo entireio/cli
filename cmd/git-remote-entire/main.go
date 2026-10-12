@@ -387,7 +387,7 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 		if envToken == "" {
 			return nil, nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
 		}
-		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
+		return resolveTokenCreds(ctx, envToken, auth.EnvTokenVar, parsedURL.Host, userdirs.Cache(), httpClient)
 	}
 
 	token, err := gitCredentialToken(ctx, parsedURL)
@@ -395,11 +395,7 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 		return nil, nil, err
 	}
 	if token != "" {
-		provider, onUnauthorized, err := resolveEnvTokenCreds(ctx, token, parsedURL.Host, userdirs.Cache(), httpClient)
-		if err != nil {
-			return nil, nil, fmt.Errorf("git credential helper token: %w", err)
-		}
-		return provider, onUnauthorized, nil
+		return resolveTokenCreds(ctx, token, "git credential helper token", parsedURL.Host, userdirs.Cache(), httpClient)
 	}
 
 	// Resolve which login context authenticates this cluster: the cluster's
@@ -479,13 +475,13 @@ func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
 	return "", errors.New("git credential helper returned no password")
 }
 
-// resolveEnvTokenCreds returns a fixed ENTIRE_TOKEN provider after validating
+// resolveTokenCreds returns a fixed token provider after validating
 // its control-plane audience against the target cluster. Split out of
 // resolveCreds with explicit clusterHost/cacheDir params (no os.Getenv /
 // userdirs.Cache globals) so the trust gate below is unit-testable against a
 // fake well-known server.
 //
-// SECURITY: coreURL is derived from the env token's *unverified* aud claim, and
+// SECURITY: coreURL is derived from the token's *unverified* aud claim, and
 // we confirm the core is one the target cluster actually advertises — anchored
 // to the clone URL's host the user typed (TLS to its
 // /.well-known/entire-cluster.json), not to the token's own claims.
@@ -495,10 +491,10 @@ func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
 // is no longer authenticated, so a MITM could advertise an attacker host as a
 // trusted core. Do not combine ENTIRE_TOKEN with ENTIRE_TLS_SKIP_VERIFY in
 // CI / workload environments.
-func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir string, httpClient *http.Client) (credentialProvider, func(), error) {
-	coreURL, err := auth.CoreURLFromEnvToken(envToken)
+func resolveTokenCreds(ctx context.Context, token, source, clusterHost, cacheDir string, httpClient *http.Client) (credentialProvider, func(), error) {
+	coreURL, err := auth.CoreURLFromToken(token, source)
 	if err != nil {
-		return nil, nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
+		return nil, nil, err //nolint:wrapcheck // CoreURLFromToken already identifies the token source in its user-facing error
 	}
 	cluster, err := clusterdiscovery.ResolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debuglog.Printf)
 	if err != nil {
@@ -506,12 +502,12 @@ func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir s
 	}
 	if !coreTrusted(coreURL, cluster.CoreURLs) {
 		return nil, nil, fmt.Errorf("%s aud %q is not a trusted login server for cluster %s (advertised: %s); the token belongs to a different cluster",
-			auth.EnvTokenVar, coreURL, clusterHost, strings.Join(cluster.CoreURLs, ", "))
+			source, coreURL, clusterHost, strings.Join(cluster.CoreURLs, ", "))
 	}
-	debuglog.Printf("auth: %s bearer (core=%s)", auth.EnvTokenVar, coreURL)
-	provider := func(context.Context) (string, error) { return envToken, nil }
+	debuglog.Printf("auth: %s bearer (core=%s)", source, coreURL)
+	provider := func(context.Context) (string, error) { return token, nil }
 	onUnauthorized := func() {
-		debuglog.Printf("data plane rejected static %s bearer; transport will retry once with the configured token", auth.EnvTokenVar)
+		debuglog.Printf("data plane rejected static %s bearer; transport will retry once with the configured token", source)
 	}
 	return provider, onUnauthorized, nil
 }

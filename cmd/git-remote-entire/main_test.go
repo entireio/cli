@@ -431,8 +431,8 @@ func TestResolveEnvTokenCreds_TrustedAudSucceeds(t *testing.T) {
 	client, clusterHost := wellKnownServer(t, []string{core}, audience, core)
 	envToken := makeTestJWT(t, core)
 
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), envToken, clusterHost, t.TempDir(), client,
+	creds, _, err := resolveTokenCreds(
+		t.Context(), envToken, auth.EnvTokenVar, clusterHost, t.TempDir(), client,
 	)
 	if err != nil {
 		t.Fatalf("expected trusted aud to succeed, got: %v", err)
@@ -455,8 +455,8 @@ func TestResolveEnvTokenCreds_CrossJurisdictionTokenUsesBearer(t *testing.T) {
 	client, clusterHost := wellKnownServer(t, []string{tokenCore, jurisdictionCore}, "https://us.entire.io", jurisdictionCore)
 	envToken := makeTestJWT(t, tokenCore)
 
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), envToken, clusterHost, t.TempDir(), client,
+	creds, _, err := resolveTokenCreds(
+		t.Context(), envToken, auth.EnvTokenVar, clusterHost, t.TempDir(), client,
 	)
 	if err != nil {
 		t.Fatalf("cross-jurisdiction token must resolve, got: %v", err)
@@ -476,8 +476,8 @@ func TestResolveEnvTokenCreds_DoesNotRequireJurisdictionAudience(t *testing.T) {
 	client, clusterHost := wellKnownServer(t, []string{core}, "", "")
 	envToken := makeTestJWT(t, core)
 
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), envToken, clusterHost, t.TempDir(), client,
+	creds, _, err := resolveTokenCreds(
+		t.Context(), envToken, auth.EnvTokenVar, clusterHost, t.TempDir(), client,
 	)
 	if err != nil {
 		t.Fatalf("resolve direct bearer without jurisdiction audience: %v", err)
@@ -507,6 +507,9 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 		{name: "environment wins", env: core, helper: "https://untrusted.example"},
 		{name: "untrusted credential", helper: "https://untrusted.example", wantErr: "not a trusted login server"},
 		{name: "malformed credential", helper: "malformed", wantErr: "git credential helper token"},
+		{name: "invalid credential audience", helper: "http://core.us.entire.io", wantErr: "git credential helper token aud"},
+		{name: "missing credential audience", helper: "entire-cli", wantErr: "git credential helper token must be"},
+		{name: "untrusted environment token", env: "https://untrusted.example", wantErr: "ENTIRE_TOKEN aud"},
 		{name: "helper refuses", helper: "quit", wantErr: "git credential lookup failed"},
 		{name: "broken Git config", helper: "bad-config", wantErr: "git credential lookup failed"},
 		{name: "no credential falls back to login", wantErr: "no auth context"},
@@ -577,6 +580,9 @@ fi
 				}
 				if !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("expected %q, got %v", tc.wantErr, err)
+				}
+				if tc.env == "" && strings.Contains(err.Error(), auth.EnvTokenVar) {
+					t.Fatalf("credential-helper error incorrectly attributes token to environment: %v", err)
 				}
 				return
 			}
@@ -741,8 +747,8 @@ func TestResolveEnvTokenCreds_UntrustedAudAborts(t *testing.T) {
 	// The gate must abort before building creds (i.e. before any exchange).
 	client, clusterHost := wellKnownServer(t, []string{"https://core.us.entire.io"}, "https://us.entire.io", "https://core.us.entire.io")
 
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "https://attacker.example.com"), clusterHost, t.TempDir(), client,
+	creds, _, err := resolveTokenCreds(
+		t.Context(), makeTestJWT(t, "https://attacker.example.com"), auth.EnvTokenVar, clusterHost, t.TempDir(), client,
 	)
 	if err == nil {
 		t.Fatal("expected untrusted aud to be rejected")
@@ -761,8 +767,8 @@ func TestResolveEnvTokenCreds_EmptyAdvertisedCoresAborts(t *testing.T) {
 	// trust, the gate must fail closed rather than trusting the token's aud.
 	client, clusterHost := wellKnownServer(t, []string{}, "https://us.entire.io", "https://core.us.entire.io")
 
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "https://core.us.entire.io"), clusterHost, t.TempDir(), client,
+	creds, _, err := resolveTokenCreds(
+		t.Context(), makeTestJWT(t, "https://core.us.entire.io"), auth.EnvTokenVar, clusterHost, t.TempDir(), client,
 	)
 	if err == nil {
 		t.Fatal("expected empty advertised core set to be rejected")
@@ -781,8 +787,8 @@ func TestResolveEnvTokenCreds_CrossSiteCoresAbort(t *testing.T) {
 	const foreignCore = "https://core.us.evil.example"
 	client, clusterHost := wellKnownServer(t, []string{foreignCore}, "https://us.entire.io", foreignCore)
 
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, foreignCore), clusterHost, t.TempDir(), client,
+	creds, _, err := resolveTokenCreds(
+		t.Context(), makeTestJWT(t, foreignCore), auth.EnvTokenVar, clusterHost, t.TempDir(), client,
 	)
 	if err == nil {
 		t.Fatal("expected a cross-site core to be refused")
@@ -813,8 +819,8 @@ func TestResolveEnvTokenCreds_DiscoveryFailureAborts(t *testing.T) {
 		t.Fatalf("parse server URL: %v", err)
 	}
 
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "https://core.us.entire.io"), u.Host, t.TempDir(), srv.Client(),
+	creds, _, err := resolveTokenCreds(
+		t.Context(), makeTestJWT(t, "https://core.us.entire.io"), auth.EnvTokenVar, u.Host, t.TempDir(), srv.Client(),
 	)
 	if err == nil {
 		t.Fatal("expected discovery failure to abort")
@@ -828,8 +834,8 @@ func TestResolveEnvTokenCreds_MalformedTokenAborts(t *testing.T) {
 	t.Parallel()
 	// A malformed aud must fail at the parse/validate step, before any network
 	// discovery happens — so a nil httpClient is safe here.
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "http://core.us.entire.io"), "cluster.example.com", t.TempDir(), nil,
+	creds, _, err := resolveTokenCreds(
+		t.Context(), makeTestJWT(t, "http://core.us.entire.io"), auth.EnvTokenVar, "cluster.example.com", t.TempDir(), nil,
 	)
 	if err == nil {
 		t.Fatal("expected http aud to be rejected before discovery")

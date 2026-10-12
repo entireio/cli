@@ -35,8 +35,14 @@ func ParseEnvToken(raw string) (coreURL, token string, err error) {
 	return coreURL, token, nil
 }
 
-// CoreURLFromEnvToken derives the home-region core URL from an ENTIRE_TOKEN
-// JWT's audience claim. Login and sa-session JWTs carry aud=<home-region URL>,
+// CoreURLFromEnvToken derives the home-region core URL from ENTIRE_TOKEN.
+func CoreURLFromEnvToken(rawToken string) (string, error) {
+	return CoreURLFromToken(rawToken, EnvTokenVar)
+}
+
+// CoreURLFromToken derives the home-region core URL from a JWT's audience claim.
+// source labels diagnostics and must be a caller-supplied name, not token data.
+// Login and sa-session JWTs carry aud=<home-region URL>,
 // so we read aud, not iss (iss may be a different regional core).
 //
 // SECURITY: ParseClaims does NOT verify the signature, so the audience is
@@ -59,10 +65,10 @@ func ParseEnvToken(raw string) (coreURL, token string, err error) {
 // client_id like "entire-cli") are skipped; the first URL-shaped audience is
 // validated strictly. A token with no URL-shaped aud is rejected with a clear
 // error rather than silently falling back to context resolution.
-func CoreURLFromEnvToken(rawToken string) (string, error) {
+func CoreURLFromToken(rawToken, source string) (string, error) {
 	claims, err := tokens.ParseClaims(rawToken)
 	if err != nil {
-		return "", fmt.Errorf("parse %s claims: %w", EnvTokenVar, err)
+		return "", fmt.Errorf("parse %s claims: %w", source, err)
 	}
 	for _, aud := range claims.Audience {
 		u, perr := url.Parse(aud)
@@ -72,27 +78,27 @@ func CoreURLFromEnvToken(rawToken string) (string, error) {
 		}
 		// URL-shaped: enforce the strict origin rules. A URL-shaped-but-invalid
 		// aud is a hard error (fail closed), never silently skipped.
-		return validateCoreAudience(u)
+		return validateCoreAudience(u, source)
 	}
-	return "", fmt.Errorf("%s must be a login or sa-session JWT whose aud is the home-region URL; found no URL-shaped audience claim", EnvTokenVar)
+	return "", fmt.Errorf("%s must be a login or sa-session JWT whose aud is the home-region URL; found no URL-shaped audience claim", source)
 }
 
 // validateCoreAudience enforces that u is a safe entire-core origin and
 // returns its canonical form (scheme://host, no trailing slash).
-func validateCoreAudience(u *url.URL) (string, error) {
+func validateCoreAudience(u *url.URL, source string) (string, error) {
 	switch {
 	case u.Scheme != "https":
-		return "", fmt.Errorf("%s aud %q must use https; refusing to exchange the token over %s", EnvTokenVar, u.Redacted(), u.Scheme)
+		return "", fmt.Errorf("%s aud %q must use https; refusing to exchange the token over %s", source, u.Redacted(), u.Scheme)
 	case u.Host == "":
-		return "", fmt.Errorf("%s aud %q has no host", EnvTokenVar, u.Redacted())
+		return "", fmt.Errorf("%s aud %q has no host", source, u.Redacted())
 	case u.User != nil:
-		return "", fmt.Errorf("%s aud %q must not contain userinfo", EnvTokenVar, u.Redacted())
+		return "", fmt.Errorf("%s aud %q must not contain userinfo", source, u.Redacted())
 	case u.Path != "" && u.Path != "/":
-		return "", fmt.Errorf("%s aud %q must be a bare origin with no path", EnvTokenVar, u.Redacted())
+		return "", fmt.Errorf("%s aud %q must be a bare origin with no path", source, u.Redacted())
 	case u.RawQuery != "":
-		return "", fmt.Errorf("%s aud %q must not contain query parameters", EnvTokenVar, u.Redacted())
+		return "", fmt.Errorf("%s aud %q must not contain query parameters", source, u.Redacted())
 	case u.Fragment != "":
-		return "", fmt.Errorf("%s aud %q must not contain a fragment", EnvTokenVar, u.Redacted())
+		return "", fmt.Errorf("%s aud %q must not contain a fragment", source, u.Redacted())
 	}
 	return strings.TrimRight(u.Scheme+"://"+u.Host, "/"), nil
 }
