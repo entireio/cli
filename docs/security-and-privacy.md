@@ -2,6 +2,22 @@
 
 Entire stores AI session transcripts and metadata in your git repository. This document explains what data is stored, how sensitive content is protected, and how to configure additional safeguards.
 
+## Explicit local-log sharing
+
+Project-mode `entire trail logs publish --share-with-trail` is a separate,
+explicit network upload of selected stdin, not checkpoint storage. Logs are
+visible to everyone who can read the Trail. This prototype keeps them only in
+DO memory for at most one hour; restart or eviction loses them sooner. No log
+payloads are persisted to the database or DO storage. It uses configured local secret/PII scanners plus common credential filters and
+optional `--redact` regexes. The default transcript mode accepts explicitly selected
+Claude Code, Codex, or Pi JSONL, sanitizes and redacts locally, then reuses the
+compact converter. Only text/tool blocks are published; images and hidden/runtime
+blocks are omitted. A scanner failure stops transcript capture and reports a gap.
+`--format text` is the explicit plain-output fallback and withholds failed lines.
+It does **not** run the checkpoint-only OpenAI Privacy Filter, launch an agent,
+or automatically discover transcripts. Only share output safe for the Trail
+without relying on comprehensive redaction. See [local log usage and limits](architecture/project-trails-cli.md#local-agent-logs).
+
 ## Transcript Storage & Git History
 
 ### Where data is stored

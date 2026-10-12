@@ -121,14 +121,18 @@ var agentHelpClassification = map[string]agentHelpFacts{
 
 	// trail is the highest-traffic family by a wide margin, so its read-only
 	// subcommands must not disappear behind the group's write-capable label.
-	"trail":                 {agentHelpAudienceTaskDriven, true},
-	"trail list":            {agentHelpAudienceReadOnly, false},
-	"trail show":            {agentHelpAudienceReadOnly, false},
-	"trail create":          {agentHelpAudienceTaskDriven, false},
-	"trail delete":          {agentHelpAudienceTaskDriven, false},
-	"trail update":          {agentHelpAudienceTaskDriven, false},
-	"trail approvals":       {agentHelpAudienceReadOnly, false},
-	"trail watch":           {agentHelpAudienceReadOnly, false},
+	"trail":           {agentHelpAudienceTaskDriven, true},
+	"trail list":      {agentHelpAudienceReadOnly, false},
+	"trail show":      {agentHelpAudienceReadOnly, false},
+	"trail create":    {agentHelpAudienceTaskDriven, false},
+	"trail delete":    {agentHelpAudienceTaskDriven, false},
+	"trail update":    {agentHelpAudienceTaskDriven, false},
+	"trail approvals": {agentHelpAudienceReadOnly, false},
+	"trail watch":     {agentHelpAudienceReadOnly, false},
+	// Local-output sharing is deliberately opt-in/user-owned, never proactive.
+	"trail logs":            {agentHelpAudienceUserOwned, false},
+	"trail logs publish":    {agentHelpAudienceUserOwned, false},
+	"trail logs watch":      {agentHelpAudienceUserOwned, false},
 	"trail approve":         {agentHelpAudienceTaskDriven, false},
 	"trail checkout":        {agentHelpAudienceTaskDriven, false},
 	"trail comment":         {agentHelpAudienceTaskDriven, false},
