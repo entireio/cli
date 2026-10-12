@@ -148,12 +148,27 @@ func approveInBrowser(ctx context.Context, exited <-chan struct{}, approvalURL, 
 		if u := a.page.URL(); u != lastURL {
 			lastURL, lastChange = u, time.Now()
 		} else if time.Since(lastChange) > stallAfter {
-			return fmt.Errorf("login stalled on %s for %s", pageName(u), stallAfter)
+			return fmt.Errorf("login stalled on %s for %s; visible controls:\n%s", pageName(u), stallAfter, describePage(a.page))
 		}
 		if err := a.step(); err != nil {
 			return err
 		}
 	}
+}
+
+// describePage lists the visible headings, buttons, and flash messages so a
+// stall names what the stepper failed to match. CI artifacts are public, so
+// this goes into the error (redacted by the caller) instead of a screenshot.
+func describePage(page playwright.Page) string {
+	out, err := page.Evaluate(`() => [...document.querySelectorAll('h1, h2, button, input[type=submit], [role=alert], .flash')]
+		.filter(e => e.offsetParent !== null)
+		.map(e => e.tagName.toLowerCase() + (e.disabled ? ' [disabled]' : '') + ': ' + (e.innerText || e.value || '').trim().replace(/\s+/g, ' ').slice(0, 160))
+		.join('\n')`)
+	if err != nil {
+		return "(could not inspect the page: " + err.Error() + ")"
+	}
+	s, _ := out.(string)
+	return s
 }
 
 // pageName is a page URL without its query, which on the device page carries
