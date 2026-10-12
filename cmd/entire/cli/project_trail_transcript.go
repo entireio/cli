@@ -298,6 +298,13 @@ func readLocalTranscript(ctx context.Context, input io.Reader, lines chan<- []by
 }
 
 func publishLocalTranscript(ctx context.Context, input io.Reader, diagnostics io.Writer, name string, filters []*regexp.Regexp, send func(context.Context, []localLogRecord) error) error {
+	return publishLocalTranscriptCapture(ctx, input, diagnostics, name, filters, send, func() {})
+}
+
+// A pipe must keep draining after capture failure; an automatic file tail must
+// stop waiting for future appends instead. stopInput cancels only that reader,
+// leaving the uploader alive long enough to report the terminal capture gap.
+func publishLocalTranscriptCapture(ctx context.Context, input io.Reader, diagnostics io.Writer, name string, filters []*regexp.Regexp, send func(context.Context, []localLogRecord) error, stopInput func()) error {
 	ag, err := agent.Get(agenttypes.AgentName(name))
 	if err != nil {
 		return fmt.Errorf("resolve transcript agent: %w", err)
@@ -316,6 +323,7 @@ func publishLocalTranscript(ctx context.Context, input io.Reader, diagnostics io
 				return
 			}
 			captureErr = err
+			stopInput()
 			select {
 			case records <- localLogRecord{Kind: localLogKindGap, Text: "Transcript capture stopped; start a new publishing stream."}:
 			default:

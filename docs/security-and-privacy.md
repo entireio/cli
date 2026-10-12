@@ -2,6 +2,26 @@
 
 Entire stores AI session transcripts and metadata in your git repository. This document explains what data is stored, how sensitive content is protected, and how to configure additional safeguards.
 
+## Experimental automatic Trail session sharing
+
+When Entire is enabled, Claude Code, Codex, and Pi lifecycle hooks automatically
+stream the exact session associated with the current branch's project
+Trail/change. No separate streaming opt-in or per-Trail toggle exists in this
+experiment. **A linked Trail is the sharing boundary: everyone who can read it
+can read these logs.** The web viewer's feature flag does not gate CLI uploads.
+Unlinked branches, unsupported agents, and sessions belonging to other worktrees
+are not uploaded. Branch membership and login identity are rechecked; failure
+stops capture instead of using a stale destination. An initial small session can
+include existing history; reassignment never backfills previous output to the new
+Trail. Larger histories and restarts report explicit gaps. See
+[automatic capture semantics and limits](architecture/project-trails-cli.md#automatic-experimental-capture).
+
+Automatic sharing uses the same local scanners and common credential filters as
+manual sharing below. It does **not** run the checkpoint-only OpenAI Privacy
+Filter, and redaction is not comprehensive. Do not use linked sessions for output
+that must remain private from the Trail audience. No transcript content is saved
+in the local streaming cursor; normal agent/checkpoint storage is unchanged.
+
 ## Explicit local-log sharing
 
 Project-mode `entire trail logs publish --share-with-trail` is a separate,

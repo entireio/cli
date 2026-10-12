@@ -129,7 +129,8 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail update":    {agentHelpAudienceTaskDriven, false},
 	"trail approvals": {agentHelpAudienceReadOnly, false},
 	"trail watch":     {agentHelpAudienceReadOnly, false},
-	// Local-output sharing is deliberately opt-in/user-owned, never proactive.
+	// Manual stdin sharing remains user-owned; automatic lifecycle streaming
+	// follows a verified project Trail/change association instead.
 	"trail logs":            {agentHelpAudienceUserOwned, false},
 	"trail logs publish":    {agentHelpAudienceUserOwned, false},
 	"trail logs watch":      {agentHelpAudienceUserOwned, false},

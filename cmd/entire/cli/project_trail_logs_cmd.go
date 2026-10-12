@@ -36,6 +36,14 @@ const (
 	localLogKindComplete     = "complete"
 )
 
+func supportedLocalTranscriptAgent(name string) bool {
+	return name == "claude-code" || name == "codex" || name == "pi"
+}
+
+func localLogFilters() []*regexp.Regexp {
+	return []*regexp.Regexp{regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`), regexp.MustCompile(`(?i)(?:api[_-]?key|access[_-]?token|secret|password)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)`)}
+}
+
 type localLogRecord struct {
 	Sequence int64  `json:"sequence"`
 	Kind     string `json:"kind"`
@@ -56,10 +64,10 @@ func newProjectTrailLogsCmd() *cobra.Command {
 			if format != localLogFormatTranscript && format != localLogKindText {
 				return errors.New("--format must be transcript or text")
 			}
-			if format == localLogFormatTranscript && transcriptAgent != "claude-code" && transcriptAgent != "codex" && transcriptAgent != "pi" {
+			if format == localLogFormatTranscript && !supportedLocalTranscriptAgent(transcriptAgent) {
 				return errors.New("--transcript-agent must be claude-code, codex, or pi for JSONL transcript input")
 			}
-			filters := []*regexp.Regexp{regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`), regexp.MustCompile(`(?i)(?:api[_-]?key|access[_-]?token|secret|password)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)`)}
+			filters := localLogFilters()
 			for _, raw := range redactions {
 				r, err := regexp.Compile(raw)
 				if err != nil {

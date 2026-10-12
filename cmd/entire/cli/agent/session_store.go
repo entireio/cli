@@ -411,6 +411,17 @@ func validateWriteName(name string) error {
 	return nil
 }
 
+// OpenRead opens a regular transcript file without following symlinks inside
+// the agent's resolved store. The caller owns the file and can bound/tail reads.
+func (s *SessionStore) OpenRead(name string) (*os.File, error) {
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return osroot.OpenNoFollow(root, name) //nolint:wrapcheck // preserve missing-file and containment errors
+}
+
 // ReadFile reads name from the store.
 func (s *SessionStore) ReadFile(name string) ([]byte, error) {
 	root, err := s.openRoot()

@@ -44,10 +44,47 @@ Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one
 
 ## Local agent logs
 
+### Automatic experimental capture
+
+Supported Claude Code, Codex, and Pi sessions automatically stream when their
+worktree branch has a discoverable project Trail/change parent. There is no
+separate streaming toggle. **Linking work to a Trail shares its session output
+with everyone who can read that Trail**, not only repository readers. Ordinary
+Entire enablement still applies; unsupported agents and unlinked branches do not
+upload. The frontend feature flag controls the viewer, not this lifecycle policy.
+
+Turn-start/end and tool-use hooks launch a detached publisher for the exact
+recorded session. Successful `trail create`/`link` also starts it mid-turn when
+the caller is positively identified and the linked branch is the current local
+branch. No newest-session fallback is allowed. A per-session advisory lock
+prevents concurrent publishers. Network/scanner failures never block the agent;
+failed attempts back off for 30 seconds before a later hook retries. Worker
+starts/stops and stream IDs are recorded in `.entire/logs/entire.log`.
+
+The worker opens the transcript through the agent's session-store boundary,
+reuses the manual publisher's redaction/conversion/transport, and checks session,
+worktree, branch, remote and login identity while following appends. Before every
+batch it freshly resolves the branch's parent; unlink, reparent, checkout, or
+unverifiable membership stops upload to the old Trail. Session end/owner exit
+finishes capture. No agent or tool is launched by the publisher.
+
+Initial capture includes the existing session only if it fits the 1 MiB input
+budget. Larger histories start at EOF. Local cursors under the git common dir's
+`entire-live-logs/` hold identity, stream IDs and byte offsets, **not content**.
+A retry resumes at its recorded offset; a new association or transcript starts
+at EOF rather than copying an old history into a new audience. Resumed streams
+report a gap and skip a partial starting line. Cursors advance before upload, so
+crash recovery is at-most-once, not guaranteed delivery. The existing per-stream
+limits still apply: exceeding them stops capture; a later lifecycle hook starts
+a new stream. Workers expire after 55 minutes and are restarted by a later hook.
+File replacement, truncation, or rewriting captured bytes stops capture as well.
+This is not continuous token streaming when the agent has not yet flushed JSONL.
+
+### Explicit stdin publishing
+
 `trail logs publish [<trail>] --share-with-trail --transcript-agent <agent>` reads explicitly selected agent JSONL from stdin;
 `trail logs watch [<trail>] --stream <ULID>` watches the stream ID printed on stderr.
-No agent is launched, and no transcript files or environment variables are read
-for capture. These commands are conservatively classified as **unlisted,
+The manual commands do not launch an agent or discover transcript files. These commands are conservatively classified as **unlisted,
 user-owned** in agent-help; agents must not start publishing on their own.
 
 ```sh
