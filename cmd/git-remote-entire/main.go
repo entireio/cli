@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -372,7 +373,7 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 //   - Git credential helper: use its password as the bearer, with the same
 //     cluster trust checks. Lookup uses the original entire:// repository URL.
 //   - otherwise: resolve the login context for this cluster from contexts.json
-//     and use its refreshed login JWT.
+//     and use its refreshed login JWT, unless ENTIRE_GIT_NO_LOGIN_FALLBACK is true.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
 	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,
 	// not Getenv, so we can tell set-empty from unset), we commit to the
@@ -390,12 +391,26 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 		return resolveTokenCreds(ctx, envToken, auth.EnvTokenVar, parsedURL.Host, userdirs.Cache(), httpClient)
 	}
 
+	// Git cannot distinguish an absent credential from some broken helpers.
+	// CI can disable saved-login fallback to avoid substituting a personal identity.
+	noLoginFallback := false
+	if raw, ok := os.LookupEnv("ENTIRE_GIT_NO_LOGIN_FALLBACK"); ok {
+		var err error
+		noLoginFallback, err = strconv.ParseBool(raw)
+		if err != nil {
+			return nil, nil, errors.New("ENTIRE_GIT_NO_LOGIN_FALLBACK must be a boolean (true or false)")
+		}
+	}
+
 	token, err := gitCredentialToken(ctx, parsedURL)
 	if err != nil {
 		return nil, nil, err
 	}
 	if token != "" {
 		return resolveTokenCreds(ctx, token, "git credential helper token", parsedURL.Host, userdirs.Cache(), httpClient)
+	}
+	if noLoginFallback {
+		return nil, nil, errors.New("git credential lookup returned no usable credential; saved-login fallback is disabled by ENTIRE_GIT_NO_LOGIN_FALLBACK")
 	}
 
 	// Resolve which login context authenticates this cluster: the cluster's
@@ -457,7 +472,7 @@ func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
 			if (strings.HasPrefix(diagnostic, "fatal: could not read Username for '") ||
 				strings.HasPrefix(diagnostic, "fatal: could not read Password for '")) &&
 				strings.HasSuffix(diagnostic, "': terminal prompts disabled") && !strings.ContainsAny(diagnostic, "\r\n") {
-				debuglog.Printf("Git credential lookup returned no credential; trying saved login")
+				debuglog.Printf("Git credential lookup returned no credential")
 				return "", nil
 			}
 			return "", fmt.Errorf("git credential lookup failed (exit %d)", exitErr.ExitCode())

@@ -499,6 +499,7 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 		helper      string
 		username    string
 		urlUsername string
+		noFallback  string
 		wantErr     string
 	}{
 		{name: "credential helper", helper: core},
@@ -513,12 +514,26 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 		{name: "helper refuses", helper: "quit", wantErr: "git credential lookup failed"},
 		{name: "broken Git config", helper: "bad-config", wantErr: "git credential lookup failed"},
 		{name: "no credential falls back to login", wantErr: "no auth context"},
+		{name: "fallback explicitly allowed", noFallback: "false", wantErr: "no auth context"},
+		{name: "fallback disabled without credential", noFallback: "true", wantErr: "saved-login fallback is disabled"},
+		{name: "fallback disabled on silent failure", helper: "silent-failure", noFallback: "1", wantErr: "saved-login fallback is disabled"},
+		{name: "fallback disabled on partial credential", helper: "password-only", noFallback: "true", wantErr: "saved-login fallback is disabled"},
+		{name: "fallback disabled on expired credential", helper: "expired", noFallback: "true", wantErr: "saved-login fallback is disabled"},
+		{name: "helper works with fallback disabled", helper: core, noFallback: "true"},
+		{name: "environment wins with fallback disabled", env: core, helper: "quit", noFallback: "true"},
+		{name: "invalid fallback setting fails closed", noFallback: "typo", wantErr: "ENTIRE_GIT_NO_LOGIN_FALLBACK must be a boolean"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gitenv.IsolateRepository(t)
 			t.Chdir(t.TempDir())
 			t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("ENTIRE_GIT_NO_LOGIN_FALLBACK", tc.noFallback)
+			if tc.noFallback == "" {
+				if err := os.Unsetenv("ENTIRE_GIT_NO_LOGIN_FALLBACK"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			t.Setenv(auth.EnvTokenVar, "")
 			if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
 				t.Fatal(err)
@@ -563,6 +578,14 @@ fi
 			}
 			if tc.helper == "bad-config" {
 				t.Setenv("GIT_CONFIG_COUNT", "invalid")
+			}
+			switch tc.helper {
+			case "silent-failure":
+				t.Setenv("GIT_CONFIG_VALUE_0", `!f() { cat >/dev/null; exit 1; }; f`)
+			case "password-only":
+				t.Setenv("GIT_CONFIG_VALUE_0", `!f() { cat >/dev/null; printf 'password=%s\n' "$TEST_GIT_CREDENTIAL"; }; f`)
+			case "expired":
+				t.Setenv("GIT_CONFIG_VALUE_0", `!f() { cat >/dev/null; printf 'username=ci\npassword=%s\npassword_expiry_utc=1\n' "$TEST_GIT_CREDENTIAL"; }; f`)
 			}
 			want := token
 			if tc.env != "" {
