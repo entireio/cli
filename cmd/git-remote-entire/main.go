@@ -20,11 +20,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"strings"
@@ -33,6 +35,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
@@ -366,6 +369,8 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 //   - ENTIRE_TOKEN set: use the env JWT verbatim. Skips contexts.json and the
 //     keyring entirely — the CI / workload path. A non-URL aud is a hard error,
 //     never a silent fallback to context resolution.
+//   - Git credential helper: use its password as the bearer, with the same
+//     cluster trust checks. Lookup uses the original entire:// repository URL.
 //   - otherwise: resolve the login context for this cluster from contexts.json
 //     and use its refreshed login JWT.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
@@ -383,6 +388,18 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 			return nil, nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
 		}
 		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
+	}
+
+	token, err := gitCredentialToken(ctx, parsedURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	if token != "" {
+		provider, onUnauthorized, err := resolveEnvTokenCreds(ctx, token, parsedURL.Host, userdirs.Cache(), httpClient)
+		if err != nil {
+			return nil, nil, fmt.Errorf("git credential helper token: %w", err)
+		}
+		return provider, onUnauthorized, nil
 	}
 
 	// Resolve which login context authenticates this cluster: the cluster's
@@ -407,6 +424,46 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	debuglog.Printf("auth: login token bearer (core=%s)", clusterCtx.CoreURL)
 	provider, onUnauthorized := refreshingProvider(loginCredential)
 	return provider, onUnauthorized, nil
+}
+
+func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
+	username := "x-access-token"
+	if repoURL.User != nil {
+		username = repoURL.User.Username()
+	}
+	for _, value := range []string{repoURL.Host, repoURL.Path, username} {
+		if strings.ContainsAny(value, "\r\n\x00") {
+			return "", errors.New("invalid control character in Git credential lookup")
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := execx.NonInteractive(ctx, "git", "-c", "core.askPass=", "credential", "fill")
+	cmd.WaitDelay = execx.KillWaitDelay
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=")
+	cmd.Stdin = strings.NewReader(fmt.Sprintf("protocol=entire\nhost=%s\npath=%s\nusername=%s\n\n",
+		repoURL.Host, strings.TrimPrefix(repoURL.Path, "/"), username))
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git credential lookup: %w", ctx.Err())
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			debuglog.Printf("Git credential lookup returned no credential; trying saved login")
+			return "", nil
+		}
+		return "", fmt.Errorf("run Git credential lookup: %w", err)
+	}
+	for line := range strings.SplitSeq(string(output), "\n") {
+		if token, ok := strings.CutPrefix(line, "password="); ok {
+			if token == "" || strings.ContainsAny(token, "\r\x00") {
+				return "", errors.New("git credential helper returned an invalid token")
+			}
+			return token, nil
+		}
+	}
+	return "", errors.New("git credential helper returned no password")
 }
 
 // resolveEnvTokenCreds returns a fixed ENTIRE_TOKEN provider after validating

@@ -306,6 +306,12 @@ ENTIRE_TOKEN=<login-or-sa-session-JWT> entire ...
 
 `ENTIRE_TOKEN` bypasses stored credentials; the CLI derives the control-plane endpoint from the token itself. Nothing is written to disk. This is the right path for CI pipelines and service accounts.
 
+### Git credential helpers
+
+`git-remote-entire` also accepts tokens from Git's configured `credential.helper`. When `ENTIRE_TOKEN` is unset, it calls `git credential fill` with `protocol=entire`, the original cluster host (including its port), the repository path without its leading slash, and username `x-access-token` unless the URL supplies one. It uses the returned password as its bearer token, after the same cluster trust checks used for `ENTIRE_TOKEN`. There is no HTTPS URL translation or agent-side token exchange.
+
+The lookup is non-interactive and has a 30-second timeout. If Git cannot supply credentials, the helper tries the existing Entire saved login. A supplied but invalid token fails rather than falling back to another identity. The token is read once per remote-helper invocation; mint a fresh token for later Git operations as needed. The remote helper does not approve, store or erase Git credentials. `ENTIRE_TOKEN`, including a set-but-empty value, always takes precedence.
+
 > **Seeing `save login` / `failed to unlock correct collection` errors from `entire login`?** That's the OS keyring being unavailable — use one of the two paths above.
 
 ## Commands Reference

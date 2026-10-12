@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 )
 
 func TestInfoFlagText(t *testing.T) {
@@ -482,6 +484,85 @@ func TestResolveEnvTokenCreds_DoesNotRequireJurisdictionAudience(t *testing.T) {
 	}
 	if got != envToken {
 		t.Errorf("creds = %q, want ENTIRE_TOKEN verbatim", got)
+	}
+}
+
+func TestResolveCreds_GitCredentialHelper(t *testing.T) {
+	const core = "https://core.us.entire.io"
+	for _, tc := range []struct {
+		name    string
+		env     string
+		helper  string
+		wantErr string
+	}{
+		{name: "credential helper", helper: core},
+		{name: "environment wins", env: core, helper: "https://untrusted.example"},
+		{name: "untrusted credential", helper: "https://untrusted.example", wantErr: "not a trusted login server"},
+		{name: "malformed credential", helper: "malformed", wantErr: "git credential helper token"},
+		{name: "no credential falls back to login", wantErr: "no auth context"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gitenv.IsolateRepository(t)
+			t.Chdir(t.TempDir())
+			t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv(auth.EnvTokenVar, "")
+			if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
+				t.Fatal(err)
+			}
+			client, host := wellKnownServer(t, []string{core}, "", "")
+			token := makeTestJWT(t, tc.helper)
+			if tc.helper == "malformed" {
+				token = "not-a-jwt"
+			}
+			t.Setenv("TEST_GIT_CREDENTIAL", token)
+			t.Setenv("GIT_CONFIG_COUNT", "1")
+			t.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
+			t.Setenv("GIT_CONFIG_VALUE_0", `!f() {
+protocol= host= path=
+while IFS= read -r line; do
+  case "$line" in
+    protocol=*) protocol=${line#protocol=} ;;
+    host=*) host=${line#host=} ;;
+    path=*) path=${line#path=} ;;
+  esac
+done
+if test "$protocol" = entire && test "$host" = cluster.entire.io && test "$path" = et/acme/api; then
+  printf 'username=x-access-token\npassword=%s\n' "$TEST_GIT_CREDENTIAL"
+fi
+}; f`)
+			if tc.helper == "" {
+				t.Setenv("GIT_CONFIG_VALUE_0", "")
+			}
+			want := token
+			if tc.env != "" {
+				want = makeTestJWT(t, tc.env)
+				t.Setenv(auth.EnvTokenVar, want)
+			}
+			creds, _, err := resolveCreds(t.Context(), &url.URL{Scheme: "entire", Host: host, Path: "/et/acme/api"}, false, client)
+			if tc.wantErr != "" {
+				if err == nil || creds != nil {
+					t.Fatal("invalid helper token must fail closed")
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://replica.entire.io/et/acme/api/info/refs?service=git-upload-pack", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := setAuthWithProvider(creds)(req); err != nil {
+				t.Fatal(err)
+			}
+			if got := req.Header.Get("Authorization"); got != "Bearer "+want {
+				t.Fatal("git request did not receive the selected bearer")
+			}
+		})
 	}
 }
 
