@@ -443,7 +443,9 @@ func resolvedRemovedTempDir(t *testing.T) string {
 func resolvedTempDir(t *testing.T) string {
 	t.Helper()
 
-	dir := t.TempDir()
+	// Also the base of linked worktrees, which InitRepo does not cover and
+	// whose .entire the code under test opens roots in.
+	dir := testutil.TempDir(t)
 	resolved, err := filepath.EvalSymlinks(dir)
 	require.NoError(t, err)
 	return filepath.ToSlash(resolved)
