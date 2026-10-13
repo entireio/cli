@@ -138,20 +138,22 @@ func TestCalculateTokenUsage_NoDoubleCountAcrossSources(t *testing.T) {
 	}
 }
 
-func TestCalculateTokenUsage_ResumedSessionSumsEachRunOnce(t *testing.T) {
+func TestCalculateTokenUsage_PerRunShutdownsAreSummed(t *testing.T) {
 	t.Parallel()
 	ag := &CopilotCLIAgent{}
 
-	// A resumed session appends one shutdown per process run, each covering
-	// only its own run. The live run after the last shutdown has no aggregate
-	// yet and is counted per call.
+	// Copilot CLI 1.0.3 appended one shutdown per process run, each covering
+	// only that run: its request count equals the run's assistant.message
+	// count. The live run after the last shutdown is counted per call.
 	lines := []string{
 		`{"type":"assistant.message","data":{"outputTokens":10},"id":"1"}`,
 		`{"type":"session.shutdown","data":{"modelMetrics":{"m":{"requests":{"count":1},"usage":{"inputTokens":500,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":400}}}},"id":"2"}`,
 		`{"type":"session.shutdown","data":{"modelMetrics":{}},"id":"3"}`,
-		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"a","inputTokens":700,"outputTokens":20,"cacheReadTokens":400,"cacheWriteTokens":200}},"id":"4"}`,
-		`{"type":"session.shutdown","data":{"modelMetrics":{"m":{"requests":{"count":1},"usage":{"inputTokens":700,"outputTokens":20,"cacheReadTokens":400,"cacheWriteTokens":200}}}},"id":"5"}`,
-		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"b","inputTokens":900,"outputTokens":5,"cacheReadTokens":600,"cacheWriteTokens":250}},"id":"6"}`,
+		`{"type":"assistant.message","data":{"outputTokens":20},"id":"4"}`,
+		`{"type":"assistant.message","data":{"outputTokens":30},"id":"5"}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"m":{"requests":{"count":2},"usage":{"inputTokens":1500,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":500}}}},"id":"6"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"b","inputTokens":900,"outputTokens":5,"cacheReadTokens":600,"cacheWriteTokens":250}},"id":"7"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"b"},"id":"8"}`,
 	}
 	content := []byte(strings.Join(lines, "\n") + "\n")
 
@@ -159,11 +161,96 @@ func TestCalculateTokenUsage_ResumedSessionSumsEachRunOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, agent.TokenUsage{
 		InputTokens:         100 + 100 + 50,
-		CacheReadTokens:     0 + 400 + 600,
-		CacheCreationTokens: 400 + 200 + 250,
-		OutputTokens:        10 + 20 + 5,
-		APICallCount:        3,
+		CacheReadTokens:     0 + 900 + 600,
+		CacheCreationTokens: 400 + 500 + 250,
+		OutputTokens:        10 + 50 + 5,
+		APICallCount:        4,
 	}, *usage)
+}
+
+// Copilot CLI 1.0.97 appends `--resume` runs to the same events.jsonl, and the
+// second session.shutdown is cumulative: it repeats the first run's calls.
+// Summing the two shutdowns counted prompts 1-3 twice.
+const resumedSessionFixture = "testdata/usage_record_resumed_session.jsonl"
+
+// Ground truth for resumedSessionFixture: its usage records summed, which
+// equals the second (cumulative) shutdown normalized to fresh input.
+var resumedSessionTotal = agent.TokenUsage{
+	InputTokens: 64, CacheReadTokens: 151364, CacheCreationTokens: 23237, OutputTokens: 898, APICallCount: 8,
+}
+
+func TestCalculateTokenUsage_CumulativeShutdownAfterResume(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+	data, err := os.ReadFile(resumedSessionFixture)
+	require.NoError(t, err)
+
+	full, err := ag.CalculateTokenUsage(data, 0)
+	require.NoError(t, err)
+	require.Equal(t, resumedSessionTotal, *full)
+
+	// Checkpoint slices count only their own records and still add up.
+	lines := bytes.SplitAfter(bytes.TrimRight(data, "\n"), []byte("\n"))
+	var offsets []int
+	for i, line := range lines {
+		if bytes.Contains(line, []byte(`"hookType":"userPromptSubmitted"`)) {
+			offsets = append(offsets, i)
+		}
+	}
+	require.Len(t, offsets, 4)
+	var sum *agent.TokenUsage
+	for i, from := range offsets {
+		end := len(lines)
+		if i+1 < len(offsets) {
+			end = offsets[i+1]
+		}
+		usage, err := ag.CalculateTokenUsage(sliceTranscript(data, end), from)
+		require.NoError(t, err)
+		sum = types.AddTokenUsage(sum, usage)
+	}
+	require.Equal(t, resumedSessionTotal, *sum)
+}
+
+func TestCalculateTokenUsage_CumulativeShutdownWithoutUsageRecords(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+	data, err := os.ReadFile(resumedSessionFixture)
+	require.NoError(t, err)
+
+	// Releases without per-call token data (seen 1.0.83-1.0.93) leave only the
+	// shutdowns. The cumulative second shutdown must still not be added on
+	// top of the first.
+	var kept []string
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if !strings.Contains(line, eventTypeUsageRecord) {
+			kept = append(kept, line)
+		}
+	}
+	usage, err := ag.CalculateTokenUsage([]byte(strings.Join(kept, "\n")+"\n"), 0)
+	require.NoError(t, err)
+	require.Equal(t, resumedSessionTotal, *usage)
+}
+
+func TestCalculateTokenUsage_UnattributableShutdownFallsBackToPerCall(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	// The second shutdown's request count (5) is neither its run's message
+	// count (1) nor the session's (2), so it is ignored and its run is counted
+	// from its usage record.
+	lines := []string{
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"a","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":90}},"id":"1"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"a"},"id":"2"}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"m":{"requests":{"count":1},"usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":90}}}},"id":"3"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"b","inputTokens":200,"outputTokens":20,"cacheReadTokens":90,"cacheWriteTokens":100}},"id":"4"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"b"},"id":"5"}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"m":{"requests":{"count":5},"usage":{"inputTokens":9000,"outputTokens":900,"cacheReadTokens":0,"cacheWriteTokens":0}}}},"id":"6"}`,
+	}
+	content := []byte(strings.Join(lines, "\n") + "\n")
+
+	usage, err := ag.CalculateTokenUsage(content, 0)
+	require.NoError(t, err)
+	require.Equal(t, agent.TokenUsage{InputTokens: 20, CacheReadTokens: 90, CacheCreationTokens: 190, OutputTokens: 30, APICallCount: 2}, *usage)
 }
 
 func TestCalculateTokenUsage_UsageRecordClampsInconsistentInput(t *testing.T) {

@@ -324,8 +324,9 @@ func (c copilotTokenCounts) toTokenUsage(apiCalls int) *agent.TokenUsage {
 }
 
 // sessionShutdownData is the data payload for session.shutdown events.
-// Contains aggregate model metrics for one Copilot process run (a resumed
-// session appends one shutdown per run, each covering only that run).
+// Contains aggregate model metrics. A resumed session appends one shutdown per
+// process run; whether each covers only its run or the whole session so far
+// depends on the Copilot release (see extractTokenUsageFromEvents).
 // modelMetrics is a JSON object keyed by model name (e.g. "claude-sonnet-4.6"),
 // not an array — using map[string] here matches the real Copilot CLI wire format.
 type sessionShutdownData struct {
@@ -372,10 +373,10 @@ const (
 //
 // Per-call usage comes from session.usage_record events, falling back to
 // assistant.message outputTokens for releases that predate usage records. For
-// full transcripts (fromOffset == 0), a session.shutdown aggregate replaces
-// the per-call counts of the run it closes. Sliced transcripts never read
-// session.shutdown: it is not checkpoint-scoped, and would count every earlier
-// checkpoint's calls again.
+// full transcripts (fromOffset == 0), session.shutdown aggregates fill in what
+// the per-call sources cannot (see extractTokenUsageFromEvents). Sliced
+// transcripts never read session.shutdown: it is not checkpoint-scoped, and
+// would count every earlier checkpoint's calls again.
 func (c *CopilotCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
 	events, err := parseEventsFromOffset(transcriptData, fromOffset)
 	if err != nil {
@@ -385,20 +386,47 @@ func (c *CopilotCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset 
 	return extractTokenUsageFromEvents(events, fromOffset == 0), nil
 }
 
-// extractTokenUsageFromEvents sums token usage over parsed events.
+// copilotRun accumulates the per-call usage of the events between two
+// session.shutdown events (or the transcript edges).
+type copilotRun struct {
+	usage    *agent.TokenUsage // usage records, plus outputTokens for calls without one
+	messages int               // assistant.message events: one per API call
+	records  int               // session.usage_record events
+}
+
+// extractTokenUsageFromEvents sums token usage over parsed events, counting
+// every API call from exactly one source.
 //
-// Every API call is counted from exactly one source. The events are walked as
-// runs separated by session.shutdown: with preferSessionShutdown, a usable
-// shutdown aggregate replaces the per-call counts accumulated since the
-// previous shutdown, and an unusable one (unparseable, or no model metrics)
-// keeps them. Calls after the last shutdown — the live run — are always
-// counted per call. Within per-call counting, an assistant.message outputTokens
-// value is skipped when a usage record covers the same call.
+// Per call, a session.usage_record wins; an assistant.message outputTokens
+// value is counted only when no usage record covers the same call.
+//
+// With preferSessionShutdown, the events are walked as runs separated by
+// session.shutdown. A shutdown's modelMetrics covers either only its own run
+// (observed on Copilot CLI 1.0.3) or everything since the session started
+// (observed on 1.0.97, where `--resume` appends to the same file). Rather than
+// assume one by version, each shutdown is classified by its request count,
+// which equals the number of assistant.message events it covers on every
+// release observed: the messages since the previous shutdown (per run) or
+// since the start (cumulative). Its share of this run is then the shutdown
+// itself, or the shutdown minus what earlier shutdowns already covered.
+//
+// A run whose every call has a usage record is counted from the records, which
+// are exact. Otherwise the shutdown's share stands in for the run, since it
+// carries the input and cache counts the older per-call source lacks. A
+// shutdown that is unusable, or whose request count matches neither reading,
+// is ignored and its run is counted per call. The run after the last shutdown
+// is always counted per call.
 func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bool) *agent.TokenUsage {
 	recordedCalls, haveRecords := usageRecordCallIDs(events)
 
 	total := &agent.TokenUsage{}
-	run := &agent.TokenUsage{}
+	// covered is what all shutdowns so far account for, cumulatively, and
+	// coveredMessages the assistant.message count over the same span.
+	covered := &agent.TokenUsage{}
+	coveredMessages := 0
+	sawShutdown := false
+	run := copilotRun{usage: &agent.TokenUsage{}}
+
 	for i := range events {
 		switch events[i].Type {
 		case eventTypeUsageRecord:
@@ -406,9 +434,11 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 			if err := json.Unmarshal(events[i].Data, &data); err != nil {
 				continue
 			}
-			run = types.AddTokenUsage(run, data.Usage.toTokenUsage(1))
+			run.records++
+			run.usage = types.AddTokenUsage(run.usage, data.Usage.toTokenUsage(1))
 
 		case eventTypeAssistantMsg:
+			run.messages++
 			var data assistantMessageTokenData
 			if err := json.Unmarshal(events[i].Data, &data); err != nil || data.OutputTokens <= 0 {
 				continue
@@ -416,20 +446,54 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 			if recordedCalls[data.APICallID] || (data.APICallID == "" && haveRecords) {
 				continue // counted from its session.usage_record
 			}
-			run = types.AddTokenUsage(run, &agent.TokenUsage{OutputTokens: data.OutputTokens, APICallCount: 1})
+			run.usage = types.AddTokenUsage(run.usage, &agent.TokenUsage{OutputTokens: data.OutputTokens, APICallCount: 1})
 
 		case eventTypeSessionShutdown:
 			if !preferSessionShutdown {
 				continue
 			}
-			if shutdown := sessionShutdownUsage(events[i].Data); shutdown != nil {
-				run = shutdown
+			share := shutdownShare(sessionShutdownUsage(events[i].Data), covered, coveredMessages, run.messages, sawShutdown)
+			sawShutdown = true
+			runUsage := run.usage
+			if share != nil && (run.records == 0 || run.records < run.messages) {
+				runUsage = share
 			}
-			total = types.AddTokenUsage(total, run)
-			run = &agent.TokenUsage{}
+			total = types.AddTokenUsage(total, runUsage)
+			if share == nil {
+				share = run.usage
+			}
+			covered = types.AddTokenUsage(covered, share)
+			coveredMessages += run.messages
+			run = copilotRun{usage: &agent.TokenUsage{}}
 		}
 	}
-	return types.AddTokenUsage(total, run)
+	return types.AddTokenUsage(total, run.usage)
+}
+
+// shutdownShare returns the part of a session.shutdown aggregate that belongs to
+// the run it closes, or nil when the shutdown cannot be attributed: no usable
+// metrics, or a request count that matches neither the run's messages (a
+// per-run aggregate) nor every message since the start (a cumulative one).
+// The first shutdown in a transcript reads the same either way.
+func shutdownShare(shutdown, covered *agent.TokenUsage, coveredMessages, runMessages int, sawShutdown bool) *agent.TokenUsage {
+	switch {
+	case shutdown == nil:
+		return nil
+	case !sawShutdown || shutdown.APICallCount == runMessages:
+		return shutdown
+	case shutdown.APICallCount == coveredMessages+runMessages:
+		return &agent.TokenUsage{
+			InputTokens:         max(0, shutdown.InputTokens-covered.InputTokens),
+			CacheCreationTokens: max(0, shutdown.CacheCreationTokens-covered.CacheCreationTokens),
+			CacheReadTokens:     max(0, shutdown.CacheReadTokens-covered.CacheReadTokens),
+			OutputTokens:        max(0, shutdown.OutputTokens-covered.OutputTokens),
+			APICallCount:        runMessages,
+		}
+	default:
+		logging.Debug(context.Background(), "copilot-cli: session.shutdown request count matches neither its run nor the session; counting the run per call",
+			"requests", shutdown.APICallCount, "runMessages", runMessages, "sessionMessages", coveredMessages+runMessages)
+		return nil
+	}
 }
 
 // usageRecordCallIDs returns the API call IDs that have a session.usage_record,
