@@ -14,6 +14,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const expectedTrailRetargetWarning = "Warning: retargeting may close an Entire-owned shadow proposal and clear the tracked proposal association; human-authored PRs are not closed."
+
+func TestTrailRetargetHelpDisclosesProposalCleanup(t *testing.T) {
+	t.Parallel()
+	for _, project := range []bool{false, true} {
+		t.Run(fmt.Sprintf("project=%t", project), func(t *testing.T) {
+			t.Parallel()
+			cmd := newTrailCmdForMode(project)
+			var out, errOut bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			cmd.SetArgs([]string{"retarget", "--help"})
+			require.NoError(t, cmd.Execute())
+			require.Contains(t, out.String(), expectedTrailRetargetWarning)
+			require.Empty(t, errOut.String())
+		})
+	}
+}
+
 func TestTrailRetargetWithoutReadingOldBase(t *testing.T) {
 	// Serial: replaces API client constructors.
 	for _, project := range []bool{false, true} {
@@ -34,12 +53,15 @@ func TestTrailRetargetWithoutReadingOldBase(t *testing.T) {
 					path = "/api/v1/repos/repo-id/trails/7"
 				}
 				patches := 0
+				var out, errOut bytes.Buffer
 				setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 					switch r.Method + " " + r.URL.Path {
 					case "GET " + path:
 						assert.False(t, project)
 						assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work", Base: "deleted/merged-parent", Status: "open"}))
 					case "PATCH " + path:
+						assert.Equal(t, expectedTrailRetargetWarning+"\n", errOut.String(), "warning must be visible before server mutation")
+						assert.Empty(t, out.String(), "success must not be reported before server mutation")
 						patches++
 						var body map[string]any
 						assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
@@ -51,9 +73,8 @@ func TestTrailRetargetWithoutReadingOldBase(t *testing.T) {
 					}
 				})
 				cmd := newTrailCmdForMode(project)
-				var out bytes.Buffer
 				cmd.SetOut(&out)
-				cmd.SetErr(&bytes.Buffer{})
+				cmd.SetErr(&errOut)
 				args := []string{"retarget", selector, "--repo", forge + "/acme/widget", "--base", "main"}
 				if project {
 					args = append(args, "--project", "gh/acme")
@@ -63,6 +84,7 @@ func TestTrailRetargetWithoutReadingOldBase(t *testing.T) {
 				require.Equal(t, 1, patches)
 				require.Contains(t, out.String(), "trail #"+selector)
 				require.Contains(t, out.String(), "main")
+				require.NotContains(t, out.String(), expectedTrailRetargetWarning, "runtime warning belongs only on stderr")
 			})
 		}
 	}
@@ -88,10 +110,14 @@ func TestTrailRetargetRejectsInvalidInputBeforeRequests(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cmd := newTrailCmdForMode(false)
-			cmd.SetOut(&bytes.Buffer{})
-			cmd.SetErr(&bytes.Buffer{})
+			var out, errOut bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			cmd.SilenceUsage = true
 			cmd.SetArgs(tt.args)
 			require.ErrorContains(t, cmd.Execute(), tt.failure)
+			require.Empty(t, out.String())
+			require.NotContains(t, errOut.String(), expectedTrailRetargetWarning)
 		})
 	}
 }
@@ -132,9 +158,9 @@ func TestTrailRetargetDegenerateTargets(t *testing.T) {
 				}
 			})
 			cmd := newTrailCmdForMode(false)
-			var out bytes.Buffer
+			var out, errOut bytes.Buffer
 			cmd.SetOut(&out)
-			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetErr(&errOut)
 			cmd.SilenceUsage = true
 			cmd.SetArgs([]string{"retarget", "7", "--repo", "gh/acme/widget", "--base", "main"})
 			err := cmd.Execute()
@@ -146,6 +172,12 @@ func TestTrailRetargetDegenerateTargets(t *testing.T) {
 				require.Contains(t, out.String(), "main")
 			}
 			require.Equal(t, tt.patches, patches)
+			if tt.patches == 0 {
+				require.NotContains(t, errOut.String(), expectedTrailRetargetWarning, "no-ops and rejections must not warn about a mutation")
+				if tt.failure == "" {
+					require.Empty(t, errOut.String())
+				}
+			}
 		})
 	}
 }
@@ -197,21 +229,23 @@ func TestTrailRetargetMutationFailureDoesNotReportSuccess(t *testing.T) {
 	for _, code := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusConflict, http.StatusInternalServerError} {
 		t.Run(strconv.Itoa(code), func(t *testing.T) {
 			patches := 0
+			var out, errOut bytes.Buffer
 			setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodGet {
 					assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{Number: 7, Branch: "feature/work", Base: "old", Status: "open"}))
 					return
 				}
 				assert.Equal(t, http.MethodPatch, r.Method)
+				assert.Equal(t, expectedTrailRetargetWarning+"\n", errOut.String(), "even rejected mutations must be preceded by the warning")
+				assert.Empty(t, out.String())
 				patches++
 				w.WriteHeader(code)
 				_, err := fmt.Fprint(w, `{"error":"target rejected"}`)
 				assert.NoError(t, err)
 			})
 			cmd := newTrailCmdForMode(false)
-			var out bytes.Buffer
 			cmd.SetOut(&out)
-			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetErr(&errOut)
 			cmd.SilenceUsage = true
 			cmd.SetArgs([]string{"retarget", "7", "--repo", "gh/acme/widget", "--base", "main"})
 			require.Error(t, cmd.Execute())

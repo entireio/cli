@@ -902,6 +902,11 @@ target. Selection follows approvals: legacy mode defaults to the current branch
 uses the shared working-context resolver and permits `--branch` to disambiguate
 within a project trail. `--repo` requires an explicit target.
 
+Retargeting may close an Entire-owned shadow proposal and clear the tracked
+proposal association; human-authored PRs are not closed. The command discloses
+this in `--help` and warns on stderr immediately before an actual PATCH, after
+all validation and no-op checks. It does not prompt.
+
 The base must be a non-empty literal branch name, not a local reflog expression.
 Unchanged targets are successful no-ops. Branchless, closed, merged, and
 self-targeting work are refused before mutation. API errors are returned without

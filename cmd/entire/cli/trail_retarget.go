@@ -10,6 +10,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const trailRetargetWarning = "Warning: retargeting may close an Entire-owned shadow proposal and clear the tracked proposal association; human-authored PRs are not closed."
+
 func newTrailRetargetCmd(mode *trailMode) *cobra.Command {
 	var branch, base string
 	cmd := &cobra.Command{
@@ -17,7 +19,7 @@ func newTrailRetargetCmd(mode *trailMode) *cobra.Command {
 		Short: "Change a trail's target base branch",
 		Long: "Change a trail's target base branch, for example after its previous target was merged.\n\n" + mode.help(
 			"If <trail> is omitted, targets the trail for the current branch (or --branch).",
-			"<trail> is a project trail number, ID, or <repo>/<number>. Without one, follow the current branch's parent. --repo and --branch select one working context; only that branch's target is changed.") + "\n\nThis updates Trail metadata through the API. It does not rebase, check out, fetch, or push local Git branches. The selected work must have a linked branch and must not be closed or merged. The old target need not exist. An unchanged target is a no-op.",
+			"<trail> is a project trail number, ID, or <repo>/<number>. Without one, follow the current branch's parent. --repo and --branch select one working context; only that branch's target is changed.") + "\n\nThis updates Trail metadata through the API. It does not rebase, check out, fetch, or push local Git branches. The selected work must have a linked branch and must not be closed or merged. The old target need not exist. An unchanged target is a no-op.\n\n" + trailRetargetWarning,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			base = strings.TrimPrefix(strings.TrimSpace(base), "refs/heads/")
@@ -48,6 +50,7 @@ func newTrailRetargetCmd(mode *trailMode) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s already targets %s\n", selected.description(), tuiutil.SanitizeTerminalLabel(base))
 				return nil
 			}
+			fmt.Fprintln(cmd.ErrOrStderr(), trailRetargetWarning)
 			if err := sendTrailPatch(cmd.Context(), selected.Client, trailNumberPathForBase(selected.BasePath, selected.Work.Number), api.TrailUpdateRequest{Base: &base}); err != nil {
 				return err
 			}
