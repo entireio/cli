@@ -548,7 +548,10 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 //
 // redactedByPath maps each redactable blob's full tree path (e.g.
 // "ab/cd.../0/full.jsonl") to its OPF-redacted bytes. Only required for
-// unapplied commits; pass nil for already-applied ones.
+// unapplied commits; pass nil for already-applied ones. A non-nil map rebuilds
+// the tree even when the commit already carries the trailer: the checkpoint-ref
+// rewrite passes one for a trailered commit above an unscanned one, whose tree
+// carries that unscanned content whatever its message says.
 //
 // Correctness note: each v1 commit tree is cumulative. During a multi-commit
 // rewrite, the newest original commit can still contain older shards that were
@@ -557,7 +560,7 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 // reintroduce an older un-OPF-redacted shard.
 func rebuildCheckpointCommit(ctx context.Context, repo *git.Repository, oldCommit *object.Commit, parent plumbing.Hash, redactedByPath map[string][]byte) (plumbing.Hash, error) {
 	newTree := oldCommit.TreeHash
-	if !trailers.HasOPFApplied(oldCommit.Message) {
+	if redactedByPath != nil || !trailers.HasOPFApplied(oldCommit.Message) {
 		tree, err := repo.TreeObject(oldCommit.TreeHash)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("load tree: %w", err)

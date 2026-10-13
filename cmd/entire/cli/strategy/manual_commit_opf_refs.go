@@ -12,28 +12,28 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// RewriteQueuedCheckpointRefsWithOPF re-redacts the checkpoint refs awaiting
-// push with OPF, rebuilds every un-applied commit on each as a commit carrying
+// rewriteQueuedCheckpointRefsWithOPF re-redacts the checkpoint refs awaiting
+// push with OPF, rebuilds the commits each push would send as commits carrying
 // Entire-OPF-Applied: true, and points the ref at the new tip. Idempotent: a
-// ref whose tip already carries the trailer is left byte-identical.
+// ref whose unsent commits all carry the trailer is left byte-identical.
 //
-// Discovery is the push-discovery queue rather than a local-vs-remote diff: it
-// already names exactly the refs this push will carry, so there is no
-// merge-base or divergence analysis. Within a ref, pushing it carries its whole
-// unpushed ancestry, so the walk covers every commit back to the first one
-// already carrying the trailer (unappliedAncestry) — bounded by the same
-// resolveBootstrapLimit the v1 path uses.
+// Discovery is the push-discovery queue: it already names exactly the refs this
+// push will carry. Within a ref, the commits a push sends are those above the
+// destination's tip for it (delivery.remoteTip), or the whole history when the
+// destination lacks the ref or its tips are unknown. The rewrite starts at the
+// deepest of those without the trailer and covers everything above it
+// (opfRewriteChain) — bounded by the same resolveBootstrapLimit the v1 path
+// uses. History the destination already holds is never rewritten: that would
+// make the push non-fast-forward and land the rewritten copy a second time.
 //
 // Each ref is collected, cap-checked, scanned, rebuilt and CAS-updated before
 // the next ref is loaded. Both the raw-memory ceiling and the prose-leaf
@@ -48,7 +48,7 @@ import (
 // Caller checks redact.OPFEnabled() and skips this when OPF is off. Returns
 // the same error taxonomy as RewriteUnpushedV1WithOPF; delivery fails closed by
 // withholding any ref whose current generation still lacks the trailer.
-func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repository) error {
+func rewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repository, delivery *opfDelivery) error {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("resolve push queue: %w", err)
@@ -101,7 +101,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 			break
 		}
 
-		pending, collectErr := collectCheckpointRefForOPF(repo, refName, rawCap, bootstrapLimit)
+		pending, collectErr := collectCheckpointRefForOPF(repo, refName, delivery.remoteTip(refName), rawCap, bootstrapLimit)
 		if collectErr != nil {
 			if errors.Is(collectErr, errNoCheckpointRefOPFWork) {
 				continue
@@ -159,6 +159,7 @@ var errNoCheckpointRefOPFWork = errors.New("checkpoint ref does not need OPF rew
 func collectCheckpointRefForOPF(
 	repo *git.Repository,
 	refName plumbing.ReferenceName,
+	remoteTip plumbing.Hash,
 	rawCap, bootstrapLimit int,
 ) (*pendingOPFRef, error) {
 	ref, err := repo.Reference(refName, true)
@@ -168,7 +169,7 @@ func collectCheckpointRefForOPF(
 		}
 		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
 	}
-	chain, base, err := unappliedAncestry(repo, ref.Hash())
+	chain, base, err := opfRewriteChain(repo, ref.Hash(), remoteTip)
 	if err != nil {
 		return nil, fmt.Errorf("walk ancestry of %s: %w", refName, err)
 	}
@@ -262,31 +263,4 @@ func updateOPFRewrittenRef(
 		return fmt.Errorf("enqueue rewritten checkpoint ref %s: %w", refName, err)
 	}
 	return nil
-}
-
-// unappliedAncestry walks first parents back from a checkpoint ref's tip and
-// returns the commits that do not carry the OPF trailer, ancestor-first, plus
-// the parent the deepest one keeps: the trailered commit the walk stopped at,
-// or zero at a root. Checkpoint refs are a single-parent chain, so the first
-// parent is the whole history.
-func unappliedAncestry(repo *git.Repository, tip plumbing.Hash) ([]*object.Commit, plumbing.Hash, error) {
-	var chain []*object.Commit
-	base := plumbing.ZeroHash
-	for h := tip; !h.IsZero(); {
-		c, err := repo.CommitObject(h)
-		if err != nil {
-			return nil, plumbing.ZeroHash, fmt.Errorf("load commit %s: %w", h.String()[:7], err)
-		}
-		if trailers.HasOPFApplied(c.Message) {
-			base = h
-			break
-		}
-		chain = append(chain, c)
-		if len(c.ParentHashes) == 0 {
-			break
-		}
-		h = c.ParentHashes[0]
-	}
-	slices.Reverse(chain)
-	return chain, base, nil
 }

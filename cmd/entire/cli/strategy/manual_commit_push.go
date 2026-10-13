@@ -17,7 +17,6 @@ import (
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 )
@@ -301,10 +300,10 @@ func opfDecisionForCheckpointRefs(ctx context.Context) (OPFDecision, error) {
 	return decision, nil
 }
 
-func rewriteCheckpointRefsForPush(ctx context.Context, repo *git.Repository) error {
+func rewriteCheckpointRefsForPush(ctx context.Context, repo *git.Repository, delivery *opfDelivery) error {
 	_, opfSpan := perf.Start(ctx, "opf_rewrite_refs")
 	defer opfSpan.End()
-	if err := RewriteQueuedCheckpointRefsWithOPF(ctx, repo); err != nil {
+	if err := rewriteQueuedCheckpointRefsWithOPF(ctx, repo, delivery); err != nil {
 		opfSpan.RecordError(err)
 		return err
 	}
@@ -504,14 +503,18 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		warnOPFCheckpointRefsWithheld(ctx, opfErr, queuedCheckpointRefCount(ctx, repo))
 		return nil
 	}
+	// One read of the destination's tips serves both the rewrite and the
+	// delivery check, so they judge the same "already sent" line.
+	delivery := newOPFDelivery(ctx, repo, ps, opfDecision)
 	if opfDecision == OPFRun && opfErr == nil {
 		// Each queued ref is rewritten and capped on its own, so a ref OPF
 		// cannot finish stays untrailered while its siblings are rewritten.
-		// Delivery below reads each ref's own tip trailer, and exact queue-token
-		// cleanup preserves any generation that advanced during this push.
-		opfErr = rewriteCheckpointRefsForPush(ctx, repo)
+		// Delivery below checks each ref's own unsent commits, and exact
+		// queue-token cleanup preserves any generation that advanced during
+		// this push.
+		opfErr = rewriteCheckpointRefsForPush(ctx, repo, delivery)
 	}
-	flushed, withheld, flushErr := flushCheckpointRefsQueue(ctx, repo, ps, deliveryRequiresOPFTrailer(opfDecision))
+	flushed, withheld, flushErr := flushCheckpointRefsQueue(ctx, repo, ps, delivery)
 	if opfErr != nil {
 		// After the flush, because the count of refs left behind is the flush's
 		// answer to give: it is the one that read each ref's trailer against the
@@ -559,11 +562,12 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	if opfCancelledCheckpointRefs(opfErr) {
 		return 0, false, opfErr
 	}
+	delivery := newOPFDelivery(ctx, repo, ps, opfDecision)
 	if opfDecision == OPFRun && opfErr == nil {
-		opfErr = rewriteCheckpointRefsForPush(ctx, repo)
+		opfErr = rewriteCheckpointRefsForPush(ctx, repo, delivery)
 	}
 	var withheld int
-	pushed, withheld, err = flushCheckpointRefsQueue(ctx, repo, ps, deliveryRequiresOPFTrailer(opfDecision))
+	pushed, withheld, err = flushCheckpointRefsQueue(ctx, repo, ps, delivery)
 	if err != nil {
 		return pushed, false, err
 	}
@@ -580,12 +584,13 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 }
 
 // partitionCheckpointRefPushes captures each queued ref's current immutable tip
-// and, when required, verifies the trailer on that exact hash. The queue token
-// remains attached solely for exact-generation cleanup after delivery.
+// and, when OPF delivery applies, verifies that every commit that tip would
+// send carries the trailer. The queue token remains attached solely for
+// exact-generation cleanup after delivery.
 func partitionCheckpointRefPushes(
 	repo *git.Repository,
 	entries []checkpoint.PushQueueEntry,
-	requireOPFTrailer bool,
+	delivery *opfDelivery,
 ) (ready []checkpointRefPush, awaiting, stale []checkpoint.PushQueueEntry) {
 	ready = make([]checkpointRefPush, 0, len(entries))
 	for _, entry := range entries {
@@ -599,12 +604,9 @@ func partitionCheckpointRefPushes(
 			continue
 		}
 		candidate := checkpointRefPush{token: entry, name: entry.Ref, hash: ref.Hash()}
-		if requireOPFTrailer {
-			commit, commitErr := repo.CommitObject(candidate.hash)
-			if commitErr != nil || !trailers.HasOPFApplied(commit.Message) {
-				awaiting = append(awaiting, entry)
-				continue
-			}
+		if delivery != nil && !delivery.verified(repo, entry.Ref, candidate.hash) {
+			awaiting = append(awaiting, entry)
+			continue
 		}
 		ready = append(ready, candidate)
 	}
@@ -644,7 +646,7 @@ func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEnt
 // surfaces it). Stale entries — refs no longer present locally — are pruned so
 // they don't block the queue forever, whether or not the trailer is required:
 // an absent ref has nothing to redact and nothing to deliver.
-func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, requireOPFTrailer bool) (pushedCount, withheldCount int, err error) {
+func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, delivery *opfDelivery) (pushedCount, withheldCount int, err error) {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return 0, 0, fmt.Errorf("resolve push queue: %w", err)
@@ -657,7 +659,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 		return 0, 0, nil
 	}
 
-	existing, awaiting, stale := partitionCheckpointRefPushes(repo, queued, requireOPFTrailer)
+	existing, awaiting, stale := partitionCheckpointRefPushes(repo, queued, delivery)
 	if len(stale) > 0 {
 		if err := queue.RemoveEntries(stale); err != nil {
 			logging.Warn(ctx, "git-refs push: prune stale queue entries failed",
@@ -761,7 +763,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 			}
 		}
 		attempted++
-		landed, pushErr := pushCheckpointRefWithRecovery(flushCtx, repo, dest.target, ref, requireOPFTrailer)
+		landed, pushErr := pushCheckpointRefWithRecovery(flushCtx, repo, dest.target, ref, delivery)
 		if pushErr != nil {
 			consecutiveFailures++
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",

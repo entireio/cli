@@ -259,11 +259,13 @@ The two backends differ in **how they find the commits to rewrite**:
 | | `git-refs` | `git-branch` |
 |---|---|---|
 | What it walks | Every ref in the push-discovery queue | The `entire/checkpoints/v1` commit chain |
-| Where it stops | The first ancestor already carrying `Entire-OPF-Applied: true` — the trailer is the watermark | The remote's v1 tip, fetched live (not a stale tracking ref) |
-| Already-OPF'd commits | Left byte-identical; they *are* the boundary | Re-parented onto the new chain, but not re-redacted |
+| Where it stops | The destination's tip for that ref, read live with `ls-remote` on the push URL; the whole history when the destination lacks the ref or cannot be read | The remote's v1 tip, fetched live (not a stale tracking ref) |
+| Already-OPF'd commits | Left byte-identical when every commit below them is already on the destination or carries the trailer; re-redacted when they sit on an unscanned commit the destination lacks | Re-parented onto the new chain, but not re-redacted |
 | Ref update | Each queued ref rewritten in place, CAS'd individually | One CAS on the local v1 ref |
 
-In steady state the `git-refs` walk stops at the last commit the previous push OPF'd. That is usually the tip's parent, but not always: each write to a checkpoint advances its ref by one commit, so a turn that creates a checkpoint and then backfills its transcript and summary leaves a three-commit chain to rewrite.
+In steady state the `git-refs` walk stops at the commit the previous push delivered. That is usually the tip's parent, but not always: each write to a checkpoint advances its ref by one commit, so a turn that creates a checkpoint and then backfills its transcript and summary leaves a three-commit chain to rewrite.
+
+The trailer alone is not the boundary on `git-refs`. When another clone wrote the same checkpoint ref with OPF off, recovery replays this clone's commits on top of that clone's unscanned ones, so a trailered commit can sit on history OPF never saw. Pushing that ref to a destination that already holds the history is fine; pushing it anywhere else (a `checkpoint_remote` configured later, say) rescans it, and delivery requires every commit the push would send to carry the trailer, not only the tip. History the destination already holds is never rewritten, so a push stays fast-forward and nothing lands twice. Both the tip read and the recovery fetch ask the repository the push writes to: for a remote with a separate `pushurl`, that is the push URL, not the fetch URL its name reads from. The tip read is bounded at 30 seconds; an unanswered read counts as unknown, so the whole history is checked.
 
 Note that the local ref move is **not** a fast-forward on either backend — the rewritten chain replaces the old commits rather than descending from them, which is exactly why step 3 leaves them unreachable. The *push* is still fast-forward-only and never forced, because the new chain is parented on a commit the remote already has.
 

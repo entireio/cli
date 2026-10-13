@@ -53,7 +53,7 @@ func TestPushCheckpointRefWithRecovery_PreservesRejection(t *testing.T) {
 		name:  refs[0],
 		hash:  ref.Hash(),
 	}
-	_, err = pushCheckpointRefWithRecovery(t.Context(), repo, bareDir, candidate, false)
+	_, err = pushCheckpointRefWithRecovery(t.Context(), repo, bareDir, candidate, nil)
 	require.ErrorContains(t, err, checkpointRejectReason)
 	require.ErrorContains(t, err, checkpointUnblockURL)
 	assert.NotContains(t, err.Error(), "sync diverged")
@@ -78,7 +78,7 @@ func TestPushCheckpointRefWithRecovery_PreservesUnknownFailure(t *testing.T) {
 		name:  refs[0],
 		hash:  ref.Hash(),
 	}
-	_, err = pushCheckpointRefWithRecovery(t.Context(), repo, filepath.Join(t.TempDir(), "missing.git"), candidate, false)
+	_, err = pushCheckpointRefWithRecovery(t.Context(), repo, filepath.Join(t.TempDir(), "missing.git"), candidate, nil)
 	var recoveryErr *checkpointRefRecoveryError
 	require.ErrorAs(t, err, &recoveryErr)
 	require.ErrorIs(t, err, recoveryErr.pushErr)

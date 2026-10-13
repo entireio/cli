@@ -16,7 +16,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/perf"
 
 	"github.com/go-git/go-git/v6"
@@ -115,7 +114,7 @@ func pushCheckpointRefWithRecovery(
 	repo *git.Repository,
 	target string,
 	candidate checkpointRefPush,
-	requireOPFTrailer bool,
+	delivery *opfDelivery,
 ) (checkpointRefPush, error) {
 	// One shared budget across the initial push, fetch+replay, and retry, matching
 	// doPushRef (fetchAndRebaseRefCommon relies on the caller's deadline).
@@ -132,25 +131,22 @@ func pushCheckpointRefWithRecovery(
 		// commits (including their committer timestamps) on every push.
 		return checkpointRefPush{}, pushErr
 	}
-	recovered, onRemote, err := recoverCheckpointRef(ctx, repo, target, candidate)
+	recovered, remoteTip, err := recoverCheckpointRef(ctx, repo, target, candidate)
 	if err != nil {
 		// Recovery is speculative: a missing remote ref may mean the push was
 		// blocked, not that it diverged. Keep the push failure primary.
 		return checkpointRefPush{}, &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
 	}
-	if onRemote {
+	if recovered.hash.Equal(remoteTip) {
 		// The remote already holds everything the candidate carried, so nothing
-		// of ours is left to ship. The tip is now the remote's own commit, which
-		// the trailer check must not judge: its history was published elsewhere.
+		// of ours is left to ship.
 		return recovered, nil
 	}
-	if requireOPFTrailer {
-		commit, commitErr := repo.CommitObject(recovered.hash)
-		if commitErr != nil {
-			return checkpointRefPush{}, fmt.Errorf("load recovered checkpoint ref %s: %w", candidate.name, commitErr)
-		}
-		if !trailers.HasOPFApplied(commit.Message) {
-			return checkpointRefPush{}, fmt.Errorf("recovered checkpoint ref %s does not carry the OPF trailer", candidate.name)
+	// The replay sits on the remote's commits, which the remote already holds;
+	// only the replayed copies above them are this push's to verify.
+	if delivery != nil {
+		if _, deepest, walkErr := opfUnsentCommits(repo, recovered.hash, remoteTip); walkErr != nil || deepest >= 0 {
+			return checkpointRefPush{}, fmt.Errorf("recovered checkpoint ref %s would send commits without the OPF trailer", candidate.name)
 		}
 	}
 	if err := batchPushCheckpointRefs(ctx, target, []checkpointRefPush{recovered}); err != nil {
@@ -162,18 +158,21 @@ func pushCheckpointRefWithRecovery(
 // recoverCheckpointRef replays exactly candidate.hash onto the fetched remote
 // tip and installs the result only if the local ref still names that same
 // generation. A concurrent checkpoint write therefore wins the CAS and remains
-// both locally reachable and queued for a later delivery attempt. onRemote
-// reports that the replay added nothing: the remote tip already contains the
-// candidate, and the local ref now names that tip.
+// both locally reachable and queued for a later delivery attempt. remoteTip is
+// the remote commit the replay sits on; recovered equals it when the replay
+// added nothing because the remote already contains the candidate.
 func recoverCheckpointRef(
 	ctx context.Context,
 	repo *git.Repository,
 	target string,
 	candidate checkpointRefPush,
-) (recovered checkpointRefPush, onRemote bool, err error) {
-	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
+) (recovered checkpointRefPush, remoteTip plumbing.Hash, err error) {
+	// Fetch from the repository the push writes to: the replay must sit on
+	// what that repository holds, or the retry is not a fast-forward there and
+	// the OPF check below judges the wrong history.
+	fetchTarget, err := remote.ResolveFetchTarget(ctx, pushedRepoTarget(ctx, target))
 	if err != nil {
-		return checkpointRefPush{}, false, fmt.Errorf("resolve fetch target: %w", err)
+		return checkpointRefPush{}, plumbing.ZeroHash, fmt.Errorf("resolve fetch target: %w", err)
 	}
 	fetchedRefName := plumbing.ReferenceName(
 		"refs/entire-fetch-tmp/" + strings.TrimPrefix(candidate.name.String(), "refs/"),
@@ -188,7 +187,7 @@ func recoverCheckpointRef(
 	fetchSpan.RecordError(fetchErr)
 	fetchSpan.End()
 	if fetchErr != nil {
-		return checkpointRefPush{}, false, fmt.Errorf("fetch failed: %w", fetchErr)
+		return checkpointRefPush{}, plumbing.ZeroHash, fmt.Errorf("fetch failed: %w", fetchErr)
 	}
 	defer func() {
 		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
@@ -196,11 +195,11 @@ func recoverCheckpointRef(
 
 	remoteRef, err := repo.Reference(fetchedRefName, true)
 	if err != nil {
-		return checkpointRefPush{}, false, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
+		return checkpointRefPush{}, plumbing.ZeroHash, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
 	}
 	newTip, err := replayCheckpointCandidate(ctx, repo, candidate.hash, remoteRef.Hash())
 	if err != nil {
-		return checkpointRefPush{}, false, err
+		return checkpointRefPush{}, plumbing.ZeroHash, err
 	}
 	if err := checkpointRefRecoveryCAS(ctx, repo, candidate.name, newTip, candidate.hash); err != nil {
 		// newTip has no unique writer data: it is derived entirely from the
@@ -209,10 +208,10 @@ func recoverCheckpointRef(
 		// remains untouched. A later delivery recomputes the replay from that
 		// winner; retaining this losing intermediate under another ref would
 		// create a second source of truth for the checkpoint.
-		return checkpointRefPush{}, false, fmt.Errorf("install recovered checkpoint ref %s: %w", candidate.name, err)
+		return checkpointRefPush{}, plumbing.ZeroHash, fmt.Errorf("install recovered checkpoint ref %s: %w", candidate.name, err)
 	}
 	candidate.hash = newTip
-	return candidate, newTip.Equal(remoteRef.Hash()), nil
+	return candidate, remoteRef.Hash(), nil
 }
 
 func replayCheckpointCandidate(
@@ -734,7 +733,10 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 // The target can be a remote name or a URL.
 func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.ReferenceName) error {
 	// No timeout: runs under doPushRef's shared budget.
-	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
+	// Fetch from the repository the push writes to: the replay must sit on
+	// what that repository holds, or the retry is not a fast-forward there and
+	// the OPF check below judges the wrong history.
+	fetchTarget, err := remote.ResolveFetchTarget(ctx, pushedRepoTarget(ctx, target))
 	if err != nil {
 		return fmt.Errorf("resolve fetch target: %w", err)
 	}

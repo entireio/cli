@@ -95,7 +95,7 @@ func TestOPFCheckpointRefRewriteDoesNotLoseConcurrentCheckpointUpdate(t *testing
 	nativeTip := makeOrphanCommit(t, repo, oldCommit.TreeHash, []plumbing.Hash{oldRef.Hash()}, "native checkpoint write")
 
 	commitNative := prepareNativeRefUpdate(t, repoRoot, refName, oldRef.Hash(), nativeTip)
-	opfErr := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	opfErr := rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil)
 	commitNative()
 
 	finalRef, err := repo.Reference(refName, true)

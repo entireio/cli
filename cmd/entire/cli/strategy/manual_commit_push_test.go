@@ -127,7 +127,7 @@ func TestFlushCheckpointRefsQueue_WithholdsARefEnqueuedAfterTheRewrite(t *testin
 
 	// The gate's inline rewrite: the queued ref is redacted and trailered, so it
 	// is genuinely ready to ship.
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 
 	// A concurrent session finalizes a checkpoint, enqueuing a ref that has
 	// never been near OPF.
@@ -138,7 +138,7 @@ func TestFlushCheckpointRefsQueue_WithholdsARefEnqueuedAfterTheRewrite(t *testin
 
 	// The flush. It is handed no exclusion set, only the requirement.
 	pushed, withheld, err := flushCheckpointRefsQueue(
-		t.Context(), repo, pushSettings{remote: bareDir}, true)
+		t.Context(), repo, pushSettings{remote: bareDir}, &opfDelivery{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, pushed, "the trailered ref must still ship; per-ref delivery is the point")
 	assert.Equal(t, 1, withheld, "the racing untrailered ref must be counted as held back")
@@ -157,13 +157,13 @@ func TestCheckpointRefDelivery_PreservesSameRefGenerationAdvancedAfterVerificati
 	configureFakeOPF(t, &fakeOPFForRewrite{})
 	bareDir, repo, refs := setupGitRefsOPFRepo(t, checkpointID)
 	refName := refs[0]
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 
 	queue, err := checkpoint.PushQueueForRepo(t.Context(), repo)
 	require.NoError(t, err)
 	drained, err := queue.DrainEntries()
 	require.NoError(t, err)
-	ready, awaiting, stale := partitionCheckpointRefPushes(repo, drained, true)
+	ready, awaiting, stale := partitionCheckpointRefPushes(repo, drained, &opfDelivery{})
 	require.Len(t, ready, 1)
 	require.Empty(t, awaiting)
 	require.Empty(t, stale)
@@ -185,7 +185,7 @@ func TestCheckpointRefDelivery_PreservesSameRefGenerationAdvancedAfterVerificati
 		"cleanup for the delivered generation must preserve the newer generation")
 
 	pushed, withheld, err := flushCheckpointRefsQueue(
-		t.Context(), repo, pushSettings{remote: bareDir}, true)
+		t.Context(), repo, pushSettings{remote: bareDir}, &opfDelivery{})
 	require.NoError(t, err)
 	assert.Zero(t, pushed)
 	assert.Equal(t, 1, withheld, "the newer untrailered generation must remain fail-closed")

@@ -196,7 +196,7 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	// pushes are rejected, then recovery replays C3's delta onto C2.
 	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
 	restore := captureStderr(t)
-	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, false)
+	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, nil)
 	output := restore()
 	require.NoError(t, pushErr, "diverged ref should be recovered by fetch+replay, not rejected")
 	assert.Equal(t, 1, pushed)
@@ -236,7 +236,8 @@ func TestPushCheckpointRefWithRecovery_RemoteAlreadyContainsLocalIsDelivered(t *
 	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
 
 	restore := captureStderr(t)
-	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, true)
+	ps := pushSettings{remote: bareDir}
+	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, ps, newOPFDelivery(ctx, repo, ps, OPFRun))
 	restore()
 
 	require.NoError(t, pushErr, "the remote already holds the local commit; nothing is left to verify")
@@ -308,7 +309,7 @@ func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflic
 	t.Cleanup(func() { checkpointRefRecoveryCAS = oldCAS })
 
 	restore := captureStderr(t)
-	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, false)
+	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, nil)
 	restore()
 	require.Error(t, pushErr)
 	assert.Zero(t, pushed)
@@ -328,7 +329,7 @@ func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflic
 	// sources of data without keeping that stale intermediate under another ref.
 	checkpointRefRecoveryCAS = oldCAS
 	restore = captureStderr(t)
-	pushed, withheld, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, false)
+	pushed, withheld, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, nil)
 	restore()
 	require.NoError(t, pushErr)
 	assert.Equal(t, 1, pushed)

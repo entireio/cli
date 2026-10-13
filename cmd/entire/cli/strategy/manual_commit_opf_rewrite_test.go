@@ -981,7 +981,7 @@ func refRewriteSizes(t *testing.T, repo *git.Repository, refName plumbing.Refere
 	t.Helper()
 	ref, err := repo.Reference(refName, true)
 	require.NoError(t, err)
-	chain, _, err := unappliedAncestry(repo, ref.Hash())
+	chain, _, err := opfRewriteChain(repo, ref.Hash(), plumbing.ZeroHash)
 	require.NoError(t, err)
 	for _, commit := range chain {
 		tree, treeErr := repo.TreeObject(commit.TreeHash)
@@ -1047,7 +1047,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.
 	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
 	before := refHashes(t, repo, refs)
 
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 	require.Equal(t, 2, fake.batchCallCount(), "one OPF call per ref")
 
 	after := refHashes(t, repo, refs)
@@ -1063,7 +1063,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.
 		require.NotContains(t, treeContents(t, repo, after[i]), "PERSONABC")
 	}
 
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 	require.Equal(t, 2, fake.batchCallCount(), "already-applied refs must not be re-scanned")
 	require.Equal(t, after, refHashes(t, repo, refs), "already-applied refs must keep their exact hash")
 }
@@ -1088,7 +1088,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_FailureLeavesEveryRefUnmoved(t *test
 	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
 	before := refHashes(t, repo, refs)
 
-	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	err := rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil)
 	var runtimeFail *OPFRuntimeFailedError
 	require.ErrorAs(t, err, &runtimeFail)
 	require.Equal(t, before, refHashes(t, repo, refs))
@@ -1130,7 +1130,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_FailingOPFRefDoesNotBlockOthers(t *t
 		"Hello, PERSONABC asked about "+failSentinel)
 	before := refHashes(t, repo, refs)
 
-	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	err := rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil)
 
 	var runtimeFail *OPFRuntimeFailedError
 	require.ErrorAs(t, err, &runtimeFail, "the failing ref must still report its own runtime failure")
@@ -1183,7 +1183,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RawByteCapIsPerRef(t *testing.T) {
 	t.Setenv(batchEnvVar, strconv.Itoa(limit))
 	before := refHashes(t, repo, refs)
 
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 	require.Equal(t, 2, fake.batchCallCount(), "each fitting ref must reach OPF")
 	after := refHashes(t, repo, refs)
 	for i := range refs {
@@ -1214,7 +1214,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RawOversizedRefDoesNotBlockLaterRef(
 	t.Setenv(batchEnvVar, strconv.Itoa(limit))
 	before := refHashes(t, repo, refs)
 
-	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	err := rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil)
 
 	var tooLarge *OPFRawBytesTooLargeError
 	require.ErrorAs(t, err, &tooLarge)
@@ -1245,7 +1245,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RuntimeFailureOutranksEarlierCapErro
 	t.Setenv(batchEnvVar, strconv.Itoa(limit))
 	before := refHashes(t, repo, refs)
 
-	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	err := rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil)
 
 	var runtimeErr *OPFRuntimeFailedError
 	require.ErrorAs(t, err, &runtimeErr, "the runtime failure must not be hidden behind the first ref's cap error")
@@ -1264,7 +1264,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RuntimeFailureRotatesTheFailedRef(t 
 	require.NoError(t, err)
 	require.Equal(t, refs, before)
 
-	err = RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	err = rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil)
 
 	var runtimeErr *OPFRuntimeFailedError
 	require.ErrorAs(t, err, &runtimeErr)
@@ -1296,7 +1296,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers(t *te
 	t.Setenv(batchEnvVar, "8000")
 	before := refHashes(t, repo, refs)
 
-	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	err := rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil)
 
 	var tooLarge *OPFBatchTooLargeError
 	require.ErrorAs(t, err, &tooLarge, "the oversized ref must still report its own cap failure")
@@ -1352,7 +1352,7 @@ func cancelOPFPrompt(t *testing.T) {
 func TestPrePushCheckpointRefs_OPFCancelShipsNothing(t *testing.T) {
 	configureFakeOPF(t, &fakeOPFForRewrite{})
 	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 	tagged := refHashes(t, repo, refs)
 	commit, err := repo.CommitObject(tagged[0])
 	require.NoError(t, err)
@@ -1376,7 +1376,7 @@ func TestPrePushCheckpointRefs_OPFCancelShipsNothing(t *testing.T) {
 func TestPushQueuedCheckpointRefs_OPFCancelShipsNothing(t *testing.T) {
 	configureFakeOPF(t, &fakeOPFForRewrite{})
 	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 	cancelOPFPrompt(t)
 
 	pushed, pushDisabled, err := PushQueuedCheckpointRefs(t.Context(), repo, bareDir)
@@ -1411,7 +1411,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RewritesEveryUnpushedAncestor(t *tes
 	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
 	require.Len(t, walkRefAncestry(t, repo, refHashes(t, repo, refs)[0]), 2, "fixture must have two unpushed commits")
 
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 
 	chain := walkRefAncestry(t, repo, refHashes(t, repo, refs)[0])
 	require.Len(t, chain, 2, "the chain length must survive the rewrite")
@@ -1428,11 +1428,11 @@ func TestRewriteQueuedCheckpointRefsWithOPF_StopsAtTrailedParent(t *testing.T) {
 	fake := &fakeOPFForRewrite{}
 	configureFakeOPF(t, fake)
 	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 	applied := refHashes(t, repo, refs)[0]
 
 	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
-	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil))
 
 	require.Equal(t, 2, fake.batchCallCount(), "one scan per push, not a re-scan of applied history")
 	chain := walkRefAncestry(t, repo, refHashes(t, repo, refs)[0])
@@ -1448,7 +1448,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_AncestryOverBootstrapLimit(t *testin
 	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
 	before := refHashes(t, repo, refs)
 
-	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	err := rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, nil)
 	var tooLarge *BootstrapTooLargeError
 	require.ErrorAs(t, err, &tooLarge)
 	require.Equal(t, 2, tooLarge.Count)
