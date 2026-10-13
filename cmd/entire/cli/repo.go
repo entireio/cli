@@ -456,13 +456,14 @@ func newRepoListCmd() *cobra.Command {
 	return cmd
 }
 
-// parseRepoListProject reads `repo list --project` the way `entire trail`
-// reads its own --project: the project declares its namespace, so a name is
-// never mistaken for a ULID or for a GitHub owner. A leading slash is
-// accepted, as every repo path takes one. Only et/ is a project that holds
-// repositories here; a gh/ owner is answered with the command that lists
-// GitHub mirrors, before any request. The name is lowercased as trail's is:
-// the server matches it case-insensitively.
+// parseRepoListProject reads `repo list --project`, spelled et/<project> as
+// `entire trail --project` spells an Entire project: the project declares its
+// namespace, so a name is never mistaken for a ULID or for a GitHub owner. It
+// is not trail's parser. A leading slash is accepted, as every repo path takes
+// one; a gh/ owner is answered with the command that lists GitHub mirrors; and
+// the name must have the server's project shape (nativeProjectRe, as in a repo
+// path), all before any request. The name is lowercased: the server matches it
+// case-insensitively.
 func parseRepoListProject(ref string) (string, error) {
 	trimmed := trimRefPrefix(ref)
 	if forge, _, ok := strings.Cut(trimmed, "/"); ok && forge == mirrorCloneForge {

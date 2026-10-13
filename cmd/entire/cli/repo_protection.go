@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -141,18 +142,39 @@ func mirrorProtectionRef(ref string) (mirrorRepoRef, bool, error) {
 // Entire, which is false of a typo. It is the exact-match directory lookup
 // `repo view` makes for a /gh/ ref, and a miss is an error, as an unknown repo
 // always was here.
+//
+// The directory lists both forges under bare full names — an Entire repo
+// /et/acme/widget is "acme/widget" there too — so a matching row counts only
+// when it is a placed GitHub mirror: forgeOfEntry names the forge as
+// buildRepoDir does, and a candidate (a GitHub repo not yet onboarded) is not
+// on Entire at all. Not lookupRepoIndexEntry, which trusts the first row and
+// so could answer with the native one.
 func requireVisibleMirror(ctx context.Context, c *coreapi.Client, mirror mirrorRepoRef) error {
 	fullName := mirror.owner + "/" + mirror.repo
 	out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(fullName)})
 	if err != nil {
 		return err
 	}
-	for _, e := range out.Repos {
-		if strings.EqualFold(e.FullName, fullName) {
-			return nil
-		}
+	if slices.ContainsFunc(out.Repos, func(e coreapi.RepoIndexEntry) bool {
+		return strings.EqualFold(e.FullName, fullName) && isPlacedGitHubMirror(e)
+	}) {
+		return nil
 	}
 	return fmt.Errorf("no GitHub mirror %s visible from your login (`entire repo mirror list` shows the mirrors you can see)", mirror.qualified())
+}
+
+// isPlacedGitHubMirror reports whether a directory entry is a GitHub mirror
+// with at least one placement on Entire.
+func isPlacedGitHubMirror(e coreapi.RepoIndexEntry) bool {
+	if _, candidate := e.Candidate.Get(); candidate {
+		return false
+	}
+	if forge, _ := forgeOfEntry(e); forge != mirrorCloneForge {
+		return false
+	}
+	return slices.ContainsFunc(e.Placements, func(p coreapi.RepoPlacement) bool {
+		return placementServesForge(p, mirrorCloneForge)
+	})
 }
 
 // reportMirrorProtection is `protection list` on a mirror. --json keeps the

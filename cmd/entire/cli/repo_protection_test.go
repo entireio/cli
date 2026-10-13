@@ -58,8 +58,10 @@ type fakeProtectionServer struct {
 	mu      sync.Mutex
 	rules   []coreapi.BranchRule
 	patches []coreapi.UpdateBranchProtectionInputBody
-	// mirrors are the GitHub owner/repo names the /repos directory lists;
-	// lookups records each filter it was asked for.
+	// mirrors are the GitHub owner/repo names the /repos directory lists as
+	// placed mirrors. Every lookup also answers a native repo and a GitHub
+	// candidate under the same full name, and a fuzzy near miss: none of
+	// those is a mirror on Entire. lookups records each filter asked for.
 	mirrors []string
 	lookups []string
 }
@@ -76,12 +78,24 @@ func (f *fakeProtectionServer) handler(t *testing.T) http.HandlerFunc {
 			f.lookups = append(f.lookups, filter)
 			mirrors := f.mirrors
 			f.mu.Unlock()
-			// The directory filter is fuzzy; the near miss proves the CLI
-			// matches the full name exactly rather than taking any row.
-			rows := []string{`{"id":"01KS6KFJR2XS6PZ188MVYE0NMS","name":"x","full_name":"` + filter + `-fork","cell":"c","clusterSlug":"s","jurisdiction":"us","visibility":"public","placements":[]}`}
+			row := func(fullName, extra string) string {
+				return `{"id":"01KS6KFJR2XS6PZ188MVYE0NMS","name":"x","full_name":"` + fullName + `","cell":"c","clusterSlug":"s","jurisdiction":"us","visibility":"public",` + extra + `}`
+			}
+			placements := func(mirror bool) string {
+				return fmt.Sprintf(`"placements":[{"id":"p","cell":"c","clusterSlug":"s","jurisdiction":"us","mirror":%t,"status":"ready"}]`, mirror)
+			}
+			rows := []string{
+				// The directory filter is fuzzy; the near miss proves the
+				// CLI matches the full name exactly.
+				row(filter+"-fork", `"provider":"github",`+placements(true)),
+				// An Entire repo /et/<filter> carries the same bare name.
+				row(filter, `"provider":"entire",`+placements(false)),
+				// A GitHub repo that could be onboarded is not on Entire.
+				row(filter, `"candidate":{"access":"read","onboardable":true},"placements":[]`),
+			}
 			for _, m := range mirrors {
 				if m == filter {
-					rows = append(rows, `{"id":"01KS6KFJR2XS6PZ188MVYE0MRR","name":"x","full_name":"`+m+`","cell":"c","clusterSlug":"s","jurisdiction":"us","visibility":"public","placements":[]}`)
+					rows = append(rows, row(m, `"provider":"github",`+placements(true)))
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -241,6 +255,8 @@ func TestRepoProtection_Mirror(t *testing.T) {
 	assert.Equal(t, "[]", strings.TrimSpace(out), "stdout stays a bare array")
 	assert.Equal(t, protectionMirrorNote+"\n", errOut, "the caveat reaches --json callers on stderr")
 
+	// The directory answers acme/typo with an Entire repo and a candidate of
+	// that name, neither of them a mirror whose default branch is protected.
 	out, err = execRepoProtection(t, "list", "/gh/acme/typo")
 	require.EqualError(t, err, "no GitHub mirror /gh/acme/typo visible from your login (`entire repo mirror list` shows the mirrors you can see)")
 	assert.Empty(t, out, "an unknown mirror gets no claim about its default branch")
