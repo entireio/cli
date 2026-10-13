@@ -148,7 +148,10 @@ func getHooksDirInPath(ctx context.Context, dir string) (string, error) {
 	}
 
 	hooksDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(hooksDir) {
+	// A rooted path such as core.hooksPath=/dev/null is not IsAbs on Windows
+	// (it has no drive), but it is not relative to dir either; joining it
+	// would turn /dev/null into <repo>/dev/null.
+	if !filepath.IsAbs(hooksDir) && !strings.HasPrefix(filepath.ToSlash(hooksDir), "/") {
 		hooksDir = filepath.Join(dir, hooksDir)
 	}
 
@@ -686,7 +689,17 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 // ERROR_PATH_NOT_FOUND, which is also what a plain missing parent returns. That
 // made a relative core.hooksPath whose parent did not exist yet (Husky's
 // .husky/_ before .husky is created) read as misconfigured on Windows.
+//
+// /dev/null is matched by name first. On Windows it is not a device path at
+// all, just \dev\null on the current drive, which usually does not exist; the
+// walk would reach the drive root and MkdirAll would create the directory,
+// reporting hooks installed for a user who set this to turn hooks off.
 func hooksDirBlockedByFile(hooksDir string) bool {
+	clean := filepath.Clean(hooksDir)
+	slashed := filepath.ToSlash(strings.TrimPrefix(clean, filepath.VolumeName(clean)))
+	if slashed == "/dev/null" || strings.HasPrefix(slashed, "/dev/null/") {
+		return true
+	}
 	for dir := hooksDir; ; {
 		info, err := os.Stat(dir)
 		if err == nil {
