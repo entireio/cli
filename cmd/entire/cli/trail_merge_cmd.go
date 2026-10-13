@@ -13,6 +13,7 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/spf13/cobra"
@@ -31,6 +32,15 @@ const (
 	trailGateFailed        = "failed"
 	trailGatePending       = "pending"
 	trailGateError         = "error"
+
+	// Why the server kept a merged native trail's branch (branchKeptReason).
+	trailBranchKeptDisabled      = "disabled"
+	trailBranchKeptIsBase        = "is_base"
+	trailBranchKeptStacked       = "stacked"
+	trailBranchKeptMoved         = "branch_moved"
+	trailBranchKeptProtected     = "branch_protected"
+	trailBranchKeptDefaultBranch = "default_branch"
+	trailBranchKeptFailed        = "failed"
 )
 
 type trailMergeOptions struct {
@@ -68,7 +78,14 @@ confirm the bypass unless --yes is passed; without a terminal to prompt on (or
 with --json), --force requires --yes.
 
 Pass --dry-run to only report whether the trail can be merged; it exits
-non-zero when the merge would be refused, so it can gate CI.`,
+non-zero when the merge would be refused, so it can gate CI.
+
+After merging a native trail, the server deletes the trail's branch when the
+repo's delete-branch-on-merge setting is on. Pass --delete-branch or
+--no-delete-branch to override that setting for this merge. The server can
+still keep the branch, for example when another open trail is based on it; the
+output says why. For a GitHub-backed trail, GitHub's own auto-delete setting
+applies and both flags are ignored.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Selector = selectorFromArgs(args)
@@ -117,6 +134,13 @@ type trailMergeResultJSON struct {
 	// through only by bypassing the blocking gates.
 	WouldBypass    bool   `json:"wouldBypass"`
 	MergeCommitSha string `json:"mergeCommitSha,omitempty"`
+	// DeleteBranchOnMerge is the repo's setting, omitted for a GitHub-backed
+	// trail and when the server does not report it. BranchDeleted and
+	// BranchKeptReason are the server's report on the branch after the
+	// merge; a GitHub-backed trail has neither.
+	DeleteBranchOnMerge *bool  `json:"deleteBranchOnMerge,omitempty"`
+	BranchDeleted       bool   `json:"branchDeleted"`
+	BranchKeptReason    string `json:"branchKeptReason,omitempty"`
 }
 
 type trailMergeBlockerJSON struct {
@@ -127,11 +151,12 @@ type trailMergeBlockerJSON struct {
 	URL       string `json:"url,omitempty"`
 }
 
-func newTrailMergeResultJSON(t *api.TrailResource, m *api.TrailMergeabilityResponse, gates []api.TrailGate, dryRun bool) *trailMergeResultJSON {
+func newTrailMergeResultJSON(forge string, t *api.TrailResource, m *api.TrailMergeabilityResponse, gates []api.TrailGate, dryRun bool) *trailMergeResultJSON {
 	out := &trailMergeResultJSON{
 		Number: t.Number, Branch: t.Branch, Base: t.Base, HeadSha: m.HeadSHA,
 		Mergeable: m.Mergeable, ConflictStatus: m.ConflictStatus, BypassPolicy: m.BypassPolicy,
 		Blockers: make([]trailMergeBlockerJSON, 0, len(gates)), DryRun: dryRun,
+		DeleteBranchOnMerge: trailMergeDeleteDefault(forge, m),
 	}
 	for _, g := range gates {
 		b := trailMergeBlockerJSON{GateKey: g.GateKey, GateType: g.GateType, Status: g.Status, URL: trailGateWebURL(g)}
@@ -179,10 +204,10 @@ func runTrailMerge(ctx context.Context, out, errW io.Writer, insecureHTTP bool, 
 		if err != nil {
 			return err
 		}
-		printTrailMergeReadiness(w, found, m)
+		printTrailMergeReadiness(w, found, m, trailMergeBranchPlan(forge, m, opts.DeleteBranch))
 
 		gates := trailMergeBlockingGates(m)
-		result := newTrailMergeResultJSON(found, m, gates, opts.DryRun)
+		result := newTrailMergeResultJSON(forge, found, m, gates, opts.DryRun)
 		err = trailMergeAfterRead(ctx, w, client, mergePath, found, m, trailBypassVerdictFor(m, actions), gates, opts, result)
 		return finishTrailMerge(out, opts.JSON, result, err)
 	})
@@ -270,6 +295,7 @@ func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, m
 		return err
 	}
 	result.Merged, result.Bypassed, result.MergeCommitSha = true, bypass, res.MergeCommitSha
+	result.BranchDeleted, result.BranchKeptReason = res.BranchDeleted, res.BranchKeptReason
 
 	// The server sends no SHA both for a fast-forward and when the base
 	// already had the head, and does not say which.
@@ -287,7 +313,77 @@ func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, m
 	} else {
 		fmt.Fprintf(w, "Merged trail #%d into %s (%s)\n", found.Number, base, commit)
 	}
+	if line := trailMergeBranchOutcome(found.Branch, res, opts.DeleteBranch); line != "" {
+		fmt.Fprintln(w, line)
+	}
 	return nil
+}
+
+// trailMergeDeleteDefault is the repo's delete-branch-on-merge setting, or nil
+// when it does not apply or is unknown: GitHub deletes a GitHub-backed trail's
+// branch by its own setting (the server reports false there), and an older
+// server does not send it.
+func trailMergeDeleteDefault(forge string, m *api.TrailMergeabilityResponse) *bool {
+	if forge == gitremote.ForgeGitHub {
+		return nil
+	}
+	return m.DeleteBranchOnMerge
+}
+
+// trailMergeBranchPlan says what the merge is set to do with a native trail's
+// branch, or "" when that is GitHub's call or unknown. The server can still
+// keep a branch it was asked to delete; trailMergeBranchOutcome says why.
+func trailMergeBranchPlan(forge string, m *api.TrailMergeabilityResponse, override *bool) string {
+	if forge == gitremote.ForgeGitHub {
+		return ""
+	}
+	repoDefault := m.DeleteBranchOnMerge
+	switch {
+	case override != nil && *override:
+		return "delete after merge (--delete-branch)"
+	case override != nil:
+		return "keep after merge (--no-delete-branch)"
+	case repoDefault == nil:
+		return ""
+	case *repoDefault:
+		return "delete after merge (repo default)"
+	default:
+		return "keep after merge (repo default)"
+	}
+}
+
+// trailMergeBranchOutcome reports what the merge did with the trail's branch,
+// or "" when the server says nothing (a GitHub-backed trail).
+func trailMergeBranchOutcome(branch string, res *api.TrailMergeResponse, override *bool) string {
+	branch = tuiutil.SanitizeDisplayText(strings.TrimSpace(branch))
+	if res.BranchDeleted {
+		return "Deleted branch " + branch
+	}
+	var why string
+	switch reason := strings.TrimSpace(res.BranchKeptReason); reason {
+	case "":
+		return ""
+	case trailBranchKeptDisabled:
+		why = "this repo keeps branches after a merge"
+		if override != nil && !*override {
+			why = "--no-delete-branch was passed"
+		}
+	case trailBranchKeptIsBase:
+		why = "it is the trail's base"
+	case trailBranchKeptStacked:
+		why = "another open trail is based on it"
+	case trailBranchKeptMoved:
+		why = "it no longer points at the merged commit"
+	case trailBranchKeptProtected:
+		why = "it is protected"
+	case trailBranchKeptDefaultBranch:
+		why = "it is the repo's default branch"
+	case trailBranchKeptFailed:
+		why = "deleting it failed"
+	default:
+		why = tuiutil.SanitizeDisplayText(reason)
+	}
+	return "Kept branch " + branch + ": " + why
 }
 
 // Seams for tests: whether a terminal can be prompted, and the prompt itself.
@@ -574,8 +670,9 @@ func trailMergeBlockedError(number int, v trailBypassVerdict, gates []api.TrailG
 }
 
 // printTrailMergeReadiness renders the mergeability read with the same view
-// `trail show` uses, plus how far the branch is behind its base.
-func printTrailMergeReadiness(w io.Writer, t *api.TrailResource, m *api.TrailMergeabilityResponse) {
+// `trail show` uses, plus how far the branch is behind its base and, when
+// known, what the merge will do with the branch.
+func printTrailMergeReadiness(w io.Writer, t *api.TrailResource, m *api.TrailMergeabilityResponse, branchPlan string) {
 	styles := newStatusStyles(w)
 	label := func(s string) string { return styles.render(styles.yellow, s) }
 	fmt.Fprintf(w, "%s\n", styles.render(styles.yellow, fmt.Sprintf("Trail #%d (%s → %s)", t.Number,
@@ -583,6 +680,9 @@ func printTrailMergeReadiness(w io.Writer, t *api.TrailResource, m *api.TrailMer
 	printTrailMergeability(w, styles, label, &m.TrailMergeability)
 	if m.ComparisonStatus == trailComparisonAvailable && m.BehindBy > 0 {
 		fmt.Fprintf(w, "  %s%d %s behind its base\n", label("Behind:    "), m.BehindBy, pluralize("commit", m.BehindBy))
+	}
+	if branchPlan != "" {
+		fmt.Fprintf(w, "  %s%s\n", label("Branch:    "), branchPlan)
 	}
 }
 
