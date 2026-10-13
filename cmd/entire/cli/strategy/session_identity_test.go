@@ -152,7 +152,9 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		// depth — so the nearer, less recently interacting session wins.
 		dir := identityTestRepo(t)
 		ancestry, ok := proclive.CurrentAncestry()
-		require.True(t, ok)
+		if !ok {
+			t.Skip("platform cannot introspect processes; ancestry cannot rank sessions here by design")
+		}
 		chain := ancestry.Chain()
 		if len(chain) < 2 {
 			t.Skip("test process has fewer than two introspectable ancestors")
