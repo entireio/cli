@@ -49,6 +49,7 @@ func sweepLeaked(t *testing.T, dir string) {
 		}
 		for _, project := range projects {
 			var repos []struct {
+				ID   string `json:"id"`
 				Path string `json:"path"`
 			}
 			if !sweepList(t, dir, &repos, "repo", "list", "--project", "et/"+project.Name, "--json") {
@@ -56,11 +57,16 @@ func sweepLeaked(t *testing.T, dir string) {
 			}
 			for _, repo := range repos {
 				sweepNativeMirrors(t, dir, repo.Path)
-				// Repos are addressed by path only; a row without one
-				// cannot be named, so it is left for the next sweep.
-				if repo.Path != "" {
-					sweepDelete(t, dir, "repo", repo.Path)
+				// Repos are addressed by path only, so a row without one
+				// cannot be deleted by any CLI command — and its project
+				// will then refuse to delete too. That is a leak only a
+				// human can clear, so it fails the sweep rather than
+				// being skipped where nobody looks.
+				if repo.Path == "" {
+					t.Errorf("sweep: repo %s in project %s has no /et/ path, so no CLI command can delete it; delete it through the API (entire api) and rerun the sweep", repo.ID, project.Name)
+					continue
 				}
+				sweepDelete(t, dir, "repo", repo.Path)
 			}
 			sweepDelete(t, dir, "project", project.ID)
 		}

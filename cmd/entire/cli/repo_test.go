@@ -712,17 +712,27 @@ func TestRepoList_ProjectFlag(t *testing.T) {
 		// serveProjectRepos(t, nil) fails the test on any page request, and
 		// on a project lookup for a name other than testProjectName.
 		serveProjectRepos(t, nil)
+		const shape = `: use et/<project>, where <project> is 3-32 letters, digits and '-', not starting or ending with '-'`
+		const ghOwner = " is a GitHub owner, not an Entire project: list GitHub mirrors with `entire repo mirror list`"
 		for ref, want := range map[string]string{
-			testProjectName:   `invalid project "widgets": use gh/<owner> or et/<project>`,
-			testProjectULID:   `invalid project "` + testProjectULID + `": use gh/<owner> or et/<project>`,
-			"/et/widgets":     `invalid project "/et/widgets": use gh/<owner> or et/<project>`,
-			"et/widgets/web":  `invalid project "et/widgets/web": use gh/<owner> or et/<project>`,
-			"gh/acme":         "entire repo mirror list",
-			"et/" + "wid_get": "project names contain only letters, digits, and hyphens",
+			testProjectName:  `invalid project "widgets"` + shape,
+			testProjectULID:  `invalid project "` + testProjectULID + `"` + shape,
+			"et/widgets/web": `invalid project "et/widgets/web"` + shape,
+			"et/wid_get":     `invalid project "et/wid_get"` + shape,
+			"gh/acme":        `--project "gh/acme"` + ghOwner,
+			"/gh/acme":       `--project "/gh/acme"` + ghOwner,
 		} {
 			_, _, err := execRepoListRaw(t, "--project", ref)
-			require.ErrorContainsf(t, err, want, "--project %q", ref)
+			require.EqualErrorf(t, err, want, "--project %q", ref)
+			require.NotContainsf(t, err.Error(), "gh/<owner>", "repo list takes no GitHub owner, so it does not offer one: %q", ref)
 		}
+	})
+
+	t.Run("a leading slash is accepted, as every repo path takes one", func(t *testing.T) {
+		serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{{Repos: bulkRepos("r", 1)}})
+		stdout, _, err := execRepoListRaw(t, "--project", "/et/"+testProjectName)
+		require.NoError(t, err)
+		require.Contains(t, stdout, "r-0000")
 	})
 
 	t.Run("a positional project is refused", func(t *testing.T) {
@@ -934,6 +944,44 @@ func TestRepoEdit_Visibility(t *testing.T) {
 		require.ErrorContains(t, err, "invalid visibility")
 		require.Empty(t, bodies)
 	})
+}
+
+// TestRepoVisibility_EchoesARefCommandsTake pins what `repo` reports in
+// `visibility get` (and `repo edit`, which shares the row): the server's path
+// when the resolution echoed one, else the ref as typed — never a label with
+// the ULID appended, so `.repo` stays a value a script can pass back.
+//
+// Not parallel: swaps the package-level activeCoreClient seam via runCoreCmd.
+func TestRepoVisibility_EchoesARefCommandsTake(t *testing.T) {
+	const repoULID = "0123456789ABCDEFGHJKMNPQR5"
+	for _, tc := range []struct {
+		name     string
+		fullName coreapi.OptString
+		want     string
+	}{
+		{name: "the server's path", fullName: coreapi.NewOptString("acme/web"), want: "/et/acme/web"},
+		{name: "no server name keeps the typed ref", want: "/et/ACME/web"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/resolve" {
+					res := nativeResolution("ACME/web", repoULID)
+					res.Resolutions[0].FullName = tc.fullName
+					writeJSONResponse(t, w, http.StatusOK, res)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"visibility":"private"}`)
+			}))
+			t.Cleanup(srv.Close)
+
+			stdout, _, err := runCoreCmd(t, newRepoVisibilityGetCmd, srv.URL, " /et/ACME/web ", "--json")
+			require.NoError(t, err)
+			var got repoVisibility
+			require.NoError(t, json.Unmarshal([]byte(stdout), &got))
+			require.Equal(t, repoVisibility{Repo: tc.want, Visibility: "private"}, got)
+		})
+	}
 }
 
 // TestRepoDelete_GitSuffixResolvesToTheSuffixFreeRepo pins that `.git` on a

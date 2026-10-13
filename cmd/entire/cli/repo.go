@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -456,19 +457,30 @@ func newRepoListCmd() *cobra.Command {
 }
 
 // parseRepoListProject reads `repo list --project` the way `entire trail`
-// reads its own --project (parseTrailProjectRef): the project declares its
-// namespace, so a name is never mistaken for a ULID or for a GitHub owner. Only
-// et/ is a project that holds repositories here; a gh/ owner is answered with
-// the command that lists GitHub mirrors, before any request.
+// reads its own --project: the project declares its namespace, so a name is
+// never mistaken for a ULID or for a GitHub owner. A leading slash is
+// accepted, as every repo path takes one. Only et/ is a project that holds
+// repositories here; a gh/ owner is answered with the command that lists
+// GitHub mirrors, before any request. The name is lowercased as trail's is:
+// the server matches it case-insensitively.
 func parseRepoListProject(ref string) (string, error) {
-	host, name, err := parseTrailProjectRef(strings.TrimSpace(ref))
-	if err != nil {
-		return "", err
-	}
-	if host != nativeCloneForge {
+	trimmed := trimRefPrefix(ref)
+	if forge, _, ok := strings.Cut(trimmed, "/"); ok && forge == mirrorCloneForge {
 		return "", fmt.Errorf("--project %q is a GitHub owner, not an Entire project: list GitHub mirrors with `entire repo mirror list`", ref)
 	}
-	return name, nil
+	name, ok := strings.CutPrefix(trimmed, nativeCloneForge+"/")
+	if !ok || !nativeProjectRe.MatchString(name) {
+		return "", fmt.Errorf("invalid project %q: use %s/<project>, where <project> is 3-32 letters, digits and '-', not starting or ending with '-'", ref, nativeCloneForge)
+	}
+	return strings.ToLower(name), nil
+}
+
+// repoEchoName is what `repo edit` and `visibility get` report as `repo`: the
+// path the server resolved, or the ref as typed when the resolution echoed
+// none. Unlike resolvedRefLabel it carries no ULID, so the value stays one a
+// script can pass back to another repo command.
+func repoEchoName(ref string, r resolvedRef) string {
+	return cmp.Or(r.Name, strings.TrimSpace(ref))
 }
 
 func newRepoViewCmd() *cobra.Command {
@@ -598,7 +610,7 @@ func newRepoVisibilityGetCmd() *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
-				return &repoVisibility{Repo: repoPathName(args[0], resolved), Visibility: string(out.Visibility)}, nil
+				return &repoVisibility{Repo: repoEchoName(args[0], resolved), Visibility: string(out.Visibility)}, nil
 			})
 		},
 	}
@@ -635,7 +647,7 @@ func newRepoEditCmd() *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
-				return &repoVisibility{Repo: repoPathName(args[0], resolved), Visibility: string(out.Visibility)}, nil
+				return &repoVisibility{Repo: repoEchoName(args[0], resolved), Visibility: string(out.Visibility)}, nil
 			})
 		},
 	}

@@ -72,7 +72,7 @@ var errRepoCreateNeedsInput = errors.New("required without an interactive termin
 var errRepoCreateFlagsNeedInput = errors.New("required when create flags are given")
 
 // repoCreatePathShape is the one spelling that creates without the wizard.
-const repoCreatePathShape = "/" + nativeCloneForge + "/<project>/<repo>"
+var repoCreatePathShape = nativeRepoRef("<project>", "<repo>")
 
 // repoCreateMissingInput refuses a create given no path, naming the path form
 // with the typed name already in it, so `entire repo create web` is shown the
@@ -80,7 +80,9 @@ const repoCreatePathShape = "/" + nativeCloneForge + "/<project>/<repo>"
 func repoCreateMissingInput(name string, reason error) error {
 	want := repoCreatePathShape
 	if name != "" {
-		want = "/" + nativeCloneForge + "/<project>/" + name
+		// Quoted as the wizard's summary quotes it: the line is pasted into
+		// a shell.
+		want = nativeRepoRef("<project>", shellArg(name))
 	}
 	hint := "'entire project list' shows project names"
 	if errors.Is(reason, errRepoCreateFlagsNeedInput) {
@@ -97,7 +99,12 @@ func repoCreateMissingInput(name string, reason error) error {
 //
 // A `.git` suffix is refused rather than dropped, as the bare name refuses it:
 // the clone parser treats the suffix as an alias of the suffix-free repo, but a
-// create would make the repo under the name the user did NOT type.
+// create would make the repo under the name the user did NOT type. The suffix
+// is judged only once the path has its shape — two names after et/, the first
+// a project name — so the suggestion it makes is a path that parses;
+// `/et/web.git` is told about its missing project instead. The repo name's own
+// rules come after it, so a name refused for the suffix hears about the
+// suffix first.
 func parseRepoCreateRef(ref string) (project, name string, err error) {
 	ref = strings.TrimSpace(ref)
 	if !declaresForge(ref, nativeCloneForge) {
@@ -106,9 +113,11 @@ func parseRepoCreateRef(ref string) (project, name string, err error) {
 		}
 		return "", ref, refuseGitSuffixRepoName("", ref)
 	}
-	cut := strings.LastIndex(ref, "/") + 1
-	if err := refuseGitSuffixRepoName(ref[:cut], ref[cut:]); err != nil {
-		return "", "", err
+	if segs := strings.Split(trimRefPrefix(ref), "/"); len(segs) == 3 && nativeProjectRe.MatchString(segs[1]) {
+		cut := strings.LastIndex(ref, "/") + 1
+		if err := refuseGitSuffixRepoName(ref[:cut], ref[cut:]); err != nil {
+			return "", "", err
+		}
 	}
 	project, name, err = parseNativeCloneRef(ref)
 	if err != nil {
@@ -240,7 +249,7 @@ func finishRepoCreate(ctx context.Context, cmd *cobra.Command, c *coreapi.Client
 // does.
 func repoEditVisibilityHint(ref, id string, vis coreapi.SetRepoVisibilityInputBodyVisibility) string {
 	if ref == "" {
-		return fmt.Sprintf(" `entire repo edit <path> --visibility %s` once the server returns this repository's %s path (repository ID: %s)", vis, repoCreatePathShape, id)
+		return fmt.Sprintf(" `entire repo edit %s --visibility %s` when the server reports the repository's path (repository ID: %s)", repoCreatePathShape, vis, id)
 	}
 	return fmt.Sprintf(": entire repo edit %s --visibility %s", shellArg(ref), vis)
 }
@@ -282,7 +291,7 @@ func repoCreateRef(r *coreapi.Repo, projectName string) string {
 	if projectName == "" || r.Name == "" {
 		return ""
 	}
-	return "/" + nativeCloneForge + "/" + projectName + "/" + r.Name
+	return nativeRepoRef(projectName, r.Name)
 }
 
 // printRepoCreateNextSteps prints the commands that put a new repo to use:

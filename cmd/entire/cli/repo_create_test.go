@@ -334,6 +334,8 @@ func TestRepoCreate_MissingInputsWithoutTerminal(t *testing.T) {
 		{[]string{"web"}, "entire repo create /et/<project>/web ("},
 		{[]string{"web", "--json"}, "entire repo create /et/<project>/web ("},
 		{[]string{"--visibility", "public"}, "entire repo create /et/<project>/<repo> ("},
+		// Pasted into a shell, so quoted as the wizard's summary quotes it.
+		{[]string{"my web"}, "entire repo create /et/<project>/'my web' ("},
 	} {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 		f.serve()
@@ -382,6 +384,17 @@ func TestRepoCreate_FlagsMeanTheFlagForm(t *testing.T) {
 func TestRepoCreate_TakesAPathOrABareName(t *testing.T) {
 	require.Nil(t, newRepoCreateCmd().Flags().Lookup(projectFlagName),
 		"the path names the project; there is no --project to name it twice")
+
+	t.Run("the suffix is judged only on a path with its shape", func(t *testing.T) {
+		// /et/web.git is missing its project: suggesting /et/web would be a
+		// second invalid path, so the shape is what it is told about.
+		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
+		f.serve()
+		_, _, err := execRepoCreateArgs(t, "/et/web.git")
+		require.ErrorContains(t, err, "2 names after the et token, got 1")
+		require.NotContains(t, err.Error(), "(use ")
+		require.Zero(t, f.requestCount())
+	})
 
 	for _, ref := range []string{"acme/web", "/gh/acme/web", "et/acme/web/extra"} {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
@@ -1226,4 +1239,15 @@ func TestRepoCreate_NoWaitSetsTheVisibility(t *testing.T) {
 	_, _, err = execRepoCreateArgs(t, "web", "--no-wait")
 	require.NoError(t, err, "the wizard runs with --no-wait")
 	require.Equal(t, []string{`{"visibility":"public"}`}, f.visBodies)
+}
+
+// repoEditVisibilityHint finishes "set it with": the command when the repo has
+// a path, and when it has none, the command's shape and the ID — never a
+// command built on the ULID, which `repo edit` refuses.
+func TestRepoEditVisibilityHint(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, ": entire repo edit /et/acme/web --visibility public",
+		repoEditVisibilityHint("/et/acme/web", testCreatedRepoID, "public"))
+	require.Equal(t, " `entire repo edit /et/<project>/<repo> --visibility public` when the server reports the repository's path (repository ID: "+testCreatedRepoID+")",
+		repoEditVisibilityHint("", testCreatedRepoID, "public"))
 }

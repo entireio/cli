@@ -95,11 +95,16 @@ func newRepoProtectionListCmd() *cobra.Command {
 		Short: "Show a repository's branch-protection rules",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if mirror, err := isMirrorProtectionRef(args[0]); mirror {
+			if mirror, ok, err := mirrorProtectionRef(args[0]); ok {
 				if err != nil {
 					return err
 				}
-				return reportMirrorProtection(cmd)
+				return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+					if err := requireVisibleMirror(ctx, c, mirror); err != nil {
+						return err
+					}
+					return reportMirrorProtection(cmd)
+				})
 			}
 			return runCoreList(cmd, protectionEmpty, protectionColumns, protectionRow, func(ctx context.Context, c *coreapi.Client) ([]branchRule, error) {
 				resolved, err := resolveRepoPathResolved(ctx, c, args[0])
@@ -118,17 +123,36 @@ func newRepoProtectionListCmd() *cobra.Command {
 	return cmd
 }
 
-// isMirrorProtectionRef reports whether ref names a GitHub mirror, answered
-// before any request. A mirror reads as empty from core, but "nothing is
-// protected" would misstate it: its default branch is always protected and
-// its rules are the upstream's, so no lookup could say more than
+// mirrorProtectionRef reports whether ref names a GitHub mirror, and parses it
+// when it does. A mirror reads as empty from core, but "nothing is protected"
+// would misstate it: its default branch is always protected and its rules are
+// the upstream's, so no branch-protection read could say more than
 // protectionMirrorNote does. A malformed /gh/ ref keeps the parser's reason.
-func isMirrorProtectionRef(ref string) (bool, error) {
+func mirrorProtectionRef(ref string) (mirrorRepoRef, bool, error) {
 	if !declaresForge(ref, mirrorCloneForge) {
-		return false, nil
+		return mirrorRepoRef{}, false, nil
 	}
-	_, err := parseMirrorRepoRef(ref, mirrorCloneForge)
-	return true, err
+	parsed, err := parseMirrorRepoRef(ref, mirrorCloneForge)
+	return parsed, true, err
+}
+
+// requireVisibleMirror confirms the mirror exists before protectionMirrorNote
+// speaks about it: the note says the repo's default branch is protected on
+// Entire, which is false of a typo. It is the exact-match directory lookup
+// `repo view` makes for a /gh/ ref, and a miss is an error, as an unknown repo
+// always was here.
+func requireVisibleMirror(ctx context.Context, c *coreapi.Client, mirror mirrorRepoRef) error {
+	fullName := mirror.owner + "/" + mirror.repo
+	out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(fullName)})
+	if err != nil {
+		return err
+	}
+	for _, e := range out.Repos {
+		if strings.EqualFold(e.FullName, fullName) {
+			return nil
+		}
+	}
+	return fmt.Errorf("no GitHub mirror %s visible from your login (`entire repo mirror list` shows the mirrors you can see)", mirror.qualified())
 }
 
 // reportMirrorProtection is `protection list` on a mirror. --json keeps the
@@ -146,8 +170,11 @@ func reportMirrorProtection(cmd *cobra.Command) error {
 
 // refuseMirrorProtectionWrite is add and remove on a mirror: refused before any
 // request, since its rules are the upstream's.
+//
+// The refusal is about the ref's forge, so it holds whether or not the mirror
+// exists and costs no lookup — and says nothing about the repo it names.
 func refuseMirrorProtectionWrite(cmd *cobra.Command, ref string) error {
-	mirror, err := isMirrorProtectionRef(ref)
+	_, mirror, err := mirrorProtectionRef(ref)
 	if !mirror {
 		return nil
 	}
@@ -155,7 +182,7 @@ func refuseMirrorProtectionWrite(cmd *cobra.Command, ref string) error {
 	if err != nil {
 		return err
 	}
-	return fmt.Errorf("repo %q is a GitHub mirror: its branch protection is governed by the upstream repository, so no rules can be added or removed here", strings.TrimSpace(ref))
+	return fmt.Errorf("%q is a GitHub mirror ref: a mirror's branch protection is governed by its upstream repository, so no rules can be added or removed here", strings.TrimSpace(ref))
 }
 
 func newRepoProtectionAddCmd() *cobra.Command {

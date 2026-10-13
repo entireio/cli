@@ -264,7 +264,8 @@ the commands are always runnable in every build.
   (an account with no handle, an org sharing its name) gets no command in the
   summary, which says why
 - `repo`: control-plane repository lifecycle — `create`, `list --project
-  et/<project>` (the project spelling `entire trail --project` takes),
+  et/<project>` (the project spelling `entire trail --project` takes, leading
+  slash optional),
   `view`, `edit`, `delete`, `clone`, plus the `mirror`, `remote`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
   `project grant`, addressing the repo by its `/et/<project>/<repo>` path;
@@ -521,9 +522,11 @@ the commands are always runnable in every build.
   ULID, so path segments never touch the `looksLikeULID` passthrough). The
   other two clone shapes are not resolved there: a `/gh/` mirror ref is refused
   (a mirror is in no project), except where a verb answers it itself —
-  `grant list` reads the mirror endpoint, and `protection` says a mirror's rules
-  are the upstream's before any request — and an `entire://` URL is not parsed
-  at all. `repo view` serves both
+  `grant list` reads the mirror endpoint, and `protection list` confirms the
+  mirror in the `/repos` directory before saying its rules are the upstream's
+  (`add`/`remove` refuse on the forge alone) — and an `entire://` URL is not
+  parsed at all. A forge-less `<a>/<b>` is offered only its native reading,
+  never the `/gh/` one these verbs would refuse. `repo view` serves both
   anyway, by routing on the ref before the resolver is reached: a `/gh/` ref
   goes to the mirror directory, and an `entire://` URL to the core fronting the
   cluster it names — in **either** forge, since the CLONE URL column prints the

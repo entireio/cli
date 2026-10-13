@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,12 +58,34 @@ type fakeProtectionServer struct {
 	mu      sync.Mutex
 	rules   []coreapi.BranchRule
 	patches []coreapi.UpdateBranchProtectionInputBody
+	// mirrors are the GitHub owner/repo names the /repos directory lists;
+	// lookups records each filter it was asked for.
+	mirrors []string
+	lookups []string
 }
 
 func (f *fakeProtectionServer) handler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/resolve" {
 			writeJSONResponse(t, w, http.StatusOK, nativeResolution(testProtectionFullName, testProtectionRepoULID))
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos" {
+			filter := r.URL.Query().Get("filter")
+			f.mu.Lock()
+			f.lookups = append(f.lookups, filter)
+			mirrors := f.mirrors
+			f.mu.Unlock()
+			// The directory filter is fuzzy; the near miss proves the CLI
+			// matches the full name exactly rather than taking any row.
+			rows := []string{`{"id":"01KS6KFJR2XS6PZ188MVYE0NMS","name":"x","full_name":"` + filter + `-fork","cell":"c","clusterSlug":"s","jurisdiction":"us","visibility":"public","placements":[]}`}
+			for _, m := range mirrors {
+				if m == filter {
+					rows = append(rows, `{"id":"01KS6KFJR2XS6PZ188MVYE0MRR","name":"x","full_name":"`+m+`","cell":"c","clusterSlug":"s","jurisdiction":"us","visibility":"public","placements":[]}`)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"repos":[%s],"truncated":false}`, strings.Join(rows, ","))
 			return
 		}
 		if r.URL.Path != "/api/v1/repos/"+testProtectionRepoULID+"/branch-protection" {
@@ -199,27 +222,37 @@ func TestRepoProtection_ListEmpty(t *testing.T) {
 
 // A GitHub mirror reads as empty from core, but "nothing is protected" would
 // misstate it: its default branch is always protected and its rules are the
-// upstream's. The ref says so before any request (the fake fails on one), and
+// upstream's. list says so once the directory confirms the mirror exists — the
+// note claims its default branch is protected, which is false of a typo — and
 // --json keeps the plain array on stdout with the caveat on stderr. add and
-// remove are refused the same way.
-func TestRepoProtection_MirrorIsAnsweredWithoutARequest(t *testing.T) {
+// remove are refused on the ref's forge alone, with no lookup.
+func TestRepoProtection_Mirror(t *testing.T) {
 	fake := newProtectionFixture(t)
+	fake.mirrors = []string{"acme/widget"}
 	const mirror = "/gh/acme/widget"
+
 	out, err := execRepoProtection(t, "list", mirror)
 	require.NoError(t, err)
 	assert.Equal(t, protectionMirrorNote+"\n", out)
+	assert.Equal(t, []string{"acme/widget"}, fake.lookups, "the mirror is looked up by its exact name")
 
 	out, errOut, err := execRepoProtectionBothStreams(t, "list", mirror, "--json")
 	require.NoError(t, err)
 	assert.Equal(t, "[]", strings.TrimSpace(out), "stdout stays a bare array")
 	assert.Equal(t, protectionMirrorNote+"\n", errOut, "the caveat reaches --json callers on stderr")
 
-	const refused = `repo "` + mirror + `" is a GitHub mirror: its branch protection is governed by the upstream repository, so no rules can be added or removed here`
+	out, err = execRepoProtection(t, "list", "/gh/acme/typo")
+	require.EqualError(t, err, "no GitHub mirror /gh/acme/typo visible from your login (`entire repo mirror list` shows the mirrors you can see)")
+	assert.Empty(t, out, "an unknown mirror gets no claim about its default branch")
+
+	fake.lookups = nil
+	const refused = `"` + mirror + `" is a GitHub mirror ref: a mirror's branch protection is governed by its upstream repository, so no rules can be added or removed here`
 	_, err = execRepoProtection(t, "add", mirror, "main")
 	require.EqualError(t, err, refused)
 	_, err = execRepoProtection(t, "remove", mirror, "main")
 	require.EqualError(t, err, refused)
 	assert.Empty(t, fake.patches)
+	assert.Empty(t, fake.lookups, "a write is refused on the forge alone")
 
 	_, err = execRepoProtection(t, "list", "/gh/acme")
 	require.ErrorContains(t, err, "/gh/acme", "a malformed mirror ref keeps the parser's reason")

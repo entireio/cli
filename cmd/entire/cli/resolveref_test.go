@@ -436,7 +436,7 @@ func TestResolveRepoPath(t *testing.T) {
 		// A ref that never named the et/ token gets the accepted shape and
 		// nothing else: the parser's "not a native ref" reason is its signal to
 		// try another grammar, not a message for the user.
-		for _, ref := range []string{ulidRepoWeb, "web", "widgets/web", "/gh/acme/tool"} {
+		for _, ref := range []string{ulidRepoWeb, "web", "/gh/acme/tool", "a/b/c"} {
 			t.Run(ref, func(t *testing.T) {
 				t.Parallel()
 				c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -462,6 +462,24 @@ func TestResolveRepoPath(t *testing.T) {
 		_, err := resolveRepoPath(context.Background(), c, "/et/widgets/web")
 		require.ErrorIs(t, err, errNamedRefNotFound)
 		require.EqualError(t, err, "repo /et/widgets/web not found or not shared with you")
+	})
+
+	t.Run("a forge-less pair is offered the native path it would parse as", func(t *testing.T) {
+		t.Parallel()
+		// Only the native reading: this resolver refuses /gh/, so offering
+		// it would be a suggestion that fails on the next run.
+		for ref, want := range map[string]string{
+			"widgets/web":  "/et/widgets/web",
+			"/widgets/web": "/et/widgets/web",
+		} {
+			c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			})
+			_, err := resolveRepoPath(context.Background(), c, ref)
+			require.EqualError(t, err, "repo ref "+strconv.Quote(ref)+" must name its forge — did you mean "+want+"?")
+			require.NotContains(t, err.Error(), "/gh/")
+			require.Zero(t, calls.Load())
+		}
 	})
 
 	t.Run("a malformed native path keeps the parser's reason", func(t *testing.T) {

@@ -11,8 +11,9 @@ import (
 
 // TestRepoCommands_TakePathsOnly pins the grammar every repo verb that acts on
 // one repository accepts: its /et/<project>/<repo> path. A bare name, a ULID
-// and a forge-less pair are each refused before any request, and there is no
-// --project to scope a bare name with.
+// and a forge-less pair are each refused before any request — the pair with
+// the native path it most likely meant — and there is no --project to scope a
+// bare name with.
 //
 // Not parallel: swaps the package-level activeCoreClient seam via runCoreCmd.
 func TestRepoCommands_TakePathsOnly(t *testing.T) {
@@ -47,7 +48,11 @@ func TestRepoCommands_TakePathsOnly(t *testing.T) {
 			}
 			for _, ref := range refs {
 				_, _, err := runCoreCmd(t, tc.newCmd, srv.URL, append([]string{ref}, tc.args...)...)
-				require.EqualErrorf(t, err, `repo "`+ref+`" must be a /et/<project>/<repo> path`, "ref %q", ref)
+				want := `repo "` + ref + `" must be a /et/<project>/<repo> path`
+				if ref == "acme/web" {
+					want = `repo ref "acme/web" must name its forge — did you mean /et/acme/web?`
+				}
+				require.EqualErrorf(t, err, want, "ref %q", ref)
 			}
 		})
 	}

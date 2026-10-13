@@ -278,13 +278,13 @@ func resolveProjectByName(ctx context.Context, c projectRefClient, name string) 
 	out, err := c.ListProjects(ctx, coreapi.ListProjectsParams{Name: coreapi.NewOptString(name)})
 	if err != nil {
 		if isCoreNotFound(err) {
-			return resolvedRef{}, noProjectNamedErr(name)
+			return resolvedRef{}, noProjectNamedErr(name, projectULIDAlternative)
 		}
 		return resolvedRef{}, fmt.Errorf("list projects: %w", err)
 	}
 	project, ok := out.Project.Get()
 	if !ok {
-		return resolvedRef{}, noProjectNamedErr(name)
+		return resolvedRef{}, noProjectNamedErr(name, projectULIDAlternative)
 	}
 	return resolvedRef{ID: project.ID, Name: project.Name}, nil
 }
@@ -328,6 +328,12 @@ func resolveNativeRepoByPath(ctx context.Context, c repoRefClient, project, repo
 	return resolvedRef{}, noRepoAtPathErr(project, repoName)
 }
 
+// nativeRepoRef spells the /et/<project>/<repo> path of a project and a repo
+// name, or of placeholders standing in for them.
+func nativeRepoRef(project, repo string) string {
+	return "/" + nativeCloneForge + "/" + project + "/" + repo
+}
+
 // nativeRepoPath spells a <project>/<repo> full name the way the user addresses
 // it, so the echoed identifier is a ref they could paste back.
 func nativeRepoPath(fullName string) string {
@@ -344,7 +350,7 @@ func nativeRepoPath(fullName string) string {
 func resolveProjectNamed(ctx context.Context, c projectRefClient, name string) (resolvedRef, error) {
 	r, err := resolveProjectByName(ctx, c, name)
 	if errors.Is(err, errNamedRefNotFound) {
-		return resolvedRef{}, &namedRefNotFoundError{message: fmt.Sprintf("no project named %q (run `entire project list` to see names)", name)}
+		return resolvedRef{}, noProjectNamedErr(name, "")
 	}
 	return r, err
 }
@@ -357,14 +363,26 @@ func resolveProjectNamed(ctx context.Context, c projectRefClient, name string) (
 // segments are names by construction, so a ULID-shaped NAME is looked up as
 // the name it is.
 //
-// A ref that never named the et/ token is answered with the accepted shape and
-// nothing else, before the parser runs: its "not a native ref" reason is the
+// A ref that never named the et/ token is answered with the accepted shape —
+// or, for a forge-less <a>/<b> that would parse as one, the path it most
+// likely meant — before the parser runs: its "not a native ref" reason is the
 // cue to try another grammar, not a message for the user. A ref that named the
 // token and got the rest wrong keeps the parser's reason, which already carries
 // the shape or the offending name; only the ref is put in front of it.
 func resolveRepoPathResolved(ctx context.Context, c repoRefClient, ref string) (resolvedRef, error) {
 	if !declaresForge(ref, nativeCloneForge) {
-		return resolvedRef{}, fmt.Errorf("repo %q must be a /%s/<project>/<repo> path", ref, nativeCloneForge)
+		// A bare <a>/<b> names no forge (#2252): suggest the native reading
+		// when it would parse, rather than guessing it. Not
+		// bareRefSuggestions, which also offers the /gh/ reading this
+		// resolver refuses: a suggestion that fails on the next run is worse
+		// than none.
+		if !declaresForge(ref, mirrorCloneForge) {
+			native := "/" + nativeCloneForge + "/" + trimRefPrefix(ref)
+			if _, _, err := parseNativeCloneRef(native); err == nil {
+				return resolvedRef{}, fmt.Errorf("repo ref %q must name its forge — did you mean %s?", ref, native)
+			}
+		}
+		return resolvedRef{}, fmt.Errorf("repo %q must be a %s path", ref, nativeRepoRef("<project>", "<repo>"))
 	}
 	project, repoName, err := parseNativeCloneRef(ref)
 	if err != nil {
@@ -417,8 +435,12 @@ type namedRefNotFoundError struct{ message string }
 func (e *namedRefNotFoundError) Error() string { return e.message }
 func (e *namedRefNotFoundError) Unwrap() error { return errNamedRefNotFound }
 
-func noProjectNamedErr(name string) error {
-	return &namedRefNotFoundError{message: fmt.Sprintf("no project named %q (run `entire project list` to see names, or pass a ULID)", name)}
+// projectULIDAlternative is noProjectNamedErr's hint for a ref that also
+// takes a project ULID; refs that take names only pass "".
+const projectULIDAlternative = ", or pass a ULID"
+
+func noProjectNamedErr(name, alternative string) error {
+	return &namedRefNotFoundError{message: fmt.Sprintf("no project named %q (run `entire project list` to see names%s)", name, alternative)}
 }
 
 // noRepoAtPathErr is a path lookup miss. The parser drops one `.git`, so a name
