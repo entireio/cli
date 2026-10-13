@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -491,62 +493,10 @@ func TestResolveEnvTokenCreds_DoesNotRequireJurisdictionAudience(t *testing.T) {
 	}
 }
 
-func TestResolveCreds_GitCredentialHelper(t *testing.T) {
-	const core = "https://core.us.entire.io"
-	for _, tc := range []struct {
-		name        string
-		env         string
-		helper      string
-		username    string
-		urlUsername string
-		noFallback  string
-		wantErr     string
-	}{
-		{name: "credential helper", helper: core},
-		{name: "configured username", helper: core, username: "buildkite"},
-		{name: "URL username wins", helper: core, username: "buildkite", urlUsername: "url-user"},
-		{name: "environment wins", env: core, helper: "https://untrusted.example"},
-		{name: "untrusted credential", helper: "https://untrusted.example", wantErr: "not a trusted login server"},
-		{name: "malformed credential", helper: "malformed", wantErr: "git credential helper token"},
-		{name: "invalid credential audience", helper: "http://core.us.entire.io", wantErr: "git credential helper token aud"},
-		{name: "missing credential audience", helper: "entire-cli", wantErr: "git credential helper token must be"},
-		{name: "untrusted environment token", env: "https://untrusted.example", wantErr: "ENTIRE_TOKEN aud"},
-		{name: "helper refuses", helper: "quit", wantErr: "git credential lookup failed"},
-		{name: "broken Git config", helper: "bad-config", wantErr: "git credential lookup failed"},
-		{name: "no credential falls back to login", wantErr: "no auth context"},
-		{name: "fallback explicitly allowed", noFallback: "false", wantErr: "no auth context"},
-		{name: "fallback disabled without credential", noFallback: "true", wantErr: "saved-login fallback is disabled"},
-		{name: "fallback disabled on silent failure", helper: "silent-failure", noFallback: "1", wantErr: "saved-login fallback is disabled"},
-		{name: "fallback disabled on partial credential", helper: "password-only", noFallback: "true", wantErr: "saved-login fallback is disabled"},
-		{name: "fallback disabled on expired credential", helper: "expired", noFallback: "true", wantErr: "saved-login fallback is disabled"},
-		{name: "helper works with fallback disabled", helper: core, noFallback: "true"},
-		{name: "environment wins with fallback disabled", env: core, helper: "quit", noFallback: "true"},
-		{name: "invalid fallback setting fails closed", noFallback: "typo", wantErr: "ENTIRE_GIT_NO_LOGIN_FALLBACK must be a boolean"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			gitenv.IsolateRepository(t)
-			t.Chdir(t.TempDir())
-			t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-			t.Setenv("XDG_CACHE_HOME", t.TempDir())
-			t.Setenv("ENTIRE_GIT_NO_LOGIN_FALLBACK", tc.noFallback)
-			if tc.noFallback == "" {
-				if err := os.Unsetenv("ENTIRE_GIT_NO_LOGIN_FALLBACK"); err != nil {
-					t.Fatal(err)
-				}
-			}
-			t.Setenv(auth.EnvTokenVar, "")
-			if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
-				t.Fatal(err)
-			}
-			client, host := wellKnownServer(t, []string{core}, "", "")
-			token := makeTestJWT(t, tc.helper)
-			if tc.helper == "malformed" {
-				token = "not-a-jwt"
-			}
-			t.Setenv("TEST_GIT_CREDENTIAL", token)
-			t.Setenv("GIT_CONFIG_COUNT", "1")
-			t.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
-			t.Setenv("GIT_CONFIG_VALUE_0", `!f() {
+// tokenHelper answers only an exact entire:// request for the test repository
+// and records that it ran.
+const tokenHelper = `!f() {
+: > "$TEST_HELPER_RAN"
 protocol= host= path= username=
 while IFS= read -r line; do
   case "$line" in
@@ -559,33 +509,118 @@ done
 if test "$protocol" = entire && test "$host" = cluster.entire.io && test "$path" = et/acme/api && test "$username" = "$TEST_GIT_USERNAME"; then
   printf 'username=x-access-token\npassword=%s\n' "$TEST_GIT_CREDENTIAL"
 fi
-}; f`)
-			t.Setenv("TEST_GIT_USERNAME", "")
-			if tc.username != "" {
-				t.Setenv("GIT_CONFIG_COUNT", "2")
-				t.Setenv("GIT_CONFIG_KEY_1", "credential.entire://cluster.entire.io.username")
-				t.Setenv("GIT_CONFIG_VALUE_1", tc.username)
-				t.Setenv("TEST_GIT_USERNAME", tc.username)
+}; f`
+
+// setCredentialHelpers replaces the Git config overrides with key/value pairs.
+func setCredentialHelpers(t *testing.T, pairs ...string) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_COUNT", strconv.Itoa(len(pairs)/2))
+	for i := 0; i < len(pairs); i += 2 {
+		t.Setenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i/2), pairs[i])
+		t.Setenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i/2), pairs[i+1])
+	}
+}
+
+// setOrUnsetenv sets key to value, or unsets it when value is empty.
+func setOrUnsetenv(t *testing.T, key, value string) {
+	t.Helper()
+	t.Setenv(key, value)
+	if value == "" {
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestResolveCreds_GitCredentialHelper(t *testing.T) {
+	const core = "https://core.us.entire.io"
+	const helperMode = gitAuthCredentialHelper
+	for _, tc := range []struct {
+		name        string
+		mode        string // ENTIRE_GIT_AUTH; empty leaves it unset
+		alias       string // ENTIRE_GIT_NO_LOGIN_FALLBACK; empty leaves it unset
+		env         string // ENTIRE_TOKEN aud; empty leaves it unset
+		helper      string // helper kind
+		aud         string // helper token aud; defaults to core
+		username    string
+		urlUsername string
+		wantErr     string
+		helperIdle  bool // the helper must not run
+	}{
+		{name: "helpers ignored without mode", helper: "token", wantErr: "no auth context", helperIdle: true},
+		{name: "login hint names CI options", wantErr: gitAuthEnvVar + "=" + gitAuthCredentialHelper},
+		{name: "fallback alias false ignores helpers", alias: "false", helper: "token", wantErr: "no auth context", helperIdle: true},
+		{name: "mode uses helper", mode: helperMode, helper: "token"},
+		{name: "fallback alias selects mode", alias: "true", helper: "token"},
+		{name: "repository-scoped helper", mode: helperMode, helper: "scoped"},
+		{name: "configured username", mode: helperMode, helper: "token", username: "buildkite"},
+		{name: "URL username wins", mode: helperMode, helper: "token", username: "buildkite", urlUsername: "url-user"},
+		{name: "environment wins", mode: helperMode, env: core, helper: "quit", helperIdle: true},
+		{name: "untrusted environment token", mode: helperMode, env: "https://untrusted.example", wantErr: auth.EnvTokenVar + " aud"},
+		{name: "invalid mode fails closed", mode: "yes", helper: "token", wantErr: gitAuthEnvVar + " must be", helperIdle: true},
+		{name: "invalid alias fails closed", alias: "typo", wantErr: gitNoLoginFallbackEnvVar + " must be a boolean"},
+		{name: "invalid alias fails closed beside mode", mode: helperMode, alias: "typo", helper: "token", wantErr: gitNoLoginFallbackEnvVar + " must be a boolean", helperIdle: true},
+		{name: "untrusted credential", mode: helperMode, helper: "token", aud: "https://untrusted.example", wantErr: "not a trusted login server"},
+		{name: "non-JWT credential", mode: helperMode, helper: "token", aud: "malformed", wantErr: "git credential helper token"},
+		{name: "invalid credential audience", mode: helperMode, helper: "token", aud: "http://core.us.entire.io", wantErr: "git credential helper token aud"},
+		{name: "missing credential audience", mode: helperMode, helper: "token", aud: "entire-cli", wantErr: "git credential helper token must be"},
+		{name: "no helper", mode: helperMode, wantErr: "no Git credential helper returned"},
+		{name: "silent failure", mode: helperMode, helper: "silent-failure", wantErr: "no Git credential helper returned"},
+		{name: "partial credential", mode: helperMode, helper: "password-only", wantErr: "no Git credential helper returned"},
+		{name: "expired credential", mode: helperMode, helper: "expired", wantErr: "no Git credential helper returned"},
+		{name: "helper refuses", mode: helperMode, helper: "quit", wantErr: "refused to provide a credential"},
+		{name: "broken Git config", mode: helperMode, helper: "bad-config", wantErr: "git credential lookup for entire://cluster.entire.io/et/acme/api failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gitenv.IsolateRepository(t)
+			t.Chdir(t.TempDir())
+			t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			setOrUnsetenv(t, gitAuthEnvVar, tc.mode)
+			setOrUnsetenv(t, gitNoLoginFallbackEnvVar, tc.alias)
+			setOrUnsetenv(t, auth.EnvTokenVar, "")
+			client, host := wellKnownServer(t, []string{core}, "", "")
+			aud := tc.aud
+			if aud == "" {
+				aud = core
 			}
-			if tc.urlUsername != "" {
-				t.Setenv("TEST_GIT_USERNAME", tc.urlUsername)
+			token := makeTestJWT(t, aud)
+			if aud == "malformed" {
+				token = "not-a-jwt"
 			}
-			if tc.helper == "" {
-				t.Setenv("GIT_CONFIG_VALUE_0", "")
-			}
-			if tc.helper == "quit" {
-				t.Setenv("GIT_CONFIG_VALUE_0", `!f() { cat >/dev/null; printf 'quit=true\n'; }; f`)
-			}
-			if tc.helper == "bad-config" {
-				t.Setenv("GIT_CONFIG_COUNT", "invalid")
-			}
+			ran := filepath.Join(t.TempDir(), "helper-ran")
+			t.Setenv("TEST_HELPER_RAN", ran)
+			t.Setenv("TEST_GIT_CREDENTIAL", token)
+			t.Setenv("TEST_GIT_USERNAME", cmp.Or(tc.urlUsername, tc.username))
 			switch tc.helper {
+			case "":
+				setCredentialHelpers(t)
+			case "token":
+				pairs := []string{"credential.helper", tokenHelper}
+				if tc.username != "" {
+					pairs = append(pairs, "credential.entire://cluster.entire.io.username", tc.username)
+				}
+				setCredentialHelpers(t, pairs...)
+			case "scoped":
+				// The Buildkite plugin's shape: a catch-all helper stays configured,
+				// but the repository URL resets the list and adds its own helper.
+				setCredentialHelpers(t,
+					"credential.helper", `!f() { cat >/dev/null; printf 'username=x\npassword=catch-all\n'; }; f`,
+					"credential.entire://cluster.entire.io/et/acme/api.helper", "",
+					"credential.entire://cluster.entire.io/et/acme/api.helper", tokenHelper,
+				)
+			case "quit":
+				setCredentialHelpers(t, "credential.helper", `!f() { : > "$TEST_HELPER_RAN"; cat >/dev/null; printf 'quit=true\n'; }; f`)
 			case "silent-failure":
-				t.Setenv("GIT_CONFIG_VALUE_0", `!f() { cat >/dev/null; exit 1; }; f`)
+				setCredentialHelpers(t, "credential.helper", `!f() { cat >/dev/null; exit 1; }; f`)
 			case "password-only":
-				t.Setenv("GIT_CONFIG_VALUE_0", `!f() { cat >/dev/null; printf 'password=%s\n' "$TEST_GIT_CREDENTIAL"; }; f`)
+				setCredentialHelpers(t, "credential.helper", `!f() { cat >/dev/null; printf 'password=%s\n' "$TEST_GIT_CREDENTIAL"; }; f`)
 			case "expired":
-				t.Setenv("GIT_CONFIG_VALUE_0", `!f() { cat >/dev/null; printf 'username=ci\npassword=%s\npassword_expiry_utc=1\n' "$TEST_GIT_CREDENTIAL"; }; f`)
+				setCredentialHelpers(t, "credential.helper", `!f() { cat >/dev/null; printf 'username=ci\npassword=%s\npassword_expiry_utc=1\n' "$TEST_GIT_CREDENTIAL"; }; f`)
+			case "bad-config":
+				t.Setenv("GIT_CONFIG_COUNT", "invalid")
+			default:
+				t.Fatalf("unknown helper kind %q", tc.helper)
 			}
 			want := token
 			if tc.env != "" {
@@ -597,14 +632,17 @@ fi
 				repoURL.User = url.User(tc.urlUsername)
 			}
 			creds, _, err := resolveCreds(t.Context(), repoURL, false, client)
+			if _, statErr := os.Stat(ran); tc.helperIdle && statErr == nil {
+				t.Fatal("credential helper ran, but this configuration must not consult it")
+			}
 			if tc.wantErr != "" {
 				if err == nil || creds != nil {
-					t.Fatal("invalid helper token must fail closed")
+					t.Fatalf("expected failure containing %q", tc.wantErr)
 				}
 				if !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("expected %q, got %v", tc.wantErr, err)
 				}
-				if tc.env == "" && strings.Contains(err.Error(), auth.EnvTokenVar) {
+				if tc.env == "" && strings.Contains(err.Error(), auth.EnvTokenVar+" aud") {
 					t.Fatalf("credential-helper error incorrectly attributes token to environment: %v", err)
 				}
 				return
@@ -626,6 +664,34 @@ fi
 	}
 }
 
+func TestGitCredentialToken_ForwardsHelperDiagnostics(t *testing.T) {
+	// The helper source carries markers standing in for inline secrets: Git
+	// quotes the whole command, newlines included, in its quit line, and none of
+	// it may be forwarded.
+	for name, helper := range map[string]string{
+		"single-line": `!f() { cat >/dev/null; echo "mint failed (STDERR_MARKER): eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjaSJ9.c2lnbmF0dXJlMTIz" >&2; printf 'quit=true\n'; }; f`,
+		"multi-line": `!f() { cat >/dev/null
+# SOURCE_MARKER
+echo "mint failed (STDERR_MARKER): eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjaSJ9.c2lnbmF0dXJlMTIz" >&2
+printf 'quit=true\n'; }; f`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			gitenv.IsolateRepository(t)
+			t.Chdir(t.TempDir())
+			setCredentialHelpers(t, "credential.helper", helper)
+			var warn strings.Builder
+			_, err := gitCredentialToken(t.Context(), &url.URL{Scheme: "entire", Host: "cluster.entire.io", Path: "/et/acme/api"}, &warn)
+			if err == nil || !strings.Contains(err.Error(), "refused to provide a credential for entire://cluster.entire.io/et/acme/api") {
+				t.Fatalf("expected a refusal naming the repository, got %v", err)
+			}
+			got := warn.String()
+			if got != "git-remote-entire: credential helper: mint failed (STDERR_MARKER): [REDACTED]\n" {
+				t.Fatalf("expected only the helper's diagnostic, token redacted; got %q", got)
+			}
+		})
+	}
+}
+
 func TestResolveCreds_CancelsCredentialHelper(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows retains direct-child cancellation; descendant termination is outside this change")
@@ -638,6 +704,7 @@ func TestResolveCreds_CancelsCredentialHelper(t *testing.T) {
 	if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv(gitAuthEnvVar, gitAuthCredentialHelper)
 	ready := filepath.Join(t.TempDir(), "ready")
 	t.Setenv("TEST_CREDENTIAL_READY", ready)
 	t.Setenv("GIT_CONFIG_COUNT", "1")

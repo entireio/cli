@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -365,15 +366,28 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 	return defaultVersion
 }
 
+// Environment variables that select Git credential-helper authentication.
+// gitNoLoginFallbackEnvVar predates gitAuthEnvVar; the Buildkite plugin sets
+// it, so true keeps selecting the same mode.
+const (
+	gitAuthEnvVar             = "ENTIRE_GIT_AUTH"
+	gitAuthCredentialHelper   = "credential-helper" //nolint:gosec // G101: a mode name, not a credential
+	gitNoLoginFallbackEnvVar  = "ENTIRE_GIT_NO_LOGIN_FALLBACK"
+	gitCredentialLookupBudget = 30 * time.Second
+)
+
 // resolveCreds returns the credential provider used by the git transport:
 //
 //   - ENTIRE_TOKEN set: use the env JWT verbatim. Skips contexts.json and the
 //     keyring entirely — the CI / workload path. A non-URL aud is a hard error,
 //     never a silent fallback to context resolution.
-//   - Git credential helper: use its password as the bearer, with the same
-//     cluster trust checks. Lookup uses the original entire:// repository URL.
+//   - credential-helper mode (ENTIRE_GIT_AUTH=credential-helper, or
+//     ENTIRE_GIT_NO_LOGIN_FALLBACK=true): Git's credential helpers are the
+//     only source. The returned password is the bearer, after the same
+//     cluster trust checks; any lookup failure is fatal.
 //   - otherwise: resolve the login context for this cluster from contexts.json
-//     and use its refreshed login JWT, unless ENTIRE_GIT_NO_LOGIN_FALLBACK is true.
+//     and use its refreshed login JWT. Credential helpers are never consulted,
+//     so helpers configured for other hosts cannot affect interactive use.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
 	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,
 	// not Getenv, so we can tell set-empty from unset), we commit to the
@@ -391,26 +405,18 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 		return resolveTokenCreds(ctx, envToken, auth.EnvTokenVar, parsedURL.Host, userdirs.Cache(), httpClient)
 	}
 
-	// Git cannot distinguish an absent credential from some broken helpers.
-	// CI can disable saved-login fallback to avoid substituting a personal identity.
-	noLoginFallback := false
-	if raw, ok := os.LookupEnv("ENTIRE_GIT_NO_LOGIN_FALLBACK"); ok {
-		var err error
-		noLoginFallback, err = strconv.ParseBool(raw)
-		if err != nil {
-			return nil, nil, errors.New("ENTIRE_GIT_NO_LOGIN_FALLBACK must be a boolean (true or false)")
-		}
-	}
-
-	token, err := gitCredentialToken(ctx, parsedURL)
+	helperMode, err := credentialHelperMode()
 	if err != nil {
 		return nil, nil, err
 	}
-	if token != "" {
+	if helperMode {
+		// The integration that selected this mode owns the credential; a saved
+		// personal login is never substituted for it.
+		token, err := gitCredentialToken(ctx, parsedURL, os.Stderr)
+		if err != nil {
+			return nil, nil, err
+		}
 		return resolveTokenCreds(ctx, token, "git credential helper token", parsedURL.Host, userdirs.Cache(), httpClient)
-	}
-	if noLoginFallback {
-		return nil, nil, errors.New("git credential lookup returned no usable credential; saved-login fallback is disabled by ENTIRE_GIT_NO_LOGIN_FALLBACK")
 	}
 
 	// Resolve which login context authenticates this cluster: the cluster's
@@ -420,6 +426,9 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	// pushed or fetched is always readable from current_context.
 	cfgDir := userdirs.Config()
 	clusterCtx, err := clusterdiscovery.ResolveContextForCluster(ctx, cfgDir, userdirs.Cache(), parsedURL.Host, httpClient, debuglog.Printf)
+	if errors.Is(err, clusterdiscovery.ErrNoAuthContext) {
+		return nil, nil, fmt.Errorf("%w\nIn CI, set %s, or set %s=%s and configure a Git credential helper for entire:// URLs", err, auth.EnvTokenVar, gitAuthEnvVar, gitAuthCredentialHelper)
+	}
 	if err != nil {
 		return nil, nil, err //nolint:wrapcheck // ResolveContextForCluster already returns a user-facing error; preserved verbatim for the "fatal: <msg>" surface
 	}
@@ -437,7 +446,37 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	return provider, onUnauthorized, nil
 }
 
-func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
+// credentialHelperMode reports whether the environment selects Git
+// credential-helper authentication. Invalid values fail closed: a typo in a
+// CI job must not silently fall through to a saved personal login.
+func credentialHelperMode() (bool, error) {
+	enabled := false
+	if raw, ok := os.LookupEnv(gitAuthEnvVar); ok {
+		if raw != gitAuthCredentialHelper {
+			return false, fmt.Errorf("%s must be %q", gitAuthEnvVar, gitAuthCredentialHelper)
+		}
+		enabled = true
+	}
+	if raw, ok := os.LookupEnv(gitNoLoginFallbackEnvVar); ok {
+		alias, err := strconv.ParseBool(raw)
+		if err != nil {
+			return false, fmt.Errorf("%s must be a boolean (true or false)", gitNoLoginFallbackEnvVar)
+		}
+		enabled = enabled || alias
+	}
+	return enabled, nil
+}
+
+// gitCredentialToken asks Git's credential helpers for the entire:// URL's
+// bearer. The request carries protocol=entire, the original host (with port),
+// the path without its leading slash, and the username only when the URL has
+// one. External integrations (the Buildkite plugin) match these fields
+// exactly, so they are a compatibility contract.
+//
+// Helper diagnostics are forwarded to warn so CI logs show why lookup failed.
+// Git's own lines naming the helper command are summarised instead, because
+// inline helpers often embed credentials, and JWT-shaped text is redacted.
+func gitCredentialToken(ctx context.Context, repoURL *url.URL, warn io.Writer) (string, error) {
 	username := ""
 	if repoURL.User != nil {
 		username = repoURL.User.Username()
@@ -447,14 +486,12 @@ func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
 			return "", errors.New("invalid control character in Git credential lookup")
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	target := "entire://" + repoURL.Host + repoURL.Path
+	ctx, cancel := context.WithTimeout(ctx, gitCredentialLookupBudget)
 	defer cancel()
 	cmd := execx.NonInteractive(ctx, "git", "-c", "core.askPass=", "credential", "fill")
 	execx.TerminateOnCancel(cmd)
-	// Git uses the same exit status for unavailable credentials and explicit
-	// refusal. Pin its diagnostic language so only the non-interactive prompt
-	// failure permits saved-login fallback. Never expose helper stderr: it may
-	// contain tokens or the configured helper command.
+	// Pin Git's diagnostic language so its own lines can be recognised below.
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "LC_ALL=C")
 	input := fmt.Sprintf("protocol=entire\nhost=%s\npath=%s\n", repoURL.Host, strings.TrimPrefix(repoURL.Path, "/"))
 	if repoURL.User != nil {
@@ -464,30 +501,65 @@ func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
 	output, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", fmt.Errorf("git credential lookup: %w", ctx.Err())
+			return "", fmt.Errorf("git credential lookup for %s: %w", target, ctx.Err())
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			diagnostic := strings.TrimSpace(string(exitErr.Stderr))
-			if (strings.HasPrefix(diagnostic, "fatal: could not read Username for '") ||
-				strings.HasPrefix(diagnostic, "fatal: could not read Password for '")) &&
-				strings.HasSuffix(diagnostic, "': terminal prompts disabled") && !strings.ContainsAny(diagnostic, "\r\n") {
-				debuglog.Printf("Git credential lookup returned no credential")
-				return "", nil
-			}
-			return "", fmt.Errorf("git credential lookup failed (exit %d)", exitErr.ExitCode())
+			return "", classifyCredentialFailure(target, exitErr, warn)
 		}
 		return "", fmt.Errorf("run Git credential lookup: %w", err)
 	}
 	for line := range strings.SplitSeq(string(output), "\n") {
 		if token, ok := strings.CutPrefix(line, "password="); ok {
 			if token == "" || strings.ContainsAny(token, "\r\x00") {
-				return "", errors.New("git credential helper returned an invalid token")
+				return "", fmt.Errorf("git credential helper returned an invalid token for %s", target)
 			}
 			return token, nil
 		}
 	}
-	return "", errors.New("git credential helper returned no password")
+	return "", fmt.Errorf("git credential helper returned no password for %s", target)
+}
+
+// jwtShaped matches three base64url segments, the shape of the bearer tokens
+// this lookup exists to fetch.
+var jwtShaped = regexp.MustCompile(`[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`)
+
+// classifyCredentialFailure turns a failed `git credential fill` into a
+// user-facing error, forwarding helper diagnostics to warn.
+func classifyCredentialFailure(target string, exitErr *exec.ExitError, warn io.Writer) error {
+	diagnostic := string(exitErr.Stderr)
+	// Git quotes the helper command verbatim, and it can span lines and embed
+	// credentials. Git dies right after quoting it, so drop everything from the
+	// start of the first line that quotes a helper to the end of the output.
+	refused := false
+	if i := strings.Index(diagnostic, "credential helper '"); i >= 0 {
+		refused = strings.HasSuffix(strings.TrimSpace(diagnostic), "' told us to quit")
+		diagnostic = diagnostic[:strings.LastIndexByte(diagnostic[:i], '\n')+1]
+	}
+	missing := false
+	for line := range strings.SplitSeq(strings.TrimSpace(diagnostic), "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case line == "":
+			continue
+		case (strings.HasPrefix(line, "fatal: could not read Username for '") ||
+			strings.HasPrefix(line, "fatal: could not read Password for '")) &&
+			strings.HasSuffix(line, "': terminal prompts disabled"):
+			missing = true
+			continue
+		}
+		fmt.Fprintf(warn, "git-remote-entire: credential helper: %s\n", jwtShaped.ReplaceAllString(line, "[REDACTED]"))
+	}
+	switch {
+	case refused:
+		return fmt.Errorf("git credential helper refused to provide a credential for %s (quit=true)", target)
+	case missing:
+		// Git reports a silent helper failure, a partial credential and an
+		// expired one the same way as no helper at all.
+		return fmt.Errorf("no Git credential helper returned a complete, unexpired credential for %s", target)
+	default:
+		return fmt.Errorf("git credential lookup for %s failed (exit %d)", target, exitErr.ExitCode())
+	}
 }
 
 // resolveTokenCreds returns a fixed token provider after validating

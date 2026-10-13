@@ -308,13 +308,34 @@ ENTIRE_TOKEN=<login-or-sa-session-JWT> entire ...
 
 ### Git credential helpers
 
-`git-remote-entire` also accepts tokens from Git's configured `credential.helper`. When `ENTIRE_TOKEN` is unset, it calls `git credential fill` with `protocol=entire`, the original cluster host (including its port), the repository path without its leading slash, and the username only if supplied in the URL. Otherwise Git's configuration and credential helpers select the username. It uses the returned password as its bearer token, after the same cluster trust checks used for `ENTIRE_TOKEN`. There is no HTTPS URL translation or agent-side token exchange.
+For CI integrations that supply credentials through Git, set `ENTIRE_GIT_AUTH=credential-helper` in the job environment. `git-remote-entire` then calls `git credential fill` with `protocol=entire`, the original cluster host (including its port), the repository path without its leading slash, and the username only if supplied in the URL. Otherwise Git's configuration and credential helpers select the username. It uses the returned password as its bearer token, after the same cluster trust checks used for `ENTIRE_TOKEN`. There is no HTTPS URL translation or agent-side token exchange. `ENTIRE_GIT_NO_LOGIN_FALLBACK=true` selects the same mode, for integrations written against the earlier name.
 
-For CI, set `ENTIRE_GIT_NO_LOGIN_FALLBACK=true` in the job environment. If Git supplies no usable credential, the operation fails without reading saved login credentials. Unset or `false` preserves saved-login fallback for interactive users. Invalid boolean values, including an empty value, fail closed when `ENTIRE_TOKEN` is unset. `ENTIRE_TOKEN`, including a set-but-empty value, always takes precedence.
+In this mode the credential helper is the only source: saved login credentials are never read, and every lookup failure is fatal. Without it, `git-remote-entire` never consults credential helpers, so helpers configured for other hosts cannot affect interactive use. Invalid values of either variable fail closed. `ENTIRE_TOKEN`, including a set-but-empty value, always takes precedence.
 
-A CI credential helper should return both `username` and `password` on success, with the minted token in `password`, and return `quit=true` when minting fails. Git can report a silently failing helper, a partial credential or an explicitly expired credential as merely missing credentials. Without `ENTIRE_GIT_NO_LOGIN_FALLBACK=true`, that result permits saved-login fallback. Keep personal logins off CI runners. Use a helper appropriate for secret storage or on-demand minting; Git's `store` helper writes credentials in plaintext.
+A CI credential helper should return both `username` and `password` on success, with the minted token in `password`, and return `quit=true` when minting fails. Git reports a silently failing helper, a partial credential and an explicitly expired credential the same way as no helper; all of them fail. Lines the helper writes to stderr are shown with JWT-shaped text redacted; Git's own lines that quote the helper command are not. Use a helper appropriate for secret storage or on-demand minting; Git's `store` helper writes credentials in plaintext.
 
-The lookup is non-interactive and has a 30-second timeout. Explicit helper refusal, other lookup failures and invalid tokens returned by a successful lookup fail rather than falling back to another identity. Cancellation terminates the subprocess group on Unix. Windows retains direct-child cancellation, so descendants can survive; the wait for inherited pipes is bounded. The token is read once per remote-helper invocation; mint a fresh token for later Git operations as needed. The remote helper does not approve, store or erase Git credentials.
+Scope the helper to the Entire repository, and clear inherited helpers for that URL first so that global or catch-all helpers cannot answer instead. An empty `helper` value resets the list Git has built up to that point:
+
+```bash
+export ENTIRE_GIT_AUTH=credential-helper
+git config --global --add 'credential.entire://<host>/<project>/<repo>.helper' ''
+git config --global --add 'credential.entire://<host>/<project>/<repo>.helper' '/path/to/your-helper'
+```
+
+To keep the configuration job-local instead of writing a config file, set the same keys through Git's environment configuration:
+
+```bash
+export ENTIRE_GIT_AUTH=credential-helper
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0='credential.entire://<host>/<project>/<repo>.helper' GIT_CONFIG_VALUE_0=''
+export GIT_CONFIG_KEY_1='credential.entire://<host>/<project>/<repo>.helper' GIT_CONFIG_VALUE_1='/path/to/your-helper'
+```
+
+If `GIT_CONFIG_COUNT` is already set, append after the existing entries instead of overwriting them. The URL is the repository's `entire://` remote URL; a prefix such as `entire://<host>` covers every repository on that cluster.
+
+The reset only clears helpers from configuration Git reads earlier. Git reads environment configuration last, so the job-local form clears every other helper. With the `--global` form, a helper in repository-level configuration is still tried if yours returns nothing; return `quit=true` on failure so Git stops there.
+
+The lookup is non-interactive and has a 30-second timeout. Cancellation terminates the subprocess group on Unix. Windows retains direct-child cancellation, so descendants can survive; the wait for inherited pipes is bounded. The token is read once per remote-helper invocation; mint a fresh token for later Git operations as needed. The remote helper does not approve, store or erase Git credentials.
 
 > **Seeing `save login` / `failed to unlock correct collection` errors from `entire login`?** That's the OS keyring being unavailable — use one of the two paths above.
 
