@@ -2,6 +2,7 @@ package vogon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,8 +11,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
-// Compile-time assertion that vogon can report transcript-derived file lists.
-var _ agent.TranscriptAnalyzer = (*Agent)(nil)
+// Compile-time assertions: vogon reports transcript-derived file lists and
+// token usage.
+var (
+	_ agent.TranscriptAnalyzer = (*Agent)(nil)
+	_ agent.TokenCalculator    = (*Agent)(nil)
+)
 
 // transcriptTypeToolUse is the entry type the vogon binary writes for file
 // writes. Keep in step with appendToolUse in e2e/vogon/main.go.
@@ -20,8 +25,9 @@ const transcriptTypeToolUse = "tool_use"
 // transcriptLine is the subset of the vogon binary's JSONL the analyzer reads.
 // Keep the `files` field in step with e2e/vogon/main.go's transcriptEntry.
 type transcriptLine struct {
-	Type  string   `json:"type"`
-	Files []string `json:"files,omitempty"`
+	Type  string            `json:"type"`
+	Files []string          `json:"files,omitempty"`
+	Usage *agent.TokenUsage `json:"usage,omitempty"`
 }
 
 // GetTranscriptPosition returns the transcript's line count, or 0 when it does not
@@ -76,6 +82,33 @@ func (v *Agent) ExtractModifiedFilesFromOffset(_ context.Context, path string, s
 		}
 	}
 	return files, len(lines), nil
+}
+
+// CalculateTokenUsage sums the usage on lines at or after fromOffset, counted
+// in the same non-empty-line units as GetTranscriptPosition. Each line with
+// usage is one API call.
+func (v *Agent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
+	usage := &agent.TokenUsage{}
+	i := 0
+	for _, raw := range bytes.Split(transcriptData, []byte("\n")) {
+		if len(raw) == 0 { // readTranscriptLines skips empty lines too
+			continue
+		}
+		i++
+		if i <= fromOffset {
+			continue
+		}
+		var entry transcriptLine
+		if err := json.Unmarshal(raw, &entry); err != nil || entry.Usage == nil {
+			continue
+		}
+		usage.InputTokens += entry.Usage.InputTokens
+		usage.OutputTokens += entry.Usage.OutputTokens
+		usage.CacheReadTokens += entry.Usage.CacheReadTokens
+		usage.CacheCreationTokens += entry.Usage.CacheCreationTokens
+		usage.APICallCount++
+	}
+	return usage, nil
 }
 
 // readTranscriptLines returns the transcript's non-empty lines. A missing file is

@@ -73,3 +73,23 @@ func TestGetTranscriptPosition_MissingFile(t *testing.T) {
 		t.Errorf("position = %d, want 0", pos)
 	}
 }
+
+// TestCalculateTokenUsage_FromOffset counts only usage lines at or after the
+// offset, in GetTranscriptPosition's non-empty-line units.
+func TestCalculateTokenUsage_FromOffset(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"user","message":"go"}
+{"type":"assistant","message":"one","usage":{"input_tokens":1,"output_tokens":2,"cache_read_tokens":3,"cache_creation_tokens":4}}
+
+{"type":"assistant","message":"two","usage":{"input_tokens":10,"output_tokens":20,"cache_read_tokens":30,"cache_creation_tokens":40}}
+`)
+	usage, err := (&Agent{}).CalculateTokenUsage(data, 2)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsage: %v", err)
+	}
+	if usage.InputTokens != 10 || usage.OutputTokens != 20 || usage.CacheReadTokens != 30 ||
+		usage.CacheCreationTokens != 40 || usage.APICallCount != 1 {
+		t.Fatalf("usage from offset 2 = %+v, want only the second call", usage)
+	}
+}
