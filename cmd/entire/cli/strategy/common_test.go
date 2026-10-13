@@ -30,7 +30,7 @@ import (
 
 func TestWorktreeRoot_Cache(t *testing.T) {
 	// Uses t.Chdir + t.Setenv so cannot be parallel.
-	tmpDir := testutil.TempDir(t)
+	tmpDir := t.TempDir()
 	initTestRepo(t, tmpDir)
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
@@ -53,7 +53,7 @@ func TestWorktreeRoot_Cache(t *testing.T) {
 
 	// Break git by pointing PATH at an empty directory.
 	// If the second call hits git it will fail.
-	emptyDir := testutil.TempDir(t)
+	emptyDir := t.TempDir()
 	t.Setenv("PATH", emptyDir)
 
 	got2, err := paths.WorktreeRoot(context.Background())
@@ -82,7 +82,7 @@ func TestWorktreeRoot_Cache(t *testing.T) {
 func TestWorktreeRoot_MainRepo(t *testing.T) {
 	// In a normal (non-worktree) repo, WorktreeRoot returns the repo root.
 	// Uses t.Chdir so cannot be parallel.
-	tmpDir := testutil.TempDir(t)
+	tmpDir := t.TempDir()
 	resolved, err := filepath.EvalSymlinks(tmpDir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks error: %v", err)
@@ -123,7 +123,7 @@ func TestWorktreeRoot_Worktree(t *testing.T) {
 	// NOT the main repository root. The worktree is placed in a separate
 	// temp directory (sibling, not child) so the two paths share no prefix.
 	// Uses t.Chdir so cannot be parallel.
-	mainDir := testutil.TempDir(t)
+	mainDir := t.TempDir()
 	mainResolved, err := filepath.EvalSymlinks(mainDir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks error: %v", err)
@@ -132,14 +132,14 @@ func TestWorktreeRoot_Worktree(t *testing.T) {
 
 	initTestRepo(t, mainDir)
 
-	worktreeDir := testutil.TempDir(t)
+	worktreeDir := t.TempDir()
 	wtResolved, err := filepath.EvalSymlinks(worktreeDir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks error: %v", err)
 	}
 	worktreeDir = wtResolved
 
-	// testutil.TempDir(t) creates the directory; git worktree add needs it to not exist.
+	// t.TempDir() creates the directory; git worktree add needs it to not exist.
 	if err := os.Remove(worktreeDir); err != nil {
 		t.Fatalf("failed to remove temp dir for worktree: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestWorktreeRoot_Worktree(t *testing.T) {
 
 func TestGetCurrentBranchName(t *testing.T) {
 	t.Run("on branch", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -241,7 +241,7 @@ func TestGetCurrentBranchName(t *testing.T) {
 	})
 
 	t.Run("detached HEAD", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -329,7 +329,7 @@ func removeWorktree(repoDir, worktreeDir string) {
 
 func TestGetDefaultBranchName(t *testing.T) {
 	t.Run("returns main when main branch exists", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -372,7 +372,7 @@ func TestGetDefaultBranchName(t *testing.T) {
 	})
 
 	t.Run("returns master when only master exists", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -408,7 +408,7 @@ func TestGetDefaultBranchName(t *testing.T) {
 	})
 
 	t.Run("returns empty when no main or master", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -458,7 +458,7 @@ func TestGetDefaultBranchName(t *testing.T) {
 	})
 
 	t.Run("returns origin/HEAD target when set", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -518,7 +518,7 @@ func TestGetDefaultBranchName(t *testing.T) {
 
 func TestIsOnDefaultBranch(t *testing.T) {
 	t.Run("returns true when on main", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -566,7 +566,7 @@ func TestIsOnDefaultBranch(t *testing.T) {
 	})
 
 	t.Run("returns true when on master", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -604,7 +604,7 @@ func TestIsOnDefaultBranch(t *testing.T) {
 	})
 
 	t.Run("returns false when on feature branch", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -652,7 +652,7 @@ func TestIsOnDefaultBranch(t *testing.T) {
 	})
 
 	t.Run("returns false for detached HEAD", func(t *testing.T) {
-		tmpDir := testutil.TempDir(t)
+		tmpDir := t.TempDir()
 		testutil.InitRepo(t, tmpDir)
 		repo, err := git.PlainOpen(tmpDir)
 		if err != nil {
@@ -757,7 +757,7 @@ func TestGetGitAuthorFromRepo(t *testing.T) {
 			useAutoConfigLoader(t)
 
 			// Isolate global git config by pointing HOME to a temp dir
-			home := testutil.TempDir(t)
+			home := t.TempDir()
 			t.Setenv("HOME", home)
 			t.Setenv("USERPROFILE", home) // Windows' home for git and os.UserHomeDir
 			t.Setenv("XDG_CONFIG_HOME", "")
@@ -777,7 +777,7 @@ func TestGetGitAuthorFromRepo(t *testing.T) {
 			}
 
 			// Create a repo for config resolution
-			dir := testutil.TempDir(t)
+			dir := t.TempDir()
 			repo, err := git.PlainInit(dir, false)
 			if err != nil {
 				t.Fatalf("failed to init repo: %v", err)
@@ -842,10 +842,10 @@ func TestIsProtectedPath(t *testing.T) {
 // entire/checkpoints/v1 branch containing checkpoint data via git CLI.
 func initBareWithMetadataBranch(t *testing.T) string {
 	t.Helper()
-	bareDir := testutil.TempDir(t)
+	bareDir := t.TempDir()
 
 	// Init bare, create main branch with a commit
-	workDir := testutil.TempDir(t)
+	workDir := t.TempDir()
 	run := func(dir string, args ...string) {
 		testutil.RunGit(t, dir, args...)
 	}
@@ -970,7 +970,7 @@ func TestEnsurePrimaryRef(t *testing.T) {
 
 	t.Run("creates empty orphan when no remote", func(t *testing.T) {
 		t.Parallel()
-		dir := testutil.TempDir(t)
+		dir := t.TempDir()
 		initTestRepo(t, dir)
 		repo, err := git.PlainOpen(dir)
 		if err != nil {
@@ -999,7 +999,7 @@ func TestEnsurePrimaryRef(t *testing.T) {
 
 	t.Run("skips empty orphan when primary is git-refs", func(t *testing.T) {
 		t.Parallel()
-		dir := testutil.TempDir(t)
+		dir := t.TempDir()
 		initTestRepo(t, dir)
 
 		// Select the git-refs backend for this repo. EnsurePrimaryRef rebinds
@@ -1034,7 +1034,7 @@ func TestEnsurePrimaryRef_WritesVercelConfigWhenEnabled(t *testing.T) {
 	vercelconfig.ResetSettingsCache()
 	t.Cleanup(vercelconfig.ResetSettingsCache)
 
-	dir := testutil.TempDir(t)
+	dir := t.TempDir()
 	initTestRepo(t, dir)
 	if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o755); err != nil {
 		t.Fatalf("mkdir .entire: %v", err)
@@ -1110,7 +1110,7 @@ func cloneWithConfig(t *testing.T, bareDir string) (string, func(args ...string)
 	// GitIsolatedEnv on every invocation, matching initBareWithMetadataBranch:
 	// without it these commands inherit the developer's or CI's global git
 	// config, and a global gc.autoDetach=true lets a background `git gc` write
-	// .git/objects after the test returns and race testutil.TempDir(t) cleanup. Per-command
+	// .git/objects after the test returns and race t.TempDir() cleanup. Per-command
 	// env rather than t.Setenv, so callers can still use t.Parallel().
 	cmd := exec.CommandContext(context.Background(), "git", "clone", bareDir, cloneDir)
 	cmd.Env = testutil.GitIsolatedEnv()
@@ -1246,7 +1246,7 @@ func TestEnsurePrimaryRef_DoesNotFastForwardWhenBehind(t *testing.T) {
 func TestSafelyAdvanceLocalRef_DoesNotAdvanceOnRefReadError(t *testing.T) {
 	t.Parallel()
 
-	dir := testutil.TempDir(t)
+	dir := t.TempDir()
 	initTestRepo(t, dir)
 
 	repo, err := git.PlainOpen(dir)
@@ -1274,9 +1274,9 @@ func TestSafelyAdvanceLocalRef_DoesNotReplayDisconnectedChainWhenTargetIsShallow
 	t.Parallel()
 
 	ctx := context.Background()
-	bareDir := testutil.TempDir(t)
-	setupDir := testutil.TempDir(t)
-	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
+	bareDir := t.TempDir()
+	setupDir := t.TempDir()
+	cloneDir := filepath.Join(t.TempDir(), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 
 	run := func(dir string, args ...string) {
@@ -1346,7 +1346,7 @@ func TestSafelyAdvanceLocalRef_DoesNotReplayDisconnectedChainWhenTargetIsShallow
 // Example: {"a3/b2c4d5e6f7/0/prompt.txt": "Hello"} creates the nested directory structure.
 func buildCommittedTree(t *testing.T, files map[string]string) *object.Tree {
 	t.Helper()
-	dir := testutil.TempDir(t)
+	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
@@ -1558,7 +1558,7 @@ func TestIsEmptyRepository(t *testing.T) {
 	t.Parallel()
 	t.Run("empty repo returns true", func(t *testing.T) {
 		t.Parallel()
-		dir := testutil.TempDir(t)
+		dir := t.TempDir()
 		testutil.InitRepo(t, dir)
 		repo, err := git.PlainOpen(dir)
 		if err != nil {
@@ -1571,7 +1571,7 @@ func TestIsEmptyRepository(t *testing.T) {
 
 	t.Run("repo with commit returns false", func(t *testing.T) {
 		t.Parallel()
-		dir := testutil.TempDir(t)
+		dir := t.TempDir()
 		testutil.InitRepo(t, dir)
 		repo, err := git.PlainOpen(dir)
 		if err != nil {
@@ -1643,7 +1643,7 @@ func TestReadAgentTypeFromTree(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			dir := testutil.TempDir(t)
+			dir := t.TempDir()
 			testutil.InitRepo(t, dir)
 			for _, f := range tt.files {
 				testutil.WriteFile(t, dir, f, `{}`)
@@ -1661,7 +1661,7 @@ func TestReadAgentTypeFromTree(t *testing.T) {
 func TestReadAgentTypeFromTree_MetadataJSON_OverridesDir(t *testing.T) {
 	t.Parallel()
 
-	dir := testutil.TempDir(t)
+	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, ".claude/settings.json", `{}`)
 	testutil.GitAdd(t, dir, ".claude/settings.json")
@@ -1677,7 +1677,7 @@ func TestReadAgentTypeFromTree_MetadataJSON_OverridesDir(t *testing.T) {
 func TestEnsureEntireGitignore_IncludesRedactorsLocal(t *testing.T) {
 	// Cannot t.Parallel(): EnsureEntireGitignore writes to the worktree root.
 
-	dir := testutil.TempDir(t)
+	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 	paths.ClearWorktreeRootCache()
@@ -1710,7 +1710,7 @@ func writeSettingsJSON(t *testing.T, dir, body string) {
 
 func TestEnsureRedactionConfigured_ScannerError(t *testing.T) {
 	// Cannot t.Parallel(): uses t.Chdir and resets a package-level sync.Once.
-	tmp := testutil.TempDir(t)
+	tmp := t.TempDir()
 	testutil.InitRepo(t, tmp)
 	writeSettingsJSON(t, tmp, `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false}}}`)
 	t.Chdir(tmp)
@@ -1730,7 +1730,7 @@ func TestEnsureRedactionConfigured_ScannerError(t *testing.T) {
 
 func TestEnsureRedactionConfigured_GoredactEnabled(t *testing.T) {
 	// Cannot t.Parallel(): uses t.Chdir and resets a package-level sync.Once.
-	tmp := testutil.TempDir(t)
+	tmp := t.TempDir()
 	testutil.InitRepo(t, tmp)
 	writeSettingsJSON(t, tmp, `{"enabled":true,"strategy":"manual-commit","redaction":{"goredact":{"enabled":true}}}`)
 	t.Chdir(tmp)
@@ -1751,7 +1751,7 @@ func TestEnsureRedactionConfigured_GoredactEnabled(t *testing.T) {
 
 func TestEnsureRedactionConfigured_NarrowedScanners(t *testing.T) {
 	// Cannot t.Parallel(): uses t.Chdir and resets a package-level sync.Once.
-	tmp := testutil.TempDir(t)
+	tmp := t.TempDir()
 	testutil.InitRepo(t, tmp)
 	writeSettingsJSON(t, tmp, `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false},"goredact":{"enabled":true}}}`)
 	t.Chdir(tmp)

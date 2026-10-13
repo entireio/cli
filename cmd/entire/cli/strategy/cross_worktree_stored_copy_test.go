@@ -47,7 +47,7 @@ func TestCondenseSessionByID_ReadsStoredCopyFromLinkedWorktree(t *testing.T) { /
 	paths.ClearWorktreeRootCache()
 	writeStoredCopy(t, worktreeDir, sessionID, "linked-worktree-transcript")
 	testutil.WriteFile(t, worktreeDir, "work.txt", "agent content")
-	liveTranscript := filepath.Join(testutil.TempDir(t), "live.jsonl")
+	liveTranscript := filepath.Join(t.TempDir(), "live.jsonl")
 	require.NoError(t, s.SaveStep(t.Context(), StepContext{
 		SessionID:     sessionID,
 		NewFiles:      []string{"work.txt"},
@@ -143,7 +143,7 @@ func TestStoredSessionRoot_RefusesUntrustedWorktreePaths(t *testing.T) { //nolin
 
 	// A directory outside the repository, carrying a stored copy that must
 	// never be read.
-	unregistered, err := filepath.EvalSymlinks(testutil.TempDir(t))
+	unregistered, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 	writeStoredCopy(t, unregistered, sessionID, "unregistered-copy")
 
@@ -195,10 +195,10 @@ func TestStoredSessionRoot_RefusesSymlinkedEntireInRegisteredWorktree(t *testing
 	sessionID := "symlinked-entire"
 	writeStoredCopy(t, mainDir, sessionID, "main-worktree-copy")
 
-	symlinked := filepath.Join(testutil.TempDir(t), "symlinked")
+	symlinked := filepath.Join(t.TempDir(), "symlinked")
 	testutil.RunGit(t, mainDir, "worktree", "add", symlinked, "-b", "symlinked-branch")
 	symlinked = gitToplevel(t, symlinked)
-	elsewhere := testutil.TempDir(t)
+	elsewhere := t.TempDir()
 	writeStoredCopy(t, elsewhere, sessionID, "symlinked-copy")
 	require.NoError(t, os.Symlink(filepath.Join(elsewhere, paths.EntireDir), filepath.Join(symlinked, paths.EntireDir)))
 

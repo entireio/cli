@@ -443,7 +443,7 @@ func resolvedRemovedTempDir(t *testing.T) string {
 func resolvedTempDir(t *testing.T) string {
 	t.Helper()
 
-	dir := testutil.TempDir(t)
+	dir := t.TempDir()
 	resolved, err := filepath.EvalSymlinks(dir)
 	require.NoError(t, err)
 	return filepath.ToSlash(resolved)
