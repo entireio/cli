@@ -60,9 +60,12 @@ by `TestListProjectRepos_UnknownEnumValuesPassThrough`,
 `TestListOrgMembers_UnknownEnumValuesPassThrough` in `client_test.go`.
 
 The detach result is the same shape: `entire repo mirror detach` displays each
-`DetachPrecondition.precondition` slug, each `DetachAccessEntry`'s `source` and
-`subjectType`, and `DetachRepoResult.status` and `RepoDetachState.status`, and the server documents both the
-precondition list and the status set as growing. Locked in by
+`DetachPrecondition.precondition` slug, and `DetachRepoResult.status` and
+`RepoDetachState.status`, and the server documents both the
+precondition list and the status set as growing. The CLI no longer reads
+`DetachAccessEntry`, but its `source` and `subjectType` stay loosened while
+core still sends `access`: a new value would otherwise fail the whole result.
+Locked in by
 `TestDetachRepo_UnknownEnumValuesPassThrough` and
 `TestGetRepoDetach_UnknownStatusPassesThrough`.
 Retire the allowlist entries as upstream loosens the corresponding fields.
@@ -100,6 +103,10 @@ consumer: the consolidated index is what `resolveRepoCellTarget` routes with
 and what `search`, `repo mirror` and the dispatch wizard page through, so a
 decode failure there takes out cell routing and search together rather than
 one command.
+
+`DetachRepoResult.access` is on the same list for the opposite reason: core
+drops the field, and the CLI no longer reads it. Locked in by
+`TestDetachRepo_UnsentAccessDecodes`.
 
 ## 2c. Nullable objects are typed as the object alone
 

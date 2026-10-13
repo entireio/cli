@@ -529,8 +529,8 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 		}
 
 		// OpenAI Privacy Filter (opt-in 9th layer).
-		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
-			opf := s.Redaction.OpenAIPrivacyFilter
+		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil { //nolint:staticcheck // OPF is deprecated but still honored until it is removed
+			opf := s.Redaction.OpenAIPrivacyFilter //nolint:staticcheck // OPF is deprecated but still honored until it is removed
 			// The loader records rather than logs (see
 			// settings.enforceOPFCommandTrust); surface it here or a user
 			// whose configured binary is ignored gets no signal.

@@ -439,7 +439,7 @@ func reviewTokenUsageForSession(ctx context.Context, st *session.State, lookup a
 			slog.String("error", err.Error()))
 		return nil
 	}
-	return agent.CalculateTokenUsage(ctx, ag, transcript, st.CheckpointTranscriptStart, reviewSubagentsDir(st))
+	return agent.CalculateTokenUsage(ctx, ag, transcript, st.TokenStart(), reviewSubagentsDir(st))
 }
 
 func reviewSubagentsDir(st *session.State) string {

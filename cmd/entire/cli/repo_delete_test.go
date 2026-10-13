@@ -19,7 +19,7 @@ import (
 )
 
 // repoDeleteFake is the core `repo delete` talks to: the native-mirror
-// listing the copy count reads, the DELETE, and the repo read the wait polls.
+// listing the mirror count reads, the DELETE, and the repo read the wait polls.
 type repoDeleteFake struct {
 	mirrors         []coreapi.NativeMirrorPlacement
 	mirrorsStatus   int // non-zero: the listing answers this problem instead
@@ -27,6 +27,7 @@ type repoDeleteFake struct {
 	deleteDetail    string // problem detail for a 4xx deleteStatus
 	readsBeforeGone int    // 200s the repo read serves before it answers 404
 	rejectReads     bool   // a repo read is a test failure (--no-wait)
+	unnamed         bool   // the resolution carries no FullName
 
 	mu      sync.Mutex
 	deletes []url.Values
@@ -41,6 +42,12 @@ func (f *repoDeleteFake) handler(t *testing.T) http.Handler {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/resolve":
+			res := nativeResolution(testDeletePath, testDeleteULID)
+			if f.unnamed {
+				res.Resolutions[0].FullName = coreapi.OptString{}
+			}
+			writeJSONResponse(t, w, http.StatusOK, res)
 		case r.Method == http.MethodGet && r.URL.Path == repoPath+"/native-mirrors":
 			f.listed++
 			if f.mirrorsStatus != 0 {
@@ -72,7 +79,11 @@ func (f *repoDeleteFake) handler(t *testing.T) http.Handler {
 	})
 }
 
-func twoCopies() []coreapi.NativeMirrorPlacement {
+// testDeletePath is the <project>/<repo> full name the fake resolves to
+// testDeleteULID.
+const testDeletePath = "acme/web"
+
+func twoMirrors() []coreapi.NativeMirrorPlacement {
 	eu := nativeMirrorAt(coreapi.NativeMirrorPlacementStatusReady)
 	au := nativeMirrorAt(coreapi.NativeMirrorPlacementStatusSuspended)
 	au.ClusterSlug = "aws-ap-southeast-2"
@@ -109,12 +120,12 @@ func TestRepoDelete_Cascade(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, fake.deletes, 1)
 		require.False(t, fake.deletes[0].Has("cascade"))
-		require.Zero(t, fake.listed, "no copy count without --cascade")
+		require.Zero(t, fake.listed, "no mirror count without --cascade")
 		require.Contains(t, out, "✓ Deleted repo "+testDeleteULID)
 	})
 
 	t.Run("--cascade sends cascade=true and a 204 is a finished delete", func(t *testing.T) {
-		fake := &repoDeleteFake{mirrors: twoCopies(), deleteStatus: http.StatusNoContent}
+		fake := &repoDeleteFake{mirrors: twoMirrors(), deleteStatus: http.StatusNoContent}
 		out, err := run(t, fake, "--cascade")
 		require.NoError(t, err)
 		require.Len(t, fake.deletes, 1)
@@ -125,45 +136,70 @@ func TestRepoDelete_Cascade(t *testing.T) {
 	})
 
 	t.Run("--cascade waits out a 202 until the repo read answers 404", func(t *testing.T) {
-		fake := &repoDeleteFake{mirrors: twoCopies(), deleteStatus: http.StatusAccepted, readsBeforeGone: 2}
+		fake := &repoDeleteFake{mirrors: twoMirrors(), deleteStatus: http.StatusAccepted, readsBeforeGone: 2}
 		out, err := run(t, fake, "--cascade")
 		require.NoError(t, err)
-		require.Contains(t, out, "Deleting repo "+testDeleteULID+" and its 2 copies…")
+		require.Contains(t, out, "Deleting repo "+testDeleteULID+" and its 2 mirrors…")
 		require.Contains(t, out, "✓ Deleted repo "+testDeleteULID)
 		require.Equal(t, 3, fake.reads, "two deleting reads, then the 404")
 	})
 
 	t.Run("--no-wait returns after the 202", func(t *testing.T) {
-		fake := &repoDeleteFake{mirrors: twoCopies()[:1], deleteStatus: http.StatusAccepted, rejectReads: true}
+		fake := &repoDeleteFake{mirrors: twoMirrors()[:1], deleteStatus: http.StatusAccepted, rejectReads: true}
 		out, err := run(t, fake, "--cascade", "--no-wait")
 		require.NoError(t, err)
-		require.Contains(t, out, "Deleting repo "+testDeleteULID+" and its copy in the background.")
+		require.Contains(t, out, "Deleting repo "+testDeleteULID+" and its mirror in the background.")
 		require.NotContains(t, out, "✓ Deleted")
 	})
 
-	t.Run("copies already being removed are not counted", func(t *testing.T) {
-		copies := twoCopies()
-		copies[1].DesiredState = coreapi.NativeMirrorPlacementDesiredStateDeleted
-		fake := &repoDeleteFake{mirrors: copies, deleteStatus: http.StatusAccepted}
+	t.Run("mirrors already being removed are not counted", func(t *testing.T) {
+		mirrors := twoMirrors()
+		mirrors[1].DesiredState = coreapi.NativeMirrorPlacementDesiredStateDeleted
+		fake := &repoDeleteFake{mirrors: mirrors, deleteStatus: http.StatusAccepted}
 		out, err := run(t, fake, "--cascade")
 		require.NoError(t, err)
-		require.Contains(t, out, "Deleting repo "+testDeleteULID+" and its copy…")
+		require.Contains(t, out, "Deleting repo "+testDeleteULID+" and its mirror…")
 	})
 
-	t.Run("a failed copy count degrades the wording only", func(t *testing.T) {
+	t.Run("a failed mirror count degrades the wording only", func(t *testing.T) {
 		fake := &repoDeleteFake{mirrorsStatus: http.StatusNotFound, deleteStatus: http.StatusAccepted}
 		out, err := run(t, fake, "--cascade")
 		require.NoError(t, err)
-		require.Contains(t, out, "Deleting repo "+testDeleteULID+" and any copies…")
+		require.Contains(t, out, "Deleting repo "+testDeleteULID+" and any mirrors…")
 		require.Contains(t, out, "✓ Deleted repo "+testDeleteULID)
 	})
 
 	t.Run("a timeout says the server is still deleting", func(t *testing.T) {
-		fake := &repoDeleteFake{mirrors: twoCopies(), deleteStatus: http.StatusAccepted, readsBeforeGone: 1 << 30}
+		fake := &repoDeleteFake{mirrors: twoMirrors(), deleteStatus: http.StatusAccepted, readsBeforeGone: 1 << 30}
 		_, stderr, err := runWithStderr(t, fake, "--cascade", "--wait-timeout", "20ms")
 		require.EqualError(t, err, "stopped waiting after 20ms (--wait-timeout)")
-		require.Contains(t, stderr, "The server is still deleting repo "+testDeleteULID+" and its 2 copies.")
-		require.Contains(t, stderr, "Check with: entire api /api/v1/repos/"+testDeleteULID)
+		require.Contains(t, stderr, "The server is still deleting repo "+testDeleteULID+" and its 2 mirrors.")
+		require.NotContains(t, stderr, "Check with", "repo view takes only paths; a ULID ref has none to suggest")
+	})
+
+	t.Run("a path ref names the repo by path and suggests repo view", func(t *testing.T) {
+		fake := &repoDeleteFake{mirrors: twoMirrors(), deleteStatus: http.StatusAccepted, readsBeforeGone: 1 << 30}
+		srv := httptest.NewServer(fake.handler(t))
+		t.Cleanup(srv.Close)
+		// No leading slash: the spelling that used to fall back to `entire api`.
+		out, stderr, err := runCoreCmd(t, newRepoDeleteCmd, srv.URL, "et/"+testDeletePath, "--force", "--cascade", "--wait-timeout", "20ms")
+		require.Error(t, err)
+		require.Contains(t, out, "Deleting repo /et/"+testDeletePath+" and its 2 mirrors…")
+		require.Contains(t, stderr, "The server is still deleting repo /et/"+testDeletePath+" and its 2 mirrors.")
+		require.Contains(t, stderr, "Check with: entire repo view /et/"+testDeletePath+"\n")
+		require.NotContains(t, out+stderr, testDeleteULID, "the ULID stays internal")
+	})
+
+	t.Run("a resolution without a name keeps the ULID and suggests nothing", func(t *testing.T) {
+		fake := &repoDeleteFake{mirrors: twoMirrors(), deleteStatus: http.StatusAccepted, readsBeforeGone: 1 << 30, unnamed: true}
+		srv := httptest.NewServer(fake.handler(t))
+		t.Cleanup(srv.Close)
+		out, stderr, err := runCoreCmd(t, newRepoDeleteCmd, srv.URL, "/et/"+testDeletePath, "--force", "--cascade", "--wait-timeout", "20ms")
+		require.Error(t, err)
+		label := "repo /et/" + testDeletePath + " (" + testDeleteULID + ")"
+		require.Contains(t, out, "Deleting "+label+" and its 2 mirrors…", "the typed ref is not a confirmed path; the ULID shows what resolved")
+		require.Contains(t, stderr, "The server is still deleting "+label+" and its 2 mirrors.")
+		require.NotContains(t, stderr, "Check with", "no server path to suggest; the typed ref is unconfirmed")
 	})
 
 	t.Run("an already-gone repo is idempotent under --cascade", func(t *testing.T) {
@@ -181,14 +217,14 @@ func TestRepoDelete_Cascade(t *testing.T) {
 	})
 }
 
-// TestRepoDelete_MirrorConflictHint pins the one refusal the CLI adds to: the
-// native-mirror 409 names --cascade as the remedy, and only when the user has
-// not already passed it. Every other refusal is the server's own detail.
+// TestRepoDelete_MirrorConflictHint pins the one refusal the CLI rewords: the
+// server's mirrors-exist 409 names --cascade as the remedy, or, when --cascade
+// was passed, says the server did not take it. Every other refusal is the
+// server's own detail.
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
 func TestRepoDelete_MirrorConflictHint(t *testing.T) {
-	const detail = "delete native mirrors before deleting their primary"
-	const hint = "add --cascade to delete its copies too"
+	const detail = mirrorsExistDetail
 
 	run := func(t *testing.T, detail string, args ...string) error {
 		t.Helper()
@@ -199,20 +235,25 @@ func TestRepoDelete_MirrorConflictHint(t *testing.T) {
 		return err
 	}
 
-	t.Run("the native-mirror 409 hints at --cascade", func(t *testing.T) {
+	t.Run("the mirrors-exist 409 hints at --cascade", func(t *testing.T) {
 		err := run(t, detail)
-		require.ErrorContains(t, err, detail)
-		require.ErrorContains(t, err, hint)
+		require.EqualError(t, err, "repo "+testDeleteULID+" has mirrors on other clusters; add --cascade to delete them too")
 	})
 
-	t.Run("no hint when --cascade was already passed", func(t *testing.T) {
+	t.Run("under --cascade it says the server did not take the cascade", func(t *testing.T) {
 		err := run(t, detail, "--cascade")
-		require.EqualError(t, err, detail)
+		require.EqualError(t, err, "repo "+testDeleteULID+" has mirrors on other clusters and the server did not delete them with --cascade; remove them with `entire repo mirror remove`, then delete the repo")
 	})
 
 	t.Run("other conflicts keep the server's words", func(t *testing.T) {
 		err := run(t, "repo is locked")
 		require.EqualError(t, err, "repo is locked")
+	})
+
+	t.Run("another native-mirror conflict keeps the server's words", func(t *testing.T) {
+		const draining = "native mirror is being deleted; retry later"
+		require.EqualError(t, run(t, draining), draining)
+		require.EqualError(t, run(t, draining, "--cascade"), draining)
 	})
 }
 
@@ -297,6 +338,14 @@ func TestReportUnfinishedDelete(t *testing.T) {
 		require.Equal(t, "The server is still deleting repo web.\nCheck with: entire repo view /et/acme/web\n", w.String())
 	})
 
+	t.Run("no check line without a command to suggest", func(t *testing.T) {
+		t.Parallel()
+		var w strings.Builder
+		err := reportUnfinishedDelete(&w, "repo web", "", time.Minute, context.DeadlineExceeded)
+		require.EqualError(t, err, "stopped waiting after 1m0s (--wait-timeout)")
+		require.Equal(t, "The server is still deleting repo web.\n", w.String())
+	})
+
 	t.Run("a poll failure keeps its error", func(t *testing.T) {
 		t.Parallel()
 		glitch := errors.New("poll repository: connection reset")
@@ -307,7 +356,23 @@ func TestReportUnfinishedDelete(t *testing.T) {
 
 func TestRepoCheckCommand(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, "entire repo view /et/acme/web", repoCheckCommand("/et/acme/web", testDeleteULID))
-	require.Equal(t, "entire api /api/v1/repos/"+testDeleteULID, repoCheckCommand("web", testDeleteULID))
-	require.Equal(t, "entire api /api/v1/repos/"+testDeleteULID, repoCheckCommand(testDeleteULID, testDeleteULID))
+	require.Equal(t, "entire repo view /et/acme/web", repoCheckCommand("/et/acme/web"))
+	require.Empty(t, repoCheckCommand(""), "no server path, no suggestion")
+}
+
+// TestRepoDelete_TakesPathsOnly pins the grammar `repo delete` accepts: the
+// /et/<project>/<repo> path. A bare name is refused before any request, and
+// there is no --project to scope one.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoDelete_TakesPathsOnly(t *testing.T) {
+	require.Nil(t, newRepoDeleteCmd().Flags().Lookup(projectFlagName),
+		"--project scoped a bare name, which this verb no longer takes")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	_, _, err := runCoreCmd(t, newRepoDeleteCmd, srv.URL, "web", "--force")
+	require.EqualError(t, err, `repo "web" must be a /et/<project>/<repo> path`)
 }

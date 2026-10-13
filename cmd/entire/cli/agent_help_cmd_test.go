@@ -946,3 +946,42 @@ func TestAgentHelpGuidance_NeverLeaksIntoCobraHelp(t *testing.T) {
 		}
 	}
 }
+
+// Group guidance reaches the leaves agents actually look up: `agent-help trail
+// finding list` must carry trail's network/keyring explanation, in text and JSON.
+func TestAgentHelpGuidance_InheritedByLeafCommands(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	leaf := root
+	for _, name := range []string{"trail", "finding", "list"} {
+		leaf = agentHelpFindChild(leaf, name)
+		if leaf == nil {
+			t.Fatalf("command %q not found", name)
+		}
+	}
+	trailFirstLine := strings.SplitN(agentHelpGuidance["trail"], "\n", 2)[0]
+
+	if got := agentHelpGuidanceFor(leaf); !strings.Contains(got, trailFirstLine) {
+		t.Errorf("guidance for %q = %q, want it to inherit trail's", agentHelpPath(leaf), got)
+	}
+	if text := renderAgentHelpCommand(leaf, "", true); !strings.Contains(text, trailFirstLine) {
+		t.Errorf("text agent-help for %q is missing trail's guidance:\n%s", agentHelpPath(leaf), text)
+	}
+	js, err := renderAgentHelpJSON(root, leaf, "", true)
+	if err != nil {
+		t.Fatalf("renderAgentHelpJSON: %v", err)
+	}
+	if !strings.Contains(js, strings.TrimSpace(trailFirstLine)) {
+		t.Errorf("JSON agent-help for %q is missing trail's guidance:\n%s", agentHelpPath(leaf), js)
+	}
+
+	// A leaf with its own guidance keeps it, after its ancestors'.
+	del := agentHelpFindChild(agentHelpFindChild(root, "checkpoint"), "delete")
+	if del == nil {
+		t.Fatal("checkpoint delete not found")
+	}
+	if got := agentHelpGuidanceFor(del); got != agentHelpGuidance["checkpoint delete"] {
+		t.Errorf("checkpoint delete guidance = %q, want only its own", got)
+	}
+}

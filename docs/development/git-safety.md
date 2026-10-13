@@ -325,21 +325,6 @@ Two rules about *where* the check goes, both learned by getting them wrong:
   there, and a cwd-relative directory that works beats a hard failure, so the
   distinction is drawn in the one place that still has the information.
 
-**The OPF `command` is the deliberate exception, and stays one.**
-`redaction.openai_privacy_filter.command` becomes `argv[0]` of an
-`exec.CommandContext` in `redact/opf.go` with no `cmd.Dir` and no absoluteness
-check, so `"command": "./tools/opf"` resolves against the pre-push process's
-working directory. That is allowed because the field is not repo-supplied: the
-[OPF ownership gate](checkpoint-implementation.md) honors it only from an untracked, index-and-HEAD-verified
-`.entire/settings.local.json`, so a relative path there is the developer's own
-choice about their own machine, and a bare name is still covered by
-`exec.Command`'s `ErrDot` re-check. The scanners are the opposite case — they
-resolve names nobody chose, out of a `$PATH` the repository can reach — which
-is why the rule is theirs and not this field's. Do not "finish the job" by
-rejecting a relative OPF `command`: it would break the GUI-git-client setups
-the explicit `command` exists to serve, without closing anything the trust gate
-leaves open.
-
 #### Invoking Commands on Windows - Never Put a Dynamic Value on a cmd.exe Line
 
 **When Entire performs the exec itself, do not go through `cmd.exe`.** Pass the

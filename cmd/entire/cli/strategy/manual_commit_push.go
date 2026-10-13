@@ -244,7 +244,7 @@ func opfPrePushDecision(ctx context.Context) (OPFDecision, error) {
 	cfg, _ := settings.Load(ctx) //nolint:errcheck // Load already failed at hook init; fall back to nil
 	var opfCfg *settings.OPFSettings
 	if cfg != nil && cfg.Redaction != nil {
-		opfCfg = cfg.Redaction.OpenAIPrivacyFilter
+		opfCfg = cfg.Redaction.OpenAIPrivacyFilter //nolint:staticcheck // OPF is deprecated but still honored until it is removed
 	}
 	return resolveOPFDecisionForPrePush(ctx, opfCfg, opfPrePushProgressWriter)
 }

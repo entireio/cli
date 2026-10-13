@@ -22,7 +22,7 @@ Both backends are **git-backed** — they store the committed record in the repo
 
 Checkpoint storage is pluggable. The topology is a single **primary** plus zero or more **mirrors**:
 
-- **Primary** — the source of truth. It serves all reads and writes, and the full checkpoint lifecycle (resume bootstrap, `doctor` reconcile, `explain` tree reads, push, cleanup) drives *its* record. Pre-push OPF follows the primary too: each backend has its own rewrite (`manual_commit_opf_rewrite.go` for the v1 branch, `manual_commit_opf_refs.go` for the per-ref push).
+- **Primary** — the source of truth. It serves all reads and writes, and the full checkpoint lifecycle (resume bootstrap, `doctor` reconcile, `explain` tree reads, push, cleanup) drives *its* record.
 - **Mirror** — an independent backend that receives best-effort **write fan-out** only. Reads never come from a mirror.
 
 Backends register in `checkpoint/registry.go`. Each carries a `gitBacked` capability:
@@ -159,8 +159,7 @@ the ref can push it back; remote tombstones are deferred.
 A checkpoint on the `v1` branch is deleted per remote by fetching that
 remote's branch tip into a temporary ref, committing the subtree's removal on
 it, and pushing with a lease on the fetched tip (a fast-forward). Local `v1`
-commits are never pushed by a delete, so unpushed (for example not yet
-OPF-redacted) data stays local. The remote-tracking `v1` ref of each named
+commits are never pushed by a delete, so unpushed data stays local. The remote-tracking `v1` ref of each named
 remote whose fetch URL is the target is advanced to the pushed tip (or to the
 fetched tip when the checkpoint was already gone there) so read fallbacks and
 migration stop seeing the checkpoint. The content remains in the branch's
@@ -277,5 +276,4 @@ When checkpoints *are* actively migrated from the branch into refs (a path that 
 ## Known limitations and deferred work
 
 - **Storage-level `List` is local-only by default**, with **opt-in remote discovery** for user-facing enumeration (see [List and remote discovery](#list-and-remote-discovery)): an `ls-remote` of `refs/entire/checkpoints/*` surfaces checkpoints written on another machine, hydrated lazily on read. It queries the dedicated `checkpoint_remote` when one is configured, else the checkpoint read candidates with merged listings, and is kept off the per-turn hook hot path.
-- ~~**OPF (OpenAI Privacy Filter) at pre-push is git-branch-only.**~~ **Resolved.** The per-ref push now runs OPF re-redaction over every unpushed commit on each queued ref. See `strategy/manual_commit_opf_refs.go` and [security-and-privacy.md](../security-and-privacy.md).
 - **The "ULIDs never land on the branch" invariant is not yet enforced at write time.** A config flip or a missing `ENTIRE_CHECKPOINTS_PRIMARY` in an amending environment could, in principle, condense a ULID checkpoint onto the `v1` branch, which readers (routing ULIDs to refs only) would then fail to find. Because git-branch is *not* a mirror of git-refs (see [Migration and coexistence](#migration-and-coexistence)), a ULID reaching the git-branch write path is unambiguously a bug — so enforcing this is a straightforward reject at that write path, not a topology-role-aware check.

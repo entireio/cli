@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,10 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/auth-go/tokenmanager"
 	"github.com/entireio/auth-go/tokens"
 	authtokenstore "github.com/entireio/auth-go/tokenstore"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/netcause"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
@@ -237,6 +240,99 @@ func TestNewRefreshingLoginProvider_UnreachableCore(t *testing.T) {
 	}
 	if strings.Contains(got, "/oauth/token") {
 		t.Errorf("error %q repeats the token endpoint URL", got)
+	}
+}
+
+// A connection the operating system refused (a sandbox or firewall) never
+// reached the core, so it must say so and must not send the user to
+// `entire login`, which cannot fix it.
+func TestNewRefreshingLoginProvider_NetworkDeniedIsNotALoginProblem(t *testing.T) {
+	denied := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.EPERM)}
+	})
+	provider := seedExpiredLogin(t, "alice@core", "https://core.example", denied)
+	_, err := provider(t.Context())
+	if err == nil {
+		t.Fatal("denied network: want an error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, `cannot reach the login server for "alice@core"`) || !strings.Contains(got, "not allowed to open network connections") {
+		t.Errorf("error %q does not name the denied network access", got)
+	}
+	if strings.Contains(got, "entire login") || strings.Contains(got, "entire auth switch") {
+		t.Errorf("error %q suggests a login change for a network denial", got)
+	}
+	if !errors.Is(err, syscall.EPERM) {
+		t.Errorf("error %v no longer unwraps to EPERM", err)
+	}
+}
+
+// A refresh over a transport that already names the cause must not repeat it.
+func TestNewRefreshingLoginProvider_NetworkHintNotRepeated(t *testing.T) {
+	denied := netcause.Transport(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.EPERM)}
+	}))
+	provider := seedExpiredLogin(t, "alice@core", "https://core.example", denied)
+	_, err := provider(t.Context())
+	if err == nil {
+		t.Fatal("denied network: want an error")
+	}
+	got := err.Error()
+	const hint = "not allowed to open network connections"
+	if n := strings.Count(got, hint); n != 1 {
+		t.Errorf("error %q names the denied network %d times, want 1", got, n)
+	}
+	// Hint is empty here (the transport already explained it), and the
+	// denial must still drop the login advice.
+	if strings.Contains(got, "entire login") || strings.Contains(got, "entire auth switch") {
+		t.Errorf("error %q suggests a login change for a network denial", got)
+	}
+	if strings.HasSuffix(strings.TrimSpace(got), ";") {
+		t.Errorf("error %q ends with a dangling separator", got)
+	}
+}
+
+// A saved login whose keyring cannot be searched must be reported as an
+// unreadable login, not as "no usable login; run `entire login`".
+func TestNewRefreshingLoginProvider_UnreachableKeyring(t *testing.T) {
+	t.Cleanup(tokenstore.UseUnreachableKeyringForTesting(filepath.Join(t.TempDir(), "tokens.json")))
+
+	svc := tokenstore.CoreKeyringService("https://core.example")
+	c := &contexts.Context{Name: "alice@core", CoreURL: "https://core.example", Handle: "alice", KeychainService: svc}
+	provider, err := NewRefreshingLoginProvider(c, failRoundTripper(t), false)
+	if err != nil {
+		t.Fatalf("NewRefreshingLoginProvider: %v", err)
+	}
+	_, err = provider(t.Context())
+	if !errors.Is(err, tokenstore.ErrKeyringUnavailable) {
+		t.Fatalf("error = %v, want ErrKeyringUnavailable", err)
+	}
+	if errors.Is(err, ErrNotLoggedIn) {
+		t.Errorf("error %v still matches ErrNotLoggedIn, so callers add the login hint", err)
+	}
+	if got, want := err.Error(), `cannot read the saved login for "alice@core" (https://core.example): the macOS Keychain is not accessible`; !strings.HasPrefix(got, want) {
+		t.Errorf("error = %q, want prefix %q", got, want)
+	}
+}
+
+// An unreadable keyring wins over any re-login sentinel in the same chain:
+// with the keyring unreadable, "expired" or "not logged in" is a guess.
+func TestContextAuthError_KeyringUnavailableWinsOverReauthSentinels(t *testing.T) {
+	t.Parallel()
+
+	c := &contexts.Context{Name: "alice@core", CoreURL: "https://core.example"}
+	for _, sentinel := range []error{tokenmanager.ErrNotLoggedIn, tokenmanager.ErrReauthRequired} {
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			t.Parallel()
+
+			err := contextAuthError(c, fmt.Errorf("load: %w", errors.Join(sentinel, tokenstore.ErrKeyringUnavailable)))
+			if !errors.Is(err, tokenstore.ErrKeyringUnavailable) {
+				t.Fatalf("error = %v, want ErrKeyringUnavailable", err)
+			}
+			if errors.Is(err, sentinel) || strings.Contains(err.Error(), "run `entire login`") {
+				t.Errorf("error %q still reports %v and the login hint", err, sentinel)
+			}
+		})
 	}
 }
 

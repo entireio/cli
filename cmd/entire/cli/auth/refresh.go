@@ -14,6 +14,7 @@ import (
 	authtokenstore "github.com/entireio/auth-go/tokenstore"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/netcause"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/entireio/cli/internal/testdirs"
 )
@@ -183,6 +184,12 @@ func (e *reauthError) Unwrap() error { return e.sentinel }
 func contextAuthError(c *contexts.Context, err error) error {
 	coreURL := strings.TrimRight(c.CoreURL, "/")
 	switch {
+	case errors.Is(err, tokenstore.ErrKeyringUnavailable):
+		// The login exists; it just can't be read from here. Name the login
+		// and keep the keyring's explanation, not the store-read chain. First,
+		// because a keyring that could not be read makes any "expired" or
+		// "not logged in" conclusion in the same chain unreliable.
+		return fmt.Errorf("cannot read the saved login for %q (%s): %w", c.Name, coreURL, tokenstore.ErrKeyringUnavailable)
 	case errors.Is(err, tokenmanager.ErrReauthRequired):
 		return &reauthError{
 			msg:      fmt.Sprintf("login session for %q (%s) expired; run `entire login` to re-authenticate", c.Name, coreURL),
@@ -227,6 +234,10 @@ func contextAuthError(c *contexts.Context, err error) error {
 // urlErr.Err is wrapped rather than urlErr itself so the message doesn't repeat
 // the core URL we already name; errors.Is against the syscall/net cause still
 // matches. http.Client always sets it.
+//
+// When the cause can be named (netcause.Hint) it leads the advice. A connection
+// the operating system refused (a sandbox or firewall) never reached the core,
+// so the re-login and switch hints are dropped: they cannot fix it.
 func contextUnreachableError(c *contexts.Context, coreURL string, err error) error {
 	var urlErr *url.Error
 	if !errors.As(err, &urlErr) {
@@ -235,10 +246,23 @@ func contextUnreachableError(c *contexts.Context, coreURL string, err error) err
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil
 	}
-	return fmt.Errorf(
-		"cannot reach the login server for %q (%s): %w; run `entire login` to sign in again, or `entire auth switch <context>` to switch to another login",
-		c.Name, coreURL, urlErr.Err,
-	)
+	const switchHint = "run `entire login` to sign in again, or `entire auth switch <context>` to switch to another login"
+	// Denied is decided apart from Hint: Hint is empty when the transport
+	// already explained the cause, and a denial must still drop switchHint.
+	hint := netcause.Hint(err)
+	var advice string
+	switch {
+	case netcause.Denied(err):
+		advice = hint
+	case hint != "":
+		advice = hint + "; if this login server no longer exists, " + switchHint
+	default:
+		advice = switchHint
+	}
+	if advice == "" {
+		return fmt.Errorf("cannot reach the login server for %q (%s): %w", c.Name, coreURL, urlErr.Err)
+	}
+	return fmt.Errorf("cannot reach the login server for %q (%s): %w; %s", c.Name, coreURL, urlErr.Err, advice)
 }
 
 // RefreshingLoginCredential resolves a context's login JWT and can force a

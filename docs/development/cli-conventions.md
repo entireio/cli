@@ -356,12 +356,10 @@ the commands are always runnable in every build.
   by name, its repo is the name the detach is asked to use). It is
   keyed by the placement ID from `/mirrors/placements`, and with several
   placements it sends the first so the server's `single-placement`
-  precondition explains the refusal. Every run asks for the dry-run plan first,
-  and tables show its access split into who loses and who keeps it, in the
-  grant tables' layout, accounts named by handle and display name from one
-  best-effort `GET
-  /repos/{repoId}/people` read before the write (the API names subjects by ID
-  only; `--json` keeps the IDs and skips the read);
+  precondition explains the refusal. Every run asks for the dry-run plan first
+  and shows its preconditions. It shows no access list: after the detach only
+  the target project grants member access, and the plan, the prompt and the
+  help say so. `--json` still prints any `access` an older core sends;
   an ineligible plan stops before the write with the failed precondition slugs
   (under `--json`, after printing the plan). A real detach is confirmed through
   `confirmPrompt` (shared with `grant remove`'s revoke prompt), which writes the

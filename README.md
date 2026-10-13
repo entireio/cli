@@ -112,7 +112,7 @@ go install github.com/entireio/cli/cmd/git-remote-entire@latest
 export PATH="$HOME/go/bin:$PATH"
 ```
 
-Install both, or just `entire` if you never clone over `entire://`. Git finds the helper by name on `$PATH`, which is what `go install` produces, so nothing else needs configuring.
+Install both, or just `entire` if you never clone over `entire://`. Git finds the helper by name on `$PATH`, which is what `go install` produces, so nothing else needs configuring. Like git itself, the helper honours `GIT_HTTP_USER_AGENT` for the HTTP `User-Agent` it sends.
 
 One difference from a stable release: a `go install` build leaves [experimental commands](#experimental-commands) visible in `entire help`, the same as a nightly or a local build.
 
@@ -525,7 +525,9 @@ Personal overrides, gitignored by default:
 | `summary_generation.provider`             | e.g. `claude-code`, `codex`, `pi`            | Which agent generates summaries (defaults to Claude)                              |
 | `summary_generation.model`                | provider-specific model hint                 | Model hint for summary generation (requires `provider`)                            |
 | `summary_timeout_seconds`                 | seconds                                      | Hard deadline for `entire checkpoint explain --generate`. Unset or `0` means **no deadline** |
-| `redaction.*`                             | nested object                                | PII redaction, custom secret patterns, scanner engines, and the OpenAI Privacy Filter — documented in [docs/security-and-privacy.md](docs/security-and-privacy.md) |
+| `redaction.*`                             | nested object                                | PII redaction, custom secret patterns, and scanner engines — documented in [docs/security-and-privacy.md](docs/security-and-privacy.md) |
+
+> **Deprecated:** the OpenAI Privacy Filter (`redaction.openai_privacy_filter`) is deprecated and will be removed in a future release. Existing configurations keep working until then, but don't enable it in new setups.
 
 ### Agent Hook Configuration
 
@@ -659,7 +661,7 @@ Two exceptions to field-by-field merging:
 
 Entire automatically redacts detected secrets (API keys, tokens, credentials) from transcripts and metadata before writing a checkpoint, but redaction is best-effort.
 
-Older Entire versions also kept local `entire/<commit>-<worktree>` shadow branches whose code-file snapshots were raw blobs of your working tree. Current versions no longer create them, but do not delete leftover ones automatically: `entire doctor` reports them and `entire doctor --force` deletes them, leaving pending agent work alone (plain `entire clean` would also clear the session state that records it). `entire disable --uninstall` deletes the `entire/<commit>-<worktree>` form too, and lists any oldest-form `entire/<commit>` branches without deleting them, since a branch of yours named after a short SHA looks the same; `entire clean --all` covers that form after you confirm. See [docs/security-and-privacy.md](docs/security-and-privacy.md) for the full picture, including the configurable scanner layers, opt-in PII redaction, and the OpenAI Privacy Filter pass.
+Older Entire versions also kept local `entire/<commit>-<worktree>` shadow branches whose code-file snapshots were raw blobs of your working tree. Current versions no longer create them, but do not delete leftover ones automatically: `entire doctor` reports them and `entire doctor --force` deletes them, leaving pending agent work alone (plain `entire clean` would also clear the session state that records it). `entire disable --uninstall` deletes the `entire/<commit>-<worktree>` form too, and lists any oldest-form `entire/<commit>` branches without deleting them, since a branch of yours named after a short SHA looks the same; `entire clean --all` covers that form after you confirm. See [docs/security-and-privacy.md](docs/security-and-privacy.md) for the full picture, including the configurable scanner layers and opt-in PII redaction.
 
 ## Troubleshooting
 

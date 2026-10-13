@@ -236,6 +236,15 @@ var agentHelpGuidance = map[string]string{
 		"did, read \"tasks\" in --json, then stream one subagent's transcript with\n" +
 		"--transcript --task <tool_use_id>.",
 
+	// Agent sandboxes commonly block both, and the failure reads like an auth
+	// wall to an agent that does not know what the command needs.
+	"trail": "Trail commands talk to entire.io and read the saved login from the OS\n" +
+		"keyring (the Keychain on macOS), so they need network and keyring access.\n" +
+		"If you run commands in a sandbox, request unsandboxed execution for\n" +
+		"`entire trail` up front. An error saying the Keychain is not accessible or\n" +
+		"the network is not allowed means the sandbox blocked it, not that the user\n" +
+		"is logged out: ask to re-run it unsandboxed, and do not run `entire login`.",
+
 	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
 }
@@ -256,6 +265,20 @@ func agentHelpFactsFor(path string) agentHelpFacts {
 func agentHelpClassified(path string) (agentHelpFacts, bool) {
 	f, ok := agentHelpClassification[path]
 	return f, ok
+}
+
+// agentHelpGuidanceFor returns the guidance for cmd and every ancestor that has
+// some, outermost first. Inherited so a group-wide fact (trail needs network and
+// keyring access) reaches the leaf an agent actually looks up, e.g.
+// `agent-help trail finding list`, without repeating it on every subcommand.
+func agentHelpGuidanceFor(cmd *cobra.Command) string {
+	var parts []string
+	for c := cmd; c != nil && c != c.Root(); c = c.Parent() {
+		if g := agentHelpGuidance[agentHelpPath(c)]; g != "" {
+			parts = append([]string{g}, parts...)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // agentHelpPath is a command's path relative to the root, the key shape used by
@@ -614,7 +637,7 @@ func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trails
 		Command:  target.CommandPath(),
 		Short:    target.Short,
 		Long:     strings.TrimSpace(target.Long),
-		Guidance: agentHelpGuidance[agentHelpPath(target)],
+		Guidance: agentHelpGuidanceFor(target),
 		Example:  strings.TrimSpace(target.Example),
 		Repo:     repoLine,
 	}
@@ -705,7 +728,7 @@ func renderAgentHelpCommand(cmd *cobra.Command, repoLine string, trailsEnabled b
 	}
 	// Before the flags and examples: whether to use the command at all outranks
 	// how to call it.
-	if guidance := agentHelpGuidance[agentHelpPath(cmd)]; guidance != "" {
+	if guidance := agentHelpGuidanceFor(cmd); guidance != "" {
 		b.WriteString("\nWhen to use this:\n")
 		b.WriteString(guidance)
 		b.WriteString("\n")

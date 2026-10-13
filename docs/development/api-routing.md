@@ -50,7 +50,7 @@ retain precedence over name matching. Duplicate normalized slugs preserve all
 matching search entries (deduplicated by ID); wizard jurisdictions are merged
 and picker suggestions deduplicated, preserving the first spelling/order.
 Do not use the removed BFF
-`GET /api/v1/repositories` route. Dispatch generation still uses the BFF.
+`GET /api/v1/repositories` route.
 
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)
 
@@ -86,8 +86,19 @@ uses the following routing shapes, mirroring the entire.io BFF:
   See [Project trails CLI](../architecture/project-trails-cli.md).
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
-  `home_jurisdiction` JWT claim; activity/recap use it with a data-API
-  fallback (`runAuthenticatedActivityAPI` in `entireapi_client.go`).
+  `home_jurisdiction` JWT claim. Activity and recap use it with no data-API
+  fallback (`runAuthenticatedActivityAPI` in `entireapi_client.go`,
+  `newRecapClient` in `recap.go`): the BFF serves `/me/*` by proxying to the
+  same home cell, so it cannot answer a caller the cell path cannot.
+- **Cloud dispatch → one jurisdiction's cell**: `entire dispatch` builds one
+  `CellClientFactory` (`newDispatchCellClient` in `dispatch/mode_cloud.go`)
+  and dials the `--jurisdiction` cell, else the home cell. It posts to
+  `/me/dispatches`, which answers 202 with a generating run, and polls
+  `/me/dispatches/{id}` until the run completes or fails. The cell resolves
+  the forge-qualified repos among its own placements and 404s
+  `repository not found: …` for the rest. The dispatch wizard reads the home
+  jurisdiction from the same factory. Do not use the BFF's
+  `POST /api/v1/dispatches/generate`.
 - **Repo-set queries → fan out and merge client-side**: `cell_fanout.go` —
   `groupReposByCell` (repo index → per-cell groups; the catalog join key is
   `ClusterSlug`↔`Cluster.Slug`, NOT the cell name, which the catalog does not

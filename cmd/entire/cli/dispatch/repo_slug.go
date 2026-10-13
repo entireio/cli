@@ -76,9 +76,9 @@ func normalizeRepoSlugs(values []string) ([]string, error) {
 	return normalized, nil
 }
 
-// echoedSlugMatches reports whether a slug the gateway echoed names the
+// echoedSlugMatches reports whether a slug the server echoed names the
 // forge-qualified slug this request sent. The forge must agree and the name
-// compares case-insensitively. The gateway learned the prefixed form after
+// compares case-insensitively. The server learned the prefixed form after
 // years of bare GitHub names, so a bare echo is read as GitHub: that is the
 // server's legacy spelling, never a user's input, which SplitRepoSlug refuses.
 func echoedSlugMatches(echoed, requested string) bool {

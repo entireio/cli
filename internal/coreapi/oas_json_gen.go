@@ -15012,12 +15012,14 @@ func (s *DetachRepoResult) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
-		e.FieldStart("access")
-		e.ArrStart()
-		for _, elem := range s.Access {
-			elem.Encode(e)
+		if s.Access != nil {
+			e.FieldStart("access")
+			e.ArrStart()
+			for _, elem := range s.Access {
+				elem.Encode(e)
+			}
+			e.ArrEnd()
 		}
-		e.ArrEnd()
 	}
 	{
 		e.FieldStart("dryRun")
@@ -15142,7 +15144,6 @@ func (s *DetachRepoResult) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"$schema\"")
 			}
 		case "access":
-			requiredBitSet[0] |= 1 << 1
 			if err := func() error {
 				s.Access = make([]DetachAccessEntry, 0)
 				if err := d.Arr(func(d *jx.Decoder) error {
@@ -15343,7 +15344,7 @@ func (s *DetachRepoResult) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [2]uint8{
-		0b00101110,
+		0b00101100,
 		0b00100101,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {

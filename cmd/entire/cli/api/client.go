@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/netcause"
 )
 
 const (
@@ -59,7 +60,7 @@ func NewClientWithBaseURL(token, baseURL string) *Client {
 		httpClient: &http.Client{
 			Transport: &bearerTransport{
 				token: token,
-				base:  http.DefaultTransport,
+				base:  netcause.Transport(http.DefaultTransport),
 			},
 			// A cross-host redirect must never carry the Entire bearer to
 			// another origin; refuse it rather than follow it. Same-origin

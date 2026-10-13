@@ -240,8 +240,7 @@ func (a *CursorCLI) startInteractiveSession(dir string) (*TmuxSession, error) {
 	args = append(args, bin, "--force", "--workspace", dir)
 
 	name := fmt.Sprintf("cursor-cli-test-%d", time.Now().UnixNano())
-	unset := []string{"CI"}
-	s, err := NewTmuxSession(name, dir, unset, args[0], args[1:]...)
+	s, err := NewTmuxSession(name, dir, nil, args[0], args[1:]...)
 	if err != nil {
 		_ = os.RemoveAll(configDir)
 		return nil, err

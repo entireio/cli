@@ -353,7 +353,10 @@ type RedactionSettings struct {
 	CustomRedactions map[string]string `json:"custom_redactions,omitempty"`
 
 	// OpenAIPrivacyFilter is the optional 8th redaction layer (opt-in).
-	// See docs/security-and-privacy.md.
+	//
+	// Deprecated: the OpenAI Privacy Filter will be removed in a future
+	// release. Existing configurations keep working until then; do not build
+	// new behavior on it.
 	OpenAIPrivacyFilter *OPFSettings `json:"openai_privacy_filter,omitempty"`
 
 	// ExternalizeImages opts into lifting inline base64 images out of transcripts

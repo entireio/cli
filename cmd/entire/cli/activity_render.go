@@ -5,10 +5,12 @@ import (
 	"io"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
@@ -90,7 +92,7 @@ func (s activityStyles) renderAgent(agentID, text string) string {
 	if !s.colorEnabled {
 		return text
 	}
-	display := agentDisplayMap[agentID]
+	display := agentDisplayFor(agentID)
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(display.Color)).Render(text)
 }
 
@@ -108,22 +110,158 @@ type agentDisplay struct {
 // recognizable; lipgloss resolves them to the best representation for the
 // terminal's color profile. The non-brand "unknown" fallback uses muted gray.
 var agentDisplayMap = map[string]agentDisplay{
-	activityAgentClaude:   {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
-	activityAgentGemini:   {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
-	activityAgentAmp:      {Label: "Amp", Color: "#f87171", Char: '▓'},         // red-400
-	activityAgentCodex:    {Label: "Codex", Color: "#818cf8", Char: '▓'},       // indigo-400
-	activityAgentOpencode: {Label: "OpenCode", Color: "#22d3ee", Char: '▓'},    // cyan-400
-	activityAgentCopilot:  {Label: "Copilot", Color: "#a78bfa", Char: '▓'},     // violet-400
-	activityAgentPi:       {Label: "Pi", Color: "#fbbf24", Char: '▓'},          // amber-400
-	activityAgentCursor:   {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
-	activityAgentDroid:    {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
-	activityAgentKiro:     {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
-	activityAgentUnknown:  {Label: "Unknown", Color: palette.Muted, Char: '░'},
+	activityAgentClaude:      {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
+	activityAgentGemini:      {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
+	activityAgentAmp:         {Label: "Amp", Color: "#f87171", Char: '▓'},         // red-400
+	activityAgentCodex:       {Label: "Codex", Color: "#818cf8", Char: '▓'},       // indigo-400
+	activityAgentOpencode:    {Label: "OpenCode", Color: "#22d3ee", Char: '▓'},    // cyan-400
+	activityAgentCopilot:     {Label: "Copilot", Color: "#a78bfa", Char: '▓'},     // violet-400
+	activityAgentPi:          {Label: "Pi", Color: "#fbbf24", Char: '▓'},          // amber-400
+	activityAgentCursor:      {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
+	activityAgentDroid:       {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
+	activityAgentKiro:        {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
+	activityAgentAntigravity: {Label: "Antigravity", Color: "#2dd4bf", Char: '▓'}, // teal-400
+	activityAgentGoose:       {Label: "Goose", Color: "#a3e635", Char: '▓'},       // lime-400
+	activityAgentUnknown:     {Label: "Unknown", Color: palette.Muted, Char: externalAgentBarChar},
+}
+
+// agentKey is the built-in agent ID for raw, or raw itself for an agent Entire
+// does not know (an external agent), so each keeps its own name.
+func agentKey(raw string) string {
+	if id := normalizeAgentString(raw); id != agentUnknown {
+		return id
+	}
+	// The CLI itself records an unidentified agent as "Unknown"
+	// (agent.AgentTypeUnknown); any casing of it is the unknown bucket.
+	if name := externalAgentName(raw); name != "" && !strings.EqualFold(name, agentUnknown) {
+		return name
+	}
+	return agentUnknown
+}
+
+// externalAgentBarChar fills the bar segment of an agent without its own
+// colour (external agents and Unknown). It differs from the bar's empty track
+// ('░') so their share stays visible without colour.
+const externalAgentBarChar = '▒'
+
+// maxExternalAgentNameRunes caps a self-reported name before it is cleaned and
+// measured, so an absurdly long one cannot stall rendering.
+const maxExternalAgentNameRunes = 256
+
+// zeroWidthJoiner joins emoji sequences, so it is kept inside a name.
+const zeroWidthJoiner = '\u200d'
+
+// externalAgentName is raw without control or invisible format characters
+// (bidi controls, zero-width spaces, BOM, soft hyphens), trimmed. External
+// agent names are self-reported, so escape sequences must not reach the
+// terminal, and the web and API clean names the same way.
+func externalAgentName(raw string) string {
+	if runes := []rune(raw); len(runes) > maxExternalAgentNameRunes {
+		raw = string(runes[:maxExternalAgentNameRunes])
+	}
+	cleaned := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && r != zeroWidthJoiner) {
+			return -1
+		}
+		return r
+	}, raw)
+	return strings.TrimFunc(cleaned, func(r rune) bool {
+		return unicode.IsSpace(r) || r == zeroWidthJoiner
+	})
+}
+
+// agentCounts re-keys counts by agentKey, so raw names that clean to the same
+// agent (or to a built-in) are counted once, and merges external names that
+// differ only in case.
+func agentCounts(counts map[string]int) map[string]int {
+	out := make(map[string]int, len(counts))
+	for raw, count := range counts {
+		out[agentKey(raw)] += count
+	}
+	return mergeCaseVariants(out)
+}
+
+// mergeCaseVariants folds agent keys that differ only in case into one key,
+// spelled the way most of the counts spell it (ties go to the smaller
+// spelling), as entire-api does for its chart series. Built-in IDs are left
+// alone: Unicode case folding maps names such as "\u212airo" (Kelvin sign) onto
+// a built-in ID, and a self-reported name must not take over that agent's
+// share.
+func mergeCaseVariants(counts map[string]int) map[string]int {
+	type variants struct {
+		total, bestCount int
+		best             string
+	}
+	out := make(map[string]int, len(counts))
+	groups := make(map[string]*variants, len(counts))
+	for key, count := range counts {
+		if _, builtIn := agentDisplayMap[key]; builtIn {
+			out[key] += count
+			continue
+		}
+		folded := strings.ToLower(key)
+		g, ok := groups[folded]
+		if !ok {
+			g = &variants{}
+			groups[folded] = g
+		}
+		g.total += count
+		if g.best == "" || count > g.bestCount || (count == g.bestCount && key < g.best) {
+			g.best, g.bestCount = key, count
+		}
+	}
+	for _, g := range groups {
+		out[g.best] += g.total
+	}
+	return out
+}
+
+// maxExternalAgentLabelWidth bounds an external agent's self-reported name so
+// a long one cannot push session and commit rows past the terminal width.
+const maxExternalAgentLabelWidth = 24
+
+// agentDisplayFor is agentDisplayMap[key], or a plain entry labelled with the
+// key for an external agent.
+func agentDisplayFor(key string) agentDisplay {
+	if d, ok := agentDisplayMap[key]; ok {
+		return d
+	}
+	if name := externalAgentName(key); name != "" {
+		return agentDisplay{Label: truncateDisplayWidth(name, maxExternalAgentLabelWidth, "…"), Color: palette.Muted, Char: externalAgentBarChar}
+	}
+	return agentDisplayMap[activityAgentUnknown]
 }
 
 var agentOrder = []string{
 	activityAgentClaude, activityAgentCodex, activityAgentGemini, activityAgentAmp, activityAgentOpencode,
-	activityAgentCopilot, activityAgentPi, activityAgentCursor, activityAgentDroid, activityAgentKiro, activityAgentUnknown,
+	activityAgentCopilot, activityAgentPi, activityAgentCursor, activityAgentDroid, activityAgentKiro,
+	activityAgentAntigravity, activityAgentGoose, activityAgentUnknown,
+}
+
+// agentRenderOrder is the keys of counts in display order: built-in agents in
+// agentOrder, then external agents by name, then Unknown.
+func agentRenderOrder(counts map[string]int) []string {
+	keys := make([]string, 0, len(counts))
+	for _, id := range agentOrder {
+		if id == activityAgentUnknown {
+			break
+		}
+		if counts[id] > 0 {
+			keys = append(keys, id)
+		}
+	}
+	var external []string
+	for id, count := range counts {
+		if count > 0 && !slices.Contains(agentOrder, id) {
+			external = append(external, id)
+		}
+	}
+	slices.Sort(external)
+	keys = append(keys, external...)
+	if counts[activityAgentUnknown] > 0 {
+		keys = append(keys, activityAgentUnknown)
+	}
+	return keys
 }
 
 // renderActivityHeader renders the stat cards, contribution heatmap, and repo
@@ -179,14 +317,17 @@ func renderContributionChart(w io.Writer, sty activityStyles, hourly []hourlyPoi
 }
 
 func renderDotChart(w io.Writer, sty activityStyles, hourly []hourlyPoint, repos []repoContribution) {
-	agentTotals := make(map[string]int)
+	// Sum raw names before normalizing, so one agent spelled differently in
+	// two repos is still one legend entry.
+	rawTotals := make(map[string]int)
 	total := 0
 	for _, r := range repos {
 		total += r.Total
 		for agent, count := range r.Agents {
-			agentTotals[agent] += count
+			rawTotals[agent] += count
 		}
 	}
+	agentTotals := agentCounts(rawTotals)
 
 	totalLabel := ""
 	if total > 0 {
@@ -315,13 +456,9 @@ func renderDotChart(w io.Writer, sty activityStyles, hourly []hourlyPoint, repos
 	// Agent legend
 	if total > 0 {
 		var parts []string
-		for _, id := range agentOrder {
-			count, ok := agentTotals[id]
-			if !ok || count == 0 {
-				continue
-			}
-			pct := float64(count) / float64(total) * 100
-			display := agentDisplayMap[id]
+		for _, id := range agentRenderOrder(agentTotals) {
+			pct := float64(agentTotals[id]) / float64(total) * 100
+			display := agentDisplayFor(id)
 			parts = append(parts, sty.renderAgent(id, fmt.Sprintf("● %s %d%%", display.Label, int(math.Round(pct)))))
 		}
 		fmt.Fprintln(w, strings.Join(parts, sty.render(sty.dim, "  ")))
@@ -381,12 +518,10 @@ func renderAgentBar(sty activityStyles, agents map[string]int, maxCount, barWidt
 
 	var b strings.Builder
 
+	agents = agentCounts(agents)
 	filled := 0
-	for _, id := range agentOrder {
-		count, ok := agents[id]
-		if !ok || count == 0 {
-			continue
-		}
+	for _, id := range agentRenderOrder(agents) {
+		count := agents[id]
 		segWidth := int(math.Round(float64(count) / float64(maxCount) * float64(barWidth)))
 		if segWidth < 1 && count > 0 {
 			segWidth = 1
@@ -398,7 +533,7 @@ func renderAgentBar(sty activityStyles, agents map[string]int, maxCount, barWidt
 			continue
 		}
 
-		display := agentDisplayMap[id]
+		display := agentDisplayFor(id)
 		seg := strings.Repeat(string(display.Char), segWidth)
 		b.WriteString(sty.renderAgent(id, seg))
 		filled += segWidth
@@ -448,8 +583,7 @@ func renderCommitListN(w io.Writer, sty activityStyles, days []commitDay, maxDay
 
 			var badges []string
 			for _, a := range uniqueCommitAgents(c) {
-				display := agentDisplayMap[a]
-				badges = append(badges, sty.renderAgent(a, display.Label))
+				badges = append(badges, sty.renderAgent(a, agentDisplayFor(a).Label))
 			}
 
 			fileStats := fmt.Sprintf("%d files", c.FilesChanged)
@@ -494,7 +628,7 @@ func renderCommitListN(w io.Writer, sty activityStyles, days []commitDay, maxDay
 			left += leftSb359.String()
 			var leftPlainSb362 strings.Builder
 			for _, a := range uniqueCommitAgents(c) {
-				leftPlainSb362.WriteString("  " + agentDisplayMap[a].Label)
+				leftPlainSb362.WriteString("  " + agentDisplayFor(a).Label)
 			}
 			leftPlain += leftPlainSb362.String()
 
@@ -517,7 +651,7 @@ func renderCommitListN(w io.Writer, sty activityStyles, days []commitDay, maxDay
 				left += leftSb378.String()
 				var leftPlainSb381 strings.Builder
 				for _, a := range uniqueCommitAgents(c) {
-					leftPlainSb381.WriteString("  " + agentDisplayMap[a].Label)
+					leftPlainSb381.WriteString("  " + agentDisplayFor(a).Label)
 				}
 				leftPlain += leftPlainSb381.String()
 			}
@@ -578,10 +712,10 @@ func renderSessionListN(w io.Writer, sty activityStyles, days []sessionDay, maxD
 // checkpoint count. Fields mirror the entire.io Overview row.
 func renderSessionRow(w io.Writer, sty activityStyles, s userSession) {
 	agentID := agentUnknown
-	if s.Agent != nil && *s.Agent != "" {
-		agentID = normalizeAgentString(*s.Agent)
+	if s.Agent != nil {
+		agentID = agentKey(*s.Agent)
 	}
-	agentLabel := agentDisplayMap[agentID].Label
+	agentLabel := agentDisplayFor(agentID).Label
 
 	title := strings.TrimSpace(s.DisplayName)
 	if title == "" {
@@ -643,8 +777,7 @@ func renderSessionRow(w io.Writer, sty activityStyles, s userSession) {
 }
 
 func uniqueCommitAgents(c userCommit) []string {
-	seen := make(map[string]struct{})
-	var result []string
+	seen := make(map[string]int)
 	for _, cp := range c.Checkpoints {
 		agents := cp.Agents
 		// Fall back to singular Agent field when Agents slice is empty
@@ -652,12 +785,13 @@ func uniqueCommitAgents(c userCommit) []string {
 			agents = []string{cp.Agent}
 		}
 		for _, a := range agents {
-			id := normalizeAgentString(a)
-			if _, ok := seen[id]; !ok {
-				seen[id] = struct{}{}
-				result = append(result, id)
-			}
+			seen[agentKey(a)]++
 		}
+	}
+	merged := mergeCaseVariants(seen)
+	result := make([]string, 0, len(merged))
+	for id := range merged {
+		result = append(result, id)
 	}
 	sort.Strings(result)
 	return result
