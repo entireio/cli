@@ -163,7 +163,7 @@ func TestCheckpointRefDelivery_PreservesSameRefGenerationAdvancedAfterVerificati
 	require.NoError(t, err)
 	drained, err := queue.DrainEntries()
 	require.NoError(t, err)
-	ready, awaiting, stale := partitionCheckpointRefPushes(repo, drained, &opfDelivery{})
+	ready, awaiting, stale, _ := partitionCheckpointRefPushes(repo, drained, &opfDelivery{})
 	require.Len(t, ready, 1)
 	require.Empty(t, awaiting)
 	require.Empty(t, stale)

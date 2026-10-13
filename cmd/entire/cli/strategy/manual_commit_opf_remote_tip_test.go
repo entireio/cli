@@ -132,12 +132,12 @@ func TestPartitionCheckpointRefPushes_ChecksEveryUnsentCommit(t *testing.T) {
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, tip)))
 	entries := []checkpoint.PushQueueEntry{{Ref: ref, Hash: tip}}
 
-	ready, awaiting, _ := partitionCheckpointRefPushes(repo, entries, &opfDelivery{})
+	ready, awaiting, _, _ := partitionCheckpointRefPushes(repo, entries, &opfDelivery{})
 	require.Empty(t, ready, "the unscanned commit below the trailered tip would be sent")
 	require.Len(t, awaiting, 1)
 
 	held := &opfDelivery{remoteTips: map[plumbing.ReferenceName]plumbing.Hash{ref: unscanned}}
-	ready, awaiting, _ = partitionCheckpointRefPushes(repo, entries, held)
+	ready, awaiting, _, _ = partitionCheckpointRefPushes(repo, entries, held)
 	require.Len(t, ready, 1, "the destination already holds the unscanned commit")
 	require.Empty(t, awaiting)
 }

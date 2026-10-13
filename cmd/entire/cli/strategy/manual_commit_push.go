@@ -586,12 +586,14 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 // partitionCheckpointRefPushes captures each queued ref's current immutable tip
 // and, when OPF delivery applies, verifies that every commit that tip would
 // send carries the trailer. The queue token remains attached solely for
-// exact-generation cleanup after delivery.
+// exact-generation cleanup after delivery. A ref whose lookup fails for any
+// reason but absence is unreadable: it has no tip to pin, so it stays queued
+// for the next push rather than being pruned over a flaky read.
 func partitionCheckpointRefPushes(
 	repo *git.Repository,
 	entries []checkpoint.PushQueueEntry,
 	delivery *opfDelivery,
-) (ready []checkpointRefPush, awaiting, stale []checkpoint.PushQueueEntry) {
+) (ready []checkpointRefPush, awaiting, stale, unreadable []checkpoint.PushQueueEntry) {
 	ready = make([]checkpointRefPush, 0, len(entries))
 	for _, entry := range entries {
 		ref, err := repo.Reference(entry.Ref, true)
@@ -600,7 +602,7 @@ func partitionCheckpointRefPushes(
 			continue
 		}
 		if err != nil {
-			awaiting = append(awaiting, entry)
+			unreadable = append(unreadable, entry)
 			continue
 		}
 		candidate := checkpointRefPush{token: entry, name: entry.Ref, hash: ref.Hash()}
@@ -610,7 +612,7 @@ func partitionCheckpointRefPushes(
 		}
 		ready = append(ready, candidate)
 	}
-	return ready, awaiting, stale
+	return ready, awaiting, stale, unreadable
 }
 
 func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEntry {
@@ -660,12 +662,17 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 		return 0, 0, nil
 	}
 
-	existing, awaiting, stale := partitionCheckpointRefPushes(repo, queued, delivery)
+	existing, awaiting, stale, unreadable := partitionCheckpointRefPushes(repo, queued, delivery)
 	if len(stale) > 0 {
 		if err := queue.RemoveEntries(stale); err != nil {
 			logging.Warn(ctx, "git-refs push: prune stale queue entries failed",
 				slog.String("error", err.Error()))
 		}
+	}
+	if len(unreadable) > 0 {
+		logging.Warn(ctx, "git-refs push: checkpoint refs could not be read; left queued",
+			slog.Int("unreadable", len(unreadable)))
+		fmt.Fprintf(stderrWriter, "[entire] %d checkpoint ref(s) could not be read and stay queued for the next push.\n", len(unreadable))
 	}
 
 	// Per-ref delivery gate, on the drained set and nothing else. Skipped

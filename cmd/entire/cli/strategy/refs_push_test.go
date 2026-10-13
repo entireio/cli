@@ -497,3 +497,32 @@ func TestPushQueuedCheckpointRefs_OPFFailureWithholdsPush(t *testing.T) {
 	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "withheld refs stay queued")
 	assertRefsAbsentFromRemote(t, bareDir, refs, "withheld push must not reach the remote")
 }
+
+// A queued ref that cannot be read (here a symbolic-ref loop, which fails with
+// something other than not-found) has no tip to pin. With OPF off it must still
+// stay queued and be reported, not be withheld silently or pruned as stale.
+func TestFlushCheckpointRefsQueue_UnreadableRefStaysQueuedAndIsReported(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	ctx := context.Background()
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+
+	loop := plumbing.ReferenceName("refs/entire/loop")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewSymbolicReference(refs[0], loop)))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewSymbolicReference(loop, refs[0])))
+	queue := enqueueRefs(t, repo, refs)
+
+	stderr := captureStderrWriter(t)
+	restore := captureStderr(t)
+	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, nil)
+	restore()
+
+	require.NoError(t, pushErr)
+	assert.Equal(t, 1, pushed, "the readable ref still ships")
+	assert.Zero(t, withheld, "nothing is withheld for OPF")
+	assert.Contains(t, stderr.String(), "1 checkpoint ref(s) could not be read")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{refs[0]}, remaining, "the unreadable ref stays queued")
+}
