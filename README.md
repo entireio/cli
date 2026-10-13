@@ -66,6 +66,8 @@ curl -fsSL https://entire.io/install.sh | bash                          # stable
 # curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly  # or nightly
 ```
 
+The script installs `entire` and `git-remote-entire` to `~/.local/bin`. If `entire version` says `command not found`, run `export PATH="$HOME/.local/bin:$PATH"` and add that line to your shell profile.
+
 ### Windows
 
 Install with Windows PowerShell 5.1 or later:
