@@ -35,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/entireio/auth-go/tokens"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -372,6 +373,8 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 //     never a silent fallback to context resolution.
 //   - Git credential helper: use its password as the bearer, with the same
 //     cluster trust checks. Lookup uses the original entire:// repository URL.
+//     A password that isn't JWT-shaped, or a JWT whose issuer isn't one of the
+//     cluster's cores, is ignored as if no helper answered.
 //   - otherwise: resolve the login context for this cluster from contexts.json
 //     and use its refreshed login JWT, unless ENTIRE_GIT_NO_LOGIN_FALLBACK is true.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
@@ -406,6 +409,32 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	if err != nil {
 		return nil, nil, err
 	}
+	// Catch-all helpers (static-token scripts, SSO helpers) answer for every
+	// protocol, including entire. A password that isn't JWT-shaped, or a JWT
+	// whose issuer isn't one of this cluster's cores, can never authenticate
+	// here, so treat it as no credential: skipping it cannot substitute an
+	// identity that would have worked. An unparseable JWT, or a token from a
+	// trusted issuer that fails validation, stays fatal.
+	if token != "" {
+		foreign, issuer, err := foreignHelperToken(ctx, token, parsedURL.Host, httpClient)
+		if err != nil {
+			return nil, nil, err
+		}
+		if foreign {
+			// Never print the helper's value: inline helpers often embed the token.
+			what := "a password that isn't an Entire token"
+			if issuer != "" {
+				what = fmt.Sprintf("a token issued by %q, which isn't a login server for %s", issuer, parsedURL.Host)
+			}
+			next := "using your Entire login"
+			if noLoginFallback {
+				next = "saved-login fallback is disabled"
+			}
+			fmt.Fprintf(os.Stderr, "git-remote-entire: a git credential helper returned %s; ignoring it (%s).\n"+
+				"git-remote-entire: to find the helper, run: git config --show-origin --get-regexp '^credential\\..*helper$'\n", what, next)
+			token = ""
+		}
+	}
 	if token != "" {
 		return resolveTokenCreds(ctx, token, "git credential helper token", parsedURL.Host, userdirs.Cache(), httpClient)
 	}
@@ -435,6 +464,30 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	debuglog.Printf("auth: login token bearer (core=%s)", clusterCtx.CoreURL)
 	provider, onUnauthorized := refreshingProvider(loginCredential)
 	return provider, onUnauthorized, nil
+}
+
+// foreignHelperToken reports whether a credential-helper token was not issued
+// for this cluster: not JWT-shaped, or a JWT whose iss isn't an advertised
+// core (clusters advertise every jurisdiction's cores, so any genuine Entire
+// token's issuer is listed). issuer is the token's iss, empty when there is
+// none. A JWT that fails to parse is not reported as foreign, so
+// resolveTokenCreds rejects it.
+func foreignHelperToken(ctx context.Context, token, clusterHost string, httpClient *http.Client) (foreign bool, issuer string, err error) {
+	if strings.Count(token, ".") != 2 {
+		return true, "", nil
+	}
+	claims, err := tokens.ParseClaims(token)
+	if err != nil {
+		return false, "", nil //nolint:nilerr // resolveTokenCreds reports the parse failure
+	}
+	cluster, err := clusterdiscovery.ResolveClusterCores(ctx, userdirs.Cache(), clusterHost, httpClient, debuglog.Printf)
+	if err != nil {
+		return false, "", err //nolint:wrapcheck // ResolveClusterCores returns a user-facing discovery error
+	}
+	if claims.Issuer != "" && coreTrusted(claims.Issuer, cluster.CoreURLs) {
+		return false, "", nil
+	}
+	return true, claims.Issuer, nil
 }
 
 func gitCredentialToken(ctx context.Context, repoURL *url.URL) (string, error) {
