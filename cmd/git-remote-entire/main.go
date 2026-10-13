@@ -426,8 +426,12 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 			if issuer != "" {
 				what = fmt.Sprintf("a token issued by %q, which isn't a login server for %s", issuer, parsedURL.Host)
 			}
-			fmt.Fprintf(os.Stderr, "git-remote-entire: a git credential helper returned %s; ignoring it and using your Entire login.\n"+
-				"git-remote-entire: to find the helper, run: git config --show-origin --get-regexp '^credential\\..*helper$'\n", what)
+			next := "using your Entire login"
+			if noLoginFallback {
+				next = "saved-login fallback is disabled"
+			}
+			fmt.Fprintf(os.Stderr, "git-remote-entire: a git credential helper returned %s; ignoring it (%s).\n"+
+				"git-remote-entire: to find the helper, run: git config --show-origin --get-regexp '^credential\\..*helper$'\n", what, next)
 			token = ""
 		}
 	}
