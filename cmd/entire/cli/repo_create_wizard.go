@@ -229,7 +229,7 @@ func (s *repoCreateState) objectFormatDisplay() string {
 // non-interactive spelling.
 func (s *repoCreateState) command() string {
 	req := s.request()
-	parts := []string{"entire repo create", shellArg(req.name), "--project", shellArg(req.projectName), "--visibility", string(req.visibility)}
+	parts := []string{"entire repo create", shellArg("/" + nativeCloneForge + "/" + req.projectName + "/" + req.name), "--visibility", string(req.visibility)}
 	if req.objectFormat != "" {
 		parts = append(parts, "--object-format", string(req.objectFormat))
 	}

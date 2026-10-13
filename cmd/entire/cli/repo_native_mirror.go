@@ -402,17 +402,15 @@ func regionHosts(regions []regionChoice) []string {
 // fields that say anything useful about a placement that is stuck.
 //
 // The ref is always the /et/<project>/<repo> path: it is the only spelling
-// `repo view` takes for a native repo, so the resolver is reached with no
-// project override and its ULID passthrough is unreachable from here. A ULID
-// names no project, and a repo name is unique only within one — neither is a
-// repository's name, and this verb takes the name.
+// any repo verb takes for a native repo. A ULID names no project, and a repo
+// name is unique only within one — neither is a repository's name.
 //
 // clusterHost is empty for a typed path, which names no cluster and so resolves
 // on the active context's core. An entire:// clone URL names one, and is
 // resolved there instead (coreRunnerFor).
 func runNativeRepoView(cmd *cobra.Command, ref, clusterHost string, authoritative bool) error {
 	return coreRunnerFor(clusterHost)(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		resolved, err := resolveRepoRefResolved(ctx, c, ref, "")
+		resolved, err := resolveRepoPathResolved(ctx, c, ref)
 		if err != nil {
 			return err
 		}

@@ -48,9 +48,6 @@ type fakeRepoCreateCore struct {
 	conflicts int
 	// withPath adds the server's /et/<project>/<repo> path to the created repo.
 	withPath bool
-	// lookupFails makes GET /projects/{id} fail; projectGets counts those reads.
-	lookupFails bool
-	projectGets int
 	// invalids is how many creates are refused with a 422 (after any
 	// conflicts) before one succeeds.
 	invalids int
@@ -171,19 +168,10 @@ func (f *fakeRepoCreateCore) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(http.StatusOK, map[string]any{"repos": repos})
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/projects/"):
-		f.mu.Lock()
-		f.projectGets++
-		f.mu.Unlock()
-		if f.lookupFails {
-			problem(http.StatusInternalServerError)
-			return
-		}
-		p, ok := f.project(strings.TrimPrefix(path, "/projects/"))
-		if !ok {
-			problem(http.StatusNotFound)
-			return
-		}
-		writeJSON(http.StatusOK, p.json())
+		// A create always names its project, by path or in the wizard, so
+		// nothing has to recover the name from the id.
+		t.Errorf("unexpected project read by id: %s", path)
+		problem(http.StatusNotFound)
 	case r.Method == http.MethodPost && path == "/repos":
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -332,34 +320,36 @@ func answerRepoCreatePrompts(t *testing.T, answers ...string) *bytes.Buffer {
 }
 
 // TestRepoCreate_MissingInputsWithoutTerminal pins the non-interactive
-// contract: without a terminal the wizard is not an option, so a missing name
-// or --project is refused before any request, naming the flag form.
+// contract: without a terminal the wizard is not an option, so a create
+// without a /et/<project>/<repo> path is refused before any request, naming
+// the path form — with a bare name already in it.
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
 func TestRepoCreate_MissingInputsWithoutTerminal(t *testing.T) {
 	for _, tc := range []struct {
-		args    []string
-		missing string
+		args []string
+		want string
 	}{
-		{nil, "a repository name and --project are required"},
-		{[]string{"web"}, "--project is required"},
-		{[]string{"web", "--json"}, "--project is required"},
-		{[]string{"--project", "acme"}, "a repository name is required"},
+		{nil, "entire repo create /et/<project>/<repo> ("},
+		{[]string{"web"}, "entire repo create /et/<project>/web ("},
+		{[]string{"web", "--json"}, "entire repo create /et/<project>/web ("},
+		{[]string{"--visibility", "public"}, "entire repo create /et/<project>/<repo> ("},
 	} {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 		f.serve()
 		_, _, err := execRepoCreateArgs(t, tc.args...)
 		require.ErrorIs(t, err, errRepoCreateNeedsInput, tc.args)
-		require.ErrorContains(t, err, tc.missing+" without an interactive terminal: entire repo create <name> --project <project>", "names what is missing: %v", tc.args)
+		require.ErrorContains(t, err, "a /et/<project>/<repo> path is required without an interactive terminal: "+tc.want, "names the path form: %v", tc.args)
 		require.ErrorContains(t, err, "'entire project list' shows project names")
 		require.NotContains(t, err.Error(), "ULID")
+		require.NotContains(t, err.Error(), "--project")
 		require.Zero(t, f.requestCount(), "refused before any request")
 	}
 }
 
-// Flags mean the flag form: the wizard takes only the positional name, so a
-// create flag given with the name or --project missing is refused before any
-// request — even in a terminal — rather than silently dropped.
+// Flags mean the path form: the wizard takes only a bare name to start from,
+// so a create flag given without a path is refused before any request — even
+// in a terminal — rather than silently dropped.
 //
 // Not parallel: sets env vars and swaps package-level seams.
 func TestRepoCreate_FlagsMeanTheFlagForm(t *testing.T) {
@@ -369,18 +359,45 @@ func TestRepoCreate_FlagsMeanTheFlagForm(t *testing.T) {
 		return false, nil
 	})
 	for _, args := range [][]string{
-		{"--project", "acme"},
 		{"web", "--visibility", "public"},
 		{"--object-format", "sha256"},
-		{"web", "--project", ""},
+		{"web", "--visibility", ""},
 	} {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 		f.serve()
 		_, _, err := execRepoCreateArgs(t, args...)
 		require.ErrorIs(t, err, errRepoCreateFlagsNeedInput, args)
-		require.ErrorContains(t, err, "required when create flags are given: entire repo create <name> --project <project> (or, in a terminal and without flags, run 'entire repo create' or 'entire repo create <name>' to be asked)")
+		require.ErrorContains(t, err, "path is required when create flags are given: entire repo create /et/<project>/")
+		require.ErrorContains(t, err, "(or, in a terminal and without flags, run 'entire repo create' or 'entire repo create <name>' to be asked)")
 		require.Zero(t, f.requestCount(), "refused before any request: %v", args)
 	}
+}
+
+// TestRepoCreate_TakesAPathOrABareName pins the positional grammar: a
+// /et/<project>/<repo> path creates, a bare name only starts the wizard, and
+// nothing else is a spelling — no --project, no project ULID standing in for a
+// name, no forge-less pair, no GitHub path.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoCreate_TakesAPathOrABareName(t *testing.T) {
+	require.Nil(t, newRepoCreateCmd().Flags().Lookup(projectFlagName),
+		"the path names the project; there is no --project to name it twice")
+
+	for _, ref := range []string{"acme/web", "/gh/acme/web", "et/acme/web/extra"} {
+		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
+		f.serve()
+		_, _, err := execRepoCreateArgs(t, ref)
+		require.Errorf(t, err, "%q is not a create spelling", ref)
+		require.Zero(t, f.requestCount(), "refused before any request: %q", ref)
+	}
+
+	t.Run("a project segment is a name, even shaped like a ULID", func(t *testing.T) {
+		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
+		f.serve()
+		_, _, err := execRepoCreateArgs(t, "/et/"+testCreateProjectAcme+"/web")
+		require.EqualError(t, err, `no project named "`+testCreateProjectAcme+`" (run `+"`entire project list`"+` to see names)`)
+		require.Empty(t, f.createBodies)
+	})
 }
 
 // TestRepoCreate_VisibilityFlag pins the second call a visibility needs: the
@@ -392,7 +409,7 @@ func TestRepoCreate_VisibilityFlag(t *testing.T) {
 	t.Run("public is set after the create", func(t *testing.T) {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), createdVisibility: "private"}
 		f.serve()
-		stdout, _, err := execRepoCreateArgs(t, "web", "--project", "acme", "--visibility", "public", "--json")
+		stdout, _, err := execRepoCreateArgs(t, "/et/acme/web", "--visibility", "public", "--json")
 		require.NoError(t, err)
 		require.Len(t, f.createBodies, 1)
 		require.NotContains(t, f.createBodies[0], "visibility", "the create endpoint takes no visibility")
@@ -405,7 +422,7 @@ func TestRepoCreate_VisibilityFlag(t *testing.T) {
 	t.Run("a visibility the create already reports is not set again", func(t *testing.T) {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), createdVisibility: "private"}
 		f.serve()
-		_, _, err := execRepoCreateArgs(t, "web", "--project", "acme", "--visibility", "private")
+		_, _, err := execRepoCreateArgs(t, "/et/acme/web", "--visibility", "private")
 		require.NoError(t, err)
 		require.Empty(t, f.visBodies)
 	})
@@ -413,7 +430,7 @@ func TestRepoCreate_VisibilityFlag(t *testing.T) {
 	t.Run("no flag leaves the server default alone", func(t *testing.T) {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 		f.serve()
-		_, _, err := execRepoCreateArgs(t, "web", "--project", "acme")
+		_, _, err := execRepoCreateArgs(t, "/et/acme/web")
 		require.NoError(t, err)
 		require.Empty(t, f.visBodies)
 	})
@@ -421,7 +438,7 @@ func TestRepoCreate_VisibilityFlag(t *testing.T) {
 	t.Run("an unknown value fails before any request", func(t *testing.T) {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 		f.serve()
-		_, _, err := execRepoCreateArgs(t, "web", "--project", "acme", "--visibility", "internal")
+		_, _, err := execRepoCreateArgs(t, "/et/acme/web", "--visibility", "internal")
 		require.ErrorContains(t, err, "invalid visibility")
 		require.Empty(t, f.createBodies)
 	})
@@ -429,7 +446,7 @@ func TestRepoCreate_VisibilityFlag(t *testing.T) {
 	t.Run("a failed visibility write keeps the repo and says how to finish", func(t *testing.T) {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), failVisibility: true}
 		f.serve()
-		stdout, stderr, err := execRepoCreateArgs(t, "web", "--project", "acme", "--visibility", "public")
+		stdout, stderr, err := execRepoCreateArgs(t, "/et/acme/web", "--visibility", "public")
 		var silent *SilentError
 		require.ErrorAs(t, err, &silent, "the failure is explained on stderr, not reprinted")
 		require.Contains(t, stdout, "✓ Created repo /et/acme/web")
@@ -451,7 +468,7 @@ func TestRepoCreate_NextSteps(t *testing.T) {
 	t.Run("from the server's full name", func(t *testing.T) {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 		f.serve()
-		stdout, _, err := execRepoCreateArgs(t, "web", "--project", testCreateProjectAcme)
+		stdout, _, err := execRepoCreateArgs(t, "/et/acme/web")
 		require.NoError(t, err)
 		require.Contains(t, stdout, "Next steps")
 		require.Contains(t, stdout, "entire repo clone /et/acme/web")
@@ -462,15 +479,15 @@ func TestRepoCreate_NextSteps(t *testing.T) {
 	t.Run("from the resolved project name", func(t *testing.T) {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), omitFullName: true}
 		f.serve()
-		stdout, _, err := execRepoCreateArgs(t, "web", "--project", "acme")
+		stdout, _, err := execRepoCreateArgs(t, "/et/acme/web")
 		require.NoError(t, err)
 		require.Contains(t, stdout, "entire repo clone /et/acme/web")
 	})
 
-	t.Run("from the server's path, for a project given as a ULID", func(t *testing.T) {
+	t.Run("from the server's path", func(t *testing.T) {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), omitFullName: true, withPath: true}
 		f.serve()
-		stdout, _, err := execRepoCreateArgs(t, "web", "--project", testCreateProjectAcme)
+		stdout, _, err := execRepoCreateArgs(t, "/et/acme/web")
 		require.NoError(t, err)
 		require.Contains(t, stdout, "✓ Created repo /et/acme/web")
 		require.Contains(t, stdout, "entire repo clone /et/acme/web")
@@ -480,7 +497,7 @@ func TestRepoCreate_NextSteps(t *testing.T) {
 	t.Run("left out of --json", func(t *testing.T) {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 		f.serve()
-		stdout, _, err := execRepoCreateArgs(t, "web", "--project", "acme", "--json")
+		stdout, _, err := execRepoCreateArgs(t, "/et/acme/web", "--json")
 		require.NoError(t, err)
 		var obj map[string]any
 		require.NoError(t, json.Unmarshal([]byte(stdout), &obj), "stdout stays one JSON object")
@@ -604,11 +621,11 @@ func TestRepoCreateState_SummaryNamesNoIDs(t *testing.T) {
 		"Path           /et/Acme/my web\n"+
 		"Visibility     private\n"+
 		"Object format  sha1 (server default)\n"+
-		"Command        entire repo create 'my web' --project Acme --visibility private", s.summary())
+		"Command        entire repo create '/et/Acme/my web' --visibility private", s.summary())
 
 	s.answers.Advanced = true
 	s.answers.ObjectFormat = coreapi.CreateRepoInputBodyObjectFormatSHA256
-	require.Equal(t, "entire repo create 'my web' --project Acme --visibility private --object-format sha256", s.command())
+	require.Equal(t, "entire repo create '/et/Acme/my web' --visibility private --object-format sha256", s.command())
 	require.NotContains(t, s.summary(), testCreateProjectAcme)
 }
 
@@ -727,7 +744,7 @@ func TestRepoCreate_CompleteFlagsSkipTheWizard(t *testing.T) {
 		t.Error("the wizard must not open")
 		return false, nil
 	})
-	stdout, _, err := execRepoCreateArgs(t, "web", "--project", "acme")
+	stdout, _, err := execRepoCreateArgs(t, "/et/acme/web")
 	require.NoError(t, err)
 	require.Contains(t, stdout, "✓ Created repo /et/acme/web\n")
 	require.NotContains(t, stdout, testCreatedRepoID)
@@ -825,7 +842,7 @@ func TestRepoCreateWizard_AccessibleRun(t *testing.T) {
 	require.Contains(t, shown, "2. beta")
 	require.NotContains(t, shown, "locked")
 	require.Contains(t, shown, "1 project hidden: you can't create repositories in it.")
-	require.Contains(t, shown, "Command        entire repo create web --project beta --visibility public --object-format sha256")
+	require.Contains(t, shown, "Command        entire repo create /et/beta/web --visibility public --object-format sha256")
 	require.NotContains(t, shown, testCreateProjectBeta, "no id is ever shown")
 
 	require.Contains(t, stdout, "✓ Created repo /et/beta/web")
@@ -870,10 +887,11 @@ func TestPrintRepoCreateNextSteps_QuotesTheRef(t *testing.T) {
 	require.NotContains(t, out.String(), "clone /et/acme/$(boom)")
 }
 
-// The usage line advertises the one optional name the command accepts.
+// The usage line advertises the one optional <repo> the command accepts: a
+// /et/<project>/<repo> path, or a bare name to start the wizard with.
 func TestRepoCreate_UsageNamesOneOptionalName(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, "create [<name>]", newRepoCreateCmd().Use)
+	require.Equal(t, "create [<repo>]", newRepoCreateCmd().Use)
 }
 
 // A readiness snapshot that omits the visibility must not erase what the
@@ -884,7 +902,7 @@ func TestRepoCreate_UsageNamesOneOptionalName(t *testing.T) {
 func TestRepoCreate_VisibilitySurvivesTheReadinessSnapshot(t *testing.T) {
 	f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), createdVisibility: "private", snapshotOmitsVisibility: true}
 	f.serve()
-	stdout, _, err := execRepoCreateArgs(t, "web", "--project", "acme", "--visibility", "private")
+	stdout, _, err := execRepoCreateArgs(t, "/et/acme/web", "--visibility", "private")
 	require.NoError(t, err)
 	require.Empty(t, f.visBodies)
 	require.Contains(t, stdout, "✓ Created repo /et/acme/web")
@@ -898,7 +916,7 @@ func TestRepoCreate_VisibilitySurvivesTheReadinessSnapshot(t *testing.T) {
 func TestRepoCreate_VisibilityAfterWaitTimeout(t *testing.T) {
 	f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), snapshotHangs: true}
 	f.serve()
-	_, stderr, err := execRepoCreateArgs(t, "web", "--project", "acme", "--visibility", "public", "--wait-timeout", "300ms")
+	_, stderr, err := execRepoCreateArgs(t, "/et/acme/web", "--visibility", "public", "--wait-timeout", "300ms")
 	require.ErrorIs(t, err, context.DeadlineExceeded, "readiness was not confirmed")
 	require.Contains(t, stderr, "Readiness was not confirmed")
 	require.Equal(t, []string{`{"visibility":"public"}`}, f.visBodies, "the visibility was still set")
@@ -931,7 +949,7 @@ func TestRepoCreateWizard_UnderJSONPrintsOnlyTheObject(t *testing.T) {
 func TestRepoCreate_NoVisibilityWhenProvisioningFailed(t *testing.T) {
 	f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), snapshotState: "failed"}
 	f.serve()
-	_, stderr, err := execRepoCreateArgs(t, "web", "--project", "acme", "--visibility", "public")
+	_, stderr, err := execRepoCreateArgs(t, "/et/acme/web", "--visibility", "public")
 	require.ErrorContains(t, err, "provisioning failed")
 	require.Empty(t, f.visBodies)
 	require.Contains(t, stderr, "Visibility was not set. Once the repository is active, set it with: entire repo edit /et/acme/web --visibility public")
@@ -945,7 +963,7 @@ func TestRepoCreate_NoVisibilityWhenProvisioningFailed(t *testing.T) {
 func TestRepoCreate_NameArgumentIsTrimmed(t *testing.T) {
 	f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 	f.serve()
-	_, _, err := execRepoCreateArgs(t, " web ", "--project", "acme")
+	_, _, err := execRepoCreateArgs(t, " /et/acme/web ")
 	require.NoError(t, err)
 	require.Len(t, f.createBodies, 1)
 	require.Equal(t, "web", f.createBodies[0]["name"])
@@ -955,7 +973,7 @@ func TestRepoCreate_NameArgumentIsTrimmed(t *testing.T) {
 	require.Len(t, f.createBodies, 1, "no second create")
 }
 
-// Without a terminal, a create flag with an input missing gets the
+// Without a terminal, a create flag without a path gets the
 // no-terminal refusal: the flag-form one suggests running without flags to be
 // prompted, which nothing can do there.
 //
@@ -963,7 +981,7 @@ func TestRepoCreate_NameArgumentIsTrimmed(t *testing.T) {
 func TestRepoCreate_NoTerminalRefusalWinsOverFlagForm(t *testing.T) {
 	f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 	f.serve()
-	_, _, err := execRepoCreateArgs(t, "--project", "acme")
+	_, _, err := execRepoCreateArgs(t, "web", "--visibility", "public")
 	require.ErrorIs(t, err, errRepoCreateNeedsInput)
 	require.NotContains(t, err.Error(), "to be asked", "nothing can ask without a terminal")
 	require.Zero(t, f.requestCount())
@@ -979,13 +997,16 @@ func TestRepoCreate_RefusesGitSuffixName(t *testing.T) {
 		t.Error("the wizard must not open for a refused name")
 		return false, nil
 	})
-	for _, args := range [][]string{{"web.git", "--project", "acme"}, {" web.git "}} {
+	for _, tc := range []struct{ ref, use string }{
+		{ref: "/et/acme/web.git", use: "/et/acme/web"},
+		{ref: " web.git ", use: "web"},
+	} {
 		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
 		f.serve()
-		_, _, err := execRepoCreateArgs(t, args...)
-		require.ErrorContains(t, err, `repo name "web.git" must not end in .git`, args)
-		require.ErrorContains(t, err, `(use "web")`)
-		require.Zero(t, f.requestCount(), "refused before any request: %v", args)
+		_, _, err := execRepoCreateArgs(t, tc.ref)
+		require.ErrorContains(t, err, `repo name "web.git" must not end in .git`, tc.ref)
+		require.ErrorContains(t, err, `(use "`+tc.use+`")`, "the advice is spelled as it was typed")
+		require.Zero(t, f.requestCount(), "refused before any request: %q", tc.ref)
 	}
 }
 
@@ -1086,57 +1107,6 @@ func TestRepoNameIndex_LoadsOnlyWhereTheCursorRests(t *testing.T) {
 	require.Equal(t, []string{"p3"}, loaded)
 }
 
-// --project is not cobra-required (the wizard asks for it), so its help says
-// it is required: agents read the flag list and never have a terminal.
-func TestRepoCreate_ProjectFlagSaysRequired(t *testing.T) {
-	t.Parallel()
-	usage := newRepoCreateCmd().Flags().Lookup(projectFlagName).Usage
-	require.Contains(t, usage, "(required; run in a terminal without --project, --visibility or --object-format to be asked instead)")
-}
-
-// When nothing names the new repo — a project given as a ULID, and no full
-// name or /et/ path in the response — one project lookup names it for the
-// output. It is skipped when the output would not use it, and a failed lookup
-// falls back to the ID rather than failing a create that succeeded.
-//
-// Not parallel: swaps the package-level activeCoreClient seam.
-func TestRepoCreate_NamesTheProjectOnlyWhenNothingElseDoes(t *testing.T) {
-	t.Run("one lookup names it", func(t *testing.T) {
-		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), omitFullName: true}
-		f.serve()
-		stdout, _, err := execRepoCreateArgs(t, "web", "--project", testCreateProjectAcme)
-		require.NoError(t, err)
-		require.Contains(t, stdout, "✓ Created repo /et/acme/web")
-		require.Contains(t, stdout, "entire repo clone /et/acme/web")
-		require.Equal(t, 1, f.projectGets)
-	})
-
-	t.Run("no lookup when the server names it", func(t *testing.T) {
-		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects()}
-		f.serve()
-		_, _, err := execRepoCreateArgs(t, "web", "--project", testCreateProjectAcme)
-		require.NoError(t, err)
-		require.Zero(t, f.projectGets)
-	})
-
-	t.Run("no lookup when --json on a ready repo would not use it", func(t *testing.T) {
-		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), omitFullName: true}
-		f.serve()
-		_, _, err := execRepoCreateArgs(t, "web", "--project", testCreateProjectAcme, "--json")
-		require.NoError(t, err)
-		require.Zero(t, f.projectGets)
-	})
-
-	t.Run("a failed lookup falls back to the ID", func(t *testing.T) {
-		f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), omitFullName: true, lookupFails: true}
-		f.serve()
-		stdout, _, err := execRepoCreateArgs(t, "web", "--project", testCreateProjectAcme)
-		require.NoError(t, err, "the create succeeded")
-		require.Contains(t, stdout, "✓ Created repo web ("+testCreatedRepoID+")")
-		require.NotContains(t, stdout, "Next steps")
-	})
-}
-
 // The summary follows a revisited answer. Driving the paged form itself:
 // through to the summary, Shift+Tab back to the visibility page, a different
 // choice, forward again — the summary must show what will be created. It used
@@ -1178,7 +1148,7 @@ func TestRepoCreate_VisibilityFailureComesLast(t *testing.T) {
 	var screen bytes.Buffer // stdout and stderr as a terminal interleaves them
 	parent.SetOut(&screen)
 	parent.SetErr(&screen)
-	parent.SetArgs([]string{"create", "web", "--project", "acme", "--visibility", "public"})
+	parent.SetArgs([]string{"create", "/et/acme/web", "--visibility", "public"})
 	require.Error(t, parent.ExecuteContext(t.Context()))
 	out := screen.String()
 	created := strings.Index(out, "✓ Created repo ")
@@ -1242,7 +1212,7 @@ func TestRepoNameIndex_RetriesAfterAFailedLoad(t *testing.T) {
 func TestRepoCreate_NoWaitSetsTheVisibility(t *testing.T) {
 	f := &fakeRepoCreateCore{t: t, projects: defaultCreateProjects(), createdVisibility: "private"}
 	f.serve()
-	_, _, err := execRepoCreateArgs(t, "web", "--project", "acme", "--no-wait", "--visibility", "public")
+	_, _, err := execRepoCreateArgs(t, "/et/acme/web", "--no-wait", "--visibility", "public")
 	require.NoError(t, err)
 	require.Equal(t, []string{`{"visibility":"public"}`}, f.visBodies)
 

@@ -187,30 +187,31 @@ func suggestRepoName(rest string) (string, bool) {
 
 func newRepoCreateCmd() *cobra.Command {
 	var (
-		projectRef   string
 		objectFormat string
 		visibility   string
 		noWait       bool
 		waitTimeout  time.Duration
 	)
 	cmd := &cobra.Command{
-		Use:   "create [<name>]",
+		Use:   "create [<repo>]",
 		Short: "Create a repository in a project",
 		Long: `Create a repository and wait for provisioning to become active by
 default. Active means provisioning completed; later pushes or mirror
 creation can still fail for other reasons.
 
-With both a name and --project the repository is created directly.
+<repo> is the new repository's /et/<project>/<repo> path, which creates
+it directly in that project.
 
 In an interactive terminal, 'entire repo create' or 'entire repo create
 <name>' opens a wizard instead. It asks for the project, name,
-visibility and advanced options, starting from the given name (or the
-current folder's), and shows a summary before creating anything. With
+visibility and advanced options, starting from the given bare name (or
+the current folder's), and shows a summary before creating anything. A
+bare name never creates on its own: it only starts the wizard. With
 --json the prompts stay off stdout, which carries only the repository
 object.
 
---project, --visibility and --object-format are the flag form: give any
-of them and both a name and --project are required.
+--visibility and --object-format are the path form: give either and the
+/et/<project>/<repo> path is required.
 
 --visibility is set once the repository is ready, or straight after
 creation with --no-wait: public grants read-only (pull) access to any
@@ -230,10 +231,10 @@ If creation succeeds but readiness cannot be confirmed, the command exits
 nonzero and preserves the repository result. Do not create again to
 recover. With --json, stdout contains one repository object; progress
 and recovery instructions go to stderr.`,
-		Example: "  entire repo create web --project acme\n" +
-			"  entire repo create web --project acme --visibility public\n" +
-			"  entire repo create web --project acme --no-wait\n" +
-			"  entire repo create web --project acme --wait-timeout=5m\n\n" +
+		Example: "  entire repo create /et/acme/web\n" +
+			"  entire repo create /et/acme/web --visibility public\n" +
+			"  entire repo create /et/acme/web --no-wait\n" +
+			"  entire repo create /et/acme/web --wait-timeout=5m\n\n" +
 			"  # Pick the project and settings interactively\n" +
 			"  entire repo create web",
 		PreRunE: func(_ *cobra.Command, _ []string) error {
@@ -247,16 +248,18 @@ and recovery instructions go to stderr.`,
 		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			req := repoCreateRequest{}
+			var projectName string
 			if len(args) == 1 {
-				// Trimmed once for both paths, as the wizard trims what is
+				// Trimmed once for both forms, as the wizard trims what is
 				// typed, so ' web ' names the same repo either way and a blank
 				// name counts as missing. The trimmed name is what gets checked
 				// AND what gets sent.
-				req.name = strings.TrimSpace(args[0])
-			}
-			if err := refuseGitSuffixRepoName(req.name); err != nil {
-				cmd.SilenceUsage = true
-				return err
+				project, name, err := parseRepoCreateRef(args[0])
+				if err != nil {
+					cmd.SilenceUsage = true
+					return err
+				}
+				projectName, req.name = project, name
 			}
 			if objectFormat != "" {
 				parsed, err := parseObjectFormat(objectFormat)
@@ -275,30 +278,32 @@ and recovery instructions go to stderr.`,
 				req.visibility = parsed
 			}
 			opts := repoCreateOptions{noWait: noWait, waitTimeout: waitTimeout}
-			if req.name == "" || projectRef == "" {
+			if projectName == "" {
 				// Settled from the command line alone, before any request: a
 				// run that cannot be prompted must not cost a lookup. Flags
-				// mean the flag form, so a create flag with an input missing
-				// is refused even in a terminal: the wizard takes only the
-				// positional name. --json still prompts, as `grant add` does:
-				// the form renders on stderr or the controlling terminal and
-				// stdout carries only the result.
+				// mean the path form, so a create flag without a path is
+				// refused even in a terminal: the wizard takes only a bare
+				// name to start from. --json still prompts, as `grant add`
+				// does: the form renders on stderr or the controlling terminal
+				// and stdout carries only the result.
 				// No terminal is checked first: the flag-form refusal suggests
 				// running without flags to be prompted, which nothing can do
 				// without one.
 				cmd.SilenceUsage = true
 				if !interactive.CanPromptInteractively() {
-					return repoCreateMissingInput(req.name, projectRef, errRepoCreateNeedsInput)
+					return repoCreateMissingInput(req.name, errRepoCreateNeedsInput)
 				}
 				if repoCreateFlagsGiven(cmd) {
-					return repoCreateMissingInput(req.name, projectRef, errRepoCreateFlagsNeedInput)
+					return repoCreateMissingInput(req.name, errRepoCreateFlagsNeedInput)
 				}
 				return runRepoCreateWizard(cmd, req.name, opts)
 			}
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 				ctx, cancel := context.WithTimeout(ctx, waitTimeout)
 				defer cancel()
-				project, err := resolveProjectRefResolved(ctx, c, projectRef)
+				// A path segment is a name by construction, so a project NAMED
+				// like a ULID is looked up as the name it is.
+				project, err := resolveProjectNamed(ctx, c, projectName)
 				if err != nil {
 					return err
 				}
@@ -313,10 +318,6 @@ and recovery instructions go to stderr.`,
 	}
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return after creation without confirming provisioning readiness")
 	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 10*time.Minute, "Time limit for project resolution, creation, and provisioning readiness")
-	// "(required)" stays in the text although the flag is not cobra-required
-	// (the wizard asks for it): agents read this list and never have a
-	// terminal, so it is the only place they learn it.
-	cmd.Flags().StringVar(&projectRef, projectFlagName, "", "Owning project (by name) (required; run in a terminal without --project, --visibility or --object-format to be asked instead)")
 	cmd.Flags().StringVar(&objectFormat, repoCreateFlagObjectFormat, "", "Git object format for the repository: sha1 or sha256 (defaults to the server default)")
 	cmd.Flags().StringVar(&visibility, repoCreateFlagVisibility, "", "Visibility to set after creation: public or private (new repositories are private)")
 	addJSONFlag(cmd)
@@ -330,7 +331,8 @@ func newRepoListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cmdList,
 		Short: "List repositories in a project",
-		Long: "List repositories in the project named by --project (name or ULID).\n\n" +
+		Long: "List repositories in the project named by --project " + nativeCloneForge + "/<project>, " +
+			"the project spelling `entire trail` takes. GitHub mirrors are listed by `entire repo mirror list`.\n\n" +
 			"By default at most " + strconv.Itoa(coreListFetchBudget) + " repositories are fetched; when the project " +
 			"has more, a note on stderr says so — pass --all to fetch everything, or " +
 			"--limit N for exactly the first N (rows come in server order; this list " +
@@ -346,26 +348,32 @@ func newRepoListCmd() *cobra.Command {
 			return validatePageSize(cmd, pageSize)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// The project's name is known only once the ref is resolved, which
-			// happens inside the core call below — but the row func has to be
-			// built out here, where the real writer decides color. The closure
-			// reads it at render time, which is always after the resolve.
+			// Parsed here rather than in PreRunE, which cobra runs before it
+			// checks required flags: a missing --project must say so, not
+			// read as a malformed empty one.
+			projectName, err := parseRepoListProject(project)
+			if err != nil {
+				return err
+			}
+			// The row func is built out here, where the real writer decides
+			// color, but the project's name it prints is the server's, known
+			// only once the resolve inside the core call below has run. The
+			// closure reads it at render time, which is always after that.
 			// Styled the way `repo mirror list` styles the same table: yellow
 			// headers via styledHeaders, cells via this view's own styler. The
 			// two directories show the same facts and should not look unalike.
-			var projectName string
 			st := newStatusStyles(cmd.OutOrStdout())
 			headers := styledHeaders(st, repoColumns)
 			row := func(r coreapi.Repo) []string { return repoRowStyled(st, projectName)(r) }
 			if pageModeRequested(cmd) {
 				return flushThroughPager(cmd, noPager, func() error {
 					return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-						projID, name, err := resolveProjectRefNamed(ctx, c, project)
+						resolved, err := resolveProjectNamed(ctx, c, projectName)
 						if err != nil {
 							return err
 						}
-						projectName = name
-						params := coreapi.ListProjectReposParams{ProjectId: projID}
+						projectName = resolved.Name
+						params := coreapi.ListProjectReposParams{ProjectId: resolved.ID}
 						if pageToken != "" {
 							params.PageToken = coreapi.NewOptString(pageToken)
 						}
@@ -382,11 +390,12 @@ func newRepoListCmd() *cobra.Command {
 			}
 			return flushThroughPager(cmd, noPager, func() error {
 				return runCoreList(cmd, "No repositories found in this project.", headers, row, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
-					projID, name, err := resolveProjectRefNamed(ctx, c, project)
+					resolved, err := resolveProjectNamed(ctx, c, projectName)
 					if err != nil {
 						return nil, err
 					}
-					projectName = name
+					projectName = resolved.Name
+					projID := resolved.ID
 					// Rows render in server order with no local filters or
 					// sort, so --limit bounds the fetch directly; without it
 					// the default budget bounds the walk instead.
@@ -428,7 +437,7 @@ func newRepoListCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&project, projectFlagName, "", "Project to list (name or ULID) (required)")
+	cmd.Flags().StringVar(&project, projectFlagName, "", "Project to list, as "+nativeCloneForge+"/<project> (required)")
 	markRequired(cmd, projectFlagName)
 	cmd.Flags().IntVar(&limit, "limit", 0, "Fetch and show only the first N repositories (0 uses the default fetch budget)")
 	cmd.Flags().BoolVar(&all, "all", false, "Fetch every repository instead of the first "+strconv.Itoa(coreListFetchBudget)+" (slower on large projects)")
@@ -444,6 +453,22 @@ func newRepoListCmd() *cobra.Command {
 		flagGroup{name: flagGroupFormatting},
 	)
 	return cmd
+}
+
+// parseRepoListProject reads `repo list --project` the way `entire trail`
+// reads its own --project (parseTrailProjectRef): the project declares its
+// namespace, so a name is never mistaken for a ULID or for a GitHub owner. Only
+// et/ is a project that holds repositories here; a gh/ owner is answered with
+// the command that lists GitHub mirrors, before any request.
+func parseRepoListProject(ref string) (string, error) {
+	host, name, err := parseTrailProjectRef(strings.TrimSpace(ref))
+	if err != nil {
+		return "", err
+	}
+	if host != nativeCloneForge {
+		return "", fmt.Errorf("--project %q is a GitHub owner, not an Entire project: list GitHub mirrors with `entire repo mirror list`", ref)
+	}
+	return name, nil
 }
 
 func newRepoViewCmd() *cobra.Command {
@@ -559,26 +584,24 @@ func newRepoVisibilityCmd() *cobra.Command {
 }
 
 func newRepoVisibilityGetCmd() *cobra.Command {
-	var project string
 	cmd := &cobra.Command{
 		Use:   "get <repo>",
 		Short: "Show a repository's visibility (public or private)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, visibilityColumns, visibilityRow, func(ctx context.Context, c *coreapi.Client) (*repoVisibility, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				resolved, err := resolveRepoPathResolved(ctx, c, args[0])
 				if err != nil {
 					return nil, err
 				}
-				out, err := c.GetRepoVisibility(ctx, coreapi.GetRepoVisibilityParams{RepoId: repoID})
+				out, err := c.GetRepoVisibility(ctx, coreapi.GetRepoVisibilityParams{RepoId: resolved.ID})
 				if err != nil {
 					return nil, err
 				}
-				return &repoVisibility{Repo: args[0], Visibility: string(out.Visibility)}, nil
+				return &repoVisibility{Repo: repoPathName(args[0], resolved), Visibility: string(out.Visibility)}, nil
 			})
 		},
 	}
-	bindRepoProjectFlag(cmd, &project)
 	addJSONFlag(cmd)
 	return cmd
 }
@@ -587,7 +610,7 @@ func newRepoVisibilityGetCmd() *cobra.Command {
 // today, so --visibility is required; further settings become further flags
 // on this command.
 func newRepoEditCmd() *cobra.Command {
-	var project, visibility string
+	var visibility string
 	cmd := &cobra.Command{
 		Use:   "edit <repo>",
 		Short: "Edit a repository's settings",
@@ -604,82 +627,29 @@ func newRepoEditCmd() *cobra.Command {
 				return err
 			}
 			return runCoreObject(cmd, visibilityColumns, visibilityRow, func(ctx context.Context, c *coreapi.Client) (*repoVisibility, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				resolved, err := resolveRepoPathResolved(ctx, c, args[0])
 				if err != nil {
 					return nil, err
 				}
-				out, err := c.SetRepoVisibility(ctx, &coreapi.SetRepoVisibilityInputBody{Visibility: vis}, coreapi.SetRepoVisibilityParams{RepoId: repoID})
+				out, err := c.SetRepoVisibility(ctx, &coreapi.SetRepoVisibilityInputBody{Visibility: vis}, coreapi.SetRepoVisibilityParams{RepoId: resolved.ID})
 				if err != nil {
 					return nil, err
 				}
-				return &repoVisibility{Repo: args[0], Visibility: string(out.Visibility)}, nil
+				return &repoVisibility{Repo: repoPathName(args[0], resolved), Visibility: string(out.Visibility)}, nil
 			})
 		},
 	}
 	cmd.Flags().StringVar(&visibility, "visibility", "", "Visibility to set: public or private (required)")
 	markRequired(cmd, "visibility")
-	bindRepoProjectFlag(cmd, &project)
 	addJSONFlag(cmd)
 	return cmd
 }
 
-// projectFlagName is the --project flag's name, in the one place the repo
-// commands register, require, group and read it. The same word is also a NOUN
+// projectFlagName is the --project flag's name, which `repo list` registers,
+// requires, groups and reads, and which the other repo verbs pin as absent. The same word is also a NOUN
 // in `entire project` and in the grant family's messages; those are a different
 // thing that happens to be spelled alike, so they keep their own literals.
 const projectFlagName = "project"
-
-// bindRepoProjectFlag wires the shared --project scope used to resolve a repo
-// addressed by a BARE NAME. That is the only form it serves: a repo name is
-// unique only within its project, and the control plane has no by-name route
-// that is not project-scoped (ListProjectRepos takes the project as a path
-// segment), so without the flag a bare name is not an address at all.
-//
-// The other two spellings carry their own project, so the flag cannot change
-// what they resolve to — and the two used to disagree about saying so. A
-// /et/<project>/<repo> path is checked for agreement by resolveRepoPathRef,
-// which costs nothing because it resolves that project anyway. A ULID
-// short-circuits resolveRepoRef before projectRef is ever read, so a flatly
-// wrong project was accepted in silence; warnRedundantProjectFlag is what ends
-// that.
-func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
-	cmd.Flags().StringVar(project, projectFlagName, "", "Owning project (name or ULID); required when <repo> is a bare name, redundant with a /"+nativeCloneForge+"/<project>/<repo> path or a ULID")
-	warnRedundantProjectFlag(cmd, project)
-}
-
-// warnRedundantProjectFlag reports on stderr that --project cannot affect the
-// lookup, when the ref identifies the repo on its own.
-//
-// It WARNS rather than refusing because addressing a repo by ULID with an
-// unconditional --project has been accepted since the flag shipped (ece9fb3dc,
-// June 2026) and is plausibly scripted; breaking that to report a flag that was
-// already being ignored is a poor trade. It does not VALIDATE because that
-// needs GetRepo's owningProjectId, an extra round trip on every command that
-// binds this flag. `repo view` used to be the exemption, since it fetches the
-// repo anyway — it no longer binds the flag at all, taking the
-// /et/<project>/<repo> path that names its own project instead.
-//
-// Wired as a PreRunE because the answer needs only the flag and args[0]: no
-// resolution, no network, and every command binding this flag takes the repo
-// ref as args[0]. An existing PreRunE is chained rather than clobbered, so a
-// command that grows one later does not silently lose the warning (or its own
-// hook).
-func warnRedundantProjectFlag(cmd *cobra.Command, project *string) {
-	prev := cmd.PreRunE
-	cmd.PreRunE = func(c *cobra.Command, args []string) error {
-		if prev != nil {
-			if err := prev(c, args); err != nil {
-				return err
-			}
-		}
-		// Changed(), not a non-empty value: an explicit --project "" is still
-		// the user saying something, and reporting it is the point.
-		if len(args) > 0 && c.Flags().Changed(projectFlagName) && looksLikeULID(args[0]) {
-			fmt.Fprintf(c.ErrOrStderr(), "Note: --project %q is ignored — %s is a repo ULID, which identifies the repo on its own.\n", *project, args[0])
-		}
-		return nil
-	}
-}
 
 // warnFlagsGitHubViewIgnores reports --authoritative reaching the GitHub half of
 // `repo view`, where it means nothing: Entire holds no repo record for an
@@ -691,14 +661,10 @@ func warnRedundantProjectFlag(cmd *cobra.Command, project *string) {
 // exit 0 with no check performed. Warning rather than erroring keeps a
 // `for repo in ...` loop over mixed forges working.
 //
-// --project is not checked: `repo view` does not register it, so Changed()
-// could only ever answer false.
-//
 // The VALUE is what decides, not Changed(): --authoritative=false asks for
 // exactly what the GitHub path does, so reporting it as ignored tells the
-// caller a flag they turned off was disregarded. warnRedundantProjectFlag tests
-// Changed() alone on purpose — an explicit --project "" still states a scope —
-// but false is this flag's default and states nothing.
+// caller a flag they turned off was disregarded; false is this flag's default
+// and states nothing.
 func warnFlagsGitHubViewIgnores(cmd *cobra.Command, authoritative bool) {
 	if authoritative {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Note: --authoritative is ignored for a GitHub repository; Entire holds no repository record for an upstream, only the mirrors of it.")

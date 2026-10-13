@@ -51,9 +51,8 @@ func TestOrgCreate_JSONOnRequest(t *testing.T) {
 	require.NotContains(t, out, "✓ Created")
 }
 
-// testRepoCreateProjectULID is the --project value for the repo-create tests
-// below: a syntactically valid ULID so resolveProjectRef skips the by-name
-// lookup and the fake server only needs to answer repository requests.
+// testRepoCreateProjectULID is the id of project acme, which the repo-create
+// tests below name in their /et/acme/web path.
 const testRepoCreateProjectULID = "01HZX7QABCDEFGHJKMNPQRSTV2"
 
 // newCreateRepoServer answers creation and authoritative GETs with a repo whose
@@ -63,9 +62,10 @@ func newCreateRepoServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+testRepoCreateProjectULID {
-			// The one lookup made when nothing else names the new repo.
-			fmt.Fprintf(w, `{"id":%q,"name":"acme","ownerType":"org","ownerId":"o","region":"us","createdAt":"2026-01-01T00:00:00Z","capabilities":{"canCreateRepository":true,"canDelete":false,"canManageAccess":false,"canManageTrails":false}}`, testRepoCreateProjectULID)
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects" {
+			// The path names the project; this is its by-name lookup.
+			assert.Equal(t, "acme", r.URL.Query().Get("name"))
+			fmt.Fprintf(w, `{"project":{"id":%q,"name":"acme","ownerType":"org","ownerId":"o","region":"us","createdAt":"2026-01-01T00:00:00Z","capabilities":{"canCreateRepository":true,"canDelete":false,"canManageAccess":false,"canManageTrails":false}}}`, testRepoCreateProjectULID)
 			return
 		}
 		if r.Method == http.MethodPost {
@@ -96,10 +96,10 @@ func newCreateRepoServer(t *testing.T) *httptest.Server {
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestRepoCreate_HumanByDefault(t *testing.T) {
 	srv := newCreateRepoServer(t)
-	out, errOut, err := runCoreCmd(t, newRepoCmd, srv.URL, "create", "web", "--project", testRepoCreateProjectULID)
+	out, errOut, err := runCoreCmd(t, newRepoCmd, srv.URL, "create", "/et/acme/web")
 	require.NoError(t, err)
-	// The project was given as a ULID and the path is not an /et/ one, so
-	// one lookup names the project for the output.
+	// The server's path is not an /et/ one, so the output names the repo
+	// from the project the path resolved.
 	require.Contains(t, out, "✓ Created repo /et/acme/web\n")
 	require.NotContains(t, out, testDeleteULID)
 	require.Contains(t, out, "Remote: entire://c.example.com/gh/o/web")
@@ -109,7 +109,7 @@ func TestRepoCreate_HumanByDefault(t *testing.T) {
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestRepoCreate_JSONOnRequest(t *testing.T) {
 	srv := newCreateRepoServer(t)
-	out, _, err := runCoreCmd(t, newRepoCmd, srv.URL, "create", "web", "--project", testRepoCreateProjectULID, "--json")
+	out, _, err := runCoreCmd(t, newRepoCmd, srv.URL, "create", "/et/acme/web", "--json")
 	require.NoError(t, err)
 	require.Contains(t, out, `"remote": "entire://c.example.com/gh/o/web"`)
 	require.NotContains(t, out, "✓ Created")

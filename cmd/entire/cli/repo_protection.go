@@ -23,19 +23,12 @@ var protectionColumns = []string{colHeaderBranch, "LEVEL"}
 const (
 	protectionLevelProtected = "protected"
 	protectionLevelMergeOnly = "server-side merge only"
-	// protectionEmpty asserts that nothing protects this repository, so it
-	// is printed only for a provider positively known to be Entire-native.
+	// protectionEmpty asserts that nothing protects this repository. The
+	// verbs resolve only the native /et/ path, so every repo they reach is
+	// one whose rules are Entire's own.
 	protectionEmpty      = "Nothing is protected yet."
 	protectionMirrorNote = "GitHub mirror: branch protection is governed by the upstream repository. " +
 		"Its default branch is always protected on Entire; no rules can be added here."
-	// protectionUnknownNote covers every empty list whose provider was not
-	// established: absent (an older core), a value this build does not know
-	// (a forge added later), or a lookup that failed. Each of those is
-	// "we could not find out", which is not the same as "nothing is
-	// protected" — see reportNoProtectionRules.
-	protectionUnknownNote = "No branch-protection rules are set here on Entire. This repository's " +
-		"provider could not be determined, so whether protection is governed elsewhere is unknown; " +
-		"a mirror's rules are its upstream's."
 	// headBranchPattern is the server's pattern for "whatever branch HEAD
 	// points at"; it follows a default-branch rename.
 	headBranchPattern       = "HEAD"
@@ -97,91 +90,75 @@ func newRepoProtectionCmd() *cobra.Command {
 }
 
 func newRepoProtectionListCmd() *cobra.Command {
-	var project string
 	cmd := &cobra.Command{
 		Use:   cmdListRepo,
 		Short: "Show a repository's branch-protection rules",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+			if mirror, err := isMirrorProtectionRef(args[0]); mirror {
 				if err != nil {
 					return err
 				}
-				out, err := c.GetBranchProtection(ctx, coreapi.GetBranchProtectionParams{RepoId: repoID})
+				return reportMirrorProtection(cmd)
+			}
+			return runCoreList(cmd, protectionEmpty, protectionColumns, protectionRow, func(ctx context.Context, c *coreapi.Client) ([]branchRule, error) {
+				resolved, err := resolveRepoPathResolved(ctx, c, args[0])
 				if err != nil {
-					return err
+					return nil, err
 				}
-				rules := branchRulesFromWire(out)
-				if len(rules) > 0 {
-					// Only the empty list needs the repo's provider, so the
-					// common case costs one round trip rather than two.
-					if jsonRequested(cmd) {
-						return printJSON(cmd.OutOrStdout(), rules)
-					}
-					return printTable(cmd.OutOrStdout(), protectionColumns, rules, protectionRow)
+				out, err := c.GetBranchProtection(ctx, coreapi.GetBranchProtectionParams{RepoId: resolved.ID})
+				if err != nil {
+					return nil, err
 				}
-				return reportNoProtectionRules(ctx, cmd, c, repoID)
+				return branchRulesFromWire(out), nil
 			})
 		},
 	}
-	bindRepoProjectFlag(cmd, &project)
 	addJSONFlag(cmd)
 	return cmd
 }
 
-// reportNoProtectionRules renders an empty rule list, naming which kind of
-// empty it is. A GitHub mirror always reads as empty — its rules are the
-// upstream's, and the data plane protects its default branch regardless — so
-// "nothing is protected" would misstate it.
-//
-// All three outcomes are identified positively, and "native" is not the else
-// of "mirror". `provider` is optional (an older core omits it) and open
-// (`readModelEnumFields` drops its enum, so a forge added later decodes
-// verbatim), and in JSON mode the lookup may fail outright. Every one of
-// those is "we could not find out", which is not evidence that nothing is
-// protected — treating it as such is how an unqualified "Nothing is
-// protected yet." would come to hide a mirror's upstream rules. Only
-// repoProviderEntire earns that sentence; everything else gets
-// protectionUnknownNote.
-//
-// The caveat reaches --json callers too, on stderr: stdout stays the bare
-// array a script parses, but a script concluding "no rules ⇒ nothing is
-// protected" is wrong on a mirror, which is the misreading the note exists
-// to prevent. That makes the note advisory for --json and load-bearing for
-// the human rendering, so a failed provider lookup is fatal only to the
-// latter — the branch-protection answer is already in hand, and a script
-// must not lose its array because a secondary lookup flaked. It is still
-// told, with the reason, rather than handed a silent [].
-func reportNoProtectionRules(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, repoID string) error {
-	note := protectionUnknownNote
-	repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
-	switch {
-	case err != nil:
-		if !jsonRequested(cmd) {
-			return err
-		}
-		note = fmt.Sprintf("%s (looking it up failed: %v)", protectionUnknownNote, err)
-	case repo.Response.Provider.Or("") == repoProviderGitHub:
-		note = protectionMirrorNote
-	case repo.Response.Provider.Or("") == repoProviderEntire:
-		note = "" // the one case that positively establishes "native".
+// isMirrorProtectionRef reports whether ref names a GitHub mirror, answered
+// before any request. A mirror reads as empty from core, but "nothing is
+// protected" would misstate it: its default branch is always protected and
+// its rules are the upstream's, so no lookup could say more than
+// protectionMirrorNote does. A malformed /gh/ ref keeps the parser's reason.
+func isMirrorProtectionRef(ref string) (bool, error) {
+	if !declaresForge(ref, mirrorCloneForge) {
+		return false, nil
 	}
+	_, err := parseMirrorRepoRef(ref, mirrorCloneForge)
+	return true, err
+}
+
+// reportMirrorProtection is `protection list` on a mirror. --json keeps the
+// plain array on stdout so a script still parses it, and puts the caveat on
+// stderr: a script concluding "no rules ⇒ nothing is protected" is wrong on a
+// mirror, which is what the note exists to say.
+func reportMirrorProtection(cmd *cobra.Command) error {
 	if jsonRequested(cmd) {
-		if note != "" {
-			fmt.Fprintln(cmd.ErrOrStderr(), note)
-		}
+		fmt.Fprintln(cmd.ErrOrStderr(), protectionMirrorNote)
 		return printJSON(cmd.OutOrStdout(), []branchRule{})
 	}
-	if note == "" {
-		note = protectionEmpty
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), note)
+	fmt.Fprintln(cmd.OutOrStdout(), protectionMirrorNote)
 	return nil
 }
 
+// refuseMirrorProtectionWrite is add and remove on a mirror: refused before any
+// request, since its rules are the upstream's.
+func refuseMirrorProtectionWrite(cmd *cobra.Command, ref string) error {
+	mirror, err := isMirrorProtectionRef(ref)
+	if !mirror {
+		return nil
+	}
+	cmd.SilenceUsage = true
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("repo %q is a GitHub mirror: its branch protection is governed by the upstream repository, so no rules can be added or removed here", strings.TrimSpace(ref))
+}
+
 func newRepoProtectionAddCmd() *cobra.Command {
-	var project string
 	var mergeOnly bool
 	cmd := &cobra.Command{
 		Use:   "add <repo> <branch>",
@@ -195,17 +172,16 @@ func newRepoProtectionAddCmd() *cobra.Command {
 			"resulting rules. Requires manage permission on the repo.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := refuseMirrorProtectionWrite(cmd, args[0]); err != nil {
+				return err
+			}
 			ref, err := expandBranchRef(args[1])
 			if err != nil {
 				cmd.SilenceUsage = true
 				return err
 			}
-			// protectionEmpty asserts the repo is native, which list has to
-			// establish but this verb gets for free: add and remove share one
-			// PATCH, the server refuses it on a mirror, so reaching the render
-			// at all means the write landed on a repo that accepts rules.
 			return runCoreList(cmd, protectionEmpty, protectionColumns, protectionRow, func(ctx context.Context, c *coreapi.Client) ([]branchRule, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				resolved, err := resolveRepoPathResolved(ctx, c, args[0])
 				if err != nil {
 					return nil, err
 				}
@@ -218,7 +194,7 @@ func newRepoProtectionAddCmd() *cobra.Command {
 					rule.ServerSideMergeOnly = coreapi.NewOptBool(mergeOnly)
 				}
 				body := &coreapi.UpdateBranchProtectionInputBody{AddRules: []coreapi.BranchRuleUpdate{rule}}
-				out, err := c.UpdateBranchProtection(ctx, body, coreapi.UpdateBranchProtectionParams{RepoId: repoID})
+				out, err := c.UpdateBranchProtection(ctx, body, coreapi.UpdateBranchProtectionParams{RepoId: resolved.ID})
 				if err != nil {
 					return nil, err
 				}
@@ -226,14 +202,12 @@ func newRepoProtectionAddCmd() *cobra.Command {
 			})
 		},
 	}
-	bindRepoProjectFlag(cmd, &project)
 	cmd.Flags().BoolVar(&mergeOnly, serverSideMergeOnlyFlag, false, "Refuse every direct push; the branch moves only through a merge Entire performs. Omit to keep an existing rule's level; =false lowers it")
 	addJSONFlag(cmd)
 	return cmd
 }
 
 func newRepoProtectionRemoveCmd() *cobra.Command {
-	var project string
 	cmd := &cobra.Command{
 		Use:   "remove <repo> <branch>",
 		Short: "Remove a branch-protection rule",
@@ -243,22 +217,21 @@ func newRepoProtectionRemoveCmd() *cobra.Command {
 			"Requires manage permission on the repo.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := refuseMirrorProtectionWrite(cmd, args[0]); err != nil {
+				return err
+			}
 			ref, err := expandBranchRef(args[1])
 			if err != nil {
 				cmd.SilenceUsage = true
 				return err
 			}
-			// protectionEmpty asserts the repo is native, which list has to
-			// establish but this verb gets for free: add and remove share one
-			// PATCH, the server refuses it on a mirror, so reaching the render
-			// at all means the write landed on a repo that accepts rules.
 			return runCoreList(cmd, protectionEmpty, protectionColumns, protectionRow, func(ctx context.Context, c *coreapi.Client) ([]branchRule, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+				resolved, err := resolveRepoPathResolved(ctx, c, args[0])
 				if err != nil {
 					return nil, err
 				}
 				body := &coreapi.UpdateBranchProtectionInputBody{RemoveRefs: []string{ref}}
-				out, err := c.UpdateBranchProtection(ctx, body, coreapi.UpdateBranchProtectionParams{RepoId: repoID})
+				out, err := c.UpdateBranchProtection(ctx, body, coreapi.UpdateBranchProtectionParams{RepoId: resolved.ID})
 				if err != nil {
 					return nil, err
 				}
@@ -266,7 +239,6 @@ func newRepoProtectionRemoveCmd() *cobra.Command {
 			})
 		},
 	}
-	bindRepoProjectFlag(cmd, &project)
 	addJSONFlag(cmd)
 	return cmd
 }

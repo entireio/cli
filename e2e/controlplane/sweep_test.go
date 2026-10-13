@@ -41,22 +41,26 @@ func sweepLeaked(t *testing.T, dir string) {
 			continue
 		}
 		var projects []struct {
-			ID string `json:"id"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
 		}
 		if !sweepList(t, dir, &projects, "project", "list", "--org", org.ID, "--json") {
 			continue
 		}
 		for _, project := range projects {
 			var repos []struct {
-				ID   string `json:"id"`
 				Path string `json:"path"`
 			}
-			if !sweepList(t, dir, &repos, "repo", "list", "--project", project.ID, "--json") {
+			if !sweepList(t, dir, &repos, "repo", "list", "--project", "et/"+project.Name, "--json") {
 				continue
 			}
 			for _, repo := range repos {
 				sweepNativeMirrors(t, dir, repo.Path)
-				sweepDelete(t, dir, "repo", repo.ID)
+				// Repos are addressed by path only; a row without one
+				// cannot be named, so it is left for the next sweep.
+				if repo.Path != "" {
+					sweepDelete(t, dir, "repo", repo.Path)
+				}
 			}
 			sweepDelete(t, dir, "project", project.ID)
 		}

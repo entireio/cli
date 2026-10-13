@@ -561,13 +561,7 @@ func TestRepoCreateReadinessFlags(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var creates atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+testProjectULID {
-					// The one lookup made when nothing else names the new repo.
-					w.Header().Set("Content-Type", "application/json")
-					fmt.Fprintf(w, `{"id":%q,"name":"acme","ownerType":"org","ownerId":"o","region":"us","createdAt":"2026-01-01T00:00:00Z","capabilities":{"canCreateRepository":true,"canDelete":false,"canManageAccess":false,"canManageTrails":false}}`, testProjectULID)
-					return
-				}
+			srv := httptest.NewServer(withRepoCreateProjectLookup(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodPost {
 					t.Errorf("unexpected %s", r.Method)
 				}
@@ -577,7 +571,7 @@ func TestRepoCreateReadinessFlags(t *testing.T) {
 				fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":"provisioning","capabilities":{"canManage":true,"canPush":true,"canPull":true}}`, testDeleteULID, testProjectULID)
 			}))
 			defer srv.Close()
-			args := append([]string{"web", "--project", testProjectULID, "--json"}, tc.args...)
+			args := append([]string{"/et/acme/web", "--json"}, tc.args...)
 			out, stderr, err := runCoreCmd(t, func() *cobra.Command {
 				cmd := newRepoCreateCmd()
 				// The real root delegates error output to main, not Cobra.
@@ -631,7 +625,7 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, asJSON := range []bool{false, true} {
 				var posts, gets atomic.Int32
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				srv := httptest.NewServer(withRepoCreateProjectLookup(t, func(w http.ResponseWriter, r *http.Request) {
 					state := tc.initial
 					switch r.Method {
 					case http.MethodPost:
@@ -675,7 +669,7 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 					}
 					fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":"","provider":"entire","state":%q,"provisionReason":"max retries exhausted","foreign":%t,"capabilities":{"canManage":false,"canPush":false,"canPull":true}}`, snapshotID, state, tc.foreign)
 				}))
-				args := []string{"web", "--project", testProjectULID}
+				args := []string{"/et/acme/web"}
 				if asJSON {
 					args = append(args, "--json")
 				}
@@ -846,7 +840,7 @@ func TestRepoCreateInterruptedAfterCreation(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			var posts, gets atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv := httptest.NewServer(withRepoCreateProjectLookup(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodPost {
 					posts.Add(1)
 					w.Header().Set("Content-Type", "application/json")
@@ -868,7 +862,7 @@ func TestRepoCreateInterruptedAfterCreation(t *testing.T) {
 			var out, stderr bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&stderr)
-			args := []string{"web", "--project", testProjectULID, "--json"}
+			args := []string{"/et/acme/web", "--json"}
 			if timeout {
 				args = append(args, "--wait-timeout=1s")
 			}
@@ -1071,9 +1065,6 @@ func TestRepoCreateMirrorReadinessFlags(t *testing.T) {
 					timeoutFlag = "--wait-timeout="
 				}
 				args := []string{"foo", timeoutFlag + value}
-				if cmd.Flags().Lookup("project") != nil {
-					args = append(args, "--project", testProjectULID)
-				}
 				cmd.SetArgs(args)
 				require.Error(t, cmd.ExecuteContext(t.Context()))
 				require.False(t, cmd.SilenceUsage, "invalid flags are usage errors on both commands")

@@ -89,12 +89,10 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	require.NotEmpty(t, project.ID)
 	projectRef = project.ID
 
-	stdout, _ = mustRunEntire(t, dir, "repo", "create", name, "--project", project.ID, "--json")
-	repoRef := ref
-	t.Cleanup(func() { deleteResource(t, dir, "repo", repoRef) })
+	stdout, _ = mustRunEntire(t, dir, "repo", "create", ref, "--json")
+	t.Cleanup(func() { deleteResource(t, dir, "repo", ref) })
 	created := decodeJSON[repoJSON](t, stdout)
 	require.NotEmpty(t, created.ID)
-	repoRef = created.ID
 
 	repo := waitForRepoClonable(t, dir, ref)
 	require.NotEmpty(t, repo.primary().ClusterSlug, "a provisioned repo names its primary cluster")
@@ -265,8 +263,8 @@ func pickClusters(t *testing.T, dir string, repo repoJSON) (home, foreign cluste
 // is not the caller's to choose: it is the primary cell of the owning project's
 // region. Flag parsing fails before any network call, so this creates nothing.
 func TestControlPlane_RepoCreateRejectsClusterHost(t *testing.T) {
-	_, stderr, err := runEntire(t, t.TempDir(), "repo", "create", "irrelevant",
-		"--project", "irrelevant", "--cluster-host", "aws-us-east-2.entire.io")
+	_, stderr, err := runEntire(t, t.TempDir(), "repo", "create", "/et/irrelevant/irrelevant",
+		"--cluster-host", "aws-us-east-2.entire.io")
 	require.Error(t, err)
 	require.True(t, strings.Contains(stderr, "unknown flag") && strings.Contains(stderr, "cluster-host"),
 		"expected an unknown-flag error, got:\n%s", stderr)

@@ -18,7 +18,13 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-const testProtectionRepoULID = "01KS6KFJR2XS6PZ188MVYE07AN"
+const (
+	testProtectionRepoULID = "01KS6KFJR2XS6PZ188MVYE07AN"
+	// testProtectionFullName is the <project>/<repo> the fake resolves to
+	// testProtectionRepoULID; testProtectionPath is how a user names it.
+	testProtectionFullName = "acme/web"
+	testProtectionPath     = "/et/" + testProtectionFullName
+)
 
 func TestExpandBranchRef(t *testing.T) {
 	t.Parallel()
@@ -48,43 +54,15 @@ func TestProtectionRow(t *testing.T) {
 // applies PATCH bodies with the server's upsert-by-ref rule so a test sees the
 // same resulting list the real core would return.
 type fakeProtectionServer struct {
-	mu       sync.Mutex
-	provider string // the repo's provider as GET /repos/{id} reports it
-	rules    []coreapi.BranchRule
-	patches  []coreapi.UpdateBranchProtectionInputBody
-	// repoGets counts GET /repos/{id}. Only the empty-list rendering needs
-	// the provider, so every other path must leave this at zero — see
-	// TestRepoProtection_LooksUpTheRepoOnlyForAnEmptyList.
-	repoGets int
-	// repoGetFails makes GET /repos/{id} 500, so the empty rendering has to
-	// cope with never learning the provider at all.
-	repoGetFails bool
+	mu      sync.Mutex
+	rules   []coreapi.BranchRule
+	patches []coreapi.UpdateBranchProtectionInputBody
 }
 
 func (f *fakeProtectionServer) handler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/"+testProtectionRepoULID {
-			f.mu.Lock()
-			f.repoGets++
-			fails, provider := f.repoGetFails, f.provider
-			f.mu.Unlock()
-			if fails {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			repo := &coreapi.Repo{
-				ID: testProtectionRepoULID, Name: "web", OwningProjectId: testProjectULID,
-			}
-			// An empty provider stands in for a core that predates the
-			// field: it must be absent from the body, not sent as "".
-			if provider != "" {
-				repo.Provider = coreapi.NewOptString(provider)
-			}
-			if err := printJSON(w, repo); err != nil {
-				t.Errorf("encode repo response: %v", err)
-			}
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/resolve" {
+			writeJSONResponse(t, w, http.StatusOK, nativeResolution(testProtectionFullName, testProtectionRepoULID))
 			return
 		}
 		if r.URL.Path != "/api/v1/repos/"+testProtectionRepoULID+"/branch-protection" {
@@ -162,7 +140,7 @@ func (f *fakeProtectionServer) apply(body coreapi.UpdateBranchProtectionInputBod
 // Not parallel: swaps the package-level activeCoreClient seam.
 func newProtectionFixture(t *testing.T, rules ...coreapi.BranchRule) *fakeProtectionServer {
 	t.Helper()
-	fake := &fakeProtectionServer{provider: repoProviderEntire, rules: rules}
+	fake := &fakeProtectionServer{rules: rules}
 	srv := httptest.NewServer(fake.handler(t))
 	t.Cleanup(srv.Close)
 	prev := activeCoreClient
@@ -210,53 +188,41 @@ func execRepoProtectionBothStreams(t *testing.T, args ...string) (stdout, stderr
 
 func TestRepoProtection_ListEmpty(t *testing.T) {
 	newProtectionFixture(t)
-	out, err := execRepoProtection(t, "list", testProtectionRepoULID)
+	out, err := execRepoProtection(t, "list", testProtectionPath)
 	require.NoError(t, err)
 	assert.Equal(t, protectionEmpty+"\n", out)
 
-	out, err = execRepoProtection(t, "list", testProtectionRepoULID, "--json")
+	out, err = execRepoProtection(t, "list", testProtectionPath, "--json")
 	require.NoError(t, err)
 	assert.Equal(t, "[]", strings.TrimSpace(out), "an empty list is a JSON array, not null")
 }
 
 // A GitHub mirror reads as empty from core, but "nothing is protected" would
 // misstate it: its default branch is always protected and its rules are the
-// upstream's. --json keeps the plain array on stdout so a script still parses
-// it, and puts the caveat on stderr — a script concluding "no rules ⇒ nothing
-// is protected" is wrong on a mirror, which is what the note exists to say.
-func TestRepoProtection_ListOnMirrorExplains(t *testing.T) {
+// upstream's. The ref says so before any request (the fake fails on one), and
+// --json keeps the plain array on stdout with the caveat on stderr. add and
+// remove are refused the same way.
+func TestRepoProtection_MirrorIsAnsweredWithoutARequest(t *testing.T) {
 	fake := newProtectionFixture(t)
-	fake.provider = repoProviderGitHub
-	out, err := execRepoProtection(t, "list", testProtectionRepoULID)
+	const mirror = "/gh/acme/widget"
+	out, err := execRepoProtection(t, "list", mirror)
 	require.NoError(t, err)
 	assert.Equal(t, protectionMirrorNote+"\n", out)
 
-	out, errOut, err := execRepoProtectionBothStreams(t, "list", testProtectionRepoULID, "--json")
+	out, errOut, err := execRepoProtectionBothStreams(t, "list", mirror, "--json")
 	require.NoError(t, err)
 	assert.Equal(t, "[]", strings.TrimSpace(out), "stdout stays a bare array")
 	assert.Equal(t, protectionMirrorNote+"\n", errOut, "the caveat reaches --json callers on stderr")
-}
 
-// The provider is needed only to render an empty list, so a list that has
-// rules — and a --json render of one — costs a single round trip. A repo
-// lookup here would also be a second way for `list` to fail after the
-// branch-protection answer is already in hand.
-func TestRepoProtection_LooksUpTheRepoOnlyForAnEmptyList(t *testing.T) {
-	fake := newProtectionFixture(t, coreapi.BranchRule{Ref: "HEAD"})
+	const refused = `repo "` + mirror + `" is a GitHub mirror: its branch protection is governed by the upstream repository, so no rules can be added or removed here`
+	_, err = execRepoProtection(t, "add", mirror, "main")
+	require.EqualError(t, err, refused)
+	_, err = execRepoProtection(t, "remove", mirror, "main")
+	require.EqualError(t, err, refused)
+	assert.Empty(t, fake.patches)
 
-	_, err := execRepoProtection(t, "list", testProtectionRepoULID)
-	require.NoError(t, err)
-	_, err = execRepoProtection(t, "list", testProtectionRepoULID, "--json")
-	require.NoError(t, err)
-	assert.Zero(t, fake.repoGets, "a non-empty list must not fetch the repo")
-
-	_, err = execRepoProtection(t, "remove", testProtectionRepoULID, "HEAD")
-	require.NoError(t, err)
-	assert.Zero(t, fake.repoGets, "add/remove render their own result and never need the provider")
-
-	_, err = execRepoProtection(t, "list", testProtectionRepoULID)
-	require.NoError(t, err)
-	assert.Equal(t, 1, fake.repoGets, "the empty rendering is the one branch that needs it")
+	_, err = execRepoProtection(t, "list", "/gh/acme")
+	require.ErrorContains(t, err, "/gh/acme", "a malformed mirror ref keeps the parser's reason")
 }
 
 func TestRepoProtection_ListShowsLevels(t *testing.T) {
@@ -264,7 +230,7 @@ func TestRepoProtection_ListShowsLevels(t *testing.T) {
 		coreapi.BranchRule{Ref: "HEAD", ServerSideMergeOnly: coreapi.NewOptBool(true)},
 		coreapi.BranchRule{Ref: "refs/heads/release/*"},
 	)
-	out, err := execRepoProtection(t, "list", testProtectionRepoULID)
+	out, err := execRepoProtection(t, "list", testProtectionPath)
 	require.NoError(t, err)
 	assert.Contains(t, out, "BRANCH")
 	assert.Contains(t, out, "HEAD")
@@ -272,7 +238,7 @@ func TestRepoProtection_ListShowsLevels(t *testing.T) {
 	assert.Contains(t, out, "refs/heads/release/*")
 	assert.Contains(t, out, protectionLevelProtected)
 
-	out, err = execRepoProtection(t, "list", testProtectionRepoULID, "--json")
+	out, err = execRepoProtection(t, "list", testProtectionPath, "--json")
 	require.NoError(t, err)
 	var got []branchRule
 	require.NoError(t, json.Unmarshal([]byte(out), &got))
@@ -285,7 +251,7 @@ func TestRepoProtection_ListShowsLevels(t *testing.T) {
 func TestRepoProtection_AddAndRemove(t *testing.T) {
 	fake := newProtectionFixture(t, coreapi.BranchRule{Ref: "HEAD"})
 
-	out, err := execRepoProtection(t, "add", testProtectionRepoULID, "release/*")
+	out, err := execRepoProtection(t, "add", testProtectionPath, "release/*")
 	require.NoError(t, err)
 	require.Len(t, fake.patches, 1)
 	assert.Equal(t, []branchRule{{Ref: "refs/heads/release/*"}}, updatesView(fake.patches[0].AddRules))
@@ -293,7 +259,7 @@ func TestRepoProtection_AddAndRemove(t *testing.T) {
 	assert.Empty(t, fake.patches[0].RemoveRefs)
 	assert.Contains(t, out, "refs/heads/release/*")
 
-	out, err = execRepoProtection(t, "add", testProtectionRepoULID, "HEAD", "--server-side-merge-only")
+	out, err = execRepoProtection(t, "add", testProtectionPath, "HEAD", "--server-side-merge-only")
 	require.NoError(t, err)
 	require.Len(t, fake.patches, 2)
 	assert.Equal(t, []branchRule{{Ref: "HEAD", ServerSideMergeOnly: true}}, updatesView(fake.patches[1].AddRules))
@@ -306,20 +272,20 @@ func TestRepoProtection_AddAndRemove(t *testing.T) {
 
 	// The regression the CLI review caught: an add that only names the branch
 	// must not lower it. Lowering takes the flag set to false.
-	_, err = execRepoProtection(t, "add", testProtectionRepoULID, "HEAD")
+	_, err = execRepoProtection(t, "add", testProtectionPath, "HEAD")
 	require.NoError(t, err)
 	require.Len(t, fake.patches, 3)
 	assert.False(t, fake.patches[2].AddRules[0].ServerSideMergeOnly.IsSet())
 	assert.True(t, rulesView(fake.rules)[0].ServerSideMergeOnly, "HEAD stays merge-only")
 
-	out, err = execRepoProtection(t, "add", testProtectionRepoULID, "HEAD", "--server-side-merge-only=false")
+	out, err = execRepoProtection(t, "add", testProtectionPath, "HEAD", "--server-side-merge-only=false")
 	require.NoError(t, err)
 	require.Len(t, fake.patches, 4)
 	assert.Equal(t, coreapi.NewOptBool(false), fake.patches[3].AddRules[0].ServerSideMergeOnly, "an explicit false is sent")
 	assert.False(t, rulesView(fake.rules)[0].ServerSideMergeOnly, "and lowers HEAD")
 	assert.NotContains(t, out, protectionLevelMergeOnly)
 
-	out, err = execRepoProtection(t, "remove", testProtectionRepoULID, "HEAD")
+	out, err = execRepoProtection(t, "remove", testProtectionPath, "HEAD")
 	require.NoError(t, err)
 	require.Len(t, fake.patches, 5)
 	assert.Equal(t, []string{"HEAD"}, fake.patches[4].RemoveRefs)
@@ -327,69 +293,7 @@ func TestRepoProtection_AddAndRemove(t *testing.T) {
 	assert.NotContains(t, out, "HEAD")
 	assert.Contains(t, out, "refs/heads/release/*")
 
-	out, err = execRepoProtection(t, "remove", testProtectionRepoULID, "refs/heads/release/*")
+	out, err = execRepoProtection(t, "remove", testProtectionPath, "refs/heads/release/*")
 	require.NoError(t, err)
 	assert.Equal(t, protectionEmpty+"\n", out)
-}
-
-func TestRepoProtection_NameNeedsProject(t *testing.T) {
-	fake := newProtectionFixture(t)
-	_, err := execRepoProtection(t, "list", "web")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--project")
-	assert.Empty(t, fake.patches)
-}
-
-// "Nothing is protected yet." asserts that nothing protects this repository,
-// so it needs the provider to be positively "entire". `provider` is optional
-// (an older core omits it) and open (its enum is stripped, so a forge added
-// later decodes verbatim), and the lookup can fail outright — each of those
-// is "we could not find out", and answering it with the native sentence is
-// how an empty list would come to hide a mirror's upstream rules.
-func TestRepoProtection_EmptyListNeedsAPositivelyNativeProvider(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		provider string
-		getFails bool
-		want     string
-	}{
-		{name: "native", provider: repoProviderEntire, want: protectionEmpty},
-		{name: "mirror", provider: repoProviderGitHub, want: protectionMirrorNote},
-		{name: "absent", provider: "", want: protectionUnknownNote},
-		{name: "unknown forge", provider: "gitlab", want: protectionUnknownNote},
-		{name: "lookup failed", provider: repoProviderEntire, getFails: true, want: ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := newProtectionFixture(t)
-			fake.provider = tc.provider
-			fake.repoGetFails = tc.getFails
-
-			out, err := execRepoProtection(t, "list", testProtectionRepoULID)
-			if tc.getFails {
-				// The note is load-bearing for the human rendering, so a
-				// provider we could not read is an error rather than a
-				// sentence that might be wrong.
-				require.Error(t, err, "a failed lookup must not be rendered as an answer")
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, tc.want+"\n", out)
-			}
-
-			// --json keeps stdout a bare array either way, and puts whatever
-			// qualification applies on stderr — including the reason the
-			// provider is unknown, rather than a silent [].
-			out, errOut, err := execRepoProtectionBothStreams(t, "list", testProtectionRepoULID, "--json")
-			require.NoError(t, err, "a script must not lose its array to a secondary lookup")
-			assert.Equal(t, "[]", strings.TrimSpace(out))
-			switch {
-			case tc.getFails:
-				assert.Contains(t, errOut, protectionUnknownNote)
-				assert.Contains(t, errOut, "looking it up failed", "the reason is reported, not just the doubt")
-			case tc.want == protectionEmpty:
-				assert.Empty(t, errOut, "a positively native repo needs no qualification")
-			default:
-				assert.Equal(t, tc.want+"\n", errOut)
-			}
-		})
-	}
 }
