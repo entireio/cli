@@ -626,14 +626,15 @@ func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEnt
 // removing from the queue only the refs that land. It returns the number pushed
 // and the number withheld for want of the OPF trailer.
 //
-// When requireOPFTrailer is set, a drained ref whose tip does not already carry
-// Entire-OPF-Applied is excluded from this push entirely: never attempted, never
-// pruned as stale, left queued exactly like a ref whose push was rejected. That
+// When delivery is non-nil, a drained ref that would send any commit without
+// Entire-OPF-Applied (see opfDelivery.verified) is excluded from this push
+// entirely: never attempted, never pruned as stale, left queued exactly like a
+// ref whose push was rejected. That
 // is how OPF delivery fails closed per ref — a ref still awaiting redaction is
 // simply invisible to this delivery attempt — rather than by withholding the
 // whole flush and stranding siblings that already carry the trailer.
 //
-// The check reads the trailer off the refs this call drained, and is made here
+// The check reads the trailers of the refs this call drained, and is made here
 // rather than handed in as a set computed earlier for one reason: between any
 // earlier readiness read and the Drain below, a concurrent session finalizing a
 // checkpoint can enqueue a ref that the earlier read never saw. Such a ref would
