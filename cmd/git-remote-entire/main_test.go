@@ -507,7 +507,9 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 		{name: "URL username wins", helper: core, username: "buildkite", urlUsername: "url-user"},
 		{name: "environment wins", env: core, helper: "https://untrusted.example"},
 		{name: "untrusted credential", helper: "https://untrusted.example", wantErr: "not a trusted login server"},
-		{name: "malformed credential", helper: "malformed", wantErr: "git credential helper token"},
+		{name: "non-JWT credential falls back to login", helper: "malformed", wantErr: "no auth context"},
+		{name: "fallback disabled on non-JWT credential", helper: "malformed", noFallback: "true", wantErr: "saved-login fallback is disabled"},
+		{name: "malformed JWT-shaped credential", helper: "malformed-jwt", wantErr: "git credential helper token"},
 		{name: "invalid credential audience", helper: "http://core.us.entire.io", wantErr: "git credential helper token aud"},
 		{name: "missing credential audience", helper: "entire-cli", wantErr: "git credential helper token must be"},
 		{name: "untrusted environment token", env: "https://untrusted.example", wantErr: "ENTIRE_TOKEN aud"},
@@ -540,8 +542,11 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 			}
 			client, host := wellKnownServer(t, []string{core}, "", "")
 			token := makeTestJWT(t, tc.helper)
-			if tc.helper == "malformed" {
+			switch tc.helper {
+			case "malformed":
 				token = "not-a-jwt"
+			case "malformed-jwt":
+				token = "not.a.jwt"
 			}
 			t.Setenv("TEST_GIT_CREDENTIAL", token)
 			t.Setenv("GIT_CONFIG_COUNT", "1")

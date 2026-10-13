@@ -372,6 +372,7 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 //     never a silent fallback to context resolution.
 //   - Git credential helper: use its password as the bearer, with the same
 //     cluster trust checks. Lookup uses the original entire:// repository URL.
+//     A password that isn't JWT-shaped is ignored as if no helper answered.
 //   - otherwise: resolve the login context for this cluster from contexts.json
 //     and use its refreshed login JWT, unless ENTIRE_GIT_NO_LOGIN_FALLBACK is true.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
@@ -405,6 +406,16 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	token, err := gitCredentialToken(ctx, parsedURL)
 	if err != nil {
 		return nil, nil, err
+	}
+	// Catch-all helpers (static-token scripts, `store` entries) answer for every
+	// protocol, including entire. A password that isn't JWT-shaped was never
+	// meant for us, so treat it as no credential. A JWT-shaped token that fails
+	// validation stays fatal: that is a misconfigured Entire credential.
+	if token != "" && strings.Count(token, ".") != 2 {
+		// Never print the helper's value: inline helpers often embed the token.
+		fmt.Fprintln(os.Stderr, "git-remote-entire: a git credential helper returned a password that isn't an Entire token; ignoring it and using your Entire login.\n"+
+			"git-remote-entire: to find the helper, run: git config --show-origin --get-regexp '^credential\\..*helper$'")
+		token = ""
 	}
 	if token != "" {
 		return resolveTokenCreds(ctx, token, "git credential helper token", parsedURL.Host, userdirs.Cache(), httpClient)
