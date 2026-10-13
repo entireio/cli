@@ -231,6 +231,10 @@ type TrailMergeabilityResponse struct {
 	BypassPolicy     string `json:"bypass_policy"`
 	BehindBy         int    `json:"behind_by"`
 	ComparisonStatus string `json:"comparison_status"`
+	// DeleteBranchOnMerge is the repo's default for the merge request's
+	// deleteBranch. The server reports false for a GitHub-backed repo; nil
+	// means a server that predates the setting.
+	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge"`
 }
 
 // TrailMergeDetail is the part of GET .../trails/{number} the merge command
@@ -258,10 +262,20 @@ type TrailActionAvailability struct {
 type TrailMergeRequest struct {
 	ExpectedHeadSha string `json:"expectedHeadSha,omitempty"`
 	Bypass          bool   `json:"bypass,omitempty"`
+	// DeleteBranch overrides the repo's delete-branch-on-merge setting for a
+	// native trail; nil leaves it to the setting. A pointer, because an
+	// explicit false must reach the server.
+	DeleteBranch *bool `json:"deleteBranch,omitempty"`
 }
 
 type TrailMergeResponse struct {
 	OK bool `json:"ok"`
 	// Empty when the merge fast-forwarded or the base was already up to date.
 	MergeCommitSha string `json:"mergeCommitSha"`
+	// BranchDeleted is always false for a GitHub-backed trail, whose branch
+	// GitHub manages.
+	BranchDeleted bool `json:"branchDeleted"`
+	// BranchKeptReason says why a native trail's branch was kept; empty when
+	// it was deleted and for a GitHub-backed trail.
+	BranchKeptReason string `json:"branchKeptReason,omitempty"`
 }

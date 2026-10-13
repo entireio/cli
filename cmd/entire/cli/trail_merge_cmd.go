@@ -40,10 +40,14 @@ type trailMergeOptions struct {
 	Force    bool
 	Yes      bool
 	JSON     bool
+	// DeleteBranch is --delete-branch (true) or --no-delete-branch (false);
+	// nil leaves it to the repo's delete-branch-on-merge setting.
+	DeleteBranch *bool
 }
 
 func newTrailMergeCmd() *cobra.Command {
 	var opts trailMergeOptions
+	var deleteBranch, noDeleteBranch bool
 
 	cmd := &cobra.Command{
 		Use:   "merge [<trail>]",
@@ -68,6 +72,10 @@ non-zero when the merge would be refused, so it can gate CI.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Selector = selectorFromArgs(args)
+			// The two are mutually exclusive, so deleteBranch is the choice.
+			if deleteBranch || noDeleteBranch {
+				opts.DeleteBranch = &deleteBranch
+			}
 			if err := ensureTrailRepoHasTarget(cmd, opts.Selector != "" || strings.TrimSpace(opts.Branch) != "", "pass a trail selector or --branch"); err != nil {
 				return err
 			}
@@ -80,6 +88,9 @@ non-zero when the merge would be refused, so it can gate CI.`,
 	cmd.Flags().BoolVar(&opts.Force, "force", false, "Merge even when blocking gates fail (requires bypass permission)")
 	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Skip the confirmation prompt before --force bypasses gates")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&deleteBranch, "delete-branch", false, "Delete the trail's branch after the merge, whatever the repo's setting (native trails only)")
+	cmd.Flags().BoolVar(&noDeleteBranch, "no-delete-branch", false, "Keep the trail's branch after the merge, whatever the repo's setting (native trails only)")
+	cmd.MarkFlagsMutuallyExclusive("delete-branch", "no-delete-branch")
 
 	return cmd
 }
@@ -253,7 +264,7 @@ func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, m
 	// failing in between is refused rather than bypassed unseen. A bypass is
 	// pinned to the head only: the server takes no gate set, so a gate that
 	// changes on the same head after the recheck is bypassed too.
-	req := api.TrailMergeRequest{Bypass: bypass, ExpectedHeadSha: trailMergeHead(m)}
+	req := api.TrailMergeRequest{Bypass: bypass, ExpectedHeadSha: trailMergeHead(m), DeleteBranch: opts.DeleteBranch}
 	res, err := postTrailMerge(ctx, client, mergePath, found.Number, req, v, m.BypassPolicy)
 	if err != nil {
 		return err

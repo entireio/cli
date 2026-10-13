@@ -279,6 +279,39 @@ func TestTrailMerge_MergeableWithoutForceOmitsBypass(t *testing.T) {
 	require.Contains(t, out, "Merged trail #7 into trunk (merge-example)")
 }
 
+func TestTrailMerge_DeleteBranchFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "no flag leaves it to the repo", want: `{"expectedHeadSha":"` + trailMergeTestHead + `"}`},
+		{name: "delete-branch", args: []string{"--delete-branch"}, want: `{"expectedHeadSha":"` + trailMergeTestHead + `","deleteBranch":true}`},
+		{name: "no-delete-branch sends an explicit false", args: []string{"--no-delete-branch"}, want: `{"expectedHeadSha":"` + trailMergeTestHead + `","deleteBranch":false}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &trailMergeStub{
+				t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t),
+				mergeBody: `{"ok":true,"mergeCommitSha":"merge-example"}`,
+			}
+			_, err := runTrailMergeTest(t, stub, "et/acme/widget", tc.args...)
+
+			require.NoError(t, err)
+			posts := stub.mergePosts()
+			require.Len(t, posts, 1)
+			require.JSONEq(t, tc.want, posts[0])
+		})
+	}
+}
+
+func TestTrailMerge_DeleteBranchFlagsAreExclusive(t *testing.T) {
+	stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t)}
+	_, err := runTrailMergeTest(t, stub, "et/acme/widget", "--delete-branch", "--no-delete-branch")
+
+	require.ErrorContains(t, err, "[delete-branch no-delete-branch] were all set")
+	require.Empty(t, stub.mergePosts())
+}
+
 func TestTrailMerge_ForceBypassForbidden(t *testing.T) {
 	stub := &trailMergeStub{
 		t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, blocked, baseChecksRed),
