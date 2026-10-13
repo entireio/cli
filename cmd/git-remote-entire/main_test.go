@@ -559,6 +559,7 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 		{name: "untrusted environment token", mode: helperMode, env: "https://untrusted.example", wantErr: auth.EnvTokenVar + " aud"},
 		{name: "invalid mode fails closed", mode: "yes", helper: "token", wantErr: gitAuthEnvVar + " must be", helperIdle: true},
 		{name: "invalid alias fails closed", alias: "typo", wantErr: gitNoLoginFallbackEnvVar + " must be a boolean"},
+		{name: "invalid alias fails closed beside mode", mode: helperMode, alias: "typo", helper: "token", wantErr: gitNoLoginFallbackEnvVar + " must be a boolean", helperIdle: true},
 		{name: "untrusted credential", mode: helperMode, helper: "token", aud: "https://untrusted.example", wantErr: "not a trusted login server"},
 		{name: "non-JWT credential", mode: helperMode, helper: "token", aud: "malformed", wantErr: "git credential helper token"},
 		{name: "invalid credential audience", mode: helperMode, helper: "token", aud: "http://core.us.entire.io", wantErr: "git credential helper token aud"},
@@ -664,23 +665,30 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 }
 
 func TestGitCredentialToken_ForwardsHelperDiagnostics(t *testing.T) {
-	gitenv.IsolateRepository(t)
-	t.Chdir(t.TempDir())
-	// The helper source carries a marker standing in for an inline secret: Git
-	// quotes the helper command in its quit line, which must not be forwarded.
-	setCredentialHelpers(t, "credential.helper",
-		`!f() { cat >/dev/null; echo "mint failed (INLINE_SECRET_MARKER): eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjaSJ9.c2lnbmF0dXJlMTIz" >&2; printf 'quit=true\n'; }; f`)
-	var warn strings.Builder
-	_, err := gitCredentialToken(t.Context(), &url.URL{Scheme: "entire", Host: "cluster.entire.io", Path: "/et/acme/api"}, &warn)
-	if err == nil || !strings.Contains(err.Error(), "refused to provide a credential for entire://cluster.entire.io/et/acme/api") {
-		t.Fatalf("expected a refusal naming the repository, got %v", err)
-	}
-	got := warn.String()
-	if !strings.Contains(got, "git-remote-entire: credential helper: mint failed (INLINE_SECRET_MARKER): [REDACTED]") {
-		t.Fatalf("helper diagnostic was not forwarded with the token redacted: %q", got)
-	}
-	if strings.Contains(got, "told us to quit") || strings.Count(got, "INLINE_SECRET_MARKER") != 1 || strings.Contains(got, "eyJ") {
-		t.Fatalf("forwarded diagnostics leak the helper command or token: %q", got)
+	// The helper source carries markers standing in for inline secrets: Git
+	// quotes the whole command, newlines included, in its quit line, and none of
+	// it may be forwarded.
+	for name, helper := range map[string]string{
+		"single-line": `!f() { cat >/dev/null; echo "mint failed (STDERR_MARKER): eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjaSJ9.c2lnbmF0dXJlMTIz" >&2; printf 'quit=true\n'; }; f`,
+		"multi-line": `!f() { cat >/dev/null
+# SOURCE_MARKER
+echo "mint failed (STDERR_MARKER): eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjaSJ9.c2lnbmF0dXJlMTIz" >&2
+printf 'quit=true\n'; }; f`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			gitenv.IsolateRepository(t)
+			t.Chdir(t.TempDir())
+			setCredentialHelpers(t, "credential.helper", helper)
+			var warn strings.Builder
+			_, err := gitCredentialToken(t.Context(), &url.URL{Scheme: "entire", Host: "cluster.entire.io", Path: "/et/acme/api"}, &warn)
+			if err == nil || !strings.Contains(err.Error(), "refused to provide a credential for entire://cluster.entire.io/et/acme/api") {
+				t.Fatalf("expected a refusal naming the repository, got %v", err)
+			}
+			got := warn.String()
+			if got != "git-remote-entire: credential helper: mint failed (STDERR_MARKER): [REDACTED]\n" {
+				t.Fatalf("expected only the helper's diagnostic, token redacted; got %q", got)
+			}
+		})
 	}
 }
 

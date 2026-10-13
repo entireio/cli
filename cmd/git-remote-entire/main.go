@@ -450,20 +450,21 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 // credential-helper authentication. Invalid values fail closed: a typo in a
 // CI job must not silently fall through to a saved personal login.
 func credentialHelperMode() (bool, error) {
+	enabled := false
 	if raw, ok := os.LookupEnv(gitAuthEnvVar); ok {
 		if raw != gitAuthCredentialHelper {
 			return false, fmt.Errorf("%s must be %q", gitAuthEnvVar, gitAuthCredentialHelper)
 		}
-		return true, nil
+		enabled = true
 	}
 	if raw, ok := os.LookupEnv(gitNoLoginFallbackEnvVar); ok {
-		enabled, err := strconv.ParseBool(raw)
+		alias, err := strconv.ParseBool(raw)
 		if err != nil {
 			return false, fmt.Errorf("%s must be a boolean (true or false)", gitNoLoginFallbackEnvVar)
 		}
-		return enabled, nil
+		enabled = enabled || alias
 	}
-	return false, nil
+	return enabled, nil
 }
 
 // gitCredentialToken asks Git's credential helpers for the entire:// URL's
@@ -526,22 +527,25 @@ var jwtShaped = regexp.MustCompile(`[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-
 // classifyCredentialFailure turns a failed `git credential fill` into a
 // user-facing error, forwarding helper diagnostics to warn.
 func classifyCredentialFailure(target string, exitErr *exec.ExitError, warn io.Writer) error {
-	refused, missing := false, false
-	for line := range strings.SplitSeq(strings.TrimSpace(string(exitErr.Stderr)), "\n") {
+	diagnostic := string(exitErr.Stderr)
+	// Git quotes the helper command verbatim, and it can span lines and embed
+	// credentials. Git dies right after quoting it, so drop everything from the
+	// start of the first line that quotes a helper to the end of the output.
+	refused := false
+	if i := strings.Index(diagnostic, "credential helper '"); i >= 0 {
+		refused = strings.HasSuffix(strings.TrimSpace(diagnostic), "' told us to quit")
+		diagnostic = diagnostic[:strings.LastIndexByte(diagnostic[:i], '\n')+1]
+	}
+	missing := false
+	for line := range strings.SplitSeq(strings.TrimSpace(diagnostic), "\n") {
 		line = strings.TrimRight(line, "\r")
 		switch {
 		case line == "":
-			continue
-		case strings.HasPrefix(line, "fatal: credential helper '") && strings.HasSuffix(line, "' told us to quit"):
-			refused = true
 			continue
 		case (strings.HasPrefix(line, "fatal: could not read Username for '") ||
 			strings.HasPrefix(line, "fatal: could not read Password for '")) &&
 			strings.HasSuffix(line, "': terminal prompts disabled"):
 			missing = true
-			continue
-		case strings.Contains(line, "credential helper '"):
-			// Any other Git line quoting the helper command.
 			continue
 		}
 		fmt.Fprintf(warn, "git-remote-entire: credential helper: %s\n", jwtShaped.ReplaceAllString(line, "[REDACTED]"))
