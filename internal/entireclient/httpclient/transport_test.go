@@ -1,6 +1,7 @@
 package httpclient
 
 import (
+	"net/http"
 	"testing"
 	"time"
 )
@@ -49,5 +50,37 @@ func TestDiscoveryDialTimeout(t *testing.T) {
 				t.Fatalf("DiscoveryDialTimeout()=%s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNewTransportTimeouts(t *testing.T) {
+	t.Setenv(EnvConnectTimeout, "")
+	tests := []struct {
+		name string
+		tr   *http.Transport
+		want time.Duration
+	}{
+		{"failover", NewTransport(false), DefaultDialTimeout},
+		{"discovery", NewDiscoveryTransport(false), DefaultDiscoveryDialTimeout},
+	}
+	for _, tc := range tests {
+		if tc.tr.TLSHandshakeTimeout != tc.want {
+			t.Errorf("%s: TLSHandshakeTimeout=%s, want %s", tc.name, tc.tr.TLSHandshakeTimeout, tc.want)
+		}
+		if tc.tr.ResponseHeaderTimeout != 0 {
+			t.Errorf("%s: ResponseHeaderTimeout=%s, want 0 (push/fetch may send headers late)", tc.name, tc.tr.ResponseHeaderTimeout)
+		}
+	}
+}
+
+func TestNewTransportTLSHandshakeHonorsOverride(t *testing.T) {
+	t.Setenv(EnvConnectTimeout, "30")
+	for name, tr := range map[string]*http.Transport{
+		"failover":  NewTransport(false),
+		"discovery": NewDiscoveryTransport(false),
+	} {
+		if tr.TLSHandshakeTimeout != 30*time.Second {
+			t.Errorf("%s: TLSHandshakeTimeout=%s, want 30s", name, tr.TLSHandshakeTimeout)
+		}
 	}
 }

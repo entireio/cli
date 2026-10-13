@@ -92,9 +92,20 @@ func NewDiscoveryTransport(skipTLSVerify bool) *http.Transport {
 	return newTransport(skipTLSVerify, DiscoveryDialTimeout())
 }
 
+// newTransport bounds the TLS handshake with the same budget as the TCP
+// connect: net.Dialer.Timeout stops at TCP, so without TLSHandshakeTimeout a
+// peer that accepts the connection but stalls TLS hangs the request and
+// failover never moves on. Sharing dialTimeout keeps replica failover fast,
+// gives discovery its patient budget, and honors ENTIRE_CONNECT_TIMEOUT_SECONDS.
+//
+// It deliberately sets no ResponseHeaderTimeout: a push may run index-pack
+// and hooks, and a large fetch may spend time building the pack, before the
+// server sends any headers. A tight value would mark healthy replicas as
+// failed.
 func newTransport(skipTLSVerify bool, dialTimeout time.Duration) *http.Transport {
 	return &http.Transport{
-		DialContext: (&net.Dialer{Timeout: dialTimeout}).DialContext,
+		DialContext:         (&net.Dialer{Timeout: dialTimeout}).DialContext,
+		TLSHandshakeTimeout: dialTimeout,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: skipTLSVerify, //nolint:gosec // intentional for local development
