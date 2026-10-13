@@ -30,10 +30,11 @@ func clearGlobalHooksPath(t *testing.T, repoDir string) {
 // the repo root cache. Returns the repo directory path and the hooks directory path.
 func initHooksTestRepo(t *testing.T) (string, string) {
 	t.Helper()
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	t.Chdir(tmpDir)
 
 	testutil.RunGit(t, tmpDir, "init")
+	testutil.ReleaseRootsOnCleanup(t, tmpDir)
 	clearGlobalHooksPath(t, tmpDir)
 	paths.ClearWorktreeRootCache()
 
@@ -43,7 +44,7 @@ func initHooksTestRepo(t *testing.T) (string, string) {
 func TestGetGitDirInPath_RegularRepo(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 
 	testutil.RunGit(t, tmpDir, "init")
 
@@ -72,7 +73,7 @@ func TestGetGitDirInPath_RegularRepo(t *testing.T) {
 func TestGetGitDirInPath_Worktree(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	mainRepo := filepath.Join(tmpDir, "main")
 	worktreeDir := filepath.Join(tmpDir, "worktree")
 
@@ -130,7 +131,7 @@ func TestGetGitDirInPath_Worktree(t *testing.T) {
 func TestGetGitDirInPath_NotARepo(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 
 	_, err := getGitDirInPath(context.Background(), tmpDir)
 	if err == nil {
@@ -146,7 +147,7 @@ func TestGetGitDirInPath_NotARepo(t *testing.T) {
 func TestGetHooksDirInPath_RegularRepo(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 
 	testutil.RunGit(t, tmpDir, "init")
 	clearGlobalHooksPath(t, tmpDir)
@@ -202,7 +203,7 @@ func TestGetHooksDirInPath_Worktree(t *testing.T) {
 func TestGetHooksDirInPath_CoreHooksPath(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 
 	testutil.RunGit(t, tmpDir, "init")
 
@@ -233,7 +234,7 @@ func TestInstallGitHook_HooksPathNotADirectory(t *testing.T) {
 	// core.hooksPath pointing at a non-directory (commonly /dev/null, the
 	// "disable git hooks globally" idiom) must fail with guidance naming
 	// core.hooksPath, not a raw mkdir error.
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	ctx := context.Background()
 
 	testutil.RunGit(t, tmpDir, "init")
@@ -278,7 +279,7 @@ func TestInstallGitHook_HooksPathUnderNonDirectory(t *testing.T) {
 	// core.hooksPath pointing below a non-directory (e.g. /dev/null/hooks)
 	// makes os.Stat fail instead of succeeding on a non-dir; the guidance must
 	// fire for this variant too.
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	ctx := context.Background()
 
 	testutil.RunGit(t, tmpDir, "init")
@@ -310,7 +311,7 @@ func TestInstallGitHook_HooksPathNonexistentIsCreated(t *testing.T) {
 	// not fire, and MkdirAll must create the directory and install hooks. Its
 	// parent is missing too: on Windows that stat error is the same errno as
 	// "a component is a file", which used to trip the guard.
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	ctx := context.Background()
 
 	testutil.RunGit(t, tmpDir, "init")
@@ -384,7 +385,7 @@ func TestInstallGitHook_WorktreeInstallsInCommonHooks(t *testing.T) {
 func initHooksWorktreeRepo(t *testing.T) (string, string) {
 	t.Helper()
 
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	mainRepo := filepath.Join(tmpDir, "main")
 	worktreeDir := filepath.Join(tmpDir, "worktree")
 
@@ -475,7 +476,7 @@ func TestIsGitSequenceOperation_Revert(t *testing.T) {
 
 func TestIsGitSequenceOperation_Worktree(t *testing.T) {
 	// Test that detection works in a worktree (git dir is different)
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	mainRepo := filepath.Join(tmpDir, "main")
 	worktreeDir := filepath.Join(tmpDir, "worktree")
 
@@ -591,14 +592,14 @@ func TestCheckGitHookState(t *testing.T) {
 
 	t.Run("no hooks at all is Absent", func(t *testing.T) {
 		t.Parallel()
-		if got := gitHookStateInHooksDir(t.TempDir()); got != GitHooksAbsent {
+		if got := gitHookStateInHooksDir(testutil.TempDir(t)); got != GitHooksAbsent {
 			t.Errorf("empty hooks dir = %v, want GitHooksAbsent", got)
 		}
 	})
 
 	t.Run("a foreign hook at our path is Absent", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir()
+		dir := testutil.TempDir(t)
 		writeCurrentManagedHooks(t, dir)
 		// Overwrite one with somebody else's hook.
 		if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte("#!/bin/sh\necho lefthook\n"), 0o755); err != nil {
@@ -611,7 +612,7 @@ func TestCheckGitHookState(t *testing.T) {
 
 	t.Run("an incomplete set is Absent", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir()
+		dir := testutil.TempDir(t)
 		writeCurrentManagedHooks(t, dir)
 		if err := os.Remove(filepath.Join(dir, "post-commit")); err != nil {
 			t.Fatal(err)
@@ -627,7 +628,7 @@ func TestCheckGitHookState(t *testing.T) {
 	// TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled.
 	t.Run("hooks in the current shape are Current", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir()
+		dir := testutil.TempDir(t)
 		writeCurrentManagedHooks(t, dir)
 		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
 			t.Errorf("current-shape hooks = %v, want GitHooksCurrent", got)
@@ -640,7 +641,7 @@ func TestCheckGitHookState(t *testing.T) {
 			"./scripts/entire-dev hooks git pre-push",
 			`go run ./cmd/entire/main.go hooks git pre-push "$1" || true`,
 		} {
-			dir := t.TempDir()
+			dir := testutil.TempDir(t)
 			writeCurrentManagedHooks(t, dir)
 			legacyContent := "#!/bin/sh\n# " + entireHookMarker + "\n" + legacy + "\n"
 			if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte(legacyContent), 0o755); err != nil {
@@ -668,7 +669,7 @@ func TestCheckGitHookState_UserAdditionsAreNotDrift(t *testing.T) {
 		"go run ./tools/mylint.go",
 		"sh ./scripts/entire-dev-notes.sh",
 	} {
-		dir := t.TempDir()
+		dir := testutil.TempDir(t)
 		for _, hook := range gitHookNames {
 			content := "#!/bin/sh\n# " + entireHookMarker + "\n" +
 				"if command -v entire >/dev/null 2>&1; then entire hooks git " + hook + "; else :; fi\n" +
@@ -689,7 +690,7 @@ func TestCheckGitHookState_UserAdditionsAreNotDrift(t *testing.T) {
 func TestCheckGitHookState_LegacyEntireLineIsStillDrift(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	for _, hook := range gitHookNames {
 		content := "#!/bin/sh\n# " + entireHookMarker + "\n" +
 			"./scripts/entire-dev hooks git " + hook + "\n" +
@@ -1110,7 +1111,7 @@ func TestRemoveGitHook_IgnoresNonEntireHooks(t *testing.T) {
 
 func TestRemoveGitHook_NotAGitRepo(t *testing.T) {
 	// Create a temp directory without git init
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	t.Chdir(tmpDir)
 
 	// Clear cache so paths resolve correctly
@@ -1207,7 +1208,7 @@ func TestGitHookCommitMsg_MissingEntireWarnsAndAllowsCommit(t *testing.T) {
 	t.Parallel()
 
 	shPath := requireShell(t)
-	tempDir := t.TempDir()
+	tempDir := testutil.TempDir(t)
 	msgFile := filepath.Join(tempDir, "COMMIT_EDITMSG")
 	if err := os.WriteFile(msgFile, []byte("commit message\n"), 0o600); err != nil {
 		t.Fatalf("failed to write commit message: %v", err)
@@ -1220,7 +1221,7 @@ func TestGitHookCommitMsg_MissingEntireWarnsAndAllowsCommit(t *testing.T) {
 	}
 
 	cmd := exec.CommandContext(context.Background(), shPath, hookPath, msgFile)
-	cmd.Env = envWithPath(t.TempDir())
+	cmd.Env = envWithPath(testutil.TempDir(t))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("commit-msg hook should allow commit when entire is missing: %v\n%s", err, output)
@@ -1234,7 +1235,7 @@ func TestGitHookPrePush_MissingEntireSkipsSilentlyAndAllowsPush(t *testing.T) {
 	t.Parallel()
 
 	shPath := requireShell(t)
-	tempDir := t.TempDir()
+	tempDir := testutil.TempDir(t)
 
 	hook := findHookSpec(t, buildHookSpecs("entire"), "pre-push")
 	hookPath := filepath.Join(tempDir, "pre-push")
@@ -1243,7 +1244,7 @@ func TestGitHookPrePush_MissingEntireSkipsSilentlyAndAllowsPush(t *testing.T) {
 	}
 
 	cmd := exec.CommandContext(context.Background(), shPath, hookPath, "origin")
-	cmd.Env = envWithPath(t.TempDir())
+	cmd.Env = envWithPath(testutil.TempDir(t))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("pre-push hook should allow push when entire is missing: %v\n%s", err, output)
@@ -1257,8 +1258,8 @@ func TestGitHookCommitMsg_EntireFailureAllowsCommit(t *testing.T) {
 	t.Parallel()
 
 	shPath := requireShell(t)
-	tempDir := t.TempDir()
-	binDir := t.TempDir()
+	tempDir := testutil.TempDir(t)
+	binDir := testutil.TempDir(t)
 	msgFile := filepath.Join(tempDir, "COMMIT_EDITMSG")
 	if err := os.WriteFile(msgFile, []byte("commit message\n"), 0o600); err != nil {
 		t.Fatalf("failed to write commit message: %v", err)
@@ -1294,8 +1295,8 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 	t.Parallel()
 
 	shPath := requireShell(t)
-	tempDir := t.TempDir()
-	binDir := t.TempDir()
+	tempDir := testutil.TempDir(t)
+	binDir := testutil.TempDir(t)
 	msgFile := filepath.Join(tempDir, "COMMIT_EDITMSG")
 	markerFile := msgFile + ".backup-ran"
 	if err := os.WriteFile(msgFile, []byte("commit message\n"), 0o600); err != nil {
@@ -1865,6 +1866,9 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("Test cannot run as root (permission checks are bypassed)")
 	}
+	if runtime.GOOS == goosWindows {
+		t.Skip("unix permission bits")
+	}
 
 	tmpDir, _ := initHooksTestRepo(t)
 
@@ -1957,7 +1961,7 @@ func TestInstallGitHook_SymlinkedHookIsBackedUpNotFollowed(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 	require.NoError(t, os.MkdirAll(hooksDir, 0o750))
 
-	targetDir := t.TempDir()
+	targetDir := testutil.TempDir(t)
 	target := filepath.Join(targetDir, "shared-pre-push")
 	const targetContent = "#!/bin/sh\necho shared\n"
 	require.NoError(t, os.WriteFile(target, []byte(targetContent), 0o700))
@@ -2028,7 +2032,7 @@ func TestCheckGitHookState_SymlinkedHookIsNotOurs(t *testing.T) {
 	hookPath := filepath.Join(hooksDir, "post-commit")
 	ours, err := os.ReadFile(hookPath)
 	require.NoError(t, err)
-	elsewhere := filepath.Join(t.TempDir(), "post-commit")
+	elsewhere := filepath.Join(testutil.TempDir(t), "post-commit")
 	require.NoError(t, os.WriteFile(elsewhere, ours, 0o700))
 	require.NoError(t, os.Remove(hookPath))
 	if err := os.Symlink(elsewhere, hookPath); err != nil {
@@ -2049,7 +2053,7 @@ func TestRemoveGitHook_LeavesSymlinkedForeignHook(t *testing.T) {
 
 	hookPath := filepath.Join(hooksDir, "post-commit")
 	require.NoError(t, os.Remove(hookPath))
-	elsewhere := filepath.Join(t.TempDir(), "post-commit")
+	elsewhere := filepath.Join(testutil.TempDir(t), "post-commit")
 	require.NoError(t, os.WriteFile(elsewhere, []byte("#!/bin/sh\n"), 0o700))
 	if err := os.Symlink(elsewhere, hookPath); err != nil {
 		t.Skipf("symlink not supported: %v", err)
@@ -2170,7 +2174,7 @@ func TestSymlinkedHooksDirError_RemedyIsPasteable(t *testing.T) {
 
 	// symlinkedHooksDirError resolves its target, so the expectation has to be
 	// composed from the resolved temp dir (/private/var/... on macOS).
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	dir, err := filepath.EvalSymlinks(testutil.TempDir(t))
 	require.NoError(t, err)
 	realHooks := filepath.Join(dir, "real-hooks")
 	require.NoError(t, os.MkdirAll(realHooks, 0o750))
@@ -2231,7 +2235,7 @@ func TestSymlinkedHooksDirError_UsesTheQuotedCommand(t *testing.T) {
 		t.Skip("POSIX quoting")
 	}
 
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	dir, err := filepath.EvalSymlinks(testutil.TempDir(t))
 	require.NoError(t, err)
 	realHooks := filepath.Join(dir, "real hooks")
 	require.NoError(t, os.MkdirAll(realHooks, 0o750))

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -37,6 +38,9 @@ func identityTestRepo(t *testing.T) string {
 // captureSessionOwner records as SessionState.Owner.
 func selfAncestorOwner(t *testing.T) *proclive.Identity {
 	t.Helper()
+	if runtime.GOOS == goosWindows {
+		t.Skip("proclive has no process introspection on Windows, so no session has an owner to match")
+	}
 	id, ok := proclive.IdentityOf(os.Getppid())
 	require.True(t, ok, "IdentityOf(parent) must resolve on supported platforms")
 	return &id

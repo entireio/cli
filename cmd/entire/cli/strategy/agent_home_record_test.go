@@ -18,7 +18,7 @@ import (
 func canonicalTempDir(t *testing.T) string {
 	t.Helper()
 
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	dir, err := filepath.EvalSymlinks(testutil.TempDir(t))
 	require.NoError(t, err)
 	return dir
 }
@@ -31,13 +31,13 @@ func relocateClaudeHome(t *testing.T) string {
 	home := canonicalTempDir(t)
 	t.Setenv("CLAUDE_CONFIG_DIR", home)
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", "")
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("ENTIRE_CONFIG_DIR", testutil.TempDir(t))
 	return home
 }
 
 func TestUpdateSessionAgentHome(t *testing.T) {
 	home := relocateClaudeHome(t)
-	other := t.TempDir()
+	other := testutil.TempDir(t)
 	inHome := filepath.Join(home, "projects", "repo", "session.jsonl")
 	inOther := filepath.Join(other, "projects", "repo", "session.jsonl")
 
@@ -56,7 +56,7 @@ func TestUpdateSessionAgentHome(t *testing.T) {
 		{name: "stored home still holding the transcript is kept", agentType: agent.AgentTypeClaudeCode, stored: other, transcript: inOther,
 			wantHome: other},
 		{name: "transcript outside every home", agentType: agent.AgentTypeClaudeCode, stored: other,
-			transcript: filepath.Join(t.TempDir(), "session.jsonl")},
+			transcript: filepath.Join(testutil.TempDir(t), "session.jsonl")},
 		{name: "transcript beside the store, not in it", agentType: agent.AgentTypeClaudeCode,
 			transcript: filepath.Join(home, "projects-old", "session.jsonl")},
 		{name: "transcript escaping the store with dot-dot", agentType: agent.AgentTypeClaudeCode,
@@ -81,7 +81,7 @@ func TestUpdateSessionAgentHome(t *testing.T) {
 func TestUpdateSessionAgentHome_SymlinkedActiveHome(t *testing.T) {
 	relocateClaudeHome(t)
 	home := canonicalTempDir(t)
-	link := filepath.Join(t.TempDir(), "claude")
+	link := filepath.Join(testutil.TempDir(t), "claude")
 	if err := os.Symlink(home, link); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestUpdateSessionAgentHome_SymlinkedActiveHome(t *testing.T) {
 }
 
 func TestInitializeSession_RecordsTheAgentHome(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "init.txt", "init\n")
 	testutil.GitAdd(t, dir, "init.txt")
@@ -147,7 +147,7 @@ func TestInitializeSession_RecordsTheAgentHome(t *testing.T) {
 	assert.Equal(t, []string{second, home}, known())
 
 	// A turn whose transcript lies outside every home clears it.
-	state = turn(filepath.Join(t.TempDir(), sessionID+".jsonl"))
+	state = turn(filepath.Join(testutil.TempDir(t), sessionID+".jsonl"))
 	assert.Empty(t, state.AgentHome)
 	assert.Equal(t, []string{second, home}, known())
 }

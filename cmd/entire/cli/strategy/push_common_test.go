@@ -32,7 +32,7 @@ func TestHasUnpushedBranchRef(t *testing.T) {
 
 	setupRepo := func(t *testing.T) (*git.Repository, plumbing.Hash) {
 		t.Helper()
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -84,7 +84,7 @@ func TestHasUnpushedBranchRef(t *testing.T) {
 func setupRepoWithCheckpointBranch(t *testing.T) string {
 	t.Helper()
 
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	testutil.InitRepo(t, tmpDir)
 	testutil.WriteFile(t, tmpDir, "f.txt", "init")
 	testutil.GitAdd(t, tmpDir, "f.txt")
@@ -118,7 +118,7 @@ func TestDoPushRef_UnreachableTarget_ReturnsNil(t *testing.T) {
 	// 1. Try to push (fails — target doesn't exist)
 	// 2. Try to fetch+rebase (fails — can't fetch from non-existent path)
 	// 3. Log warning and return nil (graceful degradation)
-	nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
+	nonExistentPath := filepath.Join(testutil.TempDir(t), "does-not-exist")
 	delivered, err := doPushRef(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	require.NoError(t, err, "doPushRef should return nil when target is unreachable (graceful degradation)")
 	assert.False(t, delivered, "an unreachable target delivered nothing, which err cannot express")
@@ -142,7 +142,7 @@ func TestPushRefIfNeeded_UnreachableTarget_ReturnsNil(t *testing.T) {
 	// 3. Since target is not a URL (no :// or @), check hasUnpushedBranchRef
 	//    which finds no remote tracking ref -> returns true (has unpushed)
 	// 4. Call doPushRef which fails gracefully
-	nonExistentPath := filepath.Join(t.TempDir(), "does-not-exist")
+	nonExistentPath := filepath.Join(testutil.TempDir(t), "does-not-exist")
 	delivered, err := pushRefIfNeeded(ctx, nonExistentPath, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	require.NoError(t, err, "pushRefIfNeeded should return nil when target is unreachable")
 	assert.False(t, delivered, "an unreachable target delivered nothing, which err cannot express")
@@ -167,7 +167,7 @@ func TestPushRefIfNeeded_NonBranchRef(t *testing.T) {
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(customRef, head.Hash())))
 
 	// Create a bare repo as the push target.
-	bareDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
 	testutil.RunGit(t, bareDir, "init", "--bare")
 
 	t.Chdir(tmpDir)
@@ -197,7 +197,7 @@ func TestPushRefIfNeeded_LocalBareRepo_PushesSuccessfully(t *testing.T) {
 	tmpDir := setupRepoWithCheckpointBranch(t)
 
 	// Create a bare repo as the push target.
-	bareDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
 	testutil.RunGit(t, bareDir, "init", "--bare")
 
 	t.Chdir(tmpDir)
@@ -237,7 +237,7 @@ func TestFetchAndRebase_NonBranchRef(t *testing.T) {
 
 	// Bare remote that has the same ref at the same hash so the fetch+rebase
 	// resolves to a no-op fast-forward (no rebase work required).
-	bareDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
 	for _, args := range [][]string{
 		{"init", "--bare"},
 	} {
@@ -264,8 +264,8 @@ func TestFetchAndRebase_NonBranchRefDisconnected(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 
 	customRef := plumbing.ReferenceName("refs/entire/checkpoints/synthetic")
-	bareDir := t.TempDir()
-	setupDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
+	setupDir := testutil.TempDir(t)
 
 	gitRun := func(dir string, args ...string) {
 		t.Helper()
@@ -294,7 +294,7 @@ func TestFetchAndRebase_NonBranchRefDisconnected(t *testing.T) {
 	gitRun(setupDir, "push", "origin", customRef.String()+":"+customRef.String())
 	gitRun(setupDir, "checkout", "main")
 
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")
@@ -348,8 +348,8 @@ func TestFetchAndRebase_DivergedBranches(t *testing.T) {
 	branchName := paths.MetadataBranchName
 
 	// 1. Create bare origin with a metadata branch containing a base checkpoint
-	bareDir := t.TempDir()
-	workDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
+	workDir := testutil.TempDir(t)
 	gitRun := func(dir string, args ...string) {
 		testutil.RunGit(t, dir, args...)
 	}
@@ -378,8 +378,8 @@ func TestFetchAndRebase_DivergedBranches(t *testing.T) {
 	gitRun(workDir, "checkout", "main")
 
 	// 2. Clone into two separate working directories
-	cloneA := filepath.Join(t.TempDir(), "cloneA")
-	cloneB := filepath.Join(t.TempDir(), "cloneB")
+	cloneA := filepath.Join(testutil.TempDir(t), "cloneA")
+	cloneB := filepath.Join(testutil.TempDir(t), "cloneB")
 	require.NoError(t, os.MkdirAll(cloneA, 0o755))
 	require.NoError(t, os.MkdirAll(cloneB, 0o755))
 
@@ -470,10 +470,10 @@ func TestFetchAndRebase_SharedCloneLocalCommitInAlternate(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	branchName := paths.MetadataBranchName
 
-	bareDir := t.TempDir()
-	sourceDir := filepath.Join(t.TempDir(), "source")
-	remoteWorkDir := filepath.Join(t.TempDir(), "remote-work")
-	cloneDir := filepath.Join(t.TempDir(), "shared-clone")
+	bareDir := testutil.TempDir(t)
+	sourceDir := filepath.Join(testutil.TempDir(t), "source")
+	remoteWorkDir := filepath.Join(testutil.TempDir(t), "remote-work")
+	cloneDir := filepath.Join(testutil.TempDir(t), "shared-clone")
 	gitRun := func(dir string, args ...string) string {
 		return testutil.RunGit(t, dir, args...)
 	}
@@ -544,8 +544,8 @@ func TestFetchAndRebase_LocalBehind(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	branchName := paths.MetadataBranchName
 
-	bareDir := t.TempDir()
-	workDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
+	workDir := testutil.TempDir(t)
 	gitRun := func(dir string, args ...string) {
 		testutil.RunGit(t, dir, args...)
 	}
@@ -573,7 +573,7 @@ func TestFetchAndRebase_LocalBehind(t *testing.T) {
 	gitRun(workDir, "checkout", "main")
 
 	// Clone
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")
@@ -621,8 +621,8 @@ func TestFetchAndRebase_MergeBaseOnSecondParent_DoesNotReplayAncestors(t *testin
 	testutil.IsolateGitConfigEnv(t)
 	branchName := paths.MetadataBranchName
 
-	bareDir := t.TempDir()
-	setupDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
+	setupDir := testutil.TempDir(t)
 	gitRun := func(dir string, args ...string) {
 		t.Helper()
 		testutil.RunGit(t, dir, args...)
@@ -652,8 +652,8 @@ func TestFetchAndRebase_MergeBaseOnSecondParent_DoesNotReplayAncestors(t *testin
 	gitRun(setupDir, "checkout", "main")
 
 	// Clone twice: local gets the old merge-commit history, remote advances later.
-	cloneLocal := filepath.Join(t.TempDir(), "clone-local")
-	cloneRemote := filepath.Join(t.TempDir(), "clone-remote")
+	cloneLocal := filepath.Join(testutil.TempDir(t), "clone-local")
+	cloneRemote := filepath.Join(testutil.TempDir(t), "clone-remote")
 	require.NoError(t, os.MkdirAll(cloneLocal, 0o755))
 	require.NoError(t, os.MkdirAll(cloneRemote, 0o755))
 
@@ -749,8 +749,8 @@ func TestFetchAndRebase_DoesNotResurrectRemoteOnlyCheckpointFromMerge(t *testing
 	testutil.IsolateGitConfigEnv(t)
 	branchName := paths.MetadataBranchName
 
-	bareDir := t.TempDir()
-	setupDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
+	setupDir := testutil.TempDir(t)
 	gitRun := func(dir string, args ...string) {
 		t.Helper()
 		testutil.RunGit(t, dir, args...)
@@ -777,8 +777,8 @@ func TestFetchAndRebase_DoesNotResurrectRemoteOnlyCheckpointFromMerge(t *testing
 	gitRun(setupDir, "push", "origin", branchName)
 	gitRun(setupDir, "checkout", "main")
 
-	cloneLocal := filepath.Join(t.TempDir(), "clone-local")
-	cloneRemote := filepath.Join(t.TempDir(), "clone-remote")
+	cloneLocal := filepath.Join(testutil.TempDir(t), "clone-local")
+	cloneRemote := filepath.Join(testutil.TempDir(t), "clone-remote")
 	require.NoError(t, os.MkdirAll(cloneLocal, 0o755))
 	require.NoError(t, os.MkdirAll(cloneRemote, 0o755))
 
@@ -861,8 +861,8 @@ func TestFetchAndRebase_NonOriginRemote_ReconcilesFetchedRef(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	branchName := paths.MetadataBranchName
 
-	bareDir := t.TempDir()
-	setupDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
+	setupDir := testutil.TempDir(t)
 	gitRun := func(dir string, args ...string) {
 		t.Helper()
 		testutil.RunGit(t, dir, args...)
@@ -889,7 +889,7 @@ func TestFetchAndRebase_NonOriginRemote_ReconcilesFetchedRef(t *testing.T) {
 	gitRun(setupDir, "push", "origin", branchName)
 	gitRun(setupDir, "checkout", "main")
 
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")
@@ -958,8 +958,8 @@ func TestFetchAndRebase_URLTarget_ReconcilesFetchedTempRef(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	branchName := paths.MetadataBranchName
 
-	bareDir := t.TempDir()
-	setupDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
+	setupDir := testutil.TempDir(t)
 	gitRun := func(dir string, args ...string) {
 		t.Helper()
 		testutil.RunGit(t, dir, args...)
@@ -986,7 +986,7 @@ func TestFetchAndRebase_URLTarget_ReconcilesFetchedTempRef(t *testing.T) {
 	gitRun(setupDir, "push", "origin", branchName)
 	gitRun(setupDir, "checkout", "main")
 
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")
@@ -1052,8 +1052,8 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	branchName := paths.MetadataBranchName
 
-	bareDir := t.TempDir()
-	setupDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
+	setupDir := testutil.TempDir(t)
 	gitRun := func(dir string, args ...string) {
 		t.Helper()
 		testutil.RunGit(t, dir, args...)
@@ -1080,7 +1080,7 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 	gitRun(setupDir, "push", "origin", branchName)
 	gitRun(setupDir, "checkout", "main")
 
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")
@@ -1150,7 +1150,7 @@ func TestIsCheckpointRemoteCommitted(t *testing.T) {
 	checkpointRemoteSettings := `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`
 
 	t.Run("false when settings.json not committed", func(t *testing.T) {
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1167,7 +1167,7 @@ func TestIsCheckpointRemoteCommitted(t *testing.T) {
 	})
 
 	t.Run("false when committed settings.json has no checkpoint_remote", func(t *testing.T) {
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1185,7 +1185,7 @@ func TestIsCheckpointRemoteCommitted(t *testing.T) {
 	})
 
 	t.Run("true when committed settings.json has checkpoint_remote", func(t *testing.T) {
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1204,7 +1204,7 @@ func TestIsCheckpointRemoteCommitted(t *testing.T) {
 	})
 
 	t.Run("false when checkpoint_remote only in local changes", func(t *testing.T) {
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1227,7 +1227,7 @@ func TestIsCheckpointRemoteCommitted(t *testing.T) {
 	})
 
 	t.Run("works from subdirectory", func(t *testing.T) {
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1258,7 +1258,7 @@ func TestPrintSettingsCommitHint(t *testing.T) {
 	t.Run("no hint for non-URL target", func(t *testing.T) {
 		settingsHintOnce = sync.Once{}
 
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1285,7 +1285,7 @@ func TestPrintSettingsCommitHint(t *testing.T) {
 	t.Run("hint when checkpoint_remote not in committed settings", func(t *testing.T) {
 		settingsHintOnce = sync.Once{}
 
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1319,7 +1319,7 @@ func TestPrintSettingsCommitHint(t *testing.T) {
 	t.Run("hint when committed settings lacks checkpoint_remote", func(t *testing.T) {
 		settingsHintOnce = sync.Once{}
 
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1354,7 +1354,7 @@ func TestPrintSettingsCommitHint(t *testing.T) {
 	t.Run("no hint when checkpoint_remote is committed", func(t *testing.T) {
 		settingsHintOnce = sync.Once{}
 
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1389,7 +1389,7 @@ func TestPrintSettingsCommitHint(t *testing.T) {
 	t.Run("prints only once per process", func(t *testing.T) {
 		settingsHintOnce = sync.Once{}
 
-		tmpDir := t.TempDir()
+		tmpDir := testutil.TempDir(t)
 		testutil.InitRepo(t, tmpDir)
 		testutil.WriteFile(t, tmpDir, "f.txt", "init")
 		testutil.GitAdd(t, tmpDir, "f.txt")
@@ -1457,7 +1457,7 @@ func setupBareRemoteWithCheckpointBranch(t *testing.T) (string, string) {
 
 	workDir := setupRepoWithCheckpointBranch(t)
 
-	bareDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
 	testutil.RunGit(t, bareDir, "init", "--bare")
 
 	// Push the checkpoint branch to the bare remote
@@ -1492,7 +1492,7 @@ func TestDoPushRef_NewContent_SaysDone(t *testing.T) {
 	workDir := setupRepoWithCheckpointBranch(t)
 
 	// Create a bare remote with no checkpoint branch yet
-	bareDir := t.TempDir()
+	bareDir := testutil.TempDir(t)
 	testutil.RunGit(t, bareDir, "init", "--bare")
 
 	t.Chdir(workDir)

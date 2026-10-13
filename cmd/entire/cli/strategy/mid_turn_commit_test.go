@@ -55,9 +55,9 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 
 	// Create a transcript file that references the file by absolute path
 	// (this is what Claude Code does — tool_use Write has absolute file_path)
-	absFilePath := filepath.Join(worktreePath, "src", "main.go")
+	absFilePath := jsonQuote(t, filepath.Join(worktreePath, "src", "main.go"))
 	transcriptContent := `{"type":"human","message":{"content":"write a main.go file"}}
-{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` + absFilePath + `","content":"package main\n"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":` + absFilePath + `,"content":"package main\n"}}]}}
 `
 	transcriptPath := filepath.Join(dir, "transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcriptContent), 0o644))
@@ -232,7 +232,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 	subagentsDir := filepath.Join(transcriptDir, modelSessionID, "subagents")
 	require.NoError(t, os.MkdirAll(subagentsDir, 0o755))
 
-	subagentTranscript := `{"type":"assistant","uuid":"sa1","message":{"content":[{"type":"tool_use","id":"toolu_write1","name":"Write","input":{"file_path":"` + absFeaturePath + `","content":"package src\n"}}]}}
+	subagentTranscript := `{"type":"assistant","uuid":"sa1","message":{"content":[{"type":"tool_use","id":"toolu_write1","name":"Write","input":{"file_path":` + jsonQuote(t, absFeaturePath) + `,"content":"package src\n"}}]}}
 `
 	require.NoError(t, os.WriteFile(
 		filepath.Join(subagentsDir, "agent-sub123.jsonl"),

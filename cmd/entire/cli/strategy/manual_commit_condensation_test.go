@@ -107,6 +107,9 @@ func TestBuildSummaryGenerator_ExternalProvider(t *testing.T) { //nolint:paralle
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
+	if runtime.GOOS == goosWindows {
+		t.Skip("the fake agent is a shell script, which Windows cannot run as an executable")
+	}
 
 	const provider = "strategy-external-summary"
 	dir := t.TempDir()

@@ -34,7 +34,7 @@ func TestReconcileDisconnected_NoRemote(t *testing.T) {
 	t.Parallel()
 
 	// Local-only repo with metadata branch, no remote tracking branch
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	run := func(args ...string) {
 		cmd := exec.CommandContext(context.Background(), "git", args...)
 		cmd.Dir = tmpDir
@@ -393,7 +393,7 @@ func TestIsMetadataDisconnected_NoRemote(t *testing.T) {
 	t.Parallel()
 
 	// Local-only repo with metadata branch, no remote tracking branch
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	run := func(args ...string) {
 		cmd := exec.CommandContext(context.Background(), "git", args...)
 		cmd.Dir = tmpDir
@@ -698,7 +698,7 @@ func assertNoOPFSentinel(t *testing.T, commit *object.Commit) {
 func TestCollectCommitChain_DepthLimit(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
@@ -744,7 +744,7 @@ func TestCollectCommitChain_DepthLimit(t *testing.T) {
 func TestCollectCommitChain_StopsAtShallowBoundary(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
@@ -800,7 +800,7 @@ func TestLoadShallowHashes(t *testing.T) {
 
 	t.Run("non-shallow repo returns empty set", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir()
+		dir := testutil.TempDir(t)
 		testutil.InitRepo(t, dir)
 
 		set, err := loadShallowHashes(context.Background(), dir)
@@ -810,7 +810,7 @@ func TestLoadShallowHashes(t *testing.T) {
 
 	t.Run("reads .git/shallow hash list", func(t *testing.T) {
 		t.Parallel()
-		dir := t.TempDir()
+		dir := testutil.TempDir(t)
 		testutil.InitRepo(t, dir)
 
 		shallowFile := filepath.Join(dir, ".git", "shallow")

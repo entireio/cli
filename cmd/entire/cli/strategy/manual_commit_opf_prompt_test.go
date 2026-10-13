@@ -105,7 +105,7 @@ func TestResolveOPFDecision_Precedence(t *testing.T) {
 // Modifies process cwd (no t.Parallel), but uses t.Chdir so subsequent
 // tests see the reverted cwd.
 func TestPersistOPFPromptDefaultAlways_WritesNestedField(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := testutil.TempDir(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, paths.EntireDir), 0o755))
 	// Seed an existing settings.local.json with some unrelated content
 	// so we can verify it survives the write.
@@ -146,7 +146,7 @@ func TestPersistOPFPromptDefaultAlways_WritesNestedField(t *testing.T) {
 // TestPersistOPFPromptDefaultAlways_CreatesFileFromScratch covers the
 // fresh-install path where .entire/settings.local.json doesn't exist yet.
 func TestPersistOPFPromptDefaultAlways_CreatesFileFromScratch(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := testutil.TempDir(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, paths.EntireDir), 0o755))
 	t.Chdir(tempDir)
 
@@ -171,7 +171,7 @@ func TestPersistOPFPromptDefaultAlways_CreatesFileFromScratch(t *testing.T) {
 // PrePush still emits the non-interactive OPF progress notice in production,
 // but tests can redirect it away from process stderr.
 func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testutil.TempDir(t)
 	testutil.InitRepo(t, tmpDir)
 	testutil.WriteFile(t, tmpDir, "f.txt", "init")
 	testutil.GitAdd(t, tmpDir, "f.txt")
@@ -189,7 +189,7 @@ func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
 	// The checkpoint sync gate requires a configured remote that resolves to
 	// "origin"; use a local bare repo so resolution stays hermetic (no
 	// network) rather than an unreachable URL.
-	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	remoteDir := filepath.Join(testutil.TempDir(t), "origin.git")
 	_, err := git.PlainInit(remoteDir, true)
 	require.NoError(t, err)
 	testutil.AddRemote(t, tmpDir, "origin", remoteDir)
