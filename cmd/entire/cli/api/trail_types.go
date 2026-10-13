@@ -233,8 +233,9 @@ type TrailMergeabilityResponse struct {
 	BehindBy         int    `json:"behind_by"`
 	ComparisonStatus string `json:"comparison_status"`
 	// DeleteBranchOnMerge is the repo's default for the merge request's
-	// deleteBranch. The server reports false for a GitHub-backed repo; nil
-	// means a server that predates the setting.
+	// deleteBranch. It is nil for a GitHub-backed repo, whose branch GitHub
+	// manages, when readiness is unavailable, and from a server that predates
+	// the setting.
 	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge"`
 }
 

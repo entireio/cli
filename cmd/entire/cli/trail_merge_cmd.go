@@ -34,11 +34,12 @@ const (
 	trailGateError         = "error"
 
 	// Why the server kept a merged native trail's branch (branchKeptReason).
+	trailBranchKeptNotRequested  = "not_requested"
 	trailBranchKeptDisabled      = "disabled"
-	trailBranchKeptIsBase        = "is_base"
+	trailBranchKeptBase          = "base"
 	trailBranchKeptStacked       = "stacked"
-	trailBranchKeptMoved         = "branch_moved"
-	trailBranchKeptProtected     = "branch_protected"
+	trailBranchKeptMoved         = "moved"
+	trailBranchKeptProtected     = "protected"
 	trailBranchKeptDefaultBranch = "default_branch"
 	trailBranchKeptFailed        = "failed"
 )
@@ -158,12 +159,12 @@ type trailMergeBlockerJSON struct {
 	URL       string `json:"url,omitempty"`
 }
 
-func newTrailMergeResultJSON(t *api.TrailResource, m *api.TrailMergeabilityResponse, gates []api.TrailGate, dryRun bool, deleteDefault *bool) *trailMergeResultJSON {
+func newTrailMergeResultJSON(t *api.TrailResource, m *api.TrailMergeabilityResponse, gates []api.TrailGate, dryRun bool) *trailMergeResultJSON {
 	out := &trailMergeResultJSON{
 		Number: t.Number, Branch: t.Branch, Base: t.Base, HeadSha: m.HeadSHA,
 		Mergeable: m.Mergeable, ConflictStatus: m.ConflictStatus, BypassPolicy: m.BypassPolicy,
 		Blockers: make([]trailMergeBlockerJSON, 0, len(gates)), DryRun: dryRun,
-		DeleteBranchOnMerge: deleteDefault,
+		DeleteBranchOnMerge: m.DeleteBranchOnMerge,
 	}
 	for _, g := range gates {
 		b := trailMergeBlockerJSON{GateKey: g.GateKey, GateType: g.GateType, Status: g.Status, URL: trailGateWebURL(g)}
@@ -216,11 +217,10 @@ func runTrailMerge(ctx context.Context, out, errW io.Writer, insecureHTTP bool, 
 		if err != nil {
 			return err
 		}
-		deleteDefault := trailMergeDeleteDefault(forge, m)
-		printTrailMergeReadiness(w, found, m, trailMergeBranchPlan(deleteDefault, opts.DeleteBranch))
+		printTrailMergeReadiness(w, found, m, trailMergeBranchPlan(m.DeleteBranchOnMerge, opts.DeleteBranch))
 
 		gates := trailMergeBlockingGates(m)
-		result := newTrailMergeResultJSON(found, m, gates, opts.DryRun, deleteDefault)
+		result := newTrailMergeResultJSON(found, m, gates, opts.DryRun)
 		err = trailMergeAfterRead(ctx, w, client, mergePath, found, m, trailBypassVerdictFor(m, actions), gates, opts, result)
 		return finishTrailMerge(out, opts.JSON, result, err)
 	})
@@ -267,10 +267,11 @@ func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, m
 			return fmt.Errorf("cannot merge trail #%d with --force: the server did not report its head commit, so the bypass cannot be pinned to the commit whose gates were checked", found.Number)
 		}
 	}
-	// A server that predates the setting would reject deleteBranch as an
-	// unknown field. Checked after the trail's own blockers, which say more.
+	// The setting is null when readiness is unavailable and absent from a
+	// server that predates it, which would reject deleteBranch as an unknown
+	// field. Checked after the trail's own blockers, which say more.
 	if opts.DeleteBranch != nil && m.DeleteBranchOnMerge == nil {
-		return fmt.Errorf("cannot merge trail #%d: the server does not support --delete-branch or --no-delete-branch yet; rerun without them", found.Number)
+		return fmt.Errorf("cannot merge trail #%d: the server did not report the repo's delete-branch-on-merge setting, so it may not support --delete-branch or --no-delete-branch; rerun without them", found.Number)
 	}
 
 	if !opts.DryRun && bypass {
@@ -335,21 +336,10 @@ func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, m
 	} else {
 		fmt.Fprintf(w, "Merged trail #%d into %s (%s)\n", found.Number, base, commit)
 	}
-	if line := trailMergeBranchOutcome(found.Branch, res, opts.DeleteBranch); line != "" {
+	if line := trailMergeBranchOutcome(found.Branch, res); line != "" {
 		fmt.Fprintln(w, line)
 	}
 	return nil
-}
-
-// trailMergeDeleteDefault returns the repo's delete-branch-on-merge setting,
-// or nil when it does not apply or is unknown: GitHub deletes a GitHub-backed
-// trail's branch by its own setting (the server reports false there), and an
-// older server does not send it.
-func trailMergeDeleteDefault(forge string, m *api.TrailMergeabilityResponse) *bool {
-	if forge == gitremote.ForgeGitHub {
-		return nil
-	}
-	return m.DeleteBranchOnMerge
 }
 
 // trailMergeDeleteBranchFlag returns the flag that sets deleteBranch to v.
@@ -361,9 +351,10 @@ func trailMergeDeleteBranchFlag(v bool) string {
 }
 
 // trailMergeBranchPlan returns what the merge will do with the trail's branch,
-// given the repo setting (from trailMergeDeleteDefault) and the flag override,
-// or "" when the setting is unknown. The server can still keep a branch it was
-// asked to delete; trailMergeBranchOutcome says why.
+// given the repo setting and the flag override, or "" when the server reports
+// no setting (a GitHub-backed trail, or the setting is unknown). The server
+// can still keep a branch it was asked to delete; trailMergeBranchOutcome says
+// why.
 func trailMergeBranchPlan(repoDefault, override *bool) string {
 	switch {
 	case repoDefault == nil:
@@ -384,7 +375,7 @@ func trailMergeBranchPlan(repoDefault, override *bool) string {
 // trailMergeBranchOutcome returns the line saying what the merge did with the
 // trail's branch, or "" when the server reports nothing (a GitHub-backed
 // trail).
-func trailMergeBranchOutcome(branch string, res *api.TrailMergeResponse, override *bool) string {
+func trailMergeBranchOutcome(branch string, res *api.TrailMergeResponse) string {
 	subject := "the trail's branch"
 	if branch = tuiutil.SanitizeDisplayText(strings.TrimSpace(branch)); branch != "" {
 		subject = "branch " + branch
@@ -396,12 +387,11 @@ func trailMergeBranchOutcome(branch string, res *api.TrailMergeResponse, overrid
 	switch reason := strings.TrimSpace(res.BranchKeptReason); reason {
 	case "":
 		return ""
+	case trailBranchKeptNotRequested:
+		why = "--no-delete-branch was passed"
 	case trailBranchKeptDisabled:
 		why = "the repo's delete-branch-on-merge setting is off"
-		if override != nil && !*override {
-			why = "--no-delete-branch was passed"
-		}
-	case trailBranchKeptIsBase:
+	case trailBranchKeptBase:
 		why = "it is the trail's base"
 	case trailBranchKeptStacked:
 		why = "another open trail is based on it"
