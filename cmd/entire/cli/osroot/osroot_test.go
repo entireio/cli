@@ -828,3 +828,54 @@ func TestMkdirAllNoSymlink_RejectsBackslashSeparatedName(t *testing.T) {
 		t.Fatalf("nothing may be created for a refused name, found %v", entries)
 	}
 }
+
+func TestForgetUnder_ClosesRootsInTheTreeOnly(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	tree := filepath.Join(base, "repo")
+	nested := filepath.Join(tree, ".git")
+	// Shares tree's spelling as a string prefix but is not beneath it.
+	sibling := filepath.Join(base, "repo-other")
+	for _, dir := range []string{nested, sibling} {
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+	}
+
+	treeRoot, err := osroot.Shared(tree)
+	require.NoError(t, err)
+	nestedRoot, err := osroot.Shared(nested)
+	require.NoError(t, err)
+	siblingRoot, err := osroot.Shared(sibling)
+	require.NoError(t, err)
+	t.Cleanup(func() { osroot.Forget(sibling) })
+
+	osroot.ForgetUnder(tree)
+
+	_, err = treeRoot.Stat(".")
+	require.ErrorIs(t, err, os.ErrClosed)
+	_, err = nestedRoot.Stat(".")
+	require.ErrorIs(t, err, os.ErrClosed)
+	_, err = siblingRoot.Stat(".")
+	require.NoError(t, err, "a root outside the tree must stay open")
+}
+
+func TestForgetUnder_MatchesTheResolvedSpelling(t *testing.T) {
+	t.Parallel()
+
+	// t.TempDir is reached through a symlink on macOS (/var -> /private/var)
+	// and a short name on Windows; production code keys the registry on the
+	// resolved path, which is the one tests do not hold.
+	base := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(base)
+	require.NoError(t, err)
+	dir := filepath.Join(resolved, "repo")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+
+	root, err := osroot.Shared(dir)
+	require.NoError(t, err)
+
+	osroot.ForgetUnder(base)
+
+	_, err = root.Stat(".")
+	require.ErrorIs(t, err, os.ErrClosed)
+}

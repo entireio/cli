@@ -702,6 +702,48 @@ func Forget(dir string) {
 	}
 }
 
+// ForgetUnder closes and drops every cached root at or beneath dir, under each
+// spelling of dir: as given and with symlinks and Windows short names
+// resolved, since callers key the registry on whichever spelling they reached
+// the directory by.
+//
+// It is for tearing down a directory tree the process created and is done
+// with, such as a test's temporary repository. Windows cannot delete a
+// directory while a handle to it is open, so a root left cached there makes
+// the deletion fail. Unlike ResetShared, it leaves roots elsewhere alone, so
+// tests running in parallel keep theirs.
+func ForgetUnder(dir string) {
+	if !filepath.IsAbs(dir) {
+		return
+	}
+	prefixes := []string{filepath.Clean(dir)}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != prefixes[0] {
+		prefixes = append(prefixes, filepath.Clean(resolved))
+	}
+
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	for key, root := range sharedRoots {
+		for _, prefix := range prefixes {
+			if pathWithin(key, prefix) {
+				_ = root.Close()
+				delete(sharedRoots, key)
+				break
+			}
+		}
+	}
+}
+
+// pathWithin reports whether path is dir or beneath it. filepath.Rel compares
+// Windows paths case-insensitively and fails across volumes.
+func pathWithin(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
 // ResetShared closes and forgets every root Shared handed out. Call it after
 // deleting or replacing a directory a root was held on: a root that outlives its
 // directory is a handle to an unlinked inode, so writes through it succeed and

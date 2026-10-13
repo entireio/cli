@@ -15,6 +15,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 )
 
@@ -31,8 +32,14 @@ type PendingCheckpoint struct {
 }
 
 // InitRepo initializes a git repository in the given directory with test user config.
+//
+// It also closes, at cleanup, the shared roots code under test opened in the
+// repository. Windows cannot delete a directory with an open handle, so a root
+// left cached there fails the t.TempDir cleanup. The cleanup is registered
+// after the caller's t.TempDir, so it runs first.
 func InitRepo(t *testing.T, repoDir string) {
 	t.Helper()
+	ReleaseRootsOnCleanup(t, repoDir)
 
 	repo, err := git.PlainInit(repoDir, false)
 	if err != nil {
@@ -58,6 +65,31 @@ func InitRepo(t *testing.T, repoDir string) {
 	if err := repo.SetConfig(cfg); err != nil {
 		t.Fatalf("failed to set repo config: %v", err)
 	}
+}
+
+// ReleaseRootsOnCleanup closes, when t ends, every shared root opened at or
+// beneath dir. Call it after the t.TempDir that created dir: cleanups run last
+// registered first, so the handles are closed before the directory is removed.
+// InitRepo calls it; tests that create a repository another way call it
+// themselves.
+func ReleaseRootsOnCleanup(t *testing.T, dir string) {
+	t.Helper()
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return
+	}
+	t.Cleanup(func() { osroot.ForgetUnder(abs) })
+}
+
+// TempDir is t.TempDir for a test whose code under test opens shared roots in
+// the directory without a repository made by InitRepo: a clone, a linked
+// worktree, or a bare hooks or .entire directory. It releases those roots
+// before the directory is removed, which Windows needs.
+func TempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	ReleaseRootsOnCleanup(t, dir)
+	return dir
 }
 
 // SkipWithoutSymlinks skips a test that needs to create a symlink. On Windows
