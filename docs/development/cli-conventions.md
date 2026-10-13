@@ -891,6 +891,23 @@ Diagnostic subcommands live alongside `doctor.go` as `doctor_logs.go` and
 `doctor_bundle.go`. Group roots and noun-group children live in files
 named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
 
+### Trail retargeting
+
+`trail retarget [<trail>] --base <branch>` changes the selected branch work's
+merge target through the repository metadata PATCH route; it never rebases,
+fetches, checks out, or pushes local Git branches. This supports stacked work
+whose previous target has merged or been deleted, without resolving that old
+target. Selection follows approvals: legacy mode defaults to the current branch
+(or `--branch`) and rejects a selector combined with `--branch`; project mode
+uses the shared working-context resolver and permits `--branch` to disambiguate
+within a project trail. `--repo` requires an explicit target.
+
+The base must be a non-empty literal branch name, not a local reflog expression.
+Unchanged targets are successful no-ops. Branchless, closed, merged, and
+self-targeting work are refused before mutation. API errors are returned without
+reporting success. The command is unlisted/user-owned in agent-help by default,
+because it changes review intent.
+
 ### Error Handling
 
 The CLI uses a specific pattern for error output to avoid duplication between Cobra and main.go.

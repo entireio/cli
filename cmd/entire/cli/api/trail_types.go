@@ -130,6 +130,7 @@ type TrailCreateResponse struct {
 // the caller as a flaky server rather than as the wrong route, and that is what
 // made this bug survive as long as it did.
 type TrailUpdateRequest struct {
+	Base               *string   `json:"base,omitempty"`
 	Status             *string   `json:"status,omitempty"`
 	Title              *string   `json:"title,omitempty"`
 	Assignees          *[]string `json:"assignees,omitempty"`
