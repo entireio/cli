@@ -92,4 +92,12 @@ func TestCalculateTokenUsage_FromOffset(t *testing.T) {
 		usage.CacheCreationTokens != 40 || usage.APICallCount != 1 {
 		t.Fatalf("usage from offset 2 = %+v, want only the second call", usage)
 	}
+
+	none, err := (&Agent{}).CalculateTokenUsage([]byte(`{"type":"user","message":"go"}`+"\n"), 0)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsage without usage: %v", err)
+	}
+	if none != nil {
+		t.Fatalf("usage without usage lines = %+v, want nil (no token data)", none)
+	}
 }

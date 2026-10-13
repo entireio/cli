@@ -4,7 +4,6 @@ package integration
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -70,6 +69,9 @@ type tokenAgentDriver interface {
 	// Expressible trims a usage to the fields the agent's own format can
 	// carry (Codex has no cache writes); the harness spends and records that.
 	Expressible(u tokenCounts) tokenCounts
+	// Runs reports whether the driver takes part in a scenario at all; a
+	// variant driver that pins one hypothesis runs only the rows it needs.
+	Runs(scenario string) bool
 }
 
 // tokenSession is one fake agent session. Spend-type methods only write what
@@ -103,7 +105,7 @@ func hookCall(h *tokenHarness, dir, agentNS, hook string, payload any) {
 	h.t.Helper()
 	data, err := json.Marshal(payload)
 	require.NoError(h.t, err)
-	cmd := exec.CommandContext(context.Background(), getTestBinary(), "hooks", agentNS, hook)
+	cmd := exec.CommandContext(h.t.Context(), getTestBinary(), "hooks", agentNS, hook)
 	cmd.Dir = dir
 	cmd.Stdin = bytes.NewReader(data)
 	cmd.Env = h.env.cliEnv()
@@ -160,6 +162,7 @@ func (claudeTokenDriver) Caps() map[tokenCap]bool {
 }
 func (claudeTokenDriver) Setup(*tokenHarness)                   {}
 func (claudeTokenDriver) Expressible(u tokenCounts) tokenCounts { return u }
+func (claudeTokenDriver) Runs(string) bool                      { return true }
 
 func (claudeTokenDriver) NewSession(h *tokenHarness) tokenSession {
 	id := fmt.Sprintf("claude-tok-%d", h.nextSessionNumber())
@@ -182,23 +185,16 @@ func (s *claudeTokenSession) ID() string             { return s.id }
 func (s *claudeTokenSession) TranscriptPath() string { return s.path }
 
 func (s *claudeTokenSession) hook(name string, extra map[string]any) {
-	payload := map[string]any{"session_id": s.id, "transcript_path": s.path}
-	for k, v := range extra {
-		payload[k] = v
-	}
+	payload := mergeMaps(map[string]any{"session_id": s.id, "transcript_path": s.path}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), agentClaudeCode, name, payload)
 }
 
 func (s *claudeTokenSession) line(typ string, message any, extra map[string]any) map[string]any {
 	s.seq++
-	l := map[string]any{
+	return mergeMaps(map[string]any{
 		"type": typ, "uuid": fmt.Sprintf("%s-%d", s.id, s.seq), "sessionId": s.id, "cwd": s.h.sessionDir(s.id),
 		"timestamp": time.Now().UTC().Format(time.RFC3339Nano), "message": message,
-	}
-	for k, v := range extra {
-		l[k] = v
-	}
-	return l
+	}, extra)
 }
 
 func (s *claudeTokenSession) appendLines(lines ...any) { appendJSONLines(s.h, s.path, lines...) }

@@ -3,7 +3,7 @@
 package integration
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -207,23 +207,28 @@ func stateTokenCounts(env *TestEnv, sessionID string) (tokenCounts, bool, error)
 }
 
 // sessionTokensTotal runs `entire session tokens <id> --json` in dir and
-// returns its inclusive total (main + subagents). ok is false when the
-// command reports no session.
+// returns its inclusive total (main + subagents). ok is false only when the
+// command reports the session is not found; any other failure is an error.
 func sessionTokensTotal(env *TestEnv, dir, sessionID string) (int, bool, error) {
-	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "session", "tokens", sessionID, "--json")
+	cmd := execx.NonInteractive(env.T.Context(), getTestBinary(), "session", "tokens", sessionID, "--json")
 	cmd.Dir = dir
 	cmd.Env = env.cliEnv()
-	out, err := cmd.Output()
-	if err != nil {
-		return 0, false, nil //nolint:nilerr // "Session not found" exits non-zero
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if strings.Contains(stderr.String(), "Session not found.") {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("session tokens %s: %w\n%s%s", sessionID, err, stdout.String(), stderr.String())
 	}
 	var report struct {
 		Tokens *struct {
 			Total int `json:"total"`
 		} `json:"tokens"`
 	}
-	if err := json.Unmarshal(out, &report); err != nil {
-		return 0, false, fmt.Errorf("parse session tokens --json %q: %w", out, err)
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		return 0, false, fmt.Errorf("parse session tokens --json %q: %w", stdout.String(), err)
 	}
 	if report.Tokens == nil {
 		return 0, true, nil

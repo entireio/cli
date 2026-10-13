@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -34,6 +36,7 @@ func (b tokenDriverBase) Caps() map[tokenCap]bool {
 	return m
 }
 func (b tokenDriverBase) Expressible(u tokenCounts) tokenCounts { return u }
+func (b tokenDriverBase) Runs(string) bool                      { return true }
 
 // realDir resolves symlinks so paths match what the CLI computes on macOS.
 func realDir(h *tokenHarness) string {
@@ -88,10 +91,7 @@ func (s *cursorTokenSession) ID() string             { return s.id }
 func (s *cursorTokenSession) TranscriptPath() string { return s.path }
 
 func (s *cursorTokenSession) hook(name string, extra map[string]any) {
-	in := map[string]any{"conversation_id": s.id, "transcript_path": s.path}
-	for k, v := range extra {
-		in[k] = v
-	}
+	in := mergeMaps(map[string]any{"conversation_id": s.id, "transcript_path": s.path}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), "cursor", name, in)
 }
 
@@ -113,11 +113,13 @@ func (s *cursorTokenSession) Spend(u tokenCounts) {
 }
 
 // Stop reports the turn's tokens; Cursor reports input including cache reads
-// and writes. A repeated Stop reports the turn's running total again.
+// and writes. Each turn has its own generation_id, and a repeated Stop for
+// the same turn re-sends it with the turn's running total.
 func (s *cursorTokenSession) Stop() {
 	u := s.pending
 	s.hook("stop", map[string]any{
 		"model": "cursor-default", "loop_count": 1,
+		"generation_id":     fmt.Sprintf("%s-gen-%d", s.id, s.turn),
 		"input_tokens":      u.In + u.CacheRead + u.CacheWrite,
 		"output_tokens":     u.Out,
 		"cache_read_tokens": u.CacheRead, "cache_write_tokens": u.CacheWrite,
@@ -169,13 +171,10 @@ func (s *codexTokenSession) ID() string             { return s.id }
 func (s *codexTokenSession) TranscriptPath() string { return s.path }
 
 func (s *codexTokenSession) hook(name, event string, extra map[string]any) {
-	in := map[string]any{
+	in := mergeMaps(map[string]any{
 		"session_id": s.id, "transcript_path": s.path, "cwd": s.h.sessionDir(s.id), "model": "gpt-5",
 		"permission_mode": "default", "hook_event_name": event, "turn_id": fmt.Sprintf("turn-%d", s.turn),
-	}
-	for k, v := range extra {
-		in[k] = v
-	}
+	}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), "codex", name, in)
 }
 
@@ -235,9 +234,10 @@ func (s *codexTokenSession) DeleteSubagentTranscript(agentID string) {
 	require.NoError(s.h.t, os.Remove(s.childPath(agentID)))
 }
 
-// codexChildID turns the harness's agent ID into a UUID-shaped thread ID.
+// codexChildID derives a UUID-shaped thread ID from the harness's agent ID.
 func codexChildID(agentID string) string {
-	return "019b0000-0000-7000-8000-" + fmt.Sprintf("%012x", len(agentID)*7919+int(agentID[len(agentID)-1]))
+	sum := sha256.Sum256([]byte(agentID))
+	return "019b0000-0000-7000-8000-" + hex.EncodeToString(sum[:6])
 }
 
 func (s *codexTokenSession) Stop() {
@@ -260,13 +260,6 @@ func (copilotTokenDriver) Setup(h *tokenHarness) {
 	h.env.ExtraEnv = append(h.env.ExtraEnv, "ENTIRE_TEST_COPILOT_SESSION_DIR="+h.agentDir)
 }
 
-// While the session runs, Copilot's events carry only output tokens per
-// message; input and cache counts appear only in the session.shutdown
-// aggregate. The driver spends what the live transcript can show.
-func (copilotTokenDriver) Expressible(u tokenCounts) tokenCounts {
-	return tokenCounts{Out: u.Out}
-}
-
 func (copilotTokenDriver) NewSession(h *tokenHarness) tokenSession {
 	id := fmt.Sprintf("copilot-tok-%d", h.nextSessionNumber())
 	s := &copilotTokenSession{unsupportedSession: unsupportedSession{"copilot-cli"}, h: h, id: id,
@@ -281,7 +274,7 @@ type copilotTokenSession struct {
 	h        *tokenHarness
 	id, path string
 	seq      int
-	output   int
+	spent    tokenCounts
 	calls    int
 }
 
@@ -295,11 +288,8 @@ func (s *copilotTokenSession) event(typ string, data map[string]any) {
 }
 
 func (s *copilotTokenSession) hook(name string, extra map[string]any) {
-	in := map[string]any{"sessionId": s.id, "transcriptPath": s.path, "cwd": s.h.sessionDir(s.id),
-		"timestamp": time.Now().UnixMilli()}
-	for k, v := range extra {
-		in[k] = v
-	}
+	in := mergeMaps(map[string]any{"sessionId": s.id, "transcriptPath": s.path, "cwd": s.h.sessionDir(s.id),
+		"timestamp": time.Now().UnixMilli()}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), "copilot-cli", name, in)
 }
 
@@ -316,20 +306,23 @@ func (s *copilotTokenSession) WriteFile(path string) {
 		"model": "claude-sonnet-4.6", "toolTelemetry": map[string]any{"properties": map[string]any{"filePaths": string(files)}}})
 }
 
+// Spend records a real API call. Copilot's live events carry only its output
+// tokens; input and cache counts reach the transcript only in the
+// session.shutdown aggregate (SessionEnd), so the CLI cannot see them before.
 func (s *copilotTokenSession) Spend(u tokenCounts) {
-	s.output += u.Out
+	s.spent = s.spent.plus(u)
 	s.calls++
 	s.event("assistant.message", map[string]any{"content": "ok", "outputTokens": u.Out})
 }
 
 func (s *copilotTokenSession) Stop() { s.hook("agent-stop", nil) }
 
-// SessionEnd writes the shutdown aggregate Copilot appends on exit, holding
-// the same output total the per-message events already show.
+// SessionEnd writes the session-wide aggregate Copilot appends on exit.
 func (s *copilotTokenSession) SessionEnd() {
 	s.event("session.shutdown", map[string]any{"modelMetrics": map[string]any{"claude-sonnet-4.6": map[string]any{
 		"requests": map[string]any{"count": s.calls},
-		"usage":    map[string]any{"inputTokens": 0, "outputTokens": s.output, "cacheReadTokens": 0, "cacheWriteTokens": 0},
+		"usage": map[string]any{"inputTokens": s.spent.In, "outputTokens": s.spent.Out,
+			"cacheReadTokens": s.spent.CacheRead, "cacheWriteTokens": s.spent.CacheWrite},
 	}}})
 	s.hook("session-end", nil)
 }
@@ -366,10 +359,7 @@ func (s *droidTokenSession) ID() string             { return s.id }
 func (s *droidTokenSession) TranscriptPath() string { return s.path }
 
 func (s *droidTokenSession) hook(name string, extra map[string]any) {
-	in := map[string]any{"session_id": s.id, "transcript_path": s.path, "model": "droid-test"}
-	for k, v := range extra {
-		in[k] = v
-	}
+	in := mergeMaps(map[string]any{"session_id": s.id, "transcript_path": s.path, "model": "droid-test"}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), "factoryai-droid", name, in)
 }
 
@@ -470,10 +460,7 @@ func (s *openCodeTokenSession) ID() string             { return s.id }
 func (s *openCodeTokenSession) TranscriptPath() string { return s.path }
 
 func (s *openCodeTokenSession) hook(name string, extra map[string]any) {
-	in := map[string]any{"session_id": s.id, "model": "opencode-test"}
-	for k, v := range extra {
-		in[k] = v
-	}
+	in := mergeMaps(map[string]any{"session_id": s.id, "model": "opencode-test"}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), "opencode", name, in)
 }
 
@@ -550,10 +537,7 @@ func (s *piTokenSession) ID() string             { return s.id }
 func (s *piTokenSession) TranscriptPath() string { return s.path }
 
 func (s *piTokenSession) hook(name string, extra map[string]any) {
-	in := map[string]any{"type": name, "cwd": s.h.sessionDir(s.id), "session_file": s.path}
-	for k, v := range extra {
-		in[k] = v
-	}
+	in := mergeMaps(map[string]any{"type": name, "cwd": s.h.sessionDir(s.id), "session_file": s.path}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), "pi", name, in)
 }
 
@@ -588,10 +572,21 @@ func (s *piTokenSession) Stop() { s.hook("agent_end", nil) }
 
 // --- Antigravity: cumulative statusline snapshots outside the transcript ---
 
-type antigravityTokenDriver struct{ tokenDriverBase }
+type antigravityTokenDriver struct {
+	tokenDriverBase
+
+	cacheInTotal bool
+}
 
 func newAntigravityTokenDriver() antigravityTokenDriver {
-	return antigravityTokenDriver{tokenDriverBase{name: "antigravity", agent: "antigravity"}}
+	return antigravityTokenDriver{tokenDriverBase: tokenDriverBase{name: "antigravity", agent: "antigravity"}}
+}
+
+// newAntigravityCacheInTotalDriver writes total_input_tokens that include
+// cache reads; see antigravityTokenSession.Spend.
+func newAntigravityCacheInTotalDriver() antigravityTokenDriver {
+	return antigravityTokenDriver{tokenDriverBase: tokenDriverBase{name: "antigravity-cache-in-total", agent: "antigravity"},
+		cacheInTotal: true}
 }
 
 func (antigravityTokenDriver) Setup(h *tokenHarness) {
@@ -602,12 +597,18 @@ func (antigravityTokenDriver) Setup(h *tokenHarness) {
 		"ENTIRE_ANTIGRAVITY_CONFIG_DIR="+realDir(h))
 }
 
-func (antigravityTokenDriver) NewSession(h *tokenHarness) tokenSession {
+// Runs limits the cache-in-total variant to plain turns: one row is enough
+// to show what the other reading of the statusline would mean.
+func (d antigravityTokenDriver) Runs(scenario string) bool {
+	return !d.cacheInTotal || scenario == "plain turns"
+}
+
+func (d antigravityTokenDriver) NewSession(h *tokenHarness) tokenSession {
 	id := fmt.Sprintf("antigravity-tok-%d", h.nextSessionNumber())
 	s := &antigravityTokenSession{unsupportedSession: unsupportedSession{"antigravity"}, h: h, id: id,
 		path:     filepath.Join(antigravityBrainDir(h.env.RepoDir), id, ".system_generated", "logs", "transcript.jsonl"),
 		snapshot: filepath.Join(h.agentDir, id+".jsonl"),
-		clock:    time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)}
+		clock:    time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC), cacheInTotal: d.cacheInTotal}
 	return s
 }
 
@@ -619,17 +620,15 @@ type antigravityTokenSession struct {
 	step, invocation   int
 	totalIn, totalOut  int
 	clock              time.Time
+	cacheInTotal       bool
 }
 
 func (s *antigravityTokenSession) ID() string             { return s.id }
 func (s *antigravityTokenSession) TranscriptPath() string { return s.path }
 
 func (s *antigravityTokenSession) hook(name string, extra map[string]any) {
-	in := map[string]any{"conversationId": s.id, "workspacePaths": []string{s.h.sessionDir(s.id)},
-		"transcriptPath": s.path, "artifactDirectoryPath": filepath.Join(s.h.env.RepoDir, ".gemini", "antigravity-cli", "artifacts")}
-	for k, v := range extra {
-		in[k] = v
-	}
+	in := mergeMaps(map[string]any{"conversationId": s.id, "workspacePaths": []string{s.h.sessionDir(s.id)},
+		"transcriptPath": s.path, "artifactDirectoryPath": filepath.Join(s.h.env.RepoDir, ".gemini", "antigravity-cli", "artifacts")}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), "antigravity", name, in)
 }
 
@@ -654,7 +653,15 @@ func (s *antigravityTokenSession) WriteFile(path string) {
 
 // Spend appends a snapshot: input/output totals are cumulative, cache counts
 // are the call's own (current_usage).
+//
+// Unverified (token plan revision 14): whether agy's total_input_tokens
+// already includes cache reads. The default driver assumes it does not; the
+// antigravity-cache-in-total variant assumes it does, so both readings of
+// statusline.go's arithmetic are pinned until a real agy capture settles it.
 func (s *antigravityTokenSession) Spend(u tokenCounts) {
+	if s.cacheInTotal {
+		s.totalIn += u.CacheRead
+	}
 	s.totalIn += u.In
 	s.totalOut += u.Out
 	s.clock = s.clock.Add(time.Minute)
@@ -706,10 +713,7 @@ func (s *vogonTokenSession) ID() string             { return s.id }
 func (s *vogonTokenSession) TranscriptPath() string { return s.path }
 
 func (s *vogonTokenSession) hook(name string, extra map[string]any) {
-	in := map[string]any{"session_id": s.id, "transcript_path": s.path, "model": "vogon-test"}
-	for k, v := range extra {
-		in[k] = v
-	}
+	in := mergeMaps(map[string]any{"session_id": s.id, "transcript_path": s.path, "model": "vogon-test"}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), "vogon", name, in)
 }
 

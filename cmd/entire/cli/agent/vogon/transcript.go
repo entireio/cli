@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -84,23 +85,26 @@ func (v *Agent) ExtractModifiedFilesFromOffset(_ context.Context, path string, s
 	return files, len(lines), nil
 }
 
-// CalculateTokenUsage sums the usage on lines at or after fromOffset, counted
-// in the same non-empty-line units as GetTranscriptPosition. Each line with
-// usage is one API call.
+// CalculateTokenUsage sums the usage on lines after the first fromOffset,
+// counted exactly as GetTranscriptPosition counts them. Each line with usage
+// is one API call. It returns nil when no line carries usage, so callers keep
+// treating the transcript as having no token data.
 func (v *Agent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
-	usage := &agent.TokenUsage{}
-	i := 0
-	for _, raw := range bytes.Split(transcriptData, []byte("\n")) {
-		if len(raw) == 0 { // readTranscriptLines skips empty lines too
-			continue
-		}
-		i++
-		if i <= fromOffset {
+	lines, err := scanTranscriptLines(bytes.NewReader(transcriptData))
+	if err != nil {
+		return nil, err
+	}
+	var usage *agent.TokenUsage
+	for i, raw := range lines {
+		if i < fromOffset {
 			continue
 		}
 		var entry transcriptLine
-		if err := json.Unmarshal(raw, &entry); err != nil || entry.Usage == nil {
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil || entry.Usage == nil {
 			continue
+		}
+		if usage == nil {
+			usage = &agent.TokenUsage{}
 		}
 		usage.InputTokens += entry.Usage.InputTokens
 		usage.OutputTokens += entry.Usage.OutputTokens
@@ -125,9 +129,14 @@ func readTranscriptLines(path string) ([]string, error) {
 		return nil, fmt.Errorf("open transcript: %w", err)
 	}
 	defer f.Close()
+	return scanTranscriptLines(f)
+}
 
+// scanTranscriptLines returns r's non-empty lines. It is the single line
+// splitter, so positions and token offsets always agree.
+func scanTranscriptLines(r io.Reader) ([]string, error) {
 	var lines []string
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
 		if line := scanner.Text(); line != "" {

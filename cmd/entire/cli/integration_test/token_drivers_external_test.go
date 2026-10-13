@@ -114,10 +114,7 @@ func (s *externalTokenSession) ID() string             { return s.id }
 func (s *externalTokenSession) TranscriptPath() string { return s.path }
 
 func (s *externalTokenSession) hook(name string, extra map[string]any) {
-	in := map[string]any{"session_id": s.id, "transcript_path": s.path}
-	for k, v := range extra {
-		in[k] = v
-	}
+	in := mergeMaps(map[string]any{"session_id": s.id, "transcript_path": s.path}, extra)
 	hookCall(s.h, s.h.sessionDir(s.id), "faketok", name, in)
 }
 
