@@ -103,6 +103,8 @@ Each line has: `type`, `data`, `id` (UUID), `timestamp` (ISO 8601), `parentId`
 - `user.message` — User messages (`content`, `transformedContent`, `attachments`, `interactionId`)
 - `assistant.turn_start` — Start of assistant turn (`turnId`, `interactionId`)
 - `assistant.message` — Assistant response (`content`, `toolRequests[]`, `reasoningText`)
+- `session.usage_record` — Per-API-call token usage (`usage.inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `apiCallId`); newer releases only, see Token usage
+- `session.shutdown` — Per-run aggregate `modelMetrics`, written after the last hook returns
 - `tool.execution_complete` — Tool result (`toolCallId`, `parentToolCallId`, top-level `agentId`, and JSON-encoded `filePaths` under `toolTelemetry.properties` or `restrictedProperties`)
 - `subagent.started` — Stable join between top-level child `agentId` and the parent task `toolCallId`
 - `subagent.completed` — Completion totals, written after the synchronous `subagentStop` hook returns
@@ -121,7 +123,15 @@ Each line has: `type`, `data`, `id` (UUID), `timestamp` (ISO 8601), `parentId`
 
 The `assistant.message` entries have a `toolRequests` array with tool call IDs. After each tool executes, a `tool.execution_complete` event is emitted with a JSON-encoded `filePaths` value. Current releases place sensitive telemetry under `restrictedProperties`; older fixtures use `properties`, so the parser supports both.
 
-**Token usage:** Extracted via `TokenCalculator` from `session.shutdown` events, which contain aggregate `modelMetrics` with per-model `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, and `requests.count`. Mid-session checkpoints use per-message `outputTokens` fallback from `assistant.message` events. **Timing constraint:** Copilot CLI writes `session.shutdown` AFTER all hooks (including `sessionEnd`) return — hooks are synchronous/blocking. This means in-hook token extraction can only use the per-message fallback. The authoritative aggregate is captured at condensation time (commit/push), when the framework re-reads the full transcript and `session.shutdown` is present. Condensation also backfills `state.TokenUsage` so the session JSON reflects the authoritative totals after the first commit.
+**Token usage:** `TokenCalculator` reads three sources, and counts every API call from exactly one of them:
+
+- `session.usage_record` — one event per model API call (main agent and subagents), written just before that call's `assistant.message` and joined to it by `apiCallId`. Carries `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `reasoningTokens`. First seen in local sessions at Copilot CLI 1.0.94; absent through 1.0.93.
+- `assistant.message.outputTokens` — the per-call fallback for older releases (seen through 1.0.63). Output only, no input or cache counts. Skipped for any call a usage record covers. Releases between those two (seen at 1.0.83–1.0.93) write neither, so a checkpoint slice there has no per-call tokens at all and only the session total is recoverable.
+- `session.shutdown.modelMetrics` — per-model aggregates (`usage` with the same four counts, plus `requests.count`) for one Copilot process run. A resumed session appends one shutdown per run, each covering only its own run.
+
+Copilot's `inputTokens` is the **total** prompt size, including cache reads and cache writes: its own billing breakdown (`tokenDetails.input`) equals `inputTokens - cacheReadTokens - cacheWriteTokens` on every release that writes one (1.0.49 through 1.0.97). Entire reports fresh input, so both the usage records and the shutdown aggregate are normalized that way; `cacheWriteTokens` maps to `CacheCreationTokens`. `reasoningTokens` is a subset of `outputTokens` (`tokenDetails.output` equals `outputTokens`) and is not added.
+
+Sliced reads (a checkpoint's window, `fromOffset > 0`) count only per-call sources inside the slice and never read `session.shutdown`, which is not checkpoint-scoped. Full reads (`fromOffset == 0`) let each usable shutdown replace the per-call counts of the run it closes, and count the live run after the last shutdown per call. On 1.0.94 sessions the per-turn usage-record sums equal the shutdown totals exactly, so checkpoints sum to the session total. **Timing constraint:** Copilot CLI writes `session.shutdown` AFTER all hooks (including `sessionEnd`) return — hooks are synchronous/blocking — so hook-time reads only ever see per-call sources. Condensation re-reads the full transcript and backfills `state.TokenUsage` with the full-read total (`sessionStateBackfillTokenUsage`), which is how the shutdown aggregate reaches session state on releases without usage records. Subagent calls are included in the main totals; `SubagentTokens` stays unset (see Subagents).
 
 ### Transcript Position
 
@@ -235,16 +245,18 @@ session state without scanning the parent transcript as the child. The older
 
 Copilot does not create standalone child transcript files. Task metadata therefore
 records transcript unavailability and never probes the generic Claude-style
-`agent-<id>.jsonl` layout. Per-child token breakdown is also unavailable at hook time:
-`session.shutdown.modelMetrics` is authoritative but is appended only after
-`sessionEnd` returns. Entire leaves child token usage unset rather than misclassifying
-Copilot's total-only completion value.
+`agent-<id>.jsonl` layout. Per-child token breakdown is not recorded: child calls are counted in the
+session's main totals (their `session.usage_record` events, tagged
+`interactionType: "conversation-subagent"`, are interleaved into the parent
+transcript, and `session.shutdown.modelMetrics` includes them). Entire leaves
+child token usage unset rather than misclassifying Copilot's total-only
+`subagent.completed` value.
 
 ## Gaps & Limitations
 
 - No `Compaction` event — Copilot CLI doesn't appear to have a context compaction hook
 - No standalone child transcript; Copilot interleaves child events into the parent JSONL
-- Exact per-child token breakdown becomes available only after the last synchronous hook
+- No per-child token breakdown: child calls count toward the session's main totals
 - `subagentStart` cannot be correlated safely and is retained as an observed pass-through hook
 - `transcriptPath` only available in `agentStop` hook — `userPromptSubmitted` and `sessionStart` don't include it, so we compute it from `~/.copilot/session-state/<sessionId>/events.jsonl`
 
@@ -253,5 +265,9 @@ Copilot's total-only completion value.
 - Contract reverified on 2026-09-03 with Copilot CLI 1.0.82 using two
   concurrent same-type custom agents (one writing, one read-only) and one
   built-in `general-purpose` agent.
+- Token format reverified on 2026-10-13 with Copilot CLI 1.0.94 and 1.0.97:
+  `session.usage_record` per call, no `assistant.message.outputTokens`, and
+  per-turn record sums equal to the `session.shutdown` totals. The scrubbed
+  1.0.94 capture is `testdata/usage_record_session.jsonl`.
 - Tests retain only synthetic structural fixtures; prompts, responses, and
   local capture paths are not committed.

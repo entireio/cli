@@ -378,6 +378,35 @@ func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *
 	require.Equal(t, 3, backfillUsage.APICallCount)
 }
 
+// Copilot releases that write session.usage_record: the checkpoint counts only
+// its slice's records, and the session backfill — read before Copilot appends
+// session.shutdown — sums every record with fresh input separated from cache.
+func TestSessionStateBackfillTokenUsage_CopilotUsageRecords(t *testing.T) {
+	t.Parallel()
+
+	transcript := []byte(strings.Join([]string{
+		`{"type":"user.message","data":{"content":"one"},"id":"1"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"c1","inputTokens":1000,"outputTokens":40,"cacheReadTokens":0,"cacheWriteTokens":990}},"id":"2"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"c1","content":"ok"},"id":"3"}`,
+		`{"type":"user.message","data":{"content":"two"},"id":"4"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"c2","inputTokens":1100,"outputTokens":9,"cacheReadTokens":990,"cacheWriteTokens":100}},"id":"5"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"c2","content":"done"},"id":"6"}`,
+	}, "\n") + "\n")
+
+	ag, err := agent.GetByAgentType(agent.AgentTypeCopilotCLI)
+	require.NoError(t, err)
+
+	checkpointUsage := calculateTokenUsage(agent.AgentTypeCopilotCLI, transcript, 3)
+	require.Equal(t, &agent.TokenUsage{
+		InputTokens: 10, CacheReadTokens: 990, CacheCreationTokens: 100, OutputTokens: 9, APICallCount: 1,
+	}, checkpointUsage)
+
+	backfillUsage := sessionStateBackfillTokenUsage(t.Context(), ag, agent.AgentTypeCopilotCLI, transcript, checkpointUsage)
+	require.Equal(t, &agent.TokenUsage{
+		InputTokens: 20, CacheReadTokens: 990, CacheCreationTokens: 1090, OutputTokens: 49, APICallCount: 2,
+	}, backfillUsage)
+}
+
 func TestSessionStateBackfillTokenUsage_CopilotFallsBackToCheckpointUsage(t *testing.T) {
 	t.Parallel()
 

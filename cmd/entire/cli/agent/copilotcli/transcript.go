@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
@@ -294,8 +295,37 @@ func extractModelFromEvents(events []copilotEvent) string {
 		func(d toolExecCompleteData) string { return d.Model })
 }
 
+// copilotTokenCounts is the token block Copilot CLI writes both per API call
+// (session.usage_record) and per model in the session.shutdown aggregate.
+//
+// InputTokens is the TOTAL prompt size: it includes CacheReadTokens and
+// CacheWriteTokens. Copilot's own billing breakdown (tokenDetails.input) is
+// inputTokens - cacheReadTokens - cacheWriteTokens, on every Copilot version
+// that writes one (observed 1.0.49 through 1.0.97). ReasoningTokens is a subset
+// of OutputTokens (tokenDetails.output equals outputTokens), so it is not read.
+type copilotTokenCounts struct {
+	InputTokens      int `json:"inputTokens"`
+	OutputTokens     int `json:"outputTokens"`
+	CacheReadTokens  int `json:"cacheReadTokens"`
+	CacheWriteTokens int `json:"cacheWriteTokens"`
+}
+
+// toTokenUsage converts Copilot's counts to Entire's convention, where
+// InputTokens is fresh (uncached) input only. The subtraction is clamped so a
+// malformed record cannot produce negative input.
+func (c copilotTokenCounts) toTokenUsage(apiCalls int) *agent.TokenUsage {
+	return &agent.TokenUsage{
+		InputTokens:         max(0, c.InputTokens-c.CacheReadTokens-c.CacheWriteTokens),
+		CacheCreationTokens: c.CacheWriteTokens,
+		CacheReadTokens:     c.CacheReadTokens,
+		OutputTokens:        c.OutputTokens,
+		APICallCount:        apiCalls,
+	}
+}
+
 // sessionShutdownData is the data payload for session.shutdown events.
-// Contains aggregate model metrics for the entire session.
+// Contains aggregate model metrics for one Copilot process run (a resumed
+// session appends one shutdown per run, each covering only that run).
 // modelMetrics is a JSON object keyed by model name (e.g. "claude-sonnet-4.6"),
 // not an array — using map[string] here matches the real Copilot CLI wire format.
 type sessionShutdownData struct {
@@ -305,34 +335,47 @@ type sessionShutdownData struct {
 // modelMetric contains per-model token usage aggregates.
 // The model name is the map key in sessionShutdownData.ModelMetrics, not a field.
 type modelMetric struct {
-	Requests modelRequests `json:"requests"`
-	Usage    modelUsage    `json:"usage"`
+	Requests modelRequests      `json:"requests"`
+	Usage    copilotTokenCounts `json:"usage"`
 }
 
 type modelRequests struct {
 	Count int `json:"count"`
 }
 
-type modelUsage struct {
-	InputTokens      int `json:"inputTokens"`
-	OutputTokens     int `json:"outputTokens"`
-	CacheReadTokens  int `json:"cacheReadTokens"`
-	CacheWriteTokens int `json:"cacheWriteTokens"`
+// usageRecordData is the data payload for session.usage_record events, which
+// Copilot CLI writes once per model API call (main agent and subagents alike),
+// immediately before the assistant.message for that call. Observed from
+// Copilot CLI 1.0.94; earlier releases do not write it.
+type usageRecordData struct {
+	Usage struct {
+		copilotTokenCounts
+
+		APICallID string `json:"apiCallId"`
+	} `json:"usage"`
 }
 
-// assistantMessageTokenData is used as a fallback when session.shutdown is not
-// yet available. Each assistant.message may carry an outputTokens field.
+// assistantMessageTokenData is the per-call fallback for Copilot CLI releases
+// that carried outputTokens on assistant.message (observed through 1.0.63;
+// later releases dropped the field). It has no input or cache counts.
 type assistantMessageTokenData struct {
-	OutputTokens int `json:"outputTokens"`
+	OutputTokens int    `json:"outputTokens"`
+	APICallID    string `json:"apiCallId"`
 }
 
-const eventTypeSessionShutdown = "session.shutdown"
+const (
+	eventTypeSessionShutdown = "session.shutdown"
+	eventTypeUsageRecord     = "session.usage_record"
+)
 
 // CalculateTokenUsage computes token usage from the Copilot CLI JSONL transcript.
-// For full transcripts (fromOffset == 0), it prefers session.shutdown, which
-// contains session-wide aggregates. For sliced transcripts, session.shutdown
-// would overcount because it is not checkpoint-scoped, so we fall back to
-// summing assistant.message outputTokens within the slice.
+//
+// Per-call usage comes from session.usage_record events, falling back to
+// assistant.message outputTokens for releases that predate usage records. For
+// full transcripts (fromOffset == 0), a session.shutdown aggregate replaces
+// the per-call counts of the run it closes. Sliced transcripts never read
+// session.shutdown: it is not checkpoint-scoped, and would count every earlier
+// checkpoint's calls again.
 func (c *CopilotCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
 	events, err := parseEventsFromOffset(transcriptData, fromOffset)
 	if err != nil {
@@ -342,58 +385,90 @@ func (c *CopilotCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset 
 	return extractTokenUsageFromEvents(events, fromOffset == 0), nil
 }
 
-// extractTokenUsageFromEvents extracts token usage from parsed events.
-// Prefers session.shutdown aggregate only when the caller is looking at the
-// full transcript; otherwise falls back to per-message outputTokens.
+// extractTokenUsageFromEvents sums token usage over parsed events.
+//
+// Every API call is counted from exactly one source. The events are walked as
+// runs separated by session.shutdown: with preferSessionShutdown, a usable
+// shutdown aggregate replaces the per-call counts accumulated since the
+// previous shutdown, and an unusable one (unparseable, or no model metrics)
+// keeps them. Calls after the last shutdown — the live run — are always
+// counted per call. Within per-call counting, an assistant.message outputTokens
+// value is skipped when a usage record covers the same call.
 func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bool) *agent.TokenUsage {
-	if preferSessionShutdown {
-		// session.shutdown is authoritative, but only for full-session totals.
-		for i := len(events) - 1; i >= 0; i-- {
-			if events[i].Type != eventTypeSessionShutdown {
-				continue
-			}
+	recordedCalls, haveRecords := usageRecordCallIDs(events)
 
-			var data sessionShutdownData
+	total := &agent.TokenUsage{}
+	run := &agent.TokenUsage{}
+	for i := range events {
+		switch events[i].Type {
+		case eventTypeUsageRecord:
+			var data usageRecordData
 			if err := json.Unmarshal(events[i].Data, &data); err != nil {
-				logging.Debug(context.Background(), "copilot-cli: session.shutdown data unmarshal failed",
-					"err", err)
 				continue
 			}
+			run = types.AddTokenUsage(run, data.Usage.toTokenUsage(1))
 
-			if len(data.ModelMetrics) == 0 {
+		case eventTypeAssistantMsg:
+			var data assistantMessageTokenData
+			if err := json.Unmarshal(events[i].Data, &data); err != nil || data.OutputTokens <= 0 {
 				continue
 			}
-
-			// Sum across all models.
-			usage := &agent.TokenUsage{}
-			for _, m := range data.ModelMetrics {
-				usage.InputTokens += m.Usage.InputTokens
-				usage.OutputTokens += m.Usage.OutputTokens
-				usage.CacheReadTokens += m.Usage.CacheReadTokens
-				usage.CacheCreationTokens += m.Usage.CacheWriteTokens
-				usage.APICallCount += m.Requests.Count
+			if recordedCalls[data.APICallID] || (data.APICallID == "" && haveRecords) {
+				continue // counted from its session.usage_record
 			}
-			return usage
+			run = types.AddTokenUsage(run, &agent.TokenUsage{OutputTokens: data.OutputTokens, APICallCount: 1})
+
+		case eventTypeSessionShutdown:
+			if !preferSessionShutdown {
+				continue
+			}
+			if shutdown := sessionShutdownUsage(events[i].Data); shutdown != nil {
+				run = shutdown
+			}
+			total = types.AddTokenUsage(total, run)
+			run = &agent.TokenUsage{}
 		}
 	}
+	return types.AddTokenUsage(total, run)
+}
 
-	// Fallback: sum outputTokens from assistant.message events
-	usage := &agent.TokenUsage{}
+// usageRecordCallIDs returns the API call IDs that have a session.usage_record,
+// and whether any usage record is present at all.
+func usageRecordCallIDs(events []copilotEvent) (map[string]bool, bool) {
+	ids := map[string]bool{}
+	found := false
 	for i := range events {
-		if events[i].Type != eventTypeAssistantMsg {
+		if events[i].Type != eventTypeUsageRecord {
 			continue
 		}
-
-		var data assistantMessageTokenData
+		var data usageRecordData
 		if err := json.Unmarshal(events[i].Data, &data); err != nil {
 			continue
 		}
-		usage.OutputTokens += data.OutputTokens
-		if data.OutputTokens > 0 {
-			usage.APICallCount++
+		found = true
+		if data.Usage.APICallID != "" {
+			ids[data.Usage.APICallID] = true
 		}
 	}
+	return ids, found
+}
 
+// sessionShutdownUsage returns the normalized usage summed across models in a
+// session.shutdown payload, or nil when the payload carries no usable metrics.
+func sessionShutdownUsage(raw json.RawMessage) *agent.TokenUsage {
+	var data sessionShutdownData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		logging.Debug(context.Background(), "copilot-cli: session.shutdown data unmarshal failed",
+			"err", err)
+		return nil
+	}
+	if len(data.ModelMetrics) == 0 {
+		return nil
+	}
+	usage := &agent.TokenUsage{}
+	for _, m := range data.ModelMetrics {
+		usage = types.AddTokenUsage(usage, m.Usage.toTokenUsage(m.Requests.Count))
+	}
 	return usage
 }
 

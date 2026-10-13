@@ -401,8 +401,10 @@ func TestCalculateTokenUsage_SessionShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if usage.InputTokens != 64807 {
-		t.Errorf("InputTokens = %d, want 64807", usage.InputTokens)
+	// Copilot's inputTokens includes cache reads and writes; Entire reports
+	// fresh input only: 64807 - 42625 - 100.
+	if usage.InputTokens != 22082 {
+		t.Errorf("InputTokens = %d, want 22082", usage.InputTokens)
 	}
 	if usage.OutputTokens != 289 {
 		t.Errorf("OutputTokens = %d, want 289", usage.OutputTokens)
@@ -431,8 +433,9 @@ func TestCalculateTokenUsage_MultiModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if usage.InputTokens != 1500 {
-		t.Errorf("InputTokens = %d, want 1500", usage.InputTokens)
+	// Fresh input per model: (1000 - 0 - 0) + (500 - 300 - 50).
+	if usage.InputTokens != 1150 {
+		t.Errorf("InputTokens = %d, want 1150", usage.InputTokens)
 	}
 	if usage.OutputTokens != 300 {
 		t.Errorf("OutputTokens = %d, want 300", usage.OutputTokens)

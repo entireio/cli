@@ -48,6 +48,28 @@ type copilotAssistantData struct {
 	Content      string               `json:"content"`
 	ToolReqs     []copilotToolRequest `json:"toolRequests"`
 	OutputTokens int                  `json:"outputTokens"`
+	APICallID    string               `json:"apiCallId"`
+}
+
+// copilotUsageRecordData is the payload of session.usage_record, which newer
+// Copilot CLI releases write once per API call in place of
+// assistant.message outputTokens. inputTokens includes the cache counts.
+type copilotUsageRecordData struct {
+	Usage struct {
+		APICallID        string `json:"apiCallId"`
+		InputTokens      int    `json:"inputTokens"`
+		OutputTokens     int    `json:"outputTokens"`
+		CacheReadTokens  int    `json:"cacheReadTokens"`
+		CacheWriteTokens int    `json:"cacheWriteTokens"`
+	} `json:"usage"`
+}
+
+// applyCopilotUsageRecord sets an assistant line's token counts from the usage
+// record for its API call, with input reported as fresh (uncached) input.
+func applyCopilotUsageRecord(line *transcriptLine, rec copilotUsageRecordData) {
+	u := rec.Usage
+	line.InputTokens = max(0, u.InputTokens-u.CacheReadTokens-u.CacheWriteTokens)
+	line.OutputTokens = u.OutputTokens
 }
 
 type copilotToolRequest struct {
@@ -69,6 +91,10 @@ func compactCopilot(content []byte, opts MetadataFields) ([]byte, error) {
 	base := newTranscriptLine(opts)
 	var result []byte
 	var pending *transcriptLine
+	var pendingCallID string
+	// Usage records precede the assistant.message for the same call; keyed by
+	// apiCallId so either order attaches the counts to the right line.
+	records := map[string]copilotUsageRecordData{}
 
 	flushPending := func() {
 		if pending == nil {
@@ -76,6 +102,7 @@ func compactCopilot(content []byte, opts MetadataFields) ([]byte, error) {
 		}
 		appendLine(&result, *pending)
 		pending = nil
+		pendingCallID = ""
 	}
 
 	reader := bufio.NewReader(bytes.NewReader(content))
@@ -97,7 +124,18 @@ func compactCopilot(content []byte, opts MetadataFields) ([]byte, error) {
 					}
 				case "assistant.message":
 					flushPending()
-					pending = copilotAssistantLine(base, line)
+					pending, pendingCallID = copilotAssistantLine(base, line)
+					if rec, ok := records[pendingCallID]; ok && pending != nil {
+						applyCopilotUsageRecord(pending, rec)
+					}
+				case "session.usage_record":
+					var rec copilotUsageRecordData
+					if json.Unmarshal(line.Data, &rec) == nil && rec.Usage.APICallID != "" {
+						records[rec.Usage.APICallID] = rec
+						if pending != nil && pendingCallID == rec.Usage.APICallID {
+							applyCopilotUsageRecord(pending, rec)
+						}
+					}
 				case "tool.execution_complete":
 					if pending != nil {
 						copilotInlineToolResult(pending, line)
@@ -143,10 +181,12 @@ func copilotUserLine(base transcriptLine, line copilotLine) *transcriptLine {
 	return &out
 }
 
-func copilotAssistantLine(base transcriptLine, line copilotLine) *transcriptLine {
+// copilotAssistantLine converts an assistant.message and returns it with the
+// message's apiCallId (empty on releases that do not write one).
+func copilotAssistantLine(base transcriptLine, line copilotLine) (*transcriptLine, string) {
 	var data copilotAssistantData
 	if json.Unmarshal(line.Data, &data) != nil {
-		return nil
+		return nil, ""
 	}
 
 	// Capacity hint only: the +1 is the optional text block. It cannot
@@ -194,17 +234,17 @@ func copilotAssistantLine(base transcriptLine, line copilotLine) *transcriptLine
 	}
 
 	if len(content) == 0 {
-		return nil
+		return nil, ""
 	}
 
 	contentJSON, err := json.Marshal(content)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 
 	ts, err := json.Marshal(line.Timestamp)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 
 	out := base
@@ -213,7 +253,7 @@ func copilotAssistantLine(base transcriptLine, line copilotLine) *transcriptLine
 	out.ID = data.MessageID
 	out.OutputTokens = data.OutputTokens
 	out.Content = contentJSON
-	return &out
+	return &out, data.APICallID
 }
 
 func copilotInlineToolResult(pending *transcriptLine, line copilotLine) {
