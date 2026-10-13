@@ -288,10 +288,12 @@ func TestTrailMerge_DeleteBranchFlags(t *testing.T) {
 		{name: "no flag leaves it to the repo", want: `{"expectedHeadSha":"` + trailMergeTestHead + `"}`},
 		{name: "delete-branch", args: []string{"--delete-branch"}, want: `{"expectedHeadSha":"` + trailMergeTestHead + `","deleteBranch":true}`},
 		{name: "no-delete-branch sends an explicit false", args: []string{"--no-delete-branch"}, want: `{"expectedHeadSha":"` + trailMergeTestHead + `","deleteBranch":false}`},
+		{name: "delete-branch=false keeps the branch", args: []string{"--delete-branch=false"}, want: `{"expectedHeadSha":"` + trailMergeTestHead + `","deleteBranch":false}`},
+		{name: "no-delete-branch=false deletes the branch", args: []string{"--no-delete-branch=false"}, want: `{"expectedHeadSha":"` + trailMergeTestHead + `","deleteBranch":true}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := &trailMergeStub{
-				t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t),
+				t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, withField("delete_branch_on_merge", true)),
 				mergeBody: `{"ok":true,"mergeCommitSha":"merge-example"}`,
 			}
 			_, err := runTrailMergeTest(t, stub, "et/acme/widget", tc.args...)
@@ -314,13 +316,14 @@ func TestTrailMerge_DeleteBranchFlagsAreExclusive(t *testing.T) {
 
 func TestTrailMerge_ReportsBranchOutcome(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		body string
-		want string
+		name  string
+		args  []string
+		trail string
+		body  string
+		want  string
 	}{
 		{name: "deleted", body: `"branchDeleted":true`, want: "Deleted branch feature/example\n"},
-		{name: "kept by repo setting", body: `"branchDeleted":false,"branchKeptReason":"disabled"`, want: "Kept branch feature/example: this repo keeps branches after a merge\n"},
+		{name: "kept by repo setting", body: `"branchDeleted":false,"branchKeptReason":"disabled"`, want: "Kept branch feature/example: the repo's delete-branch-on-merge setting is off\n"},
 		{name: "kept by flag", args: []string{"--no-delete-branch"}, body: `"branchDeleted":false,"branchKeptReason":"disabled"`, want: "Kept branch feature/example: --no-delete-branch was passed\n"},
 		{name: "is base", body: `"branchDeleted":false,"branchKeptReason":"is_base"`, want: "Kept branch feature/example: it is the trail's base\n"},
 		{name: "stacked", body: `"branchDeleted":false,"branchKeptReason":"stacked"`, want: "Kept branch feature/example: another open trail is based on it\n"},
@@ -329,16 +332,29 @@ func TestTrailMerge_ReportsBranchOutcome(t *testing.T) {
 		{name: "default branch", body: `"branchDeleted":false,"branchKeptReason":"default_branch"`, want: "Kept branch feature/example: it is the repo's default branch\n"},
 		{name: "failed", body: `"branchDeleted":false,"branchKeptReason":"failed"`, want: "Kept branch feature/example: deleting it failed\n"},
 		{name: "unknown reason is shown sanitized", body: `"branchDeleted":false,"branchKeptReason":"new\u001b[2J_reason"`, want: "Kept branch feature/example: new_reason\n"},
+		{
+			name:  "branch name is sanitized",
+			trail: `{"id":"trail-example","number":7,"status":"open","branch":"feat\u001b]8;;https://example.com\u0007ure","base":"trunk","title":"Example"}`,
+			body:  `"branchDeleted":true`, want: "Deleted branch feature\n",
+		},
+		{
+			name:  "no branch name",
+			trail: `{"id":"trail-example","number":7,"status":"open","branch":"","base":"trunk","title":"Example"}`,
+			body:  `"branchDeleted":true`, want: "Deleted the trail's branch\n",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := &trailMergeStub{
-				t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t),
-				mergeBody: `{"ok":true,"mergeCommitSha":"merge-example",` + tc.body + `}`,
+				t: t, lookupBase: trailMergeLookupBase, trailJSON: tc.trail,
+				mergeability: trailMergeability(t, withField("delete_branch_on_merge", true)),
+				mergeBody:    `{"ok":true,"mergeCommitSha":"merge-example",` + tc.body + `}`,
 			}
 			out, err := runTrailMergeTest(t, stub, "et/acme/widget", tc.args...)
 
 			require.NoError(t, err)
-			require.Contains(t, out, "Merged trail #7 into trunk (merge-example)\n"+tc.want)
+			_, after, ok := strings.Cut(out, "(merge-example)\n")
+			require.True(t, ok, out)
+			require.Equal(t, tc.want, after)
 		})
 	}
 }
@@ -354,9 +370,24 @@ func TestTrailMerge_GitHubTrailReportsNoBranchOutcome(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Contains(t, out, "Merged trail #7 into trunk (merge-example)")
-	require.NotContains(t, out, "Kept branch")
-	require.NotContains(t, out, "Deleted branch")
+	require.NotContains(t, out, "Kept ")
+	require.NotContains(t, out, "Deleted ")
 	require.NotContains(t, out, "Branch:", "GitHub decides whether the branch is deleted")
+}
+
+// The server ignores the choice for a GitHub-backed trail, so a flag that
+// could be contradicted by GitHub's own setting is refused before anything is
+// read or merged.
+func TestTrailMerge_GitHubTrailRefusesDeleteBranchFlags(t *testing.T) {
+	for _, flag := range []string{"--delete-branch", "--no-delete-branch", "--delete-branch=false"} {
+		t.Run(flag, func(t *testing.T) {
+			stub := &trailMergeStub{t: t, lookupBase: "/api/v1/trails/gh/acme/widget", mergeability: trailMergeability(t), mergeBody: `{"ok":true}`}
+			_, err := runTrailMergeTest(t, stub, "gh/acme/widget", flag)
+
+			require.ErrorContains(t, err, "--delete-branch and --no-delete-branch apply to native trails only")
+			require.Empty(t, stub.mergePosts())
+		})
+	}
 }
 
 func TestTrailMerge_ReadinessShowsBranchPlan(t *testing.T) {
@@ -370,7 +401,6 @@ func TestTrailMerge_ReadinessShowsBranchPlan(t *testing.T) {
 		{name: "repo keeps", edits: []func(map[string]any){withField("delete_branch_on_merge", false)}, want: "Branch:    keep after merge (repo default)"},
 		{name: "flag deletes", edits: []func(map[string]any){withField("delete_branch_on_merge", false)}, args: []string{"--delete-branch"}, want: "Branch:    delete after merge (--delete-branch)"},
 		{name: "flag keeps", edits: []func(map[string]any){withField("delete_branch_on_merge", true)}, args: []string{"--no-delete-branch"}, want: "Branch:    keep after merge (--no-delete-branch)"},
-		{name: "flag without a repo setting", args: []string{"--delete-branch"}, want: "Branch:    delete after merge (--delete-branch)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, tc.edits...)}
@@ -378,6 +408,7 @@ func TestTrailMerge_ReadinessShowsBranchPlan(t *testing.T) {
 
 			require.NoError(t, err)
 			require.Contains(t, out, tc.want)
+			require.Empty(t, stub.mergePosts())
 		})
 	}
 	t.Run("server without the setting", func(t *testing.T) {
@@ -386,6 +417,28 @@ func TestTrailMerge_ReadinessShowsBranchPlan(t *testing.T) {
 
 		require.NoError(t, err)
 		require.NotContains(t, out, "Branch:", "an absent setting is unknown, not off")
+	})
+}
+
+// A server that predates the setting would reject deleteBranch as an unknown
+// field, after the readiness report had promised the choice.
+func TestTrailMerge_DeleteBranchFlagsNeedServerSupport(t *testing.T) {
+	for _, args := range [][]string{{"--delete-branch"}, {"--no-delete-branch"}, {"--delete-branch", "--dry-run"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t), mergeBody: `{"ok":true}`}
+			out, err := runTrailMergeTest(t, stub, "et/acme/widget", args...)
+
+			require.ErrorContains(t, err, "cannot merge trail #7: the server does not support --delete-branch or --no-delete-branch yet")
+			require.NotContains(t, out, "Branch:")
+			require.Empty(t, stub.mergePosts())
+		})
+	}
+	t.Run("a blocked trail reports its blockers first", func(t *testing.T) {
+		stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, blocked, baseChecksRed)}
+		_, err := runTrailMergeTest(t, stub, "et/acme/widget", "--delete-branch")
+
+		require.ErrorContains(t, err, "trail #7 is not mergeable")
+		require.Empty(t, stub.mergePosts())
 	})
 }
 
@@ -672,7 +725,7 @@ func TestTrailMerge_JSON(t *testing.T) {
 			"mergeable":false,"conflictStatus":"clean","bypassPolicy":"admins",
 			"blockers":[{"gateKey":"base_checks","gateType":"base_checks","status":"failed",
 				"rationale":"trunk is red: acme/entire-api build #1234 failed","url":"https://buildkite.com/acme/entire-api/builds/1234"}],
-			"dryRun":true,"merged":false,"bypassed":false,"wouldBypass":false,"branchDeleted":false}`, out)
+			"dryRun":true,"merged":false,"bypassed":false,"wouldBypass":false}`, out)
 		require.Empty(t, stub.mergePosts())
 	})
 	t.Run("kept branch carries the reason", func(t *testing.T) {
@@ -698,7 +751,7 @@ func TestTrailMerge_JSON(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(out), &got))
 		require.NotContains(t, got, "deleteBranchOnMerge")
 		require.NotContains(t, got, "branchKeptReason")
-		require.Equal(t, false, got["branchDeleted"])
+		require.NotContains(t, got, "branchDeleted", "GitHub may have deleted it; false would claim otherwise")
 	})
 	t.Run("dry run force reports wouldBypass", func(t *testing.T) {
 		stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, blocked, baseChecksRed)}

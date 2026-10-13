@@ -224,7 +224,8 @@ type TrailApprovalsResponse struct {
 
 // TrailMergeabilityResponse is the full mergeability snapshot the detail
 // resource serves (TrailMergeability, as `trail show` reads it) plus the
-// fields the merge command needs to decide on and explain a bypass.
+// fields the merge command needs to decide on and explain a bypass and to say
+// what the merge will do with the trail's branch.
 type TrailMergeabilityResponse struct {
 	TrailMergeability
 
@@ -272,8 +273,9 @@ type TrailMergeResponse struct {
 	OK bool `json:"ok"`
 	// Empty when the merge fast-forwarded or the base was already up to date.
 	MergeCommitSha string `json:"mergeCommitSha"`
-	// BranchDeleted is always false for a GitHub-backed trail, whose branch
-	// GitHub manages.
+	// BranchDeleted reports whether the server deleted the trail's branch
+	// after the merge. It is always false for a GitHub-backed trail, whose
+	// branch GitHub manages.
 	BranchDeleted bool `json:"branchDeleted"`
 	// BranchKeptReason says why a native trail's branch was kept; empty when
 	// it was deleted and for a GitHub-backed trail.
