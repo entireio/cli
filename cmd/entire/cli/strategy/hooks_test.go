@@ -276,16 +276,21 @@ func TestInstallGitHook_HooksPathNotADirectory(t *testing.T) {
 
 func TestInstallGitHook_HooksPathUnderNonDirectory(t *testing.T) {
 	// core.hooksPath pointing below a non-directory (e.g. /dev/null/hooks)
-	// makes os.Stat fail with ENOTDIR instead of succeeding on a non-dir;
-	// the guidance must fire for this variant too.
-	if runtime.GOOS == goosWindows {
-		t.Skip("ENOTDIR detection is POSIX-specific; Windows falls back to the raw mkdir error")
-	}
+	// makes os.Stat fail instead of succeeding on a non-dir; the guidance must
+	// fire for this variant too.
 	tmpDir := t.TempDir()
 	ctx := context.Background()
 
 	testutil.RunGit(t, tmpDir, "init")
-	testutil.RunGit(t, tmpDir, "config", "core.hooksPath", "/dev/null/hooks")
+	hooksPath := "/dev/null/hooks"
+	if runtime.GOOS == goosWindows {
+		notADir := filepath.Join(tmpDir, "not-a-dir")
+		if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+			t.Fatalf("failed to create non-directory: %v", err)
+		}
+		hooksPath = filepath.Join(notADir, "hooks")
+	}
+	testutil.RunGit(t, tmpDir, "config", "core.hooksPath", hooksPath)
 
 	t.Chdir(tmpDir)
 	ClearHooksDirCache()
@@ -302,12 +307,14 @@ func TestInstallGitHook_HooksPathUnderNonDirectory(t *testing.T) {
 
 func TestInstallGitHook_HooksPathNonexistentIsCreated(t *testing.T) {
 	// A configured-but-missing core.hooksPath is legitimate: the guard must
-	// not fire, and MkdirAll must create the directory and install hooks.
+	// not fire, and MkdirAll must create the directory and install hooks. Its
+	// parent is missing too: on Windows that stat error is the same errno as
+	// "a component is a file", which used to trip the guard.
 	tmpDir := t.TempDir()
 	ctx := context.Background()
 
 	testutil.RunGit(t, tmpDir, "init")
-	hooksPath := filepath.Join(tmpDir, "githooks-not-yet-created")
+	hooksPath := filepath.Join(tmpDir, "githooks-not-yet-created", "_")
 	testutil.RunGit(t, tmpDir, "config", "core.hooksPath", hooksPath)
 
 	t.Chdir(tmpDir)
