@@ -368,6 +368,15 @@ func makeTestJWT(t *testing.T, aud string) string {
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 
+// makeTestJWTWithIssuer is makeTestJWT plus an iss claim.
+func makeTestJWTWithIssuer(t *testing.T, iss, aud string) string {
+	t.Helper()
+	enc := base64.RawURLEncoding
+	header := enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload := enc.EncodeToString([]byte(fmt.Sprintf(`{"sub":"ci-runner","iss":%q,"aud":%q}`, iss, aud)))
+	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
+}
+
 // testClusterHost is the cluster name the ENTIRE_TOKEN tests dial. It shares
 // entire.io with the cores they advertise, which the same-site gate on
 // discovery requires; the TLS test server itself answers on 127.0.0.1, so
@@ -497,6 +506,7 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 		name        string
 		env         string
 		helper      string
+		issuer      string // helper token's iss; defaults to core
 		username    string
 		urlUsername string
 		noFallback  string
@@ -510,6 +520,10 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 		{name: "non-JWT credential falls back to login", helper: "malformed", wantErr: "no auth context"},
 		{name: "fallback disabled on non-JWT credential", helper: "malformed", noFallback: "true", wantErr: "saved-login fallback is disabled"},
 		{name: "malformed JWT-shaped credential", helper: "malformed-jwt", wantErr: "git credential helper token"},
+		{name: "foreign JWT falls back to login", helper: "api://corp-app", issuer: "https://login.microsoftonline.com/tenant/v2.0", wantErr: "no auth context"},
+		{name: "fallback disabled on foreign JWT", helper: "api://corp-app", issuer: "https://login.microsoftonline.com/tenant/v2.0", noFallback: "true", wantErr: "saved-login fallback is disabled"},
+		{name: "JWT without issuer falls back to login", helper: "api://corp-app", issuer: "-", wantErr: "no auth context"},
+		{name: "other cluster's Entire token falls back to login", helper: "https://core.staging.entire.io", issuer: "https://core.staging.entire.io", wantErr: "no auth context"},
 		{name: "invalid credential audience", helper: "http://core.us.entire.io", wantErr: "git credential helper token aud"},
 		{name: "missing credential audience", helper: "entire-cli", wantErr: "git credential helper token must be"},
 		{name: "untrusted environment token", env: "https://untrusted.example", wantErr: "ENTIRE_TOKEN aud"},
@@ -541,7 +555,15 @@ func TestResolveCreds_GitCredentialHelper(t *testing.T) {
 				t.Fatal(err)
 			}
 			client, host := wellKnownServer(t, []string{core}, "", "")
-			token := makeTestJWT(t, tc.helper)
+			var token string
+			switch tc.issuer {
+			case "":
+				token = makeTestJWTWithIssuer(t, core, tc.helper)
+			case "-":
+				token = makeTestJWT(t, tc.helper)
+			default:
+				token = makeTestJWTWithIssuer(t, tc.issuer, tc.helper)
+			}
 			switch tc.helper {
 			case "malformed":
 				token = "not-a-jwt"
