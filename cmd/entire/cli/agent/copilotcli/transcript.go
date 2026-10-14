@@ -430,9 +430,9 @@ type copilotRun struct {
 // an assistant.message outputTokens value (older releases), keyed by
 // apiCallId. Copilot writes a call's record before its message, so on every
 // release observed the record wins. A message without an apiCallId is counted
-// only if no usage record has appeared earlier in its run; deciding by what
-// came earlier, not by the whole file, keeps a prefix's count unchanged by
-// what is appended after it.
+// unless an earlier record in its run is still unpaired with a message;
+// deciding by what came earlier, not by the whole file, keeps a prefix's count
+// unchanged by what is appended after it.
 //
 // For a full read (fromLine == 0), the events are also walked as runs
 // separated by session.shutdown. A shutdown's modelMetrics covers either only
@@ -453,7 +453,10 @@ type copilotRun struct {
 func extractTokenUsageFromEvents(events []copilotEvent, fromLine int) *agent.TokenUsage {
 	preferSessionShutdown := fromLine == 0
 	countedCalls := map[string]bool{} // apiCallIds already counted by either source
-	runHasRecord := false             // a usage record has appeared in the current run
+	// Usage records in the current run not yet paired with a message: by
+	// apiCallId, plus a count of those (unobserved) without one.
+	unpairedRecords := map[string]bool{}
+	unpairedAnonymousRecords := 0
 
 	total := &agent.TokenUsage{}
 	// covered is what has been counted for every run closed by a shutdown so
@@ -471,12 +474,14 @@ func extractTokenUsageFromEvents(events []copilotEvent, fromLine int) *agent.Tok
 			if err := json.Unmarshal(events[i].Data, &data); err != nil {
 				continue
 			}
-			runHasRecord = true
 			if id := data.Usage.APICallID; id != "" {
 				if countedCalls[id] {
 					continue // a repeated record, or a call its message already counted
 				}
 				countedCalls[id] = true
+				unpairedRecords[id] = true
+			} else {
+				unpairedAnonymousRecords++
 			}
 			if counting {
 				run.records++
@@ -488,21 +493,33 @@ func extractTokenUsageFromEvents(events []copilotEvent, fromLine int) *agent.Tok
 				run.messages++
 			}
 			var data assistantMessageTokenData
-			if err := json.Unmarshal(events[i].Data, &data); err != nil || data.OutputTokens <= 0 {
+			if err := json.Unmarshal(events[i].Data, &data); err != nil {
 				continue
 			}
 			if id := data.APICallID; id != "" {
-				if countedCalls[id] {
-					continue // counted from its session.usage_record
+				delete(unpairedRecords, id)
+				if data.OutputTokens <= 0 || countedCalls[id] {
+					continue // no fallback count, or counted from its session.usage_record
 				}
 				countedCalls[id] = true
-			} else if runHasRecord {
-				// Every assistant.message in a record-writing run observed so
-				// far (main agent and subagents, 1.0.94-1.0.97) carries an
-				// apiCallId, so an unmatched one is assumed covered by a
-				// record rather than risk counting the call twice.
-				logging.Debug(context.Background(), "copilot-cli: skipping outputTokens on an assistant.message without apiCallId in a run with usage records",
-					"outputTokens", data.OutputTokens)
+			} else if data.OutputTokens <= 0 {
+				continue
+			} else if n := len(unpairedRecords) + unpairedAnonymousRecords; n > 0 {
+				// A message without apiCallId cannot be matched by ID. Every
+				// message in the record-writing runs observed (main agent and
+				// subagents, 1.0.94-1.0.97) has one, so this is defensive: it
+				// is taken as covered only while an earlier record in its run
+				// is still unpaired, and counted otherwise.
+				if unpairedAnonymousRecords > 0 {
+					unpairedAnonymousRecords--
+				} else {
+					for id := range unpairedRecords {
+						delete(unpairedRecords, id)
+						break
+					}
+				}
+				logging.Debug(context.Background(), "copilot-cli: pairing an assistant.message without apiCallId with an unpaired usage record",
+					"outputTokens", data.OutputTokens, "unpairedRecords", n)
 				continue
 			}
 			if counting {
@@ -510,7 +527,8 @@ func extractTokenUsageFromEvents(events []copilotEvent, fromLine int) *agent.Tok
 			}
 
 		case eventTypeSessionShutdown:
-			runHasRecord = false
+			unpairedRecords = map[string]bool{}
+			unpairedAnonymousRecords = 0
 			if !preferSessionShutdown {
 				continue
 			}

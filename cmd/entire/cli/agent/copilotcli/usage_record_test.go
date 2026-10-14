@@ -121,15 +121,19 @@ func TestCalculateTokenUsage_NoDoubleCountAcrossSources(t *testing.T) {
 		// A usage record and an assistant.message for the same call: count once.
 		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"new-1","inputTokens":1000,"outputTokens":30,"cacheReadTokens":600,"cacheWriteTokens":300}},"id":"2"}`,
 		`{"type":"assistant.message","data":{"apiCallId":"new-1","outputTokens":30},"id":"3"}`,
-		// No call ID to match on while records exist: the record is authoritative.
-		`{"type":"assistant.message","data":{"outputTokens":99},"id":"4"}`,
+		// No call ID to match on, but an earlier record is still unpaired:
+		// taken as that record's message.
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"new-2","inputTokens":500,"outputTokens":20,"cacheReadTokens":400,"cacheWriteTokens":50}},"id":"4"}`,
+		`{"type":"assistant.message","data":{"outputTokens":20},"id":"5"}`,
+		// No call ID and every record paired: a call without a record, counted.
+		`{"type":"assistant.message","data":{"outputTokens":99},"id":"6"}`,
 	}
 	content := []byte(strings.Join(lines, "\n") + "\n")
 
 	for _, from := range []int{0, 1} {
 		usage, err := ag.CalculateTokenUsage(content, from)
 		require.NoError(t, err)
-		want := agent.TokenUsage{InputTokens: 100, CacheReadTokens: 600, CacheCreationTokens: 300, OutputTokens: 30, APICallCount: 1}
+		want := agent.TokenUsage{InputTokens: 150, CacheReadTokens: 1000, CacheCreationTokens: 350, OutputTokens: 30 + 20 + 99, APICallCount: 3}
 		if from == 0 {
 			want.OutputTokens += 40
 			want.APICallCount++
