@@ -353,3 +353,67 @@ func TestCalculateTokenUsage_RepeatedUsageRecordCountedOnce(t *testing.T) {
 		require.Equal(t, agent.TokenUsage{InputTokens: 10, CacheCreationTokens: 90, OutputTokens: 10, APICallCount: 1}, *usage, "fromOffset %d", from)
 	}
 }
+
+// splitSum returns the usage of the first k lines read as a full transcript
+// plus the usage of the whole transcript sliced from line k, which is how two
+// adjacent checkpoints are computed.
+func splitSum(t *testing.T, data []byte, k int) agent.TokenUsage {
+	t.Helper()
+	ag := &CopilotCLIAgent{}
+	head, err := ag.CalculateTokenUsage(sliceTranscript(data, k), 0)
+	require.NoError(t, err)
+	tail, err := ag.CalculateTokenUsage(data, k)
+	require.NoError(t, err)
+	return *types.AddTokenUsage(head, tail)
+}
+
+func TestCalculateTokenUsage_EverySplitOfLiveFixturesSumsToFull(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	for _, fixture := range []string{usageRecordSessionFixture, resumedSessionFixture} {
+		data, err := os.ReadFile(fixture)
+		require.NoError(t, err)
+		full, err := ag.CalculateTokenUsage(data, 0)
+		require.NoError(t, err)
+
+		n := len(bytes.SplitAfter(bytes.TrimRight(data, "\n"), []byte("\n")))
+		for k := 0; k <= n; k++ {
+			require.Equal(t, *full, splitSum(t, data, k), "%s split at line %d", fixture, k)
+		}
+	}
+}
+
+func TestCalculateTokenUsage_DuplicateRecordAcrossSlicesCountedOnce(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(strings.Join([]string{
+		`{"type":"session.start","data":{},"id":"0"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"a","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":90}},"id":"1"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"a"},"id":"2"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"a","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":90}},"id":"3"}`,
+	}, "\n") + "\n")
+	want := agent.TokenUsage{InputTokens: 10, CacheCreationTokens: 90, OutputTokens: 10, APICallCount: 1}
+
+	// The copy lands in the second checkpoint's slice; it was counted in the first.
+	second, err := (&CopilotCLIAgent{}).CalculateTokenUsage(data, 3)
+	require.NoError(t, err)
+	require.Equal(t, agent.TokenUsage{}, *second)
+	require.Equal(t, want, splitSum(t, data, 3))
+}
+
+func TestCalculateTokenUsage_RecordAndFallbackMessageAcrossSlicesCountedOnce(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(strings.Join([]string{
+		`{"type":"session.start","data":{},"id":"0"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"a","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":90}},"id":"1"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"a","outputTokens":10},"id":"2"}`,
+	}, "\n") + "\n")
+
+	// The message's outputTokens is in the second slice, its record in the first.
+	second, err := (&CopilotCLIAgent{}).CalculateTokenUsage(data, 2)
+	require.NoError(t, err)
+	require.Equal(t, agent.TokenUsage{}, *second)
+	require.Equal(t, agent.TokenUsage{InputTokens: 10, CacheCreationTokens: 90, OutputTokens: 10, APICallCount: 1}, splitSum(t, data, 2))
+}

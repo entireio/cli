@@ -141,6 +141,44 @@ func TestCopilotSplitTurns_UsageRecordTokens(t *testing.T) {
 	}
 }
 
+// TestCopilotSplitTurns_CallCountedInOneTurnOnly covers a call whose usage is
+// written twice, once on each side of a turn boundary: a repeated record, and
+// a fallback outputTokens message after its record. Each turn's tokens are
+// computed separately, and the call must land in the first turn only.
+func TestCopilotSplitTurns_CallCountedInOneTurnOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "events.jsonl")
+	full := []byte(strings.Join([]string{
+		`{"type":"session.start","id":"s0","timestamp":"2026-10-13T00:00:00Z","data":{"context":{"gitRoot":"/work/myrepo"}}}`,
+		`{"type":"user.message","id":"u1","timestamp":"2026-10-13T00:00:01Z","data":{"content":"first"}}`,
+		`{"type":"session.usage_record","id":"r1","data":{"usage":{"apiCallId":"c1","inputTokens":1000,"outputTokens":40,"cacheReadTokens":0,"cacheWriteTokens":990}}}`,
+		`{"type":"user.message","id":"u2","timestamp":"2026-10-13T00:01:00Z","data":{"content":"second"}}`,
+		`{"type":"session.usage_record","id":"r1-again","data":{"usage":{"apiCallId":"c1","inputTokens":1000,"outputTokens":40,"cacheReadTokens":0,"cacheWriteTokens":990}}}`,
+		`{"type":"assistant.message","id":"a1","data":{"apiCallId":"c1","content":"ok","outputTokens":40}}`,
+	}, "\n") + "\n")
+	if err := os.WriteFile(p, full, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	turns, err := copilotImporter{}.SplitTurns(SessionFile{Path: p, SessionID: "sess"}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("want 2 turns, got %d", len(turns))
+	}
+	want := []agent.TokenUsage{
+		{InputTokens: 10, CacheCreationTokens: 990, OutputTokens: 40, APICallCount: 1},
+		{},
+	}
+	for i := range turns {
+		if turns[i].Tokens == nil || *turns[i].Tokens != want[i] {
+			t.Errorf("turn%d tokens = %+v, want %+v", i, turns[i].Tokens, want[i])
+		}
+	}
+}
+
 // TestCopilotSplitTurns_NumericTimestamp covers the dual-format timestamp:
 // Copilot may emit a numeric epoch-millis timestamp instead of an RFC3339
 // string. Decoding it as a plain string would fail json.Unmarshal and silently
