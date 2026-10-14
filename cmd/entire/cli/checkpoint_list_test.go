@@ -262,8 +262,10 @@ func TestCheckpointListPending_PreviewEmptyArraysPresent(t *testing.T) {
 		AgentType:    agent.AgentTypeClaudeCode,
 		WorktreePath: worktree,
 		Phase:        session.PhaseIdle,
-		StartedAt:    time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC),
-		StepCount:    1,
+		// Recent, not a fixed date: a session older than
+		// session.StaleSessionThreshold is left out of the preview.
+		StartedAt: time.Now().Add(-time.Hour),
+		StepCount: 1,
 	}))
 
 	out := runListCmd(t, "--pending", "--json")
