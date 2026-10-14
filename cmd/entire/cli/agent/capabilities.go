@@ -230,6 +230,14 @@ func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
 	return declaredCapability[TokenCalculator](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
 }
 
+// AsCumulativeTokenSource returns the agent as CumulativeTokenSource if it
+// implements the interface and (for CapabilityDeclarer agents) has declared
+// token_calculator: an external agent's cumulative total is its protocol token
+// calculation over the whole transcript, so the same declaration gates both.
+func AsCumulativeTokenSource(ag Agent) (CumulativeTokenSource, bool) {
+	return declaredCapability[CumulativeTokenSource](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
+}
+
 // AsLateTranscriptWriter returns the agent as LateTranscriptWriter if supported.
 // External (CapabilityDeclarer) agents are excluded: the late-transcript trait
 // is wire-format knowledge the external protocol does not currently express,
