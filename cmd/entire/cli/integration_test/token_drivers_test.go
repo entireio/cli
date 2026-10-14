@@ -4,6 +4,8 @@ package integration
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +16,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/stretchr/testify/require"
 )
+
+// The drivers write what each agent writes, in the order it writes it. The
+// shapes follow real captures (2026-10-14) of Claude Code 2.1.299, Codex
+// 0.156.1, Cursor 2026.10.01, Copilot CLI 1.0.97 and Antigravity (agy) 1.3.4;
+// each driver's comment says what was observed. The values are synthetic:
+// the harness picks every count, so the truth is known exactly.
 
 // tokenCap names an optional behaviour a token driver can fake. Scenarios
 // that need a capability the driver lacks report "not supported".
@@ -31,7 +39,7 @@ const (
 	capCompact tokenCap = "compact"
 	// capFork: the agent can start a new session from a copy of another's history.
 	capFork tokenCap = "fork"
-	// capSplitMessage: one API call is streamed as several transcript rows
+	// capSplitMessage: one API call is written as several transcript rows
 	// with the same message id.
 	capSplitMessage tokenCap = "split-message"
 	// capAttach: `entire session attach` can find the session's transcript.
@@ -70,27 +78,44 @@ type tokenAgentDriver interface {
 	// carry (Codex has no cache writes); the harness spends and records that.
 	Expressible(u tokenCounts) tokenCounts
 	// Runs reports whether the driver takes part in a scenario at all; a
-	// variant driver that pins one hypothesis runs only the rows it needs.
+	// variant driver that pins one agent mode runs only the rows it needs.
 	Runs(scenario string) bool
 }
 
+// toolUse is the tool an API call asks for: a file write (path, relative to
+// the session's worktree) or a shell command.
+type toolUse struct {
+	path    string
+	command string
+}
+
+func writeTool(path string) toolUse    { return toolUse{path: path} }
+func shellTool(command string) toolUse { return toolUse{command: command} }
+
 // tokenSession is one fake agent session. Spend-type methods only write what
 // the agent would write; the harness records the truth.
+//
+// Every API call either asks for a tool (ToolCall) or answers in text
+// (Spend). An agent reads every tool result with another API call, so a turn
+// always ends with a Spend, and a commit the agent makes (with a tool) is
+// always followed by usage.
 type tokenSession interface {
 	ID() string
 	StartTurn(prompt string)
-	// WriteFile creates path in the session's worktree and records the tool
-	// call that wrote it.
-	WriteFile(path string)
-	// Spend records one API call of the main agent.
+	// ToolCall makes one API call that asks for tool, runs it (run has the
+	// tool's effect: the file write or the commit) and records its result.
+	// Drivers write the call's usage where and when the agent does relative
+	// to the tool running.
+	ToolCall(u tokenCounts, tool toolUse, run func())
+	// Spend makes one API call that answers in text.
 	Spend(u tokenCounts)
 	// SpendSubagent runs a foreground subagent that makes one API call.
 	SpendSubagent(agentID string, u tokenCounts)
 	StartBackgroundSubagent(agentID string)
 	FinishSubagent(agentID string, u tokenCounts)
 	DeleteSubagentTranscript(agentID string)
-	// SpendPartial / SpendFinal stream one API call as two rows with the same
-	// message id: the second row carries the final usage.
+	// SpendPartial / SpendFinal write one API call as two rows with the same
+	// message id, both carrying the call's final usage (as Claude Code does).
 	SpendPartial(msgID string, u tokenCounts)
 	SpendFinal(msgID string, u tokenCounts)
 	Stop()
@@ -128,6 +153,15 @@ func appendJSONLines(h *tokenHarness, path string, lines ...any) {
 	require.NoError(h.t, f.Close())
 }
 
+// fakeUUID derives a stable UUID-shaped ID from its parts.
+func fakeUUID(parts ...any) string {
+	sum := sha256.Sum256([]byte(fmt.Sprint(parts...)))
+	x := hex.EncodeToString(sum[:16])
+	return x[:8] + "-" + x[8:12] + "-" + x[12:16] + "-" + x[16:20] + "-" + x[20:32]
+}
+
+func nowMillis() string { return time.Now().UTC().Format("2006-01-02T15:04:05.000Z") }
+
 // unsupportedSession panics on every optional operation; drivers embed it and
 // override what they support. Scenarios gate on Caps, so reaching one of
 // these is a harness bug.
@@ -153,7 +187,7 @@ type claudeTokenDriver struct{}
 func (claudeTokenDriver) Name() string      { return "claude-code" }
 func (claudeTokenDriver) AgentName() string { return agentClaudeCode }
 func (claudeTokenDriver) FullMatrix() bool  { return true }
-func (claudeTokenDriver) Caps() map[tokenCap]bool {
+func (d claudeTokenDriver) Caps() map[tokenCap]bool {
 	return map[tokenCap]bool{
 		capSubagent: true, capBackgroundSubagent: true, capSessionEnd: true, capCompact: true,
 		capFork: true, capSplitMessage: true, capAttach: true, capResumeRestore: true,
@@ -165,85 +199,161 @@ func (claudeTokenDriver) Expressible(u tokenCounts) tokenCounts { return u }
 func (claudeTokenDriver) Runs(string) bool                      { return true }
 
 func (claudeTokenDriver) NewSession(h *tokenHarness) tokenSession {
-	id := fmt.Sprintf("claude-tok-%d", h.nextSessionNumber())
-	return &claudeTokenSession{
+	id := fakeUUID("claude", h.t.Name(), h.nextSessionNumber())
+	s := &claudeTokenSession{
 		h: h, id: id,
 		path: filepath.Join(h.env.ClaudeProjectDir, id+".jsonl"),
 	}
+	s.hook("session-start", "SessionStart", map[string]any{"source": "startup"})
+	return s
 }
 
 // claudeTokenSession writes a Claude Code transcript in the agent's project
 // dir (where attach, resume and import look) by appending, as Claude does.
+//
+// Observed in 2.1.299: an API call's content blocks are separate rows with
+// the same message.id, and every row repeats the call's identical final
+// usage (thinking + tool_use, or thinking + text). A tool call's usage is on
+// its tool_use rows, written before the tool runs; there is no separate text
+// row for it. Between messages sit rows without usage: queue-operation,
+// attachment, last-prompt, system stop_hook_summary and cost-state.
 type claudeTokenSession struct {
-	h    *tokenHarness
-	id   string
-	path string
-	seq  int
+	h        *tokenHarness
+	id, path string
+	seq      int
+	turns    int
+	promptID string
+	parent   any
+	// spent is the process's running usage, for the cost-state row.
+	spent tokenCounts
 }
 
 func (s *claudeTokenSession) ID() string             { return s.id }
 func (s *claudeTokenSession) TranscriptPath() string { return s.path }
 
-func (s *claudeTokenSession) hook(name string, extra map[string]any) {
-	payload := mergeMaps(map[string]any{"session_id": s.id, "transcript_path": s.path}, extra)
+func (s *claudeTokenSession) hook(name, event string, extra map[string]any) {
+	payload := mergeMaps(map[string]any{"session_id": s.id, "transcript_path": s.path,
+		"cwd": s.h.sessionDir(s.id), "hook_event_name": event}, extra)
+	if s.promptID != "" && event != "SessionStart" {
+		payload["prompt_id"] = s.promptID
+	}
 	hookCall(s.h, s.h.sessionDir(s.id), agentClaudeCode, name, payload)
 }
 
-func (s *claudeTokenSession) line(typ string, message any, extra map[string]any) map[string]any {
+// record is a conversation row: it gets a uuid and chains to the previous one.
+func (s *claudeTokenSession) record(typ string, fields map[string]any) map[string]any {
 	s.seq++
-	return mergeMaps(map[string]any{
-		"type": typ, "uuid": fmt.Sprintf("%s-%d", s.id, s.seq), "sessionId": s.id, "cwd": s.h.sessionDir(s.id),
-		"timestamp": time.Now().UTC().Format(time.RFC3339Nano), "message": message,
-	}, extra)
+	uuid := fakeUUID(s.id, "row", s.seq)
+	row := mergeMaps(map[string]any{
+		"parentUuid": s.parent, "isSidechain": false, "type": typ, "uuid": uuid,
+		"timestamp": nowMillis(), "userType": "external", "entrypoint": "cli",
+		"cwd": s.h.sessionDir(s.id), "sessionId": s.id, "version": "2.1.299", "gitBranch": "feature/test-branch",
+	}, fields)
+	s.parent = uuid
+	return row
 }
 
 func (s *claudeTokenSession) appendLines(lines ...any) { appendJSONLines(s.h, s.path, lines...) }
 
+// claudeUsage is a usage object as Claude Code 2.1.299 writes it.
 func claudeUsage(u tokenCounts) map[string]any {
 	return map[string]any{
-		"input_tokens": u.In, "output_tokens": u.Out,
-		"cache_read_input_tokens": u.CacheRead, "cache_creation_input_tokens": u.CacheWrite,
+		"input_tokens": u.In, "cache_creation_input_tokens": u.CacheWrite,
+		"cache_read_input_tokens": u.CacheRead, "output_tokens": u.Out,
+		"output_tokens_details": map[string]any{"thinking_tokens": u.Out / 3},
+		"server_tool_use":       map[string]any{"web_search_requests": 0, "web_fetch_requests": 0},
+		"service_tier":          "standard",
+		"cache_creation":        map[string]any{"ephemeral_1h_input_tokens": u.CacheWrite, "ephemeral_5m_input_tokens": 0},
+		"inference_geo":         "global",
+		"iterations": []any{map[string]any{"input_tokens": u.In, "output_tokens": u.Out,
+			"cache_read_input_tokens": u.CacheRead, "cache_creation_input_tokens": u.CacheWrite,
+			"cache_creation": map[string]any{"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": u.CacheWrite},
+			"type":           "message"}},
+		"speed": "standard",
 	}
 }
 
-func claudeAssistant(msgID string, content []any, u *tokenCounts) map[string]any {
-	m := map[string]any{"id": msgID, "role": roleAssistant, "model": "claude-test", "content": content}
+func claudeAssistant(msgID string, content []any, stopReason string, u *tokenCounts) map[string]any {
+	m := map[string]any{"model": "claude-test", "id": msgID, "type": "message", "role": roleAssistant,
+		"content": content, "stop_reason": stopReason, "stop_sequence": nil}
 	if u != nil {
 		m["usage"] = claudeUsage(*u)
 	}
 	return m
 }
 
-func (s *claudeTokenSession) StartTurn(prompt string) {
-	s.hook("user-prompt-submit", map[string]any{"prompt": prompt})
-	s.appendLines(s.line(roleUser, map[string]any{"role": roleUser, "content": prompt}, nil))
+// assistantRow is one content block of an API call.
+func (s *claudeTokenSession) assistantRow(msgID string, block map[string]any, stopReason string, u *tokenCounts) map[string]any {
+	return s.record(roleAssistant, map[string]any{
+		"message":   claudeAssistant(msgID, []any{block}, stopReason, u),
+		"requestId": "req_" + msgID, "apiBlockIndex": 0,
+	})
 }
 
-func (s *claudeTokenSession) WriteFile(path string) {
-	s.h.writeWorktreeFile(s.h.sessionDir(s.id), path)
-	s.seq++
-	toolID := fmt.Sprintf("toolu_%s_%d", s.id, s.seq)
+func thinkingBlock() map[string]any {
+	return map[string]any{"type": "thinking", "thinking": "", "signature": "c2lnbmF0dXJl"}
+}
+
+func (s *claudeTokenSession) StartTurn(prompt string) {
+	s.turns++
+	s.promptID = fakeUUID(s.id, "prompt", s.turns)
+	ts := nowMillis()
 	s.appendLines(
-		s.line(roleAssistant, claudeAssistant(fmt.Sprintf("msg-tool-%s-%d", s.id, s.seq), []any{map[string]any{
-			"type": blockTypeToolUse, "id": toolID, "name": "Write",
-			"input": map[string]any{"file_path": path, "content": "x"},
-		}}, nil), nil),
-		s.line(roleUser, map[string]any{"role": roleUser, "content": []any{map[string]any{
-			"type": blockTypeToolResult, "tool_use_id": toolID, "content": "Success",
-		}}}, nil),
+		map[string]any{"type": "queue-operation", "operation": "enqueue", "timestamp": ts, "sessionId": s.id, "content": prompt},
+		map[string]any{"type": "queue-operation", "operation": "dequeue", "timestamp": ts, "sessionId": s.id},
 	)
+	s.hook("user-prompt-submit", "UserPromptSubmit", map[string]any{"prompt": prompt, "permission_mode": "default"})
+	s.appendLines(
+		s.record(roleUser, map[string]any{"promptId": s.promptID, "message": map[string]any{"role": roleUser, "content": prompt},
+			"permissionMode": "default"}),
+		s.record("attachment", map[string]any{"attachment": map[string]any{"type": "hook_success",
+			"hookName": "UserPromptSubmit", "hookEvent": "UserPromptSubmit", "exitCode": 0}}),
+	)
+	s.appendLines(map[string]any{"type": "last-prompt", "lastPrompt": prompt, "leafUuid": s.parent, "sessionId": s.id})
+}
+
+func (s *claudeTokenSession) ToolCall(u tokenCounts, tool toolUse, run func()) {
+	s.seq++
+	msgID := fmt.Sprintf("msg_%s_%d", s.id[:8], s.seq)
+	toolID := fmt.Sprintf("toolu_%s_%d", s.id[:8], s.seq)
+	block := map[string]any{"type": blockTypeToolUse, "id": toolID, "caller": map[string]any{"type": "direct"}}
+	result := map[string]any{"stdout": "ok", "stderr": "", "interrupted": false}
+	if tool.path != "" {
+		abs := filepath.Join(s.h.sessionDir(s.id), tool.path)
+		block["name"] = "Write"
+		block["input"] = map[string]any{"file_path": abs, "content": "x\n"}
+		result = map[string]any{"type": "create", "filePath": abs, "content": "x\n", "structuredPatch": []any{}}
+	} else {
+		block["name"] = "Bash"
+		block["input"] = map[string]any{"command": tool.command, "description": "Commit"}
+	}
+	s.spent = s.spent.plus(u)
+	s.appendLines(s.assistantRow(msgID, thinkingBlock(), "tool_use", &u))
+	toolRow := s.assistantRow(msgID, block, "tool_use", &u)
+	s.appendLines(toolRow)
+	run()
+	s.appendLines(s.record(roleUser, map[string]any{"promptId": s.promptID,
+		"message": map[string]any{"role": roleUser, "content": []any{map[string]any{
+			"tool_use_id": toolID, "type": blockTypeToolResult, "content": "ok"}}},
+		"toolUseResult": result, "sourceToolAssistantUUID": toolRow["uuid"]}))
 }
 
 func (s *claudeTokenSession) Spend(u tokenCounts) {
 	s.seq++
-	s.SpendFinal(fmt.Sprintf("msg-%s-%d", s.id, s.seq), u)
+	msgID := fmt.Sprintf("msg_%s_%d", s.id[:8], s.seq)
+	s.SpendPartial(msgID, u)
+	s.SpendFinal(msgID, u)
 }
 
-func (s *claudeTokenSession) SpendPartial(msgID string, u tokenCounts) { s.SpendFinal(msgID, u) }
+// SpendPartial writes an API call's thinking row and SpendFinal its text
+// row. Both carry the call's final usage, as Claude Code writes them.
+func (s *claudeTokenSession) SpendPartial(msgID string, u tokenCounts) {
+	s.spent = s.spent.plus(u)
+	s.appendLines(s.assistantRow(msgID, thinkingBlock(), "end_turn", &u))
+}
 
 func (s *claudeTokenSession) SpendFinal(msgID string, u tokenCounts) {
-	s.appendLines(s.line(roleAssistant, claudeAssistant(msgID,
-		[]any{map[string]any{"type": blockTypeText, "text": "working"}}, &u), nil))
+	s.appendLines(s.assistantRow(msgID, map[string]any{"type": blockTypeText, "text": "working"}, "end_turn", &u))
 }
 
 func (s *claudeTokenSession) subagentPath(agentID string) string {
@@ -254,44 +364,49 @@ func (s *claudeTokenSession) subagentPath(agentID string) string {
 // naming the agent, which is how the CLI finds the agent's transcript.
 func (s *claudeTokenSession) launchSubagent(agentID string, background bool) string {
 	toolID := "toolu_" + agentID
-	s.appendLines(s.line(roleAssistant, claudeAssistant("msg-launch-"+agentID, []any{map[string]any{
+	s.appendLines(s.assistantRow("msg-launch-"+agentID, map[string]any{
 		"type": blockTypeToolUse, "id": toolID, "name": "Agent",
 		"input": map[string]any{"prompt": "help", "subagent_type": "general-purpose"},
-	}}, nil), nil))
-	s.hook("pre-task", map[string]any{"tool_use_id": toolID, "tool_input": map[string]any{"subagent_type": "general-purpose"}})
-	s.hook("subagent-start", map[string]any{"hook_event_name": "SubagentStart", "agent_id": agentID, "agent_type": "general-purpose"})
+	}, "tool_use", nil))
+	s.hook("pre-task", "PreToolUse", map[string]any{"tool_use_id": toolID, "tool_name": "Agent",
+		"tool_input": map[string]any{"subagent_type": "general-purpose"}})
+	s.hook("subagent-start", "SubagentStart", map[string]any{"agent_id": agentID, "agent_type": "general-purpose"})
 	appendJSONLines(s.h, s.subagentPath(agentID), map[string]any{
 		"type": roleUser, "isSidechain": true, "agentId": agentID, "uuid": agentID + "-u",
 		"message": map[string]any{"role": roleUser, "content": "help"},
 	})
 	if background {
-		s.appendLines(s.line(roleUser, map[string]any{"role": roleUser, "content": []any{map[string]any{
+		s.appendLines(s.record(roleUser, map[string]any{"message": map[string]any{"role": roleUser, "content": []any{map[string]any{
 			"type": blockTypeToolResult, "tool_use_id": toolID,
 			"content": "Async agent launched successfully.\nagentId: " + agentID,
-		}}}, nil))
-		s.hook("post-task", map[string]any{"tool_use_id": toolID, "tool_name": "Agent", "tool_input": map[string]any{},
+		}}}}))
+		s.hook("post-task", "PostToolUse", map[string]any{"tool_use_id": toolID, "tool_name": "Agent", "tool_input": map[string]any{},
 			"tool_response": map[string]any{"status": "async_launched", "isAsync": true, "agentId": agentID}})
 	}
 	return toolID
 }
 
+// subagentCall writes one subagent API call (thinking + text rows with the
+// same usage) and fires SubagentStop.
 func (s *claudeTokenSession) subagentCall(agentID string, u tokenCounts) {
-	appendJSONLines(s.h, s.subagentPath(agentID), map[string]any{
-		"type": roleAssistant, "isSidechain": true, "agentId": agentID, "uuid": fmt.Sprintf("%s-%d", agentID, u.total()),
-		"message": claudeAssistant(fmt.Sprintf("msg-%s-%d", agentID, u.total()),
-			[]any{map[string]any{"type": blockTypeText, "text": "sub work"}}, &u),
-	})
-	s.hook("subagent-stop", map[string]any{"hook_event_name": "SubagentStop", "agent_id": agentID,
+	msgID := fmt.Sprintf("msg-%s-%d", agentID, u.total())
+	for i, block := range []map[string]any{thinkingBlock(), {"type": blockTypeText, "text": "sub work"}} {
+		appendJSONLines(s.h, s.subagentPath(agentID), map[string]any{
+			"type": roleAssistant, "isSidechain": true, "agentId": agentID, "uuid": fmt.Sprintf("%s-%d-%d", agentID, u.total(), i),
+			"requestId": "req_" + msgID, "message": claudeAssistant(msgID, []any{block}, "end_turn", &u),
+		})
+	}
+	s.hook("subagent-stop", "SubagentStop", map[string]any{"agent_id": agentID,
 		"agent_type": "general-purpose", "agent_transcript_path": s.subagentPath(agentID)})
 }
 
 func (s *claudeTokenSession) SpendSubagent(agentID string, u tokenCounts) {
 	toolID := s.launchSubagent(agentID, false)
 	s.subagentCall(agentID, u)
-	s.appendLines(s.line(roleUser, map[string]any{"role": roleUser, "content": []any{map[string]any{
+	s.appendLines(s.record(roleUser, map[string]any{"message": map[string]any{"role": roleUser, "content": []any{map[string]any{
 		"type": blockTypeToolResult, "tool_use_id": toolID, "content": "Done.\nagentId: " + agentID,
-	}}}, nil))
-	s.hook("post-task", map[string]any{"tool_use_id": toolID, "tool_name": "Agent", "tool_input": map[string]any{},
+	}}}}))
+	s.hook("post-task", "PostToolUse", map[string]any{"tool_use_id": toolID, "tool_name": "Agent", "tool_input": map[string]any{},
 		"tool_response": map[string]any{"status": "completed", "agentId": agentID}})
 }
 
@@ -305,17 +420,33 @@ func (s *claudeTokenSession) DeleteSubagentTranscript(agentID string) {
 	require.NoError(s.h.t, os.Remove(s.subagentPath(agentID)))
 }
 
-func (s *claudeTokenSession) Stop()       { s.hook("stop", nil) }
-func (s *claudeTokenSession) SessionEnd() { s.hook("session-end", nil) }
+// Stop fires the Stop hook, then appends what Claude writes after it: the
+// hook summary, the prompt pointer and the running cost state.
+func (s *claudeTokenSession) Stop() {
+	s.hook("stop", "Stop", map[string]any{"stop_hook_active": false, "last_assistant_message": "done",
+		"permission_mode": "default", "background_tasks": []any{}, "session_crons": []any{}})
+	s.appendLines(s.record("system", map[string]any{"subtype": "stop_hook_summary", "hookCount": 1, "hookErrors": []any{},
+		"preventedContinuation": false, "stopReason": "", "hasOutput": false, "level": "suggestion"}))
+	s.appendLines(
+		map[string]any{"type": "last-prompt", "leafUuid": s.parent, "sessionId": s.id},
+		map[string]any{"type": "cost-state", "sessionId": s.id, "modelUsage": map[string]any{"claude-test": map[string]any{
+			"inputTokens": s.spent.In, "outputTokens": s.spent.Out,
+			"cacheReadInputTokens": s.spent.CacheRead, "cacheCreationInputTokens": s.spent.CacheWrite}}},
+	)
+}
+
+func (s *claudeTokenSession) SessionEnd() {
+	s.hook("session-end", "SessionEnd", map[string]any{"reason": "other"})
+}
 
 // Compact appends what /compact writes: a boundary and a summary. The
 // compaction call's own usage is not in the transcript, so it is not truth.
 func (s *claudeTokenSession) Compact() {
 	s.appendLines(
-		s.line("system", nil, map[string]any{"subtype": "compact_boundary", "content": "Conversation compacted",
+		s.record("system", map[string]any{"subtype": "compact_boundary", "content": "Conversation compacted",
 			"compactMetadata": map[string]any{"trigger": "manual", "preTokens": 1000}}),
-		s.line(roleUser, map[string]any{"role": roleUser, "content": "Summary of the conversation so far."},
-			map[string]any{"isCompactSummary": true}),
+		s.record(roleUser, map[string]any{"message": map[string]any{"role": roleUser, "content": "Summary of the conversation so far."},
+			"isCompactSummary": true}),
 	)
 }
 
@@ -330,5 +461,6 @@ func (s *claudeTokenSession) Fork() tokenSession {
 	require.NoError(s.h.t, err)
 	require.NoError(s.h.t, os.WriteFile(f.path, data, 0o600))
 	f.seq = s.seq
+	f.parent = s.parent
 	return f
 }

@@ -38,8 +38,13 @@ import (
 // fails. A known bug that stops reproducing fails the test, so the fix PR
 // must delete its entry.
 //
-// By default Claude Code runs the full scenario table and the other drivers
-// run the smoke subset; ENTIRE_TOKEN_MATRIX=full runs everything.
+// Each API call is a tool call or the text answer that ends a turn, and its
+// usage is written where the real agent writes it relative to the tool
+// running (see token_drivers_test.go).
+//
+// By default Claude Code and Vogon run the full scenario table and the
+// other drivers run the smoke subset; ENTIRE_TOKEN_MATRIX=full runs
+// everything.
 
 const tokenMatrixEnv = "ENTIRE_TOKEN_MATRIX"
 
@@ -224,28 +229,50 @@ func (h *tokenHarness) newSession() tokenSession {
 	return s
 }
 
-// turn starts a turn that writes nFiles new files and makes one API call.
+// turn runs a whole turn: a prompt, one tool call per new file, and the
+// text answer that ends it.
 func (h *tokenHarness) turn(s tokenSession, nFiles int) []string {
 	h.t.Helper()
-	s.StartTurn(fmt.Sprintf("turn %d", h.spendSeq+1))
-	h.expectState[s.ID()] = true
-	files := make([]string, 0, nFiles)
-	for range nFiles {
-		files = append(files, h.writeFile(s))
-	}
+	h.startTurn(s)
+	files := h.writeFiles(s, nFiles)
 	h.spend(s)
 	return files
 }
 
-// writeFile makes the running turn write one new file.
+func (h *tokenHarness) startTurn(s tokenSession) {
+	h.t.Helper()
+	s.StartTurn(fmt.Sprintf("turn %d", h.spendSeq+1))
+	h.expectState[s.ID()] = true
+}
+
+func (h *tokenHarness) writeFiles(s tokenSession, n int) []string {
+	files := make([]string, 0, n)
+	for range n {
+		files = append(files, h.writeFile(s))
+	}
+	return files
+}
+
+// writeFile makes the running turn write one new file with a tool call.
 func (h *tokenHarness) writeFile(s tokenSession) string {
+	h.t.Helper()
 	h.fileSeq++
 	f := fmt.Sprintf("f%d.txt", h.fileSeq)
-	s.WriteFile(f)
+	h.toolCall(s, "write "+f, writeTool(f), func() { h.writeWorktreeFile(h.sessionDir(s.ID()), f) })
 	return f
 }
 
-// spend makes one more API call in the running turn.
+// toolCall makes one API call that runs tool. The call is spent (and
+// recorded) before the tool runs, as with a real agent.
+func (h *tokenHarness) toolCall(s tokenSession, step string, tool toolUse, run func()) {
+	h.t.Helper()
+	u := h.next()
+	h.truth.add(s.ID(), u)
+	s.ToolCall(u, tool, run)
+	h.check(step, nil)
+}
+
+// spend makes one API call that answers in text.
 func (h *tokenHarness) spend(s tokenSession) {
 	h.t.Helper()
 	u := h.next()
@@ -296,10 +323,13 @@ func (h *tokenHarness) commit(files ...string) {
 	h.check("commit "+strings.Join(files, " "), nil)
 }
 
-func (h *tokenHarness) agentCommit(files ...string) {
+// agentCommit has the running turn commit files with a shell tool call.
+func (h *tokenHarness) agentCommit(s tokenSession, files ...string) {
 	h.t.Helper()
-	h.env.GitCommitWithHooksAsAgent("agent commit "+strings.Join(files, " "), files...)
-	h.check("agent commit "+strings.Join(files, " "), nil)
+	msg := "agent commit " + strings.Join(files, " ")
+	h.toolCall(s, msg, shellTool("git add -A && git commit -m wip"), func() {
+		h.env.GitCommitWithHooksAsAgent(msg, files...)
+	})
 }
 
 // amend runs a real `git commit --amend --no-edit`, so git itself fires
@@ -447,12 +477,16 @@ func turnTokenScenarios() []tokenScenario {
 		}},
 		{name: "plain turns with subagent", needs: []tokenCap{capSubagent}, run: func(h *tokenHarness) {
 			s := h.newSession()
-			a := h.turn(s, 1)
+			h.startTurn(s)
+			a := h.writeFiles(s, 1)
 			h.subagent(s, "a1111111111111111")
+			h.spend(s)
 			h.stop(s)
 			h.commit(a...)
-			b := h.turn(s, 1)
+			h.startTurn(s)
+			b := h.writeFiles(s, 1)
 			h.subagent(s, "a2222222222222222")
+			h.spend(s)
 			h.stop(s)
 			h.commit(b...)
 		}},
@@ -465,33 +499,44 @@ func turnTokenScenarios() []tokenScenario {
 			h.stop(s)
 			h.commit(append(ab[1:], c...)...)
 		}},
-		{name: "mid-turn agent commit, usage after", smoke: true, run: func(h *tokenHarness) {
+		{name: "mid-turn agent commit", smoke: true, run: func(h *tokenHarness) {
 			s := h.newSession()
-			ab := h.turn(s, 2)
-			h.agentCommit(ab[0])
+			h.startTurn(s)
+			ab := h.writeFiles(s, 2)
+			h.agentCommit(s, ab[0])
 			h.spend(s)
 			h.stop(s)
 			h.commit(ab[1])
 		}},
-		{name: "mid-turn agent commit, no usage after", smoke: true, run: func(h *tokenHarness) {
+		{name: "mid-turn agent commit of every file", smoke: true, run: func(h *tokenHarness) {
+			// The real-agent run's second prompt: the agent commits all it
+			// wrote, so the turn ends with no uncommitted changes.
 			s := h.newSession()
-			ab := h.turn(s, 2)
-			h.agentCommit(ab[0])
+			h.startTurn(s)
+			a := h.writeFiles(s, 1)
+			h.agentCommit(s, a...)
+			h.spend(s)
 			h.stop(s)
-			h.commit(ab[1])
+			b := h.turn(s, 1)
+			h.stop(s)
+			h.commit(b...)
 		}},
-		{name: "mid-turn agent commit, no usage after, attach after stop", needs: []tokenCap{capAttach}, run: func(h *tokenHarness) {
+		{name: "mid-turn agent commit, attach after stop", needs: []tokenCap{capAttach}, run: func(h *tokenHarness) {
 			s := h.newSession()
-			ab := h.turn(s, 2)
-			h.agentCommit(ab[0])
+			h.startTurn(s)
+			ab := h.writeFiles(s, 2)
+			h.agentCommit(s, ab[0])
+			h.spend(s)
 			h.stop(s)
 			h.attach(s)
 			h.commit(ab[1])
 		}},
-		{name: "mid-turn agent commit, no usage after, next turn", run: func(h *tokenHarness) {
+		{name: "mid-turn agent commit, next turn", run: func(h *tokenHarness) {
 			s := h.newSession()
-			ab := h.turn(s, 2)
-			h.agentCommit(ab[0])
+			h.startTurn(s)
+			ab := h.writeFiles(s, 2)
+			h.agentCommit(s, ab[0])
+			h.spend(s)
 			h.stop(s)
 			c := h.turn(s, 1)
 			h.stop(s)
@@ -500,7 +545,9 @@ func turnTokenScenarios() []tokenScenario {
 	}
 }
 
-// attachTokenScenarios: `entire session attach` in each session phase.
+// attachTokenScenarios: `entire session attach` in each session phase. An
+// attach while a turn runs happens between its API calls (while a tool
+// runs), so more usage always follows it.
 func attachTokenScenarios() []tokenScenario {
 	return []tokenScenario{
 		{name: "attach ended session", smoke: true, needs: []tokenCap{capAttach}, run: func(h *tokenHarness) {
@@ -515,34 +562,27 @@ func attachTokenScenarios() []tokenScenario {
 			h.stop(s)
 			h.commit(append(ab[1:], c...)...)
 		}},
-		{name: "attach running session, usage after", smoke: true, needs: []tokenCap{capAttach}, run: func(h *tokenHarness) {
+		{name: "attach running session", smoke: true, needs: []tokenCap{capAttach}, run: func(h *tokenHarness) {
 			s := h.newSession()
 			a := h.turn(s, 1)
 			h.stop(s)
 			h.commit(a...)
-			b := h.turn(s, 1)
+			h.startTurn(s)
+			b := h.writeFiles(s, 1)
 			h.attach(s)
 			h.spend(s)
 			h.stop(s)
 			h.commit(b...)
 		}},
-		{name: "attach running session, no usage after", needs: []tokenCap{capAttach}, run: func(h *tokenHarness) {
+		{name: "attach running session, next turn", needs: []tokenCap{capAttach}, run: func(h *tokenHarness) {
 			s := h.newSession()
 			a := h.turn(s, 1)
 			h.stop(s)
 			h.commit(a...)
-			b := h.turn(s, 1)
+			h.startTurn(s)
+			b := h.writeFiles(s, 1)
 			h.attach(s)
-			h.stop(s)
-			h.commit(b...)
-		}},
-		{name: "attach running session, no usage after, next turn", needs: []tokenCap{capAttach}, run: func(h *tokenHarness) {
-			s := h.newSession()
-			a := h.turn(s, 1)
-			h.stop(s)
-			h.commit(a...)
-			b := h.turn(s, 1)
-			h.attach(s)
+			h.spend(s)
 			h.stop(s)
 			c := h.turn(s, 1)
 			h.stop(s)
@@ -704,8 +744,9 @@ func stopTokenScenarios() []tokenScenario {
 		}},
 		{name: "resume same machine with tail", smoke: true, run: func(h *tokenHarness) {
 			s := h.newSession()
-			ab := h.turn(s, 2)
-			h.agentCommit(ab...)
+			h.startTurn(s)
+			ab := h.writeFiles(s, 2)
+			h.agentCommit(s, ab...)
 			h.spend(s) // tail after the last checkpoint
 			h.stop(s)
 			c := h.turn(s, 1)
@@ -833,18 +874,18 @@ func transcriptTokenScenarios() []tokenScenario {
 			h.commit(b...)
 		}},
 		{name: "split message across commit", needs: []tokenCap{capSplitMessage}, run: func(h *tokenHarness) {
+			// The user commits while one API call's rows are being written:
+			// both rows carry the call's final usage.
 			s := h.newSession()
-			ab := h.turn(s, 2)
-			partial := h.next()
-			s.SpendPartial("msg-split", partial)
-			h.truth.add(s.ID(), partial)
-			h.check("partial row", nil)
-			h.agentCommit(ab[0])
-			final := partial
-			final.Out += 50
-			s.SpendFinal("msg-split", final)
-			h.truth.add(s.ID(), tokenCounts{Out: 50})
-			h.check("final row", nil)
+			h.startTurn(s)
+			ab := h.writeFiles(s, 2)
+			u := h.next()
+			s.SpendPartial("msg-split", u)
+			h.truth.add(s.ID(), u)
+			h.check("first row", nil)
+			h.commit(ab[0])
+			s.SpendFinal("msg-split", u)
+			h.check("second row", nil)
 			h.stop(s)
 			h.commit(ab[1])
 		}},
@@ -863,20 +904,25 @@ func transcriptTokenScenarios() []tokenScenario {
 		}},
 		{name: "unreadable transcript at mid-turn condensation", needs: []tokenCap{capTranscriptTokens}, run: func(h *tokenHarness) {
 			s := h.newSession()
-			ab := h.turn(s, 2)
+			h.startTurn(s)
+			ab := h.writeFiles(s, 2)
 			path := s.TranscriptPath()
 			h.skipIfRoot()
-			require.NoError(h.t, os.Chmod(path, 0o000))
-			h.agentCommit(ab[0])
-			require.NoError(h.t, os.Chmod(path, 0o600))
+			h.toolCall(s, "agent commit, transcript unreadable", shellTool("git commit"), func() {
+				require.NoError(h.t, os.Chmod(path, 0o000))
+				h.env.GitCommitWithHooksAsAgent("agent commit", ab[0])
+				require.NoError(h.t, os.Chmod(path, 0o600))
+			})
 			h.spend(s)
 			h.stop(s)
 			h.commit(ab[1])
 		}},
 		{name: "subagent transcript deleted after counted", needs: []tokenCap{capSubagent}, run: func(h *tokenHarness) {
 			s := h.newSession()
-			a := h.turn(s, 1)
+			h.startTurn(s)
+			a := h.writeFiles(s, 1)
 			h.subagent(s, "adel111111111111")
+			h.spend(s)
 			h.stop(s)
 			h.commit(a...)
 			s.DeleteSubagentTranscript("adel111111111111")
@@ -912,23 +958,31 @@ const (
 	dStOver   = "d-st:over"
 )
 
-// Known bugs. IDs 1-9 and A follow the token-accounting plan; N-prefixed IDs
-// were found by this harness. Each lists the violation keys it produces on
-// its own; a scenario that combines bugs lists each, and where they overlap
-// on a field (an over and an under on the same invariant read as "mixed"),
-// the combined key is given to one of them with withKeys.
+// Known bugs. IDs 1-9 follow the token-accounting plan; N-prefixed IDs were
+// found by this harness or by the 2026-10-14 real-agent run. Each lists the
+// violation keys it produces on its own; a scenario that combines bugs lists
+// each, and where they overlap on a field (an over and an under on the same
+// invariant read as "mixed"), the combined key is given to one of them with
+// withKeys.
+//
+// Plan bug A (a mid-turn checkpoint followed by a Stop with no new usage
+// counts the turn twice) is gone: it needs a turn whose last API call comes
+// before the checkpoint, and a real agent always reads a tool's result (the
+// commit) with another API call. The real run did not reproduce it either.
 var (
-	bugA = tokenKnownBug{"A", "a mid-turn checkpoint stores the turn so far, then condensation falls back to the " +
-		"pending usage, which still holds it", []string{bOver, dCpOver}}
 	bug1 = tokenKnownBug{"1", "a repeated Stop counts the turn again from its start", []string{cStOver, cCliOver, dStOver}}
 	bug2 = tokenKnownBug{"2", "new state for a session with an existing transcript counts the transcript from line 0",
 		[]string{bOver, dCpOver}}
 	bug3 = tokenKnownBug{"3", "import writes checkpoints for turns live checkpoints already hold", []string{bOver, dCpOver}}
 	bug4 = tokenKnownBug{"4", "amending keeps the amended checkpoint's tokens and defers the new turn's to the next " +
 		"commit; they are lost only if no commit follows", []string{bUnder}}
-	bug5 = tokenKnownBug{"5", "a turn without file changes is missing from the session total until a checkpoint " +
-		"recounts it", []string{cStUnder, cCliUnder}}
-	bug6 = tokenKnownBug{"6", "a message streamed across a checkpoint is counted in both", []string{bOver, dCpOver}}
+	bug5 = tokenKnownBug{"5", "a turn that ends without uncommitted file changes (none made, or all committed by the " +
+		"agent mid-turn) is missing from the session total until a checkpoint recounts it", []string{cStUnder, cCliUnder}}
+	// bug5Cursor: Cursor's tokens exist only in the turn's Stop payload, so no
+	// later checkpoint can recount the turn.
+	bug5Cursor = bug5.withKeys(bUnder, cStUnder, cCliUnder).withReason("a turn that ends without uncommitted file " +
+		"changes drops its Stop payload's tokens: no session total, and no checkpoint can recount them")
+	bug6 = tokenKnownBug{"6", "an API call whose rows straddle a checkpoint is counted in both", []string{bOver, dCpOver}}
 	bug8 = tokenKnownBug{"8", "a background subagent that stops after its parent's Stop is missing from the session total",
 		[]string{cStUnder, cCliUnder}}
 	bug9  = tokenKnownBug{"9", "the checkpoint after a snapshot recounts what the snapshot stored", []string{bOver, dCpOver}}
@@ -938,12 +992,14 @@ var (
 		"no checkpoint", []string{bUnder}}
 	bugN4 = tokenKnownBug{"N4", "a turn that never gets Stop (interrupted) is missing from the session total once " +
 		"the next prompt starts", []string{cStUnder, cCliUnder}}
-	bugN5 = tokenKnownBug{"N5", "Copilot: condensation backfills the session total from line 0, then Stop adds the " +
-		"whole turn again", []string{cStMixed, dStOver}}
-	bugN6 = tokenKnownBug{"N6", "Copilot: input and cache tokens reach events.jsonl only in session.shutdown, so " +
-		"until the session ends neither the session total nor checkpoints carry them", []string{bUnder, cStUnder, cCliUnder}}
-	bugN7 = tokenKnownBug{"N7", "if agy's total_input_tokens includes cache reads (unverified), cache reads are " +
-		"counted twice", []string{bOver, cStOver, cCliOver, dCpOver, dStOver}}
+	bugN6 = tokenKnownBug{"N6", "Copilot: tokens appear only in session.shutdown, written after the process's last " +
+		"hooks: assistant.message carries none and the per-call session.usage_record events are not read, so a " +
+		"session has no tokens until its process exits", []string{bUnder, cStUnder, cCliUnder}}
+	bugN8 = tokenKnownBug{"N8", "Copilot: session.shutdown's inputTokens includes cache reads and writes; it is " +
+		"stored as input and the cache fields are counted again", []string{bOver, dCpOver, dStOver}}
+	bugN9 = tokenKnownBug{"N9", "Antigravity: the statusline's total_input_tokens is a context-size gauge, not a " +
+		"running total, so input is under-counted; and snapshots lag one call, so a run's last call is missing " +
+		"until the next run", []string{bUnder, cStUnder, cCliUnder}}
 )
 
 // withKeys returns the bug expecting keys instead of its usual ones.
@@ -952,114 +1008,78 @@ func (kb tokenKnownBug) withKeys(keys ...string) tokenKnownBug {
 	return kb
 }
 
-func bugs(kbs ...tokenKnownBug) []tokenKnownBug { return kbs }
-
-// tokenKnownBugs maps "scenario/driver" (driver "*" for all) to the bugs it
-// reproduces. An exact driver entry replaces the wildcard; an empty one means
-// the driver reproduces none.
-var tokenKnownBugs = map[string][]tokenKnownBug{
-	"mid-turn agent commit, no usage after/*":                    bugs(bugA),
-	"mid-turn agent commit, no usage after, attach after stop/*": bugs(bugA),
-	"attach running session, no usage after/*":                   bugs(bugA),
-	"attach ended session/*":                                     bugs(bug5),
-	"amend twice/*":                                              bugs(bug4),
-	"amend after a no-file turn/*":                               bugs(bug4, bug5),
-	"repeated stop/*":                                            bugs(bug1),
-	"repeated stop without pre-prompt state/*":                   bugs(bug1),
-	"no-file turn then commit/*":                                 bugs(bug5),
-	"no-file turn, session end, resume/*":                        bugs(bug5),
-	"background subagent finishes after stop/*":                  bugs(bug8),
-	"background subagent spans turns/*":                          bugs(bug8),
-	"resume same machine with tail/*":                            bugs(bug5),
-	"resume after state cleared with tail/*":                     bugs(bug5, bug2),
-	"fork/*":                                                     bugs(bug2),
-	"import overlapping live checkpoints/*":                      bugs(bug3),
-	"interrupted turn (no Stop) then next turn/*":                bugs(bugN4),
-	"crash then exited-owner sweep/*":                            bugs(bugN1),
-	"snapshot then commit/*":                                     bugs(bug5, bug9),
-	"transcript shrinks on resume restore/*":                     bugs(bug5, bugN2),
-	"split message across commit/*":                              bugs(bug6),
-
-	// Cursor reports a turn's tokens only in its Stop payload: nothing is
-	// consumed mid-turn (no A), and a turn without changes or a repeated Stop
-	// reaches checkpoints the way it reaches the session total.
-	"mid-turn agent commit, no usage after/cursor":                    nil,
-	"mid-turn agent commit, no usage after, attach after stop/cursor": nil,
-	"attach running session, no usage after/cursor":                   nil,
-	"attach ended session/cursor":                                     bugs(bug5.withKeys(bUnder, cStUnder, cCliUnder)),
-	"no-file turn then commit/cursor":                                 bugs(bug5.withKeys(bUnder, cStUnder, cCliUnder)),
-	"no-file turn, session end, resume/cursor":                        bugs(bug5.withKeys(bUnder, cStUnder, cCliUnder)),
-	"resume same machine with tail/cursor":                            bugs(bug5.withKeys(bUnder, cStUnder, cCliUnder)),
-	"resume after state cleared with tail/cursor":                     bugs(bug5.withKeys(bUnder, cStUnder, cCliUnder)),
-	"snapshot then commit/cursor":                                     bugs(bug5.withKeys(bUnder, cStUnder, cCliUnder)),
-	"amend after a no-file turn/cursor":                               bugs(bug4, bug5),
-	"repeated stop/cursor": bugs(bug1.withKeys(bOver, cStOver, cCliOver, dCpOver, dStOver).
-		withReason("a repeated Stop re-sending the same generation_id is counted again, in the session total and the checkpoint")),
-	"repeated stop without pre-prompt state/cursor": bugs(bug1.withKeys(bOver, cStOver, cCliOver, dCpOver, dStOver).
-		withReason("a repeated Stop re-sending the same generation_id is counted again, in the session total and the checkpoint")),
-
-	// Antigravity reads cumulative statusline snapshots out of band: no-change
-	// turns are recorded at Stop (no 5) and nothing is consumed mid-turn (no A).
-	"mid-turn agent commit, no usage after/antigravity": nil,
-	"no-file turn then commit/antigravity":              nil,
-	"resume same machine with tail/antigravity":         nil,
-	"amend after a no-file turn/antigravity":            bugs(bug4),
-	"snapshot then commit/antigravity":                  bugs(bug9),
-	"repeated stop/antigravity": bugs(bug1.withKeys(bUnder, cStUnder, cCliUnder).
-		withReason("the second Stop drops the tokens spent since the first")),
-	"repeated stop without pre-prompt state/antigravity": bugs(bug1.withKeys(bUnder, cStUnder, cCliUnder).
-		withReason("the second Stop drops the tokens spent since the first")),
-	"resume after state cleared with tail/antigravity": bugs(bug2.withKeys(bUnder, cStUnder, cCliUnder).
-		withReason("new state drops the snapshot baseline and the tail with it")),
-	"plain turns/antigravity-cache-in-total": bugs(bugN7),
-
-	"subagent transcript deleted after counted/codex": bugs(bug8.withReason(
-		"the session total re-reads child rollouts, so a deleted child's counted tokens drop out")),
-
-	// Copilot: N6 hides input and cache tokens everywhere until the session
-	// ends; where it overlaps an over-count the combined field reads "mixed".
-	"plain turns/copilot-cli":                                       bugs(bugN6),
-	"partial commit carries forward/copilot-cli":                    bugs(bugN6),
-	"attach running session, usage after/copilot-cli":               bugs(bugN6),
-	"attach running session, no usage after, next turn/copilot-cli": bugs(bugN6),
-	"attach stuck session/copilot-cli":                              bugs(bugN6),
-	"attach dead-owner session/copilot-cli":                         bugs(bugN6),
-	"amend after a new turn/copilot-cli":                            bugs(bugN6),
-	"cherry-pick then continue/copilot-cli":                         bugs(bugN6),
-	"squash merge with pending turn/copilot-cli":                    bugs(bugN6),
-	"unreadable transcript at condensation/copilot-cli":             bugs(bugN6),
-	"unreadable transcript at mid-turn condensation/copilot-cli":    bugs(bugN6),
-	"attach ended session/copilot-cli":                              bugs(bug5, bugN6),
-	"no-file turn then commit/copilot-cli":                          bugs(bug5, bugN6),
-	"no-file turn, session end, resume/copilot-cli":                 bugs(bug5, bugN6),
-	"resume same machine with tail/copilot-cli":                     bugs(bug5, bugN6),
-	"interrupted turn (no Stop) then next turn/copilot-cli":         bugs(bugN4, bugN6),
-	"amend twice/copilot-cli":                                       bugs(bug4, bugN6),
-	"amend after a no-file turn/copilot-cli":                        bugs(bug4, bug5, bugN6),
-	"mid-turn agent commit, usage after/copilot-cli":                bugs(bugN5, bugN6.withKeys(bUnder, cCliUnder)),
-	"mid-turn agent commit, no usage after, next turn/copilot-cli":  bugs(bugN5, bugN6.withKeys(bUnder, cCliUnder)),
-	"mid-turn agent commit, no usage after/copilot-cli": bugs(bugA.withKeys(bMixed, dCpOver), bugN5,
-		bugN6.withKeys(cCliUnder)),
-	"mid-turn agent commit, no usage after, attach after stop/copilot-cli": bugs(bugA.withKeys(bMixed, dCpOver), bugN5,
-		bugN6.withKeys(cCliUnder)),
-	"attach running session, no usage after/copilot-cli": bugs(bugA.withKeys(bMixed, dCpOver), bugN6.withKeys(cStUnder, cCliUnder)),
-	"repeated stop/copilot-cli":                          bugs(bug1.withKeys(cStMixed, dStOver), bugN6),
-	"repeated stop without pre-prompt state/copilot-cli": bugs(bug1.withKeys(cStMixed, dStOver), bugN6),
-	"resume after state cleared with tail/copilot-cli":   bugs(bug5, bug2.withKeys(bMixed, dCpOver), bugN6.withKeys(cStUnder, cCliUnder)),
-	"snapshot then commit/copilot-cli":                   bugs(bug5, bug9.withKeys(bMixed, dCpOver), bugN6.withKeys(cStUnder, cCliUnder)),
-}
-
 // withReason returns the bug with a driver-specific explanation.
 func (kb tokenKnownBug) withReason(reason string) tokenKnownBug {
 	kb.reason = reason
 	return kb
 }
 
+func bugs(kbs ...tokenKnownBug) []tokenKnownBug { return kbs }
+
+// tokenKnownBugs maps "scenario/driver" to the bugs it reproduces. The
+// lookup takes the exact entry, else the driver's "*/driver" entry, else the
+// scenario's "scenario/*" entry; an empty exact entry means the pair
+// reproduces none.
+//
+// A driver-wide entry is for an agent whose own bug hides every token until
+// later (Copilot's N6, Antigravity's N9): the scenario's own bugs can't show
+// through it, so they are not listed for that agent.
+var tokenKnownBugs = map[string][]tokenKnownBug{
+	"mid-turn agent commit of every file/*":       bugs(bug5),
+	"attach ended session/*":                      bugs(bug5),
+	"amend twice/*":                               bugs(bug4),
+	"amend after a no-file turn/*":                bugs(bug4, bug5),
+	"repeated stop/*":                             bugs(bug1),
+	"repeated stop without pre-prompt state/*":    bugs(bug1),
+	"no-file turn then commit/*":                  bugs(bug5),
+	"no-file turn, session end, resume/*":         bugs(bug5),
+	"background subagent finishes after stop/*":   bugs(bug8),
+	"background subagent spans turns/*":           bugs(bug8),
+	"resume same machine with tail/*":             bugs(bug5),
+	"resume after state cleared with tail/*":      bugs(bug5, bug2),
+	"fork/*":                                      bugs(bug2),
+	"import overlapping live checkpoints/*":       bugs(bug3),
+	"interrupted turn (no Stop) then next turn/*": bugs(bugN4),
+	"crash then exited-owner sweep/*":             bugs(bugN1),
+	"snapshot then commit/*":                      bugs(bug5, bug9),
+	"transcript shrinks on resume restore/*":      bugs(bug5, bugN2),
+	"split message across commit/*":               bugs(bug6),
+
+	// Cursor reports a turn's tokens only in its Stop payload.
+	"attach ended session/cursor":                 bugs(bug5Cursor),
+	"mid-turn agent commit of every file/cursor":  bugs(bug5Cursor),
+	"no-file turn then commit/cursor":             bugs(bug5Cursor),
+	"no-file turn, session end, resume/cursor":    bugs(bug5Cursor),
+	"resume same machine with tail/cursor":        bugs(bug5Cursor),
+	"resume after state cleared with tail/cursor": bugs(bug5Cursor),
+	"snapshot then commit/cursor":                 bugs(bug5Cursor),
+	"repeated stop/cursor": bugs(bug1.withKeys(bOver, cStOver, cCliOver, dCpOver, dStOver).
+		withReason("a repeated Stop re-sending the same generation_id is counted again, in the session total and the checkpoint")),
+	"repeated stop without pre-prompt state/cursor": bugs(bug1.withKeys(bOver, cStOver, cCliOver, dCpOver, dStOver).
+		withReason("a repeated Stop re-sending the same generation_id is counted again, in the session total and the checkpoint")),
+
+	// Codex's post-tool-use records each file the turn writes, so the sweep
+	// condenses a turn whose agent died before Stop.
+	"crash then exited-owner sweep/codex": nil,
+	"subagent transcript deleted after counted/codex": bugs(bug8.withReason(
+		"the session total re-reads child rollouts, so a deleted child's counted tokens drop out")),
+
+	// Copilot CLI (interactive): nothing until the session ends (N6); then
+	// the shutdown's cache-inclusive input double counts (N8).
+	"*/copilot-cli": bugs(bugN6),
+	"crash then exited-owner sweep/copilot-cli":     bugs(bugN1),
+	"no-file turn, session end, resume/copilot-cli": bugs(bug5, bugN6, bugN8.withKeys(dStOver)),
+
+	"*/antigravity": bugs(bugN9),
+}
+
 func lookupKnownBugs(scenario, driver string) []tokenKnownBug {
-	if kbs, ok := tokenKnownBugs[scenario+"/"+driver]; ok {
-		return kbs
+	for _, key := range []string{scenario + "/" + driver, "*/" + driver, scenario + "/*"} {
+		if kbs, ok := tokenKnownBugs[key]; ok {
+			return kbs
+		}
 	}
-	return tokenKnownBugs[scenario+"/*"]
+	return nil
 }
 
 func tokenDrivers() []tokenAgentDriver {
@@ -1072,7 +1092,6 @@ func tokenDrivers() []tokenAgentDriver {
 		newOpenCodeTokenDriver(),
 		newPiTokenDriver(),
 		newAntigravityTokenDriver(),
-		newAntigravityCacheInTotalDriver(),
 		newExternalTokenDriver(),
 		newVogonTokenDriver(),
 	}

@@ -131,9 +131,12 @@ func (s *externalTokenSession) StartTurn(prompt string) {
 	appendJSONLines(s.h, s.path, map[string]any{"kind": "user", "text": prompt})
 }
 
-func (s *externalTokenSession) WriteFile(path string) {
-	s.h.writeWorktreeFile(s.h.sessionDir(s.id), path)
-	appendJSONLines(s.h, s.path, map[string]any{"kind": "file", "path": path})
+func (s *externalTokenSession) ToolCall(u tokenCounts, tool toolUse, run func()) {
+	s.Spend(u)
+	if tool.path != "" {
+		appendJSONLines(s.h, s.path, map[string]any{"kind": "file", "path": tool.path})
+	}
+	run()
 }
 
 func (s *externalTokenSession) Spend(u tokenCounts) {

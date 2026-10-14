@@ -20,9 +20,14 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// tokenCounts is the four billable counters the invariants compare. API call
-// counts are left out: agents report them inconsistently and they carry no
-// cost.
+// tokenCounts is the four billable counters the invariants compare, with
+// agent.TokenUsage's meanings: In is input neither read from nor written to
+// the cache, CacheRead and CacheWrite are the cache portions, and Out
+// includes reasoning/thinking tokens. Drivers render it in each agent's own
+// terms (Codex and Cursor report input including cache reads, Copilot input
+// including cache reads and writes), so the truth never counts a cache token
+// twice however the agent spells it. API call counts are left out: agents
+// report them inconsistently and they carry no cost.
 type tokenCounts struct {
 	In, Out, CacheRead, CacheWrite int
 }
