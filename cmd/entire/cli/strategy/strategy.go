@@ -148,8 +148,8 @@ type StepContext struct {
 	TurnNonce string
 
 	// TranscriptSize is the byte length of the transcript read at this Stop.
-	// Without a TurnNonce, an unchanged size is what tells a repeated Stop
-	// from a new turn. Zero means unknown.
+	// An unchanged size is what tells a repeated Stop from a new turn (see
+	// isRepeatedStep). Zero means unknown.
 	TranscriptSize int
 }
 

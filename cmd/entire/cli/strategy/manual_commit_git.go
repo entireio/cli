@@ -176,16 +176,21 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 }
 
 // isRepeatedStep reports whether step ends the same turn as the step state
-// last recorded. A Stop that carries its turn's pre-prompt nonce is matched on
-// it, which also covers concurrent Stops: both loaded the nonce before either
-// consumed it. A Stop without one (an earlier Stop already consumed it, or the
-// turn had no TurnStart) is matched on the transcript instead: a new turn
-// grows it, a repeat does not.
+// last recorded. A repeat has read the same transcript: a new turn grows it,
+// a repeat does not. That covers a Stop without a pre-prompt nonce (an earlier
+// Stop already consumed it, or the turn had no TurnStart). A nonce different
+// from the recorded one is always a new turn, even over an unchanged
+// transcript. But a matching nonce is not enough on its own: the pre-prompt
+// file is per session, so a Stop that ran late can read the NEXT turn's
+// nonce. The size check keeps it from claiming that turn.
 func isRepeatedStep(state *SessionState, step StepContext) bool {
-	if step.TurnNonce != "" {
-		return state.LastStepTurnNonce == step.TurnNonce
+	if step.TurnNonce != "" && step.TurnNonce != state.LastStepTurnNonce {
+		return false
 	}
-	return step.TranscriptSize > 0 && state.LastStepTranscriptSize == step.TranscriptSize
+	if step.TranscriptSize > 0 {
+		return state.LastStepTranscriptSize == step.TranscriptSize
+	}
+	return step.TurnNonce != ""
 }
 
 func invalidateStaleSubagentSnapshot(step *StepContext, state *SessionState) {

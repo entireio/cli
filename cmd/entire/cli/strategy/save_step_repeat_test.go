@@ -90,6 +90,16 @@ func TestSaveStep_NewTurnNonceCountsEvenWithUnrotatedTurnID(t *testing.T) {
 	requireStepTokens(t, state, 2, 200, 200)
 }
 
+// The pre-prompt file is per session, so a slow Stop for one turn can read
+// the next turn's nonce. When that turn's own Stop arrives, the transcript
+// has grown, so it still counts.
+func TestSaveStep_MatchingNonceOverGrownTranscriptCounts(t *testing.T) {
+	f := newSaveStepRepeatFixture(t)
+	f.save("turn-b", 500, "uuid-a") // turn A's late Stop, holding turn B's nonce
+	f.save("turn-b", 900, "uuid-b") // turn B's own Stop
+	requireStepTokens(t, f.state(), 2, 200, 200)
+}
+
 // A Stop without a pre-prompt nonce (it was consumed by an earlier Stop, or
 // the turn had no TurnStart) is a repeat only if the transcript did not grow.
 func TestSaveStep_WithoutNonceMatchesOnTranscriptSize(t *testing.T) {
