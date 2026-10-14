@@ -476,11 +476,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
-	runIDs := workflowRunIDsFromToolUseResults(transcriptData)
-	for _, runID := range ExtractWorkflowRunIDs(fullParsed) {
-		runIDs = appendWorkflowRunID(runIDs, runID)
-	}
-	agentPaths := subagentTranscriptPaths(spawnedAgentIDs(transcriptData, fullParsed), runIDs, subagentsDir)
+	agentPaths := launchedSubagentTranscripts(transcriptData, fullParsed, subagentsDir)
 
 	// Calculate subagent token usage. This re-reads each subagent transcript from
 	// line 0 on every call, so mainUsage.SubagentTokens is a cumulative-since-
@@ -506,6 +502,16 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	}
 
 	return mainUsage, nil
+}
+
+// launchedSubagentTranscripts maps every subagent the full transcript launched
+// (Agent calls, forked skills, and Workflow runs) to its transcript path.
+func launchedSubagentTranscripts(transcriptData []byte, fullParsed []TranscriptLine, subagentsDir string) map[string]string {
+	runIDs := workflowRunIDsFromToolUseResults(transcriptData)
+	for _, runID := range ExtractWorkflowRunIDs(fullParsed) {
+		runIDs = appendWorkflowRunID(runIDs, runID)
+	}
+	return subagentTranscriptPaths(spawnedAgentIDs(transcriptData, fullParsed), runIDs, subagentsDir)
 }
 
 // subagentTranscriptPaths maps every subagent the transcript launched to its
