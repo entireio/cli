@@ -571,6 +571,15 @@ func newDroidTokenDriver() droidTokenDriver {
 		caps: []tokenCap{capAttach, capSessionEnd, capSubagent, capMidTurnTokens}}}
 }
 
+// newDroidExecTokenDriver is `droid exec`: one process per prompt, each firing
+// SessionStart (startup, then resume), the user-prompt-submit alias, Stop and
+// SessionEnd. The real UserPromptSubmit never fires.
+func newDroidExecTokenDriver() droidTokenDriver {
+	d := newDroidTokenDriver()
+	d.name, d.headless = "factoryai-droid-exec", true
+	return d
+}
+
 // Setup lays out ~/.factory/sessions: a session's transcript is in its
 // project dir, a Worker's at the sessions root.
 func (droidTokenDriver) Setup(h *tokenHarness) {
@@ -792,6 +801,15 @@ func newOpenCodeTokenDriver() openCodeTokenDriver {
 		caps: []tokenCap{capAttach, capSessionEnd, capMidTurnTokens}}}
 }
 
+// newOpenCodeRunTokenDriver is `opencode run`: one process per prompt, each
+// firing session-start, turn-start and turn-end, and never session-end.
+func newOpenCodeRunTokenDriver() openCodeTokenDriver {
+	d := newOpenCodeTokenDriver()
+	d.name, d.headless = "opencode-run", true
+	d.caps = []tokenCap{capAttach, capMidTurnTokens}
+	return d
+}
+
 func (openCodeTokenDriver) Setup(h *tokenHarness) {
 	h.env.ExtraEnv = append(h.env.ExtraEnv, "ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1")
 }
@@ -997,6 +1015,14 @@ type piTokenDriver struct{ tokenDriverBase }
 func newPiTokenDriver() piTokenDriver {
 	return piTokenDriver{tokenDriverBase{name: "pi", agent: "pi",
 		caps: []tokenCap{capAttach, capSessionEnd, capTranscriptTokens, capMidTurnTokens}}}
+}
+
+// newPiHeadlessTokenDriver is `pi -p`: one process per prompt, each firing
+// session_start, before_agent_start, agent_end and session_shutdown.
+func newPiHeadlessTokenDriver() piTokenDriver {
+	d := newPiTokenDriver()
+	d.name, d.headless = "pi-p", true
+	return d
 }
 
 func (piTokenDriver) Setup(h *tokenHarness) {

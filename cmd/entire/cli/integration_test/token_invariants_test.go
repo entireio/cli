@@ -46,8 +46,8 @@ import (
 //
 // By default Claude Code and Vogon run the full scenario table, the other
 // drivers run the smoke subset, and the headless variants (claude-code-p,
-// codex-exec, copilot-cli-p) run headlessScenarios; ENTIRE_TOKEN_MATRIX=full
-// runs everything.
+// codex-exec, copilot-cli-p, factoryai-droid-exec, opencode-run, pi-p) run
+// headlessScenarios; ENTIRE_TOKEN_MATRIX=full runs everything.
 
 const tokenMatrixEnv = "ENTIRE_TOKEN_MATRIX"
 
@@ -1159,8 +1159,10 @@ var tokenKnownBugs = map[string][]tokenKnownBug{
 	"*/antigravity": bugs(bugN9),
 
 	// Factory Droid: no token is ever counted (N11), which hides the
-	// scenario's own bugs. A Worker is also an unlinked session (N12).
+	// scenario's own bugs; N10 reproduces on factoryai-droid-exec once the
+	// tokens are visible. A Worker is also an unlinked session (N12).
 	"*/factoryai-droid":                                         bugs(bugN11),
+	"*/factoryai-droid-exec":                                    bugs(bugN11),
 	"plain turns with subagent/factoryai-droid":                 bugs(bugN11, bugN12),
 	"subagent transcript deleted after counted/factoryai-droid": bugs(bugN11, bugN12),
 	// No Stop runs, so only the checkpoint sum can fall short.
@@ -1171,10 +1173,13 @@ var tokenKnownBugs = map[string][]tokenKnownBug{
 	// hits N10.
 	"reasoning on every call/opencode":                  bugs(bugN14),
 	"mid-turn agent commit/opencode":                    bugs(bugN13),
+	"mid-turn agent commit/opencode-run":                bugs(bugN13),
 	"mid-turn agent commit of every file/opencode":      bugs(bug5, bugN13),
+	"mid-turn agent commit of every file/opencode-run":  bugs(bug5, bugN13),
 	"mid-turn agent commit, attach after stop/opencode": bugs(bugN13),
 	"mid-turn agent commit, next turn/opencode":         bugs(bugN13),
 	"real-run replay/opencode":                          bugs(bug5, bugN13),
+	"real-run replay/opencode-run":                      bugs(bug5, bugN13),
 	"resume same machine with tail/opencode":            bugs(bug5, bugN13),
 	"no-file turn, session end, resume/opencode":        bugs(bug5, bugN10),
 }
@@ -1198,8 +1203,11 @@ func tokenDrivers() []tokenAgentDriver {
 		newCopilotTokenDriver(),
 		newCopilotHeadlessTokenDriver(),
 		newDroidTokenDriver(),
+		newDroidExecTokenDriver(),
 		newOpenCodeTokenDriver(),
+		newOpenCodeRunTokenDriver(),
 		newPiTokenDriver(),
+		newPiHeadlessTokenDriver(),
 		newAntigravityTokenDriver(),
 		newExternalTokenDriver(),
 		newVogonTokenDriver(),
