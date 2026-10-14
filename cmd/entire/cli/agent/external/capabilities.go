@@ -114,6 +114,25 @@ func (w *wrappedAgent) CalculateTokenUsage(data []byte, offset int) (*agent.Toke
 	return w.ea.CalculateTokenUsage(data, offset)
 }
 
+// --- CumulativeTokenSource ---
+
+// externalSubagentsKey is the single child key for an external agent's
+// subagent usage: the protocol reports one aggregate, not per-child totals.
+const externalSubagentsKey = "subagents"
+
+// CumulativeTokenUsage runs the protocol's token calculation over the whole
+// transcript. Its subagent aggregate, when present, is moved out of the main
+// total into the one child the protocol can describe.
+func (w *wrappedAgent) CumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
+	usage, err := w.ea.CalculateTokenUsage(in.TranscriptData, 0)
+	if err != nil || usage == nil || usage.SubagentTokens == nil {
+		return usage, nil, err
+	}
+	main := *usage
+	main.SubagentTokens, main.SubagentTokensComplete = nil, nil
+	return &main, map[string]*agent.TokenUsage{externalSubagentsKey: usage.SubagentTokens}, nil
+}
+
 // --- TextGenerator ---
 
 func (w *wrappedAgent) GenerateText(ctx context.Context, prompt string, model string) (string, error) {
@@ -161,6 +180,7 @@ var (
 	_ agent.TranscriptAnalyzer     = (*wrappedAgent)(nil)
 	_ agent.TranscriptPreparer     = (*wrappedAgent)(nil)
 	_ agent.TokenCalculator        = (*wrappedAgent)(nil)
+	_ agent.CumulativeTokenSource  = (*wrappedAgent)(nil)
 	_ agent.TextGenerator          = (*wrappedAgent)(nil)
 	_ agent.TranscriptCompactor    = (*wrappedAgent)(nil)
 	_ agent.HookResponseWriter     = (*wrappedAgent)(nil)
