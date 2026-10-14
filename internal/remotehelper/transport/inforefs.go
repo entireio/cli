@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/discovery"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
 )
 
@@ -59,6 +60,10 @@ func (p *Proxy) infoRefs(ctx context.Context, label, suffix string, setHeaders f
 		if err == nil {
 			return p.handleInfoRefsResponse(resp)
 		}
+		// Fall back even after a policy rejection: the entry URL is HTTPS,
+		// derived from the user's remote, and every hop from it passes the
+		// same redirect policy. Refusing would pin a stale cached replica
+		// until the cache expires.
 		if p.entryURL == "" {
 			return nil, fmt.Errorf("fetching %s: %w", label, err)
 		}
@@ -72,7 +77,7 @@ func (p *Proxy) infoRefs(ctx context.Context, label, suffix string, setHeaders f
 
 	body, err := p.coldInfoRefs(ctx, suffix, setHeaders)
 	if err != nil && warmErr != nil {
-		return nil, errors.Join(fmt.Errorf("cached replicas: %w", warmErr), err)
+		return nil, fmt.Errorf("cached replicas: %w; %w", warmErr, err)
 	}
 	return body, err
 }
@@ -120,7 +125,7 @@ func (p *Proxy) coldInfoRefs(ctx context.Context, suffix string, setHeaders func
 		return p.handleInfoRefsResponse(viaReplicas)
 	}
 
-	if location == "" {
+	if location == "" || errors.Is(err, httpclient.ErrRequestPolicy) {
 		return nil, fmt.Errorf("fetching info/refs after entry-domain redirect: %w", err)
 	}
 	// The Location target is server-controlled. Salvaging the request means
@@ -133,7 +138,7 @@ func (p *Proxy) coldInfoRefs(ctx context.Context, suffix string, setHeaders func
 	debuglog.Printf("all advertised replicas failed; trying redirect Location %s as last-ditch fallback: %v", location, err)
 	locResp, locErr := p.doGet(ctx, location, p.client, setHeaders)
 	if locErr != nil {
-		return nil, fmt.Errorf("fetching info/refs after entry-domain redirect: %w", errors.Join(err, locErr))
+		return nil, fmt.Errorf("fetching info/refs after entry-domain redirect: %w; %w", err, locErr)
 	}
 	return p.handleInfoRefsResponse(locResp)
 }

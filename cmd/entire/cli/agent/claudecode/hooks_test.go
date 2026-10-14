@@ -1,17 +1,25 @@
 package claudecode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 
 	"github.com/stretchr/testify/require"
 )
@@ -567,10 +575,66 @@ func TestUninstallHooks_RemovesLegacyLocalDevHooks(t *testing.T) {
 	}
 }
 
-// TestInstallHooks_SessionEndIsUntimed verifies no hook carries an explicit
-// timeout. The explicit SessionEnd timeout existed only for local-dev hooks,
-// which compiled from source and could exceed Claude Code's exit grace.
-func TestInstallHooks_SessionEndIsUntimed(t *testing.T) {
+// expectedHookTimeout is one installed Entire hook and the timeout it must carry.
+type expectedHookTimeout struct {
+	hookType string
+	matcher  string
+	command  string
+	timeout  int
+}
+
+func expectedHookTimeouts() []expectedHookTimeout {
+	silent := agentpkg.WrapProductionSilentHookCommand
+	return []expectedHookTimeout{
+		{"SessionStart", "", agentpkg.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agentpkg.WarningFormatMultiLine), 30},
+		{"UserPromptSubmit", "", silent("entire hooks claude-code user-prompt-submit"), 30},
+		{"SubagentStart", workflowAgentMatcher, silent("entire hooks claude-code subagent-start"), 30},
+		{"PreToolUse", subagentToolMatcher, silent("entire hooks claude-code pre-task"), 30},
+		{"Stop", "", silent("entire hooks claude-code stop"), 120},
+		{"StopFailure", "", silent("entire hooks claude-code stop-failure"), 120},
+		{"SubagentStop", "", silent("entire hooks claude-code subagent-stop"), 120},
+		{"PostToolUse", subagentToolMatcher, silent("entire hooks claude-code post-task"), 120},
+		{"PostToolUse", skillToolMatcher, silent("entire hooks claude-code post-task"), 120},
+		// Claude Code gives SessionEnd a short exit grace by default; an explicit
+		// timeout would make it wait longer on exit, not shorter.
+		{"SessionEnd", "", silent("entire hooks claude-code session-end"), 0},
+	}
+}
+
+func hookMatchersByType(settings ClaudeSettings) map[string][]ClaudeHookMatcher {
+	h := settings.Hooks
+	return map[string][]ClaudeHookMatcher{
+		"SessionStart":     h.SessionStart,
+		"SessionEnd":       h.SessionEnd,
+		"UserPromptSubmit": h.UserPromptSubmit,
+		"SubagentStart":    h.SubagentStart,
+		"SubagentStop":     h.SubagentStop,
+		"Stop":             h.Stop,
+		"StopFailure":      h.StopFailure,
+		"PreToolUse":       h.PreToolUse,
+		"PostToolUse":      h.PostToolUse,
+	}
+}
+
+func assertHookTimeouts(t *testing.T, settings ClaudeSettings) {
+	t.Helper()
+	byType := hookMatchersByType(settings)
+	for _, want := range expectedHookTimeouts() {
+		hook, ok := lookupHook(byType[want.hookType], want.matcher, want.command)
+		if !ok {
+			t.Errorf("%s hook not found (matcher=%q, command=%q)", want.hookType, want.matcher, want.command)
+			continue
+		}
+		if hook.Timeout != want.timeout {
+			t.Errorf("%s (matcher=%q) timeout = %d, want %d", want.hookType, want.matcher, hook.Timeout, want.timeout)
+		}
+	}
+}
+
+// TestInstallHooks_SetsHookTimeouts pins a per-hook timeout on every Entire hook
+// that Claude Code waits on, so a stalled `entire` launch cannot block startup,
+// prompts, or turn ends indefinitely.
+func TestInstallHooks_SetsHookTimeouts(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
@@ -580,21 +644,501 @@ func TestInstallHooks_SessionEndIsUntimed(t *testing.T) {
 	}
 
 	settings := readClaudeSettings(t, tempDir)
-	if len(settings.Hooks.SessionEnd) == 0 || len(settings.Hooks.SessionEnd[0].Hooks) == 0 {
-		t.Fatal("expected a SessionEnd hook to be installed")
-	}
-	if got := settings.Hooks.SessionEnd[0].Hooks[0].Timeout; got != 0 {
-		t.Errorf("SessionEnd timeout = %d, want 0", got)
-	}
+	assertHookTimeouts(t, settings)
 
-	// Stronger than the parsed check: prove the field is omitted entirely
-	// (omitempty), not written as an explicit "timeout": 0.
+	// SessionEnd must omit the field entirely (omitempty), not write "timeout": 0.
 	raw, err := os.ReadFile(filepath.Join(tempDir, ".claude", "settings.json"))
 	if err != nil {
 		t.Fatalf("failed to read settings.json: %v", err)
 	}
-	if strings.Contains(string(raw), "timeout") {
-		t.Errorf("settings.json must not contain any timeout field, got:\n%s", raw)
+	var parsed struct {
+		Hooks map[string][]struct {
+			Hooks []map[string]json.RawMessage `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+	for _, m := range parsed.Hooks["SessionEnd"] {
+		for _, h := range m.Hooks {
+			if _, ok := h["timeout"]; ok {
+				t.Errorf("SessionEnd hook must not carry a timeout field, got:\n%s", raw)
+			}
+		}
+	}
+}
+
+// TestInstallHooks_BackfillsMissingTimeouts covers configs written by older CLIs:
+// the hook is already present without a timeout, so nothing is added, but the
+// install must still write the timeout.
+func TestInstallHooks_BackfillsMissingTimeouts(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeClaudeStopHooks(t, tempDir, []string{agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")})
+
+	ag := &ClaudeCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	assertHookTimeouts(t, readClaudeSettings(t, tempDir))
+}
+
+// TestInstallHooks_KeepsUserSetTimeout verifies an install never overrides a
+// timeout the user chose for an Entire hook.
+func TestInstallHooks_KeepsUserSetTimeout(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stopCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q, "timeout": 300}]}]
+  }
+}`, stopCmd))
+
+	ag := &ClaudeCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	hook, ok := lookupHook(readClaudeSettings(t, tempDir).Hooks.Stop, "", stopCmd)
+	if !ok {
+		t.Fatal("Stop hook not found")
+	}
+	if hook.Timeout != 300 {
+		t.Errorf("Stop timeout = %d, want the user's 300", hook.Timeout)
+	}
+}
+
+// TestInstallHooks_TimeoutsAreIdempotent verifies a second install of an
+// up-to-date config neither adds hooks nor rewrites the file.
+func TestInstallHooks_TimeoutsAreIdempotent(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &ClaudeCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	settingsPath := filepath.Join(tempDir, ".claude", "settings.json")
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(settingsPath, past, past); err != nil {
+		t.Fatalf("Chtimes() error = %v", err)
+	}
+
+	count, err := ag.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+	if count != 0 {
+		t.Errorf("second InstallHooks() count = %d, want 0", count)
+	}
+	info, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if !info.ModTime().Equal(past) {
+		t.Errorf("settings.json was rewritten by an install that had nothing to change")
+	}
+}
+
+// userStopMatcherJSON is a user-owned Stop matcher carrying fields Entire does
+// not model: a prompt hook, an async command hook, and a matcher-level key.
+const userStopMatcherJSON = `{
+  "matcher": "",
+  "comment": "team notifications",
+  "hooks": [
+    {"type": "prompt", "prompt": "Check the task is done", "timeout": 30},
+    {"type": "command", "command": "./notify.sh > /dev/null && echo ok", "async": true, "statusMessage": "notifying"}
+  ]
+}`
+
+// writeSettingsWithUserStopMatcher seeds an Entire Stop hook without a timeout
+// (as older CLIs wrote it) next to userStopMatcherJSON.
+func writeSettingsWithUserStopMatcher(t *testing.T, dir string) {
+	t.Helper()
+	stopCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	writeSettingsFile(t, dir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [
+      {"matcher": "", "hooks": [{"type": "command", "command": %q}]},
+      %s
+    ]
+  }
+}`, stopCmd, userStopMatcherJSON))
+}
+
+// assertUserStopMatcherIntact fails unless the user's Stop matcher survives
+// byte-for-byte in meaning: every field kept and none added.
+func assertUserStopMatcherIntact(t *testing.T, dir string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+	var parsed struct {
+		Hooks struct {
+			Stop []map[string]any `json:"Stop"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+	var want map[string]any
+	if err := json.Unmarshal([]byte(userStopMatcherJSON), &want); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range parsed.Hooks.Stop {
+		if m["comment"] != nil {
+			require.Equal(t, want, m, "user Stop matcher changed")
+			return
+		}
+	}
+	t.Fatalf("user Stop matcher missing:\n%s", raw)
+}
+
+// TestInstallHooks_PreservesUserHookFields covers the upgrade rewrite: a
+// timeout backfill must not strip fields from the user's own hooks.
+func TestInstallHooks_PreservesUserHookFields(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	writeSettingsWithUserStopMatcher(t, tempDir)
+
+	ag := &ClaudeCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	assertUserStopMatcherIntact(t, tempDir)
+
+	raw, err := os.ReadFile(filepath.Join(tempDir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `\u003e`) || strings.Contains(string(raw), `\u0026`) {
+		t.Errorf("settings.json must not HTML-escape commands, got:\n%s", raw)
+	}
+}
+
+func TestUninstallHooks_PreservesUserHookFields(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	writeSettingsWithUserStopMatcher(t, tempDir)
+
+	ag := &ClaudeCodeAgent{}
+	if err := ag.UninstallHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+
+	assertUserStopMatcherIntact(t, tempDir)
+}
+
+// TestInstallHooks_KeepsUserHooksEntireCannotModel covers user hooks whose
+// shape Entire's types do not fully model. A rewrite must leave them exactly as
+// written: encoding/json would otherwise read a differently-cased key into a
+// modeled field and write it twice, and a modeled field holding another type
+// would fail the decode and drop every unmodeled field.
+func TestInstallHooks_KeepsUserHooksEntireCannotModel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		matcher string
+	}{
+		{
+			name:    "differently-cased keys",
+			matcher: `{"matcher": "user", "Matcher": "x", "hooks": [{"type": "command", "command": "./a.sh", "Command": "./b.sh", "Timeout": 5}]}`,
+		},
+		{
+			name:    "fractional timeout",
+			matcher: `{"matcher": "user", "hooks": [{"type": "command", "command": "./notify.sh", "timeout": 1.5, "async": true, "statusMessage": "notifying"}]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rawHooks := map[string]json.RawMessage{"Stop": json.RawMessage(`[` + tt.matcher + `]`)}
+
+			installHookEntries(rawHooks, false)
+
+			var stop []map[string]any
+			require.NoError(t, json.Unmarshal(rawHooks["Stop"], &stop))
+			var want map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tt.matcher), &want))
+			require.Contains(t, stop, want, "user Stop matcher changed:\n%s", rawHooks["Stop"])
+		})
+	}
+}
+
+// TestInstallHooks_KeepsUnmodeledTimeoutOnEntireHook: a timeout the user set on
+// an Entire hook is theirs even when Entire cannot model it, either because it
+// is fractional or because an explicit 0 reads the same as no timeout. Neither
+// install nor doctor backfills one, enable does not report the hook as
+// outdated, and a rewrite keeps the value as written.
+func TestInstallHooks_KeepsUnmodeledTimeoutOnEntireHook(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		timeout string
+	}{
+		{"fractional", "45.5"},
+		{"explicit zero", "0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Chdir(tempDir)
+
+			stopCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+			entry := fmt.Sprintf(`{"type": "command", "command": %q, "timeout": %s}`, stopCmd, tt.timeout)
+			writeSettingsFile(t, tempDir, fmt.Sprintf(`{"hooks": {"Stop": [{"matcher": "", "hooks": [%s]}]}}`, entry))
+
+			c := &ClaudeCodeAgent{}
+			if c.HasStaleManagedHooks(context.Background()) {
+				t.Errorf("HasStaleManagedHooks() = true for an Entire hook with user-set timeout %s", tt.timeout)
+			}
+			changed, err := c.RepairHookTimeouts(context.Background())
+			if err != nil {
+				t.Fatalf("RepairHookTimeouts() error = %v", err)
+			}
+			if changed {
+				t.Errorf("RepairHookTimeouts() changed = true for user-set timeout %s", tt.timeout)
+			}
+			if _, err := c.InstallHooks(context.Background(), false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+
+			stop := readClaudeSettingsHooksOnly(t, tempDir, "Stop")
+			var hooks []map[string]any
+			for _, m := range stop {
+				data, err := json.Marshal(m.Hooks)
+				require.NoError(t, err)
+				var entries []map[string]any
+				require.NoError(t, json.Unmarshal(data, &entries))
+				hooks = append(hooks, entries...)
+			}
+			var want map[string]any
+			require.NoError(t, json.Unmarshal([]byte(entry), &want))
+			require.Equal(t, []map[string]any{want}, hooks, "Entire Stop hook changed or duplicated")
+		})
+	}
+}
+
+// TestClaudeHookEntry_RedecodeDropsKeptBytes: encoding/json reuses slice
+// elements when decoding into an existing value, so bytes kept from an entry
+// Entire could not model must not outlive the entry that replaced it.
+func TestClaudeHookEntry_RedecodeDropsKeptBytes(t *testing.T) {
+	t.Parallel()
+
+	matchers := []ClaudeHookMatcher{}
+	require.NoError(t, json.Unmarshal([]byte(`[{"matcher":"","hooks":[{"type":"command","command":"a","timeout":1.5}]}]`), &matchers))
+	require.NoError(t, json.Unmarshal([]byte(`[{"matcher":"","hooks":[{"type":"command","command":"b","timeout":30}]}]`), &matchers))
+
+	got, err := json.Marshal(matchers)
+	require.NoError(t, err)
+	require.JSONEq(t, `[{"matcher":"","hooks":[{"type":"command","command":"b","timeout":30}]}]`, string(got))
+}
+
+// TestHasStaleManagedHooks_MissingTimeout lets enable report a timeout
+// backfill instead of calling the rewritten config "already installed".
+func TestHasStaleManagedHooks_MissingTimeout(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	writeClaudeStopHooks(t, tempDir, []string{agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")})
+
+	c := &ClaudeCodeAgent{}
+	if !c.HasStaleManagedHooks(context.Background()) {
+		t.Fatal("HasStaleManagedHooks() = false for a hook missing its timeout, want true")
+	}
+	if _, err := c.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if c.HasStaleManagedHooks(context.Background()) {
+		t.Error("HasStaleManagedHooks() = true after install, want false")
+	}
+}
+
+// TestHasStaleManagedHooks_FreshInstall: hooks a first install adds are new,
+// not outdated, so enable must not say it updated them.
+func TestHasStaleManagedHooks_FreshInstall(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if (&ClaudeCodeAgent{}).HasStaleManagedHooks(context.Background()) {
+		t.Error("HasStaleManagedHooks() = true with no settings file, want false")
+	}
+}
+
+// TestRepairHookTimeouts_FillsOnlyMissingTimeouts covers the doctor repair:
+// it may only give Entire hooks their missing timeout, so the user's matcher, a
+// hook type that does not parse, and the permissions block all stay as written.
+func TestRepairHookTimeouts_FillsOnlyMissingTimeouts(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stopCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "permissions": {"allow": ["Bash(ls)"]},
+  "hooks": {
+    "SessionStart": {"not": "a matcher list"},
+    "Stop": [
+      {"matcher": "", "hooks": [{"type": "command", "command": %q}]},
+      %s
+    ]
+  }
+}`, stopCmd, userStopMatcherJSON))
+
+	c := &ClaudeCodeAgent{}
+	changed, err := c.RepairHookTimeouts(context.Background())
+	if err != nil {
+		t.Fatalf("RepairHookTimeouts() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("RepairHookTimeouts() changed = false, want true")
+	}
+
+	hook, ok := lookupHook(readClaudeSettingsHooksOnly(t, tempDir, "Stop"), "", stopCmd)
+	if !ok {
+		t.Fatal("Entire Stop hook missing after repair")
+	}
+	if hook.Timeout != checkpointHookTimeoutSec {
+		t.Errorf("Stop timeout = %d, want %d", hook.Timeout, checkpointHookTimeoutSec)
+	}
+	assertUserStopMatcherIntact(t, tempDir)
+
+	raw, err := os.ReadFile(filepath.Join(tempDir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Permissions json.RawMessage            `json:"permissions"`
+		Hooks       map[string]json.RawMessage `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+	if got := slices.Sorted(maps.Keys(parsed.Hooks)); !slices.Equal(got, []string{"SessionStart", "Stop"}) {
+		t.Errorf("hook types = %v, want only [SessionStart Stop]", got)
+	}
+	require.JSONEq(t, `{"not": "a matcher list"}`, string(parsed.Hooks["SessionStart"]), "unparseable hook type changed")
+	require.JSONEq(t, `{"allow": ["Bash(ls)"]}`, string(parsed.Permissions), "permissions block changed")
+
+	changed, err = c.RepairHookTimeouts(context.Background())
+	if err != nil {
+		t.Fatalf("second RepairHookTimeouts() error = %v", err)
+	}
+	if changed {
+		t.Error("second RepairHookTimeouts() changed = true, want false")
+	}
+}
+
+// TestRepairHookTimeouts_DropsEmptyPermissions: the repair writes through the
+// same helper as install, so an empty permissions block goes the way install
+// drops it rather than surviving only when doctor rewrote the file.
+func TestRepairHookTimeouts_DropsEmptyPermissions(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stopCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "permissions": {},
+  "hooks": {"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}]}
+}`, stopCmd))
+
+	changed, err := (&ClaudeCodeAgent{}).RepairHookTimeouts(context.Background())
+	if err != nil {
+		t.Fatalf("RepairHookTimeouts() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("RepairHookTimeouts() changed = false, want true")
+	}
+	raw, err := os.ReadFile(filepath.Join(tempDir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &parsed))
+	if _, ok := parsed["permissions"]; ok {
+		t.Errorf("empty permissions block kept after repair:\n%s", raw)
+	}
+}
+
+// TestRepairHookTimeouts_NoSettingsFile: doctor runs where Claude Code was
+// never set up, and the repair must not create a config there.
+func TestRepairHookTimeouts_NoSettingsFile(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	changed, err := (&ClaudeCodeAgent{}).RepairHookTimeouts(context.Background())
+	if err != nil {
+		t.Fatalf("RepairHookTimeouts() error = %v", err)
+	}
+	if changed {
+		t.Error("RepairHookTimeouts() changed = true with no settings file")
+	}
+	if _, err := os.Stat(filepath.Join(tempDir, ".claude")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf(".claude exists after repair with no settings file (stat err = %v)", err)
+	}
+}
+
+// TestRepairHookTimeouts_KeepsUserSetTimeout: a timeout the user chose for an
+// Entire hook is not missing, so the repair leaves the file untouched.
+func TestRepairHookTimeouts_KeepsUserSetTimeout(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stopCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	content := fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q, "timeout": 300}]}]
+  }
+}`, stopCmd)
+	writeSettingsFile(t, tempDir, content)
+
+	changed, err := (&ClaudeCodeAgent{}).RepairHookTimeouts(context.Background())
+	if err != nil {
+		t.Fatalf("RepairHookTimeouts() error = %v", err)
+	}
+	if changed {
+		t.Error("RepairHookTimeouts() changed = true for a user-set timeout")
+	}
+	raw, err := os.ReadFile(filepath.Join(tempDir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != content {
+		t.Errorf("settings.json changed:\n%s", raw)
+	}
+}
+
+// readClaudeSettingsHooksOnly parses one hook type, for files where another
+// hook type is deliberately malformed and readClaudeSettings would fail.
+func readClaudeSettingsHooksOnly(t *testing.T, dir, hookType string) []ClaudeHookMatcher {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+	var parsed struct {
+		Hooks map[string]json.RawMessage `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+	var matchers []ClaudeHookMatcher
+	if err := json.Unmarshal(parsed.Hooks[hookType], &matchers); err != nil {
+		t.Fatalf("failed to parse %s: %v", hookType, err)
+	}
+	return matchers
+}
+
+// TestCaptureHookTimeoutExceedsStatusWalkBudget keeps Claude Code from killing
+// a capture hook before its status walk can give up and degrade on its own.
+func TestCaptureHookTimeoutExceedsStatusWalkBudget(t *testing.T) {
+	t.Parallel()
+	if time.Duration(captureHookTimeoutSec)*time.Second <= gitrepo.StatusWalkBudget {
+		t.Errorf("captureHookTimeoutSec = %ds, want more than gitrepo.StatusWalkBudget (%s)", captureHookTimeoutSec, gitrepo.StatusWalkBudget)
 	}
 }
 
@@ -777,19 +1321,27 @@ func TestInstallHooks_PrunesPostTodoHook(t *testing.T) {
 	}
 }
 
-// assertHookExists checks that a hook with the given matcher and command exists
-func assertHookExists(t *testing.T, matchers []ClaudeHookMatcher, matcher, command, description string) {
-	t.Helper()
+// lookupHook returns the hook with the given matcher and command.
+func lookupHook(matchers []ClaudeHookMatcher, matcher, command string) (ClaudeHookEntry, bool) {
 	for _, m := range matchers {
-		if m.Matcher == matcher {
-			for _, h := range m.Hooks {
-				if h.Command == command {
-					return
-				}
+		if m.Matcher != matcher {
+			continue
+		}
+		for _, h := range m.Hooks {
+			if h.Command == command {
+				return h, true
 			}
 		}
 	}
-	t.Errorf("%s was not found (matcher=%q, command=%q)", description, matcher, command)
+	return ClaudeHookEntry{}, false
+}
+
+// assertHookExists checks that a hook with the given matcher and command exists
+func assertHookExists(t *testing.T, matchers []ClaudeHookMatcher, matcher, command, description string) {
+	t.Helper()
+	if _, ok := lookupHook(matchers, matcher, command); !ok {
+		t.Errorf("%s was not found (matcher=%q, command=%q)", description, matcher, command)
+	}
 }
 
 func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
@@ -969,15 +1521,15 @@ func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
 		wantCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
 		assertHookExists(t, settings.Hooks.SubagentStop, "", wantCmd, "SubagentStop hook")
 
-		// Same shape as Stop: single command, empty matcher, no timeout.
+		// Same shape as Stop: single command, empty matcher, Stop's timeout.
 		if len(settings.Hooks.SubagentStop) != 1 || settings.Hooks.SubagentStop[0].Matcher != "" {
 			t.Fatalf("SubagentStop = %+v, want a single matcher with an empty string matcher (same shape as Stop)", settings.Hooks.SubagentStop)
 		}
 		if len(settings.Hooks.SubagentStop[0].Hooks) != 1 {
 			t.Fatalf("SubagentStop hooks = %d, want 1", len(settings.Hooks.SubagentStop[0].Hooks))
 		}
-		if got := settings.Hooks.SubagentStop[0].Hooks[0].Timeout; got != 0 {
-			t.Errorf("SubagentStop timeout = %d, want 0 (no explicit timeout, same as Stop)", got)
+		if got, want := settings.Hooks.SubagentStop[0].Hooks[0].Timeout, settings.Hooks.Stop[0].Hooks[0].Timeout; got != want {
+			t.Errorf("SubagentStop timeout = %d, want %d (same as Stop)", got, want)
 		}
 	})
 }
@@ -1289,6 +1841,59 @@ func TestCheckHookConfig_Outdated_MissingSkillHook(t *testing.T) {
 	}
 }
 
+// TestCheckHookConfig_Outdated_WhenInstallWouldRewrite: a config that has every
+// required hook but that an install would still rewrite is outdated, so
+// `entire status` and `entire doctor` surface it instead of calling it current.
+func TestCheckHookConfig_Outdated_WhenInstallWouldRewrite(t *testing.T) {
+	stopCmd, err := jsonutil.MarshalWithNoHTMLEscape(agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop"))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		mutate func([]byte) []byte
+	}{
+		{
+			name: "missing timeouts",
+			mutate: func(b []byte) []byte {
+				return regexp.MustCompile(`,\s*"timeout": \d+`).ReplaceAll(b, nil)
+			},
+		},
+		{
+			// Written before the sh -c wrapper existed; a stalled launch blocks it too.
+			name: "older command shape",
+			mutate: func(b []byte) []byte {
+				return bytes.Replace(b, stopCmd, []byte(`"entire hooks claude-code stop"`), 1)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Chdir(tempDir)
+			a := &ClaudeCodeAgent{}
+			if _, err := a.InstallHooks(context.Background(), false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+			settingsPath := filepath.Join(tempDir, ".claude", ClaudeSettingsFileName)
+			data, err := os.ReadFile(settingsPath)
+			require.NoError(t, err)
+			mutated := tt.mutate(data)
+			require.NotEqual(t, data, mutated, "fixture mutation changed nothing")
+			writeSettingsFile(t, tempDir, string(mutated))
+
+			if got := CheckHookConfig(context.Background()); got != HooksOutdated {
+				t.Errorf("CheckHookConfig() = %v, want HooksOutdated", got)
+			}
+			if _, err := a.InstallHooks(context.Background(), false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+			if got := CheckHookConfig(context.Background()); got != HooksCurrent {
+				t.Errorf("CheckHookConfig() after reinstall = %v, want HooksCurrent", got)
+			}
+		})
+	}
+}
+
 func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -1299,23 +1904,19 @@ func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 	subagentStop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
 	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
 	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
-	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
 	// "Agent|Foo" still covers Agent; "Agent|Skill|Foo" still covers Agent and
-	// Skill; "TaskCreate|TaskUpdate|TaskGet" still covers TaskCreate and
-	// TaskUpdate; "workflow-subagent|Explore" still covers workflow-subagent.
+	// Skill; "workflow-subagent|Explore" still covers workflow-subagent.
 	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
   "hooks": {
-    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
-    "StopFailure": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
-    "SubagentStart": [{"matcher": "workflow-subagent|Explore", "hooks": [{"type": "command", "command": %q}]}],
-    "SubagentStop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
-    "PreToolUse": [{"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]}],
-    "PostToolUse": [
-      {"matcher": "Agent|Skill|Foo", "hooks": [{"type": "command", "command": %q}]},
-      {"matcher": "TaskCreate|TaskUpdate|TaskGet", "hooks": [{"type": "command", "command": %q}]}
-    ]
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q, "timeout": %d}]}],
+    "StopFailure": [{"matcher": "", "hooks": [{"type": "command", "command": %q, "timeout": %d}]}],
+    "SubagentStart": [{"matcher": "workflow-subagent|Explore", "hooks": [{"type": "command", "command": %q, "timeout": %d}]}],
+    "SubagentStop": [{"matcher": "", "hooks": [{"type": "command", "command": %q, "timeout": %d}]}],
+    "PreToolUse": [{"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q, "timeout": %d}]}],
+    "PostToolUse": [{"matcher": "Agent|Skill|Foo", "hooks": [{"type": "command", "command": %q, "timeout": %d}]}]
   }
-}`, stop, stopFailure, subagentStart, subagentStop, pre, post, todo))
+}`, stop, checkpointHookTimeoutSec, stopFailure, checkpointHookTimeoutSec, subagentStart, captureHookTimeoutSec,
+		subagentStop, checkpointHookTimeoutSec, pre, captureHookTimeoutSec, post, checkpointHookTimeoutSec))
 
 	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
 		t.Errorf("CheckHookConfig() = %v, want HooksCurrent (superset matcher)", got)

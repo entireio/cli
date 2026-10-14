@@ -371,3 +371,30 @@ func TestResolveDataAPI_SingleLoginIsSilent(t *testing.T) {
 		t.Fatalf("notice = %q, want none with a single login", notice.String())
 	}
 }
+
+// The plain-HTTP discovery client is reused for the cluster listing at the
+// discovered core, which carries the login JWT. Only the data origin may be
+// downgraded; every other host keeps the scheme the caller asked for.
+func TestDataAPIHTTPDiscoveryTransport_RewritesOnlyDataOrigin(t *testing.T) {
+	t.Parallel()
+	var schemes []string
+	tr := dataAPIHTTPDiscoveryTransport{host: "127.0.0.1:8080", base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		schemes = append(schemes, req.URL.Scheme+"://"+req.URL.Host)
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+	})}
+	for _, target := range []string{"https://127.0.0.1:8080/.well-known/entire-api.json", "https://us.console.entire.io/api/v1/clusters"} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+	want := []string{"http://127.0.0.1:8080", "https://us.console.entire.io"}
+	if strings.Join(schemes, " ") != strings.Join(want, " ") {
+		t.Fatalf("dialed %v, want %v", schemes, want)
+	}
+}

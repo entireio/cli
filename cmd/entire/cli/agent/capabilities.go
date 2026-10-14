@@ -31,6 +31,7 @@ type CapabilityDeclarer interface {
 //   - HomeScopedInventoryExtractor
 //   - HookConfigLocator
 //   - HookFreshness
+//   - HookTimeoutRepairer
 //   - InventoryAwareExtractor
 //   - LateTranscriptWriter (refuses CapabilityDeclarer agents)
 //   - ModelExtractor
@@ -129,6 +130,12 @@ func AsHookFreshness(ag Agent) (HookFreshness, bool) {
 // stale Entire hooks its next install will remove.
 func AsStaleHookReporter(ag Agent) (StaleHookReporter, bool) {
 	return builtinCapability[StaleHookReporter](ag)
+}
+
+// AsHookTimeoutRepairer returns the agent as HookTimeoutRepairer if it can
+// add the hook timeouts an older CLI wrote its config without.
+func AsHookTimeoutRepairer(ag Agent) (HookTimeoutRepairer, bool) {
+	return builtinCapability[HookTimeoutRepairer](ag)
 }
 
 // AsEffectiveHookDiagnostics returns the agent as EffectiveHookDiagnostics if

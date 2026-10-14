@@ -187,6 +187,13 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Agent-specific: does agy actually load the workspace hooks?
 	checkAntigravityHooksLoaded(cmd)
 
+	// Hook timeouts that configs from older CLIs lack. Fixes rather than only
+	// reporting: it only fills in a timeout on a hook Entire wrote. Runs before
+	// the drift check, which counts a missing timeout as drift, so that check
+	// reports on the repaired config instead of telling the user to run
+	// `entire enable --force` for something doctor just fixed.
+	checkHookTimeouts(cmd)
+
 	// Agent-specific: Claude Code hook config drift.
 	checkHookDrift(cmd)
 
@@ -1330,7 +1337,10 @@ func checkLogSink(cmd *cobra.Command) {
 // checkHookDrift warns when an installed agent's Entire hook config is out of
 // date — an older release wrote Claude Code tool matchers that no longer fire,
 // or a repo committed a Pi/OpenCode extension that the template has since moved
-// past. Read-only; the fix is `entire enable --force`. Stays silent for agents
+// past. Read-only; the fix is `entire agent add <agent>`, which installs
+// without --force so the timeouts and fields the user set on Entire's hooks
+// survive. A bare `entire enable` would not do: on a repo that is already
+// enabled it returns without reinstalling agent hooks. Stays silent for agents
 // that aren't installed here or don't implement a drift check.
 func checkHookDrift(cmd *cobra.Command) {
 	ctx := cmd.Context()
@@ -1355,9 +1365,11 @@ func checkHookDrift(cmd *cobra.Command) {
 			fmt.Fprintf(w, "✓ %s hook config: OK\n", displayName)
 		case agent.HooksOutdated:
 			fmt.Fprintf(w, "%s hooks: OUT OF DATE\n", displayName)
-			fmt.Fprintln(w, "  The installed hook config no longer matches what this CLI writes,")
-			fmt.Fprintln(w, "  so some or all hooks may silently not fire.")
-			fmt.Fprintln(w, "  Run `entire enable --force` to update it.")
+			fmt.Fprintln(w, "  The installed hook config no longer matches what this CLI writes, so")
+			fmt.Fprintln(w, "  some hooks may not fire, or may block the agent if `entire` stalls on launch.")
+			fmt.Fprintf(w, "  Run `entire agent add %s` to update it.\n", ag.Name())
+			fmt.Fprintln(w, "  If that does not fix it, add --force, which rebuilds Entire's hooks and")
+			fmt.Fprintln(w, "  drops any changes you made to them.")
 		}
 	}
 }
@@ -1368,7 +1380,7 @@ func checkHookDrift(cmd *cobra.Command) {
 // under the repo root need manual approval, which defeats unattended permission
 // modes, and it guarded a staging buffer rather than the durable copy.
 //
-// This is the one doctor check that repairs without asking, and the reason is
+// It repairs without asking, as checkHookTimeouts does, and the reason is
 // ownership: it deletes only a rule byte-identical to the string Entire itself
 // wrote, so nothing the user chose is touched. `entire enable` performs the same
 // removal; this exists because a user who has already enabled Entire has no
@@ -1379,6 +1391,55 @@ func checkHookDrift(cmd *cobra.Command) {
 // left visible rather than hidden: the message says the file changed so the user
 // can commit or revert it.
 func checkRetiredDenyRule(cmd *cobra.Command) {
+	// A repair error is logged rather than printed. An agent whose config will
+	// not parse never reaches here — AreHooksInstalled fails on it, so
+	// GetAgentsWithHooksInstalled leaves it out — which leaves only write
+	// failures, and printing "stale rule" for those would name the wrong
+	// problem. (That a broken config goes unreported at all is a separate,
+	// pre-existing gap: agentHookState.unchecked has no consumer.)
+	repairInstalledAgents(cmd, "could not remove retired deny rule",
+		// One pass: Repair reports whether it found the rule, so a separate
+		// detect call would only read and parse the same file twice.
+		agent.RepairRetiredMetadataDenyRule,
+		func(w io.Writer, ag agent.Agent) {
+			fmt.Fprintf(w, "%s permissions: STALE RULE\n", ag.Type())
+			fmt.Fprintf(w, "  A retired Entire deny rule (%s) was still present.\n", agent.MetadataDenyRule)
+			fmt.Fprintln(w, "  It makes ordinary commands (a recursive grep from the repo root, or any")
+			fmt.Fprintln(w, "  command naming that path) need manual approval, and it no longer protects")
+			fmt.Fprintln(w, "  anything: the file it guarded is removed once a session is condensed.")
+			fmt.Fprintln(w, "  ✓ Fixed: rule removed (your other deny rules are untouched).")
+		})
+}
+
+// checkHookTimeouts gives Entire's hooks the timeouts a config written by an
+// older CLI lacks, so a stalled `entire` launch cannot block the agent until
+// its own default timeout. It repairs without asking for the reason
+// checkRetiredDenyRule does: it only sets a timeout on a hook Entire wrote that
+// has none, so nothing the user chose is touched. As there, a repair error is
+// logged rather than printed.
+func checkHookTimeouts(cmd *cobra.Command) {
+	repairInstalledAgents(cmd, "could not add missing hook timeouts",
+		func(ctx context.Context, ag agent.Agent) (bool, error) {
+			repairer, ok := agent.AsHookTimeoutRepairer(ag)
+			if !ok {
+				return false, nil
+			}
+			return repairer.RepairHookTimeouts(ctx)
+		},
+		func(w io.Writer, ag agent.Agent) {
+			fmt.Fprintf(w, "%s hooks: MISSING TIMEOUTS\n", ag.Type())
+			fmt.Fprintln(w, "  Some Entire hooks had no timeout, so a stalled `entire` launch could block")
+			fmt.Fprintln(w, "  the agent until its own default timeout.")
+			fmt.Fprintln(w, "  ✓ Fixed: timeouts added (your own hooks and timeouts are untouched).")
+		})
+}
+
+// repairInstalledAgents runs repair, which fixes an agent's config without
+// asking, on every agent with hooks installed here. For each config it changed,
+// report says what was fixed, and the user is told the settings file changed:
+// it is usually tracked in git, so they can commit or revert it. A repair error
+// is logged rather than printed, under failure.
+func repairInstalledAgents(cmd *cobra.Command, failure string, repair func(context.Context, agent.Agent) (bool, error), report func(io.Writer, agent.Agent)) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	for _, name := range GetAgentsWithHooksInstalled(ctx) {
@@ -1386,31 +1447,16 @@ func checkRetiredDenyRule(cmd *cobra.Command) {
 		if err != nil {
 			continue
 		}
-		// One pass: Repair reports whether it found the rule, so a separate
-		// detect call would only read and parse the same file twice.
-		//
-		// A repair error is logged rather than printed. An agent whose config
-		// will not parse never reaches here — AreHooksInstalled fails on it, so
-		// GetAgentsWithHooksInstalled leaves it out — which leaves only write
-		// failures, and printing "stale rule" for those would name the wrong
-		// problem. (That a broken config goes unreported at all is a separate,
-		// pre-existing gap: agentHookState.unchecked has no consumer.)
-		changed, repairErr := agent.RepairRetiredMetadataDenyRule(ctx, ag)
+		changed, repairErr := repair(ctx, ag)
 		if repairErr != nil {
-			logging.Warn(ctx, "could not remove retired deny rule",
+			logging.Warn(ctx, failure,
 				slog.String("agent", string(ag.Type())),
 				slog.String("error", repairErr.Error()))
 			continue
 		}
 		if changed {
-			displayName := string(ag.Type())
-			fmt.Fprintf(w, "%s permissions: STALE RULE\n", displayName)
-			fmt.Fprintf(w, "  A retired Entire deny rule (%s) was still present.\n", agent.MetadataDenyRule)
-			fmt.Fprintln(w, "  It makes ordinary commands (a recursive grep from the repo root, or any")
-			fmt.Fprintln(w, "  command naming that path) need manual approval, and it no longer protects")
-			fmt.Fprintln(w, "  anything: the file it guarded is removed once a session is condensed.")
-			fmt.Fprintln(w, "  ✓ Fixed: rule removed (your other deny rules are untouched).")
-			fmt.Fprintln(w, "  The settings file changed — commit or revert it as you prefer.")
+			report(w, ag)
+			fmt.Fprintln(w, "  The settings file changed. Commit or revert it as you prefer.")
 		}
 	}
 }
