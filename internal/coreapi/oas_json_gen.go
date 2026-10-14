@@ -38892,16 +38892,20 @@ func (s *OrgCapabilities) encodeFields(e *jx.Encoder) {
 		e.Bool(s.CanDelete)
 	}
 	{
-		e.FieldStart("canManageBilling")
-		e.Bool(s.CanManageBilling)
+		if s.CanManageBilling.Set {
+			e.FieldStart("canManageBilling")
+			s.CanManageBilling.Encode(e)
+		}
 	}
 	{
 		e.FieldStart("canManageMembers")
 		e.Bool(s.CanManageMembers)
 	}
 	{
-		e.FieldStart("canView")
-		e.Bool(s.CanView)
+		if s.CanView.Set {
+			e.FieldStart("canView")
+			s.CanView.Encode(e)
+		}
 	}
 	for k, elem := range s.AdditionalProps {
 		e.FieldStart(k)
@@ -38968,11 +38972,9 @@ func (s *OrgCapabilities) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"canDelete\"")
 			}
 		case "canManageBilling":
-			requiredBitSet[0] |= 1 << 3
 			if err := func() error {
-				v, err := d.Bool()
-				s.CanManageBilling = bool(v)
-				if err != nil {
+				s.CanManageBilling.Reset()
+				if err := s.CanManageBilling.Decode(d); err != nil {
 					return err
 				}
 				return nil
@@ -38992,11 +38994,9 @@ func (s *OrgCapabilities) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"canManageMembers\"")
 			}
 		case "canView":
-			requiredBitSet[0] |= 1 << 5
 			if err := func() error {
-				v, err := d.Bool()
-				s.CanView = bool(v)
-				if err != nil {
+				s.CanView.Reset()
+				if err := s.CanView.Decode(d); err != nil {
 					return err
 				}
 				return nil
@@ -39024,7 +39024,7 @@ func (s *OrgCapabilities) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00111111,
+		0b00010111,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
@@ -44742,8 +44742,10 @@ func (s *ProjectCapabilities) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
-		e.FieldStart("canManagePlugins")
-		e.Bool(s.CanManagePlugins)
+		if s.CanManagePlugins.Set {
+			e.FieldStart("canManagePlugins")
+			s.CanManagePlugins.Encode(e)
+		}
 	}
 	{
 		e.FieldStart("canManageTrails")
@@ -44824,11 +44826,9 @@ func (s *ProjectCapabilities) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"canManageAgents\"")
 			}
 		case "canManagePlugins":
-			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
-				v, err := d.Bool()
-				s.CanManagePlugins = bool(v)
-				if err != nil {
+				s.CanManagePlugins.Reset()
+				if err := s.CanManagePlugins.Decode(d); err != nil {
 					return err
 				}
 				return nil
@@ -44868,7 +44868,7 @@ func (s *ProjectCapabilities) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00110111,
+		0b00100111,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.

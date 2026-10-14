@@ -277,7 +277,9 @@ var readModelOptionalFields = map[string][]string{
 	"DetachRepoResult":    {"access"},
 	"ListReposOutputBody": {"candidatesIncomplete"},
 	"Org":                 {"capabilities"},
+	"OrgCapabilities":     {"canManageBilling", "canView"},
 	"Project":             {"capabilities"},
+	"ProjectCapabilities": {"canManagePlugins"},
 	"Repo":                {"capabilities", "provider"},
 	"RepoIndexEntry":      {"org", "provider"},
 }

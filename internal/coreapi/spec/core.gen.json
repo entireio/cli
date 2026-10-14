@@ -5058,8 +5058,6 @@
           "canCreateProject",
           "canManageMembers",
           "canDelete",
-          "canView",
-          "canManageBilling",
           "canChangeOwners"
         ],
         "type": "object"
@@ -5857,8 +5855,7 @@
           "canDelete",
           "canManageAccess",
           "canCreateRepository",
-          "canManageTrails",
-          "canManagePlugins"
+          "canManageTrails"
         ],
         "type": "object"
       },

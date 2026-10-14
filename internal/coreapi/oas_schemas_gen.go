@@ -19628,10 +19628,10 @@ type OrgCapabilities struct {
 	CanCreateProject bool `json:"canCreateProject"`
 	CanDelete        bool `json:"canDelete"`
 	// Whether the caller may view and manage this org's billing.
-	CanManageBilling bool `json:"canManageBilling"`
-	CanManageMembers bool `json:"canManageMembers"`
+	CanManageBilling OptBool `json:"canManageBilling"`
+	CanManageMembers bool    `json:"canManageMembers"`
 	// Whether the caller may see this org's projects and members.
-	CanView         bool `json:"canView"`
+	CanView         OptBool `json:"canView"`
 	AdditionalProps OrgCapabilitiesAdditional
 }
 
@@ -19651,7 +19651,7 @@ func (s *OrgCapabilities) GetCanDelete() bool {
 }
 
 // GetCanManageBilling returns the value of CanManageBilling.
-func (s *OrgCapabilities) GetCanManageBilling() bool {
+func (s *OrgCapabilities) GetCanManageBilling() OptBool {
 	return s.CanManageBilling
 }
 
@@ -19661,7 +19661,7 @@ func (s *OrgCapabilities) GetCanManageMembers() bool {
 }
 
 // GetCanView returns the value of CanView.
-func (s *OrgCapabilities) GetCanView() bool {
+func (s *OrgCapabilities) GetCanView() OptBool {
 	return s.CanView
 }
 
@@ -19686,7 +19686,7 @@ func (s *OrgCapabilities) SetCanDelete(val bool) {
 }
 
 // SetCanManageBilling sets the value of CanManageBilling.
-func (s *OrgCapabilities) SetCanManageBilling(val bool) {
+func (s *OrgCapabilities) SetCanManageBilling(val OptBool) {
 	s.CanManageBilling = val
 }
 
@@ -19696,7 +19696,7 @@ func (s *OrgCapabilities) SetCanManageMembers(val bool) {
 }
 
 // SetCanView sets the value of CanView.
-func (s *OrgCapabilities) SetCanView(val bool) {
+func (s *OrgCapabilities) SetCanView(val OptBool) {
 	s.CanView = val
 }
 
@@ -22212,7 +22212,7 @@ type ProjectCapabilities struct {
 	CanDelete           bool    `json:"canDelete"`
 	CanManageAccess     bool    `json:"canManageAccess"`
 	CanManageAgents     OptBool `json:"canManageAgents"`
-	CanManagePlugins    bool    `json:"canManagePlugins"`
+	CanManagePlugins    OptBool `json:"canManagePlugins"`
 	CanManageTrails     bool    `json:"canManageTrails"`
 	AdditionalProps     ProjectCapabilitiesAdditional
 }
@@ -22238,7 +22238,7 @@ func (s *ProjectCapabilities) GetCanManageAgents() OptBool {
 }
 
 // GetCanManagePlugins returns the value of CanManagePlugins.
-func (s *ProjectCapabilities) GetCanManagePlugins() bool {
+func (s *ProjectCapabilities) GetCanManagePlugins() OptBool {
 	return s.CanManagePlugins
 }
 
@@ -22273,7 +22273,7 @@ func (s *ProjectCapabilities) SetCanManageAgents(val OptBool) {
 }
 
 // SetCanManagePlugins sets the value of CanManagePlugins.
-func (s *ProjectCapabilities) SetCanManagePlugins(val bool) {
+func (s *ProjectCapabilities) SetCanManagePlugins(val OptBool) {
 	s.CanManagePlugins = val
 }
 
