@@ -26,6 +26,8 @@ import (
 type tokenDriverBase struct {
 	name, agent string
 	caps        []tokenCap
+	// headless marks a variant whose agent runs one process per prompt.
+	headless bool
 }
 
 func (b tokenDriverBase) Name() string      { return b.name }
@@ -39,7 +41,9 @@ func (b tokenDriverBase) Caps() map[tokenCap]bool {
 	return m
 }
 func (b tokenDriverBase) Expressible(u tokenCounts) tokenCounts { return u }
-func (b tokenDriverBase) Runs(string) bool                      { return true }
+func (b tokenDriverBase) Runs(scenario string) bool {
+	return !b.headless || headlessScenarios[scenario]
+}
 
 // realDir resolves symlinks so paths match what the CLI computes on macOS.
 func realDir(h *tokenHarness) string {
@@ -174,6 +178,14 @@ func newCodexTokenDriver() codexTokenDriver {
 		caps: []tokenCap{capAttach, capSessionEnd, capTranscriptTokens, capMidTurnTokens, capSubagent}}}
 }
 
+// newCodexExecTokenDriver is `codex exec`: one process per prompt, so
+// SessionStart (startup, then resume) and SessionEnd fire around every turn.
+func newCodexExecTokenDriver() codexTokenDriver {
+	d := newCodexTokenDriver()
+	d.name, d.headless = "codex-exec", true
+	return d
+}
+
 func (codexTokenDriver) Setup(h *tokenHarness) {
 	h.agentDir = filepath.Join(h.env.RepoDir, ".entire", "tmp")
 	h.env.ExtraEnv = append(h.env.ExtraEnv, "ENTIRE_TEST_CODEX_SESSION_DIR="+h.agentDir)
@@ -186,9 +198,9 @@ func (codexTokenDriver) Expressible(u tokenCounts) tokenCounts {
 	return u
 }
 
-func (codexTokenDriver) NewSession(h *tokenHarness) tokenSession {
+func (d codexTokenDriver) NewSession(h *tokenHarness) tokenSession {
 	id := fakeUUID("codex", h.t.Name(), h.nextSessionNumber())
-	s := &codexTokenSession{unsupportedSession: unsupportedSession{"codex"}, h: h, id: id,
+	s := &codexTokenSession{unsupportedSession: unsupportedSession{"codex"}, h: h, id: id, headless: d.headless,
 		path: filepath.Join(h.agentDir, "rollout-2026-01-01T00-00-00-"+id+".jsonl")}
 	s.line("session_meta", map[string]any{"session_id": id, "id": id, "timestamp": "2026-01-01T00:00:00.000Z",
 		"cwd": h.sessionDir(id), "originator": "codex_exec", "cli_version": "0.156.1", "source": "exec",
@@ -210,6 +222,7 @@ type codexTokenSession struct {
 
 	h        *tokenHarness
 	id, path string
+	headless bool
 	ordinal  int
 	turn     int
 	turnID   string
@@ -250,6 +263,9 @@ func codexUsage(u tokenCounts) map[string]any {
 
 func (s *codexTokenSession) StartTurn(prompt string) {
 	s.turn++
+	if s.headless && s.turn > 1 {
+		s.hook("session-start", "SessionStart", map[string]any{"source": "resume"})
+	}
 	s.turnID = fakeUUID(s.id, "turn", s.turn)
 	s.turnUsage = tokenCounts{}
 	s.event(map[string]any{"type": "task_started", "turn_id": s.turnID, "root_turn_id": s.turnID,
@@ -350,10 +366,13 @@ func codexChildID(agentID string) string {
 }
 
 // Stop: the turn's last token_count is already written; task_complete comes
-// next, then the Stop hook.
+// next, then the Stop hook. `codex exec` then exits (SessionEnd).
 func (s *codexTokenSession) Stop() {
 	s.event(map[string]any{"type": "task_complete", "turn_id": s.turnID, "last_agent_message": "done"})
 	s.turnHook("stop", "Stop", map[string]any{"stop_hook_active": false, "last_assistant_message": "done"})
+	if s.headless {
+		s.SessionEnd()
+	}
 }
 
 func (s *codexTokenSession) SessionEnd() {
@@ -369,18 +388,27 @@ func newCopilotTokenDriver() copilotTokenDriver {
 		caps: []tokenCap{capAttach, capSessionEnd, capTranscriptTokens, capMidTurnTokens}}}
 }
 
+// newCopilotHeadlessTokenDriver is `copilot -p`: one process per prompt.
+// userPromptSubmitted fires before sessionStart, and session.shutdown is
+// appended after the agent-stop and session-end hooks of every process.
+func newCopilotHeadlessTokenDriver() copilotTokenDriver {
+	d := newCopilotTokenDriver()
+	d.name, d.headless = "copilot-cli-p", true
+	return d
+}
+
 func (copilotTokenDriver) Setup(h *tokenHarness) {
 	h.agentDir = realDir(h)
 	h.env.ExtraEnv = append(h.env.ExtraEnv, "ENTIRE_TEST_COPILOT_SESSION_DIR="+h.agentDir)
 }
 
-func (copilotTokenDriver) NewSession(h *tokenHarness) tokenSession {
+func (d copilotTokenDriver) NewSession(h *tokenHarness) tokenSession {
 	id := fakeUUID("copilot", h.t.Name(), h.nextSessionNumber())
-	s := &copilotTokenSession{unsupportedSession: unsupportedSession{"copilot-cli"}, h: h, id: id,
+	s := &copilotTokenSession{unsupportedSession: unsupportedSession{"copilot-cli"}, h: h, id: id, headless: d.headless,
 		path: filepath.Join(h.agentDir, id, "events.jsonl")}
-	s.event("session.start", map[string]any{"sessionId": s.id, "version": 1, "producer": "copilot-agent",
-		"copilotVersion": "1.0.97", "selectedModel": "claude-test", "context": map[string]any{"cwd": h.sessionDir(id)}})
-	s.hook("session-start", map[string]any{"source": "new"})
+	if !d.headless {
+		s.startProcess("")
+	}
 	return s
 }
 
@@ -397,6 +425,8 @@ type copilotTokenSession struct {
 
 	h          *tokenHarness
 	id, path   string
+	headless   bool
+	started    bool
 	prev       string
 	seq, calls int
 	turnID     int
@@ -424,8 +454,32 @@ func (s *copilotTokenSession) hook(name string, extra map[string]any) {
 	hookCall(s.h, s.h.sessionDir(s.id), "copilot-cli", name, in)
 }
 
+// startProcess writes session.start (or session.resume) and fires
+// sessionStart, as a new copilot process does.
+func (s *copilotTokenSession) startProcess(prompt string) {
+	source := "new"
+	if s.started {
+		source = "resume"
+		s.event("session.resume", map[string]any{"eventCount": s.seq, "selectedModel": "claude-test",
+			"context": map[string]any{"cwd": s.h.sessionDir(s.id)}})
+	} else {
+		s.event("session.start", map[string]any{"sessionId": s.id, "version": 1, "producer": "copilot-agent",
+			"copilotVersion": "1.0.97", "selectedModel": "claude-test", "context": map[string]any{"cwd": s.h.sessionDir(s.id)}})
+	}
+	s.started = true
+	extra := map[string]any{"source": source}
+	if prompt != "" {
+		extra["initialPrompt"] = prompt
+	}
+	s.hook("session-start", extra)
+}
+
 func (s *copilotTokenSession) StartTurn(prompt string) {
 	s.hook("user-prompt-submitted", map[string]any{"prompt": prompt})
+	if s.headless {
+		// copilot -p: the prompt hook fires before the process's sessionStart.
+		s.startProcess(prompt)
+	}
 	s.turnID = 0
 	s.event("user.message", map[string]any{"content": prompt, "messageId": fakeUUID(s.id, "prompt", s.seq)})
 }
@@ -477,8 +531,12 @@ func (s *copilotTokenSession) Spend(u tokenCounts) {
 	s.turnID++
 }
 
+// Stop fires agent-stop; a headless process then exits.
 func (s *copilotTokenSession) Stop() {
 	s.hook("agent-stop", map[string]any{"transcriptPath": s.path, "stopReason": "end_turn", "stop_hook_active": false})
+	if s.headless {
+		s.SessionEnd()
+	}
 }
 
 // SessionEnd is the process exiting: the session-end hook runs, then the

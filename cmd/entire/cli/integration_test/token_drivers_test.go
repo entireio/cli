@@ -180,13 +180,33 @@ func (u unsupportedSession) SessionEnd()                        { u.fail("Sessio
 func (u unsupportedSession) Compact()                           { u.fail("Compact") }
 func (u unsupportedSession) Fork() tokenSession                 { u.fail("Fork"); return nil }
 
+// headlessScenarios is what a headless variant driver (one agent process per
+// prompt, so a session end and a session start around every turn) runs: the
+// rows where that can change the outcome. Scenarios that end the session
+// themselves stay with the interactive driver.
+var headlessScenarios = map[string]bool{
+	"plain turns":                         true,
+	"no-file turn then commit":            true,
+	"mid-turn agent commit":               true,
+	"mid-turn agent commit of every file": true,
+	"real-run replay":                     true,
+}
+
 // --- Claude Code ---
 
-type claudeTokenDriver struct{}
+// claudeTokenDriver drives Claude Code. headless is `claude -p`: every prompt
+// is its own process, so SessionStart (source startup, then resume) and
+// SessionEnd fire around every turn.
+type claudeTokenDriver struct{ headless bool }
 
-func (claudeTokenDriver) Name() string      { return "claude-code" }
-func (claudeTokenDriver) AgentName() string { return agentClaudeCode }
-func (claudeTokenDriver) FullMatrix() bool  { return true }
+func (d claudeTokenDriver) Name() string {
+	if d.headless {
+		return "claude-code-p"
+	}
+	return "claude-code"
+}
+func (claudeTokenDriver) AgentName() string  { return agentClaudeCode }
+func (d claudeTokenDriver) FullMatrix() bool { return !d.headless }
 func (d claudeTokenDriver) Caps() map[tokenCap]bool {
 	return map[tokenCap]bool{
 		capSubagent: true, capBackgroundSubagent: true, capSessionEnd: true, capCompact: true,
@@ -196,12 +216,14 @@ func (d claudeTokenDriver) Caps() map[tokenCap]bool {
 }
 func (claudeTokenDriver) Setup(*tokenHarness)                   {}
 func (claudeTokenDriver) Expressible(u tokenCounts) tokenCounts { return u }
-func (claudeTokenDriver) Runs(string) bool                      { return true }
+func (d claudeTokenDriver) Runs(scenario string) bool {
+	return !d.headless || headlessScenarios[scenario]
+}
 
-func (claudeTokenDriver) NewSession(h *tokenHarness) tokenSession {
+func (d claudeTokenDriver) NewSession(h *tokenHarness) tokenSession {
 	id := fakeUUID("claude", h.t.Name(), h.nextSessionNumber())
 	s := &claudeTokenSession{
-		h: h, id: id,
+		h: h, id: id, headless: d.headless,
 		path: filepath.Join(h.env.ClaudeProjectDir, id+".jsonl"),
 	}
 	s.hook("session-start", "SessionStart", map[string]any{"source": "startup"})
@@ -220,6 +242,7 @@ func (claudeTokenDriver) NewSession(h *tokenHarness) tokenSession {
 type claudeTokenSession struct {
 	h        *tokenHarness
 	id, path string
+	headless bool
 	seq      int
 	turns    int
 	promptID string
@@ -296,6 +319,9 @@ func thinkingBlock() map[string]any {
 
 func (s *claudeTokenSession) StartTurn(prompt string) {
 	s.turns++
+	if s.headless && s.turns > 1 {
+		s.hook("session-start", "SessionStart", map[string]any{"source": "resume"})
+	}
 	s.promptID = fakeUUID(s.id, "prompt", s.turns)
 	ts := nowMillis()
 	s.appendLines(
@@ -421,7 +447,8 @@ func (s *claudeTokenSession) DeleteSubagentTranscript(agentID string) {
 }
 
 // Stop fires the Stop hook, then appends what Claude writes after it: the
-// hook summary, the prompt pointer and the running cost state.
+// hook summary, the prompt pointer and the running cost state. A headless
+// (-p) process then exits, firing SessionEnd.
 func (s *claudeTokenSession) Stop() {
 	s.hook("stop", "Stop", map[string]any{"stop_hook_active": false, "last_assistant_message": "done",
 		"permission_mode": "default", "background_tasks": []any{}, "session_crons": []any{}})
@@ -433,6 +460,9 @@ func (s *claudeTokenSession) Stop() {
 			"inputTokens": s.spent.In, "outputTokens": s.spent.Out,
 			"cacheReadInputTokens": s.spent.CacheRead, "cacheCreationInputTokens": s.spent.CacheWrite}}},
 	)
+	if s.headless {
+		s.SessionEnd()
+	}
 }
 
 func (s *claudeTokenSession) SessionEnd() {

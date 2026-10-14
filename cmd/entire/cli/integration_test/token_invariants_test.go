@@ -42,9 +42,10 @@ import (
 // usage is written where the real agent writes it relative to the tool
 // running (see token_drivers_test.go).
 //
-// By default Claude Code and Vogon run the full scenario table and the
-// other drivers run the smoke subset; ENTIRE_TOKEN_MATRIX=full runs
-// everything.
+// By default Claude Code and Vogon run the full scenario table, the other
+// drivers run the smoke subset, and the headless variants (claude-code-p,
+// codex-exec, copilot-cli-p) run headlessScenarios; ENTIRE_TOKEN_MATRIX=full
+// runs everything.
 
 const tokenMatrixEnv = "ENTIRE_TOKEN_MATRIX"
 
@@ -542,6 +543,24 @@ func turnTokenScenarios() []tokenScenario {
 			h.stop(s)
 			h.commit(append(ab[1:], c...)...)
 		}},
+		{name: "real-run replay", smoke: true, run: func(h *tokenHarness) {
+			// The prompts of the 2026-10-14 real-agent run: create a file; add
+			// one and have the agent commit everything; a question; create
+			// a file, committed by the user.
+			s := h.newSession()
+			a := h.turn(s, 1)
+			h.stop(s)
+			h.startTurn(s)
+			b := h.writeFiles(s, 1)
+			h.agentCommit(s, append(a, b...)...)
+			h.spend(s)
+			h.stop(s)
+			h.turn(s, 0)
+			h.stop(s)
+			c := h.turn(s, 1)
+			h.stop(s)
+			h.commit(c...)
+		}},
 	}
 }
 
@@ -1000,6 +1019,9 @@ var (
 	bugN9 = tokenKnownBug{"N9", "Antigravity: the statusline's total_input_tokens is a context-size gauge, not a " +
 		"running total, so input is under-counted; and snapshots lag one call, so a run's last call is missing " +
 		"until the next run", []string{bUnder, cStUnder, cCliUnder}}
+	bugN10 = tokenKnownBug{"N10", "a headless session (a process per prompt) that ends after a turn without file " +
+		"changes is deleted as orphaned at the next SessionStart; the new state recounts the whole transcript (as 2) " +
+		"and the session total restarts", []string{bOver, dCpOver}}
 )
 
 // withKeys returns the bug expecting keys instead of its usual ones.
@@ -1026,6 +1048,7 @@ func bugs(kbs ...tokenKnownBug) []tokenKnownBug { return kbs }
 // through it, so they are not listed for that agent.
 var tokenKnownBugs = map[string][]tokenKnownBug{
 	"mid-turn agent commit of every file/*":       bugs(bug5),
+	"real-run replay/*":                           bugs(bug5),
 	"attach ended session/*":                      bugs(bug5),
 	"amend twice/*":                               bugs(bug4),
 	"amend after a no-file turn/*":                bugs(bug4, bug5),
@@ -1045,9 +1068,17 @@ var tokenKnownBugs = map[string][]tokenKnownBug{
 	"transcript shrinks on resume restore/*":      bugs(bug5, bugN2),
 	"split message across commit/*":               bugs(bug6),
 
+	// Headless variants: a session-end after the no-file turn lets the next
+	// SessionStart delete the state.
+	"no-file turn then commit/claude-code-p": bugs(bug5, bugN10),
+	"real-run replay/claude-code-p":          bugs(bug5, bugN10),
+	"no-file turn then commit/codex-exec":    bugs(bug5, bugN10),
+	"real-run replay/codex-exec":             bugs(bug5, bugN10),
+
 	// Cursor reports a turn's tokens only in its Stop payload.
 	"attach ended session/cursor":                 bugs(bug5Cursor),
 	"mid-turn agent commit of every file/cursor":  bugs(bug5Cursor),
+	"real-run replay/cursor":                      bugs(bug5Cursor),
 	"no-file turn then commit/cursor":             bugs(bug5Cursor),
 	"no-file turn, session end, resume/cursor":    bugs(bug5Cursor),
 	"resume same machine with tail/cursor":        bugs(bug5Cursor),
@@ -1070,6 +1101,17 @@ var tokenKnownBugs = map[string][]tokenKnownBug{
 	"crash then exited-owner sweep/copilot-cli":     bugs(bugN1),
 	"no-file turn, session end, resume/copilot-cli": bugs(bug5, bugN6, bugN8.withKeys(dStOver)),
 
+	// copilot -p: every prompt's process appends a cumulative shutdown, so
+	// tokens arrive one process late (N6) and cache-inclusive (N8).
+	"plain turns/copilot-cli-p": bugs(bugN6.withKeys(cStUnder, cCliUnder),
+		bugN8.withKeys(bMixed, cStMixed, dCpOver, dStOver)),
+	"no-file turn then commit/copilot-cli-p": bugs(bugN6.withKeys(cStUnder, cCliUnder),
+		bugN8.withKeys(bMixed, cStMixed, dCpOver, dStOver)),
+	"real-run replay/copilot-cli-p": bugs(bugN6.withKeys(cStUnder, cCliUnder),
+		bugN8.withKeys(bMixed, cStMixed, dCpOver, dStOver)),
+	"mid-turn agent commit/copilot-cli-p":               bugs(bugN6, bugN8.withKeys(dStOver)),
+	"mid-turn agent commit of every file/copilot-cli-p": bugs(bugN6, bugN8.withKeys(dStOver)),
+
 	"*/antigravity": bugs(bugN9),
 }
 
@@ -1085,9 +1127,12 @@ func lookupKnownBugs(scenario, driver string) []tokenKnownBug {
 func tokenDrivers() []tokenAgentDriver {
 	return []tokenAgentDriver{
 		claudeTokenDriver{},
+		claudeTokenDriver{headless: true},
 		newCursorTokenDriver(),
 		newCodexTokenDriver(),
+		newCodexExecTokenDriver(),
 		newCopilotTokenDriver(),
+		newCopilotHeadlessTokenDriver(),
 		newDroidTokenDriver(),
 		newOpenCodeTokenDriver(),
 		newPiTokenDriver(),
