@@ -43,12 +43,77 @@
           },
           "orgName": {
             "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "reference": {
+            "$ref": "#/components/schemas/InvitationReference"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "repoName": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member",
+              "reader",
+              "writer"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "org",
+              "project",
+              "repo"
+            ],
+            "type": "string"
           }
         },
         "required": [
+          "scope",
           "orgId",
           "orgName",
-          "membership"
+          "role"
+        ],
+        "type": "object"
+      },
+      "AccountByUsername": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/AccountByUsername.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "username"
         ],
         "type": "object"
       },
@@ -66,6 +131,10 @@
               "$ref": "#/components/schemas/AccountProfileHandle"
             },
             "type": "array"
+          },
+          "username": {
+            "description": "The account's Entire username. Omitted until claimed.",
+            "type": "string"
           }
         },
         "required": [
@@ -105,6 +174,10 @@
               "$ref": "#/components/schemas/AccountProfileOrganization"
             },
             "type": "array"
+          },
+          "username": {
+            "description": "The account's Entire username. Omitted until claimed.",
+            "type": "string"
           }
         },
         "required": [
@@ -264,6 +337,125 @@
           "repo",
           "access",
           "status"
+        ],
+        "type": "object"
+      },
+      "BillingCompleteRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/BillingCompleteRequest.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "checkoutSessionId": {
+            "description": "The Checkout session id from the return URL.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "checkoutSessionId"
+        ],
+        "type": "object"
+      },
+      "BillingSignupRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/BillingSignupRequest.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "cancelUrl": {
+            "description": "Absolute https URL on entire.io or partial.to.",
+            "type": "string"
+          },
+          "returnUrl": {
+            "description": "Absolute https URL on entire.io or partial.to. Include the literal {CHECKOUT_SESSION_ID} so the return page learns the session id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "returnUrl",
+          "cancelUrl"
+        ],
+        "type": "object"
+      },
+      "BillingSignupResult": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/BillingSignupResult.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "checkoutUrl": {
+            "description": "Stripe Checkout URL. Empty when the card is already saved.",
+            "type": "string"
+          },
+          "currency": {
+            "description": "Billing currency. Empty until sign-up starts.",
+            "type": "string"
+          },
+          "state": {
+            "description": "not_started: nothing created. pending_card: waiting for the card. provisioning: card saved, setup unfinished and retried automatically. active: signed up.",
+            "enum": [
+              "not_started",
+              "pending_card",
+              "provisioning",
+              "active"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "BillingStatus": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/BillingStatus.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "currency": {
+            "description": "Billing currency. Empty until sign-up starts.",
+            "type": "string"
+          },
+          "state": {
+            "description": "not_started: nothing created. pending_card: waiting for the card. provisioning: card saved, setup unfinished and retried automatically. active: signed up.",
+            "enum": [
+              "not_started",
+              "pending_card",
+              "provisioning",
+              "active"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
         ],
         "type": "object"
       },
@@ -937,6 +1129,10 @@
           "handle_provider": {
             "description": "Provider the handle came from: github, workos, system",
             "type": "string"
+          },
+          "username": {
+            "description": "Actor's Entire username; omitted until claimed",
+            "type": "string"
           }
         },
         "required": [
@@ -1106,6 +1302,33 @@
         },
         "required": [
           "needsOnboarding"
+        ],
+        "type": "object"
+      },
+      "ConnectOrgCIBitriseOrganizationInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ConnectOrgCIBitriseOrganizationInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "oidc_policy_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "oidc_policy_id"
         ],
         "type": "object"
       },
@@ -1354,7 +1577,7 @@
             "type": "string"
           },
           "state": {
-            "description": "Opaque state interpreted by the selected plugin profile",
+            "description": "Opaque state from a plugin-started install. Required for an org installation. Without one, a project installation gets no receipt",
             "maxLength": 1024,
             "type": "string"
           }
@@ -2079,7 +2302,7 @@
             "type": "string"
           },
           "dryRun": {
-            "description": "Evaluate the preconditions and the access diff, and change nothing.",
+            "description": "Evaluate the preconditions and change nothing.",
             "type": "boolean"
           },
           "name": {
@@ -2115,7 +2338,8 @@
             "type": "string"
           },
           "access": {
-            "description": "Every account, team, automation, and project with access today.",
+            "deprecated": true,
+            "description": "Deprecated: always empty. After the detach, only the target project grants member access. A public repository stays public, and platform admins keep access.",
             "items": {
               "$ref": "#/components/schemas/DetachAccessEntry"
             },
@@ -2127,13 +2351,6 @@
           "eligible": {
             "description": "True when every precondition passes.",
             "type": "boolean"
-          },
-          "lostAccess": {
-            "description": "Real detach only. The access sources the target project does not cover, which the detach removed. An empty list when nobody lost access. Absent on a resume, which does not know who lost access.",
-            "items": {
-              "$ref": "#/components/schemas/DetachAccessEntry"
-            },
-            "type": "array"
           },
           "name": {
             "description": "Native repository name the detach would use.",
@@ -2415,6 +2632,15 @@
           "installation_id": {
             "type": "string"
           },
+          "lifecycle_state": {
+            "description": "active, suspended, or deleting",
+            "enum": [
+              "active",
+              "suspended",
+              "deleting"
+            ],
+            "type": "string"
+          },
           "next_cursor": {
             "description": "Present when more repositories remain",
             "type": "string"
@@ -2442,6 +2668,19 @@
             "description": "Increases with each change; matches the installation lifecycle events",
             "format": "int64",
             "type": "integer"
+          },
+          "suspended_at": {
+            "description": "While suspended: when the suspension started",
+            "format": "date-time",
+            "type": "string"
+          },
+          "suspended_by": {
+            "description": "While suspended: plugin or customer. Only that side resumes.",
+            "enum": [
+              "plugin",
+              "customer"
+            ],
+            "type": "string"
           }
         },
         "required": [
@@ -2450,6 +2689,7 @@
           "repositories",
           "installation_id",
           "account",
+          "lifecycle_state",
           "created_at"
         ],
         "type": "object"
@@ -2770,7 +3010,7 @@
             "type": "string"
           },
           "email": {
-            "description": "The invited address, normalized to lowercase.",
+            "description": "The invited address, normalized to lowercase. Empty for an account-targeted invitation.",
             "type": "string"
           },
           "expiresAt": {
@@ -2788,6 +3028,14 @@
             "$ref": "#/components/schemas/AccountIdentity",
             "description": "Resolved identity for InvitedBy. Absent when it cannot be resolved."
           },
+          "inviteeAccountId": {
+            "description": "The invited account. Empty for an email invitation.",
+            "type": "string"
+          },
+          "inviteeIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InviteeAccountID. Absent when it cannot be resolved."
+          },
           "revokedAt": {
             "format": "date-time",
             "type": "string"
@@ -2802,12 +3050,34 @@
         },
         "required": [
           "id",
-          "email",
           "role",
           "status",
           "invitedBy",
           "createdAt",
           "expiresAt"
+        ],
+        "type": "object"
+      },
+      "InvitationReference": {
+        "additionalProperties": true,
+        "properties": {
+          "host": {
+            "enum": [
+              "et",
+              "gh"
+            ],
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "project"
         ],
         "type": "object"
       },
@@ -2919,6 +3189,30 @@
         ],
         "type": "object"
       },
+      "ListMeInvitationsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListMeInvitationsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "invitations": {
+            "items": {
+              "$ref": "#/components/schemas/MeInvitation"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "invitations"
+        ],
+        "type": "object"
+      },
       "ListMirrorCollaboratorsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -2971,6 +3265,30 @@
         ],
         "type": "object"
       },
+      "ListNativeMirrorTargetsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListNativeMirrorTargetsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/NativeMirrorTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "targets"
+        ],
+        "type": "object"
+      },
       "ListNativeMirrorsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -3020,6 +3338,30 @@
         },
         "required": [
           "providers"
+        ],
+        "type": "object"
+      },
+      "ListOrgCIBitriseOrganizationsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListOrgCIBitriseOrganizationsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "connections": {
+            "items": {
+              "$ref": "#/components/schemas/OrgCIBitriseConnectionView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "connections"
         ],
         "type": "object"
       },
@@ -3271,6 +3613,35 @@
         ],
         "type": "object"
       },
+      "ListPluginsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListPluginsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "next_cursor": {
+            "description": "Present when more plugins remain",
+            "type": "string"
+          },
+          "plugins": {
+            "description": "Plugins in display order",
+            "items": {
+              "$ref": "#/components/schemas/Plugin"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "plugins"
+        ],
+        "type": "object"
+      },
       "ListProjectCollaboratorsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -3324,6 +3695,30 @@
         },
         "required": [
           "members"
+        ],
+        "type": "object"
+      },
+      "ListProjectNativeMirrorTargetsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListProjectNativeMirrorTargetsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/NativeMirrorTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "targets"
         ],
         "type": "object"
       },
@@ -3597,6 +3992,34 @@
         ],
         "type": "object"
       },
+      "ListResourceInvitationsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListResourceInvitationsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "invitations": {
+            "items": {
+              "$ref": "#/components/schemas/ResourceInvitation"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invitations"
+        ],
+        "type": "object"
+      },
       "ListServiceAccountGrantsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -3755,6 +4178,10 @@
           },
           "homeJurisdiction": {
             "type": "string"
+          },
+          "username": {
+            "description": "The account's Entire username. Empty until claimed.",
+            "type": "string"
           }
         },
         "required": [
@@ -3785,6 +4212,73 @@
           "provider",
           "handle",
           "providerUserId"
+        ],
+        "type": "object"
+      },
+      "MeInvitation": {
+        "additionalProperties": true,
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expiresAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "invitedBy": {
+            "description": "Account ID of the inviter. Empty when that account has been erased.",
+            "type": "string"
+          },
+          "invitedByIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InvitedBy. Absent when it cannot be resolved."
+          },
+          "orgId": {
+            "description": "The owning organization, when the scope has one.",
+            "type": "string"
+          },
+          "orgName": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member",
+              "reader",
+              "writer"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "org",
+              "project",
+              "repo"
+            ],
+            "type": "string"
+          },
+          "scopeId": {
+            "description": "Org, project, or repository ID.",
+            "type": "string"
+          },
+          "scopeName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "scopeId",
+          "scopeName",
+          "role",
+          "invitedBy",
+          "createdAt",
+          "expiresAt"
         ],
         "type": "object"
       },
@@ -3882,6 +4376,10 @@
           },
           "status": {
             "description": "Membership lifecycle status.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The member's Entire username. Omitted until claimed.",
             "type": "string"
           },
           "workosOrgMembershipId": {
@@ -4011,6 +4509,10 @@
           },
           "role": {
             "description": "reader (pull) or writer (pull+push).",
+            "type": "string"
+          },
+          "username": {
+            "description": "The account's Entire username. Omitted until claimed.",
             "type": "string"
           }
         },
@@ -4183,6 +4685,28 @@
         ],
         "type": "object"
       },
+      "NativeMirrorTarget": {
+        "additionalProperties": true,
+        "properties": {
+          "cell": {
+            "description": "Region id, matching a topology region's id.",
+            "type": "string"
+          },
+          "clusterSlug": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "description": "Jurisdiction id, matching a topology jurisdiction's id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "clusterSlug",
+          "jurisdiction",
+          "cell"
+        ],
+        "type": "object"
+      },
       "OIDCProvider": {
         "additionalProperties": true,
         "properties": {
@@ -4242,6 +4766,43 @@
           "name",
           "region",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "OrgCIBitriseConnectionView": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/OrgCIBitriseConnectionView.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "type": "string"
+          },
+          "connected_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "oidc_policy_id": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "account",
+          "owner",
+          "oidc_policy_id"
         ],
         "type": "object"
       },
@@ -4451,7 +5012,15 @@
           "canDelete": {
             "type": "boolean"
           },
+          "canManageBilling": {
+            "description": "Whether the caller may view and manage this org's billing.",
+            "type": "boolean"
+          },
           "canManageMembers": {
+            "type": "boolean"
+          },
+          "canView": {
+            "description": "Whether the caller may see this org's projects and members.",
             "type": "boolean"
           }
         },
@@ -4459,6 +5028,8 @@
           "canCreateProject",
           "canManageMembers",
           "canDelete",
+          "canView",
+          "canManageBilling",
           "canChangeOwners"
         ],
         "type": "object"
@@ -4498,6 +5069,10 @@
           },
           "status": {
             "description": "Membership lifecycle status.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The member's Entire username. Omitted until claimed.",
             "type": "string"
           },
           "workosOrgMembershipId": {
@@ -4548,6 +5123,10 @@
             "$ref": "#/components/schemas/OrgPersonMembership"
           },
           "provider": {
+            "type": "string"
+          },
+          "username": {
+            "description": "The account's Entire username. Omitted until claimed.",
             "type": "string"
           }
         },
@@ -4695,6 +5274,10 @@
           },
           "provider": {
             "type": "string"
+          },
+          "username": {
+            "description": "The account's Entire username. Omitted until claimed.",
+            "type": "string"
           }
         },
         "required": [
@@ -4738,6 +5321,107 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "Plugin": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/Plugin.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "description": {
+            "description": "Display description",
+            "type": "string"
+          },
+          "id": {
+            "description": "Plugin id (plugin_<ULID>)",
+            "type": "string"
+          },
+          "install_levels": {
+            "description": "Where the plugin installs",
+            "items": {
+              "enum": [
+                "org",
+                "project"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "installable_project_id": {
+            "description": "The only project that can install the plugin. Absent when any project can",
+            "type": "string"
+          },
+          "logo_url": {
+            "description": "Logo URL. A path without a host is on the web app's origin",
+            "type": "string"
+          },
+          "name": {
+            "description": "Display name",
+            "type": "string"
+          },
+          "permissions": {
+            "description": "Repository access an installation grants. A project installation also reads itself",
+            "items": {
+              "$ref": "#/components/schemas/PluginPermission"
+            },
+            "type": "array"
+          },
+          "slug": {
+            "description": "Plugin slug, the {plugin} in plugin paths",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "logo_url",
+          "install_levels",
+          "permissions"
+        ],
+        "type": "object"
+      },
+      "PluginAccessTokenOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/PluginAccessTokenOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "permissions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "token": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "username",
+          "expires_at",
+          "permissions"
+        ],
         "type": "object"
       },
       "PluginInstallation": {
@@ -4825,6 +5509,15 @@
           "installation_id": {
             "type": "string"
           },
+          "lifecycle_state": {
+            "description": "active, suspended, or deleting",
+            "enum": [
+              "active",
+              "suspended",
+              "deleting"
+            ],
+            "type": "string"
+          },
           "org_id": {
             "type": "string"
           },
@@ -4833,12 +5526,127 @@
           },
           "repository_selection": {
             "type": "string"
+          },
+          "suspended_at": {
+            "description": "While suspended: when the suspension started",
+            "format": "date-time",
+            "type": "string"
+          },
+          "suspended_by": {
+            "description": "While suspended: plugin or customer. Only that side resumes.",
+            "enum": [
+              "plugin",
+              "customer"
+            ],
+            "type": "string"
           }
         },
         "required": [
           "installation_id",
           "account",
+          "lifecycle_state",
           "created_at"
+        ],
+        "type": "object"
+      },
+      "PluginPermission": {
+        "additionalProperties": true,
+        "properties": {
+          "access": {
+            "description": "Access, such as read",
+            "type": "string"
+          },
+          "description": {
+            "description": "The permission as an installer reads it",
+            "type": "string"
+          },
+          "resource": {
+            "description": "Resource, such as contents",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource",
+          "access",
+          "description"
+        ],
+        "type": "object"
+      },
+      "PluginRepoPlacement": {
+        "additionalProperties": true,
+        "properties": {
+          "api_base_url": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "region",
+          "role"
+        ],
+        "type": "object"
+      },
+      "PluginRepositoriesOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/PluginRepositoriesOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "next_cursor": {
+            "description": "Always null: the list is one page."
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/PluginRepository"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "repositories",
+          "next_cursor"
+        ],
+        "type": "object"
+      },
+      "PluginRepository": {
+        "additionalProperties": true,
+        "properties": {
+          "clone_url": {
+            "type": "string"
+          },
+          "entire_clone_url": {
+            "type": "string"
+          },
+          "full_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "placements": {
+            "items": {
+              "$ref": "#/components/schemas/PluginRepoPlacement"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "full_name",
+          "clone_url",
+          "entire_clone_url",
+          "placements"
         ],
         "type": "object"
       },
@@ -4861,6 +5669,69 @@
         },
         "required": [
           "token"
+        ],
+        "type": "object"
+      },
+      "Problem": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/Problem.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "api_base_url": {
+            "description": "wrong_cell only: the processing primary's API base URL to retry.",
+            "type": "string"
+          },
+          "code": {
+            "description": "Stable machine-readable code (not_found, no_primary, wrong_cell, …).",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Human-readable sentence. Can change any time — branch on code, never on detail.",
+            "type": "string"
+          },
+          "git_command": {
+            "description": "moved only: the git command that points an existing clone at the new address.",
+            "type": "string"
+          },
+          "moved_to": {
+            "description": "moved only: the repo path that now holds the repo (e.g. \"et/acme/api\").",
+            "type": "string"
+          },
+          "region": {
+            "description": "wrong_cell only: the processing primary's public region name.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Opaque id for this request; give it to support to locate server logs.",
+            "type": "string"
+          },
+          "status": {
+            "description": "HTTP status code.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "title": {
+            "description": "Short human summary of the status.",
+            "type": "string"
+          },
+          "type": {
+            "description": "URL of this error's documentation page.",
+            "format": "uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code"
         ],
         "type": "object"
       },
@@ -4942,6 +5813,12 @@
           "canManageAccess": {
             "type": "boolean"
           },
+          "canManageAgents": {
+            "type": "boolean"
+          },
+          "canManagePlugins": {
+            "type": "boolean"
+          },
           "canManageTrails": {
             "type": "boolean"
           }
@@ -4950,7 +5827,8 @@
           "canDelete",
           "canManageAccess",
           "canCreateRepository",
-          "canManageTrails"
+          "canManageTrails",
+          "canManagePlugins"
         ],
         "type": "object"
       },
@@ -4967,6 +5845,10 @@
             "type": "string"
           },
           "handle": {
+            "type": "string"
+          },
+          "username": {
+            "description": "The account's Entire username. Omitted until claimed.",
             "type": "string"
           }
         },
@@ -4989,6 +5871,10 @@
             "type": "string"
           },
           "granteeType": {
+            "type": "string"
+          },
+          "granteeUsername": {
+            "description": "The account's Entire username. Omitted until claimed and for non-account grantees.",
             "type": "string"
           },
           "role": {
@@ -5216,6 +6102,10 @@
               "admin"
             ],
             "type": "string"
+          },
+          "username": {
+            "description": "The account's Entire username. Omitted until claimed.",
+            "type": "string"
           }
         },
         "required": [
@@ -5324,6 +6214,10 @@
             "type": "string"
           },
           "granteeType": {
+            "type": "string"
+          },
+          "granteeUsername": {
+            "description": "The account's Entire username. Omitted until claimed and for non-account grantees.",
             "type": "string"
           },
           "role": {
@@ -5776,6 +6670,10 @@
           },
           "providerUserId": {
             "type": "string"
+          },
+          "username": {
+            "description": "The account's Entire username. Omitted until claimed.",
+            "type": "string"
           }
         },
         "required": [
@@ -5810,6 +6708,144 @@
         ],
         "type": "object"
       },
+      "ResourceInvitation": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResourceInvitation.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "acceptedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "acceptedBy": {
+            "description": "Account ID that used the token. Empty until the invitation is accepted.",
+            "type": "string"
+          },
+          "acceptedByIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for AcceptedBy. Absent when it cannot be resolved."
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "declinedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "email": {
+            "description": "The invited address, normalized to lowercase. Empty for an account-targeted invitation.",
+            "type": "string"
+          },
+          "expiresAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "invitedBy": {
+            "description": "Account ID of the manager who created the invitation. Empty when that account has been erased.",
+            "type": "string"
+          },
+          "invitedByIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InvitedBy. Absent when it cannot be resolved."
+          },
+          "inviteeAccountId": {
+            "description": "The invited account. Empty for an email invitation.",
+            "type": "string"
+          },
+          "inviteeIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InviteeAccountID. Absent when it cannot be resolved."
+          },
+          "revokedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "project",
+              "repo"
+            ],
+            "type": "string"
+          },
+          "scopeId": {
+            "description": "Project ID or repository ID.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Derived from the outcome columns at read time.",
+            "enum": [
+              "open",
+              "accepted",
+              "revoked",
+              "expired",
+              "declined"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "scopeId",
+          "role",
+          "status",
+          "invitedBy",
+          "createdAt",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
+      "ResourceInvitationBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResourceInvitationBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "email": {
+            "format": "email",
+            "type": "string"
+          },
+          "role": {
+            "default": "reader",
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "role"
+        ],
+        "type": "object"
+      },
       "ResourcePeopleOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -5821,6 +6857,13 @@
             "format": "uri",
             "readOnly": true,
             "type": "string"
+          },
+          "invitations": {
+            "description": "Outstanding (open and expired) invitations. Only grant managers on the scope's home core get them, on the first page of an unfiltered request.",
+            "items": {
+              "$ref": "#/components/schemas/ResourceInvitation"
+            },
+            "type": "array"
           },
           "items": {
             "items": {
@@ -5884,6 +6927,10 @@
               "$ref": "#/components/schemas/ResourcePersonSource"
             },
             "type": "array"
+          },
+          "username": {
+            "description": "The account's Entire username. Omitted until claimed.",
+            "type": "string"
           }
         },
         "required": [
@@ -6057,6 +7104,51 @@
           "status",
           "systemManaged",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "SetMyUsernameInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetMyUsernameInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "username": {
+            "description": "1-39 letters, digits or '-'; no leading, trailing or double '-'. Unique case-insensitively.",
+            "maxLength": 39,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "username"
+        ],
+        "type": "object"
+      },
+      "SetMyUsernameOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetMyUsernameOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username"
         ],
         "type": "object"
       },
@@ -6349,9 +7441,21 @@
       }
     },
     "securitySchemes": {
+      "automationToken": {
+        "bearerFormat": "JWT",
+        "description": "A token this core issued to an automation, such as a plugin installation's.",
+        "scheme": "bearer",
+        "type": "http"
+      },
       "bearerAuth": {
         "bearerFormat": "JWT",
         "description": "Bearer access token.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "pluginToken": {
+        "bearerFormat": "JWT",
+        "description": "A JWT the plugin signs with its registered keys, for the installation it names.",
         "scheme": "bearer",
         "type": "http"
       },
@@ -6370,6 +7474,64 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/accounts/by-username/{username}": {
+      "get": {
+        "operationId": "getAccountByUsername",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "schema": {
+              "maxLength": 39,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountByUsername"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resolve an Entire username to its account",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
     "/accounts/{accountId}": {
       "get": {
         "operationId": "getAccountProfile",
@@ -6621,12 +7783,46 @@
                     },
                     "orgName": {
                       "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "projectName": {
+                      "type": "string"
+                    },
+                    "reference": {
+                      "$ref": "#/components/schemas/InvitationReference"
+                    },
+                    "repoId": {
+                      "type": "string"
+                    },
+                    "repoName": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "owner",
+                        "admin",
+                        "member",
+                        "reader",
+                        "writer"
+                      ],
+                      "type": "string"
+                    },
+                    "scope": {
+                      "enum": [
+                        "org",
+                        "project",
+                        "repo"
+                      ],
+                      "type": "string"
                     }
                   },
                   "required": [
+                    "scope",
                     "orgId",
                     "orgName",
-                    "membership"
+                    "role"
                   ],
                   "type": "object"
                 }
@@ -6663,7 +7859,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Accept an organization invitation",
+        "summary": "Accept an invitation",
         "tags": [
           "orgs"
         ]
@@ -6705,7 +7901,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Decline an organization invitation",
+        "summary": "Decline an invitation",
         "tags": [
           "orgs"
         ]
@@ -6731,17 +7927,51 @@
                 "schema": {
                   "additionalProperties": true,
                   "properties": {
+                    "inviterAvatarUrl": {
+                      "description": "The inviter's avatar URL. Absent when unseeded.",
+                      "type": "string"
+                    },
+                    "inviterDisplayName": {
+                      "description": "The inviter's Display Name. Absent when unseeded.",
+                      "type": "string"
+                    },
                     "inviterHandle": {
                       "type": "string"
                     },
+                    "inviterUsername": {
+                      "description": "The inviter's Entire username. Omitted until claimed.",
+                      "type": "string"
+                    },
                     "orgName": {
+                      "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "projectName": {
+                      "type": "string"
+                    },
+                    "repoId": {
+                      "type": "string"
+                    },
+                    "repoName": {
                       "type": "string"
                     },
                     "role": {
                       "enum": [
                         "owner",
                         "admin",
-                        "member"
+                        "member",
+                        "reader",
+                        "writer"
+                      ],
+                      "type": "string"
+                    },
+                    "scope": {
+                      "enum": [
+                        "org",
+                        "project",
+                        "repo"
                       ],
                       "type": "string"
                     }
@@ -6783,7 +8013,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Preview an organization invitation",
+        "summary": "Preview an invitation",
         "tags": [
           "orgs"
         ]
@@ -6855,6 +8085,140 @@
         "summary": "Get the calling account's identity and profile",
         "tags": [
           "identity"
+        ]
+      }
+    },
+    "/me/billing": {
+      "get": {
+        "operationId": "getAccountBilling",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingStatus"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/me/billing/complete": {
+      "post": {
+        "operationId": "completeAccountBillingSignup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingCompleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingStatus"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/me/billing/signup": {
+      "post": {
+        "operationId": "startAccountBillingSignup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingSignupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingSignupResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
         ]
       }
     },
@@ -6988,6 +8352,206 @@
         ]
       }
     },
+    "/me/invitations": {
+      "get": {
+        "operationId": "listMeInvitations",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListMeInvitationsOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List the calling account's open invitations in this jurisdiction",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/invitations/{id}/accept": {
+      "post": {
+        "operationId": "acceptMeInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "membership": {
+                      "$ref": "#/components/schemas/Membership"
+                    },
+                    "orgId": {
+                      "type": "string"
+                    },
+                    "orgName": {
+                      "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "projectName": {
+                      "type": "string"
+                    },
+                    "reference": {
+                      "$ref": "#/components/schemas/InvitationReference"
+                    },
+                    "repoId": {
+                      "type": "string"
+                    },
+                    "repoName": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "owner",
+                        "admin",
+                        "member",
+                        "reader",
+                        "writer"
+                      ],
+                      "type": "string"
+                    },
+                    "scope": {
+                      "enum": [
+                        "org",
+                        "project",
+                        "repo"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "scope",
+                    "orgId",
+                    "orgName",
+                    "role"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Accepted; the caller already held the access"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedInvitation"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Accept one of the calling account's invitations",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/invitations/{id}/decline": {
+      "post": {
+        "operationId": "declineMeInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Decline one of the calling account's invitations",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
     "/me/onboarding": {
       "get": {
         "operationId": "getOnboardingStatus",
@@ -7061,6 +8625,55 @@
           }
         ],
         "summary": "Record that the calling account completed web onboarding",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/username": {
+      "put": {
+        "operationId": "setMyUsername",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMyUsernameInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetMyUsernameOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Claim or change the calling account's Entire username",
         "tags": [
           "identity"
         ]
@@ -7932,6 +9545,332 @@
         "summary": "Get an organization",
         "tags": [
           "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/billing": {
+      "get": {
+        "operationId": "getOrgBilling",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingStatus"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/orgs/{orgId}/billing/complete": {
+      "post": {
+        "operationId": "completeOrgBillingSignup",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingCompleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingStatus"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/orgs/{orgId}/billing/signup": {
+      "post": {
+        "operationId": "startOrgBillingSignup",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingSignupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingSignupResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/bitrise/connection": {
+      "post": {
+        "operationId": "connectOrgCIBitriseOrganization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectOrgCIBitriseOrganizationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgCIBitriseConnectionView"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/bitrise/connection/{account}": {
+      "delete": {
+        "operationId": "disconnectOrgCIBitriseOrganization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/bitrise/connections": {
+      "get": {
+        "operationId": "listOrgCIBitriseOrganizations",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgCIBitriseOrganizationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "org-ci-webhooks"
         ]
       }
     },
@@ -9447,6 +11386,144 @@
         ]
       }
     },
+    "/plugins": {
+      "get": {
+        "operationId": "listPlugins",
+        "parameters": [
+          {
+            "description": "Project the catalog is for. It adds the unlisted plugins the project owns or has installed, and needs manage permission on the project",
+            "explode": false,
+            "in": "query",
+            "name": "project_id",
+            "schema": {
+              "description": "Project the catalog is for. It adds the unlisted plugins the project owns or has installed, and needs manage permission on the project",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's next_cursor",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's next_cursor",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plugins per page",
+            "explode": false,
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 30,
+              "description": "Plugins per page",
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPluginsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List the plugins this core installs",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/plugins/{plugin}": {
+      "get": {
+        "operationId": "getPlugin",
+        "parameters": [
+          {
+            "description": "Plugin slug",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin slug",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project the plugin is read for. Needs manage permission on the project. A plugin that only its owner project can install is not found for another project",
+            "explode": false,
+            "in": "query",
+            "name": "project_id",
+            "schema": {
+              "description": "Project the plugin is read for. Needs manage permission on the project. A plugin that only its owner project can install is not found for another project",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plugin"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get a plugin's catalog listing",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
     "/plugins/{plugin}/install/validate": {
       "get": {
         "description": "Answers 404 for a plugin that registers no post-install URLs. The create route checks the link again.",
@@ -9598,7 +11675,7 @@
         ]
       },
       "post": {
-        "description": "Requires project#manage with project_id, or org#manage with org_id. Without installation_id, creates an installation (201). With one the project or org owns on this core, refreshes the selected static profile output (200).",
+        "description": "Requires project#manage with project_id, or org#manage with org_id. Without installation_id, creates a project installation (201); new org installations are closed (400). With an installation_id the project or org owns on this core, refreshes the selected static profile output (200).",
         "operationId": "createPluginInstallation",
         "parameters": [
           {
@@ -9652,7 +11729,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Install a plugin on a project or an org, or refresh its profile output",
+        "summary": "Install a plugin on a project, or refresh an installation's profile output",
         "tags": [
           "plugins"
         ]
@@ -9797,6 +11874,77 @@
         ]
       }
     },
+    "/plugins/{plugin}/installations/{id}/access-tokens": {
+      "post": {
+        "description": "Called by the plugin with a JWT it signed for the installation. A token this core issued is refused.",
+        "operationId": "createPluginInstallationAccessToken",
+        "parameters": [
+          {
+            "description": "Plugin slug",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin slug",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Installation id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Installation id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "contentMediaType": "application/octet-stream",
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginAccessTokenOutputBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "pluginToken": []
+          }
+        ],
+        "summary": "Issue an access token for a plugin installation",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
     "/plugins/{plugin}/installations/{id}/deletion": {
       "post": {
         "description": "Requires org#manage on the installation's org. New provider access is denied before the response.",
@@ -9847,6 +11995,68 @@
           }
         ],
         "summary": "Begin uninstalling an org plugin installation",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/plugins/{plugin}/installations/{id}/repositories": {
+      "get": {
+        "description": "Called by the plugin with a JWT it signed for the installation, or with a token this core issued to the installation's automation.",
+        "operationId": "listPluginInstallationRepositories",
+        "parameters": [
+          {
+            "description": "Plugin slug",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin slug",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Installation id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Installation id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginRepositoriesOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "pluginToken": []
+          },
+          {
+            "automationToken": []
+          }
+        ],
+        "summary": "List the repositories a plugin installation covers",
         "tags": [
           "plugins"
         ]
@@ -10047,6 +12257,134 @@
           }
         ],
         "summary": "Replace a project plugin installation's repository selection",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/plugins/{plugin}/installations/{id}/suspended": {
+      "delete": {
+        "description": "Only the side that suspended the installation can resume it; the other side gets 409. Resuming an active installation succeeds.",
+        "operationId": "resumePluginInstallation",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plugin installation id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginInstallationView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          },
+          {
+            "pluginToken": []
+          }
+        ],
+        "summary": "Resume a suspended project plugin installation",
+        "tags": [
+          "plugins"
+        ]
+      },
+      "put": {
+        "description": "The plugin suspends with a JWT it signs for the installation. A caller with project#manage suspends as the customer. A suspended installation mints no tokens, lists no repositories, and gets no repository events. Repeating a suspension succeeds. A suspension by the other side answers 409.",
+        "operationId": "suspendPluginInstallation",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plugin installation id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginInstallationView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          },
+          {
+            "pluginToken": []
+          }
+        ],
+        "summary": "Suspend a project plugin installation",
         "tags": [
           "plugins"
         ]
@@ -10355,6 +12693,68 @@
         ]
       }
     },
+    "/projects/{projectId}/available-placements": {
+      "get": {
+        "operationId": "listProjectAvailablePlacements",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListProjectNativeMirrorTargetsOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List clusters available for placements of a new repository in a project",
+        "tags": [
+          "native-mirrors"
+        ]
+      }
+    },
     "/projects/{projectId}/collaborators": {
       "get": {
         "description": "Without repoId, returns people who can manage or write the project, plus source-managed members of a forge project. Requires project inspect. With repoId, returns people who can manage or push the repository's logical group, including project-level authority. Requires non-public list access to that repository. Readers and organization members without write access are excluded. Returns approved human accounts with public profile fields, ordered by account ID. Search and eligibility apply before pagination. Assignment writes must authorize independently. Staff authority does not bypass these requirements.",
@@ -10635,6 +13035,218 @@
           }
         ],
         "summary": "Revoke project access by grantee id",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}/invitations": {
+      "get": {
+        "operationId": "listProjectInvitations",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Lifecycle state to return; all returns every state.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "default": "open",
+              "description": "Lifecycle state to return; all returns every state.",
+              "enum": [
+                "open",
+                "accepted",
+                "revoked",
+                "expired",
+                "declined",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResourceInvitationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a project's invitations",
+        "tags": [
+          "projects"
+        ]
+      },
+      "post": {
+        "operationId": "createProjectInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResourceInvitationBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceInvitation"
+                }
+              }
+            },
+            "description": "Resent; an open invitation for that address already existed. The role in the body is the stored role."
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceInvitation"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Invite an address into a project",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}/invitations/{id}": {
+      "delete": {
+        "operationId": "revokeProjectInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke a project invitation",
         "tags": [
           "projects"
         ]
@@ -11683,6 +14295,80 @@
         "summary": "Get repository",
         "tags": [
           "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/available-placements": {
+      "get": {
+        "operationId": "listRepoAvailablePlacements",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListNativeMirrorTargetsOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List clusters available for a new placement of a repository",
+        "tags": [
+          "native-mirrors"
         ]
       }
     },
@@ -12865,6 +15551,218 @@
           }
         ],
         "summary": "Revoke repo access by grantee id",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/invitations": {
+      "get": {
+        "operationId": "listRepoInvitations",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Lifecycle state to return; all returns every state.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "default": "open",
+              "description": "Lifecycle state to return; all returns every state.",
+              "enum": [
+                "open",
+                "accepted",
+                "revoked",
+                "expired",
+                "declined",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResourceInvitationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a repository's invitations",
+        "tags": [
+          "repos"
+        ]
+      },
+      "post": {
+        "operationId": "createRepoInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResourceInvitationBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceInvitation"
+                }
+              }
+            },
+            "description": "Resent; an open invitation for that address already existed. The role in the body is the stored role."
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceInvitation"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Invite an address into a repository",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/invitations/{id}": {
+      "delete": {
+        "operationId": "revokeRepoInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke a repository invitation",
         "tags": [
           "repos"
         ]

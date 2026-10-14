@@ -42,7 +42,7 @@ const testInviteEmail = "dev@example.com"
 func testInvitation(role, status string) *coreapi.Invitation {
 	return &coreapi.Invitation{
 		ID:        testInvitationULID,
-		Email:     testInviteEmail,
+		Email:     coreapi.NewOptString(testInviteEmail),
 		Role:      role,
 		Status:    status,
 		InvitedBy: testDeleteULID,

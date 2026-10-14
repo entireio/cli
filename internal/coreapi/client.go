@@ -173,6 +173,14 @@ func (s staticBearer) SessionAuth(context.Context, OperationName) (SessionAuth, 
 	return SessionAuth{}, ogenerrors.ErrSkipClientSecurity
 }
 
+func (s staticBearer) PluginToken(context.Context, OperationName) (PluginToken, error) {
+	return PluginToken{}, ogenerrors.ErrSkipClientSecurity
+}
+
+func (s staticBearer) AutomationToken(context.Context, OperationName) (AutomationToken, error) {
+	return AutomationToken{}, ogenerrors.ErrSkipClientSecurity
+}
+
 // providerSource implements the generated SecuritySource, supplying the
 // logged-in user's bearer token for every request from a token-provider
 // func (auth.ControlPlaneTarget.TokenSource). The control plane only uses
@@ -209,6 +217,18 @@ func (p *providerSource) SessionAuth(context.Context, OperationName) (SessionAut
 	// scheme entirely for the request (no Cookie header added); the
 	// bearerAuth path alone satisfies the OR-requirement.
 	return SessionAuth{}, ogenerrors.ErrSkipClientSecurity
+}
+
+// pluginToken and automationToken are credentials a plugin or an automation
+// holds, never a logged-in user, so the CLI skips them the same way. An
+// operation that accepts only those schemes then fails at call time with
+// ogen's unsatisfied-security error instead of going out unauthenticated.
+func (p *providerSource) PluginToken(context.Context, OperationName) (PluginToken, error) {
+	return PluginToken{}, ogenerrors.ErrSkipClientSecurity
+}
+
+func (p *providerSource) AutomationToken(context.Context, OperationName) (AutomationToken, error) {
+	return AutomationToken{}, ogenerrors.ErrSkipClientSecurity
 }
 
 // APIError reports the title/detail/status of a control-plane RFC 7807

@@ -38,6 +38,48 @@ func encodeAddOrgMemberRequest(
 	return nil
 }
 
+func encodeCompleteAccountBillingSignupRequest(
+	req *BillingCompleteRequest,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeCompleteOrgBillingSignupRequest(
+	req *BillingCompleteRequest,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeConnectOrgCIBitriseOrganizationRequest(
+	req *ConnectOrgCIBitriseOrganizationInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeConnectOrgCIBuildkiteCredentialRequest(
 	req *ConnectOrgCIBuildkiteCredentialInputBody,
 	r *http.Request,
@@ -150,8 +192,36 @@ func encodeCreatePluginInstallationRequest(
 	return nil
 }
 
+func encodeCreatePluginInstallationAccessTokenRequest(
+	req string,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		e.Str(req)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeCreateProjectRequest(
 	req *CreateProjectInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeCreateProjectInvitationRequest(
+	req *ResourceInvitationBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -180,6 +250,20 @@ func encodeCreateRepoRequest(
 
 func encodeCreateRepoCIWebhookRequest(
 	req *CreateRepoCIWebhookInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeCreateRepoInvitationRequest(
+	req *ResourceInvitationBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -374,6 +458,20 @@ func encodeSetBranchProtectionRequest(
 	return nil
 }
 
+func encodeSetMyUsernameRequest(
+	req *SetMyUsernameInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeSetPluginInstallationRepositoriesRequest(
 	req *SetPluginInstallationRepositoriesInputBody,
 	r *http.Request,
@@ -390,6 +488,34 @@ func encodeSetPluginInstallationRepositoriesRequest(
 
 func encodeSetRepoVisibilityRequest(
 	req *SetRepoVisibilityInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeStartAccountBillingSignupRequest(
+	req *BillingSignupRequest,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeStartOrgBillingSignupRequest(
+	req *BillingSignupRequest,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
