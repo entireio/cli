@@ -80,8 +80,9 @@ func copilotSessionInRepo(path, repoRoot string) bool {
 }
 
 // SplitTurns produces one Turn per user.message event, bounded by the next.
-// Token usage is delegated to the Copilot agent (per-turn slices sum
-// assistant.message outputTokens); the model is read once from the transcript.
+// Token usage is delegated to the Copilot agent, whose per-turn slices sum
+// session.usage_record events (assistant.message outputTokens on releases that
+// predate them); the model is read once from the transcript.
 func (copilotImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 	ag := &copilotcli.CopilotCLIAgent{}
 	model := copilotcli.ExtractModelFromTranscript(context.Background(), sf.Path)

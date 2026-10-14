@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
 // copilotSession writes <base>/<id>/events.jsonl with a session.start carrying
@@ -95,6 +97,85 @@ func TestCopilotSplitTurns_PromptsTokensModel(t *testing.T) {
 	}
 	if turns[1].Tokens == nil || turns[1].Tokens.OutputTokens != 7 {
 		t.Errorf("turn1 tokens wrong: %+v", turns[1].Tokens)
+	}
+}
+
+// TestCopilotSplitTurns_UsageRecordTokens covers Copilot releases that write a
+// session.usage_record per API call and no assistant.message outputTokens.
+// Each turn counts only its own records, with fresh input separated from the
+// cache counts that Copilot's inputTokens includes, and the session.shutdown
+// aggregate after the last turn is not added to it.
+func TestCopilotSplitTurns_UsageRecordTokens(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "events.jsonl")
+	full := []byte(strings.Join([]string{
+		`{"type":"session.start","id":"s0","timestamp":"2026-10-13T00:00:00Z","data":{"context":{"gitRoot":"/work/myrepo"}}}`,
+		`{"type":"user.message","id":"u1","timestamp":"2026-10-13T00:00:01Z","data":{"content":"first"}}`,
+		`{"type":"session.usage_record","id":"r1","data":{"usage":{"apiCallId":"c1","inputTokens":1000,"outputTokens":40,"cacheReadTokens":0,"cacheWriteTokens":990}}}`,
+		`{"type":"assistant.message","id":"a1","data":{"apiCallId":"c1","content":"ok"}}`,
+		`{"type":"user.message","id":"u2","timestamp":"2026-10-13T00:01:00Z","data":{"content":"second"}}`,
+		`{"type":"session.usage_record","id":"r2","data":{"usage":{"apiCallId":"c2","inputTokens":1100,"outputTokens":9,"cacheReadTokens":990,"cacheWriteTokens":100}}}`,
+		`{"type":"assistant.message","id":"a2","data":{"apiCallId":"c2","content":"done"}}`,
+		`{"type":"session.shutdown","id":"sd","data":{"modelMetrics":{"m":{"requests":{"count":2},"usage":{"inputTokens":2100,"outputTokens":49,"cacheReadTokens":990,"cacheWriteTokens":1090}}}}}`,
+	}, "\n") + "\n")
+	if err := os.WriteFile(p, full, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	turns, err := copilotImporter{}.SplitTurns(SessionFile{Path: p, SessionID: "sess"}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("want 2 turns, got %d", len(turns))
+	}
+	want := []agent.TokenUsage{
+		{InputTokens: 10, CacheCreationTokens: 990, OutputTokens: 40, APICallCount: 1},
+		{InputTokens: 10, CacheReadTokens: 990, CacheCreationTokens: 100, OutputTokens: 9, APICallCount: 1},
+	}
+	for i := range turns {
+		if turns[i].Tokens == nil || *turns[i].Tokens != want[i] {
+			t.Errorf("turn%d tokens = %+v, want %+v", i, turns[i].Tokens, want[i])
+		}
+	}
+}
+
+// TestCopilotSplitTurns_CallCountedInOneTurnOnly covers a call whose usage is
+// written twice, once on each side of a turn boundary: a repeated record, and
+// a fallback outputTokens message after its record. Each turn's tokens are
+// computed separately, and the call must land in the first turn only.
+func TestCopilotSplitTurns_CallCountedInOneTurnOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "events.jsonl")
+	full := []byte(strings.Join([]string{
+		`{"type":"session.start","id":"s0","timestamp":"2026-10-13T00:00:00Z","data":{"context":{"gitRoot":"/work/myrepo"}}}`,
+		`{"type":"user.message","id":"u1","timestamp":"2026-10-13T00:00:01Z","data":{"content":"first"}}`,
+		`{"type":"session.usage_record","id":"r1","data":{"usage":{"apiCallId":"c1","inputTokens":1000,"outputTokens":40,"cacheReadTokens":0,"cacheWriteTokens":990}}}`,
+		`{"type":"user.message","id":"u2","timestamp":"2026-10-13T00:01:00Z","data":{"content":"second"}}`,
+		`{"type":"session.usage_record","id":"r1-again","data":{"usage":{"apiCallId":"c1","inputTokens":1000,"outputTokens":40,"cacheReadTokens":0,"cacheWriteTokens":990}}}`,
+		`{"type":"assistant.message","id":"a1","data":{"apiCallId":"c1","content":"ok","outputTokens":40}}`,
+	}, "\n") + "\n")
+	if err := os.WriteFile(p, full, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	turns, err := copilotImporter{}.SplitTurns(SessionFile{Path: p, SessionID: "sess"}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("want 2 turns, got %d", len(turns))
+	}
+	want := []agent.TokenUsage{
+		{InputTokens: 10, CacheCreationTokens: 990, OutputTokens: 40, APICallCount: 1},
+		{},
+	}
+	for i := range turns {
+		if turns[i].Tokens == nil || *turns[i].Tokens != want[i] {
+			t.Errorf("turn%d tokens = %+v, want %+v", i, turns[i].Tokens, want[i])
+		}
 	}
 }
 
