@@ -335,3 +335,21 @@ func TestCalculateTokenUsage_CumulativeShareMeasuredAgainstCountedTotal(t *testi
 	require.NoError(t, err)
 	require.Equal(t, agent.TokenUsage{InputTokens: 290, CacheReadTokens: 20, OutputTokens: 3, APICallCount: 3}, *usage)
 }
+
+func TestCalculateTokenUsage_RepeatedUsageRecordCountedOnce(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	lines := []string{
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"a","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":90}},"id":"1"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"a","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":90}},"id":"2"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"a"},"id":"3"}`,
+	}
+	content := []byte(strings.Join(lines, "\n") + "\n")
+
+	for _, from := range []int{0, 1} {
+		usage, err := ag.CalculateTokenUsage(append([]byte(`{"type":"session.start","data":{},"id":"0"}`+"\n"), content...), from)
+		require.NoError(t, err)
+		require.Equal(t, agent.TokenUsage{InputTokens: 10, CacheCreationTokens: 90, OutputTokens: 10, APICallCount: 1}, *usage, "fromOffset %d", from)
+	}
+}

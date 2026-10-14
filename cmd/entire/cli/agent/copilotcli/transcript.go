@@ -427,6 +427,7 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 	coveredMessages := 0
 	sawShutdown := false
 	run := copilotRun{usage: &agent.TokenUsage{}}
+	countedRecords := map[string]bool{}
 
 	for i := range events {
 		switch events[i].Type {
@@ -434,6 +435,12 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 			var data usageRecordData
 			if err := json.Unmarshal(events[i].Data, &data); err != nil {
 				continue
+			}
+			if id := data.Usage.APICallID; id != "" {
+				if countedRecords[id] {
+					continue // a repeated record for a call already counted
+				}
+				countedRecords[id] = true
 			}
 			run.records++
 			run.usage = types.AddTokenUsage(run.usage, data.Usage.toTokenUsage(1))
@@ -471,7 +478,11 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 			}
 			total = types.AddTokenUsage(total, runUsage)
 			// Track what was actually counted, so a later cumulative
-			// shutdown's share telescopes against the same total.
+			// shutdown's share telescopes against the same total. When an
+			// earlier run could only be counted per call (output only), a
+			// later cumulative share also absorbs that run's input and cache
+			// counts: misattributed between runs, but the total then equals
+			// the cumulative shutdown, which is what a full read returns.
 			covered = types.AddTokenUsage(covered, runUsage)
 			coveredMessages += run.messages
 			run = copilotRun{usage: &agent.TokenUsage{}}
