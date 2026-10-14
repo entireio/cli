@@ -1984,10 +1984,10 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 }
 
 // installAgentHooks installs ag's hooks (setupAgentHooks) and reports whether
-// the install also pruned Entire hooks this version no longer writes (for
-// Claude Code, the retired post-todo hook). The stale check runs before the
-// install, because afterwards there is nothing left to detect. Every enable
-// path reports a prune, so a rewritten config is never called "already
+// the install also pruned or updated outdated Entire hooks (for Claude Code,
+// the retired post-todo hook or a hook missing its timeout). The stale check
+// runs before the install, because afterwards there is nothing left to detect.
+// Every enable path reports it, so a rewritten config is never called "already
 // installed" or left unmentioned.
 func installAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (installed int, prunedStale bool, err error) {
 	if reporter, ok := agent.AsStaleHookReporter(ag); ok {
@@ -2000,10 +2000,10 @@ func installAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (in
 	return installed, prunedStale, nil
 }
 
-// reportPrunedStaleHooks tells the user an install removed outdated Entire
-// hooks from ag's config.
+// reportPrunedStaleHooks tells the user an install removed or updated outdated
+// Entire hooks in ag's config.
 func reportPrunedStaleHooks(w io.Writer, ag agent.Agent) {
-	fmt.Fprintf(w, "  Removed outdated Entire hooks for %s (hooks no longer used by this version)\n", ag.Description())
+	fmt.Fprintf(w, "  Updated outdated Entire hooks for %s\n", ag.Description())
 }
 
 func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
@@ -2377,7 +2377,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	case installedHooks == 0:
 		fmt.Fprintf(w, "  Hooks for %s already installed\n", ag.Description())
 	case prunedStaleHooks:
-		fmt.Fprintf(w, "  Installed %d hooks for %s and removed outdated ones\n", installedHooks, ag.Description())
+		fmt.Fprintf(w, "  Installed %d hooks for %s and updated outdated ones\n", installedHooks, ag.Description())
 	default:
 		fmt.Fprintf(w, "  Installed %d hooks for %s\n", installedHooks, ag.Description())
 	}

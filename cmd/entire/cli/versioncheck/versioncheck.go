@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
@@ -173,7 +174,7 @@ func fetchLatestVersion(ctx context.Context) (string, error) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", versioninfo.UserAgent())
 
-	client := &http.Client{}
+	client := httpclient.New(httpclient.Options{})
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetching release info: %w", err)
@@ -217,7 +218,7 @@ func fetchLatestNightlyVersion(ctx context.Context) (string, error) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", versioninfo.UserAgent())
 
-	client := &http.Client{}
+	client := httpclient.New(httpclient.Options{})
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetching releases: %w", err)

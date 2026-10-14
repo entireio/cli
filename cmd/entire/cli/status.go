@@ -241,7 +241,10 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			b.WriteString(strings.Join(displayNames, ", "))
 		}
 
-		// Warn when installed hooks are out of date (read-only; fix is manual).
+		// Warn when installed hooks are out of date. Status stays read-only and
+		// points to doctor rather than `entire enable --force`: doctor repairs
+		// missing hook timeouts in place, while --force rebuilds every Entire hook
+		// and drops the timeouts and fields the user set on them.
 		for _, name := range OutdatedHookAgents(ctx) {
 			ag, err := agent.Get(name)
 			if err != nil {
@@ -249,7 +252,7 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			}
 			b.WriteString("\n")
 			b.WriteString(sty.render(sty.yellow, "  ! "+string(ag.Type())+" hooks out of date"))
-			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
+			b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
 		}
 		if warning := codexStatusWarning(inspectCodexHookIssue(ctx)); warning != "" {
 			b.WriteString("\n")
@@ -1102,8 +1105,8 @@ type statusJSON struct {
 	// `entire status --json` instead of the human footer. Set only on the
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
 	AgentHelp string `json:"agent_help,omitempty"`
-	// HooksOutdated lists agents whose installed hook config is out of date and
-	// should be refreshed with `entire enable --force`.
+	// HooksOutdated lists agents whose installed hook config is out of date;
+	// `entire doctor` repairs it or names the fix.
 	HooksOutdated []string `json:"hooks_outdated,omitempty"`
 	// LegacyShadowBranches counts the strict-shape entire/<commit>-<worktree>
 	// shadow branches older versions left behind; `entire doctor` reports and

@@ -295,7 +295,7 @@ const httpUserAgentEnvVar = "GIT_HTTP_USER_AGENT"
 // here would otherwise fail the whole clone/fetch. Split out of run() so
 // tests exercise the same chain the helper ships.
 func newAuthHTTPClient(skipTLS bool, ua string) *http.Client {
-	return &http.Client{
+	return httpclient.New(httpclient.Options{
 		Timeout: 30 * time.Second,
 		Transport: &httpclient.UserAgentTransport{
 			Next: &httpdebug.TimingRoundTripper{
@@ -304,7 +304,7 @@ func newAuthHTTPClient(skipTLS bool, ua string) *http.Client {
 			},
 			UA: ua,
 		},
-	}
+	})
 }
 
 // resolveHTTPUserAgent returns the HTTP User-Agent to send, matching

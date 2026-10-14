@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -1168,7 +1169,48 @@ func TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated(t *testing.T) {
 
 	out := stdout.String()
 	require.Contains(t, out, "Claude Code hooks: OUT OF DATE")
-	require.Contains(t, out, "entire enable --force")
+	require.Contains(t, out, "Run `entire agent add claude-code` to update it.")
+}
+
+// TestCheckHookTimeouts_RestoresWhatEnableWrites — a Claude Code config from
+// before hook timeouts existed is repaired to exactly what `entire enable`
+// writes today, and a repaired config is left alone on the next run.
+func TestCheckHookTimeouts_RestoresWhatEnableWrites(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	settingsPath := filepath.Join(dir, claudeDirName, claudecode.ClaudeSettingsFileName)
+	want, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+
+	untimed := regexp.MustCompile(`,\s*"timeout": \d+`).ReplaceAll(want, nil)
+	require.NotEqual(t, want, untimed, "fixture should have had timeouts to strip")
+	require.NoError(t, os.WriteFile(settingsPath, untimed, 0o600))
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+	require.Contains(t, stdout.String(), "Claude Code hooks: OUT OF DATE")
+
+	cmd, stdout = newTestCmd(t)
+	checkHookTimeouts(cmd)
+	out := stdout.String()
+	require.Contains(t, out, "Claude Code hooks: MISSING TIMEOUTS")
+	require.Contains(t, out, "✓ Fixed: timeouts added (your own hooks and timeouts are untouched).")
+
+	got, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	require.Equal(t, string(want), string(got))
+
+	cmd, stdout = newTestCmd(t)
+	checkHookTimeouts(cmd)
+	require.Empty(t, stdout.String())
+
+	cmd, stdout = newTestCmd(t)
+	checkHookDrift(cmd)
+	require.Contains(t, stdout.String(), "Claude Code hook config: OK")
 }
 
 // TestCheckCodexHookTrust_FlagsStaleHooksFile — user enabled Codex on
