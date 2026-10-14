@@ -29,6 +29,9 @@ func TestCompact_CopilotUsageRecordTokens(t *testing.T) {
 	for name, lines := range map[string][]string{
 		"record before message": {record, message, unrelated},
 		"record after message":  {message, record, unrelated},
+		// A concurrent call's message lands between this call's message and
+		// its record, flushing the line before the record arrives.
+		"record after an interleaved call": {message, unrelated, record},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

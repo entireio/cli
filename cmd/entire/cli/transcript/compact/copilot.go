@@ -64,6 +64,25 @@ type copilotUsageRecordData struct {
 	} `json:"usage"`
 }
 
+// copilotUsageRecords indexes a transcript's session.usage_record events by
+// apiCallId. Lines that do not parse are skipped, as in the main pass.
+func copilotUsageRecords(content []byte) map[string]copilotUsageRecordData {
+	records := map[string]copilotUsageRecordData{}
+	for _, raw := range bytes.Split(content, []byte("\n")) {
+		if !bytes.Contains(raw, []byte(`"session.usage_record"`)) {
+			continue
+		}
+		var line copilotLine
+		var rec copilotUsageRecordData
+		if json.Unmarshal(raw, &line) != nil || line.Type != "session.usage_record" ||
+			json.Unmarshal(line.Data, &rec) != nil || rec.Usage.APICallID == "" {
+			continue
+		}
+		records[rec.Usage.APICallID] = rec
+	}
+	return records
+}
+
 // applyCopilotUsageRecord sets an assistant line's token counts from the usage
 // record for its API call, with input reported as fresh (uncached) input.
 func applyCopilotUsageRecord(line *transcriptLine, rec copilotUsageRecordData) {
@@ -91,10 +110,10 @@ func compactCopilot(content []byte, opts MetadataFields) ([]byte, error) {
 	base := newTranscriptLine(opts)
 	var result []byte
 	var pending *transcriptLine
-	var pendingCallID string
-	// Usage records precede the assistant.message for the same call; keyed by
-	// apiCallId so either order attaches the counts to the right line.
-	records := map[string]copilotUsageRecordData{}
+	// Records are joined to messages by apiCallId over the whole transcript,
+	// so neither their order nor interleaved calls (concurrent subagents)
+	// can detach a record from its message.
+	records := copilotUsageRecords(content)
 
 	flushPending := func() {
 		if pending == nil {
@@ -102,7 +121,6 @@ func compactCopilot(content []byte, opts MetadataFields) ([]byte, error) {
 		}
 		appendLine(&result, *pending)
 		pending = nil
-		pendingCallID = ""
 	}
 
 	reader := bufio.NewReader(bytes.NewReader(content))
@@ -124,17 +142,10 @@ func compactCopilot(content []byte, opts MetadataFields) ([]byte, error) {
 					}
 				case "assistant.message":
 					flushPending()
-					pending, pendingCallID = copilotAssistantLine(base, line)
-					if rec, ok := records[pendingCallID]; ok && pending != nil {
+					var callID string
+					pending, callID = copilotAssistantLine(base, line)
+					if rec, ok := records[callID]; ok && pending != nil {
 						applyCopilotUsageRecord(pending, rec)
-					}
-				case "session.usage_record":
-					var rec copilotUsageRecordData
-					if json.Unmarshal(line.Data, &rec) == nil && rec.Usage.APICallID != "" {
-						records[rec.Usage.APICallID] = rec
-						if pending != nil && pendingCallID == rec.Usage.APICallID {
-							applyCopilotUsageRecord(pending, rec)
-						}
 					}
 				case "tool.execution_complete":
 					if pending != nil {
