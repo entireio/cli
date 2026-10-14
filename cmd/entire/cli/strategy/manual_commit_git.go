@@ -183,6 +183,13 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 // transcript. But a matching nonce is not enough on its own: the pre-prompt
 // file is per session, so a Stop that ran late can read the NEXT turn's
 // nonce. The size check keeps it from claiming that turn.
+//
+// A differing nonce wins over an unchanged size on purpose. A new turn whose
+// transcript has not yet grown at its Stop (a slow flush) must not lose its
+// tokens. The cost is a TurnStart delivered twice, between two deliveries of
+// one Stop, which counts that turn again. Entire already treats such a
+// TurnStart as a new turn everywhere else: it rotates TurnID and the
+// pre-prompt baseline.
 func isRepeatedStep(state *SessionState, step StepContext) bool {
 	if step.TurnNonce != "" && step.TurnNonce != state.LastStepTurnNonce {
 		return false
