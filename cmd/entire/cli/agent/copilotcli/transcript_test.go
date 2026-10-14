@@ -393,7 +393,7 @@ func TestCalculateTokenUsage_SessionShutdown(t *testing.T) {
 	ag := &CopilotCLIAgent{}
 
 	lines := append(testJSONLLines, //nolint:gocritic // append to copy is intentional
-		`{"type":"session.shutdown","data":{"modelMetrics":{"claude-sonnet-4.6":{"requests":{"count":3},"usage":{"inputTokens":64807,"outputTokens":289,"cacheReadTokens":42625,"cacheWriteTokens":100}}}},"id":"99","timestamp":"2026-03-03T00:01:00Z","parentId":""}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"claude-sonnet-4.6":{"requests":{"count":2},"usage":{"inputTokens":64807,"outputTokens":289,"cacheReadTokens":42625,"cacheWriteTokens":100}}}},"id":"99","timestamp":"2026-03-03T00:01:00Z","parentId":""}`,
 	)
 	content := []byte(strings.Join(lines, "\n") + "\n")
 
@@ -415,8 +415,10 @@ func TestCalculateTokenUsage_SessionShutdown(t *testing.T) {
 	if usage.CacheCreationTokens != 100 {
 		t.Errorf("CacheCreationTokens = %d, want 100", usage.CacheCreationTokens)
 	}
-	if usage.APICallCount != 3 {
-		t.Errorf("APICallCount = %d, want 3", usage.APICallCount)
+	// The shutdown's request count matches the transcript's two
+	// assistant.message events, so the aggregate is attributable.
+	if usage.APICallCount != 2 {
+		t.Errorf("APICallCount = %d, want 2", usage.APICallCount)
 	}
 }
 
@@ -424,7 +426,11 @@ func TestCalculateTokenUsage_MultiModel(t *testing.T) {
 	t.Parallel()
 	ag := &CopilotCLIAgent{}
 
+	// One assistant.message per API call, matching the 3 requests.
 	lines := []string{
+		`{"type":"assistant.message","data":{"content":"a"},"id":"m1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`{"type":"assistant.message","data":{"content":"b"},"id":"m2","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
+		`{"type":"assistant.message","data":{"content":"c"},"id":"m3","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
 		`{"type":"session.shutdown","data":{"modelMetrics":{"gpt-4.1":{"requests":{"count":2},"usage":{"inputTokens":1000,"outputTokens":200,"cacheReadTokens":0,"cacheWriteTokens":0}},"claude-sonnet-4.6":{"requests":{"count":1},"usage":{"inputTokens":500,"outputTokens":100,"cacheReadTokens":300,"cacheWriteTokens":50}}}},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
 	}
 	content := []byte(strings.Join(lines, "\n") + "\n")

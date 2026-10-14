@@ -262,3 +262,50 @@ func TestCalculateTokenUsage_UsageRecordClampsInconsistentInput(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, agent.TokenUsage{CacheReadTokens: 20, CacheCreationTokens: 5, OutputTokens: 3, APICallCount: 1}, *usage)
 }
+
+func TestCalculateTokenUsage_OldRunCountedWhenLaterRunHasRecords(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	// A session started on an old release (outputTokens, no apiCallId) and
+	// resumed on one that writes usage records. Record presence in the later
+	// run must not suppress the earlier run's per-call output. The first
+	// shutdown is unusable, so the old run is counted per call.
+	lines := []string{
+		`{"type":"assistant.message","data":{"outputTokens":40},"id":"1"}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{}},"id":"2"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"n1","inputTokens":1000,"outputTokens":30,"cacheReadTokens":600,"cacheWriteTokens":300}},"id":"3"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"n1"},"id":"4"}`,
+	}
+	content := []byte(strings.Join(lines, "\n") + "\n")
+	want := agent.TokenUsage{InputTokens: 100, CacheReadTokens: 600, CacheCreationTokens: 300, OutputTokens: 70, APICallCount: 2}
+
+	usage, err := ag.CalculateTokenUsage(content, 0)
+	require.NoError(t, err)
+	require.Equal(t, want, *usage)
+
+	// The sliced path, which never reads shutdowns, keeps the runs apart too.
+	usage, err = ag.CalculateTokenUsage(append([]byte(`{"type":"session.start","data":{},"id":"0"}`+"\n"), content...), 1)
+	require.NoError(t, err)
+	require.Equal(t, want, *usage)
+}
+
+func TestCalculateTokenUsage_FirstShutdownMismatchFallsBackToPerCall(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	// The first (and only) shutdown claims 4 requests but its run has two
+	// assistant.message events, so it is not trusted and the run's usage
+	// record is counted instead.
+	lines := []string{
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"a","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":90}},"id":"1"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"a"},"id":"2"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"b"},"id":"3"}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"m":{"requests":{"count":4},"usage":{"inputTokens":9000,"outputTokens":900,"cacheReadTokens":0,"cacheWriteTokens":0}}}},"id":"4"}`,
+	}
+	content := []byte(strings.Join(lines, "\n") + "\n")
+
+	usage, err := ag.CalculateTokenUsage(content, 0)
+	require.NoError(t, err)
+	require.Equal(t, agent.TokenUsage{InputTokens: 10, CacheCreationTokens: 90, OutputTokens: 10, APICallCount: 1}, *usage)
+}

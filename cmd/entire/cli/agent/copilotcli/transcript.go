@@ -417,7 +417,8 @@ type copilotRun struct {
 // is ignored and its run is counted per call. The run after the last shutdown
 // is always counted per call.
 func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bool) *agent.TokenUsage {
-	recordedCalls, haveRecords := usageRecordCallIDs(events)
+	recordedCalls, runsWithRecords := usageRecordCallIDs(events)
+	runIndex := 0
 
 	total := &agent.TokenUsage{}
 	// covered is what all shutdowns so far account for, cumulatively, and
@@ -443,12 +444,13 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 			if err := json.Unmarshal(events[i].Data, &data); err != nil || data.OutputTokens <= 0 {
 				continue
 			}
-			if recordedCalls[data.APICallID] || (data.APICallID == "" && haveRecords) {
+			if recordedCalls[data.APICallID] || (data.APICallID == "" && runsWithRecords[runIndex]) {
 				continue // counted from its session.usage_record
 			}
 			run.usage = types.AddTokenUsage(run.usage, &agent.TokenUsage{OutputTokens: data.OutputTokens, APICallCount: 1})
 
 		case eventTypeSessionShutdown:
+			runIndex++
 			if !preferSessionShutdown {
 				continue
 			}
@@ -474,14 +476,15 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 // the run it closes, or nil when the shutdown cannot be attributed: no usable
 // metrics, or a request count that matches neither the run's messages (a
 // per-run aggregate) nor every message since the start (a cumulative one).
-// The first shutdown in a transcript reads the same either way.
+// The first shutdown reads the same either way, but is still checked against
+// its run's messages.
 func shutdownShare(shutdown, covered *agent.TokenUsage, coveredMessages, runMessages int, sawShutdown bool) *agent.TokenUsage {
 	switch {
 	case shutdown == nil:
 		return nil
-	case !sawShutdown || shutdown.APICallCount == runMessages:
+	case shutdown.APICallCount == runMessages:
 		return shutdown
-	case shutdown.APICallCount == coveredMessages+runMessages:
+	case sawShutdown && shutdown.APICallCount == coveredMessages+runMessages:
 		return &agent.TokenUsage{
 			InputTokens:         max(0, shutdown.InputTokens-covered.InputTokens),
 			CacheCreationTokens: max(0, shutdown.CacheCreationTokens-covered.CacheCreationTokens),
@@ -497,24 +500,30 @@ func shutdownShare(shutdown, covered *agent.TokenUsage, coveredMessages, runMess
 }
 
 // usageRecordCallIDs returns the API call IDs that have a session.usage_record,
-// and whether any usage record is present at all.
-func usageRecordCallIDs(events []copilotEvent) (map[string]bool, bool) {
+// and which runs (numbered from 0, advancing at each session.shutdown) contain
+// any usage record. A resumed session can mix a run from an older release,
+// whose messages carry outputTokens and no apiCallId, with a later run that
+// writes records, so record presence is decided per run.
+func usageRecordCallIDs(events []copilotEvent) (map[string]bool, map[int]bool) {
 	ids := map[string]bool{}
-	found := false
+	runsWithRecords := map[int]bool{}
+	runIndex := 0
 	for i := range events {
-		if events[i].Type != eventTypeUsageRecord {
-			continue
-		}
-		var data usageRecordData
-		if err := json.Unmarshal(events[i].Data, &data); err != nil {
-			continue
-		}
-		found = true
-		if data.Usage.APICallID != "" {
-			ids[data.Usage.APICallID] = true
+		switch events[i].Type {
+		case eventTypeSessionShutdown:
+			runIndex++
+		case eventTypeUsageRecord:
+			var data usageRecordData
+			if err := json.Unmarshal(events[i].Data, &data); err != nil {
+				continue
+			}
+			runsWithRecords[runIndex] = true
+			if data.Usage.APICallID != "" {
+				ids[data.Usage.APICallID] = true
+			}
 		}
 	}
-	return ids, found
+	return ids, runsWithRecords
 }
 
 // sessionShutdownUsage returns the normalized usage summed across models in a

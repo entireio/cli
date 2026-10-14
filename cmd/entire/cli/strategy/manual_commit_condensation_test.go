@@ -358,7 +358,7 @@ func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *
 	transcript := []byte(strings.Join([]string{
 		`{"type":"user.message","data":{"content":"hello"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`,
 		`{"type":"assistant.message","data":{"content":"hi","outputTokens":25},"id":"2","timestamp":"2026-03-03T00:00:01Z","parentId":"1"}`,
-		`{"type":"session.shutdown","data":{"modelMetrics":{"claude-sonnet-4.6":{"requests":{"count":3},"usage":{"inputTokens":0,"outputTokens":50,"cacheReadTokens":20,"cacheWriteTokens":10}}}},"id":"3","timestamp":"2026-03-03T00:00:02Z","parentId":""}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"claude-sonnet-4.6":{"requests":{"count":1},"usage":{"inputTokens":0,"outputTokens":50,"cacheReadTokens":20,"cacheWriteTokens":10}}}},"id":"3","timestamp":"2026-03-03T00:00:02Z","parentId":""}`,
 	}, "\n") + "\n")
 
 	ag, err := agent.GetByAgentType(agent.AgentTypeCopilotCLI)
@@ -375,7 +375,7 @@ func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *
 	require.Equal(t, 50, backfillUsage.OutputTokens)
 	require.Equal(t, 20, backfillUsage.CacheReadTokens)
 	require.Equal(t, 10, backfillUsage.CacheCreationTokens)
-	require.Equal(t, 3, backfillUsage.APICallCount)
+	require.Equal(t, 1, backfillUsage.APICallCount)
 }
 
 // Copilot releases that write session.usage_record: the checkpoint counts only
