@@ -140,6 +140,17 @@ type StepContext struct {
 	// while token evidence was extracted. nil means no inventory snapshot;
 	// a pointer to zero is a valid snapshot before the first child is observed.
 	SubagentLedgerVersion *uint64
+
+	// TurnNonce identifies the turn this step ends: the nonce TurnStart wrote
+	// into the pre-prompt state. Empty when the Stop has no pre-prompt state
+	// (a repeated Stop that an earlier one already consumed, or a turn that
+	// never had a TurnStart).
+	TurnNonce string
+
+	// TranscriptSize is the byte length of the transcript read at this Stop.
+	// Without a TurnNonce, an unchanged size is what tells a repeated Stop
+	// from a new turn. Zero means unknown.
+	TranscriptSize int
 }
 
 // TaskMetadataDir returns the path to a task's metadata directory

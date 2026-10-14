@@ -215,6 +215,16 @@ type State struct {
 	// JSON tag kept as "checkpoint_count" for backward compatibility with existing state files.
 	StepCount int `json:"checkpoint_count"`
 
+	// LastStepTurnNonce and LastStepTranscriptSize identify the turn whose
+	// Stop recorded the latest step (StepContext.TurnNonce and
+	// TranscriptSize). SaveStep sets them in the same locked mutation that
+	// counts the step, and a repeated or concurrent Stop for that turn
+	// matches them and is not counted again. They are deliberately not keyed
+	// on TurnID: a TurnStart that times out on the session lock never
+	// rotates TurnID, but it still writes its pre-prompt nonce.
+	LastStepTurnNonce      string `json:"last_step_turn_nonce,omitempty"`
+	LastStepTranscriptSize int    `json:"last_step_transcript_size,omitempty"`
+
 	// CheckpointTranscriptStart is the transcript line offset where the current
 	// checkpoint cycle began. Set to 0 at session start, updated to current
 	// transcript length after each condensation. Used to scope the transcript

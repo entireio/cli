@@ -86,18 +86,30 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			return ErrMutationSkip
 		}
 
-		// LastCheckpointID is intentionally NOT cleared here. It is set during
-		// condensation and used by handleAmendCommitMsg to restore checkpoint
-		// trailers on amend operations.
-		state.StepCount++
+		// A Stop can reach us more than once for one turn (a retried or
+		// duplicate hook, or two racing). The repeat still merges its files,
+		// which is idempotent, but must not add the turn's tokens or count a
+		// step again. It does count a step when a commit condensed the window
+		// in between: its files are then new pending work.
+		repeat := isRepeatedStep(state, step)
+		if !repeat || state.StepCount == 0 {
+			// LastCheckpointID is intentionally NOT cleared here. It is set during
+			// condensation and used by handleAmendCommitMsg to restore checkpoint
+			// trailers on amend operations.
+			state.StepCount++
+			if state.StepCount == 1 && !repeat {
+				state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
+			}
+		}
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
 		applyTouchedFileHashes(state, changedFiles, stepFileHashes, recordedDeletions)
 		recordUntrackedDeletions(worktreeRoot, state, untrackedGone)
 		dropPhantomFilesTouched(worktreeRoot, state, changedFiles)
-		if state.StepCount == 1 {
-			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
+		if !repeat {
+			state.LastStepTurnNonce = step.TurnNonce
+			state.LastStepTranscriptSize = step.TranscriptSize
 		}
-		if step.TokenUsage != nil {
+		if step.TokenUsage != nil && !repeat {
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
 			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
 			// step.TokenUsage.SubagentTokens is a cumulative-since-session-start
@@ -149,6 +161,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			slog.String("strategy", "manual-commit"),
 			slog.String("checkpoint_type", "session"),
 			slog.Int("checkpoint_count", state.StepCount),
+			slog.Bool("repeated_stop", repeat),
 			slog.Int("modified_files", len(step.ModifiedFiles)),
 			slog.Int("new_files", len(step.NewFiles)),
 			slog.Int("deleted_files", len(step.DeletedFiles)),
@@ -160,6 +173,19 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		return nil
 	}
 	return mutErr
+}
+
+// isRepeatedStep reports whether step ends the same turn as the step state
+// last recorded. A Stop that carries its turn's pre-prompt nonce is matched on
+// it, which also covers concurrent Stops: both loaded the nonce before either
+// consumed it. A Stop without one (an earlier Stop already consumed it, or the
+// turn had no TurnStart) is matched on the transcript instead: a new turn
+// grows it, a repeat does not.
+func isRepeatedStep(state *SessionState, step StepContext) bool {
+	if step.TurnNonce != "" {
+		return state.LastStepTurnNonce == step.TurnNonce
+	}
+	return step.TranscriptSize > 0 && state.LastStepTranscriptSize == step.TranscriptSize
 }
 
 func invalidateStaleSubagentSnapshot(step *StepContext, state *SessionState) {

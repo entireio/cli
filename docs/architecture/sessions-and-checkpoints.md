@@ -292,6 +292,11 @@ A turn end (`SaveStep`) writes no git objects. It records the turn into session 
 └── prompt.txt           # Checkpoint-scoped user prompts
 ```
 
+**One step per turn.** A Stop can arrive more than once for the same turn: a retried hook, a duplicate delivery, or two racing hook processes. Each repeat reaches `SaveStep` again, so `SaveStep` records which turn its last step came from (`LastStepTurnNonce`, `LastStepTranscriptSize`). It sets them in the same locked mutation that adds tokens and increments `StepCount`. A repeat still merges its files, but adds no tokens and no step.
+- A Stop is matched on its turn's `PrePromptState.TurnNonce` when it has one. TurnStart writes the nonce before taking any session lock, so a TurnStart that times out on the lock (and so never rotates `TurnID`) still gets a fresh one. Concurrent Stops both loaded the nonce before either consumed it.
+- A Stop without a nonce is matched on the transcript's byte size instead. This covers a repeat whose pre-prompt state an earlier Stop already removed, and a turn that never had a TurnStart. A new turn grows the transcript; a repeat does not.
+- If a commit condensed the window between a Stop and its repeat, the repeat still counts a step, because its files are new pending work. It adds no tokens.
+
 Hashing runs before the session lock is taken (`hashTouchedFiles`), and the results are applied inside it (`applyTouchedFileHashes`). Multiple concurrent sessions each keep their own state file and metadata directory, so nothing interleaves.
 
 **Pending work.** Whether a session has anything to condense is one predicate, `State.HasPendingWork()` (`session/state.go`): steps, touched files, or task content. Condensation triggers, session-end eager condensation, orphan cleanup, the session sweep, and `entire doctor` all key on it. It ignores `FullyCondensed`; the session sweep, `IsCondensableEndedSession`, and doctor's ENDED classification exclude fully condensed sessions themselves.

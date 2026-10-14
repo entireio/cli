@@ -1117,11 +1117,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	// Get transcript position/identifier from pre-prompt state
-	var transcriptIdentifierAtStart string
+	var transcriptIdentifierAtStart, turnNonce string
 	var transcriptLinesAtStart int
 	if preState != nil {
 		transcriptIdentifierAtStart = preState.LastTranscriptIdentifier
 		transcriptLinesAtStart = preState.TranscriptOffset
+		turnNonce = preState.TurnNonce
 	}
 
 	// Resolve token usage. Hook-provided counts (e.g., Cursor's stop hook,
@@ -1162,6 +1163,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		StepTranscriptStart:      transcriptLinesAtStart,
 		TokenUsage:               tokenUsage,
 		SubagentLedgerVersion:    codexLedgerVersion,
+		TurnNonce:                turnNonce,
+		TranscriptSize:           len(transcriptData),
 	}
 
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {

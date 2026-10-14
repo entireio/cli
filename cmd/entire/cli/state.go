@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -77,6 +78,14 @@ type PrePromptState struct {
 	// checkpoint-scoped token delta. Empty for agents with transcript-embedded
 	// token data.
 	TokenBaseline json.RawMessage `json:"token_baseline,omitempty"`
+
+	// TurnNonce identifies the turn this state was captured for. Turn-end
+	// hands it to SaveStep, which records a step at most once per nonce, so a
+	// repeated or concurrent Stop for the turn is not counted twice. It is
+	// written here, before any session lock, so a TurnStart that times out on
+	// the lock still gets a fresh one. Empty in state written by older
+	// versions.
+	TurnNonce string `json:"turn_nonce,omitempty"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -268,6 +277,9 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		UntrackedScanSkipped: scanSkipped,
 		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
 		TranscriptOffset:     transcriptOffset,
+	}
+	if nonce, nonceErr := id.Generate(); nonceErr == nil {
+		state.TurnNonce = nonce.String()
 	}
 
 	// Out-of-band token baseline: agents whose token usage lives outside the
