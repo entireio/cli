@@ -88,6 +88,12 @@ func parseEventsFromBytes(data []byte) ([]copilotEvent, error) {
 // parseEventsFromOffset scans JSONL data and returns events starting after
 // the first startOffset lines. Malformed lines are silently skipped.
 func parseEventsFromOffset(data []byte, startOffset int) ([]copilotEvent, error) {
+	return parseEventLines(data, startOffset, nil)
+}
+
+// parseEventLines is parseEventsFromOffset with an optional cheap pre-filter:
+// when keep is non-nil, a line it rejects is skipped without being unmarshaled.
+func parseEventLines(data []byte, startOffset int, keep func(line []byte) bool) ([]copilotEvent, error) {
 	var events []copilotEvent
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), 10*1024*1024) // 10 MB max line
@@ -100,7 +106,7 @@ func parseEventsFromOffset(data []byte, startOffset int) ([]copilotEvent, error)
 		}
 
 		line := scanner.Bytes()
-		if len(line) == 0 {
+		if len(line) == 0 || (keep != nil && !keep(line)) {
 			continue
 		}
 
@@ -383,15 +389,27 @@ const (
 // transcripts never read session.shutdown: it is not checkpoint-scoped, and
 // would count every earlier checkpoint's calls again.
 //
-// Events before fromOffset are still parsed, but only to learn which calls
-// were already counted, so a call is never counted again in a later slice.
+// Events before fromOffset are still read, but only to learn which calls were
+// already counted, so a call is never counted again in a later slice. Only the
+// three token-bearing event types are unmarshaled (see isTokenEventLine), so
+// the large tool-output lines that dominate a long transcript are skipped by a
+// byte scan rather than parsed on every checkpoint.
 func (c *CopilotCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
-	events, err := parseEventsFromOffset(transcriptData, 0)
+	events, err := parseEventLines(transcriptData, 0, isTokenEventLine)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript for token usage: %w", err)
 	}
 
 	return extractTokenUsageFromEvents(events, fromOffset), nil
+}
+
+// isTokenEventLine reports whether a raw transcript line may be one of the
+// event types extractTokenUsageFromEvents reads. It is a pre-filter only: a
+// line that merely mentions a type name is unmarshaled and then ignored.
+func isTokenEventLine(line []byte) bool {
+	return bytes.Contains(line, []byte(eventTypeUsageRecord)) ||
+		bytes.Contains(line, []byte(eventTypeAssistantMsg)) ||
+		bytes.Contains(line, []byte(eventTypeSessionShutdown))
 }
 
 // copilotRun accumulates the per-call usage of the events between two
