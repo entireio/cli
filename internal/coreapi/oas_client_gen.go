@@ -38,7 +38,7 @@ type Invoker interface {
 	// Add a member to an organization.
 	//
 	// POST /orgs/{orgId}/members
-	AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (*Membership, error)
+	AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (*AddOrgMemberResult, error)
 	// BeginPluginInstallationDeletion invokes beginPluginInstallationDeletion operation.
 	//
 	// Requires org#manage on the installation's org. New provider access is denied before the response.
@@ -435,13 +435,13 @@ type Invoker interface {
 	// Grant project access to an identity.
 	//
 	// POST /projects/{projectId}/grants
-	GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (*GrantProjectAccessOutputBody, error)
+	GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (*GrantAccessResult, error)
 	// GrantRepoAccess invokes grantRepoAccess operation.
 	//
 	// Grant repo access to an identity.
 	//
 	// POST /repos/{repoId}/grants
-	GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (*GrantRepoAccessOutputBody, error)
+	GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (*GrantAccessResult, error)
 	// GrantServiceAccountAccess invokes grantServiceAccountAccess operation.
 	//
 	// Grant service account access on a repo or project.
@@ -1194,12 +1194,12 @@ func (c *Client) sendAcceptMeInvitation(ctx context.Context, params AcceptMeInvi
 // Add a member to an organization.
 //
 // POST /orgs/{orgId}/members
-func (c *Client) AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (*Membership, error) {
+func (c *Client) AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (*AddOrgMemberResult, error) {
 	res, err := c.sendAddOrgMember(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendAddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (res *Membership, err error) {
+func (c *Client) sendAddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (res *AddOrgMemberResult, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string
@@ -7622,12 +7622,12 @@ func (c *Client) sendGetVersion(ctx context.Context) (res *GetVersionOutputBody,
 // Grant project access to an identity.
 //
 // POST /projects/{projectId}/grants
-func (c *Client) GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (*GrantProjectAccessOutputBody, error) {
+func (c *Client) GrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (*GrantAccessResult, error) {
 	res, err := c.sendGrantProjectAccess(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (res *GrantProjectAccessOutputBody, err error) {
+func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAccessBody, params GrantProjectAccessParams) (res *GrantAccessResult, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string
@@ -7726,12 +7726,12 @@ func (c *Client) sendGrantProjectAccess(ctx context.Context, request *GrantAcces
 // Grant repo access to an identity.
 //
 // POST /repos/{repoId}/grants
-func (c *Client) GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (*GrantRepoAccessOutputBody, error) {
+func (c *Client) GrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (*GrantAccessResult, error) {
 	res, err := c.sendGrantRepoAccess(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendGrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (res *GrantRepoAccessOutputBody, err error) {
+func (c *Client) sendGrantRepoAccess(ctx context.Context, request *GrantAccessBody, params GrantRepoAccessParams) (res *GrantAccessResult, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string

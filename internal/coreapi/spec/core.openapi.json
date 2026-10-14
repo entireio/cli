@@ -260,6 +260,44 @@
         ],
         "type": "object"
       },
+      "AddOrgMemberResult": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/AddOrgMemberResult.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "expiresAt": {
+            "description": "When the invitation lapses. Set when status is invited.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "invitationId": {
+            "description": "Set when status is invited.",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "granted",
+              "invited"
+            ],
+            "type": "string"
+          },
+          "membership": {
+            "$ref": "#/components/schemas/Membership",
+            "description": "The membership written. Set when status is granted."
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
       "AuditEvent": {
         "additionalProperties": true,
         "properties": {
@@ -2925,40 +2963,32 @@
         ],
         "type": "object"
       },
-      "GrantProjectAccessOutputBody": {
+      "GrantAccessResult": {
         "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
             "examples": [
-              "/api/v1/schemas/GrantProjectAccessOutputBody.json"
+              "/api/v1/schemas/GrantAccessResult.json"
             ],
             "format": "uri",
             "readOnly": true,
             "type": "string"
           },
-          "status": {
+          "expiresAt": {
+            "description": "When the invitation lapses. Set when status is invited.",
+            "format": "date-time",
             "type": "string"
-          }
-        },
-        "required": [
-          "status"
-        ],
-        "type": "object"
-      },
-      "GrantRepoAccessOutputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/GrantRepoAccessOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
+          },
+          "invitationId": {
+            "description": "Set when status is invited.",
             "type": "string"
           },
           "status": {
+            "enum": [
+              "granted",
+              "invited"
+            ],
             "type": "string"
           }
         },
@@ -14741,7 +14771,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Membership"
+                  "$ref": "#/components/schemas/AddOrgMemberResult"
                 }
               }
             },
@@ -18660,7 +18690,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GrantProjectAccessOutputBody"
+                  "$ref": "#/components/schemas/GrantAccessResult"
                 }
               }
             },
@@ -23506,7 +23536,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GrantRepoAccessOutputBody"
+                  "$ref": "#/components/schemas/GrantAccessResult"
                 }
               }
             },

@@ -150,6 +150,24 @@ the only failure mode here that would not announce itself (a requirement
 mixing `oauth2` with `bearerAuth` survives whole and makes ogen abort at
 generate time on the now-dangling scheme).
 
+## 4. Hand-edited ahead of upstream: ENT-2652 add endpoints invite
+
+**Symptom:** `entire grant` handles the invited outcome before the server's
+spec publishes it. `core.openapi.json` carries the entiredb#4666 contract by
+hand: `POST /orgs/{id}/members` answers `AddOrgMemberResult` and
+`POST /projects/{id}/grants` / `POST /repos/{id}/grants` answer
+`GrantAccessResult`, each `{status: granted|invited, invitationId?,
+expiresAt?}` with the org result carrying `membership` when granted. The
+`GrantProjectAccessOutputBody` / `GrantRepoAccessOutputBody` schemas those
+routes used to answer are gone.
+
+**Fix upstream:** entiredb publishes the same shape once the server deploys.
+A plain `curl` refresh then carries it, and this entry goes.
+
+**Workaround:** none in `normalize.go`. Do not refresh the spec from a core
+that predates the server change: the result types disappear and
+`cmd/entire/cli/grant.go` stops compiling.
+
 <!-- Resolved upstream and removed:
   - Nullable arrays (`"type": ["array","null"]`) — entiredb now emits
     non-nullable arrays (`"type": "array"`, absent ⇒ `[]`), so the

@@ -459,6 +459,40 @@ func (s AddOrgMemberInputBodyRole) Validate() error {
 	}
 }
 
+func (s *AddOrgMemberResult) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := s.Status.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "status",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s AddOrgMemberResultStatus) Validate() error {
+	switch s {
+	case "granted":
+		return nil
+	case "invited":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
 func (s *AvailableMirror) Validate() error {
 	if s == nil {
 		return validate.ErrNilPointer
@@ -2647,6 +2681,40 @@ func (s GrantAccessBodyRole) Validate() error {
 	case "writer":
 		return nil
 	case "admin":
+		return nil
+	default:
+		return errors.Errorf("invalid value: %v", s)
+	}
+}
+
+func (s *GrantAccessResult) Validate() error {
+	if s == nil {
+		return validate.ErrNilPointer
+	}
+
+	var failures []validate.FieldError
+	if err := func() error {
+		if err := s.Status.Validate(); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		failures = append(failures, validate.FieldError{
+			Name:  "status",
+			Error: err,
+		})
+	}
+	if len(failures) > 0 {
+		return &validate.Error{Fields: failures}
+	}
+	return nil
+}
+
+func (s GrantAccessResultStatus) Validate() error {
+	switch s {
+	case "granted":
+		return nil
+	case "invited":
 		return nil
 	default:
 		return errors.Errorf("invalid value: %v", s)

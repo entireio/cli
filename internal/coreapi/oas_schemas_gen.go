@@ -1358,6 +1358,132 @@ func (s *AddOrgMemberInputBodyRole) UnmarshalText(data []byte) error {
 	}
 }
 
+// Ref: #/components/schemas/AddOrgMemberResult
+type AddOrgMemberResult struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// When the invitation lapses. Set when status is invited.
+	ExpiresAt OptDateTime `json:"expiresAt"`
+	// Set when status is invited.
+	InvitationId OptString `json:"invitationId"`
+	// The membership written. Set when status is granted.
+	Membership      OptMembership            `json:"membership"`
+	Status          AddOrgMemberResultStatus `json:"status"`
+	AdditionalProps AddOrgMemberResultAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *AddOrgMemberResult) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetExpiresAt returns the value of ExpiresAt.
+func (s *AddOrgMemberResult) GetExpiresAt() OptDateTime {
+	return s.ExpiresAt
+}
+
+// GetInvitationId returns the value of InvitationId.
+func (s *AddOrgMemberResult) GetInvitationId() OptString {
+	return s.InvitationId
+}
+
+// GetMembership returns the value of Membership.
+func (s *AddOrgMemberResult) GetMembership() OptMembership {
+	return s.Membership
+}
+
+// GetStatus returns the value of Status.
+func (s *AddOrgMemberResult) GetStatus() AddOrgMemberResultStatus {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AddOrgMemberResult) GetAdditionalProps() AddOrgMemberResultAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *AddOrgMemberResult) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetExpiresAt sets the value of ExpiresAt.
+func (s *AddOrgMemberResult) SetExpiresAt(val OptDateTime) {
+	s.ExpiresAt = val
+}
+
+// SetInvitationId sets the value of InvitationId.
+func (s *AddOrgMemberResult) SetInvitationId(val OptString) {
+	s.InvitationId = val
+}
+
+// SetMembership sets the value of Membership.
+func (s *AddOrgMemberResult) SetMembership(val OptMembership) {
+	s.Membership = val
+}
+
+// SetStatus sets the value of Status.
+func (s *AddOrgMemberResult) SetStatus(val AddOrgMemberResultStatus) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AddOrgMemberResult) SetAdditionalProps(val AddOrgMemberResultAdditional) {
+	s.AdditionalProps = val
+}
+
+type AddOrgMemberResultAdditional map[string]jx.Raw
+
+func (s *AddOrgMemberResultAdditional) init() AddOrgMemberResultAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type AddOrgMemberResultStatus string
+
+const (
+	AddOrgMemberResultStatusGranted AddOrgMemberResultStatus = "granted"
+	AddOrgMemberResultStatusInvited AddOrgMemberResultStatus = "invited"
+)
+
+// AllValues returns all AddOrgMemberResultStatus values.
+func (AddOrgMemberResultStatus) AllValues() []AddOrgMemberResultStatus {
+	return []AddOrgMemberResultStatus{
+		AddOrgMemberResultStatusGranted,
+		AddOrgMemberResultStatusInvited,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s AddOrgMemberResultStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case AddOrgMemberResultStatusGranted:
+		return []byte(s), nil
+	case AddOrgMemberResultStatusInvited:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *AddOrgMemberResultStatus) UnmarshalText(data []byte) error {
+	switch AddOrgMemberResultStatus(data) {
+	case AddOrgMemberResultStatusGranted:
+		*s = AddOrgMemberResultStatusGranted
+		return nil
+	case AddOrgMemberResultStatusInvited:
+		*s = AddOrgMemberResultStatusInvited
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/AuditEvent
 type AuditEvent struct {
 	ActorId   string `json:"actorId"`
@@ -9120,47 +9246,71 @@ func (s *GrantAccessBodyRole) UnmarshalText(data []byte) error {
 	}
 }
 
-// Ref: #/components/schemas/GrantProjectAccessOutputBody
-type GrantProjectAccessOutputBody struct {
+// Ref: #/components/schemas/GrantAccessResult
+type GrantAccessResult struct {
 	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Status          string `json:"status"`
-	AdditionalProps GrantProjectAccessOutputBodyAdditional
+	Schema OptURI `json:"$schema"`
+	// When the invitation lapses. Set when status is invited.
+	ExpiresAt OptDateTime `json:"expiresAt"`
+	// Set when status is invited.
+	InvitationId    OptString               `json:"invitationId"`
+	Status          GrantAccessResultStatus `json:"status"`
+	AdditionalProps GrantAccessResultAdditional
 }
 
 // GetSchema returns the value of Schema.
-func (s *GrantProjectAccessOutputBody) GetSchema() OptURI {
+func (s *GrantAccessResult) GetSchema() OptURI {
 	return s.Schema
 }
 
+// GetExpiresAt returns the value of ExpiresAt.
+func (s *GrantAccessResult) GetExpiresAt() OptDateTime {
+	return s.ExpiresAt
+}
+
+// GetInvitationId returns the value of InvitationId.
+func (s *GrantAccessResult) GetInvitationId() OptString {
+	return s.InvitationId
+}
+
 // GetStatus returns the value of Status.
-func (s *GrantProjectAccessOutputBody) GetStatus() string {
+func (s *GrantAccessResult) GetStatus() GrantAccessResultStatus {
 	return s.Status
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
-func (s *GrantProjectAccessOutputBody) GetAdditionalProps() GrantProjectAccessOutputBodyAdditional {
+func (s *GrantAccessResult) GetAdditionalProps() GrantAccessResultAdditional {
 	return s.AdditionalProps
 }
 
 // SetSchema sets the value of Schema.
-func (s *GrantProjectAccessOutputBody) SetSchema(val OptURI) {
+func (s *GrantAccessResult) SetSchema(val OptURI) {
 	s.Schema = val
 }
 
+// SetExpiresAt sets the value of ExpiresAt.
+func (s *GrantAccessResult) SetExpiresAt(val OptDateTime) {
+	s.ExpiresAt = val
+}
+
+// SetInvitationId sets the value of InvitationId.
+func (s *GrantAccessResult) SetInvitationId(val OptString) {
+	s.InvitationId = val
+}
+
 // SetStatus sets the value of Status.
-func (s *GrantProjectAccessOutputBody) SetStatus(val string) {
+func (s *GrantAccessResult) SetStatus(val GrantAccessResultStatus) {
 	s.Status = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
-func (s *GrantProjectAccessOutputBody) SetAdditionalProps(val GrantProjectAccessOutputBodyAdditional) {
+func (s *GrantAccessResult) SetAdditionalProps(val GrantAccessResultAdditional) {
 	s.AdditionalProps = val
 }
 
-type GrantProjectAccessOutputBodyAdditional map[string]jx.Raw
+type GrantAccessResultAdditional map[string]jx.Raw
 
-func (s *GrantProjectAccessOutputBodyAdditional) init() GrantProjectAccessOutputBodyAdditional {
+func (s *GrantAccessResultAdditional) init() GrantAccessResultAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -9169,53 +9319,45 @@ func (s *GrantProjectAccessOutputBodyAdditional) init() GrantProjectAccessOutput
 	return m
 }
 
-// Ref: #/components/schemas/GrantRepoAccessOutputBody
-type GrantRepoAccessOutputBody struct {
-	// A URL to the JSON Schema for this object.
-	Schema          OptURI `json:"$schema"`
-	Status          string `json:"status"`
-	AdditionalProps GrantRepoAccessOutputBodyAdditional
-}
+type GrantAccessResultStatus string
 
-// GetSchema returns the value of Schema.
-func (s *GrantRepoAccessOutputBody) GetSchema() OptURI {
-	return s.Schema
-}
+const (
+	GrantAccessResultStatusGranted GrantAccessResultStatus = "granted"
+	GrantAccessResultStatusInvited GrantAccessResultStatus = "invited"
+)
 
-// GetStatus returns the value of Status.
-func (s *GrantRepoAccessOutputBody) GetStatus() string {
-	return s.Status
-}
-
-// GetAdditionalProps returns the value of AdditionalProps.
-func (s *GrantRepoAccessOutputBody) GetAdditionalProps() GrantRepoAccessOutputBodyAdditional {
-	return s.AdditionalProps
-}
-
-// SetSchema sets the value of Schema.
-func (s *GrantRepoAccessOutputBody) SetSchema(val OptURI) {
-	s.Schema = val
-}
-
-// SetStatus sets the value of Status.
-func (s *GrantRepoAccessOutputBody) SetStatus(val string) {
-	s.Status = val
-}
-
-// SetAdditionalProps sets the value of AdditionalProps.
-func (s *GrantRepoAccessOutputBody) SetAdditionalProps(val GrantRepoAccessOutputBodyAdditional) {
-	s.AdditionalProps = val
-}
-
-type GrantRepoAccessOutputBodyAdditional map[string]jx.Raw
-
-func (s *GrantRepoAccessOutputBodyAdditional) init() GrantRepoAccessOutputBodyAdditional {
-	m := *s
-	if m == nil {
-		m = map[string]jx.Raw{}
-		*s = m
+// AllValues returns all GrantAccessResultStatus values.
+func (GrantAccessResultStatus) AllValues() []GrantAccessResultStatus {
+	return []GrantAccessResultStatus{
+		GrantAccessResultStatusGranted,
+		GrantAccessResultStatusInvited,
 	}
-	return m
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s GrantAccessResultStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case GrantAccessResultStatusGranted:
+		return []byte(s), nil
+	case GrantAccessResultStatusInvited:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *GrantAccessResultStatus) UnmarshalText(data []byte) error {
+	switch GrantAccessResultStatus(data) {
+	case GrantAccessResultStatusGranted:
+		*s = GrantAccessResultStatusGranted
+		return nil
+	case GrantAccessResultStatusInvited:
+		*s = GrantAccessResultStatusInvited
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Ref: #/components/schemas/GrantServiceAccountAccessInputBody

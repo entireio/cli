@@ -287,7 +287,7 @@ func decodeAcceptMeInvitationResponse(resp *http.Response) (res AcceptMeInvitati
 	return res, errors.Wrap(defRes, "error")
 }
 
-func decodeAddOrgMemberResponse(resp *http.Response) (res *Membership, _ error) {
+func decodeAddOrgMemberResponse(resp *http.Response) (res *AddOrgMemberResult, _ error) {
 	switch resp.StatusCode {
 	case 201:
 		// Code 201.
@@ -303,7 +303,7 @@ func decodeAddOrgMemberResponse(resp *http.Response) (res *Membership, _ error) 
 			}
 			d := jx.DecodeBytes(buf)
 
-			var response Membership
+			var response AddOrgMemberResult
 			if err := func() error {
 				if err := response.Decode(d); err != nil {
 					return err
@@ -319,6 +319,15 @@ func decodeAddOrgMemberResponse(resp *http.Response) (res *Membership, _ error) 
 					Err:         err,
 				}
 				return res, err
+			}
+			// Validate response.
+			if err := func() error {
+				if err := response.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return res, errors.Wrap(err, "validate")
 			}
 			return &response, nil
 		default:
@@ -5727,7 +5736,7 @@ func decodeGetVersionResponse(resp *http.Response) (res *GetVersionOutputBody, _
 	return res, errors.Wrap(defRes, "error")
 }
 
-func decodeGrantProjectAccessResponse(resp *http.Response) (res *GrantProjectAccessOutputBody, _ error) {
+func decodeGrantProjectAccessResponse(resp *http.Response) (res *GrantAccessResult, _ error) {
 	switch resp.StatusCode {
 	case 201:
 		// Code 201.
@@ -5743,7 +5752,7 @@ func decodeGrantProjectAccessResponse(resp *http.Response) (res *GrantProjectAcc
 			}
 			d := jx.DecodeBytes(buf)
 
-			var response GrantProjectAccessOutputBody
+			var response GrantAccessResult
 			if err := func() error {
 				if err := response.Decode(d); err != nil {
 					return err
@@ -5759,6 +5768,15 @@ func decodeGrantProjectAccessResponse(resp *http.Response) (res *GrantProjectAcc
 					Err:         err,
 				}
 				return res, err
+			}
+			// Validate response.
+			if err := func() error {
+				if err := response.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return res, errors.Wrap(err, "validate")
 			}
 			return &response, nil
 		default:
@@ -5810,7 +5828,7 @@ func decodeGrantProjectAccessResponse(resp *http.Response) (res *GrantProjectAcc
 	return res, errors.Wrap(defRes, "error")
 }
 
-func decodeGrantRepoAccessResponse(resp *http.Response) (res *GrantRepoAccessOutputBody, _ error) {
+func decodeGrantRepoAccessResponse(resp *http.Response) (res *GrantAccessResult, _ error) {
 	switch resp.StatusCode {
 	case 201:
 		// Code 201.
@@ -5826,7 +5844,7 @@ func decodeGrantRepoAccessResponse(resp *http.Response) (res *GrantRepoAccessOut
 			}
 			d := jx.DecodeBytes(buf)
 
-			var response GrantRepoAccessOutputBody
+			var response GrantAccessResult
 			if err := func() error {
 				if err := response.Decode(d); err != nil {
 					return err
@@ -5842,6 +5860,15 @@ func decodeGrantRepoAccessResponse(resp *http.Response) (res *GrantRepoAccessOut
 					Err:         err,
 				}
 				return res, err
+			}
+			// Validate response.
+			if err := func() error {
+				if err := response.Validate(); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return res, errors.Wrap(err, "validate")
 			}
 			return &response, nil
 		default:

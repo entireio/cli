@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -56,7 +57,13 @@ type pickerFixture struct {
 	// withOwnerRow adds the synthetic row for the owning org, which every real
 	// listing carries and neither picker may offer.
 	withOwnerRow bool
+	// invites makes every add answer the invited outcome, as the server does
+	// for an account outside the parent scope, instead of a direct grant.
+	invites bool
 }
+
+// pickerInvitationExpiry is the expiry the invited fixture answers with.
+var pickerInvitationExpiry = time.Date(2026, 11, 13, 9, 30, 0, 0, time.UTC)
 
 // inactive is a member who has not joined, so no provider identity resolves for
 // them and they cannot be granted anything.
@@ -154,7 +161,15 @@ func pickerServer(t *testing.T, f pickerFixture, grants *[]string, grantStatus f
 					return
 				}
 			}
-			write(w, http.StatusCreated, map[string]string{"status": "ok"})
+			if f.invites {
+				write(w, http.StatusCreated, &coreapi.GrantAccessResult{
+					Status:       coreapi.GrantAccessResultStatusInvited,
+					InvitationId: coreapi.NewOptString("inv-" + body.ProviderUserID),
+					ExpiresAt:    coreapi.NewOptDateTime(pickerInvitationExpiry),
+				})
+				return
+			}
+			write(w, http.StatusCreated, &coreapi.GrantAccessResult{Status: coreapi.GrantAccessResultStatusGranted})
 			return
 		}
 		if r.Method == http.MethodDelete {
@@ -983,6 +998,44 @@ func TestGrantAdd_TypedGranteeIsOnlyAskedForARole(t *testing.T) {
 	require.Equal(t, []string{"github:alice"}, gotKnown, "the typed grantee is the whole selection")
 	require.Empty(t, gotOffered, "no pool is offered when the grantee was named")
 	require.Contains(t, out, "✓ Granted github:alice admin access to project "+pickerProjULID)
+}
+
+// TestGrantAdd_InvitedOutcome: when the server answers invited, the add
+// created an invitation rather than access, and the line says so with the
+// expiry instead of claiming a grant. --json carries the wire result through.
+//
+// Not parallel: swaps the activeCoreClient seam.
+func TestGrantAdd_InvitedOutcome(t *testing.T) {
+	var grants []string
+	srv := pickerServer(t, pickerFixture{invites: true}, &grants, nil)
+	t.Cleanup(srv.Close)
+
+	out, _, err := runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID, "github:alice", "--role", "reader")
+	require.NoError(t, err)
+	require.Equal(t, []string{"/api/v1/projects/" + pickerProjULID + "/grants uid-alice reader"}, grants)
+	require.Contains(t, out, "✓ Invitation sent to github:alice for project "+pickerProjULID+" as reader (expires 2026-11-13)")
+	require.NotContains(t, out, "Granted")
+
+	out, _, err = runPickerCmd(t, newProjectGrantCmd, srv.URL, pickerProjULID, "github:alice", "--role", "reader", "--json")
+	require.NoError(t, err)
+	require.Contains(t, out, `"status": "invited"`)
+	require.Contains(t, out, `"invitationId": "inv-uid-alice"`)
+}
+
+// TestGrantAdd_InvitedOrgReportsTheDefaultRole: an org add is always an
+// invitation, which carries no membership to read the role from, so an
+// omitted --role reports the server default the invitation will apply.
+//
+// Not parallel: swaps the activeCoreClient seam.
+func TestGrantAdd_InvitedOrgReportsTheDefaultRole(t *testing.T) {
+	var grants []string
+	srv := pickerServer(t, pickerFixture{invites: true}, &grants, nil)
+	t.Cleanup(srv.Close)
+
+	out, _, err := runPickerCmd(t, newOrgGrantCmd, srv.URL, pickerOrgULID, "github:alice")
+	require.NoError(t, err)
+	require.Equal(t, []string{"/api/v1/orgs/" + pickerOrgULID + "/members uid-alice "}, grants)
+	require.Contains(t, out, "✓ Invitation sent to github:alice for org "+pickerOrgULID+" as member (expires 2026-11-13)")
 }
 
 // TestRemovePicker_DropsMembersTheRoutesCannotAddress: the remove pool applies
