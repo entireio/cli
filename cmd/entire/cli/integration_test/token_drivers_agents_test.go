@@ -10,17 +10,17 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/stretchr/testify/require"
 )
 
 // Token drivers for the agents other than Claude Code. Each writes the
 // agent's own transcript (or hook payload) format and fires its real hooks.
-// Cursor, Codex, Copilot CLI and Antigravity follow real captures; Factory
-// Droid, OpenCode, Pi, the external agent and Vogon were not captured and
-// keep the shapes their CLI parsers document.
+// Cursor, Codex, Copilot CLI, Antigravity, Factory Droid, OpenCode and Pi
+// follow real captures; the external agent and Vogon have no real
+// counterpart and keep the shapes their CLI parsers document.
 
 // tokenDriverBase holds what every simple driver shares.
 type tokenDriverBase struct {
@@ -92,8 +92,9 @@ func (cursorTokenDriver) NewSession(h *tokenHarness) tokenSession {
 // cursorTokenSession fakes Cursor 2026.10.01. Its transcript is
 // {"role":..,"message":{"content":[text|tool_use]}} lines with no usage; the
 // tokens come only in the stop payload, per turn: input_tokens includes the
-// cache reads (and, the CLI assumes, cache writes; the capture had none),
-// keyed by the turn's generation_id, which beforeSubmitPrompt announced.
+// cache reads and the cache writes (a capture's first turn reported 47,165 =
+// 6 + 31,480 read + 15,679 written), keyed by the turn's generation_id, which
+// beforeSubmitPrompt announced. Every call here spends cache writes.
 // sessionStart and the first beforeSubmitPrompt carry transcript_path null:
 // the transcript does not exist yet.
 type cursorTokenSession struct {
@@ -559,110 +560,230 @@ func (s *copilotTokenSession) SessionEnd() {
 	})
 }
 
-// --- Factory AI Droid: Claude-like usage inside Droid's message envelope ---
+// --- Factory AI Droid: no usage in the transcript, a cumulative sidecar ---
 
 type droidTokenDriver struct{ tokenDriverBase }
 
+// newDroidTokenDriver lacks capTranscriptTokens: Droid's tokens are in its
+// settings.json, not its transcript.
 func newDroidTokenDriver() droidTokenDriver {
 	return droidTokenDriver{tokenDriverBase{name: "factoryai-droid", agent: "factoryai-droid",
-		caps: []tokenCap{capAttach, capSessionEnd, capTranscriptTokens, capSubagent, capSplitMessage, capMidTurnTokens}}}
+		caps: []tokenCap{capAttach, capSessionEnd, capSubagent, capMidTurnTokens}}}
 }
 
+// Setup lays out ~/.factory/sessions: a session's transcript is in its
+// project dir, a Worker's at the sessions root.
 func (droidTokenDriver) Setup(h *tokenHarness) {
-	h.agentDir = realDir(h)
+	h.agentDir = filepath.Join(realDir(h), "sessions", "-tmp-repo")
 	h.env.ExtraEnv = append(h.env.ExtraEnv, "ENTIRE_TEST_DROID_PROJECT_DIR="+h.agentDir)
 }
 
-func (droidTokenDriver) NewSession(h *tokenHarness) tokenSession {
-	id := fmt.Sprintf("droid-tok-%d", h.nextSessionNumber())
-	return &droidTokenSession{unsupportedSession: unsupportedSession{"factoryai-droid"}, h: h, id: id,
+func (d droidTokenDriver) NewSession(h *tokenHarness) tokenSession {
+	id := fakeUUID("droid", h.t.Name(), h.nextSessionNumber())
+	s := &droidTokenSession{unsupportedSession: unsupportedSession{"factoryai-droid"}, h: h, id: id, headless: d.headless,
 		path: filepath.Join(h.agentDir, id+".jsonl")}
+	appendJSONLines(h, s.path, map[string]any{"type": "session_start", "id": id, "title": "task", "sessionTitle": "task",
+		"owner": "tester", "version": 2, "cwd": h.sessionDir(id)})
+	if !d.headless {
+		s.startProcess()
+	}
+	return s
 }
 
+// droidTokenSession fakes Factory AI Droid 0.82.0. Transcript lines are
+// {"type":"message","id","timestamp","message":{role,content},"parentId"}
+// after a session_start line; assistant messages carry openaiMessageId and no
+// usage at all. The binary keeps the session's cumulative tokenUsage
+// (inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
+// thinkingTokens) in <session>.settings.json next to the transcript; the
+// BYOK capture had none there, so whether outputTokens includes
+// thinkingTokens is unverified and the driver spends no thinking.
+//
+// Hook payloads carry snake_case and camelCase copies of every field and no
+// model. Each process fires SessionStart and, because Entire also installs
+// user-prompt-submit on SessionStart, the same payload again as
+// user-prompt-submit. The interactive driver's real UserPromptSubmit (with
+// the prompt) was not captured.
 type droidTokenSession struct {
 	unsupportedSession
 
 	h        *tokenHarness
 	id, path string
+	headless bool
+	running  bool
+	started  bool
 	seq      int
+	parent   string
+	// spent is the session's cumulative usage, which settings.json reports.
+	spent tokenCounts
 }
 
 func (s *droidTokenSession) ID() string             { return s.id }
 func (s *droidTokenSession) TranscriptPath() string { return s.path }
 
-func (s *droidTokenSession) hook(name string, extra map[string]any) {
-	in := mergeMaps(map[string]any{"session_id": s.id, "transcript_path": s.path, "model": "droid-test"}, extra)
-	hookCall(s.h, s.h.sessionDir(s.id), "factoryai-droid", name, in)
+// droidPayload is a Droid hook payload: each field in snake_case and again in
+// camelCase.
+func droidPayload(fields map[string]any) map[string]any {
+	out := make(map[string]any, 2*len(fields))
+	for k, v := range fields {
+		out[k] = v
+		parts := strings.Split(k, "_")
+		for i := 1; i < len(parts); i++ {
+			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+		}
+		out[strings.Join(parts, "")] = v
+	}
+	return out
 }
 
-func (s *droidTokenSession) message(role, msgID string, content []any, u *tokenCounts) {
+func droidHook(h *tokenHarness, sessionID, transcript, name, event string, extra map[string]any) {
+	in := droidPayload(mergeMaps(map[string]any{"session_id": sessionID, "transcript_path": transcript,
+		"cwd": h.sessionDir(sessionID), "permission_mode": "off", "hook_event_name": event}, extra))
+	hookCall(h, h.sessionDir(sessionID), "factoryai-droid", name, in)
+}
+
+func (s *droidTokenSession) hook(name, event string, extra map[string]any) {
+	droidHook(s.h, s.id, s.path, name, event, extra)
+}
+
+// startProcess is a droid process starting on the session: SessionStart and
+// its user-prompt-submit alias.
+func (s *droidTokenSession) startProcess() {
+	source := "startup"
+	if s.started {
+		source = "resume"
+	}
+	s.started, s.running = true, true
+	extra := map[string]any{"source": source}
+	s.hook("session-start", "SessionStart", extra)
+	s.hook("user-prompt-submit", "SessionStart", extra)
+}
+
+func (s *droidTokenSession) message(role string, content []any, extra map[string]any) {
 	s.seq++
-	inner := map[string]any{"role": role, "content": content}
-	if msgID != "" {
-		inner["id"] = msgID
+	id := fakeUUID(s.id, "message", s.seq)
+	line := map[string]any{"type": entryTypeMessage, "id": id, "timestamp": nowMillis(),
+		"message": mergeMaps(map[string]any{"role": role, "content": content}, extra)}
+	if s.parent != "" {
+		line["parentId"] = s.parent
 	}
-	if u != nil {
-		inner["usage"] = claudeUsage(*u)
+	appendJSONLines(s.h, s.path, line)
+	s.parent = id
+}
+
+// assistant writes an API call's message and adds its usage to the
+// settings.json total.
+func (s *droidTokenSession) assistant(u tokenCounts, content ...any) {
+	s.message(roleAssistant, content, map[string]any{"openaiMessageId": fmt.Sprintf("oai%s%d", s.id[:8], s.seq)})
+	s.spent = s.spent.plus(u)
+	writeDroidSettings(s.h, s.path, s.headless, s.spent)
+}
+
+// writeDroidSettings rewrites <session>.settings.json with the cumulative usage.
+func writeDroidSettings(h *tokenHarness, transcript string, exec bool, u tokenCounts) {
+	tags := []any{}
+	if exec {
+		tags = []any{map[string]any{"name": "exec"}}
 	}
-	appendJSONLines(s.h, s.path, map[string]any{"type": entryTypeMessage, "id": fmt.Sprintf("m%d", s.seq), "message": inner})
+	writeJSONFile(h, strings.TrimSuffix(transcript, ".jsonl")+".settings.json", map[string]any{
+		"assistantActiveTimeMs": 0, "model": "droid-test", "reasoningEffort": "none", "interactionMode": "auto",
+		"autonomyLevel": "off", "autonomyMode": "normal", "tags": tags, "providerLock": "generic-chat-completion-api",
+		"tokenUsage": map[string]any{"inputTokens": u.In, "outputTokens": u.Out, "cacheCreationTokens": u.CacheWrite,
+			"cacheReadTokens": u.CacheRead, "thinkingTokens": 0},
+	})
 }
 
 func (s *droidTokenSession) StartTurn(prompt string) {
-	s.hook("user-prompt-submit", map[string]any{"prompt": prompt})
-	s.message(roleUser, "", []any{map[string]any{"type": blockTypeText, "text": prompt}}, nil)
+	if !s.running {
+		s.startProcess()
+	}
+	if !s.headless {
+		s.hook("user-prompt-submit", "UserPromptSubmit", map[string]any{"prompt": prompt})
+	}
+	s.message(roleUser, []any{
+		map[string]any{"type": blockTypeText, "text": "<system-reminder>\nUser system info\n</system-reminder>"},
+		map[string]any{"type": blockTypeText, "text": prompt},
+	}, nil)
 }
 
 func (s *droidTokenSession) ToolCall(u tokenCounts, tool toolUse, run func()) {
-	toolID := fmt.Sprintf("toolu_%s_%d", s.id, s.seq)
-	name, input := "Execute", map[string]any{"command": tool.command}
+	toolID := fmt.Sprintf("function-call-%s%d", s.id[:8], s.seq)
+	name, input := "Execute", map[string]any{"command": tool.command, "riskLevel": "medium", "riskLevelReason": "commit"}
 	if tool.path != "" {
-		name, input = "Write", map[string]any{"file_path": tool.path, "content": "x"}
+		name, input = "Create", map[string]any{"file_path": tool.path, "content": "x"}
 	}
-	s.message(roleAssistant, fmt.Sprintf("msg_%s_%d", s.id, s.seq+1),
-		[]any{map[string]any{"type": blockTypeToolUse, "id": toolID, "name": name, "input": input}}, &u)
+	s.assistant(u, map[string]any{"type": blockTypeToolUse, "id": toolID, "name": name, "input": input})
 	run()
-	s.message(roleUser, "", []any{map[string]any{"type": blockTypeToolResult, "tool_use_id": toolID, "content": "Success"}}, nil)
+	s.message(roleUser, []any{map[string]any{"type": blockTypeToolResult, "tool_use_id": toolID, "content": "ok"}}, nil)
 }
 
 func (s *droidTokenSession) Spend(u tokenCounts) {
-	s.SpendFinal(fmt.Sprintf("msg_%s_%d", s.id, s.seq+1), u)
+	s.assistant(u, map[string]any{"type": blockTypeText, "text": "working"})
 }
 
-func (s *droidTokenSession) SpendPartial(msgID string, u tokenCounts) { s.SpendFinal(msgID, u) }
-
-func (s *droidTokenSession) SpendFinal(msgID string, u tokenCounts) {
-	s.message(roleAssistant, msgID, []any{map[string]any{"type": blockTypeText, "text": "working"}}, &u)
-}
-
-// SpendSubagent runs a Task subagent Claude-style: its transcript sits under
-// <dir>/<session>/subagents and the tool result names its agent ID.
+// SpendSubagent runs a Task Worker as Droid does: a session of its own whose
+// transcript sits at the sessions root, its session_start naming the calling
+// session and tool call (and no cwd), with its own hooks (SessionStart
+// carrying calling_session_id) and settings.json usage. The project dir gets
+// only a session_end stub for it. The parent's Pre/PostToolUse carry no
+// tool_use_id, and the Task result is a plain string with no agent ID.
 func (s *droidTokenSession) SpendSubagent(agentID string, u tokenCounts) {
-	toolID := "toolu_" + agentID
-	s.message(roleAssistant, "", []any{map[string]any{"type": blockTypeToolUse, "id": toolID, "name": "Task",
-		"input": map[string]any{"prompt": "help", "subagent_type": "worker"}}}, nil)
-	s.hook("pre-tool-use", map[string]any{"tool_use_id": toolID, "tool_name": "Task",
-		"tool_input": map[string]any{"prompt": "help", "subagent_type": "worker"}})
-	appendJSONLines(s.h, s.subagentPath(agentID), map[string]any{"type": entryTypeMessage, "id": "sm1", "message": map[string]any{
-		"role": roleAssistant, "id": "msg_" + agentID, "content": []any{map[string]any{"type": blockTypeText, "text": "sub"}},
-		"usage": claudeUsage(u)}})
-	s.message(roleUser, "", []any{map[string]any{"type": blockTypeToolResult, "tool_use_id": toolID,
-		"content": "Done.\nagentId: " + agentID}}, nil)
-	s.hook("post-tool-use", map[string]any{"tool_use_id": toolID, "tool_name": "Task",
-		"tool_input": map[string]any{"prompt": "help"}, "tool_response": map[string]any{"agentId": agentID}})
+	toolID := fmt.Sprintf("function-call-%s%d", s.id[:8], s.seq)
+	input := map[string]any{"subagent_type": "worker", "description": "help", "prompt": "help"}
+	s.message(roleAssistant, []any{map[string]any{"type": blockTypeToolUse, "id": toolID, "name": "Task", "input": input}},
+		map[string]any{"openaiMessageId": "oai-" + agentID})
+	s.hook("pre-tool-use", "PreToolUse", map[string]any{"tool_name": "Task", "tool_input": input})
+
+	worker := s.workerID(agentID)
+	s.h.subagentSessions[worker] = true
+	path := s.workerPath(agentID)
+	appendJSONLines(s.h, path, map[string]any{"type": "session_start", "id": worker, "title": "Task Tool Invocation",
+		"sessionTitle": "worker: help", "isSessionTitleManuallySet": true, "owner": "tester",
+		"callingSessionId": s.id, "callingToolUseId": toolID, "version": 2})
+	start := map[string]any{"source": "startup", "calling_session_id": s.id}
+	droidHook(s.h, worker, path, "session-start", "SessionStart", start)
+	droidHook(s.h, worker, path, "user-prompt-submit", "SessionStart", start)
+	appendJSONLines(s.h, path,
+		map[string]any{"type": entryTypeMessage, "id": worker + "-u", "timestamp": nowMillis(),
+			"message": map[string]any{"role": roleUser, "content": []any{map[string]any{"type": blockTypeText, "text": "help"}}}},
+		map[string]any{"type": entryTypeMessage, "id": worker + "-a", "timestamp": nowMillis(), "parentId": worker + "-u",
+			"message": map[string]any{"role": roleAssistant, "openaiMessageId": "oai-" + worker,
+				"content": []any{map[string]any{"type": blockTypeText, "text": "sub work"}}}})
+	writeDroidSettings(s.h, path, true, u)
+	droidHook(s.h, worker, path, "stop", "Stop", map[string]any{"stop_hook_active": false, "tool_execution_count": 0})
+	droidHook(s.h, worker, path, "session-end", "SessionEnd", map[string]any{"reason": "other"})
+	appendJSONLines(s.h, filepath.Join(s.h.agentDir, worker+".jsonl"), map[string]any{"type": "session_end",
+		"timestamp": nowMillis(), "toolCount": 0, "finalText": "sub work"})
+
+	s.message(roleUser, []any{map[string]any{"type": blockTypeToolResult, "tool_use_id": toolID, "content": "sub work"}}, nil)
+	s.hook("post-tool-use", "PostToolUse", map[string]any{"tool_name": "Task", "tool_input": input,
+		"tool_response": "sub work"})
 }
 
-func (s *droidTokenSession) subagentPath(agentID string) string {
-	return filepath.Join(paths.SubagentsDir(filepath.Dir(s.path), s.id), paths.AgentTranscriptFileName(agentID))
+func (s *droidTokenSession) workerID(agentID string) string { return fakeUUID(s.id, "worker", agentID) }
+
+func (s *droidTokenSession) workerPath(agentID string) string {
+	return filepath.Join(filepath.Dir(s.h.agentDir), s.workerID(agentID)+".jsonl")
 }
 
 func (s *droidTokenSession) DeleteSubagentTranscript(agentID string) {
-	require.NoError(s.h.t, os.Remove(s.subagentPath(agentID)))
+	require.NoError(s.h.t, os.Remove(s.workerPath(agentID)))
 }
 
-func (s *droidTokenSession) Stop()       { s.hook("stop", nil) }
-func (s *droidTokenSession) SessionEnd() { s.hook("session-end", nil) }
+// Stop fires Stop; a `droid exec` process then exits.
+func (s *droidTokenSession) Stop() {
+	s.hook("stop", "Stop", map[string]any{"stop_hook_active": false, "tool_execution_count": 0})
+	if s.headless {
+		s.SessionEnd()
+	}
+}
 
-// --- OpenCode: the whole export is rewritten each time ---
+func (s *droidTokenSession) SessionEnd() {
+	s.hook("session-end", "SessionEnd", map[string]any{"reason": "other", "message_count": s.seq})
+	s.running = false
+}
+
+// --- OpenCode: the export, with each API call's tokens filled in at step end ---
 
 type openCodeTokenDriver struct{ tokenDriverBase }
 
@@ -675,80 +796,207 @@ func (openCodeTokenDriver) Setup(h *tokenHarness) {
 	h.env.ExtraEnv = append(h.env.ExtraEnv, "ENTIRE_TEST_OPENCODE_MOCK_EXPORT=1")
 }
 
-func (openCodeTokenDriver) NewSession(h *tokenHarness) tokenSession {
-	id := fmt.Sprintf("opencode-tok-%d", h.nextSessionNumber())
-	s := &openCodeTokenSession{unsupportedSession: unsupportedSession{"opencode"}, h: h, id: id,
+func (d openCodeTokenDriver) NewSession(h *tokenHarness) tokenSession {
+	sum := sha256.Sum256([]byte(fmt.Sprint("opencode", h.t.Name(), h.nextSessionNumber())))
+	id := "ses_" + hex.EncodeToString(sum[:13])
+	s := &openCodeTokenSession{unsupportedSession: unsupportedSession{"opencode"}, h: h, id: id, headless: d.headless,
 		path: filepath.Join(h.env.OpenCodeProjectDir, id+".json")}
 	s.write()
-	s.hook("session-start", nil)
+	if !d.headless {
+		s.startProcess()
+	}
 	return s
 }
 
+// openCodeTokenSession fakes OpenCode 1.18.33. Every API call is one
+// assistant message whose info.tokens {total, input, output, reasoning,
+// cache{read, write}} is repeated in its step-finish part. Input excludes
+// cache reads, reasoning is separate from output, and total is their sum.
+// The message exists with zero tokens while its tool runs: the tokens are
+// filled in at step end, after the tool finishes. The plugin fires
+// turn-start with an empty prompt and model, and turn-end with the model;
+// `opencode run` never fires session-end, and a turn whose API call fails
+// fires turn-end twice (not modelled). The interactive (TUI) driver was not
+// captured and keeps the plugin's session-end.
 type openCodeTokenSession struct {
 	unsupportedSession
 
 	h        *tokenHarness
 	id, path string
-	messages []map[string]any
+	headless bool
+	running  bool
+	messages []*openCodeMessage
+	userID   string
+	parts    int
+	// spent is the session's cumulative usage, for info.tokens.
+	spent *openCodeUsage
+}
+
+// openCodeMessage is one export message: info and parts.
+type openCodeMessage struct {
+	Info    map[string]any `json:"info"`
+	Parts   []any          `json:"parts"`
+	created int
+}
+
+// openCodeUsage is usage in OpenCode's terms: reasoning apart from output.
+type openCodeUsage struct{ input, output, reasoning, read, write int }
+
+func (u openCodeUsage) plus(o openCodeUsage) openCodeUsage {
+	return openCodeUsage{u.input + o.input, u.output + o.output, u.reasoning + o.reasoning, u.read + o.read, u.write + o.write}
+}
+
+// render is the tokens object; total is the sum of every field.
+func (u openCodeUsage) render() map[string]any {
+	return map[string]any{"total": u.input + u.output + u.reasoning + u.read + u.write, "input": u.input,
+		"output": u.output, "reasoning": u.reasoning, "cache": map[string]any{"read": u.read, "write": u.write}}
 }
 
 func (s *openCodeTokenSession) ID() string             { return s.id }
 func (s *openCodeTokenSession) TranscriptPath() string { return s.path }
 
 func (s *openCodeTokenSession) hook(name string, extra map[string]any) {
-	in := mergeMaps(map[string]any{"session_id": s.id, "model": "opencode-test"}, extra)
-	hookCall(s.h, s.h.sessionDir(s.id), "opencode", name, in)
+	hookCall(s.h, s.h.sessionDir(s.id), "opencode", name, mergeMaps(map[string]any{"session_id": s.id}, extra))
+}
+
+func (s *openCodeTokenSession) startProcess() {
+	s.running = true
+	s.hook("session-start", nil)
 }
 
 // write stores the export where `opencode export` would produce it, and
-// the copy the CLI reads in mock-export mode.
+// the copy the CLI reads in mock-export mode: an export at any moment shows
+// the session as it stands, including a call still waiting on its tool.
 func (s *openCodeTokenSession) write() {
-	export := map[string]any{"info": map[string]any{"id": s.id}, "messages": s.messages}
+	info := map[string]any{"id": s.id, "slug": "test-session", "directory": s.h.sessionDir(s.id), "path": "",
+		"title": "test", "agent": "build", "version": "1.18.33", "cost": 0,
+		"model": map[string]any{"id": "opencode-test", "providerID": "openai", "variant": "default"}}
+	if s.spent != nil {
+		info["tokens"] = s.spent.render()
+	}
+	export := map[string]any{"info": info, "messages": s.messages}
 	writeJSONFile(s.h, s.path, export)
 	writeJSONFile(s.h, filepath.Join(s.h.sessionDir(s.id), ".entire", "tmp", s.id+".json"), export)
 }
 
-func (s *openCodeTokenSession) add(role string, parts []any, u *tokenCounts) {
-	n := len(s.messages) + 1
-	info := map[string]any{"id": fmt.Sprintf("msg-%d", n), "role": role,
-		"time": map[string]any{"created": 1708300000 + n, "completed": 1708300000 + n + 1}}
-	if u != nil {
-		info["tokens"] = map[string]any{"input": u.In, "output": u.Out, "reasoning": 0,
-			"cache": map[string]any{"read": u.CacheRead, "write": u.CacheWrite}}
+func (s *openCodeTokenSession) part(msgID string, fields map[string]any) map[string]any {
+	s.parts++
+	return mergeMaps(map[string]any{"id": fmt.Sprintf("prt_%s%04d", s.id[4:12], s.parts), "sessionID": s.id,
+		"messageID": msgID}, fields)
+}
+
+// openCodeTokens renders usage as OpenCode does. With h.reasoning, a third
+// of output is reasoning, reported apart from output.
+func (s *openCodeTokenSession) openCodeTokens(u tokenCounts) openCodeUsage {
+	reasoning := 0
+	if s.h.reasoning {
+		reasoning = u.Out / 3
 	}
-	s.messages = append(s.messages, map[string]any{"info": info, "parts": parts})
-	s.write()
+	return openCodeUsage{input: u.In, output: u.Out - reasoning, reasoning: reasoning, read: u.CacheRead, write: u.CacheWrite}
 }
 
 func (s *openCodeTokenSession) StartTurn(prompt string) {
-	s.hook("turn-start", map[string]any{"prompt": prompt})
-	s.add(roleUser, []any{map[string]any{"type": blockTypeText, "text": prompt}}, nil)
+	if !s.running {
+		s.startProcess()
+	}
+	n := len(s.messages) + 1
+	s.userID = fmt.Sprintf("msg_%s%04d", s.id[4:12], n)
+	s.messages = append(s.messages, &openCodeMessage{
+		Info: map[string]any{"id": s.userID, "sessionID": s.id, "role": roleUser, "agent": "build",
+			"time":  map[string]any{"created": 1792000000000 + n},
+			"model": map[string]any{"providerID": "openai", "modelID": "opencode-test"}},
+		Parts: []any{s.part(s.userID, map[string]any{"type": blockTypeText, "text": prompt})},
+	})
+	s.write()
+	s.hook("turn-start", map[string]any{"prompt": "", "model": ""})
 }
 
-func (s *openCodeTokenSession) ToolCall(u tokenCounts, tool toolUse, run func()) {
-	part := map[string]any{"type": "tool", "tool": "bash", "callID": fmt.Sprintf("call-%d", len(s.messages)),
-		"state": map[string]any{"status": "completed", "input": map[string]any{"command": tool.command}, "output": "ok"}}
-	if tool.path != "" {
-		part = map[string]any{"type": "tool", "tool": "write", "callID": "call-" + tool.path,
-			"state": map[string]any{"status": "completed", "input": map[string]any{"filePath": tool.path}, "output": "ok"}}
+// call appends one API call's message with zero tokens; finish fills in its
+// tokens and step-finish part.
+func (s *openCodeTokenSession) call(parts func(msgID string) []any) (*openCodeMessage, string) {
+	n := len(s.messages) + 1
+	msgID := fmt.Sprintf("msg_%s%04d", s.id[4:12], n)
+	all := []any{s.part(msgID, map[string]any{"type": "step-start", "snapshot": "0000000"})}
+	if s.h.reasoning {
+		all = append(all, s.part(msgID, map[string]any{"type": "reasoning", "text": "thinking"}))
 	}
-	s.add(roleAssistant, []any{part}, &u)
+	msg := &openCodeMessage{created: 1792000000000 + n, Parts: append(all, parts(msgID)...)}
+	msg.Info = map[string]any{"id": msgID, "sessionID": s.id, "parentID": s.userID, "role": roleAssistant,
+		"mode": "build", "agent": "build", "cost": 0, "tokens": openCodeUsage{}.render(), "modelID": "opencode-test",
+		"providerID": "openai", "path": map[string]any{"cwd": s.h.sessionDir(s.id), "root": s.h.sessionDir(s.id)},
+		"time": map[string]any{"created": msg.created}}
+	s.messages = append(s.messages, msg)
+	s.write()
+	return msg, msgID
+}
+
+func (s *openCodeTokenSession) finish(msg *openCodeMessage, msgID, reason string, u tokenCounts, extra ...any) {
+	usage := s.openCodeTokens(u)
+	spent := usage
+	if s.spent != nil {
+		spent = s.spent.plus(usage)
+	}
+	s.spent = &spent
+	tokens := usage.render()
+	msg.Info["tokens"], msg.Info["finish"] = tokens, reason
+	msg.Info["time"] = map[string]any{"created": msg.created, "completed": msg.created + 1}
+	msg.Parts = append(append(msg.Parts, s.part(msgID, map[string]any{"type": "step-finish",
+		"reason": reason, "snapshot": "0000000", "tokens": tokens, "cost": 0})), extra...)
+	s.write()
+}
+
+// ToolCall writes the call's message with zero tokens, runs the tool, and only
+// then fills in the tokens, as OpenCode does at step end.
+func (s *openCodeTokenSession) ToolCall(u tokenCounts, tool toolUse, run func()) {
+	callID := fmt.Sprintf("call_%s%04d", s.id[4:12], len(s.messages)+1)
+	name, state := "bash", map[string]any{"status": "running", "input": map[string]any{"command": tool.command}}
+	if tool.path != "" {
+		name, state = "apply_patch", map[string]any{"status": "running",
+			"input": map[string]any{"patchText": "*** Begin Patch\n*** Add File: " + tool.path + "\n+x\n*** End Patch"}}
+	}
+	msg, msgID := s.call(func(msgID string) []any {
+		return []any{s.part(msgID, map[string]any{"type": "tool", "tool": name, "callID": callID, "state": state})}
+	})
 	run()
+	state["status"], state["output"], state["title"] = "completed", "ok", "ok"
+	var extra []any
+	if tool.path != "" {
+		abs := filepath.Join(s.h.sessionDir(s.id), tool.path)
+		state["metadata"] = map[string]any{"diff": "", "files": []any{map[string]any{"filePath": abs, "relativePath": tool.path,
+			"type": "add", "additions": 1, "deletions": 0}}, "diagnostics": map[string]any{}, "truncated": false}
+		extra = append(extra, s.part(msgID, map[string]any{"type": "patch", "hash": "0000000", "files": []string{abs}}))
+	}
+	s.finish(msg, msgID, "tool-calls", u, extra...)
 }
 
 func (s *openCodeTokenSession) Spend(u tokenCounts) {
-	s.add(roleAssistant, []any{map[string]any{"type": blockTypeText, "text": "working"}}, &u)
+	msg, msgID := s.call(func(msgID string) []any {
+		return []any{s.part(msgID, map[string]any{"type": blockTypeText, "text": "working"})}
+	})
+	s.finish(msg, msgID, "stop", u)
 }
 
-func (s *openCodeTokenSession) Stop()       { s.hook("turn-end", nil) }
-func (s *openCodeTokenSession) SessionEnd() { s.hook("session-end", nil) }
+// Stop fires turn-end; an `opencode run` process then exits without
+// session-end.
+func (s *openCodeTokenSession) Stop() {
+	s.hook("turn-end", map[string]any{"model": "opencode-test"})
+	if s.headless {
+		s.running = false
+	}
+}
 
-// --- Pi: session JSONL with a linear parentId chain ---
+func (s *openCodeTokenSession) SessionEnd() {
+	s.hook("session-end", nil)
+	s.running = false
+}
+
+// --- Pi: session JSONL with a parentId chain ---
 
 type piTokenDriver struct{ tokenDriverBase }
 
 func newPiTokenDriver() piTokenDriver {
-	return piTokenDriver{tokenDriverBase{name: "pi", agent: "pi", caps: []tokenCap{capAttach, capTranscriptTokens, capMidTurnTokens}}}
+	return piTokenDriver{tokenDriverBase{name: "pi", agent: "pi",
+		caps: []tokenCap{capAttach, capSessionEnd, capTranscriptTokens, capMidTurnTokens}}}
 }
 
 func (piTokenDriver) Setup(h *tokenHarness) {
@@ -756,22 +1004,37 @@ func (piTokenDriver) Setup(h *tokenHarness) {
 	h.env.ExtraEnv = append(h.env.ExtraEnv, "ENTIRE_TEST_PI_SESSION_DIR="+h.agentDir)
 }
 
-func (piTokenDriver) NewSession(h *tokenHarness) tokenSession {
-	id := fmt.Sprintf("0199a000-0000-7000-8000-%012d", h.nextSessionNumber())
-	s := &piTokenSession{unsupportedSession: unsupportedSession{"pi"}, h: h, id: id,
+func (d piTokenDriver) NewSession(h *tokenHarness) tokenSession {
+	id := fakeUUID("pi", h.t.Name(), h.nextSessionNumber())
+	s := &piTokenSession{unsupportedSession: unsupportedSession{"pi"}, h: h, id: id, headless: d.headless,
 		path: filepath.Join(h.agentDir, "2026-01-01T00-00-00-000Z_"+id+".jsonl")}
 	appendJSONLines(h, s.path, map[string]any{"type": "session", "version": 3, "id": id,
 		"timestamp": "2026-01-01T00:00:00.000Z", "cwd": h.sessionDir(id)})
-	s.hook("session_start", nil)
+	s.entry("model_change", map[string]any{"provider": "google", "modelId": "pi-test"})
+	s.entry("thinking_level_change", map[string]any{"thinkingLevel": "medium"})
+	if !d.headless {
+		s.startProcess()
+	}
 	return s
 }
 
+// piTokenSession fakes Pi 0.70.2. After the session header come
+// model_change and thinking_level_change entries, then message entries
+// (user, assistant, toolResult) chained by parentId. Each assistant message
+// carries usage {input, output, cacheRead, cacheWrite, totalTokens, cost},
+// written when the response arrives, before its tool runs. Hooks:
+// session_start, before_agent_start (prompt, skill_events), agent_end, and
+// session_shutdown with only {type}, which Entire ignores (it can race ahead
+// of agent_end; the driver sends it after).
 type piTokenSession struct {
 	unsupportedSession
 
 	h        *tokenHarness
 	id, path string
+	headless bool
+	running  bool
 	seq      int
+	parent   any
 }
 
 func (s *piTokenSession) ID() string             { return s.id }
@@ -782,42 +1045,72 @@ func (s *piTokenSession) hook(name string, extra map[string]any) {
 	hookCall(s.h, s.h.sessionDir(s.id), "pi", name, in)
 }
 
-func (s *piTokenSession) message(m map[string]any) {
+func (s *piTokenSession) startProcess() {
+	s.running = true
+	s.hook("session_start", nil)
+}
+
+func (s *piTokenSession) entry(typ string, fields map[string]any) {
 	s.seq++
-	var parent any
-	if s.seq > 1 {
-		parent = fmt.Sprintf("m%d", s.seq-1)
-	}
-	appendJSONLines(s.h, s.path, map[string]any{"type": entryTypeMessage, "id": fmt.Sprintf("m%d", s.seq),
-		"parentId": parent, "message": m})
+	id := fakeUUID(s.id, "entry", s.seq)[:8]
+	appendJSONLines(s.h, s.path, mergeMaps(map[string]any{"type": typ, "id": id, "parentId": s.parent,
+		"timestamp": nowMillis()}, fields))
+	s.parent = id
+}
+
+func (s *piTokenSession) message(m map[string]any) {
+	s.entry(entryTypeMessage, map[string]any{"message": mergeMaps(map[string]any{"timestamp": time.Now().UnixMilli()}, m)})
 }
 
 func piUsage(u tokenCounts) map[string]any {
-	return map[string]any{"input": u.In, "output": u.Out, "cacheRead": u.CacheRead, "cacheWrite": u.CacheWrite}
+	return map[string]any{"input": u.In, "output": u.Out, "cacheRead": u.CacheRead, "cacheWrite": u.CacheWrite,
+		"totalTokens": u.total(), "cost": map[string]any{"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}
+}
+
+func (s *piTokenSession) assistant(u tokenCounts, stopReason string, content ...any) {
+	s.message(map[string]any{"role": roleAssistant, "content": content, "api": "google-generative-ai",
+		"provider": "google", "model": "pi-test", "usage": piUsage(u), "stopReason": stopReason,
+		"responseId": fmt.Sprintf("resp%d", s.seq)})
 }
 
 func (s *piTokenSession) StartTurn(prompt string) {
-	s.hook("before_agent_start", map[string]any{"prompt": prompt})
+	if !s.running {
+		s.startProcess()
+	}
+	s.hook("before_agent_start", map[string]any{"prompt": prompt, "skill_events": []any{}})
 	s.message(map[string]any{"role": roleUser, "content": []any{map[string]any{"type": blockTypeText, "text": prompt}}})
 }
 
 func (s *piTokenSession) ToolCall(u tokenCounts, tool toolUse, run func()) {
-	call := map[string]any{"type": "toolCall", "id": fmt.Sprintf("tc-%d", s.seq), "name": "bash",
-		"arguments": map[string]any{"command": tool.command}}
+	callID := fmt.Sprintf("bash_%d", s.seq)
+	name, args := "bash", map[string]any{"command": tool.command}
 	if tool.path != "" {
-		call = map[string]any{"type": "toolCall", "id": "tc-" + tool.path, "name": "write",
-			"arguments": map[string]any{"path": tool.path, "content": "x"}}
+		callID, name, args = fmt.Sprintf("write_%d", s.seq), "write", map[string]any{"path": tool.path, "content": "x"}
 	}
-	s.message(map[string]any{"role": roleAssistant, "model": "pi-test", "content": []any{call}, "usage": piUsage(u)})
+	s.assistant(u, "toolUse", map[string]any{"type": "thinking", "thinking": "plan"},
+		map[string]any{"type": "toolCall", "id": callID, "name": name, "arguments": args})
 	run()
+	s.message(map[string]any{"role": "toolResult", "toolCallId": callID, "toolName": name,
+		"content": []any{map[string]any{"type": blockTypeText, "text": "ok"}}, "isError": false})
 }
 
 func (s *piTokenSession) Spend(u tokenCounts) {
-	s.message(map[string]any{"role": roleAssistant, "model": "pi-test",
-		"content": []any{map[string]any{"type": blockTypeText, "text": "working"}}, "usage": piUsage(u)})
+	s.assistant(u, "stop", map[string]any{"type": blockTypeText, "text": "working"})
 }
 
-func (s *piTokenSession) Stop() { s.hook("agent_end", nil) }
+// Stop fires agent_end; a `pi -p` process then shuts down.
+func (s *piTokenSession) Stop() {
+	s.hook("agent_end", nil)
+	if s.headless {
+		s.SessionEnd()
+	}
+}
+
+// SessionEnd is the process exiting: session_shutdown carries only its type.
+func (s *piTokenSession) SessionEnd() {
+	hookCall(s.h, s.h.sessionDir(s.id), "pi", "session_shutdown", map[string]any{"type": "session_shutdown"})
+	s.running = false
+}
 
 // --- Antigravity: per-call usage in the transcript, a lagging statusline ---
 

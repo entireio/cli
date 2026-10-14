@@ -29,7 +29,9 @@ import (
 //	    equals the truth so far;
 //	(d) neither the checkpoint sum nor the session total ever exceeds the
 //	    truth so far;
-//	(e) each checkpoint's root token_usage equals the sum of its slots.
+//	(e) each checkpoint's root token_usage equals the sum of its slots;
+//	(f) a subagent that runs as a session of its own (Droid's Workers) has
+//	    no session state of its own: its work belongs to its parent.
 //
 // (a), the latest cumulative per session, arrives with session_tokens.
 //
@@ -59,8 +61,9 @@ type tokenScenario struct {
 
 // tokenKnownBug is one bug a scenario reproduces on today's CLI, with the
 // violations it must produce: "<invariant>:<direction>" keys, where the
-// invariant is b, c-st, c-cli, d-cp, d-st or e and the direction is over,
-// under, mixed (some fields over, some under) or mismatch (e only).
+// invariant is b, c-st, c-cli, d-cp, d-st, e or f and the direction is over,
+// under, mixed (some fields over, some under), mismatch (e only) or unlinked
+// (f only).
 type tokenKnownBug struct {
 	id     string
 	reason string
@@ -87,6 +90,14 @@ type tokenHarness struct {
 	observed map[string]string
 	// expectState is the sessions whose state file must exist right now.
 	expectState map[string]bool
+	// subagentSessions is the session IDs of subagents that run as sessions
+	// of their own; drivers register them.
+	subagentSessions map[string]bool
+	// reasoning makes the model spend reasoning tokens, which are part of
+	// output. Only drivers whose agent reports reasoning apart from output
+	// (OpenCode) render it differently; one scenario sets it, so that such a
+	// driver's reasoning bug doesn't hide its other bugs everywhere else.
+	reasoning bool
 }
 
 func newTokenHarness(t *testing.T, d tokenAgentDriver) *tokenHarness {
@@ -97,7 +108,8 @@ func newTokenHarness(t *testing.T, d tokenAgentDriver) *tokenHarness {
 	env.ExtraEnv = append(env.ExtraEnv,
 		"PATH="+filepath.Dir(getTestBinary())+string(os.PathListSeparator)+os.Getenv("PATH"))
 	h := &tokenHarness{t: t, env: env, d: d, dir: env.RepoDir, truth: newTokenTruth(),
-		observed: map[string]string{}, dirs: map[string]string{}, expectState: map[string]bool{}}
+		observed: map[string]string{}, dirs: map[string]string{}, expectState: map[string]bool{},
+		subagentSessions: map[string]bool{}}
 	d.Setup(h)
 	return h
 }
@@ -159,8 +171,8 @@ func scalarDirection(got, want int) string {
 	return "over"
 }
 
-// check evaluates (c), (d) and (e). stopped is the session whose Stop (or
-// SubagentStop) just ran; its total must equal the truth.
+// check evaluates (c), (d), (e) and (f). stopped is the session whose Stop
+// (or SubagentStop) just ran; its total must equal the truth.
 func (h *tokenHarness) check(step string, stopped tokenSession) {
 	h.t.Helper()
 	h.step = step
@@ -175,6 +187,7 @@ func (h *tokenHarness) check(step string, stopped tokenSession) {
 			h.violate("e", "mismatch", "(e) checkpoint %s root token_usage %v != sum of slots %v", cp.ID, cp.Root, sum)
 		}
 	}
+	h.checkSubagentSessions()
 	for _, s := range h.sessions {
 		truth := h.truth.of(s.ID())
 		if sum := checkpointSumFor(cps, s.ID()); !sum.atMost(truth) {
@@ -202,6 +215,18 @@ func (h *tokenHarness) check(step string, stopped tokenSession) {
 		if total != truth.total() {
 			h.violate("c-cli", scalarDirection(total, truth.total()),
 				"(c) session %s `session tokens --json` total %d != truth %d after Stop", s.ID(), total, truth.total())
+		}
+	}
+}
+
+// checkSubagentSessions evaluates (f).
+func (h *tokenHarness) checkSubagentSessions() {
+	h.t.Helper()
+	for id := range h.subagentSessions {
+		_, ok, err := stateTokenCounts(h.env, id)
+		require.NoError(h.t, err)
+		if ok {
+			h.violate("f", "unlinked", "(f) subagent session %s has session state of its own", id)
 		}
 	}
 }
@@ -475,6 +500,13 @@ func turnTokenScenarios() []tokenScenario {
 			h.spend(s)
 			h.stop(s)
 			h.commit(b...)
+		}},
+		{name: "reasoning on every call", smoke: true, run: func(h *tokenHarness) {
+			h.reasoning = true
+			s := h.newSession()
+			a := h.turn(s, 1)
+			h.stop(s)
+			h.commit(a...)
 		}},
 		{name: "plain turns with subagent", needs: []tokenCap{capSubagent}, run: func(h *tokenHarness) {
 			s := h.newSession()
@@ -975,6 +1007,7 @@ const (
 	cCliUnder = "c-cli:under"
 	dCpOver   = "d-cp:over"
 	dStOver   = "d-st:over"
+	fUnlinked = "f:unlinked"
 )
 
 // Known bugs. IDs 1-9 follow the token-accounting plan; N-prefixed IDs were
@@ -1019,9 +1052,20 @@ var (
 	bugN9 = tokenKnownBug{"N9", "Antigravity: the statusline's total_input_tokens is a context-size gauge, not a " +
 		"running total, so input is under-counted; and snapshots lag one call, so a run's last call is missing " +
 		"until the next run", []string{bUnder, cStUnder, cCliUnder}}
-	bugN10 = tokenKnownBug{"N10", "a headless session (a process per prompt) that ends after a turn without file " +
-		"changes is deleted as orphaned at the next SessionStart; the new state recounts the whole transcript (as 2) " +
-		"and the session total restarts", []string{bOver, dCpOver}}
+	bugN10 = tokenKnownBug{"N10", "a session that ends after a turn without file changes (a headless process per " +
+		"prompt, or a session resumed in a new process) is deleted as orphaned at its next SessionStart; the new " +
+		"state recounts the whole transcript (as 2) and the session total restarts", []string{bOver, dCpOver}}
+	bugN11 = tokenKnownBug{"N11", "Factory Droid: tokens are read from message.usage, which Droid never writes " +
+		"(it keeps a cumulative tokenUsage in <session>.settings.json), so no Droid token is counted",
+		[]string{bUnder, cStUnder, cCliUnder}}
+	bugN12 = tokenKnownBug{"N12", "Factory Droid: a Worker subagent runs as a session of its own (transcript at the " +
+		"sessions root, linked only by its session_start's callingSessionId); it is tracked as an unlinked top-level " +
+		"session, gets no task record on the parent, and its tokens fold into neither", []string{fUnlinked}}
+	bugN13 = tokenKnownBug{"N13", "OpenCode: an API call's tokens are filled in only after its tool finishes, so the " +
+		"call that makes a mid-turn commit is condensed with zero tokens and the next checkpoint starts after it: " +
+		"its tokens reach no checkpoint", []string{bUnder}}
+	bugN14 = tokenKnownBug{"N14", "OpenCode: reasoning tokens, which OpenCode reports apart from output, are dropped",
+		[]string{bUnder, cStUnder, cCliUnder}}
 )
 
 // withKeys returns the bug expecting keys instead of its usual ones.
@@ -1113,6 +1157,26 @@ var tokenKnownBugs = map[string][]tokenKnownBug{
 	"mid-turn agent commit of every file/copilot-cli-p": bugs(bugN6, bugN8.withKeys(dStOver)),
 
 	"*/antigravity": bugs(bugN9),
+
+	// Factory Droid: no token is ever counted (N11), which hides the
+	// scenario's own bugs. A Worker is also an unlinked session (N12).
+	"*/factoryai-droid":                                         bugs(bugN11),
+	"plain turns with subagent/factoryai-droid":                 bugs(bugN11, bugN12),
+	"subagent transcript deleted after counted/factoryai-droid": bugs(bugN11, bugN12),
+	// No Stop runs, so only the checkpoint sum can fall short.
+	"crash then exited-owner sweep/factoryai-droid": bugs(bugN11.withKeys(bUnder)),
+
+	// OpenCode: the agent commit's own call is lost (N13); reasoning is
+	// dropped (N14); a session resumed in a new process after a session end
+	// hits N10.
+	"reasoning on every call/opencode":                  bugs(bugN14),
+	"mid-turn agent commit/opencode":                    bugs(bugN13),
+	"mid-turn agent commit of every file/opencode":      bugs(bug5, bugN13),
+	"mid-turn agent commit, attach after stop/opencode": bugs(bugN13),
+	"mid-turn agent commit, next turn/opencode":         bugs(bugN13),
+	"real-run replay/opencode":                          bugs(bug5, bugN13),
+	"resume same machine with tail/opencode":            bugs(bug5, bugN13),
+	"no-file turn, session end, resume/opencode":        bugs(bug5, bugN10),
 }
 
 func lookupKnownBugs(scenario, driver string) []tokenKnownBug {

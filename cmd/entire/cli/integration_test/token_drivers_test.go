@@ -19,9 +19,10 @@ import (
 
 // The drivers write what each agent writes, in the order it writes it. The
 // shapes follow real captures (2026-10-14) of Claude Code 2.1.299, Codex
-// 0.156.1, Cursor 2026.10.01, Copilot CLI 1.0.97 and Antigravity (agy) 1.3.4;
-// each driver's comment says what was observed. The values are synthetic:
-// the harness picks every count, so the truth is known exactly.
+// 0.156.1, Cursor 2026.10.01, Copilot CLI 1.0.97, Antigravity (agy) 1.3.4,
+// Factory Droid 0.82.0, OpenCode 1.18.33 and Pi 0.70.2; each driver's
+// comment says what was observed. The values are synthetic: the harness
+// picks every count, so the truth is known exactly.
 
 // tokenCap names an optional behaviour a token driver can fake. Scenarios
 // that need a capability the driver lacks report "not supported".
