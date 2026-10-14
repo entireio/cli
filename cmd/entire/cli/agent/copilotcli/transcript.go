@@ -421,8 +421,8 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 	runIndex := 0
 
 	total := &agent.TokenUsage{}
-	// covered is what all shutdowns so far account for, cumulatively, and
-	// coveredMessages the assistant.message count over the same span.
+	// covered is what has been counted for every run closed by a shutdown so
+	// far, and coveredMessages the assistant.message count over the same span.
 	covered := &agent.TokenUsage{}
 	coveredMessages := 0
 	sawShutdown := false
@@ -461,10 +461,9 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 				runUsage = share
 			}
 			total = types.AddTokenUsage(total, runUsage)
-			if share == nil {
-				share = run.usage
-			}
-			covered = types.AddTokenUsage(covered, share)
+			// Track what was actually counted, so a later cumulative
+			// shutdown's share telescopes against the same total.
+			covered = types.AddTokenUsage(covered, runUsage)
 			coveredMessages += run.messages
 			run = copilotRun{usage: &agent.TokenUsage{}}
 		}

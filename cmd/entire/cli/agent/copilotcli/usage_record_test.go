@@ -309,3 +309,29 @@ func TestCalculateTokenUsage_FirstShutdownMismatchFallsBackToPerCall(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, agent.TokenUsage{InputTokens: 10, CacheCreationTokens: 90, OutputTokens: 10, APICallCount: 1}, *usage)
 }
+
+func TestCalculateTokenUsage_CumulativeShareMeasuredAgainstCountedTotal(t *testing.T) {
+	t.Parallel()
+	ag := &CopilotCLIAgent{}
+
+	// Run 1 is counted from its records. Call "a" reports less input than
+	// cache, so its fresh input clamps to 0 per call, while the shutdown's
+	// per-model aggregate clamps once (110-20 = 90, not 100). Run 2 has no
+	// records and closes with a cumulative shutdown; its share must be measured
+	// against what run 1 actually contributed, so the total telescopes to the
+	// cumulative shutdown.
+	lines := []string{
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"a","inputTokens":10,"outputTokens":1,"cacheReadTokens":20,"cacheWriteTokens":0}},"id":"1"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"a"},"id":"2"}`,
+		`{"type":"session.usage_record","data":{"usage":{"apiCallId":"b","inputTokens":100,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}},"id":"3"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"b"},"id":"4"}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"m":{"requests":{"count":2},"usage":{"inputTokens":110,"outputTokens":2,"cacheReadTokens":20,"cacheWriteTokens":0}}}},"id":"5"}`,
+		`{"type":"assistant.message","data":{"apiCallId":"c"},"id":"6"}`,
+		`{"type":"session.shutdown","data":{"modelMetrics":{"m":{"requests":{"count":3},"usage":{"inputTokens":310,"outputTokens":3,"cacheReadTokens":20,"cacheWriteTokens":0}}}},"id":"7"}`,
+	}
+	content := []byte(strings.Join(lines, "\n") + "\n")
+
+	usage, err := ag.CalculateTokenUsage(content, 0)
+	require.NoError(t, err)
+	require.Equal(t, agent.TokenUsage{InputTokens: 290, CacheReadTokens: 20, OutputTokens: 3, APICallCount: 3}, *usage)
+}
