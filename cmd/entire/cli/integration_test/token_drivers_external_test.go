@@ -5,6 +5,7 @@ package integration
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -87,9 +88,16 @@ func (externalTokenDriver) Setup(h *tokenHarness) {
 		[]byte(fmt.Sprintf(externalTokenAgentScript, sessions)), 0o755))
 	require.NoError(h.t, os.WriteFile(filepath.Join(h.env.RepoDir, ".entire", "settings.local.json"),
 		[]byte(`{"external_agents":true}`+"\n"), 0o644))
+	// A minimal PATH: every hook's external-agent discovery scans PATH under a
+	// short timeout, and a developer PATH with other entire-agent-* binaries can
+	// exhaust it under the parallel matrix. Keep the fake agent, the binary under
+	// test, git and the POSIX tools the fake agent's script uses.
+	gitPath, err := exec.LookPath("git")
+	require.NoError(h.t, err)
+	dirs := []string{bin, filepath.Dir(getTestBinary()), filepath.Dir(gitPath), "/usr/bin", "/bin"}
 	for i, kv := range h.env.ExtraEnv {
-		if path, ok := strings.CutPrefix(kv, "PATH="); ok {
-			h.env.ExtraEnv[i] = "PATH=" + bin + string(os.PathListSeparator) + path
+		if strings.HasPrefix(kv, "PATH=") {
+			h.env.ExtraEnv[i] = "PATH=" + strings.Join(dirs, string(os.PathListSeparator))
 		}
 	}
 }
