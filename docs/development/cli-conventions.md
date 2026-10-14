@@ -790,7 +790,10 @@ spelling (visible in every build, grouped with Sessions & Checkpoints);
 attaches the right bearer and dials the right host so callers don't plumb auth
 themselves. `--to core` (default) hits the control plane; `--to cell` hits an
 entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
-jurisdiction's cell instead of the caller's home cell and implies `--to cell`
+jurisdiction's cell instead of the caller's home cell and implies `--to cell`.
+A non-`/me` path that uses `{repo_id}` goes to the cell holding that repo's
+placement instead (`apiCellTarget`), and a `--jurisdiction` naming another
+cell is refused; `/me/*` stays on the home cell even with `?repo={repo_id}`
 (cell routing lives in `auth.NewEntireAPICellClient` via `auth.CellTarget`;
 the login JWT is the bearer). **The cell path acts as the same login
 `--to core` does** — `ENTIRE_TOKEN` when set, else the selected context: with no

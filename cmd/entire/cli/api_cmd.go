@@ -19,7 +19,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
-	"github.com/entireio/cli/internal/coreapi"
 )
 
 const apiMaxResponseBytes = 32 << 20 // 32 MiB cap on a printed response body.
@@ -59,9 +58,11 @@ func newAPICmd() *cobra.Command {
 			"The CLI attaches the right bearer token and dials the right host for the\n" +
 			"chosen backend, so you don't have to plumb auth yourself:\n\n" +
 			"  --to core   the control plane (default): orgs, repos, mirrors, clusters, /me\n" +
-			"  --to cell   your home entire-api cell: /me/* activity, repo aggregates\n\n" +
+			"  --to cell   an entire-api cell: your home cell for /me/* and other paths,\n" +
+			"              the repo's own cell for a path that uses {repo_id}\n\n" +
 			"Use --jurisdiction <slug> (e.g. us, eu) to reach a specific jurisdiction's\n" +
-			"entire-api cell instead of your home one; it implies --to cell.\n\n" +
+			"entire-api cell instead of your home one; it implies --to cell, and is an\n" +
+			"error when it names a different cell than {repo_id} lives in.\n\n" +
 			"Both backends act as ENTIRE_TOKEN when set, else the selected login\n" +
 			"(--context, else $ENTIRE_CONTEXT, else the active context), so a staging\n" +
 			"login reaches staging's control plane and cells. The cell host comes from\n" +
@@ -69,13 +70,14 @@ func newAPICmd() *cobra.Command {
 			"data host directly instead.\n\n" +
 			"<path> is the full path on that host, e.g. /api/v1/clusters. These\n" +
 			"placeholders are filled from the current repo's origin remote:\n" +
-			"  {owner} {repo}   the GitHub owner / repo\n" +
-			"  {repo_id}        the repo's Entire ULID (from its mirror) — cells key on this\n\n" +
+			"  {owner} {repo}   the GitHub owner / repo, or the Entire project / repo\n" +
+			"  {repo_id}        the repo's Entire ULID (its processing placement) — cells key on this\n\n" +
 			"The method is GET unless a field/body is given (then POST); override with -X.",
 		Example: "  entire api /api/v1/clusters\n" +
 			"  entire api --to cell /api/v1/me/activity\n" +
 			"  entire api --jurisdiction eu /api/v1/me/activity\n" +
 			"  entire api --to cell \"/api/v1/me/recap?repo={repo_id}\"\n" +
+			"  entire api --to cell /api/v1/repos/{repo_id}/checkpoints\n" +
 			"  entire api -X POST /api/v1/projects -f name=demo",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -102,16 +104,26 @@ func runAPI(ctx context.Context, w, errW io.Writer, rawPath string, f *apiFlags,
 		return err
 	}
 
-	client, err := resolveAPIClient(ctx, to, jurisdiction, insecure)
-	if err != nil {
-		return err
-	}
-
-	path, err := expandAPIPlaceholders(ctx, rawPath)
+	// Placeholders are filled before the client is built: a {repo_id} pins the
+	// repo's placement, and that placement decides which cell the request goes to.
+	path, placement, err := expandAPIPlaceholders(ctx, rawPath)
 	if err != nil {
 		return err
 	}
 	if err := validateAPIPath(path); err != nil {
+		return err
+	}
+
+	var cellTarget *auth.CellTarget
+	if strings.EqualFold(strings.TrimSpace(to), apiTargetCell) {
+		cellTarget, err = apiCellTarget(path, jurisdiction, placement)
+		if err != nil {
+			return err
+		}
+	}
+
+	client, err := resolveAPIClient(ctx, to, cellTarget, insecure)
+	if err != nil {
 		return err
 	}
 
@@ -159,12 +171,46 @@ func resolveAPITarget(f *apiFlags, toExplicit bool) (to, jurisdiction string, er
 	return to, jurisdiction, nil
 }
 
+// apiCellTarget picks the entire-api cell for a --to cell request, following
+// the routing shapes in docs/development/api-routing.md:
+//
+//   - a /me path goes to the caller's home cell (or the --jurisdiction one):
+//     /me/* is consolidated there, even when it carries ?repo={repo_id};
+//   - any other path that used {repo_id} goes to the cell holding the repo's
+//     placement — the id only resolves there, and any other cell answers 404;
+//   - everything else goes to the home cell, or the --jurisdiction one.
+//
+// A --jurisdiction that contradicts the repo's cell is refused rather than
+// sent to a cell that cannot know the id. A nil result means home routing.
+func apiCellTarget(path, jurisdiction string, placement *repoCellPlacement) (*auth.CellTarget, error) {
+	var home *auth.CellTarget
+	if jurisdiction != "" {
+		home = &auth.CellTarget{Jurisdiction: jurisdiction}
+	}
+	if placement == nil || isMeAPIPath(path) {
+		return home, nil
+	}
+	if jurisdiction != "" && jurisdiction != placement.Target.Jurisdiction {
+		return nil, fmt.Errorf("--jurisdiction %s conflicts with {repo_id}: the repo lives in the %s cell", jurisdiction, placement.Target.Jurisdiction)
+	}
+	return placement.Target, nil
+}
+
+// isMeAPIPath reports whether path addresses the caller's /me namespace.
+// path has already passed validateAPIPath.
+func isMeAPIPath(path string) bool {
+	u, err := url.Parse(path)
+	if err != nil {
+		return false
+	}
+	return u.Path == "/api/v1/me" || strings.HasPrefix(u.Path, "/api/v1/me/")
+}
+
 // resolveAPIClient builds an authenticated client for the chosen backend. Both
 // return an *api.Client whose base URL is the backend origin, so <path> is the
-// full path (e.g. /api/v1/…) against that host. jurisdiction, when non-empty,
-// pins the entire-api cell to that jurisdiction (cell path only; resolveAPITarget
-// guarantees it is empty for core).
-func resolveAPIClient(ctx context.Context, to, jurisdiction string, insecure bool) (*api.Client, error) {
+// full path (e.g. /api/v1/…) against that host. cellTarget is the cell
+// apiCellTarget picked (cell path only; nil means the home cell).
+func resolveAPIClient(ctx context.Context, to string, cellTarget *auth.CellTarget, insecure bool) (*api.Client, error) {
 	switch strings.ToLower(strings.TrimSpace(to)) {
 	case "", apiTargetCore:
 		target, err := resolveAuthStatusTarget(ctx, auth.Contexts, auth.RefreshedLoginToken)
@@ -185,11 +231,7 @@ func resolveAPIClient(ctx context.Context, to, jurisdiction string, insecure boo
 		auth.AnnounceContext(target.totalContexts, target.activeContext)
 		return api.NewClientWithBaseURL(target.token, target.coreURL), nil
 	case apiTargetCell:
-		var target *auth.CellTarget
-		if jurisdiction != "" {
-			target = &auth.CellTarget{Jurisdiction: jurisdiction}
-		}
-		client, err := auth.NewEntireAPICellClient(ctx, insecure, target)
+		client, err := auth.NewEntireAPICellClient(ctx, insecure, cellTarget)
 		if err != nil {
 			return nil, err //nolint:wrapcheck // NewEntireAPICellClient already returns contextual auth errors
 		}
@@ -217,58 +259,48 @@ func validateAPIPath(path string) error {
 
 // expandAPIPlaceholders fills {owner}/{repo}/{repo_id} from the current repo.
 // Resolution is lazy: {owner}/{repo} need only the git remote; {repo_id} costs
-// a control-plane mirror lookup, so it's only done when actually referenced.
-func expandAPIPlaceholders(ctx context.Context, s string) (string, error) {
+// a placement lookup, so it's only done when actually referenced. The returned
+// placement is non-nil exactly when {repo_id} was filled, for cell routing.
+func expandAPIPlaceholders(ctx context.Context, s string) (string, *repoCellPlacement, error) {
 	needOwnerRepo := strings.Contains(s, "{owner}") || strings.Contains(s, "{repo}")
 	needRepoID := strings.Contains(s, "{repo_id}")
 	if !needOwnerRepo && !needRepoID {
-		return s, nil
+		return s, nil, nil
 	}
 
 	// Resolve the origin remote once, even when both {owner}/{repo} and
-	// {repo_id} are present, and thread it into the mirror lookup.
+	// {repo_id} are present, and thread it into the placement lookup.
 	forge, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
 	if err != nil {
-		return "", fmt.Errorf("resolve current repo from origin remote: %w", err)
+		return "", nil, fmt.Errorf("resolve current repo from origin remote: %w", err)
 	}
 	if needOwnerRepo {
 		s = strings.ReplaceAll(s, "{owner}", owner)
 		s = strings.ReplaceAll(s, "{repo}", repo)
 	}
-	if needRepoID {
-		id, err := resolveCurrentRepoID(ctx, forge, owner, repo)
-		if err != nil {
-			return "", err
-		}
-		s = strings.ReplaceAll(s, "{repo_id}", id)
+	if !needRepoID {
+		return s, nil, nil
 	}
-	return s, nil
+	placement, err := resolveCurrentRepoPlacement(ctx, forge, owner, repo)
+	if err != nil {
+		return "", nil, err
+	}
+	return strings.ReplaceAll(s, "{repo_id}", placement.RepoID), &placement, nil
 }
 
-// resolveCurrentRepoID resolves a repo's Entire ULID from its mirror (the mirror
-// id, which entire-api uses as the repo_id), given its already-resolved origin
-// coordinates. Picks the first active placement.
-func resolveCurrentRepoID(ctx context.Context, forge, owner, repo string) (string, error) {
-	if f := strings.ToLower(strings.TrimSpace(forge)); f != "gh" && f != mirrorCloneProviderGitHub {
-		return "", fmt.Errorf("{repo_id} needs a GitHub repo; origin forge is %q", forge)
-	}
-	c, err := coreapi.New()
+// resolveCurrentRepoPlacement resolves the repo_id entire-api keys repo-scoped
+// routes on, and the cell holding it, given the origin's already-resolved coordinates. It delegates to
+// resolveForgeRepoCellPlacement, the resolver trails, explain --repo and
+// experts --repo share: a GitHub mirror resolves to its PROCESSING placement
+// (not whichever active mirror happens to be listed first — on a repo mirrored
+// in several regions only the processing placement holds the data), and an
+// Entire-native origin resolves through the native path lookup.
+func resolveCurrentRepoPlacement(ctx context.Context, forge, owner, repo string) (repoCellPlacement, error) {
+	placement, err := resolveForgeRepoCellPlacement(ctx, forge, owner, repo)
 	if err != nil {
-		return "", fmt.Errorf("resolve {repo_id} needs the control plane: %w", err)
+		return repoCellPlacement{}, fmt.Errorf("resolve {repo_id}: %w", err)
 	}
-	mirrors, err := listMirrorsForRepo(ctx, c, mirrorCloneProviderGitHub, strings.ToLower(owner), strings.ToLower(repo))
-	if err != nil {
-		return "", fmt.Errorf("list mirrors for %s/%s: %w", owner, repo, err)
-	}
-	for i := range mirrors {
-		if !isActiveMirror(mirrors[i]) {
-			continue
-		}
-		if id := strings.TrimSpace(mirrors[i].MirrorId); id != "" {
-			return id, nil
-		}
-	}
-	return "", fmt.Errorf("no active mirror for %s/%s to resolve {repo_id}", owner, repo)
+	return placement, nil
 }
 
 // buildAPIFields merges -f (always string) and -F (type-inferred) into one map.
