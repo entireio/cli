@@ -138,8 +138,14 @@ per-operation requirements, since those are what a request actually carries.
 
 **Workaround:** `spec/normalize.go` (`dropInteractiveSecurity`,
 `interactiveSecuritySchemes`) removes the two schemes from the components
-and from every security list, so the generated `SecuritySource` keeps the
-`BearerAuth` and `SessionAuth` methods the client implements.
+and from every security list, so the generated `SecuritySource` has no
+method ogen cannot generate. The bearer schemes it keeps are `bearerAuth`
+and `sessionAuth`, which the client implements, plus `pluginToken` and
+`automationToken`, which a plugin or an automation holds rather than a user.
+Those two stay because a few plugin operations accept nothing else, so
+dropping them would empty those security lists. `client.go` skips them the
+way it skips `sessionAuth`; a plugin-only operation fails at call time with
+ogen's unsatisfied-security error instead of going out unauthenticated.
 
 The transform refuses to *empty* a security list that had entries. An empty
 operation-level `security` means "no authentication required" in OpenAPI, so
