@@ -444,8 +444,17 @@ func extractTokenUsageFromEvents(events []copilotEvent, preferSessionShutdown bo
 			if err := json.Unmarshal(events[i].Data, &data); err != nil || data.OutputTokens <= 0 {
 				continue
 			}
-			if recordedCalls[data.APICallID] || (data.APICallID == "" && runsWithRecords[runIndex]) {
+			if recordedCalls[data.APICallID] {
 				continue // counted from its session.usage_record
+			}
+			if data.APICallID == "" && runsWithRecords[runIndex] {
+				// Every assistant.message in a record-writing run observed so
+				// far (main agent and subagents, 1.0.94-1.0.97) carries an
+				// apiCallId, so an unmatched one is assumed covered by a
+				// record rather than risk counting the call twice.
+				logging.Debug(context.Background(), "copilot-cli: skipping outputTokens on an assistant.message without apiCallId in a run with usage records",
+					"outputTokens", data.OutputTokens)
+				continue
 			}
 			run.usage = types.AddTokenUsage(run.usage, &agent.TokenUsage{OutputTokens: data.OutputTokens, APICallCount: 1})
 
