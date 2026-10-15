@@ -1,90 +1,94 @@
 package brainnotify
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestNotifySpawnsContentFreeBrainHint(t *testing.T) {
-	t.Setenv(memoryWorkerOriginEnv, "")
+func stubPluginOnPath(t *testing.T) {
+	t.Helper()
+	original := lookPath
+	t.Cleanup(func() { lookPath = original })
+	lookPath = func(string) (string, error) { return "/managed/entire-brain", nil }
+}
 
-	originalSpawn := spawnDetached
-	t.Cleanup(func() { spawnDetached = originalSpawn })
-
-	var gotDir string
-	var gotArgs []string
-	spawnDetached = func(dir string, args ...string) {
-		gotDir = dir
-		gotArgs = slices.Clone(args)
+func captureSpawns(t *testing.T) (*string, *[]string, *int) {
+	t.Helper()
+	original := spawnDetached
+	t.Cleanup(func() { spawnDetached = original })
+	var dir string
+	var args []string
+	spawned := 0
+	spawnDetached = func(d string, a ...string) {
+		dir = d
+		args = slices.Clone(a)
+		spawned++
 	}
+	return &dir, &args, &spawned
+}
 
-	Notify("/repo", EventCheckpoint, "session-123", "feature/memory")
+func TestNotifyCheckpointSpawnsContentFreeBrainHint(t *testing.T) {
+	t.Setenv(memoryWorkerOriginEnv, "")
+	stubPluginOnPath(t)
+	gotDir, gotArgs, _ := captureSpawns(t)
 
-	require.Equal(t, "/repo", gotDir)
+	NotifyCheckpoint("/repo", "session-123", "feature/memory")
+
+	require.Equal(t, "/repo", *gotDir)
 	require.Equal(t, []string{
 		"brain", "memory", "notify",
 		"--event", "checkpoint",
 		"--session", "session-123",
 		"--branch", "feature/memory",
-	}, gotArgs)
-	require.NotContains(t, gotArgs, "--repo-key", "Brain remains the repository identity authority")
+	}, *gotArgs)
+	require.NotContains(t, *gotArgs, "--repo-key", "Brain remains the repository identity authority")
 }
 
-func TestNotifyOmitsUnknownBranch(t *testing.T) {
+func TestNotifyCheckpointOmitsUnknownBranch(t *testing.T) {
 	t.Setenv(memoryWorkerOriginEnv, "")
+	stubPluginOnPath(t)
+	_, gotArgs, _ := captureSpawns(t)
 
-	originalSpawn := spawnDetached
-	t.Cleanup(func() { spawnDetached = originalSpawn })
-
-	var gotArgs []string
-	spawnDetached = func(_ string, args ...string) {
-		gotArgs = slices.Clone(args)
-	}
-
-	Notify("/repo", EventSessionStart, "session-123", "")
+	NotifyCheckpoint("/repo", "session-123", "")
 
 	require.Equal(t, []string{
 		"brain", "memory", "notify",
-		"--event", "session_start",
+		"--event", "checkpoint",
 		"--session", "session-123",
-	}, gotArgs)
+	}, *gotArgs)
 }
 
-func TestNotifySkipsInvalidOrRecursiveHints(t *testing.T) {
-	originalSpawn := spawnDetached
-	t.Cleanup(func() { spawnDetached = originalSpawn })
-
-	spawned := 0
-	spawnDetached = func(_ string, _ ...string) { spawned++ }
+func TestNotifyCheckpointSkipsInvalidOrRecursiveHints(t *testing.T) {
+	stubPluginOnPath(t)
+	_, _, spawned := captureSpawns(t)
 
 	t.Run("empty repository root", func(t *testing.T) {
 		t.Setenv(memoryWorkerOriginEnv, "")
-		Notify("", EventSessionStart, "session-123", "main")
+		NotifyCheckpoint("", "session-123", "main")
 	})
 	t.Run("empty session", func(t *testing.T) {
 		t.Setenv(memoryWorkerOriginEnv, "")
-		Notify("/repo", EventSessionStart, "", "main")
+		NotifyCheckpoint("/repo", "", "main")
 	})
-	t.Run("unknown event", func(t *testing.T) {
-		t.Setenv(memoryWorkerOriginEnv, "")
-		Notify("/repo", Event("turn_end"), "session-123", "main")
+	t.Run("memory worker origin", func(t *testing.T) {
+		t.Setenv(memoryWorkerOriginEnv, "1")
+		NotifyCheckpoint("/repo", "session-123", "main")
 	})
 
-	require.Zero(t, spawned)
+	require.Zero(t, *spawned)
 }
 
-func TestNotifySkipsMemoryWorkerOrigin(t *testing.T) {
-	t.Setenv(memoryWorkerOriginEnv, "1")
+func TestNotifyCheckpointSkipsWhenPluginMissing(t *testing.T) {
+	t.Setenv(memoryWorkerOriginEnv, "")
+	originalLook := lookPath
+	t.Cleanup(func() { lookPath = originalLook })
+	lookPath = func(string) (string, error) { return "", errors.New("not installed") }
+	_, _, spawned := captureSpawns(t)
 
-	originalSpawn := spawnDetached
-	t.Cleanup(func() { spawnDetached = originalSpawn })
+	NotifyCheckpoint("/repo", "session-123", "main")
 
-	spawned := 0
-	spawnDetached = func(_ string, _ ...string) { spawned++ }
-
-	Notify("/repo", EventSessionEnd, "session-123", "main")
-
-	require.Zero(t, spawned, "a Brain worker must not recursively launch another memory worker")
+	require.Zero(t, *spawned, "no plugin on PATH must cost a LookPath, not a fork")
 }

@@ -7,7 +7,6 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/brainnotify"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/go-git/go-git/v6"
@@ -16,7 +15,6 @@ import (
 
 type capturedBrainCheckpointHint struct {
 	repoRoot  string
-	event     brainnotify.Event
 	sessionID string
 	branch    string
 }
@@ -27,10 +25,9 @@ func captureBrainCheckpointHints(t *testing.T) *[]capturedBrainCheckpointHint {
 	t.Cleanup(func() { sendBrainCheckpointHint = originalSend })
 
 	var hints []capturedBrainCheckpointHint
-	sendBrainCheckpointHint = func(repoRoot string, event brainnotify.Event, sessionID, branch string) {
+	sendBrainCheckpointHint = func(repoRoot, sessionID, branch string) {
 		hints = append(hints, capturedBrainCheckpointHint{
 			repoRoot:  repoRoot,
-			event:     event,
 			sessionID: sessionID,
 			branch:    branch,
 		})
@@ -71,7 +68,6 @@ func TestPostCommitSendsCheckpointHintForEachCondensedSession(t *testing.T) {
 	require.Equal(t, sessionIDs, gotSessions)
 	for _, hint := range *hints {
 		require.Equal(t, repoRoot, hint.repoRoot)
-		require.Equal(t, brainnotify.EventCheckpoint, hint.event)
 		require.Equal(t, branch, hint.branch)
 	}
 }

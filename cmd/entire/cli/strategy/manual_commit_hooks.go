@@ -68,10 +68,10 @@ const CommitLinkingPromptLogMsg = "prepare-commit-msg: prompting to link commit"
 // is the one Enter selects.
 const confirmPromptTimeout = 15 * time.Second
 
-// errPromptTimedOut reports that readPromptAnswer gave up waiting.
-// sendBrainCheckpointHint is a test seam over brainnotify.Notify.
-var sendBrainCheckpointHint = brainnotify.Notify
+// sendBrainCheckpointHint is a test seam over brainnotify.NotifyCheckpoint.
+var sendBrainCheckpointHint = brainnotify.NotifyCheckpoint
 
+// errPromptTimedOut reports that readPromptAnswer gave up waiting.
 var errPromptTimedOut = errors.New("no answer before the prompt timed out")
 
 // readPromptAnswer reads one line from r, giving up after timeout. A read
@@ -1387,6 +1387,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// pre-loop snapshot would warn about sessions this commit just condensed.
 	staleEnded := 0
 
+	// One branch resolution per commit: HEAD cannot change inside this loop,
+	// and the checkpoint hints below all carry the same branch.
+	hintBranch := GetCurrentBranchName(repo)
+
 	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
 	for _, sess := range sessions {
 		if sess.FullyCondensed && sess.Phase == session.PhaseEnded {
@@ -1409,17 +1413,19 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		}, func() {
 			EmitSkillInvocationTelemetry(iterCtx, newSkillEvents)
 			condensedTelemetry.emit(iterCtx, condensedSignal)
+			if condensed {
+				// Advisory, detached, content-free: the optional Brain plugin
+				// learns a checkpoint exists for this session. onSaved gates the
+				// hint on the durable save, like the telemetry beside it; a lost
+				// hint costs freshness only — Brain's canonical reconciliation
+				// remains authoritative.
+				sendBrainCheckpointHint(worktreePath, sessionID, hintBranch)
+			}
 		})
 		if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
 			logging.Warn(logCtx, "post-commit: session mutation failed",
 				slog.String("session_id", sessionID),
 				slog.String("error", mutErr.Error()))
-		}
-		if condensed {
-			// Advisory, detached, content-free: the optional Brain plugin learns a
-			// checkpoint exists for this session. A lost hint costs freshness only;
-			// Brain's canonical reconciliation remains authoritative.
-			sendBrainCheckpointHint(worktreePath, brainnotify.EventCheckpoint, sessionID, GetCurrentBranchName(repo))
 		}
 		iterSpan.End()
 	}
