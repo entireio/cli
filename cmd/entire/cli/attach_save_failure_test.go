@@ -5,13 +5,16 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/stretchr/testify/require"
 )
@@ -229,4 +232,42 @@ func TestAttachStateUndo_LeavesARemovedStateRemoved(t *testing.T) {
 	got, err := store.Load(ctx, sessionID)
 	require.NoError(t, err)
 	require.Nil(t, got)
+}
+
+// Another session's checkpoint moving the shared v1 branch while the write
+// fails doesn't stop the undo: the branch doesn't hold this session.
+func TestAttach_CheckpointWriteFailureWhileBranchMovesElsewhere(t *testing.T) {
+	setupAttachTestRepo(t)
+	ctx := context.Background()
+	sessionID := "test-attach-write-fails-branch-moves"
+	setupClaudeTranscript(t, sessionID, attachFailureTranscript)
+
+	orig := writeAttachCheckpoint
+	t.Cleanup(func() { writeAttachCheckpoint = orig })
+	writeAttachCheckpoint = func(context.Context, cpkg.PersistentStore, cpkg.WriteRequest) error {
+		git := func(args ...string) string {
+			cmd := exec.CommandContext(ctx, "git", args...)
+			cmd.Env = append(os.Environ(),
+				"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+				"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+			out, err := cmd.Output()
+			require.NoError(t, err)
+			return strings.TrimSpace(string(out))
+		}
+		tree := git("mktree")
+		commit := git("commit-tree", tree, "-m", "another session's checkpoint")
+		git("update-ref", "refs/heads/"+paths.MetadataBranchName, commit)
+		return errors.New("injected write failure")
+	}
+
+	var out bytes.Buffer
+	err := runAttach(ctx, &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+	require.ErrorContains(t, err, "injected write failure")
+	require.NotContains(t, err.Error(), "was left as it is")
+
+	store, err := session.NewStateStore(ctx)
+	require.NoError(t, err)
+	got, err := store.Load(ctx, sessionID)
+	require.NoError(t, err)
+	require.Nil(t, got, "the state attach created is removed")
 }

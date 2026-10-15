@@ -398,7 +398,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	// does: appending to an existing ULID checkpoint under the git-branch
 	// primary must land in its ref, not on the v1 branch where reads never
 	// look for a ULID. A freshly minted ID already matches the primary.
-	if err := writeAttachSession(ctx, repo, cp.store, cpkg.ReservedSession(writeOpts), sessionID, checkpointID, undo); err != nil {
+	if err := writeAttachSession(ctx, repo, refs, cp.store, cpkg.ReservedSession(writeOpts), sessionID, checkpointID, undo); err != nil {
 		return err
 	}
 	if activeHome {
@@ -428,11 +428,13 @@ var writeAttachCheckpoint = func(ctx context.Context, store cpkg.PersistentStore
 
 // writeAttachSession writes the attach checkpoint after the session state
 // recorded its tokens as counted. If the write fails, the state is put back
-// only when the write provably stored nothing — no ref it can write moved;
-// if it might have, the tokens stay counted, since putting them back would
-// count them twice. Reading the checkpoint back can't prove absence: a read
-// error there reads as "no checkpoint".
-func writeAttachSession(ctx context.Context, repo *git.Repository, store cpkg.PersistentStore, req cpkg.WriteRequest, sessionID string, checkpointID id.CheckpointID, undo attachStateUndo) error {
+// only when the write stored nothing: no ref it can write moved, or only the
+// shared v1 branch did — other sessions write there too — and the checkpoint
+// there doesn't hold the session. If it might, the tokens stay counted, since
+// putting them back would count them twice. A process killed between the
+// save and the write leaves them counted with no checkpoint; saving after the
+// write instead left them counted twice when the save failed.
+func writeAttachSession(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, store cpkg.PersistentStore, req cpkg.WriteRequest, sessionID string, checkpointID id.CheckpointID, undo attachStateUndo) error {
 	before, beforeErr := attachRefHashes(ctx, repo, checkpointID)
 	writeErr := writeAttachCheckpoint(ctx, store, req)
 	if writeErr == nil {
@@ -448,12 +450,34 @@ func writeAttachSession(ctx context.Context, repo *git.Repository, store cpkg.Pe
 	case beforeErr != nil || afterErr != nil:
 		return kept(fmt.Sprintf("couldn't check whether it was stored (%v)", errors.Join(beforeErr, afterErr)))
 	case !maps.Equal(before, after):
-		return kept("the checkpoint may hold the session anyway")
+		if !onlyBranchMoved(checkpointID, before, after) {
+			return kept("the checkpoint may hold the session anyway")
+		}
+		// Reading back is no proof on its own (a read error reads as absent),
+		// so it is used only when another writer may have moved the branch.
+		landed, err := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
+		if err != nil || landed {
+			return kept("the checkpoint may hold the session anyway")
+		}
 	}
 	if err := undo.restore(ctx); err != nil {
 		return kept(fmt.Sprintf("its state couldn't be put back (%v)", err))
 	}
 	return fmt.Errorf("failed to write checkpoint %s: %w", checkpointID, writeErr)
+}
+
+// onlyBranchMoved reports whether, for a hex checkpoint ID, the v1 branch is
+// the only ref that moved.
+func onlyBranchMoved(checkpointID id.CheckpointID, before, after map[string]string) bool {
+	if checkpointID.Kind() == id.KindULID {
+		return false
+	}
+	for name, hash := range after {
+		if before[name] != hash && name != paths.MetadataBranchName {
+			return false
+		}
+	}
+	return true
 }
 
 // attachRefHashes resolves every ref a write of checkpointID can move.
