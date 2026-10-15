@@ -1530,6 +1530,11 @@ func (u attachStateUndo) restoreLocked(ctx context.Context) error {
 	if !bytes.Equal(data, u.saved) {
 		return errors.New("session state changed since attach saved it")
 	}
+	return u.revert(ctx)
+}
+
+// revert writes the prior state back, or removes the state attach created.
+func (u attachStateUndo) revert(ctx context.Context) error {
 	if u.prior == nil {
 		return u.store.Delete(u.sessionID) //nolint:wrapcheck // already describes the failure
 	}
@@ -1693,14 +1698,19 @@ func saveAttachSessionStateLocked(ctx context.Context, stateStore *session.State
 	if err := stateStore.Save(ctx, state); err != nil {
 		return attachStateUndo{}, fmt.Errorf("failed to save session state: %w", err)
 	}
-	// Read back what was saved, so the undo compares like with like. Without
-	// it the undo can't tell a hook's change from attach's own state, and
-	// leaves the state as it is.
+	// Read back what was saved, so the undo compares like with like. The lock
+	// is still held, so this is attach's own state; without it the undo
+	// couldn't work, so the save is reverted and nothing is attached.
 	undo := attachStateUndo{store: stateStore, sessionID: sessionID, prior: prior}
-	if saved, loadErr := stateStore.Load(ctx, sessionID); loadErr == nil && saved != nil {
-		if data, encErr := encodeAttachState(saved); encErr == nil {
-			undo.saved = data
-		}
+	saved, err := stateStore.Load(ctx, sessionID)
+	if err == nil && saved == nil {
+		err = errors.New("saved session state is missing")
+	}
+	if err == nil {
+		undo.saved, err = encodeAttachState(saved)
+	}
+	if err != nil {
+		return attachStateUndo{}, errors.Join(fmt.Errorf("failed to read back session state: %w", err), undo.revert(ctx))
 	}
 	return undo, nil
 }
