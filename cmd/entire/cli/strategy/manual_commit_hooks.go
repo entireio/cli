@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/brainnotify"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -68,6 +69,9 @@ const CommitLinkingPromptLogMsg = "prepare-commit-msg: prompting to link commit"
 const confirmPromptTimeout = 15 * time.Second
 
 // errPromptTimedOut reports that readPromptAnswer gave up waiting.
+// sendBrainCheckpointHint is a test seam over brainnotify.Notify.
+var sendBrainCheckpointHint = brainnotify.Notify
+
 var errPromptTimedOut = errors.New("no answer before the prompt timed out")
 
 // readPromptAnswer reads one line from r, giving up after timeout. A read
@@ -1392,8 +1396,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		iterCtx, iterSpan := processSessionsLoop.Iteration(loopCtx)
 		var newSkillEvents []agent.SkillEvent
 		var condensedSignal *commitCondensedSignal
+		var condensed bool
 		mutErr := MutateSessionStateOnSaved(iterCtx, sessionID, func(state *SessionState) error {
-			var condensed bool
 			newSkillEvents, condensedSignal, condensed = s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
 				committedFileSet, sessionsWithCommittedFiles, condensedTelemetry)
@@ -1410,6 +1414,12 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 			logging.Warn(logCtx, "post-commit: session mutation failed",
 				slog.String("session_id", sessionID),
 				slog.String("error", mutErr.Error()))
+		}
+		if condensed {
+			// Advisory, detached, content-free: the optional Brain plugin learns a
+			// checkpoint exists for this session. A lost hint costs freshness only;
+			// Brain's canonical reconciliation remains authoritative.
+			sendBrainCheckpointHint(worktreePath, brainnotify.EventCheckpoint, sessionID, GetCurrentBranchName(repo))
 		}
 		iterSpan.End()
 	}
