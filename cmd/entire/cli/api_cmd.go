@@ -197,13 +197,17 @@ func apiCellTarget(path, jurisdiction string, placement *repoCellPlacement) (*au
 }
 
 // isMeAPIPath reports whether path addresses the caller's /me namespace.
-// path has already passed validateAPIPath.
+// path has already passed validateAPIPath. It is classified the way the client
+// sends it: api.ResolveURLFromBase resolves it against the origin root, so a
+// relative "api/v1/me" and dot segments ("/api/v1/me/../repos/…") are
+// normalized here too.
 func isMeAPIPath(path string) bool {
 	u, err := url.Parse(path)
 	if err != nil {
 		return false
 	}
-	return u.Path == "/api/v1/me" || strings.HasPrefix(u.Path, "/api/v1/me/")
+	p := (&url.URL{Path: "/"}).ResolveReference(u).Path
+	return p == "/api/v1/me" || strings.HasPrefix(p, "/api/v1/me/")
 }
 
 // resolveAPIClient builds an authenticated client for the chosen backend. Both

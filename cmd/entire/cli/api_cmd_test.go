@@ -340,6 +340,11 @@ func TestAPICellTarget(t *testing.T) {
 			placement: euRepo, want: &auth.CellTarget{Jurisdiction: "us"}},
 		{name: "me-prefixed sibling is not me", path: "/api/v1/members/x", placement: euRepo,
 			want: euRepo.Target},
+		{name: "relative me path stays home", path: "api/v1/me/recap?repo=mirror-eu", placement: euRepo},
+		{name: "me path that dot-segments into repos goes to repo cell", path: "/api/v1/me/../repos/mirror-eu/checkpoints",
+			placement: euRepo, want: euRepo.Target},
+		{name: "repo path that dot-segments into me stays home", path: "/api/v1/repos/../me/recap?repo=mirror-eu",
+			placement: euRepo},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
