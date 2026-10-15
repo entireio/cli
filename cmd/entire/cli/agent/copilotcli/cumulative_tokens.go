@@ -19,9 +19,11 @@ const eventTypeUsageRecord = "session.usage_record"
 // shares, which are split out. A record carrying a subagent's agentId (set on
 // every event a subagent emits) is reported as that child's usage.
 //
-// Transcripts without usage records fall back to the session.shutdown
-// aggregates: one per process, cumulative across resumes, so they are summed
-// per segment. That fallback cannot split out subagents.
+// The session.shutdown aggregates (one per process, cumulative across
+// resumes, summed per segment) are a second lower bound that also covers
+// calls made before Copilot wrote usage records. The session-wide total is
+// the per-field max of the two; whatever exceeds the children's records is
+// attributed to the main agent, since the aggregates cannot be split.
 func (c *CopilotCLIAgent) CumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
 	events, err := parseEventsFromBytes(in.TranscriptData)
 	if err != nil {
@@ -63,19 +65,21 @@ func (c *CopilotCLIAgent) CumulativeTokenUsage(_ context.Context, in agent.Cumul
 			shutdowns = append(shutdowns, usage)
 		}
 	}
-	if len(calls) == 0 {
-		return agent.SumCumulativeSegments(shutdowns), nil, nil
-	}
 	var children map[string]*agent.TokenUsage
+	var recorded, childTotal *agent.TokenUsage
 	for agentID, byCall := range calls {
+		sum := agent.SumTokenUsageByKey(byCall)
+		recorded = types.AddTokenUsage(recorded, sum)
 		if agentID != "" {
 			if children == nil {
 				children = make(map[string]*agent.TokenUsage)
 			}
-			children[agentID] = agent.SumTokenUsageByKey(byCall)
+			children[agentID] = sum
+			childTotal = types.AddTokenUsage(childTotal, sum)
 		}
 	}
-	return agent.SumTokenUsageByKey(calls[""]), children, nil
+	session := agent.MaxTokenUsage(recorded, agent.SumCumulativeSegments(shutdowns))
+	return types.SubtractTokenUsage(session, childTotal), children, nil
 }
 
 // tokenUsage converts Copilot's cache-inclusive usage counts.
