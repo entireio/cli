@@ -174,3 +174,36 @@ func TestAttachStateUndo_LeavesPendingUsageAStopAdded(t *testing.T) {
 	require.NotNil(t, got.CheckpointTokenUsage)
 	require.Equal(t, 3, got.CheckpointTokenUsage.OutputTokens)
 }
+
+// Under the git-refs primary the checkpoint is a ULID in its own ref, and a
+// write that stored nothing is undone there too.
+func TestAttach_CheckpointWriteFailureUnderRefsPrimary(t *testing.T) {
+	setupAttachTestRepo(t)
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+	ctx := context.Background()
+
+	for _, land := range []bool{false, true} {
+		sessionID := "test-attach-refs-write-fails"
+		if land {
+			sessionID += "-landed"
+		}
+		t.Run(sessionID, func(t *testing.T) {
+			setupClaudeTranscript(t, sessionID, attachFailureTranscript)
+			failAttachWrite(t, land)
+			var out bytes.Buffer
+			err := runAttach(ctx, &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
+			require.ErrorContains(t, err, "injected write failure")
+
+			store, err := session.NewStateStore(ctx)
+			require.NoError(t, err)
+			got, err := store.Load(ctx, sessionID)
+			require.NoError(t, err)
+			if land {
+				require.NotNil(t, got, "a stored checkpoint keeps the state")
+				require.Positive(t, got.TokenStart())
+			} else {
+				require.Nil(t, got, "nothing stored, so the state attach created is removed")
+			}
+		})
+	}
+}

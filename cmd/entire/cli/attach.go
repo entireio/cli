@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"reflect"
@@ -397,7 +398,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	// does: appending to an existing ULID checkpoint under the git-branch
 	// primary must land in its ref, not on the v1 branch where reads never
 	// look for a ULID. A freshly minted ID already matches the primary.
-	if err := writeAttachSession(ctx, repo, refs, cp.store, cpkg.ReservedSession(writeOpts), sessionID, checkpointID, undo); err != nil {
+	if err := writeAttachSession(ctx, repo, cp.store, cpkg.ReservedSession(writeOpts), sessionID, checkpointID, undo); err != nil {
 		return err
 	}
 	if activeHome {
@@ -427,13 +428,12 @@ var writeAttachCheckpoint = func(ctx context.Context, store cpkg.PersistentStore
 
 // writeAttachSession writes the attach checkpoint after the session state
 // recorded its tokens as counted. If the write fails, the state is put back
-// only when the write provably stored nothing — the ref it writes didn't
-// move; if it might have, the tokens stay counted, since putting them back
-// would count them twice. Reading the checkpoint back can't prove absence: a
-// read error there reads as "no checkpoint".
-func writeAttachSession(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, store cpkg.PersistentStore, req cpkg.WriteRequest, sessionID string, checkpointID id.CheckpointID, undo attachStateUndo) error {
-	ref, onPrimary := attachWriteRef(refs, checkpointID)
-	before, beforeErr := refHash(repo, ref)
+// only when the write provably stored nothing — no ref it can write moved;
+// if it might have, the tokens stay counted, since putting them back would
+// count them twice. Reading the checkpoint back can't prove absence: a read
+// error there reads as "no checkpoint".
+func writeAttachSession(ctx context.Context, repo *git.Repository, store cpkg.PersistentStore, req cpkg.WriteRequest, sessionID string, checkpointID id.CheckpointID, undo attachStateUndo) error {
+	before, beforeErr := attachRefHashes(ctx, repo, checkpointID)
 	writeErr := writeAttachCheckpoint(ctx, store, req)
 	if writeErr == nil {
 		return nil
@@ -443,16 +443,11 @@ func writeAttachSession(ctx context.Context, repo *git.Repository, refs cpkg.Per
 	kept := func(why string) error {
 		return fmt.Errorf("failed to write checkpoint %s: %w; %s, so session %s's tokens since its last checkpoint stay recorded as counted", checkpointID, writeErr, why, sessionID)
 	}
-	// A write to a backend other than the primary can store the session in
-	// one backend and then fail updating the other.
-	if !onPrimary {
-		return kept("the checkpoint may hold the session anyway")
-	}
-	after, afterErr := refHash(repo, ref)
+	after, afterErr := attachRefHashes(ctx, repo, checkpointID)
 	switch {
 	case beforeErr != nil || afterErr != nil:
 		return kept(fmt.Sprintf("couldn't check whether it was stored (%v)", errors.Join(beforeErr, afterErr)))
-	case after != before:
+	case !maps.Equal(before, after):
 		return kept("the checkpoint may hold the session anyway")
 	}
 	if err := undo.restore(ctx); err != nil {
@@ -461,17 +456,21 @@ func writeAttachSession(ctx context.Context, repo *git.Repository, refs cpkg.Per
 	return fmt.Errorf("failed to write checkpoint %s: %w", checkpointID, writeErr)
 }
 
-// attachWriteRef is the ref a write of checkpointID moves, and whether that
-// is the primary's: a ULID lives in its own ref, a hex ID on the branch.
-func attachWriteRef(refs cpkg.PersistentRefs, checkpointID id.CheckpointID) (plumbing.ReferenceName, bool) {
-	if checkpointID.Kind() != id.KindULID {
-		return refs.Primary, !isCheckpointRef(refs.Primary.String())
+// attachRefHashes resolves every ref a write of checkpointID can move.
+func attachRefHashes(ctx context.Context, repo *git.Repository, checkpointID id.CheckpointID) (map[string]string, error) {
+	hashes := map[string]string{}
+	for _, name := range checkpointStorageRefs(ctx, checkpointID) {
+		ref := plumbing.ReferenceName(name)
+		if !isCheckpointRef(name) {
+			ref = plumbing.NewBranchReferenceName(name)
+		}
+		hash, err := refHash(repo, ref)
+		if err != nil {
+			return nil, err
+		}
+		hashes[name] = hash
 	}
-	ref, err := cpkg.RefName(checkpointID)
-	if err != nil {
-		return "", false
-	}
-	return ref, isCheckpointRef(refs.Primary.String())
+	return hashes, nil
 }
 
 // refHash resolves ref, "" when it doesn't exist.
