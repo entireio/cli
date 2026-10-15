@@ -147,3 +147,30 @@ func TestAttachStateUndo_LeavesStateAHookChanged(t *testing.T) {
 	require.NotNil(t, got)
 	require.Equal(t, session.PhaseActive, got.Phase)
 }
+
+// A Stop that adds a turn to the pending usage moves neither the offset nor
+// the checkpoint ID; the undo must still leave its update alone.
+func TestAttachStateUndo_LeavesPendingUsageAStopAdded(t *testing.T) {
+	setupAttachTestRepo(t)
+	ctx := context.Background()
+	sessionID := "test-attach-undo-stop"
+	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	undo, err := saveAttachSessionState(ctx, nil, sessionID, agent.AgentTypeClaudeCode,
+		"/t.jsonl", "", cpID, transcriptMetadata{}, &agent.TokenUsage{OutputTokens: 9}, 4, 7, attachOptions{}, nil)
+	require.NoError(t, err)
+
+	store, err := session.NewStateStore(ctx)
+	require.NoError(t, err)
+	stopped, err := store.Load(ctx, sessionID)
+	require.NoError(t, err)
+	stopped.CheckpointTokenUsage = &agent.TokenUsage{OutputTokens: 3}
+	require.NoError(t, store.Save(ctx, stopped))
+
+	require.ErrorContains(t, undo.restore(ctx), "changed since attach saved it")
+	got, err := store.Load(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.CheckpointTokenUsage)
+	require.Equal(t, 3, got.CheckpointTokenUsage.OutputTokens)
+}

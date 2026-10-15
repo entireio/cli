@@ -1431,9 +1431,22 @@ type attachStateUndo struct {
 	// prior is the state on disk before attach saved; nil when there was none.
 	prior *session.State
 	// What attach saved: a state that no longer shows these was changed by a
-	// hook since, and is left as the hook wrote it.
+	// hook since, and is left as the hook wrote it. A Stop adds to the pending
+	// usage without moving the offset, so that is compared too.
 	checkpointID id.CheckpointID
 	tokenStart   int
+	pending      string
+	phase        session.Phase
+}
+
+// pendingUsageKey is the pending token usage in a form that compares equal
+// across a save and a reload.
+func pendingUsageKey(s *session.State) string {
+	data, err := json.Marshal(s.CheckpointTokenUsage)
+	if err != nil {
+		return "unencodable"
+	}
+	return string(data)
 }
 
 // restore puts the prior state back, unless a hook has written the state since.
@@ -1445,7 +1458,8 @@ func (u attachStateUndo) restore(ctx context.Context) error {
 	if current == nil {
 		return nil
 	}
-	if current.LastCheckpointID != u.checkpointID || current.TokenStart() != u.tokenStart {
+	if current.LastCheckpointID != u.checkpointID || current.TokenStart() != u.tokenStart ||
+		pendingUsageKey(current) != u.pending || current.Phase != u.phase {
 		return errors.New("session state changed since attach saved it")
 	}
 	if u.prior == nil {
@@ -1596,7 +1610,10 @@ func saveAttachSessionState(ctx context.Context, existingState *session.State, s
 	if err := stateStore.Save(ctx, state); err != nil {
 		return attachStateUndo{}, fmt.Errorf("failed to save session state: %w", err)
 	}
-	return attachStateUndo{store: stateStore, sessionID: sessionID, prior: prior, checkpointID: checkpointID, tokenStart: state.TokenStart()}, nil
+	return attachStateUndo{
+		store: stateStore, sessionID: sessionID, prior: prior,
+		checkpointID: checkpointID, tokenStart: state.TokenStart(), pending: pendingUsageKey(state), phase: state.Phase,
+	}, nil
 }
 
 // seedAttachBaseCommit sets an attached session's BaseCommit to HEAD when it
