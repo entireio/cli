@@ -1474,8 +1474,20 @@ func encodeAttachState(s *session.State) ([]byte, error) {
 	return data, nil
 }
 
-// restore puts the prior state back, unless a hook has written the state since.
+// restore puts the prior state back, unless a hook has written the state
+// since. It holds the session lock hooks write under, so a hook can't write
+// between the check and the restore.
 func (u attachStateUndo) restore(ctx context.Context) error {
+	commonDir, err := strategy.GetGitCommonDir(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to locate session state: %w", err)
+	}
+	return strategy.WithSessionStateLocks(ctx, u.sessionID, []string{commonDir}, func() error { //nolint:wrapcheck // restoreLocked describes its failures
+		return u.restoreLocked(ctx)
+	})
+}
+
+func (u attachStateUndo) restoreLocked(ctx context.Context) error {
 	current, err := u.store.Load(ctx, u.sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to reload session state: %w", err)
@@ -1525,7 +1537,22 @@ func saveAttachSessionState(ctx context.Context, existingState *session.State, s
 	if err != nil {
 		return attachStateUndo{}, fmt.Errorf("failed to open session store: %w", err)
 	}
+	commonDir, err := strategy.GetGitCommonDir(ctx)
+	if err != nil {
+		return attachStateUndo{}, fmt.Errorf("failed to locate session state: %w", err)
+	}
+	// Under the session lock hooks write under, so none writes between the
+	// load and the save.
+	var undo attachStateUndo
+	err = strategy.WithSessionStateLocks(ctx, sessionID, []string{commonDir}, func() error {
+		var saveErr error
+		undo, saveErr = saveAttachSessionStateLocked(ctx, stateStore, existingState, sessionID, agentType, transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, transcriptEnd, opts, reviewSkills)
+		return saveErr
+	})
+	return undo, err //nolint:wrapcheck // saveAttachSessionStateLocked describes its failures
+}
 
+func saveAttachSessionStateLocked(ctx context.Context, stateStore *session.StateStore, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath, agentHome string, checkpointID id.CheckpointID, meta transcriptMetadata, sessionUsage *agent.TokenUsage, tokenPos, transcriptEnd int, opts attachOptions, reviewSkills []string) (attachStateUndo, error) {
 	now := time.Now()
 	// Start from the state on disk, which hooks may have changed while attach
 	// waited at its prompt. Nothing is written yet, so a state that can't be
