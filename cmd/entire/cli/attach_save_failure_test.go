@@ -62,7 +62,7 @@ func TestAttach_CheckpointWriteFailureRestoresState(t *testing.T) {
 	var out bytes.Buffer
 	err = runAttach(ctx, &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
 	require.ErrorContains(t, err, "injected write failure")
-	require.NotContains(t, err.Error(), "stay recorded as counted")
+	require.NotContains(t, err.Error(), "was left as it is")
 
 	got, err := store.Load(ctx, sessionID)
 	require.NoError(t, err)
@@ -111,7 +111,7 @@ func TestAttach_CheckpointWriteFailureAfterStoringKeepsState(t *testing.T) {
 	var out bytes.Buffer
 	err := runAttach(ctx, &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
 	require.ErrorContains(t, err, "injected write failure")
-	require.ErrorContains(t, err, "stay recorded as counted")
+	require.ErrorContains(t, err, "was left as it is")
 
 	store, err := session.NewStateStore(ctx)
 	require.NoError(t, err)
@@ -206,4 +206,27 @@ func TestAttach_CheckpointWriteFailureUnderRefsPrimary(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A state removed after attach saved it stays removed, and the undo says so.
+func TestAttachStateUndo_LeavesARemovedStateRemoved(t *testing.T) {
+	setupAttachTestRepo(t)
+	ctx := context.Background()
+	sessionID := "test-attach-undo-removed"
+	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	store, err := session.NewStateStore(ctx)
+	require.NoError(t, err)
+	now := time.Now()
+	require.NoError(t, store.Save(ctx, &session.State{SessionID: sessionID, StartedAt: now, LastInteractionTime: &now}))
+
+	undo, err := saveAttachSessionState(ctx, nil, sessionID, agent.AgentTypeClaudeCode,
+		"/t.jsonl", "", cpID, transcriptMetadata{}, &agent.TokenUsage{OutputTokens: 9}, 4, 7, attachOptions{}, nil)
+	require.NoError(t, err)
+	require.NoError(t, store.Delete(sessionID))
+
+	require.ErrorContains(t, undo.restore(ctx), "removed since attach saved it")
+	got, err := store.Load(ctx, sessionID)
+	require.NoError(t, err)
+	require.Nil(t, got)
 }

@@ -441,7 +441,7 @@ func writeAttachSession(ctx context.Context, repo *git.Repository, store cpkg.Pe
 	// Finish the undo even after Ctrl-C.
 	ctx = context.WithoutCancel(ctx)
 	kept := func(why string) error {
-		return fmt.Errorf("failed to write checkpoint %s: %w; %s, so session %s's tokens since its last checkpoint stay recorded as counted", checkpointID, writeErr, why, sessionID)
+		return fmt.Errorf("failed to write checkpoint %s: %w; %s, so session %s's state was left as it is", checkpointID, writeErr, why, sessionID)
 	}
 	after, afterErr := attachRefHashes(ctx, repo, checkpointID)
 	switch {
@@ -1481,7 +1481,11 @@ func (u attachStateUndo) restore(ctx context.Context) error {
 		return fmt.Errorf("failed to reload session state: %w", err)
 	}
 	if current == nil {
-		return nil
+		if u.prior == nil {
+			return nil
+		}
+		// Removed on purpose (entire clean, say); bringing it back would undo that.
+		return errors.New("session state was removed since attach saved it")
 	}
 	data, err := encodeAttachState(current)
 	if err != nil {
