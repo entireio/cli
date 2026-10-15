@@ -1419,6 +1419,16 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 				// hint on the durable save, like the telemetry beside it; a lost
 				// hint costs freshness only — Brain's canonical reconciliation
 				// remains authoritative.
+				//
+				// DELIBERATE SCOPE: this is the only hint call site, so only
+				// commit-driven checkpoints hint. The sibling condense paths —
+				// CondenseAndMarkFullyCondensed (session end, late subagent
+				// capture, the background sweep) and CreateSnapshotCheckpoint —
+				// produce checkpoints with no commit behind them: the session-end
+				// flow runs Brain's own sync, and the rest ride Brain's periodic
+				// reconciliation. When the session-end flow is retired, the hint
+				// moves to the condensation chokepoint instead of growing more
+				// call sites here.
 				sendBrainCheckpointHint(worktreePath, sessionID, hintBranch)
 			}
 		})
