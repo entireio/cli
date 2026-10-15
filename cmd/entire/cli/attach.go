@@ -427,9 +427,13 @@ var writeAttachCheckpoint = func(ctx context.Context, store cpkg.PersistentStore
 
 // writeAttachSession writes the attach checkpoint after the session state
 // recorded its tokens as counted. If the write fails, the state is put back
-// only when the checkpoint provably doesn't hold the session; if it might,
-// the tokens stay counted, since putting them back would count them twice.
+// only when the write provably stored nothing — the ref it writes didn't
+// move; if it might have, the tokens stay counted, since putting them back
+// would count them twice. Reading the checkpoint back can't prove absence: a
+// read error there reads as "no checkpoint".
 func writeAttachSession(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, store cpkg.PersistentStore, req cpkg.WriteRequest, sessionID string, checkpointID id.CheckpointID, undo attachStateUndo) error {
+	ref, onPrimary := attachWriteRef(refs, checkpointID)
+	before, beforeErr := refHash(repo, ref)
 	writeErr := writeAttachCheckpoint(ctx, store, req)
 	if writeErr == nil {
 		return nil
@@ -439,22 +443,47 @@ func writeAttachSession(ctx context.Context, repo *git.Repository, refs cpkg.Per
 	kept := func(why string) error {
 		return fmt.Errorf("failed to write checkpoint %s: %w; %s, so session %s's tokens since its last checkpoint stay recorded as counted", checkpointID, writeErr, why, sessionID)
 	}
-	// Writing to a backend other than the primary can land the session in one
-	// backend and then fail, and only the primary can be checked here.
-	if (checkpointID.Kind() == id.KindULID) != isCheckpointRef(refs.Primary.String()) {
+	// A write to a backend other than the primary can store the session in
+	// one backend and then fail updating the other.
+	if !onPrimary {
 		return kept("the checkpoint may hold the session anyway")
 	}
-	landed, err := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
+	after, afterErr := refHash(repo, ref)
 	switch {
-	case err != nil:
-		return kept(fmt.Sprintf("couldn't check whether it holds the session (%v)", err))
-	case landed:
-		return kept("the checkpoint holds the session anyway")
+	case beforeErr != nil || afterErr != nil:
+		return kept(fmt.Sprintf("couldn't check whether it was stored (%v)", errors.Join(beforeErr, afterErr)))
+	case after != before:
+		return kept("the checkpoint may hold the session anyway")
 	}
 	if err := undo.restore(ctx); err != nil {
 		return kept(fmt.Sprintf("its state couldn't be put back (%v)", err))
 	}
 	return fmt.Errorf("failed to write checkpoint %s: %w", checkpointID, writeErr)
+}
+
+// attachWriteRef is the ref a write of checkpointID moves, and whether that
+// is the primary's: a ULID lives in its own ref, a hex ID on the branch.
+func attachWriteRef(refs cpkg.PersistentRefs, checkpointID id.CheckpointID) (plumbing.ReferenceName, bool) {
+	if checkpointID.Kind() != id.KindULID {
+		return refs.Primary, !isCheckpointRef(refs.Primary.String())
+	}
+	ref, err := cpkg.RefName(checkpointID)
+	if err != nil {
+		return "", false
+	}
+	return ref, isCheckpointRef(refs.Primary.String())
+}
+
+// refHash resolves ref, "" when it doesn't exist.
+func refHash(repo *git.Repository, ref plumbing.ReferenceName) (string, error) {
+	r, err := repo.Reference(ref, true)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", ref, err)
+	}
+	return r.Hash().String(), nil
 }
 
 // attachTokens returns the tokens the attach checkpoint stores, the session's
@@ -1430,23 +1459,20 @@ type attachStateUndo struct {
 	sessionID string
 	// prior is the state on disk before attach saved; nil when there was none.
 	prior *session.State
-	// What attach saved: a state that no longer shows these was changed by a
-	// hook since, and is left as the hook wrote it. A Stop adds to the pending
-	// usage without moving the offset, so that is compared too.
-	checkpointID id.CheckpointID
-	tokenStart   int
-	pending      string
-	phase        session.Phase
+	// saved is the state attach saved, as read back. A state that differs
+	// from it was changed by a hook since, and is left as the hook wrote it:
+	// a Stop or a step can update pending tokens and files without touching
+	// the token offset or the checkpoint ID.
+	saved []byte
 }
 
-// pendingUsageKey is the pending token usage in a form that compares equal
-// across a save and a reload.
-func pendingUsageKey(s *session.State) string {
-	data, err := json.Marshal(s.CheckpointTokenUsage)
+// encodeAttachState encodes s for comparing it with a later read.
+func encodeAttachState(s *session.State) ([]byte, error) {
+	data, err := json.Marshal(s)
 	if err != nil {
-		return "unencodable"
+		return nil, fmt.Errorf("encode session state: %w", err)
 	}
-	return string(data)
+	return data, nil
 }
 
 // restore puts the prior state back, unless a hook has written the state since.
@@ -1458,8 +1484,11 @@ func (u attachStateUndo) restore(ctx context.Context) error {
 	if current == nil {
 		return nil
 	}
-	if current.LastCheckpointID != u.checkpointID || current.TokenStart() != u.tokenStart ||
-		pendingUsageKey(current) != u.pending || current.Phase != u.phase {
+	data, err := encodeAttachState(current)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(data, u.saved) {
 		return errors.New("session state changed since attach saved it")
 	}
 	if u.prior == nil {
@@ -1610,10 +1639,16 @@ func saveAttachSessionState(ctx context.Context, existingState *session.State, s
 	if err := stateStore.Save(ctx, state); err != nil {
 		return attachStateUndo{}, fmt.Errorf("failed to save session state: %w", err)
 	}
-	return attachStateUndo{
-		store: stateStore, sessionID: sessionID, prior: prior,
-		checkpointID: checkpointID, tokenStart: state.TokenStart(), pending: pendingUsageKey(state), phase: state.Phase,
-	}, nil
+	// Read back what was saved, so the undo compares like with like. Without
+	// it the undo can't tell a hook's change from attach's own state, and
+	// leaves the state as it is.
+	undo := attachStateUndo{store: stateStore, sessionID: sessionID, prior: prior}
+	if saved, loadErr := stateStore.Load(ctx, sessionID); loadErr == nil && saved != nil {
+		if data, encErr := encodeAttachState(saved); encErr == nil {
+			undo.saved = data
+		}
+	}
+	return undo, nil
 }
 
 // seedAttachBaseCommit sets an attached session's BaseCommit to HEAD when it
@@ -1629,23 +1664,19 @@ func seedAttachBaseCommit(ctx context.Context, errW io.Writer, repo *git.Reposit
 }
 
 func seedBaseCommit(ctx context.Context, repo *git.Repository, sessionID string) error {
-	stateStore, err := session.NewStateStore(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open session store: %w", err)
-	}
-	state, err := stateStore.Load(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to load session state: %w", err)
-	}
-	if state == nil || state.BaseCommit != "" {
-		return nil
-	}
 	head, err := repo.Head()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HEAD: %w", err)
 	}
-	state.BaseCommit = head.Hash().String()
-	if err := stateStore.Save(ctx, state); err != nil {
+	// Under the session lock, so a hook's concurrent update isn't overwritten.
+	err = strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if state.BaseCommit != "" {
+			return strategy.ErrMutationSkip
+		}
+		state.BaseCommit = head.Hash().String()
+		return nil
+	})
+	if err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
 		return fmt.Errorf("failed to save session state: %w", err)
 	}
 	return nil
