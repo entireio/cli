@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/netcause"
 )
 
@@ -47,7 +48,7 @@ func (c *Client) WithAuthSessionsPath(path string) *Client {
 // NewClientWithBaseURL creates a new authenticated API client targeting an
 // explicit base URL.
 //
-// This is the only constructor on purpose. Its predecessor, NewClient(token),
+// Both constructors require the base URL. Their predecessor, NewClient(token),
 // defaulted the host to BaseURL() — ENTIRE_API_BASE_URL or the production apex —
 // which is exactly the ambient default the data plane no longer has: the host
 // belongs to the acting login and comes from auth.ResolveDataAPI /
@@ -56,38 +57,48 @@ func (c *Client) WithAuthSessionsPath(path string) *Client {
 // entire.io, so the base URL is a required argument and every caller has to say
 // where it got it.
 func NewClientWithBaseURL(token, baseURL string) *Client {
+	return NewClientWithTransport(token, baseURL, nil)
+}
+
+// NewClientWithTransport creates an API client using an injected network
+// transport, retaining the standard bearer and redirect policies. A nil
+// transport uses http.DefaultTransport. The transport must not rewrite the
+// request URL: the redirect policy only sees the URL it was given, so a
+// scheme rewrite beneath it would hide a downgrade.
+func NewClientWithTransport(token, baseURL string, transport http.RoundTripper) *Client {
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
 	return &Client{
-		httpClient: &http.Client{
+		httpClient: httpclient.New(httpclient.Options{
 			Transport: &bearerTransport{
 				token: token,
-				base:  netcause.Transport(http.DefaultTransport),
+				base:  netcause.Transport(transport),
 			},
 			// A cross-host redirect must never carry the Entire bearer to
 			// another origin; refuse it rather than follow it. Same-origin
 			// requests are guaranteed by the base-host check in do().
 			CheckRedirect: rejectCrossHostRedirect,
-		},
+		}),
 		baseURL: baseURL,
 	}
 }
 
 // rejectCrossHostRedirect stops a redirect chain from leaving the origin the
 // client was built for. Same-host redirects (e.g. a trailing-slash normalize)
-// still follow, up to Go's usual 10-hop cap.
+// still follow; httpclient.New adds the hop cap and HTTPS floor around it.
 func rejectCrossHostRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return errors.New("stopped after 10 redirects")
-	}
 	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
 		return fmt.Errorf("refusing redirect to a different host (%s → %s): the Entire bearer must not leave its origin", via[0].URL.Host, req.URL.Host)
 	}
 	return nil
 }
 
-// requireSameHost rejects an endpoint whose host differs from the base URL's.
-// It guards the direct case (a path that resolved to another host); redirects
+// requireSameOrigin rejects off-host endpoints and downgrades from an HTTPS base.
+// Explicit HTTP bases may upgrade to HTTPS on the same host.
+// It guards direct absolute paths as well as relative paths; redirects
 // are handled by rejectCrossHostRedirect.
-func requireSameHost(baseURL, endpoint string) error {
+func requireSameOrigin(baseURL, endpoint string) error {
 	b, err := url.Parse(baseURL)
 	if err != nil {
 		return fmt.Errorf("parse base URL: %w", err)
@@ -96,8 +107,11 @@ func requireSameHost(baseURL, endpoint string) error {
 	if err != nil {
 		return fmt.Errorf("parse endpoint URL: %w", err)
 	}
+	if b.Scheme == schemeHTTPS && e.Scheme != schemeHTTPS {
+		return fmt.Errorf("%w: refusing an insecure endpoint for an HTTPS API base URL", httpclient.ErrRequestPolicy)
+	}
 	if !strings.EqualFold(b.Host, e.Host) {
-		return fmt.Errorf("refusing to send an authenticated request to %q, which is not the API host %q", e.Host, b.Host)
+		return fmt.Errorf("%w: refusing to send an authenticated request to %q, which is not the API host %q", httpclient.ErrRequestPolicy, e.Host, b.Host)
 	}
 	return nil
 }
@@ -234,7 +248,7 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, he
 	// The bearer is only ever sent to the API's own host. A path that resolves
 	// to another host (absolute or scheme-relative URL) would otherwise redirect
 	// the Authorization header off-origin.
-	if err := requireSameHost(c.baseURL, endpoint); err != nil {
+	if err := requireSameOrigin(c.baseURL, endpoint); err != nil {
 		return nil, err
 	}
 

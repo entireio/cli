@@ -200,7 +200,8 @@ func TestDoWithFailover_SkipsReplicaStalledAfterAccept(t *testing.T) {
 	}()
 	stalled := "https://" + l.Addr().String()
 
-	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// TLS: replicas must be HTTPS, and SkipTLS accepts the test certificate.
+	good := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "from good")
 	}))

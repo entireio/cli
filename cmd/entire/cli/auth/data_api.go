@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -193,11 +195,20 @@ func dataAPIContext(ctx context.Context, dataBaseURL string) (*contexts.Context,
 	return selected, nil
 }
 
+// dataAPIHTTPDiscoveryTransport sends requests for the plain-HTTP data origin
+// over HTTP. Only that host is rewritten: the same client later lists clusters
+// at the discovered core with the login JWT, and a blanket rewrite would send
+// that token in plaintext beneath the redirect policy, which only sees HTTPS.
 type dataAPIHTTPDiscoveryTransport struct {
+	host string
 	base http.RoundTripper
 }
 
 func (t dataAPIHTTPDiscoveryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !strings.EqualFold(req.URL.Host, t.host) {
+		//nolint:wrapcheck // passthrough - wrapping would change error semantics
+		return t.base.RoundTrip(req)
+	}
 	clone := req.Clone(req.Context())
 	clone.URL.Scheme = schemeHTTP
 	resp, err := t.base.RoundTrip(clone)
@@ -208,12 +219,16 @@ func (t dataAPIHTTPDiscoveryTransport) RoundTrip(req *http.Request) (*http.Respo
 }
 
 func dataAPIDiscoveryClient(dataOrigin string) *http.Client {
-	client := &http.Client{Timeout: dataAPIDiscoveryTimeout, Transport: versioninfo.WrapTransport(nil)}
+	client := httpclient.New(httpclient.Options{Timeout: dataAPIDiscoveryTimeout, Transport: versioninfo.WrapTransport(nil)})
 	if !shouldUsePlainHTTPDiscovery(dataOrigin) {
 		return client
 	}
 
-	client.Transport = dataAPIHTTPDiscoveryTransport{base: client.Transport}
+	host, ok := hostOf(dataOrigin)
+	if !ok {
+		return client
+	}
+	client.Transport = dataAPIHTTPDiscoveryTransport{host: host, base: client.Transport}
 	return client
 }
 

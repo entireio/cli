@@ -22,6 +22,7 @@ import (
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -146,6 +147,26 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 const retiredDenyRuleWarning = "\n  A retired Entire permission rule in this repo is causing repeated" +
 	"\n  approval prompts. Run 'entire doctor' to remove it."
 
+// missingHooksWarning is appended to the Claude Code session-start banner
+// when the repo's Entire hooks lack one this CLI needs, so whatever a newer
+// CLI added hooks for silently records nothing. Like retiredDenyRuleWarning,
+// it reports and points at the fix; it never rewrites the tracked config.
+const missingHooksWarning = "\n  Entire's Claude Code hooks in this repo are missing hooks this CLI needs," +
+	"\n  so some activity isn't recorded. Run 'entire agent add claude-code' to add them."
+
+// missingHooksBannerSuffix returns missingHooksWarning when it applies to ag.
+// Only Claude Code, and only its missing-required-hook check: the rest of
+// CheckHookConfig (commands or timeouts an install would rewrite) and the
+// exact-match checks of OpenCode, Pi and Copilot also fire when a teammate's
+// newer CLI wrote the config, and would tell them to downgrade it. Those
+// stay with `entire status` and `entire doctor`.
+func missingHooksBannerSuffix(ctx context.Context, ag agent.Agent) string {
+	if ag.Name() != agent.AgentNameClaudeCode || !claudecode.MissingRequiredHooks(ctx) {
+		return ""
+	}
+	return missingHooksWarning
+}
+
 // handleLifecycleSessionStart handles session start: shows banner, checks concurrent sessions,
 // fires state machine transition.
 func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
@@ -255,6 +276,11 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 			bannerFirst = true
 		}
 		if bannerFirst {
+			// Checked only for a banner that is shown: it reads the agent's
+			// settings file, which resume/compact/clear SessionStarts would
+			// throw away. Appended after any agent-help pointer, which only
+			// Factory AI Droid gets, so for Claude Code it ends the banner.
+			message += missingHooksBannerSuffix(ctx, ag)
 			if err := writer.WriteHookResponse(message); err != nil {
 				hookResponseSpan.RecordError(err)
 				hookResponseSpan.End()

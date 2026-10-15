@@ -1376,6 +1376,17 @@ func TestRepoView_Routing(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorContains(t, err, "no repo matching")
 	})
+
+	t.Run("a mismatched lookup cannot emit another repo's coordinates", func(t *testing.T) {
+		gotFilter := serveRepoDetail(t, []coreapi.RepoIndexEntry{
+			repoIndexFixture("other/repo", "mirror-eu", placementFixture{id: "mirror-eu", slug: euClusterSlug}),
+		}, clustersWithSlugs())
+
+		out, err := runRepoView(t, "/gh/entirehq/entiredb", "--json")
+		require.ErrorContains(t, err, `control plane returned "other/repo" for entirehq/entiredb`)
+		require.Empty(t, out, "must not emit coordinates for an unrelated repository")
+		require.Equal(t, "entirehq/entiredb", *gotFilter)
+	})
 }
 
 // TestRepoView_NativeCloneURL pins the native half of the clone-URL form: it is

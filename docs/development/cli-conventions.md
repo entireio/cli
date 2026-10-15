@@ -396,8 +396,15 @@ the commands are always runnable in every build.
   its only record. Saving it under a second remote the caller never named was
   the previous design, and its failure mode was a name collision that reported
   a clean ✓ over a URL that had left git config for good.
-  There is no URL-printing verb: `repo view` already lists a clone URL per
-  cluster for both forges, in a table and in `--json`.
+  `repo view [repo]` lists a clone URL per cluster for both forges, in a table
+  and in `--json`. Without an argument it resolves `origin`; an Entire clone
+  URL retains its cluster's login-server routing. JSON also carries top-level
+  `repoId` and `apiUrl` for the responsible API cell. For GitHub repos these
+  come from the processing placement; for native repos they are the repo ID
+  and its home cluster's API URL. The fields use the shared routing resolver's
+  selection and catalog joins, with no additional requests. Both are omitted
+  when coordinates cannot resolve, so an unready repo remains inspectable.
+  Consumers must require both fields before making a repo-scoped API call.
   `remote add` and `clone` choose a placement through the shared
   `selectPlacement` picker, each passing its own `placementPicker` wording. The
   picker matches on the cluster host, which is what `--cluster` takes, and both

@@ -45,6 +45,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | Interface | Methods | When to implement |
 |-----------|---------|-------------------|
 | `HookSupport` | `InstallHooks`, `UninstallHooks`, `AreHooksInstalled` | Agent uses a config file for hook registration (e.g., `settings.json`) |
+| `HookFreshness` | `CheckHookConfig` | Agent can tell whether its installed hook config still matches what this CLI writes (read-only). `entire status` points drift at `entire doctor`, which names the fix: `entire agent add <agent>`, then `--force` if that does not fix it. Claude Code also warns in its SessionStart banner, but only when a hook this CLI requires is missing (`claudecode.MissingRequiredHooks`); stale commands, missing timeouts and every other agent's check (Codex, OpenCode, Pi, Copilot) stay out of the banner because they also fire when a teammate's newer CLI wrote the config. |
 | `HookHandler` | `GetHookNames` | **Required for CLI hook registration** — `entire hooks <agent> <verb>` subcommands are only created for agents implementing this interface. Typically delegates to `HookNames()`. |
 | `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |

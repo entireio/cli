@@ -141,7 +141,7 @@ const (
 	HooksCurrent
 	// HooksOutdated means Entire hooks are installed but stale — an older CLI
 	// wrote a config that no longer matches the current one. Fix:
-	// `entire enable --force`.
+	// `entire agent add <agent>`; add --force if that does not fix it.
 	HooksOutdated
 )
 

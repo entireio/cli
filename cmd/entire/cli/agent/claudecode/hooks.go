@@ -47,8 +47,10 @@ const (
 //   - https://code.claude.com/docs/en/hooks.md (matcher evaluation rules)
 //
 // Configs written by older CLI versions used the outdated matchers "Task" and
-// "TodoWrite", where the hooks silently never fired. Those are not rewritten in
-// place on a normal `entire enable`; run with --force to strip and reinstall.
+// "TodoWrite", where the hooks silently never fired. A plain install adds the
+// hooks under the current matchers (clearing drift) but keeps an Entire entry
+// under the dead "Task" matcher if its command is current;
+// `entire agent add claude-code --force` strips those too.
 const (
 	subagentToolMatcher = "Agent"
 	// skillToolMatcher routes Skill calls to post-task, which records the agent
@@ -681,7 +683,7 @@ const (
 	// HooksCurrent means the installed hooks match the current config.
 	HooksCurrent = agent.HooksCurrent
 	// HooksOutdated means the installed hooks are stale.
-	// Fix: `entire enable --force`.
+	// Fix: `entire agent add claude-code`; add --force if that does not fix it.
 	HooksOutdated = agent.HooksOutdated
 )
 
@@ -712,19 +714,35 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 	if err != nil || !hasEntireHook(settings.Hooks.Stop) {
 		return HooksAbsent
 	}
+	if missingRequiredHooks(settings) || (&ClaudeCodeAgent{}).HasStaleManagedHooks(ctx) {
+		return HooksOutdated
+	}
+	return HooksCurrent
+}
+
+// MissingRequiredHooks reports whether Entire is installed in this repo's
+// Claude Code settings but a hook this CLI needs is missing: the half of
+// CheckHookConfig that says nothing about commands or timeouts it would
+// rewrite. A config a newer CLI wrote still has every hook this one requires,
+// so unlike the full check it does not misfire across teammates' CLI versions.
+// Read-only; an unreadable file reports false.
+//
+// That holds only while the required list grows. Removing or renaming a hook
+// from missingRequiredHooks would make older CLIs warn about a newer config,
+// and their `entire agent add` would rewrite it back.
+func MissingRequiredHooks(ctx context.Context) bool {
+	settings, err := loadClaudeSettings(ctx)
+	return err == nil && hasEntireHook(settings.Hooks.Stop) && missingRequiredHooks(settings)
+}
+
+func missingRequiredHooks(settings ClaudeSettings) bool {
 	subagentTools := splitMatcherTools(subagentToolMatcher)
-	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
+	return !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, []string{skillToolMatcher}) ||
 		!hasEntireHookCoveringTools(settings.Hooks.SubagentStart, []string{workflowAgentMatcher}) ||
 		!hasEntireHook(settings.Hooks.SubagentStop) ||
-		!hasEntireHook(settings.Hooks.StopFailure) {
-		return HooksOutdated
-	}
-	if (&ClaudeCodeAgent{}).HasStaleManagedHooks(ctx) {
-		return HooksOutdated
-	}
-	return HooksCurrent
+		!hasEntireHook(settings.Hooks.StopFailure)
 }
 
 // Helper functions for hook management

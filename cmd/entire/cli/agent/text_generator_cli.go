@@ -59,8 +59,10 @@ func NewTextGenerationDir() (string, func(), error) {
 // are removed even from overrides.
 //
 // Returns (result, capturedStderr, stdoutByteCount, err). capturedStderr and
-// stdoutByteCount are populated even on error so callers can wrap them into a
-// *agent.TextGenerationError for timeout diagnostics.
+// stdoutByteCount are populated whether or not the process failed, so callers
+// can wrap them into a *agent.TextGenerationError for timeout diagnostics, and
+// so can callers that parse a successful exit's output and find a failure in
+// it (OpenCode's and Antigravity's JSON results).
 func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string, envOverrides ...string) (string, string, int, error) {
 	dir, cleanup, err := NewTextGenerationDir()
 	if err != nil {
@@ -120,11 +122,12 @@ func RunIsolatedTextGeneratorCLIIn(ctx context.Context, runner TextCommandRunner
 		return "", capturedStderr, stdoutBytes, fmt.Errorf("failed to run %s CLI: %w", displayName, err)
 	}
 
+	capturedStderr := strings.TrimSpace(stderr.String())
 	result := strings.TrimSpace(stdout.String())
 	if result == "" {
-		return "", "", 0, fmt.Errorf("%s CLI returned empty output", displayName)
+		return "", capturedStderr, stdout.Len(), fmt.Errorf("%s CLI returned empty output", displayName)
 	}
-	return result, "", stdout.Len(), nil
+	return result, capturedStderr, stdout.Len(), nil
 }
 
 // summaryProviderBinaries maps agent names to the CLI binary that

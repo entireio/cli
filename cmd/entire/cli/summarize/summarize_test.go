@@ -1258,12 +1258,9 @@ func TestBuildCondensedTranscriptFromBytes_Antigravity(t *testing.T) {
 	}
 }
 
-// A summary prompt travels to Antigravity as a single argv element, and Linux
-// caps one argument at MAX_ARG_STRLEN (128 KiB) however large ARG_MAX is. An
-// unbounded transcript therefore failed with E2BIG on exactly the long sessions
-// a summary is most wanted for, so the formatted transcript carries a budget.
-// The file list has its own bound: FilesTouched is unbounded, and the argv
-// ceiling behind maxCondensedTranscriptBytes applies to the whole prompt.
+// The formatted transcript carries a budget (maxCondensedTranscriptBytes).
+// The file list has its own bound: FilesTouched is unbounded, and the budget
+// is meant to cover the whole prompt.
 func TestFormatCondensedTranscript_BoundsOversizedFileLists(t *testing.T) {
 	t.Parallel()
 	files := make([]string, 0, 4000)

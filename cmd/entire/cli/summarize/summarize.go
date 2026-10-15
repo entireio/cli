@@ -655,26 +655,18 @@ func formatCondensedTranscript(input Input, bounded bool) string {
 }
 
 // maxCondensedTranscriptBytes bounds the transcript text a summary prompt
-// carries. Two independent reasons, and the tighter one sets the number:
+// carries. Every byte here becomes prompt tokens, on every provider, on every
+// checkpoint; long sessions were previously unbounded.
 //
-//   - Cost. Every byte here becomes prompt tokens, on every provider, on every
-//     checkpoint. Long sessions were previously unbounded.
-//   - argv. Antigravity takes its prompt as a single argv element, because agy
-//     ignores stdin in print mode (see antigravity.GenerateText). Linux caps a
-//     SINGLE argument at MAX_ARG_STRLEN — 128 KiB — regardless of the much
-//     larger total ARG_MAX, so an unbounded transcript fails with E2BIG on
-//     exactly the long sessions a summary is most wanted for. macOS's ~1 MiB
-//     total is permissive enough to hide this in local testing.
-//
-// 96 KiB, plus maxCondensedFilesBytes for the file list, keeps the whole prompt
-// inside that 128 KiB once buildSummarizationPrompt's wrapper is added. It does NOT rescue Windows,
-// which caps an entire command line near 32 KiB; that limit is narrower than
-// any transcript budget worth having and needs a different fix.
+// The number was originally sized to keep Antigravity's prompt, then a single
+// argv element, inside Linux's 128 KiB MAX_ARG_STRLEN. Antigravity now reads
+// the prompt from stdin (see antigravity.GenerateText); the budget stays as a
+// cost bound.
 const maxCondensedTranscriptBytes = 96 * 1024
 
 // maxCondensedFilesBytes bounds the [Files Modified] list that follows the
 // transcript. 16 KiB is a few hundred paths; past that a summary needs the
-// count, not the names, and the total stays inside the argv ceiling above.
+// count, not the names.
 const maxCondensedFilesBytes = 16 * 1024
 
 // formatFilesList renders the [Files Modified] section. When bounded, it

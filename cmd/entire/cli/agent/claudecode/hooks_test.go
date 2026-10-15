@@ -1711,7 +1711,7 @@ func TestInstallHooks_SubagentStop_UpgradeInPlace(t *testing.T) {
 // TestCheckHookConfig_Outdated_MissingTurnHook pins CheckHookConfig's drift
 // detection for hooks added after the first install: a config that predates
 // SubagentStart, SubagentStop or StopFailure (everything else current) must read as outdated
-// so `entire doctor`/`entire enable --force` picks it up, not silently stay
+// so `entire doctor`/`entire agent add claude-code` picks it up, not silently stay
 // HooksCurrent forever.
 func TestCheckHookConfig_Outdated_MissingTurnHook(t *testing.T) {
 	for _, hookType := range []string{"SubagentStart", "SubagentStop", "StopFailure"} {
@@ -1925,8 +1925,9 @@ func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 
 // TestInstallHooks_Force_ReinstallsStaleToolMatchers verifies that `--force`
 // strips Entire hooks left under the outdated "Task"/"TodoWrite" matchers by
-// older CLI versions and reinstalls them under the current matchers. (A normal
-// enable does not rewrite existing hook config; --force is the fix path.)
+// older CLI versions and reinstalls them under the current matchers. (A plain
+// install adds the current matchers but keeps an Entire entry under the dead
+// "Task" matcher if its command is current; --force strips those too.)
 func TestInstallHooks_Force_ReinstallsStaleToolMatchers(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
