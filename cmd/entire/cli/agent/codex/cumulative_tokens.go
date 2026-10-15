@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strconv"
@@ -15,8 +16,9 @@ var _ agent.CumulativeTokenSource = (*CodexAgent)(nil)
 const rolloutLineTypeTokenUsageRecord = "token_usage_record" //nolint:gosec // a JSONL line type, not a credential
 
 // rolloutUsage is one Codex usage object: a call's usage on token_usage_record,
-// or the running total on token_count. input_tokens includes the cached and
-// cache-written shares; output_tokens includes reasoning.
+// or the running total on token_count. input_tokens includes the cached share
+// and, by assumption (unverified: captured runs wrote no cache), the
+// cache-written share too; output_tokens includes reasoning.
 type rolloutUsage struct {
 	InputTokens           int `json:"input_tokens"`
 	CachedInputTokens     int `json:"cached_input_tokens"`
@@ -34,11 +36,15 @@ func (u rolloutUsage) tokenUsage(calls int) *agent.TokenUsage {
 	}
 }
 
-// CumulativeTokenUsage prefers per-call token_usage_record lines, deduped by
-// response_id: exact per call, they are immune to a counter restarted on
-// resume or a replayed total. Older rollouts without them fall back to
-// segment-summed token_count running totals. Children come from the session's
-// authoritative inventory, keyed by child agent ID.
+// CumulativeTokenUsage takes the per-field max of two lower bounds: per-call
+// token_usage_record lines deduped by response_id (exact, immune to a counter
+// restarted on resume), and segment-summed token_count running totals, which
+// also cover calls made before Codex began writing records.
+//
+// Children come from the session's authoritative inventory, keyed by child
+// agent ID. They keep the inventory's own rule — the child's last token_count
+// snapshot, without the cache-write split — because a forked child copies its
+// parent's history and only that analysis knows which lines are its own.
 func (c *CodexAgent) CumulativeTokenUsage(ctx context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
 	total := cumulativeRolloutUsage(in.TranscriptData)
 	if len(in.Subagents) == 0 {
@@ -66,6 +72,9 @@ func cumulativeRolloutUsage(data []byte) *agent.TokenUsage {
 	var snapshots []*agent.TokenUsage
 	snapshotCalls := 0
 	for index, raw := range splitJSONL(data) {
+		if !bytes.Contains(raw, []byte(rolloutLineTypeTokenUsageRecord)) && !bytes.Contains(raw, []byte(eventMsgTypeTokenCount)) {
+			continue
+		}
 		var line rolloutLine
 		if json.Unmarshal(raw, &line) != nil {
 			continue
@@ -102,12 +111,9 @@ func cumulativeRolloutUsage(data []byte) *agent.TokenUsage {
 			snapshots = append(snapshots, snapshot)
 		}
 	}
-	if len(records) > 0 {
-		return agent.SumTokenUsageByKey(records)
+	segments := agent.SumCumulativeSegments(snapshots)
+	if segments != nil {
+		segments.APICallCount = snapshotCalls
 	}
-	total := agent.SumCumulativeSegments(snapshots)
-	if total != nil {
-		total.APICallCount = snapshotCalls
-	}
-	return total
+	return agent.MaxTokenUsage(agent.SumTokenUsageByKey(records), segments)
 }

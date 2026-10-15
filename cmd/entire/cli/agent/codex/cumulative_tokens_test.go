@@ -26,9 +26,12 @@ func TestCumulativeTokenUsage(t *testing.T) {
 		lines []string
 		want  *agent.TokenUsage
 	}{
-		{"per-call records win, deduped by response_id",
-			[]string{record("r1", 1000, 600, 50), total(1000, 600, 50), record("r2", 1200, 900, 30), record("r2", 1200, 900, 30), total(2200, 1500, 80)},
+		{"records beat a stale replayed token_count total",
+			[]string{record("r1", 1000, 600, 50), total(1000, 600, 50), record("r2", 1200, 900, 30), record("r2", 1200, 900, 30), total(1000, 600, 50)},
 			&agent.TokenUsage{InputTokens: 700, CacheReadTokens: 1500, OutputTokens: 80, APICallCount: 2}},
+		{"usage from before records began is kept",
+			[]string{total(3000, 2000, 30), record("r1", 3500, 3000, 5), total(6500, 5000, 35)},
+			&agent.TokenUsage{InputTokens: 1500, CacheReadTokens: 5000, OutputTokens: 35, APICallCount: 2}},
 		{"token_count fallback: replay ignored, restart starts a segment",
 			[]string{total(1000, 600, 50), total(2200, 1500, 80), total(2200, 1500, 80), total(300, 100, 10)},
 			&agent.TokenUsage{InputTokens: 900, CacheReadTokens: 1600, OutputTokens: 90, APICallCount: 3}},
