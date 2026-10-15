@@ -101,6 +101,16 @@ func MaxTokenUsage(a, b *TokenUsage) *TokenUsage {
 	}
 }
 
+// UsageOrNil maps usage with no tokens and no calls to nil, the "no data"
+// value CumulativeTokenUsage returns. Agents can write all-zero placeholders
+// (Droid's settings.json before its first update, an idle Copilot shutdown).
+func UsageOrNil(u *TokenUsage) *TokenUsage {
+	if u == nil || (tokenTotal(u) == 0 && u.APICallCount == 0 && u.SubagentTokens == nil) {
+		return nil
+	}
+	return u
+}
+
 func tokenTotal(u *TokenUsage) int {
 	return u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens + u.OutputTokens
 }

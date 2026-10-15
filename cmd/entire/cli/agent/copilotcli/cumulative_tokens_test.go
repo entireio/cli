@@ -43,6 +43,7 @@ func TestCumulativeTokenUsage(t *testing.T) {
 			[]string{shutdown(1000, 50, 800, 100, 2), shutdown(3000, 90, 2500, 300, 4), shutdown(600, 10, 500, 0, 1)},
 			&agent.TokenUsage{InputTokens: 300, CacheReadTokens: 3000, CacheCreationTokens: 300, OutputTokens: 100, APICallCount: 5}, nil},
 		{"no usage is nil", []string{`{"type":"user.message","data":{"content":"hi"}}`}, nil, nil},
+		{"an all-zero shutdown is no data", []string{shutdown(0, 0, 0, 0, 0)}, nil, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

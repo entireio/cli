@@ -62,7 +62,9 @@ func (c *CopilotCLIAgent) CumulativeTokenUsage(_ context.Context, in agent.Cumul
 			for _, m := range data.ModelMetrics {
 				usage = types.AddTokenUsage(usage, m.Usage.tokenUsage(m.Requests.Count))
 			}
-			shutdowns = append(shutdowns, usage)
+			if usage = agent.UsageOrNil(usage); usage != nil {
+				shutdowns = append(shutdowns, usage)
+			}
 		}
 	}
 	var children map[string]*agent.TokenUsage

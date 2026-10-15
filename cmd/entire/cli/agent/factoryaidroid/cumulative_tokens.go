@@ -104,13 +104,14 @@ func readSettingsTokenUsage(transcriptPath string) (*agent.TokenUsage, error) {
 	if u == nil {
 		return nil, nil //nolint:nilnil // settings without tokenUsage carry no usage data
 	}
-	// The file has no call count, so APICallCount stays 0.
-	return &agent.TokenUsage{
+	// The file has no call count, so APICallCount stays 0. An all-zero
+	// placeholder is no data.
+	return agent.UsageOrNil(&agent.TokenUsage{
 		InputTokens:         u.InputTokens,
 		OutputTokens:        u.OutputTokens,
 		CacheCreationTokens: u.CacheCreationTokens,
 		CacheReadTokens:     u.CacheReadTokens,
-	}, nil
+	}), nil
 }
 
 // findWorkerSessions returns the Worker sessions in dirs whose session_start
