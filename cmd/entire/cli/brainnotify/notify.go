@@ -5,7 +5,6 @@ package brainnotify
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/execx"
@@ -17,10 +16,7 @@ import (
 // optimization, not the recursion guard.
 const memoryWorkerOriginEnv = "ENTIRE_BRAIN_MEMORY_WORKER"
 
-var (
-	spawnDetached = execx.SpawnDetached
-	lookPath      = exec.LookPath
-)
+var spawnDetached = execx.SpawnDetached
 
 // NotifyCheckpoint launches `entire brain memory notify --event checkpoint` as
 // detached, best-effort work. The argv is deliberately limited to content-free
@@ -29,17 +25,22 @@ var (
 //
 // NotifyCheckpoint has no result by design: a missing or failing Brain plugin
 // must never change the host hook's result or output. Canonical reconciliation
-// repairs a missed hint later. When the entire-brain plugin is not resolvable
-// it skips the spawn entirely — main.go prepends the managed plugin dir to
-// PATH, so a machine without Brain pays a LookPath, not a fork, per commit.
+// repairs a missed hint later.
+//
+// There is deliberately NO plugin-presence probe here: built-in commands run
+// after main.go's restorePATH(), so the managed plugin dir is NOT on this
+// process's PATH and exec.LookPath cannot see a managed install — only the
+// spawned `entire` child, whose own startup re-prepends that dir, can resolve
+// the plugin. A machine without Brain pays one short-lived fork whose
+// dispatcher exits on the unknown verb.
 func NotifyCheckpoint(repoRoot, sessionID, branch string) {
 	if os.Getenv(memoryWorkerOriginEnv) == "1" {
 		return
 	}
-	if strings.TrimSpace(repoRoot) == "" || strings.TrimSpace(sessionID) == "" {
-		return
-	}
-	if _, err := lookPath("entire-brain"); err != nil {
+	repoRoot = strings.TrimSpace(repoRoot)
+	sessionID = strings.TrimSpace(sessionID)
+	branch = strings.TrimSpace(branch)
+	if repoRoot == "" || sessionID == "" {
 		return
 	}
 

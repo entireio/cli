@@ -1,19 +1,11 @@
 package brainnotify
 
 import (
-	"errors"
 	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
-
-func stubPluginOnPath(t *testing.T) {
-	t.Helper()
-	original := lookPath
-	t.Cleanup(func() { lookPath = original })
-	lookPath = func(string) (string, error) { return "/managed/entire-brain", nil }
-}
 
 func captureSpawns(t *testing.T) (*string, *[]string, *int) {
 	t.Helper()
@@ -32,7 +24,6 @@ func captureSpawns(t *testing.T) (*string, *[]string, *int) {
 
 func TestNotifyCheckpointSpawnsContentFreeBrainHint(t *testing.T) {
 	t.Setenv(memoryWorkerOriginEnv, "")
-	stubPluginOnPath(t)
 	gotDir, gotArgs, _ := captureSpawns(t)
 
 	NotifyCheckpoint("/repo", "session-123", "feature/memory")
@@ -49,7 +40,6 @@ func TestNotifyCheckpointSpawnsContentFreeBrainHint(t *testing.T) {
 
 func TestNotifyCheckpointOmitsUnknownBranch(t *testing.T) {
 	t.Setenv(memoryWorkerOriginEnv, "")
-	stubPluginOnPath(t)
 	_, gotArgs, _ := captureSpawns(t)
 
 	NotifyCheckpoint("/repo", "session-123", "")
@@ -62,7 +52,6 @@ func TestNotifyCheckpointOmitsUnknownBranch(t *testing.T) {
 }
 
 func TestNotifyCheckpointSkipsInvalidOrRecursiveHints(t *testing.T) {
-	stubPluginOnPath(t)
 	_, _, spawned := captureSpawns(t)
 
 	t.Run("empty repository root", func(t *testing.T) {
@@ -81,14 +70,17 @@ func TestNotifyCheckpointSkipsInvalidOrRecursiveHints(t *testing.T) {
 	require.Zero(t, *spawned)
 }
 
-func TestNotifyCheckpointSkipsWhenPluginMissing(t *testing.T) {
+func TestNotifyCheckpointTrimsRoutingValues(t *testing.T) {
 	t.Setenv(memoryWorkerOriginEnv, "")
-	originalLook := lookPath
-	t.Cleanup(func() { lookPath = originalLook })
-	lookPath = func(string) (string, error) { return "", errors.New("not installed") }
-	_, _, spawned := captureSpawns(t)
+	gotDir, gotArgs, _ := captureSpawns(t)
 
-	NotifyCheckpoint("/repo", "session-123", "main")
+	NotifyCheckpoint(" /repo ", " session-123 ", " main ")
 
-	require.Zero(t, *spawned, "no plugin on PATH must cost a LookPath, not a fork")
+	require.Equal(t, "/repo", *gotDir)
+	require.Equal(t, []string{
+		"brain", "memory", "notify",
+		"--event", "checkpoint",
+		"--session", "session-123",
+		"--branch", "main",
+	}, *gotArgs)
 }
