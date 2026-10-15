@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,6 +21,9 @@ func (a *PiAgent) CumulativeTokenUsage(_ context.Context, in agent.CumulativeTok
 	var total *agent.TokenUsage
 	scanner := pijsonl.NewScanner(in.TranscriptData)
 	for scanner.Scan() {
+		if !bytes.Contains(scanner.Bytes(), []byte(`"usage"`)) {
+			continue // only assistant messages carry usage; skip decoding the rest
+		}
 		var entry pijsonl.Entry
 		if json.Unmarshal(scanner.Bytes(), &entry) != nil || entry.Type != pijsonl.EntryTypeMessage ||
 			entry.Message.Role != pijsonl.RoleAssistant || entry.Message.Usage == nil {
