@@ -26,3 +26,15 @@ func TestSumCumulativeSegments(t *testing.T) {
 		})
 	}
 }
+
+func TestMaxTokenUsage(t *testing.T) {
+	t.Parallel()
+
+	got := MaxTokenUsage(&TokenUsage{InputTokens: 5, OutputTokens: 1, APICallCount: 1}, &TokenUsage{InputTokens: 3, OutputTokens: 9, APICallCount: 2})
+	if *got != (TokenUsage{InputTokens: 5, OutputTokens: 9, APICallCount: 2}) {
+		t.Fatalf("MaxTokenUsage = %+v", got)
+	}
+	if MaxTokenUsage(nil, nil) != nil {
+		t.Fatal("MaxTokenUsage(nil, nil) must be nil")
+	}
+}
