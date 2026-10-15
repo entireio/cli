@@ -32,6 +32,10 @@ func TestCumulativeTokenUsage(t *testing.T) {
 	usageLine := `{"type":"message","id":"e1","message":{"role":"assistant","id":"msg_1","content":[],"usage":{"input_tokens":6,"cache_read_input_tokens":50,"output_tokens":4}}}`
 	fallback := writeDroidSession(t, projectDir, "exec-1", `{"type":"session_start","id":"exec-1"}`+"\n"+usageLine+"\n"+usageLine, `{"model":"m"}`)
 	quiet := writeDroidSession(t, projectDir, "quiet-1", `{"type":"session_start","id":"quiet-1"}`, `{"model":"m"}`)
+	// settings.json is written on a debounce and can lag the transcript: each
+	// field takes the larger source, so the total never goes down.
+	lagging := writeDroidSession(t, projectDir, "lag-1", `{"type":"session_start","id":"lag-1"}`+"\n"+usageLine,
+		`{"model":"m","tokenUsage":{"inputTokens":3,"outputTokens":9,"cacheCreationTokens":0,"cacheReadTokens":20,"thinkingTokens":0}}`)
 	droid := &FactoryAIDroidAgent{}
 
 	for _, tt := range []struct {
@@ -44,6 +48,7 @@ func TestCumulativeTokenUsage(t *testing.T) {
 			map[string]*agent.TokenUsage{"worker-1": {InputTokens: 7, OutputTokens: 3}}},
 		{"exec-1", fallback, &agent.TokenUsage{InputTokens: 6, CacheReadTokens: 50, OutputTokens: 4, APICallCount: 1}, nil},
 		{"quiet-1", quiet, nil, nil},
+		{"lag-1", lagging, &agent.TokenUsage{InputTokens: 6, CacheReadTokens: 50, OutputTokens: 9, APICallCount: 1}, nil},
 	} {
 		total, children, err := droid.CumulativeTokenUsage(context.Background(), agent.CumulativeTokenInput{SessionID: tt.id, TranscriptPath: tt.path})
 		if err != nil {

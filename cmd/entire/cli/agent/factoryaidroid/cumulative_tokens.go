@@ -51,12 +51,15 @@ func (f *FactoryAIDroidAgent) CumulativeTokenUsage(_ context.Context, in agent.C
 	return total, children, nil
 }
 
-// sessionTokenUsage returns a session's usage from its settings.json, else
-// from its transcript (data, or the file when data is nil). nil means no data.
+// sessionTokenUsage returns a session's usage: the per-field max of its
+// settings.json total and its transcript's usage (data, or the file when data
+// is nil). Droid writes settings.json on a debounce, so it can lag the
+// transcript; taking the max keeps the total from going down when it does.
+// nil means no data in either.
 func sessionTokenUsage(transcriptPath string, data []byte) (*agent.TokenUsage, error) {
-	usage, err := readSettingsTokenUsage(transcriptPath)
-	if err != nil || usage != nil {
-		return usage, err
+	settings, err := readSettingsTokenUsage(transcriptPath)
+	if err != nil {
+		return nil, err
 	}
 	var lines []TranscriptLine
 	if data != nil {
@@ -67,10 +70,11 @@ func sessionTokenUsage(transcriptPath string, data []byte) (*agent.TokenUsage, e
 	if err != nil {
 		return nil, fmt.Errorf("parse droid transcript: %w", err)
 	}
-	if usage = CalculateTokenUsage(lines); usage.APICallCount == 0 {
-		return nil, nil //nolint:nilnil // a transcript without usage carries no data
+	transcript := CalculateTokenUsage(lines)
+	if transcript.APICallCount == 0 {
+		transcript = nil
 	}
-	return usage, nil
+	return agent.MaxTokenUsage(settings, transcript), nil
 }
 
 // readSettingsTokenUsage returns the tokenUsage from the settings.json beside
