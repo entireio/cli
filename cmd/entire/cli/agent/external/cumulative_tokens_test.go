@@ -3,6 +3,7 @@ package external
 import (
 	"context"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -42,4 +43,12 @@ esac
 	testutil.AssertCumulative(t, total, children, &agent.TokenUsage{InputTokens: 10, CacheCreationTokens: 1, CacheReadTokens: 200, OutputTokens: 5, APICallCount: 2}, map[string]*agent.TokenUsage{
 		externalSubagentsKey: {InputTokens: 4, OutputTokens: 2, APICallCount: 1},
 	})
+
+	undeclared, err := Wrap(newExternalAgent(t, testBinaryDir(t, strings.Replace(script, `"token_calculator":true`, `"token_calculator":false`, 1))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := agent.AsCumulativeTokenSource(undeclared); ok {
+		t.Error("token_calculator=false must hide CumulativeTokenSource")
+	}
 }

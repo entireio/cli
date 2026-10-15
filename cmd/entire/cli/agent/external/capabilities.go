@@ -122,15 +122,23 @@ const externalSubagentsKey = "subagents"
 
 // CumulativeTokenUsage runs the protocol's token calculation over the whole
 // transcript. Its subagent aggregate, when present, is moved out of the main
-// total into the one child the protocol can describe.
+// total into the one child the protocol can describe. An all-zero result is
+// reported as nil (no data), like the built-in sources.
 func (w *wrappedAgent) CumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
 	usage, err := w.ea.CalculateTokenUsage(in.TranscriptData, 0)
-	if err != nil || usage == nil || usage.SubagentTokens == nil {
-		return usage, nil, err
+	if err != nil || usage == nil {
+		return nil, nil, err
 	}
 	main := *usage
 	main.SubagentTokens, main.SubagentTokensComplete = nil, nil
-	return &main, map[string]*agent.TokenUsage{externalSubagentsKey: usage.SubagentTokens}, nil
+	var children map[string]*agent.TokenUsage
+	if usage.SubagentTokens != nil && *usage.SubagentTokens != (agent.TokenUsage{}) {
+		children = map[string]*agent.TokenUsage{externalSubagentsKey: usage.SubagentTokens}
+	}
+	if main == (agent.TokenUsage{}) {
+		return nil, children, nil
+	}
+	return &main, children, nil
 }
 
 // --- TextGenerator ---
