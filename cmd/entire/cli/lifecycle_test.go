@@ -3309,7 +3309,7 @@ func TestSaveSubagentSessionTaskStep_SecondTurn_MergesAndKeepsDeclaredPath(t *te
 		event:         &agent.Event{Type: agent.TurnEnd, SessionID: "droid-worker", Timestamp: time.Now()},
 		transcriptRef: "/tmp/worker.jsonl",
 		modifiedFiles: []string{"a.txt"},
-		agentType:     agent.AgentTypeClaudeCode,
+		ag:            &mockLifecycleAgent{name: "mock", agentType: agent.AgentTypeClaudeCode},
 		strat:         GetStrategy(ctx),
 	}
 	require.NoError(t, saveSubagentSessionTaskStep(ctx, step))

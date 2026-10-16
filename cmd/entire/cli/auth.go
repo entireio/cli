@@ -398,10 +398,21 @@ func resolveStatusTarget(ctx context.Context, listContexts contextsProvider, res
 		if c.Name != current || c.CoreURL == "" {
 			continue
 		}
-		if tok, terr := resolveLogin(ctx, c); terr == nil && tok != "" {
+		// An unreadable keyring is surfaced rather than becoming a zero-token
+		// target: the login exists, and "not logged in" would send the user
+		// to `entire login`, which cannot help.
+		tok, terr := resolveLogin(ctx, c)
+		if errors.Is(terr, tokenstore.ErrKeyringUnavailable) {
+			return statusTarget{}, terr
+		}
+		if terr == nil && tok != "" {
 			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
 		}
-		if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
+		tok, terr = auth.LoginTokenForContext(c)
+		if errors.Is(terr, tokenstore.ErrKeyringUnavailable) {
+			return statusTarget{}, terr //nolint:wrapcheck // already names the context ("read token for context …")
+		}
+		if terr == nil && tok != "" {
 			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
 		}
 		// Active context with no readable token: report against its core so

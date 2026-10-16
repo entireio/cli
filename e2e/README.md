@@ -39,6 +39,17 @@ e2e/
 - Use the `entire` package for CLI interactions, not raw `exec.Command`.
 - Skip tests pending CLI fixes with `t.Skip("ENT-XXX: reason")`.
 
+### Agents see only real agent signals
+
+Whether a git hook may prompt is decided from the agent's process alone, as on a user's machine, so the harness hands agents no shortcut:
+
+- Agent processes and tmux sessions start without `ENTIRE_TEST_TTY`, `CI`, `GITHUB_ACTIONS` or `GIT_TERMINAL_PROMPT` (`agents.harnessOnlyEnv`). Build a runner's env with `agentEnv`, never from bare `os.Environ()`; `NewTmuxSession` unsets them itself.
+- Headless agents start detached from the runner's terminal (`setupProcessGroup`), as an IDE or desktop app starts them: on Unix in a new session with no controlling terminal, on Windows in a console with no window (`CREATE_NO_WINDOW`), which the agent's git and hooks inherit.
+- Test repos keep the default `commit_linking` ("prompt"). Every E2E commit comes from an agent or the harness, so a test fails if any hook logged `strategy.CommitLinkingPromptLogMsg` (`failIfCommitLinkingPrompted`). The prompt gives up after a timeout, so without this a misjudged agent shell only shows as a slower commit.
+- Vogon behaves like a real agent: in interactive mode it turns off canonical input on its terminal as a TUI does, and it sets no "don't prompt" variable for its git commands.
+
+These rules exist because every one of those shortcuts hid a hang users hit: Windows `git commit` from Claude Code and Codex desktop blocked on an invisible prompt (#2725, #2726) while E2E stayed green.
+
 ### OpenCode dependency cache
 
 OpenCode setup shares a version-keyed plugin dependency tree under the system
@@ -183,4 +194,4 @@ OpenCode installs deliberately keep npm to avoid the shell installer's
 unauthenticated GitHub API rate limits. Windows also keeps npm for Codex,
 Copilot, and OpenCode rather than using Unix shell installers.
 
-The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary; `nightly-e2e.yml` checks the published nightly installation.
+The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary on Linux, and runs the Vogon canary on Windows (`test-canary-windows`; roger-roger stays Linux-only); `nightly-e2e.yml` checks the published nightly installation.

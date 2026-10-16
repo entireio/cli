@@ -1599,17 +1599,6 @@ func (s *DetachRepoResult) Validate() error {
 
 	var failures []validate.FieldError
 	if err := func() error {
-		if s.Access == nil {
-			return errors.New("nil is invalid value")
-		}
-		return nil
-	}(); err != nil {
-		failures = append(failures, validate.FieldError{
-			Name:  "access",
-			Error: err,
-		})
-	}
-	if err := func() error {
 		if s.Preconditions == nil {
 			return errors.New("nil is invalid value")
 		}

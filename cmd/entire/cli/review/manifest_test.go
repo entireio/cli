@@ -595,7 +595,7 @@ func TestWritePostReviewManifest_WarnsWhenNoMatchingSessions(t *testing.T) {
 	}
 
 	// SHA is irrelevant: matcher never runs since no session states exist.
-	writePostReviewManifest(context.Background(), &out, repoRoot, "abc123", summary, "")
+	writePostReviewManifest(context.Background(), &out, repoRoot, "abc123", summary, "", false)
 
 	got := out.String()
 	if !strings.Contains(got, "Note: review skills ran but findings were not persisted.") {
@@ -627,7 +627,7 @@ func TestWritePostReviewManifest_SurvivesCancelledRunContext(t *testing.T) {
 		},
 	}
 
-	writePostReviewManifest(ctx, &out, repoRoot, "abc123", summary, "")
+	writePostReviewManifest(ctx, &out, repoRoot, "abc123", summary, "", false)
 
 	got := out.String()
 	if strings.Contains(got, "context canceled") {

@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/pi/pijsonl"
+	"github.com/entireio/cli/transcript/pijsonl"
 )
 
 // Compile-time interface assertions

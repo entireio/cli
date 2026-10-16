@@ -77,15 +77,15 @@ func TestPiReviewer_ParseJSONEventStream(t *testing.T) {
 	if _, ok := events[0].(reviewtypes.Started); !ok {
 		t.Fatalf("events[0] = %T, want Started", events[0])
 	}
-	if got, ok := events[1].(reviewtypes.AssistantText); !ok || got.Text != "Finding " {
-		t.Fatalf("events[1] = %#v, want AssistantText{Finding }", events[1])
+	if got, ok := events[1].(reviewtypes.AssistantText); !ok || got.Text != "Finding " || got.Delta {
+		t.Fatalf("events[1] = %#v, want AssistantText{Finding } starting a message", events[1])
 	}
 	tool, ok := events[2].(reviewtypes.ToolCall)
 	if !ok || tool.Name != "bash" || !strings.Contains(tool.Args, "git diff --stat") {
 		t.Fatalf("events[2] = %#v, want ToolCall(bash)", events[2])
 	}
-	if got, ok := events[3].(reviewtypes.AssistantText); !ok || got.Text != "one" {
-		t.Fatalf("events[3] = %#v, want AssistantText{one}", events[3])
+	if got, ok := events[3].(reviewtypes.AssistantText); !ok || got.Text != "one" || !got.Delta {
+		t.Fatalf("events[3] = %#v, want AssistantText{one} continuing the message", events[3])
 	}
 	tokens, ok := events[4].(reviewtypes.Tokens)
 	if !ok || tokens.In != 10 || tokens.Out != 4 {
@@ -94,6 +94,45 @@ func TestPiReviewer_ParseJSONEventStream(t *testing.T) {
 	finished, ok := events[5].(reviewtypes.Finished)
 	if !ok || !finished.Success {
 		t.Fatalf("events[5] = %#v, want Finished{Success:true}", events[5])
+	}
+}
+
+// A delta continues the previous text only within one message, so separate
+// messages and retry attempts never join into one line.
+func TestPiReviewer_ParseDeltaStartsEachMessageAndRetry(t *testing.T) {
+	t.Parallel()
+	input := strings.Join([]string{
+		`{"type":"agent_start"}`,
+		`{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"I'll read "}}`,
+		`{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"the diff."}}`,
+		`{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse"}}`,
+		`{"type":"tool_execution_start","toolName":"bash","args":{"command":"git diff"}}`,
+		`{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"request changes"}}`,
+		`{"type":"auto_retry_start"}`,
+		`{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"approve"}}`,
+		`{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}`,
+		`{"type":"agent_end"}`,
+	}, "\n")
+
+	var texts []reviewtypes.AssistantText
+	for _, ev := range collectPiReviewEvents(input) {
+		if text, ok := ev.(reviewtypes.AssistantText); ok {
+			texts = append(texts, text)
+		}
+	}
+	want := []reviewtypes.AssistantText{
+		{Text: "I'll read "},
+		{Text: "the diff.", Delta: true},
+		{Text: "request changes"},
+		{Text: "approve"},
+	}
+	if len(texts) != len(want) {
+		t.Fatalf("texts = %#v, want %#v", texts, want)
+	}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Errorf("texts[%d] = %#v, want %#v", i, texts[i], want[i])
+		}
 	}
 }
 

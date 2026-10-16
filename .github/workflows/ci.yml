@@ -81,6 +81,22 @@ jobs:
           E2E_CHECKPOINT_STORE: ${{ matrix.checkpoint_store }}
         run: mise run test:e2e:canary
 
+  # The Vogon canary on Windows: no API calls, so it runs on every PR. Vogon
+  # commits from a console with no window, as desktop agents do, which is the
+  # case a Windows-only prompt regression hangs on (#2725). The roger-roger
+  # lane stays on Linux; the canary script skips it here.
+  test-canary-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - name: E2E Canary (Vogon)
+        shell: bash
+        run: mise run test:e2e:canary
+
   test-windows:
     runs-on: windows-latest
     timeout-minutes: 10
@@ -104,6 +120,7 @@ jobs:
       - test-integration
       - test-codex-hooks
       - test-canary
+      - test-canary-windows
       - test-windows
     if: ${{ always() }}
     steps:
@@ -113,4 +130,5 @@ jobs:
           [ "${{ needs.test-integration.result }}" = "success" ]
           [ "${{ needs.test-codex-hooks.result }}" = "success" ]
           [ "${{ needs.test-canary.result }}" = "success" ]
+          [ "${{ needs.test-canary-windows.result }}" = "success" ]
           [ "${{ needs.test-windows.result }}" = "success" ]

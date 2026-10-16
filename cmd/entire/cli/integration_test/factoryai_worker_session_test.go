@@ -3,7 +3,12 @@
 package integration
 
 import (
+	"encoding/json"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/stretchr/testify/require"
 )
 
 // Factory AI Droid dispatches Workers as detached sessions: the parent's
@@ -126,6 +131,113 @@ func TestFactoryDroidWorkerSessionBecomesTaskCheckpoint(t *testing.T) {
 			t.Errorf("turn 2 must re-declare the Worker transcript path, got %q", rec.DeclaredTranscriptPath)
 		}
 	})
+}
+
+// TestFactoryDroidReadOnlyWorkerReachesParentCheckpoint covers a Worker turn
+// that changes no files: it must still become a completed task record on the
+// parent, so its transcript and tokens reach the parent's next checkpoint,
+// with the tokens on the task once and never on the Worker's own session.
+func TestFactoryDroidReadOnlyWorkerReachesParentCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire()
+	env.WriteFile(".gitignore", ".entire/\n")
+	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd(".gitignore")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	parent := env.NewFactoryDroidSession()
+	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmit(parent.ID))
+
+	// A read-only Worker: it reads and reports, consuming tokens, and writes
+	// nothing.
+	const toolUseID = "toolu_reader_01"
+	worker := env.NewFactoryDroidSession()
+	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmit(worker.ID))
+	appendLines(t, worker.TranscriptPath,
+		`{"type":"message","id":"w1","message":{"role":"user","content":[{"type":"text","text":"Summarize the repo"}]}}`,
+		`{"type":"message","id":"w2","message":{"role":"assistant","id":"msg_w1","content":[{"type":"text","text":"It is a test repository."}],"usage":{"input_tokens":70,"output_tokens":7}}}`)
+	worker.MarkAsWorkerSession(parent.ID, toolUseID, "worker: Summarize the repo")
+
+	// Twice: a repeated Stop must not count the Worker's usage again.
+	require.NoError(t, env.SimulateFactoryDroidStop(worker.ID, worker.TranscriptPath))
+	require.NoError(t, env.SimulateFactoryDroidStop(worker.ID, worker.TranscriptPath))
+
+	state, err := env.GetSessionState(parent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	rec := state.FindTaskRecord(toolUseID)
+	require.NotNil(t, rec, "a read-only Worker turn must still record a task on the parent")
+	require.False(t, rec.CompletedAt.IsZero(), "the record must be completed")
+	require.Empty(t, rec.Files, "a read-only Worker touches no files")
+	require.Equal(t, worker.TranscriptPath, rec.DeclaredTranscriptPath)
+	require.NotNil(t, rec.TokenUsage, "the record must carry the Worker's usage")
+	require.Equal(t, 70, rec.TokenUsage.InputTokens, "the Worker's usage, once")
+	require.Equal(t, 7, rec.TokenUsage.OutputTokens, "the Worker's usage, once")
+
+	if workerState, err := env.GetSessionState(worker.ID); err != nil {
+		t.Fatalf("GetSessionState(worker) failed: %v", err)
+	} else if workerState != nil {
+		require.Zero(t, workerState.StepCount, "a Worker's turn must not step its own session")
+		if workerState.TokenUsage != nil {
+			require.Zero(t, workerState.TokenUsage.InputTokens, "the Worker's usage belongs to the parent's task, not its own session")
+		}
+	}
+
+	// The parent's own turn changes a file; committing it condenses the
+	// parent, Worker task included.
+	env.WriteFile("feature.go", "package main\n")
+	parent.CreateDroidTranscript("Add a feature", []FileChange{{Path: "feature.go", Content: "package main\n"}})
+	require.NoError(t, env.SimulateFactoryDroidStop(parent.ID, parent.TranscriptPath))
+	env.GitCommitWithHooks("Add feature", "feature.go")
+	checkpointID := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, checkpointID, "expected a checkpoint for the parent's commit")
+
+	raw, ok := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointTaskFilePath(checkpointID, toolUseID, "task.json"))
+	require.True(t, ok, "the read-only Worker's task must be materialized in the parent's checkpoint")
+	var task checkpoint.TaskRecord
+	require.NoError(t, json.Unmarshal([]byte(raw), &task))
+	require.Equal(t, worker.ID, task.AgentID)
+	require.NotNil(t, task.TokenUsage, "the stored task must carry the Worker's usage: %s", raw)
+	require.Equal(t, 70, task.TokenUsage.InputTokens, "the stored task holds the Worker's usage once: %s", raw)
+	require.Equal(t, 7, task.TokenUsage.OutputTokens, "the stored task holds the Worker's usage once: %s", raw)
+
+	transcript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+		CheckpointTaskFilePath(checkpointID, toolUseID, paths.AgentTranscriptFileName(worker.ID)))
+	require.True(t, ok, "the Worker's transcript must be stored with its task")
+	require.Contains(t, transcript, "It is a test repository.")
+
+	if usage := readCommittedTokenUsage(t, env, checkpointID); usage != nil {
+		require.NotEqual(t, 70, usage.InputTokens, "the parent session's own usage must not absorb the Worker's")
+	}
+
+	// A second Worker turn after that commit: the next checkpoint's task must
+	// hold only the second turn, not the first again.
+	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmit(parent.ID))
+	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmitWithTranscript(worker.ID, worker.TranscriptPath))
+	appendLines(t, worker.TranscriptPath,
+		`{"type":"message","id":"w3","message":{"role":"user","content":[{"type":"text","text":"And the tests?"}]}}`,
+		`{"type":"message","id":"w4","message":{"role":"assistant","id":"msg_w2","content":[{"type":"text","text":"There are none."}],"usage":{"input_tokens":30,"output_tokens":3}}}`)
+	require.NoError(t, env.SimulateFactoryDroidStop(worker.ID, worker.TranscriptPath))
+
+	env.WriteFile("feature2.go", "package main\n")
+	parent.CreateDroidTranscript("Add another feature", []FileChange{{Path: "feature2.go", Content: "package main\n"}})
+	require.NoError(t, env.SimulateFactoryDroidStop(parent.ID, parent.TranscriptPath))
+	env.GitCommitWithHooks("Add feature 2", "feature2.go")
+	checkpoint2 := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, checkpoint2)
+	require.NotEqual(t, checkpointID, checkpoint2, "expected a second checkpoint")
+
+	raw, ok = env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointTaskFilePath(checkpoint2, toolUseID, "task.json"))
+	require.True(t, ok, "the second Worker turn must be materialized in the second checkpoint")
+	var task2 checkpoint.TaskRecord
+	require.NoError(t, json.Unmarshal([]byte(raw), &task2))
+	require.NotNil(t, task2.TokenUsage, "the second stored task must carry the Worker's usage: %s", raw)
+	require.Equal(t, 30, task2.TokenUsage.InputTokens, "the first Worker turn is already in the first checkpoint: %s", raw)
+	require.Equal(t, 3, task2.TokenUsage.OutputTokens, "the first Worker turn is already in the first checkpoint: %s", raw)
 }
 
 // TestFactoryDroidTopLevelSessionStillCheckpoints guards the fallback: an

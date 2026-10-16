@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"io"
 	"strings"
 	"time"
@@ -10,7 +9,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -19,40 +17,18 @@ import (
 // it), so a stalled core must not hang the command — mirror cellResolveTimeout.
 const currentRepoRefTimeout = 5 * time.Second
 
-// runAuthenticatedActivityAPI runs fn with an authenticated client for the
-// activity/recap surface. It prefers the caller's home entire-api cell (the same
-// shared client the experts commands use), which serves the /me/* endpoints
-// these commands call.
-//
-// Cell routing is a best-effort upgrade: any failure building the cell client —
-// the region has no cell yet (ErrNoCellForJurisdiction), not logged in, or a
-// discovery/exchange error — falls back to the data API, which also serves
-// /me/* and yields the canonical auth errors (e.g. the "not logged in" hint).
-// This keeps the migration transparent and non-regressive; non-obvious
-// fallbacks are logged for diagnosis. Both backends expose the same /me/* paths,
-// so fn is agnostic to which client it receives.
-//
-// Both paths act as the same login — auth.ResolveDataAPI applies the cell
-// path's precedence (ENTIRE_TOKEN, else the selected context) — so the
-// fallback never changes identity or environment.
+// runAuthenticatedActivityAPI runs fn with a client for the caller's home
+// entire-api cell, which serves the /me/* endpoints the activity command calls.
+// There is no data-API fallback: the BFF answers /me/* by proxying to that same
+// home cell, so a caller the cell path cannot serve gets nothing better there.
+// Client-construction failures go through renderDataAPIAuthError, which turns
+// ErrNotLoggedIn into the login hint and silences the caller's own cancellation.
 func runAuthenticatedActivityAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, fn func(context.Context, *api.Client) error) error {
 	client, err := auth.NewEntireAPICellClient(ctx, insecureHTTP, nil)
 	if err != nil {
-		logCellClientFallback(ctx, err)
-		return runAuthenticatedDataAPI(ctx, errW, insecureHTTP, fn)
+		return renderDataAPIAuthError(ctx, errW, "", err)
 	}
 	return fn(ctx, client)
-}
-
-// logCellClientFallback records, at debug, that an activity/recap command fell
-// back from the entire-api cell to the data API. The expected cases — the
-// region has no cell yet, or the caller isn't logged in — aren't logged: they
-// are normal during rollout and on first use, not diagnosable failures.
-func logCellClientFallback(ctx context.Context, err error) {
-	if errors.Is(err, auth.ErrNoCellForJurisdiction) || errors.Is(err, auth.ErrNotLoggedIn) {
-		return
-	}
-	logging.Debug(ctx, "activity/recap: entire-api cell client unavailable, using data API", "error", err.Error())
 }
 
 // forgeToMirrorProvider maps a gitremote forge identifier (e.g. "gh") to the

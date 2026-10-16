@@ -191,28 +191,45 @@ func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 		json     string
 		wantCTS  int // CheckpointTranscriptStart
 		wantStep int // StepCount
+		wantTok  int // TokenStart; older state counted tokens from CheckpointTranscriptStart
 	}{
 		{
 			name:     "migrates old condensed_transcript_lines",
 			json:     `{"session_id":"s1","condensed_transcript_lines":42,"checkpoint_count":5}`,
 			wantCTS:  42,
 			wantStep: 5,
+			wantTok:  42,
 		},
 		{
 			name:    "migrates old transcript_lines_at_start",
 			json:    `{"session_id":"s1","transcript_lines_at_start":75}`,
 			wantCTS: 75,
+			wantTok: 75,
 		},
 		{
 			name:    "preserves new field over old",
 			json:    `{"session_id":"s1","condensed_transcript_lines":10,"checkpoint_transcript_start":50}`,
 			wantCTS: 50,
+			wantTok: 50,
 		},
 		{
 			name:     "handles clean new format",
 			json:     `{"session_id":"s1","checkpoint_transcript_start":25,"checkpoint_count":3}`,
 			wantCTS:  25,
 			wantStep: 3,
+			wantTok:  25,
+		},
+		{
+			name:    "keeps token offset ahead of a carry-forward window",
+			json:    `{"session_id":"s1","checkpoint_transcript_start":0,"token_transcript_start":40}`,
+			wantCTS: 0,
+			wantTok: 40,
+		},
+		{
+			name:    "keeps an explicit zero token offset",
+			json:    `{"session_id":"s1","checkpoint_transcript_start":30,"token_transcript_start":0}`,
+			wantCTS: 30,
+			wantTok: 0,
 		},
 	}
 
@@ -224,6 +241,8 @@ func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 
 			assert.Equal(t, tt.wantCTS, state.CheckpointTranscriptStart)
 			assert.Equal(t, tt.wantStep, state.StepCount)
+			assert.Equal(t, tt.wantTok, state.TokenStart())
+			require.NotNil(t, state.TokenTranscriptStart, "the token offset is persisted after load")
 			assert.Equal(t, 0, state.CondensedTranscriptLines, "deprecated field should be cleared")
 			assert.Equal(t, 0, state.TranscriptLinesAtStart, "deprecated field should be cleared")
 		})
@@ -1278,6 +1297,44 @@ func TestState_RebaselineSubagentTokensPreservesTriState(t *testing.T) {
 	require.NotNil(t, unknown.SubagentTokensBaselineComplete)
 	assert.False(t, *unknown.SubagentTokensBaselineComplete)
 	assert.Nil(t, unknown.SubagentTokensBaseline)
+}
+
+func TestState_AdvanceDisplayWindowKeepsTokenOffset(t *testing.T) {
+	t.Parallel()
+	unset := State{CheckpointTranscriptStart: 8}
+	unset.AdvanceDisplayWindow(12)
+	assert.Equal(t, 12, unset.CheckpointTranscriptStart)
+	assert.Equal(t, 8, unset.TokenStart(), "an unset token offset must not follow the display window")
+
+	set := State{CheckpointTranscriptStart: 0}
+	set.SetTokenStart(8)
+	set.AdvanceDisplayWindow(12)
+	assert.Equal(t, 8, set.TokenStart())
+}
+
+func TestState_AdvanceCheckpointWindowNeverMovesTokenOffsetBack(t *testing.T) {
+	t.Parallel()
+	advanced := State{}
+	advanced.AdvanceCheckpointWindow(12)
+	assert.Equal(t, 12, advanced.CheckpointTranscriptStart)
+	assert.Equal(t, 12, advanced.TokenStart())
+
+	// A condensation that could not read the transcript reports 0 lines.
+	unreadable := State{CheckpointTranscriptStart: 12}
+	unreadable.SetTokenStart(12)
+	unreadable.AdvanceCheckpointWindow(0)
+	assert.Equal(t, 0, unreadable.CheckpointTranscriptStart)
+	assert.Equal(t, 12, unreadable.TokenStart(), "tokens already counted must not be counted again")
+}
+
+func TestState_SetTokenStartDoesNotShareAcrossCopies(t *testing.T) {
+	t.Parallel()
+	source := State{}
+	source.SetTokenStart(10)
+	copied := source
+	copied.SetTokenStart(20)
+	assert.Equal(t, 10, source.TokenStart())
+	assert.Equal(t, 20, copied.TokenStart())
 }
 
 func TestState_RebaselineSubagentTokensPreservesLegacyNilUsage(t *testing.T) {

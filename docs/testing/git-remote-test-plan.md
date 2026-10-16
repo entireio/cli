@@ -12,7 +12,7 @@ Scope: e2e (`e2e/tests/`) + integration (`cmd/entire/cli/integration_test/`) cov
 | Layer | Coverage |
 |---|---|
 | Integration | `remote_operations_test.go` (12 tests: pre-push to bare file remote, checkpoint_remote routing, clone+resume, concurrent push rebase-retry, graceful degradation, filtered-fetch resume), `http_remote_test.go` (4 tests: in-process smart-HTTPS server, `ENTIRE_CHECKPOINT_TOKEN` injection, URL derivation, non-FF rebase, 401 degradation), `explain_test.go` (fetch-on-miss ×3 incl. treeless), `diverged_replay_test.go` |
-| Strategy/checkpoint unit | `push_common_test.go`, `checkpoint_remote_test.go`, `refs_push_test.go` (FF-only, fetch+replay recovery), `manual_commit_opf_rewrite_test.go`, `safely_advance_local_ref_test.go`, `replay_disconnected_test.go`, `pushqueue_test.go`, `checkpoint/remote/util_test.go` |
+| Strategy/checkpoint unit | `push_common_test.go`, `checkpoint_remote_test.go`, `refs_push_test.go` (FF-only, fetch+replay recovery), `safely_advance_local_ref_test.go`, `replay_disconnected_test.go`, `pushqueue_test.go`, `checkpoint/remote/util_test.go` |
 | E2E | `SetupBareRemote` helper (opt-in; default harness repo has **no remote**); 4 remote-flavored tests: `resume_remote_test.go` (clone+auto-fetch ×2), `explain_test.go` (explain from clone), `doctor_test.go`, `alternates_test.go` (the only pre-push-hook e2e — **skipped under git-refs**) |
 | Backend matrix | e2e only: `E2E_CHECKPOINT_STORE` → `ENTIRE_CHECKPOINTS_PRIMARY` (`e2e/testutil/backend.go`); CI canary runs both. **Integration tests have zero git-refs parameterization.** |
 
@@ -22,9 +22,8 @@ Scope: e2e (`e2e/tests/`) + integration (`cmd/entire/cli/integration_test/`) cov
 2. **The read/fetch side hardcodes `origin` everywhere** (`checkpoint/remote/util.go:18`, `git_operations.go:363-443`, `strategy/common.go`, `resume.go`, `api_cmd.go:216`, …) while the push side follows the hook's `$1`. No test has a repo whose only remote is `upstream`, a multi-remote fork triangle, or a push to a non-origin remote followed by reads.
 3. **Upstream tracking config is never consulted** (`branch.<name>.remote`, `remote.pushDefault`, separate `pushurl`) — and never pinned by a test, so we don't even document the current behavior.
 4. **git-refs remote behavior is unit-tested only**: batch FF-only push, fetch+replay recovery, queue drain/compaction/stale-pruning, on-demand `RefFetcher` — nothing at integration level, and the one hook-driven e2e skips under git-refs.
-5. **OPF pre-push rewrite has zero integration/e2e coverage** (divergence abort, CAS `V1RefMovedError`, bootstrap cap — all unit-only).
-6. **No worktree+remote coverage at all** (the git-refs push queue lives in the git *common* dir, shared across worktrees — never exercised with >1 worktree).
-7. **No SSH remotes anywhere; no shallow user clones; detached HEAD only as setup plumbing.**
+5. **No worktree+remote coverage at all** (the git-refs push queue lives in the git *common* dir, shared across worktrees — never exercised with >1 worktree).
+6. **No SSH remotes anywhere; no shallow user clones; detached HEAD only as setup plumbing.**
 
 ### History says these regress (mined from PRs/commits)
 
@@ -40,7 +39,7 @@ Scope: e2e (`e2e/tests/`) + integration (`cmd/entire/cli/integration_test/`) cov
 
 ## 2. Infrastructure work (enablers, do first)
 
-**I-1. Integration backend matrix.** Add a `CheckpointStore` option to `TestEnv` (sets `ENTIRE_CHECKPOINTS_PRIMARY`, inherited by spawned binaries/hooks like the e2e TestMain does) plus a `ForEachBackend(t, func(t, env))` helper. Run the whole remote-touching integration surface (`remote_operations_test.go`, `http_remote_test.go`, explain fetch-on-miss, diverged replay) under both backends; use targeted skips where behavior legitimately differs (e.g. OPF is git-branch-only).
+**I-1. Integration backend matrix.** Add a `CheckpointStore` option to `TestEnv` (sets `ENTIRE_CHECKPOINTS_PRIMARY`, inherited by spawned binaries/hooks like the e2e TestMain does) plus a `ForEachBackend(t, func(t, env))` helper. Run the whole remote-touching integration surface (`remote_operations_test.go`, `http_remote_test.go`, explain fetch-on-miss, diverged replay) under both backends; use targeted skips where behavior legitimately differs.
 
 **I-2. Real-hook push in tests.**
 - Integration: `GitPushWithHooks` (no `--no-verify`) so the installed pre-push script runs exactly as git runs it (stdin refspec lines, remote name + URL argv). Keep `GitPush` for setup plumbing.
@@ -108,16 +107,6 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 | D6 | Multi-worktree git-refs queue: two worktrees enqueue checkpoints; `git push` from worktree A drains the shared common-dir queue — worktree B's refs also pushed, queue compacted; stale refs pruned | integration | gr |
 | D7 | Pin the known two-remote queue bug: push to remote A drains the queue, so remote B never receives those refs (decision D-2 — pin now, flip assertion when fixed) | integration | gr |
 
-### E. OPF pre-push rewrite (git-branch only) — P1
-
-| # | Test | Layer |
-|---|---|---|
-| E1 | OPF enabled, happy path over a real bare remote via real hook: unpushed v1 commits rewritten with `Entire-OPF-Applied: true`, pushed; remote content is the redacted version | integration |
-| E2 | Diverged v1 during rewrite → `V1DivergedError` aborts the **user** push with the actionable message | integration |
-| E3 | CAS conflict: concurrent checkpoint write between rewrite and ref-update → `V1RefMovedError`, re-run push succeeds | integration |
-| E4 | Bootstrap cap: remote has no v1 + local history over cap → typed abort, nothing pushed | integration |
-| E5 | Non-TTY push with OPF (regression `626a0344e`): no /dev/tty writes, hook completes | integration |
-
 ### F. Degraded remotes & protocol edges — P1
 
 | # | Test | Layer | Backend |
@@ -154,6 +143,6 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 2. **PR 2 — P0 hook & cross-machine**: A1–A6, C1–C4, plus e2e G1.
 3. **PR 3 — divergence matrix**: D1–D7 (D4/D5 fill known untested regressions).
 4. **PR 4 — remote-name/upstream pinning**: B1–B7 after a decision on D-1 (or with explicit "pins current behavior" markers).
-5. **PR 5 — OPF + degraded**: E1–E5, F1–F5, G2–G3, C5–C6.
+5. **PR 5 — degraded**: F1–F5, G2–G3, C5–C6.
 
 Rough sizing: PRs 1–3 are the high-value core (~2/3 of the risk reduction, all P0); 4–5 can trail.

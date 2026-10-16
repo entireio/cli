@@ -27,7 +27,7 @@ func SpawnDetached(dir string, args ...string) {
 		return
 	}
 
-	cmd := detachedCommand(executable, dir, args...)
+	cmd := newDetachedCmd(executable, dir, args...)
 	// The child outlives this process; nothing else this process inherited may
 	// outlive it with the child (see markInheritedFDsCloseOnExec).
 	markInheritedFDsCloseOnExec()
@@ -39,15 +39,15 @@ func SpawnDetached(dir string, args ...string) {
 	_ = cmd.Process.Release()
 }
 
-// detachedCommand builds the child SpawnDetached starts. Separate from the
-// spawn so tests can check how the child is wired without forking it.
-//
-// Stdout and stderr stay nil, which os/exec opens as the null device. A
-// non-*os.File writer such as io.Discard would instead hand the child a pipe
-// drained by a goroutine in this process; once this process exits, the child's
-// next write to that pipe raises SIGPIPE and kills it. A child that reports
-// progress on stderr (`__opf_flush` does) would die on its first line.
-func detachedCommand(executable, dir string, args ...string) *exec.Cmd {
+// newDetachedCmd builds the detached child's command. Stdout and Stderr stay
+// nil so os/exec opens the null device FOR THE CHILD instead of creating
+// pipes: a non-*os.File writer (io.Discard was used here before) makes
+// os/exec allocate an OS pipe whose read end lives in THIS process, so once a
+// short-lived parent — a git hook — exits, the child's next stdout/stderr
+// write takes EPIPE, and the Go runtime kills a Go child on SIGPIPE to fds
+// 1/2, terminating it mid-work. Process.Release does not prevent that; only
+// the absence of parent-held pipes does.
+func newDetachedCmd(executable, dir string, args ...string) *exec.Cmd {
 	// context.Background(): the child must outlive the parent, so it is never
 	// tied to a cancellable context.
 	cmd := exec.CommandContext(context.Background(), executable, args...)

@@ -426,6 +426,8 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	cmd := exec.CommandContext(ctx, a.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Env = openCodePromptEnv(os.Environ(), dir)
+	setupProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
 
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -459,7 +461,7 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 // plugin never loads. The tmux/interactive path is unaffected because
 // `tmux new-session -c dir` already sets PWD correctly.
 func openCodePromptEnv(base []string, dir string) []string {
-	return append(filterEnv(base, "ENTIRE_TEST_TTY", "PWD"), "PWD="+dir)
+	return append(agentEnv(base, "PWD"), "PWD="+dir)
 }
 
 func (a *openCodeAgent) StartSession(ctx context.Context, dir string) (Session, error) {
@@ -470,7 +472,7 @@ func (a *openCodeAgent) StartSession(ctx context.Context, dir string) (Session, 
 	for attempt := range 2 {
 		name := fmt.Sprintf("opencode-test-%d", time.Now().UnixNano())
 		var err error
-		s, err = NewTmuxSession(name, dir, []string{"ENTIRE_TEST_TTY"}, a.Binary(), "--model", a.model)
+		s, err = NewTmuxSession(name, dir, nil, a.Binary(), "--model", a.model)
 		if err != nil {
 			return nil, err
 		}

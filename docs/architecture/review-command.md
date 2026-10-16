@@ -84,6 +84,11 @@ The profile-level `task` is the shared work item. Each `agents` map entry is a w
 - Reviewers run the profile task.
 - Multi-reviewer profiles run reviewers concurrently, then run one judge.
 - Results are printed and saved locally; `output: "trail"` also posts findings to the branch trail.
+- In trail mode, reviewers and the judge end their output with a JSON line, `{"summary":...,"comments":[...]}` (`trail_report.go`). The instruction is appended last, after profile and per-run text, and is skipped for a verbatim `prompt` override. Posting reads that line instead of interpreting prose:
+  - `"comments":[]` posts nothing, unless the prose has a list item, a severity marker, a feedback label such as `Nits:` or `Findings:`, or a non-approving verdict such as `request changes`, `approve with nits`, or `needs changes` (also when labeled `Verdict:` or `Verdict -`).
+  - Comments post as native findings with their severity and location; entries without a body are dropped. When the prose has more severity-marked findings than the line has comments, the line is incomplete and the prose is posted instead, since it normally repeats every comment. When a judge runs, its line alone decides what is posted. Without a judge, each reviewer's report (the last text between tool calls that ends with a valid line) is read separately and the comments are merged; earlier narration cannot contradict it. A reviewer whose report contradicts its line posts that report; one without a valid line posts its whole narrative. Either is posted alongside the other reviewers' structured comments.
+  - A missing or malformed line (no `comments` array) posts the prose, with a trailing `summary`/`comments` object removed, split into findings by top-level bullet. Other trailing JSON, such as a quoted config snippet, stays. A JSON-only reply posts its `summary`, or the reviewers' narratives when it has none; when neither has text, nothing is posted and the run says so.
+  - The line is kept in the saved manifest and hidden when results are displayed.
 - A bare non-interactive `entire review` does not auto-run a profile. Automation should pass a profile name.
 - Profile selection is positional/`--profile` → `review_default_profile` → `general` → the only configured profile.
 

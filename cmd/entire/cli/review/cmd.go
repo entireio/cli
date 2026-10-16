@@ -67,12 +67,12 @@ type Deps struct {
 	// AppendReviewEnv), so review/cmd.go cannot import them back.
 	ReviewerFor func(agentName string) reviewtypes.AgentReviewer
 
-	// PostReviewToTrail posts the final review verdict to the current branch's
-	// trail as a finding (the "trail" output destination). Injected from the cli
+	// PostReviewToTrail posts the final review report to the current branch's
+	// trail as findings (the "trail" output destination). Injected from the cli
 	// package because the data API + auth live there. It prints its own success
 	// line to out. nil when trail delivery is unavailable (e.g. tests), in which
 	// case the run falls back to local output with a notice.
-	PostReviewToTrail func(ctx context.Context, out io.Writer, profileName, verdict string) error
+	PostReviewToTrail func(ctx context.Context, out io.Writer, profileName string, report TrailReport) error
 
 	// ResolveTarget resolves a branch, trail ID, or trail URL to a local branch
 	// and pins its head without checking anything out.
@@ -1195,6 +1195,8 @@ func runSingleAgentPath(
 		// No review runner adapter yet: write marker (with scope-aware prompt) and print guidance.
 		return RunMarkerFallback(ctx, agentName, runCfg, worktreeRoot, out)
 	}
+	// Set after the marker fallback, whose output is never posted to the trail.
+	runCfg.TrailFindingsJSON = outputMode == ReviewOutputTrail
 	reviewer = &perAgentConfiguredReviewer{name: displayName, inner: reviewer, cfg: runCfg}
 
 	runCtx, cancelRun := context.WithCancel(ctx)
@@ -1202,11 +1204,12 @@ func runSingleAgentPath(
 
 	runCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
 	sinks := composeSingleAgentSinks(singleAgentSinkInputs{
-		out:       out,
-		isTTY:     canPrompt,
-		canPrompt: canPrompt,
-		agentName: displayName,
-		cancelRun: cancelRun,
+		out:               out,
+		isTTY:             canPrompt,
+		canPrompt:         canPrompt,
+		agentName:         displayName,
+		cancelRun:         cancelRun,
+		trailFindingsJSON: runCfg.TrailFindingsJSON,
 	})
 	if tuiSink, ok := findTUISink(sinks); ok {
 		tuiSink.Start()
@@ -1214,7 +1217,7 @@ func runSingleAgentPath(
 	}
 
 	summary, waitErr := Run(runCtx, reviewer, runCfg, sinks)
-	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, "")
+	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, "", runCfg.TrailFindingsJSON)
 	maybePostReviewToTrail(ctx, out, deps, outputMode, profileName, summary, "")
 	if waitErr != nil && runCtx.Err() == nil && ctx.Err() == nil {
 		// Non-cancellation error: surface to caller.
@@ -1344,6 +1347,7 @@ func runMultiAgentPath(
 				PerRunPrompt:      perRunPrompt,
 				ScopeBaseRef:      scopeBaseRef,
 				CheckpointContext: checkpointContext,
+				TrailFindingsJSON: outputMode == ReviewOutputTrail,
 				StartingSHA:       headSHA,
 			}, agentCfg),
 		})
@@ -1382,6 +1386,7 @@ func runMultiAgentPath(
 		profileName:       profileName,
 		task:              profile.Task,
 		masterName:        masterLabel,
+		trailFindingsJSON: outputMode == ReviewOutputTrail,
 		judgeTimeout:      judgeTimeoutArg(timeout),
 		onSynthesisResult: func(result string) {
 			aggregateOutput = result
@@ -1404,7 +1409,7 @@ func runMultiAgentPath(
 		cmd.SilenceUsage = true
 		return multiReviewFailureError(waitErr)
 	}
-	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput)
+	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput, outputMode == ReviewOutputTrail)
 	maybePostReviewToTrail(ctx, out, deps, outputMode, profileName, summary, aggregateOutput)
 	// The judge produces the review's primary deliverable — the consolidated
 	// verdict. If it was attempted but failed (provider error or timeout), the
@@ -1462,6 +1467,7 @@ type multiAgentSinkInputs struct {
 	profileName       string
 	task              string
 	masterName        string
+	trailFindingsJSON bool
 	// judgeTimeout bounds the judge's consolidation call, following the same
 	// three-state convention as the reviewer timeout (positive: use it; zero:
 	// default; negative: disabled). Set from the resolved --timeout so one knob
@@ -1472,11 +1478,12 @@ type multiAgentSinkInputs struct {
 }
 
 type singleAgentSinkInputs struct {
-	out       io.Writer
-	isTTY     bool
-	canPrompt bool
-	agentName string
-	cancelRun context.CancelFunc
+	out               io.Writer
+	isTTY             bool
+	canPrompt         bool
+	agentName         string
+	cancelRun         context.CancelFunc
+	trailFindingsJSON bool
 }
 
 // composeMultiAgentSinks builds the sink slice for a multi-agent run. The
@@ -1492,23 +1499,24 @@ type singleAgentSinkInputs struct {
 func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 	sinks := []reviewtypes.Sink{}
 	if in.isTTY {
-		tui := NewTUISink(in.agentNames, in.cancelRun, in.out, os.Stdin)
+		tui := NewTUISink(in.agentNames, in.cancelRun, in.out, os.Stdin, in.trailFindingsJSON)
 		sinks = append(sinks, tui)
 		if in.synthesisProvider != nil {
 			postRunOut := &bytes.Buffer{}
-			sinks = append(sinks, DumpSink{W: postRunOut})
+			sinks = append(sinks, DumpSink{W: postRunOut, TrailFindingsJSON: in.trailFindingsJSON})
 			sinks = append(sinks, SynthesisSink{
-				Provider:        in.synthesisProvider,
-				Writer:          postRunOut,
-				RenderWriter:    in.out,
-				PerRunPrompt:    in.perRunPrompt,
-				ProfileName:     in.profileName,
-				Task:            in.task,
-				MasterName:      in.masterName,
-				RunContext:      in.runContext,
-				ProviderTimeout: in.judgeTimeout,
-				OnResult:        in.onSynthesisResult,
-				OnError:         in.onSynthesisError,
+				Provider:          in.synthesisProvider,
+				Writer:            postRunOut,
+				RenderWriter:      in.out,
+				PerRunPrompt:      in.perRunPrompt,
+				ProfileName:       in.profileName,
+				Task:              in.task,
+				MasterName:        in.masterName,
+				TrailFindingsJSON: in.trailFindingsJSON,
+				RunContext:        in.runContext,
+				ProviderTimeout:   in.judgeTimeout,
+				OnResult:          in.onSynthesisResult,
+				OnError:           in.onSynthesisError,
 				OnStart: func() {
 					tui.FinalPhaseStarted(finalJudgeDisplayName(in.masterName))
 				},
@@ -1520,23 +1528,24 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 			return sinks
 		}
 		sinks = append(sinks, tuiPostRunCompleteSink{tui: tui})
-		sinks = append(sinks, DumpSink{W: in.out})
+		sinks = append(sinks, DumpSink{W: in.out, TrailFindingsJSON: in.trailFindingsJSON})
 		return sinks
 	}
 
-	sinks = append(sinks, DumpSink{W: in.out})
+	sinks = append(sinks, DumpSink{W: in.out, TrailFindingsJSON: in.trailFindingsJSON})
 	if in.synthesisProvider != nil {
 		sinks = append(sinks, SynthesisSink{
-			Provider:        in.synthesisProvider,
-			Writer:          in.out,
-			PerRunPrompt:    in.perRunPrompt,
-			ProfileName:     in.profileName,
-			Task:            in.task,
-			MasterName:      in.masterName,
-			RunContext:      in.runContext,
-			ProviderTimeout: in.judgeTimeout,
-			OnResult:        in.onSynthesisResult,
-			OnError:         in.onSynthesisError,
+			Provider:          in.synthesisProvider,
+			Writer:            in.out,
+			PerRunPrompt:      in.perRunPrompt,
+			ProfileName:       in.profileName,
+			Task:              in.task,
+			MasterName:        in.masterName,
+			TrailFindingsJSON: in.trailFindingsJSON,
+			RunContext:        in.runContext,
+			ProviderTimeout:   in.judgeTimeout,
+			OnResult:          in.onSynthesisResult,
+			OnError:           in.onSynthesisError,
 		})
 	}
 	return sinks
@@ -1598,12 +1607,13 @@ func maybePostReviewToTrail(
 	if outputMode != ReviewOutputTrail || summary.Cancelled {
 		return
 	}
-	verdict := strings.TrimSpace(aggregateOutput)
-	if verdict == "" {
-		verdict = combinedReviewNarratives(summary)
-	}
-	if verdict == "" {
+	report, post := trailReportFor(summary, aggregateOutput)
+	if !post {
 		fmt.Fprintln(out, "Nothing to report, so nothing was posted to the trail.")
+		return
+	}
+	if len(report.Comments) == 0 && strings.TrimSpace(report.Prose) == "" {
+		fmt.Fprintln(out, "The review produced no readable report, so nothing was posted to the trail.")
 		return
 	}
 	if deps.PostReviewToTrail == nil {
@@ -1611,7 +1621,7 @@ func maybePostReviewToTrail(
 		return
 	}
 	// On success the hook prints its own confirmation and trail link.
-	if err := deps.PostReviewToTrail(ctx, out, profileName, verdict); err != nil {
+	if err := deps.PostReviewToTrail(ctx, out, profileName, report); err != nil {
 		if !userMessageAlreadyPrinted(err) {
 			fmt.Fprintf(out, "Could not post the review to the trail: %v\n", err)
 		}
@@ -1627,13 +1637,19 @@ func userMessageAlreadyPrinted(err error) bool {
 	return errors.As(err, &printed) && printed.AlreadyPrinted()
 }
 
-// combinedReviewNarratives joins the reviewers' narratives into one document,
-// used as the trail-posting body for single-reviewer runs (which have no
-// synthesized verdict) and as a fallback when synthesis produced nothing.
-func combinedReviewNarratives(summary reviewtypes.RunSummary) string {
+// combinedReviewNarratives joins the given reviewers' narratives into one
+// document, the trail-posting body for reviewers whose JSON contract cannot
+// be posted. A reviewer that ended its report with a contract line
+// contributes only that report, so exploration narration is not posted as
+// findings; any other reviewer contributes its whole narrative.
+func combinedReviewNarratives(runs []reviewtypes.AgentRun) string {
 	var b strings.Builder
-	for _, run := range usableAgentRuns(summary) {
-		narrative := joinAssistantText(run.Buffer)
+	for _, run := range runs {
+		text := reportText(run.Buffer)
+		if text == "" {
+			text = joinAssistantText(run.Buffer)
+		}
+		narrative, _, _ := splitTrailJSON(text)
 		if narrative == "" {
 			continue
 		}
@@ -1652,6 +1668,7 @@ func writePostReviewManifest(
 	headSHA string,
 	summary reviewtypes.RunSummary,
 	aggregateOutput string,
+	trailFindingsJSON bool,
 ) {
 	if summary.Cancelled || len(summary.AgentRuns) == 0 {
 		return
@@ -1669,6 +1686,7 @@ func writePostReviewManifest(
 		return
 	}
 	manifest.WorktreePath = reviewManifestWorktreePath(worktreeRoot)
+	manifest.TrailFindingsJSON = trailFindingsJSON
 	if len(manifest.Sources) == 0 {
 		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
 		if sentinel {
@@ -1760,13 +1778,13 @@ func reviewAgentRunTokenEnricherForRuns(worktreeRoot, headSHA string, planned []
 func composeSingleAgentSinks(in singleAgentSinkInputs) []reviewtypes.Sink {
 	if !in.isTTY || !in.canPrompt {
 		fmt.Fprintf(in.out, "Running review with %s...\n", in.agentName)
-		return []reviewtypes.Sink{DumpSink{W: in.out}}
+		return []reviewtypes.Sink{DumpSink{W: in.out, TrailFindingsJSON: in.trailFindingsJSON}}
 	}
-	tui := NewTUISink([]string{in.agentName}, in.cancelRun, in.out, os.Stdin)
+	tui := NewTUISink([]string{in.agentName}, in.cancelRun, in.out, os.Stdin, in.trailFindingsJSON)
 	postRunOut := &bytes.Buffer{}
 	return []reviewtypes.Sink{
 		tui,
-		DumpSink{W: postRunOut},
+		DumpSink{W: postRunOut, TrailFindingsJSON: in.trailFindingsJSON},
 		tuiPostRunCompleteSink{tui: tui, buf: postRunOut, out: in.out},
 	}
 }

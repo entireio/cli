@@ -1939,7 +1939,47 @@ func TestRunStatusJSON_SecretScanners(t *testing.T) {
 func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
+	writeOutdatedClaudeHooks(t)
 
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !slices.Contains(result.HooksOutdated, "claude-code") {
+		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
+	}
+}
+
+// TestRunStatus_HooksOutdatedPointsToDoctor: `entire enable --force` rebuilds
+// every Entire hook and drops the timeouts and fields the user set on them, while
+// doctor repairs what it can in place and names the fix for the rest.
+func TestRunStatus_HooksOutdatedPointsToDoctor(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeOutdatedClaudeHooks(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "hooks out of date · run 'entire doctor'") {
+		t.Errorf("status output does not point outdated hooks to doctor:\n%s", out)
+	}
+	if strings.Contains(out, "enable --force") {
+		t.Errorf("status output suggests enable --force:\n%s", out)
+	}
+}
+
+// writeOutdatedClaudeHooks writes Claude Code hooks under the retired
+// Task/TodoWrite matchers.
+func writeOutdatedClaudeHooks(t *testing.T) {
+	t.Helper()
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -1955,19 +1995,6 @@ func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 }`
 	if err := os.WriteFile(".claude/settings.json", []byte(stale), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	var result statusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if !slices.Contains(result.HooksOutdated, "claude-code") {
-		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
 	}
 }
 

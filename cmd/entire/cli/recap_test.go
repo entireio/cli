@@ -176,7 +176,7 @@ func TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery(t *testing.T) {
 	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
 	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
 	t.Setenv(api.BaseURLEnvVar, "http://recap.invalid")
-	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+	t.Cleanup(auth.SetResolveContextForCellAPIForTest(t,
 		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
 			t.Fatal("discovery ran against an insecure override")
 			return nil, errors.New("unreachable")
@@ -201,7 +201,7 @@ func TestRunRecap_InsecureOverrideMessageNamesTheVariable(t *testing.T) {
 	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
 	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
 	t.Setenv(api.BaseURLEnvVar, "http://recap.invalid")
-	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+	t.Cleanup(auth.SetResolveContextForCellAPIForTest(t,
 		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
 			t.Fatal("discovery ran against an insecure override")
 			return nil, errors.New("unreachable")
@@ -217,6 +217,36 @@ func TestRunRecap_InsecureOverrideMessageNamesTheVariable(t *testing.T) {
 		if !strings.Contains(errOut.String(), want) {
 			t.Errorf("stderr missing %q: %s", want, errOut.String())
 		}
+	}
+}
+
+// With no login, recap prints the login hint itself instead of falling back
+// to the data API and rendering that server's 401.
+//
+// Not parallel: it isolates the user config dir and unsets env overrides.
+func TestRunRecap_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
+	unsetEnv(t, auth.EnvTokenVar)
+	unsetEnv(t, api.BaseURLEnvVar)
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
+
+	var out, errOut bytes.Buffer
+	err := runRecap(t.Context(), &out, &errOut, &recapFlags{})
+	if !errors.Is(err, auth.ErrNotLoggedIn) {
+		t.Fatalf("error = %v, want ErrNotLoggedIn", err)
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("error = %T %v, want SilentError", err, err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", out.String())
+	}
+	if want := "Not logged in. Run 'entire login' to authenticate."; !strings.Contains(errOut.String(), want) {
+		t.Errorf("stderr = %q, want %q", errOut.String(), want)
 	}
 }
 

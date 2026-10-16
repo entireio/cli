@@ -211,10 +211,14 @@ agy or touching the developer's keychain.
   `ExtractModifiedFilesFromOffset` logs a WARN per dropped call instead of
   silently skipping; live PreToolUse stdin is never truncated, so normal turns
   are unaffected — only the late-flush / first-turn mid-turn fallbacks are.
-- **Headless prompt goes in argv**: agy ≥ 1.2.x ignores stdin in print mode
-  (`-p " "` → "Error: empty prompt"; `-p -` is answered as the literal message
-  "-"), so `GenerateText` (summaries, `dispatch --local`) passes the prompt as
-  the `-p` value. The summarizer condenses agy step JSONL through
+- **Headless prompt goes on stdin as stream-json**: agy ≥ 1.2.x ignores stdin
+  in text print mode (`-p " "` → "Error: empty prompt"; `-p -` is answered as
+  the literal message "-"), and argv would expose the transcript-bearing prompt
+  to other local users through the process table. So `GenerateText`
+  (summaries, `dispatch --local`) runs `agy --input-format stream-json
+  --output-format stream-json --print=` (agy ≥ 1.1.15), writes one
+  `{"event":"user","message":{"role":"user","content":…}}` line to stdin, and
+  reads the reply from the final `result` event. The summarizer condenses agy step JSONL through
   `antigravity.CondenseTranscript` (USER_INPUT, PLANNER_RESPONSE text and tool
   calls; GENERIC/SYSTEM_MESSAGE skipped) — without it agy transcripts fell
   through to the Claude parser and summarized to nothing.

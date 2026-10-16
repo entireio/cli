@@ -833,7 +833,7 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 
 		// Discover + dedupe + filter hints.
 		var discovered []agent.DiscoveredSkill
-		if d, ok := c.ag.(agent.SkillDiscoverer); ok {
+		if d, ok := agent.AsSkillDiscoverer(c.ag); ok {
 			if ds, dErr := d.DiscoverReviewSkills(ctx); dErr == nil {
 				discovered = ds
 			} else {
@@ -1143,7 +1143,7 @@ func VerifyConfiguredSkillsInstalled(ctx context.Context, ag agent.Agent, cfg se
 	}
 	builtins := builtinNameSet(skilldiscovery.CuratedBuiltinsFor(string(ag.Name())))
 	discoveredNames := map[string]struct{}{}
-	if d, ok := ag.(agent.SkillDiscoverer); ok {
+	if d, ok := agent.AsSkillDiscoverer(ag); ok {
 		if skills, err := d.DiscoverReviewSkills(ctx); err == nil {
 			for _, s := range skills {
 				discoveredNames[s.Name] = struct{}{}

@@ -753,7 +753,7 @@ func antigravityPromptEnvFrom(base []string, repoDir string) []string {
 	switch antigravityAuthModeFrom(base) {
 	case antigravityAuthADC:
 		env := append(
-			filterEnv(base, "ENTIRE_TEST_TTY", "ACCESSIBLE", "HOME", "USERPROFILE", antigravityADCEnvKey, googleCloudProjectEnvKey,
+			agentEnv(base, "ACCESSIBLE", "HOME", "USERPROFILE", antigravityADCEnvKey, googleCloudProjectEnvKey,
 				geminiAPIKeyEnvKey, googleAPIKeyEnvKey),
 			"ACCESSIBLE=1",
 			antigravityADCEnvKey+"=1",
@@ -765,14 +765,14 @@ func antigravityPromptEnvFrom(base []string, repoDir string) []string {
 		return env
 	case antigravityAuthAPIKey:
 		env := append(
-			filterEnv(base, "ENTIRE_TEST_TTY", "ACCESSIBLE", "HOME", "USERPROFILE", antigravityADCEnvKey, googleCloudProjectEnvKey, googleAPIKeyEnvKey),
+			agentEnv(base, "ACCESSIBLE", "HOME", "USERPROFILE", antigravityADCEnvKey, googleCloudProjectEnvKey, googleAPIKeyEnvKey),
 			"ACCESSIBLE=1",
 		)
 		return append(env, antigravityIsolatedHomeEnv(repoDir)...)
 	case antigravityAuthOAuth:
-		return append(filterEnv(base, "ENTIRE_TEST_TTY", "ACCESSIBLE"), "ACCESSIBLE=1")
+		return append(agentEnv(base, "ACCESSIBLE"), "ACCESSIBLE=1")
 	}
-	return append(filterEnv(base, "ENTIRE_TEST_TTY", "ACCESSIBLE"), "ACCESSIBLE=1")
+	return append(agentEnv(base, "ACCESSIBLE"), "ACCESSIBLE=1")
 }
 
 // antigravityIsolatedHomeEnv points agy AND the entire hooks it spawns at the
@@ -916,7 +916,7 @@ func antigravityTrustPaths(repoDir string) []string {
 
 func antigravitySessionEnv(base []string, repoDir string) ([]string, []string) {
 	envArgs := []string{"ACCESSIBLE=1"}
-	unsetEnv := []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}
+	var unsetEnv []string
 	if term, ok := antigravityEnvValue(base, "TERM"); ok && term != "" {
 		envArgs = append(envArgs, "TERM="+term)
 	}

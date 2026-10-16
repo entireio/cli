@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -529,7 +530,11 @@ func runNativeRepoView(cmd *cobra.Command, ref, clusterHost string, authoritativ
 		}
 		row := nativeRepoDetailRow(name, repo, mirrors, clusters)
 		if jsonRequested(cmd) {
-			out, jerr := nativeRepoViewJSON(repo, row)
+			repoID, apiURL, coordErr := nativeRepoViewCoords(repo, clusters)
+			if coordErr != nil {
+				logging.Debug(ctx, "repo view: API coordinates unavailable", "error", coordErr)
+			}
+			out, jerr := nativeRepoViewJSON(repo, row, repoID, apiURL)
 			if jerr != nil {
 				return jerr
 			}
@@ -539,6 +544,16 @@ func runNativeRepoView(cmd *cobra.Command, ref, clusterHost string, authoritativ
 		reportNativeMirrorNotes(cmd.ErrOrStderr(), repo, row)
 		return nil
 	})
+}
+
+// nativeRepoViewCoords pairs the native repo ID with its home cluster's API
+// URL, using the routing resolver's catalog join without another request.
+func nativeRepoViewCoords(repo *coreapi.Repo, clusters []coreapi.Cluster) (repoID, apiURL string, err error) {
+	placement, err := nativeRepoCellPlacementInCatalog(repo, clusters)
+	if err != nil {
+		return "", "", err
+	}
+	return placement.RepoID, placement.Target.BaseURL, nil
 }
 
 // nativeRepoViewJSON answers with the repo as the SERVER describes it, plus the
@@ -564,7 +579,7 @@ func runNativeRepoView(cmd *cobra.Command, ref, clusterHost string, authoritativ
 // spellings of `path`/`visibility` under the keys `mirror list --json` uses,
 // `project` is the project NAME where the record carries only its ULID, and
 // `status` comes from reads the record knows nothing about.
-func nativeRepoViewJSON(repo *coreapi.Repo, row repoDirRow) (map[string]json.RawMessage, error) {
+func nativeRepoViewJSON(repo *coreapi.Repo, row repoDirRow, repoID, apiURL string) (map[string]json.RawMessage, error) {
 	obj, err := wireObject(repo)
 	if err != nil {
 		return nil, err
@@ -572,6 +587,15 @@ func nativeRepoViewJSON(repo *coreapi.Repo, row repoDirRow) (map[string]json.Raw
 	fields := map[string]any{
 		"repo":   row.Repo,
 		"status": row.Status,
+	}
+	// repoId/apiUrl are the repo's entire-api coordinates — same keys and same
+	// placement choice as the GitHub detail view (mirrorRepoViewJSON), so the
+	// two forges answer the question identically. They travel as a pair or not
+	// at all: an id without its cell (or vice versa) is the mismatched-pair
+	// 404 the shared resolver exists to prevent.
+	if repoID != "" && apiURL != "" {
+		fields["repoId"] = repoID
+		fields["apiUrl"] = apiURL
 	}
 	// Omitted when empty, as repoDirRow tags it: a repo nothing holds and a
 	// GitHub candidate are the same answer, and they must not differ by which

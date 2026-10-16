@@ -826,10 +826,17 @@ func (r *FactoryDroidHookRunner) runDroidHookInRepoDir(hookName string, inputJSO
 // SimulateUserPromptSubmit simulates the UserPromptSubmit hook for Factory Droid.
 func (r *FactoryDroidHookRunner) SimulateUserPromptSubmit(sessionID string) error {
 	r.T.Helper()
+	return r.SimulateUserPromptSubmitWithTranscript(sessionID, "")
+}
+
+// SimulateUserPromptSubmitWithTranscript simulates UserPromptSubmit with the
+// transcript path Droid reports, so turn start records the transcript offset.
+func (r *FactoryDroidHookRunner) SimulateUserPromptSubmitWithTranscript(sessionID, transcriptPath string) error {
+	r.T.Helper()
 
 	input := map[string]string{
 		"session_id":      sessionID,
-		"transcript_path": "",
+		"transcript_path": transcriptPath,
 		"prompt":          "test prompt",
 	}
 
@@ -997,6 +1004,13 @@ func (env *TestEnv) SimulateFactoryDroidUserPromptSubmit(sessionID string) error
 	env.T.Helper()
 	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
 	return runner.SimulateUserPromptSubmit(sessionID)
+}
+
+// SimulateFactoryDroidUserPromptSubmitWithTranscript is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidUserPromptSubmitWithTranscript(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulateUserPromptSubmitWithTranscript(sessionID, transcriptPath)
 }
 
 // SimulateFactoryDroidStop is a convenience method on TestEnv.

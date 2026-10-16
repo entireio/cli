@@ -31,11 +31,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/redact"
+	transcriptlib "github.com/entireio/cli/transcript"
 
 	"charm.land/lipgloss/v2"
 	"github.com/go-git/go-git/v6"
@@ -1756,9 +1756,9 @@ func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentT
 		}
 		return scoped
 	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
-		return transcript.SliceFromLine(fullTranscript, startOffset)
+		return transcriptlib.SliceFromLine(fullTranscript, startOffset)
 	}
-	return transcript.SliceFromLine(fullTranscript, startOffset)
+	return transcriptlib.SliceFromLine(fullTranscript, startOffset)
 }
 
 // extractPromptsFromTranscript extracts user prompts from transcript bytes.

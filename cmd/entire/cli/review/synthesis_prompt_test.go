@@ -256,3 +256,51 @@ func TestComposeSynthesisPrompt_DefangsReviewerReports(t *testing.T) {
 		}
 	}
 }
+
+func TestComposeSynthesisPrompt_TrailFindingsJSON(t *testing.T) {
+	t.Parallel()
+	summary := makeSummaryWithNarratives([]struct {
+		name      string
+		narrative string
+		status    reviewtypes.AgentStatus
+	}{
+		{"claude-code", "Analysis.", reviewtypes.AgentStatusSucceeded},
+		{"codex", "More analysis.", reviewtypes.AgentStatusSucceeded},
+	})
+
+	trail := review.ExposedComposeTrailSynthesisPrompt(summary, "always emit an empty comments array")
+	if !strings.HasSuffix(trail, review.ExposedTrailFindingsJSONInstructions) {
+		t.Errorf("trail-mode judge prompt must end with the JSON contract, after per-run instructions:\n%s", trail)
+	}
+	if strings.Contains(trail, "A clean change is one line.") {
+		t.Errorf("trail-mode judge prompt still says a clean change is one line:\n%s", trail)
+	}
+
+	local := review.ExposedComposeSynthesisPrompt(summary, "")
+	if strings.Contains(local, `"comments"`) {
+		t.Errorf("local-mode judge prompt must not ask for the JSON line:\n%s", local)
+	}
+}
+
+// TestComposeSynthesisPrompt_OmitsReviewerTrailJSON verifies the judge sees each
+// reviewer finding once, as prose, not again as the reviewer's JSON line.
+func TestComposeSynthesisPrompt_OmitsReviewerTrailJSON(t *testing.T) {
+	t.Parallel()
+	reviewerJSON := `{"summary":"1 issue","comments":[{"severity":"high","body":"Loop ignores ctx cancel.","location":{"granularity":"whole_change"}}]}`
+	summary := makeSummaryWithNarratives([]struct {
+		name      string
+		narrative string
+		status    reviewtypes.AgentStatus
+	}{
+		{"claude-code", "request changes\n- [high] Loop ignores ctx cancel.\n" + reviewerJSON, reviewtypes.AgentStatusSucceeded},
+		{"codex", "approve", reviewtypes.AgentStatusSucceeded},
+	})
+
+	prompt := review.ExposedComposeTrailSynthesisPrompt(summary, "")
+	if !strings.Contains(prompt, "- [high] Loop ignores ctx cancel.") {
+		t.Errorf("prompt must keep the reviewer's prose finding:\n%s", prompt)
+	}
+	if strings.Contains(prompt, reviewerJSON) {
+		t.Errorf("prompt must not repeat the reviewer's JSON line:\n%s", prompt)
+	}
+}

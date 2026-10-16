@@ -664,6 +664,140 @@ func TestJSONLContent_SupabaseSecretMalformedLineFallback(t *testing.T) {
 	}
 }
 
+func bareSKPrefix() string { return "s" + "k-" }
+
+// TestString_BareSKKeys covers issue #2728: an "sk-" key with a short body
+// (LiteLLM proxy virtual keys are sk- + 22 chars) written as a bare value in
+// prose was missed by every layer. The entropy layer structurally cannot catch
+// it (see providers.go), so the provider layer must, wherever it appears.
+func TestString_BareSKKeys(t *testing.T) {
+	t.Parallel()
+
+	issueKey := bareSKPrefix() + "Qm4Wn8Rt_bVcXzLkJhGfDs" // issue #2728 fake value
+	lowerDigitKey := bareSKPrefix() + "a1b2c3d4e5f6g7h8i9j0k1"
+	hyphenKey := bareSKPrefix() + "Qm4Wn8Rt-bVcXzLkJhGfDs"
+	body20 := bareSKPrefix() + "Qm4Wn8RtbVcXzLkJhGfD"
+	body19 := bareSKPrefix() + "Qm4Wn8RtbVcXzLkJhGf"
+	for _, low := range []string{issueKey, lowerDigitKey, body19} {
+		if e := shannonEntropy(low); e > entropyThreshold {
+			t.Fatalf("value %q has entropy %.3f > %.1f; not an entropy-miss regression case", low, e, entropyThreshold)
+		}
+	}
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "issue #2728 repro: bare key in prose",
+			input: "the first is " + issueKey + " the second",
+			want:  "the first is REDACTED the second",
+		},
+		{
+			name:  "lowercase body with digits",
+			input: "key " + lowerDigitKey + " here",
+			want:  "key REDACTED here",
+		},
+		{
+			name:  "body with a hyphen is redacted whole",
+			input: "key " + hyphenKey + " here",
+			want:  "key REDACTED here",
+		},
+		{
+			name:  "quoted value",
+			input: `"api_key": "` + issueKey + `"`,
+			want:  `"api_key": "REDACTED"`,
+		},
+		{
+			name:  "bearer header",
+			input: "Authorization: Bearer " + issueKey,
+			want:  "Authorization: Bearer REDACTED",
+		},
+		{
+			name:  "exactly 20-char body redacts",
+			input: body20,
+			want:  "REDACTED",
+		},
+		{
+			name:  "exactly 19-char body is preserved",
+			input: body19,
+			want:  body19,
+		},
+		{
+			// Raw-text fall-back shape: "\n" is a literal backslash-n, so the
+			// byte before the prefix is the word char 'n'.
+			name:  "preceded by a literal JSON escape letter",
+			input: `first line\n` + issueKey,
+			want:  `first line\nREDACTED`,
+		},
+	})
+}
+
+// TestDetectProviderTokens_BareSKKeyBoundaries pins the underscore and escape
+// boundaries on the provider layer alone: through String, the entropy layer can
+// swallow the preceding name or escape digits together with the key and mask a
+// missing boundary.
+func TestDetectProviderTokens_BareSKKeyBoundaries(t *testing.T) {
+	t.Parallel()
+
+	key := bareSKPrefix() + "Qm4Wn8Rt_bVcXzLkJhGfDs"
+	for _, prefix := range []string{`API_KEY_`, `first line\n`, `quote\u0022`} {
+		input := prefix + key
+		regions := detectProviderTokens(input)
+		if len(regions) != 1 || input[regions[0].start:regions[0].end] != key {
+			t.Errorf("detectProviderTokens(%q) = %v, want exactly the key", input, regions)
+		}
+	}
+}
+
+// TestString_BareSKKeyOverRedactionGuards pins the two guards that keep the
+// bare sk- rule off ordinary text: the prefix must not sit inside a word, and
+// an all-lowercase digit-free body is a kebab-case name, not a key.
+func TestString_BareSKKeyOverRedactionGuards(t *testing.T) {
+	t.Parallel()
+
+	inWord := "risk-assessment-2026-q4-planning-doc"
+	kebab := bareSKPrefix() + "learn-model-selection-guide"
+	for _, low := range []string{inWord, kebab} {
+		if e := shannonEntropy(low); e > entropyThreshold {
+			t.Fatalf("value %q has entropy %.3f > %.1f; entropy layer would mask the guard", low, e, entropyThreshold)
+		}
+	}
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "sk- inside a hyphenated word is preserved",
+			input: "see " + inWord + " for details",
+			want:  "see " + inWord + " for details",
+		},
+		{
+			name:  "all-lowercase digit-free body is preserved",
+			input: "read " + kebab,
+			want:  "read " + kebab,
+		},
+		{
+			name:  "bare prefix in prose is preserved",
+			input: "OpenAI keys start with " + bareSKPrefix(),
+			want:  "OpenAI keys start with " + bareSKPrefix(),
+		},
+	})
+}
+
+// TestJSONLContent_BareSKKeyRedacted drives the issue #2728 value through the
+// field-aware JSONL path used for transcript.jsonl and full.jsonl.
+func TestJSONLContent_BareSKKeyRedacted(t *testing.T) {
+	t.Parallel()
+	key := bareSKPrefix() + "Qm4Wn8Rt_bVcXzLkJhGfDs"
+	line := `{"type":"user","message":{"role":"user","content":"the first is ` + key + ` the second"}}`
+	got, err := JSONLContent(line)
+	if err != nil {
+		t.Fatalf("JSONLContent error: %v", err)
+	}
+	if strings.Contains(got, key) {
+		t.Fatalf("key survived JSONL redaction: %q", got)
+	}
+	if !strings.Contains(got, "REDACTED") {
+		t.Fatalf("expected REDACTED placeholder in %q", got)
+	}
+}
+
 func TestString_CredentialedURIs(t *testing.T) {
 	tests := []struct {
 		name  string

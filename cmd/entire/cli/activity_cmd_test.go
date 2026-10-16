@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 func strPtr(v string) *string { return &v }
@@ -37,14 +38,17 @@ func strPtr(v string) *string { return &v }
 // from an internal resolver timeout that fires on its own derived context
 // while the caller's ctx is still live.
 func TestRunActivity_SilencesContextCanceled(t *testing.T) {
-	// No t.Parallel: SetResolveContextForAPIForTest mutates package-level
+	// No t.Parallel: SetResolveContextForCellAPIForTest mutates package-level
 	// auth state.
 	//
 	// Simulate the user hitting Ctrl+C during auth resolution: the
 	// cancellation surfaces from the discovery fetch, and runActivity must
 	// silence it rather than mislabel it "Not logged in".
+	unsetEnv(t, auth.EnvTokenVar)
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
 	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
-	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+	t.Cleanup(auth.SetResolveContextForCellAPIForTest(t,
 		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
 			return nil, context.Canceled
 		}))
@@ -74,15 +78,18 @@ func TestRunActivity_SilencesContextCanceled(t *testing.T) {
 // hint and a SilentError so the raw "not logged in" string doesn't
 // also print via cobra.
 func TestRunActivity_PrintsLoginHintOnNotLoggedIn(t *testing.T) {
-	// No t.Parallel: SetResolveContextForAPIForTest mutates package-level
+	// No t.Parallel: SetResolveContextForCellAPIForTest mutates package-level
 	// auth state.
 	//
 	// Discovery selects a context whose keyring slot holds nothing, so the
 	// per-context provider reports ErrNotLoggedIn.
+	unsetEnv(t, auth.EnvTokenVar)
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
 	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
 	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
 	c := &contexts.Context{Name: "me@core", CoreURL: "https://core.example", Handle: "me", KeychainService: "kc:me"}
-	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+	t.Cleanup(auth.SetResolveContextForCellAPIForTest(t,
 		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
 			return c, nil
 		}))

@@ -124,6 +124,11 @@ type RunConfig struct {
 	// this context.
 	CheckpointContext string
 
+	// TrailFindingsJSON asks the reviewer to end its output with the
+	// machine-read findings line that trail posting consumes. Set only when
+	// the run's output is posted to the trail.
+	TrailFindingsJSON bool
+
 	// StartingSHA is HEAD at invocation time, propagated to the lifecycle
 	// hook via ENTIRE_REVIEW_STARTING_SHA so checkpoint metadata records
 	// the commit that was reviewed.
@@ -185,6 +190,10 @@ func (Started) isEvent() {}
 // response, not tool-call chrome or session metadata).
 type AssistantText struct {
 	Text string
+	// Delta marks a streamed fragment that continues the previous
+	// AssistantText of the same message, so it joins without a separator and
+	// a line split across fragments stays whole.
+	Delta bool
 }
 
 func (AssistantText) isEvent() {}

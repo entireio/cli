@@ -189,6 +189,24 @@ func TestApplyTaskRecordCompletion_DropsStaleTouchedFileHashes(t *testing.T) {
 	assert.Equal(t, map[string]string{"kept.txt": "1111111111111111111111111111111111111111"}, state.TouchedFileHashes)
 }
 
+// TestTaskRecordCompletion_KeepsBackgroundFlag pins that a background stop
+// marks its record Background whether or not a launch marker exists: one it
+// creates (a resumed run under a new key) and one launched by an older CLI
+// without the flag must both be visible to an overlapping task's claim check.
+func TestTaskRecordCompletion_KeepsBackgroundFlag(t *testing.T) {
+	t.Parallel()
+	state := &SessionState{}
+	stop := session.TaskRecord{ToolUseID: "toolu_new", StartedAt: time.Now(), Background: true}
+	state.AddTaskRecord(launchStubTaskRecord(stop))
+	state.AddTaskRecord(session.TaskRecord{ToolUseID: "toolu_old", StartedAt: time.Now()})
+
+	require.NoError(t, applyTaskRecordCompletion(state, stop))
+	require.NoError(t, applyTaskRecordCompletion(state, session.TaskRecord{ToolUseID: "toolu_old", Background: true}))
+
+	assert.True(t, state.FindTaskRecord("toolu_new").Background, "a record created at stop keeps the flag")
+	assert.True(t, state.FindTaskRecord("toolu_old").Background, "completion sets the flag on an unflagged record")
+}
+
 func TestMergeUnhashedFilesTouched_ClearsEmptyMap(t *testing.T) {
 	t.Parallel()
 	state := &SessionState{

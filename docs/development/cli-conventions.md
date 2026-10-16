@@ -356,12 +356,10 @@ the commands are always runnable in every build.
   by name, its repo is the name the detach is asked to use). It is
   keyed by the placement ID from `/mirrors/placements`, and with several
   placements it sends the first so the server's `single-placement`
-  precondition explains the refusal. Every run asks for the dry-run plan first,
-  and tables show its access split into who loses and who keeps it, in the
-  grant tables' layout, accounts named by handle and display name from one
-  best-effort `GET
-  /repos/{repoId}/people` read before the write (the API names subjects by ID
-  only; `--json` keeps the IDs and skips the read);
+  precondition explains the refusal. Every run asks for the dry-run plan first
+  and shows its preconditions. It shows no access list: after the detach only
+  the target project grants member access, and the plan, the prompt and the
+  help say so. `--json` still prints any `access` an older core sends;
   an ineligible plan stops before the write with the failed precondition slugs
   (under `--json`, after printing the plan). A real detach is confirmed through
   `confirmPrompt` (shared with `grant remove`'s revoke prompt), which writes the
@@ -398,8 +396,15 @@ the commands are always runnable in every build.
   its only record. Saving it under a second remote the caller never named was
   the previous design, and its failure mode was a name collision that reported
   a clean ✓ over a URL that had left git config for good.
-  There is no URL-printing verb: `repo view` already lists a clone URL per
-  cluster for both forges, in a table and in `--json`.
+  `repo view [repo]` lists a clone URL per cluster for both forges, in a table
+  and in `--json`. Without an argument it resolves `origin`; an Entire clone
+  URL retains its cluster's login-server routing. JSON also carries top-level
+  `repoId` and `apiUrl` for the responsible API cell. For GitHub repos these
+  come from the processing placement; for native repos they are the repo ID
+  and its home cluster's API URL. The fields use the shared routing resolver's
+  selection and catalog joins, with no additional requests. Both are omitted
+  when coordinates cannot resolve, so an unready repo remains inspectable.
+  Consumers must require both fields before making a repo-scoped API call.
   `remote add` and `clone` choose a placement through the shared
   `selectPlacement` picker, each passing its own `placementPicker` wording. The
   picker matches on the cluster host, which is what `--cluster` takes, and both

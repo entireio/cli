@@ -27,7 +27,7 @@ func recordingProxy(t *testing.T, nodes []string) (*Proxy, *[]string) {
 	var mu sync.Mutex
 	var failed []string
 	p := New(Config{
-		Nodes:        replicas.NodeConfig{InitialNodes: nodes, ClusterHost: mustHost(t, nodes[0])},
+		Nodes:        replicas.NodeConfig{InitialNodes: nodes, EntryURL: nodes[0], ClusterHost: mustHost(t, nodes[0])},
 		Path:         "/et/alice/repo",
 		OnNodeFailed: func(node string) { mu.Lock(); failed = append(failed, node); mu.Unlock() },
 	})

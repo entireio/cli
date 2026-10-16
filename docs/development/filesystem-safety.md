@@ -503,7 +503,7 @@ comments at each site say which case applies:
     the user saying which arrangement is theirs.
   - **Two independent boundaries.** `enforceSymlinkedAgentDirsTrust` answers
     "may this FILE grant anything" with the same untracked-and-verified gate as
-    the OPF command and `external_agents` (a repository that could both ship the
+    `external_agents` (a repository that could both ship the
     link and vouch for it is the whole attack). `agent.SetVouchedSymlinkedDirs`
     then answers "is this PATH one an agent config lives under", against a
     pinned list plus a structural `neverVouchable` rule, so `.entire` and

@@ -38,7 +38,7 @@ at session start. Follow its related links when the task crosses those boundarie
 | Ref-based checkpoint backend | [Ref backend](docs/architecture/ref-checkpoint-backend.md) |
 | Agent integrations | [Agent guide](docs/architecture/agent-guide.md), [integration checklist](docs/architecture/agent-integration-checklist.md) |
 | External commands or agents | [External commands](docs/architecture/external-commands.md), [agent protocol](docs/architecture/external-agent-protocol.md) |
-| Security, privacy, scanners, OPF | [Security and privacy](docs/security-and-privacy.md), [implementation contracts](docs/development/checkpoint-implementation.md) |
+| Security, privacy, scanners | [Security and privacy](docs/security-and-privacy.md), [implementation contracts](docs/development/checkpoint-implementation.md) |
 | Review command | [Review architecture](docs/architecture/review-command.md) |
 | E2E tests | [E2E guide](e2e/README.md) |
 
@@ -84,8 +84,9 @@ implementations/tests. Check `.golangci.yaml`; handle errors and avoid duplicati
   terminal cannot make them prompt or hang.
 - Caller-resolution tests clear every variable from `agent.CallerSessionEnvVars()`;
   never hand-maintain a partial list or inherit the developer's agent identity.
-- Source-scanning guards use `testutil.GitGrepGuard`, restrict pathspecs to Go
-  files, and fail on zero matches. Do not weaken guard ledgers to silence failures.
+- Source-scanning guards discover files through testutil's guard helpers
+  (`GitGrepGuard`, `GuardGoFiles`), restrict pathspecs to Go files, and fail on
+  zero matches. Do not weaken guard ledgers to silence failures.
 
 ## Filesystem and settings safety
 
@@ -145,7 +146,7 @@ I/O beneath it.** Read the filesystem reference before adding or changing I/O.
   honor intentionally exported repo selectors.
 - PATH scanners use `execx.PathScanDirs()`; external-agent execution requires
   absolute binary paths. User-directory overrides use the checked `userdirs`
-  resolvers before any I/O. Preserve the documented developer-owned OPF exception.
+  resolvers before any I/O.
 - When Entire owns execution, pass arguments separately; never interpolate
   dynamic values into `cmd.exe`. Agent-owned shell execution uses the shared
   escaping helper. See the reference for the literal-only Unix updater exception.

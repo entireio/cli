@@ -207,10 +207,12 @@ func Delete(service, user string) error {
 type keyringStore struct{}
 
 func (keyringStore) Get(service, user string) (string, error) {
-	// keyring.ErrNotFound propagates unchanged; only a timeout wraps.
-	return callKeyringWithTimeout("get", func() (string, error) {
+	// keyring.ErrNotFound propagates unchanged unless the keyring could not
+	// be searched at all; only a timeout wraps.
+	val, err := callKeyringWithTimeout("get", func() (string, error) {
 		return keyring.Get(service, user)
 	})
+	return checkNotFound(val, err, keyringReachable)
 }
 
 func (keyringStore) Set(service, user, password string) error {

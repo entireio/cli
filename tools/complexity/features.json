@@ -288,7 +288,8 @@
    "area": "capture",
    "paths": [
     "cmd/entire/cli/transcript/",
-    "cmd/entire/cli/trailers/"
+    "cmd/entire/cli/trailers/",
+    "transcript/"
    ]
   },
   {
@@ -420,7 +421,6 @@
     "cmd/entire/cli/tuiutil/",
     "cmd/entire/cli/uiform/",
     "cmd/entire/cli/palette/",
-    "cmd/entire/cli/textutil/",
     "cmd/entire/cli/stringutil/",
     "cmd/entire/cli/jsonutil/",
     "cmd/entire/cli/validation/"

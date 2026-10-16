@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -1168,13 +1169,54 @@ func TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated(t *testing.T) {
 
 	out := stdout.String()
 	require.Contains(t, out, "Claude Code hooks: OUT OF DATE")
-	require.Contains(t, out, "entire enable --force")
+	require.Contains(t, out, "Run `entire agent add claude-code` to update it.")
+}
+
+// TestCheckHookTimeouts_RestoresWhatEnableWrites — a Claude Code config from
+// before hook timeouts existed is repaired to exactly what `entire enable`
+// writes today, and a repaired config is left alone on the next run.
+func TestCheckHookTimeouts_RestoresWhatEnableWrites(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	settingsPath := filepath.Join(dir, claudeDirName, claudecode.ClaudeSettingsFileName)
+	want, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+
+	untimed := regexp.MustCompile(`,\s*"timeout": \d+`).ReplaceAll(want, nil)
+	require.NotEqual(t, want, untimed, "fixture should have had timeouts to strip")
+	require.NoError(t, os.WriteFile(settingsPath, untimed, 0o600))
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+	require.Contains(t, stdout.String(), "Claude Code hooks: OUT OF DATE")
+
+	cmd, stdout = newTestCmd(t)
+	checkHookTimeouts(cmd)
+	out := stdout.String()
+	require.Contains(t, out, "Claude Code hooks: MISSING TIMEOUTS")
+	require.Contains(t, out, "✓ Fixed: timeouts added (your own hooks and timeouts are untouched).")
+
+	got, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	require.Equal(t, string(want), string(got))
+
+	cmd, stdout = newTestCmd(t)
+	checkHookTimeouts(cmd)
+	require.Empty(t, stdout.String())
+
+	cmd, stdout = newTestCmd(t)
+	checkHookDrift(cmd)
+	require.Contains(t, stdout.String(), "Claude Code hook config: OK")
 }
 
 // TestCheckCodexHookTrust_FlagsStaleHooksFile — user enabled Codex on
 // an older release that didn't ship PostToolUse. Their hooks.json has
 // only the three legacy events. Doctor must surface the gap and tell
-// them to re-run `entire enable`.
+// them to run `entire agent add codex`.
 func TestCheckCodexHookTrust_FlagsStaleHooksFile(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
@@ -1214,7 +1256,7 @@ trusted_hash = "sha256:ccc"
 	require.Contains(t, out, "Codex hooks: OUT OF DATE")
 	require.Contains(t, out, "- session_end")
 	require.Contains(t, out, "- post_tool_use")
-	require.Contains(t, out, "entire enable")
+	require.Contains(t, out, "Run `entire agent add codex` from this worktree")
 	// Trust stays quiet: every event the stale file actually declares is trusted,
 	// so only the out-of-date finding should fire.
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")

@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // Compile-time interface assertions.
@@ -107,7 +108,7 @@ func (f *FactoryAIDroidAgent) ExtractPrompts(sessionRef string, fromOffset int) 
 
 	var prompts []string
 	for i := range lines {
-		if lines[i].Type != transcript.TypeUser {
+		if lines[i].Type != transcriptlib.TypeUser {
 			continue
 		}
 		// ExtractUserContent already strips IDE tags; stripping again is not a

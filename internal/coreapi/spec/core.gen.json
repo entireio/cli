@@ -2185,8 +2185,7 @@
           "requestedBy",
           "targetProject",
           "name",
-          "preconditions",
-          "access"
+          "preconditions"
         ],
         "type": "object"
       },

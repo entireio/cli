@@ -52,7 +52,13 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, min(1024*1024, piReviewMaxScannerBuf)), piReviewMaxScannerBuf)
-		messageIDsWithTextDelta := map[string]struct{}{}
+		// inTextBlock marks that a delta already started the current text
+		// block, so the next one continues it; a new block starts a new line.
+		// messageHadDelta marks that the current message streamed text, so
+		// message_end does not emit it again. Message IDs can be empty, so
+		// both track position in the stream instead of IDs.
+		inTextBlock := false
+		messageHadDelta := false
 		// pendingErr is the latest failure reason. It is reported only if the
 		// run still fails at the end: Pi auto-retries errors such as
 		// "overloaded", and a recovered error is not a failure.
@@ -82,14 +88,23 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 				// Pi is retrying the failed attempt; judge the retry instead.
 				success = true
 				pendingErr = ""
+				inTextBlock = false
+				messageHadDelta = false
 			case "session", "agent_start", "queue_update", "compaction_start", "compaction_end", "auto_retry_end":
 				// Session/control events do not map to user-visible review output.
 			case "message_update":
+				if env.AssistantMessageEvent.Type == "text_start" {
+					inTextBlock = false
+				}
 				if text := env.AssistantMessageEvent.TextDelta(); text != "" {
-					messageIDsWithTextDelta[env.MessageID()] = struct{}{}
-					out <- reviewtypes.AssistantText{Text: text}
+					out <- reviewtypes.AssistantText{Text: text, Delta: inTextBlock}
+					inTextBlock = true
+					messageHadDelta = true
 				}
 			case "message_end":
+				sawDelta := messageHadDelta
+				inTextBlock = false
+				messageHadDelta = false
 				if env.Message.Role == "assistant" {
 					if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
 						success = false
@@ -98,7 +113,7 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 					if env.Message.Usage != nil {
 						emitPiReviewTokens(out, env, &tokens, messageIDsWithUsage, messageUsageByTurn, turnNumber)
 					}
-					if _, sawDelta := messageIDsWithTextDelta[env.MessageID()]; !sawDelta {
+					if !sawDelta {
 						if text := piReviewMessageText(env.Message.Content); text != "" {
 							out <- reviewtypes.AssistantText{Text: text}
 						}
