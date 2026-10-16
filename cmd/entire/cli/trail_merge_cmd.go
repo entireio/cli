@@ -84,10 +84,8 @@ non-zero when the merge would be refused, so it can gate CI.
 
 After merging a native trail, the server deletes the trail's branch when the
 repo's delete-branch-on-merge setting is on; your local branch is not touched.
-Pass --delete-branch or --no-delete-branch to override that setting for this
-merge. The server can still keep the branch, for example when another open
-trail is based on it; the output says why. A GitHub-backed trail's branch is
-left to GitHub's own auto-delete setting, so both flags are refused there.`,
+The server can still keep the branch, for example when another open trail is
+based on it; the output says why.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Selector = selectorFromArgs(args)
@@ -116,6 +114,13 @@ left to GitHub's own auto-delete setting, so both flags are refused there.`,
 	cmd.Flags().BoolVar(&deleteBranch, "delete-branch", false, "Delete the trail's branch after merging, overriding the repo setting (native trails only)")
 	cmd.Flags().BoolVar(&noDeleteBranch, "no-delete-branch", false, "Keep the trail's branch after merging, overriding the repo setting (native trails only)")
 	cmd.MarkFlagsMutuallyExclusive("delete-branch", "no-delete-branch")
+	// Hidden until entire-api's delete-branch-on-merge is rolled out; they
+	// still run. Unhide them with a help paragraph and a changelog entry.
+	for _, name := range []string{"delete-branch", "no-delete-branch"} {
+		if err := cmd.Flags().MarkHidden(name); err != nil {
+			panic(fmt.Sprintf("hide %s flag: %v", name, err))
+		}
+	}
 
 	return cmd
 }

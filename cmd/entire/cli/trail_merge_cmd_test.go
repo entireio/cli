@@ -314,6 +314,19 @@ func TestTrailMerge_DeleteBranchFlagsAreExclusive(t *testing.T) {
 	require.Empty(t, stub.mergePosts())
 }
 
+// The branch flags stay out of help until the server side is rolled out.
+func TestTrailMerge_DeleteBranchFlagsAreHidden(t *testing.T) {
+	t.Parallel()
+	cmd := newTrailMergeCmd()
+
+	usage := cmd.UsageString()
+	for _, name := range []string{"delete-branch", "no-delete-branch"} {
+		require.True(t, cmd.Flags().Lookup(name).Hidden, name)
+		require.NotContains(t, usage, "--"+name)
+	}
+	require.NotContains(t, cmd.Long, "--delete-branch")
+}
+
 func TestTrailMerge_ReportsBranchOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
