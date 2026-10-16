@@ -21,14 +21,12 @@ import (
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // Transcripts are append-only JSONL, but every checkpoint used to re-redact them
-// from byte zero: a 70MB Codex rollout cost ~67s per Stop hook, and a session
-// with N checkpoints re-redacted O(N^2) bytes overall. Redaction is ~99.7% of
-// that write path (git object writing is milliseconds), and it is by far the
-// dominant cost of a Stop hook on a large session.
+// from byte zero: a 70MB Codex rollout cost ~67s per checkpoint write, and a
+// session with N checkpoints re-redacted O(N^2) bytes overall. Redaction is
+// ~99.7% of that write path (git object writing is milliseconds).
 //
 // So keep the redacted output for the prefix already processed and redact only
 // what was appended. Correctness rests on two properties:
@@ -46,20 +44,13 @@ import (
 // transcript, a compaction, changed custom rules, a CLI upgrade -- falls back to
 // redacting everything.
 //
-// Scope: all three whole-transcript paths reuse prefixes -- the shadow-branch
-// metadata write (via createRedactedBlobFromFile, which walks files), and
-// post-commit condensation and the Stop finalize rewrite (via
-// RedactTranscriptCached, which hold the transcript in memory).
-// Single-JSON-value transcripts (OpenCode export) get only the sharding in
-// redact.JSONLContent, since they have no line structure to split on.
-//
-// Those paths do NOT all redact the same bytes: the metadata walk stores a
-// sanitized transcript, while condensation and finalize store a sanitized *and*
-// image-externalized one. They stay separate because their cache keys are
-// different strings -- the walk uses its real tree path, the in-memory callers a
-// synthetic one (see transcriptCacheKey) -- and a key is hashed into its own
-// file. Sharing a key would be safe, since the prefix hash check rejects a
-// mismatch, but it would miss on every checkpoint.
+// Scope: both whole-transcript paths reuse prefixes -- post-commit
+// condensation and the Stop finalize rewrite, which hold the transcript in
+// memory and go through RedactTranscriptCached. The key is the synthetic
+// per-session transcriptCacheKey, not a file path, so condensations of the same
+// session across commits share it and stay incremental. Single-JSON-value
+// transcripts (OpenCode export) get only the sharding in redact.JSONLContent,
+// since they have no line structure to split on.
 
 const (
 	// RedactCacheDirName sits in the git common dir, NOT under .entire/, because
@@ -85,7 +76,7 @@ var redactCacheMinBytes = 1 << 20 // 1MiB
 // prefix. Written atomically; a missing, unreadable, or stale entry simply means
 // a full redaction.
 type redactPrefixEntry struct {
-	// Fingerprint identifies the redaction rules that produced RedactedBlob.
+	// Fingerprint identifies the redaction rules that produced the prefix.
 	Fingerprint string `json:"fingerprint"`
 	// SourceBytes is the length of the source prefix covered, always ending
 	// immediately after a newline.
@@ -93,12 +84,8 @@ type redactPrefixEntry struct {
 	// SourceHash is the SHA-256 of source[:SourceBytes], proving the prefix has
 	// not been rewritten underneath us.
 	SourceHash string `json:"source_hash"`
-	// RedactedBlob is the git blob holding the redacted prefix. Set by the
-	// metadata walk, which had to write that blob for the checkpoint tree anyway.
-	RedactedBlob string `json:"redacted_blob,omitempty"`
 	// RedactedFile names a file beside this entry holding the redacted prefix.
-	// Used by callers that hold a transcript in memory, for whom a git blob is
-	// pure overhead: go-git deflates the whole payload before discovering the
+	// A file rather than a git blob, because a blob is pure overhead here: go-git deflates the whole payload before discovering the
 	// object already exists (dotgit dedups the rename, not the compression), so a
 	// 65MB transcript cost ~1-2s of zlib per checkpoint. Worse, the store chunks
 	// transcripts at agent.MaxChunkSize (50MB), so above that the whole-transcript
@@ -179,29 +166,18 @@ func (c *redactCache) load(treePath string) *redactPrefixEntry {
 	if entry.SourceBytes <= 0 || entry.SourceHash == "" {
 		return nil
 	}
-	if entry.RedactedBlob == "" && entry.RedactedFile == "" {
+	if entry.RedactedFile == "" {
 		return nil
 	}
 	return &entry
 }
 
-// storePrefix records the prefix just written so the next checkpoint can reuse
-// it. sourceHash must be the digest of the whole of the source content, and blob
-// the object holding its redacted form.
+// storePrefixBytes records the redacted prefix just produced so the next
+// checkpoint can reuse it, writing it as a file beside the entry (see
+// redactPrefixEntry). sourceHash must be the digest of the whole source content.
 //
 // Failures are silent: losing a cache entry only costs a full redaction next
 // time.
-func (c *redactCache) storePrefix(ctx context.Context, treePath, sourceHash string, sourceBytes int, blob plumbing.Hash) {
-	c.writeEntry(ctx, treePath, redactPrefixEntry{
-		Fingerprint:  redactionFingerprint(),
-		SourceBytes:  sourceBytes,
-		SourceHash:   sourceHash,
-		RedactedBlob: blob.String(),
-	})
-}
-
-// storePrefixBytes is storePrefix for callers with no blob to point at: it writes
-// the redacted prefix as a file beside the entry. See redactPrefixEntry.
 func (c *redactCache) storePrefixBytes(ctx context.Context, treePath, sourceHash string, sourceBytes int, redacted []byte) {
 	if c == nil {
 		return
@@ -243,24 +219,14 @@ func prefixFileName(treePath string) string {
 	return hex.EncodeToString(sum[:]) + ".prefix"
 }
 
-// readPrefix loads the redacted prefix an entry points at, from wherever it
-// lives. sizeHint pre-sizes the buffer so the join can append in place instead of
-// copying the whole prefix a second time.
-//
-// Each branch checks the field it is about to use rather than trusting load() to
-// have rejected a record with neither set. load() does reject that, so this is
-// not a reachable path today -- but the guarantee would otherwise live 80 lines
-// away from the code depending on it, and plumbing.NewHash("") does not fail
-// loudly: it yields the zero hash and surfaces as a puzzling missing-object
-// error instead of a bad cache entry.
-func (c *redactCache) readPrefix(repo *git.Repository, entry *redactPrefixEntry, sizeHint int) ([]byte, error) {
-	if entry.RedactedFile != "" {
-		return readFileBytes(c.root, c.name+"/"+entry.RedactedFile, sizeHint)
+// readPrefix loads the redacted prefix an entry points at. sizeHint pre-sizes
+// the buffer so the join can append in place instead of copying the whole
+// prefix a second time.
+func (c *redactCache) readPrefix(entry *redactPrefixEntry, sizeHint int) ([]byte, error) {
+	if entry.RedactedFile == "" {
+		return nil, errors.New("cache entry names no prefix file")
 	}
-	if entry.RedactedBlob == "" {
-		return nil, errors.New("cache entry names neither a prefix file nor a blob")
-	}
-	return readBlobBytes(repo, plumbing.NewHash(entry.RedactedBlob), sizeHint)
+	return readFileBytes(c.root, c.name+"/"+entry.RedactedFile, sizeHint)
 }
 
 // redactResult is the outcome of one incremental redaction attempt.
@@ -307,13 +273,12 @@ type transcriptRedactor func(ctx context.Context, content []byte) ([]byte, error
 // one is available and still valid.
 func redactIncrementally(
 	ctx context.Context,
-	repo *git.Repository,
 	cache *redactCache,
 	content []byte,
 	treePath string,
 	redactor transcriptRedactor,
 ) (redactResult, error) {
-	res, err := reusePrefix(ctx, repo, cache, content, treePath, redactor)
+	res, err := reusePrefix(ctx, cache, content, treePath, redactor)
 	if err != nil || res.Redacted != nil {
 		return res, err
 	}
@@ -332,7 +297,6 @@ func redactIncrementally(
 // content is not eligible or no valid prefix is available.
 func reusePrefix(
 	ctx context.Context,
-	repo *git.Repository,
 	cache *redactCache,
 	content []byte,
 	treePath string,
@@ -387,7 +351,7 @@ func reusePrefix(
 		}
 	}
 
-	prefix, readErr := cache.readPrefix(repo, entry, len(redactedSuffix))
+	prefix, readErr := cache.readPrefix(entry, len(redactedSuffix))
 	if readErr != nil {
 		logging.Debug(logCtx, "cached redacted prefix unreadable, redacting in full",
 			slog.String("path", treePath), slog.String("error", readErr.Error()))
@@ -420,30 +384,9 @@ func hashBytes(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// readBlobBytes loads a blob's full contents into a buffer with room for
-// sizeHint extra bytes, so the caller can append the redacted suffix without
-// copying the whole prefix again.
-func readBlobBytes(repo *git.Repository, hash plumbing.Hash, sizeHint int) ([]byte, error) {
-	blob, err := repo.BlobObject(hash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read blob %s: %w", hash, err)
-	}
-	reader, err := blob.Reader()
-	if err != nil {
-		return nil, fmt.Errorf("failed to open blob %s: %w", hash, err)
-	}
-	defer func() { _ = reader.Close() }()
-
-	// blob.Size is known, so read into an exact buffer: io.ReadAll grows by
-	// doubling and allocates roughly 2.3x the payload for a large transcript.
-	out := make([]byte, blob.Size, int64(sizeHint)+blob.Size)
-	if _, err := io.ReadFull(reader, out); err != nil {
-		return nil, fmt.Errorf("failed to read blob %s: %w", hash, err)
-	}
-	return out, nil
-}
-
-// readFileBytes is readBlobBytes for a file-backed prefix, named inside root.
+// readFileBytes loads a file-backed prefix, named inside root, into a buffer
+// with room for sizeHint extra bytes, so the caller can append the redacted
+// suffix without copying the whole prefix again.
 func readFileBytes(root *os.Root, path string, sizeHint int) ([]byte, error) {
 	f, err := root.Open(path)
 	if err != nil {
@@ -467,12 +410,9 @@ func readFileBytes(root *os.Root, path string, sizeHint int) ([]byte, error) {
 // on that basename, and carries the session ID so concurrent sessions in one
 // worktree never share an entry.
 //
-// It cannot collide with the metadata walk's entries even though both describe
-// "a session transcript": the walk keys on its real tree path
-// (.entire/metadata/<session>/full.jsonl), a different string and so a different
-// cache file. That difference matters because the two do not redact the same
-// bytes -- the walk stores a sanitized transcript, these callers a sanitized
-// *and* image-externalized one.
+// Older CLIs also cached a turn-end metadata walk under the real tree path
+// (.entire/metadata/<session>/full.jsonl); that is a different string and so a
+// different cache file, which nothing reads anymore and `entire clean` reclaims.
 func transcriptCacheKey(sessionID string) string {
 	return "committed/" + sessionID + "/" + paths.TranscriptFileName
 }
@@ -518,7 +458,7 @@ func RedactTranscriptCached(
 	}
 
 	cache := repoRedactCache(repo)
-	result, err := redactIncrementally(ctx, repo, cache, content, treePath,
+	result, err := redactIncrementally(ctx, cache, content, treePath,
 		func(ctx context.Context, b []byte) ([]byte, error) {
 			out, redErr := redactor(ctx, b)
 			if redErr != nil {

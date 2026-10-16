@@ -1390,7 +1390,7 @@ func envWithPath(path string) []string {
 	return append(env, "PATH="+path)
 }
 
-func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
+func TestInstallGitHook_KeepsBothBackupAndNewForeignHook(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
 	// Create a backup file manually (simulating a previous backup)
@@ -1412,13 +1412,20 @@ func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 
-	// Verify the original backup was NOT overwritten
+	// The current hook becomes the backup; the previous one is kept as an older copy.
 	backupData, err := os.ReadFile(backupPath)
 	if err != nil {
 		t.Fatalf("backup should still exist: %v", err)
 	}
-	if string(backupData) != firstBackupContent {
-		t.Errorf("backup content = %q, want original %q", string(backupData), firstBackupContent)
+	if string(backupData) != secondCustomContent {
+		t.Errorf("backup content = %q, want the current hook %q", string(backupData), secondCustomContent)
+	}
+	older, err := filepath.Glob(backupPath + ".*")
+	if err != nil || len(older) != 1 {
+		t.Fatalf("older copies = %v, %v; want one", older, err)
+	}
+	if data, err := os.ReadFile(older[0]); err != nil || string(data) != firstBackupContent {
+		t.Errorf("older copy = %q, %v; want the previous backup", data, err)
 	}
 
 	// Verify our hook was installed with chain call
@@ -1556,12 +1563,15 @@ func TestRemoveGitHook_RestoresBackup(t *testing.T) {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 
-	removed, err := RemoveGitHook(context.Background())
+	res, err := RemoveGitHookDetailed(context.Background())
 	if err != nil {
-		t.Fatalf("RemoveGitHook(context.Background()) error = %v", err)
+		t.Fatalf("RemoveGitHookDetailed() error = %v", err)
 	}
-	if removed == 0 {
-		t.Error("RemoveGitHook(context.Background()) should remove hooks")
+	if res.Removed == 0 {
+		t.Error("RemoveGitHookDetailed() should remove hooks")
+	}
+	if !slices.Equal(res.Restored, []string{"prepare-commit-msg"}) {
+		t.Errorf("Restored = %v, want [prepare-commit-msg]", res.Restored)
 	}
 
 	// Original custom hook should be restored
@@ -1577,6 +1587,62 @@ func TestRemoveGitHook_RestoresBackup(t *testing.T) {
 	backupPath := hookPath + backupSuffix
 	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
 		t.Error("backup should be removed after restore")
+	}
+}
+
+// The install tells the user their existing hook is kept and still runs, and
+// names where it went, so a hook that "disappeared" from .git/hooks is not
+// mistaken for a deleted one.
+func TestInstallGitHook_ReportsKeptHook(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho 'mine'\n"), 0o755); err != nil {
+		t.Fatalf("failed to create custom hook: %v", err)
+	}
+
+	stderr := captureStderrWriter(t)
+	if _, err := InstallGitHook(context.Background(), true, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	want := "[entire] Your prepare-commit-msg hook still runs, after Entire's (moved to " + hookPath + backupSuffix + ")."
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+	if strings.Count(stderr.String(), "still runs") != 1 {
+		t.Errorf("stderr = %q, want exactly one kept-hook line (only one hook pre-existed)", stderr.String())
+	}
+}
+
+// When a backup already exists, the hook now at the path takes its place and
+// keeps running; the warning names the older copy, which no longer runs.
+func TestInstallGitHook_WarnsWhenRotatingExistingBackup(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho 'new'\n"), 0o755); err != nil {
+		t.Fatalf("failed to create hook: %v", err)
+	}
+	if err := os.WriteFile(hookPath+backupSuffix, []byte("#!/bin/sh\necho 'old'\n"), 0o755); err != nil {
+		t.Fatalf("failed to create backup: %v", err)
+	}
+
+	stderr := captureStderrWriter(t)
+	if _, err := InstallGitHook(context.Background(), true, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+
+	want := "[entire] prepare-commit-msg changed since Entire backed it up. The current version now runs after Entire's; the older copy was kept as prepare-commit-msg" + backupSuffix + "."
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+	backup, err := os.ReadFile(hookPath + backupSuffix)
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if !strings.Contains(string(backup), "echo 'new'") {
+		t.Errorf("backup = %q, want the hook that was at the path", backup)
 	}
 }
 
@@ -1760,9 +1826,16 @@ func TestRemoveGitHook_DoesNotOverwriteReplacedHook(t *testing.T) {
 	}
 
 	// entire disable: should NOT overwrite hook B with backup A
-	_, err = RemoveGitHook(context.Background())
+	stderr := captureStderrWriter(t)
+	res, err := RemoveGitHookDetailed(context.Background())
 	if err != nil {
-		t.Fatalf("RemoveGitHook(context.Background()) error = %v", err)
+		t.Fatalf("RemoveGitHookDetailed() error = %v", err)
+	}
+	if len(res.Restored) != 0 {
+		t.Errorf("Restored = %v, want none: hook B blocks the restore", res.Restored)
+	}
+	if want := "prepare-commit-msg was modified since install; backup prepare-commit-msg" + backupSuffix + " left in place"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 	}
 
 	// Hook B should still be in place
@@ -2137,6 +2210,7 @@ func TestHooksPathCommand_QuotesWhatAShellWouldSplit(t *testing.T) {
 		{"/tmp/a;rm -rf b", `git config core.hooksPath '/tmp/a;rm -rf b'`},
 		{"/tmp/$(id)", `git config core.hooksPath '/tmp/$(id)'`},
 		{"/tmp/it's", `git config core.hooksPath '/tmp/it'\''s'`},
+		{`/tmp/a\b`, `git config core.hooksPath '/tmp/a\b'`},
 	} {
 		assert.Equal(t, tc.want, HooksPathCommand(tc.in), "input %q", tc.in)
 	}

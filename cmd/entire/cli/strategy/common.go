@@ -30,7 +30,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
-	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
@@ -356,10 +355,9 @@ func checkpointInfosFromCommitted(committed []checkpoint.CheckpointInfo) []Check
 }
 
 const (
-	entireGitignore    = ".entire/.gitignore"
-	entireDir          = ".entire"
-	gitDir             = ".git"
-	shadowBranchPrefix = "entire/"
+	entireGitignore = ".entire/.gitignore"
+	entireDir       = ".entire"
+	gitDir          = ".git"
 )
 
 // isProtectedPath returns true if relPath is inside a directory that should
@@ -531,8 +529,8 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 		}
 
 		// OpenAI Privacy Filter (opt-in 9th layer).
-		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil {
-			opf := s.Redaction.OpenAIPrivacyFilter
+		if s.Redaction != nil && s.Redaction.OpenAIPrivacyFilter != nil { //nolint:staticcheck // OPF is deprecated but still honored until it is removed
+			opf := s.Redaction.OpenAIPrivacyFilter //nolint:staticcheck // OPF is deprecated but still honored until it is removed
 			// The loader records rather than logs (see
 			// settings.enforceOPFCommandTrust); surface it here or a user
 			// whose configured binary is ignored gets no signal.
@@ -1176,8 +1174,8 @@ func ReadSessionPromptFromTree(tree *object.Tree, checkpointPath string) string 
 }
 
 // ReadAgentTypeFromTree reads the agent type from a checkpoint's metadata.json file in a git tree.
-// If metadata.json doesn't exist (shadow branches), it falls back to detecting the agent
-// from the presence of agent-specific config files (.gemini/settings.json or .claude/).
+// If metadata.json doesn't exist, it falls back to detecting the agent
+// from the presence of agent-specific config markers (.claude/, .codex/, .cursor/, etc.).
 // Returns agent.AgentTypeUnknown if the agent type cannot be determined.
 func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.AgentType {
 	// First, try to read from metadata.json (present in condensed/committed checkpoints)
@@ -1191,7 +1189,7 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 		}
 	}
 
-	// Fall back to detecting agent from config markers (shadow branches don't have metadata.json).
+	// Fall back to detecting agent from config markers when there is no metadata.json.
 	// Multiple agent config markers may coexist when users configure multiple agents via
 	// `entire configure`. Only return a specific agent type when exactly one agent config
 	// marker (directory or file) is present; otherwise return Unknown since we can't
@@ -1199,10 +1197,6 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 	var detected types.AgentType
 	detectedCount := 0
 
-	if _, err := tree.File(".gemini/settings.json"); err == nil {
-		detected = agent.AgentTypeGemini
-		detectedCount++
-	}
 	if _, err := tree.Tree(".claude"); err == nil {
 		detected = agent.AgentTypeClaudeCode
 		detectedCount++
@@ -1229,6 +1223,16 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 
 	if detectedCount == 1 {
 		return detected
+	}
+	// Gemini CLI support was removed, but a session still in flight when it
+	// was is condensed at its next commit, and its JSON-document
+	// transcript cannot be read as anything else. Only a last resort: counted
+	// with the others, a leftover .gemini would make every later session in a
+	// repo that also has another agent's marker ambiguous.
+	if detectedCount == 0 {
+		if _, err := tree.File(".gemini/settings.json"); err == nil {
+			return agent.AgentTypeGemini
+		}
 	}
 	return agent.AgentTypeUnknown
 }
@@ -1452,136 +1456,10 @@ func EnsureEntireGitignore(ctx context.Context) error {
 	return nil
 }
 
-// readWorktreeFile reads a repo-relative file through the worktree's shared
-// root. The names come from git status, so they are already the coordinate the
-// root reads in — joining them onto repoRoot and reading the result was the
-// thing that made "which directory is this relative to?" a per-call-site
-// question.
-func readWorktreeFile(repoRoot, file string) ([]byte, error) {
-	root, err := worktreedir.OpenAt(repoRoot)
-	if err != nil {
-		return nil, fmt.Errorf("open worktree root: %w", err)
-	}
-	name, err := worktreedir.Name(repoRoot, file)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s in worktree: %w", file, err)
-	}
-	content, err := osroot.ReadFileNoFollow(root, name)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", file, err)
-	}
-	return content, nil
-}
-
-// splitLines splits content into lines, preserving empty lines.
-// Handles both Unix (\n) and Windows (\r\n) line endings.
-func splitLines(content []byte) []string {
-	if len(content) == 0 {
-		return nil
-	}
-	s := string(content)
-	// Normalize Windows line endings to Unix
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	// Remove trailing newline to avoid empty last element
-	s = strings.TrimSuffix(s, "\n")
-	return strings.Split(s, "\n")
-}
-
 // fileExists checks if a file exists at the given path.
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-// getTaskCheckpointFromTree retrieves a task checkpoint from a commit tree.
-// Shared implementation for shadow and linear-shadow strategies.
-func getTaskCheckpointFromTree(ctx context.Context, point PendingCheckpoint) (*TaskCheckpoint, error) {
-	if !point.IsTaskCheckpoint {
-		return nil, ErrNotTaskCheckpoint
-	}
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	commitHash := plumbing.NewHash(point.ID)
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tree: %w", err)
-	}
-
-	// Read checkpoint.json from the tree
-	checkpointPath := point.MetadataDir + "/checkpoint.json"
-	file, err := tree.File(checkpointPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find checkpoint at %s: %w", checkpointPath, err)
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-
-	var checkpoint TaskCheckpoint
-	if err := json.Unmarshal([]byte(content), &checkpoint); err != nil {
-		return nil, fmt.Errorf("failed to parse checkpoint: %w", err)
-	}
-
-	return &checkpoint, nil
-}
-
-// getTaskTranscriptFromTree retrieves a task transcript from a commit tree.
-// Shared implementation for shadow and linear-shadow strategies.
-func getTaskTranscriptFromTree(ctx context.Context, point PendingCheckpoint) ([]byte, error) {
-	if !point.IsTaskCheckpoint {
-		return nil, ErrNotTaskCheckpoint
-	}
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	commitHash := plumbing.NewHash(point.ID)
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tree: %w", err)
-	}
-
-	// MetadataDir format: .entire/metadata/<session>/tasks/<toolUseID>
-	// Session transcript is at: .entire/metadata/<session>/<TranscriptFileName>
-	sessionDir := filepath.Dir(filepath.Dir(point.MetadataDir))
-
-	// Try current format first, then legacy
-	transcriptPath := sessionDir + "/" + paths.TranscriptFileName
-	file, err := tree.File(transcriptPath)
-	if err != nil {
-		transcriptPath = sessionDir + "/" + paths.TranscriptFileNameLegacy
-		file, err = tree.File(transcriptPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find transcript: %w", err)
-		}
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read transcript: %w", err)
-	}
-
-	return []byte(content), nil
 }
 
 // ErrBranchNotFound is returned by DeleteBranchCLI when the branch does not exist.
@@ -1614,16 +1492,6 @@ func DeleteBranchCLI(ctx context.Context, branchName string) error {
 	cmd := exec.CommandContext(ctx, "git", "branch", "-D", "--", branchName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to delete branch %s: %s: %w", branchName, strings.TrimSpace(string(output)), err)
-	}
-	return nil
-}
-
-// branchExistsCLI checks if a branch exists using git CLI.
-// Returns nil if the branch exists, or an error if it does not.
-func branchExistsCLI(ctx context.Context, branchName string) error {
-	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("branch %s not found: %w", branchName, err)
 	}
 	return nil
 }

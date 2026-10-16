@@ -81,7 +81,7 @@ func maybeOfferSessionImport(ctx context.Context, w io.Writer, agents []agent.Ag
 		return
 	}
 
-	eligible := sessionImportDiscover(ctx, agents, repoRoot)
+	eligible := sessionImportDiscover(ctx, w, agents, repoRoot)
 	if len(eligible) == 0 {
 		return
 	}
@@ -156,8 +156,10 @@ func resolveImportAnchorForOnboarding(ctx context.Context, w io.Writer) (string,
 }
 
 // discoverImportableAgents keeps the selected agents that have a registered
-// importer and at least one discoverable session for the repo.
-func discoverImportableAgents(ctx context.Context, agents []agent.Agent, repoRoot string) []eligibleImport {
+// importer and at least one discoverable session for the repo. An agent whose
+// discovery fails is skipped with a note saying why: the error can be a refusal
+// the user can act on (Cursor's names the --path rerun).
+func discoverImportableAgents(ctx context.Context, w io.Writer, agents []agent.Agent, repoRoot string) []eligibleImport {
 	now := time.Now()
 	var out []eligibleImport
 	for _, ag := range agents {
@@ -168,6 +170,7 @@ func discoverImportableAgents(ctx context.Context, agents []agent.Agent, repoRoo
 		sessions, err := imp.Discover(repoRoot, "", now, nil)
 		if err != nil {
 			logging.Warn(ctx, "session import discovery failed", "agent", string(ag.Type()), "error", err)
+			fmt.Fprintf(w, "Note: skipping %s history import: %v\n", ag.Type(), err)
 			continue
 		}
 		if len(sessions) == 0 {
@@ -289,11 +292,12 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot, linkCommitSH
 	for _, e := range selected {
 		progress, stopProgress := newImportProgressReporter(w, e.displayName)
 		res, err := agentimport.Run(ctx, repo, e.imp, agentimport.Options{
-			LinkCommitSHA: linkCommitSHA,
-			RepoRoot:      repoRoot,
-			Now:           time.Now(),
-			Progress:      progress,
-			ReadRemotes:   strategy.CheckpointReadRemotes(ctx),
+			LinkCommitSHA:   linkCommitSHA,
+			RepoRoot:        repoRoot,
+			Now:             time.Now(),
+			Progress:        progress,
+			ReadRemotes:     strategy.CheckpointReadRemotes(ctx),
+			RemoteRefLister: ListCheckpointRefsOnRemote,
 		})
 		stopProgress(err == nil)
 		if err != nil {

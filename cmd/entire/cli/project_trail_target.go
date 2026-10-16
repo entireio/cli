@@ -1,0 +1,397 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/coreapi"
+)
+
+type projectTrailCoreClient interface {
+	ResolveProject(ctx context.Context, params coreapi.ResolveProjectParams) (*coreapi.ResolveProjectOutputBody, error)
+	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
+}
+
+var newProjectTrailCoreClient = func() (projectTrailCoreClient, error) { return coreapi.New() }
+var newProjectTrailCellClient = auth.NewEntireAPICellClient
+
+type projectTrailTarget struct {
+	Client    *api.Client
+	ProjectID string
+	Host      string
+	Project   string
+	BasePath  string
+	TrailID   string
+	// Number is the project-local trail number when the resolution path
+	// learned it (a numeric selector or a parent reference); 0 otherwise.
+	Number int
+}
+
+func projectTrailBasePath(host, project string) string {
+	return "/api/v1/" + url.PathEscape(host) + "/" + url.PathEscape(strings.ToLower(project)) + "/trails"
+}
+
+func projectTrailProjectFlag(cmd *cobra.Command) string {
+	v, _ := cmd.Flags().GetString("project") //nolint:errcheck // registered on trail root
+	return strings.TrimSpace(v)
+}
+
+// Project references always declare their namespace. In particular gh/acme
+// and et/acme must not resolve through the same by-name project lookup.
+func parseTrailProjectRef(ref string) (string, string, error) {
+	host, project, ok := strings.Cut(ref, "/")
+	if !ok || (host != mirrorCloneForge && host != nativeCloneForge) || project == "" || strings.ContainsAny(project, "/\\?#%") || project == "." || project == ".." {
+		return "", "", fmt.Errorf("invalid project %q: use gh/<owner> or et/<project>", ref)
+	}
+	for _, c := range project {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' {
+			return "", "", fmt.Errorf("invalid project %q: project names contain only letters, digits, and hyphens", ref)
+		}
+	}
+	return host, strings.ToLower(project), nil
+}
+
+// projectTrailCellTarget never falls back to a repo or jurisdiction-default
+// cell. A project may be assigned somewhere else, or not assigned at all.
+func projectTrailCellTarget(clusters []coreapi.Cluster, cell, jurisdiction string) (*auth.CellTarget, error) {
+	cell, jurisdiction = strings.TrimSpace(cell), strings.TrimSpace(jurisdiction)
+	if cell == "" || jurisdiction == "" {
+		return nil, errors.New("project has no processing cell or jurisdiction assignment")
+	}
+	cluster, ok := matchClusterBySlug(clusters, cell)
+	if !ok {
+		cluster, ok = matchClusterByCellInURL(clusters, cell)
+	}
+	if !ok {
+		return nil, fmt.Errorf("project processing cell %q is absent from Core's cluster catalog", cell)
+	}
+	if !strings.EqualFold(cluster.Jurisdiction, jurisdiction) {
+		return nil, fmt.Errorf("project processing cell %q has jurisdiction %q, expected %q", cell, cluster.Jurisdiction, jurisdiction)
+	}
+	return cellTargetFromCluster(cluster)
+}
+
+func projectTrailTargetForReference(ref api.TrailParentReference) (*projectTrailTarget, error) {
+	host, project, err := parseTrailProjectRef(ref.Host + "/" + ref.Project)
+	if err != nil {
+		return nil, err
+	}
+	base := projectTrailBasePath(host, project)
+	if !looksLikeULID(ref.ProjectID) {
+		return nil, errors.New("project reference has no valid project ID")
+	}
+	if ref.ID != "" && (!looksLikeULID(ref.ID) || ref.Path != base+"/"+ref.ID) {
+		return nil, errors.New("parent reference has an invalid trail ID or canonical path")
+	}
+	return &projectTrailTarget{ProjectID: ref.ProjectID, Host: host, Project: project, BasePath: base, TrailID: ref.ID, Number: ref.Number}, nil
+}
+
+// Branch parent navigation currently supplies a cell ID but no apiUrl. Keep
+// its addressed catalog route so repo-only readers need not resolve a project.
+func openProjectTrailTarget(ctx context.Context, core projectTrailCoreClient, ref api.TrailParentReference, insecure bool) (*projectTrailTarget, error) {
+	target, err := projectTrailTargetForReference(ref)
+	if err != nil {
+		return nil, err
+	}
+	clusters, err := core.ListClusters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve project cell catalog: %w", err)
+	}
+	cell, err := projectTrailCellTarget(clusters.Clusters, ref.PrimaryProcessingCell, ref.Jurisdiction)
+	if err != nil {
+		return nil, err
+	}
+	client, err := newProjectTrailCellClient(ctx, insecure, cell)
+	if err != nil {
+		return nil, fmt.Errorf("open project trail cell: %w", err)
+	}
+	target.Client = client
+	return target, nil
+}
+
+func resolveProjectTrailCollection(cmd *cobra.Command) (*projectTrailTarget, error) {
+	host, project, err := resolveTrailProjectReference(cmd)
+	if err != nil {
+		return nil, err
+	}
+	target, err := resolveProjectTrailCollectionFor(cmd.Context(), host, project, trailInsecureHTTP(cmd))
+	if err != nil {
+		return nil, renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", err)
+	}
+	return target, nil
+}
+
+func resolveProjectTrailCollectionFor(ctx context.Context, host, project string, insecure bool) (*projectTrailTarget, error) {
+	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
+	defer cancel()
+	core, err := newProjectTrailCoreClient()
+	if err != nil {
+		return nil, fmt.Errorf("project control plane: %w", err)
+	}
+	target, cell, err := resolveProjectTrailRoute(ctx, core, host, project)
+	if err != nil {
+		return nil, err
+	}
+	target.Client, err = newProjectTrailCellClient(ctx, insecure, cell)
+	if err != nil {
+		return nil, fmt.Errorf("open project trail cell: %w", err)
+	}
+	return target, nil
+}
+
+func resolveProjectTrailRoute(ctx context.Context, core projectTrailCoreClient, host, project string) (*projectTrailTarget, *auth.CellTarget, error) {
+	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{Host: coreapi.ResolveProjectHost(host), Project: project})
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve project: %w", err)
+	}
+	if string(resolved.Reference.Host) != host || !strings.EqualFold(resolved.Reference.Project, project) {
+		return nil, nil, errors.New("core returned a different project reference")
+	}
+	target, err := projectTrailTargetForReference(api.TrailParentReference{
+		ProjectID: resolved.Project.ID, Host: string(resolved.Reference.Host), Project: resolved.Reference.Project,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	cell, err := projectTrailResolvedCellTarget(resolved.Project.ApiUrl.Or(""), resolved.Project.PrimaryProcessingCell.Or(""), resolved.Project.Region)
+	if err != nil {
+		return nil, nil, fmt.Errorf("route project %s/%s: %w", host, project, err)
+	}
+	return target, cell, nil
+}
+
+// Core resolves the stored cell, including hidden clusters and API overrides.
+// An absent URL is authoritative unavailability, not a catalog/default fallback.
+func projectTrailResolvedCellTarget(apiURL, cell, jurisdiction string) (*auth.CellTarget, error) {
+	if strings.TrimSpace(cell) == "" {
+		return nil, errors.New("core did not return primaryProcessingCell; project assignment is unavailable")
+	}
+	if strings.TrimSpace(jurisdiction) == "" {
+		return nil, errors.New("core did not return the project's jurisdiction (region)")
+	}
+	if strings.TrimSpace(apiURL) == "" {
+		return nil, errors.New("core did not return apiUrl for the assigned processing cell; project routing is unavailable")
+	}
+	u, err := url.Parse(apiURL)
+	if err != nil || (u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP) || u.Hostname() == "" || u.User != nil ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(apiURL, "#") {
+		return nil, errors.New("core returned an invalid project apiUrl; expected an HTTP(S) origin")
+	}
+	region, err := auth.NormalizeJurisdiction(jurisdiction)
+	if err != nil {
+		return nil, fmt.Errorf("invalid project jurisdiction: %w", err)
+	}
+	// The cell client enforces HTTPS (or the explicit local-development policy)
+	// before sending credentials; this helper only validates the response shape.
+	return &auth.CellTarget{BaseURL: strings.TrimSuffix(apiURL, "/"), Jurisdiction: region}, nil
+}
+
+func resolveTrailProjectReference(cmd *cobra.Command) (string, string, error) {
+	if ref := projectTrailProjectFlag(cmd); ref != "" {
+		return parseTrailProjectRef(ref)
+	}
+	host, owner, _, err := resolveTrailRepoOrRemote(cmd.Context(), trailRepoFlag(cmd))
+	return host, owner, err
+}
+
+// trailProjectReferenceOr returns --project when given, otherwise the supplied
+// repository namespace: a repo's own project is the default collection.
+func trailProjectReferenceOr(cmd *cobra.Command, host, project string) (string, string, error) {
+	if ref := projectTrailProjectFlag(cmd); ref != "" {
+		return parseTrailProjectRef(ref)
+	}
+	return host, project, nil
+}
+
+// validateProjectTrailSelector rejects anything but a project trail ID or
+// number before any I/O. Branch work is selected with --branch, never by a
+// repo-local selector.
+func validateProjectTrailSelector(selector string) error {
+	if looksLikeULID(selector) {
+		return nil
+	}
+	if _, ok := parseTrailNumberSelector(selector); !ok {
+		return errors.New("use a project trail ID or number; select a branch with --branch")
+	}
+	return nil
+}
+
+// With no selector, discover the project parent through the branch's Change.
+// This does NOT call ResolveProject: repo-only readers must retain access to an
+// addressed parent even when they cannot enumerate the project's collection.
+// A selector plus --branch goes through the working context so the branch is
+// verified to belong to that trail.
+func resolveProjectTrail(cmd *cobra.Command, selector string) (*projectTrailTarget, error) {
+	branch := trailBranchFlag(cmd)
+	if change, ok := parseProjectTrailChangeSelector(selector); ok {
+		if branch != "" {
+			return nil, errChangeSelectorWithBranch
+		}
+		return resolveProjectTrailChangeParent(cmd, change)
+	}
+	switch {
+	case selector == "":
+		return resolveBranchProjectTrail(cmd, branch)
+	case branch == "":
+		return resolveProjectTrailBySelector(cmd, selector)
+	default:
+		selected, err := resolveProjectTrailWorkingContext(cmd, selector, branch, false)
+		if err != nil {
+			return nil, err
+		}
+		return selected.Target, nil
+	}
+}
+
+// resolveProjectTrailChangeParent is the project trail a <repo>/<number>
+// change belongs to, for intent-level commands (show, update, comment).
+func resolveProjectTrailChangeParent(cmd *cobra.Command, sel projectTrailChangeSelector) (*projectTrailTarget, error) {
+	change, err := resolveProjectTrailChange(cmd, sel, false)
+	if err != nil {
+		return nil, err
+	}
+	return openTrailParentTarget(cmd, change.Work, "change "+sel.String())
+}
+
+func resolveProjectTrailBySelector(cmd *cobra.Command, selector string) (*projectTrailTarget, error) {
+	if err := validateProjectTrailSelector(selector); err != nil {
+		return nil, err
+	}
+	target, err := resolveProjectTrailCollection(cmd)
+	if err != nil {
+		return nil, err
+	}
+	return target.resolveSelector(cmd.Context(), selector)
+}
+
+// resolveSelector sets TrailID from a ULID, or from a project-local number
+// with one GET: the detail route accepts a number (projectTrailDetail), unlike
+// PATCH and subresources, which take only the ULID used from here on.
+func (t *projectTrailTarget) resolveSelector(ctx context.Context, selector string) (*projectTrailTarget, error) {
+	if err := validateProjectTrailSelector(selector); err != nil {
+		return nil, err
+	}
+	if looksLikeULID(selector) {
+		t.TrailID = selector
+		return t, nil
+	}
+	number, _ := parseTrailNumberSelector(selector)
+	ctx, cancel := context.WithTimeout(ctx, projectTrailListTimeout)
+	defer cancel()
+	var out api.ProjectTrail
+	if _, err := t.Client.ProjectTrailRequest(ctx, http.MethodGet, t.BasePath+"/"+strconv.Itoa(number), nil, nil, &out); err != nil {
+		if api.IsHTTPErrorStatus(err, http.StatusNotFound) {
+			return nil, fmt.Errorf("project trail #%d not found in %s/%s", number, t.Host, t.Project)
+		}
+		return nil, fmt.Errorf("read project trail #%d: %w", number, err)
+	}
+	if err := t.validateResponse(out); err != nil {
+		return nil, err
+	}
+	if out.Number != number {
+		return nil, errors.New("project trail response identity does not match the request")
+	}
+	t.TrailID, t.Number = out.ID, out.Number
+	return t, nil
+}
+
+func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (_ *projectTrailTarget, err error) {
+	if err := ensureTrailRepoHasTarget(cmd, branch != "", "pass --branch or a project trail ID"); err != nil {
+		return nil, err
+	}
+	ctx := cmd.Context()
+	forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, trailRepoFlag(cmd))
+	if err != nil {
+		return nil, err
+	}
+	branch, err = resolveTrailBranch(ctx, branch)
+	if err != nil {
+		return nil, err
+	}
+	client, repoID, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), forge, owner, repo)
+	if err != nil {
+		return nil, renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repo, err)
+	}
+	if trailRepoFlag(cmd) == "" {
+		defer func() { noteTrailCommandEnablement(ctx, client, err) }()
+	}
+	base, err := trailRepoBasePath(forge, owner, repo, repoID)
+	if err != nil {
+		return nil, err
+	}
+	change, err := findTrailByBranchAtPath(ctx, client, base, branch)
+	if err != nil {
+		return nil, err
+	}
+	return openTrailParentTarget(cmd, change, fmt.Sprintf("branch %q", branch))
+}
+
+// openTrailParentTarget routes to the project parent a branch's Change points
+// at. An absent parent may be inaccessible or unresolved, so this never falls
+// back to a repo-scoped read; --project, when given, must name that parent.
+// subject names the work in errors, e.g. `branch "feature/x"` or `change cli/7`.
+func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, subject string) (*projectTrailTarget, error) {
+	if change == nil || change.Parent == nil || !looksLikeULID(change.Parent.ID) {
+		return nil, fmt.Errorf("%s has no discoverable project trail; pass a project trail ID with --project (a missing parent may be inaccessible or unresolved)", subject)
+	}
+	parent := *change.Parent
+	if ref := projectTrailProjectFlag(cmd); ref != "" {
+		host, project, err := parseTrailProjectRef(ref)
+		if err != nil {
+			return nil, err
+		}
+		if parent.Host != host || !strings.EqualFold(parent.Project, project) {
+			return nil, errors.New("branch's parent does not belong to --project")
+		}
+	}
+	core, err := newProjectTrailCoreClient()
+	if err != nil {
+		return nil, renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", fmt.Errorf("project control plane: %w", err))
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), requiredCellResolveTimeout)
+	defer cancel()
+	target, err := openProjectTrailTarget(ctx, core, parent, trailInsecureHTTP(cmd))
+	if err != nil {
+		return nil, renderDataAPIAuthError(cmd.Context(), cmd.ErrOrStderr(), "", err)
+	}
+	return target, nil
+}
+
+// label names the trail for people: its project number when the resolution
+// path learned it, otherwise the ULID the caller gave.
+func (t *projectTrailTarget) label() string {
+	if t.Number > 0 {
+		return "trail #" + strconv.Itoa(t.Number)
+	}
+	return "trail " + t.TrailID
+}
+
+func (t *projectTrailTarget) path() string { return t.BasePath + "/" + url.PathEscape(t.TrailID) }
+
+func (t *projectTrailTarget) read(ctx context.Context) (api.ProjectTrail, string, error) {
+	var out api.ProjectTrail
+	etag, err := t.Client.ProjectTrailRequest(ctx, http.MethodGet, t.path(), nil, nil, &out)
+	if err != nil {
+		return out, "", fmt.Errorf("read project trail: %w", err)
+	}
+	if err := t.validateResponse(out); err != nil {
+		return out, "", err
+	}
+	return out, etag, nil
+}
+
+func (t *projectTrailTarget) validateResponse(out api.ProjectTrail) error {
+	if !looksLikeULID(out.ID) || out.ProjectID != t.ProjectID || (t.TrailID != "" && out.ID != t.TrailID) {
+		return errors.New("project trail response identity does not match the request")
+	}
+	return nil
+}

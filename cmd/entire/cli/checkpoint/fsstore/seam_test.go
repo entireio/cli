@@ -20,7 +20,7 @@ import (
 
 // TestSeam_GitPrimaryWithFsMirror exercises the full pluggable seam: a git
 // primary with the fsstore as a configured mirror, driven through
-// checkpoint.Open. It writes all five WriteRequest variants and asserts each
+// checkpoint.Open. It writes all four WriteRequest variants and asserts each
 // lands in BOTH backends, while reads resolve from the git primary.
 //
 // Not parallel: uses t.Chdir so settings + ref resolution target the test repo.
@@ -70,11 +70,6 @@ func TestSeam_GitPrimaryWithFsMirror(t *testing.T) {
 	require.NoError(t, stores.Persistent.Write(ctx, cp.SessionSummary{
 		CheckpointID: cid, Summary: &cp.Summary{Intent: "intent-x", Outcome: "outcome-y"},
 	}))
-	// 5. CheckpointAttribution: set combined attribution.
-	require.NoError(t, stores.Persistent.Write(ctx, cp.CheckpointAttribution{
-		CheckpointID: cid, Attribution: &cp.Attribution{AgentLines: 7, AgentPercentage: 70},
-	}))
-
 	// Reads resolve from the git primary.
 	t.Run("git primary", func(t *testing.T) {
 		assertAllVariants(t, stores.Persistent, cid, reservedCID)
@@ -87,7 +82,7 @@ func TestSeam_GitPrimaryWithFsMirror(t *testing.T) {
 	})
 }
 
-// assertAllVariants verifies that all five writes are visible in a backend.
+// assertAllVariants verifies that all four writes are visible in a backend.
 func assertAllVariants(t *testing.T, store cp.PersistentStore, cid, reservedCID id.CheckpointID) {
 	t.Helper()
 	ctx := context.Background()
@@ -107,10 +102,6 @@ func assertAllVariants(t *testing.T, store cp.PersistentStore, cid, reservedCID 
 	require.NoError(t, err)
 	require.NotNil(t, meta.Summary)
 	assert.Equal(t, "intent-x", meta.Summary.Intent)
-
-	// CheckpointAttribution landed.
-	require.NotNil(t, summary.CombinedAttribution)
-	assert.Equal(t, 7, summary.CombinedAttribution.AgentLines)
 
 	reservedContent, err := store.ReadSessionContent(ctx, reservedCID, 0)
 	require.NoError(t, err)

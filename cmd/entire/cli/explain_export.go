@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -49,6 +50,10 @@ type explainExportOptions struct {
 	transcript     bool
 	rawTranscript  bool
 	sessionIndex   int
+	// task selects a subagent task record (tool_use_id or agent_id) whose
+	// transcript --transcript streams instead of a session's. Cobra-layer
+	// validation guarantees it only arrives with transcript set.
+	task string
 	// listLimit caps the JSON list view at N entries. 0 means use the
 	// default (branchCheckpointsLimit). Only consulted in list mode.
 	listLimit int
@@ -367,6 +372,9 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 	defer lookup.Close()
 
 	store := lookup.store
+	if opts.task != "" {
+		return streamTaskTranscript(ctx, w, store, cpID, opts.task)
+	}
 	summary, err := checkpoint.ReadCheckpoint(ctx, store, cpID)
 	if err != nil {
 		return fmt.Errorf("failed to read checkpoint: %w", err)
@@ -386,15 +394,83 @@ func runExplainStreamTranscript(ctx context.Context, w, errW io.Writer, opts exp
 	return nil
 }
 
+// streamTaskTranscript writes the stored transcript of the subagent task record
+// that selector names (its tool_use_id or agent_id) to w.
+//
+// An exact tool_use_id is tried first: it names one record even when another
+// record's agent_id happens to equal it, and it reads one task.json instead
+// of every record's (each a network round trip after a filtered fetch). Only
+// when no record has that tool_use_id are the records listed to match it as
+// an agent_id.
+func streamTaskTranscript(ctx context.Context, w io.Writer, reader checkpoint.TaskReader, cpID id.CheckpointID, selector string) error {
+	transcript, err := reader.ReadTaskTranscript(ctx, cpID, selector)
+	if errors.Is(err, checkpoint.ErrTaskNotFound) {
+		entries, listErr := reader.ListTasks(ctx, cpID)
+		if listErr != nil {
+			return fmt.Errorf("failed to list subagent tasks for checkpoint %s: %w", cpID, listErr)
+		}
+		toolUseID, matchErr := matchTaskAgentID(entries, cpID, selector)
+		if matchErr != nil {
+			return matchErr
+		}
+		transcript, err = reader.ReadTaskTranscript(ctx, cpID, toolUseID)
+		selector = toolUseID
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read subagent transcript for task %s in checkpoint %s: %w", selector, cpID, err)
+	}
+	if _, err := w.Write(transcript); err != nil {
+		return fmt.Errorf("failed to write transcript: %w", err)
+	}
+	return nil
+}
+
+// matchTaskAgentID resolves a --task selector that is no record's tool_use_id
+// to the one record whose agent_id it is. An agent_id can name several records
+// (a resumed subagent keeps its ID across Task calls), and streaming an
+// arbitrary one of them would be wrong, so that is an error.
+func matchTaskAgentID(entries []checkpoint.TaskEntry, cpID id.CheckpointID, selector string) (string, error) {
+	var matches []string
+	for _, entry := range entries {
+		if entry.Err == nil && entry.Record.AgentID == selector {
+			matches = append(matches, entry.ToolUseID)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		if len(entries) == 0 {
+			return "", fmt.Errorf("checkpoint %s has no subagent task records (--task %s)", cpID, selector)
+		}
+		available := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			if entry.Err == nil && entry.Record.AgentID != "" {
+				available = append(available, fmt.Sprintf("%s (agent %s)", entry.ToolUseID, entry.Record.AgentID))
+				continue
+			}
+			available = append(available, entry.ToolUseID)
+		}
+		return "", fmt.Errorf("no subagent task %q in checkpoint %s; available: %s", selector, cpID, strings.Join(available, ", "))
+	default:
+		return "", fmt.Errorf("--task %q is ambiguous in checkpoint %s: it matches %d task records (%s); pass a tool_use_id", selector, cpID, len(matches), strings.Join(matches, ", "))
+	}
+}
+
 // checkpointExportJSON is the metadata-only envelope returned by
 // `entire checkpoint explain --json`. It exposes only existing CheckpointSummary
 // and Metadata fields — no schema invention, no transcript bytes.
 //
-// `partial` is true when any session metadata read failed; the offending
-// entries surface their cause via Sessions[].error. Consumers that don't
-// want to inspect every entry can branch on this single top-level flag.
-// The command also exits non-zero in that case so automation doesn't
-// mistake incomplete data for a clean export.
+// `partial` is true when any session metadata read or subagent task record
+// read failed; the offending entries surface their cause via
+// Sessions[].error / Tasks[].error (or tasks_error when the task list itself
+// was unreadable). Consumers that don't want to inspect every entry can
+// branch on this single top-level flag. The command also exits non-zero in
+// that case so automation doesn't mistake incomplete data for a clean export.
+//
+// `tasks` is always an array (empty when the checkpoint has no subagent task
+// records) except when the checkpoint source cannot carry task records at all
+// (--repo, read over the Entire API), where the key is omitted.
 type checkpointExportJSON struct {
 	CheckpointID     string                  `json:"checkpoint_id"`
 	Strategy         string                  `json:"strategy,omitempty"`
@@ -405,7 +481,38 @@ type checkpointExportJSON struct {
 	HasInvestigation bool                    `json:"has_investigation,omitempty"`
 	SessionCount     int                     `json:"session_count"`
 	Sessions         []checkpointSessionJSON `json:"sessions"`
+	Tasks            []checkpointTaskJSON    `json:"tasks,omitzero"`
+	TasksError       string                  `json:"tasks_error,omitempty"`
 	Partial          bool                    `json:"partial,omitempty"`
+}
+
+// checkpointTaskJSON is one subagent task record (tasks/<tool_use_id>/) in
+// the --json envelope. Metadata only: the transcript streams through
+// `--transcript --task <tool_use_id>`, never through the envelope.
+type checkpointTaskJSON struct {
+	ToolUseID       string            `json:"tool_use_id"`
+	AgentID         string            `json:"agent_id,omitempty"`
+	SubagentType    string            `json:"subagent_type,omitempty"`
+	TaskDescription string            `json:"task_description,omitempty"`
+	StartedAt       *time.Time        `json:"started_at,omitempty"`
+	CompletedAt     *time.Time        `json:"completed_at,omitempty"`
+	Files           []string          `json:"files,omitempty"`
+	TokenUsage      *types.TokenUsage `json:"token_usage,omitempty"`
+	// TranscriptStored is a pointer so an unreadable record (Error set)
+	// carries no field that looks like real data.
+	TranscriptStored            *bool  `json:"transcript_stored,omitempty"`
+	TranscriptUnavailableReason string `json:"transcript_unavailable_reason,omitempty"`
+
+	// Error is set when this task record could not be read; only ToolUseID
+	// is meaningful alongside it.
+	Error string `json:"error,omitempty"`
+}
+
+// checkpointExportReader is what the single-checkpoint JSON envelope reads:
+// per-session metadata plus the subagent task records.
+type checkpointExportReader interface {
+	checkpoint.SessionReader
+	checkpoint.TaskReader
 }
 
 type checkpointSessionJSON struct {
@@ -420,7 +527,7 @@ type checkpointSessionJSON struct {
 	IsTask       bool                      `json:"is_task,omitempty"`
 	ToolUseID    string                    `json:"tool_use_id,omitempty"`
 	FilesTouched []string                  `json:"files_touched,omitempty"`
-	TokenUsage   *checkpointSessionTokens  `json:"token_usage,omitempty"`
+	TokenUsage   *types.TokenUsage         `json:"token_usage,omitempty"`
 	Summary      *checkpointSessionSummary `json:"summary,omitempty"`
 
 	// Investigation tagging — set only on sessions whose Kind is an
@@ -432,13 +539,6 @@ type checkpointSessionJSON struct {
 	// field remains valid; all other content fields are zero. Consumers can
 	// detect this by checking for a non-empty Error.
 	Error string `json:"error,omitempty"`
-}
-
-type checkpointSessionTokens struct {
-	InputTokens         int `json:"input_tokens"`
-	OutputTokens        int `json:"output_tokens"`
-	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 }
 
 type checkpointSessionSummary struct {
@@ -479,30 +579,57 @@ func runExplainCheckpointJSON(ctx context.Context, w, errW io.Writer, opts expla
 	}
 	envelope, failedSessions := buildCheckpointJSONEnvelope(ctx, store, summary, cpID)
 
+	return writeCheckpointJSONEnvelope(w, errW, cpID, envelope, failedSessions)
+}
+
+// writeCheckpointJSONEnvelope encodes the envelope to w and, when it is
+// partial, reports what was unreadable on errW and returns a SilentError.
+// Shared by the local and --repo paths so both fail the same way.
+func writeCheckpointJSONEnvelope(w, errW io.Writer, cpID id.CheckpointID, envelope checkpointExportJSON, failedSessions []int) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(envelope); err != nil {
 		return fmt.Errorf("failed to encode checkpoint json: %w", err)
 	}
+	if !envelope.Partial {
+		return nil
+	}
 
 	// Fail hard so automation can't mistake incomplete metadata for a clean
-	// export. The envelope (with its `partial` flag and per-session error
+	// export. The envelope (with its `partial` flag and per-entry error
 	// fields) has already been written to stdout; using SilentError keeps
 	// the diagnostic on stderr from interleaving with that output.
-	if envelope.Partial {
+	var problems []string
+	if len(failedSessions) > 0 {
 		fmt.Fprintf(errW, "checkpoint %s: failed to read metadata for %d session(s) (indexes %v)\n",
 			cpID, len(failedSessions), failedSessions)
-		return NewSilentError(fmt.Errorf("checkpoint %s export incomplete: %d session(s) unreadable", cpID, len(failedSessions)))
+		problems = append(problems, fmt.Sprintf("%d session(s) unreadable", len(failedSessions)))
 	}
-	return nil
+	if envelope.TasksError != "" {
+		fmt.Fprintf(errW, "checkpoint %s: failed to list subagent task records: %s\n", cpID, envelope.TasksError)
+		problems = append(problems, "task records unreadable")
+	}
+	var failedTasks []string
+	for _, task := range envelope.Tasks {
+		if task.Error != "" {
+			failedTasks = append(failedTasks, task.ToolUseID)
+		}
+	}
+	if len(failedTasks) > 0 {
+		fmt.Fprintf(errW, "checkpoint %s: failed to read %d subagent task record(s) (%s)\n",
+			cpID, len(failedTasks), strings.Join(failedTasks, ", "))
+		problems = append(problems, fmt.Sprintf("%d task record(s) unreadable", len(failedTasks)))
+	}
+	return NewSilentError(fmt.Errorf("checkpoint %s export incomplete: %s", cpID, strings.Join(problems, ", ")))
 }
 
 // buildCheckpointJSONEnvelope builds the JSON envelope for a single checkpoint,
-// reading each session's metadata via the supplied reader. Returns the envelope
-// plus the list of session indexes that failed to read; a non-empty failed
-// list means envelope.Partial is true. Extracted from runExplainCheckpointJSON so
-// the envelope-building behavior can be tested independently of git storage.
-func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.SessionReader, summary *checkpoint.CheckpointSummary, cpID id.CheckpointID) (checkpointExportJSON, []int) {
+// reading each session's metadata and the subagent task records via the
+// supplied reader. Returns the envelope plus the list of session indexes that
+// failed to read; envelope.Partial is true when that list is non-empty or any
+// task record failed to read. Extracted from runExplainCheckpointJSON so the
+// envelope-building behavior can be tested independently of git storage.
+func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpointExportReader, summary *checkpoint.CheckpointSummary, cpID id.CheckpointID) (checkpointExportJSON, []int) {
 	envelope := checkpointExportJSON{
 		CheckpointID:     cpID.String(),
 		Strategy:         summary.Strategy,
@@ -532,8 +659,61 @@ func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpoint.SessionR
 		}
 		envelope.Sessions = append(envelope.Sessions, sessionMetadataToJSON(idx, meta))
 	}
-	envelope.Partial = len(failedSessions) > 0
+	tasksPartial := addTasksToEnvelope(ctx, reader, cpID, &envelope)
+	envelope.Partial = len(failedSessions) > 0 || tasksPartial
 	return envelope, failedSessions
+}
+
+// addTasksToEnvelope fills envelope.Tasks from the checkpoint's subagent task
+// records and reports whether any read failed. A source that cannot carry
+// task records leaves Tasks nil, which omits the key rather than claiming
+// the checkpoint had no subagents.
+func addTasksToEnvelope(ctx context.Context, reader checkpoint.TaskReader, cpID id.CheckpointID, envelope *checkpointExportJSON) bool {
+	entries, err := reader.ListTasks(ctx, cpID)
+	if errors.Is(err, checkpoint.ErrTaskRecordsUnsupported) {
+		return false
+	}
+	if err != nil {
+		envelope.TasksError = err.Error()
+		return true
+	}
+	envelope.Tasks = make([]checkpointTaskJSON, 0, len(entries))
+	failed := false
+	for _, entry := range entries {
+		if entry.Err != nil {
+			envelope.Tasks = append(envelope.Tasks, checkpointTaskJSON{ToolUseID: entry.ToolUseID, Error: entry.Err.Error()})
+			failed = true
+			continue
+		}
+		envelope.Tasks = append(envelope.Tasks, taskEntryToJSON(entry))
+	}
+	return failed
+}
+
+func taskEntryToJSON(entry checkpoint.TaskEntry) checkpointTaskJSON {
+	rec := entry.Record
+	stored := entry.TranscriptStored
+	out := checkpointTaskJSON{
+		ToolUseID:                   entry.ToolUseID,
+		AgentID:                     rec.AgentID,
+		SubagentType:                rec.SubagentType,
+		TaskDescription:             rec.TaskDescription,
+		Files:                       rec.Files,
+		TokenUsage:                  boundedTokenUsage(rec.TokenUsage),
+		TranscriptStored:            &stored,
+		TranscriptUnavailableReason: rec.TranscriptUnavailableReason,
+	}
+	if !rec.StartedAt.IsZero() {
+		ts := rec.StartedAt
+		out.StartedAt = &ts
+	}
+	// A zero CompletedAt marks a task still in flight when the checkpoint was
+	// written; omitting it keeps that distinguishable from a real time.
+	if !rec.CompletedAt.IsZero() {
+		ts := rec.CompletedAt
+		out.CompletedAt = &ts
+	}
+	return out
 }
 
 // readSessionMetadataForExport reads only metadata.json for a session — no
@@ -566,18 +746,22 @@ func sessionMetadataToJSON(idx int, meta *checkpoint.Metadata) checkpointSession
 		ts := meta.CreatedAt
 		out.CreatedAt = &ts
 	}
-	if meta.TokenUsage != nil {
-		out.TokenUsage = &checkpointSessionTokens{
-			InputTokens:         meta.TokenUsage.InputTokens,
-			OutputTokens:        meta.TokenUsage.OutputTokens,
-			CacheReadTokens:     meta.TokenUsage.CacheReadTokens,
-			CacheCreationTokens: meta.TokenUsage.CacheCreationTokens,
-		}
-	}
+	// The persisted shape, subagent totals and completeness marker included,
+	// with the subagent chain bounded (see boundedTokenUsage).
+	out.TokenUsage = boundedTokenUsage(meta.TokenUsage)
 	if meta.Summary != nil {
 		out.Summary = summaryToExportJSON(meta.Summary)
 	}
 	return out
+}
+
+// boundedTokenUsage copies usage with its subagent_tokens chain truncated at
+// types.MaxSubagentDepth. The usage comes from pushed metadata.json/task.json
+// blobs, and indented JSON grows quadratically with chain depth, so a small
+// hostile record could otherwise expand into hundreds of MB of output.
+// AddTokenUsage with a nil operand is the existing depth-capped copy.
+func boundedTokenUsage(usage *types.TokenUsage) *types.TokenUsage {
+	return types.AddTokenUsage(usage, nil)
 }
 
 // summaryToExportJSON projects the full persisted summary onto the export

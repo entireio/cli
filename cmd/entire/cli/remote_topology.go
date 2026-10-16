@@ -228,11 +228,12 @@ func (t remoteTopology) hasPinnedDestination() bool {
 func (t remoteTopology) describeSyncDisabled(w io.Writer, header string) {
 	fmt.Fprintln(w, header)
 
-	var misconfigured *strategy.CheckpointPushRemoteNotConfiguredError
+	var misconfigured *strategy.CheckpointPushRemoteNotFetchableError
 	if errors.As(t.electionErr, &misconfigured) {
-		fmt.Fprintf(w, "  checkpoint_push_remote names %q, which is not one of this repo's remotes,\n",
+		fmt.Fprintf(w, "  checkpoint_push_remote names %q, which has no fetch URL in this repo,\n",
 			misconfigured.Remote)
-		fmt.Fprintln(w, "  so nothing is elected to carry checkpoints.")
+		fmt.Fprintln(w, "  so nothing is elected to carry checkpoints. A push-only remote counts as")
+		fmt.Fprintln(w, "  missing here: reads and reconciliation need a fetch URL.")
 	} else {
 		fmt.Fprintf(w, "  %s.\n", t.electionErr)
 	}
@@ -250,7 +251,7 @@ func (t remoteTopology) describeSyncDisabled(w io.Writer, header string) {
 		return
 	}
 	fmt.Fprintln(w, "  Fix: remove strategy_options.checkpoint_push_remote to let Entire elect one,")
-	fmt.Fprintln(w, "  or point it at a remote this repo actually has.")
+	fmt.Fprintln(w, "  or point it at a remote that has a fetch URL.")
 	fmt.Fprintln(w, "  A remote name is a per-clone fact: prefer .entire/settings.local.json, since a")
 	fmt.Fprintln(w, "  committed one disables checkpoint sync in every clone that lacks that name.")
 }

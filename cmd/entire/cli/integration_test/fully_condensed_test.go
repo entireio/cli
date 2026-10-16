@@ -71,7 +71,7 @@ func TestFullyCondensed_ReactivationClearsFlag(t *testing.T) {
 
 	// Commit the work — PostCommit condenses the ENDED session with files touched,
 	// all files are committed so no carry-forward remains → FullyCondensed = true
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 
 	// Verify ENDED with FullyCondensed
 	state, err = env.GetSessionState(sess.ID)

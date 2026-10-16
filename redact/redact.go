@@ -66,6 +66,24 @@ var (
 // and tokens which tend to have entropy well above 5.0.
 const entropyThreshold = 4.5
 
+// claudeToolUseIDPattern is the exact shape of a Claude Code tool-use id:
+// "toolu_01" plus 22 base62 characters. Such ids score just above
+// entropyThreshold and appear in free text (e.g. <tool-use-id> in task
+// notifications), where the "*id" JSON-key skip cannot protect them.
+//
+// Anchored and fixed-length on purpose: secretPattern's class includes '_' and
+// '-', so a secret glued onto an id forms one longer match, and that longer
+// match must stay subject to the entropy check. A prefix rule would let it
+// through.
+var claudeToolUseIDPattern = regexp.MustCompile(`^toolu_01[A-Za-z0-9]{22}$`)
+
+// isClaudeToolUseID reports whether an entropy-layer match is, in its
+// entirety, a Claude Code tool-use id. It exempts the match from the entropy
+// layer only; every other layer still scans it.
+func isClaudeToolUseID(match string) bool {
+	return len(match) == 30 && claudeToolUseIDPattern.MatchString(match)
+}
+
 // RedactedPlaceholder is the replacement text used for redacted secrets.
 const RedactedPlaceholder = "REDACTED"
 
@@ -208,6 +226,9 @@ func detectAllLayers(s string) []taggedRegion {
 			}
 		}
 
+		if isClaudeToolUseID(s[start:end]) {
+			continue
+		}
 		if shannonEntropy(s[start:end]) > entropyThreshold {
 			regions = append(regions, taggedRegion{region: region{start, end}})
 		}

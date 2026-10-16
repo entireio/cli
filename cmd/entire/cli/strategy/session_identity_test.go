@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -401,8 +401,8 @@ func TestIsSessionHomeWorktree_RejectsUnknownPaths(t *testing.T) {
 
 // Guest-linked sessions (identity-matched from a worktree other than their
 // home) must never have worktree-coupled state advanced by the foreign
-// commit: BaseCommit keys the shadow branch, and rewriting it from another
-// worktree orphans that branch and breaks the session's next home commit.
+// commit: BaseCommit tracks the home worktree's HEAD, and rewriting it from
+// another worktree breaks the session's next home commit.
 // The inverse matters just as much — a session committed in its OWN worktree
 // must keep advancing, or BaseCommit tracking silently freezes for everyone.
 //
@@ -434,11 +434,11 @@ func TestUpdateBaseCommitIfChanged_GuestWorktreeGating(t *testing.T) {
 }
 
 // A guest condensation may advance transcript bookkeeping, but it must not
-// consume or unpin the home worktree's pending shadow state. The home branch
-// still contains uncommitted files that must survive until a home commit.
+// consume the home worktree's pending state. The home worktree still holds
+// uncommitted files that must survive until a home commit.
 //
 // Not parallel: uses t.Chdir().
-func TestPostCommit_GuestCondensationPreservesHomeShadowState(t *testing.T) {
+func TestPostCommit_GuestCondensationPreservesHomePendingState(t *testing.T) {
 	ctx := context.Background()
 	homeDir := setupGitRepo(t)
 	t.Chdir(homeDir)
@@ -448,7 +448,7 @@ func TestPostCommit_GuestCondensationPreservesHomeShadowState(t *testing.T) {
 	t.Cleanup(func() { _ = homeRepo.Close() })
 
 	s := NewManualCommitStrategy()
-	sessionID := "sess-guest-shadow"
+	sessionID := "sess-guest-pending"
 	setupSessionWithCheckpoint(t, s, homeRepo, homeDir, sessionID)
 
 	state, err := s.loadSessionState(ctx, sessionID)
@@ -461,9 +461,8 @@ func TestPostCommit_GuestCondensationPreservesHomeShadowState(t *testing.T) {
 	baseCommitBefore := state.BaseCommit
 	stepCountBefore := state.StepCount
 	filesTouchedBefore := append([]string(nil), state.FilesTouched...)
-	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	shadowRefBefore, err := homeRepo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
-	require.NoError(t, err)
+	hashesBefore := maps.Clone(state.TouchedFileHashes)
+	require.NotEmpty(t, hashesBefore, "sanity: the home turn-end step recorded hashes")
 
 	guestDir := addSiblingWorktree(t, homeDir, "guest-condense")
 	t.Chdir(guestDir)
@@ -477,12 +476,9 @@ func TestPostCommit_GuestCondensationPreservesHomeShadowState(t *testing.T) {
 	state, err = guestStrategy.loadSessionState(ctx, sessionID)
 	require.NoError(t, err)
 	assert.Equal(t, baseCommitBefore, state.BaseCommit, "guest commit must not advance the home worktree base")
-	assert.Equal(t, stepCountBefore, state.StepCount, "guest condensation must keep the home shadow branch pinned")
+	assert.Equal(t, stepCountBefore, state.StepCount, "guest condensation must keep the home session pending")
 	assert.Equal(t, filesTouchedBefore, state.FilesTouched, "guest condensation must preserve home pending files")
-
-	shadowRefAfter, err := homeRepo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
-	require.NoError(t, err)
-	assert.Equal(t, shadowRefBefore.Hash(), shadowRefAfter.Hash(), "home shadow ref must remain byte-identical")
+	assert.Equal(t, hashesBefore, state.TouchedFileHashes, "guest condensation must preserve the home worktree's recorded hashes")
 }
 
 // Not parallel: uses t.Chdir()

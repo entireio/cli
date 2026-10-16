@@ -47,17 +47,21 @@ const (
 var errTrailReviewDefaultTargetNotFound = errors.New("default trail finding target not found")
 
 type trailReviewListOptions struct {
-	Status           string
-	StatusChanged    bool
-	Severity         string
-	Freshness        string
-	IncludeDismissed bool
-	Limit            int
-	Offset           int
-	JSON             bool
+	Status                  string
+	StatusChanged           bool
+	Severity                string
+	Freshness               string
+	IncludeDismissed        bool
+	Limit                   int
+	Cursor                  string
+	SeverityChanged         bool
+	FreshnessChanged        bool
+	IncludeDismissedChanged bool
+	JSON                    bool
 }
 
 type trailReviewTargetOptions struct {
+	Mode     *trailMode
 	Selector string
 	Branch   string
 }
@@ -69,31 +73,36 @@ type trailReviewTarget struct {
 	Trail api.TrailResource
 }
 
-func newTrailFindingCmd() *cobra.Command {
+func newTrailFindingCmd(mode *trailMode) *cobra.Command {
 	opts := defaultTrailReviewListOptions()
-	targetOpts := trailReviewTargetOptions{}
+	targetOpts := trailReviewTargetOptions{Mode: mode}
 
 	cmd := &cobra.Command{
 		Use:   "finding [<trail>]",
 		Short: "Manage a trail's agent findings",
-		Long: `Manage a trail's agent-native findings.
-
-Running 'entire trail finding' shows the finding dashboard for the current
+		Long: "Manage a trail's agent-native findings.\n\n" + mode.help(`Running 'entire trail finding' shows the finding dashboard for the current
 branch's trail. Pass a trail selector (number, id, or branch) to inspect another
 trail in the same repo. Use 'entire trail list --status any' when you need to
-discover a trail selector first.`,
+discover a trail selector first.`, `Running 'entire trail finding' shows the finding dashboard for the current
+branch's trail. Pass a project trail number, ID, or <repo>/<number> to inspect another trail.
+--repo and --branch select the working context; findings apply only to that
+branch, not the whole trail. Use 'entire trail list' to discover trails.`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			selector, err := parseOptionalTrailSelector(args, targetOpts.Selector)
 			if err != nil {
 				return err
 			}
-			opts.StatusChanged = cmd.Flags().Changed("status")
-			return runTrailReviewDashboard(cmd, selector, opts)
+			readTrailReviewListFlagChanges(cmd, &opts)
+			return runTrailReviewDashboard(cmd, targetOpts.Mode, selector, opts)
 		},
 	}
-	cmd.PersistentFlags().StringVar(&targetOpts.Selector, "trail", "", "Trail selector (number, id, or branch); defaults to the current branch's trail")
-	cmd.PersistentFlags().StringVar(&targetOpts.Branch, "branch", "", "Resolve the trail for this branch instead of the current branch; cannot be combined with a trail selector")
+	cmd.PersistentFlags().StringVar(&targetOpts.Selector, "trail", "", mode.help(
+		"Trail selector (number, id, or branch); defaults to the current branch's trail",
+		"Project trail number, ID, or <repo>/<number> (defaults to the current branch's parent)"))
+	cmd.PersistentFlags().StringVar(&targetOpts.Branch, "branch", "", mode.help(
+		"Resolve the trail for this branch instead of the current branch; cannot be combined with a trail selector",
+		"Select a repository branch within the trail"))
 	addTrailReviewListFlags(cmd, &opts)
 
 	cmd.AddCommand(newTrailFindingListCmd(&targetOpts))
@@ -122,8 +131,15 @@ func addTrailReviewListFlags(cmd *cobra.Command, opts *trailReviewListOptions) {
 	cmd.Flags().StringVar(&opts.Freshness, "freshness", opts.Freshness, "Filter code-version freshness: current,stale,any")
 	cmd.Flags().BoolVar(&opts.IncludeDismissed, "include-dismissed", false, "Include dismissed findings")
 	cmd.Flags().IntVarP(&opts.Limit, "limit", "n", opts.Limit, "Maximum number of findings to show")
-	cmd.Flags().IntVar(&opts.Offset, "offset", 0, "Pagination offset")
+	cmd.Flags().StringVar(&opts.Cursor, "cursor", "", "Continue from the next cursor returned by a previous page")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output as JSON")
+}
+
+func readTrailReviewListFlagChanges(cmd *cobra.Command, opts *trailReviewListOptions) {
+	opts.StatusChanged = cmd.Flags().Changed("status")
+	opts.SeverityChanged = cmd.Flags().Changed("severity")
+	opts.FreshnessChanged = cmd.Flags().Changed("freshness")
+	opts.IncludeDismissedChanged = cmd.Flags().Changed("include-dismissed")
 }
 
 func newTrailFindingListCmd(targetOpts *trailReviewTargetOptions) *cobra.Command {
@@ -137,8 +153,8 @@ func newTrailFindingListCmd(targetOpts *trailReviewTargetOptions) *cobra.Command
 			if err != nil {
 				return err
 			}
-			opts.StatusChanged = cmd.Flags().Changed("status")
-			return runTrailReviewComments(cmd, selector, opts)
+			readTrailReviewListFlagChanges(cmd, &opts)
+			return runTrailReviewComments(cmd, targetOpts.Mode, selector, opts)
 		},
 	}
 	addTrailReviewListFlags(cmd, &opts)
@@ -171,7 +187,7 @@ func newTrailFindingAddCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 			if err != nil {
 				return err
 			}
-			return runTrailReviewCommentAdd(cmd, selector, opts)
+			return runTrailReviewCommentAdd(cmd, targetOpts.Mode, selector, opts)
 		},
 	}
 	cmd.Flags().StringVarP(&opts.Body, "body", "m", "", "Finding body")
@@ -199,7 +215,7 @@ func newTrailReviewShowCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 			if err != nil {
 				return err
 			}
-			return runTrailReviewShow(cmd, selector, commentID)
+			return runTrailReviewShow(cmd, targetOpts.Mode, selector, commentID)
 		},
 	}
 	return cmd
@@ -229,7 +245,7 @@ func newTrailReviewUpdateCmd(targetOpts *trailReviewTargetOptions) *cobra.Comman
 			opts.BodyChanged = cmd.Flags().Changed("body")
 			opts.SeverityChanged = cmd.Flags().Changed("severity")
 			opts.ConfidenceChanged = cmd.Flags().Changed("confidence")
-			return runTrailReviewUpdate(cmd, selector, commentID, opts)
+			return runTrailReviewUpdate(cmd, targetOpts.Mode, selector, commentID, opts)
 		},
 	}
 	cmd.Flags().StringVarP(&opts.Body, "body", "m", "", "Finding body")
@@ -262,7 +278,7 @@ lifecycle status after the patch applies successfully.`,
 			if err != nil {
 				return err
 			}
-			return runTrailReviewApply(cmd, selector, commentID, opts)
+			return runTrailReviewApply(cmd, targetOpts.Mode, selector, commentID, opts)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Resolve, "resolve", false, "Mark the finding resolved after applying")
@@ -281,20 +297,20 @@ func newTrailReviewStatusCmd(targetOpts *trailReviewTargetOptions, use, status, 
 			if err != nil {
 				return err
 			}
-			return runTrailReviewSetStatus(cmd, selector, commentID, status, message)
+			return runTrailReviewSetStatus(cmd, targetOpts.Mode, selector, commentID, status, message)
 		},
 	}
 	cmd.Flags().StringVarP(&message, "message", "m", "", "Status reason to record")
 	return cmd
 }
 
-func runTrailReviewDashboard(cmd *cobra.Command, selector string, opts trailReviewListOptions) error {
+func runTrailReviewDashboard(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewListOptions) error {
 	var err error
 	opts, err = normalizeTrailReviewListOptions(opts)
 	if err != nil {
 		return err
 	}
-	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		if strings.TrimSpace(selector) == "" && errors.Is(err, errTrailReviewDefaultTargetNotFound) {
 			fmt.Fprintln(cmd.OutOrStdout(), "No trail found for the current branch; showing trails in this repo.")
@@ -303,7 +319,7 @@ func runTrailReviewDashboard(cmd *cobra.Command, selector string, opts trailRevi
 		}
 		return err
 	}
-	comments, hasMore, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, opts)
+	comments, nextCursor, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, opts)
 	if err != nil {
 		return err
 	}
@@ -313,35 +329,35 @@ func runTrailReviewDashboard(cmd *cobra.Command, selector string, opts trailRevi
 	}
 	counts := countTrailReviewComments(summaryComments)
 	if opts.JSON {
-		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, hasMore, counts)
+		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, counts)
 	}
-	printTrailReviewDashboard(cmd.OutOrStdout(), target, comments, hasMore, opts, counts)
+	printTrailReviewDashboard(cmd.OutOrStdout(), target, comments, nextCursor, opts, counts)
 	return nil
 }
 
-func runTrailReviewComments(cmd *cobra.Command, selector string, opts trailReviewListOptions) error {
+func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewListOptions) error {
 	var err error
 	opts, err = normalizeTrailReviewListOptions(opts)
 	if err != nil {
 		return err
 	}
-	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
-	comments, hasMore, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, opts)
+	comments, nextCursor, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, opts)
 	if err != nil {
 		return err
 	}
 	if opts.JSON {
-		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, hasMore, countTrailReviewComments(comments))
+		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, countTrailReviewComments(comments))
 	}
-	printTrailReviewComments(cmd.OutOrStdout(), comments, hasMore)
+	printTrailReviewComments(cmd.OutOrStdout(), comments, nextCursor)
 	return nil
 }
 
-func runTrailReviewCommentAdd(cmd *cobra.Command, selector string, opts trailReviewCommentAddOptions) error {
-	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+func runTrailReviewCommentAdd(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewCommentAddOptions) error {
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
@@ -367,7 +383,7 @@ func runTrailReviewCommentAdd(cmd *cobra.Command, selector string, opts trailRev
 	if opts.JSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(created); err != nil {
+		if err := enc.Encode(toTrailReviewCommentJSON(created)); err != nil {
 			return fmt.Errorf("encode created finding: %w", err)
 		}
 		return nil
@@ -376,8 +392,8 @@ func runTrailReviewCommentAdd(cmd *cobra.Command, selector string, opts trailRev
 	return nil
 }
 
-func runTrailReviewShow(cmd *cobra.Command, selector string, commentID string) error {
-	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+func runTrailReviewShow(cmd *cobra.Command, mode *trailMode, selector string, commentID string) error {
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
@@ -392,8 +408,8 @@ func runTrailReviewShow(cmd *cobra.Command, selector string, commentID string) e
 	return nil
 }
 
-func runTrailReviewUpdate(cmd *cobra.Command, selector string, commentID string, opts trailReviewUpdateOptions) error {
-	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+func runTrailReviewUpdate(cmd *cobra.Command, mode *trailMode, selector string, commentID string, opts trailReviewUpdateOptions) error {
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
@@ -412,7 +428,7 @@ func runTrailReviewUpdate(cmd *cobra.Command, selector string, commentID string,
 	if opts.JSON {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(updated); err != nil {
+		if err := enc.Encode(toTrailReviewCommentJSON(updated)); err != nil {
 			return fmt.Errorf("encode updated finding: %w", err)
 		}
 		return nil
@@ -421,8 +437,8 @@ func runTrailReviewUpdate(cmd *cobra.Command, selector string, commentID string,
 	return nil
 }
 
-func runTrailReviewApply(cmd *cobra.Command, selector string, commentID string, opts trailReviewApplyOptions) error {
-	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+func runTrailReviewApply(cmd *cobra.Command, mode *trailMode, selector string, commentID string, opts trailReviewApplyOptions) error {
+	client, target, err := mode.reviewTarget(cmd, selector, true)
 	if err != nil {
 		return err
 	}
@@ -456,8 +472,8 @@ func runTrailReviewApply(cmd *cobra.Command, selector string, commentID string, 
 	return nil
 }
 
-func runTrailReviewSetStatus(cmd *cobra.Command, selector string, commentID, status, message string) error {
-	client, target, err := authenticatedTrailReviewTarget(cmd, selector)
+func runTrailReviewSetStatus(cmd *cobra.Command, mode *trailMode, selector string, commentID, status, message string) error {
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
@@ -477,27 +493,14 @@ func runTrailReviewSetStatus(cmd *cobra.Command, selector string, commentID, sta
 	return nil
 }
 
-func authenticatedTrailReviewTarget(cmd *cobra.Command, selector string) (*api.Client, trailReviewTarget, error) {
-	repoOverride := trailRepoFlag(cmd)
-	branchOverride := trailBranchFlag(cmd)
-	if selector != "" && branchOverride != "" {
-		return nil, trailReviewTarget{}, errors.New("pass a trail selector or --branch, not both")
-	}
-	if repoOverride != "" && selector == "" && branchOverride == "" {
-		return nil, trailReviewTarget{}, errors.New("--repo requires an explicit target: pass a trail selector or --branch")
-	}
-	var target trailReviewTarget
-	var resolvedClient *api.Client
-	err := runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client, repoID string) error {
-		var err error
-		resolvedClient = client
-		target, err = resolveTrailReviewTarget(ctx, client, repoID, selector, repoOverride, branchOverride)
-		return err
-	})
+// projectTrailReviewTarget is projectTrailMode's finding/watch target: the
+// selected branch of a project trail.
+func projectTrailReviewTarget(cmd *cobra.Command, selector string, localOnly bool) (*api.Client, trailReviewTarget, error) {
+	selected, err := resolveProjectTrailWorkingContext(cmd, selector, trailBranchFlag(cmd), localOnly)
 	if err != nil {
 		return nil, trailReviewTarget{}, err
 	}
-	return resolvedClient, target, nil
+	return selected.Client, trailReviewTarget{Host: selected.Host, Owner: selected.Owner, Repo: selected.Repo, Trail: selected.Work}, nil
 }
 
 func resolveTrailReviewTarget(ctx context.Context, client *api.Client, repoID, selector, repoOverride, branchOverride string) (trailReviewTarget, error) {
@@ -551,9 +554,6 @@ func normalizeTrailReviewListOptions(opts trailReviewListOptions) (trailReviewLi
 	if opts.Limit <= 0 {
 		return opts, errors.New("limit must be greater than 0")
 	}
-	if opts.Offset < 0 {
-		return opts, errors.New("offset must be non-negative")
-	}
 	status, err := normalizeTrailReviewStatusFilter(opts.Status)
 	if err != nil {
 		return opts, err
@@ -577,7 +577,7 @@ func normalizeTrailReviewListOptions(opts trailReviewListOptions) (trailReviewLi
 	// `--include-dismissed` should do what it says for the common case: when the
 	// caller did not explicitly choose a status, do not keep the default open-only
 	// status filter that would still hide dismissed findings.
-	if opts.IncludeDismissed && !opts.StatusChanged && strings.TrimSpace(opts.Status) == trailReviewStatusOpen {
+	if opts.Cursor == "" && opts.IncludeDismissed && !opts.StatusChanged && strings.TrimSpace(opts.Status) == trailReviewStatusOpen {
 		opts.Status = trailReviewStatusAny
 	}
 	return opts, nil
@@ -618,25 +618,25 @@ func normalizeCommaSet(filter, name string, valid map[string]bool) (string, erro
 	return strings.Join(out, ","), nil
 }
 
-func fetchTrailReviewComments(ctx context.Context, client *api.Client, trailID string, opts trailReviewListOptions) ([]api.TrailReviewComment, bool, error) {
+func fetchTrailReviewComments(ctx context.Context, client *api.Client, trailID string, opts trailReviewListOptions) ([]api.TrailReviewComment, string, error) {
 	var err error
 	opts, err = normalizeTrailReviewListOptions(opts)
 	if err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 	resp, err := client.Get(ctx, trailReviewCommentsPath(trailID, opts))
 	if err != nil {
-		return nil, false, fmt.Errorf("list findings: %w", err)
+		return nil, "", fmt.Errorf("list findings: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 	var out api.TrailReviewCommentsResponse
 	if err := api.DecodeJSON(resp, &out); err != nil {
-		return nil, false, fmt.Errorf("decode findings: %w", err)
+		return nil, "", fmt.Errorf("decode findings: %w", err)
 	}
-	return out.Comments, out.HasMore, nil
+	return out.Comments, stringPtrValue(out.NextCursor), nil
 }
 
 func fetchAllTrailReviewComments(ctx context.Context, client *api.Client, trailID string, opts trailReviewListOptions) ([]api.TrailReviewComment, error) {
@@ -644,34 +644,26 @@ func fetchAllTrailReviewComments(ctx context.Context, client *api.Client, trailI
 		opts.Limit = defaultTrailReviewLimit
 	}
 	var all []api.TrailReviewComment
-	seenPages := make(map[string]bool)
+	seenCursors := map[string]bool{opts.Cursor: true}
 	for {
-		comments, hasMore, err := fetchTrailReviewComments(ctx, client, trailID, opts)
+		comments, nextCursor, err := fetchTrailReviewComments(ctx, client, trailID, opts)
 		if err != nil {
 			return nil, err
 		}
 		all = append(all, comments...)
-		if !hasMore {
+		if nextCursor == "" {
 			break
 		}
-		signature := trailReviewCommentPageSignature(comments)
-		if signature == "" {
-			return nil, errors.New("finding pagination returned hasMore with an empty page")
+		if seenCursors[nextCursor] {
+			return nil, fmt.Errorf("finding pagination repeated cursor %q", nextCursor)
 		}
-		if seenPages[signature] {
-			return nil, fmt.Errorf("finding pagination repeated page at offset %d", opts.Offset)
-		}
-		seenPages[signature] = true
-		opts.Offset += opts.Limit
+		seenCursors[nextCursor] = true
+		// Continuations carry only cursor+per_page: the opaque cursor holds the
+		// active filters (RFD-026 §8), the server restores them each page, and
+		// repeating them is at best redundant (a conflicting respelling is a 400).
+		opts = trailReviewListOptions{Limit: opts.Limit, Cursor: nextCursor}
 	}
 	return all, nil
-}
-
-func trailReviewCommentPageSignature(comments []api.TrailReviewComment) string {
-	if len(comments) == 0 {
-		return ""
-	}
-	return comments[0].ID + ":" + comments[len(comments)-1].ID
 }
 
 func trailReviewSummaryOptions() trailReviewListOptions {
@@ -684,28 +676,32 @@ func trailReviewSummaryOptions() trailReviewListOptions {
 }
 
 func trailReviewCommentsPath(trailID string, opts trailReviewListOptions) string {
-	// entire-api's review reads use include_dismissed plus limit/offset and
-	// return hasMore/nextOffset; they are not pageSize/pageToken.
 	q := url.Values{}
-	if opts.Status != "" && opts.Status != trailReviewStatusAny {
-		q.Set("status", opts.Status)
+	// A cursor restores the original filters server-side (RFD-026 §8), so
+	// continuations stay filtered without repeating them. Only repeat filters
+	// the user explicitly supplied so defaults cannot overwrite the cursor's
+	// scope.
+	status := opts.Status
+	if status == trailReviewStatusAny {
+		status = ""
 	}
-	if opts.Severity != "" {
-		q.Set("severity", opts.Severity)
+	if (opts.Cursor == "" && status != "") || opts.StatusChanged {
+		q.Set("status[eq]", status)
 	}
-	// Unlike status=any (which the API treats as no status filter), stale=any is
-	// semantically significant: omitting stale defaults to current-only server-side.
-	if opts.Freshness != "" {
+	if (opts.Cursor == "" && opts.Severity != "") || opts.SeverityChanged {
+		q.Set("severity[eq]", opts.Severity)
+	}
+	if (opts.Cursor == "" && opts.Freshness != "") || opts.FreshnessChanged {
 		q.Set("stale", opts.Freshness)
 	}
-	if opts.IncludeDismissed {
-		q.Set("include_dismissed", "true")
+	if (opts.Cursor == "" && opts.IncludeDismissed) || opts.IncludeDismissedChanged {
+		q.Set("include_dismissed", strconv.FormatBool(opts.IncludeDismissed))
 	}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		q.Set("per_page", strconv.Itoa(opts.Limit))
 	}
-	if opts.Offset > 0 {
-		q.Set("offset", strconv.Itoa(opts.Offset))
+	if opts.Cursor != "" {
+		q.Set("cursor", opts.Cursor)
 	}
 	path := trailReviewListCommentsPath(trailID)
 	if encoded := q.Encode(); encoded != "" {
@@ -1148,30 +1144,18 @@ func trailReviewListCommentsPath(trailID string) string {
 }
 
 func resolveTrailReviewComment(ctx context.Context, client *api.Client, trailID, commentID string) (api.TrailReviewComment, error) {
-	opts := trailReviewListOptions{
-		Status:           trailReviewStatusAny,
-		Freshness:        trailReviewFreshnessAny,
-		IncludeDismissed: true,
-		Limit:            defaultTrailReviewLimit,
+	comments, err := fetchAllTrailReviewComments(ctx, client, trailID, trailReviewSummaryOptions())
+	if err != nil {
+		return api.TrailReviewComment{}, err
 	}
 	var matches []api.TrailReviewComment
-	for {
-		comments, hasMore, err := fetchTrailReviewComments(ctx, client, trailID, opts)
-		if err != nil {
-			return api.TrailReviewComment{}, err
+	for _, comment := range comments {
+		if comment.ID == commentID {
+			return comment, nil
 		}
-		for _, comment := range comments {
-			if comment.ID == commentID {
-				return comment, nil
-			}
-			if strings.HasPrefix(comment.ID, commentID) {
-				matches = append(matches, comment)
-			}
+		if strings.HasPrefix(comment.ID, commentID) {
+			matches = append(matches, comment)
 		}
-		if !hasMore {
-			break
-		}
-		opts.Offset += opts.Limit
 	}
 	switch len(matches) {
 	case 0:
@@ -1247,14 +1231,12 @@ func fetchTrailReviewState(ctx context.Context, client *api.Client, trailID, rev
 }
 
 func trailReviewStatePath(trailID, reviewID, cursor string) string {
-	// The entire-api snapshot route uses include_dismissed/limit/cursor rather
-	// than pageSize/pageToken.
-	q := url.Values{}
-	q.Set("include_dismissed", "true")
-	q.Set("stale", trailReviewFreshnessAny)
-	q.Set("limit", strconv.Itoa(defaultTrailReviewLimit))
-	if strings.TrimSpace(cursor) != "" {
-		q.Set("cursor", strings.TrimSpace(cursor))
+	q := url.Values{"per_page": {strconv.Itoa(defaultTrailReviewLimit)}}
+	if cursor == "" {
+		q.Set("include_dismissed", "true")
+		q.Set("stale", trailReviewFreshnessAny)
+	} else {
+		q.Set("cursor", cursor)
 	}
 	return "/api/v1/trails/" + url.PathEscape(trailID) + "/reviews/" + url.PathEscape(reviewID) + "?" + q.Encode()
 }
@@ -1469,22 +1451,24 @@ func resolveGitRev(ctx context.Context, ref string) (string, error) {
 	return sha, nil
 }
 
-func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, hasMore bool, counts trailReviewCommentCounts) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(map[string]any{
-		"trail":    target.Trail,
-		"counts":   counts,
-		"findings": comments,
-		"has_more": hasMore,
-	}); err != nil {
-		return fmt.Errorf("encode trail findings JSON: %w", err)
-	}
-	return nil
+func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, counts trailReviewCommentCounts) error {
+	return printJSON(w, struct {
+		Counts     trailReviewCommentCounts `json:"counts"`
+		Findings   []trailReviewCommentJSON `json:"findings"`
+		HasMore    bool                     `json:"has_more"`
+		NextCursor string                   `json:"next_cursor,omitempty"`
+		Trail      trailResourceJSON        `json:"trail"`
+	}{
+		Counts:     counts,
+		Findings:   toTrailReviewCommentsJSON(comments),
+		HasMore:    nextCursor != "",
+		NextCursor: nextCursor,
+		Trail:      toTrailResourceJSON(trailForDisplay(target.Trail)),
+	})
 }
 
-func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, hasMore bool, opts trailReviewListOptions, counts trailReviewCommentCounts) {
-	trail := target.Trail
+func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts) {
+	trail := trailForDisplay(target.Trail)
 	if trail.Number > 0 {
 		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, trail.Title)
 	} else {
@@ -1495,8 +1479,8 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 
 	fmt.Fprintf(w, "  Open findings: %d  high %d  medium %d  low %d\n", counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow)
 	fmt.Fprintf(w, "  Resolved: %d        Dismissed: %d     Stale: %d\n", counts.Resolved, counts.Dismissed, counts.Stale)
-	if hasMore {
-		fmt.Fprintf(w, "  Showing first %d findings; rerun with --offset for more.\n", opts.Limit)
+	if nextCursor != "" {
+		fmt.Fprintf(w, "  Showing up to %d findings; next page: --cursor %q\n", opts.Limit, nextCursor)
 	}
 	fmt.Fprintln(w)
 
@@ -1517,14 +1501,14 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	fmt.Fprintln(w, "  entire trail watch")
 }
 
-func printTrailReviewComments(w io.Writer, comments []api.TrailReviewComment, hasMore bool) {
+func printTrailReviewComments(w io.Writer, comments []api.TrailReviewComment, nextCursor string) {
 	if len(comments) == 0 {
 		fmt.Fprintln(w, "No findings found.")
-		return
+	} else {
+		printTrailReviewCommentsTable(w, comments)
 	}
-	printTrailReviewCommentsTable(w, comments)
-	if hasMore {
-		fmt.Fprintln(w, "More findings available; rerun with --offset for the next page.")
+	if nextCursor != "" {
+		fmt.Fprintf(w, "More findings available; next page: --cursor %q\n", nextCursor)
 	}
 }
 
@@ -1589,6 +1573,9 @@ func printTrailReviewCommentDetail(w io.Writer, comment api.TrailReviewComment) 
 }
 
 func trailReviewTargetDisplay(target trailReviewTarget) string {
+	if target.Trail.Parent != nil {
+		return describeTrailRef(&target.Trail)
+	}
 	if target.Trail.Number > 0 {
 		return fmt.Sprintf("trail #%d (%s)", target.Trail.Number, target.Trail.Title)
 	}

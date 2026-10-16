@@ -145,9 +145,9 @@ func TestReviewCmd_ListModels(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	out := buf.String()
-	// claude-code advertises real aliases; codex/gemini have no enumeration
-	// command, so they list no models and point at Default/--model instead.
-	for _, want := range []string{"claude-code", "opus", "sonnet", "codex", "gemini", "no advertised models"} {
+	// claude-code advertises real aliases; codex has no enumeration command,
+	// so it lists no models and points at Default/--model instead.
+	for _, want := range []string{"claude-code", "opus", "sonnet", "codex", "no advertised models"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--models output missing %q:\n%s", want, out)
 		}
@@ -176,8 +176,8 @@ func TestReviewCmd_ListModelsFilteredByAgent(t *testing.T) {
 	if !strings.Contains(out, "codex") || !strings.Contains(out, "no advertised models") {
 		t.Errorf("expected codex section with no-advertised-models note, got:\n%s", out)
 	}
-	if strings.Contains(out, "gemini") {
-		t.Errorf("--agent codex should not list gemini:\n%s", out)
+	if strings.Contains(out, "sonnet") {
+		t.Errorf("--agent codex should not list claude-code's models:\n%s", out)
 	}
 }
 
@@ -260,28 +260,22 @@ func TestRunReview_MissingHooksAborts(t *testing.T) {
 	}
 }
 
-// TestRunReview_NonLaunchableAgentPreservesMarker verifies that the pending
-// marker is NOT cleared when a non-launchable agent is selected. Uses cursor
-// because it has HookSupport but no Launcher.
+// TestRunReview_HandOffPreservesMarker verifies that the pending marker is NOT
+// cleared once review hands off to the agent: the agent's next session reads
+// it. Uses cursor because it has HookSupport.
 //
 // Regression: previously the cleanup defer was registered before the
-// LauncherFor check, so the marker was wiped on the !ok path, breaking
-// the hand-off message.
-func TestRunReview_NonLaunchableAgentPreservesMarker(t *testing.T) {
+// hand-off, so the marker was wiped, breaking the hand-off message.
+func TestRunReview_HandOffPreservesMarker(t *testing.T) {
 	setupCmdTestRepo(t)
 
-	const nonLaunchableAgent = "cursor"
-	installHooksForCmdTest(t, types.AgentName(nonLaunchableAgent))
-
-	// Confirm cursor has no Launcher; skip if a future change adds one.
-	if _, hasLauncher := agent.LauncherFor(types.AgentName(nonLaunchableAgent)); hasLauncher {
-		t.Skipf("%s now implements Launcher; pick another non-launchable agent", nonLaunchableAgent)
-	}
+	const handOffAgent = "cursor"
+	installHooksForCmdTest(t, types.AgentName(handOffAgent))
 
 	// Use prompt-only config: cursor has no curated built-ins, so a Skills
 	// value would trip the installed-skill guard before reaching this path.
 	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
-		nonLaunchableAgent: {Prompt: "review the diff"},
+		handOffAgent: {Prompt: "review the diff"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -306,8 +300,8 @@ func TestRunReview_NonLaunchableAgentPreservesMarker(t *testing.T) {
 	if !ok {
 		t.Fatal("marker was cleared — hand-off is broken")
 	}
-	if m.AgentName != nonLaunchableAgent {
-		t.Errorf("AgentName = %q, want %s", m.AgentName, nonLaunchableAgent)
+	if m.AgentName != handOffAgent {
+		t.Errorf("AgentName = %q, want %s", m.AgentName, handOffAgent)
 	}
 }
 
@@ -1378,14 +1372,14 @@ func TestDispatchFork_AllWorkersInvalidStillFails(t *testing.T) {
 
 	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		testCodexAgent: {Skills: []string{"$missing-review"}},
-		"gemini":       {Skills: []string{"$also-missing"}},
+		"pi":           {Skills: []string{"$also-missing"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	deps := review.Deps{
 		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
-			return []types.AgentName{testCodexAgent, "gemini"}
+			return []types.AgentName{testCodexAgent, "pi"}
 		},
 		NewSilentError: func(err error) error { return err },
 		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {

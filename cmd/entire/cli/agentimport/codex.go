@@ -178,27 +178,74 @@ func codexLineTime(raw []byte) time.Time {
 
 // repoMatches reports whether cwd is the repo root or a descendant of it. Both
 // paths are normalized (cleaned, symlinks resolved best-effort) before
-// comparison. Used by the global/flat-store importers (Codex, Copilot) to keep
-// only sessions belonging to this repo.
+// comparison. Used by every importer that reads a recorded cwd to keep only
+// sessions belonging to this repo.
 func repoMatches(cwd, repoRoot string) bool {
-	if cwd == "" || repoRoot == "" {
+	// A relative cwd would resolve against Entire's own working directory, not
+	// where the agent ran.
+	if !isRooted(cwd) || !isRooted(repoRoot) {
 		return false
 	}
-	rel, err := filepath.Rel(normalizePath(repoRoot), normalizePath(cwd))
+	root, dir := normalizePath(repoRoot), normalizePath(cwd)
+	// Only a leading ".." component leaves the root; a descendant may itself be
+	// named "..cache".
+	if rel, err := filepath.Rel(root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return true
+	}
+	// On a case-insensitive filesystem the two may spell one directory
+	// differently; fall back to comparing directory identity.
+	return hasAncestorSameAs(dir, root)
+}
+
+// isRooted reports whether p starts at a filesystem root: absolute, or (on
+// Windows) rooted on the current drive like \work\repo. It rejects "", relative
+// paths, and drive-relative "C:foo". A drive-less rooted path never matches a
+// drive-qualified repo root, since filepath.Rel refuses to relate them.
+func isRooted(p string) bool {
+	if filepath.IsAbs(p) {
+		return true
+	}
+	return filepath.VolumeName(p) == "" && p != "" && os.IsPathSeparator(p[0])
+}
+
+// hasAncestorSameAs reports whether dir, or one of its existing ancestors, is
+// the same directory as root by file identity.
+func hasAncestorSameAs(dir, root string) bool {
+	rootInfo, err := os.Stat(root)
 	if err != nil {
 		return false
 	}
-	return !strings.HasPrefix(rel, "..")
+	for cur := dir; ; {
+		if info, statErr := os.Stat(cur); statErr == nil && os.SameFile(info, rootInfo) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
 }
 
 // normalizePath cleans a path and resolves symlinks when possible, so a cwd
 // recorded through a symlinked path (e.g. macOS /var → /private/var) still
-// matches the repo root. Falls back to the cleaned path when the target does
-// not exist on this machine.
+// matches the repo root. When the path no longer exists on this machine (a
+// deleted subdirectory), its longest existing ancestor is resolved and the
+// missing components are re-appended, so the spelling stays comparable to a
+// resolved repo root. Falls back to the cleaned path when nothing resolves.
 func normalizePath(p string) string {
 	cleaned := filepath.Clean(p)
-	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
-		return resolved
+	var missing []string
+	for cur := cleaned; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			slices.Reverse(missing)
+			return filepath.Join(append([]string{resolved}, missing...)...)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return cleaned
+		}
+		missing = append(missing, filepath.Base(cur))
+		cur = parent
 	}
-	return cleaned
 }

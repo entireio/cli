@@ -12,7 +12,7 @@ import (
 )
 
 // HookConfigFile is an agent's hook-configuration file inside the worktree —
-// .claude/settings.json, .cursor/hooks.json, .gemini/settings.json,
+// .claude/settings.json, .cursor/hooks.json,
 // .github/hooks/entire.json, .factory/settings.json, .codex/hooks.json,
 // .opencode/plugins/entire.ts, .pi/extensions/entire/index.ts.
 //
@@ -88,6 +88,13 @@ type HookConfigLocator interface {
 	// HookConfigRelPath returns the config file's path relative to the worktree
 	// root, slash-separated, exactly as passed to OpenHookConfig.
 	HookConfigRelPath() string
+}
+
+// AsHookConfigLocator returns the agent as HookConfigLocator if it implements
+// the interface. External agents declare hooks in their manifest instead, so
+// there is no DeclaredCaps gate.
+func AsHookConfigLocator(ag Agent) (HookConfigLocator, bool) {
+	return builtinCapability[HookConfigLocator](ag)
 }
 
 // OpenHookConfig returns the hook-config file at relPath inside worktreeRoot.

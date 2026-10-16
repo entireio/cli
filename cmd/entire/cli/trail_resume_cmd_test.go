@@ -30,7 +30,7 @@ import (
 func TestTrailResumeCmdRejectsConflictingSelectors(t *testing.T) {
 	t.Parallel()
 
-	cmd := newTrailResumeCmd()
+	cmd := newTrailResumeCmd(legacyTrailMode)
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{"575", "--trail", "feature/a"})
@@ -227,11 +227,11 @@ func TestBuildTrailResumeContextWithRepoIncludesRepoInResumeCommands(t *testing.
 		Number: 575,
 		Title:  "Add trail resume",
 		Branch: "feature/trail-resume",
-	}, nil, "", 0, trailResumeFindingsContext{}, "entireio/cli")
+	}, nil, "", 0, trailResumeFindingsContext{}, "gh/entireio/cli")
 
 	wantCommands := []string{
 		"entire trail finding 575 --json",
-		"entire trail resume 575 --repo entireio/cli --branch feature/trail-resume",
+		"entire trail resume 575 --repo gh/entireio/cli --branch feature/trail-resume",
 	}
 	if len(ctx.Commands) != len(wantCommands) {
 		t.Fatalf("commands len = %d, want %d: %#v", len(ctx.Commands), len(wantCommands), ctx.Commands)
@@ -628,6 +628,7 @@ func TestEncodeTrailResumeContextJSON(t *testing.T) {
 			Counts: trailReviewCommentCounts{Open: 1, OpenHigh: 1},
 			Top: []api.TrailReviewComment{{
 				ID:       "finding-1",
+				ReviewID: "review-example",
 				Severity: &sev,
 				Status:   trailReviewStatusOpen,
 			}},
@@ -658,7 +659,8 @@ func TestEncodeTrailResumeContextJSON(t *testing.T) {
 			OpenHigh int `json:"open_high"`
 		} `json:"findings_summary"`
 		Findings []struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			ReviewID string `json:"reviewId"`
 		} `json:"findings"`
 		Commands []string `json:"commands"`
 	}
@@ -682,6 +684,9 @@ func TestEncodeTrailResumeContextJSON(t *testing.T) {
 	}
 	if len(decoded.Findings) != 1 || decoded.Findings[0].ID != "finding-1" {
 		t.Fatalf("decoded findings = %#v", decoded.Findings)
+	}
+	if decoded.Findings[0].ReviewID != "review-example" {
+		t.Fatalf("finding JSON keys changed: %s", out.String())
 	}
 }
 
@@ -1199,7 +1204,7 @@ func TestTrailResumeWorktreeClashMessage(t *testing.T) {
 		`Branch "feature/work" is already checked out in another worktree:`,
 		"/tmp/path with spaces",
 		"Resume from that worktree with:",
-		"cd '/tmp/path with spaces' && entire trail resume feature/work",
+		"cd '/tmp/path with spaces' && entire trail resume --branch feature/work",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("message missing %q:\n%s", want, msg)

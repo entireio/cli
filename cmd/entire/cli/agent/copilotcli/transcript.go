@@ -44,10 +44,6 @@ type userMessageData struct {
 	Content string `json:"content"`
 }
 
-type assistantMessageData struct {
-	Content string `json:"content"`
-}
-
 // modelChangeData is the data payload for session.model_change events.
 // Copilot CLI emits this early in the transcript with the LLM model being used.
 type modelChangeData struct {
@@ -286,12 +282,6 @@ func lastEventField[T any](events []copilotEvent, eventType string, extract func
 	return ""
 }
 
-// extractSummaryFromEvents returns the content of the last assistant.message event.
-func extractSummaryFromEvents(events []copilotEvent) string {
-	return lastEventField(events, eventTypeAssistantMsg,
-		func(d assistantMessageData) string { return d.Content })
-}
-
 // extractModelFromEvents returns the model from transcript events.
 // First checks session.model_change events, then falls back to the model field
 // in tool.execution_complete events (Copilot CLI includes model per tool call).
@@ -486,7 +476,7 @@ func (c *CopilotCLIAgent) GetTranscriptPosition(path string) (int, error) {
 //   - files: list of file paths modified by Copilot (from tool.execution_complete events)
 //   - currentPosition: total number of lines in the file
 //   - error: any error encountered during reading
-func (c *CopilotCLIAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+func (c *CopilotCLIAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}
@@ -538,18 +528,4 @@ func (c *CopilotCLIAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]s
 		return nil, fmt.Errorf("failed to parse transcript events: %w", err)
 	}
 	return extractPromptsFromEvents(events), nil
-}
-
-// ExtractSummary extracts the last assistant message as a session summary.
-func (c *CopilotCLIAgent) ExtractSummary(sessionRef string) (string, error) {
-	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
-	if err != nil {
-		return "", fmt.Errorf("failed to read transcript: %w", err)
-	}
-
-	events, err := parseEventsFromBytes(data)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse transcript events: %w", err)
-	}
-	return extractSummaryFromEvents(events), nil
 }

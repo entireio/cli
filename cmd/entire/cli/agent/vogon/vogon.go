@@ -38,7 +38,6 @@ func (v *Agent) Type() types.AgentType { return AgentTypeVogon }
 func (v *Agent) Description() string {
 	return "Vogon Agent - deterministic E2E canary (no API calls)"
 }
-func (v *Agent) IsPreview() bool         { return false }
 func (v *Agent) ProtectedDirs() []string { return []string{".vogon"} }
 
 // DetectPresence returns false — vogon agent is never auto-detected.

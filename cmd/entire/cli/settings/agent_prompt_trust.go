@@ -26,9 +26,9 @@ const (
 )
 
 // AgentPromptRejections reports the agent instruction fields Load dropped as
-// untrusted. Consumers that would have applied a dropped field (review,
-// investigate) should surface these on stderr, because it is the only signal
-// that an instruction the user can see in a settings file is not in effect.
+// untrusted. Consumers that would have applied a dropped field (review) should
+// surface these on stderr, because it is the only signal that an instruction
+// the user can see in a settings file is not in effect.
 func (s *EntireSettings) AgentPromptRejections() []AgentPromptRejection {
 	if s == nil {
 		return nil
@@ -41,11 +41,11 @@ func (s *EntireSettings) AgentPromptRejections() []AgentPromptRejection {
 // the git common dir and cannot arrive by cloning), or a local settings file
 // positively verified as untracked.
 //
-// The gated fields are the free-text instruction channels:
-// investigate.always_prompt, every ReviewConfig.Prompt, and every review
-// profile's Task. All of them land verbatim in the prompts of agents that
-// investigate and review spawn with approval checks disabled (claude-code's
-// bypassPermissions, codex's --dangerously-bypass-approvals-and-sandbox), and
+// The gated fields are the free-text instruction channels: every
+// ReviewConfig.Prompt and every review profile's Task. Both land verbatim in
+// the prompts of agents that review spawns with approval checks disabled
+// (claude-code's bypassPermissions, codex's
+// --dangerously-bypass-approvals-and-sandbox), and
 // the prompt is the stated control for those spawns, so whoever writes these
 // strings gets the last word in it. Task and Prompt are adjacent sections of
 // the same composed prompt (see review's BuildReviewerPrompt), which is why
@@ -63,8 +63,8 @@ func (s *EntireSettings) AgentPromptRejections() []AgentPromptRejection {
 // means an attacker steering a permission-bypassed agent rather than losing a
 // preference.
 //
-// Provenance follows the merge order. The local layer replaces investigate
-// wholesale and review profiles per profile name, so a field whose key is
+// Provenance follows the merge order. The local layer replaces review
+// profiles per profile name, so a field whose key is
 // present in the local raw JSON was set by the local file. Otherwise a profile
 // (or the legacy review map) present in clone preferences was set there, and
 // anything left came from the committed project file and is dropped.
@@ -130,14 +130,6 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 				AgentPromptRejection{Field: field, Value: value, Reason: agentPromptRejectionNotLocal})
 			return ""
 		}
-	}
-
-	if s.Investigate != nil {
-		// mergeInvestigate replaces the whole object, so a non-empty effective
-		// value with the key present in the local raw JSON came from there.
-		// Clone preferences carry no investigate block.
-		s.Investigate.AlwaysPrompt = decide("investigate.always_prompt", s.Investigate.AlwaysPrompt,
-			rawHasKey(localRaw, "investigate", "always_prompt"), false)
 	}
 
 	// keepWorkerPresent keeps a worker whose only configuration was a dropped

@@ -24,7 +24,7 @@ func TestFetchMeRecap_ReturnsTypedUnauthorizedError(t *testing.T) {
 
 	_, err := FetchMeRecap(
 		context.Background(),
-		api.NewClient("expired-token"),
+		api.NewClientWithBaseURL("expired-token", server.URL),
 		time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 5, 9, 0, 0, 0, 0, time.UTC),
 		"",

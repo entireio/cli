@@ -114,16 +114,10 @@ type State struct {
 	// CLIVersion is the version of the CLI that created this session
 	CLIVersion string `json:"cli_version,omitempty"`
 
-	// BaseCommit tracks the current shadow branch base. Initially set to HEAD when the
-	// session starts, but updated on migration (pull/rebase) and after condensation.
-	// Used for shadow branch naming and checkpoint storage — NOT for attribution.
+	// BaseCommit is the commit the session's pending work sits on top of.
+	// Initially set to HEAD when the session starts, then moved to HEAD when it
+	// moves (commit, pull, rebase, reset) and after condensation.
 	BaseCommit string `json:"base_commit"`
-
-	// AttributionBaseCommit is the commit used as the reference point for attribution calculations.
-	// Unlike BaseCommit (which tracks the shadow branch and moves with migration), this field
-	// preserves the original base commit so deferred condensation can correctly calculate
-	// agent vs human line attribution. Updated only after successful condensation.
-	AttributionBaseCommit string `json:"attribution_base_commit,omitempty"`
 
 	// WorktreePath is the absolute path to the worktree root
 	WorktreePath string `json:"worktree_path,omitempty"`
@@ -211,10 +205,8 @@ type State struct {
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
 	// CaptureDegradedAt records when the session's most recent turn degraded
-	// capture because a worktree status scan breached its budget (new-file
-	// detection skipped, or the checkpoint itself skipped). Set at turn end,
-	// cleared by the next turn whose scans stay within budget. Surfaced as a
-	// warning by `entire status`.
+	// capture because a bounded capture operation exceeded its budget. Set at
+	// turn end, cleared by the next healthy turn, and surfaced by `entire status`.
 	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
 
 	// StepCount is the number of checkpoints/steps created in this session.
@@ -227,10 +219,30 @@ type State struct {
 	// for checkpoint condensation: "everything since last checkpoint".
 	CheckpointTranscriptStart int `json:"checkpoint_transcript_start,omitempty"`
 
+	// TokenTranscriptStart is the transcript position up to which this
+	// session's tokens are already stored in a checkpoint. Carry-forward and
+	// adopt move CheckpointTranscriptStart back to 0 so the next checkpoint
+	// shows the whole conversation; they never reset this offset, so that
+	// checkpoint still counts only new tokens. It moves back only when a
+	// condensation or attach finds the transcript shorter (rewritten or
+	// compacted) and records its new end. Nil in state written before the
+	// field existed; NormalizeAfterLoad fills it. Read it through TokenStart.
+	TokenTranscriptStart *int `json:"token_transcript_start,omitempty"`
+
 	// CheckpointTranscriptSize is the byte size of the transcript at last condensation.
 	// Used for fast "has new content?" checks in PostCommit: compare the git blob size
 	// against this value without reading the full transcript content.
 	CheckpointTranscriptSize int64 `json:"checkpoint_transcript_size,omitempty"`
+
+	// TranscriptOffsetPending records that the turn-end advance of
+	// CheckpointTranscriptStart could not run because a late-transcript agent
+	// (agent.LateTranscriptWriter, e.g. Antigravity) had not flushed its
+	// transcript by the Stop hook. Everything the flush will eventually write
+	// is already condensed, so the next mid-turn condensation resolves the
+	// pending advance against the by-then-flushed file — without this, prompts
+	// and the scoped transcript for the next checkpoint would start inside the
+	// previous (already-condensed) turn, attributing the wrong prompt to it.
+	TranscriptOffsetPending bool `json:"transcript_offset_pending,omitempty"`
 
 	// Deprecated: CondensedTranscriptLines is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
@@ -244,6 +256,21 @@ type State struct {
 	// FilesTouched tracks files modified/created/deleted during this session
 	FilesTouched []string `json:"files_touched,omitempty"`
 
+	// TouchedFileHashes records the content a turn-end step left for each file
+	// it changed: repo-relative path → git blob hash (hex) of the worktree file
+	// at that turn end, with clean filters applied as `git add` would. A path
+	// the step deleted maps to "" (a recorded deletion). A later step
+	// overwrites an earlier one's entry. Entries exist only for paths in
+	// FilesTouched; a FilesTouched path with no entry has no recorded content
+	// (hashing failed, a symlink, or it arrived via a task record or per-tool
+	// hook), and commit-time decisions fall back to its name.
+	//
+	// Commit hooks compare a committed or staged blob hash with this map to
+	// tell "the human committed what the agent wrote" from "the human replaced
+	// it". It replaced the shadow-branch snapshot those decisions used to
+	// read, and records no content.
+	TouchedFileHashes map[string]string `json:"touched_file_hashes,omitempty"`
+
 	// LastCheckpointID is the checkpoint ID from the most recent condensation.
 	// Used to restore the Entire-Checkpoint trailer on amend and to identify
 	// sessions that have been condensed at least once. Cleared on new prompt.
@@ -253,16 +280,9 @@ type State struct {
 	// retry after process death keeps both the intended ID and recovery mode.
 	CondensationAttempt *CondensationAttempt `json:"condensation_attempt,omitempty"`
 
-	// LastCheckpointCommitHash is the exact commit SHA that carried
-	// LastCheckpointID at condensation time. Used by the reconcile path to
-	// distinguish "reset back to the condensed commit" (same SHA) from
-	// "cherry-picked / rebased a commit that happens to preserve the trailer"
-	// (different SHA). Without this guard, a cherry-picked checkpoint would
-	// falsely fire reconcile and drop the pinned AttributionBaseCommit,
-	// corrupting attribution math for uncondensed shadow-branch work.
-	// Empty for legacy state files — reconcile falls back to trailer-only
-	// matching for backward compatibility.
-	LastCheckpointCommitHash string `json:"last_checkpoint_commit_hash,omitempty"`
+	// last_checkpoint_commit_hash, written by older CLIs for a shadow-branch
+	// reconcile path that no longer exists, is an unknown key now: encoding/json
+	// ignores it on load and the next save drops it.
 
 	// FullyCondensed indicates this session has been condensed and has no remaining
 	// carry-forward files. PostCommit skips fully-condensed sessions entirely.
@@ -270,12 +290,6 @@ type State struct {
 	// and the session phase is ENDED. Cleared on session reactivation (ENDED →
 	// ACTIVE via TurnStart, or ENDED → IDLE via SessionStart) by ActionClearEndedAt.
 	FullyCondensed bool `json:"fully_condensed,omitempty"`
-
-	// DivergenceNoticeShown indicates the prepare-commit-msg warning about
-	// attribution divergence has been shown. Set when the warning fires,
-	// cleared when AttributionBaseCommit realigns with BaseCommit (next
-	// successful condensation). Prevents repeated warnings on every commit.
-	DivergenceNoticeShown bool `json:"divergence_notice_shown,omitempty"`
 
 	// AttachedManually indicates this session was imported via
 	// `entire session attach` rather than being captured by hooks during
@@ -291,7 +305,7 @@ type State struct {
 	// Review/investigate sessions leave this false because they skip injection.
 	ContextInjectionDecided bool `json:"context_injection_decided,omitempty"`
 
-	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
+	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Codex", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 
 	// ModelName is the LLM model used in this session (e.g., "claude-sonnet-4-20250514", "gpt-4o").
@@ -401,18 +415,25 @@ type State struct {
 	// TranscriptPath is the path to the live transcript file (for mid-session commit detection)
 	TranscriptPath string `json:"transcript_path,omitempty"`
 
+	// AgentHome is the agent's home directory (for example CLAUDE_CONFIG_DIR or
+	// CODEX_HOME) whose session stores held TranscriptPath when it was last set
+	// at session initialization or turn start, in whichever spelling (as the
+	// environment sets it, or canonical) contains TranscriptPath. A home set by
+	// an earlier turn is kept while its stores still hold TranscriptPath. It is
+	// "" when the agent has no home layout or the transcript lies in none of
+	// the home's stores. It grants no trust: readers pass it to
+	// agent.ResolveTrustedHome before relying on it.
+	AgentHome string `json:"agent_home,omitempty"`
+
 	// LastPrompt is the most recent user prompt for this session (truncated for display).
 	// Updated on every turn start (UserPromptSubmit). JSON tag kept as "first_prompt"
 	// for backward compatibility with existing state files.
 	LastPrompt string `json:"last_prompt,omitempty"`
 
-	// PromptAttributions tracks user and agent line changes at each prompt start.
-	// This enables accurate attribution by capturing user edits between checkpoints.
-	PromptAttributions []PromptAttribution `json:"prompt_attributions,omitempty"`
-
-	// PendingPromptAttribution holds attribution calculated at prompt start (before agent runs).
-	// This is moved to PromptAttributions when SaveStep is called.
-	PendingPromptAttribution *PromptAttribution `json:"pending_prompt_attribution,omitempty"`
+	// Line attribution was removed: state files written by older CLIs may
+	// still carry attribution_base_commit, prompt_attributions,
+	// pending_prompt_attribution, and divergence_notice_shown. encoding/json
+	// ignores those unknown keys on load, and the next save drops them.
 
 	// Owner fingerprints the process that owns this session's agent turn,
 	// captured at each turn start via proclive.ResolveOwner. It lets liveness
@@ -446,8 +467,8 @@ type SubagentInventoryEntry struct {
 
 // TaskRecord is the durable pointer ledger entry for a subagent dispatched by
 // this session: a small session-state record (correlation ID, agent type,
-// description, declared transcript path, files touched, tokens) rather than a
-// shadow-tree write. Condensation is what materializes a record's transcript
+// description, declared transcript path, files touched, tokens). Condensation
+// is what materializes a record's transcript
 // (sanitize → externalize → redact) into the parent session's checkpoint —
 // see docs/superpowers/plans/2026-08-19-subagent-durable-records.md.
 //
@@ -464,7 +485,10 @@ type SubagentInventoryEntry struct {
 // SessionEnd sweep to retry.
 type TaskRecord struct {
 	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
-	// to key TaskMetadataDir. Dedup key for AddTaskRecord.
+	// to key TaskMetadataDir. Dedup key for AddTaskRecord. For a Claude Code
+	// Workflow agent it is the agent ID instead: those agents have no tool call
+	// of their own (the Workflow's tool_use_id is shared by every agent in the
+	// run), so the record is keyed by the subagent, and AgentID equals it.
 	ToolUseID string `json:"tool_use_id"`
 
 	// AgentID is the subagent identifier (tool_response.agentId at launch
@@ -473,6 +497,12 @@ type TaskRecord struct {
 
 	// StartedAt is when the background launch was observed.
 	StartedAt time.Time `json:"started_at"`
+
+	// Background marks a record created at a background launch, which runs
+	// until a later SubagentStop instead of completing at launch. Its stop
+	// captures no worktree scan, so another background task overlapping its
+	// run makes new untracked files ambiguous between the two.
+	Background bool `json:"background,omitempty"`
 
 	// SubagentType and TaskDescription are captured at launch time because
 	// SubagentStop payloads carry no tool_input — a Final-path capture has no
@@ -503,8 +533,16 @@ type TaskRecord struct {
 	Files []string `json:"files,omitempty"`
 
 	// TokenUsage is this subagent's token usage, when the completing hook
-	// payload provided one. nil when unavailable.
+	// payload provided one or the agent computed it from the subagent's
+	// transcript. nil when unavailable.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// TokenUsageFromTranscript records that TokenUsage was computed from the
+	// subagent's transcript at completion (or would have been, had that read
+	// found usage) rather than reported by the agent. Condensation recomputes
+	// such usage from the transcript it stores, which by then holds API calls
+	// the agent had not yet written when it stopped.
+	TokenUsageFromTranscript bool `json:"token_usage_from_transcript,omitempty"`
 
 	// CompletedAt is when this record was completed (CompleteTaskRecord).
 	// Zero means the record is still in flight. See the type doc comment.
@@ -673,6 +711,36 @@ func (s *State) FindTaskRecord(toolUseID string) *TaskRecord {
 	return nil
 }
 
+// FindTaskRecordByAgentID returns the record whose AgentID is agentID, or nil.
+// An empty agentID matches nothing. Used where the completing event names the
+// subagent but not its tool_use_id (Claude Code's SubagentStop).
+//
+// A live (uncompleted) record wins over a completed one, should two records
+// ever share an agent ID before condensation; a completed match is returned
+// only when no live one exists, so a duplicate stop still reaches the
+// exactly-once guard and is skipped. (Claude Code continues a subagent with
+// SendMessage, which reuses the agent ID without a new Agent call, so it does
+// not create a second record.)
+func (s *State) FindTaskRecordByAgentID(agentID string) *TaskRecord {
+	if agentID == "" {
+		return nil
+	}
+	var completed *TaskRecord
+	for i := range s.TaskRecords {
+		rec := &s.TaskRecords[i]
+		if rec.AgentID != agentID {
+			continue
+		}
+		if rec.CompletedAt.IsZero() {
+			return rec
+		}
+		if completed == nil {
+			completed = rec
+		}
+	}
+	return completed
+}
+
 // CompleteTaskRecord marks the record for toolUseID as consumed exactly
 // once: it sets CompletedAt and returns true, or returns false — a no-op —
 // when no record exists for toolUseID or it was already completed
@@ -703,11 +771,28 @@ func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time) bool
 
 // HasTaskContent reports whether this session carries pending subagent task
 // content: any task record — live (transcript-so-far still needs capturing)
-// or completed-unmaterialized (awaiting condensation) — counts. Condensation
-// triggers and session-empty guards key on this, not on shadow-branch
-// existence: task records never touch the shadow branch.
+// or completed-unmaterialized (awaiting condensation) — counts.
 func (s *State) HasTaskContent() bool {
 	return len(s.TaskRecords) > 0
+}
+
+// HasPendingWork reports whether this session holds work no checkpoint has
+// captured yet: a turn-end step since the last condensation (StepCount), files
+// still awaiting a commit (FilesTouched, including carry-forward), or subagent
+// task records.
+//
+// It is the single answer to "is there anything here to condense or lose?" —
+// lifecycle cleanup, doctor, the session sweeper, and condensation all ask it,
+// and must not re-derive it from the parts. (Shadow-branch existence used to
+// stand in for it; nothing writes git objects at turn end anymore.)
+//
+// It deliberately ignores FullyCondensed: a fully condensed session can still
+// carry task records (a background subagent finishing after its session
+// ended). Callers that must leave fully condensed sessions alone — doctor's
+// ENDED classification, the zombie sweep, IsCondensableEndedSession — check
+// FullyCondensed themselves, as they always have.
+func (s *State) HasPendingWork() bool {
+	return s.StepCount > 0 || len(s.FilesTouched) > 0 || s.HasTaskContent()
 }
 
 // LiveTaskRecords returns the records not yet completed (CompletedAt zero) —
@@ -723,38 +808,6 @@ func (s *State) LiveTaskRecords() []TaskRecord {
 		}
 	}
 	return live
-}
-
-// PromptAttribution captures line-level attribution data at the start of each prompt.
-// By recording what changed since the last checkpoint BEFORE the agent works,
-// we can accurately separate user edits from agent contributions.
-type PromptAttribution struct {
-	// CheckpointNumber is which checkpoint this was recorded before (1-indexed)
-	CheckpointNumber int `json:"checkpoint_number"`
-
-	// UserLinesAdded is lines added by user since the last checkpoint
-	UserLinesAdded int `json:"user_lines_added"`
-
-	// UserLinesRemoved is lines removed by user since the last checkpoint
-	UserLinesRemoved int `json:"user_lines_removed"`
-
-	// AgentLinesAdded is total agent lines added so far (base → last checkpoint).
-	// Always 0 for checkpoint 1 since there's no previous checkpoint to measure against.
-	AgentLinesAdded int `json:"agent_lines_added"`
-
-	// AgentLinesRemoved is total agent lines removed so far (base → last checkpoint).
-	// Always 0 for checkpoint 1 since there's no previous checkpoint to measure against.
-	AgentLinesRemoved int `json:"agent_lines_removed"`
-
-	// UserAddedPerFile tracks per-file user additions for accurate modification tracking.
-	// This enables distinguishing user self-modifications from agent modifications.
-	// See docs/architecture/attribution.md for details.
-	UserAddedPerFile map[string]int `json:"user_added_per_file,omitempty"`
-
-	// UserRemovedPerFile tracks per-file user removals for accurate agent deletion attribution.
-	// Without this, global user removals would be subtracted from agent-file-only removals,
-	// incorrectly reducing agent deletion credit when users delete lines in non-agent files.
-	UserRemovedPerFile map[string]int `json:"user_removed_per_file,omitempty"`
 }
 
 // NormalizeAfterLoad applies backward-compatible migrations to state loaded from disk.
@@ -782,26 +835,18 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 			s.CheckpointTranscriptStart = s.TranscriptLinesAtStart
 		}
 	}
+	// State written before TokenTranscriptStart existed counted tokens from
+	// CheckpointTranscriptStart, so start there. An older CLI saving a shared
+	// state drops the field again; the next load lands here the same way.
+	if s.TokenTranscriptStart == nil {
+		s.SetTokenStart(s.CheckpointTranscriptStart)
+	}
 	// Clear deprecated fields so they aren't re-persisted.
 	// Note: this is a one-way migration. If the state is re-saved, older CLI versions
 	// will see 0 for these fields and fall back to scoping from the transcript start.
 	// This is acceptable since CLI upgrades are monotonic and the worst case is
 	// redundant transcript content in a condensation, not data loss.
 	s.ClearLegacyTranscriptOffsets()
-
-	// Backfill AttributionBaseCommit for sessions created before this field existed.
-	// Without this, a mid-turn commit would migrate BaseCommit and the fallback in
-	// calculateSessionAttributions would use the migrated value, producing zero attribution.
-	if s.AttributionBaseCommit == "" && s.BaseCommit != "" {
-		s.AttributionBaseCommit = s.BaseCommit
-	}
-
-	// DivergenceNoticeShown is only meaningful while attribution is actually
-	// diverged. Self-heal any state file where the flag outlived the divergence
-	// — otherwise a future legitimate divergence would be silently suppressed.
-	if s.DivergenceNoticeShown && s.AttributionBaseCommit == s.BaseCommit {
-		s.DivergenceNoticeShown = false
-	}
 
 	// Codex states saved before the authoritative child ledger cannot claim an
 	// exact child aggregate. Keep any exact task-record IDs as discovery hints,
@@ -866,6 +911,45 @@ func (s *State) ClearCondensationAttempt() {
 	s.CondensationAttempt = nil
 }
 
+// TokenStart returns the transcript position the next checkpoint counts tokens
+// from. See TokenTranscriptStart.
+func (s *State) TokenStart() int {
+	if s.TokenTranscriptStart == nil {
+		return s.CheckpointTranscriptStart
+	}
+	return *s.TokenTranscriptStart
+}
+
+// SetTokenStart records that tokens up to pos are stored in a checkpoint. It
+// always assigns a fresh pointer so shallow copies of a state never share it.
+func (s *State) SetTokenStart(pos int) {
+	s.TokenTranscriptStart = &pos
+}
+
+// AdvanceCheckpointWindow moves both transcript offsets to pos after a
+// condensation stored the transcript and its tokens up to pos. A condensation
+// that could not read the transcript reports pos 0 and stored no transcript
+// tokens, so the token offset stays put rather than moving back and letting
+// the next checkpoint count everything again.
+func (s *State) AdvanceCheckpointWindow(pos int) {
+	tokenStart := pos
+	if pos == 0 {
+		tokenStart = s.TokenStart()
+	}
+	s.CheckpointTranscriptStart = pos
+	s.SetTokenStart(tokenStart)
+}
+
+// AdvanceDisplayWindow moves only CheckpointTranscriptStart to pos, for paths
+// that change what a checkpoint shows without storing tokens: the turn-end
+// advances past already-condensed content, and carry-forward's restart at 0.
+// The token offset is pinned first so an unset one cannot follow
+// CheckpointTranscriptStart through TokenStart's fallback.
+func (s *State) AdvanceDisplayWindow(pos int) {
+	s.SetTokenStart(s.TokenStart())
+	s.CheckpointTranscriptStart = pos
+}
+
 // RebaselineSubagentTokens snapshots the current cumulative subagent total
 // (TokenUsage.SubagentTokens) into SubagentTokensBaseline so the next checkpoint
 // window's CheckpointTokenUsage.SubagentTokens is rescoped to "since this
@@ -873,8 +957,8 @@ func (s *State) ClearCondensationAttempt() {
 //
 // The invariant is: every site that starts a fresh checkpoint window by clearing
 // CheckpointTokenUsage MUST also re-baseline. Callers: the condensation reset
-// helper (resetCheckpointWindow) and cross-repo session adoption, which likewise
-// opens a fresh target-local window. Sharing this here keeps the two in step.
+// helper (resetCheckpointWindow) and attach. Session adoption deliberately does
+// not: it continues the source's token window.
 func (s *State) RebaselineSubagentTokens() {
 	// Legacy agents without a snapshot retain their existing window baseline.
 	if s.TokenUsage == nil && s.AgentType != agent.AgentTypeCodex {
@@ -892,17 +976,6 @@ func (s *State) RebaselineSubagentTokens() {
 	complete := true
 	s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
 	s.SubagentTokensBaselineComplete = &complete
-}
-
-// RealignAttributionBase sets AttributionBaseCommit to newBase and clears any
-// bookkeeping whose meaning depends on attribution being diverged from the
-// shadow-branch base. Call this every time a code path intentionally brings
-// AttributionBaseCommit back in line with BaseCommit (condensation, reconcile,
-// post-commit base advance) so a stale DivergenceNoticeShown cannot suppress
-// the next legitimate divergence warning.
-func (s *State) RealignAttributionBase(newBase string) {
-	s.AttributionBaseCommit = newBase
-	s.DivergenceNoticeShown = false
 }
 
 // IsStale returns true when a session hasn't seen interaction for longer than

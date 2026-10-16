@@ -221,7 +221,7 @@ func TestCheckpointNote_FailedElectionReplacesTheDestinationClaim(t *testing.T) 
 			{name: "origin", pushURLs: []string{"https://example.com/a.git"}},
 			{name: "publish", pushURLs: []string{"https://example.com/b.git"}},
 		},
-		electionErr: &strategy.CheckpointPushRemoteNotConfiguredError{Remote: "gone"},
+		electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
 	}
 
 	out := describeTopology(t, topo)
@@ -257,7 +257,7 @@ func TestCheckpointNote_FailedElectionReportsASingleRemoteRepo(t *testing.T) {
 
 	topo := remoteTopology{
 		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
-		electionErr:  &strategy.CheckpointPushRemoteNotConfiguredError{Remote: "gone"},
+		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
 	}
 	if topo.ambiguous() {
 		t.Fatal("setup: a single-remote repo must not be ambiguous, or this asserts nothing")
@@ -273,7 +273,7 @@ func TestCheckpointNote_FailedElectionReportsASingleRemoteRepo(t *testing.T) {
 }
 
 // TestCheckpointNote_UnrecognizedElectionErrorGetsNoRemedy pins the matched-cause
-// rule documented on CheckpointPushRemoteNotConfiguredError: an unreadable
+// rule documented on CheckpointPushRemoteNotFetchableError: an unreadable
 // settings file is fail-closed too, and "name a real remote" is not its fix.
 func TestCheckpointNote_UnrecognizedElectionErrorGetsNoRemedy(t *testing.T) {
 	t.Parallel()
@@ -303,7 +303,7 @@ func TestCheckpointNote_PinnedRemoteKeepsSyncingThroughAFailedElection(t *testin
 		destinations: []remoteDestination{
 			{name: "origin", pushURLs: []string{"https://example.com/a.git"}, pinned: true},
 		},
-		electionErr: &strategy.CheckpointPushRemoteNotConfiguredError{Remote: "gone"},
+		electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
 	}
 
 	if out := describeTopology(t, topo); out != "" {
@@ -319,7 +319,7 @@ func TestCheckpointNote_MixedDedicatedDestinationsReportPartialSync(t *testing.T
 			{name: "origin", pushURLs: []string{"https://example.com/a.git"}, pinned: true},
 			{name: "publish", pushURLs: []string{"https://example.com/b.git"}},
 		},
-		electionErr: &strategy.CheckpointPushRemoteNotConfiguredError{Remote: "gone"},
+		electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
 	}
 
 	out := describeTopology(t, topo)
@@ -338,7 +338,7 @@ func TestCheckpointNote_MixedDedicatedDestinationsReportPartialSync(t *testing.T
 func TestCheckpointNote_FailedElectionWithNoRemotes(t *testing.T) {
 	t.Parallel()
 
-	topo := remoteTopology{electionErr: &strategy.CheckpointPushRemoteNotConfiguredError{Remote: "gone"}}
+	topo := remoteTopology{electionErr: &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"}}
 
 	out := describeTopology(t, topo)
 	if !strings.Contains(out, "Checkpoint sync: DISABLED") || !strings.Contains(out, "Fix:") {

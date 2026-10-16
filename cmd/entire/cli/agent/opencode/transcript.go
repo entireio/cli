@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -91,7 +92,7 @@ func (a *OpenCodeAgent) GetTranscriptPosition(path string) (int, error) {
 }
 
 // ExtractModifiedFilesFromOffset extracts files modified by tool calls from the given message offset.
-func (a *OpenCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
+func (a *OpenCodeAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) ([]string, int, error) {
 	session, err := parseExportSessionFromFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

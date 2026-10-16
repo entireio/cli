@@ -77,11 +77,19 @@ func TestAgentHelpCommands_IncludesAnnotatedHiddenOnly(t *testing.T) {
 	}
 }
 
-// Per the trails rollout: agent-help must not surface trail-gated commands when
-// trails aren't enabled for the repo, but non-trail commands always show.
-func TestAgentHelpCommands_GatesTrailOnTrailsEnabled(t *testing.T) {
-	t.Parallel()
+func projectTrailsHelpTestRoot() *cobra.Command {
 	root := NewRootCmd()
+	if old, _, err := root.Find([]string{"trail"}); err == nil {
+		root.RemoveCommand(old)
+	}
+	root.AddCommand(newTrailCmdForMode(true))
+	return root
+}
+
+// Project intent remains discoverable without a repository Trails toggle.
+func TestAgentHelpCommands_ProjectTrailsIndependentOfRepoToggle(t *testing.T) {
+	t.Parallel()
+	root := projectTrailsHelpTestRoot()
 
 	enabled := commandNames(agentHelpCommands(root, true))
 	if !contains(enabled, "trail") {
@@ -92,8 +100,8 @@ func TestAgentHelpCommands_GatesTrailOnTrailsEnabled(t *testing.T) {
 	}
 
 	disabled := commandNames(agentHelpCommands(root, false))
-	if contains(disabled, "trail") {
-		t.Errorf("trail must NOT be advertised when trails are disabled, got %v", disabled)
+	if !contains(disabled, "trail") {
+		t.Errorf("project trails must be advertised without repo trails, got %v", disabled)
 	}
 	if !contains(disabled, "checkpoint") {
 		t.Errorf("non-trail commands should always be advertised, got %v", disabled)
@@ -189,7 +197,7 @@ func TestAgentHelpRepoContext_CachesRefreshFailureBriefly(t *testing.T) {
 // auth eventually reports that the user is not logged in.
 // Not parallel: changes the process working directory and auth environment.
 func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
-	t.Setenv("ENTIRE_TOKEN", "")
+	unsetEnv(t, "ENTIRE_TOKEN")
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
@@ -285,27 +293,21 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_NotOnboardedSavesDisa
 	}
 }
 
-// Drilling into a trail-gated command is blocked when trails are disabled.
-func TestRunAgentHelp_TrailDrillGatedOnTrailsEnabled(t *testing.T) {
+// Project-level operations do not require enabled repository code work.
+func TestRunAgentHelp_ProjectTrailDrillIndependentOfRepoToggle(t *testing.T) {
 	t.Parallel()
-	root := NewRootCmd()
+	root := projectTrailsHelpTestRoot()
 
 	if _, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, true); err != nil {
 		t.Errorf("trail drill should resolve when trails enabled: %v", err)
 	}
-	_, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, false)
-	if err == nil {
-		t.Fatalf("trail drill should be unavailable when trails disabled")
-	}
-	if !strings.Contains(err.Error(), "trails are not enabled") {
-		t.Errorf("expected the requires-trails unavailable error, got: %v", err)
+	if _, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, false); err != nil {
+		t.Fatalf("project trail drill should work without repo trails: %v", err)
 	}
 }
 
-// The --json output path gates trail-gated subcommands exactly like the text
-// path: the top-level JSON subcommand list omits trail when trails are disabled
-// and includes it when enabled.
-func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
+// JSON discovery also exposes project intent without repository code work.
+func TestRunAgentHelp_JSONProjectTrailsIndependentOfRepoToggle(t *testing.T) {
 	t.Parallel()
 
 	hasSub := func(jsonOut, name string) bool {
@@ -325,12 +327,12 @@ func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
 		return false
 	}
 
-	disabled, err := runAgentHelp(NewRootCmd(), nil, agentHelpTestRepo, true /*json*/, false /*trailsDisabled*/)
+	disabled, err := runAgentHelp(projectTrailsHelpTestRoot(), nil, agentHelpTestRepo, true /*json*/, false /*trailsDisabled*/)
 	if err != nil {
 		t.Fatalf("json top (trails disabled): %v", err)
 	}
-	if hasSub(disabled, "trail") {
-		t.Errorf("trail must NOT appear in --json subcommands when trails disabled:\n%s", disabled)
+	if !hasSub(disabled, "trail") {
+		t.Errorf("project trails must appear without repository trails:\n%s", disabled)
 	}
 	if !hasSub(disabled, "checkpoint") {
 		t.Errorf("checkpoint should always appear in --json subcommands:\n%s", disabled)
@@ -727,9 +729,9 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 	// Listed commands appear with their audience.
 	for _, want := range []string{
 		"status", "trail", "checkpoint", "session", "why", "search",
-		"read-only except: explain",                     // checkpoint, one line
+		"read-only except: delete, explain",             // checkpoint, one line
 		"read-only except: adopt, attach, resume, stop", // session, one line
-		"read-only: approvals, list, show, watch",       // trail: minority side named
+		"read-only: approvals, list, show, watch",       // project trail: minority side named
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("listing missing %q:\n%s", want, out)
@@ -737,7 +739,7 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 	}
 
 	// Unlisted commands are named in the footer index, not given entries.
-	for _, name := range []string{"enable", "review", "investigate", "org", "api"} {
+	for _, name := range []string{"enable", "review", "org", "api"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("unlisted command %q should still be named in the footer:\n%s", name, out)
 		}
@@ -779,7 +781,7 @@ func TestRenderAgentHelpCommand_SubcommandsCarryAudienceNote(t *testing.T) {
 		t.Fatal("checkpoint command not found")
 	}
 	out := renderAgentHelpCommand(child, agentHelpTestRepo, true)
-	if !strings.Contains(out, "read-only except: explain") {
+	if !strings.Contains(out, "read-only except: delete, explain") {
 		t.Errorf("text drill-down must state which subcommands write:\n%s", out)
 	}
 }
@@ -820,7 +822,7 @@ func TestRenderAgentHelpJSON_CarriesAudienceWhereClassified(t *testing.T) {
 	drill := drillJSON(t, root, "checkpoint")
 	want := map[string]string{
 		"list": "read-only", "explain": "task-driven", "search": "read-only",
-		"tokens": "read-only",
+		"tokens": "read-only", "delete": agentHelpUserOwnedSlug,
 	}
 	for _, sub := range drill.Subcommands {
 		if w, ok := want[sub.Name]; ok && sub.Audience != w {
@@ -942,5 +944,44 @@ func TestAgentHelpGuidance_NeverLeaksIntoCobraHelp(t *testing.T) {
 		if strings.Contains(cmd.Long, firstLine) || strings.Contains(cmd.Short, firstLine) {
 			t.Errorf("guidance for %q is duplicated into its cobra help; keep it agent-only", path)
 		}
+	}
+}
+
+// Group guidance reaches the leaves agents actually look up: `agent-help trail
+// finding list` must carry trail's network/keyring explanation, in text and JSON.
+func TestAgentHelpGuidance_InheritedByLeafCommands(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	leaf := root
+	for _, name := range []string{"trail", "finding", "list"} {
+		leaf = agentHelpFindChild(leaf, name)
+		if leaf == nil {
+			t.Fatalf("command %q not found", name)
+		}
+	}
+	trailFirstLine := strings.SplitN(agentHelpGuidance["trail"], "\n", 2)[0]
+
+	if got := agentHelpGuidanceFor(leaf); !strings.Contains(got, trailFirstLine) {
+		t.Errorf("guidance for %q = %q, want it to inherit trail's", agentHelpPath(leaf), got)
+	}
+	if text := renderAgentHelpCommand(leaf, "", true); !strings.Contains(text, trailFirstLine) {
+		t.Errorf("text agent-help for %q is missing trail's guidance:\n%s", agentHelpPath(leaf), text)
+	}
+	js, err := renderAgentHelpJSON(root, leaf, "", true)
+	if err != nil {
+		t.Fatalf("renderAgentHelpJSON: %v", err)
+	}
+	if !strings.Contains(js, strings.TrimSpace(trailFirstLine)) {
+		t.Errorf("JSON agent-help for %q is missing trail's guidance:\n%s", agentHelpPath(leaf), js)
+	}
+
+	// A leaf with its own guidance keeps it, after its ancestors'.
+	del := agentHelpFindChild(agentHelpFindChild(root, "checkpoint"), "delete")
+	if del == nil {
+		t.Fatal("checkpoint delete not found")
+	}
+	if got := agentHelpGuidanceFor(del); got != agentHelpGuidance["checkpoint delete"] {
+		t.Errorf("checkpoint delete guidance = %q, want only its own", got)
 	}
 }

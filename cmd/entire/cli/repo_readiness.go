@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -13,6 +15,23 @@ import (
 
 	"github.com/entireio/cli/internal/coreapi"
 )
+
+// createdRepoAsRepo converts the create response into the read model that the
+// readiness poll and the creation report share. The spec gives the two schemas
+// the same fields apart from the deprecated commitToken, so the conversion goes
+// through the wire form: it carries additional properties and any field a later
+// spec adds to both, where a field-by-field copy would silently drop them.
+func createdRepoAsRepo(created *coreapi.CreatedRepo) (*coreapi.Repo, error) {
+	raw, err := json.Marshal(created)
+	if err != nil {
+		return nil, fmt.Errorf("encode created repository: %w", err)
+	}
+	var repo coreapi.Repo
+	if err := json.Unmarshal(raw, &repo); err != nil {
+		return nil, fmt.Errorf("decode created repository: %w", err)
+	}
+	return &repo, nil
+}
 
 // These values mirror the provisioning enum in entiredb api/corev1/repos.go.
 // Mirror clone readiness has its own enum: an active repo need not be cloned.
@@ -43,7 +62,7 @@ const repoPollMaxInterval = 30 * time.Second
 // because ENTIRE_TOKEN still chooses its audience core and a foreign registry
 // snapshot cannot confirm lifecycle state.
 type repoLifecycleGetter interface {
-	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error)
+	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.RepoHeaders, error)
 }
 
 // awaitRepoActive waits for an authoritative repository snapshot to become active.
@@ -115,11 +134,11 @@ func awaitRepoActive(ctx context.Context, c repoLifecycleGetter, result *coreapi
 				return fmt.Errorf("poll repository lifecycle: %w", err)
 			}
 		default:
-			if snapshot.ID != result.ID {
+			if snapshot.Response.ID != result.ID {
 				return errors.New("repository readiness unconfirmed: inspection returned a different repository ID")
 			}
 			failures = repoPollFailures{}
-			retainRepoCreation(result, snapshot)
+			retainRepoCreation(result, &snapshot.Response)
 			authoritative = true
 			// Observe terminal or incompatible state before sleeping.
 			if result.State.Or("") != repoStateProvisioning || result.Foreign.Or(false) {
@@ -217,6 +236,16 @@ func retainRepoCreation(result, snapshot *coreapi.Repo) {
 	if snapshot.Path.Or("") == "" {
 		snapshot.Path = result.Path
 	}
+	// The output names the repo by its full name, and a requested visibility
+	// is skipped when the create already reports it, so an omission in the
+	// snapshot must not erase either.
+	if snapshot.FullName.Or("") == "" {
+		snapshot.FullName = result.FullName
+	}
+	if snapshot.Visibility.Or("") == "" {
+		snapshot.Visibility = result.Visibility
+	}
+
 	for key, value := range result.AdditionalProps {
 		if snapshot.AdditionalProps == nil {
 			snapshot.AdditionalProps = make(coreapi.RepoAdditional)
@@ -228,9 +257,40 @@ func retainRepoCreation(result, snapshot *coreapi.Repo) {
 	*result = *snapshot
 }
 
+// repoViewRef spells a just-created repo the way `repo view` takes it: the
+// server's own /et/<project>/<repo> path. A recovery hint has to name a ref the
+// command accepts, and a ULID is no longer one.
+//
+// Empty when the create response carries no path — the same window in which
+// readiness goes unconfirmed. The bare name is NOT offered there: `repo view`
+// refuses it, so printing it would hand someone already stuck a command that
+// fails on its own terms. The caller drops the command lines instead and keeps
+// the repository ID, which is what support is asked for.
+func repoViewRef(r *coreapi.Repo) string {
+	return strings.TrimSpace(r.Path.Or(""))
+}
+
 // reportRepoCreation reports the successful POST even when waiting failed,
 // unlike runCoreMutation. A nonzero exit does not mean another POST is safe.
-func reportRepoCreation(cmd *cobra.Command, result *coreapi.Repo, noWait bool, waitErr error) error {
+//
+// ref is the repo's /et/<project>/<repo> ref, or empty when it is not known.
+// The repo is named and `repo view` addressed by it (else by the server's
+// path, see repoViewRef); with neither, the view lines are dropped, since that
+// verb takes no ULID. The ID is always given for support to act on.
+func reportRepoCreation(cmd *cobra.Command, result *coreapi.Repo, ref string, noWait bool, waitErr error) error {
+	// Quoted: the ref is server-derived and goes into commands the user pastes
+	// into a shell.
+	viewRef := cmp.Or(ref, repoViewRef(result))
+	if viewRef != "" {
+		viewRef = shellArg(viewRef)
+	}
+	// The repo is named by its fully qualified path, /et/<project>/<repo>.
+	// Without one the ID is the only handle on the new repo, so the name
+	// carries it.
+	shown := fmt.Sprintf("%s (%s)", result.Name, result.ID)
+	if ref != "" {
+		shown = ref
+	}
 	// repoRemoteURL answers "" for both an invalid host and a repo still
 	// provisioning; warn so the missing remote does not suggest waiting.
 	if host := strings.TrimSpace(result.ClusterHost.Or("")); host != "" {
@@ -247,7 +307,7 @@ func reportRepoCreation(cmd *cobra.Command, result *coreapi.Repo, noWait bool, w
 			outputErr = printJSON(cmd.OutOrStdout(), wire)
 		}
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "✓ Created repository %s (%s)\n  Last observed state: %s\n", result.Name, result.ID, result.State.Or("unavailable"))
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ Created repo %s\n  Last observed state: %s\n", shown, result.State.Or("unavailable"))
 		if reason := result.ProvisionReason.Or(""); reason != "" {
 			fmt.Fprintln(cmd.OutOrStdout(), "  Provision reason: "+reason)
 		}
@@ -256,12 +316,24 @@ func reportRepoCreation(cmd *cobra.Command, result *coreapi.Repo, noWait bool, w
 		}
 	}
 	if waitErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Repository creation succeeded: %s (%s). Readiness was not confirmed: %v\n", result.Name, result.ID, renderRepoReadError(waitErr))
-		fmt.Fprintf(cmd.ErrOrStderr(), "Inspect repository details with: entire repo view %s\nCheck readiness with: entire repo view %s --authoritative\nWhen that command reports active, retry the intended push or mirror creation. If readiness remains unavailable, contact support with this repository ID. Do not create the repository again. For future creates, --no-wait skips readiness checks.\n", result.ID, result.ID)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Repository creation succeeded: %s. Readiness was not confirmed: %v\n", shown, renderRepoReadError(waitErr))
+		// The PATH, because that is what `repo view` takes — a ULID is not a
+		// repository's name and the verb no longer accepts one. With no path
+		// yet there is no ref to offer, so the inspection lines are dropped
+		// rather than naming a command that would fail; the rest of the advice
+		// does not depend on them.
+		if viewRef != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Inspect repository details with: entire repo view %s\nCheck readiness with: entire repo view %s --authoritative\nWhen that command reports the primary as ready, retry the intended push or mirror creation.\n", viewRef, viewRef)
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "If readiness remains unavailable, contact support with this repository ID (%s). Do not create the repository again. For future creates, --no-wait skips readiness checks.\n", result.ID)
 		return NewSilentError(errors.Join(waitErr, outputErr))
 	}
 	if noWait && (result.State.Or("") != repoStateActive || result.Foreign.Or(false)) {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Repository readiness is unconfirmed (--no-wait). Check readiness with: entire repo view %s --authoritative\n", result.ID)
+		if viewRef != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Repository readiness is unconfirmed (--no-wait). Check readiness with: entire repo view %s --authoritative\n", viewRef)
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Repository readiness is unconfirmed (--no-wait), and the server has not returned this repository's path yet, so there is no reference to check it by. Repository ID: %s\n", result.ID)
+		}
 	}
 	return outputErr
 }

@@ -19,12 +19,27 @@ const (
 	trustedPrompt  = "Be skeptical and cite evidence."
 )
 
-func investigateSettings(prompt string) string {
-	return `{"enabled":true,"investigate":{"agents":["claude-code"],"always_prompt":"` + prompt + `"}}`
+// workerPromptSettings and localWorkerPromptSettings drive the provenance
+// tests below. They exercise a single gated field (a worker's Prompt) in the
+// two layers whose interaction the gate decides, which is what these tests are
+// about; the full positional coverage (task / worker prompt / judge prompt)
+// lives in reviewProfileSettings' own test further down.
+// No `task` here: Task is itself a gated field, and these tests assert on a
+// single rejection so the provenance decision under test is unambiguous.
+func workerPromptSettings(prompt string) string {
+	return `{"enabled":true,"review_profiles":{"general":` +
+		`{"agents":{"codex":{"prompt":"` + prompt + `"}}}}}`
 }
 
-func localInvestigateSettings(prompt string) string {
-	return `{"investigate":{"agents":["claude-code"],"always_prompt":"` + prompt + `"}}`
+func localWorkerPromptSettings(prompt string) string {
+	return `{"review_profiles":{"general":` +
+		`{"agents":{"codex":{"prompt":"` + prompt + `"}}}}}`
+}
+
+// workerPrompt returns the gated worker prompt, or "" when the profile or
+// worker was dropped entirely.
+func workerPrompt(s *EntireSettings) string {
+	return s.ReviewProfiles["general"].Agents["codex"].Prompt
 }
 
 func reviewProfileSettings(prompt string) string {
@@ -51,20 +66,20 @@ func loadedForPromptTrust(t *testing.T, projectPath, prefsPath, localPath string
 // An instruction in the version-controlled project file is
 // attacker-deliverable through an ordinary pull request, so it must never
 // reach the prompt of an approvals-disabled agent.
-func TestAgentPromptTrust_ProjectInvestigatePromptIsIgnored(t *testing.T) {
+func TestAgentPromptTrust_ProjectWorkerPromptIsIgnored(t *testing.T) {
 	t.Parallel()
 	_, project, local := newOPFRepo(t)
-	writeSettingsFile(t, project, investigateSettings(attackerPrompt))
+	writeSettingsFile(t, project, workerPromptSettings(attackerPrompt))
 
 	s := loadedForPromptTrust(t, project, "", local)
-	assert.Empty(t, s.Investigate.AlwaysPrompt,
-		"an always_prompt from the committed project settings file must be dropped")
-	assert.Equal(t, []string{"claude-code"}, s.Investigate.Agents,
-		"only the prompt is gated, the rest of the investigate block still loads")
+	assert.Empty(t, workerPrompt(s),
+		"a worker prompt from the committed project settings file must be dropped")
+	assert.NotEmpty(t, s.ReviewProfiles["general"].Agents,
+		"only the instruction field is gated; the worker itself still loads")
 
 	rejections := s.AgentPromptRejections()
 	require.Len(t, rejections, 1, "the rejection must be reportable to the consumer")
-	assert.Equal(t, "investigate.always_prompt", rejections[0].Field)
+	assert.Equal(t, "review_profiles.general.agents.codex.prompt", rejections[0].Field)
 	assert.Equal(t, attackerPrompt, rejections[0].Value,
 		"the ignored instruction is preserved for the warning")
 	assert.Contains(t, rejections[0].Reason, "settings.local.json",
@@ -72,14 +87,14 @@ func TestAgentPromptTrust_ProjectInvestigatePromptIsIgnored(t *testing.T) {
 }
 
 // The supported configuration: developer-owned, untracked local override.
-func TestAgentPromptTrust_UntrackedLocalInvestigatePromptIsHonored(t *testing.T) {
+func TestAgentPromptTrust_UntrackedLocalWorkerPromptIsHonored(t *testing.T) {
 	t.Parallel()
 	_, project, local := newOPFRepo(t)
 	writeSettingsFile(t, project, `{"enabled":true}`)
-	writeSettingsFile(t, local, localInvestigateSettings(trustedPrompt))
+	writeSettingsFile(t, local, localWorkerPromptSettings(trustedPrompt))
 
 	s := loadedForPromptTrust(t, project, "", local)
-	assert.Equal(t, trustedPrompt, s.Investigate.AlwaysPrompt,
+	assert.Equal(t, trustedPrompt, workerPrompt(s),
 		"an untracked local override is developer-owned and must be honored")
 	assert.Empty(t, s.AgentPromptRejections(),
 		"a trusted instruction must not be reported as rejected")
@@ -91,12 +106,12 @@ func TestAgentPromptTrust_StagedLocalPromptIsIgnored(t *testing.T) {
 	t.Parallel()
 	root, project, local := newOPFRepo(t)
 	writeSettingsFile(t, project, `{"enabled":true}`)
-	writeSettingsFile(t, local, localInvestigateSettings(attackerPrompt))
+	writeSettingsFile(t, local, localWorkerPromptSettings(attackerPrompt))
 
 	testutil.RunGit(t, root, "add", "-f", EntireSettingsLocalFile)
 
 	s := loadedForPromptTrust(t, project, "", local)
-	assert.True(t, s.Investigate.IsZero(),
+	assert.Empty(t, workerPrompt(s),
 		"a local file tracked in the index must not contribute instructions")
 }
 
@@ -106,14 +121,14 @@ func TestAgentPromptTrust_CommittedThenUnstagedLocalPromptIsIgnored(t *testing.T
 	t.Parallel()
 	root, project, local := newOPFRepo(t)
 	writeSettingsFile(t, project, `{"enabled":true}`)
-	writeSettingsFile(t, local, localInvestigateSettings(attackerPrompt))
+	writeSettingsFile(t, local, localWorkerPromptSettings(attackerPrompt))
 
 	testutil.RunGit(t, root, "add", "-f", EntireSettingsLocalFile)
 	testutil.RunGit(t, root, "commit", "-m", "carry local settings")
 	testutil.RunGit(t, root, "rm", "--cached", EntireSettingsLocalFile)
 
 	s := loadedForPromptTrust(t, project, "", local)
-	assert.Empty(t, s.Investigate.AlwaysPrompt,
+	assert.Empty(t, workerPrompt(s),
 		"content still reachable from HEAD must not be trusted")
 
 	rejections := s.AgentPromptRejections()
@@ -134,10 +149,10 @@ func TestAgentPromptTrust_UnverifiableRepoKeepsLayerDropsPrompt(t *testing.T) {
 	local := filepath.Join(dir, EntireSettingsLocalFile)
 	writeSettingsFile(t, project, `{"enabled":true}`)
 	writeSettingsFile(t, local,
-		`{"investigate":{"agents":["claude-code"],"always_prompt":"`+attackerPrompt+`"},"commit_linking":"always"}`)
+		`{"review_profiles":{"general":{"agents":{"codex":{"prompt":"`+attackerPrompt+`"}}}},"commit_linking":"always"}`)
 
 	s := loadedForPromptTrust(t, project, "", local)
-	assert.Empty(t, s.Investigate.AlwaysPrompt,
+	assert.Empty(t, workerPrompt(s),
 		"an unverifiable repo must not yield an applied instruction")
 	assert.Equal(t, "always", s.CommitLinking,
 		"unrelated local settings must survive an unverifiable repo")
@@ -153,10 +168,10 @@ func TestAgentPromptTrust_OutsideGitRepoHonorsLocal(t *testing.T) {
 	project := filepath.Join(dir, EntireSettingsFile)
 	local := filepath.Join(dir, EntireSettingsLocalFile)
 	writeSettingsFile(t, project, `{"enabled":true}`)
-	writeSettingsFile(t, local, localInvestigateSettings(trustedPrompt))
+	writeSettingsFile(t, local, localWorkerPromptSettings(trustedPrompt))
 
 	s := loadedForPromptTrust(t, project, "", local)
-	assert.Equal(t, trustedPrompt, s.Investigate.AlwaysPrompt,
+	assert.Equal(t, trustedPrompt, workerPrompt(s),
 		"absence of a repository is proof of locality, not a failure to verify")
 }
 
@@ -212,14 +227,14 @@ func TestAgentPromptTrust_ClonePreferencesReviewPromptIsHonored(t *testing.T) {
 	writeSettingsFile(t, project, `{"enabled":true}`)
 	prefs := writePreferences(t,
 		`{"review_profiles":{"general":{"task":"Audit it.","agents":{"codex":{"prompt":"`+trustedPrompt+`"}}}},`+
-			`"review":{"gemini":{"prompt":"`+trustedPrompt+`"}}}`)
+			`"review":{"pi":{"prompt":"`+trustedPrompt+`"}}}`)
 
 	s := loadedForPromptTrust(t, project, prefs, local)
 	assert.Equal(t, "Audit it.", s.ReviewProfiles["general"].Task,
 		"a preferences-owned profile keeps its task")
 	assert.Equal(t, trustedPrompt, s.ReviewProfiles["general"].Agents["codex"].Prompt,
 		"a preferences-owned profile keeps its prompt")
-	assert.Equal(t, trustedPrompt, s.Review["gemini"].Prompt,
+	assert.Equal(t, trustedPrompt, s.Review["pi"].Prompt,
 		"the preferences-owned legacy review map keeps its prompts")
 	assert.Empty(t, s.AgentPromptRejections())
 }
@@ -252,7 +267,7 @@ func TestAgentPromptTrust_PromptOnlyWorkerStaysPresent(t *testing.T) {
 	_, project, local := newOPFRepo(t)
 	writeSettingsFile(t, project,
 		`{"enabled":true,"review_profiles":{"general":{"agents":{"pi":{"prompt":"`+attackerPrompt+`"}}}},`+
-			`"review":{"gemini":{"prompt":"`+attackerPrompt+`"}}}`)
+			`"review":{"opencode":{"prompt":"`+attackerPrompt+`"}}}`)
 
 	s := loadedForPromptTrust(t, project, "", local)
 
@@ -261,9 +276,9 @@ func TestAgentPromptTrust_PromptOnlyWorkerStaysPresent(t *testing.T) {
 	assert.Equal(t, "pi", worker.Agent, "the worker stays present via its own agent name")
 	assert.False(t, worker.IsZero(), "a gated worker must not read as unset")
 
-	legacy := s.Review["gemini"]
+	legacy := s.Review["opencode"]
 	assert.Empty(t, legacy.Prompt)
-	assert.Equal(t, "gemini", legacy.Agent)
+	assert.Equal(t, "opencode", legacy.Agent)
 	assert.False(t, legacy.IsZero())
 }
 

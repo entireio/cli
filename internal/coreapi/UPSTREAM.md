@@ -43,12 +43,31 @@ plain strings (drop `enum`), or have ogen treat them as open enums. Enums
 the *client sends* (request bodies like `SetRepoVisibilityInputBody`) should
 stay strict.
 
+`Membership.role`/`status` and `Invitation.role`/`status` are the same shape:
+`entire org grant list` displays memberships. `entire org invite list`
+displays invitations, and the generated `ListOrgInvitations` client decodes
+them. A new role or lifecycle state must display rather than fail either
+listing.
+
 **Workaround:** `spec/normalize.go` (`loosenReadModelEnums`, allowlist
 `readModelEnumFields`) deletes the `enum` constraint from those response
 read-model fields, so ogen emits plain strings with no `Validate()` and
 unknown values pass through for display. Only response read models are
-loosened; request-body enums stay strict. Locked in by
-`TestListProjectRepos_UnknownEnumValuesPassThrough` in `client_test.go`.
+loosened; request-body enums stay strict — `CreateOrgInvitationInputBody.role`
+keeps its enum for outgoing requests. Locked in
+by `TestListProjectRepos_UnknownEnumValuesPassThrough`,
+`TestListOrgInvitations_UnknownEnumValuesPassThrough` and
+`TestListOrgMembers_UnknownEnumValuesPassThrough` in `client_test.go`.
+
+The detach result is the same shape: `entire repo mirror detach` displays each
+`DetachPrecondition.precondition` slug, and `DetachRepoResult.status` and
+`RepoDetachState.status`, and the server documents both the
+precondition list and the status set as growing. The CLI no longer reads
+`DetachAccessEntry`, but its `source` and `subjectType` stay loosened while
+core still sends `access`: a new value would otherwise fail the whole result.
+Locked in by
+`TestDetachRepo_UnknownEnumValuesPassThrough` and
+`TestGetRepoDetach_UnknownStatusPassesThrough`.
 Retire the allowlist entries as upstream loosens the corresponding fields.
 
 ## 2b. New read-model fields ship as `required`
@@ -59,6 +78,9 @@ were added as `required`. ogen's
 decoder then fails the whole response when a field is absent, so a core that
 predates the field, or a mixed-version roll, breaks every list, get and
 repo-routing call in a client that does not depend on any of them.
+
+The create responses (`CreatedOrg`, `CreatedProject`, `CreatedRepo`) repeat the
+shape of their read models and so repeat the problem.
 
 **Fix upstream:** add read-model fields as optional until every deployment
 sends them, then tighten.
@@ -81,6 +103,26 @@ consumer: the consolidated index is what `resolveRepoCellTarget` routes with
 and what `search`, `repo mirror` and the dispatch wizard page through, so a
 decode failure there takes out cell routing and search together rather than
 one command.
+
+`DetachRepoResult.access` is on the same list for the opposite reason: core
+drops the field, and the CLI no longer reads it. Locked in by
+`TestDetachRepo_UnsentAccessDecodes`.
+
+## 2c. Nullable objects are typed as the object alone
+
+**Symptom:** `ResourcePerson.directGrant` is a `$ref` to
+`ResourcePersonDirectGrant`, but the server sends `"directGrant": null` for
+everyone without a direct grant, which is every GitHub-synced collaborator.
+ogen's decoder then rejects the whole `GET /repos/{repoId}/people` (and
+`/projects/{projectId}/people`) response.
+
+**Fix upstream:** declare the field nullable (`anyOf: [$ref, {type: null}]`),
+or omit it instead of sending null.
+
+**Workaround:** `spec/normalize.go` (`allowReadModelNulls`, allowlist
+`readModelNullableFields`) rewrites the listed `$ref` fields into that
+`anyOf`, so ogen generates a `Nil…` wrapper. Locked in by
+`TestListRepoPeople_NullDirectGrantDecodes`.
 
 ## 3. Every operation advertises the interactive login schemes
 

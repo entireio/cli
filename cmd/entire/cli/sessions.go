@@ -40,7 +40,8 @@ import (
 //     Only one line is held in memory at a time. A trailing partial line
 //     (agent mid-write) is silently dropped so consumers never see a
 //     truncated record.
-//   - Whole-document JSON agents (Gemini) — read snapshot into memory and
+//   - Whole-document JSON agents (Gemini CLI sessions recorded before its
+//     support was removed) — read snapshot into memory and
 //     validate with json.Valid before emitting. These transcripts are
 //     bounded by conversation size and rarely exceed a few MB even for
 //     long sessions, so buffering is acceptable here.
@@ -96,7 +97,8 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string, age
 }
 
 // isWholeDocumentJSONAgent reports whether an agent's on-disk transcript is
-// a single JSON document (e.g. Gemini's session-*.json) versus JSONL.
+// a single JSON document (Gemini's session-*.json) versus JSONL. Gemini CLI is
+// no longer supported, but session state it left behind can still be read.
 func isWholeDocumentJSONAgent(agentType types.AgentType) bool {
 	return agentType == agent.AgentTypeGemini
 }
@@ -482,9 +484,12 @@ and files touched. Works for both active and ended sessions.
 Output modes:
   Default       Human-readable summary.
   --json        Metadata-only JSON envelope (no transcript bytes).
+                "pending_turns" counts turns not yet condensed into a
+                checkpoint. "checkpoints" is a deprecated alias with the
+                same value and will be removed in the next release.
   --transcript  Stream the live raw agent transcript bytes to stdout in
-                the agent's native format (JSONL for Claude/Cursor/Codex,
-                JSON for Gemini). Snapshot is bounded to the file size
+                the agent's native format (e.g. JSONL for
+                Claude/Cursor/Codex). Snapshot is bounded to the file size
                 observed at open. JSONL streams have a trailing partial
                 line trimmed; JSON documents are emitted intact.
 
@@ -546,8 +551,8 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 
 // writeSessionTranscript streams the live raw agent transcript for a session
 // to stdout. The transcript bytes are exactly what the agent has written to
-// disk in its native per-agent format (JSONL for Claude Code/Cursor, JSON for
-// Gemini, etc.) — Entire performs no normalization here.
+// disk in its native per-agent format (JSONL for Claude Code/Cursor,
+// etc.) — Entire performs no normalization here.
 func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
 	if state.TranscriptPath == "" {
 		cmd.SilenceUsage = true
@@ -572,19 +577,23 @@ func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *stra
 
 // sessionInfoJSON is the JSON output structure for sessions info --json.
 type sessionInfoJSON struct {
-	SessionID      string         `json:"session_id"`
-	Agent          string         `json:"agent"`
-	Model          string         `json:"model,omitempty"`
-	Status         string         `json:"status"`
-	Kind           string         `json:"kind,omitempty"`
-	ReadOnly       bool           `json:"read_only,omitempty"`
-	Branch         string         `json:"branch,omitempty"`
-	WorktreeID     string         `json:"worktree_id,omitempty"`
-	WorktreePath   string         `json:"worktree_path,omitempty"`
-	StartedAt      time.Time      `json:"started_at"`
-	EndedAt        *time.Time     `json:"ended_at,omitempty"`
-	LastActive     *time.Time     `json:"last_active,omitempty"`
-	Turns          int            `json:"turns"`
+	SessionID    string     `json:"session_id"`
+	Agent        string     `json:"agent"`
+	Model        string     `json:"model,omitempty"`
+	Status       string     `json:"status"`
+	Kind         string     `json:"kind,omitempty"`
+	ReadOnly     bool       `json:"read_only,omitempty"`
+	Branch       string     `json:"branch,omitempty"`
+	WorktreeID   string     `json:"worktree_id,omitempty"`
+	WorktreePath string     `json:"worktree_path,omitempty"`
+	StartedAt    time.Time  `json:"started_at"`
+	EndedAt      *time.Time `json:"ended_at,omitempty"`
+	LastActive   *time.Time `json:"last_active,omitempty"`
+	Turns        int        `json:"turns"`
+	PendingTurns int        `json:"pending_turns"`
+	// Checkpoints is the deprecated name of PendingTurns, kept for one release
+	// so scripts reading `checkpoints` keep working. Remove it in the release
+	// after the one that introduced pending_turns.
 	Checkpoints    int            `json:"checkpoints"`
 	LastCheckpoint string         `json:"last_checkpoint_id,omitempty"`
 	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
@@ -632,6 +641,7 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		EndedAt:        state.EndedAt,
 		LastActive:     state.LastInteractionTime,
 		Turns:          state.SessionTurnCount,
+		PendingTurns:   state.StepCount,
 		Checkpoints:    state.StepCount,
 		LastCheckpoint: string(state.LastCheckpointID),
 		LastPrompt:     state.LastPrompt,
@@ -702,7 +712,7 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 		fmt.Fprintf(w, "Turns:       %d\n", state.SessionTurnCount)
 	}
 
-	fmt.Fprintf(w, "Checkpoints: %d\n", state.StepCount)
+	fmt.Fprintf(w, "Pending turns: %d\n", state.StepCount)
 
 	if state.LastCheckpointID != "" {
 		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)

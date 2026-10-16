@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/spf13/cobra"
 )
 
@@ -562,3 +563,13 @@ func TestCheckAndNotify_FetchFailureUpdatesCacheToPreventRetry(t *testing.T) {
 		t.Errorf("cache LastCheckTime not updated after fetch failure: %v", cache.LastCheckTime)
 	}
 }
+
+// globalConfigDirPath returns the CLI's global config directory. Resolution
+// lives in userdirs.Config — the single implementation shared by all
+// config-dir consumers (contexts.json, the file token store, this cache).
+func globalConfigDirPath() string {
+	return userdirs.Config()
+}
+
+// globalConfigDirName is the name of the global config directory in the user's home.
+const globalConfigDirName = ".config/entire"

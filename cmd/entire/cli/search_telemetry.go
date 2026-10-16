@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
 // classifySearchError maps a search failure to a coarse telemetry error class
@@ -20,7 +21,9 @@ import (
 // class.
 func classifySearchError(err error) string {
 	switch {
-	case errors.Is(err, auth.ErrNotLoggedIn):
+	case errors.Is(err, auth.ErrNotLoggedIn), errors.Is(err, tokenstore.ErrKeyringUnavailable):
+		// An unreadable keyring was reported as not-logged-in before it had
+		// its own error; keep it in the auth class so the series is continuous.
 		return telemetry.SearchErrClassAuth
 	case errors.Is(err, auth.ErrNoCellForJurisdiction):
 		return telemetry.SearchErrClassCellSkip

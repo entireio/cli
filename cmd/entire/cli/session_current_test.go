@@ -128,8 +128,15 @@ func TestSessionCurrent_JSONPrintsCurrentSessionInfo(t *testing.T) {
 	if got.SessionID != state.SessionID {
 		t.Fatalf("session_id = %q, want %q", got.SessionID, state.SessionID)
 	}
-	if got.Checkpoints != state.StepCount {
-		t.Fatalf("checkpoints = %d, want %d", got.Checkpoints, state.StepCount)
+	if got.PendingTurns != state.StepCount {
+		t.Fatalf("pending_turns = %d, want %d", got.PendingTurns, state.StepCount)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal raw output: %v", err)
+	}
+	if alias, ok := raw["checkpoints"].(float64); !ok || int(alias) != state.StepCount {
+		t.Fatalf("deprecated checkpoints alias = %v, want %d", raw["checkpoints"], state.StepCount)
 	}
 	if got.WorktreePath != dir {
 		t.Fatalf("worktree_path = %q, want %q", got.WorktreePath, dir)

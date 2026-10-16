@@ -8,6 +8,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -72,10 +73,6 @@ func (e *Agent) Type() types.AgentType {
 
 func (e *Agent) Description() string {
 	return e.info.Description
-}
-
-func (e *Agent) IsPreview() bool {
-	return e.info.IsPreview
 }
 
 func (e *Agent) DetectPresence(ctx context.Context) (bool, error) {
@@ -161,7 +158,11 @@ func (e *Agent) GetSessionID(input *agent.HookInput) string {
 }
 
 func (e *Agent) GetSessionDir(repoPath string) (string, error) {
-	stdout, err := e.run(context.Background(), nil, "get-session-dir", "--repo-path", repoPath)
+	return e.getSessionDir(context.Background(), repoPath)
+}
+
+func (e *Agent) getSessionDir(ctx context.Context, repoPath string) (string, error) {
+	stdout, err := e.run(ctx, nil, "get-session-dir", "--repo-path", repoPath)
 	if err != nil {
 		return "", fmt.Errorf("get-session-dir: %w", err)
 	}
@@ -202,6 +203,30 @@ func (e *Agent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error)
 }
 
 func (e *Agent) WriteSession(ctx context.Context, session *agent.AgentSession) error {
+	// Preflight before marshalling: a ref that is going to be refused should not
+	// first be serialized into the payload it will never be sent in.
+	needsStoreCheck, err := agent.ValidateExternalSessionRef(session.SessionRef)
+	if err != nil {
+		return fmt.Errorf("write-session: validate session reference: %w", err)
+	}
+	if needsStoreCheck && session.RepoPath != "" {
+		// Fails closed: a filesystem-shaped reference cannot be checked for
+		// containment without the directory it is supposed to be inside, and
+		// this is the preflight's whole job. A plugin that cannot report its
+		// session directory is told which subprocess failed.
+		sessionDir, dirErr := e.getSessionDir(ctx, session.RepoPath)
+		if dirErr != nil {
+			return fmt.Errorf("write-session: get-session-dir: %w", dirErr)
+		}
+		store, storeErr := agent.OpenSessionStoreAt(e, sessionDir)
+		if storeErr != nil {
+			return fmt.Errorf("write-session: open session store: %w", storeErr)
+		}
+		if err := store.ValidateExternalWriteRef(session.SessionRef); err != nil {
+			return fmt.Errorf("write-session: validate session reference: %w", err)
+		}
+	}
+
 	data, err := marshalAgentSession(session)
 	if err != nil {
 		return fmt.Errorf("write-session: marshal: %w", err)
@@ -317,7 +342,7 @@ func (e *Agent) GetTranscriptPosition(path string) (int, error) {
 	return resp.Position, nil
 }
 
-func (e *Agent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
+func (e *Agent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) ([]string, int, error) {
 	stdout, err := e.run(context.Background(), nil, "extract-modified-files",
 		"--path", path, "--offset", strconv.Itoa(startOffset))
 	if err != nil {
@@ -341,18 +366,6 @@ func (e *Agent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, err
 		return nil, fmt.Errorf("extract-prompts: invalid JSON: %w", err)
 	}
 	return resp.Prompts, nil
-}
-
-func (e *Agent) ExtractSummary(sessionRef string) (string, error) {
-	stdout, err := e.run(context.Background(), nil, "extract-summary", "--session-ref", sessionRef)
-	if err != nil {
-		return "", fmt.Errorf("extract-summary: %w", err)
-	}
-	var resp ExtractSummaryResponse
-	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return "", fmt.Errorf("extract-summary: invalid JSON: %w", err)
-	}
-	return resp.Summary, nil
 }
 
 // --- TranscriptPreparer methods ---
@@ -382,8 +395,19 @@ func (e *Agent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*age
 
 // --- TextGenerator methods ---
 
+// GenerateText runs generate-text outside the repository. Its stdin is a
+// summary prompt carrying untrusted transcript content, so the plugin gets
+// what the built-in generators get (agent.RunIsolatedTextGeneratorCLI): a
+// fresh empty working directory, no ENTIRE_REPO_ROOT, and no GIT_* variables.
+// Whatever tools the plugin's own model has, the repository is not where it
+// starts.
 func (e *Agent) GenerateText(ctx context.Context, prompt string, model string) (string, error) {
-	stdout, err := e.run(ctx, []byte(prompt), "generate-text", "--model", model)
+	dir, cleanup, err := agent.NewTextGenerationDir()
+	if err != nil {
+		return "", fmt.Errorf("generate-text: %w", err)
+	}
+	defer cleanup()
+	stdout, err := e.runIn(ctx, dir, []byte(prompt), "generate-text", "--model", model)
 	if err != nil {
 		return "", fmt.Errorf("generate-text: %w", err)
 	}
@@ -436,6 +460,16 @@ func (e *Agent) CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, 
 // If stdin is non-nil it is piped to the process. On non-zero exit, stderr is
 // included in the returned error.
 func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+	return e.runIn(ctx, "", stdin, args...)
+}
+
+// runIn is run with a choice of working directory. An empty isolatedDir runs
+// from the repository root with ENTIRE_REPO_ROOT set, as the protocol
+// documents for every subcommand. A non-empty one runs there instead, with
+// ENTIRE_REPO_ROOT, GIT_*, and the caller's PWD removed from the environment
+// (agent.TextGenerationEnv): the repository is neither the working directory
+// nor named to the plugin.
+func (e *Agent) runIn(ctx context.Context, isolatedDir string, stdin []byte, args ...string) ([]byte, error) {
 	// Every error below labels its message with the subcommand, args[0], so an
 	// empty slice panics on the way to reporting the real failure rather than
 	// returning it. run is variadic and New is exported, so the callers are not
@@ -476,8 +510,15 @@ func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, 
 		"ENTIRE_PROTOCOL_VERSION="+strconv.Itoa(ProtocolVersion),
 		"ENTIRE_CLI_VERSION="+versioninfo.Version,
 	)
-	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
-		cmd.Env = append(cmd.Env, "ENTIRE_REPO_ROOT="+repoRoot)
+	if isolatedDir != "" {
+		cmd.Dir = isolatedDir
+		// EqualFold: Windows environment names are case-insensitive.
+		cmd.Env = slices.DeleteFunc(agent.TextGenerationEnv(isolatedDir, cmd.Env), func(kv string) bool {
+			name, _, _ := strings.Cut(kv, "=")
+			return strings.EqualFold(name, repoRootEnvVar)
+		})
+	} else if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
+		cmd.Env = append(cmd.Env, repoRootEnvVar+"="+repoRoot)
 		cmd.Dir = repoRoot
 	}
 
@@ -507,6 +548,9 @@ func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, 
 
 	return stdoutBuf.Bytes(), nil
 }
+
+// repoRootEnvVar names the repository root to a plugin subcommand.
+const repoRootEnvVar = "ENTIRE_REPO_ROOT"
 
 // --- Helpers ---
 

@@ -43,7 +43,9 @@ type MigrateResult struct {
 //
 // Refs are enqueued for push — a failed enqueue is an error, not best-effort —
 // including already-imported refs, so a ref left unqueued by a partial earlier
-// run still gets pushed. This function does not push. When dryRun is true it
+// run still gets pushed. Checkpoints on this clone's deleted-checkpoints list
+// (see DeletedCheckpoints) are skipped and not counted. This function does not
+// push. When dryRun is true it
 // reports what would change without writing or enqueuing anything.
 func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool) (MigrateResult, error) {
 	return migrateBranchToRefs(ctx, repo, dryRun, updatePersistentRef)
@@ -75,10 +77,20 @@ func migrateBranchToRefs(
 	if err != nil {
 		return result, fmt.Errorf("resolve push queue: %w", err)
 	}
+	deleted, err := loadDeletedForRepo(repo)
+	if err != nil {
+		return result, err
+	}
 
 	walkErr := WalkCheckpointShards(ctx, repo, tree, func(cid id.CheckpointID, cpTreeHash plumbing.Hash) error {
 		if err := ctx.Err(); err != nil {
 			return err //nolint:wrapcheck // propagate context cancellation
+		}
+		if deleted.Contains(cid) {
+			// Deleted from this clone: a v1 copy still visible here (a stale
+			// tracking ref, a remote the delete could not reach) must not
+			// bring it back as a ref.
+			return nil
 		}
 		result.Total++
 

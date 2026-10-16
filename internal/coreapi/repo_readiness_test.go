@@ -89,13 +89,14 @@ func TestRepoAuthoritativeCrossRegion(t *testing.T) {
 			c.cfg.Client = &http.Client{Transport: rt}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			created, err := c.CreateRepo(ctx, &CreateRepoInputBody{Name: "web", ProjectId: id})
+			response, err := c.CreateRepo(ctx, &CreateRepoInputBody{Name: "web", ProjectId: id})
 			require.NoError(t, err)
+			created := response.Response
 			require.Equal(t, "provisioning", created.State.Or(""))
 			for _, state := range []string{"provisioning", "active"} {
 				snapshot, err := c.GetRepo(ctx, GetRepoParams{RepoId: created.ID, Authoritative: NewOptBool(true)})
 				require.NoError(t, err)
-				require.Equal(t, state, snapshot.State.Or(""))
+				require.Equal(t, state, snapshot.Response.State.Or(""))
 			}
 			require.EqualValues(t, 1, creates.Load())
 			require.EqualValues(t, 2, reads.Load())

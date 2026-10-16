@@ -123,9 +123,10 @@ scan reaches it through `unsupportedEntryError` and describes other types with
 
 This is deliberately redundant with the `.entire` entry scan, because the two
 cover different callers: the scan hangs off the root pre-run and
-`LoadEntireSettings`, while **eighteen files call `settings.Load` directly** —
-`strategy/hooks.go`, `manual_commit_hooks.go`, `checkpoint/remote/*`, `review/*`,
-`investigate/*` — and reach settings without ever passing the pre-run.
+`LoadEntireSettings`, while **more than twenty files call `settings.Load`
+directly** — `strategy/hooks.go`, `manual_commit_hooks.go`,
+`checkpoint/remote/*`, `review/*` — and reach settings without ever passing the
+pre-run.
 
 **`os.Root` confinement is not the invariant, and was not sufficient.** Measured
 against `readConfined` before the change: an absolute target (even one pointing
@@ -223,6 +224,75 @@ redaction settings from `.entire/settings.json`, and ahead of `doctor logs` /
 `doctor bundle`, which read `.entire/logs` — prints the diagnosis, and stops. It
 does not auto-fix: what occupies the path may be someone's data.
 
+### Recorded agent homes
+
+Agents with a relocatable home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`COPILOT_HOME`, `FACTORY_HOME_OVERRIDE`, `PI_CODING_AGENT_DIR`) implement
+`agent.HomeLayoutProvider`. Session initialization and every turn start set
+`session.State.AgentHome` to the active home when one of its session stores
+holds the transcript, spelled as the environment sets it or in canonical form,
+whichever contains the transcript path. They keep a home set by an earlier turn
+while it still holds the transcript, and clear it otherwise
+(`strategy.updateSessionAgentHome`). Correcting a session's agent type clears
+it too.
+
+`entire attach` searches every agent's active home before any agent's other
+recorded homes, which it searches last, most recently used first, starting
+with the agent it resolved; it skips an active home only when the active
+search already covered it. Per-project agents have each recorded store
+searched one level deep, where a session's own transcript lives. Attach says
+when it found the transcript under a recorded home, and sets `AgentHome` to
+that home, or to the active home when one of its stores holds the transcript,
+and clears it otherwise. A registry that cannot be read is named in attach's
+not-found error. Pi sessions kept in a store relocated with
+`PI_CODING_AGENT_SESSION_DIR` lie outside every home, so they are never
+recorded or found this way.
+
+The active home is also recorded in the per-user registry `agent_homes.json`
+in the user config directory (`agent.RememberAgentHome`): by session
+initialization after the session state is saved and its lock released, and by
+`entire attach` after it saves the state. Only a home resolved from the user's
+environment is recorded, never one read from session state. The registry
+lists each agent's homes most recently used first, at most 32 per agent, in
+canonical form; a home must exist to be recorded, and entries that are no
+longer directories are dropped when it is next rewritten. An unreadable or
+unsupported registry is never overwritten.
+
+`AgentHome` grants no trust on its own. Session state can come from another
+repository (`entire session adopt --from`), so a reader uses `AgentHome` only
+after `agent.ResolveTrustedHome` matches it against the active home or a
+recorded one. That keeps a home named by foreign state to the homes the user's
+own environment has resolved. It does not defend against code running as the
+user: such code can write the registry, the agent's home, and the
+repository's git hooks alike. Codex child rollouts of a session from another
+trusted home are looked up in that home's stores
+(`agent.HomeScopedInventoryExtractor`).
+
+`entire session adopt` accepts the source session's transcript, and each
+declared task transcript, when it lies where the session's `AgentHome` keeps
+the source worktree's sessions and `ResolveTrustedHome` accepts that home.
+`agent.RepoHomeLayout` narrows the agent's stores to the source worktree the
+way its session directory is narrowed under the active home: Claude Code's
+project directory, or every store for an agent without per-project
+directories such as Codex. A trusted home therefore admits no other project's
+files. Paths are compared against the spelling `ResolveTrustedHome` returns,
+and task transcripts must still match the agent's task layout
+(`agent.TaskTranscriptMatcher`). Otherwise, including for a session with no
+`AgentHome` or an untrusted one, the path must lie in the session directory of
+an agent's active home (`agent.AgentForTranscriptPath`). When neither holds
+the transcript, the error names the session's home if it was trusted, since
+then the path is at fault. If the agent keeps the worktree's sessions outside
+its active home, as Pi does with `PI_CODING_AGENT_SESSION_DIR`, there is
+nowhere beneath the session's home to check, and the error says so; such a
+session can be adopted only where that store is active. Otherwise the error
+names the relocation variables (`agent.RelocationEnvVars`) and why the
+recorded home was refused.
+
+The adopted state keeps `AgentHome`, in the checked spelling, only while that
+home holds the transcript, and only that home vouches for task transcripts. A
+session without a transcript keeps no home. Any other home is cleared, and
+the next turn start records the home the agent runs under.
+
 ### The Root Anchors
 
 Entire does filesystem I/O in eight trees, and each has one package that owns a
@@ -234,7 +304,7 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 | `.entire` | `entiredir` | worktree root (`paths.WorktreeRoot`), cwd only when there is provably no repo |
 | git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
 | the working tree | `worktreedir` | worktree root |
-| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.gemini/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`) |
+| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`, `.agents/`; also `.gemini/` for the retired Gemini CLI hook cleanup) |
 | an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |
 | the active git hooks dir | `strategy.hooksRootForInstall` / `ForRemoval` | `git rev-parse --git-path hooks`, absolutized |
 | per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |
@@ -259,7 +329,8 @@ data, _ := osroot.ReadFile(root, name)
 Anchoring on the target's own parent puts every component the caller resolved
 *above* the root, so containment covers only the final component and enforces
 nothing the `filepath.Join` had not already decided. A symlink at `.claude`, at
-`.entire`, or at `entire-investigations` is resolved before the root exists.
+`.entire`, or at a per-feature subdirectory of the git common dir is resolved
+before the root exists.
 Anchoring one level up makes those components **names inside** the root, which is
 what `os.Root` and `osroot.MkdirAllNoSymlink` can actually refuse. The same
 reasoning kills a containment *check* built on a derived base:
@@ -300,8 +371,7 @@ of having them.
 one of those directories is walked wholesale into every checkpoint tree.**
 `jsonutil.CreateTempIn` writes `<base>.<16 hex>.tmp` beside the file it is
 replacing; `.entire/metadata/<session>` holds `full.jsonl` and is copied into
-the tree by `addDirectoryToChanges` (ephemeral) and `copyMetadataDir`
-(persistent). A hook killed between the create and the rename — an agent hook
+the tree by `copyMetadataDir` when a commit writes the checkpoint. A hook killed between the create and the rename — an agent hook
 timeout, Codex's session-end process-tree kill, a crash — leaves the temp
 behind, and without a filter it is redacted, committed, and pushed on every
 later checkpoint. Both walks therefore skip `jsonutil.IsTempName`. Keep that
@@ -319,23 +389,22 @@ under several of these directories are fixed constants right now, and that is no
 a reason to skip the root. Two places already carried hand-written comments
 saying validation was the only thing keeping a path inside its tree —
 `PluginDataDir` ("guarantees ENTIRE_PLUGIN_DATA_DIR always points inside the
-managed data subtree") and `investigate.RunDir` ("an unvalidated id would be a
-path-traversal sink") — which is the argument for the primitive, not against it.
+managed data subtree") and the since-extracted `investigate.RunDir` ("an
+unvalidated id would be a path-traversal sink") — which is the argument for the
+primitive, not against it.
 
 **What each anchor is actually protecting.** These are not uniform, and the
 comments at each site say which case applies:
 
 - `.entire` and the git common dir hold names built from agent-supplied session
-  IDs, tool-use IDs, and investigation run IDs. Several call sites used to carry
+  IDs and tool-use IDs. Several call sites used to carry
   hand-written comments explaining that an unvalidated ID would be a traversal
   sink feeding `os.RemoveAll`. The root makes that structural.
 - The working tree holds names from `git status` and from checkpoint **tree
   entries**, which may have been fetched from a remote. The removed rewind
   implementation demonstrated this boundary: its restore writes were rooted
   before its reads were. There is no current worktree restore path.
-- An agent's session store is where a hook payload's session ID becomes a path,
-  via the agent's own `ResolveSessionFile`. `SessionStore.SessionFile` converts
-  the result back to a name inside the store and **rejects** an ID that left it.
+- An agent's session store is where a hook payload's session ID becomes a path, via the agent's own `ResolveSessionFile`. `SessionStore.SessionFile` is two checks, not one: it **validates the ID** (`validation.ValidateSessionID`) before the resolver ever sees it, then converts the result back to a name inside the store and **rejects** an ID that left it. The order is the point — several agents use the ID as a *directory* component (Copilot: `<dir>/<id>/events.jsonl`) or return it verbatim when absolute (Codex, Pi), so a containment check on the resolver's output is not a substitute for refusing the input. `agent.Agent.ResolveSessionFile` documents that it must not be called with unvalidated input, and `TestResolveSessionFileCallersAreSanctioned` enforces it: the sanctioned callers are `SessionFile` itself, `external`'s pure delegation, and the e2e harness helper that resolves an ID it generated. Two agents violated the contract for as long as it existed — a new integration copies the nearest existing one rather than re-deriving whether the ID was checked — which is why the rule is a guard test rather than a comment. A malformed ID reports `ErrUnsafeSessionName`; one that resolved out of the store reports `ErrOutsideSessionStore`. Distinct sentinels because "path is outside the agent's session directory" names the wrong problem for an ID that never resolved anywhere.
 - The git hooks directory holds no untrusted *name* — the five hook filenames are
   compile-time constants — so it is anchored for the opposite reason: what is at
   those names arrived from somewhere else. It was the last tree Entire wrote to
@@ -405,8 +474,8 @@ comments at each site say which case applies:
   pre-run guard so it still runs on such a repo, and its message says the repo is
   stopped rather than that the setup is fine.
   The agent hook-config directories get the same treatment via
-  `agent.HookConfigFile`: a symlinked `.claude` / `.cursor` / `.gemini` /
-  `.codex` / `.pi` is refused at the create, because a working tree arrives by
+  `agent.HookConfigFile`: a symlinked `.claude` / `.cursor` / `.codex` /
+  `.pi` is refused at the create, because a working tree arrives by
   clone and `entire enable` must not create directories and write JSON through a
   link the repository supplied. Pi was the last agent still joining its path onto
   the repo root and calling `os.ReadFile` / `os.MkdirAll` / `os.WriteFile` /
@@ -434,7 +503,7 @@ comments at each site say which case applies:
     the user saying which arrangement is theirs.
   - **Two independent boundaries.** `enforceSymlinkedAgentDirsTrust` answers
     "may this FILE grant anything" with the same untracked-and-verified gate as
-    the OPF command and `external_agents` (a repository that could both ship the
+    `external_agents` (a repository that could both ship the
     link and vouch for it is the whole attack). `agent.SetVouchedSymlinkedDirs`
     then answers "is this PATH one an agent config lives under", against a
     pinned list plus a structural `neverVouchable` rule, so `.entire` and
@@ -508,18 +577,24 @@ comments at each site say which case applies:
   one pointing elsewhere inside it, so `.claude -> vendor/x` was previously read
   by `Read`/`GeneratedState`, reported present by `Exists`, and had `Remove`
   delete the file at the far end; only `Write` checked, because
-  `MkdirAllNoSymlink` was the only check there was. `osroot.NoSymlinkedParent` is
-  that function's read-only counterpart, and every `HookConfigFile` method calls
-  it. `HookConfigFile.Root()` hands over the raw primitives, so its one caller
+  `MkdirAllNoSymlink` was the only check there was. Every `HookConfigFile`
+  method now resolves through the read-only no-symlink primitives
+  (`osroot.LstatNoSymlinks`, `RemoveNoSymlinks`, ...). `HookConfigFile.Root()` hands over the raw primitives, so its one caller
   (Codex's `hooksDocumentRoot`) makes the check itself.
 
   **`writeManagedScaffold` is the same rule for the skill scaffolds** —
-  `.claude/skills/`, `.claude/agents/`, `.codex/agents/`, `.gemini/agents/`. It
+  `.claude/skills/`, `.claude/agents/`, `.codex/agents/`. It
   was not one of the seven call sites `HookConfigFile` replaced, and until it was
   anchored it did `os.MkdirAll` two levels and `os.WriteFile` through a symlinked
   `.claude`, landing files outside the repository and reporting Created. It now
   takes a worktree root rather than an assembled absolute path, and its callers
   no longer fall back to `os.Getwd()` when `WorktreeRoot` fails.
+- **An agent's session DIRECTORY is the exception, and is followed.** The store refuses a symlink for every name *inside* it — nested directories go through `MkdirAllNoSymlink`, the leaf through `LstatNoSymlinks` — but `openRoot` is a plain `os.OpenRoot(s.dir)` and `openRootForWrite` a plain `os.MkdirAll`, both of which follow a link at the store directory itself or above it.
+
+  That is deliberate and was reverted back into place once. The store's location comes from the agent's own `GetSessionDir`, not from checkpoint metadata or a hook payload, so it is not the untrusted input the rest of this section is about; and `~/.claude` or `~/.codex` managed by chezmoi/stow/yadm is an ordinary setup among exactly the people who run coding agents. Refusing it broke reads as well as writes, whenever the link was the deepest component that existed yet, with no opt-out — `allow_symlinked_agent_dirs` covers worktree-relative agent *config* directories, never the home session store. Anyone who can plant a symlink in that directory can write the transcripts directly and does not need Entire to follow it.
+
+  The store and every directory created beneath it are `0700`, not `0750`: they hold session transcripts, and with the usual umask the difference is group-readable. Copilot, Cursor and Codex all write into nested directories, so the root alone was not enough.
+- **Another worktree's `.entire` is touched in exactly one place: a condensation's stored transcript and prompts.** The sweep and doctor condense sessions recorded in other worktrees of the same repository, and a session's turn-end stored copy (`.entire/metadata/<session>/full.jsonl`, `prompt.txt`) lives in the worktree it ran in. `storedSessionRoot` (`strategy/manual_commit_condensation.go`) reads it from `state.WorktreePath` only when `foreignWorktreeEntireRoot` positively accepts that path: absolute, not the current worktree, and lexically equal after cleaning to an entry of `git worktree list --porcelain` for THIS repository (`gitrepo.ListWorktreePaths`). The root is then opened on the path git printed, never on the state value, and never after `EvalSymlinks` on the state value to make it match. `.entire` must pass `paths.ValidateEntireDirAt` and is opened through `entiredir.OpenAtForRead` (no creation, symlink refused at the child boundary), the session ID is validated before the name is built (`storedSessionFileName`), and reads go through `osroot.LstatNoSymlinks` / `ReadFileNoFollow`. The root is resolved once per condensation. After a commit-less condense (`CondenseSessionByID`) succeeds and its state is saved, the same root releases the staged `prompt.txt` and `full.jsonl` (`clearStagedFilesIn`, through `osroot.OpenDirNoSymlinks`), and the commit path's release after carry-forward goes through the root its condensation resolved, never a separately opened current-worktree root. Every refusal falls back to the current worktree with a Warn log naming the reason, never an error; a release whose root could not be opened is logged at Warn with where the copy lives. Nothing else follows `WorktreePath` into another worktree; widening the sweep and doctor scoping is separate work.
 - **Call `Reset()` before deleting a rooted directory** (see
   `removeEntireDirectory`). A root that outlives its directory is a handle to an
   unlinked inode: writes succeed and land nowhere.
@@ -532,8 +607,8 @@ comments at each site say which case applies:
   `checkpoint.WriteOptions.MetadataDirAbs` existed alongside `MetadataDir` and
   was deleted for exactly that reason. Guard tests pin the pairs that must agree.
 - **Absolute paths stay absolute when they cross a process boundary** —
-  `opencode export` takes a path, `entire investigate` hands the agent its
-  `state.json` path, a transcript path becomes a checkpoint's `SessionRef`.
+  `opencode export` takes a path, a transcript path becomes a checkpoint's
+  `SessionRef`.
   Those keep an absolute spelling; the reads and writes around them still go
   through a root.
 - **Anything outside the CLI packages takes an `fs.FS`, not a path.**
@@ -580,6 +655,12 @@ comments at each site say which case applies:
   it by anchoring a root on `filepath.Dir(sessionRef)` — that is the derived
   base the rule above refuses, and it would contain nothing while looking like
   it did.
+
+  The same gap covers listing Claude Code Workflow runs:
+  `paths.WorkflowAgentTranscripts` / `WorkflowRunAgentTranscripts` call bare
+  `os.ReadDir` under the session's `subagents/workflows/`, derived from the
+  transcript path. They take only path-safe run and agent IDs, skip symlinked
+  runs and files, and read nothing but regular `agent-<id>.jsonl` files.
 
   `TestTranscriptReadsOnlyShrink` (`agent/transcript_read_guard_test.go`) is a
   **ratchet** over that set: it pins the per-file count of

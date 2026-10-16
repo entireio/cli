@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"github.com/spf13/cobra"
 )
@@ -98,12 +99,23 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
+	writeRefusedAgentHomes(w)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
 	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// writeRefusedAgentHomes names every agent relocation variable Entire refuses.
+// Printed in the short output too, not only --detailed: the refusal breaks
+// resume and attach for that agent and silently drops it from transcript-owner
+// matching, and nothing else in a default run says so.
+func writeRefusedAgentHomes(w io.Writer) {
+	for _, err := range agent.RefusedRelocationEnvVars() {
+		fmt.Fprintf(w, "  ignoring agent home: %v\n", err)
+	}
 }
 
 // agentHelpCommand is the invocation a coding agent runs to get machine-readable
@@ -128,6 +140,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
+	writeRefusedAgentHomes(w)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -228,7 +241,10 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			b.WriteString(strings.Join(displayNames, ", "))
 		}
 
-		// Warn when installed hooks are out of date (read-only; fix is manual).
+		// Warn when installed hooks are out of date. Status stays read-only and
+		// points to doctor rather than `entire enable --force`: doctor repairs
+		// missing hook timeouts in place, while --force rebuilds every Entire hook
+		// and drops the timeouts and fields the user set on them.
 		for _, name := range OutdatedHookAgents(ctx) {
 			ag, err := agent.Get(name)
 			if err != nil {
@@ -236,11 +252,19 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			}
 			b.WriteString("\n")
 			b.WriteString(sty.render(sty.yellow, "  ! "+string(ag.Type())+" hooks out of date"))
-			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
+			b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
 		}
 		if warning := codexStatusWarning(inspectCodexHookIssue(ctx)); warning != "" {
 			b.WriteString("\n")
 			b.WriteString(sty.render(sty.yellow, "  ! "+warning))
+		}
+		// Shadow branches older versions left behind hold raw working-tree
+		// snapshots and are no longer removed automatically; surface them so
+		// they are not pushed or kept by accident.
+		if n := legacyShadowBranchCount(ctx); n > 0 {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! "+pluralCount(n, "legacy shadow branch", "legacy shadow branches")))
+			b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
 		}
 	}
 
@@ -389,9 +413,22 @@ type checkpointSyncInfo struct {
 	// IgnoredRemote and IgnoredReason report a configured checkpoint_remote
 	// that the ownership check rejected as inherited with the clone. Both
 	// reads and pushes then fall back to the elected remote, and status is
-	// where a user finds out why — the hooks only log the rejection.
+	// where a user finds out why.
 	IgnoredRemote string
 	IgnoredReason string
+	// IgnoredDisproved marks a rejection where a remote named a different
+	// owner — the fork case, where checkpoints landing on the elected remote is
+	// the intended outcome — so it renders as information, not a warning. False
+	// for an unprovable owner, which only the user can settle.
+	IgnoredDisproved bool
+	// IgnoredReasonIsReadSide marks the push-disabled report, which comes from
+	// the fetch side's verdict rather than ownership, so it names no verdict.
+	IgnoredReasonIsReadSide bool
+	// IgnoredRemedy is the command that claims the ignored store for this
+	// clone, empty only when the configured entry is too malformed to name
+	// one. Carried rather than rebuilt at render time so the text and the
+	// JSON cannot offer different fixes.
+	IgnoredRemedy string
 }
 
 // resolveDedicatedReadSource records where checkpoint READS land when the
@@ -440,8 +477,8 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
-		// Fail-closed: checkpoint_push_remote names a remote that does not
-		// exist. The pre-push gate is silently skipping checkpoint sync, so
+		// Fail-closed: election could not confirm a usable checkpoint sync
+		// remote. The pre-push gate is silently skipping checkpoint sync, so
 		// status is the user's signal.
 		//
 		// With pushing enabled, a dedicated checkpoint_remote bypasses election
@@ -532,26 +569,14 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// but a fetch with NO candidate votes on origin alone, so a mismatch that
 	// lives only in the elected remote's push URL shows "not in use" here
 	// even though such a lead-less fetch still resolves the checkpoint remote.
-	if cr := s.GetCheckpointRemote(); cr != nil {
-		if repo, reason, inherited := checkpointremote.InheritedCheckpointRemote(ctx, s, elected.Name); inherited {
-			info.IgnoredRemote = repo
-			info.IgnoredReason = reason
-		} else if info.PushDisabled {
-			// That verdict is ownership only, so it accepts a store the fetch
-			// side declined for another reason (an unparseable origin URL, an
-			// unmappable protocol) — and with pushing disabled the fetch side
-			// is the one that decided the line above. Without this the
-			// configured store is reported by nothing at all, which is the
-			// silent-ignore the warning exists to prevent. Ownership itself
-			// cannot split the two: both vote over origin plus the
-			// candidate's push urls.
-			//
-			// No reason is given: the fetch side returns a verdict and not a
-			// cause, so naming one would be a guess. The causes are logged
-			// where they are decided.
-			info.IgnoredRemote = cr.Repo
-			info.IgnoredReason = "checkpoint reads do not resolve to it (see .entire/logs for the reason)"
-		}
+	// With pushing disabled, reaching here means the fetch side already
+	// declined the store above (resolveDedicatedReadSource returned false).
+	if r, ok := ignoredCheckpointRemote(ctx, s, elected.Name, info.PushDisabled); ok {
+		info.IgnoredRemote = r.Repo
+		info.IgnoredReason = r.Reason
+		info.IgnoredDisproved = r.Verdict == checkpointremote.OwnershipDisproved
+		info.IgnoredReasonIsReadSide = r.ReadSide
+		info.IgnoredRemedy = r.Remedy
 	}
 	return info
 }
@@ -567,6 +592,19 @@ func newDedicatedCheckpointSyncInfo(ctx context.Context, cr *settings.Checkpoint
 		info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
 	}
 	return info
+}
+
+// IgnoredVerdict names the ownership verdict behind IgnoredRemote for --json;
+// empty when nothing is ignored or the refusal was not an ownership verdict.
+func (info checkpointSyncInfo) IgnoredVerdict() string {
+	switch {
+	case info.IgnoredRemote == "" || info.IgnoredReasonIsReadSide:
+		return ""
+	case info.IgnoredDisproved:
+		return "disproved"
+	default:
+		return "unprovable"
+	}
 }
 
 // countUnpushedCheckpointsForStatus counts best-effort: status must never fail
@@ -645,10 +683,19 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString(sty.render(sty.dim, " (fallback; nothing was elected)"))
 	}
 	if info.IgnoredRemote != "" {
+		// The repo comes from the committed settings file, so it is stripped
+		// of escape sequences before it reaches the terminal.
+		repo := tuiutil.SanitizeDisplayText(info.IgnoredRemote)
+		line := ignoredCheckpointRemoteSentence(repo, info.IgnoredReason, info.Remote) + " " +
+			ignoredCheckpointRemoteFix(repo, info.IgnoredRemedy)
 		b.WriteString("\n")
-		b.WriteString(sty.render(sty.yellow,
-			"  ! checkpoint_remote "+info.IgnoredRemote+" is not in use: "+info.IgnoredReason+
-				". If this checkpoint repo is yours, set checkpoint_remote in .entire/settings.local.json."))
+		if info.IgnoredDisproved {
+			// Another owner's store: checkpoints on the elected remote is the
+			// intended outcome for a fork, so this is information, not a fault.
+			b.WriteString(sty.render(sty.dim, "  "+line))
+		} else {
+			b.WriteString(sty.render(sty.yellow, "  ! "+line))
+		}
 	}
 	if info.Unpushed > 0 {
 		b.WriteString("\n  ")
@@ -695,19 +742,48 @@ func timeAgo(t time.Time) string {
 	return formatRelativeDuration(time.Since(t))
 }
 
-// formatRelativeDuration renders a positive duration as "just now" / "Xm ago"
-// / "Xh ago" / "Xd ago". Shared between `entire status` and `entire auth list`
-// so the bucket thresholds and labels stay consistent.
+// formatRelativeDuration renders a signed duration relative to now: "just now"
+// near zero, "Xm ago" / "Xh ago" / "Xd ago" / "Xmo ago" in the past, and "in Xm"
+// … "in Xmo" in the future. Shared between `entire status` and `entire auth
+// status` so the bucket thresholds and labels stay consistent.
+//
+// The sign test comes first on purpose: a future duration is negative, so it
+// would otherwise satisfy d < time.Minute and report "just now" for a session
+// that expires in a month.
 func formatRelativeDuration(d time.Duration) string {
-	switch {
-	case d < time.Minute:
+	if d > -time.Minute && d < time.Minute {
+		// Also absorbs the small negative durations that clock skew produces
+		// for a timestamp the server stamped moments ago.
 		return lastUsedJustNow
+	}
+	if d < 0 {
+		return "in " + humanizeDuration(-d)
+	}
+	return humanizeDuration(d) + " ago"
+}
+
+// humanizeDuration renders a positive duration as a single coarse unit. It
+// holds the bucket ladder that formatRelativeDuration wraps with tense, so past
+// and future can never drift apart.
+//
+// Each unit's band starts at 1 — 1m, 1h, 1d, 1mo — which is why days stop at 30
+// rather than running to 60. A wider day band would make the first reachable
+// month "2mo", so a value ticking past the boundary would read 59d then 2mo and
+// look like it had doubled.
+func humanizeDuration(d time.Duration) string {
+	const (
+		day   = 24 * time.Hour
+		month = 30 * day
+	)
+	switch {
 	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < day:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < month:
+		return fmt.Sprintf("%dd", int(d/day))
 	default:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+		return fmt.Sprintf("%dmo", int(d/month))
 	}
 }
 
@@ -868,7 +944,7 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
 			if st.CaptureDegradedAt != nil {
-				warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
+				warning := fmt.Sprintf("capture degraded %s: a status scan or checkpoint finalize ran out of time (see 'entire doctor logs')",
 					timeAgo(*st.CaptureDegradedAt))
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
@@ -1014,9 +1090,6 @@ func computeSessionDivergenceWarnings(
 		}
 
 		if st.BaseCommit == head.commitHash {
-			if st.AttributionBaseCommit != "" && st.AttributionBaseCommit != st.BaseCommit {
-				warnings[st.SessionID] = "attribution base diverged after history movement; figures may be off until next checkpoint"
-			}
 			continue
 		}
 
@@ -1051,9 +1124,17 @@ type statusJSON struct {
 	// `entire status --json` instead of the human footer. Set only on the
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
 	AgentHelp string `json:"agent_help,omitempty"`
-	// HooksOutdated lists agents whose installed hook config is out of date and
-	// should be refreshed with `entire enable --force`.
+	// HooksOutdated lists agents whose installed hook config is out of date;
+	// `entire doctor` repairs it or names the fix.
 	HooksOutdated []string `json:"hooks_outdated,omitempty"`
+	// LegacyShadowBranches counts the strict-shape entire/<commit>-<worktree>
+	// shadow branches older versions left behind; `entire doctor` reports and
+	// deletes them.
+	LegacyShadowBranches int `json:"legacy_shadow_branches,omitempty"`
+	// RefusedAgentHomes lists agent relocation variables (CLAUDE_CONFIG_DIR,
+	// CODEX_HOME, ...) set to a value Entire refuses, one message per variable.
+	// Resume and attach fail for that agent until it is fixed.
+	RefusedAgentHomes []string `json:"refused_agent_homes,omitempty"`
 	// CodexHooks reports effective discovery/trust warnings separately from
 	// current-checkout installation and freshness semantics.
 	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
@@ -1095,6 +1176,17 @@ type statusJSON struct {
 	// fall back to the elected remote). Mirrors the text path's warning line.
 	CheckpointRemoteIgnored       string `json:"checkpoint_remote_ignored,omitempty"`
 	CheckpointRemoteIgnoredReason string `json:"checkpoint_remote_ignored_reason,omitempty"`
+	// CheckpointRemoteIgnoredRemedy is the command that claims the ignored
+	// store for this clone. Emitted so an agent reading --json can act on the
+	// rejection rather than only report it; absent when no single command
+	// fixes it.
+	CheckpointRemoteIgnoredRemedy string `json:"checkpoint_remote_ignored_remedy,omitempty"`
+	// CheckpointRemoteIgnoredVerdict says why ownership refused the store:
+	// "disproved" when a remote names a different owner (a fork, where the
+	// fallback is the intended outcome) or "unprovable" when no owner could be
+	// read (only the user can settle it). Absent when the refusal was not an
+	// ownership verdict.
+	CheckpointRemoteIgnoredVerdict string `json:"checkpoint_remote_ignored_verdict,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
@@ -1137,7 +1229,7 @@ type sessionBriefJSON struct {
 	Model        string `json:"model,omitempty"`
 	Status       string `json:"status"`
 	// CaptureDegraded reports that a session for this agent last turned with a
-	// status scan over budget, so new-file detection was skipped.
+	// capture operation over budget.
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
@@ -1170,6 +1262,9 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		ActiveSessions: []sessionBriefJSON{},
 		AgentHelp:      agentHelpCommand,
 	}
+	for _, refusal := range agent.RefusedRelocationEnvVars() {
+		result.RefusedAgentHomes = append(result.RefusedAgentHomes, refusal.Error())
+	}
 
 	if s.Enabled {
 		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
@@ -1181,6 +1276,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		for _, name := range OutdatedHookAgents(ctx) {
 			result.HooksOutdated = append(result.HooksOutdated, string(name))
 		}
+		result.LegacyShadowBranches = legacyShadowBranchCount(ctx)
 		result.CodexHooks = codexHooksStatusFromIssue(inspectCodexHookIssue(ctx))
 
 		// Same computation as the text path (writeCheckpointSyncLines);
@@ -1195,6 +1291,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.UnpushedCheckpoints = syncInfo.Unpushed
 		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
 		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
+		result.CheckpointRemoteIgnoredRemedy = syncInfo.IgnoredRemedy
+		result.CheckpointRemoteIgnoredVerdict = syncInfo.IgnoredVerdict()
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			// Read-only, and one entry per session. Collapsing by agent hid a
@@ -1253,4 +1351,14 @@ func sessionStatusLabel(s *session.State) string {
 		return string(s.Phase)
 	}
 	return string(session.PhaseIdle)
+}
+
+// legacyShadowBranchCount returns how many strict-shape legacy shadow branches
+// exist (the ones `entire doctor` reports), or 0 when they cannot be listed.
+func legacyShadowBranchCount(ctx context.Context) int {
+	branches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
+	if err != nil {
+		return 0
+	}
+	return len(branches)
 }

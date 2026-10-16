@@ -176,7 +176,7 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
 {"role":"assistant","message":{"content":[{"type":"text","text":"Created the file."}]}}
 ```
 
-- Cursor may prepend a `<timestamp>...</timestamp>` line inside the text before `<user_query>`; both are stripped by `textutil.StripIDEContextTags`. The timestamp strip is anchored to the start of the message so `<timestamp>` elements in pasted user content survive.
+- Cursor may prepend a `<timestamp>...</timestamp>` line inside the text before `<user_query>`; both are stripped by `transcript.StripIDEContextTags` (root `transcript` package). The timestamp strip is anchored to the start of the message so `<timestamp>` elements in pasted user content survive.
 - Transcript DOES contain `tool_use` content blocks, in the same shape as Claude Code: `message.content[i].type == "tool_use"` with `name` and `input`. Verified against a real session captured 2026-08-24 and pinned by `testdata/real_session_tool_use.jsonl` (`TestCursorAgent_RealSessionContainsToolUseBlocks`). Observed tools and their input keys:
 
   | Tool | Input keys | Modifies files |
@@ -206,6 +206,13 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
   - `--workspace <path>`: Set working directory
   - `--model <model>`: Model override (e.g., `sonnet-4`, `gpt-5`)
   - `--output-format <fmt>`: `text` (default), `json`, `stream-json`
+- Summary text generation (`explain --generate`, auto-summarize) does **not**
+  use `--force`: it runs `agent --print --trust --workspace <fresh empty dir>`
+  with the prompt on stdin, where the workspace holds a `.cursor/cli.json`
+  denying every permission kind (`Shell`, `Read`, `Write`, `WebFetch`, `Mcp`).
+  The prompt carries untrusted transcript content, and Cursor has no
+  "no tools" flag: `--mode ask` and `--sandbox enabled` still allowed shell
+  reads and network requests when verified live. See `generate.go`.
 - Interactive mode: `agent --force` (launches TUI)
   - Prompt pattern for TUI ready: TBD (needs interactive probe)
   - `--resume [chatId]`: Resume specific session

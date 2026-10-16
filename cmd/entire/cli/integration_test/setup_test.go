@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
 // TestMain builds the CLI binary once before running all tests.
@@ -87,6 +88,15 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 	}
+	// The developer's shell-scoped login selection must not reach the spawned
+	// binary either: ENTIRE_CONFIG_DIR above is an empty directory, so an
+	// inherited ENTIRE_CONTEXT names a login that is not saved there and every
+	// child fails with UnknownContextError before it does anything.
+	if err := os.Unsetenv(contexts.EnvContextVar); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to unset %s: %v\n", contexts.EnvContextVar, err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
+	}
 
 	// Same shape, same reason: absence, not a redirected path. ENTIRE_TOKEN
 	// outranks stored contexts in the identity resolver, and gitenv.Isolated()
@@ -95,6 +105,28 @@ func TestMain(m *testing.M) {
 	// from the host in the developer's token aud.
 	if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to unset %s: %v\n", auth.EnvTokenVar, err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
+	}
+
+	// Same reason for the agents' relocated homes: tests steer them through
+	// HOME and ENTIRE_TEST_*_PROJECT_DIR in the child env, and an inherited
+	// relocation variable would outrank HOME in the base-dir fallback. The list
+	// is static for the same reason as the one above.
+	for _, name := range agent.RelocationEnvVars() {
+		if err := os.Unsetenv(name); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to unset %s: %v\n", name, err)
+			os.RemoveAll(tmpDir)
+			os.Exit(1)
+		}
+	}
+
+	// Resume and attach ask claude for its config home (see
+	// agent.EnableHomeProbes). A spawned binary is not under `go test`, so
+	// without this it would start whatever claude the developer has on PATH;
+	// a test that exercises the probe points it at a fake one instead.
+	if err := os.Setenv("ENTIRE_TEST_CLAUDE_CONFIG_PROBE", "off"); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to disable the claude config probe: %v\n", err)
 		os.RemoveAll(tmpDir)
 		os.Exit(1)
 	}

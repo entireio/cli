@@ -209,7 +209,12 @@ func dedicatedCandidatesFixture(t *testing.T, refOnFork, refOnOrigin bool) (stri
 	// placed first on PATH, so a rewrite key carrying `;` or `)` was command
 	// execution. Keep them literal: dedupe by giving each caller its own
 	// script, never by generating one from parameters.
-	testutil.WriteFile(t, binDir, "git", `#!/bin/bash
+	//
+	// bash specifically (indexed arrays, ${!args[@]}), reached through
+	// /usr/bin/env: /bin/bash is not universal — NixOS ships /bin/sh alone, and
+	// a hardcoded interpreter path fails there at exec time, surfacing as a
+	// baffling "fork/exec …/git: no such file or directory".
+	testutil.WriteFile(t, binDir, "git", `#!/usr/bin/env bash
 args=("$@")
 for arg in "$@"; do
   if [[ "$arg" == ls-remote || "$arg" == fetch ]]; then

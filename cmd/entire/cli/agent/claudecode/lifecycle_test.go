@@ -1,8 +1,11 @@
 package claudecode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -136,6 +140,24 @@ func TestParseHookEvent_TurnEnd(t *testing.T) {
 	}
 }
 
+// TestParseHookEvent_StopFailure_EndsTurn verifies that a turn ending on an
+// API error ends the turn like Stop, so the session leaves ACTIVE instead of
+// waiting for the next prompt.
+func TestParseHookEvent_StopFailure_EndsTurn(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id": "sess-fail", "transcript_path": "/tmp/fail.jsonl", "hook_event_name": "StopFailure", "error": "rate_limit"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStopFailure, strings.NewReader(input))
+
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.TurnEnd, event.Type)
+	require.Equal(t, "sess-fail", event.SessionID)
+	require.Equal(t, "/tmp/fail.jsonl", event.SessionRef)
+}
+
 func TestParseHookEvent_TurnEnd_IncludesModel(t *testing.T) {
 	t.Parallel()
 
@@ -235,7 +257,9 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 		"transcript_path": "/tmp/main.jsonl",
 		"tool_use_id":     "toolu_xyz789",
 		"tool_input":      json.RawMessage(`{"prompt": "task done"}`),
-		"tool_response": map[string]string{
+		"tool_response": map[string]any{
+			"status":  "async_launched",
+			"isAsync": true,
 			"agentId": "agent-subagent-001",
 		},
 	}
@@ -294,6 +318,57 @@ func TestParseHookEvent_SubagentEnd_NoAgentID(t *testing.T) {
 	}
 }
 
+// TestParseHookEvent_SubagentEnd_LaunchMode pins how a launch-time
+// PostToolUse payload is classified. Claude Code decides whether an Agent
+// call runs in the background, and the model's run_in_background argument is
+// usually absent (or sent as a string), so tool_response.status is the
+// authoritative signal. Payloads are trimmed from real Claude Code 2.1.288
+// hooks.
+func TestParseHookEvent_SubagentEnd_LaunchMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		payload string
+		want    agent.SubagentLaunchMode
+	}{
+		{
+			name:    "async launch without run_in_background",
+			payload: `{"session_id":"s","transcript_path":"/tmp/s.jsonl","hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"description":"Add count subcommand","prompt":"p","subagent_type":"general-purpose"},"tool_response":{"isAsync":true,"status":"async_launched","agentId":"aa6579c96e11a281b","description":"Add count subcommand","prompt":"p","outputFile":"/tmp/out","canReadOutputFile":true},"tool_use_id":"toolu_01A"}`,
+			want:    agent.SubagentLaunchBackground,
+		},
+		{
+			name:    "foreground completion",
+			payload: `{"session_id":"s","transcript_path":"/tmp/s.jsonl","hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"description":"d","prompt":"p","subagent_type":"general-purpose","run_in_background":false},"tool_response":{"status":"completed","prompt":"p","agentId":"aa6579c96e11a281b","agentType":"general-purpose","content":[{"type":"text","text":"Done."}],"totalDurationMs":6060},"tool_use_id":"toolu_01A"}`,
+			want:    agent.SubagentLaunchForeground,
+		},
+		{
+			name:    "completed status wins over run_in_background true",
+			payload: `{"session_id":"s","transcript_path":"/tmp/s.jsonl","tool_input":{"run_in_background":true},"tool_response":{"status":"completed","agentId":"aa6579c96e11a281b"},"tool_use_id":"toolu_01A"}`,
+			want:    agent.SubagentLaunchForeground,
+		},
+		{
+			name:    "no status leaves the mode unknown",
+			payload: `{"session_id":"s","transcript_path":"/tmp/s.jsonl","tool_input":{},"tool_response":{"agentId":"aa6579c96e11a281b"},"tool_use_id":"toolu_01A"}`,
+			want:    agent.SubagentLaunchUnknown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ag := &ClaudeCodeAgent{}
+			event, err := ag.ParseHookEvent(context.Background(), HookNamePostTask, strings.NewReader(tt.payload))
+			require.NoError(t, err)
+			require.NotNil(t, event)
+			assert.Equal(t, tt.want, event.SubagentLaunch)
+			assert.Equal(t, "toolu_01A", event.ToolUseID)
+			assert.Equal(t, "aa6579c96e11a281b", event.SubagentID)
+			assert.False(t, event.Final)
+		})
+	}
+}
+
 // TestParseHookEvent_SubagentStop covers the true-completion signal for
 // background subagents. Background subagents return a launch stub
 // immediately, so the launch-time post-task (PostToolUse) hook fires seconds
@@ -301,12 +376,15 @@ func TestParseHookEvent_SubagentEnd_NoAgentID(t *testing.T) {
 // never captured beyond the stub. SubagentStop fires at real completion, even
 // after the parent's turn ended, and must translate into the same
 // agent.SubagentEnd event, marked Final so lifecycle code can tell the two
-// apart and prefer the payload's own transcript path over resolution.
+// apart and prefer the payload's own transcript path over resolution. The
+// payload carries agent_id but no tool_use_id (observed through Claude Code
+// 2.1.288, foreground and background alike), so ToolUseID stays empty and the
+// lifecycle correlates on SubagentID.
 func TestParseHookEvent_SubagentStop(t *testing.T) {
 	t.Parallel()
 
 	ag := &ClaudeCodeAgent{}
-	input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","agent_transcript_path":"/tmp/parent/subagents/agent-a123.jsonl","tool_use_id":"toolu_01X","cwd":"/repo"}`
+	input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","agent_transcript_path":"/tmp/parent/subagents/agent-a123.jsonl","cwd":"/repo"}`
 
 	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
 
@@ -326,8 +404,8 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	if event.SubagentID != "a123" {
 		t.Errorf("expected subagent_id 'a123', got %q", event.SubagentID)
 	}
-	if event.ToolUseID != "toolu_01X" {
-		t.Errorf("expected tool_use_id 'toolu_01X', got %q", event.ToolUseID)
+	if event.ToolUseID != "" {
+		t.Errorf("expected empty tool_use_id, got %q", event.ToolUseID)
 	}
 	if event.SubagentTranscriptPath != "/tmp/parent/subagents/agent-a123.jsonl" {
 		t.Errorf("expected subagent_transcript '/tmp/parent/subagents/agent-a123.jsonl', got %q", event.SubagentTranscriptPath)
@@ -343,7 +421,7 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	t.Run("no transcript path", func(t *testing.T) {
 		t.Parallel()
 
-		input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","tool_use_id":"toolu_01X","cwd":"/repo"}`
+		input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","cwd":"/repo"}`
 
 		event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
 
@@ -358,6 +436,128 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 			t.Error("expected Final to be true for SubagentStop event")
 		}
 	})
+}
+
+// TestParseHookEvent_WorkflowSubagentStart covers Claude Code's SubagentStart
+// hook (#2685). A Workflow launches its agents without an Agent tool call, so
+// SubagentStart is the only launch signal; the payload shape is a real Claude
+// Code 2.1.291 capture. It becomes a background launch keyed by the agent ID,
+// which the later SubagentStop completes by the same ID.
+func TestParseHookEvent_WorkflowSubagentStart(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","cwd":"/repo","prompt_id":"p1","agent_id":"ae3d7b8f2930c8787","agent_type":"workflow-subagent","hook_event_name":"SubagentStart"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStart, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+
+	assert.Equal(t, agent.SubagentEnd, event.Type)
+	assert.False(t, event.Final, "a launch is not a completion")
+	assert.Equal(t, agent.SubagentLaunchBackground, event.SubagentLaunch)
+	assert.True(t, event.SubagentLaunchIdempotent, "a repeated SubagentStart must not reset the record")
+	assert.Equal(t, "parent-sess", event.SessionID)
+	assert.Equal(t, "/tmp/parent.jsonl", event.SessionRef)
+	assert.Equal(t, "ae3d7b8f2930c8787", event.ToolUseID)
+	assert.Equal(t, "ae3d7b8f2930c8787", event.SubagentID)
+	assert.Equal(t, "workflow-subagent", event.SubagentType)
+}
+
+// TestParseHookEvent_WorkflowSubagentStop_TranscriptPath: a Workflow agent's
+// declared transcript is accepted only when it is this agent's transcript in a
+// Workflow run of this session, inside the parent's session directory, with no
+// link on the way. Anything else is dropped (the lifecycle then falls back to
+// the layout lookup) and carries no run ID.
+func TestParseHookEvent_WorkflowSubagentStop_TranscriptPath(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sessionID = "parent-sess"
+		agentID   = "ae3d7b8f2930c8787"
+		runID     = "wf_e5264e60-494"
+	)
+	store := t.TempDir()
+	runPath := func(session, run, agent string) string {
+		return filepath.Join(store, session, "subagents", "workflows", run, "agent-"+agent+".jsonl")
+	}
+	write := func(path string) string {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
+		return path
+	}
+	valid := write(runPath(sessionID, runID, agentID))
+	otherSession := write(runPath("other-sess", runID, agentID))
+	otherAgent := write(runPath(sessionID, runID, "a0000000000000001"))
+	outside := write(filepath.Join(t.TempDir(), sessionID, "subagents", "workflows", runID, "agent-"+agentID+".jsonl"))
+	ordinaryLayout := write(filepath.Join(store, sessionID, "subagents", "agent-"+agentID+".jsonl"))
+
+	cases := map[string]string{
+		"another session":        otherSession,
+		"another agent":          otherAgent,
+		"outside the store":      outside,
+		"not a workflow run":     ordinaryLayout,
+		"missing":                runPath(sessionID, "wf_missing-000", agentID),
+		"traversal out":          filepath.Join(store, sessionID, "subagents", "workflows", runID, "..", "..", "..", "..", "other-sess", "subagents", "workflows", runID, "agent-"+agentID+".jsonl"),
+		"relative traversal":     filepath.Join("..", filepath.Base(filepath.Dir(outside))),
+		"unsafe run component":   filepath.Join(store, sessionID, "subagents", "workflows", "wf.x", "agent-"+agentID+".jsonl"),
+		"workflows dir itself":   filepath.Join(store, sessionID, "subagents", "workflows"),
+		"empty agent transcript": "",
+	}
+	linkedFile := runPath(sessionID, "wf_linkfile-001", agentID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(linkedFile), 0o700))
+	if err := os.Symlink(valid, linkedFile); err != nil {
+		t.Logf("symlink cases skipped: %v", err)
+	} else {
+		cases["symlinked transcript"] = linkedFile
+		require.NoError(t, os.Symlink(filepath.Dir(valid), filepath.Join(store, sessionID, "subagents", "workflows", "wf_linkdir-002")))
+		cases["symlinked run directory"] = runPath(sessionID, "wf_linkdir-002", agentID)
+	}
+
+	stop := func(declared string) *agent.Event {
+		t.Helper()
+		input, err := json.Marshal(map[string]string{
+			"session_id": sessionID, "transcript_path": filepath.Join(store, sessionID+".jsonl"),
+			"hook_event_name": "SubagentStop", "agent_id": agentID, "agent_type": "workflow-subagent",
+			"agent_transcript_path": declared,
+		})
+		require.NoError(t, err)
+		event, err := (&ClaudeCodeAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(string(input)))
+		require.NoError(t, err)
+		require.NotNil(t, event)
+		return event
+	}
+
+	event := stop(valid)
+	assert.Equal(t, valid, event.SubagentTranscriptPath)
+	assert.Equal(t, runID, event.SubagentRunID)
+
+	for name, declared := range cases {
+		event := stop(declared)
+		assert.Empty(t, event.SubagentTranscriptPath, name)
+		assert.Empty(t, event.SubagentRunID, name)
+		assert.Equal(t, agentID, event.SubagentID, name)
+	}
+}
+
+// TestParseHookEvent_SubagentStart_IgnoresOtherAgentTypes: direct Agent
+// launches also fire SubagentStart, but PreToolUse/PostToolUse[Agent] already
+// record them under the call's tool_use_id. Recording them here as well would
+// create a second record for the same subagent. The installed matcher already
+// filters these out; this is the parse-side defence for a hand-widened one.
+func TestParseHookEvent_SubagentStart_IgnoresOtherAgentTypes(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{
+		`{"session_id":"s","transcript_path":"/t","agent_id":"a1","agent_type":"general-purpose"}`,
+		`{"session_id":"s","transcript_path":"/t","agent_id":"a1","agent_type":"Explore"}`,
+		`{"session_id":"s","transcript_path":"/t","agent_id":"a1"}`,
+		`{"session_id":"s","transcript_path":"/t","agent_type":"workflow-subagent"}`,
+	} {
+		event, err := (&ClaudeCodeAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStart, strings.NewReader(input))
+		require.NoError(t, err, input)
+		assert.Nil(t, event, input)
+	}
 }
 
 func TestParseHookEvent_PostTodo_ReturnsNil(t *testing.T) {
@@ -446,6 +646,11 @@ func TestParseHookEvent_AllHookTypes(t *testing.T) {
 			hookName:      HookNameStop,
 			expectedType:  agent.TurnEnd,
 			inputTemplate: `{"session_id": "s3", "transcript_path": "/t"}`,
+		},
+		{
+			hookName:      HookNameStopFailure,
+			expectedType:  agent.TurnEnd,
+			inputTemplate: `{"session_id": "s3f", "transcript_path": "/t"}`,
 		},
 		{
 			hookName:      HookNameSessionEnd,
@@ -596,6 +801,26 @@ func TestWaitForTranscriptFlush_StaleFile_SkipsWait(t *testing.T) {
 
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("expected fast return for stale transcript, but took %v", elapsed)
+	}
+}
+
+// TestCheckStopSentinel_MatchesBothTurnEndHooks pins that the flush sentinel
+// recognizes the StopFailure hook as well as Stop. Tightening the match to the
+// exact stop command would make API-error turns fall back to the slower
+// size-stability wait.
+func TestCheckStopSentinel_MatchesBothTurnEndHooks(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	for _, verb := range []string{HookNameStop, HookNameStopFailure} {
+		t.Run(verb, func(t *testing.T) {
+			t.Parallel()
+			transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
+			line := fmt.Sprintf(`{"type":"progress","data":{"type":"hook_progress","command":"entire hooks claude-code %s"},"timestamp":%q}`,
+				verb, now.UTC().Format(time.RFC3339Nano))
+			require.NoError(t, os.WriteFile(transcriptFile, []byte(line+"\n"), 0o600))
+			require.True(t, checkStopSentinel(transcriptFile, 4096, now, 2*time.Second))
+		})
 	}
 }
 
@@ -779,5 +1004,89 @@ func TestClaudeCodeAgent_ContextInjector(t *testing.T) {
 	}
 	if parsed.HookSpecificOutput.AdditionalContext != "use entire trail" {
 		t.Errorf("additionalContext = %q", parsed.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+// forkedSkillPostToolUse is a Skill call's PostToolUse payload as Claude Code
+// 2.1.291 sends it; background is omitted when nil.
+func forkedSkillPostToolUse(t *testing.T, status, agentID string, background *bool) io.Reader {
+	t.Helper()
+	response := map[string]any{"success": true, "commandName": "fanout-fork"}
+	if status != "" {
+		response["status"] = status
+	}
+	if agentID != "" {
+		response["agentId"] = agentID
+	}
+	if background != nil {
+		response["background"] = *background
+	}
+	data, err := json.Marshal(map[string]any{
+		"session_id":      "main-session",
+		"transcript_path": "/tmp/main.jsonl",
+		"hook_event_name": "PostToolUse",
+		"tool_name":       "Skill",
+		"tool_use_id":     "toolu_skill",
+		"tool_input":      map[string]any{"skill": "fanout-fork", "args": "user text"},
+		"tool_response":   response,
+	})
+	require.NoError(t, err)
+	return bytes.NewReader(data)
+}
+
+func TestParseHookEvent_ForkedSkill(t *testing.T) {
+	t.Parallel()
+	ag := &ClaudeCodeAgent{}
+	yes, no := true, false
+
+	for _, tc := range []struct {
+		name       string
+		background *bool
+		want       agent.SubagentLaunchMode
+	}{
+		{"background", &yes, agent.SubagentLaunchBackground},
+		// Only an explicit false means the agent finished; completing a
+		// still-running agent at launch would lose its work.
+		{"background omitted", nil, agent.SubagentLaunchBackground},
+		{"finished", &no, agent.SubagentLaunchForeground},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			event, err := ag.ParseHookEvent(context.Background(), HookNamePostTask,
+				forkedSkillPostToolUse(t, "forked", "a80ff32f89f7dadc4", tc.background))
+			require.NoError(t, err)
+			require.NotNil(t, event)
+			assert.Equal(t, agent.SubagentEnd, event.Type)
+			assert.False(t, event.Final)
+			assert.Equal(t, "toolu_skill", event.ToolUseID)
+			assert.Equal(t, "a80ff32f89f7dadc4", event.SubagentID)
+			assert.Equal(t, "/fanout-fork", event.TaskDescription, "only the skill name describes the task, never its args")
+			assert.Empty(t, event.SubagentType, "the agent's type comes from its SubagentStop")
+			assert.Equal(t, tc.want, event.SubagentLaunch)
+			assert.Equal(t, tc.want == agent.SubagentLaunchForeground, event.SubagentFilesFromTranscript,
+				"a finished fork has no worktree baseline, so only its transcript names its files")
+		})
+	}
+}
+
+func TestParseHookEvent_SkillWithoutAgent(t *testing.T) {
+	t.Parallel()
+	ag := &ClaudeCodeAgent{}
+	yes := true
+
+	for _, tc := range []struct {
+		name, status, agentID string
+	}{
+		{"inline skill", "", ""},
+		{"forked without agent ID", "forked", ""},
+		{"other status", "completed", "a80ff32f89f7dadc4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			event, err := ag.ParseHookEvent(context.Background(), HookNamePostTask,
+				forkedSkillPostToolUse(t, tc.status, tc.agentID, &yes))
+			require.NoError(t, err)
+			assert.Nil(t, event)
+		})
 	}
 }

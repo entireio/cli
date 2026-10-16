@@ -36,13 +36,20 @@ func TestNoDeprecatedCommandFormsInUserFacingStrings(t *testing.T) {
 		"entire auth use",                  // → entire auth switch
 		"entire repo get",                  // → entire repo view
 		"entire repo mirror create",        // → entire repo mirror add
-		"entire repo mirror use",           // → entire repo remote use
-		"entire repo mirror collaborators", // → entire repo access
+		"entire repo mirror get",           // → entire repo view
+		"entire repo mirror use",           // → entire repo remote add
+		"entire repo remote use",           // → entire repo remote add
+		"entire repo remote url",           // → removed; entire repo view lists a URL per cluster
+		"entire repo mirror collaborators", // → entire repo grant list
+		"entire repo access",               // → entire repo grant list
 		"entire repo visibility set",       // → entire repo edit --visibility
 		// The grant family moved under its nouns; the old spelling is gone.
 		"entire grant org",     // → entire org grant
 		"entire grant project", // → entire project grant
 		"entire grant repo",    // → entire repo grant
+		// A repo's home cluster is its owning project's region, so there is
+		// nothing for a caller to choose.
+		"--cluster-host", // → removed; the owning project's region decides
 	}
 
 	var offenders []string

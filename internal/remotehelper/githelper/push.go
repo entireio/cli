@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
@@ -149,7 +151,11 @@ func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine st
 			return fmt.Errorf("amending receive-pack agent: %w", err)
 		}
 
-		resp, err := t.ServiceRPC(ctx, serviceReceivePack, bytes.NewReader(amendedBody))
+		resp, err := t.ServiceRPC(ctx, serviceReceivePack, bytes.NewReader(amendedBody), func(req *http.Request) {
+			// The same declaration handleConnect makes on v0/v1: it lets the
+			// server refuse an over-limit push before the body uploads.
+			req.Header.Set("X-Entire-Push-Size", strconv.Itoa(len(amendedBody)))
+		})
 		if err != nil {
 			close(respCh)
 			killAndWaitSendPack(sp, "after posting receive-pack failed")

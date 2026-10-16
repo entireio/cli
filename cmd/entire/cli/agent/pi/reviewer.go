@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -16,7 +18,8 @@ import (
 
 // NewReviewer returns the AgentReviewer for Pi.
 //
-// Argv shape: pi --mode json --print [--model <model>] <prompt>.
+// Argv shape: pi --mode json --print --append-system-prompt <guardrail>
+// [--model <model>] <prompt>.
 // The prompt is passed as a positional message because Pi's CLI accepts prompts
 // as message arguments in non-interactive mode. Stdout is newline-delimited JSON
 // session events; the parser maps Pi's AgentSessionEvent stream into Entire's
@@ -31,7 +34,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 
 func buildPiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
-	args := []string{"--mode", "json", "--print"}
+	args := []string{"--mode", "json", "--print", "--append-system-prompt", review.ReviewerGuardrail}
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
@@ -49,7 +52,17 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, min(1024*1024, piReviewMaxScannerBuf)), piReviewMaxScannerBuf)
-		messageIDsWithTextDelta := map[string]struct{}{}
+		// inTextBlock marks that a delta already started the current text
+		// block, so the next one continues it; a new block starts a new line.
+		// messageHadDelta marks that the current message streamed text, so
+		// message_end does not emit it again. Message IDs can be empty, so
+		// both track position in the stream instead of IDs.
+		inTextBlock := false
+		messageHadDelta := false
+		// pendingErr is the latest failure reason. It is reported only if the
+		// run still fails at the end: Pi auto-retries errors such as
+		// "overloaded", and a recovered error is not a failure.
+		pendingErr := ""
 		messageIDsWithUsage := map[string]struct{}{}
 		messageUsageByTurn := map[int]map[piReviewUsageKey]struct{}{}
 		turnNumber := 0
@@ -71,22 +84,36 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			switch env.Type {
 			case "turn_start":
 				turnNumber++
-			case "session", "agent_start", "queue_update", "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end":
+			case "auto_retry_start":
+				// Pi is retrying the failed attempt; judge the retry instead.
+				success = true
+				pendingErr = ""
+				inTextBlock = false
+				messageHadDelta = false
+			case "session", "agent_start", "queue_update", "compaction_start", "compaction_end", "auto_retry_end":
 				// Session/control events do not map to user-visible review output.
 			case "message_update":
+				if env.AssistantMessageEvent.Type == "text_start" {
+					inTextBlock = false
+				}
 				if text := env.AssistantMessageEvent.TextDelta(); text != "" {
-					messageIDsWithTextDelta[env.MessageID()] = struct{}{}
-					out <- reviewtypes.AssistantText{Text: text}
+					out <- reviewtypes.AssistantText{Text: text, Delta: inTextBlock}
+					inTextBlock = true
+					messageHadDelta = true
 				}
 			case "message_end":
+				sawDelta := messageHadDelta
+				inTextBlock = false
+				messageHadDelta = false
 				if env.Message.Role == "assistant" {
 					if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
 						success = false
+						pendingErr = piReviewFailureReason(env.Message)
 					}
 					if env.Message.Usage != nil {
 						emitPiReviewTokens(out, env, &tokens, messageIDsWithUsage, messageUsageByTurn, turnNumber)
 					}
-					if _, sawDelta := messageIDsWithTextDelta[env.MessageID()]; !sawDelta {
+					if !sawDelta {
 						if text := piReviewMessageText(env.Message.Content); text != "" {
 							out <- reviewtypes.AssistantText{Text: text}
 						}
@@ -101,12 +128,20 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			case "turn_end":
 				if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
 					success = false
+					pendingErr = piReviewFailureReason(env.Message)
 				}
 				if env.Message.Usage != nil {
 					emitPiReviewTokens(out, env, &tokens, messageIDsWithUsage, messageUsageByTurn, turnNumber)
 				}
 			case "agent_end":
+				if env.WillRetry {
+					// The retry continues in this stream and ends in its own agent_end.
+					continue
+				}
 				finished = true
+				if !success && pendingErr != "" {
+					out <- reviewtypes.RunError{Err: errors.New(pendingErr)}
+				}
 				out <- reviewtypes.Finished{Success: success}
 			default:
 				// Unknown future events are ignored; Pi's event stream is additive.
@@ -119,6 +154,9 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			return
 		}
 		if !finished {
+			if pendingErr != "" {
+				out <- reviewtypes.RunError{Err: errors.New(pendingErr)}
+			}
 			out <- reviewtypes.Finished{Success: false}
 		}
 	}()
@@ -134,6 +172,8 @@ type piReviewEnvelope struct {
 	AssistantMessageEvent piAssistantMessageEvent `json:"assistantMessageEvent"`
 	ToolName              string                  `json:"toolName"`
 	Args                  json.RawMessage         `json:"args"`
+	// WillRetry marks an agent_end Pi follows with an automatic retry.
+	WillRetry bool `json:"willRetry"`
 }
 
 func (e piReviewEnvelope) MessageID() string {
@@ -149,6 +189,18 @@ type piReviewMessage struct {
 	Content    json.RawMessage `json:"content"`
 	Usage      *piReviewUsage  `json:"usage"`
 	StopReason string          `json:"stopReason"`
+	// ErrorMessage explains an "error" or "aborted" stop, e.g. a provider
+	// rejecting the request; without it a failed review shows an empty report.
+	ErrorMessage string `json:"errorMessage"`
+}
+
+// piReviewFailureReason explains a failed message: Pi's errorMessage, or the
+// stop reason when Pi gave none.
+func piReviewFailureReason(msg piReviewMessage) string {
+	if reason := strings.TrimSpace(msg.ErrorMessage); reason != "" {
+		return "pi: " + reason
+	}
+	return "pi: stopped with " + msg.StopReason
 }
 
 type piAssistantMessageEvent struct {

@@ -4,9 +4,10 @@
 // child agent process; the UserPromptSubmit hook reads them to tag the
 // in-flight session with the right Kind and provenance metadata.
 //
-// Single source of truth for the names — review, investigate, and
-// agentlaunch (which strips both families before spawning a fix agent) all
-// reference this package.
+// Single source of truth for the names. `entire review` lives in this
+// repository; `entire investigate` ships as the entire-investigate plugin and
+// imports this package for the same constants, so these names are a contract
+// across a process boundary as well as inside this binary.
 //
 // These names are stable API; renaming any constant is a breaking change.
 package provenance
@@ -65,8 +66,9 @@ func IsInvestigateEntry(kv string) bool {
 }
 
 // IsEntry reports whether kv is a "KEY=VALUE" entry from either family.
-// agentlaunch uses this to strip provenance markers before spawning a fix
-// session so the child is not tagged as review or investigate.
+// Callers strip provenance markers with it before spawning a child that must
+// not inherit the parent's tagging — review when it builds a nested agent's
+// environment, and the investigate plugin before it launches a fix session.
 func IsEntry(kv string) bool {
 	return IsReviewEntry(kv) || IsInvestigateEntry(kv)
 }

@@ -37,13 +37,13 @@ const requiredCellResolveTimeout = 15 * time.Second
 // An interface (with a swappable constructor) so the resolver is unit-testable
 // against a fake control plane; *coreapi.Client satisfies it.
 type cellCoreClient interface {
-	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error)
+	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.RepoHeaders, error)
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
 	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
 }
 
 type nativeRepoCellCoreClient interface {
-	nativeRepoResolverClient
+	repoRefClient
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
 	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
 }
@@ -91,7 +91,7 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) (*auth.Ce
 		if err != nil {
 			return nil, cellPlacementError(ctx, ulid, fmt.Errorf("resolve the Entire cell for %s: %w", ulid, err))
 		}
-		clusterHost := strings.TrimSpace(repo.ClusterHost.Or(""))
+		clusterHost := strings.TrimSpace(repo.Response.ClusterHost.Or(""))
 		if clusterHost == "" {
 			return nil, fmt.Errorf("resolve the Entire cell for %s: repo has no cluster host", ulid)
 		}
@@ -130,7 +130,12 @@ func cellTargetForClusterHost(ctx context.Context, c cellCoreClient, clusterHost
 	if err != nil {
 		return nil, fmt.Errorf("list clusters: %w", err)
 	}
-	cluster, ok := matchClusterByHost(clusters.Clusters, clusterHost)
+	return cellTargetForClusterHostInCatalog(clusters.Clusters, clusterHost)
+}
+
+// cellTargetForClusterHostInCatalog also serves callers holding the catalog.
+func cellTargetForClusterHostInCatalog(clusters []coreapi.Cluster, clusterHost string) (*auth.CellTarget, error) {
+	cluster, ok := matchClusterByHost(clusters, clusterHost)
 	if !ok {
 		return nil, fmt.Errorf("no cluster matches host %q", clusterHost)
 	}
@@ -159,9 +164,16 @@ func cellTargetForPlacement(ctx context.Context, c cellCoreClient, placement cor
 	if err != nil {
 		return nil, fmt.Errorf("list clusters: %w", err)
 	}
-	cluster, ok := matchClusterBySlug(clusters.Clusters, placement.ClusterSlug)
+	return cellTargetForPlacementInCatalog(clusters.Clusters, placement)
+}
+
+// cellTargetForPlacementInCatalog is cellTargetForPlacement's join against an
+// already-fetched catalog, for callers (repo view) that hold the clusters list
+// and must not pay a second ListClusters.
+func cellTargetForPlacementInCatalog(clusters []coreapi.Cluster, placement coreapi.RepoPlacement) (*auth.CellTarget, error) {
+	cluster, ok := matchClusterBySlug(clusters, placement.ClusterSlug)
 	if !ok {
-		cluster, ok = matchClusterByCellInURL(clusters.Clusters, placement.Cell)
+		cluster, ok = matchClusterByCellInURL(clusters, placement.Cell)
 	}
 	if !ok {
 		return nil, fmt.Errorf("no cluster matches slug %q or cell %q", placement.ClusterSlug, placement.Cell)
@@ -219,6 +231,12 @@ func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName 
 	if err != nil {
 		return coreapi.RepoPlacement{}, err
 	}
+	return processingPlacementOfEntry(entry)
+}
+
+// processingPlacementOfEntry selects the processing placement from an index
+// entry. Repo view shares this selection without fetching the entry again.
+func processingPlacementOfEntry(entry coreapi.RepoIndexEntry) (coreapi.RepoPlacement, error) {
 	// A Candidate row is a repo that exists on the forge and is visible to the
 	// caller but was never onboarded: no placements or primaries to resolve.
 	//
@@ -314,9 +332,9 @@ func resolveForgeRepoCellPlacement(ctx context.Context, forge, owner, repo strin
 }
 
 // resolveNativeRepoCellPlacement resolves /et/<project>/<repo> through the
-// native project-scoped repo lookup, then maps the repo's home cluster to its
-// entire-api cell. It deliberately never consults the forge-blind repos index:
-// that index can select a same-named /gh/ mirror instead.
+// native path lookup, then maps the repo's home cluster to its entire-api
+// cell. It deliberately never consults the forge-blind repos index: that index
+// can select a same-named /gh/ mirror instead.
 func resolveNativeRepoCellPlacement(ctx context.Context, project, repoName string) (repoCellPlacement, error) {
 	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
 	defer cancel()
@@ -332,17 +350,31 @@ func resolveNativeRepoCellPlacement(ctx context.Context, project, repoName strin
 		}
 		return repoCellPlacement{}, cellPlacementError(ctx, project+"/"+repoName, fmt.Errorf("resolve native repo %s/%s: %w", project, repoName, err))
 	}
+	clusters, err := c.ListClusters(ctx)
+	if err != nil {
+		return repoCellPlacement{}, cellPlacementError(ctx, project+"/"+repoName, fmt.Errorf("list clusters: %w", err))
+	}
+	placement, err := nativeRepoCellPlacementInCatalog(repo, clusters.Clusters)
+	if err != nil {
+		return repoCellPlacement{}, cellPlacementError(ctx, project+"/"+repoName, fmt.Errorf("resolve the Entire cell for %s/%s: %w", project, repoName, err))
+	}
+	return placement, nil
+}
+
+// nativeRepoCellPlacementInCatalog keeps native view coordinates and API routing
+// on the same identity validation and home-cluster catalog join.
+func nativeRepoCellPlacementInCatalog(repo *coreapi.Repo, clusters []coreapi.Cluster) (repoCellPlacement, error) {
 	repoID := strings.TrimSpace(repo.ID)
 	if repoID == "" {
-		return repoCellPlacement{}, fmt.Errorf("resolve native repo %s/%s: repo has no id", project, repoName)
+		return repoCellPlacement{}, errors.New("repo has no id")
 	}
 	clusterHost := strings.TrimSpace(repo.ClusterHost.Or(""))
 	if clusterHost == "" {
-		return repoCellPlacement{}, &repoNotOnboardedError{inner: fmt.Errorf("resolve the Entire cell for %s/%s: repo has no cluster host", project, repoName)}
+		return repoCellPlacement{}, &repoNotOnboardedError{inner: errors.New("repo has no cluster host")}
 	}
-	target, err := cellTargetForClusterHost(ctx, c, clusterHost)
+	target, err := cellTargetForClusterHostInCatalog(clusters, clusterHost)
 	if err != nil {
-		return repoCellPlacement{}, cellPlacementError(ctx, repoID, fmt.Errorf("resolve the Entire cell for %s/%s: %w", project, repoName, err))
+		return repoCellPlacement{}, err
 	}
 	return repoCellPlacement{RepoID: repoID, Target: target}, nil
 }

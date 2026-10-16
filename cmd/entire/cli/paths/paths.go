@@ -34,7 +34,6 @@ const (
 	// begins at the session metadata's compact_transcript_start.
 	CompactTranscriptFileName = "transcript.jsonl"
 	MetadataFileName          = "metadata.json"
-	CheckpointFileName        = "checkpoint.json"
 	ContentHashFileName       = "content_hash.txt"
 	SettingsFileName          = "settings.json"
 

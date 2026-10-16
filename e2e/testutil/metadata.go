@@ -10,16 +10,6 @@ type TokenUsage struct {
 	APICallCount        int `json:"api_call_count"`
 }
 
-type Attribution struct {
-	CalculatedAt    time.Time `json:"calculated_at"`
-	AgentLines      int       `json:"agent_lines"`
-	HumanAdded      int       `json:"human_added"`
-	HumanModified   int       `json:"human_modified"`
-	HumanRemoved    int       `json:"human_removed"`
-	TotalCommitted  int       `json:"total_committed"`
-	AgentPercentage float64   `json:"agent_percentage"`
-}
-
 type CheckpointMetadata struct {
 	CLIVersion       string       `json:"cli_version"`
 	CheckpointID     string       `json:"checkpoint_id"`
@@ -40,24 +30,23 @@ type SessionRef struct {
 }
 
 type SessionMetadata struct {
-	CLIVersion       string      `json:"cli_version"`
-	CheckpointID     string      `json:"checkpoint_id"`
-	SessionID        string      `json:"session_id"`
-	Strategy         string      `json:"strategy"`
-	CreatedAt        time.Time   `json:"created_at"`
-	Branch           string      `json:"branch"`
-	Agent            string      `json:"agent"`
-	Model            string      `json:"model"`
-	CheckpointsCount int         `json:"checkpoints_count"`
-	FilesTouched     []string    `json:"files_touched"`
-	TokenUsage       TokenUsage  `json:"token_usage"`
-	Attribution      Attribution `json:"initial_attribution"`
-	TranscriptPath   string      `json:"transcript_path"`
+	CLIVersion       string     `json:"cli_version"`
+	CheckpointID     string     `json:"checkpoint_id"`
+	SessionID        string     `json:"session_id"`
+	Strategy         string     `json:"strategy"`
+	CreatedAt        time.Time  `json:"created_at"`
+	Branch           string     `json:"branch"`
+	Agent            string     `json:"agent"`
+	Model            string     `json:"model"`
+	CheckpointsCount int        `json:"checkpoints_count"`
+	FilesTouched     []string   `json:"files_touched"`
+	TokenUsage       TokenUsage `json:"token_usage"`
+	TranscriptPath   string     `json:"transcript_path"`
 
 	// CheckpointTranscriptStart is the transcript.jsonl line offset where this
 	// checkpoint's contributions begin. For the first checkpoint in a session
 	// it's 0; for subsequent checkpoints it must point past prior content so
-	// consumers (explain, attribution, summaries) can scope the transcript
+	// consumers (explain, summaries) can scope the transcript
 	// correctly. omitempty in the on-wire form, so we read 0 when absent.
 	CheckpointTranscriptStart int `json:"checkpoint_transcript_start,omitempty"`
 }

@@ -224,7 +224,7 @@ func TestRedactTranscriptCached_PrefixSurvivesGC(t *testing.T) {
 // than a failed checkpoint.
 func TestRedactCache_EntryWithNoPayloadFallsBack(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 	require.NotNil(t, cache)
 	ctx := context.Background()
@@ -232,7 +232,7 @@ func TestRedactCache_EntryWithNoPayloadFallsBack(t *testing.T) {
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
 	const treePath = "full.jsonl"
 
-	// Hand-built: storePrefix always names a payload, so it cannot express this.
+	// Hand-built: storePrefixBytes always names a payload, so it cannot express this.
 	writeCacheEntry(t, cache, treePath, redactPrefixEntry{
 		Fingerprint: redactionFingerprint(),
 		SourceBytes: len(content) / 2,
@@ -240,7 +240,7 @@ func TestRedactCache_EntryWithNoPayloadFallsBack(t *testing.T) {
 	})
 	require.Nil(t, cache.load(treePath), "load must reject an entry with no payload")
 
-	got, err := redactIncrementally(ctx, repo, cache, []byte(content), treePath, testRedactor)
+	got, err := redactIncrementally(ctx, cache, []byte(content), treePath, testRedactor)
 	require.NoError(t, err)
 	want, wantErr := RedactBlobBytes(ctx, []byte(content), treePath, false)
 	require.NoError(t, wantErr)

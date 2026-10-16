@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -54,7 +55,7 @@ func TestImportClaudeCode_MixedTurnAnchors(t *testing.T) {
 		testutil.RunGit(t, env.RepoDir, "branch", "-f", "master", fallback)
 		firstID := importAnchorFixture(t, env, recorded, fallback)
 		assertImportedAnchorMetadata(t, env, env.RepoDir, firstID, recorded)
-		secondID := agentimport.DeriveCheckpointID("anchor-fixture", "u2").String()
+		secondID := importedCheckpointID(t, env, "anchor-fixture", "u2", anchorFixtureU2At)
 		assertImportedAnchorMetadata(t, env, env.RepoDir, secondID, fallback)
 	})
 }
@@ -150,7 +151,7 @@ func TestImportClaudeCode_AnchorlessRepoRefusesImport(t *testing.T) {
 		env.CheckpointStore = backend
 		env.InitRepo()
 		testutil.WriteFile(t, env.ClaudeProjectDir, "anchorless.jsonl",
-			`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`+"\n")
+			`{"type":"user","uuid":"u1","cwd":`+claudeFixtureCwdJSON(t, env.RepoDir)+`,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`+"\n")
 		for _, extra := range [][]string{nil, {"--dry-run"}} {
 			out, err := env.RunCLIWithError(append([]string{"import", agentClaudeCode}, extra...)...)
 			require.Error(t, err, "output: %s", out)
@@ -162,7 +163,7 @@ func TestImportClaudeCode_AnchorlessRepoRefusesImport(t *testing.T) {
 
 func importAnchorFixture(t *testing.T, env *TestEnv, recorded, fallback string) string {
 	t.Helper()
-	lines := []string{`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`}
+	lines := []string{`{"type":"user","uuid":"u1","cwd":` + claudeFixtureCwdJSON(t, env.RepoDir) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`}
 	if recorded != "" {
 		lines = append(lines, fmt.Sprintf(`{"type":"user","toolUseResult":{"gitOperation":{"commit":{"sha":%q,"kind":"committed"}}},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"committed"}]}}`, recorded))
 	}
@@ -170,13 +171,32 @@ func importAnchorFixture(t *testing.T, env *TestEnv, recorded, fallback string) 
 	testutil.WriteFile(t, env.ClaudeProjectDir, "anchor-fixture.jsonl", strings.Join(lines, "\n")+"\n")
 	out := env.RunCLI("import", agentClaudeCode, "--path", filepath.Clean(env.ClaudeProjectDir))
 	require.Contains(t, out, "Imported 2")
-	id := agentimport.DeriveCheckpointID("anchor-fixture", "u1").String()
+	id := importedCheckpointID(t, env, "anchor-fixture", "u1", anchorFixtureU1At)
 	want := fallback
 	if recorded != "" {
 		want = recorded
 	}
 	assertImportedAnchorMetadata(t, env, env.RepoDir, id, want)
 	return id
+}
+
+// Timestamps of the u1 and u2 turns importAnchorFixture writes.
+var (
+	anchorFixtureU1At = time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+	anchorFixtureU2At = anchorFixtureU1At.Add(time.Minute)
+)
+
+// importedCheckpointID returns the ID `entire import` stores a turn under in
+// env's backend: a ULID derived from the turn under git-refs, 12-hex under
+// git-branch.
+func importedCheckpointID(t *testing.T, env *TestEnv, sessionID, turnUUID string, createdAt time.Time) string {
+	t.Helper()
+	if !env.usingGitRefs() {
+		return agentimport.DeriveCheckpointID(sessionID, turnUUID).String()
+	}
+	cid, err := agentimport.DeriveULIDCheckpointID(sessionID, turnUUID, createdAt)
+	require.NoError(t, err)
+	return cid.String()
 }
 
 func assertImportedAnchorMetadata(t *testing.T, env *TestEnv, repoDir, checkpointID, want string) {
