@@ -327,6 +327,7 @@ func TestTrailMerge_ReportsBranchOutcome(t *testing.T) {
 		{name: "kept by flag", args: []string{"--no-delete-branch"}, body: `"branchDeleted":false,"branchKeptReason":"not_requested"`, want: "Kept branch feature/example: --no-delete-branch was passed\n"},
 		{name: "base", body: `"branchDeleted":false,"branchKeptReason":"base"`, want: "Kept branch feature/example: it is the trail's base\n"},
 		{name: "stacked", body: `"branchDeleted":false,"branchKeptReason":"stacked"`, want: "Kept branch feature/example: another open trail is based on it\n"},
+		{name: "claimed", body: `"branchDeleted":false,"branchKeptReason":"claimed"`, want: "Kept branch feature/example: another trail claims its name\n"},
 		{name: "moved", body: `"branchDeleted":false,"branchKeptReason":"moved"`, want: "Kept branch feature/example: it no longer points at the merged commit\n"},
 		{name: "protected", body: `"branchDeleted":false,"branchKeptReason":"protected"`, want: "Kept branch feature/example: it is protected\n"},
 		{name: "default branch", body: `"branchDeleted":false,"branchKeptReason":"default_branch"`, want: "Kept branch feature/example: it is the repo's default branch\n"},

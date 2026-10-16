@@ -38,6 +38,7 @@ const (
 	trailBranchKeptDisabled      = "disabled"
 	trailBranchKeptBase          = "base"
 	trailBranchKeptStacked       = "stacked"
+	trailBranchKeptClaimed       = "claimed"
 	trailBranchKeptMoved         = "moved"
 	trailBranchKeptProtected     = "protected"
 	trailBranchKeptDefaultBranch = "default_branch"
@@ -395,6 +396,8 @@ func trailMergeBranchOutcome(branch string, res *api.TrailMergeResponse) string 
 		why = "it is the trail's base"
 	case trailBranchKeptStacked:
 		why = "another open trail is based on it"
+	case trailBranchKeptClaimed:
+		why = "another trail claims its name"
 	case trailBranchKeptMoved:
 		why = "it no longer points at the merged commit"
 	case trailBranchKeptProtected:
