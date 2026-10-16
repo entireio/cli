@@ -499,9 +499,9 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	pushCtx, pushSpan := perf.Start(ctx, "push_checkpoint_refs")
 	defer pushSpan.End()
 
-	existing, stale := partitionLocalRefs(repo, queued)
+	existing, stale, expectedHashes := partitionLocalRefs(repo, queued)
 	if len(stale) > 0 {
-		if err := queue.Remove(stale); err != nil {
+		if err := queue.RemoveIfUnchanged(stale, expectedHashes); err != nil {
 			logging.Warn(ctx, "git-refs push: prune stale queue entries failed",
 				slog.String("error", err.Error()))
 		}
@@ -528,7 +528,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	batchErr := batchPushRefs(pushCtx, dest.target, existing)
 	if batchErr == nil {
 		stop(" done")
-		if removeErr := queue.Remove(existing); removeErr != nil {
+		if removeErr := queue.RemoveIfUnchanged(existing, expectedHashes); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
 		}
@@ -595,7 +595,8 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 			}
 		}
 		attempted++
-		if err := pushCheckpointRefWithRecovery(flushCtx, dest.target, ref); err != nil {
+		recoveredHash, err := pushCheckpointRefWithRecovery(flushCtx, dest.target, ref)
+		if err != nil {
 			consecutiveFailures++
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
@@ -613,6 +614,9 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 			failed = append(failed, ref)
 		} else {
 			consecutiveFailures = 0
+			if recoveredHash != plumbing.ZeroHash {
+				expectedHashes[ref.String()] = recoveredHash
+			}
 			pushed = append(pushed, ref)
 		}
 	}
@@ -634,7 +638,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	if rejectionWarning != "" {
 		fmt.Fprintln(os.Stderr, rejectionWarning)
 	}
-	if err := queue.Remove(pushed); err != nil {
+	if err := queue.RemoveIfUnchanged(pushed, expectedHashes); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))
 	}
