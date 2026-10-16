@@ -526,3 +526,19 @@ func TestParseClaudeOutput_IgnoresNonObjectMessageOnOtherEvents(t *testing.T) {
 		t.Fatalf("Finished = %+v, want success", finished)
 	}
 }
+
+// Tool calls the permission settings denied are reported once per tool.
+func TestParseClaudeOutput_ReportsPermissionDenials(t *testing.T) {
+	t.Parallel()
+	stream := `{"type":"result","subtype":"success","is_error":false,"permission_denials":[` +
+		`{"tool_name":"mcp__docs__search","tool_use_id":"a"},{"tool_name":"mcp__docs__search","tool_use_id":"b"},{"tool_name":"WebFetch","tool_use_id":"c"}]}` + "\n"
+	var blocked []string
+	for _, ev := range collectEvents(parseClaudeOutput(strings.NewReader(stream))) {
+		if e, ok := ev.(reviewtypes.ToolsBlocked); ok {
+			blocked = append(blocked, e.Names...)
+		}
+	}
+	if strings.Join(blocked, ",") != "mcp__docs__search,WebFetch" {
+		t.Fatalf("blocked = %v", blocked)
+	}
+}

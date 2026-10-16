@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -31,6 +32,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 		AgentName: "claude-code",
 		BuildCmd:  buildReviewCmd,
 		Parser:    parseClaudeOutput,
+		Prepare:   prepareReviewAgentConfig,
 	}
 }
 
@@ -39,6 +41,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
 	args := []string{"-p", prompt, flagOutputFormat, "stream-json", "--verbose", "--append-system-prompt", review.ReviewerGuardrail}
+	args = append(args, cfg.ExtraArgs...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)
@@ -153,6 +156,9 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 				sawResult = true
 				resultErr = env.IsError
 				resultUsage = env.Usage
+				if names := deniedToolNames(env.PermissionDenials); len(names) > 0 {
+					out <- reviewtypes.ToolsBlocked{Names: names, Allow: claudeAllowHint}
+				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -189,6 +195,25 @@ type claudeEnvelope struct {
 	// Claude API usage shape (transcript parsing + stream-json review parser)
 	// can't drift apart.
 	Usage messageUsage `json:"usage"`
+	// PermissionDenials lists tool calls the permission settings refused.
+	PermissionDenials []permissionDenial `json:"permission_denials"`
+}
+
+type permissionDenial struct {
+	ToolName string `json:"tool_name"`
+}
+
+const claudeAllowHint = "add them to permissions.allow in the reviewer's settings (its review profile config, or ~/.claude/settings.json)"
+
+// deniedToolNames returns the distinct denied tool names, in order.
+func deniedToolNames(denials []permissionDenial) []string {
+	var names []string
+	for _, d := range denials {
+		if d.ToolName != "" && !slices.Contains(names, d.ToolName) {
+			names = append(names, d.ToolName)
+		}
+	}
+	return names
 }
 
 type claudeMessage struct {
