@@ -496,7 +496,13 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 		// Short-circuiting here instead would drop Err and count a push queue
 		// that is going nowhere.
 		if !info.PushDisabled {
-			if cr := s.GetCheckpointRemote(); cr != nil && inspectRemoteTopology(ctx).hasPinnedDestination() {
+			// `!syncAffected()` rather than `hasPinnedDestination()`: the claim
+			// "checkpoints sync to the dedicated store" is only true when NO
+			// remote is left unpinned. With origin pinned and a fork that is
+			// not, pushes to the fork carry nothing, and keying on "any remote
+			// is pinned" dropped the error here while doctor reported PARTIAL —
+			// the two commands disagreeing about whether sync works.
+			if cr := s.GetCheckpointRemote(); cr != nil && !inspectRemoteTopology(ctx).syncAffected() {
 				return newDedicatedCheckpointSyncInfo(ctx, cr, info)
 			}
 		}

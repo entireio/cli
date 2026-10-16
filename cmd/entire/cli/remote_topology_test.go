@@ -370,3 +370,46 @@ func TestCheckpointNote_SuccessfulElectionKeepsTheAmbiguityNote(t *testing.T) {
 		t.Errorf("nothing is disabled here, got:\n%s", out)
 	}
 }
+
+// TestCheckpointNote_PushDisabledDoesNotBlameTheElection covers trail finding
+// 01M51C5T8M01: with push_sessions off nothing is pushed anywhere regardless, so
+// "pushes carry no session history" named the wrong setting as the cause.
+func TestCheckpointNote_PushDisabledDoesNotBlameTheElection(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
+		pushDisabled: true,
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "push_sessions=false") {
+		t.Errorf("the note should say pushing is off at all, got:\n%s", out)
+	}
+	if strings.Contains(out, "carry your code but no session history") {
+		t.Errorf("nothing is pushed either way, so that sentence blames the wrong setting:\n%s", out)
+	}
+}
+
+// TestCheckpointNote_UnfetchableWordingCoversBothShapes covers trail finding
+// 01M51C5N89PT: after the fetch-URL narrowing, "is not one of this repo's
+// remotes" was false for a pushurl-only remote, which `git remote` does list.
+func TestCheckpointNote_UnfetchableWordingCoversBothShapes(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "pushonly"},
+	}
+
+	out := describeTopology(t, topo)
+	for _, want := range []string{"missing or has no fetch URL", "git remote set-url pushonly"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("note should contain %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not one of this repo's remotes") {
+		t.Errorf("a pushurl-only remote IS one of this repo's remotes:\n%s", out)
+	}
+}

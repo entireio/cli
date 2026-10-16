@@ -173,18 +173,27 @@ func TestEnableCheckpointPushRemote_RejectedLocalLayerSkipsPicker(t *testing.T) 
 // actually been asked.
 func TestEnableCheckpointPushRemote_AmbiguityNoteFollowsThePicker(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		choice   *enableCheckpointRemoteChoice
-		wantNote bool
+		name       string
+		choice     *enableCheckpointRemoteChoice
+		pushRemote string
+		wantNote   bool
 	}{
 		{name: "no prepare step", wantNote: true},
 		{name: "prepared but never offered", choice: &enableCheckpointRemoteChoice{}, wantNote: true},
 		{name: "offered", choice: &enableCheckpointRemoteChoice{offered: true}},
+		// Trail finding 01M51C5QZX42: a failed election is reported by
+		// enableCheckpointRemoteChoice.report, which offers `entire enable
+		// --checkpoint-push-remote`. Printing doctor's report here too stated
+		// the condition twice with two different fixes.
+		{name: "failed election is enable's own report", pushRemote: "gone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := setupTestRepo(t)
 			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
 			testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
+			if tc.pushRemote != "" {
+				testutil.WriteCheckpointPushRemoteSetting(t, dir, tc.pushRemote)
+			}
 			ctx := t.Context()
 			if tc.choice != nil {
 				ctx = context.WithValue(ctx, enableCheckpointRemoteKey{}, tc.choice)

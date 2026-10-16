@@ -367,51 +367,29 @@ func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool
 // URL directly. Local and best-effort (reads config, no network); any error is
 // treated as "not a configured remote".
 func isConfiguredRemote(ctx context.Context, name string) bool {
-	configured, _ := configuredRemote(ctx, name) //nolint:errcheck // best-effort callers deliberately collapse probe failures
-	return configured
-}
-
-// configuredRemote preserves the distinction between positive evidence that a
-// remote is absent and a failure to inspect git config. The election resolver
-// needs that distinction so it never answers a config/readability failure with
-// the remedy for a misspelled checkpoint_push_remote.
-func configuredRemote(ctx context.Context, name string) (bool, error) {
 	if name == "" {
-		return false, nil
+		return false
 	}
-	return cachedIsConfiguredRemoteChecked(ctx, name, func() (bool, error) {
+	return cachedIsConfiguredRemote(ctx, name, func() (bool, error) {
 		cmd := exec.CommandContext(ctx, "git", "remote", "get-url", name)
 		if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
 			cmd.Dir = worktreeRoot
+			// Dir alone does not override GIT_DIR/GIT_WORK_TREE exported to a
+			// hook, and this probe runs inside pre-push.
 			cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 		}
 		err := cmd.Run()
 		if err == nil {
 			return true, nil
 		}
-
+		// git ran and said no: a real answer worth caching. git failing to run at
+		// all says nothing about the remote, and memoizing that false would
+		// fail-close checkpoint_push_remote for the rest of the process.
 		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
-			return false, fmt.Errorf("probe remote %q: %w", name, err)
+		if errors.As(err, &exitErr) {
+			return false, nil
 		}
-
-		// A non-zero get-url result is not positive evidence of absence: malformed
-		// or unreadable config exits non-zero too. Ask git for the configured names
-		// and classify absence only when that independent read succeeds and omits
-		// this one. This slow path runs only after get-url failed.
-		listCmd := exec.CommandContext(ctx, "git", "remote")
-		listCmd.Dir = cmd.Dir
-		listCmd.Env = cmd.Env
-		out, listErr := listCmd.Output()
-		if listErr != nil {
-			return false, fmt.Errorf("list remotes after probing %q: %w", name, listErr)
-		}
-		for _, configuredName := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if strings.TrimSpace(configuredName) == name {
-				return false, fmt.Errorf("probe configured remote %q: %w", name, err)
-			}
-		}
-		return false, nil
+		return false, fmt.Errorf("probe remote %q: %w", name, err)
 	})
 }
 

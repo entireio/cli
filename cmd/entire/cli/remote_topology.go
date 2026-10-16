@@ -230,7 +230,7 @@ func (t remoteTopology) describeSyncDisabled(w io.Writer, header string) {
 
 	var misconfigured *strategy.CheckpointPushRemoteNotFetchableError
 	if errors.As(t.electionErr, &misconfigured) {
-		fmt.Fprintf(w, "  checkpoint_push_remote names %q, which has no fetch URL in this repo,\n",
+		fmt.Fprintf(w, "  checkpoint_push_remote names %q, which is missing or has no fetch URL,\n",
 			misconfigured.Remote)
 		fmt.Fprintln(w, "  so nothing is elected to carry checkpoints. A push-only remote counts as")
 		fmt.Fprintln(w, "  missing here: reads and reconciliation need a fetch URL.")
@@ -243,15 +243,24 @@ func (t remoteTopology) describeSyncDisabled(w io.Writer, header string) {
 	// mid-sentence moves the wrap by however long the names happen to be.
 	if names := t.unpinnedNames(); len(names) > 0 {
 		fmt.Fprintf(w, "  Affected remotes: %s\n", strings.Join(names, ", "))
-		fmt.Fprintln(w, "  Pushes to them carry your code but no session history, which stays in")
-		fmt.Fprintln(w, "  this clone.")
+		// With push_sessions off, nothing is pushed anywhere regardless, so a
+		// failed election is not what is stopping delivery and saying "pushes
+		// carry no session history" would blame the wrong setting.
+		if t.pushDisabled {
+			fmt.Fprintln(w, "  Automatic checkpoint pushing is also disabled (push_sessions=false), so")
+			fmt.Fprintln(w, "  this is what a push would run into once you re-enable it.")
+		} else {
+			fmt.Fprintln(w, "  Pushes to them carry your code but no session history, which stays in")
+			fmt.Fprintln(w, "  this clone.")
+		}
 	}
 
 	if misconfigured == nil {
 		return
 	}
 	fmt.Fprintln(w, "  Fix: remove strategy_options.checkpoint_push_remote to let Entire elect one,")
-	fmt.Fprintln(w, "  or point it at a remote that has a fetch URL.")
+	fmt.Fprintln(w, "  point it at a remote that has a fetch URL, or give that remote one with")
+	fmt.Fprintf(w, "  `git remote set-url %s <url>`.\n", misconfigured.Remote)
 	fmt.Fprintln(w, "  A remote name is a per-clone fact: prefer .entire/settings.local.json, since a")
 	fmt.Fprintln(w, "  committed one disables checkpoint sync in every clone that lacks that name.")
 }

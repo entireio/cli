@@ -100,26 +100,6 @@ func TestResolveCheckpointSyncRemote_ConfigSettingInvalidRemote_FailsClosed(t *t
 }
 
 // Not parallel: uses t.Chdir()
-func TestConfiguredRemote_ConfigReadFailureIsNotAbsence(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-
-	configPath := filepath.Join(tmpDir, ".git", "config")
-	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
-	require.NoError(t, err)
-	_, err = f.WriteString("\n[broken\n")
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-
-	ctx := settings.WithWorktreeRoot(context.Background(), tmpDir)
-	configured, err := configuredRemote(ctx, "origin")
-	require.Error(t, err)
-	assert.False(t, configured)
-}
-
-// Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_DefaultsToOrigin(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()

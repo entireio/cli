@@ -1650,12 +1650,9 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 // enableCheckpointNoteHeaders phrases the checkpoint-destination note for the
 // setup flow, where it follows "Ready." and reads as a note rather than as a
-// doctor verdict.
+// doctor verdict. Ambiguity only: a failed election is reported by
+// enableCheckpointRemoteChoice.report, which owns enable's own remedy for it.
 var enableCheckpointNoteHeaders = checkpointNoteHeaders{
-	// Neutral about the cause: the note reports an unreadable settings file
-	// under this header too, which no setting is responsible for.
-	disabled:  "\nNote: checkpoint sync is currently disabled in this repo.",
-	partial:   "\nNote: checkpoint sync is only partially enabled in this repo.",
 	ambiguous: "\nNote: this repo's remotes make the checkpoint destination ambiguous.",
 }
 
