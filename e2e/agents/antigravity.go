@@ -573,7 +573,7 @@ func antigravityHookProbeEnabled(env []string) bool {
 // PrepareRepo runs after `entire enable`. When the hook probe is enabled it
 // adds a second, independent entry to the repo's .agents/hooks.json that
 // appends the hook's cwd and stdin payload to antigravityHookProbeLog for
-// PreInvocation, PreToolUse and Stop. Entire's own entry is untouched. This
+// SessionStart, PreInvocation, PreToolUse and Stop. Entire's own entry is untouched. This
 // answers "did agy run hooks at all, from where, with what payload" when a run
 // leaves no session state — the failure mode that is otherwise invisible.
 func (a *Antigravity) PrepareRepo(repoDir string) error {
@@ -600,6 +600,7 @@ func antigravityPrepareRepo(env []string, repoDir string) error {
 	// Format starts with %s: a leading "---" would be parsed by printf as an option.
 	probeCmd := fmt.Sprintf(`sh -c 'printf "%%s cwd=%%s\n" "--- $(date +%%T)" "$(pwd)" >> %q; cat >> %q; printf "\n" >> %q'`, logPath, logPath, logPath)
 	probe := map[string]any{
+		"SessionStart":  []map[string]any{{"type": "command", "command": probeCmd}},
 		"PreInvocation": []map[string]any{{"type": "command", "command": probeCmd}},
 		"PreToolUse":    []map[string]any{{"matcher": "*", "hooks": []map[string]any{{"type": "command", "command": probeCmd}}}},
 		"Stop":          []map[string]any{{"type": "command", "command": probeCmd}},

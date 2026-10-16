@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -99,8 +100,8 @@ func (a *AntigravityAgent) InstallHooks(ctx context.Context, force bool) (int, e
 		return 0, err
 	}
 
-	// 3 hooks: pre-tool-use, pre-invocation, stop
-	return 3, nil
+	// 4 hooks: session-start, pre-tool-use, pre-invocation, stop
+	return 4, nil
 }
 
 // entireEntryMatches compares an installed "entire" entry against candidate by
@@ -120,27 +121,60 @@ func entireEntryMatches(existing json.RawMessage, candidate HookConfig) (disable
 	return false, err1 == nil && err2 == nil && bytes.Equal(existingBytes, candidateBytes)
 }
 
-// HooksEntryMatchesHost reports whether the repo's installed "entire" entry is
-// exactly what InstallHooks would write on THIS host. installed is false when
-// there is no entry. A user-disabled entry counts as current.
+// HooksEntryWrongHost reports whether the repo's installed "entire" entry
+// carries a hook command InstallHooks writes only for the other host family.
+// An absent, user-disabled or current entry is not wrong-host, and neither is
+// one merely outdated (written for this host by an older release), since its
+// hooks still run here.
 //
 // It exists for `entire doctor`: the hook command's SHAPE is host-specific
 // (agy runs it through cmd.exe on Windows and sh elsewhere), and a hooks.json
 // committed from a macOS checkout carries a sh wrapper that cmd.exe tears
 // apart — the hook exits 1, the failure shows only in agy's log, and nothing
 // is tracked. A file that merely exists proves nothing about that; comparing
-// against the candidate does, at zero cost and without spawning agy.
-func (a *AntigravityAgent) HooksEntryMatchesHost(ctx context.Context) (installed, current bool, err error) {
+// against the other host's candidate does, at zero cost and without spawning
+// agy.
+func (a *AntigravityAgent) HooksEntryWrongHost(ctx context.Context) (bool, error) {
 	cfg, err := a.hookConfig(ctx)
 	if err != nil {
-		return false, false, err
+		return false, err
 	}
 	existing, ok, err := readEntireEntry(cfg)
 	if err != nil || !ok {
-		return false, false, err
+		return false, err
 	}
-	disabled, same := entireEntryMatches(existing, buildEntireHookConfig())
-	return true, disabled || same, nil
+	var existingCfg HookConfig
+	if err := json.Unmarshal(existing, &existingCfg); err != nil {
+		return false, fmt.Errorf("parse entire hook entry: %w", err)
+	}
+	if existingCfg.Enabled != nil && !*existingCfg.Enabled {
+		return false, nil
+	}
+	otherHost := hookCommands(buildEntireHookConfigForHost(!agent.HookHostIsWindows()))
+	for _, cmd := range hookCommands(existingCfg) {
+		if slices.Contains(otherHost, cmd) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// hookCommands lists every command in cfg, across all event keys.
+func hookCommands(cfg HookConfig) []string {
+	var commands []string
+	for _, handlers := range [][]SimpleHandler{cfg.SessionStart, cfg.PreInvocation, cfg.PostInvocation, cfg.Stop} {
+		for _, h := range handlers {
+			commands = append(commands, h.Command)
+		}
+	}
+	for _, handlers := range [][]ToolHandler{cfg.PreToolUse, cfg.PostToolUse} {
+		for _, th := range handlers {
+			for _, hc := range th.Hooks {
+				commands = append(commands, hc.Command)
+			}
+		}
+	}
+	return commands
 }
 
 // readEntireEntry returns the raw "entire" entry from the repo's hooks.json.
@@ -253,7 +287,8 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) (bool, error) 
 	}
 
 	// Check at least one of our hook commands is present
-	return hasEntireHookInToolHandlers(cfg.PreToolUse) ||
+	return hasEntireHookInSimpleHandlers(cfg.SessionStart) ||
+		hasEntireHookInToolHandlers(cfg.PreToolUse) ||
 		hasEntireHookInToolHandlers(cfg.PostToolUse) ||
 		hasEntireHookInSimpleHandlers(cfg.PreInvocation) ||
 		hasEntireHookInSimpleHandlers(cfg.PostInvocation) ||
@@ -297,6 +332,7 @@ func buildEntireHookConfigForHost(windowsHost bool) HookConfig {
 	// fields stay in HookConfig so the idempotency comparison detects (and
 	// replaces) stale installs that still carry them.
 	return HookConfig{
+		SessionStart: []SimpleHandler{{Type: hookTypeCommand, Command: makeCmd("session-start")}},
 		PreToolUse: []ToolHandler{
 			{
 				Matcher: "*",

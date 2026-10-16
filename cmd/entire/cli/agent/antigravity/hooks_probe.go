@@ -63,7 +63,7 @@ var ErrHooksProbeVersionUnknown = errors.New("could not determine the agy versio
 // local-answer behaviour is verified per platform rather than assumed from a
 // version number, a default doctor run must not risk the user's quota. The
 // probe also only proves agy PARSED hooks.json, not that the command in it can
-// run; HooksEntryMatchesHost is the check that catches the failure that
+// run; HooksEntryWrongHost is the check that catches the failure that
 // actually occurs.
 const DoctorProbeEnv = "ENTIRE_ANTIGRAVITY_DOCTOR_PROBE"
 

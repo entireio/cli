@@ -486,15 +486,15 @@ Test `ParseHookEvent` for every hook name your agent supports. See [Testing Patt
 
 The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles each event type as follows:
 
-| Event Type | Framework Actions | Claude Code Hook | Cursor Hook | OpenCode Hook | Factory AI Droid Hook | Copilot CLI Hook |
-|------------|-------------------|------------------|-----------------|---------------|----------------------|-----------------|
-| `SessionStart` | Shows banner, checks concurrent sessions, fires state machine transition | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` |
-| `TurnStart` | Captures pre-prompt state (git status, transcript position), ensures strategy setup, initializes session | `user-prompt-submit` | `before-submit-prompt` | `turn-start` | `user-prompt-submit` | `user-prompt-submitted` |
-| `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop`, `stop-failure` | `stop` | `turn-end` | `stop` | `agent-stop` |
-| `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compact` | `compaction` | `pre-compact` | *(not used)* |
-| `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
-| `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | `subagent-start` (observed pass-through; no child identity) |
-| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Agent] and PostToolUse[Skill] for a `context: fork` skill's agent, `Final: false`) + `subagent-start` (SubagentStart, matcher `workflow-subagent`: a Workflow agent's background launch, keyed by its agent ID, `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` (`agentId` joined to parent `subagent.started.toolCallId`) |
+| Event Type | Framework Actions | Claude Code Hook | Cursor Hook | OpenCode Hook | Factory AI Droid Hook | Copilot CLI Hook | Antigravity Hook |
+|------------|-------------------|------------------|-----------------|---------------|----------------------|-----------------|------------------|
+| `SessionStart` | Shows banner, checks concurrent sessions, fires state machine transition | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` |
+| `TurnStart` | Captures pre-prompt state (git status, transcript position), ensures strategy setup, initializes session | `user-prompt-submit` | `before-submit-prompt` | `turn-start` | `user-prompt-submit` | `user-prompt-submitted` | `pre-invocation` (`invocationNum == 0`; conditional for `> 0`) |
+| `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop`, `stop-failure` | `stop` | `turn-end` | `stop` | `agent-stop` | `stop` (`fullyIdle: true`) |
+| `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compact` | `compaction` | `pre-compact` | *(not used)* | *(not used)* |
+| `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` | *(not used)* |
+| `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | `subagent-start` (observed pass-through; no child identity) | *(not used)* |
+| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Agent] and PostToolUse[Skill] for a `context: fork` skill's agent, `Final: false`) + `subagent-start` (SubagentStart, matcher `workflow-subagent`: a Workflow agent's background launch, keyed by its agent ID, `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` (`agentId` joined to parent `subagent.started.toolCallId`) | *(not used)* |
 
 ### Event Field Requirements
 
@@ -996,7 +996,7 @@ Captured from real agy stdin (1.0.x); all enforced by tests in `agent/antigravit
 - **Transcript is written AFTER the Stop hook** — `PrepareTranscript` briefly waits, then materialises an empty placeholder; condensation degrades to a files/prompt-only checkpoint and re-extracts prompts late (`resolvePromptsFromLateFlushedTranscript`). The hook payload's `transcriptPath` points at `transcript_full.jsonl` under `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/`.
 - **Tool args can be double-encoded** — `toolCall.args` values sometimes arrive as JSON strings containing JSON; see `decodeAgyString`/`decodeAgyBool`.
 - **Token usage has exactly one surface** — the statusline/title JSON payload (`context_window`). The integration tees it to disk via the global settings.json `title` slot (`entire hooks antigravity title-tee`) and implements `OutOfBandTokenSource`.
-- **No SessionStart hook surface** — there is no way to show a "tracked by entire" banner; agy tracks silently like Cursor/OpenCode/Copilot/Pi. Only PreToolUse, PreInvocation, and Stop are installed — agy's PostToolUse/PostInvocation have no lifecycle mapping and are deliberately not installed.
+- **SessionStart is installed but silent** — `session-start` (agy 1.1.1+) fires once per new conversation, not on `agy --conversation` resumes, and maps to `SessionStart` for the model hint and the zombie-session sweep. `AntigravityAgent` is not a `HookResponseWriter`, so no banner is written and agy tracks silently like Cursor/OpenCode/Copilot/Pi. Only SessionStart, PreToolUse, PreInvocation, and Stop are installed — agy's PostToolUse/PostInvocation have no lifecycle mapping and are deliberately not installed.
 
 #### Antigravity status: Preview
 
@@ -1004,8 +1004,8 @@ The integration is preview status. That is a documentation statement, not a
 code flag: `agent.IsPreview` was removed from the Agent interface (#2554), so
 nothing in the CLI renders a label. Known limitations while in preview:
 
-- **No in-agy banner**: tracking is silent inside the agy UI (no SessionStart
-  hook surface). `entire status` is the visibility surface.
+- **No in-agy banner**: tracking is silent inside the agy UI (SessionStart is
+  installed but writes no banner). `entire status` is the visibility surface.
 - **Mid-turn commit token scoping is coarse**: a checkpoint created by a
   mid-turn agy commit records zero tokens; the turn's delta lands on the next
   condensation. Session totals stay correct.
