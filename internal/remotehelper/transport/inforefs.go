@@ -163,7 +163,7 @@ func (p *Proxy) handleInfoRefsResponse(resp *http.Response) (io.ReadCloser, erro
 // dropping HTML bodies (they're LB/proxy noise, not a server message).
 // Closes resp.Body.
 func (p *Proxy) httpError(resp *http.Response) error {
-	return HTTPErrorMessage(resp.StatusCode, readErrorMessage(resp), p.ErrorBaseURL())
+	return newHTTPStatusError(resp.StatusCode, readErrorMessage(resp), p.ErrorBaseURL())
 }
 
 // readErrorMessage drains up to 1KB of an error body as the server's message,
@@ -294,9 +294,8 @@ func (e *HTTPStatusError) Error() string {
 	}
 }
 
-// HTTPErrorMessage returns the typed error for a non-200 HTTP response.
-// Exposed so handlers outside the transport package can produce the same shape.
-func HTTPErrorMessage(statusCode int, serverMsg, baseURL string) error {
+// newHTTPStatusError returns the typed error for a non-200 HTTP response.
+func newHTTPStatusError(statusCode int, serverMsg, baseURL string) error {
 	if statusCode == http.StatusInsufficientStorage {
 		return &InsufficientStorageError{ServerMsg: serverMsg}
 	}

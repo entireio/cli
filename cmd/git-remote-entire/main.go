@@ -144,7 +144,8 @@ func run(args []string) int {
 	helperStart := time.Now()
 	if err := githelper.Run(ctx, proxy, protocolVersion, os.Stdin, os.Stdout); err != nil {
 		debuglog.Printf("helper session failed: %v", err)
-		fmt.Fprintf(os.Stderr, "fatal: %s\n", userMessage(err, parsedURL))
+		_, usesEnvToken := os.LookupEnv(auth.EnvTokenVar)
+		fmt.Fprintf(os.Stderr, "fatal: %s\n", userMessage(err, parsedURL, usesEnvToken))
 		return 128
 	}
 	debuglog.Printf("timing: helper-session dur_ms=%d", time.Since(helperStart).Milliseconds())
@@ -162,7 +163,10 @@ func run(args []string) int {
 // request-policy rejections such as an HTTPS-to-HTTP redirect. The migrate plugin
 // matches the push-too-large marker on git's stderr. Anything unrecognised
 // also prints verbatim, since the chain is then the only clue to the cause.
-func userMessage(err error, remote *url.URL) string {
+//
+// usesEnvToken reports that ENTIRE_TOKEN was the bearer. A rejected token then
+// has to be replaced in the environment, and `entire login` would not help.
+func userMessage(err error, remote *url.URL, usesEnvToken bool) string {
 	cluster, repo := remote.Host, strings.Trim(remote.Path, "/")
 	var tooLarge *transport.PushTooLargeError
 	var lowDisk *transport.InsufficientStorageError
@@ -180,25 +184,27 @@ func userMessage(err error, remote *url.URL) string {
 		// answered with an HTTP error.
 		return err.Error()
 	case errors.As(err, &status):
-		return statusMessage(status, cluster, repo)
-	case errors.Is(err, transport.ErrNoNodeSucceeded):
+		return statusMessage(status, cluster, repo, usesEnvToken)
+	case errors.Is(err, transport.ErrNoNodeSucceeded), errors.Is(err, transport.ErrUnreachable):
 		return fmt.Sprintf("could not reach any server for %s on %s. Check your connection and try again", repo, cluster)
 	}
 	return err.Error()
 }
 
-func statusMessage(status *transport.HTTPStatusError, cluster, repo string) string {
+func statusMessage(status *transport.HTTPStatusError, cluster, repo string, usesEnvToken bool) string {
 	reason := ""
 	if status.ServerMsg != "" {
 		reason = " (" + status.ServerMsg + ")"
 	}
 	switch code := status.StatusCode; {
+	case code == http.StatusUnauthorized && usesEnvToken:
+		return fmt.Sprintf("%s rejected %s%s", cluster, auth.EnvTokenVar, reason)
 	case code == http.StatusUnauthorized:
 		return fmt.Sprintf("%s rejected your login%s. Run `entire login`, then try again", cluster, reason)
 	case code == http.StatusForbidden:
 		return fmt.Sprintf("you do not have access to %s on %s%s", repo, cluster, reason)
 	case code == http.StatusNotFound:
-		return fmt.Sprintf("repository %s not found on %s", repo, cluster)
+		return fmt.Sprintf("repository %s not found on %s%s", repo, cluster, reason)
 	case code >= 500 && status.ServerMsg != "":
 		return fmt.Sprintf("%s could not handle the request (HTTP %d: %s). Try again later", cluster, code, status.ServerMsg)
 	case code >= 500:

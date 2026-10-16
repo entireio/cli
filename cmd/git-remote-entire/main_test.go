@@ -708,7 +708,7 @@ func TestUserMessage(t *testing.T) {
 		want string
 	}{
 		{"404", wrapV2(status(http.StatusNotFound, "")), "repository gh/o/r not found on c.example"},
-		{"404 ignores server wording", wrapV2(status(http.StatusNotFound, "repo row missing")), "repository gh/o/r not found on c.example"},
+		{"404 keeps server reason", wrapV2(status(http.StatusNotFound, "repository is being migrated")), "repository gh/o/r not found on c.example (repository is being migrated)"},
 		{"403", wrapV2(status(http.StatusForbidden, "")), "you do not have access to gh/o/r on c.example"},
 		{"403 keeps server reason", wrapV2(status(http.StatusForbidden, "read access required")), "you do not have access to gh/o/r on c.example (read access required)"},
 		{"401", wrapV2(status(http.StatusUnauthorized, "")), "c.example rejected your login. Run `entire login`, then try again"},
@@ -734,7 +734,13 @@ func TestUserMessage(t *testing.T) {
 		},
 		{"policy rejection stays verbatim", policyExhausted, policyExhausted.Error()},
 		{"policy rejection beats a 5xx on another node", policyAndStatus, policyAndStatus.Error()},
+		{
+			"entry domain unreachable",
+			wrapV2(fmt.Errorf("fetching info/refs from entry domain: %w: doing request: %w", transport.ErrUnreachable, errors.New("dial tcp: connection refused"))),
+			"could not reach any server for gh/o/r on c.example. Check your connection and try again",
+		},
 		{"interrupted", wrapV2(context.Canceled), "interrupted"},
+		{"interrupted while dialing", wrapV2(fmt.Errorf("%w: doing request: %w", transport.ErrUnreachable, context.Canceled)), "interrupted"},
 		{"push too large stays verbatim", fmt.Errorf("posting receive-pack: calling git-receive-pack: %w", &transport.PushTooLargeError{Size: 10, Limit: 5}), tooLarge.Error()},
 		{"low disk stays verbatim", fmt.Errorf("calling git-receive-pack: %w", &transport.InsufficientStorageError{}), (&transport.InsufficientStorageError{}).Error()},
 		{"unknown stays verbatim", errors.New("send-pack exited with error: exit status 128"), "send-pack exited with error: exit status 128"},
@@ -742,7 +748,7 @@ func TestUserMessage(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := userMessage(tc.err, &url.URL{Scheme: "entire", Host: "c.example", Path: "/gh/o/r"}); got != tc.want {
+			if got := userMessage(tc.err, &url.URL{Scheme: "entire", Host: "c.example", Path: "/gh/o/r"}, false); got != tc.want {
 				t.Errorf("userMessage() = %q, want %q", got, tc.want)
 			}
 		})
@@ -756,7 +762,7 @@ func TestUserMessage_OmitsURLCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	statusErr := &transport.HTTPStatusError{StatusCode: http.StatusNotFound}
-	got := userMessage(statusErr, remote)
+	got := userMessage(statusErr, remote, false)
 	if want := "repository gh/o/r not found on c.example:8443"; got != want {
 		t.Errorf("userMessage() = %q, want %q", got, want)
 	}
@@ -788,6 +794,28 @@ func TestInvalidURLMessage(t *testing.T) {
 			}
 			if strings.Contains(got, "alice") || strings.Contains(got, "s3cret") {
 				t.Errorf("credentials leaked: %q", got)
+			}
+		})
+	}
+}
+
+func TestUserMessage_EnvTokenRejected(t *testing.T) {
+	t.Parallel()
+	remote := &url.URL{Scheme: "entire", Host: "c.example", Path: "/gh/o/r"}
+	tests := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{"bare", "", "c.example rejected ENTIRE_TOKEN"},
+		{"with server reason", "token expired", "c.example rejected ENTIRE_TOKEN (token expired)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := fmt.Errorf("stateless-connect v2 info/refs: %w", &transport.HTTPStatusError{StatusCode: http.StatusUnauthorized, ServerMsg: tc.msg})
+			if got := userMessage(err, remote, true); got != tc.want {
+				t.Errorf("userMessage() = %q, want %q", got, tc.want)
 			}
 		})
 	}

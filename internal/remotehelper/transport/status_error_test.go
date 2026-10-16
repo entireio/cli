@@ -13,7 +13,7 @@ import (
 	"github.com/entireio/cli/internal/remotehelper/replicas"
 )
 
-func TestHTTPErrorMessage_ReturnsStatusError(t *testing.T) {
+func TestNewHTTPStatusError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
@@ -31,7 +31,7 @@ func TestHTTPErrorMessage_ReturnsStatusError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := HTTPErrorMessage(tt.statusCode, tt.serverMsg, "https://n/gh/o/r")
+			err := newHTTPStatusError(tt.statusCode, tt.serverMsg, "https://n/gh/o/r")
 			var statusErr *HTTPStatusError
 			if !errors.As(err, &statusErr) {
 				t.Fatalf("want *HTTPStatusError, got %T: %v", err, err)
@@ -121,5 +121,43 @@ func TestDoWithFailover_ExhaustedByPolicyMatchesRequestPolicy(t *testing.T) {
 	_, err := p.ServiceRPC(t.Context(), "git-upload-pack", strings.NewReader("0000"))
 	if !errors.Is(err, ErrNoNodeSucceeded) || !errors.Is(err, httpclient.ErrRequestPolicy) {
 		t.Fatalf("want ErrNoNodeSucceeded and ErrRequestPolicy, got %v", err)
+	}
+}
+
+func TestInfoRefs_UnreachableEntryDomainIsTyped(t *testing.T) {
+	t.Parallel()
+	entry := deadServerURL(t)
+	p := proxyWithClient(nil, "/gh/o/r", entry, "127.0.0.1", &http.Client{})
+
+	_, err := p.InfoRefs(t.Context(), "git-upload-pack")
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("want ErrUnreachable, got %v", err)
+	}
+}
+
+func TestDoWithFailover_NoEligibleReplicaIsTyped(t *testing.T) {
+	t.Parallel()
+	p := New(Config{Nodes: replicas.NodeConfig{EntryURL: "https://cluster.example", ClusterHost: "cluster.example", InitialNodes: []string{"https://elsewhere.example"}}})
+
+	_, err := p.ServiceRPC(t.Context(), "git-upload-pack", strings.NewReader("0000"))
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("want ErrUnreachable, got %v", err)
+	}
+}
+
+func TestInfoRefs_CredentialFailureIsNotUnreachable(t *testing.T) {
+	t.Parallel()
+	credErr := errors.New("cannot reach the login server")
+	p := New(Config{
+		Nodes:   replicas.NodeConfig{EntryURL: "https://cluster.example", ClusterHost: "cluster.example"},
+		SetAuth: func(*http.Request) error { return credErr },
+	})
+
+	_, err := p.InfoRefs(t.Context(), "git-upload-pack")
+	if !errors.Is(err, credErr) {
+		t.Fatalf("want the credential error, got %v", err)
+	}
+	if errors.Is(err, ErrUnreachable) {
+		t.Errorf("a credential failure must not read as a connectivity failure: %v", err)
 	}
 }
