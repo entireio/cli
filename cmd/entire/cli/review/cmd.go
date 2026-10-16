@@ -292,6 +292,9 @@ func NewCommand(deps Deps) *cobra.Command {
 			// default 0, an explicit --timeout 0, and a negative all mean
 			// "reviewers run until done". The judge derives its own bound via
 			// judgeTimeoutArg and is never uncapped.
+			if targetPrompt := takeTargetChildPrompt(); targetPrompt != "" && !cmd.Flags().Changed("prompt") {
+				perRunPrompt = targetPrompt
+			}
 			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, reviewTimeout, gateOpts, deps)
 		},
 	}

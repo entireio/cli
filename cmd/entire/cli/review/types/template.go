@@ -41,6 +41,11 @@ type ReviewerTemplate struct {
 	// must emit Started first, Finished{Success: ...} or RunError last,
 	// and check scanner.Err() before emitting Finished{Success: true}.
 	Parser func(stdout io.Reader) <-chan Event
+
+	// Preflight, when set, runs before BuildCmd and refuses an environment the
+	// command cannot work in (for example an agent CLI too old for the argv
+	// shape BuildCmd produces), so the review fails before any paid run.
+	Preflight func(ctx context.Context) error
 }
 
 // Compile-time check.
@@ -66,6 +71,11 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 	}
 	if t.Parser == nil {
 		return nil, fmt.Errorf("ReviewerTemplate.Start: %w (nil Parser for agent %q)", ErrTemplateMisconfigured, t.AgentName)
+	}
+	if t.Preflight != nil {
+		if err := t.Preflight(ctx); err != nil {
+			return nil, fmt.Errorf("%s: %w", t.AgentName, err)
+		}
 	}
 	cmd := t.BuildCmd(ctx, cfg)
 	if cmd == nil {

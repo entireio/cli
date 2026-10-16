@@ -77,7 +77,7 @@ Minimal example:
 
 `entire review --models` lists the models each review-runner agent advertises via the optional `agent.ModelLister` capability (`cmd/entire/cli/agent/model_lister.go`). claude-code returns a curated list of real aliases (opus/sonnet/haiku); Pi enumerates live by shelling out to `pi --list-models`. An agent whose CLI has no enumeration command (codex) does not implement `ListModels`, so the picker offers only Default + Custom. The `--model` flag still forwards any value the agent CLI accepts.
 
-The profile-level `task` is the shared work item. Each `agents` map entry is a worker id. For simple entries the worker id is also the agent name; to run the same agent more than once, use aliases and set `agent` plus `model`. Per-worker `skills`, `prompt`, and `model` adapt that task to agent-specific mechanics. Pi is a prompt/model-driven worker (`pi --mode json --print [--model ...]`) rather than a slash-command worker. Settings fields: `EntireSettings.ReviewProfiles` and `EntireSettings.ReviewDefaultProfile` in `cmd/entire/cli/settings/settings.go`. The old top-level `review` map is parse-tolerated and can be exposed as a legacy `general` profile when no `review_profiles` are configured.
+The profile-level `task` is the shared work item. Each `agents` map entry is a worker id. For simple entries the worker id is also the agent name; to run the same agent more than once, use aliases and set `agent` plus `model`. Per-worker `skills`, `prompt`, and `model` adapt that task to agent-specific mechanics. Pi is a prompt/model-driven worker (`pi --mode json --print [--model ...]`, prompt on stdin) rather than a slash-command worker. Every reviewer receives its prompt on stdin, never in argv; `TestReviewers_PromptNeverInArgv` enforces this. Settings fields: `EntireSettings.ReviewProfiles` and `EntireSettings.ReviewDefaultProfile` in `cmd/entire/cli/settings/settings.go`. The old top-level `review` map is parse-tolerated and can be exposed as a legacy `general` profile when no `review_profiles` are configured.
 
 ## Behavior
 
@@ -154,7 +154,7 @@ approval first.
 
 ## Flow
 
-1. With `--target`, `entire review` selects the profile in the caller's checkout, resolves the branch directly or through its trail, pins its head, runs the trust gate, prepares a worktree, and re-runs the command there without `--target`.
+1. With `--target`, `entire review` selects the profile in the caller's checkout, resolves the branch directly or through its trail, pins its head, runs the trust gate, prepares a worktree, and re-runs the command there without `--target`. `--prompt` reaches the re-run through `ENTIRE_REVIEW_TARGET_PROMPT`, not its argv.
 2. It selects a profile. If no profiles exist, it runs guided setup in an interactive terminal or writes an opinionated clone-local default profile in non-interactive mode. Plain reviews then run the trust gate.
 3. It composes worker prompts via `review.ComposeReviewPrompt` and computes scope (mainline base ref via `review.ComputeScopeStats`, overridable with `--base`).
 4. Adapter-backed review workers (claude-code, codex, pi) are spawned with `ENTIRE_REVIEW_{SESSION,AGENT,SKILLS,PROMPT,STARTING_SHA}` env vars. Their lifecycle hooks use those values to tag sessions as `Kind = "agent_review"`.
@@ -173,7 +173,7 @@ Review metadata is stored at two levels on `entire/checkpoints/v1`:
 ## Architecture
 
 - **`AgentReviewer` interface** (`cmd/entire/cli/review/types/reviewer.go`): per-agent contract with `Name() string` and `Start(ctx, RunConfig) (Process, error)`. Each adapter-backed review worker implements this in its own package.
-- **`ReviewerTemplate`** (`cmd/entire/cli/review/types/template.go`): shared scaffolding (spawn → pipe stdout → run parser → forward events → close). Each agent supplies only its `BuildCmd` and `Parser`.
+- **`ReviewerTemplate`** (`cmd/entire/cli/review/types/template.go`): shared scaffolding (spawn → pipe stdout → run parser → forward events → close). Each agent supplies its `BuildCmd` and `Parser`, plus an optional `Preflight` that refuses an unusable CLI before the run (Pi requires >= 0.65.1, the first release that keeps `--mode json` output for a prompt on stdin).
 - **`Sink` interface** (`cmd/entire/cli/review/types/sink.go`): consumers of the event stream. Production sinks include `DumpSink`, `TUISink`, and `SynthesisSink`.
 - **`Run(ctx, reviewer, cfg, sinks)`** (`cmd/entire/cli/review/run.go`): single-agent orchestrator. Forwards events to sinks and calls `RunFinished` once with a populated `RunSummary`.
 - **`RunMulti(ctx, reviewers, cfg, sinks)`** (`cmd/entire/cli/review/run_multi.go`): N-agent orchestrator. Agents run concurrently; events fan into a single dispatch loop so sink dispatch remains serialized.
