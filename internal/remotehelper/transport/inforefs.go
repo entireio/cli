@@ -77,7 +77,11 @@ func (p *Proxy) infoRefs(ctx context.Context, label, suffix string, setHeaders f
 
 	body, err := p.coldInfoRefs(ctx, suffix, setHeaders)
 	if err != nil && warmErr != nil {
-		return nil, fmt.Errorf("cached replicas: %w; %w", warmErr, err)
+		// Only the fallback's error is wrapped. It is the latest answer for
+		// this repository, so it decides how the failure is classified. A
+		// stale cached replica's 503 must not mask the entry URL's 404. The
+		// cached failure stays in the text for the debug trace.
+		return nil, fmt.Errorf("%w (cached replicas: %v)", err, warmErr) //nolint:errorlint // warmErr is context only and must not match errors.Is/As
 	}
 	return body, err
 }

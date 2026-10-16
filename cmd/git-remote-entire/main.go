@@ -158,7 +158,8 @@ func run(args []string) int {
 // itself goes to the ENTIRE_DEBUG trace. The cluster is the URL's host, which
 // never carries userinfo, so credentials typed into the URL are not echoed.
 //
-// The push-size and disk-space errors keep their own text. The migrate plugin
+// The push-size and disk-space errors keep their own text, and so do
+// request-policy rejections such as an HTTPS-to-HTTP redirect. The migrate plugin
 // matches the push-too-large marker on git's stderr. Anything unrecognised
 // also prints verbatim, since the chain is then the only clue to the cause.
 func userMessage(err error, remote *url.URL) string {
@@ -173,6 +174,11 @@ func userMessage(err error, remote *url.URL) string {
 		return lowDisk.Error()
 	case errors.Is(err, context.Canceled):
 		return "interrupted"
+	case errors.Is(err, httpclient.ErrRequestPolicy):
+		// A refused unsafe hop is a security diagnostic, not a connectivity
+		// or server problem. It prints in full even when another node also
+		// answered with an HTTP error.
+		return err.Error()
 	case errors.As(err, &status):
 		return statusMessage(status, cluster, repo)
 	case errors.Is(err, transport.ErrNoNodeSucceeded):

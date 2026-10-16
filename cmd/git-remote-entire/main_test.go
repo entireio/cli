@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/remotehelper/transport"
 )
 
@@ -698,6 +699,9 @@ func TestUserMessage(t *testing.T) {
 	}
 	wrapV2 := func(err error) error { return fmt.Errorf("stateless-connect v2 info/refs: %w", err) }
 	tooLarge := errors.New("entire: push too large: size 10 exceeds limit 5")
+	downgrade := &url.Error{Op: "Get", URL: "https://a.c.example/gh/o/r/info/refs", Err: httpclient.ErrInsecureRedirect}
+	policyExhausted := wrapV2(fmt.Errorf("%w: %w", transport.ErrNoNodeSucceeded, downgrade))
+	policyAndStatus := wrapV2(fmt.Errorf("%w: %w; %w", transport.ErrNoNodeSucceeded, downgrade, status(http.StatusBadGateway, "")))
 	tests := []struct {
 		name string
 		err  error
@@ -723,6 +727,13 @@ func TestUserMessage(t *testing.T) {
 			wrapV2(fmt.Errorf("%w: all 2 attempted nodes failed, last error: %w", transport.ErrNoNodeSucceeded, errors.New("dial tcp: connection refused"))),
 			"could not reach any server for gh/o/r on c.example. Check your connection and try again",
 		},
+		{
+			"fallback 404 wins over cached replica 503",
+			wrapV2(fmt.Errorf("%w (cached replicas: %v)", status(http.StatusNotFound, ""), status(http.StatusServiceUnavailable, ""))), //nolint:errorlint // mirrors transport's context-only cached error
+			"repository gh/o/r not found on c.example",
+		},
+		{"policy rejection stays verbatim", policyExhausted, policyExhausted.Error()},
+		{"policy rejection beats a 5xx on another node", policyAndStatus, policyAndStatus.Error()},
 		{"interrupted", wrapV2(context.Canceled), "interrupted"},
 		{"push too large stays verbatim", fmt.Errorf("posting receive-pack: calling git-receive-pack: %w", &transport.PushTooLargeError{Size: 10, Limit: 5}), tooLarge.Error()},
 		{"low disk stays verbatim", fmt.Errorf("calling git-receive-pack: %w", &transport.InsufficientStorageError{}), (&transport.InsufficientStorageError{}).Error()},
