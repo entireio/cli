@@ -32,6 +32,11 @@ import (
 // an insecure scheme. It matches httpclient.ErrRequestPolicy, not a redirect.
 var ErrInsecureReplica = fmt.Errorf("%w: insecure replica URL (HTTPS required)", httpclient.ErrRequestPolicy)
 
+// ErrNoNodeSucceeded marks a request that every attempted replica failed,
+// whether by connection error, 5xx, or redirect-policy rejection. The last
+// node's error stays wrapped alongside it.
+var ErrNoNodeSucceeded = errors.New("no replica succeeded")
+
 // SetAuthFunc attaches authentication headers to an outbound request.
 // Errors are surfaced verbatim — they short-circuit failover because
 // they originate at the auth provider, not the data-plane node.
@@ -509,11 +514,9 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 		}
 
 		if shouldFailover(resp.StatusCode) {
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024)) //nolint:errcheck // best-effort body read for error message
-			_ = resp.Body.Close()
-			msg := strings.TrimSpace(string(respBody))
+			msg := readErrorMessage(resp)
 			debuglog.Printf("node %s returned HTTP %d: %s", node, resp.StatusCode, msg)
-			lastErr = fmt.Errorf("node %s: HTTP %d: %s", node, resp.StatusCode, msg)
+			lastErr = fmt.Errorf("node %s: %w", node, HTTPErrorMessage(resp.StatusCode, msg, p.ErrorBaseURL()))
 			p.markNodeFailed(node)
 			continue
 		}
@@ -537,16 +540,16 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 	}
 	if policyErr != nil {
 		if lastErr == nil {
-			return nil, fmt.Errorf("no replica succeeded: %w", policyErr)
+			return nil, fmt.Errorf("%w: %w", ErrNoNodeSucceeded, policyErr)
 		}
 		// fmt rather than errors.Join: Join's newline would split git's
 		// one-line error output.
-		return nil, fmt.Errorf("no replica succeeded: %w; %w", policyErr, lastErr)
+		return nil, fmt.Errorf("%w: %w; %w", ErrNoNodeSucceeded, policyErr, lastErr)
 	}
 	if attempted == 0 {
 		return nil, errors.New("no eligible replicas available")
 	}
-	return nil, fmt.Errorf("all %d attempted nodes failed, last error: %w", attempted, lastErr)
+	return nil, fmt.Errorf("%w: all %d attempted nodes failed, last error: %w", ErrNoNodeSucceeded, attempted, lastErr)
 }
 
 // noRedirectClient returns a one-shot client for the cold info/refs probe
