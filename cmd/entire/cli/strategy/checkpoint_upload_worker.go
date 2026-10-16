@@ -306,6 +306,10 @@ func uploadRedactionReady(ctx context.Context, coord *checkpoint.UploadCoordinat
 // after the `git push` has returned. It waits for a running worker (bounded by
 // foregroundUploadLockWait) and returns how many refs landed.
 func UploadRequestedCheckpoints(ctx context.Context, w io.Writer) int {
+	// callerCtx releases the lock: a push that found it held left a request
+	// and relies on the holder to start a worker for it (releaseUploadLock),
+	// which a context marked as the worker would skip.
+	callerCtx := ctx
 	ctx = withinUploadWorker(logging.WithComponent(ctx, checkpointUploadComponent))
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -323,7 +327,7 @@ func UploadRequestedCheckpoints(ctx context.Context, w io.Writer) int {
 		fmt.Fprintln(w, "[entire] Another checkpoint upload is in progress; checkpoints will follow with it or the next push.")
 		return 0
 	}
-	defer release()
+	defer releaseUploadLock(callerCtx, coord, release)
 	req, err := coord.TakeRequest()
 	if err != nil || req == nil {
 		return 0
