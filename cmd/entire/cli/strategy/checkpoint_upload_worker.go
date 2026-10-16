@@ -1,11 +1,11 @@
 // Background checkpoint upload (git-refs).
 //
-// The pre-push hook uploads queued checkpoint refs inline for a short budget
-// (checkpointInlineUploadBudget). A queue that does not fit — a backlog, a slow
-// uplink — is handed to one detached `entire __checkpoint_upload` worker per
-// repository, so the user's `git push` returns in seconds and the remaining
-// checkpoints follow. An ordinary push finishes inside the inline budget and
-// behaves exactly as before: checkpoints are on the remote when the push returns.
+// The pre-push hook does not push queued checkpoint refs itself. It hands them
+// to one detached `entire __checkpoint_upload` worker per repository, which
+// uploads once the user's `git push` has exited (waitForUserPushes): pushed from
+// the hook, they land just before git's own pack, and GitHub rejects a push that
+// arrives right after another one finishes. The user's push never waits on the
+// upload, and checkpoints reach the remote a second or two after it returns.
 //
 // The worker acts only on what the pushing hook decided in the foreground, where
 // the user can still be asked: the OPF decision and the pending sync-remote
@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -39,17 +40,15 @@ import (
 const checkpointUploadComponent = "checkpoint-upload"
 
 // CheckpointUploadForegroundEnv, when set to 1, keeps the whole upload inside
-// the pre-push hook. Set by callers that report on the hook's delivery
-// (`entire trail create`) and by test harnesses whose temp remotes vanish when
-// the test ends.
+// the pre-push hook. Set by test harnesses whose temp remotes vanish when the
+// test ends.
 const CheckpointUploadForegroundEnv = "ENTIRE_CHECKPOINT_UPLOAD_FOREGROUND"
 
-// checkpointInlineUploadBudget is how long the pre-push hook uploads before it
-// hands the rest to the worker. Long enough that an ordinary push never hands
-// off — its checkpoints are on the remote when the push returns, which
-// entire.io, `entire trail create`, and short-lived environments rely on — and
-// short enough that a backlog no longer holds the user's push. Var for tests.
-var checkpointInlineUploadBudget = 10 * time.Second
+// CheckpointUploadAfterPushEnv, when set to 1, makes the pre-push hook record
+// the upload without starting a worker. Set by a caller that runs `git push`
+// itself and then uploads with UploadRequestedCheckpoints, so its checkpoints
+// are on the remote when it reports the push (`entire trail create`).
+const CheckpointUploadAfterPushEnv = "ENTIRE_CHECKPOINT_UPLOAD_AFTER_PUSH"
 
 // foregroundUploadLockWait bounds how long a foreground flush (hand-off
 // disabled) waits for a running worker before leaving its refs queued. Var for
@@ -260,17 +259,7 @@ func RunCheckpointUploadWorker(ctx context.Context) {
 		logging.Warn(ctx, "checkpoint upload worker: resolve state failed", slog.String("error", err.Error()))
 		return
 	}
-	// OPFEnabled reads process-global config only this sets. Without it the
-	// gate reads "OPF off" and ships unscanned content, so a worker that cannot
-	// configure redaction uploads nothing. EnsureRedactionConfigured survives a
-	// settings read failure (the hook path must), so check that separately.
-	_, settingsErr := settings.Load(ctx)
-	if err := EnsureRedactionConfigured(ctx); err != nil || settingsErr != nil {
-		now := time.Now()
-		if startErr := coord.StartRun(now); startErr == nil {
-			recordUploadFinish(ctx, coord, checkpoint.UploadResult{StartedAt: now, FinishedAt: time.Now(),
-				Error: "settings could not be loaded, so nothing was uploaded"})
-		}
+	if !uploadRedactionReady(ctx, coord) {
 		return
 	}
 
@@ -292,6 +281,72 @@ func RunCheckpointUploadWorker(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// uploadRedactionReady configures redaction for an upload run, recording a
+// failed run when it cannot. OPFEnabled reads process-global config only this
+// sets. Without it the gate reads "OPF off" and ships unscanned content, so a
+// run that cannot configure redaction uploads nothing. EnsureRedactionConfigured
+// survives a settings read failure (the hook path must), so check that separately.
+func uploadRedactionReady(ctx context.Context, coord *checkpoint.UploadCoordinator) bool {
+	_, settingsErr := settings.Load(ctx)
+	if err := EnsureRedactionConfigured(ctx); err != nil || settingsErr != nil {
+		now := time.Now()
+		if startErr := coord.StartRun(now); startErr == nil {
+			recordUploadFinish(ctx, coord, checkpoint.UploadResult{StartedAt: now, FinishedAt: time.Now(),
+				Error: "settings could not be loaded, so nothing was uploaded"})
+		}
+		return false
+	}
+	return true
+}
+
+// UploadRequestedCheckpoints runs, in this process, the upload a pre-push hook
+// recorded under CheckpointUploadAfterPushEnv, and reports it on w. Call it
+// after the `git push` has returned. It waits for a running worker (bounded by
+// foregroundUploadLockWait) and returns how many refs landed.
+func UploadRequestedCheckpoints(ctx context.Context, w io.Writer) int {
+	ctx = withinUploadWorker(logging.WithComponent(ctx, checkpointUploadComponent))
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return 0
+	}
+	defer repo.Close()
+	coord, err := checkpoint.UploadCoordinatorForRepo(repo)
+	if err != nil || !coord.HasRequest() || !uploadRedactionReady(ctx, coord) {
+		return 0
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, foregroundUploadLockWait)
+	release, err := coord.LockWorker(lockCtx)
+	cancel()
+	if err != nil {
+		fmt.Fprintln(w, "[entire] Another checkpoint upload is in progress; checkpoints will follow with it or the next push.")
+		return 0
+	}
+	defer release()
+	req, err := coord.TakeRequest()
+	if err != nil || req == nil {
+		return 0
+	}
+	runCheckpointUploadPass(ctx, repo, coord, *req)
+	st, err := coord.State()
+	if err != nil || st.Last == nil {
+		return 0
+	}
+	last := st.Last
+	if last.Announcement != "" {
+		fmt.Fprintln(w, last.Announcement)
+	}
+	if last.Pushed > 0 {
+		fmt.Fprintf(w, "[entire] Pushed %d checkpoint ref(s).\n", last.Pushed)
+	}
+	if last.Error != "" {
+		fmt.Fprintf(w, "[entire] %d checkpoint ref(s) stay queued for the next push: %s\n", last.Remaining, last.Error)
+	}
+	if err := coord.ClearReported(last.StartedAt); err != nil {
+		logging.Debug(ctx, "clear reported checkpoint upload failed", slog.String("error", err.Error()))
+	}
+	return last.Pushed
 }
 
 // runCheckpointUploadPass uploads the queue for req and records the outcome.
@@ -336,6 +391,8 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 		finish("withheld before upload (see .entire/logs)")
 		return
 	}
+
+	waitForUserPushes(ctx, coord)
 
 	deliverCtx, cancel := context.WithTimeout(ctx, checkpointUploadDeliveryBudget)
 	defer cancel()

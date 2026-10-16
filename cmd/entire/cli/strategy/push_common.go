@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -63,10 +64,38 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 	for _, ref := range refs {
 		refSpecs = append(refSpecs, ref.String()+":"+ref.String())
 	}
-	if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
-		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+	for attempt := 0; ; attempt++ {
+		res, err := pushCheckpointRefs(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs})
+		if err == nil {
+			return nil
+		}
+		if attempt >= len(pushRaceRetryDelays) || !isPushRaceRejection(res.Output) {
+			return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+		}
+		logging.Info(ctx, "checkpoint push rejected right after another push; retrying",
+			slog.Int("attempt", attempt+1))
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+		case <-time.After(pushRaceRetryDelays[attempt]):
+		}
 	}
-	return nil
+}
+
+// pushCheckpointRefs is the batch push's seam, swapped in tests.
+var pushCheckpointRefs = remote.PushWithOptions
+
+// pushRaceRetryDelays spaces the retries of a push GitHub rejected for landing
+// right after another push to the same repository finished. Var for tests.
+var pushRaceRetryDelays = []time.Duration{time.Second, 2 * time.Second}
+
+// pushRaceRejection matches git's report of GitHub refusing a pack that arrived
+// within about a second of another push finishing: the refs are fine and the
+// same push lands when retried.
+var pushRaceRejection = regexp.MustCompile(`(?m)^ ! \[remote rejected\] .+ \((failed|missing necessary objects)\)$|fatal error in commit_refs`)
+
+func isPushRaceRejection(output string) bool {
+	return pushRaceRejection.MatchString(output)
 }
 
 // chunkPushResult is what the chunked batch phase of a flush left behind.

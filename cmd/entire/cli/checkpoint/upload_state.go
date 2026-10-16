@@ -73,10 +73,24 @@ func (r *UploadResult) Running(now time.Time, maxRun time.Duration) bool {
 	return r != nil && r.FinishedAt.IsZero() && now.Sub(r.StartedAt) < maxRun
 }
 
+// UserPush marks a user's `git push` whose pre-push hook ran while background
+// upload was on. The worker waits for each to exit before it pushes: GitHub
+// rejects a push whose pack lands within about a second of another push to the
+// same repository finishing, and the one rejected is the later of the two.
+// PID is 0 when the hook could not find its git process.
+type UserPush struct {
+	PID int       `json:"pid,omitempty"`
+	At  time.Time `json:"at"`
+}
+
+// userPushMarkTTL drops marks no worker consumed (no upload followed them).
+const userPushMarkTTL = 10 * time.Minute
+
 // UploadState is the coordination file's contents.
 type UploadState struct {
-	Request *UploadRequest `json:"request,omitempty"`
-	Last    *UploadResult  `json:"last,omitempty"`
+	Request    *UploadRequest `json:"request,omitempty"`
+	Last       *UploadResult  `json:"last,omitempty"`
+	UserPushes []UserPush     `json:"user_pushes,omitempty"`
 }
 
 // UploadCoordinator owns the background upload's lock and state file for one
@@ -188,6 +202,29 @@ func (c *UploadCoordinator) ClearReported(startedAt time.Time) error {
 			st.Last.Announcement = ""
 		}
 	})
+}
+
+// NoteUserPush records a user's git push for the worker to wait on (see
+// UserPush), dropping marks older than userPushMarkTTL.
+func (c *UploadCoordinator) NoteUserPush(push UserPush) error {
+	return c.update(func(st *UploadState) {
+		kept := make([]UserPush, 0, len(st.UserPushes)+1)
+		for _, p := range st.UserPushes {
+			if push.At.Sub(p.At) < userPushMarkTTL {
+				kept = append(kept, p)
+			}
+		}
+		st.UserPushes = append(kept, push) //nolint:gocritic // kept is a fresh slice by construction
+	})
+}
+
+// TakeUserPushes returns and clears the recorded user pushes.
+func (c *UploadCoordinator) TakeUserPushes() ([]UserPush, error) {
+	var pushes []UserPush
+	err := c.update(func(st *UploadState) {
+		pushes, st.UserPushes = st.UserPushes, nil
+	})
+	return pushes, err
 }
 
 // HasRequest reports whether a request is waiting for a worker.

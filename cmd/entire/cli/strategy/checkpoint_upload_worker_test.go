@@ -16,21 +16,24 @@ import (
 )
 
 // enableBackgroundUpload opts this test into the hand-off, which in-process
-// tests otherwise skip, clears the CI markers a CI runner sets, and records
-// spawns instead of forking. Not parallel-safe: it swaps package state.
-func enableBackgroundUpload(t *testing.T, inlineBudget time.Duration) *[]string {
+// tests otherwise skip, clears the CI markers a CI runner sets, records spawns
+// instead of forking, and shortens the worker's settle delays. Not
+// parallel-safe: it swaps package state.
+func enableBackgroundUpload(t *testing.T) *[]string {
 	t.Helper()
 	for _, name := range ciEnvVars {
 		t.Setenv(name, "")
 	}
 	t.Setenv(CheckpointUploadForegroundEnv, "")
-	restoreAllowed, restoreSpawn, restoreBudget := backgroundUploadInTests, checkpointUploadSpawn, checkpointInlineUploadBudget
+	restoreAllowed, restoreSpawn := backgroundUploadInTests, checkpointUploadSpawn
+	restoreSettle, restoreUnknown := userPushSettle, unknownUserPushDelay
 	var spawned []string
 	backgroundUploadInTests = true
 	checkpointUploadSpawn = func(root string) { spawned = append(spawned, root) }
-	checkpointInlineUploadBudget = inlineBudget
+	userPushSettle, unknownUserPushDelay = 10*time.Millisecond, 10*time.Millisecond
 	t.Cleanup(func() {
-		backgroundUploadInTests, checkpointUploadSpawn, checkpointInlineUploadBudget = restoreAllowed, restoreSpawn, restoreBudget
+		backgroundUploadInTests, checkpointUploadSpawn = restoreAllowed, restoreSpawn
+		userPushSettle, unknownUserPushDelay = restoreSettle, restoreUnknown
 	})
 	return &spawned
 }
@@ -42,16 +45,16 @@ func uploadCoordinator(t *testing.T, repo *git.Repository) *checkpoint.UploadCoo
 	return coord
 }
 
-// TestPrePush_HandsBacklogToBackgroundWorker is the hybrid: the hook uploads
-// what fits its inline budget, then hands the rest to one background worker
-// instead of holding the user's push — and says so, rather than "stay queued".
-func TestPrePush_HandsBacklogToBackgroundWorker(t *testing.T) {
-	shrinkRefPushChunkSize(t, 2)
-	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+// TestPrePush_HandsQueueToWorkerWithoutPushing: the hook pushes nothing itself
+// — pushed from the hook, checkpoints land just before git's own pack and
+// GitHub rejects the user's push — and leaves the queue, a request and a mark
+// for this push to one background worker.
+func TestPrePush_HandsQueueToWorkerWithoutPushing(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 3)
 	countFile := filepath.Join(t.TempDir(), "attempts")
 	prepareGitRefsPrePush(t, workDir, bareDir)
-	installCountingHook(t, bareDir, countFile, 1) // first chunk lands, the rest stall
-	spawned := enableBackgroundUpload(t, 5*time.Second)
+	installCountingHook(t, bareDir, countFile, 0)
+	spawned := enableBackgroundUpload(t)
 
 	repo, err := gitrepo.OpenPath(workDir)
 	require.NoError(t, err)
@@ -59,48 +62,41 @@ func TestPrePush_HandsBacklogToBackgroundWorker(t *testing.T) {
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	start := time.Now()
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
-	elapsed := time.Since(start)
 	output := restore()
 
-	assert.Less(t, elapsed, 25*time.Second, "the hook must stop at its inline budget, not wait out the stall")
-	assert.Len(t, *spawned, 1, "one background worker for the remainder")
-	assert.Contains(t, output, "Uploading the remaining 4 checkpoint ref(s) in the background")
-	assert.NotContains(t, output, "Stopped pushing", "a handed-off stop is not reported as left for the next push")
-
+	assert.Equal(t, 0, countedAttempts(t, countFile), "the hook must not push")
+	assert.Len(t, *spawned, 1, "one background worker")
+	assert.Contains(t, output, "Uploading checkpoints in the background")
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
-	assert.ElementsMatch(t, refs[2:], remaining, "the landed chunk left the queue; the worker gets the rest")
+	assert.ElementsMatch(t, refs, remaining)
 	st, err := uploadCoordinator(t, repo).State()
 	require.NoError(t, err)
 	require.NotNil(t, st.Request, "the hand-off is recorded for the worker")
 	assert.Equal(t, "origin", st.Request.Remote)
+	assert.Len(t, st.UserPushes, 1, "the worker waits for this push")
 }
 
-// TestPrePush_NoHandOffWhenRemoteUnreachable: only a budget stop is handed off.
-// A worker would fail against an unreachable remote exactly as the hook did.
-func TestPrePush_NoHandOffWhenRemoteUnreachable(t *testing.T) {
-	workDir, _, refs := setupRepoWithNCheckpointRefs(t, 3)
-	prepareGitRefsPrePush(t, workDir, "ssh://git@example.invalid/repo.git")
-	fakeSSH := filepath.Join(t.TempDir(), "ssh")
-	require.NoError(t, os.WriteFile(fakeSSH,
-		[]byte("#!/bin/sh\necho 'ssh: connect to host example.invalid port 22: Connection refused' >&2\nexit 255\n"), 0o755))
-	t.Setenv("GIT_SSH_COMMAND", fakeSSH)
-	spawned := enableBackgroundUpload(t, 5*time.Second)
+// TestPrePush_RecordsUserPushWithEmptyQueue: a push with nothing queued starts
+// no worker but is still recorded, so a worker uploading an earlier push's
+// checkpoints waits for it too (`git push && git push --tags`).
+func TestPrePush_RecordsUserPushWithEmptyQueue(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithNCheckpointRefs(t, 1)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	spawned := enableBackgroundUpload(t)
 
 	repo, err := gitrepo.OpenPath(workDir)
 	require.NoError(t, err)
 	defer repo.Close()
-	enqueueRefs(t, repo, refs)
 
-	restore := captureStderr(t)
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
-	output := restore()
 
 	assert.Empty(t, *spawned)
-	assert.Contains(t, output, "Couldn't reach origin")
-	assert.NotContains(t, output, "in the background")
+	st, err := uploadCoordinator(t, repo).State()
+	require.NoError(t, err)
+	assert.Nil(t, st.Request)
+	assert.Len(t, st.UserPushes, 1)
 }
 
 // TestPrePush_RunningWorkerOwnsTheQueue: while a worker holds the upload lock,
@@ -111,7 +107,7 @@ func TestPrePush_RunningWorkerOwnsTheQueue(t *testing.T) {
 	countFile := filepath.Join(t.TempDir(), "attempts")
 	prepareGitRefsPrePush(t, workDir, bareDir)
 	installCountingHook(t, bareDir, countFile, 0)
-	enableBackgroundUpload(t, 5*time.Second)
+	enableBackgroundUpload(t)
 
 	repo, err := gitrepo.OpenPath(workDir)
 	require.NoError(t, err)
@@ -127,7 +123,7 @@ func TestPrePush_RunningWorkerOwnsTheQueue(t *testing.T) {
 	output := restore()
 
 	assert.Equal(t, 0, countedAttempts(t, countFile), "nothing pushed alongside the running worker")
-	assert.Contains(t, output, "will follow it in the background")
+	assert.Contains(t, output, "Uploading checkpoints in the background")
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, refs, remaining)
@@ -140,7 +136,7 @@ func TestPrePush_RunningWorkerOwnsTheQueue(t *testing.T) {
 // test harnesses set the foreground env; then nothing is handed off and the
 // pre-push budget applies as before.
 func TestPrePush_ForegroundEnvKeepsUploadInline(t *testing.T) {
-	spawned := enableBackgroundUpload(t, time.Second)
+	spawned := enableBackgroundUpload(t)
 	t.Setenv(CheckpointUploadForegroundEnv, "1")
 	assert.False(t, backgroundCheckpointUploadEnabled(t.Context()))
 	t.Setenv(CheckpointUploadForegroundEnv, "")
@@ -285,7 +281,7 @@ func TestOPFPrePushDecision_HonorsCarriedDecision(t *testing.T) {
 func TestReleaseUploadLock_StartsWorkerForWaitingRequest(t *testing.T) {
 	workDir, _, _ := setupRepoWithNCheckpointRefs(t, 1)
 	prepareGitRefsPrePush(t, workDir, t.TempDir())
-	spawned := enableBackgroundUpload(t, 5*time.Second)
+	spawned := enableBackgroundUpload(t)
 
 	repo, err := gitrepo.OpenPath(workDir)
 	require.NoError(t, err)
@@ -383,7 +379,7 @@ func TestRunCheckpointUploadWorker_StalledChunkDoesNotHoldTheRest(t *testing.T) 
 func TestPrePush_ForegroundNeverHandsOffWhenLockHeld(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 2)
 	prepareGitRefsPrePush(t, workDir, bareDir)
-	spawned := enableBackgroundUpload(t, 5*time.Second)
+	spawned := enableBackgroundUpload(t)
 	t.Setenv(CheckpointUploadForegroundEnv, "1")
 	restoreWait := foregroundUploadLockWait
 	foregroundUploadLockWait = 200 * time.Millisecond

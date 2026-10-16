@@ -14,11 +14,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// TestGitPushWithHooks_BackgroundUploadFinishesSlowPush runs the hybrid end to
-// end through the real binary: the pre-push hook's inline upload is cut by its
-// budget on a slow remote, the hook spawns the detached worker and returns, and
-// the worker lands the checkpoint after the user's push has finished.
-func TestGitPushWithHooks_BackgroundUploadFinishesSlowPush(t *testing.T) {
+// TestGitPushWithHooks_CheckpointsLandAfterUserPush runs the hand-off end to
+// end through the real binary: the pre-push hook pushes nothing itself, spawns
+// the detached worker and returns, and the worker uploads the checkpoint only
+// after the user's push has finished. GitHub rejects the later of two pushes
+// that land back to back, so the order is what keeps the user's push safe.
+func TestGitPushWithHooks_CheckpointsLandAfterUserPush(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -29,10 +30,9 @@ func TestGitPushWithHooks_BackgroundUploadFinishesSlowPush(t *testing.T) {
 		t.Fatal("should have a checkpoint ID after condensation")
 	}
 
-	// The first push carrying checkpoint refs outlasts the inline budget; every
-	// later push (the user's branch, the worker's upload) is immediate.
-	marker := filepath.Join(t.TempDir(), "slowed")
-	hook := "#!/bin/sh\nif grep -q refs/entire/ && [ ! -e '" + marker + "' ]; then touch '" + marker + "'; sleep 30; fi\nexit 0\n"
+	// Record the order in which the remote receives pushes.
+	received := filepath.Join(t.TempDir(), "received")
+	hook := "#!/bin/sh\nwhile read -r old new ref; do echo \"$ref\" >> '" + received + "'; done\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -44,13 +44,9 @@ func TestGitPushWithHooks_BackgroundUploadFinishesSlowPush(t *testing.T) {
 	// of the CI detection a CI runner would trip.
 	cmd.Env = append(env.cliEnv(), strategy.CheckpointUploadForegroundEnv+"=",
 		"CI=", "GITHUB_ACTIONS=", "GITLAB_CI=", "BUILDKITE=", "JENKINS_URL=", "TF_BUILD=")
-	start := time.Now()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git push failed: %v\n%s", err, output)
-	}
-	if elapsed := time.Since(start); elapsed > 20*time.Second {
-		t.Errorf("git push took %s; the hook must hand off instead of waiting out the slow remote", elapsed)
 	}
 	if !strings.Contains(string(output), "in the background") {
 		t.Fatalf("hook did not hand off to the background worker:\n%s", output)
@@ -87,5 +83,13 @@ func TestGitPushWithHooks_BackgroundUploadFinishesSlowPush(t *testing.T) {
 	}
 	if !env.CheckpointExistsOnRemote(bareDir, checkpointID) {
 		t.Fatalf("checkpoint %s should be on the remote after the background upload", checkpointID)
+	}
+	order, err := os.ReadFile(received)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Fields(string(order))
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "refs/heads/") || !strings.HasPrefix(lines[len(lines)-1], "refs/entire/") {
+		t.Fatalf("the user's branch must reach the remote before the checkpoint refs; received:\n%s", order)
 	}
 }
