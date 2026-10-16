@@ -331,3 +331,60 @@ func TestPiReviewer_ParseErrorWithoutMessage(t *testing.T) {
 		t.Fatalf("RunErrors = %q, want the stop reason", errs)
 	}
 }
+
+// Some Pi versions end the stream after the final turn without agent_end; a
+// turn that was not waiting on tool results still finishes the review, while a stream cut
+// after a tool-use turn does not.
+func TestPiReviewer_ParseEndsWithoutAgentEnd(t *testing.T) {
+	t.Parallel()
+	finished := func(input string) (bool, bool) {
+		for _, ev := range collectPiReviewEvents(input) {
+			if f, ok := ev.(reviewtypes.Finished); ok {
+				return true, f.Success
+			}
+		}
+		return false, false
+	}
+	stopped := `{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}` + "\n"
+	if seen, ok := finished(stopped); !seen || !ok {
+		t.Errorf("final stop turn: finished=%v success=%v, want a successful finish", seen, ok)
+	}
+	errored := `{"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":"boom"}}` + "\n"
+	if _, ok := finished(errored); ok {
+		t.Error("stream ending on an error turn counted as success")
+	}
+	retrying := errored + `{"type":"auto_retry_start"}` + "\n"
+	if _, ok := finished(retrying); ok {
+		t.Error("stream cut off during a retry counted as success")
+	}
+	cutOff := stopped + `{"type":"turn_start"}` + "\n"
+	if _, ok := finished(cutOff); ok {
+		t.Error("stream cut off mid-turn counted as success")
+	}
+	toolUse := `{"type":"turn_end","message":{"role":"assistant","stopReason":"toolUse"}}` + "\n"
+	if _, ok := finished(toolUse); ok {
+		t.Error("stream cut after a tool-use turn counted as success")
+	}
+}
+
+// A turn cut off at the output token limit is a truncated review, with or
+// without agent_end, and says so.
+func TestPiReviewer_ParseLengthStopFails(t *testing.T) {
+	t.Parallel()
+	turn := `{"type":"turn_end","message":{"role":"assistant","stopReason":"length"}}` + "\n"
+	for _, input := range []string{turn, turn + `{"type":"agent_end"}` + "\n"} {
+		var errs []string
+		success := true
+		for _, ev := range collectPiReviewEvents(input) {
+			switch e := ev.(type) {
+			case reviewtypes.RunError:
+				errs = append(errs, e.Err.Error())
+			case reviewtypes.Finished:
+				success = e.Success
+			}
+		}
+		if success || len(errs) != 1 || !strings.Contains(errs[0], "output token limit") {
+			t.Errorf("success=%v errs=%q, want a token-limit failure", success, errs)
+		}
+	}
+}

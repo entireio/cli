@@ -69,6 +69,9 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 		tokens := reviewtypes.Tokens{}
 		finished := false
 		success := true
+		// lastTurnStop is the stopReason of the latest turn_end. Some Pi
+		// versions end the stream after a final turn without agent_end.
+		lastTurnStop := ""
 
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -84,10 +87,12 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			switch env.Type {
 			case "turn_start":
 				turnNumber++
+				lastTurnStop = "" // a turn cut off before turn_end didn't finish
 			case "auto_retry_start":
 				// Pi is retrying the failed attempt; judge the retry instead.
 				success = true
 				pendingErr = ""
+				lastTurnStop = ""
 				inTextBlock = false
 				messageHadDelta = false
 			case "session", "agent_start", "queue_update", "compaction_start", "compaction_end", "auto_retry_end":
@@ -106,7 +111,7 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 				inTextBlock = false
 				messageHadDelta = false
 				if env.Message.Role == "assistant" {
-					if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
+					if piReviewStoppedShort(env.Message.StopReason) {
 						success = false
 						pendingErr = piReviewFailureReason(env.Message)
 					}
@@ -126,7 +131,8 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 				// finding no matches). The agent's stopReason determines review
 				// success/failure.
 			case "turn_end":
-				if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
+				lastTurnStop = env.Message.StopReason
+				if piReviewStoppedShort(env.Message.StopReason) {
 					success = false
 					pendingErr = piReviewFailureReason(env.Message)
 				}
@@ -154,6 +160,14 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			return
 		}
 		if !finished {
+			// A stream that ends right after a turn the model stopped on
+			// finished the review, as agent_end would have. Anything else (a
+			// turn waiting on tool results, cut off, or still being retried)
+			// was cut short.
+			if lastTurnStop == "stop" && success {
+				out <- reviewtypes.Finished{Success: true}
+				return
+			}
 			if pendingErr != "" {
 				out <- reviewtypes.RunError{Err: errors.New(pendingErr)}
 			}
@@ -196,9 +210,18 @@ type piReviewMessage struct {
 
 // piReviewFailureReason explains a failed message: Pi's errorMessage, or the
 // stop reason when Pi gave none.
+// piReviewStoppedShort reports a stop that didn't finish the review: an
+// error, an abort, or the output token limit, which truncates the review.
+func piReviewStoppedShort(stopReason string) bool {
+	return stopReason == "error" || stopReason == "aborted" || stopReason == "length"
+}
+
 func piReviewFailureReason(msg piReviewMessage) string {
 	if reason := strings.TrimSpace(msg.ErrorMessage); reason != "" {
 		return "pi: " + reason
+	}
+	if msg.StopReason == "length" {
+		return "pi: stopped at the output token limit, so the review is incomplete"
 	}
 	return "pi: stopped with " + msg.StopReason
 }
