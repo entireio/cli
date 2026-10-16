@@ -76,8 +76,9 @@ func TestSaveAttachSessionState_KeepsTokenOffsetMovedMeanwhile(t *testing.T) {
 
 		// transcriptEnd 7 moves an ended session's display offset, which a
 		// state without its own token offset would otherwise be read through.
-		require.NoError(t, saveAttachSessionState(ctx, nil, loaded, sessionID, agent.AgentTypeClaudeCode,
-			"/t.jsonl", "", cpID, transcriptMetadata{}, &agent.TokenUsage{OutputTokens: 9}, 4, 7, attachOptions{}, nil, false), tc.name)
+		_, err := saveAttachSessionState(ctx, loaded, sessionID, agent.AgentTypeClaudeCode,
+			"/t.jsonl", "", cpID, transcriptMetadata{}, &agent.TokenUsage{OutputTokens: 9}, 4, 7, attachOptions{}, nil)
+		require.NoError(t, err, tc.name)
 
 		got, err := store.Load(ctx, sessionID)
 		require.NoError(t, err)

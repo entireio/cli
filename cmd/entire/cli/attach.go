@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"reflect"
@@ -384,32 +386,127 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 
 	writeOpts := attachWriteOptions(ctx, plan, checkpointID, isExistingCheckpoint, sessionID, ag, redactedTranscript, meta, window, author, tokenUsage, opts, reviewSkills)
 
+	// Save the session state before writing the checkpoint, recording its
+	// tokens as counted. Saved after, a failed save left the checkpoint
+	// holding tokens the session's next checkpoint counted again.
+	undo, err := saveAttachSessionState(logCtx, existingState, sessionID, ag.Type(), transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, window.end, opts, reviewSkills)
+	if err != nil {
+		return fmt.Errorf("couldn't save the state of session %s, so nothing was attached: %w", sessionID, err)
+	}
+
 	// ReservedSession routes by the checkpoint ID's backend, as condensation
 	// does: appending to an existing ULID checkpoint under the git-branch
 	// primary must land in its ref, not on the v1 branch where reads never
 	// look for a ULID. A freshly minted ID already matches the primary.
-	if err := cp.store.Write(ctx, cpkg.ReservedSession(writeOpts)); err != nil {
-		return fmt.Errorf("failed to write checkpoint: %w", err)
+	if err := writeAttachSession(ctx, repo, refs, cp.store, cpkg.ReservedSession(writeOpts), sessionID, checkpointID, undo); err != nil {
+		return err
 	}
-
-	fmt.Fprintf(w, "Attached session %s\n", sessionID)
-	printAttachFooter(w, meta, tokenUsage)
-	linkErr := finishAttachLink(ctx, w, errW, plan, checkpointID, isExistingCheckpoint)
-
-	// Create or update session state, after any rewrite so a seeded base is
-	// the new HEAD. Seeding BaseCommit makes the session link future commits
-	// on HEAD; an attach to an older commit is about that commit only.
-	seedBase := target.Hash.Equal(headCommit.Hash)
-	if err := saveAttachSessionState(logCtx, repo, existingState, sessionID, ag.Type(), transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, window.end, opts, reviewSkills, seedBase); err != nil {
-		logging.Warn(logCtx, "failed to save session state", "error", err)
-	} else if activeHome {
+	if activeHome {
 		// The active home was resolved from the user's environment, so it may
 		// enter the registry; a failure only costs later lookups.
 		if err := agent.RememberAgentHome(ag.Type(), agentHome); err != nil {
 			logging.Warn(logCtx, "failed to record agent home", "error", err)
 		}
 	}
+
+	fmt.Fprintf(w, "Attached session %s\n", sessionID)
+	printAttachFooter(w, meta, tokenUsage)
+	linkErr := finishAttachLink(ctx, w, errW, plan, checkpointID, isExistingCheckpoint)
+
+	// Seeding BaseCommit makes the session link future commits on HEAD; an
+	// attach to an older commit is about that commit only.
+	if target.Hash.Equal(headCommit.Hash) {
+		seedAttachBaseCommit(logCtx, errW, repo, sessionID)
+	}
 	return linkErr
+}
+
+// writeAttachCheckpoint writes the attach checkpoint; tests replace it.
+var writeAttachCheckpoint = func(ctx context.Context, store cpkg.PersistentStore, req cpkg.WriteRequest) error {
+	return store.Write(ctx, req)
+}
+
+// writeAttachSession writes the attach checkpoint after the session state
+// recorded its tokens as counted. If the write fails, the state is put back
+// only when the write stored nothing: no ref it can write moved, or only the
+// shared v1 branch did — other sessions write there too — and the checkpoint
+// there doesn't hold the session. If it might, the tokens stay counted, since
+// putting them back would count them twice. A process killed between the
+// save and the write leaves them counted with no checkpoint; saving after the
+// write instead left them counted twice when the save failed.
+func writeAttachSession(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, store cpkg.PersistentStore, req cpkg.WriteRequest, sessionID string, checkpointID id.CheckpointID, undo attachStateUndo) error {
+	before, beforeErr := attachRefHashes(ctx, repo, checkpointID)
+	writeErr := writeAttachCheckpoint(ctx, store, req)
+	if writeErr == nil {
+		return nil
+	}
+	// Finish the undo even after Ctrl-C.
+	ctx = context.WithoutCancel(ctx)
+	kept := func(why string) error {
+		return fmt.Errorf("failed to write checkpoint %s: %w; %s, so session %s's state was left as it is", checkpointID, writeErr, why, sessionID)
+	}
+	after, afterErr := attachRefHashes(ctx, repo, checkpointID)
+	switch {
+	case beforeErr != nil || afterErr != nil:
+		return kept(fmt.Sprintf("couldn't check whether it was stored (%v)", errors.Join(beforeErr, afterErr)))
+	case !maps.Equal(before, after):
+		if !onlyBranchMoved(checkpointID, before, after) {
+			return kept("the checkpoint may hold the session anyway")
+		}
+		// Reading back is no proof on its own (a read error reads as absent),
+		// so it is used only when another writer may have moved the branch.
+		landed, err := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
+		if err != nil || landed {
+			return kept("the checkpoint may hold the session anyway")
+		}
+	}
+	if err := undo.restore(ctx); err != nil {
+		return kept(fmt.Sprintf("its state couldn't be put back (%v)", err))
+	}
+	return fmt.Errorf("failed to write checkpoint %s: %w", checkpointID, writeErr)
+}
+
+// onlyBranchMoved reports whether, for a hex checkpoint ID, the v1 branch is
+// the only ref that moved.
+func onlyBranchMoved(checkpointID id.CheckpointID, before, after map[string]string) bool {
+	if checkpointID.Kind() == id.KindULID {
+		return false
+	}
+	for name, hash := range after {
+		if before[name] != hash && name != paths.MetadataBranchName {
+			return false
+		}
+	}
+	return true
+}
+
+// attachRefHashes resolves every ref a write of checkpointID can move.
+func attachRefHashes(ctx context.Context, repo *git.Repository, checkpointID id.CheckpointID) (map[string]string, error) {
+	hashes := map[string]string{}
+	for _, name := range checkpointStorageRefs(ctx, checkpointID) {
+		ref := plumbing.ReferenceName(name)
+		if !isCheckpointRef(name) {
+			ref = plumbing.NewBranchReferenceName(name)
+		}
+		hash, err := refHash(repo, ref)
+		if err != nil {
+			return nil, err
+		}
+		hashes[name] = hash
+	}
+	return hashes, nil
+}
+
+// refHash resolves ref, "" when it doesn't exist.
+func refHash(repo *git.Repository, ref plumbing.ReferenceName) (string, error) {
+	r, err := repo.Reference(ref, true)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", ref, err)
+	}
+	return r.Hash().String(), nil
 }
 
 // attachTokens returns the tokens the attach checkpoint stores, the session's
@@ -1378,24 +1475,134 @@ func resolveCheckpointID(ctx context.Context, headCommit *object.Commit) (id.Che
 	return cpID, false
 }
 
-// saveAttachSessionState creates or updates the session state file for the attached session.
-// If existingState is non-nil, it is updated in place (avoids a redundant disk load).
+// attachStateUndo puts back the session state an attach saved before writing
+// its checkpoint, for when that write fails.
+type attachStateUndo struct {
+	store     *session.StateStore
+	sessionID string
+	// prior is the state on disk before attach saved; nil when there was none.
+	prior *session.State
+	// saved is the state attach saved, as read back. A state that differs
+	// from it was changed by a hook since, and is left as the hook wrote it:
+	// a Stop or a step can update pending tokens and files without touching
+	// the token offset or the checkpoint ID.
+	saved []byte
+}
+
+// encodeAttachState encodes s for comparing it with a later read.
+func encodeAttachState(s *session.State) ([]byte, error) {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return nil, fmt.Errorf("encode session state: %w", err)
+	}
+	return data, nil
+}
+
+// restore puts the prior state back, unless a hook has written the state
+// since. It holds the session lock hooks write under, so a hook can't write
+// between the check and the restore.
+func (u attachStateUndo) restore(ctx context.Context) error {
+	commonDir, err := strategy.GetGitCommonDir(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to locate session state: %w", err)
+	}
+	return strategy.WithSessionStateLocks(ctx, u.sessionID, []string{commonDir}, func() error { //nolint:wrapcheck // restoreLocked describes its failures
+		return u.restoreLocked(ctx)
+	})
+}
+
+func (u attachStateUndo) restoreLocked(ctx context.Context) error {
+	current, err := u.store.Load(ctx, u.sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to reload session state: %w", err)
+	}
+	if current == nil {
+		if u.prior == nil {
+			return nil
+		}
+		// Removed on purpose (entire clean, say); bringing it back would undo that.
+		return errors.New("session state was removed since attach saved it")
+	}
+	data, err := encodeAttachState(current)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(data, u.saved) {
+		return errors.New("session state changed since attach saved it")
+	}
+	return u.revert(ctx)
+}
+
+// revert writes the prior state back, or removes the state attach created.
+func (u attachStateUndo) revert(ctx context.Context) error {
+	if u.prior == nil {
+		return u.store.Delete(u.sessionID) //nolint:wrapcheck // already describes the failure
+	}
+	return u.store.Save(ctx, u.prior) //nolint:wrapcheck // already describes the failure
+}
+
+// copyAttachState deep-copies a session state through its JSON form.
+func copyAttachState(s *session.State) (*session.State, error) {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return nil, fmt.Errorf("copy session state: %w", err)
+	}
+	var c session.State
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("copy session state: %w", err)
+	}
+	return &c, nil
+}
+
+// saveAttachSessionState creates or updates the session state file for the
+// attached session. It runs before the checkpoint is written, so the tokens
+// the checkpoint stores are recorded as counted before they are stored: a
+// failed save leaves nothing attached, and a failed write is undone with the
+// returned undo. existingState is the state read before the confirmation.
 // reviewSkills is the resolved skills list when opts.Review is true; ignored otherwise.
 // agentHome replaces State.AgentHome; "" clears it.
-func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath, agentHome string, checkpointID id.CheckpointID, meta transcriptMetadata, sessionUsage *agent.TokenUsage, tokenPos, transcriptEnd int, opts attachOptions, reviewSkills []string, seedBase bool) error {
+func saveAttachSessionState(ctx context.Context, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath, agentHome string, checkpointID id.CheckpointID, meta transcriptMetadata, sessionUsage *agent.TokenUsage, tokenPos, transcriptEnd int, opts attachOptions, reviewSkills []string) (attachStateUndo, error) {
 	stateStore, err := session.NewStateStore(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to open session store: %w", err)
+		return attachStateUndo{}, fmt.Errorf("failed to open session store: %w", err)
 	}
+	commonDir, err := strategy.GetGitCommonDir(ctx)
+	if err != nil {
+		return attachStateUndo{}, fmt.Errorf("failed to locate session state: %w", err)
+	}
+	// Under the session lock hooks write under, so none writes between the
+	// load and the save.
+	var undo attachStateUndo
+	err = strategy.WithSessionStateLocks(ctx, sessionID, []string{commonDir}, func() error {
+		var saveErr error
+		undo, saveErr = saveAttachSessionStateLocked(ctx, stateStore, existingState, sessionID, agentType, transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, transcriptEnd, opts, reviewSkills)
+		return saveErr
+	})
+	return undo, err //nolint:wrapcheck // saveAttachSessionStateLocked describes its failures
+}
 
+func saveAttachSessionStateLocked(ctx context.Context, stateStore *session.StateStore, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath, agentHome string, checkpointID id.CheckpointID, meta transcriptMetadata, sessionUsage *agent.TokenUsage, tokenPos, transcriptEnd int, opts attachOptions, reviewSkills []string) (attachStateUndo, error) {
 	now := time.Now()
-	state := existingState
-	// A trailer rewrite remaps stored state to the new commits; start from
-	// that rather than the copy loaded before it.
-	if fresh, loadErr := stateStore.Load(ctx, sessionID); loadErr == nil && fresh != nil {
-		state = fresh
+	// Start from the state on disk, which hooks may have changed while attach
+	// waited at its prompt. Nothing is written yet, so a state that can't be
+	// read stops the attach.
+	fresh, err := stateStore.Load(ctx, sessionID)
+	if err != nil {
+		return attachStateUndo{}, fmt.Errorf("failed to load session state: %w", err)
 	}
-	if state == nil {
+	var prior, state *session.State
+	switch {
+	case fresh != nil:
+		if prior, err = copyAttachState(fresh); err != nil {
+			return attachStateUndo{}, err
+		}
+		state = fresh
+	case existingState != nil:
+		// Removed meanwhile; rebuild it from the copy read earlier.
+		if state, err = copyAttachState(existingState); err != nil {
+			return attachStateUndo{}, err
+		}
+	default:
 		state = &session.State{
 			SessionID: sessionID,
 			StartedAt: now,
@@ -1407,14 +1614,6 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	pendingOnDisk := state.CheckpointTokenUsage
 	lastCheckpointOnDisk := state.LastCheckpointID
 
-	// Populate BaseCommit from HEAD if not already set, so the session becomes
-	// active and future commits in the same session receive Entire-Checkpoint trailers.
-	if seedBase && state.BaseCommit == "" {
-		if head, headErr := repo.Head(); headErr == nil {
-			state.BaseCommit = head.Hash().String()
-		}
-	}
-
 	state.CLIVersion = versioninfo.Version
 	state.AttachedManually = true
 	state.AgentHome = agentHome
@@ -1422,7 +1621,7 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	state.TranscriptPath = transcriptPath
 	state.LastCheckpointID = checkpointID
 	// Only transition to Ended if the session is not already active — avoid
-	// breaking an ongoing session whose BaseCommit has just been restored above.
+	// breaking an ongoing session.
 	// An ended session's next attach starts after these turns. A running
 	// session's offset belongs to its hooks: moving it would take turns from
 	// the checkpoint its next commit makes.
@@ -1497,6 +1696,51 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	}
 
 	if err := stateStore.Save(ctx, state); err != nil {
+		return attachStateUndo{}, fmt.Errorf("failed to save session state: %w", err)
+	}
+	// Read back what was saved, so the undo compares like with like. The lock
+	// is still held, so this is attach's own state; without it the undo
+	// couldn't work, so the save is reverted and nothing is attached.
+	undo := attachStateUndo{store: stateStore, sessionID: sessionID, prior: prior}
+	saved, err := stateStore.Load(ctx, sessionID)
+	if err == nil && saved == nil {
+		err = errors.New("saved session state is missing")
+	}
+	if err == nil {
+		undo.saved, err = encodeAttachState(saved)
+	}
+	if err != nil {
+		return attachStateUndo{}, errors.Join(fmt.Errorf("failed to read back session state: %w", err), undo.revert(ctx))
+	}
+	return undo, nil
+}
+
+// seedAttachBaseCommit sets an attached session's BaseCommit to HEAD when it
+// has none, so the session links future commits on HEAD. It runs after any
+// trailer rewrite so the base is the rewritten HEAD: seeding the old HEAD
+// earlier would rely on PostRewrite to remap it, and PostRewrite skips state
+// without a WorktreePath, which attach-created state has. The checkpoint and
+// its tokens are recorded either way, so a failure is only a warning.
+func seedAttachBaseCommit(ctx context.Context, errW io.Writer, repo *git.Repository, sessionID string) {
+	if err := seedBaseCommit(ctx, repo, sessionID); err != nil {
+		fmt.Fprintf(errW, "warning: session %s couldn't be set to link future commits on HEAD: %v\n", sessionID, err)
+	}
+}
+
+func seedBaseCommit(ctx context.Context, repo *git.Repository, sessionID string) error {
+	head, err := repo.Head()
+	if err != nil {
+		return fmt.Errorf("failed to resolve HEAD: %w", err)
+	}
+	// Under the session lock, so a hook's concurrent update isn't overwritten.
+	err = strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if state.BaseCommit != "" {
+			return strategy.ErrMutationSkip
+		}
+		state.BaseCommit = head.Hash().String()
+		return nil
+	})
+	if err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
 		return fmt.Errorf("failed to save session state: %w", err)
 	}
 	return nil

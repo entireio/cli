@@ -1286,6 +1286,26 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 	return nil
 }
 
+// Delete removes only the session's state file and reports a failure, where
+// Clear also removes its hint files and is best-effort. A missing file is not
+// an error.
+func (s *StateStore) Delete(sessionID string) error {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return fmt.Errorf("invalid session ID: %w", err)
+	}
+	root, err := s.dirRoot()
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to open session state directory: %w", err)
+	}
+	if err := osroot.RemoveNoSymlinks(root, s.name(sessionID+".json")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove session state file: %w", err)
+	}
+	return nil
+}
+
 // Clear removes the session state file for the given session ID.
 func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 	_ = ctx // Reserved for future use
