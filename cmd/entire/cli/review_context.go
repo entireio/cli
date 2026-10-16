@@ -262,7 +262,7 @@ func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
 	}
 
 	parts := []string{"  " + short, agentName}
-	if n := len(st.FilesTouched); n > 0 {
+	if n := len(st.PendingFiles()); n > 0 {
 		fileWord := "files"
 		if n == 1 {
 			fileWord = "file"

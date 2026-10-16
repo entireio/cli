@@ -48,6 +48,7 @@ type CapabilityDeclarer interface {
 //   - SkillEventExtractor
 //   - StaleHookReporter
 //   - SubagentSessionResolver
+//   - SubagentTranscriptFetcher
 //   - TaskTranscriptMatcher
 //   - ToolInvocationScanner
 //   - TranscriptFetcher
@@ -223,6 +224,12 @@ func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
 // assertion alone with no DeclaredCaps gate.
 func AsTranscriptFetcher(ag Agent) (TranscriptFetcher, bool) {
 	return builtinCapability[TranscriptFetcher](ag)
+}
+
+// AsSubagentTranscriptFetcher returns the agent as SubagentTranscriptFetcher if
+// it implements the interface. Built-in only, like TranscriptFetcher.
+func AsSubagentTranscriptFetcher(ag Agent) (SubagentTranscriptFetcher, bool) {
+	return builtinCapability[SubagentTranscriptFetcher](ag)
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both

@@ -1799,3 +1799,49 @@ func TestResolveTaskTranscriptPath_FindsWorkflowRunTranscript(t *testing.T) {
 	assert.Equal(t, want, resolveTaskTranscriptPath(state, "ae3d7b8f2930c8787"))
 	assert.Empty(t, resolveTaskTranscriptPath(state, "other"))
 }
+
+// A commit-less condense clears the files pending in other worktrees too, so
+// its checkpoint, the last record of them, must list them.
+func TestCondenseSessionByID_RecordsOtherWorktreesFiles(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "commitless-condense-other-worktree"
+	metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
+	testutil.WriteFile(t, dir, filepath.Join(metadataDir, paths.TranscriptFileName), testTranscriptPromptResponse)
+	testutil.WriteFile(t, dir, "test.txt", "agent content")
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+	}))
+	// A worktree git still lists: the salvage prunes records of removed ones.
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	testutil.RunGit(t, dir, "worktree", "add", elsewhere, "-b", "elsewhere")
+	require.NoError(t, MutateSessionState(t.Context(), sessionID, func(state *SessionState) error {
+		state.OtherWorktrees = map[string]*session.WorktreeWork{
+			linkedKey(t, elsewhere): {Path: elsewhere, FilesTouched: []string{"elsewhere.go"}, Incarnation: mark(t, elsewhere)},
+		}
+		return nil
+	}))
+
+	require.NoError(t, s.CondenseSessionByID(t.Context(), sessionID))
+
+	state, err := s.loadSessionState(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.Empty(t, state.OtherWorktrees)
+	require.False(t, state.HasPendingWork())
+	repo, err := OpenRepository(t.Context())
+	require.NoError(t, err)
+	defer repo.Close()
+	content, err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).ReadSessionContent(t.Context(), state.LastCheckpointID, 0)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"test.txt", "elsewhere.go"}, content.Metadata.FilesTouched)
+}

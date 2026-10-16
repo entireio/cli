@@ -186,11 +186,25 @@ func (s *ManualCommitStrategy) findExactSessionsForWorktree(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	return exactWorktreeMatches(allStates, worktreePath), nil
+	return exactWorktreeMatches(ctx, allStates, worktreePath), nil
 }
 
-func exactWorktreeMatches(states []*SessionState, worktreePath string) []*SessionState {
-	var exact []*SessionState
+func exactWorktreeMatches(ctx context.Context, states []*SessionState, worktreePath string) []*SessionState {
+	exact, _ := matchWorktreeHomes(ctx, states, worktreePath)
+	return exact
+}
+
+// matchWorktreeHomes splits states by whether worktreePath is their home.
+// exact holds those homed there, a home moved there by `git worktree move`
+// included, with WorktreePath set to worktreePath in memory only (a moved
+// home's stored state follows under the session's lock: post-commit, turn
+// start; a home reached by another spelling of its path is not repointed, so
+// post-commit's path checks still treat that commit as a guest's, as before). notHome holds the IDs of those whose home
+// marker shows worktreePath is not their home even at their recorded path: a
+// worktree git re-added there. Sessions the marker can't judge are matched by
+// path, as before markers.
+func matchWorktreeHomes(ctx context.Context, states []*SessionState, worktreePath string) (exact []*SessionState, notHome map[string]bool) {
+	here := &worktreeAt{root: worktreePath}
 	for _, state := range states {
 		// Imported sessions are historical records reconstructed from
 		// transcripts; a fresh commit must never link to one (a leaked
@@ -199,18 +213,30 @@ func exactWorktreeMatches(states []*SessionState, worktreePath string) []*Sessio
 		if state.Kind.IsImported() {
 			continue
 		}
-		if state.WorktreePath == worktreePath {
+		switch here.home(ctx, state) {
+		case homeHere, homeMovedHere:
+			state.WorktreePath = worktreePath
 			exact = append(exact, state)
+		case homeNotHere, homeReplaced:
+			if notHome == nil {
+				notHome = make(map[string]bool)
+			}
+			notHome[state.SessionID] = true
+		case homeUnknown:
+			if state.WorktreePath == worktreePath {
+				exact = append(exact, state)
+			}
 		}
 	}
-	return exact
+	return exact, notHome
 }
 
 // BackgroundClaimContext is what a background task's SubagentStop needs to
 // decide which new untracked files it may claim.
 type BackgroundClaimContext struct {
-	// Recorded holds every path a session in the task's worktree has in
-	// FilesTouched.
+	// Recorded holds every path a session has pending in the task's
+	// worktree: in FilesTouched for one homed there, in its entry for that
+	// worktree for one that edited it from elsewhere.
 	Recorded map[string]struct{}
 
 	// Overlapped reports that another background task in the worktree was
@@ -239,16 +265,39 @@ func LoadBackgroundClaimContext(ctx context.Context, sessionID, toolUseID string
 		return BackgroundClaimContext{}, false, nil
 	}
 	task := own.FindTaskRecord(toolUseID)
-	if task == nil {
+	if task == nil || launchedBeforeRehome(own, task) {
+		// One launched before the session re-homed ran in the removed
+		// worktree: what is new here isn't its.
 		return BackgroundClaimContext{}, false, nil
 	}
 	claims.Recorded = make(map[string]struct{})
-	for _, state := range exactWorktreeMatches(states, own.WorktreePath) {
+	key := session.WorktreeKey(own.WorktreeID)
+	for _, state := range states {
+		work := state.OtherWorktrees[key]
+		if work == nil || state.Kind.IsImported() {
+			continue
+		}
+		// An entry from a worktree git removed before adding this one under
+		// its ID records nothing here; one that can't be checked still counts,
+		// so a failed check can't hand another session's file to the task.
+		if current, err := worktreeEntryCurrent(ctx, own.WorktreePath, key, work); err == nil && !current {
+			continue
+		}
+		for _, file := range work.FilesTouched {
+			claims.Recorded[file] = struct{}{}
+		}
+	}
+	for _, state := range exactWorktreeMatches(ctx, states, own.WorktreePath) {
 		for _, file := range state.FilesTouched {
 			claims.Recorded[file] = struct{}{}
 		}
 		for _, rec := range state.TaskRecords {
-			if !rec.Background || (state.SessionID == sessionID && rec.ToolUseID == toolUseID) {
+			if !rec.Background || (state.SessionID == sessionID && rec.ToolUseID == toolUseID) || launchedBeforeRehome(state, &rec) {
+				continue
+			}
+			// SessionEnd completes every live record, so one left on an
+			// ended session was leaked, not running.
+			if rec.CompletedAt.IsZero() && state.IsEnded() {
 				continue
 			}
 			if rec.CompletedAt.IsZero() || rec.CompletedAt.After(task.StartedAt) {
@@ -257,6 +306,12 @@ func LoadBackgroundClaimContext(ctx context.Context, sessionID, toolUseID string
 		}
 	}
 	return claims, true, nil
+}
+
+// launchedBeforeRehome reports whether task, one of state's, was launched
+// before the session re-homed (State.RehomedAt), in the worktree git removed.
+func launchedBeforeRehome(state *SessionState, task *session.TaskRecord) bool {
+	return state.RehomedAt != nil && task.StartedAt.Before(*state.RehomedAt)
 }
 
 // findSessionsForWorktree finds all sessions for the given worktree path.
@@ -282,7 +337,8 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 // nothing was linked; findSessionsForCommitLinking surfaces it to the user
 // only when identity matching cannot rescue the commit either.
 func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) ([]*SessionState, bool) {
-	if exact := exactWorktreeMatches(allStates, worktreePath); len(exact) > 0 {
+	exact, notHome := matchWorktreeHomes(ctx, allStates, worktreePath)
+	if len(exact) > 0 {
 		return exact, false
 	}
 
@@ -298,7 +354,9 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 	var commonDirMatches []*SessionState
 	commonDirByPath := make(map[string]string)
 	for _, state := range allStates {
-		if state.WorktreePath == "" || state.Kind.IsImported() {
+		// A session whose home this worktree is known not to be can't be
+		// matched as a sibling of it either.
+		if state.WorktreePath == "" || state.Kind.IsImported() || notHome[state.SessionID] {
 			continue
 		}
 
@@ -407,25 +465,29 @@ func sessionsFromSingleWorktree(candidates []*SessionState) []*SessionState {
 	return candidates
 }
 
-// reconcileWorktreePathForResumedTurn repoints a main-worktree session's recorded
-// WorktreePath when a turn starts from a different main worktree AND the recorded
-// path no longer resolves to this repository's git common dir. That is the
-// repo-relocation case (#1890): the whole repo directory was renamed or moved
-// while the session was stopped, then the agent resumed the same session from the
-// new location. WorktreePath is matched by exact string equality at commit time
-// (findSessionsForWorktree), so without this the resumed session's commits
-// silently lose their Entire-Checkpoint trailer.
+// reconcileWorktreePathForResumedTurn keeps a session's recorded home
+// (WorktreePath) pointing at its worktree when a turn starts after that
+// worktree moved, since commits are matched to sessions by their home
+// (findSessionsForWorktree).
 //
-// Scope is deliberately restricted to relocations between MAIN worktrees
-// (WorktreeID == "" on both the recorded state and the current worktree). Doing
-// so keeps WorktreePath and WorktreeID aligned by construction: both stay "".
-// Repointing a linked-worktree session (WorktreeID != "") onto the main worktree
-// would leave WorktreeID describing a different worktree than WorktreePath, and
-// that disalignment breaks every consumer that re-derives the worktree id from
-// the current directory, and the post-commit base updates follow the wrong
-// worktree's HEAD.
-// Linked-worktree relocation is a rare, documented non-goal; the zero-match path
-// still warns so the trailer loss is not silent.
+// A main-worktree session (WorktreeID "") is repointed when the turn starts
+// from a different main worktree AND the recorded path no longer resolves to
+// this repository's git common dir. That is the repo-relocation case (#1890):
+// the whole repo directory was renamed or moved while the session was
+// stopped, then the agent resumed the same session from the new location.
+// Repointing between main worktrees keeps WorktreePath and WorktreeID aligned
+// by construction: both stay "". A session resumed into a linked worktree is
+// left alone, or WorktreePath would name a different worktree than
+// WorktreeID, breaking every consumer that re-derives the worktree id from
+// the current directory.
+//
+// A linked-worktree session is judged by its home marker (homeAt), which git
+// keeps through `git worktree move`: a turn starting in its home moved there
+// repoints WorktreePath and keeps WorktreeID, which the move keeps too, so the
+// two stay aligned. A turn starting in a worktree git added at the home's
+// path after removing the home re-homes the session there (rehome): the agent
+// resumed in it. A session homed before markers were kept gains one here at
+// its next turn at home (stampLinkedHome), and with it this handling.
 //
 // The session store lives in the git common dir, so a state loaded here is by
 // construction the same repo; when its recorded worktree no longer maps back to
@@ -433,13 +495,15 @@ func sessionsFromSingleWorktree(candidates []*SessionState) []*SessionState {
 // recorded path (e.g. a concurrent sibling worktree that resolves to the same
 // common dir) is left untouched so we never steal a session from a live sibling.
 func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionState) {
-	// Only main-worktree sessions are reconciled — see the disalignment note above.
-	if state.WorktreeID != "" {
-		return
-	}
-
 	current, err := paths.WorktreeRoot(ctx)
 	if err != nil || current == "" || state.WorktreePath == "" {
+		return
+	}
+	if state.WorktreeID != "" {
+		if followMovedHome(ctx, state, current) == homeReplaced {
+			rehome(ctx, state, current)
+		}
+		stampLinkedHome(ctx, state, current)
 		return
 	}
 	if filepath.Clean(current) == filepath.Clean(state.WorktreePath) {
@@ -654,6 +718,17 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		return fmt.Errorf("failed to get worktree ID: %w", err)
 	}
 
+	// A linked home is known by its marker, which follows it through `git
+	// worktree move` (homeAt). Unmarked, the session is matched by path, as
+	// before markers.
+	worktreeIncarnation, err := MarkWorktree(ctx, worktreePath, worktreeID)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "session"), "could not mark the session's home worktree",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		worktreeIncarnation = ""
+	}
+
 	// Capture untracked files at session start so checkpoint bookkeeping can tell
 	// them apart from files the session created
 	untrackedFiles, err := collectUntrackedFiles(ctx)
@@ -676,6 +751,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		BaseCommit:            headHash,
 		WorktreePath:          worktreePath,
 		WorktreeID:            worktreeID,
+		WorktreeIncarnation:   worktreeIncarnation,
 		StartedAt:             now,
 		LastInteractionTime:   &now,
 		TurnID:                turnID.String(),
@@ -723,6 +799,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 			state.BaseCommit = headHash
 			state.WorktreePath = worktreePath
 			state.WorktreeID = worktreeID
+			state.WorktreeIncarnation = worktreeIncarnation
 			if state.StartedAt.IsZero() {
 				state.StartedAt = now
 			}
