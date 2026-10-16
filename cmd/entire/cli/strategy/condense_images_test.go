@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 )
 
@@ -28,7 +29,7 @@ func claudeImageLine(t *testing.T, payload string) (line, b64 string) {
 }
 
 func TestExternalizeSessionImages_DisabledIsNoOp(t *testing.T) {
-	t.Chdir(t.TempDir()) // isolate settings; externalization defaults off
+	t.Chdir(testutil.TempDir(t)) // isolate settings; externalization defaults off
 	line, b64 := claudeImageLine(t, "disabled-noop-bytes-padded-long-enough-to-externalize")
 	raw := []byte(line + "\n")
 	state := &SessionState{SessionID: "s1", AgentType: agent.AgentTypeClaudeCode}

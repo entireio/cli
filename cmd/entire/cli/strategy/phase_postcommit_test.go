@@ -2020,7 +2020,7 @@ func TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward(t *testing.T
 	state.AgentType = agent.AgentTypeClaudeCode
 	transcriptPath := filepath.Join(dir, "idle-transcript.jsonl")
 	transcript := `{"type":"user","message":{"content":"create file"}}
-{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` + filepath.Join(dir, "test.txt") + `","content":"committed"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":` + jsonQuote(t, filepath.Join(dir, "test.txt")) + `,"content":"committed"}}]}}
 `
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcript), 0o644))
 	state.TranscriptPath = transcriptPath

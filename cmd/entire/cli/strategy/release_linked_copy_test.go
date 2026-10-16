@@ -25,7 +25,7 @@ func releaseStoredCopyForTest(ctx context.Context, sessionID string) {
 // through the root the condensation resolved, not the committing worktree's.
 func TestClearStagedFiles_ReleasesLinkedWorktreeCopy(t *testing.T) { //nolint:paralleltest // uses t.Chdir
 	mainDir := setupGitRepo(t)
-	worktreeDir := filepath.Join(t.TempDir(), "linked")
+	worktreeDir := filepath.Join(testutil.TempDir(t), "linked")
 	testutil.RunGit(t, mainDir, "worktree", "add", worktreeDir, "-b", "linked-branch")
 	worktreeDir = filepath.FromSlash(strings.TrimSpace(testutil.RunGit(t, worktreeDir, "rev-parse", "--show-toplevel")))
 	sessionID := "linked-worktree-release"

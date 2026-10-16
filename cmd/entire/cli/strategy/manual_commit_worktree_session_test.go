@@ -437,13 +437,18 @@ func resolvedRemovedTempDir(t *testing.T) string {
 	return dir
 }
 
+// resolvedTempDir returns a temp dir spelled the way session state records a
+// worktree: as git's --show-toplevel prints it, with symlinks resolved and, on
+// Windows, forward slashes. Sessions match worktrees by exact string.
 func resolvedTempDir(t *testing.T) string {
 	t.Helper()
 
-	dir := t.TempDir()
+	// Also the base of linked worktrees, which InitRepo does not cover and
+	// whose .entire the code under test opens roots in.
+	dir := testutil.TempDir(t)
 	resolved, err := filepath.EvalSymlinks(dir)
 	require.NoError(t, err)
-	return resolved
+	return filepath.ToSlash(resolved)
 }
 
 func clearSessionMatchCaches() {

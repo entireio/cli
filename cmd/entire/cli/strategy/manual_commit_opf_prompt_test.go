@@ -105,7 +105,7 @@ func TestResolveOPFDecision_Precedence(t *testing.T) {
 // Modifies process cwd (no t.Parallel), but uses t.Chdir so subsequent
 // tests see the reverted cwd.
 func TestPersistOPFPromptDefaultAlways_WritesNestedField(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := testutil.TempDir(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, paths.EntireDir), 0o755))
 	// Seed an existing settings.local.json with some unrelated content
 	// so we can verify it survives the write.
@@ -146,7 +146,7 @@ func TestPersistOPFPromptDefaultAlways_WritesNestedField(t *testing.T) {
 // TestPersistOPFPromptDefaultAlways_CreatesFileFromScratch covers the
 // fresh-install path where .entire/settings.local.json doesn't exist yet.
 func TestPersistOPFPromptDefaultAlways_CreatesFileFromScratch(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := testutil.TempDir(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, paths.EntireDir), 0o755))
 	t.Chdir(tempDir)
 

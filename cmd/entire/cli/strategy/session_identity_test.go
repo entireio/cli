@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -37,6 +38,9 @@ func identityTestRepo(t *testing.T) string {
 // captureSessionOwner records as SessionState.Owner.
 func selfAncestorOwner(t *testing.T) *proclive.Identity {
 	t.Helper()
+	if runtime.GOOS == goosWindows {
+		t.Skip("proclive has no process introspection on Windows, so no session has an owner to match")
+	}
 	id, ok := proclive.IdentityOf(os.Getppid())
 	require.True(t, ok, "IdentityOf(parent) must resolve on supported platforms")
 	return &id
@@ -148,7 +152,9 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		// depth — so the nearer, less recently interacting session wins.
 		dir := identityTestRepo(t)
 		ancestry, ok := proclive.CurrentAncestry()
-		require.True(t, ok)
+		if !ok {
+			t.Skip("platform cannot introspect processes; ancestry cannot rank sessions here by design")
+		}
 		chain := ancestry.Chain()
 		if len(chain) < 2 {
 			t.Skip("test process has fewer than two introspectable ancestors")
