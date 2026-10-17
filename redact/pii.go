@@ -178,7 +178,9 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 // Builtin regexes are pre-compiled package vars; only custom patterns
 // need compilation here.
 func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
-	var patterns []piiPattern
+	// Non-nil even when every pattern is rejected: detectPII reads nil as
+	// "never compiled" and would recompile, re-warning, on every call.
+	patterns := []piiPattern{}
 	for _, bp := range builtinPIIPatterns {
 		if enabled, ok := cfg.Categories[bp.category]; ok && enabled {
 			patterns = append(patterns, piiPattern{regex: bp.regex, label: bp.label})
@@ -186,7 +188,7 @@ func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
 	}
 	logger := loggerOrDefault(cfg.Logger)
 	for label, pattern := range cfg.CustomPatterns {
-		compiled, err := regexp.Compile(pattern)
+		compiled, err := compileUserPattern(pattern)
 		if err != nil {
 			logger.Warn("skipping invalid custom PII pattern",
 				componentAttr,

@@ -1,6 +1,8 @@
 package redact
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -373,6 +375,26 @@ func TestDetectPII_InvalidAndValidCustomPatterns(t *testing.T) {
 	}
 }
 
+func TestDetectPII_SkipsEmptyMatchingCustomPattern(t *testing.T) {
+	t.Parallel()
+	cfg := &PIIConfig{
+		Enabled:    true,
+		Categories: map[PIICategory]bool{},
+		CustomPatterns: map[string]string{
+			"employee_id": `(EMP-\d{6})?`,
+			"badge":       `BADGE-\d{4}`,
+		},
+		Logger: slog.New(slog.DiscardHandler),
+	}
+	regions := detectPII(cfg, "hi EMP-123456 BADGE-1234")
+	if len(regions) != 1 {
+		t.Fatalf("expected 1 region (empty-matching pattern skipped, valid sibling kept), got %d", len(regions))
+	}
+	if regions[0].label != "BADGE" {
+		t.Errorf("expected label BADGE, got %q", regions[0].label)
+	}
+}
+
 // =============================================================================
 // Level 2: Email allowlist tests (TDD — these FAIL until allowlist is implemented)
 // =============================================================================
@@ -556,5 +578,34 @@ func TestPIIIntegration_JSONLSkippedFieldWithEmail(t *testing.T) {
 	}
 	if strings.Contains(got, "admin@test.org") {
 		t.Errorf("email in content should be redacted, got: %s", got)
+	}
+}
+
+// TestPIIIntegration_RejectedCustomPatternWarnsOnce covers a config whose only
+// pattern is rejected: the warning belongs to configuration, not to every
+// String call (one per transcript leaf).
+func TestPIIIntegration_RejectedCustomPatternWarnsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	ConfigurePII(PIIConfig{
+		Enabled:        true,
+		Categories:     map[PIICategory]bool{},
+		CustomPatterns: map[string]string{"employee_id": `(EMP-\d{6})?`},
+		Logger:         slog.New(slog.NewJSONHandler(&buf, nil)),
+	})
+	t.Cleanup(resetPIIConfig)
+
+	for range 3 {
+		if got := String("hi EMP-123456"); got != "hi EMP-123456" {
+			t.Fatalf("String changed text: %q", got)
+		}
+	}
+	logs := buf.String()
+	if n := strings.Count(logs, "skipping invalid custom PII pattern"); n != 1 {
+		t.Errorf("want exactly one warning, have %d: %s", n, logs)
+	}
+	for _, want := range []string{`"label":"employee_id"`, `"error":"pattern can match the empty string"`} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("warning missing %s: %s", want, logs)
+		}
 	}
 }

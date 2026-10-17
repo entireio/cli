@@ -296,7 +296,11 @@ func detectAllLayers(s string) []taggedRegion {
 
 // applyRegions sorts, merges, and replaces the given regions in s, returning
 // the redacted string. Returns s unchanged when regions is empty.
+//
+// Zero-length regions are dropped: replacing nothing would insert a token
+// into text that no layer flagged.
 func applyRegions(s string, regions []taggedRegion) string {
+	regions = slices.DeleteFunc(regions, func(r taggedRegion) bool { return r.end <= r.start })
 	if len(regions) == 0 {
 		return s
 	}

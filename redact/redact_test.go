@@ -123,6 +123,48 @@ func TestAlreadyRedacted(t *testing.T) {
 	}
 }
 
+// TestApplyRegions_IgnoresZeroLengthRegions pins that a zero-length region
+// replaces nothing. Applied, it would insert a token into text no layer
+// flagged, whichever layer produced it.
+func TestApplyRegions_IgnoresZeroLengthRegions(t *testing.T) {
+	t.Parallel()
+	const s = "deploy ACME-1 now"
+	tests := []struct {
+		name    string
+		regions []taggedRegion
+		want    string
+	}{
+		{
+			name: "only zero-length",
+			regions: []taggedRegion{
+				{region: region{0, 0}},
+				{region: region{6, 6}, label: labelEmail},
+				{region: region{len(s), len(s)}},
+			},
+			want: s,
+		},
+		{
+			name: "zero-length around a real region",
+			regions: []taggedRegion{
+				{region: region{0, 0}},
+				{region: region{7, 7}},
+				{region: region{7, 13}},
+				{region: region{13, 13}},
+				{region: region{len(s), len(s)}},
+			},
+			want: "deploy REDACTED now",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := applyRegions(s, tt.regions); got != tt.want {
+				t.Errorf("applyRegions() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestJSONLContent_TopLevelArray(t *testing.T) {
 	// Top-level JSON arrays are valid JSONL and should be redacted.
 	input := `["` + highEntropySecret + `","normal text"]`
