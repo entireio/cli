@@ -173,18 +173,27 @@ func TestEnableCheckpointPushRemote_RejectedLocalLayerSkipsPicker(t *testing.T) 
 // actually been asked.
 func TestEnableCheckpointPushRemote_AmbiguityNoteFollowsThePicker(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		choice   *enableCheckpointRemoteChoice
-		wantNote bool
+		name       string
+		choice     *enableCheckpointRemoteChoice
+		pushRemote string
+		wantNote   bool
 	}{
 		{name: "no prepare step", wantNote: true},
 		{name: "prepared but never offered", choice: &enableCheckpointRemoteChoice{}, wantNote: true},
 		{name: "offered", choice: &enableCheckpointRemoteChoice{offered: true}},
+		// Trail finding 01M51C5QZX42: a failed election is reported by
+		// enableCheckpointRemoteChoice.report, which offers `entire enable
+		// --checkpoint-push-remote`. Printing doctor's report here too stated
+		// the condition twice with two different fixes.
+		{name: "failed election is enable's own report", pushRemote: "gone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := setupTestRepo(t)
 			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
 			testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
+			if tc.pushRemote != "" {
+				testutil.WriteCheckpointPushRemoteSetting(t, dir, tc.pushRemote)
+			}
 			ctx := t.Context()
 			if tc.choice != nil {
 				ctx = context.WithValue(ctx, enableCheckpointRemoteKey{}, tc.choice)
@@ -396,7 +405,7 @@ func TestEnableCheckpointPushRemote_FanoutRendering(t *testing.T) {
 	t.Parallel()
 	topology := remoteTopology{primaryIsRefs: true, destinations: []remoteDestination{{name: "fork", pushURLs: []string{"https://github.com/me/repo.git", "https://github.com/me/other.git"}}}}
 	var output bytes.Buffer
-	topology.describeCheckpointDestination(&output, "Destinations:")
+	topology.describeCheckpointDestination(&output, checkpointNoteHeaders{ambiguous: "Destinations:"})
 	require.Equal(t, "Destinations:\n  Remote \"fork\" pushes to 2 URLs:\n    → https://github.com/me/repo.git\n      https://github.com/me/other.git\n    Checkpoints go to the first URL only; the others receive your code but\n    no session history. Clone that first repository to resume elsewhere.\n  To pin one repository for checkpoints, set checkpoint_remote in\n  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).\n", output.String())
 }
 

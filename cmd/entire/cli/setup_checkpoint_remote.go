@@ -435,7 +435,16 @@ func printSetupCheckpointDestinationNote(ctx context.Context, w io.Writer) {
 	if c, ok := ctx.Value(enableCheckpointRemoteKey{}).(*enableCheckpointRemoteChoice); ok && c != nil && c.offered {
 		return
 	}
-	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+	topology := inspectRemoteTopology(ctx)
+	// Only the ambiguity half here. enableCheckpointRemoteChoice.report already
+	// names a failed election ("Checkpoint sync remains disabled: ..."), covers
+	// the dedicated-destination case, and offers `entire enable
+	// --checkpoint-push-remote <name>` — so printing doctor's report too would
+	// state the condition twice with two different fixes.
+	if topology.syncAffected() {
+		return
+	}
+	topology.describeCheckpointDestination(w, enableCheckpointNoteHeaders)
 }
 
 // ignoredCheckpointRemoteSentence is the one wording `entire status` and

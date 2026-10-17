@@ -1648,6 +1648,14 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	return nil
 }
 
+// enableCheckpointNoteHeaders phrases the checkpoint-destination note for the
+// setup flow, where it follows "Ready." and reads as a note rather than as a
+// doctor verdict. Ambiguity only: a failed election is reported by
+// enableCheckpointRemoteChoice.report, which owns enable's own remedy for it.
+var enableCheckpointNoteHeaders = checkpointNoteHeaders{
+	ambiguous: "\nNote: this repo's remotes make the checkpoint destination ambiguous.",
+}
+
 // printEnabledStatus prints agents and a hint about `entire agent`.
 func printEnabledStatus(ctx context.Context, w io.Writer) {
 	if displayNames := InstalledAgentDisplayNames(ctx); len(displayNames) > 0 {

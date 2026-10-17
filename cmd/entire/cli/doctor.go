@@ -210,8 +210,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// checks: it breaks three commands, not capture, so it is the milder fault.
 	checkSummaryProvider(cmd)
 
-	// Where checkpoints land, when the repo's remotes make that ambiguous.
-	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
+	// Where checkpoints land, when the repo's remotes make that ambiguous — or
+	// that they land nowhere, when the sync election has failed closed.
+	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), doctorCheckpointNoteHeaders)
 
 	// Shadow branches older versions left behind: storage only, never read.
 	if legacyErr := checkLegacyShadowBranches(cmd, force); legacyErr != nil {
