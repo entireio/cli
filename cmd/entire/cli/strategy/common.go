@@ -410,6 +410,11 @@ var (
 	// errRedactionScanner is set inside the Once and returned by every
 	// subsequent EnsureRedactionConfigured call (sticky failure).
 	errRedactionScanner error
+	// errRedactionRulesUnloaded is set inside the Once when settings or the
+	// redactor packs directory failed to load, so user-defined rules may be
+	// missing. Hooks keep the warn-and-default behavior; callers whose output
+	// leaves the machine check it through RedactionRulesUnloaded.
+	errRedactionRulesUnloaded error
 )
 
 // resetRedactionConfiguredForTest reinitializes the Once so tests can
@@ -417,6 +422,34 @@ var (
 func resetRedactionConfiguredForTest() {
 	initRedactionOnce = sync.Once{}
 	errRedactionScanner = nil
+	errRedactionRulesUnloaded = nil
+}
+
+// RedactionRulesUnloaded reports why a user-defined redaction rule may not be
+// in effect after EnsureRedactionConfigured — settings that declare redaction
+// but failed to load, an unloadable redactors directory, a skipped pack file,
+// or a rule that failed to compile — or nil when every configured rule is
+// active. Only meaningful after EnsureRedactionConfigured.
+func RedactionRulesUnloaded() error {
+	return errRedactionRulesUnloaded
+}
+
+// settingsDeclareRedaction reports whether either settings file has a top-level
+// "redaction" key, read raw because the typed load just failed. Unreadable
+// files count as declaring it: they could.
+func settingsDeclareRedaction(ctx context.Context) bool {
+	for _, load := range []func(context.Context) (string, map[string]json.RawMessage, bool, error){
+		settings.LoadProjectRaw, settings.LoadLocalRaw,
+	} {
+		_, raw, _, err := load(ctx)
+		if err != nil {
+			return true
+		}
+		if _, ok := raw["redaction"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureRedactionConfigured loads redaction settings and configures the
@@ -456,7 +489,14 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 			}
 			logCtx := logging.WithComponent(ctx, "redaction")
 			logging.Warn(logCtx, "failed to load settings for redaction", slog.String("error", err.Error()))
-			return
+			// Only a settings file that declares redaction can hold inline
+			// rules or PII that now will not apply. Anything else (an
+			// unknown key from a newer CLI, an unrelated invalid field)
+			// leaves the built-ins and packs, which still load below.
+			if settingsDeclareRedaction(ctx) {
+				errRedactionRulesUnloaded = fmt.Errorf("load settings: %w", err)
+			}
+			s = &settings.EntireSettings{}
 		}
 
 		if err := redact.ConfigureScanners(redact.ScannersConfig{
@@ -508,12 +548,18 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 		var packs []*redact.Pack
 		var lerr error
 		if root, rerr := entiredir.OpenForRead(ctx); rerr == nil {
-			packs, lerr = redact.LoadPacks(root.FS(), redact.RedactorsDirName, logger)
+			var skipped int
+			packs, skipped, lerr = redact.LoadPacksCountingSkipped(root.FS(), redact.RedactorsDirName, logger)
+			if skipped > 0 && errRedactionRulesUnloaded == nil {
+				errRedactionRulesUnloaded = fmt.Errorf("%d redactor pack file(s) skipped as unreadable or invalid", skipped)
+			}
 		} else if !errors.Is(rerr, fs.ErrNotExist) {
+			errRedactionRulesUnloaded = fmt.Errorf("open .entire for redactor packs: %w", rerr)
 			logCtx := logging.WithComponent(ctx, "redaction")
 			logging.Warn(logCtx, "failed to open .entire for redactor packs", slog.String("error", rerr.Error()))
 		}
 		if lerr != nil {
+			errRedactionRulesUnloaded = fmt.Errorf("load redactor packs: %w", lerr)
 			warnUser(ctx, "redaction",
 				"failed to load redactor packs",
 				fmt.Sprintf("redactor packs failed to load (%v); see .entire/logs/entire.log or run `entire doctor`.", lerr),
@@ -526,6 +572,13 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 				Packs:  packs,
 				Logger: logger,
 			})
+			configured := len(inline)
+			for _, p := range packs {
+				configured += len(p.Rules)
+			}
+			if active := redact.ActiveCustomRules(); active < configured && errRedactionRulesUnloaded == nil {
+				errRedactionRulesUnloaded = fmt.Errorf("%d of %d custom redaction rule(s) failed to compile", configured-active, configured)
+			}
 		}
 
 		// OpenAI Privacy Filter (opt-in 9th layer).

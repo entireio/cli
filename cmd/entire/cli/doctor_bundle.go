@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/redact"
 	"github.com/spf13/cobra"
@@ -44,9 +45,11 @@ The archive includes:
 Redaction:
   By default the bundle redacts known secrets (API keys, credentialed URIs,
   database connection strings, bounded KEY=value credentials) from log files,
-  settings JSON, and git command output before zipping. Pass --raw to skip
-  redaction; use it only when support has explicitly requested an unredacted
-  bundle.
+  settings JSON, and git command output before zipping, plus your own rules:
+  redaction.custom_redactions, packs in .entire/redactors/, and PII detection
+  when enabled. If any of those rules cannot be loaded, the bundle is not
+  written. Pass --raw to skip all redaction; use it only when support has
+  explicitly requested an unredacted bundle.
 
 By default the archive is written to a path inside the OS temp directory and
 that path is printed to stdout. Use --out to choose a specific path.`,
@@ -61,6 +64,23 @@ that path is printed to stdout. Use --out to choose a specific path.`,
 			outPath := outFlag
 			if outPath == "" {
 				outPath = filepath.Join(os.TempDir(), fmt.Sprintf("entire-bundle-%s.zip", time.Now().UTC().Format("20060102-150405")))
+			}
+
+			// The redacted bundle leaves the machine, so it must apply the
+			// user's custom rules and packs, not just the built-ins. Doctor's
+			// PreRunE is not inherited, so bundle configures redaction itself
+			// — and only when it redacts, so --raw still works on a repo whose
+			// scanner config is invalid.
+			if !rawFlag {
+				if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+					return fmt.Errorf("configure redaction before bundling: %w", err)
+				}
+				// Hooks fall back to the built-in layers when settings or
+				// packs fail to load; a bundle must not, or it ships content
+				// the user's own rules were written to catch.
+				if err := strategy.RedactionRulesUnloaded(); err != nil {
+					return fmt.Errorf("refusing to write a bundle without your custom redaction rules: %w; fix it and rerun (--raw skips ALL redaction, built-in included)", err)
+				}
 			}
 
 			if err := writeDoctorBundle(ctx, repoRoot, outPath, rawFlag); err != nil {
