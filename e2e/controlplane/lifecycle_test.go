@@ -45,12 +45,13 @@ func TestControlPlane_CreateCloneDelete(t *testing.T) {
 	require.NotEmpty(t, project.ID)
 	projectRef = project.ID
 
-	stdout, _ = mustRunEntire(t, dir, "repo", "create", name, "--project", project.ID, "--json")
+	// Repos are addressed by path only, so cleanup deletes by the path the
+	// create was given rather than by the ULID it returns.
 	repoRef := "/et/" + name + "/" + name
+	stdout, _ = mustRunEntire(t, dir, "repo", "create", repoRef, "--json")
 	t.Cleanup(func() { deleteResource(t, dir, "repo", repoRef) })
 	created := decodeJSON[repoJSON](t, stdout)
 	require.NotEmpty(t, created.ID)
-	repoRef = created.ID
 	repo := waitForRepoClonable(t, dir, "/et/"+name+"/"+name)
 	require.Equal(t, created.ID, repo.ID)
 	require.Equal(t, "/et/"+name+"/"+name, repo.Path)

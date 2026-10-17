@@ -263,7 +263,9 @@ the commands are always runnable in every build.
   all under `ENTIRE_TOKEN`. An owner with no `--owner` spelling but its ULID
   (an account with no handle, an org sharing its name) gets no command in the
   summary, which says why
-- `repo`: control-plane repository lifecycle — `create`, `list --project`,
+- `repo`: control-plane repository lifecycle — `create`, `list --project
+  et/<project>` (the project spelling `entire trail --project` takes, leading
+  slash optional),
   `view`, `edit`, `delete`, `clone`, plus the `mirror`, `remote`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
   `project grant`, addressing the repo by its `/et/<project>/<repo>` path;
@@ -282,14 +284,14 @@ the commands are always runnable in every build.
   `entire cluster list` is now the last place a column headed CLUSTER prints a
   slug; settling that is worth doing on its own and is not this change.
   `repo create` takes no cluster at all: a repo's home cluster is the primary
-  cell of its owning project's region. `create <name> --project <project>`
-  creates without prompting even in a terminal. With at most a name and no
-  create flags, a terminal gets the same kind of paged wizard as `project
-  create` (project → name → visibility → advanced → object format →
-  summary); only the positional name is carried in. Flags mean the flag
-  form: `--project`, `--visibility` or `--object-format` with an input
-  missing is refused before any request, even in a terminal, and so is any
-  missing input without a terminal (`--json` still prompts, as `grant add` does:
+  cell of its owning project's region. `create /et/<project>/<repo>`
+  creates without prompting even in a terminal; the project segment is a name,
+  never a ULID. With at most a bare name and no create flags, a terminal gets
+  the same kind of paged wizard as `project create` (project → name →
+  visibility → advanced → object format → summary); only the bare name is
+  carried in, and it never creates on its own. Flags mean the path form:
+  `--visibility` or `--object-format` without a path is refused before any
+  request, even in a terminal, and so is a missing path without a terminal (`--json` still prompts, as `grant add` does:
   stdout carries only the result). Projects reporting
   `canCreateRepository: false` are hidden (one reporting no capabilities is
   offered and the server decides, as with `project create`'s orgs). The
@@ -304,12 +306,10 @@ the commands are always runnable in every build.
   which core accepts on a provisioning repo — skipped when the create already
   reports it; its failure keeps the repo and prints the `repo edit` that
   finishes the job. Output names the repo by its path, `/et/<project>/<repo>`:
-  from the server's full name or `/et/`
-  path, else the resolved project name, else (a ULID `--project` with neither)
-  one project lookup, made only then and only when the output would use it.
-  The ID is shown only when none of those names it, and in the support line. Recovery
-  `repo view` lines name the repo's path and are dropped when there is none,
-  since that verb takes no ULID.
+  from the server's full name or `/et/` path, else the resolved project name.
+  The ID is shown only when none of those names it, and in the support line.
+  Recovery `repo view` and `repo edit` lines name the repo's path and are
+  dropped when there is none, since no repo verb takes a ULID.
   `protection` (`list`, `add [--server-side-merge-only]`, `remove`) edits a
   native repo's branch-protection rules through core's
   `/repos/{repoId}/branch-protection` resource: `add` and `remove` are one
@@ -499,9 +499,8 @@ the commands are always runnable in every build.
   the only form naming its own cluster and so the only one that reaches a repo
   in another federation. It takes nothing else: a repo ULID and a bare name with
   `--project` both FIND a repository without NAMING one, so neither is a
-  spelling this verb accepts, and `--project` left with the bare name it scoped.
-  The other repo verbs still take both, since narrowing the shared resolver is
-  its own change.
+  spelling any repo verb accepts, and `--project` left with the bare name it
+  scoped.
   `clone`
   accepts a native `/et/<project>/<repo>` ref, a mirror `/gh/<owner>/<repo>`
   ref, or a full `entire://` URL passed through verbatim. **Every ref names its
@@ -511,25 +510,28 @@ the commands are always runnable in every build.
   Requiring the prefix is a **namesquatting** guard, not tidiness: without it,
   whichever namespace the CLI defaulted to could shadow the other, and
   `TestCloneRefAlwaysRequiresItsForgePrefix` pins that no forge-less pair
-  resolves in either parser, in `repo clone`, or in `resolveRepoRef` — the last
-  being the surface every other repo-ref command shares. It holds only for
+  resolves in either parser, in `repo clone`, or in `resolveRepoPathResolved` —
+  the last being the surface every other repo-ref command shares. It holds only for
   *intent* —
   lookups are already unambiguous because native rows are stored prefixed in the
   same `full_name` index (`et/<project>/<repo>`), which is why the bare-pair
   `--repo` filters on `search`/`experts`/`explain` cannot cross namespaces
   either.
   The native `/et/<project>/<repo>` path is **not** clone-only: it is the
-  `path` the API returns, and `resolveRepoRef` accepts it for every command
-  that takes a repo ref — `view`, `edit`, `delete`, and the `visibility` and
-  `protection` subtrees (COR-1632). `repo grant` takes that path and nothing else — no
-  `--project`, no bare name, no ULID (its `list` reads a `/gh/` mirror ref from
-  the mirror endpoint instead, never through this resolver) — through
-  `resolveRepoPath`, which parses
-  with `parseNativeCloneRef` and resolves both segments by name only (a project
-  or repo can be *named* like a ULID, so path segments never touch the
-  `looksLikeULID` passthrough). The other two clone shapes are not: a `/gh/`
-  mirror ref is refused there (a mirror is in no project, so it is addressed by
-  ULID), and an `entire://` URL is not parsed at all. `repo view` serves both
+  `path` the API returns, and the one spelling every command that takes a repo
+  ref accepts — `view`, `edit`, `delete`, and the `visibility`, `protection`
+  and `grant` subtrees (COR-1632) — with no `--project`, no bare name and no
+  ULID, refused before any request. They all resolve through
+  `resolveRepoPathResolved`, which parses with `parseNativeCloneRef` and
+  resolves both segments by name only (a project or repo can be *named* like a
+  ULID, so path segments never touch the `looksLikeULID` passthrough). The
+  other two clone shapes are not resolved there: a `/gh/` mirror ref is refused
+  (a mirror is in no project), except where a verb answers it itself —
+  `grant list` reads the mirror endpoint, and `protection list` confirms the
+  mirror in the `/repos` directory before saying its rules are the upstream's
+  (`add`/`remove` refuse on the forge alone) — and an `entire://` URL is not
+  parsed at all. A forge-less `<a>/<b>` is offered only its native reading,
+  never the `/gh/` one these verbs would refuse. `repo view` serves both
   anyway, by routing on the ref before the resolver is reached: a `/gh/` ref
   goes to the mirror directory, and an `entire://` URL to the core fronting the
   cluster it names — in **either** forge, since the CLONE URL column prints the
@@ -565,11 +567,7 @@ the commands are always runnable in every build.
   `repo#pull` alone. The project-scoped routes (`GET /projects?name=`,
   `GET /projects/{id}/repos?name=`) need `project#inspect`, which a direct
   repo grant does not confer, so a repo shared with one person must never
-  resolve through them. Only a `--project` **ULID** with a bare name takes the
-  project-scoped listing, since there is no ULID→name route. Alongside the
-  path form, `--project` is checked for agreement: a name compares
-  case-insensitively before any request, a ULID against the resolved repo's
-  owning project at the cost of one `GetRepo`.
+  resolve through them.
   Native names are validated client-side against the server's own rules
   (`nativeProjectRe`/`nativeRepoRe`, mirroring `normalizeName` in entiredb
   `core/resource/project_name.go`); those bounds are server parity only and buy
@@ -595,16 +593,16 @@ the commands are always runnable in every build.
   (`gitDirSuffix` documents the mechanics). One rule, three mechanics. Every ref
   parser drops it on the way in — `parseNativeCloneRef`, `parseMirrorCloneRef`,
   `parseTrailRepoShape`, `parseExpertsRepo`, `parseEntireCloneURL`, and
-  `gitremote.splitOwnerRepo` for a remote read back from git config; the one
-  deliberate exception is a bare name under `--project`, which is a name and not
-  a path, so `resolveRepoRef` looks it up verbatim and names the suffix in its
-  miss hint rather than stripping it. Nothing appends it to an Entire path, so an
+  `gitremote.splitOwnerRepo` for a remote read back from git config. Each drops
+  one suffix, so `web.git.git` is looked up as `web.git` and its miss names the
+  suffix in a hint. Nothing appends it to an Entire path, so an
   `entire://` URL, an `/et/` or `/gh/` ref, an API argument and anything the CLI
   echoes back are all suffix-free — appending stays correct only on a
   third-party forge clone URL, where it is that host's convention (the
   checkpoint-remote URL builders, and `cleanRemoteURLForReport`, which reports
   nothing at all for a remote with no upstream forge rather than synthesizing a
-  URL that addresses nothing). And `repo create` refuses a name ending in it.
+  URL that addresses nothing). And `repo create` refuses a name ending in it,
+  bare or in a path, rather than creating the repo under a name nobody typed.
   `/et/p/foo` and `/et/p/foo.git` therefore address one repository, spelled `foo`.
   Order matters where a URL is parsed: `splitOwnerRepo` strips trailing
   separators **before** the suffix, the order canonical git uses in

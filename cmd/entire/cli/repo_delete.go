@@ -64,11 +64,11 @@ func runRepoDelete(cmd *cobra.Command, ref string, opts repoDeleteOptions) error
 	force := forceRequested(cmd)
 	out := cmd.OutOrStdout()
 	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		resolved, err := resolveRepoDeleteRef(ctx, c, ref)
+		resolved, err := resolveRepoPathResolved(ctx, c, ref)
 		if err != nil {
 			return err
 		}
-		label := "repo " + repoDeleteName(ref, resolved)
+		label := "repo " + repoPathName(ref, resolved)
 		mirrors := ""
 		if opts.cascade {
 			mirrors = mirrorsSuffix(ctx, c, resolved.ID)
@@ -106,29 +106,6 @@ func runRepoDelete(cmd *cobra.Command, ref string, opts repoDeleteOptions) error
 		fmt.Fprintf(out, "✓ Deleted %s\n", label)
 		return nil
 	})
-}
-
-// resolveRepoDeleteRef resolves the repo `repo delete` names: its
-// /et/<project>/<repo> path, the one spelling the help advertises. A bare name
-// is refused, as `repo grant` refuses it: a delete should not need --project to
-// know which repo it removes. A ULID still resolves for callers that hold one,
-// but is not advertised.
-func resolveRepoDeleteRef(ctx context.Context, c repoRefClient, ref string) (resolvedRef, error) {
-	if looksLikeULID(ref) {
-		return resolvedRef{ID: ref}, nil
-	}
-	return resolveRepoPathResolved(ctx, c, ref)
-}
-
-// repoDeleteName is how `repo delete` names the repo: the path the server
-// resolved, alone, since a repo is addressed publicly by its path. Without a
-// server name it is resolvedRefLabel's `ref (id)`: the ref as typed is not a
-// path the server confirmed, so the ULID shows which repo resolved (COR-1892).
-func repoDeleteName(ref string, r resolvedRef) string {
-	if r.Name != "" {
-		return r.Name
-	}
-	return resolvedRefLabel(strings.TrimSpace(ref), r)
 }
 
 // reportUnfinishedDelete explains a wait that ended early. check is empty
