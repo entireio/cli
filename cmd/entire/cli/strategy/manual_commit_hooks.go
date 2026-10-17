@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -1151,6 +1152,31 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	})
 }
 
+// liveTaskFetchBudget is the share of a commit's subagent fetch budget
+// (agent.SubagentFetchBudget) the co-authorship checks of all its sessions may
+// spend together. They are best-effort, and a running subagent's files are
+// recorded when it completes anyway; condensation's re-exports of completed
+// tasks, which cannot be redone, keep the rest.
+const liveTaskFetchBudget = 10 * time.Second
+
+type liveTaskFetchDeadlineKey struct{}
+
+// withCommitFetchBudgets sets a commit's subagent fetch budgets: one for every
+// fetch post-commit makes, and the co-authorship checks' share of it.
+func withCommitFetchBudgets(ctx context.Context, now time.Time) context.Context {
+	ctx = agent.WithSubagentFetchBudget(ctx, agent.SubagentFetchBudget)
+	return context.WithValue(ctx, liveTaskFetchDeadlineKey{}, now.Add(liveTaskFetchBudget))
+}
+
+// withLiveTaskFetchDeadline caps ctx's fetch budget at the commit's
+// co-authorship share, when one is set.
+func withLiveTaskFetchDeadline(ctx context.Context) context.Context {
+	if deadline, ok := ctx.Value(liveTaskFetchDeadlineKey{}).(time.Time); ok {
+		return agent.WithSubagentFetchDeadline(ctx, deadline)
+	}
+	return ctx
+}
+
 // liveTaskCoauthored reports whether a session with a live task record
 // contributed to this commit through a running subagent. The subagent's edits
 // are not in FilesTouched until it completes, so without this an IDLE session
@@ -1398,7 +1424,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// pre-loop snapshot would warn about sessions this commit just condensed.
 	staleEnded := 0
 
-	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
+	loopCtx, processSessionsLoop := perf.StartLoop(withCommitFetchBudgets(ctx, time.Now()), "process_sessions")
 	for _, sess := range sessions {
 		if sess.FullyCondensed && sess.Phase == session.PhaseEnded {
 			continue
@@ -1529,37 +1555,67 @@ func logUnclaimedCheckpointTrailer(logCtx context.Context, checkpointID id.Check
 // evidence that a record-bearing IDLE session co-authored a commit another
 // session also claims. Each record's transcript is resolved the way
 // materializeTaskRecords resolves it: the declared path, then the agent-layout
-// fallback.
+// fallback. A record with neither (OpenCode's, until its stop hook runs) is
+// asked of the agent itself (agent.LiveSubagentFileReporter), within the
+// commit's co-authorship fetch budget; a report that fails or runs out of
+// budget is no evidence.
 func (s *ManualCommitStrategy) liveTaskFilesInCommit(ctx context.Context, state *SessionState, committedFileSet map[string]struct{}) bool {
 	ag, err := agent.GetByAgentType(state.AgentType)
 	if err != nil {
 		return false
 	}
-	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
-	if !ok {
+	return liveTaskFilesInCommitFor(ctx, ag, state, committedFileSet)
+}
+
+func liveTaskFilesInCommitFor(ctx context.Context, ag agent.Agent, state *SessionState, committedFileSet map[string]struct{}) bool {
+	analyzer, hasAnalyzer := agent.AsTranscriptAnalyzer(ag)
+	reporter, hasReporter := agent.AsLiveSubagentFileReporter(ag)
+	if !hasAnalyzer && !hasReporter {
 		return false
 	}
 	for _, record := range state.LiveTaskRecords() {
-		if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil {
+		if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil ||
+			validation.ValidateToolUseID(record.ToolUseID) != nil {
 			continue
 		}
-		for _, transcriptPath := range []string{record.DeclaredTranscriptPath, resolveTaskTranscriptPath(state, record.AgentID)} {
-			if transcriptPath == "" || !fileExists(transcriptPath) {
+		files, found := liveTaskTranscriptFiles(ctx, analyzer, state, record)
+		if !found && hasReporter {
+			var reportErr error
+			files, reportErr = agent.LiveSubagentModifiedFiles(ctx, reporter, record.AgentID, record.ToolUseID, record.StartedAt)
+			if reportErr != nil {
+				logging.Debug(logging.WithComponent(ctx, "checkpoint"), "post-commit: no live subagent report for the co-authorship check",
+					slog.String("session_id", state.SessionID),
+					slog.String("tool_use_id", record.ToolUseID),
+					slog.String("error", reportErr.Error()))
 				continue
 			}
-			files, _, extractErr := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptPath, 0)
-			if extractErr != nil {
-				continue
+		}
+		for _, f := range normalizeTranscriptFilePaths(ctx, state, files) {
+			if _, committed := committedFileSet[f]; committed {
+				return true
 			}
-			for _, f := range normalizeTranscriptFilePaths(ctx, state, files) {
-				if _, committed := committedFileSet[f]; committed {
-					return true
-				}
-			}
-			break
 		}
 	}
 	return false
+}
+
+// liveTaskTranscriptFiles returns the files a live record's transcript on
+// disk names, and whether one was found.
+func liveTaskTranscriptFiles(ctx context.Context, analyzer agent.TranscriptAnalyzer, state *SessionState, record session.TaskRecord) ([]string, bool) {
+	if analyzer == nil {
+		return nil, false
+	}
+	for _, transcriptPath := range []string{record.DeclaredTranscriptPath, resolveTaskTranscriptPath(state, record.AgentID)} {
+		if transcriptPath == "" || !fileExists(transcriptPath) {
+			continue
+		}
+		files, _, extractErr := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptPath, 0)
+		if extractErr != nil {
+			continue
+		}
+		return files, true
+	}
+	return nil, false
 }
 
 // collectCommittedFileClaims counts sessions whose tracked files overlap with
@@ -1724,9 +1780,11 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		headTree:                   headTree,
 		parentTree:                 parentTree,
 		sessionsWithCommittedFiles: sessionsWithCommittedFiles,
-		liveTaskClaimsCommit: func() bool {
-			return s.liveTaskFilesInCommit(ctx, state, committedFileSet)
-		},
+		// Memoized: the gate can be consulted more than once per session, and
+		// each consultation may export a running subagent.
+		liveTaskClaimsCommit: sync.OnceValue(func() bool {
+			return s.liveTaskFilesInCommit(withLiveTaskFetchDeadline(ctx), state, committedFileSet)
+		}),
 		condensedTelemetry: condensedTelemetry,
 	}
 

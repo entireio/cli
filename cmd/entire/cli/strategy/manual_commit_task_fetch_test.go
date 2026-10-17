@@ -170,3 +170,73 @@ func TestReadTaskTranscript_FetchBudgetIsShared(t *testing.T) {
 	require.Empty(t, path)
 	require.Empty(t, ag.fetched)
 }
+
+// reportingAgent is an agent.Agent whose only behaviour is
+// LiveSubagentFileReporter.
+type reportingAgent struct {
+	agent.Agent
+
+	files     []string
+	err       error
+	reported  []string
+	deadlines []time.Time
+}
+
+func (r *reportingAgent) LiveSubagentModifiedFiles(ctx context.Context, agentID, _ string, _ time.Time) ([]string, error) {
+	r.reported = append(r.reported, agentID)
+	deadline, _ := ctx.Deadline()
+	r.deadlines = append(r.deadlines, deadline)
+	return r.files, r.err
+}
+
+// TestLiveTaskFilesInCommit_AsksTheAgentForARunningSubagent pins that a live
+// record with no transcript on disk (OpenCode's, until its stop hook runs) is
+// reported by the agent for the co-authorship check, and that a failed or
+// out-of-budget report is no evidence rather than an error.
+func TestLiveTaskFilesInCommit_AsksTheAgentForARunningSubagent(t *testing.T) {
+	t.Parallel()
+	committed := map[string]struct{}{"docs/red.md": {}}
+	spent := withLiveTaskFetchDeadline(withCommitFetchBudgets(context.Background(), time.Now().Add(-time.Hour)))
+
+	tests := []struct {
+		name         string
+		ctx          context.Context
+		files        []string
+		err          error
+		want         bool
+		wantReported bool
+	}{
+		{name: "subagent wrote a committed file", ctx: context.Background(), files: []string{"docs/red.md"}, want: true, wantReported: true},
+		{name: "subagent wrote other files", ctx: context.Background(), files: []string{"docs/blue.md"}, wantReported: true},
+		{name: "report failed", ctx: context.Background(), err: errors.New("opencode export: boom"), wantReported: true},
+		{name: "co-authorship budget spent", ctx: spent, files: []string{"docs/red.md"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			ag := &reportingAgent{files: tt.files, err: tt.err}
+			state := &SessionState{
+				SessionID:    "ses_parent",
+				WorktreePath: dir,
+				TaskRecords:  []session.TaskRecord{{ToolUseID: "call_1", AgentID: "ses_child", StartedAt: time.Now()}},
+			}
+			require.Equal(t, tt.want, liveTaskFilesInCommitFor(tt.ctx, ag, state, committed))
+			require.Equal(t, tt.wantReported, len(ag.reported) == 1)
+		})
+	}
+}
+
+// TestCommitFetchBudgets_CoauthorshipGetsAShare pins that the co-authorship
+// checks are cut off at their share of the commit's fetch budget, so a hung
+// export there cannot spend what condensation's re-exports need.
+func TestCommitFetchBudgets_CoauthorshipGetsAShare(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	ag := &reportingAgent{}
+	state := &SessionState{TaskRecords: []session.TaskRecord{{ToolUseID: "call_1", AgentID: "ses_child", StartedAt: now}}}
+	liveTaskFilesInCommitFor(withLiveTaskFetchDeadline(withCommitFetchBudgets(context.Background(), now)), ag, state, nil)
+	require.Len(t, ag.deadlines, 1)
+	require.WithinDuration(t, now.Add(liveTaskFetchBudget), ag.deadlines[0], time.Second)
+	require.Less(t, liveTaskFetchBudget, agent.SubagentFetchBudget)
+}

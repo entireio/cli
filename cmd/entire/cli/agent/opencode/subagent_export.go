@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -158,4 +160,65 @@ func isCallPrompt(info MessageInfo, parts []Part) bool {
 		}
 	}
 	return true
+}
+
+// LiveSubagentModifiedFiles exports a running child to a private staging file
+// and returns the files its task call has modified so far. Unlike
+// exportSubagent it writes neither the shared export cache nor the call's
+// declared file: the call may stop while this export runs, and its stop writes
+// the complete transcript to those names.
+func (a *OpenCodeAgent) LiveSubagentModifiedFiles(ctx context.Context, childID, _ string, since time.Time) ([]string, error) {
+	if err := validation.ValidateSessionID(childID); err != nil {
+		return nil, fmt.Errorf("invalid session ID for live subagent export: %w", err)
+	}
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		repoRoot = "."
+	}
+	root, err := entiredir.OpenAt(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open %s for live subagent export: %w", paths.EntireDir, err)
+	}
+	var data []byte
+	if os.Getenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT") != "" {
+		// Integration tests pre-write the child's export (see fetchAndCacheExport).
+		data, err = entiredir.ReadFile(root, entireTmpName+"/"+childID+".json")
+	} else {
+		data, err = exportToPrivateFile(ctx, root, childID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	scoped, _, err := scopeExportToCall(data, since, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	session, err := ParseExportSession(scoped)
+	if err != nil || session == nil {
+		return nil, err
+	}
+	return modifiedFilesFromMessages(session.Messages, 0), nil
+}
+
+// exportToPrivateFile runs `opencode export` for sessionID into a staging file
+// of its own and returns the bytes, removing the file.
+func exportToPrivateFile(ctx context.Context, root *os.Root, sessionID string) ([]byte, error) {
+	if err := osroot.MkdirAllNoSymlink(root, entireTmpName, 0o750); err != nil {
+		return nil, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	staged, err := stageExportPath(root, entireTmpName, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = root.Remove(staged) //nolint:errcheck // best-effort cleanup of a private staging file
+	}()
+	if err := runOpenCodeExportToFileFn(ctx, root, sessionID, staged); err != nil {
+		return nil, err
+	}
+	data, err := entiredir.ReadFile(root, staged)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read export file: %w", err)
+	}
+	return data, nil
 }

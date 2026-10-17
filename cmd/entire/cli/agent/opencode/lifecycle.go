@@ -28,6 +28,7 @@ var runOpenCodeExportToFileFn = runOpenCodeExportToFile
 var (
 	_ agent.ContextInjector           = (*OpenCodeAgent)(nil)
 	_ agent.SubagentTranscriptFetcher = (*OpenCodeAgent)(nil)
+	_ agent.LiveSubagentFileReporter  = (*OpenCodeAgent)(nil)
 )
 
 // InjectionEvent reports that OpenCode injects model context at TurnStart. The

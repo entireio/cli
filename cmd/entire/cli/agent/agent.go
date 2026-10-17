@@ -346,6 +346,21 @@ type SubagentTranscriptFetcher interface {
 	FetchSubagentTranscript(ctx context.Context, agentID, toolUseID string, startedAt, completedAt time.Time) (string, error)
 }
 
+// LiveSubagentFileReporter is implemented by agents that can report what a
+// still-running subagent call has modified so far (OpenCode: by exporting the
+// child session). The co-authorship check in post-commit uses it for a live
+// task record, which has no transcript on disk until its stop hook runs. It
+// must not write anything a task record declares or a later capture reads: a
+// report that lands after the call's stop must not replace its transcript.
+type LiveSubagentFileReporter interface {
+	Agent
+
+	// LiveSubagentModifiedFiles returns the files the task call toolUseID,
+	// run by subagent agentID since startedAt (zero when unknown), has
+	// modified so far.
+	LiveSubagentModifiedFiles(ctx context.Context, agentID, toolUseID string, startedAt time.Time) ([]string, error)
+}
+
 // SidecarImageProvider is implemented by agents that keep images OUTSIDE the
 // transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
 // SQLite blob store, not the JSONL transcript. The strategy layer calls this

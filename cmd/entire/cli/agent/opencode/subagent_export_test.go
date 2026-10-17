@@ -241,3 +241,26 @@ func TestFetchSubagentTranscript_NeverPromptedCallDeclaresNothing(t *testing.T) 
 	require.NoError(t, err)
 	assert.Empty(t, files, "the other calls' files must not be attributed to the dropped call")
 }
+
+// TestLiveSubagentModifiedFiles_WritesNothingACaptureReads pins that the
+// co-authorship probe of a running child reports the running call's files
+// without writing the shared export cache or the call's declared file: the
+// call can stop while the probe runs, and a late probe must not replace the
+// stop's complete transcript.
+func TestLiveSubagentModifiedFiles_WritesNothingACaptureReads(t *testing.T) {
+	// Not parallel: t.Chdir and stubExport.
+	t.Chdir(t.TempDir())
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	stubExport(t, func(_ context.Context, root *os.Root, _, outputName string) error {
+		return root.WriteFile(outputName, []byte(resumedChildExportFixture), 0o600)
+	})
+
+	files, err := (&OpenCodeAgent{}).LiveSubagentModifiedFiles(context.Background(), "ses_child", "call_blue", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/repo/docs/blue.md"}, files, "only the running (last) call's files")
+
+	entries, err := os.ReadDir(paths.EntireTmpDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the probe must leave nothing under .entire/tmp")
+}
