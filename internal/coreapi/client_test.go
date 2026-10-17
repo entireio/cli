@@ -205,6 +205,14 @@ func (bearerOnlySource) SessionAuth(context.Context, OperationName) (SessionAuth
 	return SessionAuth{}, ogenerrors.ErrSkipClientSecurity
 }
 
+func (bearerOnlySource) PluginToken(context.Context, OperationName) (PluginToken, error) {
+	return PluginToken{}, ogenerrors.ErrSkipClientSecurity
+}
+
+func (bearerOnlySource) AutomationToken(context.Context, OperationName) (AutomationToken, error) {
+	return AutomationToken{}, ogenerrors.ErrSkipClientSecurity
+}
+
 // TestBearerOnlySource_NoCookieOnTheWire documents the SessionAuth
 // empty-value contract by checking the wire: any operation issued by a
 // Client built with a SessionAuth-skipping source must NOT carry a

@@ -3,6 +3,7 @@ package cli
 import (
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -82,6 +83,19 @@ func TestGranteeName(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGrantOutcomeLine(t *testing.T) {
+	t.Parallel()
+	granted := grantOutcome{role: "writer"}
+	require.Equal(t, "✓ Granted github:alice writer access to repo /et/acme/web", granted.line("github:alice", "repo /et/acme/web"))
+
+	// A server that does not report the expiry gets no empty parenthetical.
+	invited := grantOutcome{invited: true, role: "writer"}
+	require.Equal(t, "✓ Invitation sent to github:alice for repo /et/acme/web as writer", invited.line("github:alice", "repo /et/acme/web"))
+
+	invited.expiresAt = time.Date(2026, 11, 13, 9, 30, 0, 0, time.UTC)
+	require.Equal(t, "✓ Invitation sent to github:alice for repo /et/acme/web as writer (expires 2026-11-13)", invited.line("github:alice", "repo /et/acme/web"))
 }
 
 func TestGrantRows(t *testing.T) {

@@ -132,8 +132,16 @@ var interactiveSecuritySchemes = map[string]bool{"oauth2": true, "oidc": true}
 // dropInteractiveSecurity removes interactiveSecuritySchemes from
 // components.securitySchemes, from the document-level security list, and
 // from every operation's security list, so the generated SecuritySource
-// keeps exactly the bearerAuth and sessionAuth methods the client
-// implements. It returns the number of schemes removed from components.
+// has no method for a scheme ogen cannot generate. It returns the number
+// of schemes removed from components.
+//
+// The bearer schemes a plugin or an automation holds (pluginToken,
+// automationToken) stay. ogen generates them fine, and a few plugin
+// operations accept nothing else, so removing them would empty those
+// security lists — the failure refused below. The client implements them
+// as skipped, like sessionAuth: a plugin-only operation then fails at call
+// time with ogen's unsatisfied-security error rather than going out
+// unauthenticated. See client.go.
 //
 // It fails rather than empty a security list that had entries: in OpenAPI an
 // empty operation-level "security" means the operation needs NO
@@ -277,7 +285,9 @@ var readModelOptionalFields = map[string][]string{
 	"DetachRepoResult":    {"access"},
 	"ListReposOutputBody": {"candidatesIncomplete"},
 	"Org":                 {"capabilities"},
+	"OrgCapabilities":     {"canManageBilling", "canView"},
 	"Project":             {"capabilities"},
+	"ProjectCapabilities": {"canManagePlugins"},
 	"Repo":                {"capabilities", "provider"},
 	"RepoIndexEntry":      {"org", "provider"},
 }

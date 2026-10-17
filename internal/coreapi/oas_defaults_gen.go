@@ -38,3 +38,11 @@ func (s *GrantAccessBody) setDefaults() {
 		s.GranteeType.SetTo(val)
 	}
 }
+
+// setDefaults set default value of fields.
+func (s *ResourceInvitationBody) setDefaults() {
+	{
+		val := ResourceInvitationBodyRole("reader")
+		s.Role = val
+	}
+}

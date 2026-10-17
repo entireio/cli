@@ -31,7 +31,7 @@ var invitationStatuses = []string{"open", "accepted", "revoked", "expired", "all
 var invitationColumns = []string{"ID", "EMAIL", colHeaderRole, colHeaderStatus, "EXPIRES"}
 
 func invitationRow(i coreapi.Invitation) []string {
-	return []string{i.ID, i.Email, i.Role, i.Status, i.ExpiresAt.Format("2006-01-02")}
+	return []string{i.ID, orDash(i.Email.Value), i.Role, i.Status, i.ExpiresAt.Format("2006-01-02")}
 }
 
 func newOrgInviteCmd() *cobra.Command {
@@ -80,14 +80,14 @@ func newOrgInviteSendCmd() *cobra.Command {
 					// rather than trust the endpoint's contract never grows one.
 					inv := coreapi.Invitation(*out)
 					inv.AdditionalProps = nil
-					return fmt.Sprintf("✓ Invited %s to org %s as %s (%s)", inv.Email, args[0], inv.Role, inv.ID), &inv, nil
+					return fmt.Sprintf("✓ Invited %s to org %s as %s (%s)", inv.Email.Value, args[0], inv.Role, inv.ID), &inv, nil
 				case *coreapi.CreateOrgInvitationOK:
 					// The role here is the stored one, which an earlier invite
 					// chose; saying so stops a --role that did not take effect
 					// from reading as though it had.
 					inv := coreapi.Invitation(*out)
 					inv.AdditionalProps = nil
-					return fmt.Sprintf("✓ Resent the open invitation for %s to org %s, which invites as %s (%s)", inv.Email, args[0], inv.Role, inv.ID), &inv, nil
+					return fmt.Sprintf("✓ Resent the open invitation for %s to org %s, which invites as %s (%s)", inv.Email.Value, args[0], inv.Role, inv.ID), &inv, nil
 				default:
 					return "", nil, fmt.Errorf("invite %s: unexpected response %T from the control plane", email, res)
 				}
@@ -214,7 +214,7 @@ func openInvitationIDForEmail(ctx context.Context, c *coreapi.Client, orgID, ema
 		return "", err
 	}
 	for _, inv := range invitations {
-		if strings.EqualFold(inv.Email, email) {
+		if strings.EqualFold(inv.Email.Value, email) {
 			return inv.ID, nil
 		}
 	}

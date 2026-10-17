@@ -6,6 +6,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// AcceptMeInvitationParams is parameters of acceptMeInvitation operation.
+type AcceptMeInvitationParams struct {
+	ID string
+}
+
 // AddOrgMemberParams is parameters of addOrgMember operation.
 type AddOrgMemberParams struct {
 	OrgId string
@@ -17,6 +22,16 @@ type BeginPluginInstallationDeletionParams struct {
 	Plugin string
 	// Plugin installation id.
 	ID string
+}
+
+// CompleteOrgBillingSignupParams is parameters of completeOrgBillingSignup operation.
+type CompleteOrgBillingSignupParams struct {
+	OrgId string
+}
+
+// ConnectOrgCIBitriseOrganizationParams is parameters of connectOrgCIBitriseOrganization operation.
+type ConnectOrgCIBitriseOrganizationParams struct {
+	OrgId string
 }
 
 // ConnectOrgCIBuildkiteCredentialParams is parameters of connectOrgCIBuildkiteCredential operation.
@@ -50,9 +65,32 @@ type CreatePluginInstallationParams struct {
 	Plugin string
 }
 
+// CreatePluginInstallationAccessTokenParams is parameters of createPluginInstallationAccessToken operation.
+type CreatePluginInstallationAccessTokenParams struct {
+	// Plugin slug.
+	Plugin string
+	// Installation id.
+	ID string
+}
+
+// CreateProjectInvitationParams is parameters of createProjectInvitation operation.
+type CreateProjectInvitationParams struct {
+	ProjectId string
+}
+
 // CreateRepoCIWebhookParams is parameters of createRepoCIWebhook operation.
 type CreateRepoCIWebhookParams struct {
 	RepoId string
+}
+
+// CreateRepoInvitationParams is parameters of createRepoInvitation operation.
+type CreateRepoInvitationParams struct {
+	RepoId string
+}
+
+// DeclineMeInvitationParams is parameters of declineMeInvitation operation.
+type DeclineMeInvitationParams struct {
+	ID string
 }
 
 // DeleteBindingParams is parameters of deleteBinding operation.
@@ -141,10 +179,21 @@ type DetachRepoParams struct {
 	RepoId string
 }
 
+// DisconnectOrgCIBitriseOrganizationParams is parameters of disconnectOrgCIBitriseOrganization operation.
+type DisconnectOrgCIBitriseOrganizationParams struct {
+	OrgId   string
+	Account string
+}
+
 // DisconnectOrgCIDepotOrganizationParams is parameters of disconnectOrgCIDepotOrganization operation.
 type DisconnectOrgCIDepotOrganizationParams struct {
 	OrgId   string
 	Account string
+}
+
+// GetAccountByUsernameParams is parameters of getAccountByUsername operation.
+type GetAccountByUsernameParams struct {
+	Username string
 }
 
 // GetAccountProfileParams is parameters of getAccountProfile operation.
@@ -172,10 +221,24 @@ type GetOrgParams struct {
 	OrgId string
 }
 
+// GetOrgBillingParams is parameters of getOrgBilling operation.
+type GetOrgBillingParams struct {
+	OrgId string
+}
+
 // GetOrgPersonAccessParams is parameters of getOrgPersonAccess operation.
 type GetOrgPersonAccessParams struct {
 	OrgId     string
 	AccountId string
+}
+
+// GetPluginParams is parameters of getPlugin operation.
+type GetPluginParams struct {
+	// Plugin slug.
+	Plugin string
+	// Project the plugin is read for. Needs manage permission on the project. A plugin that only its
+	// owner project can install is not found for another project.
+	ProjectID OptString `json:",omitempty,omitzero"`
 }
 
 // GetPluginInstallationParams is parameters of getPluginInstallation operation.
@@ -303,6 +366,11 @@ type ListOIDCProvidersParams struct {
 	PageToken OptString `json:",omitempty,omitzero"`
 }
 
+// ListOrgCIBitriseOrganizationsParams is parameters of listOrgCIBitriseOrganizations operation.
+type ListOrgCIBitriseOrganizationsParams struct {
+	OrgId string
+}
+
 // ListOrgCIBuildkiteClustersParams is parameters of listOrgCIBuildkiteClusters operation.
 type ListOrgCIBuildkiteClustersParams struct {
 	OrgId          string
@@ -401,6 +469,14 @@ type ListOrgsParams struct {
 	CommitToken OptString `json:",omitempty,omitzero"`
 }
 
+// ListPluginInstallationRepositoriesParams is parameters of listPluginInstallationRepositories operation.
+type ListPluginInstallationRepositoriesParams struct {
+	// Plugin slug.
+	Plugin string
+	// Installation id.
+	ID string
+}
+
 // ListPluginInstallationsParams is parameters of listPluginInstallations operation.
 type ListPluginInstallationsParams struct {
 	// Plugin installation profile.
@@ -409,6 +485,22 @@ type ListPluginInstallationsParams struct {
 	OrgID OptString `json:",omitempty,omitzero"`
 	// Entire project.
 	ProjectID OptString `json:",omitempty,omitzero"`
+}
+
+// ListPluginsParams is parameters of listPlugins operation.
+type ListPluginsParams struct {
+	// Project the catalog is for. It adds the unlisted plugins the project owns or has installed, and
+	// needs manage permission on the project.
+	ProjectID OptString `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's next_cursor.
+	Cursor OptString `json:",omitempty,omitzero"`
+	// Plugins per page.
+	PerPage OptInt64 `json:",omitempty,omitzero"`
+}
+
+// ListProjectAvailablePlacementsParams is parameters of listProjectAvailablePlacements operation.
+type ListProjectAvailablePlacementsParams struct {
+	ProjectId string
 }
 
 // ListProjectCollaboratorsParams is parameters of listProjectCollaborators operation.
@@ -423,6 +515,17 @@ type ListProjectCollaboratorsParams struct {
 	RepoId OptString `json:",omitempty,omitzero"`
 	// Case-insensitive substring of account ID, active public handle, or public display name.
 	Search OptString `json:",omitempty,omitzero"`
+}
+
+// ListProjectInvitationsParams is parameters of listProjectInvitations operation.
+type ListProjectInvitationsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	ProjectId string
+	// Lifecycle state to return; all returns every state.
+	Status OptListProjectInvitationsStatus `json:",omitempty,omitzero"`
 }
 
 // ListProjectMembersParams is parameters of listProjectMembers operation.
@@ -484,6 +587,12 @@ type ListProjectsParams struct {
 	CommitToken OptString `json:",omitempty,omitzero"`
 }
 
+// ListRepoAvailablePlacementsParams is parameters of listRepoAvailablePlacements operation.
+type ListRepoAvailablePlacementsParams struct {
+	RepoId      string
+	IfNoneMatch OptString `json:",omitempty,omitzero"`
+}
+
 // ListRepoCIBuildsParams is parameters of listRepoCIBuilds operation.
 type ListRepoCIBuildsParams struct {
 	RepoId      string
@@ -534,6 +643,17 @@ type ListRepoGrantsParams struct {
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
 	RepoId    string
+}
+
+// ListRepoInvitationsParams is parameters of listRepoInvitations operation.
+type ListRepoInvitationsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	RepoId    string
+	// Lifecycle state to return; all returns every state.
+	Status OptListRepoInvitationsStatus `json:",omitempty,omitzero"`
 }
 
 // ListRepoLanguageFacetsParams is parameters of listRepoLanguageFacets operation.
@@ -721,6 +841,14 @@ type RestorePluginInstallationRepositoryParams struct {
 	RepositoryID string
 }
 
+// ResumePluginInstallationParams is parameters of resumePluginInstallation operation.
+type ResumePluginInstallationParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Plugin installation id.
+	ID string
+}
+
 // RevokeOrgInvitationParams is parameters of revokeOrgInvitation operation.
 type RevokeOrgInvitationParams struct {
 	OrgId string
@@ -741,6 +869,12 @@ type RevokeProjectAccessByProviderParams struct {
 	ProviderUserId string
 }
 
+// RevokeProjectInvitationParams is parameters of revokeProjectInvitation operation.
+type RevokeProjectInvitationParams struct {
+	ProjectId string
+	ID        string
+}
+
 // RevokeRepoAccessParams is parameters of revokeRepoAccess operation.
 type RevokeRepoAccessParams struct {
 	RepoId      string
@@ -753,6 +887,12 @@ type RevokeRepoAccessByProviderParams struct {
 	RepoId         string
 	Provider       string
 	ProviderUserId string
+}
+
+// RevokeRepoInvitationParams is parameters of revokeRepoInvitation operation.
+type RevokeRepoInvitationParams struct {
+	RepoId string
+	ID     string
 }
 
 // RevokeServiceAccountAccessParams is parameters of revokeServiceAccountAccess operation.
@@ -784,6 +924,19 @@ type SetPluginInstallationRepositoriesParams struct {
 // SetRepoVisibilityParams is parameters of setRepoVisibility operation.
 type SetRepoVisibilityParams struct {
 	RepoId string
+}
+
+// StartOrgBillingSignupParams is parameters of startOrgBillingSignup operation.
+type StartOrgBillingSignupParams struct {
+	OrgId string
+}
+
+// SuspendPluginInstallationParams is parameters of suspendPluginInstallation operation.
+type SuspendPluginInstallationParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Plugin installation id.
+	ID string
 }
 
 // UpdateBranchProtectionParams is parameters of updateBranchProtection operation.

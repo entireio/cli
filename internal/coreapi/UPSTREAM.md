@@ -138,8 +138,14 @@ per-operation requirements, since those are what a request actually carries.
 
 **Workaround:** `spec/normalize.go` (`dropInteractiveSecurity`,
 `interactiveSecuritySchemes`) removes the two schemes from the components
-and from every security list, so the generated `SecuritySource` keeps the
-`BearerAuth` and `SessionAuth` methods the client implements.
+and from every security list, so the generated `SecuritySource` has no
+method ogen cannot generate. The bearer schemes it keeps are `bearerAuth`
+and `sessionAuth`, which the client implements, plus `pluginToken` and
+`automationToken`, which a plugin or an automation holds rather than a user.
+Those two stay because a few plugin operations accept nothing else, so
+dropping them would empty those security lists. `client.go` skips them the
+way it skips `sessionAuth`; a plugin-only operation fails at call time with
+ogen's unsatisfied-security error instead of going out unauthenticated.
 
 The transform refuses to *empty* a security list that had entries. An empty
 operation-level `security` means "no authentication required" in OpenAPI, so
@@ -149,6 +155,24 @@ shape; a device-code or authorize endpoint added upstream would, and it is
 the only failure mode here that would not announce itself (a requirement
 mixing `oauth2` with `bearerAuth` survives whole and makes ogen abort at
 generate time on the now-dangling scheme).
+
+## 4. Hand-edited ahead of upstream: ENT-2652 add endpoints invite
+
+**Symptom:** `entire grant` handles the invited outcome before the server's
+spec publishes it. `core.openapi.json` carries the entiredb#4666 contract by
+hand: `POST /orgs/{id}/members` answers `AddOrgMemberResult` and
+`POST /projects/{id}/grants` / `POST /repos/{id}/grants` answer
+`GrantAccessResult`, each `{status: granted|invited, invitationId?,
+expiresAt?}` with the org result carrying `membership` when granted. The
+`GrantProjectAccessOutputBody` / `GrantRepoAccessOutputBody` schemas those
+routes used to answer are gone.
+
+**Fix upstream:** entiredb publishes the same shape once the server deploys.
+A plain `curl` refresh then carries it, and this entry goes.
+
+**Workaround:** none in `normalize.go`. Do not refresh the spec from a core
+that predates the server change: the result types disappear and
+`cmd/entire/cli/grant.go` stops compiling.
 
 <!-- Resolved upstream and removed:
   - Nullable arrays (`"type": ["array","null"]`) — entiredb now emits

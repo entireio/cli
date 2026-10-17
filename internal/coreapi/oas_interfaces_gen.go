@@ -5,8 +5,20 @@ type AcceptInvitationRes interface {
 	acceptInvitationRes()
 }
 
+type AcceptMeInvitationRes interface {
+	acceptMeInvitationRes()
+}
+
 type CreateOrgInvitationRes interface {
 	createOrgInvitationRes()
+}
+
+type CreateProjectInvitationRes interface {
+	createProjectInvitationRes()
+}
+
+type CreateRepoInvitationRes interface {
+	createRepoInvitationRes()
 }
 
 type DeleteRepoRes interface {

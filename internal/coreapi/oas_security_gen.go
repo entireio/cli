@@ -11,21 +11,57 @@ import (
 
 // SecuritySource is provider of security values (tokens, passwords, etc.).
 type SecuritySource interface {
+	// AutomationToken provides automationToken security value.
+	// A token this core issued to an automation, such as a plugin installation's.
+	AutomationToken(ctx context.Context, operationName OperationName) (AutomationToken, error)
 	// BearerAuth provides bearerAuth security value.
 	// Bearer access token.
 	BearerAuth(ctx context.Context, operationName OperationName) (BearerAuth, error)
+	// PluginToken provides pluginToken security value.
+	// A JWT the plugin signs with its registered keys, for the installation it names.
+	PluginToken(ctx context.Context, operationName OperationName) (PluginToken, error)
 	// SessionAuth provides sessionAuth security value.
 	// Console session cookie issued by the browser login flow.
 	SessionAuth(ctx context.Context, operationName OperationName) (SessionAuth, error)
 }
 
+// operationRolesAutomationToken is a private map storing roles per operation.
+var operationRolesAutomationToken = map[string][]string{
+	ListPluginInstallationRepositoriesOperation: {},
+}
+
+// GetRolesForAutomationToken returns the required roles for the given operation.
+//
+// This is useful for authorization scenarios where you need to know which roles
+// are required for an operation.
+//
+// Example:
+//
+//	requiredRoles := GetRolesForAutomationToken(AddPetOperation)
+//
+// Returns nil if the operation has no role requirements or if the operation is unknown.
+func GetRolesForAutomationToken(operation string) []string {
+	roles, ok := operationRolesAutomationToken[operation]
+	if !ok {
+		return nil
+	}
+	// Return a copy to prevent external modification
+	result := make([]string, len(roles))
+	copy(result, roles)
+	return result
+}
+
 // operationRolesBearerAuth is a private map storing roles per operation.
 var operationRolesBearerAuth = map[string][]string{
 	AcceptInvitationOperation:                    {},
+	AcceptMeInvitationOperation:                  {},
 	AddOrgMemberOperation:                        {},
 	BeginPluginInstallationDeletionOperation:     {},
 	CancelDeletionOperation:                      {},
+	CompleteAccountBillingSignupOperation:        {},
 	CompleteOnboardingOperation:                  {},
+	CompleteOrgBillingSignupOperation:            {},
+	ConnectOrgCIBitriseOrganizationOperation:     {},
 	ConnectOrgCIBuildkiteCredentialOperation:     {},
 	ConnectOrgCIDepotOrganizationOperation:       {},
 	CreateBindingOperation:                       {},
@@ -35,10 +71,13 @@ var operationRolesBearerAuth = map[string][]string{
 	CreateOrgInvitationOperation:                 {},
 	CreatePluginInstallationOperation:            {},
 	CreateProjectOperation:                       {},
+	CreateProjectInvitationOperation:             {},
 	CreateRepoOperation:                          {},
 	CreateRepoCIWebhookOperation:                 {},
+	CreateRepoInvitationOperation:                {},
 	CreateServiceAccountOperation:                {},
 	DeclineInvitationOperation:                   {},
+	DeclineMeInvitationOperation:                 {},
 	DeleteBindingOperation:                       {},
 	DeleteMeOperation:                            {},
 	DeleteMirrorOperation:                        {},
@@ -53,7 +92,10 @@ var operationRolesBearerAuth = map[string][]string{
 	DeleteServiceAccountOperation:                {},
 	DetachMyHandleOperation:                      {},
 	DetachRepoOperation:                          {},
+	DisconnectOrgCIBitriseOrganizationOperation:  {},
 	DisconnectOrgCIDepotOrganizationOperation:    {},
+	GetAccountBillingOperation:                   {},
+	GetAccountByUsernameOperation:                {},
 	GetAccountProfileOperation:                   {},
 	GetBranchProtectionOperation:                 {},
 	GetDeletionPreviewOperation:                  {},
@@ -62,7 +104,9 @@ var operationRolesBearerAuth = map[string][]string{
 	GetMirrorRequestOperation:                    {},
 	GetOnboardingStatusOperation:                 {},
 	GetOrgOperation:                              {},
+	GetOrgBillingOperation:                       {},
 	GetOrgPersonAccessOperation:                  {},
+	GetPluginOperation:                           {},
 	GetPluginInstallationOperation:               {},
 	GetProjectOperation:                          {},
 	GetRepoOperation:                             {},
@@ -78,10 +122,12 @@ var operationRolesBearerAuth = map[string][]string{
 	ListAvailableMirrorsOperation:                {},
 	ListBindingsOperation:                        {},
 	ListClustersOperation:                        {},
+	ListMeInvitationsOperation:                   {},
 	ListMirrorCollaboratorsOperation:             {},
 	ListMirrorsOperation:                         {},
 	ListNativeMirrorsOperation:                   {},
 	ListOIDCProvidersOperation:                   {},
+	ListOrgCIBitriseOrganizationsOperation:       {},
 	ListOrgCIBuildkiteClustersOperation:          {},
 	ListOrgCIBuildkiteCredentialsOperation:       {},
 	ListOrgCIDepotOrganizationsOperation:         {},
@@ -91,11 +137,15 @@ var operationRolesBearerAuth = map[string][]string{
 	ListOrgProjectsOperation:                     {},
 	ListOrgsOperation:                            {},
 	ListPluginInstallationsOperation:             {},
+	ListPluginsOperation:                         {},
+	ListProjectAvailablePlacementsOperation:      {},
 	ListProjectCollaboratorsOperation:            {},
+	ListProjectInvitationsOperation:              {},
 	ListProjectMembersOperation:                  {},
 	ListProjectPeopleOperation:                   {},
 	ListProjectReposOperation:                    {},
 	ListProjectsOperation:                        {},
+	ListRepoAvailablePlacementsOperation:         {},
 	ListRepoCIBuildsOperation:                    {},
 	ListRepoCIDeliveriesOperation:                {},
 	ListRepoCIProvidersOperation:                 {},
@@ -103,6 +153,7 @@ var operationRolesBearerAuth = map[string][]string{
 	ListRepoCIWebhooksOperation:                  {},
 	ListRepoCollaboratorsOperation:               {},
 	ListRepoGrantsOperation:                      {},
+	ListRepoInvitationsOperation:                 {},
 	ListRepoLanguageFacetsOperation:              {},
 	ListRepoOrgFacetsOperation:                   {},
 	ListRepoPeopleOperation:                      {},
@@ -122,16 +173,23 @@ var operationRolesBearerAuth = map[string][]string{
 	ResolveRepoIDsOperation:                      {},
 	ResolveReposOperation:                        {},
 	RestorePluginInstallationRepositoryOperation: {},
+	ResumePluginInstallationOperation:            {},
 	RevokeOrgInvitationOperation:                 {},
 	RevokeProjectAccessOperation:                 {},
 	RevokeProjectAccessByProviderOperation:       {},
+	RevokeProjectInvitationOperation:             {},
 	RevokeRepoAccessOperation:                    {},
 	RevokeRepoAccessByProviderOperation:          {},
+	RevokeRepoInvitationOperation:                {},
 	RevokeServiceAccountAccessOperation:          {},
 	RotateOrgCIBuildkiteInboundSecretOperation:   {},
 	SetBranchProtectionOperation:                 {},
+	SetMyUsernameOperation:                       {},
 	SetPluginInstallationRepositoriesOperation:   {},
 	SetRepoVisibilityOperation:                   {},
+	StartAccountBillingSignupOperation:           {},
+	StartOrgBillingSignupOperation:               {},
+	SuspendPluginInstallationOperation:           {},
 	UpdateBranchProtectionOperation:              {},
 	UpdateOrgMemberRoleOperation:                 {},
 	ValidatePluginInstallRedirectOperation:       {},
@@ -158,13 +216,46 @@ func GetRolesForBearerAuth(operation string) []string {
 	return result
 }
 
+// operationRolesPluginToken is a private map storing roles per operation.
+var operationRolesPluginToken = map[string][]string{
+	CreatePluginInstallationAccessTokenOperation: {},
+	ListPluginInstallationRepositoriesOperation:  {},
+	ResumePluginInstallationOperation:            {},
+	SuspendPluginInstallationOperation:           {},
+}
+
+// GetRolesForPluginToken returns the required roles for the given operation.
+//
+// This is useful for authorization scenarios where you need to know which roles
+// are required for an operation.
+//
+// Example:
+//
+//	requiredRoles := GetRolesForPluginToken(AddPetOperation)
+//
+// Returns nil if the operation has no role requirements or if the operation is unknown.
+func GetRolesForPluginToken(operation string) []string {
+	roles, ok := operationRolesPluginToken[operation]
+	if !ok {
+		return nil
+	}
+	// Return a copy to prevent external modification
+	result := make([]string, len(roles))
+	copy(result, roles)
+	return result
+}
+
 // operationRolesSessionAuth is a private map storing roles per operation.
 var operationRolesSessionAuth = map[string][]string{
 	AcceptInvitationOperation:                    {},
+	AcceptMeInvitationOperation:                  {},
 	AddOrgMemberOperation:                        {},
 	BeginPluginInstallationDeletionOperation:     {},
 	CancelDeletionOperation:                      {},
+	CompleteAccountBillingSignupOperation:        {},
 	CompleteOnboardingOperation:                  {},
+	CompleteOrgBillingSignupOperation:            {},
+	ConnectOrgCIBitriseOrganizationOperation:     {},
 	ConnectOrgCIBuildkiteCredentialOperation:     {},
 	ConnectOrgCIDepotOrganizationOperation:       {},
 	CreateBindingOperation:                       {},
@@ -174,10 +265,13 @@ var operationRolesSessionAuth = map[string][]string{
 	CreateOrgInvitationOperation:                 {},
 	CreatePluginInstallationOperation:            {},
 	CreateProjectOperation:                       {},
+	CreateProjectInvitationOperation:             {},
 	CreateRepoOperation:                          {},
 	CreateRepoCIWebhookOperation:                 {},
+	CreateRepoInvitationOperation:                {},
 	CreateServiceAccountOperation:                {},
 	DeclineInvitationOperation:                   {},
+	DeclineMeInvitationOperation:                 {},
 	DeleteBindingOperation:                       {},
 	DeleteMeOperation:                            {},
 	DeleteMirrorOperation:                        {},
@@ -192,7 +286,10 @@ var operationRolesSessionAuth = map[string][]string{
 	DeleteServiceAccountOperation:                {},
 	DetachMyHandleOperation:                      {},
 	DetachRepoOperation:                          {},
+	DisconnectOrgCIBitriseOrganizationOperation:  {},
 	DisconnectOrgCIDepotOrganizationOperation:    {},
+	GetAccountBillingOperation:                   {},
+	GetAccountByUsernameOperation:                {},
 	GetAccountProfileOperation:                   {},
 	GetBranchProtectionOperation:                 {},
 	GetDeletionPreviewOperation:                  {},
@@ -201,7 +298,9 @@ var operationRolesSessionAuth = map[string][]string{
 	GetMirrorRequestOperation:                    {},
 	GetOnboardingStatusOperation:                 {},
 	GetOrgOperation:                              {},
+	GetOrgBillingOperation:                       {},
 	GetOrgPersonAccessOperation:                  {},
+	GetPluginOperation:                           {},
 	GetPluginInstallationOperation:               {},
 	GetProjectOperation:                          {},
 	GetRepoOperation:                             {},
@@ -217,10 +316,12 @@ var operationRolesSessionAuth = map[string][]string{
 	ListAvailableMirrorsOperation:                {},
 	ListBindingsOperation:                        {},
 	ListClustersOperation:                        {},
+	ListMeInvitationsOperation:                   {},
 	ListMirrorCollaboratorsOperation:             {},
 	ListMirrorsOperation:                         {},
 	ListNativeMirrorsOperation:                   {},
 	ListOIDCProvidersOperation:                   {},
+	ListOrgCIBitriseOrganizationsOperation:       {},
 	ListOrgCIBuildkiteClustersOperation:          {},
 	ListOrgCIBuildkiteCredentialsOperation:       {},
 	ListOrgCIDepotOrganizationsOperation:         {},
@@ -230,11 +331,15 @@ var operationRolesSessionAuth = map[string][]string{
 	ListOrgProjectsOperation:                     {},
 	ListOrgsOperation:                            {},
 	ListPluginInstallationsOperation:             {},
+	ListPluginsOperation:                         {},
+	ListProjectAvailablePlacementsOperation:      {},
 	ListProjectCollaboratorsOperation:            {},
+	ListProjectInvitationsOperation:              {},
 	ListProjectMembersOperation:                  {},
 	ListProjectPeopleOperation:                   {},
 	ListProjectReposOperation:                    {},
 	ListProjectsOperation:                        {},
+	ListRepoAvailablePlacementsOperation:         {},
 	ListRepoCIBuildsOperation:                    {},
 	ListRepoCIDeliveriesOperation:                {},
 	ListRepoCIProvidersOperation:                 {},
@@ -242,6 +347,7 @@ var operationRolesSessionAuth = map[string][]string{
 	ListRepoCIWebhooksOperation:                  {},
 	ListRepoCollaboratorsOperation:               {},
 	ListRepoGrantsOperation:                      {},
+	ListRepoInvitationsOperation:                 {},
 	ListRepoLanguageFacetsOperation:              {},
 	ListRepoOrgFacetsOperation:                   {},
 	ListRepoPeopleOperation:                      {},
@@ -261,16 +367,23 @@ var operationRolesSessionAuth = map[string][]string{
 	ResolveRepoIDsOperation:                      {},
 	ResolveReposOperation:                        {},
 	RestorePluginInstallationRepositoryOperation: {},
+	ResumePluginInstallationOperation:            {},
 	RevokeOrgInvitationOperation:                 {},
 	RevokeProjectAccessOperation:                 {},
 	RevokeProjectAccessByProviderOperation:       {},
+	RevokeProjectInvitationOperation:             {},
 	RevokeRepoAccessOperation:                    {},
 	RevokeRepoAccessByProviderOperation:          {},
+	RevokeRepoInvitationOperation:                {},
 	RevokeServiceAccountAccessOperation:          {},
 	RotateOrgCIBuildkiteInboundSecretOperation:   {},
 	SetBranchProtectionOperation:                 {},
+	SetMyUsernameOperation:                       {},
 	SetPluginInstallationRepositoriesOperation:   {},
 	SetRepoVisibilityOperation:                   {},
+	StartAccountBillingSignupOperation:           {},
+	StartOrgBillingSignupOperation:               {},
+	SuspendPluginInstallationOperation:           {},
 	UpdateBranchProtectionOperation:              {},
 	UpdateOrgMemberRoleOperation:                 {},
 	ValidatePluginInstallRedirectOperation:       {},
@@ -297,10 +410,26 @@ func GetRolesForSessionAuth(operation string) []string {
 	return result
 }
 
+func (s *Client) securityAutomationToken(ctx context.Context, operationName OperationName, req *http.Request) error {
+	t, err := s.sec.AutomationToken(ctx, operationName)
+	if err != nil {
+		return errors.Wrap(err, "security source \"AutomationToken\"")
+	}
+	req.Header.Set("Authorization", "Bearer "+t.Token)
+	return nil
+}
 func (s *Client) securityBearerAuth(ctx context.Context, operationName OperationName, req *http.Request) error {
 	t, err := s.sec.BearerAuth(ctx, operationName)
 	if err != nil {
 		return errors.Wrap(err, "security source \"BearerAuth\"")
+	}
+	req.Header.Set("Authorization", "Bearer "+t.Token)
+	return nil
+}
+func (s *Client) securityPluginToken(ctx context.Context, operationName OperationName, req *http.Request) error {
+	t, err := s.sec.PluginToken(ctx, operationName)
+	if err != nil {
+		return errors.Wrap(err, "security source \"PluginToken\"")
 	}
 	req.Header.Set("Authorization", "Bearer "+t.Token)
 	return nil
