@@ -84,10 +84,12 @@ func SetCellExchangeTransportForTest(t interface{ Helper() }, rt http.RoundTripp
 // same identity `--to core` acts as.
 //
 // Cell selection, in precedence order:
+//   - an explicit loopback data host (local dev): keep it, even over a
+//     target's BaseURL — local dev serves a single cell.
 //   - target != nil: dial target.BaseURL. This is the repo-scoped path — the
 //     caller (cli) resolved the repo's own cell and jurisdiction.
 //   - an explicit data host that already targets a cell (host contains
-//     ".api.") or is loopback (local dev): keep it.
+//     ".api."): keep it.
 //   - otherwise: resolve the apiUrl for the jurisdiction (target.Jurisdiction,
 //     else the caller's home_jurisdiction claim) from the login core's cluster
 //     catalog — so a staging login lists staging's catalog and lands on a
@@ -408,6 +410,12 @@ func NormalizeJurisdiction(value string) (string, error) {
 // ENTIRE_API_BASE_URL origin or "" (cellSubject.dataHost); listCoreURL is the
 // login core whose cluster catalog is consulted, so it must accept loginJWT.
 func resolveTargetCellBaseURL(ctx context.Context, target *CellTarget, dataHost, jurisdiction, listCoreURL, loginJWT string, httpClient *http.Client) (string, error) {
+	// A loopback dev host serves the single local cell, so it wins even over a
+	// repo-resolved target: that target's BaseURL comes from the catalog, and
+	// dialing it would send a local-dev request (and its bearer) to a real cell.
+	if dataHost != "" && isLoopbackOrigin(dataHost) {
+		return strings.TrimRight(dataHost, "/"), nil
+	}
 	if target != nil && strings.TrimSpace(target.BaseURL) != "" {
 		return strings.TrimRight(target.BaseURL, "/"), nil
 	}
