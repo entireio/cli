@@ -408,6 +408,7 @@ func GitOperationInProgress(ctx context.Context) string {
 //
 
 func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFile string, source string) error {
+	ctx = withCommitAncestry(ctx)
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
 	// Skip during rebase, cherry-pick, or revert operations
@@ -480,14 +481,17 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	findSessionsSpan.End()
 
-	// Fast path: skip content detection for mid-turn agent commits.
-	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source, inherited) {
+	// Fast path: skip content detection for mid-turn agent commits. A session
+	// whose agent provably did not make this commit is left to content
+	// detection below.
+	provenance := newCommitProvenance(ctx, sessions)
+	if s.tryAgentCommitFastPath(ctx, commitMsgFile, provenance.withoutForeign(sessions), source, inherited) {
 		return nil
 	}
 
 	// Check if any session has new content to condense
 	_, filterSessionsSpan := perf.Start(ctx, "filter_sessions_with_content")
-	sessionsWithContent := s.filterSessionsWithNewContent(ctx, repo, sessions, redone)
+	sessionsWithContent := s.filterSessionsWithNewContent(ctx, repo, sessions, redone, provenance)
 	filterSessionsSpan.End()
 
 	if len(sessionsWithContent) == 0 {
@@ -533,25 +537,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return fmt.Errorf("failed to generate checkpoint ID: %w", err)
 	}
 
-	// Determine agent type and last prompt from session
-	var agentType types.AgentType
-	var lastPrompt string
-	if len(sessionsWithContent) > 0 {
-		firstSession := sessionsWithContent[0]
-		if firstSession.AgentType != "" {
-			agentType = firstSession.AgentType
-		}
-		lastPrompt = s.getLastPrompt(ctx, firstSession)
-	}
-
-	// Prepare prompt for display: collapse newlines/whitespace, then truncate (rune-safe)
-	displayPrompt := stringutil.TruncateRunes(stringutil.CollapseWhitespace(lastPrompt), 80, "...")
-
-	// Load commit_linking setting to decide whether to prompt
-	commitLinking := settings.CommitLinkingPrompt // safe default
-	if stngs, loadErr := settings.Load(ctx); loadErr == nil {
-		commitLinking = stngs.GetCommitLinking()
-	}
+	agentType, displayPrompt, commitLinking := s.trailerPromptContext(ctx, sessionsWithContent)
 	resolveMetadataSpan.End()
 
 	// Add trailer differently based on commit source
@@ -618,6 +604,31 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	writeCommitMessageSpan.End()
 
 	return nil
+}
+
+// trailerPromptContext returns what the trailer prompt shows and whether to
+// ask: the first session's agent type and display-ready last prompt, and the
+// commit_linking setting.
+func (s *ManualCommitStrategy) trailerPromptContext(ctx context.Context, sessions []*SessionState) (types.AgentType, string, string) {
+	var agentType types.AgentType
+	var lastPrompt string
+	if len(sessions) > 0 {
+		firstSession := sessions[0]
+		if firstSession.AgentType != "" {
+			agentType = firstSession.AgentType
+		}
+		lastPrompt = s.getLastPrompt(ctx, firstSession)
+	}
+
+	// Prepare prompt for display: collapse newlines/whitespace, then truncate (rune-safe)
+	displayPrompt := stringutil.TruncateRunes(stringutil.CollapseWhitespace(lastPrompt), 80, "...")
+
+	// Load commit_linking setting to decide whether to prompt
+	commitLinking := settings.CommitLinkingPrompt // safe default
+	if stngs, loadErr := settings.Load(ctx); loadErr == nil {
+		commitLinking = stngs.GetCommitLinking()
+	}
+	return agentType, displayPrompt, commitLinking
 }
 
 // openRepositoryTimed opens the repository under an "open_repository" perf span.
@@ -902,7 +913,7 @@ func (s *ManualCommitStrategy) stampFreshCheckpointForAmend(ctx context.Context,
 	if err != nil || len(sessions) == 0 {
 		return
 	}
-	withContent := s.filterSessionsWithNewContent(ctx, repo, sessions, redo{})
+	withContent := s.filterSessionsWithNewContent(ctx, repo, sessions, redo{}, newCommitProvenance(ctx, sessions))
 	if len(withContent) == 0 {
 		return
 	}
@@ -1009,6 +1020,9 @@ type postCommitActionHandler struct {
 	// modified a committed file. Evaluated lazily: only the read-only gate
 	// needs it, and only for a session it would otherwise drop.
 	liveTaskClaimsCommit func() bool
+	// foreign marks a session whose agent provably did not make this commit
+	// (see commitProvenance); it condenses only on committed-file overlap.
+	foreign bool
 
 	// Cached git objects — resolved once per PostCommit invocation to avoid
 	// redundant reads across filesOverlapWithContent, filesWithRemainingAgentChanges,
@@ -1108,7 +1122,7 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 // another session claims the committed files is somebody else's commit. Every
 // other session (a stale ACTIVE one, an IDLE one with no fresh in-flight
 // record, an ENDED one) must show file-overlap evidence between its tracked files and the
-// committed files.
+// committed files, and so must a session whose agent provably did not make the commit.
 func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasLiveTask bool) bool {
 	if !h.hasNew {
 		return false
@@ -1117,7 +1131,7 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// in-flight record has no files yet, so overlap is unsatisfiable for it.
 	// LastInteractionTime keeps a stale ACTIVE session (agent killed without a
 	// Stop hook) from condensing into every subsequent commit.
-	if (isActive && isRecentInteraction(lastInteraction)) || hasLiveTask {
+	if !h.foreign && ((isActive && isRecentInteraction(lastInteraction)) || hasLiveTask) {
 		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 && !h.liveTaskCoauthored(hasLiveTask) {
 			logging.Debug(logging.WithComponent(h.ctx, "checkpoint"), "post-commit: skipping read-only session (no tracked files, other sessions claim committed files)",
 				slog.Bool("is_active", isActive),
@@ -1274,6 +1288,7 @@ func SetBeforeCondense(fn func(ctx context.Context, sessions []*SessionState) bo
 }
 
 func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
+	ctx = withCommitAncestry(ctx)
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
 	_, openRepoSpan := perf.Start(ctx, "open_repository_and_head")
@@ -1347,6 +1362,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 			sessions = reloaded
 		}
 	}
+
+	provenance := newCommitProvenance(ctx, sessions)
 
 	// Build transition context
 	isRebase := isGitSequenceOperation(ctx)
@@ -1423,7 +1440,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 			var condensed bool
 			newSkillEvents, condensedSignal, condensed = s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
-				committedFileSet, sessionsWithCommittedFiles, condensedTelemetry)
+				committedFileSet, sessionsWithCommittedFiles, condensedTelemetry, provenance.isForeign(sessionID))
 			state.LinkedByWorktreeEntry, state.HomeNotHere = false, false
 			if inView {
 				leave()
@@ -1637,6 +1654,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	committedFileSet map[string]struct{},
 	sessionsWithCommittedFiles int,
 	condensedTelemetry *commitCondensedEmitter,
+	foreign bool,
 ) (newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal, condensed bool) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	if state.LinkedByWorktreeEntry && !overlapsFiles(state.FilesTouched, committedFileSet) {
@@ -1728,6 +1746,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 			return s.liveTaskFilesInCommit(ctx, state, committedFileSet)
 		},
 		condensedTelemetry: condensedTelemetry,
+		foreign:            foreign,
 	}
 
 	if err := TransitionAndLog(ctx, state, session.EventGitCommit, *transitionCtx, handler); err != nil {
@@ -2033,7 +2052,11 @@ func truncateHash(h string) string {
 // (a rename-detecting list would report a deletion paired with a held file
 // as that file alone). The caller returns before this for a commit that
 // stages nothing else.
-func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context, repo *git.Repository, sessions []*SessionState, redone redo) []*SessionState {
+//
+// A session in provenance's foreign set must show staged-file overlap: its
+// task records and transcript growth are not evidence about a commit its
+// agent did not make.
+func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context, repo *git.Repository, sessions []*SessionState, redone redo, provenance commitProvenance) []*SessionState {
 	logCtx := logging.WithComponent(ctx, "manual-commit")
 	var result []*SessionState
 
@@ -2063,7 +2086,16 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 			)
 			continue
 		}
-		hasNew, err := s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{stagedFiles: stagedFiles})
+		checked := state
+		if provenance.isForeign(state.SessionID) {
+			if len(stagedFiles) == 0 {
+				continue
+			}
+			withoutRecords := *state
+			withoutRecords.TaskRecords = nil
+			checked = &withoutRecords
+		}
+		hasNew, err := s.sessionHasNewContent(ctx, repo, checked, contentCheckOpts{stagedFiles: stagedFiles})
 		if err != nil {
 			logging.Debug(logCtx, "filterSessionsWithNewContent: error checking session, skipping it",
 				slog.String("session_id", state.SessionID),

@@ -531,3 +531,30 @@ func TestIsNearerOwner_Contract(t *testing.T) {
 		})
 	}
 }
+
+// A commit hook walks its process ancestry once, however many identity
+// decisions read it; outside a hook every read walks.
+func TestCommitAncestry_OneWalkPerHook(t *testing.T) { //nolint:paralleltest // swaps currentAncestry
+	walks := 0
+	old := currentAncestry
+	t.Cleanup(func() { currentAncestry = old })
+	currentAncestry = func() (proclive.Ancestry, bool) {
+		walks++
+		return proclive.Ancestry{}, true
+	}
+
+	ctx := withCommitAncestry(context.Background())
+	ctx = withCommitAncestry(ctx) // nested hook entry keeps the snapshot
+	commitAncestry(ctx)
+	commitAncestry(ctx)
+	newCommitProvenance(ctx, nil)
+	if walks != 1 {
+		t.Fatalf("walks in one hook = %d, want 1", walks)
+	}
+
+	commitAncestry(context.Background())
+	commitAncestry(context.Background())
+	if walks != 3 {
+		t.Fatalf("walks without a hook snapshot = %d, want 3", walks)
+	}
+}
