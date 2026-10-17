@@ -335,6 +335,25 @@ Prepares/processes a transcript file (e.g., converting from raw format).
 
 **Output:** Exit 0 on success.
 
+### Capability: `compact_transcript`
+
+Required when `capabilities.compact_transcript` is `true`.
+
+#### `compact-transcript --session-ref <path>`
+
+Converts a native transcript into Entire Transcript Format (the `transcript.jsonl` stored next to `full.jsonl` in each checkpoint).
+
+**Arguments:**
+- `--session-ref` — Path to a transcript file in the agent's native format. It may be a CLI temp file outside the agent's session store, so accept any regular file here.
+
+**Output (stdout):** JSON
+
+```json
+{"transcript": "<base64-encoded transcript.jsonl>", "assets": [{"name": "img-001.png", "media_type": "image/png", "data": "<base64>"}]}
+```
+
+`assets` is optional. The CLI calls this on each checkpoint write with a temp file of the already-redacted transcript, and redacts the result again. It also compacts the lines before the checkpoint's start to scope the checkpoint, so compacting a prefix of the input should yield a prefix of the output. On failure, empty output, or assets, the CLI uses its built-in compactor instead. `entire explain` also uses it for summaries.
+
 ### Capability: `token_calculator`
 
 Required when `capabilities.token_calculator` is `true`.
