@@ -86,6 +86,25 @@ func resolveRefsPushDestination(ctx context.Context, ps pushSettings) refsPushDe
 	return refsPushDestination{target: urls[0], ignoredPushURLs: len(urls) - 1}
 }
 
+// pushedRepoTarget names the repository a push to target writes to, for reads
+// that must see what that repository holds. A remote with a pushurl pushes to a
+// different repository from the one its fetch URL names, so reading it by name
+// would answer for the wrong one; there the push URL is returned. Otherwise
+// target is returned unchanged, so the common topology reads exactly as before.
+func pushedRepoTarget(ctx context.Context, target string) string {
+	if remote.IsURL(target) {
+		return target
+	}
+	pushURLs, err := remote.GetPushURLs(ctx, target)
+	if err != nil || len(pushURLs) == 0 {
+		return target
+	}
+	if fetchURL, err := remote.GetRemoteURL(ctx, target); err == nil && fetchURL == pushURLs[0] {
+		return target
+	}
+	return pushURLs[0]
+}
+
 // display names the destination for progress and warning output.
 //
 // Deliberately not displayPushTarget: that maps ANY URL to the literal words
