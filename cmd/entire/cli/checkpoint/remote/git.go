@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -105,6 +106,75 @@ func LooksLikeSSHAuthFailure(errText string) bool {
 	return false
 }
 
+// unreachableRemoteNeedles are connect-phase failures printed by ssh and curl
+// themselves, so they are not translated by git's locale. Deliberately absent:
+// bare strerror text ("Connection refused", "Connection timed out") — curl's
+// trailing strerror is localized, and a timeout or reset mid-upload means the
+// host was reachable — and git's own "Could not read from remote repository"
+// epilogue, which is translated and also follows auth failures.
+var unreachableRemoteNeedles = []string{
+	"ssh: connect to host ",
+	"ssh: could not resolve hostname",
+	"could not resolve host:",
+	"could not resolve proxy:",
+	curlFailedToConnect, // only in curl's "<host> port <n>" form, not a helper's
+	"couldn't connect to server",
+	"resolving timed out",
+}
+
+const curlFailedToConnect = "failed to connect to "
+
+// maxUnreachableLineRunes caps the cause line printed inside the user's push.
+const maxUnreachableLineRunes = 200
+
+// UnreachableRemoteLine reports whether err shows the remote could not be
+// reached at all (name resolution or TCP connect failed), and returns the line
+// that said so, credentials redacted and capped, for display. Lines relayed
+// from the remote ("remote: ...") and push porcelain are skipped: a remote that
+// printed them was reachable, even when its own hook failed to resolve a host.
+func UnreachableRemoteLine(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	text := err.Error()
+	var pushErr *PushError
+	if errors.As(err, &pushErr) {
+		text = pushErr.Output() // Line breaks preserved, unlike Error().
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "remote:") || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "=") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		for _, n := range unreachableRemoteNeedles {
+			if strings.Contains(lower, n) && (n != curlFailedToConnect || strings.Contains(lower, " port ")) {
+				return displayGitLine(line), true
+			}
+		}
+	}
+	return "", false
+}
+
+// displayGitLine makes one line of git output safe to print: no "fatal: "
+// prefix, no URL credentials, no control bytes, at most maxUnreachableLineRunes.
+func displayGitLine(line string) string {
+	line = strings.TrimPrefix(line, "fatal: ")
+	line = gitremote.RedactCredentialsInText(line)
+	line = strings.Map(func(r rune) rune {
+		// Cc: terminal escapes and newlines; Cf: bidi overrides that could
+		// make the line read as something else.
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, line)
+	if r := []rune(line); len(r) > maxUnreachableLineRunes {
+		line = string(r[:maxUnreachableLineRunes]) + "…"
+	}
+	return line
+}
+
 // batchModeOptionRe matches an explicit BatchMode ssh option (e.g.
 // "-o BatchMode=yes" or "BatchMode=no"), case-insensitively. Anchored with \b
 // so it doesn't false-positive on unrelated text that merely contains
@@ -118,16 +188,231 @@ func hasExplicitBatchMode(sshCmd string) bool {
 	return batchModeOptionRe.MatchString(sshCmd)
 }
 
-// withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
-// BatchMode=yes. The base ssh invocation is resolved via gitremote.EffectiveSSHCommand
-// (env GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > plain "ssh") so a custom
-// ssh command configured via core.sshCommand isn't silently discarded. The
-// flag is only appended when BatchMode isn't already explicitly set — an
-// existing BatchMode=no is a deliberate user choice and is left untouched —
-// so the result is idempotent.
+// connectTimeoutOptionRe matches an explicit ConnectTimeout ssh option, in the
+// same forms batchModeOptionRe accepts.
+var connectTimeoutOptionRe = regexp.MustCompile(`(?i)\bConnectTimeout\s*=\s*\S+`)
+
+// plinkBatchArgRe matches plink's own non-interactive flag as a whole word.
+var plinkBatchArgRe = regexp.MustCompile(`(?i)(^|\s)-batch(\s|$)`)
+
+// nonInteractiveSSHConnectTimeout bounds the TCP connect to an unreachable host,
+// whose kernel default (~75-130s) would otherwise spend most of the pre-push
+// checkpoint budget on one attempt. Generous for any reachable host, including
+// one behind a slow-starting ProxyCommand (SSM, cloudflared, Teleport), whose
+// banner wait ssh's ConnectTimeout also bounds.
+const nonInteractiveSSHConnectTimeout = "60"
+
+// sshVariant is the kind of ssh client git will run, which decides the options
+// it accepts. Mirrors git's own variants (connect.c, determine_ssh_variant).
+type sshVariant int
+
+const (
+	sshVariantAuto          sshVariant = iota // unrecognized client
+	sshVariantOpenSSH                         // takes -o options
+	sshVariantPlink                           // plink/putty: rejects -o; -batch is its BatchMode
+	sshVariantTortoisePlink                   // git passes -batch itself
+	sshVariantSimple                          // takes no options at all
+)
+
+// overrideSSHVariant maps an explicit GIT_SSH_VARIANT / ssh.variant value the
+// way git does: "auto" defers to detection, unknown values mean OpenSSH.
+func overrideSSHVariant(v string) sshVariant {
+	switch v {
+	case "auto":
+		return sshVariantAuto
+	case "plink", "putty":
+		return sshVariantPlink
+	case "tortoiseplink":
+		return sshVariantTortoisePlink
+	case "simple":
+		return sshVariantSimple
+	}
+	return sshVariantOpenSSH
+}
+
+// sshVariantForProgram detects the variant from a program path's basename,
+// case-insensitively and with either path separator, as git does.
+func sshVariantForProgram(prog string) sshVariant {
+	switch strings.ToLower(prog[strings.LastIndexAny(prog, `/\`)+1:]) {
+	case "ssh", "ssh.exe":
+		return sshVariantOpenSSH
+	case "plink", "plink.exe":
+		return sshVariantPlink
+	case "tortoiseplink", "tortoiseplink.exe":
+		return sshVariantTortoisePlink
+	}
+	return sshVariantAuto
+}
+
+// firstCmdlineWord returns the program of a shell-style command line, unquoted
+// the way git's split_cmdline does it: single and double quotes group, and a
+// backslash outside single quotes escapes the next character. ok is false for
+// an empty or unterminated command line.
+func firstCmdlineWord(cmdline string) (string, bool) {
+	var word strings.Builder
+	var quote rune
+	started, escaped := false, false
+	for _, c := range strings.TrimLeftFunc(cmdline, unicode.IsSpace) {
+		switch {
+		case escaped:
+			word.WriteRune(c)
+			escaped = false
+		case c == '\\' && quote != '\'':
+			escaped, started = true, true
+		case quote == 0 && unicode.IsSpace(c):
+			return word.String(), true
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote, started = c, true
+		case c == quote:
+			quote = 0
+		default:
+			word.WriteRune(c)
+			started = true
+		}
+	}
+	if quote != 0 || escaped || !started {
+		return "", false
+	}
+	return word.String(), true
+}
+
+// shellQuoteSSHProgram single-quotes a GIT_SSH program path for use as
+// GIT_SSH_COMMAND, which git runs through sh: GIT_SSH is a bare path, so one
+// containing spaces ("C:\Program Files\PuTTY\plink.exe") must stay one word.
+func shellQuoteSSHProgram(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+}
+
+// envLookup returns the value of the last occurrence of key in env (matching
+// exec.Cmd's last-wins semantics for duplicate entries) and whether it was
+// found.
+func envLookup(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(env[i], prefix); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// gitConfigSSH looks up core.sshCommand and ssh.variant in one `git config`
+// call, run with env so the lookup honors any HOME/GIT_CONFIG_* overrides
+// present in env (e.g. in tests). Unset values are "". ok is false when the
+// lookup itself failed, as opposed to finding nothing (git's exit status 1):
+// the caller must not then guess at the command git will run.
+func gitConfigSSH(ctx context.Context, env []string) (sshCommand, variant string, hasVariant, ok bool) {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get-regexp", `^(core\.sshcommand|ssh\.variant)$`)
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		return "", "", false, errors.As(err, &exitErr) && exitErr.ExitCode() == 1
+	}
+	// Last value wins, as for git's own single-valued lookups.
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		key, value, _ := strings.Cut(line, " ")
+		switch key {
+		case "core.sshcommand":
+			sshCommand = strings.TrimSpace(value)
+		case "ssh.variant":
+			variant, hasVariant = value, true
+		}
+	}
+	return sshCommand, variant, hasVariant, true
+}
+
+// resolvedSSH is the ssh client git itself would run for a remote operation.
+type resolvedSSH struct {
+	command string // shell command line (or bare program path when !cmdline)
+	cmdline bool   // false when command came from GIT_SSH, a bare program path
+	variant sshVariant
+}
+
+// resolveSSH resolves the ssh invocation git itself would use, in git's own
+// precedence order: the GIT_SSH_COMMAND environment variable, then the
+// core.sshCommand git config value, then the GIT_SSH environment variable,
+// falling back to plain "ssh" when none are set. The variant comes from
+// GIT_SSH_VARIANT or ssh.variant when set, else from the program's name. ok is
+// false when the command would come from git config that could not be read:
+// the caller then cannot know what git will run, and must not replace it.
+func resolveSSH(ctx context.Context, env []string) (resolvedSSH, bool) {
+	configCmd, configVariant, hasConfigVariant, configOK := gitConfigSSH(ctx, env)
+	res := resolvedSSH{command: "ssh", cmdline: true}
+	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok && strings.TrimSpace(v) != "" {
+		res.command = strings.TrimSpace(v)
+	} else if !configOK {
+		return res, false
+	} else if configCmd != "" {
+		res.command = configCmd
+	} else if v, ok := envLookup(env, "GIT_SSH"); ok && strings.TrimSpace(v) != "" {
+		res.command, res.cmdline = strings.TrimSpace(v), false
+	}
+
+	// An explicit variant decides, except "auto", which (as in git) means
+	// detect from the program name below.
+	if v, ok := envLookup(env, "GIT_SSH_VARIANT"); ok {
+		if res.variant = overrideSSHVariant(v); res.variant != sshVariantAuto {
+			return res, true
+		}
+	} else if hasConfigVariant {
+		if res.variant = overrideSSHVariant(configVariant); res.variant != sshVariantAuto {
+			return res, true
+		}
+	}
+	prog := res.command
+	if res.cmdline {
+		word, ok := firstCmdlineWord(res.command)
+		if !ok {
+			return res, true // sshVariantAuto
+		}
+		prog = word
+	}
+	res.variant = sshVariantForProgram(prog)
+	return res, true
+}
+
+// withBatchModeSSH returns env with GIT_SSH_COMMAND set so the ssh client git
+// runs cannot prompt: OpenSSH and unrecognized clients get BatchMode=yes, plink
+// gets its equivalent -batch, and OpenSSH also gets a ConnectTimeout. The base
+// invocation is resolved via resolveSSH, so a custom ssh command configured via
+// core.sshCommand or GIT_SSH isn't silently discarded. Options a client would
+// reject are never added: plink fails on -o, and TortoisePlink and the
+// "simple" variant need nothing from us. An option already set explicitly is
+// left as the user chose it — an existing BatchMode=no is deliberate — so the
+// result is idempotent. env is returned unchanged when nothing needs adding.
 func withBatchModeSSH(ctx context.Context, env []string) []string {
 	const key = "GIT_SSH_COMMAND="
-	base := gitremote.EffectiveSSHCommand(ctx, "", env)
+	ssh, ok := resolveSSH(ctx, env)
+	if !ok {
+		return env
+	}
+	var opts string
+	switch ssh.variant {
+	case sshVariantOpenSSH, sshVariantAuto:
+		if !hasExplicitBatchMode(ssh.command) {
+			opts += " -o BatchMode=yes"
+		}
+		// Command-line -o beats ~/.ssh/config, so a ConnectTimeout set there is
+		// overridden here; one set on the command itself is left alone.
+		// Unrecognized clients get BatchMode only, as before: wrappers that
+		// exec ssh "$@" need it, but a timeout is not ours to impose on them.
+		if ssh.variant == sshVariantOpenSSH && !connectTimeoutOptionRe.MatchString(ssh.command) {
+			opts += " -o ConnectTimeout=" + nonInteractiveSSHConnectTimeout
+		}
+	case sshVariantPlink:
+		if !plinkBatchArgRe.MatchString(ssh.command) {
+			opts += " -batch"
+		}
+	case sshVariantTortoisePlink, sshVariantSimple:
+	}
+	if opts == "" {
+		return env
+	}
+	base := ssh.command
+	if !ssh.cmdline {
+		base = shellQuoteSSHProgram(base)
+	}
 	out := make([]string, 0, len(env)+1)
 	for _, e := range env {
 		if strings.HasPrefix(e, key) {
@@ -135,10 +420,7 @@ func withBatchModeSSH(ctx context.Context, env []string) []string {
 		}
 		out = append(out, e)
 	}
-	if !hasExplicitBatchMode(base) {
-		base += " -o BatchMode=yes"
-	}
-	return append(out, key+base)
+	return append(out, key+base+opts)
 }
 
 // applyNonInteractiveSSH sets BatchMode SSH on cmd when ctx is marked

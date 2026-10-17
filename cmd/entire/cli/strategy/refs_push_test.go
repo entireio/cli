@@ -166,7 +166,8 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	// pushes are rejected, then recovery replays C3's delta onto C2.
 	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	res, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, flushOptions{boundBatch: true})
+	pushed := res.pushed
 	output := restore()
 	require.NoError(t, pushErr, "diverged ref should be recovered by fetch+replay, not rejected")
 	assert.Equal(t, 1, pushed)
@@ -258,6 +259,33 @@ func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, refs, remaining, "failed push leaves refs queued")
+}
+
+// TestPushQueuedCheckpointRefs_EarlyStopIsAnError: the batch stops after
+// consecutive failed chunks and the per-ref fallback lands every ref it
+// retried, so the flush itself returns no error with refs never tried. The
+// explicit push reports success on a nil error, so it must return one.
+func TestPushQueuedCheckpointRefs_EarlyStopIsAnError(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 8)
+	// Declines any push of more than one ref: every chunk fails, every per-ref
+	// retry lands.
+	hook := "#!/bin/sh\n[ \"$(wc -l)\" -gt 1 ] && exit 1\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, _, err := PushQueuedCheckpointRefs(t.Context(), repo, bareDir)
+	require.ErrorIs(t, err, ErrCheckpointRefsStayQueued)
+	assert.Equal(t, 4, pushed, "precondition: the batch stopped after two failed chunks and the fallback landed them")
+
+	remaining, drainErr := queue.Drain()
+	require.NoError(t, drainErr)
+	assert.ElementsMatch(t, refs[4:], remaining, "untried refs stay queued")
 }
 
 // remoteRefFiles lists the files in the tree a ref points at on the bare remote.

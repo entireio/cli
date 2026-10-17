@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -91,8 +93,9 @@ func TestFlushCheckpointRefs_StopsAfterConsecutiveFailures(t *testing.T) {
 	output := restore()
 	require.NoError(t, err, "a bounded flush must still never block the user's push")
 
-	// One batch attempt, then the fallback stops after the cap.
-	assert.Equal(t, 1+maxConsecutiveRefPushFailures, countedAttempts(t, countFile),
+	// One batch attempt, one split (both halves refused, so no deeper), then
+	// the fallback stops after the cap.
+	assert.Equal(t, 1+2+maxConsecutiveRefPushFailures, countedAttempts(t, countFile),
 		"the fallback must not walk the whole queue against a refusing remote")
 	assert.Contains(t, output, "Stopped retrying")
 	assert.Contains(t, output, fmt.Sprintf("%d consecutive failures", maxConsecutiveRefPushFailures))
@@ -138,11 +141,12 @@ func TestFlushCheckpointRefs_StopsWhenBudgetExhausted(t *testing.T) {
 		"nothing landed, so the whole queue stays")
 	assert.LessOrEqual(t, countedAttempts(t, countFile), 2, "the deadline must cut the fallback, not let it walk the queue")
 
-	// An exhausted budget still buys one attempt: aborting before any work would
-	// starve the queue instead of draining it a little at a time.
+	// The batch always attempts its first chunk; a budget that cuts it ends
+	// the flush there rather than "retrying" on the spent budget.
 	logged, readErr := os.ReadFile(filepath.Join(workDir, logging.LogsDir, "entire.log"))
 	require.NoError(t, readErr)
-	assert.Contains(t, string(logged), `"attempted":1`, "a flush must always try at least one ref")
+	assert.Contains(t, string(logged), "batch push cut by the flush budget")
+	assert.NotContains(t, output, "retrying")
 
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
@@ -247,6 +251,7 @@ func refHashOf(t *testing.T, repo *git.Repository, ref plumbing.ReferenceName) s
 // of the queue starves exactly as it does behind a failing prefix — rotation is
 // fair scheduling, not a verdict on the ref that happened to be in flight.
 func TestFlushCheckpointRefs_BudgetAbortRotatesToo(t *testing.T) {
+	shrinkRefPushChunkSize(t, 1) // the cut chunk is exactly the first ref
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 4)
 	prepareGitRefsPrePush(t, workDir, bareDir)
 	installCheckpointRejectHook(t, bareDir, false, "")
@@ -269,4 +274,457 @@ func TestFlushCheckpointRefs_BudgetAbortRotatesToo(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, append(append([]plumbing.ReferenceName{}, refs[1:]...), refs[0]),
 		remaining, "the attempted ref moves to the back so the next push starts somewhere new")
+}
+
+func shrinkRefPushChunkSize(t *testing.T, n int) {
+	t.Helper()
+	restore := checkpointRefPushChunkSize
+	checkpointRefPushChunkSize = n
+	t.Cleanup(func() { checkpointRefPushChunkSize = restore })
+}
+
+// installCountingHook accepts every push, recording one line per push in
+// countFile, and sleeps on every push after the first sleepAfter.
+func installCountingHook(t *testing.T, bareDir, countFile string, sleepAfter int) {
+	t.Helper()
+	hook := "#!/bin/sh\ncat >/dev/null\n" +
+		"n=$(cat '" + countFile + "' 2>/dev/null | wc -l)\necho attempt >> '" + countFile + "'\n"
+	if sleepAfter > 0 {
+		hook += fmt.Sprintf("[ \"$n\" -ge %d ] && sleep 30\n", sleepAfter)
+	}
+	hook += "exit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+}
+
+// installBlockRefHook declines any push whose ref updates include blockedRef —
+// the whole push, as a ruleset does, so the blocked ref's chunk fails with it.
+func installBlockRefHook(t *testing.T, bareDir, blockedRef string) {
+	t.Helper()
+	hook := "#!/bin/sh\nblocked=0\nwhile read -r old new ref; do\n" +
+		"  [ \"$ref\" = '" + blockedRef + "' ] && blocked=1\ndone\n" +
+		"if [ \"$blocked\" = 1 ]; then echo '" + checkpointRejectReason + "' >&2; exit 1; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+}
+
+// TestFlushCheckpointRefs_PushesBacklogInChunks pins the chunked batch: a
+// backlog larger than one chunk goes out a chunk per push and fully drains.
+func TestFlushCheckpointRefs_PushesBacklogInChunks(t *testing.T) {
+	shrinkRefPushChunkSize(t, 3)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 8)
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	installCountingHook(t, bareDir, countFile, 0)
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+
+	assert.Equal(t, 3, countedAttempts(t, countFile), "8 refs in chunks of 3 is three pushes")
+	assert.Contains(t, output, "Pushing 8 checkpoint ref(s)")
+	assert.Contains(t, output, " done")
+	for _, ref := range refs {
+		assert.Equal(t, refHashOf(t, repo, ref), remoteRefHash(t, bareDir, ref))
+	}
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+// TestFlushCheckpointRefs_BudgetKeepsLandedChunks is the hang this bound
+// exists for: a batch upload that stalls must not hold the user's git push past
+// the flush budget, and the chunks that landed before it must leave the queue so
+// the next push starts after them instead of re-sending the whole backlog.
+func TestFlushCheckpointRefs_BudgetKeepsLandedChunks(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	installCountingHook(t, bareDir, countFile, 1) // first push lands, the rest stall
+
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = 3 * time.Second
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	start := time.Now()
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	elapsed := time.Since(start)
+	output := restore()
+
+	assert.Less(t, elapsed, 25*time.Second, "a stalled upload must be cut by the budget, not waited out")
+	assert.Contains(t, output, "exhausted")
+	assert.Contains(t, output, "4 checkpoint ref(s) stay queued")
+	for _, ref := range refs[:2] {
+		assert.Equal(t, refHashOf(t, repo, ref), remoteRefHash(t, bareDir, ref), "the first chunk landed")
+	}
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs[2:], remaining, "landed chunks leave the queue; the rest stay")
+}
+
+// TestFlushCheckpointRefs_RejectedChunkDoesNotStopLaterChunks pins that a
+// rejection fails only its own chunk: later chunks still go out in the batch,
+// and the rejected chunk's healthy refs land through the per-ref fallback.
+func TestFlushCheckpointRefs_RejectedChunkDoesNotStopLaterChunks(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	installBlockRefHook(t, bareDir, refs[0].String())
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+
+	assert.Contains(t, output, "retrying 2 ref(s) individually", "only the rejected chunk falls back")
+	assert.Contains(t, output, "pushed 5 of 6")
+	for _, ref := range refs[1:] {
+		assert.Equal(t, refHashOf(t, repo, ref), remoteRefHash(t, bareDir, ref))
+	}
+	assertRefsAbsentFromRemote(t, bareDir, refs[:1], "the blocked ref must stay local")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, refs[:1], remaining)
+}
+
+// TestFlushCheckpointRefs_StopsBatchAfterConsecutiveChunkFailures pins the
+// batch phase's own cap: a remote refusing every push refuses every chunk, so
+// the batch stops instead of sending the whole backlog to be refused.
+func TestFlushCheckpointRefs_StopsBatchAfterConsecutiveChunkFailures(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 8)
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	installCheckpointRejectHook(t, bareDir, false, countFile)
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+
+	// Two chunk pushes, then one per-ref retry for each of their four refs.
+	assert.Equal(t, maxConsecutiveChunkPushFailures+4, countedAttempts(t, countFile))
+	assert.Contains(t, output, fmt.Sprintf("%d consecutive failed batches", maxConsecutiveChunkPushFailures))
+	assert.Contains(t, output, "8 checkpoint ref(s) stay queued")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining)
+}
+
+// TestPushQueuedCheckpointRefs_BatchNotBudgeted pins the migration push's
+// exemption: the user asked for that upload and waits on it, so the batch is
+// not cut by the pre-push budget.
+func TestPushQueuedCheckpointRefs_BatchNotBudgeted(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 5)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = time.Nanosecond
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	res, err := flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	pushed := res.pushed
+	restore()
+	require.NoError(t, err)
+	assert.Equal(t, len(refs), pushed)
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+}
+
+// TestFlushCheckpointRefs_UnreachableRemoteStopsAtOnce pins the dead-host
+// bound: when git cannot even connect, neither later chunks nor per-ref retries
+// can either, so the flush makes one attempt, says why, and keeps the queue.
+func TestFlushCheckpointRefs_UnreachableRemoteStopsAtOnce(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, _, refs := setupRepoWithNCheckpointRefs(t, 6)
+	prepareGitRefsPrePush(t, workDir, "ssh://git@example.invalid/repo.git")
+
+	// A fake ssh client: counts connections and fails the way OpenSSH does
+	// against a refused port, without touching the network. Named "ssh" so git
+	// takes it for OpenSSH and skips its "-G" probe of unrecognized clients.
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	fakeSSH := filepath.Join(t.TempDir(), "ssh")
+	script := "#!/bin/sh\necho attempt >> '" + countFile + "'\n" +
+		"echo 'ssh: connect to host example.invalid port 22: Connection refused' >&2\nexit 255\n"
+	require.NoError(t, os.WriteFile(fakeSSH, []byte(script), 0o755))
+	t.Setenv("GIT_SSH_COMMAND", fakeSSH)
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+
+	assert.Equal(t, 1, countedAttempts(t, countFile), "no further chunk or per-ref retry against a dead host")
+	assert.Contains(t, output, "Couldn't reach origin: ssh: connect to host example.invalid port 22: Connection refused")
+	assert.Contains(t, output, "6 checkpoint ref(s) stay queued")
+	assert.NotContains(t, output, "retrying")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, refs, remaining, "nothing is dropped or reordered")
+}
+
+// installSlowMultiRefHook stalls any push carrying more than one ref, and
+// accepts single-ref pushes at once: a link too slow for a whole chunk.
+func installSlowMultiRefHook(t *testing.T, bareDir string) {
+	t.Helper()
+	hook := "#!/bin/sh\nn=$(grep -c refs/entire/)\n[ \"$n\" -gt 1 ] && sleep 30\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+}
+
+// TestFlushCheckpointRefs_ChunkTooSlowForBudgetShrinks pins progress on a
+// link too slow to land one chunk within the budget: without adapting, the
+// same head-of-queue chunk is cut on every push and nothing ever lands.
+func TestFlushCheckpointRefs_ChunkTooSlowForBudgetShrinks(t *testing.T) {
+	shrinkRefPushChunkSize(t, 4)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 4)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	installSlowMultiRefHook(t, bareDir)
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = 2 * time.Second
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+	assert.Contains(t, output, "Stopped pushing: budget (2s) exhausted; 4 checkpoint ref(s) stay queued")
+	assert.NotContains(t, output, "retrying", "a budget cut is not a push failure to retry")
+	assert.Equal(t, 1, queue.ChunkSizeHint(checkpointRefPushChunkSize), "the cut chunk quarters the next one")
+
+	for range 2 { // single refs land; the next push finds nothing queued.
+		restore = captureStderr(t)
+		require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+		restore()
+	}
+	for _, ref := range refs {
+		assert.Equal(t, refHashOf(t, repo, ref), remoteRefHash(t, bareDir, ref))
+	}
+	assert.Equal(t, 2, queue.ChunkSizeHint(checkpointRefPushChunkSize), "a clean flush grows it back")
+}
+
+// TestPushQueuedCheckpointRefs_FallbackGetsFreshBudget: the migration push
+// leaves its batch unbounded, so a slow batch must not leave its per-ref
+// fallback a budget the batch already spent.
+func TestPushQueuedCheckpointRefs_FallbackGetsFreshBudget(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\nblocked=0\nwhile read -r old new ref; do\n" +
+		"  [ \"$ref\" = '" + refs[0].String() + "' ] && blocked=1\ndone\nsleep 1.5\n" +
+		"if [ \"$blocked\" = 1 ]; then echo '" + checkpointRejectReason + "' >&2; exit 1; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = 4 * time.Second
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	_, err = flushCheckpointRefsQueue(t.Context(), repo, pushSettings{remote: bareDir}, flushOptions{})
+	restore()
+	require.Error(t, err, "the blocked ref still fails")
+	assert.Equal(t, refHashOf(t, repo, refs[1]), remoteRefHash(t, bareDir, refs[1]),
+		"the blocked ref's healthy chunk-mate lands through the fallback despite the slow batch")
+}
+
+// TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered: a chunked
+// flush can land chunks and then fail (here, SSH auth on a later chunk); it
+// reports the landed count alongside the error. That the pre-push then acts on
+// the count is pinned end to end by
+// TestCheckpointSyncRemote_PartialDeliveryCapturesElection.
+func TestFlushCheckpointRefs_PartialDeliveryStillCountsAsDelivered(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 4)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\ngrep -q '" + refs[2].String() + "' && { echo 'git@github.com: Permission denied (publickey).' >&2; exit 1; }\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	res, err := flushCheckpointRefsQueue(checkpointremote.WithNonInteractiveSSH(t.Context()), repo, pushSettings{remote: bareDir}, flushOptions{boundBatch: true})
+	pushed := res.pushed
+	output := restore()
+	require.Error(t, err)
+	assert.Equal(t, 2, pushed, "the first chunk landed before the auth failure and is reported as pushed")
+	assert.Contains(t, output, "SSH authentication failed")
+}
+
+// TestFlushCheckpointRefs_RejectionProvesRemoteReachable: once the remote has
+// answered a chunk — even with a rejection — a later connect error is
+// transient, not "unreachable": the flush carries on to the per-ref fallback
+// instead of abandoning refs it could still land.
+func TestFlushCheckpointRefs_RejectionProvesRemoteReachable(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 4)
+	prepareGitRefsPrePush(t, workDir, "ssh://git@example.invalid"+bareDir)
+	installBlockRefHook(t, bareDir, refs[0].String())
+
+	// A fake ssh that runs the remote command locally, except the second
+	// connection, which fails the way an unreachable host does.
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	fakeSSH := filepath.Join(t.TempDir(), "ssh")
+	script := "#!/bin/sh\necho attempt >> '" + countFile + "'\n" +
+		"n=$(wc -l < '" + countFile + "' | tr -d ' ')\n" +
+		"if [ \"$n\" = 2 ]; then echo 'ssh: connect to host example.invalid port 22: Connection refused' >&2; exit 255; fi\n" +
+		"for last; do :; done\nexec sh -c \"$last\"\n"
+	require.NoError(t, os.WriteFile(fakeSSH, []byte(script), 0o755))
+	t.Setenv("GIT_SSH_COMMAND", fakeSSH)
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+
+	assert.NotContains(t, output, "Couldn't reach", "the remote answered the first chunk")
+	assert.Equal(t, refHashOf(t, repo, refs[1]), remoteRefHash(t, bareDir, refs[1]),
+		"the rejected chunk's healthy ref lands through the fallback")
+}
+
+// TestFlushCheckpointRefs_CutAfterProgressKeepsChunkSize: a budget cut after
+// chunks landed is a backlog draining as intended, not a chunk too large for
+// the link, so it must not shrink the chunk size — at one ref per push every
+// push would pay the remote's whole ref advertisement.
+func TestFlushCheckpointRefs_CutAfterProgressKeepsChunkSize(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	installCountingHook(t, bareDir, countFile, 1) // first chunk lands, the rest stall
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = 3 * time.Second
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+	require.Contains(t, output, "exhausted", "precondition: the budget cut the flush")
+	assert.Equal(t, 2, queue.ChunkSizeHint(checkpointRefPushChunkSize), "progress was made, so the size stays")
+}
+
+// TestAdaptChunkSize_StallAfterProgressKeepsSize: a batch whose other chunks
+// landed but one stalled did not land everything, so the size must not grow
+// back toward the cap the link just proved too slow for.
+func TestAdaptChunkSize_StallAfterProgressKeepsSize(t *testing.T) {
+	t.Parallel()
+	queue := checkpoint.NewPushQueue(t.TempDir())
+	require.NoError(t, queue.SetChunkSizeHint(50))
+
+	batch := chunkPushResult{landed: 100, stalled: []plumbing.ReferenceName{"refs/entire/checkpoints/aa/x"}}
+	adaptChunkSize(t.Context(), queue, 50, batch, false)
+
+	assert.Equal(t, 50, queue.ChunkSizeHint(checkpointRefPushChunkSize))
+}
+
+// TestFlushCheckpointRefs_SplitIsolatesRejectedRef: a forge declines a whole
+// push for one bad ref, failing its chunk. Halving finds that ref in a few
+// pushes and lands the rest, instead of retrying the chunk one ref at a time.
+func TestFlushCheckpointRefs_SplitIsolatesRejectedRef(t *testing.T) {
+	shrinkRefPushChunkSize(t, 16)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 16)
+	countFile := filepath.Join(t.TempDir(), "attempts")
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\necho attempt >> '" + countFile + "'\nblocked=0\nwhile read -r old new ref; do\n" +
+		"  [ \"$ref\" = '" + refs[11].String() + "' ] && blocked=1\ndone\n" +
+		"if [ \"$blocked\" = 1 ]; then echo '" + checkpointRejectReason + "' >&2; exit 1; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	restore()
+
+	// 1 chunk, then 16 -> 8 -> 4 (floor): 2 pushes per level, then the 4
+	// unresolved refs one at a time.
+	assert.Equal(t, 1+2+2+4, countedAttempts(t, countFile), "halving, not 16 single-ref retries")
+	for i, ref := range refs {
+		if i == 11 {
+			continue
+		}
+		assert.Equal(t, refHashOf(t, repo, ref), remoteRefHash(t, bareDir, ref))
+	}
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{refs[11]}, remaining, "only the rejected ref stays queued")
+}
+
+// TestFlushCheckpointRefs_BudgetCutStillShowsEarlierRejection: a chunk the
+// remote refused before the budget ran out never reaches the per-ref fallback
+// in that flush, so the budget stop itself must surface the refusal.
+func TestFlushCheckpointRefs_BudgetCutStillShowsEarlierRejection(t *testing.T) {
+	shrinkRefPushChunkSize(t, 2)
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 6)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	hook := "#!/bin/sh\nblocked=0\nwhile read -r old new ref; do\n" +
+		"  [ \"$ref\" = '" + refs[0].String() + "' ] && blocked=1\ndone\n" +
+		"if [ \"$blocked\" = 1 ]; then echo '" + checkpointRejectReason + "' >&2; exit 1; fi\nsleep 30\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = 3 * time.Second
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+
+	require.Contains(t, output, "Stopped pushing", "precondition: the budget cut the flush")
+	assert.Contains(t, output, checkpointRejectReason, "the earlier refusal is still shown")
 }

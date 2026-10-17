@@ -66,6 +66,7 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TOKEN_STORE_PATH", filepath.Join(stateDir, "tokens.json"))
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(stateDir, "entire-config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(stateDir, "entire-cache"))
+	os.Setenv("ENTIRE_CHECKPOINT_UPLOAD_FOREGROUND", "1") // See e2e/tests/main_test.go.
 	// ENTIRE_TOKEN's presence alone switches the CLI to token mode, and a set
 	// ENTIRE_AUTH_BASE_URL (retired) fails every command.
 	for _, name := range []string{"ENTIRE_TOKEN", "ENTIRE_CONTEXT", "ENTIRE_AUTH_BASE_URL"} {

@@ -12,7 +12,7 @@ import (
 // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS on Windows, via detachFromTTY).
 // The child runs in dir (os.TempDir() when empty, so the child never holds the
 // parent's working directory), inherits the parent's environment, and has its
-// stdout/stderr discarded. Best-effort: every error is swallowed — callers
+// stdout/stderr sent to the null device. Best-effort: every error is swallowed — callers
 // treat the spawn as advisory background work.
 //
 // In-process `go test` runs are a no-op: the current executable is the test
@@ -28,6 +28,9 @@ func SpawnDetached(dir string, args ...string) {
 	}
 
 	cmd := newDetachedCmd(executable, dir, args...)
+	// The child outlives this process; nothing else this process inherited may
+	// outlive it with the child (see markInheritedFDsCloseOnExec).
+	markInheritedFDsCloseOnExec()
 	if err := cmd.Start(); err != nil {
 		return
 	}
