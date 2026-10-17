@@ -121,14 +121,19 @@ var agentHelpClassification = map[string]agentHelpFacts{
 
 	// trail is the highest-traffic family by a wide margin, so its read-only
 	// subcommands must not disappear behind the group's write-capable label.
-	"trail":                 {agentHelpAudienceTaskDriven, true},
-	"trail list":            {agentHelpAudienceReadOnly, false},
-	"trail show":            {agentHelpAudienceReadOnly, false},
-	"trail create":          {agentHelpAudienceTaskDriven, false},
-	"trail delete":          {agentHelpAudienceTaskDriven, false},
-	"trail update":          {agentHelpAudienceTaskDriven, false},
-	"trail approvals":       {agentHelpAudienceReadOnly, false},
-	"trail watch":           {agentHelpAudienceReadOnly, false},
+	"trail":           {agentHelpAudienceTaskDriven, true},
+	"trail list":      {agentHelpAudienceReadOnly, false},
+	"trail show":      {agentHelpAudienceReadOnly, false},
+	"trail create":    {agentHelpAudienceTaskDriven, false},
+	"trail delete":    {agentHelpAudienceTaskDriven, false},
+	"trail update":    {agentHelpAudienceTaskDriven, false},
+	"trail approvals": {agentHelpAudienceReadOnly, false},
+	"trail watch":     {agentHelpAudienceReadOnly, false},
+	// Manual stdin sharing remains user-owned; automatic lifecycle streaming
+	// follows a verified project Trail/change association instead.
+	"trail logs":            {agentHelpAudienceUserOwned, false},
+	"trail logs publish":    {agentHelpAudienceUserOwned, false},
+	"trail logs watch":      {agentHelpAudienceUserOwned, false},
 	"trail approve":         {agentHelpAudienceTaskDriven, false},
 	"trail checkout":        {agentHelpAudienceTaskDriven, false},
 	"trail comment":         {agentHelpAudienceTaskDriven, false},

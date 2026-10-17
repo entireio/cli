@@ -64,6 +64,7 @@ func newTrailLinkCmd() *cobra.Command {
 			if !looksLikeULID(out.ID) || out.TrailID != target.TrailID || out.RepositoryID != request.RepositoryID {
 				return errors.New("branch link response identity does not match the request")
 			}
+			maybeStreamCallingTrailSession(cmd, branch)
 			if jsonRequested(cmd) {
 				return printJSON(cmd.OutOrStdout(), map[string]string{"trailId": out.TrailID, "repositoryId": out.RepositoryID, "branch": branch})
 			}

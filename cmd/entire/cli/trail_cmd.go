@@ -98,7 +98,7 @@ func newTrailCmdForMode(project bool) *cobra.Command {
 		cmd.Annotations[projectTrailsAnnotation] = agentHelpAnnotationEnabled
 		cmd.PersistentFlags().String("project", "", "Project as gh/<owner> or et/<project>; required for list, otherwise defaults to the repository's namespace")
 		cmd.AddCommand(newProjectTrailShowCmd(), newProjectTrailListCmd(), newProjectTrailCreateCmd(), newProjectTrailUpdateCmd())
-		cmd.AddCommand(newTrailLinkCmd(), newTrailUnlinkCmd(), newProjectTrailCommentCmd())
+		cmd.AddCommand(newTrailLinkCmd(), newTrailUnlinkCmd(), newProjectTrailCommentCmd(), newProjectTrailLogsCmd())
 	} else {
 		// Advertised to agents only when trails are enabled for the repo, so
 		// we never point agents at trails they can't use.

@@ -96,6 +96,12 @@ uses the following routing shapes, mirroring the entire.io BFF:
   selector is one `GET /api/v1/{host}/{project}/trails/{number}` there. `--repo` only
   filters within that project. No fanout or fallback; server cursors pass through.
   See [Project trails CLI](../architecture/project-trails-cli.md).
+  **Local-log exception:** `trail logs publish/watch` use the authenticated BFF,
+  not a direct cell stream, so editing and logs share the project's coordinator.
+  Numeric log selectors use the assigned cell's lightweight `/logs/access`
+  instead of an editor-backed detail read. The cell only authorizes access;
+  the DO holds a bounded, volatile log buffer and rechecks each publisher/viewer
+  through admission. Log text is not sent to the cell or persisted.
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim. Activity and recap use it with no data-API

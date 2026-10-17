@@ -278,6 +278,7 @@ func newProjectTrailCreateCmd() *cobra.Command {
 			if err := target.validateResponse(out); err != nil {
 				return err
 			}
+			maybeStreamCallingTrailSession(cmd, branch)
 			return printProjectTrail(cmd, out)
 		},
 	}

@@ -114,6 +114,10 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
+	// Start/recover automatic streaming after lifecycle state has been updated.
+	// The detached worker validates exact session ownership and branch membership.
+	defer maybeStreamTrailSession(ctx, ag, event)
+
 	switch event.Type {
 	case agent.SessionStart:
 		return handleLifecycleSessionStart(ctx, ag, event)
