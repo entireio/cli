@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 const testDispatchRunID = "01KDISPATCHRUN0000000000000"
@@ -227,6 +228,39 @@ func TestCloudClient_CreateDispatch_RetriesTransientPollFailures(t *testing.T) {
 	}
 	if run.GeneratedMarkdown != "done" {
 		t.Fatalf("GeneratedMarkdown = %q, want done", run.GeneratedMarkdown)
+	}
+}
+
+// TestCloudClient_CreateDispatch_PolicyRefusalEndsPoll: a status poll whose
+// redirect the client refuses fails at once with the policy error instead of
+// retrying until the budget reports the run as still generating.
+func TestCloudClient_CreateDispatch_PolicyRefusalEndsPoll(t *testing.T) {
+	t.Parallel()
+
+	var reads atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			run := testDispatchRun("")
+			run["status"] = dispatchStatusGenerating
+			writeDispatchRun(t, w, http.StatusAccepted, run)
+			return
+		}
+		reads.Add(1)
+		http.Redirect(w, r, "http://"+r.Host+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	client := NewCloudClient(api.NewClientWithTransport("t", srv.URL, srv.Client().Transport))
+	client.pollInterval = time.Millisecond
+	_, err := client.CreateDispatch(context.Background(), CreateDispatchRequest{Repos: []string{testRepoSlug}}, "")
+	if !errors.Is(err, httpclient.ErrInsecureRedirect) {
+		t.Fatalf("expected the insecure-redirect error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "dispatch "+testDispatchRunID) {
+		t.Fatalf("expected the error to name the run, got %v", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("status polls = %d, want 1", got)
 	}
 }
 
