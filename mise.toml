@@ -27,6 +27,10 @@ go test -tags=integration -race ./...
 mise run test:e2e:canary
 """
 
+[tasks."test:release-origins"]
+description = "Test the two-origin install path against local fake origins"
+run = "scripts/test-release-origins.sh"
+
 [tasks.check]
 description = "Run formatting, linting, and CI tests"
 depends = ["fmt", "lint", "test:ci"]
