@@ -403,6 +403,33 @@ func LefthookIntegrationCurrent(ctx context.Context) (bool, error) {
 	return artifactsExcluded(ctx, repoRoot, localConfigName), nil
 }
 
+// LefthookIntegrationPresent reports whether any artifact
+// RemoveLefthookIntegration would take is there: the extends entry, Entire's
+// config, or one of its scripts. Unlike LefthookIntegrationCurrent, a partial
+// or stale install counts.
+func LefthookIntegrationPresent(ctx context.Context) bool {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return false
+	}
+	root, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return false
+	}
+	if extendsEntryPresent(root) {
+		return true
+	}
+	if owned, err := fileIsOwned(root, entireLefthookConfig); err == nil && owned {
+		return true
+	}
+	for _, hook := range gitHookNames {
+		if owned, err := fileIsOwned(root, lefthookScriptPath(hook)); err == nil && owned {
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveLefthookIntegration removes Entire's artifacts, returning the number
 // removed. Files without Entire's marker are left alone.
 func RemoveLefthookIntegration(ctx context.Context) (int, error) {

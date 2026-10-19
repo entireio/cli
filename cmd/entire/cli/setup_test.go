@@ -30,6 +30,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
 
 // Note: Tests for hook manipulation functions (addHookToMatcher, hookCommandExists, etc.)
@@ -1309,6 +1310,38 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 	if !strings.Contains(output, "has been removed from this repository") {
 		t.Errorf("Expected success message, got: %s", output)
 	}
+}
+
+// In a Lefthook repo .git/hooks/* are Lefthook's launchers, not Entire's
+// hooks, yet uninstall edits the user's Lefthook local config. The summary
+// must say so before asking.
+func TestRunUninstall_SummaryNamesLefthookRegistration(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupTestRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lefthook.yml"), []byte("pre-commit: {}\n"), 0o644))
+	_, err := strategy.EnsureLefthookIntegration(context.Background())
+	require.NoError(t, err)
+	require.False(t, strategy.AnyGitHookInstalled(context.Background()), "fixture: no native Entire hook")
+
+	// force=false prints the summary, then stops at the no-terminal guard.
+	var stdout, stderr bytes.Buffer
+	require.Error(t, runUninstall(context.Background(), &stdout, &stderr, false))
+	require.Contains(t, stdout.String(), "Lefthook")
+	require.Contains(t, stdout.String(), "entire-lefthook.yml")
+}
+
+// A Lefthook registration on its own is still an install to remove.
+func TestRunUninstall_Force_RemovesLefthookRegistrationAlone(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := setupTestRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lefthook.yml"), []byte("pre-commit: {}\n"), 0o644))
+	_, err := strategy.EnsureLefthookIntegration(context.Background())
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	require.NoError(t, runUninstall(context.Background(), &stdout, &stderr, true))
+	require.NotContains(t, stdout.String(), "not installed")
+	require.False(t, strategy.LefthookIntegrationPresent(context.Background()))
 }
 
 func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
