@@ -996,7 +996,7 @@ Captured from real agy stdin (1.0.x); all enforced by tests in `agent/antigravit
 - **`invocationNum` is 0-indexed** — the first model invocation of a conversation is `0`. PreInvocation fires per *model invocation*, not per user prompt, so only `invocationNum == 0` maps directly to TurnStart; `invocationNum > 0` emits a TurnStart with `Event.SuppressIfSessionActive` and the dispatcher drops it when a turn is genuinely mid-flight (resumes via `agy --conversation` start at `> 0` and must still be tracked).
 - **Transcript is written AFTER the Stop hook** — `PrepareTranscript` briefly waits, then materialises an empty placeholder; condensation degrades to a files/prompt-only checkpoint and re-extracts prompts late (`resolvePromptsFromLateFlushedTranscript`). The hook payload's `transcriptPath` points at `transcript_full.jsonl` under `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/`.
 - **Tool args can be double-encoded** — `toolCall.args` values sometimes arrive as JSON strings containing JSON; see `decodeAgyString`/`decodeAgyBool`.
-- **Token usage has exactly one surface** — the statusline/title JSON payload (`context_window`). The integration tees it to disk via the global settings.json `title` slot (`entire hooks antigravity title-tee`) and implements `OutOfBandTokenSource`.
+- **Token usage comes from per-step transcript fields** — current agy writes `input_tokens`/`output_tokens`/`cache_read_tokens` on each `PLANNER_RESPONSE` step, read by `TokenCalculator`. Older agy has only the statusline/title JSON payload (`context_window`), which the integration tees to disk via the global settings.json `title` slot (`entire hooks antigravity title-tee`) and reads as the `OutOfBandTokenSource` fallback.
 - **SessionStart is installed but silent** — `session-start` (agy 1.1.1+) fires once per new conversation, not on `agy --conversation` resumes, and maps to `SessionStart` for the model hint and the zombie-session sweep. `AntigravityAgent` is not a `HookResponseWriter`, so no banner is written and agy tracks silently like Cursor/OpenCode/Copilot/Pi. Only SessionStart, PreToolUse, PreInvocation, and Stop are installed — agy's PostToolUse/PostInvocation have no lifecycle mapping and are deliberately not installed.
 
 #### Antigravity status: Preview
@@ -1007,9 +1007,10 @@ nothing in the CLI renders a label. Known limitations while in preview:
 
 - **No in-agy banner**: tracking is silent inside the agy UI (SessionStart is
   installed but writes no banner). `entire status` is the visibility surface.
-- **Mid-turn commit token scoping is coarse**: a checkpoint created by a
-  mid-turn agy commit records zero tokens; the turn's delta lands on the next
-  condensation. Session totals stay correct.
+- **Mid-turn commit token scoping is coarse on the statusline fallback**
+  (older agy): a checkpoint created by a mid-turn agy commit records zero
+  tokens; the turn's delta lands on the next condensation. With per-step
+  transcript usage the commit counts the calls already written.
 - **First-turn mid-turn commits may checkpoint without transcript content**
   (files + prompt only): agy writes its transcript after the Stop hook, so the
   condensation can run against the empty placeholder. Prompts are recovered on

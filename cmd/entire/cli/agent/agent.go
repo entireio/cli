@@ -393,10 +393,11 @@ type TokenCalculator interface {
 }
 
 // OutOfBandTokenSource provides token usage from a source other than the
-// transcript. Antigravity is the only agent that needs this: agy never writes
-// token data into its transcript or hook payloads — its title/statusline pipe
-// is the only surface, captured to disk by `entire hooks antigravity
-// title-tee` (see agent/antigravity/statusline.go).
+// transcript. Antigravity needs this for older agy, which writes no token
+// data into its transcript or hook payloads: its title/statusline pipe is the
+// only surface, captured to disk by `entire hooks antigravity title-tee` (see
+// agent/antigravity/statusline.go). Current agy writes per-call usage into the
+// transcript, which its TokenCalculator reads first.
 //
 // Flow: the lifecycle calls SnapshotTokenBaseline at TurnStart and stores the
 // opaque baseline in PrePromptState; at TurnEnd (when transcript-based

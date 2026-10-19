@@ -1101,7 +1101,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// resolved and accounted exactly as SaveStep would. Otherwise the
 		// session total misses the turn, and so does the next checkpoint for
 		// agents whose transcript carries no usage (Cursor's stop payload,
-		// Antigravity's out-of-band pipe). An Antigravity turn that commits ALL
+		// older Antigravity's out-of-band pipe). An Antigravity turn that commits ALL
 		// its work mid-turn (its normal flow) lands here with a clean tree.
 		// The tokens are applied by the turn-end transition itself, so a
 		// repeated or concurrent Stop for the same turn adds nothing.
@@ -1224,10 +1224,11 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 // usage fields) take precedence; otherwise fall back to Codex's child ledger,
 // then to transcript-based computation from the turn's start offset (preferring
 // SubagentAwareExtractor to include subagent tokens), and last to the
-// out-of-band source: Antigravity exposes token usage only via its
-// title/statusline pipe (captured by the title-tee shim), never in the
+// out-of-band source: older Antigravity exposes token usage only via its
+// title/statusline pipe (captured by the title-tee shim), not in the
 // transcript, so its delta is the current cumulative totals minus the
-// TurnStart baseline stored in PrePromptState. Only one source is used, so a
+// TurnStart baseline stored in PrePromptState. Current agy writes per-call
+// usage into the transcript, which the transcript step reads first. Only one source is used, so a
 // turn is never counted twice.
 func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) *agent.TokenUsage {
 	if event.TokenUsage != nil {
@@ -2901,8 +2902,8 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 }
 
 // computeOutOfBandTokenUsage returns the turn's token delta for
-// OutOfBandTokenSource agents (e.g. Antigravity, whose only token surface is
-// the title/statusline pipe captured by the title-tee shim): current
+// OutOfBandTokenSource agents (e.g. older Antigravity, whose only token surface
+// is the title/statusline pipe captured by the title-tee shim): current
 // cumulative totals minus the TurnStart baseline stored in PrePromptState.
 // Returns nil for other agents, on error (logged), or when no data exists.
 func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID string, preState *PrePromptState) *agent.TokenUsage {

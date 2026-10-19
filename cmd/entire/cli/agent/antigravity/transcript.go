@@ -40,8 +40,10 @@ var (
 //   }
 // Prompt extraction and field-aware modified-file/position analysis
 // (TranscriptAnalyzer) are implemented below. ReadTranscript/Chunk/Reassemble
-// remain JSONL passthrough, and token counting is handled out-of-band
-// elsewhere. See testdata/transcript_sample.jsonl for a captured fixture.
+// remain JSONL passthrough. Token counting reads per-step usage (tokens.go),
+// falling back to the out-of-band statusline source for older agy, which
+// writes none. See
+// testdata/transcript_sample.jsonl for a captured fixture.
 
 // agyStep is one line of agy's step-based JSONL transcript.
 type agyStep struct {
@@ -189,7 +191,7 @@ func CondenseTranscript(content []byte) []CondensedStep {
 			if text := extractUserRequest(step.Content); text != "" {
 				steps = append(steps, CondensedStep{Role: CondensedRoleUser, Text: text})
 			}
-		case "PLANNER_RESPONSE":
+		case agyStepTypePlannerResponse:
 			if text := strings.TrimSpace(step.Content); text != "" {
 				steps = append(steps, CondensedStep{Role: CondensedRoleAssistant, Text: text})
 			}

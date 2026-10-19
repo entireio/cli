@@ -13,8 +13,9 @@ unchanged against agy **1.1.1** (2026-07-13); agy is fast-moving.
 
 **Key differences from other agents:** hooks fire per *model invocation*, not
 per user prompt; the transcript is written **after** the Stop hook; token usage
-appears **only** in the title/statusline JSON feed (never in transcripts or
-hook payloads); tool args can arrive double-encoded.
+is read from per-step transcript fields, with the title/statusline JSON feed as
+the fallback for older agy (never in hook payloads); tool args can arrive
+double-encoded.
 
 ## Binary
 
@@ -130,10 +131,21 @@ offset metric: non-blank JSONL lines, blank lines skipped **before** counting
 consumed by the others). Validated against 385 real captured transcripts
 (0 errors, 0 offset mismatches).
 
-## Token Usage (out-of-band)
+## Token Usage
 
-agy never writes token data into transcripts or hook payloads. The **only**
-surface is the state JSON piped to the global `statusLine`/`title` command
+Current agy (verified on 1.4.2) writes each model call's usage on its
+`PLANNER_RESPONSE` step in `transcript_full.jsonl`: `input_tokens`,
+`output_tokens` (reasoning included) and `cache_read_tokens`. `tokens.go`
+implements `TokenCalculator` over those steps after the turn's offset, one API
+call per step. A parent conversation's steps exclude its subagents' calls,
+which their own transcripts carry. The calculator returns nil when no step in
+range has the fields, which is what keeps the fallback below running for older
+agy.
+
+### Fallback: the statusline (out-of-band)
+
+Older agy writes no token data into transcripts or hook payloads. There the
+**only** surface is the state JSON piped to the global `statusLine`/`title` command
 slots (`context_window`: `total_input_tokens`, `total_output_tokens`,
 `current_usage.*`). The integration:
 
@@ -202,9 +214,13 @@ agy or touching the developer's keychain.
   spawns finalizes it once the agy process has exited). The subagent's work
   condenses normally, and ghost sessions with no tracked files no longer pin
   shadow branches.
-- **Mid-turn commit token scoping is coarse**: such checkpoints record zero
-  tokens; the turn's delta lands on the next condensation (session totals stay
-  correct).
+- **Mid-turn commit token scoping is coarse on the statusline fallback**: such
+  checkpoints record zero tokens; the turn's delta lands on the next
+  condensation (session totals stay correct). With per-step transcript usage the
+  commit counts the calls already written.
+- **The statusline fallback undercounts** (older agy only): its
+  `total_input_tokens` tracks context fill rather than a running total, and the
+  snapshot for a turn's last call can land after Stop.
 - **First-turn mid-turn commits** may produce checkpoints without transcript
   content (see Transcript above).
 - **Token capture depends on the title slot** staying routed through the tee

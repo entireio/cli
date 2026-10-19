@@ -1130,12 +1130,12 @@ func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
 //     checkpoint metadata stays scoped to the token offset (TokenStart).
 //  2. Accumulated per-checkpoint usage (state.CheckpointTokenUsage, reset at
 //     every condensation). This is what carries out-of-band token counts
-//     (e.g. Antigravity, whose transcript has no token data — SaveStep
+//     (e.g. older Antigravity, whose transcript has no token data — SaveStep
 //     accumulates the title-tee delta here). Deliberately NOT
 //     state.TokenUsage: that is the session-cumulative total, which is never
 //     reset at condensation and would double-count earlier turns on every
 //     checkpoint after the first.
-//     Known limitation (mid-turn commits): the out-of-band baseline only
+//     Known limitation (mid-turn commits, out-of-band only): the baseline only
 //     re-snapshots at TurnStart, so a mid-turn commit condenses with zero
 //     tokens and the whole turn's delta lands on the next condensation.
 //     Totals across the turn remain correct; only per-checkpoint scoping is
