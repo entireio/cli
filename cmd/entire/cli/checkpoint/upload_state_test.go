@@ -96,3 +96,25 @@ func TestUploadCoordinator_TryLockWorker(t *testing.T) {
 	assert.True(t, ok)
 	release2()
 }
+
+func TestUploadCoordinator_TakeRequestIf(t *testing.T) {
+	t.Parallel()
+	coord := NewUploadCoordinator(t.TempDir())
+	at := time.Now()
+	require.NoError(t, coord.Request(UploadRequest{Remote: "origin", RequestedAt: at}))
+
+	req, err := coord.TakeRequestIf(func(r UploadRequest) bool { return r.Remote == "fork" })
+	require.NoError(t, err)
+	assert.Nil(t, req)
+	assert.True(t, coord.HasRequest(), "a request that does not match is kept")
+
+	req, err = coord.TakeRequestIf(func(r UploadRequest) bool { return r.Remote == "origin" })
+	require.NoError(t, err)
+	require.NotNil(t, req)
+	assert.True(t, req.RequestedAt.Equal(at))
+	assert.False(t, coord.HasRequest())
+
+	req, err = coord.TakeRequestIf(func(UploadRequest) bool { return true })
+	require.NoError(t, err)
+	assert.Nil(t, req, "nothing to take")
+}

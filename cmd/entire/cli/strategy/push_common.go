@@ -105,6 +105,7 @@ type chunkPushResult struct {
 	untried       []plumbing.ReferenceName // refs never attempted because the phase stopped
 	stalled       []plumbing.ReferenceName // refs of chunks cut by the per-chunk timeout
 	stopReason    string                   // why untried is non-empty
+	size          int                      // chunk size at the end of the phase; a stall shrinks it
 	firstErr      error
 	sshAuthFailed bool
 	// unreachable is the line of git output showing the remote could not be
@@ -125,14 +126,22 @@ type chunkPushResult struct {
 // chunkTimeout, when positive, bounds each chunk on its own: a chunk that
 // outlasts it is recorded as stalled and the phase moves on to the next, so one
 // stalled upload does not hold every chunk behind it. A stall is slowness, not
-// a refusal, so it does not count toward the consecutive-failure stop.
+// a refusal, so it does not count toward the consecutive-failure stop. It does
+// quarter the chunks after it (down to 2, which keep the timeout), since the
+// link just proved too slow for that size.
+//
+// beforeChunk, when set, runs before every chunk but the first, ahead of the
+// stop check, so time it spends counts against ctx like a chunk would.
 func pushRefChunks(ctx context.Context, target string, refs []plumbing.ReferenceName, size int,
-	chunkTimeout time.Duration, onLanded func([]plumbing.ReferenceName),
-) chunkPushResult {
-	var res chunkPushResult
+	chunkTimeout time.Duration, beforeChunk func(context.Context), onLanded func([]plumbing.ReferenceName),
+) (res chunkPushResult) {
 	consecutive := 0
-	for start := 0; start < len(refs); start += size {
+	defer func() { res.size = size }()
+	for start := 0; start < len(refs); {
 		if start > 0 {
+			if beforeChunk != nil {
+				beforeChunk(ctx)
+			}
 			if reason := chunkStopReason(ctx, consecutive); reason != "" {
 				res.untried = refs[start:]
 				res.stopReason = reason
@@ -142,6 +151,7 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 			}
 		}
 		chunk := refs[start:min(start+size, len(refs))]
+		start += len(chunk)
 		chunkCtx, cancel := ctx, context.CancelFunc(func() {})
 		// A single ref is as small as a chunk gets: timing it out would only
 		// re-send the same partial upload on every pass, never landing it, so
@@ -157,6 +167,7 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 			res.stalled = append(res.stalled, chunk...)
 			logging.Warn(ctx, "git-refs push: checkpoint ref chunk stalled; moving on",
 				slog.Int("refs", len(chunk)), slog.Duration("timeout", chunkTimeout))
+			size = max(2, size/4)
 			continue
 		}
 		if err == nil {
@@ -180,7 +191,7 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 		res.failed = append(res.failed, chunk...)
 		if nonInteractiveSSHAuthFailure(ctx, err) {
 			res.sshAuthFailed = true
-			res.untried = refs[start+len(chunk):]
+			res.untried = refs[start:]
 			return res
 		}
 		// A remote that already answered this flush — took a chunk, or failed
@@ -190,7 +201,7 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 		// connect failure on the first chunk the remote saw means unreachable.
 		if line, ok := remote.UnreachableRemoteLine(err); ok && res.landed == 0 && len(res.failed) == len(chunk) {
 			res.unreachable = line
-			res.untried = refs[start+len(chunk):]
+			res.untried = refs[start:]
 			return res
 		}
 	}

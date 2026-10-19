@@ -77,10 +77,13 @@ func (r *UploadResult) Running(now time.Time, maxRun time.Duration) bool {
 // upload was on. The worker waits for each to exit before it pushes: GitHub
 // rejects a push whose pack lands within about a second of another push to the
 // same repository finishing, and the one rejected is the later of the two.
-// PID is 0 when the hook could not find its git process.
+// PID is 0 when the hook could not find its git process. Start is that
+// process's start time in a platform-specific unit, 0 when unknown: a PID
+// whose start time has changed was reused by another process.
 type UserPush struct {
-	PID int       `json:"pid,omitempty"`
-	At  time.Time `json:"at"`
+	PID   int       `json:"pid,omitempty"`
+	Start int64     `json:"start,omitempty"`
+	At    time.Time `json:"at"`
 }
 
 // userPushMarkTTL drops marks no worker consumed (no upload followed them).
@@ -166,6 +169,19 @@ func (c *UploadCoordinator) TakeRequest() (*UploadRequest, error) {
 	var req *UploadRequest
 	err := c.update(func(st *UploadState) {
 		req, st.Request = st.Request, nil
+	})
+	return req, err
+}
+
+// TakeRequestIf removes and returns the pending request if match accepts it,
+// or nil. The check and the take are one update, so a request recorded in
+// between is never taken unchecked.
+func (c *UploadCoordinator) TakeRequestIf(match func(UploadRequest) bool) (*UploadRequest, error) {
+	var req *UploadRequest
+	err := c.update(func(st *UploadState) {
+		if st.Request != nil && match(*st.Request) {
+			req, st.Request = st.Request, nil
+		}
 	})
 	return req, err
 }

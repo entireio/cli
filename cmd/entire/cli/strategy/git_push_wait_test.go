@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,7 +90,7 @@ func TestWaitForUserPushes_WaitsForGitToExit(t *testing.T) {
 	shortenUserPushWaits(t, 10*time.Millisecond, 10*time.Millisecond)
 	coord := checkpoint.NewUploadCoordinator(t.TempDir())
 	pid, stop := startGitProcess(t)
-	require.True(t, isLiveGitProcess(pid))
+	require.True(t, isLiveGitProcess(pid, 0))
 	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{PID: pid, At: time.Now()}))
 
 	go func() { time.Sleep(300 * time.Millisecond); stop() }()
@@ -123,7 +124,7 @@ func TestWaitForUserPushes_WaitsForPushRecordedMeanwhile(t *testing.T) {
 	waitForUserPushes(t.Context(), coord)
 
 	assert.GreaterOrEqual(t, time.Since(start), 550*time.Millisecond)
-	assert.False(t, isLiveGitProcess(second))
+	assert.False(t, isLiveGitProcess(second, 0))
 }
 
 // A push whose git process the hook could not find gets a fixed delay.
@@ -233,4 +234,89 @@ func TestUploadRequestedCheckpoints_RunsWhatTheHookRecorded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, remaining)
 	assert.False(t, uploadCoordinator(t, repo).HasRequest())
+}
+
+// The two-minute limit bounds taking new rounds, not a push still running: a
+// slow push is waited for to its end, and then settled.
+func TestWaitForUserPushes_LivePushOutlastsRoundLimit(t *testing.T) {
+	shortenUserPushWaits(t, 200*time.Millisecond, 10*time.Millisecond)
+	restore := userPushWaitLimit
+	userPushWaitLimit = 50 * time.Millisecond
+	t.Cleanup(func() { userPushWaitLimit = restore })
+	coord := checkpoint.NewUploadCoordinator(t.TempDir())
+	pid, stop := startGitProcess(t)
+	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{PID: pid, At: time.Now()}))
+
+	go func() { time.Sleep(400 * time.Millisecond); stop() }()
+	start := time.Now()
+	waitForUserPushes(t.Context(), coord)
+
+	assert.GreaterOrEqual(t, time.Since(start), 600*time.Millisecond, "waited for the exit, then the settle")
+}
+
+// A recorded PID now held by another git process (its start time differs) is
+// the old push gone, not a push to wait for.
+func TestWaitForUserPushes_ReusedPIDIsNotWaitedFor(t *testing.T) {
+	shortenUserPushWaits(t, 10*time.Millisecond, 10*time.Millisecond)
+	coord := checkpoint.NewUploadCoordinator(t.TempDir())
+	pid, _ := startGitProcess(t)
+	started := processStartTime(pid)
+	if started == 0 {
+		t.Skip("no process start time on this platform")
+	}
+	require.NoError(t, coord.NoteUserPush(checkpoint.UserPush{PID: pid, Start: started + 1, At: time.Now()}))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	waitForUserPushes(ctx, coord)
+
+	assert.Less(t, time.Since(start), 2*time.Second)
+	assert.True(t, isLiveGitProcess(pid, started), "the process itself is still running")
+}
+
+// An exited git its parent has not reaped yet is a zombie, not a live push.
+func TestIsLiveGitProcess_ZombieIsNotLive(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("zombie processes are a Unix notion")
+	}
+	cmd := exec.CommandContext(t.Context(), "git", "--version")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = cmd.Wait() }) //nolint:errcheck // reaping only
+	pid := cmd.Process.Pid
+
+	deadline := time.Now().Add(10 * time.Second)
+	for isLiveGitProcess(pid, 0) && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	assert.False(t, isLiveGitProcess(pid, 0), "the exited, unreaped git still reads as live")
+}
+
+func TestParseProcStat(t *testing.T) {
+	t.Parallel()
+	// pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime
+	// cutime cstime priority nice num_threads itrealvalue starttime vsize rss
+	const tail = " 1 1 0 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 98765 1000 100"
+	for _, tc := range []struct {
+		name, stat string
+		ok         bool
+		ppid       int
+		comm       string
+		start      int64
+	}{
+		{"running", "4242 (git) S 4200" + tail, true, 4200, "git", 98765},
+		{"comm with spaces and parens", "4242 (a (b) c) R 7" + tail, true, 7, "a (b) c", 98765},
+		{"zombie", "4242 (git) Z 4200" + tail, false, 0, "", 0},
+		{"dead", "4242 (git) X 4200" + tail, false, 0, "", 0},
+		{"truncated", "4242 (git) S", false, 0, "", 0},
+	} {
+		ppid, comm, start, ok := parseProcStat(tc.stat)
+		assert.Equal(t, tc.ok, ok, tc.name)
+		if tc.ok {
+			assert.Equal(t, tc.ppid, ppid, tc.name)
+			assert.Equal(t, tc.comm, comm, tc.name)
+			assert.Equal(t, tc.start, start, tc.name)
+		}
+	}
 }

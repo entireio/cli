@@ -32,16 +32,30 @@ func processLookup() func(pid int) (ppid int, name string, ok bool) {
 	}
 }
 
+// processStartTime is pid's creation time as a FILETIME, or 0.
+func processStartTime(pid int) int64 {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid)) //nolint:gosec // PIDs fit in uint32
+	if err != nil {
+		return 0
+	}
+	defer windows.CloseHandle(h) //nolint:errcheck // best effort
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
+		return 0
+	}
+	return int64(created.HighDateTime)<<32 | int64(created.LowDateTime)
+}
+
 // waitProcessExit waits on the process handle until pid exits or ctx ends.
-// The name is checked after opening the handle, so a PID already reused by
-// another program is not waited on.
-func waitProcessExit(ctx context.Context, pid int) {
+// The name and start time are checked after opening the handle, so a PID
+// already reused by another process is not waited on.
+func waitProcessExit(ctx context.Context, pid int, start int64) {
 	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid)) //nolint:gosec // PIDs fit in uint32
 	if err != nil {
 		return
 	}
 	defer windows.CloseHandle(h) //nolint:errcheck // best effort
-	if !isLiveGitProcess(pid) {
+	if !isLiveGitProcess(pid, start) {
 		return
 	}
 	for ctx.Err() == nil {

@@ -5,29 +5,28 @@ package strategy
 import (
 	"os"
 	"strconv"
-	"strings"
 )
 
 func processLookup() func(pid int) (ppid int, name string, ok bool) {
 	return func(pid int) (int, string, bool) {
-		data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-		if err != nil {
-			return 0, "", false
-		}
-		// "pid (comm) state ppid ...": comm may contain spaces and parens.
-		s := string(data)
-		open, closeIdx := strings.IndexByte(s, '('), strings.LastIndexByte(s, ')')
-		if open < 0 || closeIdx < open {
-			return 0, "", false
-		}
-		fields := strings.Fields(s[closeIdx+1:])
-		if len(fields) < 2 {
-			return 0, "", false
-		}
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			return 0, "", false
-		}
-		return ppid, s[open+1 : closeIdx], true
+		ppid, comm, _, ok := readProcStat(pid)
+		return ppid, comm, ok
 	}
+}
+
+// processStartTime is pid's start time in clock ticks since boot, or 0.
+func processStartTime(pid int) int64 {
+	_, _, start, ok := readProcStat(pid)
+	if !ok {
+		return 0
+	}
+	return start
+}
+
+func readProcStat(pid int) (ppid int, comm string, start int64, ok bool) {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, "", 0, false
+	}
+	return parseProcStat(string(data))
 }

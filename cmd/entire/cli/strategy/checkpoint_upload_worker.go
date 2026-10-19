@@ -55,9 +55,11 @@ const CheckpointUploadAfterPushEnv = "ENTIRE_CHECKPOINT_UPLOAD_AFTER_PUSH"
 // tests.
 var foregroundUploadLockWait = 30 * time.Second
 
+// checkpointUploadDeliveryBudget bounds one worker pass's flush, batch
+// included. Var for tests.
+var checkpointUploadDeliveryBudget = 10 * time.Minute
+
 const (
-	// checkpointUploadDeliveryBudget bounds one worker pass's flush.
-	checkpointUploadDeliveryBudget = 10 * time.Minute
 	// checkpointUploadWorkerDeadline bounds a worker's whole run, and is how
 	// long a run record without a finish time counts as still running.
 	checkpointUploadWorkerDeadline = 30 * time.Minute
@@ -235,11 +237,14 @@ func releaseUploadLock(ctx context.Context, coord *checkpoint.UploadCoordinator,
 // `entire __checkpoint_upload` worker. Each pass takes the pending request and
 // uploads the queue under it; another pass runs only for a request that arrived
 // meanwhile, and none after a pass that left refs queued — the next push
-// retries those. Best-effort: failures are recorded and logged, never
-// returned, because nothing watches this process's exit code.
+// retries those. A worker that runs out of passes or time with a request still
+// waiting starts a fresh one for it. Best-effort: failures are recorded and
+// logged, never returned, because nothing watches this process's exit code.
 func RunCheckpointUploadWorker(ctx context.Context) {
 	ctx = logging.WithComponent(ctx, checkpointUploadComponent)
 	defer logging.Info(ctx, "checkpoint upload worker finished")
+	// Not marked as the worker, so it may start the next one.
+	spawnCtx := context.WithoutCancel(ctx)
 	// A detached child inherits the hook's environment, which may pin GIT_DIR
 	// and friends to the spawning worktree; resolve from the working directory
 	// instead, like any other CWD-based command.
@@ -267,19 +272,34 @@ func RunCheckpointUploadWorker(ctx context.Context) {
 	// unless a push asked for more meanwhile; passes are bounded either way.
 	for range checkpointUploadMaxPasses {
 		release, ok, lockErr := coord.TryLockWorker(ctx)
-		if lockErr != nil || !ok {
+		if lockErr == nil && !ok {
 			return // The holder starts a worker for any request on release.
 		}
+		if lockErr != nil {
+			if ctx.Err() == nil {
+				return // A lock that cannot be taken would fail a fresh worker too.
+			}
+			break
+		}
 		req, takeErr := coord.TakeRequest()
-		if takeErr != nil || req == nil {
+		if takeErr != nil {
 			release()
 			return
 		}
-		runCheckpointUploadPass(ctx, repo, coord, *req)
+		if req != nil {
+			runCheckpointUploadPass(ctx, repo, coord, *req)
+		}
+		// A push that recorded a request while the lock was held left it to us:
+		// its own worker found the lock taken and exited.
 		release()
 		if !coord.HasRequest() {
 			return
 		}
+	}
+	// Out of passes or time with a push still waiting. The fresh worker has
+	// its own pass limit, and gets here only if pushes keep coming.
+	if coord.HasRequest() && backgroundCheckpointUploadEnabled(spawnCtx) {
+		spawnCheckpointUploadWorker(spawnCtx)
 	}
 }
 
@@ -353,6 +373,27 @@ func UploadRequestedCheckpoints(ctx context.Context, w io.Writer) int {
 	return last.Pushed
 }
 
+// DiscardRequestedCheckpointUpload drops the request a pre-push hook recorded
+// under CheckpointUploadAfterPushEnv when that push failed: nothing should
+// upload for it. Only a request for remote recorded since pushStart is taken;
+// the refs stay queued for the next push, which records its own.
+func DiscardRequestedCheckpointUpload(ctx context.Context, remote string, pushStart time.Time) {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return
+	}
+	defer repo.Close()
+	coord, err := checkpoint.UploadCoordinatorForRepo(repo)
+	if err != nil {
+		return
+	}
+	if _, err := coord.TakeRequestIf(func(r checkpoint.UploadRequest) bool {
+		return r.Remote == remote && !r.RequestedAt.Before(pushStart)
+	}); err != nil {
+		logging.Debug(ctx, "discard checkpoint upload request failed", slog.String("error", err.Error()))
+	}
+}
+
 // runCheckpointUploadPass uploads the queue for req and records the outcome.
 func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *checkpoint.UploadCoordinator, req checkpoint.UploadRequest) {
 	result := checkpoint.UploadResult{StartedAt: time.Now()}
@@ -398,10 +439,13 @@ func runCheckpointUploadPass(ctx context.Context, repo *git.Repository, coord *c
 
 	waitForUserPushes(ctx, coord)
 
-	deliverCtx, cancel := context.WithTimeout(ctx, checkpointUploadDeliveryBudget)
-	defer cancel()
-	res, err := flushCheckpointRefsQueue(deliverCtx, repo, ps, flushOptions{
-		budget: checkpointUploadDeliveryBudget, chunkTimeout: checkpointUploadChunkTimeout})
+	// The budget bounds the batch too, so running out reads as a budget stop
+	// (stalled refs rotated, no per-ref retries on a dead context). A push made
+	// during a long upload is waited for between chunks; that wait counts
+	// against the budget.
+	res, err := flushCheckpointRefsQueue(ctx, repo, ps, flushOptions{
+		budget: checkpointUploadDeliveryBudget, boundBatch: true, chunkTimeout: checkpointUploadChunkTimeout,
+		beforeChunk: func(ctx context.Context) { waitForUserPushes(ctx, coord) }})
 	if err != nil {
 		logging.Warn(ctx, "background checkpoint upload: refs left queued", slog.String("error", err.Error()))
 	}

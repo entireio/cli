@@ -2472,7 +2472,11 @@ func pushBranchToRemote(ctx context.Context, out, errOut io.Writer, remote, bran
 	// never land just before the branch (GitHub rejects the later of two
 	// back-to-back pushes).
 	cmd.Env = append(os.Environ(), strategy.CheckpointUploadAfterPushEnv+"=1")
+	pushStart := time.Now()
 	if err := cmd.Run(); err != nil {
+		// Nothing uploads for a failed push; its refs stay queued for the next.
+		// Not under ctx: a push that timed out has spent it.
+		strategy.DiscardRequestedCheckpointUpload(context.WithoutCancel(ctx), remote, pushStart)
 		// git's own message already reached errOut, so this names the command
 		// and carries the exit status rather than repeating the diagnostic.
 		return fmt.Errorf("git push: %w", err)

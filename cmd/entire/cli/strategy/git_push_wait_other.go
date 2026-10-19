@@ -7,3 +7,5 @@ package strategy
 func processLookup() func(pid int) (ppid int, name string, ok bool) {
 	return func(int) (int, string, bool) { return 0, "", false }
 }
+
+func processStartTime(int) int64 { return 0 }

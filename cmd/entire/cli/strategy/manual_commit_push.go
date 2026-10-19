@@ -468,7 +468,11 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// `entire trail create` uploads the request itself once its git push
 	// returns (UploadRequestedCheckpoints).
 	if coord != nil && os.Getenv(CheckpointUploadAfterPushEnv) == "1" {
+		// So that upload waits for this push to exit and settle, and so does a
+		// worker still uploading an earlier push's checkpoints.
+		noteUserPush(ctx, coord)
 		if has, err := queueHasRefs(ctx, repo); err == nil && has {
+			req.RequestedAt = time.Now()
 			if err := coord.Request(req); err != nil {
 				logging.Warn(ctx, "git-refs pre-push: record checkpoint upload request failed; refs left queued",
 					slog.String("error", err.Error()))
@@ -695,7 +699,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 
 	// Fast path: push the refs a chunk per round-trip (fast-forward-only).
 	chunkSize := queue.ChunkSizeHint(checkpointRefPushChunkSize)
-	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, opts.chunkTimeout, func(landed []plumbing.ReferenceName) {
+	batch := pushRefChunks(batchCtx, dest.target, existing, chunkSize, opts.chunkTimeout, opts.beforeChunk, func(landed []plumbing.ReferenceName) {
 		if removeErr := queue.Remove(landed); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
@@ -871,6 +875,8 @@ type flushOptions struct {
 	// chunkTimeout bounds each chunk push on its own (see pushRefChunks); 0
 	// leaves chunks bounded only by budget.
 	chunkTimeout time.Duration
+	// beforeChunk runs before every chunk after the first (see pushRefChunks).
+	beforeChunk func(context.Context)
 }
 
 // flushResult is what one flushCheckpointRefsQueue did, for callers that act on
@@ -964,7 +970,8 @@ func stopOnBudgetCut(ctx, flushCtx context.Context, queue *checkpoint.PushQueue,
 // cut after chunks landed is a backlog draining as intended, not a chunk too
 // large, so the size is kept. It doubles back toward checkpointRefPushChunkSize
 // after a batch that landed everything; a stalled chunk did not land, so it
-// keeps the size too.
+// keeps the size too. A batch that shrank its chunks after a stall keeps the
+// smaller size it ended with, so the next pass does not stall at the old one.
 func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, batch chunkPushResult, budgetCut bool) {
 	next := size
 	switch {
@@ -972,6 +979,9 @@ func adaptChunkSize(ctx context.Context, queue *checkpoint.PushQueue, size int, 
 		next = max(1, size/4)
 	case len(batch.failed) == 0 && len(batch.untried) == 0 && len(batch.stalled) == 0:
 		next = min(checkpointRefPushChunkSize, size*2)
+	}
+	if batch.size > 0 && batch.size < size {
+		next = min(next, batch.size)
 	}
 	if next == size {
 		return
