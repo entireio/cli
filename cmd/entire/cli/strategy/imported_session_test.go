@@ -35,7 +35,7 @@ func saveImportedState(t *testing.T) string {
 	return sid
 }
 
-// Imported sessions are read-only and commit-less (no shadow branch, empty
+// Imported sessions are read-only and commit-less (no pending work, empty
 // BaseCommit); neither cleanup path may purge or flag them.
 func TestImportedSessions_SurviveCleanup(t *testing.T) {
 	sid := saveImportedState(t)

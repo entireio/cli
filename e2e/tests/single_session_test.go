@@ -59,7 +59,6 @@ func TestSingleSessionManualCommit(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 		testutil.AssertCheckpointMetadataComplete(t, s.Dir, cpID)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -82,7 +81,6 @@ func TestSingleSessionAgentCommitInTurn(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 		testutil.AssertCheckpointInLastN(t, s.Dir, cpID, 2)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -109,6 +107,5 @@ func TestSingleSessionSubagentCommitInTurn(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 		testutil.AssertCheckpointInLastN(t, s.Dir, cpID, 2)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

@@ -243,3 +243,34 @@ func TestReviewerTemplate_StartReturnsErrTemplateMisconfigured(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewerTemplate_PreflightFailureStopsBeforeBuildCmd(t *testing.T) {
+	t.Parallel()
+
+	errTooOld := errors.New("agent CLI too old")
+	built := false
+	tmpl := &ReviewerTemplate{
+		AgentName: "old-agent",
+		Preflight: func(context.Context) error { return errTooOld },
+		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
+			built = true
+			return exec.CommandContext(ctx, "true")
+		},
+		Parser: func(_ io.Reader) <-chan Event {
+			ch := make(chan Event)
+			close(ch)
+			return ch
+		},
+	}
+
+	proc, err := tmpl.Start(context.Background(), RunConfig{})
+	if !errors.Is(err, errTooOld) {
+		t.Fatalf("Start() error = %v, want the preflight error", err)
+	}
+	if proc != nil {
+		t.Fatal("Start() returned a process despite the preflight failure")
+	}
+	if built {
+		t.Fatal("BuildCmd ran despite the preflight failure")
+	}
+}

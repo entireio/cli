@@ -24,7 +24,7 @@ import (
 // unused ceiling costs nothing.
 //
 // The CLI is given less than the harness so a stalled seed surfaces as the
-// command's own message ("still being created, check with mirror get") rather
+// command's own message ("still being created, check with repo view") rather
 // than as a killed process with no explanation.
 const (
 	nativeMirrorSeedTimeout = 5 * time.Minute
@@ -38,12 +38,14 @@ type clusterJSON struct {
 }
 
 type placementJSON struct {
-	Cluster  string `json:"cluster"`
-	Status   string `json:"status"`
-	Role     string `json:"role"`
-	Stage    string `json:"stage"`
-	Removing bool   `json:"removing"`
-	CloneURL string `json:"cloneUrl"`
+	Cluster      string `json:"cluster"`
+	ClusterSlug  string `json:"clusterSlug"`
+	Jurisdiction string `json:"jurisdiction"`
+	Status       string `json:"status"`
+	Role         string `json:"role"`
+	Stage        string `json:"stage"`
+	Removing     bool   `json:"removing"`
+	CloneURL     string `json:"cloneUrl"`
 }
 
 type repoDirJSON struct {
@@ -95,13 +97,13 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	repoRef = created.ID
 
 	repo := waitForRepoClonable(t, dir, ref)
-	require.NotEmpty(t, repo.ClusterSlug, "a provisioned repo names its primary cluster")
+	require.NotEmpty(t, repo.primary().ClusterSlug, "a provisioned repo names its primary cluster")
 
 	// A native mirror goes in a region other than the repo's own, so the target
 	// is read from the catalog rather than hardcoded: the account's home region
 	// is not this test's to assume.
 	home, target := pickClusters(t, dir, repo)
-	t.Logf("repo %s is primary on %s (%s); mirroring to %s (%s)", ref, repo.ClusterSlug, repo.Jurisdiction, target.Slug, target.Jurisdiction)
+	t.Logf("repo %s is primary on %s (%s); mirroring to %s (%s)", ref, repo.primary().ClusterSlug, repo.primary().Jurisdiction, target.Slug, target.Jurisdiction)
 
 	// Each phase's own t shadows this one; anything that must outlive a phase
 	// is registered on lifecycle instead.
@@ -115,12 +117,12 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	}
 
 	phase("before: only the primary is listed", func(t *testing.T) {
-		stdout, _ := mustRunEntire(t, dir, "repo", "mirror", "get", ref, "--json")
+		stdout, _ := mustRunEntire(t, dir, "repo", "view", ref, "--json")
 		row := decodeJSON[repoDirJSON](t, stdout)
 		require.Equal(t, ref, row.Repo)
 		require.Len(t, row.Placements, 1, "a fresh repo has only its primary")
 		require.Equal(t, "primary", row.Placements[0].Role)
-		require.Equal(t, repo.ClusterSlug, row.Placements[0].Cluster)
+		require.Equal(t, home.Host, row.Placements[0].Cluster, "placements name their cluster by host, as --cluster takes it")
 	})
 
 	phase("the forge filter decides which directory the repo is in", func(t *testing.T) {
@@ -175,7 +177,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	})
 
 	phase("get shows the primary and the mirror, each by role", func(t *testing.T) {
-		stdout, _ := mustRunEntire(t, dir, "repo", "mirror", "get", ref, "--json")
+		stdout, _ := mustRunEntire(t, dir, "repo", "view", ref, "--json")
 		row := decodeJSON[repoDirJSON](t, stdout)
 		require.Len(t, row.Placements, 2)
 		require.Equal(t, "primary", row.Placements[0].Role)
@@ -183,31 +185,12 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 		for _, p := range row.Placements {
 			byCluster[p.Cluster] = p
 		}
-		mirror, ok := byCluster[target.Slug]
+		mirror, ok := byCluster[target.Host]
 		require.True(t, ok, "the mirror is listed under the cluster it was placed on")
-		require.Equal(t, "native_mirror", mirror.Role)
+		require.Equal(t, "mirror", mirror.Role)
 		require.Equal(t, "ready", mirror.Status)
 		require.False(t, mirror.Removing)
 		require.Equal(t, cloneURL, mirror.CloneURL)
-	})
-
-	// Two placements and no terminal — the state every script and CI job is in,
-	// and the one the unit tests can only simulate. What matters is that a
-	// mirror appearing server-side does not change what an unflagged run
-	// resolves to: the answer stays the repo's own primary, and is neither the
-	// mirror nor a refusal demanding --cluster.
-	phase("with no terminal a second placement still resolves the primary", func(t *testing.T) {
-		stdout, _ := mustRunEntire(t, dir, "repo", "remote", "url", ref)
-		require.Equal(t, "entire://"+home.Host+ref, strings.TrimSpace(stdout),
-			"an unflagged run resolves the primary, not the mirror placed above")
-
-		// A cluster the repo is not on reads the same here as on a /gh/ ref:
-		// the clusters it IS on, rather than the failed dial to the named one.
-		_, stderr, err := runEntire(t, dir, "repo", "remote", "url", ref, "--cluster", "no-such-cluster.entire.io")
-		require.Error(t, err)
-		require.Contains(t, stderr, "not mirrored on")
-		require.Contains(t, stderr, home.Host)
-		require.Contains(t, stderr, target.Host)
 	})
 
 	// Anchored on the STATUS token rather than a sentence: the status vocabulary
@@ -230,28 +213,9 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 		_, stderr, err := runEntireWithTimeout(t, dir, nativeMirrorStepTimeout, "repo", "clone", cloneURL, clone)
 		require.NoError(t, err, "cloning a mirror with the home-region login failed; if this is COR-1043, record it: %s", stderr)
 	})
-
-	// A placement serves pushes as well as fetches, so `remote use` writes ONE
-	// URL and git needs no pushurl. This pins that: a remote pointed at a mirror
-	// both fetches and pushes through it. If mirrors ever became read-only, the
-	// push below is what would say so, rather than a user discovering it.
-	phase("remote use points one URL at the mirror, and pushing through it works", func(t *testing.T) {
-		_, stderr, err := runEntire(t, clone, "repo", "remote", "use", "--cluster", target.Host)
-		require.NoError(t, err, stderr)
-
-		remotes := testutil.GitOutput(t, clone, "remote", "-v")
-		assert.Contains(t, remotes, "origin\t"+cloneURL+" (fetch)")
-		assert.Contains(t, remotes, "origin\t"+cloneURL+" (push)",
-			"one URL per remote: a mirror serves pushes too, so there is no split push target")
-
-		require.NoError(t, os.WriteFile(filepath.Join(clone, "through-the-mirror.txt"), []byte("hello\n"), 0o644))
-		// The harness isolates global git config, and a clone carries no identity.
-		testutil.Git(t, clone, "config", "user.name", "E2E Clone")
-		testutil.Git(t, clone, "config", "user.email", "e2e-clone@test.local")
-		testutil.CommitIfDirty(t, clone, "push through the mirror")
-		out, perr := testutil.GitOutputErr(clone, "push", "origin", "HEAD")
-		require.NoError(t, perr, "pushing through a mirror must work:\n%s", out)
-	})
+	// The `remote add` phases are their own sequence against the placements
+	// above; lifted out so this test stays one readable list of lifecycle steps.
+	remoteAddPhases(t, phase, clone, ref, cloneURL, home, target)
 
 	phase("remove tears the replica down", func(t *testing.T) {
 		stdout, stderr, err := runEntireWithTimeout(t, dir, nativeMirrorStepTimeout, "repo", "mirror", "remove", ref, "--cluster", target.Host)
@@ -259,7 +223,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 		require.Contains(t, stdout, ref)
 		require.Contains(t, stdout, "removed")
 
-		after, _ := mustRunEntire(t, dir, "repo", "mirror", "get", ref, "--json")
+		after, _ := mustRunEntire(t, dir, "repo", "view", ref, "--json")
 		row := decodeJSON[repoDirJSON](t, after)
 		require.Len(t, row.Placements, 1, "only the primary is left")
 		require.Equal(t, "primary", row.Placements[0].Role)
@@ -286,14 +250,14 @@ func pickClusters(t *testing.T, dir string, repo repoJSON) (home, foreign cluste
 	require.NoError(t, json.Unmarshal([]byte(stdout), &clusters), "stdout is not JSON:\n%s", stdout)
 	for _, cl := range clusters {
 		switch {
-		case cl.Slug == repo.ClusterSlug:
+		case cl.Slug == repo.primary().ClusterSlug:
 			home = cl
-		case cl.Jurisdiction != repo.Jurisdiction && cl.Host != "" && foreign.Host == "":
+		case cl.Jurisdiction != repo.primary().Jurisdiction && cl.Host != "" && foreign.Host == "":
 			foreign = cl
 		}
 	}
-	require.NotEmpty(t, home.Host, "the repo's own cluster %s is in the catalog: %s", repo.ClusterSlug, stdout)
-	require.NotEmpty(t, foreign.Host, "a cluster outside %s to mirror into: %s", repo.Jurisdiction, stdout)
+	require.NotEmpty(t, home.Host, "the repo's own cluster %s is in the catalog: %s", repo.primary().ClusterSlug, stdout)
+	require.NotEmpty(t, foreign.Host, "a cluster outside %s to mirror into: %s", repo.primary().Jurisdiction, stdout)
 	return home, foreign
 }
 
@@ -306,4 +270,77 @@ func TestControlPlane_RepoCreateRejectsClusterHost(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, strings.Contains(stderr, "unknown flag") && strings.Contains(stderr, "cluster-host"),
 		"expected an unknown-flag error, got:\n%s", stderr)
+}
+
+// remoteAddPhases exercises `repo remote add` against a repo that is on both
+// its primary and a mirror: the write itself, the refusal that protects an
+// occupied name, and the no-terminal default. Split out of the lifecycle test
+// so neither grows past being readable.
+func remoteAddPhases(t *testing.T, phase func(string, func(*testing.T)), clone, ref, cloneURL string, home, target clusterJSON) {
+	t.Helper()
+
+	// A placement serves pushes as well as fetches, so `remote add` writes ONE
+	// URL and git needs no pushurl. This pins that: a remote pointed at a mirror
+	// both fetches and pushes through it. If mirrors ever became read-only, the
+	// push below is what would say so, rather than a user discovering it.
+	phase("remote add points one URL at the mirror, and pushing through it works", func(t *testing.T) {
+		_, stderr, err := runEntire(t, clone, "repo", "remote", "add", "mirror", "--cluster", target.Host)
+		require.NoError(t, err, stderr)
+
+		remotes := testutil.GitOutput(t, clone, "remote", "-v")
+		assert.Contains(t, remotes, "mirror\t"+cloneURL+" (fetch)")
+		assert.Contains(t, remotes, "mirror\t"+cloneURL+" (push)",
+			"one URL per remote: a mirror serves pushes too, so there is no split push target")
+
+		require.NoError(t, os.WriteFile(filepath.Join(clone, "through-the-mirror.txt"), []byte("hello\n"), 0o644))
+		// The harness isolates global git config, and a clone carries no identity.
+		testutil.Git(t, clone, "config", "user.name", "E2E Clone")
+		testutil.Git(t, clone, "config", "user.email", "e2e-clone@test.local")
+		testutil.CommitIfDirty(t, clone, "push through the mirror")
+		out, perr := testutil.GitOutputErr(clone, "push", "mirror", "HEAD")
+		require.NoError(t, perr, "pushing through a mirror must work:\n%s", out)
+	})
+
+	// The whole point of naming the remote: a second add of the same name is an
+	// error, not a silent repoint — and the URL already there survives it.
+	phase("an occupied remote name is refused without --override", func(t *testing.T) {
+		_, stderr, err := runEntire(t, clone, "repo", "remote", "add", "mirror", "--cluster", home.Host)
+		require.Error(t, err)
+		require.Contains(t, stderr, "--override")
+		require.Equal(t, cloneURL, testutil.GitOutput(t, clone, "remote", "get-url", "mirror"),
+			"a refused add leaves the remote exactly as it was")
+
+		// Re-adding the URL the remote already carries is the requested end
+		// state, not a collision, so it reports instead of failing.
+		stdout, stderr, err := runEntire(t, clone, "repo", "remote", "add", "mirror", "--cluster", target.Host)
+		require.NoError(t, err, stderr)
+		require.Contains(t, stdout, "already points at")
+	})
+
+	// With several placements and no --cluster, a script gets the repo's own
+	// cluster. This runs non-interactively, which is exactly the path that used
+	// to refuse outright the moment a repo gained a second placement.
+	primaryURL := "entire://" + home.Host + ref
+	phase("no --cluster resolves the primary, and --override repoints", func(t *testing.T) {
+		// A cluster the repo is not on names the clusters it IS on, rather than
+		// the failed dial to the named one — and writes no remote.
+		_, stderr, err := runEntire(t, clone, "repo", "remote", "add", "stray", "--cluster", "no-such-cluster.entire.io")
+		require.Error(t, err)
+		require.Contains(t, stderr, "not mirrored on")
+		require.Contains(t, stderr, home.Host)
+		require.Contains(t, stderr, target.Host)
+		_, gerr := testutil.GitOutputErr(clone, "remote", "get-url", "stray")
+		require.Error(t, gerr, "a refused add writes no remote")
+
+		_, stderr, err = runEntire(t, clone, "repo", "remote", "add", "home")
+		require.NoError(t, err, stderr)
+		require.Equal(t, primaryURL, testutil.GitOutput(t, clone, "remote", "get-url", "home"),
+			"a non-interactive add with no --cluster takes the repo's primary")
+
+		stdout, stderr, err := runEntire(t, clone, "repo", "remote", "add", "home", "--cluster", target.Host, "--override")
+		require.NoError(t, err, stderr)
+		require.Equal(t, cloneURL, testutil.GitOutput(t, clone, "remote", "get-url", "home"))
+		require.Contains(t, stdout, primaryURL,
+			"the replaced URL is echoed, since --override copies it nowhere")
+	})
 }

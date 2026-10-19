@@ -68,7 +68,7 @@ func DiscoverAPI(ctx context.Context, apiHost string, c *http.Client, debugf Deb
 // reuse the cores cache (different file). Cold failures stay folded under
 // ErrDiscoveryUnavailable (from DiscoverAPI) for the caller to surface.
 func resolveAPICores(ctx context.Context, cacheDir, apiHost string, httpClient *http.Client, debugf DebugFunc) ([]string, error) {
-	entry, err := resolveCachedCores(cacheDir, apiHost, "API host", false,
+	entry, err := resolveCachedCores(cacheDir, apiHost, "API host",
 		discovery.LoadAPICores, discovery.ModifyAPICores,
 		func() (discovery.CoresEntry, error) {
 			body, err := DiscoverAPI(ctx, apiHost, httpClient, debugf)

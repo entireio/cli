@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/trail"
@@ -19,31 +20,41 @@ type TrailListResponse struct {
 // snake_case and nullable branch fields. Branch is empty when the trail is
 // currently unlinked; OriginalBranch separately preserves its last link.
 type TrailResource struct {
-	ID                 string             `json:"id,omitempty"`
-	Number             int                `json:"number,omitempty"`
-	URL                string             `json:"url,omitempty"`
-	Branch             string             `json:"branch"`
-	OriginalBranch     string             `json:"original_branch,omitempty"`
-	Base               string             `json:"base"`
-	Title              string             `json:"title"`
-	Body               string             `json:"body,omitempty"`
-	Status             string             `json:"status"`
-	Phase              string             `json:"phase,omitempty"`
-	Author             *trail.Author      `json:"author"`
-	Assignees          []string           `json:"assignees"`
-	Labels             []string           `json:"labels,omitempty"`
-	Priority           string             `json:"priority,omitempty"`
-	Type               string             `json:"type,omitempty"`
-	Reviewers          []trail.Reviewer   `json:"reviewers,omitempty"`
-	RequestedReviewers []string           `json:"requested_reviewers,omitempty"`
-	CreatedAt          time.Time          `json:"created_at"`
-	UpdatedAt          time.Time          `json:"updated_at"`
-	MergedAt           *time.Time         `json:"merged_at,omitempty"`
-	CommentCount       int                `json:"comment_count,omitempty"`
-	UnresolvedCount    int                `json:"unresolved_count,omitempty"`
-	CheckpointCount    int                `json:"checkpoint_count,omitempty"`
-	CommitsAhead       int                `json:"commits_ahead,omitempty"`
-	BodyDocument       *TrailBodyDocument `json:"body_document,omitempty"`
+	ID                 string                `json:"id,omitempty"`
+	Number             int                   `json:"number,omitempty"`
+	URL                string                `json:"url,omitempty"`
+	Branch             string                `json:"branch"`
+	OriginalBranch     string                `json:"original_branch,omitempty"`
+	Base               string                `json:"base"`
+	Title              string                `json:"title"`
+	Body               string                `json:"body,omitempty"`
+	Status             string                `json:"status"`
+	Phase              string                `json:"phase,omitempty"`
+	Author             *trail.Author         `json:"author"`
+	Assignees          []string              `json:"assignees"`
+	Labels             []string              `json:"labels,omitempty"`
+	Priority           string                `json:"priority,omitempty"`
+	Type               string                `json:"type,omitempty"`
+	Reviewers          []trail.Reviewer      `json:"reviewers,omitempty"`
+	RequestedReviewers []string              `json:"requested_reviewers,omitempty"`
+	CreatedAt          time.Time             `json:"created_at"`
+	UpdatedAt          time.Time             `json:"updated_at"`
+	MergedAt           *time.Time            `json:"merged_at,omitempty"`
+	CommentCount       int                   `json:"comment_count,omitempty"`
+	UnresolvedCount    int                   `json:"unresolved_count,omitempty"`
+	CheckpointCount    int                   `json:"checkpoint_count,omitempty"`
+	CommitsAhead       int                   `json:"commits_ahead,omitempty"`
+	BodyDocument       *TrailBodyDocument    `json:"body_document,omitempty"`
+	Parent             *TrailParentReference `json:"parent,omitempty"`
+	// Mergeability is served on the detail resource only; list items omit it.
+	// It stays raw so that every detail-route decode (approve, update, resume,
+	// review-target resolution, ...) does not depend on the snapshot's shape;
+	// only `trail show` reads it, through DecodeMergeability.
+	Mergeability json.RawMessage `json:"mergeability,omitempty"`
+	// FromDetail reports that the resource was decoded from the detail route
+	// rather than a list page. It is the reliable marker: body_document can be
+	// absent from a valid detail response.
+	FromDetail bool `json:"-"`
 }
 
 // TrailBodyDocument is the trail's description editor document. TextSnapshot
@@ -56,6 +67,19 @@ type TrailResource struct {
 type TrailBodyDocument struct {
 	TextSnapshot string `json:"text_snapshot"`
 	ETag         string `json:"etag,omitempty"`
+}
+
+// DecodeMergeability decodes the detail resource's mergeability snapshot. It
+// returns nil, nil when the snapshot is absent or null.
+func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
+	if len(r.Mergeability) == 0 || string(r.Mergeability) == "null" {
+		return nil, nil //nolint:nilnil // nil, nil means "no snapshot served"
+	}
+	var m TrailMergeability
+	if err := json.Unmarshal(r.Mergeability, &m); err != nil {
+		return nil, fmt.Errorf("decode trail mergeability: %w", err)
+	}
+	return &m, nil
 }
 
 // ToMetadata converts a TrailResource to display metadata.
@@ -73,6 +97,9 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 	}
 	if m.Labels == nil {
 		m.Labels = []string{}
+	}
+	if r.Parent != nil {
+		m.ProjectTrailURL = strings.TrimSpace(r.Parent.URL)
 	}
 	return m
 }
@@ -197,4 +224,48 @@ type TrailApprovalResponse struct {
 
 type TrailApprovalsResponse struct {
 	Approvals []TrailApproval `json:"approvals"`
+}
+
+// TrailMergeabilityResponse is the full mergeability snapshot the detail
+// resource serves (TrailMergeability, as `trail show` reads it) plus the
+// fields the merge command needs to decide on and explain a bypass.
+type TrailMergeabilityResponse struct {
+	TrailMergeability
+
+	BypassPolicy     string `json:"bypass_policy"`
+	BehindBy         int    `json:"behind_by"`
+	ComparisonStatus string `json:"comparison_status"`
+}
+
+// TrailMergeDetail is the part of GET .../trails/{number} the merge command
+// reads: the mergeability snapshot and the caller's merge actions, both from
+// the same server read.
+type TrailMergeDetail struct {
+	Actions      *TrailActions              `json:"actions"`
+	Mergeability *TrailMergeabilityResponse `json:"mergeability"`
+}
+
+// TrailActions is the detail's per-caller availability of each operation;
+// only the merge operations are decoded. The server revalidates on submit.
+type TrailActions struct {
+	Merge           TrailActionAvailability `json:"merge"`
+	MergeWithBypass TrailActionAvailability `json:"merge_with_bypass"`
+}
+
+// TrailActionAvailability.State is enabled, blocked, or unavailable; Reason
+// says why when it is not enabled.
+type TrailActionAvailability struct {
+	State  string  `json:"state"`
+	Reason *string `json:"reason"`
+}
+
+type TrailMergeRequest struct {
+	ExpectedHeadSha string `json:"expectedHeadSha,omitempty"`
+	Bypass          bool   `json:"bypass,omitempty"`
+}
+
+type TrailMergeResponse struct {
+	OK bool `json:"ok"`
+	// Empty when the merge fast-forwarded or the base was already up to date.
+	MergeCommitSha string `json:"mergeCommitSha"`
 }

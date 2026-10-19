@@ -60,10 +60,14 @@ func grantWiringHandler(t *testing.T, record func(method, path string), deleteFn
 }
 
 // TestGrantRemove_RouteWiring drives the three `<noun> grant remove` commands
-// through cobra and asserts the grantee-form → route selection: a
-// provider:handle grantee resolves then hits the by-provider revoke route,
-// while an account ULID hits the typed-id route directly. The repo cases also
-// pin that a /et/<project>/<repo> ref resolves to the repo ULID the route needs.
+// through cobra and asserts that a grantee resolves and then hits the
+// by-provider revoke route. The repo case also pins that a
+// /et/<project>/<repo> ref resolves to the repo ULID the route needs.
+//
+// There is no by-ULID case because a grantee is a provider-qualified handle and
+// nothing else — see TestGrantRemove_RefusesAULIDGrantee. The typed-id route
+// still exists, but only the remove picker reaches it, with an id it read off a
+// listing rather than one anybody typed.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestGrantRemove_RouteWiring(t *testing.T) {
@@ -82,24 +86,10 @@ func TestGrantRemove_RouteWiring(t *testing.T) {
 			"✓ Revoked github:alice from repo " + wiringRepoPath,
 		},
 		{
-			"repo/by-grantee-id",
-			newRepoGrantCmd,
-			[]string{"remove", wiringRepoPath, wiringGranteeULID},
-			"/api/v1/repos/" + wiringRepoULID + "/grants/account/" + wiringGranteeULID,
-			"",
-		},
-		{
 			"project/by-provider",
 			newProjectGrantCmd,
 			[]string{"remove", wiringProjULID, "github:alice"},
 			"/api/v1/projects/" + wiringProjULID + "/grants/account/github/12345",
-			"",
-		},
-		{
-			"project/by-grantee-id",
-			newProjectGrantCmd,
-			[]string{"remove", wiringProjULID, wiringGranteeULID},
-			"/api/v1/projects/" + wiringProjULID + "/grants/account/" + wiringGranteeULID,
 			"",
 		},
 		{
@@ -144,7 +134,6 @@ func TestGrantRemove_Idempotent(t *testing.T) {
 		args   []string
 	}{
 		{"repo/by-provider", newRepoGrantCmd, []string{"remove", wiringRepoPath, "github:alice"}},
-		{"repo/by-grantee-id", newRepoGrantCmd, []string{"remove", wiringRepoPath, wiringGranteeULID}},
 		{"project/by-provider", newProjectGrantCmd, []string{"remove", wiringProjULID, "github:alice"}},
 		{"org/by-provider", newOrgGrantCmd, []string{"remove", wiringOrgULID, "github:alice"}},
 	}
@@ -221,10 +210,14 @@ func TestGrantAdd_EmptyRoleIsRefusedLocally(t *testing.T) {
 }
 
 // TestGrantAdd_OmittedRequiredRoleIsRefusedLocally pins the other half of the
-// role contract: where --role is required (project and repo), leaving it out
-// fails cobra's required-flag check before RunE runs, so the empty role never
-// reaches validation, a lookup, or the API. That check is what lets the RunE
-// validate only a role the user typed.
+// role contract: where --role has no server default (project and repo), leaving
+// it out without a terminal to prompt on is refused locally, so the empty role
+// never reaches validation, a lookup, or the API.
+//
+// --role is no longer a cobra-required flag, because cobra enforces those
+// before RunE and a role that cannot reach RunE cannot be prompted for. The
+// guarantee moved into the RunE, ahead of every request, which is what this
+// test states; `go test` is non-interactive, so this is the refusing path.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestGrantAdd_OmittedRequiredRoleIsRefusedLocally(t *testing.T) {
@@ -242,7 +235,89 @@ func TestGrantAdd_OmittedRequiredRoleIsRefusedLocally(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := runCoreCmd(t, tc.newCmd, srv.URL, "add", tc.target, "github:alice")
-			require.ErrorContains(t, err, `required flag(s) "role" not set`)
+			require.ErrorContains(t, err, "--role is required: one of reader, writer, admin")
 		})
 	}
+}
+
+// TestGrantRemove_RefusesAULIDGrantee pins that account ULIDs are not part of
+// the interface. They were accepted once; a grantee is a provider-qualified
+// handle now, and an id pasted out of a listing gets the same message as any
+// other unqualified value rather than a route of its own.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestGrantRemove_RefusesAULIDGrantee(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			t.Errorf("revoked by ULID: %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	for name, tc := range map[string]struct {
+		newCmd func() *cobra.Command
+		ref    string
+	}{
+		"org":     {newOrgGrantCmd, wiringOrgULID},
+		"project": {newProjectGrantCmd, wiringProjULID},
+		"repo":    {newRepoGrantCmd, wiringRepoPath},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := runCoreCmd(t, tc.newCmd, srv.URL, "remove", tc.ref, wiringGranteeULID)
+			require.ErrorContains(t, err, "is an account ULID")
+			require.ErrorContains(t, err, "provider-qualified handle")
+		})
+	}
+}
+
+// TestGrantRemove_HelpDoesNotOfferULIDs pins the other half: the form is gone
+// from the help too, so nothing points a user at an argument that no longer
+// works.
+func TestGrantRemove_HelpDoesNotOfferULIDs(t *testing.T) {
+	t.Parallel()
+	for name, newCmd := range map[string]func() *cobra.Command{
+		"org": newOrgGrantCmd, "project": newProjectGrantCmd, "repo": newRepoGrantCmd,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			for _, c := range newCmd().Commands() {
+				if strings.HasPrefix(c.Use, "remove") {
+					// The TARGET is still addressable by ULID on org and
+					// project; it is the GRANTEE that is a handle and nothing
+					// else, so the check is on that clause.
+					require.NotContains(t, c.Long, "account ULID")
+					require.Contains(t, c.Long, "the grantee is a provider-qualified handle")
+				}
+			}
+		})
+	}
+}
+
+// TestGranteeErrorsNeverOfferAULID pins the wording as well as the rule. The
+// split rule is shared with `project create --owner`, which does take a ULID
+// and says so; reusing that message for a grantee offered a form this command
+// refuses. ensureGranteeIsHandle borrows the rule and not the sentence.
+func TestGranteeErrorsNeverOfferAULID(t *testing.T) {
+	t.Parallel()
+	for name, ref := range map[string]string{
+		"unqualified":    "asdasdasd",
+		"empty handle":   "github:",
+		"empty provider": ":alice",
+		"a ULID":         wiringGranteeULID,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := ensureGranteeIsHandle(ref)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "grantee")
+			require.Contains(t, err.Error(), "provider-qualified handle")
+			require.NotContains(t, err.Error(), "ULID)", "no grantee error may offer the ULID form")
+		})
+	}
+
+	// The owner ref is the caller that legitimately takes both, and keeps its
+	// own wording.
+	_, _, err := parseQualifiedHandle("asdasdasd")
+	require.ErrorContains(t, err, "(or a ULID)")
+	require.NoError(t, ensureGranteeIsHandle("github:alice"))
 }

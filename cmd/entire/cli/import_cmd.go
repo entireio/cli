@@ -80,9 +80,10 @@ with --dry-run — in a repository with no resolvable commit.`, imp.AgentType())
 			res, err := agentimport.Run(ctx, repo, imp, agentimport.Options{
 				RepoRoot: repoRoot, OverridePath: pathFlag, SessionFilter: sessions,
 				Now: time.Now(), DryRun: dryRun,
-				LinkCommitSHA: linkCommitSHA,
-				Progress:      progress,
-				ReadRemotes:   strategy.CheckpointReadRemotes(ctx),
+				LinkCommitSHA:   linkCommitSHA,
+				Progress:        progress,
+				ReadRemotes:     strategy.CheckpointReadRemotes(ctx),
+				RemoteRefLister: ListCheckpointRefsOnRemote,
 			})
 			stopProgress(err == nil)
 			if err != nil {

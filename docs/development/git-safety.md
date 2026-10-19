@@ -45,6 +45,18 @@ instead — that is what "we could not find out which repository this is" means.
 Key files: `gitrepo/repository.go` (open entry points) and
 `gitrepo/reftable.go` (`reftableStorer`).
 
+#### Local ref and commit reads
+
+HEAD checkpoint messages and metadata tracking-tip checks use go-git for files-backed worktrees without explicit Git store selectors. Pre-push tracking-ref detection stays native: go-git enumerates every ref before a prefix filter can apply, which is tens of times slower with many loose refs, and one empty loose ref file aborts that enumeration. Open through `gitrepo` and close each owned repository/iterator. Root discovery still uses native Git. Detect reftable before opening its CLI-backed storer and keep these reads as single native commands, rather than expanding one read into multiple adapter subprocesses. Git exports `GIT_DIR` to hooks in linked worktrees; when it names the discovered Git directory (compared by file identity), the reads stay on go-git. A `GIT_DIR` naming any other directory, or any other selector including `GIT_WORK_TREE`, keeps native reads.
+
+`gitrepo.CommitAtReference` reads an exact ref, resolves symbolic refs, and peels nested annotated tags to a commit. It does not parse revision expressions. Missing refs, missing objects, non-commit targets, and context errors are distinct errors; the existing best-effort consumers decide when to treat them as absence.
+
+Keep the native compatibility paths: explicit repository/object-store selectors and reftable storage (`gitrepo.ReadsNeedNativeGit`), repositories the worktree opener cannot handle (including bare repositories), and HEAD/commit reads requiring replace-ref interpretation or promisor-object backfill. Do not replace these with a guessed CWD repository. No migrated read uses status, refreshes the index, or mutates worktree files.
+
+`gitrepo.ReadsNeedNativeGit` gates ref and object reads only. It ignores `GIT_INDEX_FILE`, attributes, and pathspec variables, so a caller that reads any of those must not use it; `read_guard_test.go` lists the approved callers. Its selector list comes from `gitrepo.NativeReadSelectorEnvVars`, which `EnvWithoutRepoOverrides` shares and test isolation is checked against. `ENTIRE_NATIVE_GIT_READS=1` forces every gated read onto native Git, for working around a go-git problem in the field without a release. A go-git failure that falls back to native is logged at debug level.
+
+Both HEAD-message paths return the stored message bytes; the native path trims the terminator `git log --format=%B` appends. They still differ for a commit whose `encoding` header is not UTF-8: `git log` transcodes it and go-git returns raw bytes, so a trailer in such a message is found only natively. This fails closed. The replace-ref probe in `CommitAtReference` costs one `packed-refs` scan per peel step even though replace refs are almost always absent; checking for them once becomes cheap with a prefix iterator and is deferred with the tracking-ref revisit.
+
 #### Reading Worktree Status - Always Use `gitrepo.Status`
 
 **Never call go-git's `worktree.Status()` directly.** Use
@@ -57,8 +69,7 @@ expensive git read on the hook paths. Avoid calling it more than once per hook.
 Do not memoize it either: a context-scoped cache was tried and removed, because
 the write-free window it required cost more to maintain than the walk saved (see
 `git log` on `gitrepo/status.go` for the measurements). The turn-start hook
-currently walks twice — `CapturePrePromptState` and the strategy's prompt
-attribution each read their own status.
+walks once, in `CapturePrePromptState`.
 
 Agent-hook capture paths must use `gitrepo.StatusWithBudget` instead: it bounds
 the walk with a wall-clock budget (`gitrepo.StatusWalkBudget`) because go-git's walk is
@@ -139,19 +150,30 @@ can land between someone's `git add` and their `git commit`. For the writers we
 do not control, the mitigation is `GIT_OPTIONAL_LOCKS=0` in the environment
 (devcontainers: `containerEnv`), which covers every git process in the session.
 
-Related: any git subprocess that can run inside a git hook and names its target
-with `cmd.Dir` or `-C` must also set `cmd.Env = gitrepo.EnvWithoutRepoOverrides()`
-(`gitrepo/env.go`). Git exports `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` to
-hooks and those take precedence over `cmd.Dir`, so a bare `exec.Command`
-silently operates on the hook's repo. Deliberately *not* applied to user-invoked
-commands that act on the current directory (`status`, `doctor`, `review`): there
-a `GIT_DIR` the user exported is an instruction, not contamination.
-
 This exact producer was diagnosed once before (ENT-242, Feb 2026) and lost: the
 fix was closed unmerged on the premise that `git status --porcelain -z` "reads
 without rewriting", which is false, and it would have grown the number of
 index-rewriting call sites from one to eleven. That is why the guard test exists
 rather than a comment.
+
+#### Git Subprocesses in Hooks - Keep the Commit Index
+
+Git subprocesses that target a repository independently of the current hook must
+set `cmd.Env = gitrepo.EnvWithoutRepoOverrides()` (`gitrepo/env.go`). Setting
+`cmd.Dir` or `-C` alone does not override inherited repository selectors.
+
+Queries inspecting the commit Git is preparing must retain the hook environment,
+including `GIT_INDEX_FILE`: `git commit -a` and path-limited commits supply a
+temporary index that can differ from the worktree's ordinary index. Read staged
+paths and their blob IDs together from that commit index (`getStagedChanges`),
+never paths from one index and blobs from go-git's `Storer.Index()`. A query
+that compares per-path state must pass `--no-renames`: rename detection, which
+follows the user's `diff.renames`, reports only a rename's destination and hides
+the staged deletion of its source.
+
+Hook queries reading only the hook's own refs or reflog may strip selectors and
+resolve from `paths.WorktreeRoot`. User-invoked commands acting on the current
+repository also honor the user's repository selectors.
 
 #### go-git v5 Bugs - Use CLI Instead
 
@@ -173,6 +195,12 @@ cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hash.String())
 ```
 
 See `CheckoutBranch()` in `git_operations.go` for an example.
+
+#### Branch-name validation
+
+`cli.ValidateBranchName` uses go-git's `plumbing.ValidateBranchName` for literal names without a subprocess. Do not substitute `ReferenceName.Validate`: branch creation also rejects the shorthand `HEAD` and a leading `-`.
+
+Names containing `@{` retain native `git check-ref-format --branch` interpretation, including repository-dependent checkout history such as `@{-1}`. Validation does not expand the string returned to callers, check that a branch exists, or make checkout safe from pathspec fallback; `CheckoutBranch` must still pass the trailing `--`. Cancellation and deadline expiry are returned as wrapped context errors, not invalid-name errors. Check context state both before validation and after native interpretation, since a killed subprocess can otherwise hide the context cause behind its exit error.
 
 #### Repo Root vs Current Working Directory
 
@@ -234,14 +262,25 @@ caller, so it also covers the exported `New`.
 implementation of that rule: `userdirs.RequireAbsoluteOverride`. A relative
 value resolves against the working directory, so the same environment names a
 different directory in every process — usually one inside whatever repository
-the command ran from. It covers all three trees an override can redirect:
-`pluginParentDir` (`ENTIRE_PLUGIN_DIR`, `XDG_DATA_HOME`, `LOCALAPPDATA` — a
-tree whose `bin` subdirectory `main.go` prepends to `$PATH`), and the config and
-cache directories (`ENTIRE_CONFIG_DIR`, `XDG_CACHE_HOME`), which hold the login
-tokens and the discovery caches. Leaving it to `osroot` (which refuses a
-relative root open) and to `main.go`'s `PATH` restore was not wrong, but each
-backstop answers a question of its own, two layers from where this one is
-decided.
+the command ran from. For Entire's own directories it covers all three trees an
+override can redirect: `pluginParentDir` (`ENTIRE_PLUGIN_DIR`, `XDG_DATA_HOME`,
+`LOCALAPPDATA` — a tree whose `bin` subdirectory `main.go` prepends to `$PATH`),
+and the config and cache directories (`ENTIRE_CONFIG_DIR`, `XDG_CACHE_HOME`),
+which hold the login tokens and the discovery caches. Leaving it to `osroot`
+(which refuses a relative root open) and to `main.go`'s `PATH` restore was not
+wrong, but each backstop answers a question of its own, two layers from where
+this one is decided.
+
+The same rule reaches the agents' own relocation variables through
+`agent.ResolveHome` (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
+`FACTORY_HOME_OVERRIDE`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`),
+for a different reason: nothing of Entire's is protected there, but Entire has
+to agree with where the agent wrote, and a relative value resolves against the
+repo root inside a hook and against the user's cwd in `session resume`. The
+list is static and `ResolveHome` refuses a name missing from it, so the test
+harnesses that scrub it through `agent.RelocationEnvVars()` cannot fall behind
+an agent that starts honoring a new one. Several callers fail open on a refused
+value, so `entire status` names each one (`agent.RefusedRelocationEnvVars`).
 
 Rejecting beats falling through to the platform default: for the config
 directory that default is the developer's REAL `~/.config/entire`, so quietly
@@ -296,21 +335,6 @@ Two rules about *where* the check goes, both learned by getting them wrong:
   about a variable the user had never set. There is nothing for them to fix
   there, and a cwd-relative directory that works beats a hard failure, so the
   distinction is drawn in the one place that still has the information.
-
-**The OPF `command` is the deliberate exception, and stays one.**
-`redaction.openai_privacy_filter.command` becomes `argv[0]` of an
-`exec.CommandContext` in `redact/opf.go` with no `cmd.Dir` and no absoluteness
-check, so `"command": "./tools/opf"` resolves against the pre-push process's
-working directory. That is allowed because the field is not repo-supplied: the
-[OPF ownership gate](checkpoint-implementation.md) honors it only from an untracked, index-and-HEAD-verified
-`.entire/settings.local.json`, so a relative path there is the developer's own
-choice about their own machine, and a bare name is still covered by
-`exec.Command`'s `ErrDot` re-check. The scanners are the opposite case — they
-resolve names nobody chose, out of a `$PATH` the repository can reach — which
-is why the rule is theirs and not this field's. Do not "finish the job" by
-rejecting a relative OPF `command`: it would break the GUI-git-client setups
-the explicit `command` exists to serve, without closing anything the trust gate
-leaves open.
 
 #### Invoking Commands on Windows - Never Put a Dynamic Value on a cmd.exe Line
 

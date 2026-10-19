@@ -10,8 +10,9 @@ import (
 )
 
 // newOrgCmd is the `entire org` command group: create, list, get, and
-// delete organizations on the Entire control plane, plus the `grant` subtree
-// for membership (see grant.go).
+// delete organizations on the Entire control plane, the `grant` subtree for
+// membership (see grant.go), and the `invite` subtree for inviting by email
+// (see org_invite.go).
 func newOrgCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cmdOrg,
@@ -23,6 +24,7 @@ func newOrgCmd() *cobra.Command {
 	cmd.AddCommand(newOrgGetCmd())
 	cmd.AddCommand(newOrgDeleteCmd())
 	cmd.AddCommand(newOrgGrantCmd())
+	cmd.AddCommand(newOrgInviteCmd())
 	return cmd
 }
 
@@ -46,10 +48,11 @@ func newOrgCreateCmd() *cobra.Command {
 				if region != "" {
 					body.Region = coreapi.NewOptString(region)
 				}
-				org, err := c.CreateOrg(ctx, body)
+				created, err := c.CreateOrg(ctx, body)
 				if err != nil {
 					return "", nil, err
 				}
+				org := &created.Response
 				return fmt.Sprintf("✓ Created org %s (%s)", org.Name, org.ID), org, nil
 			})
 		},
@@ -65,23 +68,27 @@ func newOrgListCmd() *cobra.Command {
 		Short: "List organizations you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCoreList(cmd, "No organizations found.", orgColumns, orgRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Org, error) {
-				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Org, string, error) {
-					params := coreapi.ListOrgsParams{}
-					if cursor != "" {
-						params.PageToken = coreapi.NewOptString(cursor)
-					}
-					out, err := c.ListOrgs(ctx, params)
-					if err != nil {
-						return nil, "", err
-					}
-					return out.Response.Orgs, out.Response.NextPageToken.Or(""), nil
-				})
-			})
+			return runCoreList(cmd, "No organizations found.", orgColumns, orgRow, listAllOrgs)
 		},
 	}
 	addJSONFlag(cmd)
 	return cmd
+}
+
+// listAllOrgs walks every page of the caller's org listing. The list is the
+// caller's own orgs, so resolveOrgRef also matches names against it.
+func listAllOrgs(ctx context.Context, c *coreapi.Client) ([]coreapi.Org, error) {
+	return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Org, string, error) {
+		params := coreapi.ListOrgsParams{}
+		if cursor != "" {
+			params.PageToken = coreapi.NewOptString(cursor)
+		}
+		out, err := c.ListOrgs(ctx, params)
+		if err != nil {
+			return nil, "", err
+		}
+		return out.Response.Orgs, out.Response.NextPageToken.Or(""), nil
+	})
 }
 
 func newOrgGetCmd() *cobra.Command {
@@ -114,7 +121,8 @@ func newOrgDeleteCmd() *cobra.Command {
 					return resolveOrgRefResolved(ctx, c, args[0])
 				},
 				func(ctx context.Context, c *coreapi.Client, id string) error {
-					return c.DeleteOrg(ctx, coreapi.DeleteOrgParams{OrgId: id})
+					_, err := c.DeleteOrg(ctx, coreapi.DeleteOrgParams{OrgId: id})
+					return err
 				})
 		},
 	}

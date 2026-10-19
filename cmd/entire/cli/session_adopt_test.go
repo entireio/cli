@@ -64,19 +64,18 @@ func TestSessionAdopt_MovesExternalSessionIntoCurrentWorktree(t *testing.T) {
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
-		TranscriptPath:        transcriptPath,
-		LastPrompt:            "update target file",
-		FilesTouched:          []string{"source-only.txt"},
-		TurnCheckpointIDs:     []string{"abc123def456"},
-		AttachedManually:      true,
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		TranscriptPath:      transcriptPath,
+		LastPrompt:          "update target file",
+		FilesTouched:        []string{"source-only.txt"},
+		TurnCheckpointIDs:   []string{"abc123def456"},
+		AttachedManually:    true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -138,15 +137,14 @@ func TestSessionAdopt_ExternalStoreRetiresSourceSession(t *testing.T) {
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
-		LastPrompt:            "continue work in target repo",
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		LastPrompt:          "continue work in target repo",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -262,15 +260,14 @@ func TestSessionAdopt_ExternalStoreRollsBackTargetWhenSourceRetireFails(t *testi
 	sourceStateDir := filepath.Join(sourceRepo, ".git", session.SessionStateDirName)
 	sourceStore := session.NewStateStoreWithDir(sourceStateDir)
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
-		LastPrompt:            "move this session",
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		LastPrompt:          "move this session",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -282,14 +279,13 @@ func TestSessionAdopt_ExternalStoreRollsBackTargetWhenSourceRetireFails(t *testi
 		t.Fatal(err)
 	}
 	if err := targetStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-10 * time.Minute),
-		Phase:                 session.PhaseIdle,
-		BaseCommit:            testutil.GetHeadHash(t, targetRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, targetRepo),
-		WorktreePath:          targetRepo,
-		LastPrompt:            "preexisting target state",
+		SessionID:    sessionID,
+		AgentType:    agent.AgentTypeClaudeCode,
+		StartedAt:    time.Now().Add(-10 * time.Minute),
+		Phase:        session.PhaseIdle,
+		BaseCommit:   testutil.GetHeadHash(t, targetRepo),
+		WorktreePath: targetRepo,
+		LastPrompt:   "preexisting target state",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -375,15 +371,14 @@ func TestSessionAdopt_ExternalStoreClearsNewTargetWhenSourceRetireFails(t *testi
 	sourceStateDir := filepath.Join(sourceRepo, ".git", session.SessionStateDirName)
 	sourceStore := session.NewStateStoreWithDir(sourceStateDir)
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
-		LastPrompt:            "move this session",
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		LastPrompt:          "move this session",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -456,15 +451,14 @@ func TestSessionAdopt_ClearsSourceOwner(t *testing.T) {
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
-		Owner:                 &proclive.Identity{PID: os.Getpid(), Start: "source-owner"},
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		Owner:               &proclive.Identity{PID: os.Getpid(), Start: "source-owner"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -510,16 +504,15 @@ func TestSessionAdopt_RejectsUnexpectedSourceTranscriptPath(t *testing.T) {
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
-		TranscriptPath:        transcriptPath,
-		LastPrompt:            "update target file",
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		TranscriptPath:      transcriptPath,
+		LastPrompt:          "update target file",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -560,14 +553,13 @@ func TestSessionAdopt_ExternalStoreRejectsSourceEndedAfterInitialSelection(t *te
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -577,15 +569,14 @@ func TestSessionAdopt_ExternalStoreRejectsSourceEndedAfterInitialSelection(t *te
 
 	endedAt := time.Now()
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		EndedAt:               &endedAt,
-		Phase:                 session.PhaseIdle,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		EndedAt:             &endedAt,
+		Phase:               session.PhaseIdle,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -631,14 +622,13 @@ func TestSessionAdopt_ExternalStoreChecksTargetStateAfterLockWait(t *testing.T) 
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -690,14 +680,13 @@ func TestSessionAdopt_ExternalStoreChecksTargetStateAfterLockWait(t *testing.T) 
 	}
 
 	if err := targetStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now(),
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, targetRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, targetRepo),
-		WorktreePath:          targetRepo,
-		LastPrompt:            "concurrent target state",
+		SessionID:    sessionID,
+		AgentType:    agent.AgentTypeClaudeCode,
+		StartedAt:    time.Now(),
+		Phase:        session.PhaseActive,
+		BaseCommit:   testutil.GetHeadHash(t, targetRepo),
+		WorktreePath: targetRepo,
+		LastPrompt:   "concurrent target state",
 	}); err != nil {
 		release()
 		t.Fatal(err)
@@ -747,16 +736,15 @@ func TestSessionAdopt_EnablesPrepareCommitMsgTrailer(t *testing.T) {
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
-		TranscriptPath:        transcriptPath,
-		LastPrompt:            "write feature.go",
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		TranscriptPath:      transcriptPath,
+		LastPrompt:          "write feature.go",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -813,16 +801,15 @@ func TestSessionAdopt_IdleSourceSurvivesPrepareCommitMsgTrailer(t *testing.T) {
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseIdle,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
-		TranscriptPath:        transcriptPath,
-		LastPrompt:            "write idle.go",
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseIdle,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		TranscriptPath:      transcriptPath,
+		LastPrompt:          "write idle.go",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -883,15 +870,14 @@ func TestSessionAdopt_RejectsEndedAtSourceSession(t *testing.T) {
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		AgentType:             agent.AgentTypeClaudeCode,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		EndedAt:               &endedAt,
-		Phase:                 session.PhaseIdle,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		EndedAt:             &endedAt,
+		Phase:               session.PhaseIdle,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -950,7 +936,6 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 		LastInteractionTime:         &lastInteraction,
 		Phase:                       session.PhaseActive,
 		BaseCommit:                  testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit:       testutil.GetHeadHash(t, sourceRepo),
 		WorktreePath:                sourceRepo,
 		TranscriptPath:              transcriptPath,
 		LastPrompt:                  "write target feature",
@@ -971,7 +956,6 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 			CheckpointID:    id.MustCheckpointID("fedcba987654"),
 			RecoveryPending: true,
 		},
-		LastCheckpointCommitHash: "source-commit",
 		CheckpointTokenUsage:     &agent.TokenUsage{InputTokens: 100, OutputTokens: 25, APICallCount: 1},
 		UntrackedFilesAtStart:    []string{"source-only.txt"},
 		PromptWindowBase:         3,
@@ -1050,11 +1034,13 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 	if adopted.CondensationAttempt != nil {
 		t.Fatalf("CondensationAttempt = %#v, want nil", adopted.CondensationAttempt)
 	}
-	if adopted.LastCheckpointCommitHash != "" {
-		t.Fatalf("LastCheckpointCommitHash = %q, want empty", adopted.LastCheckpointCommitHash)
+	// Token accounting continues from the source's last checkpoint: the
+	// retired source never condenses its pending tokens, so the target does.
+	if adopted.CheckpointTokenUsage == nil || adopted.CheckpointTokenUsage.InputTokens != 100 || adopted.CheckpointTokenUsage.OutputTokens != 25 {
+		t.Fatalf("CheckpointTokenUsage = %#v, want the source's pending 100/25", adopted.CheckpointTokenUsage)
 	}
-	if adopted.CheckpointTokenUsage != nil {
-		t.Fatalf("CheckpointTokenUsage = %#v, want nil for first target checkpoint", adopted.CheckpointTokenUsage)
+	if adopted.TokenStart() != 2 {
+		t.Fatalf("TokenStart = %d, want the source's 2 so checkpointed turns are not recounted", adopted.TokenStart())
 	}
 
 	commitMsgFile := filepath.Join(targetRepo, "COMMIT_EDITMSG")
@@ -1088,7 +1074,7 @@ func TestSessionAdopt_ClearsLegacyTranscriptOffsets(t *testing.T) {
 		CheckpointTranscriptStart: 9,
 		CondensedTranscriptLines:  9, //nolint:staticcheck // legacy field, asserted so migration keeps working
 		TranscriptLinesAtStart:    9, //nolint:staticcheck // legacy field, asserted so migration keeps working
-	})
+	}, adoptAgentHome{}, "")
 	if err != nil {
 		t.Fatalf("buildAdoptedSessionState failed: %v", err)
 	}
@@ -1108,23 +1094,23 @@ func TestSessionAdopt_ClearsLegacyTranscriptOffsets(t *testing.T) {
 	}
 }
 
-// TestSessionAdopt_RebaselinesSubagentTokens pins finding 019f5ebf-dc42: cross-repo
-// adoption opens a fresh target-local checkpoint window (StepCount=0,
-// CheckpointTokenUsage=nil), but the cloned TokenUsage carries the SOURCE
-// session's full cumulative subagent total. If SubagentTokensBaseline is not
-// re-baselined to that cumulative, the first post-adopt checkpoint subtracts a
-// stale/nil baseline and over-reports the source session's subagent usage.
-func TestSessionAdopt_RebaselinesSubagentTokens(t *testing.T) {
+// TestSessionAdopt_KeepsSourceSubagentBaseline: adoption retires the source
+// session, which never condenses again, so subagent tokens it used after its
+// last checkpoint must be counted by the first adopted checkpoint. The adopted
+// state keeps the source's baseline (its last checkpoint) rather than
+// re-baselining to the current cumulative, which would drop them.
+func TestSessionAdopt_KeepsSourceSubagentBaseline(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		sourceBaseline *agent.TokenUsage
+		wantIn         int
+		wantOut        int
 	}{
-		// Source never condensed: baseline is nil, so the first adopted
-		// checkpoint would report the entire cumulative subagent total.
-		{name: "never-condensed-source", sourceBaseline: nil},
-		// Source condensed at an earlier window: its baseline is stale relative
-		// to the current cumulative and must not carry into the target window.
-		{name: "previously-condensed-source", sourceBaseline: &agent.TokenUsage{InputTokens: 200, OutputTokens: 100, APICallCount: 2}},
+		// Source never condensed: no subagent tokens are checkpointed yet, so
+		// the first adopted checkpoint counts all of them.
+		{name: "never-condensed-source", sourceBaseline: nil, wantIn: 500, wantOut: 250},
+		// Source condensed earlier: only growth since that checkpoint counts.
+		{name: "previously-condensed-source", sourceBaseline: &agent.TokenUsage{InputTokens: 200, OutputTokens: 100, APICallCount: 2}, wantIn: 300, wantOut: 150},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			targetRepo := setupAdoptRepo(t)
@@ -1145,24 +1131,14 @@ func TestSessionAdopt_RebaselinesSubagentTokens(t *testing.T) {
 					SubagentTokens: &agent.TokenUsage{InputTokens: 500, OutputTokens: 250, APICallCount: 5},
 				},
 				SubagentTokensBaseline: tc.sourceBaseline,
-			})
+			}, adoptAgentHome{}, "")
 			if err != nil {
 				t.Fatalf("buildAdoptedSessionState failed: %v", err)
 			}
 
-			if adopted.SubagentTokensBaseline == nil {
-				t.Fatal("adopted SubagentTokensBaseline = nil, want re-baselined to the cumulative subagent total")
-			}
-			if adopted.SubagentTokensBaseline.InputTokens != 500 || adopted.SubagentTokensBaseline.OutputTokens != 250 {
-				t.Fatalf("adopted SubagentTokensBaseline = %#v, want cumulative subagent total 500/250",
-					adopted.SubagentTokensBaseline)
-			}
-
-			// The first post-adopt checkpoint delta (cumulative - baseline) must be
-			// zero: adoption should count only target-side subagent growth.
 			delta := types.SubtractTokenUsage(adopted.TokenUsage.SubagentTokens, adopted.SubagentTokensBaseline)
-			if delta.InputTokens != 0 || delta.OutputTokens != 0 || delta.APICallCount != 0 {
-				t.Fatalf("first post-adopt subagent delta = %#v, want zero", delta)
+			if delta.InputTokens != tc.wantIn || delta.OutputTokens != tc.wantOut {
+				t.Fatalf("first post-adopt subagent delta = %#v, want %d/%d", delta, tc.wantIn, tc.wantOut)
 			}
 		})
 	}
@@ -1198,7 +1174,7 @@ func TestSessionAdopt_PreservesReviewAndInvestigateMetadata(t *testing.T) {
 				PromptWindowBase:  3,
 				SessionTurnCount:  7,
 				AttachedManually:  true,
-			})
+			}, adoptAgentHome{}, "")
 			if err != nil {
 				t.Fatalf("buildAdoptedSessionState failed: %v", err)
 			}
@@ -1234,6 +1210,13 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 		TurnCheckpointIDs:     []string{"source-checkpoint"},
 		UntrackedFilesAtStart: []string{"untracked.txt"},
 		FilesTouched:          []string{"source.txt"},
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID:              "toolu_1",
+			DeclaredTranscriptPath: "source.jsonl",
+			Files:                  []string{"task.txt"},
+			TokenUsage:             &agent.TokenUsage{InputTokens: 5},
+		}},
+		SubagentInventory: []session.SubagentInventoryEntry{{AgentID: "child", ObservedTurnIDs: []string{"turn-1"}}},
 		TokenUsage: &agent.TokenUsage{
 			InputTokens: 1,
 			SubagentTokens: &agent.TokenUsage{
@@ -1249,16 +1232,6 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 				Native: map[string]string{"tool": "skill"},
 			},
 		},
-		PromptAttributions: []session.PromptAttribution{
-			{
-				UserAddedPerFile:   map[string]int{"source.txt": 1},
-				UserRemovedPerFile: map[string]int{"source.txt": 2},
-			},
-		},
-		PendingPromptAttribution: &session.PromptAttribution{
-			UserAddedPerFile:   map[string]int{"pending.txt": 3},
-			UserRemovedPerFile: map[string]int{"pending.txt": 4},
-		},
 	}
 
 	adopted := cloneAdoptSourceState(source)
@@ -1267,14 +1240,14 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 	adopted.ReviewSkills[0] = "/changed"
 	adopted.TurnCheckpointIDs[0] = "changed-checkpoint"
 	adopted.UntrackedFilesAtStart[0] = "changed-untracked.txt"
+	adopted.TaskRecords[0].DeclaredTranscriptPath = ""
+	adopted.TaskRecords[0].Files[0] = "changed-task.txt"
+	adopted.TaskRecords[0].TokenUsage.InputTokens = 99
+	adopted.SubagentInventory[0].ObservedTurnIDs[0] = "changed-turn"
 	adopted.FilesTouched[0] = "changed-source.txt"
 	adopted.TokenUsage.SubagentTokens.OutputTokens = 99
 	adopted.SkillEvents[0].TranscriptAnchor.EntryIDs[0] = "changed-entry"
 	adopted.SkillEvents[0].Native["tool"] = "changed-skill"
-	adopted.PromptAttributions[0].UserAddedPerFile["source.txt"] = 99
-	adopted.PromptAttributions[0].UserRemovedPerFile["source.txt"] = 99
-	adopted.PendingPromptAttribution.UserAddedPerFile["pending.txt"] = 99
-	adopted.PendingPromptAttribution.UserRemovedPerFile["pending.txt"] = 99
 
 	if !source.EndedAt.Equal(endedAt) {
 		t.Fatalf("source EndedAt was mutated: %v", source.EndedAt)
@@ -1294,6 +1267,13 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 	if source.FilesTouched[0] != "source.txt" {
 		t.Fatalf("source FilesTouched = %v, want unchanged", source.FilesTouched)
 	}
+	if record := source.TaskRecords[0]; record.DeclaredTranscriptPath != "source.jsonl" ||
+		record.Files[0] != "task.txt" || record.TokenUsage.InputTokens != 5 {
+		t.Fatalf("source TaskRecords = %+v, want unchanged", source.TaskRecords)
+	}
+	if source.SubagentInventory[0].ObservedTurnIDs[0] != "turn-1" {
+		t.Fatalf("source SubagentInventory = %+v, want unchanged", source.SubagentInventory)
+	}
 	if source.TokenUsage.SubagentTokens.OutputTokens != 2 {
 		t.Fatalf("source TokenUsage.SubagentTokens.OutputTokens = %d, want unchanged", source.TokenUsage.SubagentTokens.OutputTokens)
 	}
@@ -1302,18 +1282,6 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 	}
 	if source.SkillEvents[0].Native["tool"] != "skill" {
 		t.Fatalf("source SkillEvents native = %v, want unchanged", source.SkillEvents[0].Native)
-	}
-	if source.PromptAttributions[0].UserAddedPerFile["source.txt"] != 1 {
-		t.Fatalf("source PromptAttributions user added = %v, want unchanged", source.PromptAttributions[0].UserAddedPerFile)
-	}
-	if source.PromptAttributions[0].UserRemovedPerFile["source.txt"] != 2 {
-		t.Fatalf("source PromptAttributions user removed = %v, want unchanged", source.PromptAttributions[0].UserRemovedPerFile)
-	}
-	if source.PendingPromptAttribution.UserAddedPerFile["pending.txt"] != 3 {
-		t.Fatalf("source PendingPromptAttribution user added = %v, want unchanged", source.PendingPromptAttribution.UserAddedPerFile)
-	}
-	if source.PendingPromptAttribution.UserRemovedPerFile["pending.txt"] != 4 {
-		t.Fatalf("source PendingPromptAttribution user removed = %v, want unchanged", source.PendingPromptAttribution.UserRemovedPerFile)
 	}
 }
 
@@ -1685,7 +1653,6 @@ func TestSessionAdopt_MovesSameStoreSessionIntoCurrentWorktree(t *testing.T) {
 		StepCount:                 4,
 		CheckpointTranscriptStart: 2,
 		LastCheckpointID:          id.MustCheckpointID("abc123def456"),
-		LastCheckpointCommitHash:  "source-commit",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1742,9 +1709,6 @@ func TestSessionAdopt_MovesSameStoreSessionIntoCurrentWorktree(t *testing.T) {
 	}
 	if !loaded.LastCheckpointID.IsEmpty() {
 		t.Fatalf("LastCheckpointID = %s, want empty target-local checkpoint ID", loaded.LastCheckpointID.String())
-	}
-	if loaded.LastCheckpointCommitHash != "" {
-		t.Fatalf("LastCheckpointCommitHash = %q, want empty target-local commit hash", loaded.LastCheckpointCommitHash)
 	}
 
 	commitMsgFile := filepath.Join(targetWorktree, "COMMIT_EDITMSG")

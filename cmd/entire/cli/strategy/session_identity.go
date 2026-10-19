@@ -36,8 +36,33 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 		return nil, err
 	}
 	sessions, ambiguous := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
-	if guest := s.findSessionByCommitAncestry(ctx, allStates); guest != nil && !linkingSetContains(sessions, guest.SessionID) {
+	guest := s.findSessionByCommitAncestry(ctx, allStates)
+	if guest != nil && !linkingSetContains(sessions, guest.SessionID) {
 		sessions = append(sessions, guest)
+	}
+	// A session homed elsewhere that recorded edits here, matched by the
+	// sibling fallback rather than identified as the committer, is held to
+	// those edits like one that joins below.
+	for _, state := range sessions {
+		if (guest == nil || state.SessionID != guest.SessionID) && hasWorktreeEntry(ctx, state, worktreePath) {
+			state.LinkedByWorktreeEntry = true
+		}
+	}
+	// A session that edited this worktree from elsewhere (an agent launched
+	// in another worktree writing here by path) recorded those edits for it;
+	// it may link this commit, but only one containing them.
+	for _, state := range allStates {
+		if state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" || linkingSetContains(sessions, state.SessionID) {
+			continue
+		}
+		if hasWorktreeEntry(ctx, state, worktreePath) {
+			state.LinkedByWorktreeEntry = true
+			sessions = append(sessions, state)
+		}
+	}
+	// Every session judges this commit by what it recorded for this worktree.
+	for _, state := range sessions {
+		enterWorktreeView(ctx, state, worktreePath)
 	}
 	if ambiguous && len(sessions) == 0 && !isGitSequenceOperation(ctx) {
 		fmt.Fprintln(stderrWriter,
@@ -153,14 +178,32 @@ func isNearerOwner(depth, bestDepth int, state, best *SessionState) bool {
 
 // isSessionHomeWorktree reports whether worktreePath — the commit's worktree,
 // already resolved by the hook entry point — is the one the session is
-// recorded in. Worktree-coupled state (BaseCommit, shadow-branch content and
-// deletion) may only be mutated from the session's home worktree; a
+// recorded in. Worktree-coupled state (BaseCommit, pending files and their
+// recorded hashes) may only be mutated from the session's home worktree; a
 // guest-linked commit elsewhere condenses and links without moving it. A
 // pure comparison by design: an earlier version re-resolved the worktree
 // here and read resolution failure as "home", which would have mutated a
 // guest session's state in exactly the way the gate exists to prevent.
 func isSessionHomeWorktree(worktreePath string, state *SessionState) bool {
 	return worktreePath != "" && state.WorktreePath != "" && filepath.Clean(state.WorktreePath) == filepath.Clean(worktreePath)
+}
+
+// committedAtHome is isSessionHomeWorktree for a commit hook that has also
+// checked the session's home marker (homeAt): a worktree git re-added at the
+// recorded path after removing the home is not it (State.HomeNotHere).
+func committedAtHome(repoDir string, state *SessionState) bool {
+	return !state.HomeNotHere && isSessionHomeWorktree(repoDir, state)
+}
+
+// hookInSessionHome is isSessionHomeWorktree for an agent hook running in
+// worktreeRoot: a turn can end in another worktree of the repository (the
+// agent resumed there). Such a turn still records its own changes and tokens,
+// but nothing that reads the worktree to update what the session did at home:
+// that tree's absence of the home's untracked files is not a deletion, and its
+// HEAD and branch are not the session's. A state with no recorded worktree
+// (written before WorktreePath existed) counts as home, as before.
+func hookInSessionHome(worktreeRoot string, state *SessionState) bool {
+	return state.WorktreePath == "" || isSessionHomeWorktree(worktreeRoot, state)
 }
 
 func interactedAfter(a, b *SessionState) bool {

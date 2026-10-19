@@ -576,7 +576,7 @@ func TestExtractSessionDataFromLiveTranscript_IncludesScopedSubagentTokens(t *te
 	}
 	s := &ManualCommitStrategy{}
 	writeSubagent(200, 20)
-	first, err := s.extractSessionDataFromLiveTranscript(t.Context(), state)
+	first, err := s.extractSessionData(t.Context(), mustAgent(t, state.AgentType), state)
 	require.NoError(t, err)
 	require.NotNil(t, first.TokenUsage)
 	require.NotNil(t, first.TokenUsage.SubagentTokens, "the production live extractor must wire in subagent usage")
@@ -585,7 +585,7 @@ func TestExtractSessionDataFromLiveTranscript_IncludesScopedSubagentTokens(t *te
 	state.RebaselineSubagentTokens()
 	state.CheckpointTranscriptStart = 1
 	writeSubagent(260, 35)
-	second, err := s.extractSessionDataFromLiveTranscript(t.Context(), state)
+	second, err := s.extractSessionData(t.Context(), mustAgent(t, state.AgentType), state)
 	require.NoError(t, err)
 	require.NotNil(t, second.TokenUsage)
 	require.NotNil(t, second.TokenUsage.SubagentTokens)

@@ -343,7 +343,6 @@ func TestCommandGroupsRejectUnknownSubcommands(t *testing.T) {
 	groups := map[string]func() *cobra.Command{
 		"auth":            newAuthCmd,
 		"repo":            newRepoCmd,
-		"repo access":     newRepoAccessCmd,
 		"repo grant":      newRepoGrantCmd,
 		"repo mirror":     newRepoMirrorCmd,
 		"repo protection": newRepoProtectionCmd,

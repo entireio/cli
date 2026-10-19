@@ -1,12 +1,14 @@
 package checkpoint
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -44,7 +46,7 @@ func padPastCacheThreshold(t *testing.T, content string) string {
 }
 
 // writeCacheEntry persists a hand-built entry so tests can simulate a stale or
-// damaged record. storePrefix always stamps the current fingerprint, so it
+// damaged record. storePrefixBytes always stamps the current fingerprint, so it
 // cannot express these cases.
 func writeCacheEntry(t *testing.T, cache *redactCache, treePath string, entry redactPrefixEntry) {
 	t.Helper()
@@ -65,20 +67,18 @@ func newTestRepoForCache(t *testing.T) (*git.Repository, string) {
 	return repo, dir
 }
 
-// writeAndRedact runs the production blob path and returns the redacted bytes
-// that were stored.
-func writeAndRedact(t *testing.T, repo *git.Repository, cache *redactCache, dir, name, content string) []byte {
+// writeAndRedact runs the incremental pipeline RedactTranscriptCached uses —
+// redactIncrementally, then storePrefixBytes when it asks — against cache under
+// key name, and returns the redacted bytes.
+func writeAndRedact(t *testing.T, cache *redactCache, name, content string) []byte {
 	t.Helper()
-	path := filepath.Join(dir, name)
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
-	root, err := os.OpenRoot(dir)
+	ctx := context.Background()
+	res, err := redactIncrementally(ctx, cache, []byte(content), name, testRedactor)
 	require.NoError(t, err)
-	defer root.Close()
-	hash, _, err := createRedactedBlobFromFile(context.Background(), repo, cache, root, name, name)
-	require.NoError(t, err)
-	got, err := readBlobBytes(repo, hash, 0)
-	require.NoError(t, err)
-	return got
+	if res.StorePrefix {
+		cache.storePrefixBytes(ctx, name, res.SourceHash, len(content), res.Redacted)
+	}
+	return res.Redacted
 }
 
 // TestIncrementalRedaction_MatchesFullRedaction is the correctness core: growing
@@ -86,20 +86,20 @@ func writeAndRedact(t *testing.T, repo *git.Repository, cache *redactCache, dir,
 // file in one pass produces.
 func TestIncrementalRedaction_MatchesFullRedaction(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 	require.NotNil(t, cache)
 
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
 
 	// First checkpoint: nothing cached, full redaction, primes the cache.
-	first := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	first := writeAndRedact(t, cache, "full.jsonl", content)
 	require.NotNil(t, cache.load("full.jsonl"), "first write should prime the cache")
 
 	// Append and re-checkpoint several times, as a session does.
 	for round := 1; round <= 4; round++ {
 		content += transcriptLines(round*10_000, 50)
-		got := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+		got := writeAndRedact(t, cache, "full.jsonl", content)
 
 		want, wantErr := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
 		require.NoError(t, wantErr)
@@ -114,11 +114,11 @@ func TestIncrementalRedaction_MatchesFullRedaction(t *testing.T) {
 // store stale content, so it must redact everything again.
 func TestIncrementalRedaction_RewrittenPrefixFallsBack(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
-	writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	writeAndRedact(t, cache, "full.jsonl", content)
 
 	// Rewrite the beginning while keeping the length identical, so only the hash
 	// check can catch it.
@@ -127,7 +127,7 @@ func TestIncrementalRedaction_RewrittenPrefixFallsBack(t *testing.T) {
 	copy(rewritten, marker)
 	rewritten = append(rewritten, []byte(transcriptLines(9_999, 5))...)
 
-	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", string(rewritten))
+	got := writeAndRedact(t, cache, "full.jsonl", string(rewritten))
 	want, wantErr := RedactBlobBytes(context.Background(), rewritten, "full.jsonl", false)
 	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got),
@@ -138,11 +138,11 @@ func TestIncrementalRedaction_RewrittenPrefixFallsBack(t *testing.T) {
 // under different rules is never spliced into a new result.
 func TestIncrementalRedaction_FingerprintMismatchFallsBack(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
-	writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	writeAndRedact(t, cache, "full.jsonl", content)
 
 	entry := cache.load("full.jsonl")
 	require.NotNil(t, entry)
@@ -151,7 +151,7 @@ func TestIncrementalRedaction_FingerprintMismatchFallsBack(t *testing.T) {
 	writeCacheEntry(t, cache, "full.jsonl", stale)
 
 	content += transcriptLines(500, 20)
-	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	got := writeAndRedact(t, cache, "full.jsonl", content)
 	want, wantErr := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
 	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got))
@@ -162,13 +162,13 @@ func TestIncrementalRedaction_FingerprintMismatchFallsBack(t *testing.T) {
 // partial final line still redacts correctly.
 func TestIncrementalRedaction_PartialTrailingLineNotCached(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
 	partial := content + `{"i":999,"text":"half written sk-live-999abcdefghij`
 
-	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", partial)
+	got := writeAndRedact(t, cache, "full.jsonl", partial)
 	want, wantErr := RedactBlobBytes(context.Background(), []byte(partial), "full.jsonl", false)
 	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got))
@@ -180,12 +180,12 @@ func TestIncrementalRedaction_PartialTrailingLineNotCached(t *testing.T) {
 // fires with no new transcript lines.
 func TestIncrementalRedaction_UnchangedContentReusesPrefix(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
-	first := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
-	second := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	first := writeAndRedact(t, cache, "full.jsonl", content)
+	second := writeAndRedact(t, cache, "full.jsonl", content)
 	require.Equal(t, string(first), string(second))
 }
 
@@ -193,16 +193,16 @@ func TestIncrementalRedaction_UnchangedContentReusesPrefix(t *testing.T) {
 // path narrow: only a large full.jsonl takes it.
 func TestIncrementalRedaction_SkippedUnlessLargeSessionTranscript(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 	ctx := context.Background()
 
 	small := transcriptLines(0, 5)
-	writeAndRedact(t, repo, cache, dir, "full.jsonl", small)
+	writeAndRedact(t, cache, "full.jsonl", small)
 	require.Nil(t, cache.load("full.jsonl"), "small files should not be cached")
 
 	big := padPastCacheThreshold(t, transcriptLines(0, 100))
-	writeAndRedact(t, repo, cache, dir, "other.jsonl", big)
+	writeAndRedact(t, cache, "other.jsonl", big)
 	require.Nil(t, cache.load("other.jsonl"),
 		"only the session transcript filename is cached, not any .jsonl")
 
@@ -215,7 +215,7 @@ func TestIncrementalRedaction_SkippedUnlessLargeSessionTranscript(t *testing.T) 
 	// A nil cache disables reuse but must still return a correct full redaction:
 	// the whole-content fallback lives inside redactIncrementally so both callers
 	// cannot spell it differently.
-	noCacheResult, noCacheErr := redactIncrementally(ctx, repo, nil, []byte(big), "full.jsonl", testRedactor)
+	noCacheResult, noCacheErr := redactIncrementally(ctx, nil, []byte(big), "full.jsonl", testRedactor)
 	require.NoError(t, noCacheErr)
 	require.False(t, noCacheResult.StorePrefix, "a nil cache must not record a prefix")
 	want, wantErr := RedactBlobBytes(ctx, []byte(big), "full.jsonl", false)
@@ -239,44 +239,204 @@ func testRedactor(ctx context.Context, b []byte) ([]byte, error) {
 // full redaction rather than failing the checkpoint.
 func TestRedactCache_IgnoresCorruptEntry(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
-	writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	writeAndRedact(t, cache, "full.jsonl", content)
 
 	require.NoError(t, osroot.WriteFile(cache.root, cache.entryName("full.jsonl"), []byte("{not json"), 0o600))
 	require.Nil(t, cache.load("full.jsonl"))
 
 	content += transcriptLines(700, 10)
-	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	got := writeAndRedact(t, cache, "full.jsonl", content)
 	want, wantErr := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
 	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got))
 }
 
-// TestRedactCache_MissingBlobFallsBack covers a cache entry pointing at an object
-// that is no longer reachable (pruned, or a different clone).
-func TestRedactCache_MissingBlobFallsBack(t *testing.T) {
+// TestRedactCache_MissingPrefixFileFallsBack covers a cache entry pointing at a
+// prefix file that no longer exists.
+func TestRedactCache_MissingPrefixFileFallsBack(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
-	writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	writeAndRedact(t, cache, "full.jsonl", content)
 
 	entry := cache.load("full.jsonl")
 	require.NotNil(t, entry)
 	broken := *entry
-	missing := sha256.Sum256([]byte("no such blob"))
-	broken.RedactedBlob = hex.EncodeToString(missing[:])[:40]
+	broken.RedactedFile = "no-such-prefix.prefix"
 	writeCacheEntry(t, cache, "full.jsonl", broken)
 
 	content += transcriptLines(800, 10)
-	got := writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	got := writeAndRedact(t, cache, "full.jsonl", content)
 	want, wantErr := RedactBlobBytes(context.Background(), []byte(content), "full.jsonl", false)
 	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(got))
+}
+
+// errStopStore stands in for whatever stopped a store before its entry landed.
+var errStopStore = errors.New("store stopped before its entry")
+
+// storeStoppingBeforeEntry runs one checkpoint whose cache store stops between
+// its payload write and its entry write. stop runs in place of the entry write:
+// returning an error is a failed write, panicking is a process killed between
+// the two, so nothing after the payload write runs.
+func storeStoppingBeforeEntry(t *testing.T, cache *redactCache, key, content string, stop func() error) {
+	t.Helper()
+	original := writeCacheFile
+	defer func() { writeCacheFile = original }()
+
+	var payloadWritten, entryReached bool
+	writeCacheFile = func(root *os.Root, name string, data []byte, perm fs.FileMode) error {
+		if name == cache.entryName(key) {
+			entryReached = true
+			return stop()
+		}
+		if err := original(root, name, data, perm); err != nil {
+			return err
+		}
+		payloadWritten = true
+		return nil
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if err, ok := r.(error); !ok || !errors.Is(err, errStopStore) {
+					panic(r)
+				}
+			}
+		}()
+		writeAndRedact(t, cache, key, content)
+	}()
+	require.True(t, payloadWritten, "the store must write its payload before stopping, or this covers nothing")
+	require.True(t, entryReached, "the store never reached its entry write")
+}
+
+// requireReusesIntactPrefix runs the checkpoint after a store that stopped
+// early. It must match a full redaction and still reuse the last complete
+// prefix, which covered reusedBytes of the source.
+func requireReusesIntactPrefix(t *testing.T, cache *redactCache, key, content string, reusedBytes int) {
+	t.Helper()
+	ctx := context.Background()
+	var sawBytes int
+	res, err := redactIncrementally(ctx, cache, []byte(content), key, func(ctx context.Context, b []byte) ([]byte, error) {
+		sawBytes += len(b)
+		return testRedactor(ctx, b)
+	})
+	require.NoError(t, err)
+	want, err := RedactBlobBytes(ctx, []byte(content), key, false)
+	require.NoError(t, err)
+	require.Equal(t, string(want), string(res.Redacted),
+		"a store that stopped before its entry must not pair the previous entry with a newer payload")
+	require.Equal(t, len(content)-reusedBytes, sawBytes, "the last complete prefix must still be reused")
+}
+
+// TestRedactCache_FailedEntryWriteKeepsPrefixIntact: a store whose entry write
+// fails must leave the previous entry and its payload usable together.
+func TestRedactCache_FailedEntryWriteKeepsPrefixIntact(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
+	_, dir := newTestRepoForCache(t)
+	cache := newRedactCache(filepath.Join(dir, ".git"))
+	const key = "full.jsonl"
+
+	content := padPastCacheThreshold(t, transcriptLines(0, 100))
+	writeAndRedact(t, cache, key, content)
+
+	grown := content + transcriptLines(10_000, 50)
+	storeStoppingBeforeEntry(t, cache, key, grown, func() error { return errStopStore })
+
+	requireReusesIntactPrefix(t, cache, key, grown+transcriptLines(20_000, 50), len(content))
+}
+
+// TestRedactCache_InterruptedStoreKeepsPrefixIntact is the same guarantee for a
+// process killed between the payload and entry writes.
+func TestRedactCache_InterruptedStoreKeepsPrefixIntact(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
+	_, dir := newTestRepoForCache(t)
+	cache := newRedactCache(filepath.Join(dir, ".git"))
+	const key = "full.jsonl"
+
+	content := padPastCacheThreshold(t, transcriptLines(0, 100))
+	writeAndRedact(t, cache, key, content)
+
+	grown := content + transcriptLines(10_000, 50)
+	storeStoppingBeforeEntry(t, cache, key, grown, func() error { panic(errStopStore) })
+
+	requireReusesIntactPrefix(t, cache, key, grown+transcriptLines(20_000, 50), len(content))
+}
+
+// TestRedactCache_ShortPayloadFallsBack covers a payload shorter than its entry
+// recorded. Cache writes do not fsync, so a power loss can leave one empty or
+// cut short, and reusing it would drop the lines it no longer holds.
+func TestRedactCache_ShortPayloadFallsBack(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
+	_, dir := newTestRepoForCache(t)
+	cache := newRedactCache(filepath.Join(dir, ".git"))
+	ctx := context.Background()
+	const key = "full.jsonl"
+
+	content := padPastCacheThreshold(t, transcriptLines(0, 100))
+	writeAndRedact(t, cache, key, content)
+	entry := cache.load(key)
+	require.NotNil(t, entry)
+	payload := cache.name + "/" + entry.RedactedFile
+	full, err := osroot.ReadFile(cache.root, payload)
+	require.NoError(t, err)
+
+	grown := content + transcriptLines(30_000, 20)
+	want, err := RedactBlobBytes(ctx, []byte(grown), key, false)
+	require.NoError(t, err)
+
+	// A cut at a line boundary passes the newline check on its own.
+	firstLine := full[:bytes.IndexByte(full, '\n')+1]
+	for _, short := range [][]byte{nil, firstLine} {
+		require.NoError(t, osroot.WriteFile(cache.root, payload, short, 0o600))
+		res, err := redactIncrementally(ctx, cache, []byte(grown), key, testRedactor)
+		require.NoError(t, err)
+		require.Equal(t, string(want), string(res.Redacted),
+			"a %d-byte payload under an entry for %d bytes must not be reused", len(short), len(full))
+	}
+}
+
+// TestRedactCache_KeepsOnePayloadPerKey: every store writes a new payload file,
+// so it must remove the key's others: the one the previous entry named, an
+// orphan from a store that stopped before its entry, and the fixed-name file
+// older CLIs wrote. Another key's payload stays.
+func TestRedactCache_KeepsOnePayloadPerKey(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
+	_, dir := newTestRepoForCache(t)
+	cache := newRedactCache(filepath.Join(dir, ".git"))
+	const key = "full.jsonl"
+
+	keyHash := strings.TrimSuffix(path.Base(cache.entryName(key)), ".json")
+	otherHash := strings.TrimSuffix(path.Base(cache.entryName("other/full.jsonl")), ".json")
+	otherPayload := otherHash + "-kept.prefix"
+	for _, name := range []string{keyHash + ".prefix", keyHash + "-orphan.prefix", otherPayload} {
+		require.NoError(t, osroot.WriteFile(cache.root, cache.name+"/"+name, []byte("stale\n"), 0o600))
+	}
+
+	content := padPastCacheThreshold(t, transcriptLines(0, 100))
+	for round := range 3 {
+		content += transcriptLines(round*10_000, 20)
+		writeAndRedact(t, cache, key, content)
+	}
+
+	entry := cache.load(key)
+	require.NotNil(t, entry)
+	files, err := osroot.ReadDir(cache.root, cache.name)
+	require.NoError(t, err)
+	var payloads []string
+	for _, f := range files {
+		if strings.HasSuffix(f.Name(), ".prefix") {
+			payloads = append(payloads, f.Name())
+		}
+	}
+	require.ElementsMatch(t, []string{entry.RedactedFile, otherPayload}, payloads)
 }
 
 // openCodeExport builds an OpenCode-shaped transcript: a single JSON object
@@ -320,7 +480,7 @@ func openCodeExport(t *testing.T, minBytes int) string {
 // the full.jsonl path.
 func TestIncrementalRedaction_SingleJSONValueNeverCached(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
 	content := openCodeExport(t, redactCacheMinBytes+1024)
@@ -330,7 +490,7 @@ func TestIncrementalRedaction_SingleJSONValueNeverCached(t *testing.T) {
 		"a single JSON value on the transcript path must not qualify")
 
 	// A real write must leave nothing for a later checkpoint to splice onto.
-	writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
+	writeAndRedact(t, cache, "full.jsonl", content)
 	require.Nil(t, cache.load("full.jsonl"),
 		"a single-JSON-value transcript must leave no cache entry")
 }

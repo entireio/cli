@@ -23,6 +23,8 @@ import (
 // DumpSink writes per-agent narrative blocks to W after the run completes.
 type DumpSink struct {
 	W io.Writer
+	// TrailFindingsJSON hides the trail findings JSON line the run asked for.
+	TrailFindingsJSON bool
 }
 
 // Compile-time interface check.
@@ -74,12 +76,12 @@ func (s DumpSink) dumpAgent(run reviewtypes.AgentRun) {
 		// Render any narrative text the agent produced before the failure
 		// surfaced — useful when the parser tore mid-response so reviewers
 		// can see partial output instead of a bare "(failed)" line.
-		if narrative := joinAssistantText(run.Buffer); narrative != "" {
+		if narrative := stripTrailJSON(joinAssistantText(run.Buffer), s.TrailFindingsJSON); narrative != "" {
 			b.WriteString(narrative)
 			b.WriteString("\n")
 		}
 	case reviewtypes.AgentStatusSucceeded, reviewtypes.AgentStatusUnknown:
-		if narrative := joinAssistantText(run.Buffer); narrative != "" {
+		if narrative := stripTrailJSON(joinAssistantText(run.Buffer), s.TrailFindingsJSON); narrative != "" {
 			b.WriteString(narrative)
 			b.WriteString("\n")
 		}
@@ -136,12 +138,16 @@ func sameFailureError(a, b error) bool {
 
 // joinAssistantText extracts AssistantText events from a buffer and joins
 // them with newlines, trimming the result to keep dump output tight.
+// A streamed delta continues the previous text, so it joins without a
+// separator.
 func joinAssistantText(buf []reviewtypes.Event) string {
 	var b strings.Builder
 	for _, ev := range buf {
 		if at, ok := ev.(reviewtypes.AssistantText); ok {
+			if b.Len() > 0 && !at.Delta {
+				b.WriteString("\n")
+			}
 			b.WriteString(at.Text)
-			b.WriteString("\n")
 		}
 	}
 	return strings.TrimSpace(b.String())

@@ -16,7 +16,7 @@ import (
 // jurisdiction slug `org create` and `project create` name with --region,
 // CLUSTER is the placement slug `repo mirror list --cluster` filters on, and
 // HOST is what every targeting --cluster takes (`repo mirror add`, `repo mirror
-// remove`, `repo access list`, `repo clone`, `repo remote use`) as well as the
+// remove`, `repo clone`, `repo remote add`) as well as the
 // host in an entire:// clone URL. The catalog's apiUrl is --json only: the CLI
 // dials the API URL itself.
 var clusterColumns = []string{colHeaderRegion, colHeaderCluster, "HOST"}

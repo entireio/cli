@@ -1,6 +1,9 @@
 package redact
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // Provider-specific deterministic secret patterns.
 //
@@ -70,6 +73,13 @@ var providerTokenPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sbp_[a-z0-9_-]{20,}`),
 }
 
+// bareSKKeyPattern catches short sk- keys (e.g. LiteLLM virtual keys, sk- + 22
+// chars) that are too short for the entropy layer (#2728). The prefix must
+// follow a non-alphanumeric char ("_" included) or a literal JSON escape, so
+// "risk-" doesn't match; detectProviderTokens also requires a digit or
+// uppercase letter in the body.
+var bareSKKeyPattern = regexp.MustCompile(`(?:^|[^A-Za-z0-9]|\\[bfnrt]|\\u[0-9A-Fa-f]{4})(sk-[A-Za-z0-9_-]{20,})`)
+
 // detectProviderTokens returns tagged regions for every occurrence of a
 // known provider secret-token prefix in s. Regions use the empty label so
 // they render as the bare "REDACTED" token, consistent with the other
@@ -81,5 +91,15 @@ func detectProviderTokens(s string) []taggedRegion {
 			regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
 		}
 	}
+	for _, loc := range bareSKKeyPattern.FindAllStringSubmatchIndex(s, -1) {
+		start, end := loc[2], loc[3]
+		if strings.ContainsFunc(s[start+len("sk-"):end], isDigitOrUpper) {
+			regions = append(regions, taggedRegion{region: region{start, end}})
+		}
+	}
 	return regions
+}
+
+func isDigitOrUpper(r rune) bool {
+	return ('0' <= r && r <= '9') || ('A' <= r && r <= 'Z')
 }

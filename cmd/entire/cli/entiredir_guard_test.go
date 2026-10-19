@@ -48,6 +48,8 @@ var entireDirCheckExemptions = map[string]string{
 	"entire labs":       "prints a static list of experimental workflows",
 	"entire completion": "prints a shell script; users eval it from a shell rc, which a broken repo must not break",
 	"entire doctor":     "diagnostic; has to run ON a broken repo in order to report it",
+	"entire hooks antigravity title-tee": "captures agy's token counts into the per-user cache; touches no repo state, " +
+		"and agy fires it on every agent state change, so failing the guard would print the remedy and exit non-zero once per fire",
 }
 
 // collectExemptions walks the tree and returns every command path whose own

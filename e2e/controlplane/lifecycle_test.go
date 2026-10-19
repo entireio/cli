@@ -56,7 +56,7 @@ func TestControlPlane_CreateCloneDelete(t *testing.T) {
 	require.Equal(t, "/et/"+name+"/"+name, repo.Path)
 
 	mustRunEntire(t, dir, "repo", "clone", "/et/"+name+"/"+name, name)
-	remote := "entire://" + repo.ClusterHost + repo.Path
+	remote := "entire://" + repo.primary().Cluster + repo.Path
 	remotes := testutil.GitOutput(t, filepath.Join(dir, name), "remote", "-v")
 	assert.Contains(t, remotes, "origin\t"+remote+" (fetch)")
 	assert.Contains(t, remotes, "origin\t"+remote+" (push)")
@@ -67,16 +67,34 @@ func TestControlPlane_CreateCloneDelete(t *testing.T) {
 	assertDeleted(t, dir, "org", org.ID)
 }
 
+// repoJSON decodes `entire repo view --json`. Every coordinate a repo used to
+// carry flat now hangs off its own placement, because that is what each one is
+// a property of: the repo is named once, and the cluster, its slug, its region
+// and its readiness belong to the placement holding it.
 type repoJSON struct {
-	ID          string `json:"id"`
-	ClusterHost string `json:"clusterHost"`
-	// ClusterSlug and Jurisdiction name the repo's primary placement the way
-	// `--cluster` and the cluster catalog do; the native mirror tests pick a
-	// target against them rather than hardcoding a region pair.
-	ClusterSlug  string `json:"clusterSlug"`
-	Jurisdiction string `json:"jurisdiction"`
-	Path         string `json:"path"`
-	State        string `json:"state"`
+	ID string `json:"id"`
+	// Path is the /et/<project>/<repo> reference. It reads `path`, the server's
+	// own key, which BOTH verbs carry: create answers with the repo record, and
+	// view answers with that record plus what it computed. Tagging it `repo` —
+	// the view's own spelling — silently zeroed it for every create.
+	Path string `json:"path"`
+	// State is the repo's OWN lifecycle word, and the only thing that reports a
+	// failed provision: such a repo never gets a placement, so every
+	// placement-shaped check reads the zero value and sees nothing wrong.
+	State      string          `json:"state"`
+	Placements []placementJSON `json:"placements"`
+}
+
+// primary is the repo's home placement. A repo always has exactly one; an
+// absent role means the read caught the repo before it was placed, and the
+// zero value reads as "not ready yet" at every caller.
+func (r repoJSON) primary() placementJSON {
+	for _, p := range r.Placements {
+		if p.Role == "primary" {
+			return p
+		}
+	}
+	return placementJSON{}
 }
 
 // waitForRepoClonable reads the repo by its /et/<project>/<repo> path, the
@@ -100,11 +118,17 @@ func waitForRepoClonable(t *testing.T, dir, ref string) repoJSON {
 			pending = strings.TrimSpace(stderr)
 		} else {
 			repo := decodeJSON[repoJSON](t, stdout)
-			require.NotEqual(t, "failed", repo.State, "repo %s failed to provision", ref)
-			if repo.State == "active" && repo.ClusterHost != "" && repo.Path != "" {
+			primary := repo.primary()
+			// On the repo's state, not the primary's status: a failed repo has
+			// no placement, so primary() returns the zero value and a check on
+			// its status silently passes until the deadline expires.
+			require.NotEqual(t, "failed", repo.State, "repo %s failed to provision: %s", ref, stderr)
+			// "ready", not "active": the primary reports in the same vocabulary
+			// its mirrors do, so one STATUS column speaks one language.
+			if primary.Status == "ready" && primary.Cluster != "" && repo.Path != "" {
 				return repo
 			}
-			pending = fmt.Sprintf("state %q, clusterHost %q, path %q", repo.State, repo.ClusterHost, repo.Path)
+			pending = fmt.Sprintf("state %q, status %q, cluster %q, path %q", repo.State, primary.Status, primary.Cluster, repo.Path)
 		}
 		require.True(t, time.Now().Before(deadline), "repo %s not clonable after 2 minutes: %s", ref, pending)
 		time.Sleep(3 * time.Second)

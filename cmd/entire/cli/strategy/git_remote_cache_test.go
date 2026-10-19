@@ -232,7 +232,7 @@ func TestGitRemoteCache_Invalidate(t *testing.T) {
 // TestGitRemoteCache_ElectionSeesRemoteAddedAfterInvalidate is the end-to-end
 // guard for the hazard the cache introduces: a remote added mid-invocation must
 // be visible to a later election once the mutator invalidates. `entire repo
-// remote use` is the only production mutator, and it calls
+// remote add` is the only production mutator, and it calls
 // InvalidateGitRemoteCache for exactly this reason.
 //
 // Not parallel: t.Chdir and IsolateGitConfigEnv touch process-global state.

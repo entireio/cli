@@ -49,7 +49,7 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
 		called := false
-		deps := Deps{PostReviewToTrail: func(context.Context, io.Writer, string, string) error {
+		deps := Deps{PostReviewToTrail: func(context.Context, io.Writer, string, TrailReport) error {
 			called = true
 			return nil
 		}}
@@ -66,8 +66,8 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
 		gotVerdict := ""
-		deps := Deps{PostReviewToTrail: func(_ context.Context, w io.Writer, _, verdict string) error {
-			gotVerdict = verdict
+		deps := Deps{PostReviewToTrail: func(_ context.Context, w io.Writer, _ string, report TrailReport) error {
+			gotVerdict = report.Prose
 			fmt.Fprintln(w, "Posted the review verdict to trail #1 as a finding.")
 			fmt.Fprintln(w, "View the trail: https://entire.io/gh/o/r/trails/1/b")
 			return nil
@@ -86,7 +86,7 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
 		called := false
-		deps := Deps{PostReviewToTrail: func(context.Context, io.Writer, string, string) error {
+		deps := Deps{PostReviewToTrail: func(context.Context, io.Writer, string, TrailReport) error {
 			called = true
 			return nil
 		}}
@@ -103,7 +103,7 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 	t.Run("trail mode surfaces a posting error", func(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
-		deps := Deps{PostReviewToTrail: func(context.Context, io.Writer, string, string) error {
+		deps := Deps{PostReviewToTrail: func(context.Context, io.Writer, string, TrailReport) error {
 			return errors.New("boom")
 		}}
 		maybePostReviewToTrail(context.Background(), &out, deps, ReviewOutputTrail, "general", postTrailSummary("a finding"), "")
@@ -115,7 +115,7 @@ func TestMaybePostReviewToTrail(t *testing.T) {
 	t.Run("trail mode does not double print already-rendered auth errors", func(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
-		deps := Deps{PostReviewToTrail: func(_ context.Context, w io.Writer, _, _ string) error {
+		deps := Deps{PostReviewToTrail: func(_ context.Context, w io.Writer, _ string, _ TrailReport) error {
 			fmt.Fprintln(w, "Not logged in. Run 'entire login' to authenticate.")
 			return postTrailAlreadyPrintedError{err: errors.New("not logged in")}
 		}}

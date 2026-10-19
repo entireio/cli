@@ -77,6 +77,25 @@ func offersOnDemandInstall(name string) bool {
 // child yet).
 const ExitPluginSignalled = -1
 
+// PluginExitError is returned by a built-in command that ran a plugin on the
+// user's behalf (agent-help's delegation) when the plugin did not exit 0. It
+// carries runPlugin's outcome so main.go can exit with it — the plugin's own
+// code, or its re-raised signal — exactly as it does for a dispatched plugin,
+// rather than the plain 1 every other returned error gets. The plugin's own
+// stderr is the user-facing message, so main prints nothing for it.
+type PluginExitError struct {
+	Code     int       // runPlugin's exit code; ExitPluginSignalled when killed by a signal
+	KilledBy os.Signal // runPlugin's killedBy; nil for an ordinary exit
+	Err      error
+}
+
+func (e *PluginExitError) Error() string { return e.Err.Error() }
+
+func (e *PluginExitError) Unwrap() error { return e.Err }
+
+// AlreadyPrinted reports that the plugin's stderr already carried the message.
+func (e *PluginExitError) AlreadyPrinted() bool { return true }
+
 // postPluginVersionCheck is a test seam for the version-check notice that
 // fires after a successful plugin run.
 var postPluginVersionCheck = versioncheck.CheckAndNotify

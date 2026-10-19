@@ -95,7 +95,7 @@ func TestHookPreRuns_GateSkipsRepo(t *testing.T) {
 			// SetContext, so the command's context is still the one we handed it.
 			for name, hookCmd := range map[string]*cobra.Command{
 				"git hooks":   newHooksGitCmd(),
-				"agent hooks": agentHooksCmd(t, testAgentName),
+				"agent hooks": agentHookVerbCmd(t, testAgentName),
 			} {
 				base := context.Background()
 				hookCmd.SetContext(base)
@@ -206,14 +206,20 @@ func TestHooksGitCmd_ExposesPostRewriteSubcommand(t *testing.T) {
 	}
 }
 
-// agentHooksCmd returns the hooks subcommand for one agent, whose pre-run is the
-// call site that used to rely on withHookSession's own gate.
-func agentHooksCmd(t *testing.T, agentName string) *cobra.Command {
+// agentHookVerbCmd returns one lifecycle verb of an agent's hooks command.
+// The verb, not the agent command: the hook-session pre-run lives per verb so
+// that non-verb commands attached to the same agent (Antigravity's title-tee)
+// do not inherit it.
+func agentHookVerbCmd(t *testing.T, agentName string) *cobra.Command {
 	t.Helper()
 
 	for _, sub := range newHooksCmd().Commands() {
 		if sub.Use == agentName {
-			return sub
+			verbs := sub.Commands()
+			if len(verbs) == 0 {
+				t.Fatalf("agent %q has no hook verbs", agentName)
+			}
+			return verbs[0]
 		}
 	}
 	t.Fatalf("no hooks subcommand for %q", agentName)

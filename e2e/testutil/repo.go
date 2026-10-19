@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -138,22 +139,33 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	}
 
 	entire.Enable(t, dir, agent.EntireAgent())
-	if agent.Name() == "gemini-cli" {
-		setupGeminiTestHome(t, dir)
+	if preparer, ok := agent.(agents.RepoPreparer); ok {
+		if err := preparer.PrepareRepo(dir); err != nil {
+			t.Fatalf("prepare repo for %s: %v", agent.Name(), err)
+		}
+	}
+	// Registered after the repo's own RemoveAll and before artifact capture
+	// (t.Cleanup runs last-in first-out), so agent state beside the repo is
+	// still there when artifacts are collected and gone when the test ends.
+	if cleaner, ok := agent.(agents.RepoCleaner); ok && !keepRepos {
+		t.Cleanup(func() {
+			if err := cleaner.CleanupRepo(dir); err != nil {
+				t.Logf("cleanup agent state for %s: %v", agent.Name(), err)
+			}
+		})
 	}
 	if agent.Name() == "factoryai-droid" {
 		if err := configureDroidRepoSettings(dir); err != nil {
 			t.Fatalf("configure droid repo settings: %v", err)
 		}
 	}
-	// commit_linking=always ensures the prepare-commit-msg hook adds the
-	// Entire-Checkpoint trailer unconditionally. This is needed because
-	// interactive agents run inside tmux (CanPromptInteractively()=true) but
-	// can't respond to prompts, and content detection may fail on the first
-	// checkpoint when no shadow branch exists yet. Prompt-mode agents still
-	// exercise the !CanPromptInteractively() fast path since they have no TTY
-	// regardless of this setting.
-	PatchSettings(t, dir, map[string]any{"log_level": "debug", "commit_linking": "always"})
+	// commit_linking keeps its default ("prompt"), as for users: whether a
+	// commit links must come from the hook deciding nobody can answer, not from
+	// a setting that skips the decision. Every E2E commit is made by an agent or
+	// the harness, so a prompt shown is always a failure; see
+	// failIfCommitLinkingPrompted.
+	PatchSettings(t, dir, map[string]any{"log_level": "debug"})
+	t.Cleanup(func() { failIfCommitLinkingPrompted(t, dir) })
 
 	// Agents that need files planted before their first run in a repo get them
 	// here — after `entire enable` has written the agent's own config, so a
@@ -220,31 +232,6 @@ func PushCheckpointRefs(t *testing.T, dir string) {
 		return
 	}
 	Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
-}
-
-func setupGeminiTestHome(t *testing.T, repoDir string) {
-	t.Helper()
-
-	homeDir := geminiTestHomeDir(repoDir)
-	t.Cleanup(func() {
-		if err := os.RemoveAll(homeDir); err != nil {
-			t.Errorf("remove gemini test home: %v", err)
-		}
-	})
-
-	geminiDir := filepath.Join(homeDir, ".gemini")
-	if err := os.MkdirAll(filepath.Join(geminiDir, "acknowledgments"), 0o755); err != nil {
-		t.Fatalf("create gemini test home: %v", err)
-	}
-
-	config := `{"security":{"auth":{"selectedType":"gemini-api-key"}}}`
-	if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(config), 0o644); err != nil {
-		t.Fatalf("write gemini settings: %v", err)
-	}
-}
-
-func geminiTestHomeDir(repoDir string) string {
-	return filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-gemini-home")
 }
 
 func configureDroidRepoSettings(repoDir string) error {
@@ -431,7 +418,7 @@ func runForAgents(t *testing.T, all []agents.Agent, timeout time.Duration, fn fu
 			defer agents.ReleaseSlot(agent)
 
 			// Per-test timeout starts after slot is acquired, scaled
-			// by the agent's multiplier (e.g. 2.5× for gemini).
+			// by the agent's multiplier.
 			scaled := time.Duration(float64(timeout) * agent.TimeoutMultiplier())
 
 			var prevState *RepoState
@@ -499,7 +486,7 @@ func (s *RepoState) RunPrompt(t *testing.T, ctx context.Context, prompt string, 
 	s.logPromptResult(out)
 
 	if err != nil && s.Agent.IsTransientError(out, err) {
-		errMsg := fmt.Sprintf("transient API error (stderr: %s)", strings.TrimSpace(out.Stderr))
+		errMsg := fmt.Sprintf("transient API error: %v (stderr: %s)", err, strings.TrimSpace(out.Stderr))
 		t.Logf("%s — restarting scenario", errMsg)
 		fmt.Fprintf(s.ConsoleLog, "> [transient] %s — restarting scenario\n", errMsg)
 		panic(errScenarioRestart{msg: errMsg})
@@ -526,6 +513,20 @@ func (s *RepoState) Git(t *testing.T, args ...string) {
 // mode. The session is closed automatically during test cleanup.
 func (s *RepoState) StartSession(t *testing.T, ctx context.Context) agents.Session {
 	t.Helper()
+	// Every agent's interactive driver is tmux-backed (agents/tmux.go), and
+	// Windows has no tmux. main_test.go's preflight already states that
+	// interactive tests are skipped there -- which is why it does not require
+	// the tmux binary on Windows -- but nothing enforced it, so the tests ran
+	// and every one failed with `exec: "tmux": executable file not found in
+	// %PATH%`. Only claude carried a guard of its own, so antigravity and
+	// droid, the other two agents on the Windows matrix, hit it.
+	//
+	// The guard belongs here rather than in each agent: the reason is the
+	// platform, not the agent, and one place means the next tmux-driven agent
+	// inherits it instead of having to remember.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	session, err := s.Agent.StartSession(ctx, s.Dir)
 	if err != nil {
 		t.Fatalf("start session: %v", err)

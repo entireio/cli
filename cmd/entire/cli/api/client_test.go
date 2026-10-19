@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
@@ -190,6 +191,26 @@ func TestClient_Get(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// The client's base transport names network causes: a host that cannot be
+// resolved says so instead of surfacing as a bare dial error. RFC 6761
+// reserves .invalid, so the lookup fails without depending on any server.
+func TestClient_Get_NamesUnresolvableHost(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	c := NewClientWithBaseURL("tok", "https://entire-netcause-test.invalid")
+	resp, err := c.Get(ctx, "/api/v1/test")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("unresolvable host: want an error")
+	}
+	if want := "could not resolve entire-netcause-test.invalid"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q missing %q", err, want)
 	}
 }
 

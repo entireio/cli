@@ -28,30 +28,45 @@ const (
 	HookNameSessionStart     = "session-start"
 	HookNameSessionEnd       = "session-end"
 	HookNameStop             = "stop"
+	HookNameStopFailure      = "stop-failure"
 	HookNameUserPromptSubmit = "user-prompt-submit"
 	HookNamePreTask          = "pre-task"
 	HookNamePostTask         = "post-task"
 	HookNamePostTodo         = "post-todo"
+	HookNameSubagentStart    = "subagent-start"
 	HookNameSubagentStop     = "subagent-stop"
 )
 
 // Claude Code tool-name matchers for Entire's PreToolUse/PostToolUse hooks.
 //
 // The subagent dispatch tool is "Agent" (Claude Code never exposed a tool named
-// "Task"), and the "TodoWrite" tool was disabled by default in v2.1.142 in favor
-// of the Task* tools. "TaskCreate|TaskUpdate" is a matcher list of exact tool
-// names (Claude Code treats a matcher containing only letters/digits/_/-/spaces/
-// ,/| as exact strings, not a regex). See:
+// "Task"). Older CLIs also installed a post-todo hook under "TodoWrite" and later
+// "TaskCreate|TaskUpdate"; it is no longer installed (the handler records
+// nothing) and installs prune it as a stale managed hook. See:
 //   - https://code.claude.com/docs/en/tools-reference.md (Agent, TodoWrite entries)
 //   - https://code.claude.com/docs/en/hooks.md (matcher evaluation rules)
 //
 // Configs written by older CLI versions used the outdated matchers "Task" and
-// "TodoWrite", where the hooks silently never fired. Those are not rewritten in
-// place on a normal `entire enable`; run with --force to strip and reinstall.
+// "TodoWrite", where the hooks silently never fired. A plain install adds the
+// hooks under the current matchers (clearing drift) but keeps an Entire entry
+// under the dead "Task" matcher if its command is current;
+// `entire agent add claude-code --force` strips those too.
 const (
 	subagentToolMatcher = "Agent"
-	taskToolMatcher     = "TaskCreate|TaskUpdate"
+	// skillToolMatcher routes Skill calls to post-task, which records the agent
+	// a `context: fork` skill runs in and ignores inline skills. PostToolUse
+	// only: a forked skill has no launch-time marker to write, and a
+	// PreToolUse hook would run a worktree scan for every inline skill.
+	skillToolMatcher = skillToolName
 )
+
+// workflowAgentMatcher is the agent-type matcher for Entire's SubagentStart
+// hook. SubagentStart matchers filter on agent type (hooks.md), and Workflow
+// agents report "workflow-subagent". A Workflow launches its agents without an
+// Agent tool call, so SubagentStart is the only launch signal Entire gets for
+// them; direct Agent launches are already recorded by PreToolUse/PostToolUse
+// [Agent], so the matcher keeps them from invoking Entire twice.
+const workflowAgentMatcher = workflowAgentType
 
 // ClaudeSettingsFileName is the settings file used by Claude Code.
 // This is Claude-specific and not shared with other agents.
@@ -73,7 +88,7 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 		return 0, err
 	}
 
-	count, staleDropped := installHookEntries(rawHooks, force)
+	count, staleDropped, timeoutsSet := installHookEntries(rawHooks, force)
 
 	// Unconditional, like the stale-hook migration in installHookEntries: a
 	// plain `entire enable` must drop the retired metadata deny rule, not just
@@ -84,10 +99,10 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 		return 0, fmt.Errorf("failed to update permissions in %s: %w", cfg.Path(), err)
 	}
 
-	// staleDropped forces a write even when nothing was added: a file holding
-	// both a stale and a current hook adds nothing, and returning early here
-	// would leave the stale hook on disk.
-	if count == 0 && !permissionsChanged && !staleDropped {
+	// staleDropped and timeoutsSet force a write even when nothing was added: a
+	// file holding both a stale and a current hook, or a current hook without
+	// its timeout, adds nothing, and returning early here would leave it as is.
+	if count == 0 && !permissionsChanged && !staleDropped && !timeoutsSet {
 		return 0, nil // All hooks and permissions already installed
 	}
 
@@ -96,6 +111,24 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 	}
 
 	return count, nil
+}
+
+// HasStaleManagedHooks implements agent.StaleHookReporter: whether a plain
+// install would drop Entire hooks this CLI no longer writes (the retired
+// post-todo hook, or a hook left by an older command shape) or give an Entire
+// hook the timeout an older CLI wrote it without. Read-only: it
+// runs the install's hook merge on a freshly loaded copy and discards it.
+func (c *ClaudeCodeAgent) HasStaleManagedHooks(ctx context.Context) bool {
+	cfg, err := claudeHookConfig(ctx)
+	if err != nil {
+		return false
+	}
+	_, rawHooks, _, err := loadRawClaudeSettingsForInstall(cfg)
+	if err != nil {
+		return false
+	}
+	_, staleDropped, timeoutsSet := installHookEntries(rawHooks, false)
+	return staleDropped || timeoutsSet
 }
 
 // claudeHookConfig returns .claude/settings.json for the current worktree,
@@ -162,31 +195,175 @@ func loadRawClaudeSettingsForInstall(cfg *agent.HookConfigFile) (rawSettings, ra
 	return rawSettings, rawHooks, rawPermissions, nil
 }
 
+// Claude Code waits on Entire's hooks, and an `entire` launch the OS stalls
+// before main() never returns on its own, so each hook carries a timeout after
+// which Claude Code cancels it and continues.
+const (
+	// sessionStartHookTimeoutSec bounds SessionStart, which Claude Code blocks
+	// startup on. Besides a network refresh bounded by the cli package's
+	// trailEnablementSessionStartRefreshTimeout, it resolves the repository and
+	// reads and writes session state, which a cold start or a large repository
+	// can slow well past that refresh.
+	sessionStartHookTimeoutSec = 30
+	// captureHookTimeoutSec bounds hooks that snapshot the worktree before a
+	// prompt or subagent. UserPromptSubmit already runs this work under Claude
+	// Code's 30s default; SubagentStart and pre-task drop from its 600s command
+	// default to match. It must outlast gitrepo.StatusWalkBudget so a slow walk
+	// degrades on its own before Claude Code cancels the hook and drops the
+	// snapshot.
+	captureHookTimeoutSec = 30
+	// checkpointHookTimeoutSec bounds hooks that write checkpoint data. Their
+	// path can spend checkpoint/remote.WriteProbeFetchBudget on a remote probe
+	// and gitrepo.StatusWalkBudget on a first-checkpoint status before transcript
+	// work whose cost grows with transcript size; a hook cancelled mid-write may
+	// not finish that checkpoint.
+	checkpointHookTimeoutSec = 120
+)
+
+type entireSimpleHook struct {
+	hookType string
+	matcher  string
+	command  string
+	timeout  int
+}
+
+// entireSimpleHooks lists the hooks Entire registers alone in their hook
+// type, each under one matcher (empty for all but SubagentStart).
+func entireSimpleHooks() []entireSimpleHook {
+	return []entireSimpleHook{
+		{"SessionStart", "", agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine), sessionStartHookTimeoutSec},
+		// No timeout: Claude Code gives SessionEnd a short exit grace by default,
+		// and an explicit timeout would make it wait longer on exit.
+		{"SessionEnd", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end"), 0},
+		{"Stop", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop"), checkpointHookTimeoutSec},
+		{"StopFailure", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop-failure"), checkpointHookTimeoutSec},
+		{"SubagentStart", workflowAgentMatcher, agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-start"), captureHookTimeoutSec},
+		{"SubagentStop", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop"), checkpointHookTimeoutSec},
+		{"UserPromptSubmit", "", agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit"), captureHookTimeoutSec},
+	}
+}
+
+// entireToolUseHookCommands returns Entire's pre-task and post-task commands.
+func entireToolUseHookCommands() (preTask, postTask string) {
+	return agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"),
+		agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+}
+
+// entireHookTimeouts maps each Entire hook command to its timeout. SessionEnd
+// is left out because it runs without one.
+func entireHookTimeouts() map[string]int {
+	out := make(map[string]int)
+	for _, h := range entireSimpleHooks() {
+		if h.timeout != 0 {
+			out[h.command] = h.timeout
+		}
+	}
+	preTask, postTask := entireToolUseHookCommands()
+	out[preTask] = captureHookTimeoutSec
+	out[postTask] = checkpointHookTimeoutSec
+	return out
+}
+
+// setMissingTimeout gives every Entire entry in matchers its timeout from
+// timeouts, leaving any timeout the user already chose, including one Entire
+// cannot model and so keeps as written. Reports whether it changed an entry.
+func setMissingTimeout(matchers []ClaudeHookMatcher, timeouts map[string]int) bool {
+	changed := false
+	for i := range matchers {
+		for j := range matchers[i].Hooks {
+			hook := &matchers[i].Hooks[j]
+			if timeout := timeouts[hook.Command]; timeout != 0 && hook.Timeout == 0 && hook.raw == nil {
+				hook.Timeout = timeout
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// RepairHookTimeouts implements agent.HookTimeoutRepairer. Unlike an install,
+// it adds, removes and moves no hook, so `entire doctor` can run it without
+// asking. A hook type that does not parse is skipped rather than rewritten.
+// The write goes through writeClaudeSettingsFile, so an emptied permissions
+// block is dropped as an install would drop it.
+func (c *ClaudeCodeAgent) RepairHookTimeouts(ctx context.Context) (bool, error) {
+	cfg, err := claudeHookConfig(ctx)
+	if err != nil {
+		return false, err
+	}
+	rawSettings, rawHooks, rawPermissions, err := loadRawClaudeSettingsForInstall(cfg)
+	if err != nil {
+		return false, err
+	}
+
+	timeouts := entireHookTimeouts()
+	changed := false
+	for hookType := range EntireHookCommands() {
+		raw, ok := rawHooks[hookType]
+		if !ok {
+			continue
+		}
+		var matchers []ClaudeHookMatcher
+		if err := json.Unmarshal(raw, &matchers); err != nil || !setMissingTimeout(matchers, timeouts) {
+			continue
+		}
+		updated, err := jsonutil.MarshalWithNoHTMLEscape(matchers)
+		if err != nil {
+			return false, fmt.Errorf("failed to marshal %s hooks: %w", hookType, err)
+		}
+		rawHooks[hookType] = updated
+		changed = true
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := writeClaudeSettingsFile(cfg, rawSettings, rawHooks, rawPermissions); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// retiredPostTodoHookCommand is the post-todo command older CLIs installed.
+// It is no longer installed, and an install prunes it, but its subcommand stays
+// registered and records nothing, so a checkout that still carries it runs
+// only Entire.
+func retiredPostTodoHookCommand() string {
+	return agent.WrapProductionSilentHookCommand("entire hooks claude-code " + HookNamePostTodo)
+}
+
+// EntireHookCommands returns the exact commands Entire installs, by event,
+// plus the retired post-todo command older CLIs installed, so review still
+// recognizes a teammate's config that has not been re-enabled yet as Entire's
+// own. Callers must match whole commands: a prefix would accept
+// "entire hooks ...; curl".
+func EntireHookCommands() map[string][]string {
+	out := make(map[string][]string)
+	for _, h := range entireSimpleHooks() {
+		out[h.hookType] = append(out[h.hookType], h.command)
+	}
+	preTask, postTask := entireToolUseHookCommands()
+	out["PreToolUse"] = append(out["PreToolUse"], preTask)
+	out["PostToolUse"] = append(out["PostToolUse"], postTask, retiredPostTodoHookCommand())
+	return out
+}
+
 // installHookEntries mutates rawHooks in place to ensure every Entire hook is
-// present, migrating stale entries (from older CLI versions or, when force is
-// set, any current Entire hook) first. Returns the number of hooks newly
-// added and whether any stale entry was dropped (see the staleDropped comment
-// at its InstallHooks call site for why that forces a write on its own).
-func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count int, staleDropped bool) {
+// present with its timeout, migrating stale entries (from older CLI versions
+// or, when force is set, any current Entire hook) first. Returns the number of
+// hooks newly added, whether any stale entry was dropped, and whether any entry
+// gained a timeout (see the staleDropped comment at its InstallHooks call site
+// for why either forces a write on its own).
+func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count int, staleDropped, timeoutsSet bool) {
 	var preToolUse, postToolUse []ClaudeHookMatcher
 	parseHookType(rawHooks, "PreToolUse", &preToolUse)
 	parseHookType(rawHooks, "PostToolUse", &postToolUse)
 
 	// The "simple" hook types all share one shape: a single Entire command
-	// under an empty-string matcher, no tool-use targeting. Handling them
-	// data-driven (rather than one parse/strip/add/marshal block per type)
+	// under one matcher (empty for most), alone in its hook type. Handling
+	// them data-driven (rather than one parse/strip/add/marshal block per type)
 	// keeps this function's complexity from growing linearly with each new
 	// simple hook type Entire registers.
-	simpleHooks := []struct {
-		hookType string
-		command  string
-	}{
-		{"SessionStart", agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)},
-		{"SessionEnd", agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")},
-		{"Stop", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")},
-		{"SubagentStop", agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")},
-		{"UserPromptSubmit", agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")},
-	}
+	simpleHooks := entireSimpleHooks()
 	simpleMatchers := make(map[string][]ClaudeHookMatcher, len(simpleHooks))
 	for _, h := range simpleHooks {
 		var m []ClaudeHookMatcher
@@ -205,9 +382,7 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 
 	// Define tool-use hook commands (the simple hooks' commands live in
 	// simpleHooks above).
-	preTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
-	postTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
-	postTodoCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	preTaskCmd, postTaskCmd := entireToolUseHookCommands()
 
 	// Drop Entire hooks left by older versions before adding the current ones,
 	// so a stale command (e.g. the removed local-dev launcher, which ran a
@@ -224,27 +399,49 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 		simpleMatchers[h.hookType] = drop(simpleMatchers[h.hookType], h.command)
 	}
 	preToolUse = drop(preToolUse, preTaskCmd)
-	postToolUse = drop(postToolUse, postTaskCmd, postTodoCmd)
+	// post-todo is no longer installed: the handler records nothing, so the
+	// stale-hook drop above prunes it from configs older CLIs wrote (its
+	// subcommand stays registered so those configs keep working until then).
+	postToolUse = drop(postToolUse, postTaskCmd)
 
 	// Add hooks if they don't exist
+	timeouts := entireHookTimeouts()
 	for _, h := range simpleHooks {
 		m := simpleMatchers[h.hookType]
-		if !hookCommandExists(m, h.command) {
-			simpleMatchers[h.hookType] = addHookToMatcher(m, "", h.command)
+		exists := hookCommandExists(m, h.command)
+		if h.matcher != "" {
+			exists = hookCommandExistsWithMatcher(m, h.matcher, h.command)
+		}
+		if !exists {
+			simpleMatchers[h.hookType] = addHookToMatcher(m, h.matcher, h.command, h.timeout)
 			count++
 		}
 	}
 	if !hookCommandExistsWithMatcher(preToolUse, subagentToolMatcher, preTaskCmd) {
-		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd)
+		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd, timeouts[preTaskCmd])
 		count++
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
-		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
+		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd, timeouts[postTaskCmd])
 		count++
 	}
-	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
-		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd)
+	if !hookCommandExistsWithMatcher(postToolUse, skillToolMatcher, postTaskCmd) {
+		postToolUse = addHookToMatcher(postToolUse, skillToolMatcher, postTaskCmd, timeouts[postTaskCmd])
 		count++
+	}
+
+	// Entries just added already carry theirs, so this only reaches entries older
+	// CLIs wrote without one.
+	for _, h := range simpleHooks {
+		if setMissingTimeout(simpleMatchers[h.hookType], timeouts) {
+			timeoutsSet = true
+		}
+	}
+	if setMissingTimeout(preToolUse, timeouts) {
+		timeoutsSet = true
+	}
+	if setMissingTimeout(postToolUse, timeouts) {
+		timeoutsSet = true
 	}
 
 	// Marshal modified hook types back to rawHooks
@@ -254,7 +451,7 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	marshalHookType(rawHooks, "PreToolUse", preToolUse)
 	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
-	return count, staleDropped
+	return count, staleDropped, timeoutsSet
 }
 
 // writeClaudeSettingsFile marshals rawHooks and rawPermissions into
@@ -349,10 +546,12 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	}
 
 	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, stop, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
+	var sessionStart, sessionEnd, stop, stopFailure, subagentStart, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
 	parseHookType(rawHooks, "SessionStart", &sessionStart)
 	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
 	parseHookType(rawHooks, "Stop", &stop)
+	parseHookType(rawHooks, "StopFailure", &stopFailure)
+	parseHookType(rawHooks, "SubagentStart", &subagentStart)
 	parseHookType(rawHooks, "SubagentStop", &subagentStop)
 	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
 	parseHookType(rawHooks, "PreToolUse", &preToolUse)
@@ -362,6 +561,8 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	sessionStart = removeEntireHooks(sessionStart)
 	sessionEnd = removeEntireHooks(sessionEnd)
 	stop = removeEntireHooks(stop)
+	stopFailure = removeEntireHooks(stopFailure)
+	subagentStart = removeEntireHooks(subagentStart)
 	subagentStop = removeEntireHooks(subagentStop)
 	userPromptSubmit = removeEntireHooks(userPromptSubmit)
 	preToolUse = removeEntireHooksFromMatchers(preToolUse)
@@ -371,6 +572,8 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	marshalHookType(rawHooks, "SessionStart", sessionStart)
 	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
 	marshalHookType(rawHooks, "Stop", stop)
+	marshalHookType(rawHooks, "StopFailure", stopFailure)
+	marshalHookType(rawHooks, "SubagentStart", subagentStart)
 	marshalHookType(rawHooks, "SubagentStop", subagentStop)
 	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
 	marshalHookType(rawHooks, "PreToolUse", preToolUse)
@@ -468,9 +671,10 @@ func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 // `entire status` and `entire doctor` can treat every agent's drift check
 // uniformly; the names stay exported here for existing call sites.
 //
-// For Claude Code, HooksOutdated means Entire hooks are installed but the
-// current tool-use matchers no longer carry them (e.g. an older CLI wrote them
-// under the now non-firing "Task"/"TodoWrite" matchers).
+// For Claude Code, HooksOutdated means Entire hooks are installed but a plain
+// install would change them: a required hook is missing (e.g. an older CLI
+// wrote them under the now non-firing "Task"/"TodoWrite" matchers), or an
+// Entire hook is in a shape this CLI no longer writes or lacks its timeout.
 type HookConfigState = agent.HookConfigState
 
 const (
@@ -479,7 +683,7 @@ const (
 	// HooksCurrent means the installed hooks match the current config.
 	HooksCurrent = agent.HooksCurrent
 	// HooksOutdated means the installed hooks are stale.
-	// Fix: `entire enable --force`.
+	// Fix: `entire agent add claude-code`; add --force if that does not fix it.
 	HooksOutdated = agent.HooksOutdated
 )
 
@@ -492,9 +696,13 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 
 // CheckHookConfig reports whether Entire's Claude Code hooks are absent,
 // current, or outdated. It is a read-only diagnostic used by `entire status`
-// and `entire doctor`; it never modifies settings. Outdated is detected on the
-// positive spec: Entire is installed (Stop hook present) yet one of the current
-// tool-use matchers does not carry its Entire hook.
+// and `entire doctor`; it never modifies settings. Entire is installed when a
+// Stop hook is present. It is outdated when one of the current tool-use
+// matchers (Agent, Skill), SubagentStart (for Workflow agents), SubagentStop,
+// or StopFailure does not carry its Entire hook, or when HasStaleManagedHooks
+// finds an Entire hook an install would prune or give a timeout. Without that
+// second check, a hook an older CLI wrote passes as current while a stalled
+// `entire` launch can still block Claude Code on it.
 func CheckHookConfig(ctx context.Context) HookConfigState {
 	settings, err := loadClaudeSettings(ctx)
 	// An unreadable or malformed settings file collapses to HooksAbsent
@@ -506,15 +714,35 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 	if err != nil || !hasEntireHook(settings.Hooks.Stop) {
 		return HooksAbsent
 	}
-	subagentTools := splitMatcherTools(subagentToolMatcher)
-	taskTools := splitMatcherTools(taskToolMatcher)
-	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
-		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
-		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) ||
-		!hasEntireHook(settings.Hooks.SubagentStop) {
+	if missingRequiredHooks(settings) || (&ClaudeCodeAgent{}).HasStaleManagedHooks(ctx) {
 		return HooksOutdated
 	}
 	return HooksCurrent
+}
+
+// MissingRequiredHooks reports whether Entire is installed in this repo's
+// Claude Code settings but a hook this CLI needs is missing: the half of
+// CheckHookConfig that says nothing about commands or timeouts it would
+// rewrite. A config a newer CLI wrote still has every hook this one requires,
+// so unlike the full check it does not misfire across teammates' CLI versions.
+// Read-only; an unreadable file reports false.
+//
+// That holds only while the required list grows. Removing or renaming a hook
+// from missingRequiredHooks would make older CLIs warn about a newer config,
+// and their `entire agent add` would rewrite it back.
+func MissingRequiredHooks(ctx context.Context) bool {
+	settings, err := loadClaudeSettings(ctx)
+	return err == nil && hasEntireHook(settings.Hooks.Stop) && missingRequiredHooks(settings)
+}
+
+func missingRequiredHooks(settings ClaudeSettings) bool {
+	subagentTools := splitMatcherTools(subagentToolMatcher)
+	return !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, []string{skillToolMatcher}) ||
+		!hasEntireHookCoveringTools(settings.Hooks.SubagentStart, []string{workflowAgentMatcher}) ||
+		!hasEntireHook(settings.Hooks.SubagentStop) ||
+		!hasEntireHook(settings.Hooks.StopFailure)
 }
 
 // Helper functions for hook management
@@ -559,7 +787,8 @@ func splitMatcherTools(matcher string) []string {
 // hasEntireHookCoveringTools reports whether an Entire hook is installed under a
 // matcher that covers every tool in want. A widened matcher still counts: a
 // matcher of "TaskCreate|TaskUpdate|TaskGet" covers {TaskCreate, TaskUpdate},
-// so users who broaden a matcher aren't falsely flagged as outdated.
+// so users who broaden a matcher aren't falsely flagged as outdated. The same
+// exact-string rules apply to SubagentStart's agent-type matchers.
 func hasEntireHookCoveringTools(matchers []ClaudeHookMatcher, want []string) bool {
 	for _, matcher := range matchers {
 		have := splitMatcherTools(matcher.Matcher)
@@ -595,15 +824,13 @@ func hookCommandExistsWithMatcher(matchers []ClaudeHookMatcher, matcherName, com
 	return false
 }
 
-// addHookToMatcher appends command to the matcher named matcherName, creating it
-// if absent. No timeout is set: Timeout exists on ClaudeHookEntry to round-trip
-// settings files that carry one, but Entire's own hooks all keep Claude Code's
-// default. (The removed local-dev mode was the only thing that needed a longer
-// SessionEnd budget, because it compiled the CLI from source.)
-func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string) []ClaudeHookMatcher {
+// addHookToMatcher appends command with its timeout to the matcher named
+// matcherName, creating it if absent.
+func addHookToMatcher(matchers []ClaudeHookMatcher, matcherName, command string, timeout int) []ClaudeHookMatcher {
 	entry := ClaudeHookEntry{
 		Type:    "command",
 		Command: command,
+		Timeout: timeout,
 	}
 
 	// If no matcher name, add to a matcher with empty string
@@ -641,8 +868,7 @@ func isEntireHook(command string) bool {
 
 // dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
 // want, per matcher, pruning matchers left with no hooks. want is a set because
-// one hook list can hold several Entire commands (PostToolUse carries both
-// post-task and post-todo). See agent.DropStaleManagedHooks for why this runs on
+// one hook list can hold several Entire commands. See agent.DropStaleManagedHooks for why this runs on
 // every install and why the dropped flag matters.
 func dropStaleEntireHooks(matchers []ClaudeHookMatcher, want ...string) ([]ClaudeHookMatcher, bool) {
 	result := make([]ClaudeHookMatcher, 0, len(matchers))

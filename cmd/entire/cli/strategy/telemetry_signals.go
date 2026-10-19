@@ -275,7 +275,7 @@ func skipHeredocBody(cmd string, i int, delim string) int {
 //
 // The subagent-dispatch match below exists for the artifact this feature
 // shipped as before it became a skill: a dispatchable subagent under this
-// name (.claude/agents/entire-search.md and Codex/Gemini equivalents). Those
+// name (.claude/agents/entire-search.md and its other-agent equivalents). Those
 // installs linger — the installer only removes them on the next
 // --search-skill run — and a subagent's own `entire search` Bash call is
 // written to a SEPARATE transcript file that condensation never reads, so

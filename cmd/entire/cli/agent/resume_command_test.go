@@ -46,13 +46,6 @@ func TestResumeCommandSpecFor(t *testing.T) {
 			wantOK:    true,
 		},
 		{
-			name:      "gemini",
-			agentName: AgentNameGemini,
-			sessionID: "session-123",
-			want:      ForegroundCommandSpec{Binary: "gemini", Args: []string{"--resume", "session-123"}},
-			wantOK:    true,
-		},
-		{
 			name:      "opencode",
 			agentName: AgentNameOpenCode,
 			sessionID: "session-123",

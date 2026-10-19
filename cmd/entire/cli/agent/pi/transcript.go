@@ -1,12 +1,13 @@
 package pi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/pi/pijsonl"
+	"github.com/entireio/cli/transcript/pijsonl"
 )
 
 // Compile-time interface assertions
@@ -79,7 +80,7 @@ func (a *PiAgent) GetTranscriptPosition(path string) (int, error) {
 // onward and returns file paths touched by file-modifying tools (`write`,
 // `edit`). Branch-aware: only counts entries on the active conversation
 // branch.
-func (a *PiAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
+func (a *PiAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) ([]string, int, error) {
 	if path == "" {
 		return nil, 0, nil
 	}

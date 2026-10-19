@@ -32,13 +32,12 @@ const (
 	trailEnablementCacheTTL                   = time.Hour
 	agentHelpTrailsRefreshFailureBackoff      = 5 * time.Minute
 	trailEnablementSessionStartRefreshTimeout = time.Second
-	// trailEnablementRefreshTimeout bounds a full enablement refresh. Since
-	// the probe moved onto the repo's own cell it covers ~4 sequential round
-	// trips (repos index, cluster catalog, identity-token exchange,
+	// trailEnablementRefreshTimeout bounds a full enablement refresh: ~4
+	// sequential round trips (repos index, cluster catalog, login refresh,
 	// TrailsEnabled), so requiredCellResolveTimeout's 15s inner budget is
 	// inert underneath it — this is the effective bound.
 	//
-	// Kept at 3s rather than grown to match: expiry is soft everywhere it
+	// 3s rather than longer: expiry is soft everywhere it
 	// applies (agent-help falls back to agentHelpTrailsRefreshFailureBackoff
 	// and reports trails unavailable; the detached SessionStart child just
 	// leaves the cache unknown for the next turn), whereas raising it makes

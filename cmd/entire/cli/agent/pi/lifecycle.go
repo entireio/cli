@@ -40,20 +40,6 @@ func (a *PiAgent) HookNames() []string {
 	}
 }
 
-// GetSupportedHooks maps Pi's native events to normalised lifecycle types.
-//
-//   - session_start       → SessionStart
-//   - before_agent_start  → TurnStart
-//   - agent_end           → TurnEnd
-//   - session_shutdown    → (no lifecycle event — see ParseHookEvent)
-func (a *PiAgent) GetSupportedHooks() []agent.HookType {
-	return []agent.HookType{
-		agent.HookSessionStart,
-		agent.HookUserPromptSubmit,
-		agent.HookStop,
-	}
-}
-
 // Compile-time assertion that Pi can inject context into the model.
 var _ agent.ContextInjector = (*PiAgent)(nil)
 
@@ -187,7 +173,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 	case HookNameBeforeAgentStart:
 		// Provide the live Pi session file as SessionRef so state.TranscriptPath
 		// is populated before any mid-turn commits. Without this, the
-		// post-commit hook cannot condense when no shadow branch exists yet.
+		// post-commit hook cannot condense before the first turn end.
 		return &agent.Event{
 			Type:        agent.TurnStart,
 			SessionID:   sessionID,

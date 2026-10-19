@@ -84,8 +84,8 @@ func TestCodexReviewer_ArgvShape(t *testing.T) {
 	cfg := reviewtypes.RunConfig{Skills: []string{"/skill"}}
 	cmd := buildCodexReviewCmd(context.Background(), cfg)
 
-	// Expect: codex exec --skip-git-repo-check --json -
-	want := []string{wantCodexAgentName, "exec", "--skip-git-repo-check", "--json", "-"}
+	// Expect: codex exec --skip-git-repo-check --json -c developer_instructions=<guardrail> -
+	want := []string{wantCodexAgentName, "exec", "--skip-git-repo-check", "--json", "-c", review.CodexGuardrailConfig(), "-"}
 	if len(cmd.Args) != len(want) {
 		t.Fatalf("len(Args) = %d, want %d: %v", len(cmd.Args), len(want), cmd.Args)
 	}
@@ -110,7 +110,7 @@ func TestCodexReviewer_BuiltinReviewExpandsToScopedExecPrompt(t *testing.T) {
 	}
 	cmd := buildCodexReviewCmd(context.Background(), cfg)
 
-	want := []string{wantCodexAgentName, "exec", "--skip-git-repo-check", "--json", "-"}
+	want := []string{wantCodexAgentName, "exec", "--skip-git-repo-check", "--json", "-c", review.CodexGuardrailConfig(), "-"}
 	if len(cmd.Args) != len(want) {
 		t.Fatalf("len(Args) = %d, want %d: %v", len(cmd.Args), len(want), cmd.Args)
 	}

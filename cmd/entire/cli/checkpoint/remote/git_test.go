@@ -1456,3 +1456,36 @@ func TestPushWithOptions_ErrorCarriesRemoteRejectionReason(t *testing.T) {
 		"the remote's reason must reach the caller, not just \"exit status 1\"")
 	assert.Contains(t, err.Error(), "remote rejected")
 }
+
+// A failed fetch used to return a bare "git fetch: exit status N", so the
+// strategy layer grew its own copy of this folding — without the URL redaction
+// that makes it safe to log. Both now live here, for every Fetch caller.
+func TestFetch_ErrorCarriesRedactedGitOutput(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	url := "https://user:s3cr3t@example.invalid/missing.git"
+
+	out, err := Fetch(t.Context(), FetchOptions{Dir: dir, Remote: url, RefSpecs: []string{"refs/heads/main"}, NoFilter: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "git fetch:", "the cause must stay wrapped")
+	assert.NotEmpty(t, out)
+	assert.NotContains(t, err.Error(), "s3cr3t", "a credential-bearing target must be redacted before it reaches a log")
+	assert.NotContains(t, err.Error(), "\n", "the detail must stay a single log-safe line")
+}
+
+// A process killed before it wrote anything must keep its cause rather than
+// being replaced by an empty detail — the regression that produced a bare
+// "fetch failed: " once per queued checkpoint ref.
+func TestErrWithGitOutput_KeepsCauseWhenGitIsSilent(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("signal: killed")
+
+	silent := errWithGitOutput(sentinel, nil, "origin")
+	require.ErrorIs(t, silent, sentinel)
+	assert.Equal(t, sentinel.Error(), silent.Error())
+
+	detailed := errWithGitOutput(sentinel, []byte("fatal: couldn't find remote ref\n"), "origin")
+	require.ErrorIs(t, detailed, sentinel, "detail must annotate the cause, not replace it")
+	assert.Contains(t, detailed.Error(), "couldn't find remote ref")
+}

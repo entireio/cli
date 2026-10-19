@@ -35,7 +35,6 @@ func TestMultiSessionManualCommit(t *testing.T) {
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -73,6 +72,5 @@ func TestMultiSessionSequential(t *testing.T) {
 			testutil.AssertCheckpointHasSingleSession(t, s.Dir, id)
 		}
 		testutil.AssertDistinctSessions(t, s.Dir, cpIDs)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
