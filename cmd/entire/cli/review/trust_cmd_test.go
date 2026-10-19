@@ -143,3 +143,26 @@ func TestRunReview_GateFlagsValidatedForEveryMode(t *testing.T) {
 		}
 	}
 }
+
+// A tag or local branch named like the default branch (fetched along with
+// someone's commits) must not make their branch count as the default branch.
+func TestRunReview_RefNamedLikeDefaultBranchDoesNotSkipGate(t *testing.T) {
+	for _, spoof := range [][]string{
+		{"tag", "origin/HEAD", "HEAD"},
+		{"tag", "origin/main", "HEAD"},
+		{"branch", "origin/main", "HEAD"},
+	} {
+		t.Run(spoof[0]+" "+spoof[1], func(t *testing.T) {
+			reviewer, deps, _ := setupForeignBranchRepo(t)
+			runGitCmd(t, spoof...)
+
+			cmd := review.NewCommand(deps)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"general"})
+			if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "review needs approval") || reviewer.called {
+				t.Fatalf("%s named %s skipped the gate (err=%v, called=%v)", spoof[0], spoof[1], err, reviewer.called)
+			}
+		})
+	}
+}

@@ -29,12 +29,12 @@ If your repository is **public**, this data is visible to the entire internet.
 
 Entire automatically scans transcript and metadata content before writing it to a git object. Five always-on secret detection methods plus a configurable scanner layer (pattern matching, method 2 below) run during condensation, plus a conditional seventh pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), and an opt-in eighth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below):
 
-1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern. One exact shape is exempt from this layer only: a string that is, in its entirety, a Claude Code tool-use id (`toolu_01` plus 22 letters or digits). The other layers still scan it, and a secret attached to an id forms a longer string that is not exempt.
+1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern. Two exact shapes are exempt from this layer only: a string that is, in its entirety, a Claude Code tool-use id (`toolu_01` plus 22 letters or digits), and a string that lies entirely inside a content digest of its exact encoded length (a go.sum `h1:` hash, or a `sha1-`, `sha256-`, `sha384-`, or `sha512-` integrity value as used by npm lockfiles, Subresource Integrity, and CSP). The other layers still scan them, and a secret attached to an id or digest forms a longer string that is not exempt. A base64 value that contains `/` is scored as one string rather than piece by piece, unless it reads as a file path: a word or a long hex name between slashes, or a value attached to a preceding `.`, `-`, `_`, `~` or `@`.
 2. **Pattern matching** — Runs one or both configurable scanner engines against known secret formats: [Betterleaks](https://github.com/betterleaks/betterleaks) (default on) and/or [goredact](https://github.com/lastpersonlabs/goredact) (default off). See [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below.
 3. **Provider token prefixes** — Deterministically redacts known secret-key prefixes (e.g. Supabase `sb_secret_`, `sbp_`) regardless of entropy or surrounding context.
-4. **Credentialed URI detection** — Redacts URLs with embedded passwords, such as `scheme://user:password@host`.
-5. **Database connection-string detection** — Redacts JDBC, Postgres keyword DSN, SQL Server, and ODBC-style connection strings containing passwords.
-6. **Bounded credential value detection** — Redacts password-like config values such as `DB_PASSWORD=...` and `PGPASSWORD=...` while preserving the surrounding key.
+4. **Credentialed URI detection** — Redacts URLs with embedded passwords, such as `scheme://user:password@host`. A URL whose password is a placeholder (see [Secrets (always on)](#secrets-always-on) below) is left intact, unless its query also carries a real password. Only the password is checked; a credential used as the username is left to the other layers. In database URLs (`postgres://`, `mysql://`, `mariadb://`, `mongodb://`, `redis://`), a password containing `/` or `'` is caught too.
+5. **Database connection-string detection** — Redacts JDBC, Postgres keyword DSN (including Unix-socket DSNs without `host=`), SQL Server, and ODBC-style connection strings containing passwords, where values may contain spaces. Also redacts Oracle `user/password@` logins in `jdbc:oracle:` URLs and `sqlplus` commands.
+6. **Bounded credential value detection** — Redacts password-like config values such as `DB_PASSWORD=...` and `PGPASSWORD=...` while preserving the surrounding key, and the `sig` signature of Azure SAS URLs and tokens.
 
 Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. Of the six secret-detection passes above, the scanner layer (pass 2) is configurable — see [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below — while the other five are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add a seventh secret-detection pass that only runs when configured.
 
@@ -102,9 +102,11 @@ Built-in categories (when `enabled` is `true`):
 | `phone` (North American / NANP formats) | on | `[REDACTED_PHONE]` |
 | `address` (US street addresses) | off (more false-positive prone) | `[REDACTED_ADDRESS]` |
 
-Common bot/CI email addresses are not redacted (`noreply@*`, `actions@*`, `*@users.noreply.github.com`, `*@noreply.github.com`).
+Common bot/CI email addresses are not redacted (`noreply@*`, `actions@*`, `*@users.noreply.github.com`, `*@noreply.github.com`), and neither is the `git@` user in git remotes such as `git@github.com:org/repo.git`.
 
-Teams can add their own regex patterns via `custom_patterns`. Each key is a label (uppercased in the replacement token), each value is a regex string. Example: `{"employee_id": "EMP-\\d{6}"}` produces `[REDACTED_EMPLOYEE_ID]`.
+Phone and address matches must stand on their own: digits that are part of a longer number (`2024-123-4567890`) are not a phone number, and a street suffix must be a whole word, so `Plan` or `Started` does not end an address.
+
+Teams can add their own regex patterns via `custom_patterns`. Each key is a label (uppercased in the replacement token), each value is a regex string. Example: `{"employee_id": "EMP-\\d{6}"}` produces `[REDACTED_EMPLOYEE_ID]`. A pattern that fails to compile or can match the empty string is skipped with a warning, the same as for [custom redaction rules](#customizing-redaction).
 
 ```json
 {
@@ -161,7 +163,7 @@ Secret detection as a whole is always on, though the pattern-matching scanner la
 
 All detected secrets are replaced with `REDACTED`. PII matches are replaced with category-tagged tokens like `[REDACTED_EMAIL]` (see [Optional PII redaction](#optional-pii-redaction)).
 
-To reduce over-redaction, Entire preserves structural transcript fields such as IDs and paths, leaves placeholder values alone, and redacts only credential values for bounded key/value forms. Placeholders are detected by exact match (e.g. `changeme`, `example`, `placeholder`, `your_password`, `your_secret`, prior `REDACTED`/`[REDACTED]`/`<REDACTED>` markers) or by shape: shell expansions like `${DB_PASSWORD}`, bracketed names like `<password>` or `<your-db-password>`, and mask runs of three or more `*`/`x`/`.`/`-` (so `***`, `xxxx`, `....`, `----` all match). When a connection string contains a real password, it is redacted as a unit because partial fragments can still expose sensitive material; connection strings whose passwords are placeholders are left intact.
+To reduce over-redaction, Entire preserves structural transcript fields such as IDs and paths, leaves placeholder values alone, and redacts only credential values for bounded key/value forms. In structured JSON, such as a tool call's input, a value under a key that names a credential (for example `api_key`, `token`, `client_secret` or `password`) is also scanned together with its key, so `{"api_key": "…"}` is caught by the same key-based rules that catch `api_key=…` in prose. When only the key reveals a secret, the whole value is replaced. Placeholders are detected by exact match (e.g. `changeme`, `example`, `placeholder`, `your_password`, `your_secret`, prior `REDACTED`/`[REDACTED]`/`<REDACTED>` markers) or by shape: shell expansions like `${DB_PASSWORD}`, template expressions such as `%s`, `%(password)s`, `{}`, `{password}`, or `$DB_PASSWORD`, bracketed names like `<password>` or `<your-db-password>`, and mask runs of three or more `*`/`x`/`.`/`-` (so `***`, `xxxx`, `....`, `----` all match). A shell expansion must be one complete expression, so `${A}hunter2${B}` is redacted, and one with a fallback value, such as `${DB_PASSWORD:-hunter2}`, is a placeholder only when the fallback is empty or itself a placeholder. Format-field names must be lowercase and shell variables uppercase, so `{hunter2}` and `$hunter2` are still redacted. When a connection string contains a real password, it is redacted as a unit because partial fragments can still expose sensitive material; connection strings and credentialed URLs whose passwords are placeholders are left intact. In a Postgres keyword DSN, an uppercase `PWD=` whose value is an absolute path (`/app`, `~/app`) is the shell's working directory, so `env` output is not mistaken for a connection string, while a lowercase `pwd=` always counts as a password; bounded key/value detection reads the value from the same line only, so a blank `DB_PASSWORD=` leaves the next line alone.
 
 ## Customizing redaction
 
@@ -185,7 +187,9 @@ Add a label → regex map under `redaction.custom_redactions` in `.entire/settin
 - The label is for diagnostics only; matches are replaced with the bare `REDACTED` token (matching the built-in secret layers, not the `[REDACTED_<LABEL>]` token used for PII).
 - Regexes follow [Go's RE2 syntax](https://pkg.go.dev/regexp/syntax). No lookarounds, no backreferences.
 - A failed compile is logged once at startup and the rule is skipped — it will never crash the redactor.
+- A pattern that can match the empty string is skipped the same way. That covers `""`, `x*`, a trailing `|` as in `ACME-[0-9]{8}|`, an optional group like `(EMP-\d{6})?`, and a bare `\b`. Left active, such a pattern would insert `REDACTED` between characters throughout the transcript. The warning names the label and the reason, never the pattern.
 - Override in `.entire/settings.local.json` for personal additions; entries merge per-key (override replaces the same key, leaves other keys intact).
+- An empty value is not a supported way to disable a rule. It is a pattern that matches the empty string, so it is skipped with a warning each time Entire loads the rules. Because the override replaces the rule with the same label, an empty value in `.entire/settings.local.json` still turns that `.entire/settings.json` rule off for you, and text only that rule would catch is stored unredacted.
 
 ### Surface 2: Rule packs
 
@@ -229,6 +233,8 @@ Equivalent JSON form:
 **Required fields:** `name` (must equal the filename stem — `acme-internal.yaml` → `acme-internal`), `version` (any string; semver recommended), and `rules[]` (at least one entry, each with `id` and `regex`).
 
 **Optional fields:** `description` (pack-level and rule-level), and `rules[].samples[]` (see "Self-tests" below).
+
+A rule whose regex fails to compile or can match the empty string is skipped with a warning, like an inline rule. The other rules in the pack still load.
 
 A pack does not have to target credentials. The same shape works for any string pattern you don't want stored in transcripts — for example, a project codename or a small word list:
 
@@ -281,7 +287,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 
 ### Troubleshooting
 
-- **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches are emitted by the redaction layer when Entire initializes it. In the hook path (where checkpoints are actually written) these go to `.entire/logs/entire.log` — `grep component=redaction` and look for lines mentioning your label or pack path. When a hard pack-discovery failure happens during an interactive command, Entire also prints a one-line breadcrumb on stderr pointing back at the log.
+- **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches are emitted by the redaction layer when Entire initializes it. In the hook path (where checkpoints are actually written) these go to `.entire/logs/entire.log` — `grep component=redaction` and look for lines mentioning your label or pack path. `error="pattern can match the empty string"` means the rule was skipped because it can match zero characters; change it so every match consumes at least one character, for example by dropping a trailing `|` or `?`, or using `+` instead of `*`. When a hard pack-discovery failure happens during an interactive command, Entire also prints a one-line breadcrumb on stderr pointing back at the log.
 - **My pack file is silently ignored.** Filenames must end in `.yaml`, `.yml`, or `.json`. Other extensions are skipped.
 - **I want to disable a rule temporarily.** Comment it out (prefix the YAML key with `#`) or remove the entry from `custom_redactions`. The rule reloads on the next CLI invocation.
 
@@ -289,9 +295,11 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 
 - **Best-effort.** Novel or low-entropy secrets (short passwords, predictable tokens) may not be caught.
 - **Filenames and binary data.** Secrets in filenames, binary files, or deeply nested structures may not be detected.
-- **JSONL skip rules.** Entire skips scanning fields whose name *ends in* `signature` (so `thinkingSignature` too), fields ending in `id`/`ids`, and structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`) to avoid false positives. Objects whose `type` starts with `image` or equals `base64` are also skipped — and that skip is what leaves a pasted image unredacted rather than merely unflagged. It matches some agents' image shapes and not others, which is why the outcome differs per agent: see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots) above.
+- **JSONL skip rules.** Entire skips scanning the string values of fields whose name *ends in* `signature` (so `thinkingSignature` too), fields ending in `id`/`ids`, and structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`) to avoid false positives. That includes strings in an array under such a field; objects nested under one are still scanned. Because the rule matches by suffix, a string directly under an unrelated name such as `valid` or `android` is skipped too. Objects whose `type` starts with `image` or equals `base64` are also skipped — and that skip is what leaves a pasted image unredacted rather than merely unflagged. It matches some agents' image shapes and not others, which is why the outcome differs per agent: see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots) above.
+- **JSON keys are not scanned.** Only values are. A secret used as an object key, such as a token as a header name, is stored as written.
+- **A secret recognized only by its key is redacted only there.** A value such as a hex string under `api_key` is replaced where it sits. The same value elsewhere, in another field, in prose, or on another line, is redacted only if a detector flags it there on its own.
 - **Built-in PII patterns are US-centric.** `phone` matches North American (NANP) formats only — international formats, including E.164 numbers outside `+1`, are not detected. `address` matches the street line only; city, state, and ZIP/postcode are preserved. If you handle personal data from other regions, add `custom_patterns` for your locale rather than relying on the built-in categories alone.
-- **Custom PII patterns are user-authored.** Teams own the correctness of their `custom_patterns`. An invalid regex is logged and skipped, not enforced.
+- **Custom PII patterns are user-authored.** Teams own the correctness of their `custom_patterns`. An invalid regex, or one that can match the empty string, is logged and skipped, not enforced.
 - **Users are ultimately responsible** for reviewing what they commit and push. Redaction is a safety net, not a guarantee.
 
 ## Telemetry

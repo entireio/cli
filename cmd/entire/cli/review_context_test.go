@@ -228,7 +228,7 @@ func TestReviewCommandSmoke_IncludesCheckpointContextInPrompt(t *testing.T) {
 	prompt := string(promptBytes)
 	for _, want := range []string{
 		"/review",
-		"Scope: review the commits unique to this branch vs master, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
+		"Scope: review the commits unique to this branch vs refs/heads/master, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
 		"Checkpoint context from commits in scope:",
 		checkpointID,
 		"summary: smoke checkpoint summary; review smoke receives checkpoint summary",

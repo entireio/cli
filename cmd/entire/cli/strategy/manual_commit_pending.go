@@ -15,9 +15,9 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	transcriptlib "github.com/entireio/cli/transcript"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -487,7 +487,7 @@ func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, trans
 // FirstDisplayPrompt returns the first prompt in the list worth showing as a
 // title/preview: the first entry that is non-empty, not separator-only, and not
 // agent-injected (runtime preambles, AGENTS.md dumps — see
-// textutil.IsInjectedPrompt). Returns "" if none qualifies, which callers that
+// transcriptlib.IsInjectedPrompt). Returns "" if none qualifies, which callers that
 // must show something should treat as "fall back to the raw first prompt".
 //
 // The returned text is not truncated; callers that render it into a fixed-width
@@ -495,7 +495,7 @@ func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, trans
 func FirstDisplayPrompt(prompts []string) string {
 	for _, prompt := range prompts {
 		cleaned := strings.TrimSpace(prompt)
-		if cleaned == "" || isOnlySeparators(cleaned) || textutil.IsInjectedPrompt(cleaned) {
+		if cleaned == "" || isOnlySeparators(cleaned) || transcriptlib.IsInjectedPrompt(cleaned) {
 			continue
 		}
 		return cleaned

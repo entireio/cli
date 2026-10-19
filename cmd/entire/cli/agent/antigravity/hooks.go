@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -99,8 +102,8 @@ func (a *AntigravityAgent) InstallHooks(ctx context.Context, force bool) (int, e
 		return 0, err
 	}
 
-	// 3 hooks: pre-tool-use, pre-invocation, stop
-	return 3, nil
+	// 4 hooks: session-start, pre-tool-use, pre-invocation, stop
+	return 4, nil
 }
 
 // entireEntryMatches compares an installed "entire" entry against candidate by
@@ -120,27 +123,60 @@ func entireEntryMatches(existing json.RawMessage, candidate HookConfig) (disable
 	return false, err1 == nil && err2 == nil && bytes.Equal(existingBytes, candidateBytes)
 }
 
-// HooksEntryMatchesHost reports whether the repo's installed "entire" entry is
-// exactly what InstallHooks would write on THIS host. installed is false when
-// there is no entry. A user-disabled entry counts as current.
+// HooksEntryWrongHost reports whether the repo's installed "entire" entry
+// carries a hook command InstallHooks writes only for the other host family.
+// An absent, user-disabled or current entry is not wrong-host, and neither is
+// one merely outdated (written for this host by an older release), since its
+// hooks still run here.
 //
 // It exists for `entire doctor`: the hook command's SHAPE is host-specific
 // (agy runs it through cmd.exe on Windows and sh elsewhere), and a hooks.json
 // committed from a macOS checkout carries a sh wrapper that cmd.exe tears
 // apart — the hook exits 1, the failure shows only in agy's log, and nothing
 // is tracked. A file that merely exists proves nothing about that; comparing
-// against the candidate does, at zero cost and without spawning agy.
-func (a *AntigravityAgent) HooksEntryMatchesHost(ctx context.Context) (installed, current bool, err error) {
+// against the other host's candidate does, at zero cost and without spawning
+// agy.
+func (a *AntigravityAgent) HooksEntryWrongHost(ctx context.Context) (bool, error) {
 	cfg, err := a.hookConfig(ctx)
 	if err != nil {
-		return false, false, err
+		return false, err
 	}
 	existing, ok, err := readEntireEntry(cfg)
 	if err != nil || !ok {
-		return false, false, err
+		return false, err
 	}
-	disabled, same := entireEntryMatches(existing, buildEntireHookConfig())
-	return true, disabled || same, nil
+	var existingCfg HookConfig
+	if err := json.Unmarshal(existing, &existingCfg); err != nil {
+		return false, fmt.Errorf("parse entire hook entry: %w", err)
+	}
+	if existingCfg.Enabled != nil && !*existingCfg.Enabled {
+		return false, nil
+	}
+	otherHost := hookCommands(buildEntireHookConfigForHost(!agent.HookHostIsWindows()))
+	for _, cmd := range hookCommands(existingCfg) {
+		if slices.Contains(otherHost, cmd) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// hookCommands lists every command in cfg, across all event keys.
+func hookCommands(cfg HookConfig) []string {
+	var commands []string
+	for _, handlers := range [][]SimpleHandler{cfg.SessionStart, cfg.PreInvocation, cfg.PostInvocation, cfg.Stop} {
+		for _, h := range handlers {
+			commands = append(commands, h.Command)
+		}
+	}
+	for _, handlers := range [][]ToolHandler{cfg.PreToolUse, cfg.PostToolUse} {
+		for _, th := range handlers {
+			for _, hc := range th.Hooks {
+				commands = append(commands, hc.Command)
+			}
+		}
+	}
+	return commands
 }
 
 // readEntireEntry returns the raw "entire" entry from the repo's hooks.json.
@@ -253,7 +289,8 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) (bool, error) 
 	}
 
 	// Check at least one of our hook commands is present
-	return hasEntireHookInToolHandlers(cfg.PreToolUse) ||
+	return hasEntireHookInSimpleHandlers(cfg.SessionStart) ||
+		hasEntireHookInToolHandlers(cfg.PreToolUse) ||
 		hasEntireHookInToolHandlers(cfg.PostToolUse) ||
 		hasEntireHookInSimpleHandlers(cfg.PreInvocation) ||
 		hasEntireHookInSimpleHandlers(cfg.PostInvocation) ||
@@ -265,6 +302,145 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) (bool, error) 
 // detection and SaveStep, which can exceed agy's 30s default timeout on large
 // repos, in which case agy kills the hook mid-turn-end with no trace.
 const stopHookTimeoutSeconds = 300
+
+var (
+	_ agent.HookTimeoutRepairer = (*AntigravityAgent)(nil)
+	_ agent.HookFreshness       = (*AntigravityAgent)(nil)
+)
+
+// RepairHookTimeouts implements agent.HookTimeoutRepairer. Installs from before
+// stopHookTimeoutSeconds leave agy's 30s default on Stop, which is shorter than
+// the turn-end budget derived from it. Doctor runs this without asking, so it
+// only adds a timeout to Entire's own Stop handler (matched by command) when
+// that handler has none in any key case, the decoder being case-insensitive.
+// Other handlers, null entries, a user-disabled entry, and an entry that does
+// not parse are left as they are; raw JSON editing keeps unmodeled keys.
+func (a *AntigravityAgent) RepairHookTimeouts(ctx context.Context) (bool, error) {
+	cfg, err := a.hookConfig(ctx)
+	if err != nil {
+		return false, err
+	}
+	data, err := cfg.Read()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	}
+	rawFile, changed, err := withMissingStopTimeouts(data)
+	if err != nil || !changed {
+		return false, err
+	}
+	if err := writeHooksFile(rawFile, cfg); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CheckHookConfig implements agent.HookFreshness. It reports outdated when
+// RepairHookTimeouts has a Stop timeout to add, or when Entire's entry has no
+// SessionStart hook (installs from before it was added), which leaves every
+// session idle until it is purged. `entire status` sends the user to `entire
+// doctor`, which repairs the timeout itself and for the missing hook tells the
+// user to run `entire agent add antigravity`; a user-disabled entry is current.
+func (a *AntigravityAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	if installed, err := a.AreHooksInstalled(ctx); err != nil || !installed {
+		return agent.HooksAbsent
+	}
+	cfg, err := a.hookConfig(ctx)
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	data, err := cfg.Read()
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	if _, changed, err := withMissingStopTimeouts(data); err == nil && changed {
+		return agent.HooksOutdated
+	}
+	if missingSessionStart(data) {
+		return agent.HooksOutdated
+	}
+	return agent.HooksCurrent
+}
+
+// missingSessionStart reports whether Entire's enabled entry in hooks.json has
+// no SessionStart hook of Entire's.
+func missingSessionStart(data []byte) bool {
+	var rawFile map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawFile); err != nil {
+		return false
+	}
+	var entry HookConfig
+	if err := json.Unmarshal(rawFile["entire"], &entry); err != nil {
+		return false
+	}
+	if entry.Enabled != nil && !*entry.Enabled {
+		return false
+	}
+	return !hasEntireHookInSimpleHandlers(entry.SessionStart)
+}
+
+// withMissingStopTimeouts returns hooks.json with stopHookTimeoutSeconds added
+// to each of Entire's Stop handlers that has no timeout, and whether it added
+// any. It decides what RepairHookTimeouts writes and what CheckHookConfig
+// reports, so the two cannot disagree.
+func withMissingStopTimeouts(data []byte) (map[string]json.RawMessage, bool, error) {
+	var rawFile map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawFile); err != nil {
+		return nil, false, fmt.Errorf("failed to parse hooks.json: %w", err)
+	}
+	var entry map[string]json.RawMessage
+	if err := json.Unmarshal(rawFile["entire"], &entry); err != nil || entry == nil {
+		return nil, false, nil //nolint:nilerr // an absent or unparseable entry is left for install to replace
+	}
+	var parsed HookConfig
+	if err := json.Unmarshal(rawFile["entire"], &parsed); err == nil && parsed.Enabled != nil && !*parsed.Enabled {
+		return nil, false, nil
+	}
+	var stop []map[string]json.RawMessage
+	if err := json.Unmarshal(entry["Stop"], &stop); err != nil {
+		return nil, false, nil //nolint:nilerr // an unparseable Stop list is left for install to replace
+	}
+
+	changed := false
+	for _, handler := range stop {
+		if isEntireRawHandler(handler) && !hasKeyFold(handler, "timeout") {
+			handler["timeout"] = json.RawMessage(strconv.Itoa(stopHookTimeoutSeconds))
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, false, nil
+	}
+	var err error
+	if entry["Stop"], err = jsonutil.MarshalWithNoHTMLEscape(stop); err != nil {
+		return nil, false, fmt.Errorf("failed to marshal Stop hooks: %w", err)
+	}
+	if rawFile["entire"], err = jsonutil.MarshalWithNoHTMLEscape(entry); err != nil {
+		return nil, false, fmt.Errorf("failed to marshal hook config: %w", err)
+	}
+	return rawFile, true, nil
+}
+
+// isEntireRawHandler reports whether a raw hook handler runs a command Entire
+// wrote. A nil handler (a JSON null) or one without a string command is not.
+func isEntireRawHandler(handler map[string]json.RawMessage) bool {
+	var command string
+	if err := json.Unmarshal(handler["command"], &command); err != nil {
+		return false
+	}
+	return agent.IsManagedHookCommand(command)
+}
+
+func hasKeyFold(m map[string]json.RawMessage, key string) bool {
+	for k := range m {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
+}
 
 // buildEntireHookConfig constructs the HookConfig for the "entire" entry for
 // the host this binary runs on.
@@ -297,6 +473,7 @@ func buildEntireHookConfigForHost(windowsHost bool) HookConfig {
 	// fields stay in HookConfig so the idempotency comparison detects (and
 	// replaces) stale installs that still carry them.
 	return HookConfig{
+		SessionStart: []SimpleHandler{{Type: hookTypeCommand, Command: makeCmd("session-start")}},
 		PreToolUse: []ToolHandler{
 			{
 				Matcher: "*",

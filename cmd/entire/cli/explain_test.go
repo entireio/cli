@@ -1104,6 +1104,82 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	require.NotEqual(t, fixture.v1Hash, v1After.Hash(), "v1 metadata branch must advance after UpdateSummary")
 }
 
+// useRedactionSettingsForTest writes settingsJSON as the fixture repo's
+// .entire/settings.json and makes the next EnsureRedactionConfigured load it.
+// Redaction config is process-global, so the cleanup also turns off the custom
+// rules and PII detection a test enabled; otherwise they apply to later tests.
+func useRedactionSettingsForTest(t *testing.T, settingsJSON string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(".entire", 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(".entire", "settings.json"), []byte(settingsJSON), 0o600))
+	strategy.ResetRedactionConfiguredForTest()
+	t.Cleanup(func() {
+		strategy.ResetRedactionConfiguredForTest()
+		redact.ConfigureCustomRules(redact.CustomRulesConfig{})
+		redact.ConfigurePII(redact.PIIConfig{})
+	})
+}
+
+// --generate writes the summary back into the checkpoint, so the repo's custom
+// rules and PII settings must apply to it, not only the always-on layers. The
+// model can repeat an identifier from a transcript stored before a rule existed.
+func TestGenerateCheckpointSummary_AppliesRepoRedactionSettings(t *testing.T) {
+	fixture := setupGenerateSummaryFixture(t)
+	stubSummaryProviderForTest(t)
+	useRedactionSettingsForTest(t, `{"enabled": true, "redaction": {
+		"custom_redactions": {"nightjar": "NIGHTJAR-[0-9]{4}"},
+		"pii": {"enabled": true}}}`)
+
+	const (
+		codename = "NIGHTJAR-4821"
+		email    = "nightjar.owner@example.com"
+		control  = "SUMMARY_CAPTURE_CONTROL_5c"
+	)
+	generateTranscriptSummary = func(context.Context, redact.RedactedBytes, []string, types.AgentType, summarize.Generator, agent.ProgressFn) (*checkpoint.Summary, error) {
+		return &checkpoint.Summary{Intent: "Ship " + codename + " for " + email, Outcome: control}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	require.NoError(t, generateCheckpointSummary(
+		fixture.ctx, &stdout, &stderr, fixture.store, fixture.cpID, fixture.cpSummary, fixture.content, false, 0))
+
+	content, err := checkpoint.ReadLatestSessionContent(fixture.ctx, fixture.store, fixture.cpID, fixture.cpSummary)
+	require.NoError(t, err)
+	stored := content.Metadata.Summary
+	require.NotNil(t, stored)
+	require.Equal(t, control, stored.Outcome, "summary did not reach storage, so the redaction checks are inconclusive")
+	require.NotContains(t, stored.Intent, codename, "inline custom_redactions rule must apply to the stored summary")
+	require.NotContains(t, stored.Intent, email, "PII email detection must apply to the stored summary")
+}
+
+// A scanner selection the settings reject must stop --generate before the
+// provider sees the transcript and before anything is written. The stubbed
+// provider settings skip the provider's own settings load, which would also
+// fail on this config, so the refusal under test is the write path's own.
+func TestGenerateCheckpointSummary_InvalidScannerConfigRefuses(t *testing.T) {
+	fixture := setupGenerateSummaryFixture(t)
+	stubSummaryProviderForTest(t)
+	useRedactionSettingsForTest(t, `{"enabled": true, "redaction": {
+		"betterleaks": {"enabled": false},
+		"goredact": {"enabled": false}}}`)
+
+	generated := false
+	generateTranscriptSummary = func(context.Context, redact.RedactedBytes, []string, types.AgentType, summarize.Generator, agent.ProgressFn) (*checkpoint.Summary, error) {
+		generated = true
+		return &checkpoint.Summary{Intent: "i", Outcome: "o"}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := generateCheckpointSummary(
+		fixture.ctx, &stdout, &stderr, fixture.store, fixture.cpID, fixture.cpSummary, fixture.content, false, 0)
+	require.ErrorIs(t, err, settings.ErrScannerConfig)
+	require.False(t, generated, "the provider must not be called when redaction cannot be configured")
+
+	v1After, err := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, fixture.v1Hash, v1After.Hash(), "no summary may be written")
+}
+
 // TestGenerateCheckpointAISummary_ExplicitTimeoutNarrowsLongParent verifies
 // that an explicit timeout (e.g. from --summary-timeout-seconds) takes effect
 // even when the parent context has a much longer deadline.

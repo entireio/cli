@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 func TestParseDroidTranscript_NormalizesEnvelope(t *testing.T) {
@@ -31,16 +31,16 @@ func TestParseDroidTranscript_NormalizesEnvelope(t *testing.T) {
 	}
 
 	// First line should be normalized to type="user"
-	if lines[0].Type != transcript.TypeUser {
-		t.Errorf("lines[0].Type = %q, want %q", lines[0].Type, transcript.TypeUser)
+	if lines[0].Type != transcriptlib.TypeUser {
+		t.Errorf("lines[0].Type = %q, want %q", lines[0].Type, transcriptlib.TypeUser)
 	}
 	if lines[0].UUID != "m1" {
 		t.Errorf("lines[0].UUID = %q, want \"m1\"", lines[0].UUID)
 	}
 
 	// Second line should be normalized to type="assistant"
-	if lines[1].Type != transcript.TypeAssistant {
-		t.Errorf("lines[1].Type = %q, want %q", lines[1].Type, transcript.TypeAssistant)
+	if lines[1].Type != transcriptlib.TypeAssistant {
+		t.Errorf("lines[1].Type = %q, want %q", lines[1].Type, transcriptlib.TypeAssistant)
 	}
 	if lines[1].UUID != "m2" {
 		t.Errorf("lines[1].UUID = %q, want \"m2\"", lines[1].UUID)
@@ -77,11 +77,11 @@ func TestParseDroidTranscript_StartLineOffset(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines from offset 2, want 2", len(lines))
 	}
-	if lines[0].Type != transcript.TypeAssistant {
-		t.Errorf("lines[0].Type = %q, want %q", lines[0].Type, transcript.TypeAssistant)
+	if lines[0].Type != transcriptlib.TypeAssistant {
+		t.Errorf("lines[0].Type = %q, want %q", lines[0].Type, transcriptlib.TypeAssistant)
 	}
-	if lines[1].Type != transcript.TypeUser {
-		t.Errorf("lines[1].Type = %q, want %q", lines[1].Type, transcript.TypeUser)
+	if lines[1].Type != transcriptlib.TypeUser {
+		t.Errorf("lines[1].Type = %q, want %q", lines[1].Type, transcriptlib.TypeUser)
 	}
 }
 
@@ -713,11 +713,11 @@ func TestParseDroidTranscript_MalformedLines(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want 2 (malformed lines should be silently skipped)", len(lines))
 	}
-	if lines[0].Type != transcript.TypeUser {
-		t.Errorf("lines[0].Type = %q, want %q", lines[0].Type, transcript.TypeUser)
+	if lines[0].Type != transcriptlib.TypeUser {
+		t.Errorf("lines[0].Type = %q, want %q", lines[0].Type, transcriptlib.TypeUser)
 	}
-	if lines[1].Type != transcript.TypeAssistant {
-		t.Errorf("lines[1].Type = %q, want %q", lines[1].Type, transcript.TypeAssistant)
+	if lines[1].Type != transcriptlib.TypeAssistant {
+		t.Errorf("lines[1].Type = %q, want %q", lines[1].Type, transcriptlib.TypeAssistant)
 	}
 }
 

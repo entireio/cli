@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // TranscriptLine is an alias to the shared transcript.Line type.
@@ -84,9 +85,15 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 // Due to streaming, multiple transcript rows may share the same message.id.
 // We deduplicate by taking the row with the highest output_tokens for each message.id.
 func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
-	// Map from message.id to the usage with highest output_tokens
 	usageByMessageID := make(map[string]messageUsage)
+	addUsageByMessageID(usageByMessageID, transcript)
+	return sumUsage(usageByMessageID)
+}
 
+// addUsageByMessageID adds each assistant message's usage in transcript to
+// usageByMessageID, keeping per message.id the row with the highest
+// output_tokens (the final streaming state).
+func addUsageByMessageID(usageByMessageID map[string]messageUsage, transcript []TranscriptLine) {
 	for _, line := range transcript {
 		if line.Type != envelopeTypeAssistant {
 			continue
@@ -103,14 +110,15 @@ func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
 			continue
 		}
 
-		// Keep the entry with highest output_tokens (final streaming state)
 		existing, exists := usageByMessageID[msg.ID]
 		if !exists || msg.Usage.OutputTokens > existing.OutputTokens {
 			usageByMessageID[msg.ID] = msg.Usage
 		}
 	}
+}
 
-	// Sum up all unique messages
+// sumUsage totals usageByMessageID, one API call per message.id.
+func sumUsage(usageByMessageID map[string]messageUsage) *agent.TokenUsage {
 	usage := &agent.TokenUsage{
 		APICallCount: len(usageByMessageID),
 	}
@@ -120,31 +128,25 @@ func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
 		usage.CacheReadTokens += u.CacheReadInputTokens
 		usage.OutputTokens += u.OutputTokens
 	}
-
 	return usage
-}
-
-// CalculateTokenUsageFromFile calculates token usage from a Claude Code transcript file.
-// If startLine > 0, only considers lines from startLine onwards.
-func CalculateTokenUsageFromFile(path string, startLine int) (*agent.TokenUsage, error) {
-	if path == "" {
-		return &agent.TokenUsage{}, nil
-	}
-
-	lines, err := transcript.ParseFromFileAtLine(path, startLine)
-	if err != nil {
-		return nil, err //nolint:wrapcheck // caller adds context
-	}
-
-	return CalculateTokenUsage(lines), nil
 }
 
 // ExtractSpawnedAgentIDs extracts agent IDs from Task tool results in a transcript.
 // When a Task tool completes, the tool_result contains "agentId: <id>" in its content.
 // Returns a map of agentID -> toolUseID for all spawned agents.
 func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
+	return textAgentIDs(transcript, nil)
+}
+
+// textAgentIDs maps the agent each tool result's text names ("agentId:") to
+// that result's tool_use_id, the last result winning, skipping results whose
+// tool_use_id is in skip.
+func textAgentIDs(transcript []TranscriptLine, skip map[string]bool) map[string]string {
 	agentIDs := make(map[string]string)
 	forEachToolResultText(transcript, func(toolUseID, text string) {
+		if skip[toolUseID] {
+			return
+		}
 		// Look for agentId in the text. Drop any ID that isn't path-safe:
 		// callers build agent-<id>.jsonl from it and read that file, so this
 		// is the choke point that keeps the path inside subagentsDir,
@@ -156,12 +158,16 @@ func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 	return agentIDs
 }
 
-// spawnedAgentIDs returns every agent the transcript launched under its own
-// ID: Agent calls named in their result text (ExtractSpawnedAgentIDs) and
-// skills that ran forked (forkedSkillAgentIDs).
+// spawnedAgentIDs returns every agent the transcript launched, keyed to the
+// launching tool_use_id: the agents tool results name in their structured
+// result (toolResultAgentIDs), plus, for results that name none (older
+// transcripts), the "agentId:" in their text (ExtractSpawnedAgentIDs). A
+// result that names an agent is never read for text, which can quote other
+// agents' IDs. They are skipped before the text IDs are collected, so a
+// quote can't take over the result an earlier agent was found in.
 func spawnedAgentIDs(transcriptData []byte, parsed []TranscriptLine) map[string]string {
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
-	for agentID, toolUseID := range forkedSkillAgentIDs(transcriptData) {
+	agentIDs, named := toolResultAgentIDs(transcriptData)
+	for agentID, toolUseID := range textAgentIDs(parsed, named) {
 		if _, ok := agentIDs[agentID]; !ok {
 			agentIDs[agentID] = toolUseID
 		}
@@ -169,16 +175,22 @@ func spawnedAgentIDs(transcriptData []byte, parsed []TranscriptLine) map[string]
 	return agentIDs
 }
 
-// forkedSkillAgentIDs returns the agents that skills with `context: fork` ran
-// in, keyed to the Skill call's tool_use_id. A forked Skill call's result
-// text does not name its agent; only the structured result does
-// ({"toolUseResult": {"status": "forked", "agentId": ...}}, Claude Code
-// 2.1.291). The agent's transcript is <subagentsDir>/agent-<id>.jsonl, as for
-// an Agent call. IDs that are not path-safe are dropped.
-func forkedSkillAgentIDs(transcriptData []byte) map[string]string {
-	agentIDs := make(map[string]string)
+// toolResultAgentIDs returns every agent a tool result names in its
+// structured result ({"toolUseResult": {"agentId": ...}}), keyed to that
+// result's tool_use_id: Agent calls in the foreground ("completed") and
+// background ("async_launched"), and skills that ran forked ("forked",
+// Claude Code 2.1.291). Foreground Explore and Plan results never print
+// "agentId:" in their text, so this is the only place they name their agent.
+// The first result naming an agent keeps it (later ones are follow-ups to
+// the same agent). named holds every tool_use_id whose result named an
+// agent, first or not: those results are not read for text. The agent's
+// transcript is <subagentsDir>/agent-<id>.jsonl. IDs that are empty or not
+// path-safe name no agent.
+func toolResultAgentIDs(transcriptData []byte) (agentIDs map[string]string, named map[string]bool) {
+	agentIDs = make(map[string]string)
+	named = make(map[string]bool)
 	for _, line := range bytes.Split(transcriptData, []byte("\n")) {
-		if !bytes.Contains(line, []byte(`"forked"`)) {
+		if !bytes.Contains(line, []byte(`"toolUseResult"`)) || !bytes.Contains(line, []byte(`"agentId"`)) {
 			continue
 		}
 		var entry struct {
@@ -190,13 +202,13 @@ func forkedSkillAgentIDs(transcriptData []byte) map[string]string {
 				} `json:"content"`
 			} `json:"message"`
 			ToolUseResult struct {
-				Status  string `json:"status"`
 				AgentID string `json:"agentId"`
 			} `json:"toolUseResult"`
 		}
-		if json.Unmarshal(line, &entry) != nil || entry.Type != transcript.TypeUser ||
-			entry.ToolUseResult.Status != skillToolStatusForked ||
-			validation.ValidateAgentID(entry.ToolUseResult.AgentID) != nil {
+		// ValidateAgentID allows "" (an optional field elsewhere); here an
+		// empty ID names no agent.
+		if json.Unmarshal(line, &entry) != nil || entry.Type != transcriptlib.TypeUser ||
+			entry.ToolUseResult.AgentID == "" || validation.ValidateAgentID(entry.ToolUseResult.AgentID) != nil {
 			continue
 		}
 		toolUseID := ""
@@ -206,9 +218,16 @@ func forkedSkillAgentIDs(transcriptData []byte) map[string]string {
 				break
 			}
 		}
-		agentIDs[entry.ToolUseResult.AgentID] = toolUseID
+		// A result with no tool_use_id cannot be told apart from another such
+		// result, so it suppresses no text.
+		if toolUseID != "" {
+			named[toolUseID] = true
+		}
+		if _, seen := agentIDs[entry.ToolUseResult.AgentID]; !seen {
+			agentIDs[entry.ToolUseResult.AgentID] = toolUseID
+		}
 	}
-	return agentIDs
+	return agentIDs, named
 }
 
 // ExtractWorkflowRunIDs returns the IDs of the Workflow runs a transcript
@@ -253,7 +272,7 @@ func workflowRunIDsFromToolUseResults(transcriptData []byte) []string {
 				RunID    string `json:"runId"`
 			} `json:"toolUseResult"`
 		}
-		if json.Unmarshal(line, &entry) != nil || entry.Type != transcript.TypeUser || entry.ToolUseResult.TaskType != "local_workflow" {
+		if json.Unmarshal(line, &entry) != nil || entry.Type != transcriptlib.TypeUser || entry.ToolUseResult.TaskType != "local_workflow" {
 			continue
 		}
 		runIDs = appendWorkflowRunID(runIDs, entry.ToolUseResult.RunID)
@@ -325,9 +344,16 @@ func toolResultText(content json.RawMessage) string {
 	return ""
 }
 
-// extractAgentIDFromText extracts an agent ID from text containing "agentId: <id>".
+// extractAgentIDFromText extracts the agent ID from the last "agentId: <id>"
+// in text: Claude Code appends it as a trailer, and the report before it may
+// quote other agents' IDs.
 func extractAgentIDFromText(text string) string {
-	return extractIDAfter(text, "agentId: ", false)
+	const prefix = "agentId: "
+	idx := strings.LastIndex(text, prefix)
+	if idx == -1 {
+		return ""
+	}
+	return extractIDAfter(text[idx:], prefix, false)
 }
 
 // extractIDAfter extracts the identifier following the first occurrence of
@@ -358,7 +384,7 @@ func (c *ClaudeCodeAgent) ExtractSkillEvents(transcriptData []byte, startLine in
 		return nil, nil
 	}
 
-	sliced := transcript.SliceFromLine(transcriptData, startLine)
+	sliced := transcriptlib.SliceFromLine(transcriptData, startLine)
 	parsed, err := transcript.ParseFromBytes(sliced)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
@@ -376,7 +402,7 @@ func (c *ClaudeCodeAgent) ExtractSkillEvents(transcriptData []byte, startLine in
 		}
 
 		for _, block := range msg.Content {
-			if block.Type != transcript.ContentTypeToolUse || block.Name != "Skill" {
+			if block.Type != transcriptlib.ContentTypeToolUse || block.Name != "Skill" {
 				continue
 			}
 			var input toolInput
@@ -445,7 +471,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	}
 
 	// Slice to the relevant portion and parse
-	sliced := transcript.SliceFromLine(transcriptData, startLine)
+	sliced := transcriptlib.SliceFromLine(transcriptData, startLine)
 	parsed, err := transcript.ParseFromBytes(sliced)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
@@ -484,23 +510,36 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	// line 0 on every call, so mainUsage.SubagentTokens is a cumulative-since-
 	// session-start snapshot — see the CalculateTotalTokenUsage interface contract
 	// in cmd/entire/cli/agent for how callers must accumulate it.
-	if len(agentPaths) > 0 {
-		subagentUsage := &agent.TokenUsage{}
-		for _, agentPath := range agentPaths {
-			agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)
-			if err != nil {
-				// Agent transcript may not exist yet or may have been cleaned up
-				continue
-			}
-			subagentUsage.InputTokens += agentUsage.InputTokens
-			subagentUsage.CacheCreationTokens += agentUsage.CacheCreationTokens
-			subagentUsage.CacheReadTokens += agentUsage.CacheReadTokens
-			subagentUsage.OutputTokens += agentUsage.OutputTokens
-			subagentUsage.APICallCount += agentUsage.APICallCount
+	// A fork agent's transcript opens with a copy of the parent message that
+	// launched it (same message.id and usage), and every fork that message
+	// launched copies it; a fork of a subagent copies that subagent's history.
+	// Count each API call once: merge the subagents' usage by message.id, and
+	// drop the messages the parent's transcript holds, which are the parent's
+	// calls, not a subagent's.
+	subagentByMessageID := make(map[string]messageUsage)
+	for _, agentPath := range agentPaths {
+		lines, err := transcript.ParseFromFileAtLine(agentPath, 0)
+		if err != nil {
+			// Agent transcript may not exist yet or may have been cleaned up
+			continue
 		}
-		if subagentUsage.APICallCount > 0 {
-			mainUsage.SubagentTokens = subagentUsage
+		addUsageByMessageID(subagentByMessageID, lines)
+	}
+	// A fork cancelled before its first reply holds only the copied launch.
+	// Its zero is still a reading, not a missing one: callers keep the last
+	// snapshot when SubagentTokens is nil.
+	foundSubagentUsage := len(subagentByMessageID) > 0
+	for _, line := range fullParsed {
+		if len(subagentByMessageID) == 0 {
+			break
 		}
+		var msg messageWithUsage
+		if line.Type == envelopeTypeAssistant && json.Unmarshal(line.Message, &msg) == nil {
+			delete(subagentByMessageID, msg.ID)
+		}
+	}
+	if foundSubagentUsage {
+		mainUsage.SubagentTokens = sumUsage(subagentByMessageID)
 	}
 
 	return mainUsage, nil
@@ -517,7 +556,7 @@ func launchedSubagentTranscripts(transcriptData []byte, fullParsed []TranscriptL
 }
 
 // subagentTranscriptPaths maps every subagent the transcript launched to its
-// transcript: the agents named by "agentId:" tool results (spawnedAgentIDs),
+// transcript: the agents its tool results name (spawnedAgentIDs),
 // at <subagentsDir>/agent-<id>.jsonl, plus the agents of every Workflow run
 // the transcript launched (runIDs), under <subagentsDir>/workflows/<runId>/
 // (#2685). A Workflow's tool result names its run, never its agents, so those
@@ -557,7 +596,7 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 	}
 
 	// Slice to the relevant portion and parse
-	sliced := transcript.SliceFromLine(transcriptData, startLine)
+	sliced := transcriptlib.SliceFromLine(transcriptData, startLine)
 	parsed, err := transcript.ParseFromBytes(sliced)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)

@@ -100,13 +100,14 @@ sequenceDiagram
     Note over G: Stop hook
     G->>G: HandleTurnEnd (ACTIVE→IDLE)
     G->>G: UpdateCommitted: finalize with full transcript
-    G->>S: TurnCheckpointIDs = nil
+    G->>S: TurnCheckpointIDs = nil (unfinalized IDs kept if finalize is cut short)
 ```
 
 ### Key Points
 - Agent commits detected by no TTY → fast path adds trailer directly
 - **Deferred finalization**: PostCommit saves provisional transcript, HandleTurnEnd updates with full transcript
 - TurnCheckpointIDs tracks mid-turn checkpoints for finalization at stop
+- If finalize is cut short (deadline, cancellation, late transcript, degraded scanner), the unfinalized IDs stay so a repeated Stop in the same turn retries them; the next turn start clears them
 
 ---
 
@@ -149,7 +150,7 @@ sequenceDiagram
     Note over G: Stop hook → HandleTurnEnd
     G->>G: Finalize ALL checkpoints with full transcript
     Note right of G: checkpoint-1: UpdateCommitted<br/>checkpoint-2: UpdateCommitted<br/>checkpoint-3: UpdateCommitted
-    G->>S: TurnCheckpointIDs = nil
+    G->>S: TurnCheckpointIDs = nil (unfinalized IDs kept if finalize is cut short)
 ```
 
 ### Key Points

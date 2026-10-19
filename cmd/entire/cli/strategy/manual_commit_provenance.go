@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 
@@ -132,6 +133,9 @@ const inheritedTrailersFile = "entire-inherited-trailers.json"
 type inheritedTrailers struct {
 	Parents []string          `json:"parents"`
 	IDs     []id.CheckpointID `json:"ids"`
+	// Redone are the committed paths a redo's inherited checkpoints already
+	// hold; post-commit does not count them as a session's overlap evidence.
+	Redone []string `json:"redone,omitempty"`
 }
 
 // recordInheritedTrailers tells post-commit which trailers this commit
@@ -139,6 +143,12 @@ type inheritedTrailers struct {
 // existing checkpoint, which may simply not be in this clone's store yet.
 // With nothing inherited it clears any marker a commit that never happened left.
 func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
+	recordInheritedMarker(ctx, inherited, nil)
+}
+
+// recordInheritedMarker is recordInheritedTrailers that also records the
+// paths a redo's inherited checkpoints hold.
+func recordInheritedMarker(ctx context.Context, inherited []id.CheckpointID, redone map[string]bool) {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
 		return
@@ -147,7 +157,11 @@ func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 		_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent is the usual case
 		return
 	}
-	writeInheritedTrailers(ctx, root, inheritedTrailers{IDs: inherited, Parents: commitParentCandidates(ctx)})
+	writeInheritedTrailers(ctx, root, inheritedTrailers{
+		IDs:     inherited,
+		Parents: commitParentCandidates(ctx),
+		Redone:  slices.Sorted(maps.Keys(redone)),
+	})
 }
 
 func writeInheritedTrailers(ctx context.Context, root *os.Root, marker inheritedTrailers) {
@@ -184,37 +198,53 @@ func commitParentCandidates(ctx context.Context) []string {
 // stampedTrailersOf returns the checkpoint trailers of commit that
 // prepare-commit-msg stamped, leaving out the ones it recorded as inherited
 // and any checkpoint deleted from this clone: post-commit must never condense
-// new work into a deleted ID, which would re-create it.
-func stampedTrailersOf(ctx context.Context, commit *object.Commit) []id.CheckpointID {
+// new work into a deleted ID, which would re-create it. It also returns the
+// committed paths a redo's inherited checkpoints hold.
+func stampedTrailersOf(ctx context.Context, commit *object.Commit) ([]id.CheckpointID, map[string]bool) {
 	var parent string
 	if len(commit.ParentHashes) > 0 {
 		parent = commit.ParentHashes[0].String()
 	}
-	stamped := withoutInherited(trailers.ParseAllCheckpoints(commit.Message), takeInheritedTrailers(ctx, parent))
-	return withoutDeletedCheckpoints(ctx, stamped)
+	inherited, redone := takeInheritedMarker(ctx, parent)
+	stamped := withoutInherited(trailers.ParseAllCheckpoints(commit.Message), inherited)
+	return withoutDeletedCheckpoints(ctx, stamped), redone
 }
 
 // takeInheritedTrailers returns the trailers prepare-commit-msg recorded as
 // inherited for a commit on parent, and consumes the marker either way.
 func takeInheritedTrailers(ctx context.Context, parent string) map[id.CheckpointID]bool {
+	inherited, _ := takeInheritedMarker(ctx, parent)
+	return inherited
+}
+
+// takeInheritedMarker is takeInheritedTrailers that also returns the recorded
+// redone paths.
+func takeInheritedMarker(ctx context.Context, parent string) (map[id.CheckpointID]bool, map[string]bool) {
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	data, err := osroot.ReadFileNoFollow(root, inheritedTrailersFile)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // a stale marker is ignored by its parent check
 	var marker inheritedTrailers
 	if json.Unmarshal(data, &marker) != nil || !slices.Contains(marker.Parents, parent) {
-		return nil
+		return nil, nil
 	}
 	out := make(map[id.CheckpointID]bool, len(marker.IDs))
 	for _, cpID := range marker.IDs {
 		out[cpID] = true
 	}
-	return out
+	var redone map[string]bool
+	for _, p := range marker.Redone {
+		if redone == nil {
+			redone = make(map[string]bool, len(marker.Redone))
+		}
+		redone[p] = true
+	}
+	return out, redone
 }
 
 // withoutInherited drops the trailers a commit inherited: post-commit condenses

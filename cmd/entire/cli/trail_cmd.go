@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
@@ -376,7 +377,10 @@ func printTrailDetails(w io.Writer, m *trail.Metadata, webURL string, mergeabili
 		fmt.Fprintf(w, "  %s%s\n", label("Phase:   "), phase)
 	}
 	if webURL != "" {
-		fmt.Fprintf(w, "  %s%s\n", label("URL:     "), webURL)
+		fmt.Fprintf(w, "  %s%s\n", label("URL:     "), tuiutil.SanitizeTerminalText(webURL))
+	}
+	if m.ProjectTrailURL != "" {
+		fmt.Fprintf(w, "  %s%s\n", label("Project trail: "), tuiutil.SanitizeTerminalText(m.ProjectTrailURL))
 	}
 	if len(m.Labels) > 0 {
 		fmt.Fprintf(w, "  %s%s\n", label("Labels:  "), strings.Join(m.Labels, ", "))

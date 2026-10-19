@@ -56,8 +56,12 @@ func printProjectTrail(cmd *cobra.Command, item api.ProjectTrail) error {
 		return printJSON(cmd.OutOrStdout(), item)
 	}
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "Trail #%d: %s\nID: %s\nProject: %s\nStatus: %s\nType: %s\nPriority: %s\nAssignees: %s\n",
-		item.Number, tuiutil.SanitizeTerminalLabel(item.Title), tuiutil.SanitizeTerminalLabel(item.ID), tuiutil.SanitizeTerminalLabel(item.ProjectID), tuiutil.SanitizeTerminalLabel(item.Status),
+	fmt.Fprintf(w, "Trail #%d: %s\n", item.Number, tuiutil.SanitizeTerminalLabel(item.Title))
+	if url := strings.TrimSpace(item.URL); url != "" {
+		fmt.Fprintf(w, "URL: %s\n", tuiutil.SanitizeTerminalText(url))
+	}
+	fmt.Fprintf(w, "ID: %s\nProject: %s\nStatus: %s\nType: %s\nPriority: %s\nAssignees: %s\n",
+		tuiutil.SanitizeTerminalLabel(item.ID), tuiutil.SanitizeTerminalLabel(item.ProjectID), tuiutil.SanitizeTerminalLabel(item.Status),
 		tuiutil.SanitizeTerminalLabel(item.Type), tuiutil.SanitizeTerminalLabel(item.Priority), tuiutil.SanitizeTerminalLabel(strings.Join(item.Assignees, ", ")))
 	if item.Body != "" {
 		fmt.Fprintf(w, "\n%s\n", tuiutil.SanitizeTerminalText(item.Body))

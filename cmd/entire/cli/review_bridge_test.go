@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 )
 
 const testWholeChangeGranularity = "whole_change"
@@ -43,7 +44,7 @@ func TestReviewTrailFindingInputsSplitsTopLevelBullets(t *testing.T) {
   - nested detail stays with second
 - **[Low] Third issue:** remove the note from daytona-command-native-plan.md:1`
 
-	inputs := reviewTrailFindingInputs("general", verdict)
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: verdict})
 	if len(inputs) != 3 {
 		t.Fatalf("inputs = %d, want 3", len(inputs))
 	}
@@ -86,7 +87,7 @@ func TestReviewTrailFindingInputsSplitsTopLevelMarkedFindings(t *testing.T) {
 		"Additional detail for the first issue.\n\n" +
 		"**[MEDIUM] PATCH thread route missing requestBody** — `api/src/routes/trails.ts:2802`. Generated clients cannot send updates.\n"
 
-	inputs := reviewTrailFindingInputs("general", verdict)
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: verdict})
 	if len(inputs) != 2 {
 		t.Fatalf("inputs = %d, want 2", len(inputs))
 	}
@@ -108,11 +109,15 @@ func TestReviewTrailFindingInputsSplitsTopLevelMarkedFindings(t *testing.T) {
 	}
 }
 
-func TestReviewTrailFindingInputsAcceptsRunnerStyleJSONLastLine(t *testing.T) {
-	verdict := `Intermediate prose that should be ignored for posting.
-{"summary":"","comments":[{"severity":"high","confidence":0.92,"body":"` + "`" + `daytona.ts` + "`" + ` rejects public repos without a token; allow public clones or mint a token.","location":{"granularity":"line","file_path":"daytona.ts","start_line":901,"selected_text":"return err"}},{"severity":"P2","confidence":0.7,"body":"Delete failures are swallowed, orphaning provider snapshots.","location":{"granularity":"range","file_path":"daytona.ts","start_line":966,"end_line":970}}]}`
+func TestReviewTrailFindingInputsMapsStructuredComments(t *testing.T) {
+	t.Parallel()
+	confidence, lowConfidence := 0.92, 0.7
+	report := cliReview.TrailReport{Comments: []cliReview.TrailComment{
+		{Severity: "high", Confidence: &confidence, Body: "`daytona.ts` rejects public repos without a token; allow public clones or mint a token.", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "daytona.ts", StartLine: 901, SelectedText: "return err"}},
+		{Severity: "P2", Confidence: &lowConfidence, Body: "Delete failures are swallowed, orphaning provider snapshots.", Location: cliReview.TrailLocation{Granularity: "range", FilePath: "daytona.ts", StartLine: 966, EndLine: 970}},
+	}}
 
-	inputs := reviewTrailFindingInputs("general", verdict)
+	inputs := reviewTrailFindingInputs("general", report)
 	if len(inputs) != 2 {
 		t.Fatalf("inputs = %d, want 2", len(inputs))
 	}
@@ -139,8 +144,20 @@ func TestReviewTrailFindingInputsAcceptsRunnerStyleJSONLastLine(t *testing.T) {
 	}
 }
 
+func TestReviewTrailFindingInputsSplitsUnicodeBulletsAndBoldSeverity(t *testing.T) {
+	verdict := "request changes\n\n• [high] a.go:1 — A.\n**High** b.go:2 — B."
+
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: verdict})
+	if len(inputs) != 2 {
+		t.Fatalf("inputs = %d, want 2", len(inputs))
+	}
+	if !strings.Contains(*inputs[0].Body, "a.go:1") || !strings.Contains(*inputs[1].Body, "b.go:2") {
+		t.Fatalf("findings were not split cleanly: %q, %q", *inputs[0].Body, *inputs[1].Body)
+	}
+}
+
 func TestReviewTrailFindingInputsSingleVerdictUnchanged(t *testing.T) {
-	inputs := reviewTrailFindingInputs("general", "APPROVE - no actionable findings.")
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: "APPROVE - no actionable findings."})
 	if len(inputs) != 1 {
 		t.Fatalf("inputs = %d, want 1", len(inputs))
 	}
@@ -150,7 +167,7 @@ func TestReviewTrailFindingInputsSingleVerdictUnchanged(t *testing.T) {
 }
 
 func TestReviewTrailLocationFromJSON_SingleLineRangeBecomesLine(t *testing.T) {
-	loc := reviewTrailLocationFromJSON(reviewTrailJSONLocation{
+	loc := reviewTrailLocationFromJSON(cliReview.TrailLocation{
 		Granularity: reviewTrailGranularityRange,
 		FilePath:    "src/app.ts",
 		StartLine:   42,
@@ -165,7 +182,7 @@ func TestReviewTrailLocationFromJSON_SingleLineRangeBecomesLine(t *testing.T) {
 }
 
 func TestReviewTrailLocationFromJSON_InvalidRangeKeepsStartLineAnchor(t *testing.T) {
-	loc := reviewTrailLocationFromJSON(reviewTrailJSONLocation{
+	loc := reviewTrailLocationFromJSON(cliReview.TrailLocation{
 		Granularity: reviewTrailGranularityRange,
 		FilePath:    "src/app.ts",
 		StartLine:   42,
@@ -179,7 +196,113 @@ func TestReviewTrailLocationFromJSON_InvalidRangeKeepsStartLineAnchor(t *testing
 	}
 }
 
+func TestReviewTrailFindingInputsSkipsSeverityHeadings(t *testing.T) {
+	t.Parallel()
+	verdict := "request changes\n" +
+		"### High\n" +
+		"- retry.go:42 — loop ignores ctx\n" +
+		"**Low:**\n" +
+		"- docs typo in README.md:3\n"
+
+	inputs := reviewTrailFindingInputs("", cliReview.TrailReport{Prose: verdict})
+	want := []string{"loop ignores ctx", "docs typo"}
+	if len(inputs) != len(want) {
+		bodies := make([]string, len(inputs))
+		for i, in := range inputs {
+			bodies[i] = *in.Body
+		}
+		t.Fatalf("inputs = %#v, want %d findings and no heading findings", bodies, len(want))
+	}
+	for i, w := range want {
+		body := *inputs[i].Body
+		if !strings.Contains(body, w) || strings.Contains(body, "High") || strings.Contains(body, "Low") {
+			t.Errorf("body[%d] = %q, want it to hold %q without a heading", i, body, w)
+		}
+	}
+}
+
+func TestSplitReviewVerdictFindingsEndsFindingAtHeading(t *testing.T) {
+	t.Parallel()
+	verdict := "## claude-code\n\n" +
+		"request changes\n" +
+		"- [high] retry.go:42 — loop ignores ctx\n\n" +
+		"## codex\n\n" +
+		"I read the diff.\n" +
+		"- [low] README.md:3 — docs typo\n" +
+		"### [medium] cache.go:7 — stale entry\n"
+
+	items := splitReviewVerdictFindings(verdict)
+	if len(items) != 3 || !strings.Contains(items[2], "stale entry") {
+		t.Fatalf("items = %#v, want 3 findings, the last a heading-styled finding", items)
+	}
+	if strings.Contains(items[0], "codex") || strings.Contains(items[0], "I read the diff") {
+		t.Errorf("items[0] = %q, want it to end at the next reviewer's heading", items[0])
+	}
+}
+
+func TestSplitReviewVerdictFindingsKeepsTextAfterHeading(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		verdict string
+		want    []string
+	}{
+		{
+			name: "prose-only reviewer in combined output",
+			verdict: "## claude-code\n\nrequest changes\n- [high] retry.go:42 — loop ignores ctx\n\n" +
+				"## codex\n\nrequest changes. handler.go:9 drops the error.",
+			want: []string{"loop ignores ctx", "handler.go:9 drops the error"},
+		},
+		{
+			name:    "paragraph under a non-severity heading",
+			verdict: "request changes\n- [high] a.go:1 — A.\n## Notes\nb.go:3 also leaks the lock.",
+			want:    []string{"a.go:1", "b.go:3 also leaks the lock"},
+		},
+		{
+			name:    "paragraph under a severity heading",
+			verdict: "request changes\n### High\nretry.go:42 loops forever.",
+			want:    []string{"retry.go:42 loops forever"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			items := splitReviewVerdictFindings(tc.verdict)
+			if len(items) != len(tc.want) {
+				t.Fatalf("items = %#v, want %d findings", items, len(tc.want))
+			}
+			for i, w := range tc.want {
+				if !strings.Contains(items[i], w) || strings.Contains(items[i], "#") {
+					t.Errorf("items[%d] = %q, want it to hold %q without a heading", i, items[i], w)
+				}
+			}
+		})
+	}
+}
+
+func TestSplitReviewVerdictFindingsKeepsCodeBlocksWhole(t *testing.T) {
+	t.Parallel()
+	verdict := "request changes\n" +
+		"- [high] setup.sh:3 — deps installed twice:\n" +
+		"```sh\n# install deps\nnpm ci\nnpm ci\n```\n" +
+		"- [medium] a.go:1 — wrong default:\n" +
+		"```diff\n- timeout := 0\n+ timeout := 30\n```\n" +
+		"- [low] README.md:1 — typo"
+
+	items := splitReviewVerdictFindings(verdict)
+	if len(items) != 3 {
+		t.Fatalf("items = %#v, want 3 findings", items)
+	}
+	if !strings.Contains(items[0], "# install deps\nnpm ci\nnpm ci\n```") {
+		t.Errorf("items[0] = %q, want the whole sh block", items[0])
+	}
+	if !strings.Contains(items[1], "- timeout := 0\n+ timeout := 30\n```") {
+		t.Errorf("items[1] = %q, want the whole diff block", items[1])
+	}
+}
+
 func TestSplitReviewVerdictFindingsNumberedList(t *testing.T) {
+	t.Parallel()
 	items := splitReviewVerdictFindings("Verdict\n\n1. First\n2. Second")
 	if len(items) != 2 || items[0] != "First" || items[1] != "Second" {
 		t.Fatalf("items = %#v, want numbered findings", items)

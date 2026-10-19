@@ -249,6 +249,33 @@ var agentHelpGuidance = map[string]string{
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
 }
 
+// agentHelpProjectTrailGuidance replaces agentHelpGuidance for commands in the
+// project trail tree, whose selectors (and the web URLs users paste) differ
+// from the legacy repository-scoped tree built under the same path.
+var agentHelpProjectTrailGuidance = map[string]string{
+	// No command parses web URLs, and the project and change URLs put
+	// "-" where a repository name would be, so an agent passing one through
+	// gets a misleading repository-mismatch error.
+	"trail show": "Users paste Entire trail URLs. Do not pass a URL to any command; map\n" +
+		"the path after the host to a selector:\n" +
+		"  <forge>/<project>/-/trails/<P>/changes/<repo>/<n>  change <repo>/<n>\n" +
+		"  <forge>/<project>/<repo>/-/trails/<P>/changes/<n>  change <repo>/<n>\n" +
+		"  <forge>/<project>/<repo>/trails/<n>                change <repo>/<n>\n" +
+		"  <forge>/<project>/-/trails/<P>                     project trail <P>\n" +
+		"Add --project <forge>/<project> unless <project> is origin's owner.\n" +
+		"A project trail spans repositories; each change is its branch in one\n" +
+		"repository. Pass <repo>/<n> to checkout, resume, finding, watch,\n" +
+		"approvals, approve or request-changes; given to show, it shows the parent\n" +
+		"project trail. Project trails and changes are numbered separately: never\n" +
+		"pass <P> where a change is expected, or <n> where a project trail is.\n" +
+		"To list a project trail's changes, run `entire trail show <P>\n" +
+		"--project <forge>/<project> --json`; each changes[] entry is the change\n" +
+		"<repository>/<number>. When asked to act on (e.g. review) a whole project\n" +
+		"trail, cover every change. Checkout and review need a clone of that\n" +
+		"repository: do the ones in this clone and tell the user which changes\n" +
+		"need another clone instead of skipping them silently.",
+}
+
 // agentHelpFactsFor classifies one command path, defaulting the unclassified
 // case to user-owned and unlisted so an unclassified addition is under- rather
 // than over-advertised.
@@ -274,7 +301,11 @@ func agentHelpClassified(path string) (agentHelpFacts, bool) {
 func agentHelpGuidanceFor(cmd *cobra.Command) string {
 	var parts []string
 	for c := cmd; c != nil && c != c.Root(); c = c.Parent() {
-		if g := agentHelpGuidance[agentHelpPath(c)]; g != "" {
+		g := agentHelpGuidance[agentHelpPath(c)]
+		if project, ok := agentHelpProjectTrailGuidance[agentHelpPath(c)]; ok && usesProjectTrails(c) {
+			g = project
+		}
+		if g != "" {
 			parts = append([]string{g}, parts...)
 		}
 	}

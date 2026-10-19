@@ -52,7 +52,13 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, min(1024*1024, piReviewMaxScannerBuf)), piReviewMaxScannerBuf)
-		messageIDsWithTextDelta := map[string]struct{}{}
+		// inTextBlock marks that a delta already started the current text
+		// block, so the next one continues it; a new block starts a new line.
+		// messageHadDelta marks that the current message streamed text, so
+		// message_end does not emit it again. Message IDs can be empty, so
+		// both track position in the stream instead of IDs.
+		inTextBlock := false
+		messageHadDelta := false
 		// pendingErr is the latest failure reason. It is reported only if the
 		// run still fails at the end: Pi auto-retries errors such as
 		// "overloaded", and a recovered error is not a failure.
@@ -63,6 +69,13 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 		tokens := reviewtypes.Tokens{}
 		finished := false
 		success := true
+		// lastTurnStop is the stopReason of the latest turn_end. Some Pi
+		// versions end the stream after a final turn without agent_end.
+		lastTurnStop := ""
+		// lengthErr explains a turn cut off at the output token limit. It
+		// fails the review only when that turn ends the run: Pi recovers from
+		// a cut-off tool call by asking the model to re-issue it.
+		lengthErr := ""
 
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -78,27 +91,38 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			switch env.Type {
 			case "turn_start":
 				turnNumber++
+				lastTurnStop = "" // a turn cut off before turn_end didn't finish
 			case "auto_retry_start":
 				// Pi is retrying the failed attempt; judge the retry instead.
 				success = true
 				pendingErr = ""
+				lastTurnStop = ""
+				inTextBlock = false
+				messageHadDelta = false
 			case "session", "agent_start", "queue_update", "compaction_start", "compaction_end", "auto_retry_end":
 				// Session/control events do not map to user-visible review output.
 			case "message_update":
+				if env.AssistantMessageEvent.Type == "text_start" {
+					inTextBlock = false
+				}
 				if text := env.AssistantMessageEvent.TextDelta(); text != "" {
-					messageIDsWithTextDelta[env.MessageID()] = struct{}{}
-					out <- reviewtypes.AssistantText{Text: text}
+					out <- reviewtypes.AssistantText{Text: text, Delta: inTextBlock}
+					inTextBlock = true
+					messageHadDelta = true
 				}
 			case "message_end":
+				sawDelta := messageHadDelta
+				inTextBlock = false
+				messageHadDelta = false
 				if env.Message.Role == "assistant" {
-					if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
+					if piReviewFailed(env.Message.StopReason) {
 						success = false
 						pendingErr = piReviewFailureReason(env.Message)
 					}
 					if env.Message.Usage != nil {
 						emitPiReviewTokens(out, env, &tokens, messageIDsWithUsage, messageUsageByTurn, turnNumber)
 					}
-					if _, sawDelta := messageIDsWithTextDelta[env.MessageID()]; !sawDelta {
+					if !sawDelta {
 						if text := piReviewMessageText(env.Message.Content); text != "" {
 							out <- reviewtypes.AssistantText{Text: text}
 						}
@@ -111,9 +135,13 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 				// finding no matches). The agent's stopReason determines review
 				// success/failure.
 			case "turn_end":
-				if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
+				lastTurnStop = env.Message.StopReason
+				if piReviewFailed(env.Message.StopReason) {
 					success = false
 					pendingErr = piReviewFailureReason(env.Message)
+				}
+				if env.Message.StopReason == piStopLength {
+					lengthErr = piReviewFailureReason(env.Message)
 				}
 				if env.Message.Usage != nil {
 					emitPiReviewTokens(out, env, &tokens, messageIDsWithUsage, messageUsageByTurn, turnNumber)
@@ -124,6 +152,10 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 					continue
 				}
 				finished = true
+				if lastTurnStop == piStopLength {
+					success = false
+					pendingErr = lengthErr
+				}
 				if !success && pendingErr != "" {
 					out <- reviewtypes.RunError{Err: errors.New(pendingErr)}
 				}
@@ -139,6 +171,17 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			return
 		}
 		if !finished {
+			// A stream that ends right after a turn the model stopped on
+			// finished the review, as agent_end would have. Anything else (a
+			// turn waiting on tool results, cut off, or still being retried)
+			// was cut short.
+			if lastTurnStop == "stop" && success {
+				out <- reviewtypes.Finished{Success: true}
+				return
+			}
+			if lastTurnStop == piStopLength {
+				pendingErr = lengthErr
+			}
 			if pendingErr != "" {
 				out <- reviewtypes.RunError{Err: errors.New(pendingErr)}
 			}
@@ -179,11 +222,24 @@ type piReviewMessage struct {
 	ErrorMessage string `json:"errorMessage"`
 }
 
+// piStopLength is the stop reason for a message cut off at the output token
+// limit.
+const piStopLength = "length"
+
+// piReviewFailed reports a stop that fails the review whatever follows: an
+// error or an abort. A "length" stop is judged on the run's last turn.
+func piReviewFailed(stopReason string) bool {
+	return stopReason == "error" || stopReason == "aborted"
+}
+
 // piReviewFailureReason explains a failed message: Pi's errorMessage, or the
 // stop reason when Pi gave none.
 func piReviewFailureReason(msg piReviewMessage) string {
 	if reason := strings.TrimSpace(msg.ErrorMessage); reason != "" {
 		return "pi: " + reason
+	}
+	if msg.StopReason == piStopLength {
+		return "pi: stopped at the output token limit, so the review is incomplete"
 	}
 	return "pi: stopped with " + msg.StopReason
 }

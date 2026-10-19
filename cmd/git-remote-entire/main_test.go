@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 func TestInfoFlagText(t *testing.T) {
@@ -159,7 +160,7 @@ func TestHTTPUserAgent_ReachesServer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveHTTPUserAgent: %v", err)
 			}
-			client := newAuthHTTPClient(false, ua)
+			client := newAuthHTTPClient(httpclient.NewDiscoveryTransport(false), ua)
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/.well-known/entire-cluster.json", nil)
 			if err != nil {
 				t.Fatalf("NewRequest: %v", err)

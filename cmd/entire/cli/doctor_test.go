@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -2076,14 +2077,14 @@ func TestCheckAntigravityHooksLoaded_ProbeIsOptIn(t *testing.T) {
 }
 
 // The zero-cost check that replaces the probe by default: an installed entry
-// that is not what this host needs (here a bare command with no wrapper at all)
-// is reported with the reinstall remedy, and a freshly installed one is not.
+// carrying the other host family's wrapper is reported with the reinstall
+// remedy, and a freshly installed one is not.
 func TestCheckAntigravityHooksLoaded_ReportsAnEntryStaleForThisHost(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", t.TempDir())
 	stubAgyOnPath(t)
-	writeAntigravityHooksForDoctor(t, dir)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, !agent.HookHostIsWindows())
 
 	cmd, stdout := newTestCmd(t)
 	checkAntigravityHooksLoaded(cmd)
@@ -2096,6 +2097,37 @@ func TestCheckAntigravityHooksLoaded_ReportsAnEntryStaleForThisHost(t *testing.T
 	cmd, stdout = newTestCmd(t)
 	checkAntigravityHooksLoaded(cmd)
 	require.NotContains(t, stdout.String(), "STALE FOR THIS HOST")
+}
+
+// An entry written for this host by an older release (no session-start) still
+// tracks here, so it must not be reported as stale for this host.
+func TestCheckAntigravityHooksLoaded_OutdatedEntryIsNotStaleForThisHost(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", t.TempDir())
+	stubAgyOnPath(t)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, agent.HookHostIsWindows())
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.NotContains(t, stdout.String(), "STALE FOR THIS HOST")
+}
+
+// writeAntigravityPreInvocationEntryForDoctor writes an "entire" entry holding
+// only the pre-invocation hook, wrapped as InstallHooks wraps it for a Windows
+// or POSIX host.
+func writeAntigravityPreInvocationEntryForDoctor(t *testing.T, dir string, windowsHost bool) {
+	t.Helper()
+	command := agent.WrapProductionSilentHookCommand("entire hooks antigravity pre-invocation")
+	if windowsHost {
+		command = agent.WrapWindowsProductionSilentHookCommandDirect("entire hooks antigravity pre-invocation")
+	}
+	entry, err := json.Marshal(map[string]any{"entire": map[string]any{
+		"PreInvocation": []map[string]string{{"type": "command", "command": command}},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".agents"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".agents", "hooks.json"), entry, 0o600))
 }
 
 // A version string semver cannot parse is not "too old": the agy may be newer
@@ -2112,4 +2144,19 @@ func TestCheckAntigravityHooksLoaded_UnparseableVersionSkipsProbeWithoutUpgradeA
 	require.Contains(t, stdout.String(), "could not determine the agy version")
 	require.NotContains(t, stdout.String(), "agy update")
 	require.NotContains(t, stdout.String(), "LOADED by agy")
+}
+
+// An agy entry from before the SessionStart hook leaves sessions idle until
+// they are purged; doctor reports it and names the reinstall that fixes it.
+func TestCheckHookDrift_AntigravityWarnsWithoutSessionStart(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, agent.HookHostIsWindows())
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "hooks: OUT OF DATE")
+	require.Contains(t, out, "Run `entire agent add antigravity` to update it.")
 }

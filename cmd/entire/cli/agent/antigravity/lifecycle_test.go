@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -16,6 +17,7 @@ func TestHookNames(t *testing.T) {
 	a := &AntigravityAgent{}
 	names := a.HookNames()
 	want := []string{
+		HookNameSessionStart,
 		HookNamePreToolUse,
 		HookNamePreInvocation,
 		HookNameStop,
@@ -27,6 +29,56 @@ func TestHookNames(t *testing.T) {
 		if names[i] != n {
 			t.Errorf("HookNames()[%d] = %q, want %q", i, names[i], n)
 		}
+	}
+}
+
+// The fixture's paths are synthetic, but its field set matches the
+// SessionStart stdin captured from agy 1.3.4: the common fields plus
+// modelName, which the dispatcher stores as the session's model hint.
+func TestParseHookEvent_SessionStart(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("testdata/hook_stdin_session_start.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &AntigravityAgent{}
+	ev, err := a.ParseHookEvent(context.Background(), HookNameSessionStart, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	if ev == nil {
+		t.Fatal("expected non-nil event for session-start")
+	}
+	if ev.Type != agent.SessionStart {
+		t.Errorf("Type = %v, want SessionStart", ev.Type)
+	}
+	if ev.SessionID != testConversationID {
+		t.Errorf("SessionID = %q, want %q", ev.SessionID, testConversationID)
+	}
+	if ev.SessionRef != testTranscriptPath {
+		t.Errorf("SessionRef = %q, want %q", ev.SessionRef, testTranscriptPath)
+	}
+	if ev.Model != "gemini-3.1-pro-low" {
+		t.Errorf("Model = %q, want %q", ev.Model, "gemini-3.1-pro-low")
+	}
+	if ev.Timestamp.IsZero() {
+		t.Error("Timestamp must be set")
+	}
+}
+
+func TestParseHookEvent_SessionStart_EmptyInput(t *testing.T) {
+	t.Parallel()
+	a := &AntigravityAgent{}
+	if _, err := a.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader("")); err == nil {
+		t.Fatal("expected error for empty input")
+	}
+}
+
+func TestParseHookEvent_SessionStart_MalformedJSON(t *testing.T) {
+	t.Parallel()
+	a := &AntigravityAgent{}
+	if _, err := a.ParseHookEvent(context.Background(), HookNameSessionStart, strings.NewReader("not json")); err == nil {
+		t.Fatal("expected error for malformed JSON")
 	}
 }
 

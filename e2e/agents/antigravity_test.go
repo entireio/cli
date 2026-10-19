@@ -982,7 +982,7 @@ func TestAntigravityPrepareRepoAddsProbeHookWhenEnabled(t *testing.T) {
 	if !ok {
 		t.Fatalf("probe entry missing, got %s", data)
 	}
-	for _, want := range []string{"PreInvocation", "PreToolUse", "Stop", "agy-hook-probe.log", "cwd="} {
+	for _, want := range []string{"SessionStart", "PreInvocation", "PreToolUse", "Stop", "agy-hook-probe.log", "cwd="} {
 		if !strings.Contains(string(probe), want) {
 			t.Errorf("probe entry missing %q: %s", want, probe)
 		}

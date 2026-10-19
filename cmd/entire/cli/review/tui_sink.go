@@ -77,13 +77,15 @@ var tuiPostRunCompleteGrace = 2 * time.Second
 // cmd.OutOrStdout()). input is the reader Bubble Tea reads keypresses from
 // (typically os.Stdin in production); tests must pass a non-TTY reader (e.g.
 // bytes.NewReader(nil)) so Bubble Tea does not put the inherited terminal
-// into raw mode and corrupt sibling test output.
+// into raw mode and corrupt sibling test output. trailFindingsJSON hides the
+// trail findings JSON line the run asked for in the detail view.
 //
 // tea.WithoutSignalHandler keeps SIGINT routing on the cobra root's existing
 // handler (which cancels the run context), so the TUI's KeyCtrlC path and the
 // OS signal path share a single cancel function with no race.
-func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer, input io.Reader) *TUISink {
+func NewTUISink(agents []string, cancel context.CancelFunc, output io.Writer, input io.Reader, trailFindingsJSON bool) *TUISink {
 	model := newReviewTUIModel(agents, cancel)
+	model.trailFindingsJSON = trailFindingsJSON
 	if measureTerminal := terminalMeasurer(output); measureTerminal != nil {
 		if width, height, ok := measureTerminal(); ok {
 			model.termWidth = width

@@ -190,11 +190,11 @@ func TestCreateSnapshotCheckpoint_RedactionFailureIsAnError(t *testing.T) {
 	assert.Empty(t, checkpoints, "no checkpoint may be written when the transcript could not be redacted")
 }
 
-// The per-session redaction prefix cache is written in two steps, so a snapshot
-// must condense under the session's state lock, like a commit's condensation or
-// a turn-end finalize. Probed from inside redaction: another writer trying to
-// take the lock then must time out. (Racing two writers instead would pass by
-// luck whenever the snapshot happened to be slow.)
+// A snapshot shares the per-session redaction prefix cache, so it must condense
+// under the session's state lock, like a commit's condensation or a turn-end
+// finalize. Probed from inside redaction: another writer trying to take the
+// lock then must time out. (Racing two writers instead would pass by luck
+// whenever the snapshot happened to be slow.)
 func TestCreateSnapshotCheckpoint_RedactsUnderTheSessionLock(t *testing.T) {
 	// No t.Parallel: swaps the package-level redaction seam and uses t.Chdir.
 	sessionID := "2026-10-03-snapshot-lock"

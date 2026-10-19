@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,48 +35,97 @@ const maxReplacedCommits = 200
 // replacedCommits). A dropped commit is inherited when every file it changed
 // that is staged now has exactly the content it had before the reset: the work
 // is recommitted, not rewritten, and one coincidentally identical file among
-// rewritten ones is not a redo. Returns the inherited IDs, nil when nothing
-// applies.
-func (s *ManualCommitStrategy) inheritReplacedCommitsTrailers(ctx context.Context, repo *git.Repository, commitMsgFile, source string) []id.CheckpointID {
+// rewritten ones is not a redo. Returns what was inherited; the zero redo when
+// nothing applies.
+func (s *ManualCommitStrategy) inheritReplacedCommitsTrailers(ctx context.Context, repo *git.Repository, commitMsgFile, source string) redo {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	logging.Debug(logCtx, "prepare-commit-msg: checking for redone commits")
 	tip, replaced, why := replacedCommits(ctx, repo)
 	if len(replaced) == 0 {
 		logging.Debug(logCtx, "prepare-commit-msg: no commits being redone", slog.String("reason", why))
-		return nil
+		return redo{}
 	}
-	staged, err := stagedBlobs(ctx, repo)
+	staged, err := stagedBlobs(ctx)
 	if err != nil || len(staged) == 0 {
 		logging.Debug(logCtx, "prepare-commit-msg: redo check has no staged blobs to compare",
 			slog.Int("replaced_commits", len(replaced)), slog.Any("error", err))
-		return nil
+		return redo{}
 	}
 	tipTree, err := tip.Tree()
 	if err != nil {
-		return nil
+		return redo{}
 	}
+	// Each dropped commit's diff is computed once; matching and ownership both
+	// read it.
+	changes := make([]object.Changes, len(replaced))
+	for i, c := range replaced {
+		changes[i], _ = firstParentChanges(c) //nolint:errcheck // a commit without a diff matches nothing
+	}
+	matched := make([][]string, len(replaced))
+	trailerIDs := make([][]id.CheckpointID, len(replaced))
+	var candidates []id.CheckpointID
+	for i := range replaced {
+		if matched[i] = recommitsFilesOf(changes[i], tipTree, staged); len(matched[i]) > 0 {
+			trailerIDs[i] = trailers.ParseAllCheckpoints(replaced[i].Message)
+			candidates = append(candidates, trailerIDs[i]...)
+		}
+	}
+	live := make(map[id.CheckpointID]bool)
+	for _, cpID := range withoutDeletedCheckpoints(ctx, candidates) { // one deleted-list load
+		live[cpID] = true
+	}
+	captured := s.capturedCheckpoints(ctx, repo)
+	lastChangedBy := newestChangeOf(changes)
 	var inherited []id.CheckpointID
 	seen := make(map[id.CheckpointID]bool)
+	redonePaths := make(map[string]bool)
 	for i := len(replaced) - 1; i >= 0; i-- { // oldest first, like a squash message
-		if !recommitsFilesOf(replaced[i], tipTree, staged) {
+		if len(matched[i]) == 0 {
 			continue
 		}
-		for _, cpID := range trailers.ParseAllCheckpoints(replaced[i].Message) {
+		var ids []id.CheckpointID
+		heldByCheckpoint := false
+		for _, cpID := range trailerIDs[i] {
+			if live[cpID] {
+				ids = append(ids, cpID)
+				heldByCheckpoint = heldByCheckpoint || captured(cpID)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		// A path's staged state is held by a checkpoint only when the commit
+		// that last changed it carries one this clone actually has, and the
+		// staged mode is that commit's too. Inheriting stays permissive: a
+		// trailer links even when its checkpoint is missing here, but only a
+		// checkpoint that exists may stand in for a fresh capture.
+		for _, p := range matched[i] {
+			if heldByCheckpoint && lastChangedBy[p] == i && sameModeAsTip(tipTree, p, staged[p]) {
+				redonePaths[p] = true
+			}
+		}
+		for _, cpID := range ids {
 			if !seen[cpID] {
 				seen[cpID] = true
 				inherited = append(inherited, cpID)
 			}
 		}
 	}
-	inherited = withoutDeletedCheckpoints(ctx, inherited)
 	if len(inherited) == 0 {
 		logging.Debug(logCtx, "prepare-commit-msg: redone commits carry no matching trailers",
 			slog.Int("replaced_commits", len(replaced)), slog.Int("staged", len(staged)))
-		return nil
+		return redo{}
 	}
+	result := redo{ids: inherited, paths: redonePaths}
+	for p := range staged {
+		if !redonePaths[p] {
+			result.others = append(result.others, p)
+		}
+	}
+	slices.Sort(result.others)
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
 	if err != nil {
-		return nil
+		return redo{}
 	}
 	message := string(content)
 	present := make(map[id.CheckpointID]bool)
@@ -91,26 +141,137 @@ func (s *ManualCommitStrategy) inheritReplacedCommitsTrailers(ctx context.Contex
 	}
 	if added > 0 {
 		if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
-			return nil
+			return redo{}
 		}
 	}
 	logging.Info(logCtx, "prepare-commit-msg: inherited checkpoint trailers from the commits being redone",
 		slog.Int("replaced_commits", len(replaced)),
 		slog.Int("inherited", len(inherited)),
-		slog.Int("added", added))
-	return inherited
+		slog.Int("added", added),
+		slog.Int("redone_paths", len(redonePaths)),
+		slog.Int("staged", len(staged)))
+	return result
+}
+
+// redo is what a commit inherited from the commits it redoes: their checkpoint
+// IDs, the staged paths those checkpoints already hold (content and mode, as
+// last changed by a commit whose checkpoint this clone has), and every other
+// staged path. Both sets come from one rename-free view of the commit index.
+// Held paths are no evidence of new session work: a reset puts them back in
+// the worktree, and the turn end that follows records them as touched again
+// although the session did nothing new to them.
+type redo struct {
+	ids    []id.CheckpointID
+	paths  map[string]bool
+	others []string
+}
+
+// onlyRedone reports whether everything staged is work a checkpoint holds.
+func (r redo) onlyRedone() bool {
+	return len(r.paths) > 0 && len(r.others) == 0
+}
+
+// capturedCheckpoints returns a memoized check that a checkpoint exists in
+// this clone's store. Without a store nothing counts as captured, so a redo
+// never suppresses a fresh capture it cannot vouch for.
+func (s *ManualCommitStrategy) capturedCheckpoints(ctx context.Context, repo *git.Repository) func(id.CheckpointID) bool {
+	store, err := s.getPersistentStore(ctx, repo)
+	if err != nil {
+		return func(id.CheckpointID) bool { return false }
+	}
+	known := make(map[id.CheckpointID]bool)
+	return func(cpID id.CheckpointID) bool {
+		exists, ok := known[cpID]
+		if !ok {
+			exists = checkpointExists(ctx, store, cpID)
+			known[cpID] = exists
+		}
+		return exists
+	}
+}
+
+// reconcileRedoneFiles settles a redone commit that stamped no fresh trailer
+// with the sessions in this worktree: a pure redo, or a partial redo whose
+// other staged files were no session's work. No condensation consumes the held
+// files the reset put back in those sessions' touched sets, so without this
+// they stay pending as if the session still owed a checkpoint for them. Each
+// held file the commit contains with the session's recorded content leaves
+// FilesTouched, exactly as carry-forward drops committed files after a
+// condensation; a held path the commit does not contain stays. Other touched
+// files, turn-end steps and transcript growth are left alone: that is work no
+// checkpoint holds yet.
+func (s *ManualCommitStrategy) reconcileRedoneFiles(ctx context.Context, repo *git.Repository, commit *object.Commit, redone map[string]bool) {
+	if len(redone) == 0 {
+		return
+	}
+	worktreePath, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	sessions, err := s.findExactSessionsForWorktree(ctx, worktreePath)
+	if err != nil {
+		return
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	for _, sess := range sessions {
+		if sess.FullyCondensed || !slices.ContainsFunc(sess.FilesTouched, func(f string) bool { return redone[f] }) {
+			continue
+		}
+		mutErr := MutateSessionState(ctx, sess.SessionID, func(state *SessionState) error {
+			// Only held files go through the carry-forward check; every other
+			// touched file keeps its place untouched (the check would also
+			// prune unrelated paths, which is a condensation's call).
+			var held []string
+			committed := make(map[string]struct{})
+			for _, f := range state.FilesTouched {
+				if redone[f] {
+					held = append(held, f)
+					committed[f] = struct{}{}
+				}
+			}
+			if len(held) == 0 {
+				return ErrMutationSkip
+			}
+			stillPending := make(map[string]bool)
+			for _, f := range filesWithRemainingAgentChanges(ctx, repo, state.TouchedFileHashes, commit, held, committed) {
+				stillPending[f] = true
+			}
+			remaining := slices.DeleteFunc(slices.Clone(state.FilesTouched), func(f string) bool {
+				return redone[f] && !stillPending[f]
+			})
+			if len(remaining) == len(state.FilesTouched) {
+				return ErrMutationSkip
+			}
+			logging.Debug(logCtx, "post-commit: redone files settled for session",
+				slog.String("session_id", state.SessionID),
+				slog.Int("files_touched_before", len(state.FilesTouched)),
+				slog.Int("remaining_files", len(remaining)))
+			state.FilesTouched = remaining
+			pruneTouchedFileHashes(state)
+			return nil
+		})
+		if mutErr != nil {
+			logging.Debug(logCtx, "post-commit: could not settle redone files",
+				slog.String("session_id", sess.SessionID), slog.String("error", mutErr.Error()))
+		}
+	}
 }
 
 // withRedoneTrailers adds the trailers of the commits this one redoes to the
 // message and to inherited, and records the combined set for post-commit.
-func (s *ManualCommitStrategy) withRedoneTrailers(ctx context.Context, repo *git.Repository, commitMsgFile, source string, inherited []id.CheckpointID) []id.CheckpointID {
+func (s *ManualCommitStrategy) withRedoneTrailers(ctx context.Context, repo *git.Repository, commitMsgFile, source string, inherited []id.CheckpointID) ([]id.CheckpointID, redo) {
 	redone := s.inheritReplacedCommitsTrailers(ctx, repo, commitMsgFile, source)
-	if len(redone) == 0 {
-		return inherited
+	if len(redone.ids) == 0 {
+		return inherited, redone
 	}
-	inherited = append(inherited, redone...)
-	recordInheritedTrailers(ctx, inherited)
-	return inherited
+	inherited = append(inherited, redone.ids...)
+	recordInheritedMarker(ctx, inherited, redone.paths)
+	if redone.onlyRedone() {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
+			"prepare-commit-msg: commit only redoes linked work, no new trailer",
+			slog.String("source", source))
+	}
+	return inherited, redone
 }
 
 // prepareAmendCommitMsg keeps or restores the amended commit's own trailer and
@@ -126,7 +287,7 @@ func (s *ManualCommitStrategy) prepareAmendCommitMsg(ctx context.Context, commit
 		return nil // the amend itself is prepared; folding is best-effort
 	}
 	defer repo.Close()
-	recordInheritedTrailers(ctx, s.inheritReplacedCommitsTrailers(ctx, repo, commitMsgFile, "commit"))
+	recordInheritedTrailers(ctx, s.inheritReplacedCommitsTrailers(ctx, repo, commitMsgFile, "commit").ids)
 	return nil
 }
 
@@ -392,45 +553,31 @@ func firstParentChanges(c *object.Commit) (object.Changes, error) {
 
 type stagedEntry struct {
 	blob    plumbing.Hash
+	mode    filemode.FileMode
 	deleted bool
 }
 
-// stagedBlobs maps each file staged against HEAD to its index state.
-func stagedBlobs(ctx context.Context, repo *git.Repository) (map[string]stagedEntry, error) {
-	files, err := getStagedFiles(ctx)
+// stagedBlobs maps each file staged against HEAD to what the commit index
+// stages. A detected rename would report only its destination, hiding the
+// staged deletion of its source, so rename detection is off.
+func stagedBlobs(ctx context.Context) (map[string]stagedEntry, error) {
+	changes, err := getStagedChanges(ctx, "--no-renames")
 	if err != nil {
 		return nil, err
 	}
-	idx, err := repo.Storer.Index()
-	if err != nil {
-		return nil, err //nolint:wrapcheck // caller only tests for nil
-	}
-	inIndex := make(map[string]plumbing.Hash, len(idx.Entries))
-	for _, e := range idx.Entries {
-		inIndex[e.Name] = e.Hash
-	}
-	staged := make(map[string]stagedEntry, len(files))
-	for _, f := range files {
-		if h, ok := inIndex[f]; ok {
-			staged[f] = stagedEntry{blob: h}
-		} else {
-			// getStagedFiles established that this path differs from HEAD. Its
-			// absence from the index therefore represents a staged deletion.
-			staged[f] = stagedEntry{deleted: true}
-		}
+	staged := make(map[string]stagedEntry, len(changes))
+	for _, c := range changes {
+		staged[c.path] = c.stagedEntry
 	}
 	return staged, nil
 }
 
-// recommitsFilesOf reports whether c's work is what is staged: at least one
-// file c changed is staged, and every staged file c changed has the content it
-// had at the reset's old HEAD (tipTree).
-func recommitsFilesOf(c *object.Commit, tipTree *object.Tree, staged map[string]stagedEntry) bool {
-	changes, err := firstParentChanges(c)
-	if err != nil {
-		return false
-	}
-	matched := false
+// recommitsFilesOf returns the staged paths that recommit a dropped commit's
+// work (its first-parent changes), or nil when it is not being redone: at
+// least one file it changed is staged, and every staged file it changed has
+// the content it had at the reset's old HEAD (tipTree).
+func recommitsFilesOf(changes object.Changes, tipTree *object.Tree, staged map[string]stagedEntry) []string {
+	var matched []string
 	for _, change := range changes {
 		// A rename can be partially staged as either the destination addition
 		// or the source deletion, so both endpoints can independently prove
@@ -446,15 +593,42 @@ func recommitsFilesOf(c *object.Commit, tipTree *object.Tree, staged map[string]
 			tipEntry, absent, err := findTreeEntry(tipTree, path)
 			switch {
 			case err != nil:
-				return false
+				return nil
 			case entry.deleted && absent, !entry.deleted && !absent && tipEntry.Hash.Equal(entry.blob):
-				matched = true
+				matched = append(matched, path)
 			default:
-				return false // staged, but rewritten: not this commit's work
+				return nil // staged, but rewritten: not this commit's work
 			}
 		}
 	}
 	return matched
+}
+
+// newestChangeOf maps each path the replaced commits changed to the index of
+// the newest one that changed it (replaced, and so changes, is newest first).
+func newestChangeOf(changes []object.Changes) map[string]int {
+	out := make(map[string]int)
+	for i := len(changes) - 1; i >= 0; i-- {
+		for _, change := range changes[i] {
+			for _, p := range []string{change.To.Name, change.From.Name} {
+				if p != "" {
+					out[p] = i
+				}
+			}
+		}
+	}
+	return out
+}
+
+// sameModeAsTip reports whether a staged path has the mode it had at the
+// reset's old HEAD. recommitsFilesOf matched its content already; a staged
+// deletion has no mode to compare.
+func sameModeAsTip(tipTree *object.Tree, path string, entry stagedEntry) bool {
+	if entry.deleted {
+		return true
+	}
+	tipEntry, absent, err := findTreeEntry(tipTree, path)
+	return err == nil && !absent && tipEntry.Mode == entry.mode
 }
 
 // findTreeEntry distinguishes an absent path from a tree-read failure. Walking

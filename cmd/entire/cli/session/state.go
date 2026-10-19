@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +127,20 @@ type State struct {
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
 
+	// WorktreeIncarnation is the marker (strategy's worktreeIncarnation) of
+	// the linked worktree the session is homed in: "" for the main worktree,
+	// and for a session homed before markers were kept until its next turn
+	// starts at home. Git keeps the marker through `git worktree move` and
+	// reuses a removed worktree's ID and path, so the worktree holding it is
+	// the home wherever it now is, and one at the home's path without it is
+	// not.
+	WorktreeIncarnation string `json:"worktree_incarnation,omitempty"`
+
+	// RehomedAt is when a turn started in a worktree git had added at the
+	// session's home path after removing the home, making it the new home.
+	// Background task records launched before then ran in the removed one.
+	RehomedAt *time.Time `json:"rehomed_at,omitempty"`
+
 	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after
 	// `entire session adopt` moves this session into another repository/worktree.
 	// Hook TurnStart must not reactivate tombstoned source records, otherwise the
@@ -205,10 +220,8 @@ type State struct {
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
 	// CaptureDegradedAt records when the session's most recent turn degraded
-	// capture because a worktree status scan breached its budget (new-file
-	// detection skipped, or the checkpoint itself skipped). Set at turn end,
-	// cleared by the next turn whose scans stay within budget. Surfaced as a
-	// warning by `entire status`.
+	// capture because a bounded capture operation exceeded its budget. Set at
+	// turn end, cleared by the next healthy turn, and surfaced by `entire status`.
 	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
 
 	// StepCount is the number of checkpoints/steps created in this session.
@@ -272,6 +285,37 @@ type State struct {
 	// it". It replaced the shadow-branch snapshot those decisions used to
 	// read, and records no content.
 	TouchedFileHashes map[string]string `json:"touched_file_hashes,omitempty"`
+
+	// OtherWorktrees records the session's edits in worktrees of the
+	// repository other than its home (WorktreePath), keyed by WorktreeKey of
+	// each worktree's git ID. FilesTouched and TouchedFileHashes above are the
+	// home's; a commit in another worktree matches and clears only that
+	// worktree's entry, so work in two worktrees never mixes. An agent
+	// launched in one worktree that edits another by absolute path records
+	// here. An older CLI that rewrites this state drops the map (those edits
+	// then simply aren't linked).
+	OtherWorktrees map[string]*WorktreeWork `json:"other_worktrees,omitempty"`
+
+	// LinkedByWorktreeEntry is set in memory, never stored, on a session that
+	// a commit's linking set holds only because it has an OtherWorktrees entry
+	// for the committing worktree: it links only a commit containing that
+	// entry's files.
+	LinkedByWorktreeEntry bool `json:"-"`
+
+	// InWorktreeView is set in memory, never stored, while the home fields
+	// (FilesTouched, TouchedFileHashes, BaseCommit, WorktreePath) hold another
+	// worktree's entry instead of the home's, for a commit in that worktree.
+	InWorktreeView bool `json:"-"`
+
+	// ViewHomePath is the home's WorktreePath while InWorktreeView, in memory
+	// only: the stored transcript and prompt copy stays in the home's .entire.
+	ViewHomePath string `json:"-"`
+
+	// HomeNotHere is set in memory, never stored, while a commit is processed
+	// in a worktree at the session's recorded home path that its home marker
+	// shows is not its home (git removed the home and added another there):
+	// the commit is handled as a guest's, leaving the home's base and files.
+	HomeNotHere bool `json:"-"`
 
 	// LastCheckpointID is the checkpoint ID from the most recent condensation.
 	// Used to restore the Entire-Checkpoint trailer on amend and to identify
@@ -794,7 +838,72 @@ func (s *State) HasTaskContent() bool {
 // ENDED classification, the zombie sweep, IsCondensableEndedSession — check
 // FullyCondensed themselves, as they always have.
 func (s *State) HasPendingWork() bool {
-	return s.StepCount > 0 || len(s.FilesTouched) > 0 || s.HasTaskContent()
+	return s.StepCount > 0 || s.HasPendingFiles() || s.HasTaskContent()
+}
+
+// HasPendingFiles reports whether files await a commit in any worktree: the
+// home's FilesTouched or any OtherWorktrees entry's.
+func (s *State) HasPendingFiles() bool {
+	if len(s.FilesTouched) > 0 {
+		return true
+	}
+	for _, work := range s.OtherWorktrees {
+		if work != nil && len(work.FilesTouched) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// PendingFileCount is the number of files awaiting a commit across every
+// worktree: len(PendingFiles()).
+func (s *State) PendingFileCount() int {
+	return len(s.PendingFiles())
+}
+
+// PendingFiles is the repository paths awaiting a commit across every
+// worktree (see HasPendingFiles), sorted. A path pending in two worktrees is
+// listed once: a checkpoint records the paths it touched, as a set of
+// repository paths, not per worktree.
+func (s *State) PendingFiles() []string {
+	files := slices.Clone(s.FilesTouched)
+	for _, work := range s.OtherWorktrees {
+		if work != nil {
+			files = append(files, work.FilesTouched...)
+		}
+	}
+	slices.Sort(files)
+	return slices.Compact(files)
+}
+
+// WorktreeWork is a session's record of edits in one worktree other than its
+// home: the same pair the home keeps in FilesTouched and TouchedFileHashes,
+// plus that worktree's HEAD when they were recorded, which stands in for the
+// home's BaseCommit.
+type WorktreeWork struct {
+	// Path is the worktree's root as git reports it from inside the worktree
+	// (rev-parse --show-toplevel), for logs and display; the map key is
+	// authoritative because it survives `git worktree move`.
+	Path              string            `json:"path,omitempty"`
+	BaseCommit        string            `json:"base_commit,omitempty"`
+	FilesTouched      []string          `json:"files_touched,omitempty"`
+	TouchedFileHashes map[string]string `json:"touched_file_hashes,omitempty"`
+	// Incarnation is the marker of the worktree the edits were made in
+	// (strategy's worktreeIncarnation): git reuses a removed worktree's ID, and
+	// a record whose marker no longer matches belongs to the removed one. Empty
+	// for the main worktree.
+	Incarnation string `json:"incarnation,omitempty"`
+}
+
+// WorktreeKey is the OtherWorktrees key for the worktree with git ID
+// worktreeID (paths.GetWorktreeID): the ID itself for a linked worktree, and
+// "/" — which no worktree ID can contain — for the main worktree, whose ID is
+// empty.
+func WorktreeKey(worktreeID string) string {
+	if worktreeID == "" {
+		return "/"
+	}
+	return worktreeID
 }
 
 // LiveTaskRecords returns the records not yet completed (CompletedAt zero) —

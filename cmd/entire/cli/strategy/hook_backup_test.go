@@ -337,7 +337,7 @@ func TestHooksLock_SharedHooksDirInstallVsRemoveKeepsUserHook(t *testing.T) {
 			}
 		})
 		wg.Go(func() {
-			if _, err := removeHooks(context.Background(), f.lockRoot, f.root, other, restoreLegacy); err != nil {
+			if _, err := removeHooks(context.Background(), f.lockRoot, f.root, other, restoreMovedHooks); err != nil {
 				t.Errorf("removeHooks: %v", err)
 			}
 		})
@@ -635,7 +635,7 @@ func TestRemoveHooks_AfterReclaimRestoresPreCommit(t *testing.T) {
 	}
 	f.write("commit-msg", wrapper)
 
-	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreLegacy); err != nil {
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err != nil {
 		t.Fatalf("removeHooks: %v", err)
 	}
 
@@ -657,7 +657,7 @@ func TestRemoveHooks_RightAfterReclaimKeepsUserHookInLegacy(t *testing.T) {
 	f.write("commit-msg"+backupSuffix, userHookV1)
 	f.install(spec)
 
-	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreLegacy); err != nil {
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err != nil {
 		t.Fatalf("removeHooks: %v", err)
 	}
 
@@ -695,7 +695,7 @@ func TestRemoveHooks_FailedLegacyRestoreLeavesHookForRetry(t *testing.T) {
 		"commit-msg" + keepSuffix:   userHookV1,
 	})
 
-	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreLegacy); err != nil {
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	assertHooks(t, f, map[string]string{"commit-msg": wrapper, "commit-msg" + legacySuffix: userHookV1})
@@ -780,7 +780,7 @@ func TestRemoveHooks_BeforeReclaimMovesUserHookToLegacy(t *testing.T) {
 	}
 	f.write("commit-msg", wrapper)
 
-	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreLegacy); err != nil {
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err != nil {
 		t.Fatalf("removeHooks: %v", err)
 	}
 
@@ -876,7 +876,7 @@ func TestRemoveHooks_ProceedsWithoutAUsableLock(t *testing.T) {
 			f.write("pre-push", spec.content)
 			f.write("pre-push"+backupSuffix, userHookV1)
 
-			if _, err := removeHooks(context.Background(), lockRoot(t), f.root, f.dir, restoreLegacy); err != nil {
+			if _, err := removeHooks(context.Background(), lockRoot(t), f.root, f.dir, restoreMovedHooks); err != nil {
 				t.Fatalf("removeHooks: %v", err)
 			}
 			assertHooks(t, f, map[string]string{"pre-push": userHookV1})
@@ -894,60 +894,38 @@ func TestRemoveHooks_HeldLockStillStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreLegacy); err == nil {
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err == nil {
 		t.Error("removeHooks ran while another process held the hooks lock")
 	}
 }
 
-// A hook manager other than pre-commit that moves Entire's hook aside and runs
-// it from its own wrapper becomes Entire's backup on the next install. The
-// chain must end rather than run Entire -> wrapper -> Entire -> ... forever.
-func TestInstallHooks_ForeignWrapperOverEntireDoesNotRecurse(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("runs POSIX shell hooks")
-	}
-	f := newHooksFixture(t)
-	bin := t.TempDir()
-	log := filepath.Join(t.TempDir(), "log")
-	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\necho entire >> "+log+"\n")
-	spec := specFor(t, "commit-msg")
-	// Entire chained to a user hook, then the tool moved Entire's hook to
-	// commit-msg.tool-old and put its wrapper in front.
-	f.write("commit-msg"+backupSuffix, "#!/bin/sh\necho user >> "+log+"\n")
-	f.write("commit-msg.tool-old", generateChainedContent(spec.content, spec.name))
-	f.write("commit-msg", "#!/bin/sh\n\"$(dirname \"$0\")/commit-msg.tool-old\" \"$@\" || exit $?\necho tool >> "+log+"\n")
-
-	f.installExecutable(spec)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second) // a recursive chain never ends
-	defer cancel()
-	if out, err := runHook(ctx, bin, filepath.Join(f.dir, "commit-msg"), filepath.Join(t.TempDir(), "MSG")); err != nil {
-		t.Fatalf("hook failed: %v\n%s", err, out)
-	}
-	data, err := os.ReadFile(log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Entire's hook runs again inside the tool's wrapper; only the chain stops.
-	if got := strings.Join(strings.Fields(string(data)), ","); got != "entire,entire,tool" {
-		t.Errorf("ran %s, want entire,entire,tool", got)
-	}
+// toolWrapper is a hook manager other than pre-commit: its install moves the
+// hook it finds to moved (commit-msg.tool-old), and its wrapper runs that file
+// by name before its own checks.
+func toolWrapper(moved, log string) string {
+	return "#!/bin/sh\n\"$(dirname \"$0\")/" + moved + "\" \"$@\" || exit $?\necho tool >> " + log + "\n"
 }
 
-// The same layout after an upgrade: the hook the tool moved aside was written by
-// an Entire release that predates the chain guard, so it never checks it and
-// chains straight back to .pre-entire, which is now the tool's wrapper.
-func TestInstallHooks_ForeignWrapperOverPreGuardEntireDoesNotRecurse(t *testing.T) {
+// toolInstall does what that manager's install does for commit-msg.
+func (f *hooksFixture) toolInstall(wrapper string) {
+	f.t.Helper()
+	if err := os.Rename(filepath.Join(f.dir, "commit-msg"), filepath.Join(f.dir, "commit-msg.tool-old")); err != nil {
+		f.t.Fatal(err)
+	}
+	f.write("commit-msg", wrapper)
+}
+
+// A hook manager that moves Entire's hook aside and runs it from its own
+// wrapper becomes Entire's backup on the next install. Entire takes the moved
+// copy back for the user's hook, so each hook runs once, the user's included,
+// and the chain ends rather than run Entire -> wrapper -> Entire -> ...
+func TestInstallHooks_ToolWrapperOverEntireRunsEachHookOnce(t *testing.T) { //nolint:tparallel // subtests run in turn; see TestInstallHooks_ReclaimedChainRunsEachHookOnce
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("runs POSIX shell hooks")
 	}
-	f := newHooksFixture(t)
-	bin := t.TempDir()
-	log := filepath.Join(t.TempDir(), "log")
-	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\necho entire >> "+log+"\n")
 	spec := specFor(t, "commit-msg")
+	chained := generateChainedContent(spec.content, spec.name)
 	// The chain block released Entire versions append, before the guard.
 	preGuardChained := spec.content + chainComment + `
 _entire_hook_dir="$(dirname "$0")"
@@ -955,24 +933,205 @@ if [ -x "$_entire_hook_dir/commit-msg.pre-entire" ]; then
     "$_entire_hook_dir/commit-msg.pre-entire" "$@"
 fi
 `
-	f.write("commit-msg"+backupSuffix, "#!/bin/sh\necho user >> "+log+"\n")
-	f.write("commit-msg.tool-old", preGuardChained)
-	f.write("commit-msg", "#!/bin/sh\n\"$(dirname \"$0\")/commit-msg.tool-old\" \"$@\" || exit $?\necho tool >> "+log+"\n")
+	for name, tc := range map[string]struct {
+		setup func(f *hooksFixture, user, wrapper string)
+		want  string
+	}{
+		"with a user hook": {func(f *hooksFixture, user, wrapper string) {
+			f.write("commit-msg", user)
+			f.install(spec)
+			f.toolInstall(wrapper)
+		}, "entire,user,tool"},
+		"tool installed again": {func(f *hooksFixture, user, wrapper string) {
+			f.write("commit-msg", user)
+			f.install(spec)
+			f.toolInstall(wrapper)
+			f.install(spec)
+			f.toolInstall(wrapper)
+		}, "entire,user,tool"},
+		"no user hook": {func(f *hooksFixture, _, wrapper string) {
+			f.install(spec)
+			f.toolInstall(wrapper)
+		}, "entire,tool"},
+		"moved copy predates the chain guard": {func(f *hooksFixture, user, wrapper string) {
+			f.write("commit-msg"+backupSuffix, user)
+			f.write("commit-msg.tool-old", preGuardChained)
+			f.write("commit-msg", wrapper)
+		}, "entire,user,tool"},
+		// What earlier releases left: the user's hook rotated to an older copy
+		// that nothing runs, and Entire's hook run twice. The older copy cannot
+		// be told from any other, so it stays where it is.
+		"earlier release already chained to the wrapper": {func(f *hooksFixture, user, wrapper string) {
+			f.write("commit-msg", chained)
+			f.write("commit-msg"+backupSuffix, wrapper)
+			f.write("commit-msg.tool-old", spec.content)
+			f.write("commit-msg"+backupSuffix+".20261001T170405Z", user)
+		}, "entire,tool"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newHooksFixture(t)
+			bin := t.TempDir()
+			log := filepath.Join(t.TempDir(), "log")
+			writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\necho entire >> "+log+"\n")
+			tc.setup(f, "#!/bin/sh\necho user >> "+log+"\n", toolWrapper("commit-msg.tool-old", log))
 
-	f.installExecutable(spec)
+			f.installExecutable(spec)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second) // a recursive chain never ends
-	defer cancel()
-	if out, err := runHook(ctx, bin, filepath.Join(f.dir, "commit-msg"), filepath.Join(t.TempDir(), "MSG")); err != nil {
-		data, readErr := os.ReadFile(log)
-		t.Fatalf("hook failed: %v (Entire's hook ran %d times; log: %v)\n%s", err, strings.Count(string(data), "entire\n"), readErr, out)
+			if carriesEntireMarker(f.root, "commit-msg.tool-old") {
+				t.Error("commit-msg.tool-old still holds Entire's hook, which the wrapper runs a second time")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second) // a recursive chain never ends
+			defer cancel()
+			if out, err := runHook(ctx, bin, filepath.Join(f.dir, "commit-msg"), filepath.Join(t.TempDir(), "MSG")); err != nil {
+				t.Fatalf("hook failed: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(strings.Fields(string(data)), ","); got != tc.want {
+				t.Errorf("ran %s, want %s", got, tc.want)
+			}
+		})
 	}
-	data, err := os.ReadFile(log)
-	if err != nil {
-		t.Fatal(err)
+}
+
+// Uninstall leaves the tool's wrapper in front of the user's hook, as the
+// tool's own install would have, and none of Entire's copies behind.
+func TestRemoveHooks_AfterToolWrapperRestoresTool(t *testing.T) {
+	t.Parallel()
+	spec := specFor(t, "commit-msg")
+	wrapper := toolWrapper("commit-msg.tool-old", "/dev/null")
+	for name, setup := range map[string]func(f *hooksFixture){
+		"before Entire reinstalled": func(f *hooksFixture) {
+			f.toolInstall(wrapper)
+		},
+		"after Entire reinstalled": func(f *hooksFixture) {
+			f.toolInstall(wrapper)
+			f.install(spec)
+		},
+		"tool installed again": func(f *hooksFixture) {
+			f.toolInstall(wrapper)
+			f.install(spec)
+			f.toolInstall(wrapper)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newHooksFixture(t)
+			f.write("commit-msg", userHookV1)
+			f.install(spec)
+			setup(f)
+
+			if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err != nil {
+				t.Fatalf("removeHooks: %v", err)
+			}
+
+			assertHooks(t, f, map[string]string{"commit-msg": wrapper, "commit-msg.tool-old": userHookV1})
+			for _, name := range []string{"commit-msg" + backupSuffix, "commit-msg.tool-old" + backupSuffix} {
+				if f.exists(name) {
+					t.Errorf("%s left behind", name)
+				}
+			}
+		})
 	}
-	if got := strings.Join(strings.Fields(string(data)), ","); got != "entire,entire,tool" {
-		t.Errorf("ran %s, want entire,entire,tool", got)
+}
+
+// With no user hook to give back, uninstall leaves the tool's wrapper running
+// the placeholder, never a copy of Entire's hook, including in a layout an
+// earlier release left and no install has reclaimed yet.
+func TestRemoveHooks_AfterToolWrapperWithoutUserHook(t *testing.T) {
+	t.Parallel()
+	spec := specFor(t, "commit-msg")
+	wrapper := toolWrapper("commit-msg.tool-old", "/dev/null")
+	for name, setup := range map[string]func(f *hooksFixture){
+		"before Entire reinstalled": func(f *hooksFixture) {
+			f.install(spec)
+			f.toolInstall(wrapper)
+		},
+		"after Entire reinstalled": func(f *hooksFixture) {
+			f.install(spec)
+			f.toolInstall(wrapper)
+			f.install(spec)
+		},
+		"earlier release already chained to the wrapper": func(f *hooksFixture) {
+			f.write("commit-msg", generateChainedContent(spec.content, spec.name))
+			f.write("commit-msg"+backupSuffix, wrapper)
+			f.write("commit-msg.tool-old", spec.content)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newHooksFixture(t)
+			setup(f)
+
+			if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err != nil {
+				t.Fatalf("removeHooks: %v", err)
+			}
+
+			assertHooks(t, f, map[string]string{"commit-msg": wrapper, "commit-msg.tool-old": noopMovedHook})
+			for _, name := range []string{"commit-msg" + backupSuffix, "commit-msg.tool-old" + backupSuffix} {
+				if f.exists(name) {
+					t.Errorf("%s left behind", name)
+				}
+			}
+		})
+	}
+}
+
+// The install notice names the user's hook only when the moved copy holds it,
+// and names the older copies a placeholder may have left the user's hook among.
+func TestWrapperReclaimNotice(t *testing.T) {
+	t.Parallel()
+	older := []string{"commit-msg.pre-entire.20261001T170405Z"}
+	for name, tc := range map[string]struct {
+		r          wrapperReclaim
+		older      []string
+		want, deny []string
+	}{
+		"user hook": {
+			r:     wrapperReclaim{userHook: []string{"commit-msg.tool-old"}},
+			older: older,
+			want:  []string{"commit-msg.tool-old", "then your own hook"},
+			deny:  []string{"no longer run"},
+		},
+		"placeholder": {
+			r:    wrapperReclaim{placeholder: []string{"commit-msg.tool-old"}},
+			want: []string{"commit-msg.tool-old", "does nothing"},
+			deny: []string{"your own hook", "no longer run"},
+		},
+		"placeholder with older copies": {
+			r:     wrapperReclaim{placeholder: []string{"commit-msg.tool-old"}},
+			older: older,
+			want:  []string{"does nothing", "no longer run: " + older[0]},
+			deny:  []string{"then your own hook"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.r.notice("commit-msg", tc.older)
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("notice %q lacks %q", got, w)
+				}
+			}
+			for _, d := range tc.deny {
+				if strings.Contains(got, d) {
+					t.Errorf("notice %q says %q", got, d)
+				}
+			}
+		})
+	}
+}
+
+// olderCopiesOf lists only the named hook's older backups.
+func TestOlderCopiesOf(t *testing.T) {
+	t.Parallel()
+	f := newHooksFixture(t)
+	f.write("commit-msg"+backupSuffix+".20261001T170405Z", userHookV1)
+	f.write("prepare-commit-msg"+backupSuffix+".20261001T170405Z", userHookV1)
+	if got := olderCopiesOf(f.root, "commit-msg"); !slices.Equal(got, []string{"commit-msg" + backupSuffix + ".20261001T170405Z"}) {
+		t.Errorf("olderCopiesOf = %v", got)
 	}
 }
 
@@ -1005,5 +1164,211 @@ func TestCopyHookFile_FailedWriteLeavesNoPartialFile(t *testing.T) { //nolint:pa
 	}
 	if _, err := os.Lstat(filepath.Join(dir, dst)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("partial copy left at %s (lstat err %v)", dst, err)
+	}
+}
+
+// A wrapper names the file it runs as a whole name; a longer name that
+// contains it is a different file.
+func TestNamesFile(t *testing.T) {
+	t.Parallel()
+	const file = "commit-msg.tool-old"
+	for data, want := range map[string]bool{
+		`"$(dirname "$0")/commit-msg.tool-old" "$@"`:                       true,
+		"exec .git/hooks/commit-msg.tool-old":                              true,
+		"commit-msg.tool-old":                                              true,
+		`"$(dirname "$0")/commit-msg.tool-older" "$@"`:                     false,
+		`"$(dirname "$0")/commit-msg.tool-old.1" "$@"`:                     false,
+		`"$(dirname "$0")/prepare-commit-msg.tool-old" "$@"`:               false,
+		"# was prepare-commit-msg.tool-old\n\"$0/../commit-msg.tool-old\"": true,
+	} {
+		if got := namesFile([]byte(data), file); got != want {
+			t.Errorf("namesFile(%q) = %v, want %v", data, got, want)
+		}
+	}
+}
+
+// Two moved copies of Entire's hook whose names overlap: the wrapper runs only
+// commit-msg.tool-old.1, so that is where the user's hook goes, not the stale
+// commit-msg.tool-old a substring match would also take for the wrapper's.
+func TestInstallHooks_ToolWrapperOverlappingMovedNames(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs POSIX shell hooks")
+	}
+	spec := specFor(t, "commit-msg")
+	f := newHooksFixture(t)
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "log")
+	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\necho entire >> "+log+"\n")
+	f.write("commit-msg", "#!/bin/sh\necho user >> "+log+"\n")
+	f.install(spec)
+	entireHook := f.read("commit-msg")
+	f.write("commit-msg.tool-old", entireHook)
+	f.write("commit-msg.tool-old.1", entireHook)
+	f.write("commit-msg", toolWrapper("commit-msg.tool-old.1", log))
+
+	f.installExecutable(spec)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if out, err := runHook(ctx, bin, filepath.Join(f.dir, "commit-msg"), filepath.Join(t.TempDir(), "MSG")); err != nil {
+		t.Fatalf("hook failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(strings.Fields(string(data)), ","); got != "entire,user,tool" {
+		t.Errorf("ran %s, want entire,user,tool", got)
+	}
+}
+
+// Uninstall clears every moved copy of Entire's hook, not only pre-commit's
+// .legacy: a copy another manager's wrapper runs would go on running Entire's
+// hook after uninstall.
+func TestRemoveHooks_LegacyAndToolWrapperCopies(t *testing.T) {
+	t.Parallel()
+	spec := specFor(t, "commit-msg")
+	wrapper := toolWrapper("commit-msg.tool-old", "/dev/null")
+	f := newHooksFixture(t)
+	f.write("commit-msg", generateChainedContent(spec.content, spec.name))
+	f.write("commit-msg"+backupSuffix, wrapper)
+	f.write("commit-msg.tool-old", spec.content)
+	f.write("commit-msg"+legacySuffix, spec.content)
+
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err != nil {
+		t.Fatalf("removeHooks: %v", err)
+	}
+
+	assertHooks(t, f, map[string]string{"commit-msg": wrapper, "commit-msg.tool-old": noopMovedHook})
+	if f.exists("commit-msg" + legacySuffix) {
+		t.Error("commit-msg.legacy still holds Entire's hook")
+	}
+}
+
+// toolInstallInPlace is toolInstall for a manager that copies the hook it
+// finds over its moved file in place rather than renaming it there.
+func (f *hooksFixture) toolInstallInPlace(wrapper string) {
+	f.t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.dir, "commit-msg"))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.dir, "commit-msg.tool-old"), data, 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+	f.write("commit-msg", wrapper)
+}
+
+// A manager whose reinstall writes Entire's hook into its moved file in place
+// must not reach the copy Entire keeps of the user's hook: the next install
+// still puts the user's hook back, and uninstall still restores it.
+func TestInstallHooks_ToolReinstallInPlaceKeepsUserHook(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs POSIX shell hooks")
+	}
+	spec := specFor(t, "commit-msg")
+	f := newHooksFixture(t)
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "log")
+	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\necho entire >> "+log+"\n")
+	user := "#!/bin/sh\necho user >> " + log + "\n"
+	wrapper := toolWrapper("commit-msg.tool-old", log)
+	f.write("commit-msg", user)
+	f.install(spec)
+	f.toolInstall(wrapper)
+	f.install(spec)
+	f.toolInstallInPlace(wrapper)
+
+	f.installExecutable(spec)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if out, err := runHook(ctx, bin, filepath.Join(f.dir, "commit-msg"), filepath.Join(t.TempDir(), "MSG")); err != nil {
+		t.Fatalf("hook failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(strings.Fields(string(data)), ","); got != "entire,user,tool" {
+		t.Errorf("ran %s, want entire,user,tool", got)
+	}
+
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err != nil {
+		t.Fatalf("removeHooks: %v", err)
+	}
+	assertHooks(t, f, map[string]string{"commit-msg": wrapper, "commit-msg.tool-old": user})
+}
+
+// An edit the user makes to their hook in the moved file, written to a new
+// file and renamed into place, survives the manager's next install: the keep
+// copy follows the edit rather than bringing back the version Entire moved.
+func TestInstallHooks_KeepCopyFollowsUserEdit(t *testing.T) {
+	t.Parallel()
+	spec := specFor(t, "commit-msg")
+	wrapper := toolWrapper("commit-msg.tool-old", "/dev/null")
+	f := newHooksFixture(t)
+	f.write("commit-msg", userHookV1)
+	f.install(spec)
+	f.toolInstall(wrapper)
+	f.install(spec)
+	f.write("commit-msg.tool-old.new", userHookV2)
+	if err := os.Rename(filepath.Join(f.dir, "commit-msg.tool-old.new"), filepath.Join(f.dir, "commit-msg.tool-old")); err != nil {
+		t.Fatal(err)
+	}
+	f.install(spec)
+	f.toolInstall(wrapper)
+	f.install(spec)
+
+	assertHooks(t, f, map[string]string{"commit-msg.tool-old": userHookV2, "commit-msg.tool-old" + backupSuffix: userHookV2})
+}
+
+// The same for pre-commit's .legacy.
+func TestReclaimFromPreCommit_KeepCopyFollowsUserEdit(t *testing.T) {
+	t.Parallel()
+	f := newHooksFixture(t)
+	f.write("commit-msg"+legacySuffix, userHookV2)
+	f.write("commit-msg"+keepSuffix, userHookV1)
+	if _, err := reclaimFromPreCommit(f.root, "commit-msg"); err != nil {
+		t.Fatal(err)
+	}
+	assertHooks(t, f, map[string]string{"commit-msg" + keepSuffix: userHookV2})
+}
+
+// A keep copy that holds Entire's hook, as one hard-linked to its moved file
+// does after a manager writes into that file in place, is never put back where
+// the wrapper runs it, on install or uninstall.
+func TestToolWrapper_KeepCopyHoldingEntireIsDropped(t *testing.T) {
+	t.Parallel()
+	spec := specFor(t, "commit-msg")
+	wrapper := toolWrapper("commit-msg.tool-old", "/dev/null")
+	entire := generateChainedContent(spec.content, spec.name)
+	for name, act := range map[string]func(f *hooksFixture){
+		"install": func(f *hooksFixture) { f.install(spec) },
+		"uninstall": func(f *hooksFixture) {
+			if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreMovedHooks); err != nil {
+				t.Fatalf("removeHooks: %v", err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newHooksFixture(t)
+			f.write("commit-msg", wrapper)
+			f.write("commit-msg"+backupSuffix, wrapper)
+			f.write("commit-msg.tool-old", entire)
+			f.write("commit-msg.tool-old"+backupSuffix, entire)
+
+			act(f)
+
+			if carriesEntireMarker(f.root, "commit-msg.tool-old") {
+				t.Error("commit-msg.tool-old still holds Entire's hook")
+			}
+			if f.exists("commit-msg.tool-old" + backupSuffix) {
+				t.Error("keep copy holding Entire's hook left behind")
+			}
+		})
 	}
 }

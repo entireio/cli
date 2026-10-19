@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/trail"
@@ -96,6 +97,9 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 	}
 	if m.Labels == nil {
 		m.Labels = []string{}
+	}
+	if r.Parent != nil {
+		m.ProjectTrailURL = strings.TrimSpace(r.Parent.URL)
 	}
 	return m
 }

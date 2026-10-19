@@ -348,8 +348,8 @@ type RedactionSettings struct {
 	// bundled detectors don't know about, project codenames, or any other
 	// string pattern you don't want stored. Each match is replaced with the
 	// bare "REDACTED" token used by the built-in secret layers, not the
-	// "[REDACTED_<LABEL>]" token used by PII. Failed regex compilations are
-	// logged via slog.Warn and the rule is skipped.
+	// "[REDACTED_<LABEL>]" token used by PII. A pattern that fails to compile
+	// or can match the empty string is logged via slog.Warn and skipped.
 	CustomRedactions map[string]string `json:"custom_redactions,omitempty"`
 
 	// OpenAIPrivacyFilter is the optional 8th redaction layer (opt-in).

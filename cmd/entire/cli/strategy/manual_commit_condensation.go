@@ -26,12 +26,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
+	transcriptlib "github.com/entireio/cli/transcript"
 
 	"github.com/go-git/go-git/v6"
 )
@@ -360,6 +360,8 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 		return nil, assets
 	}
 
+	// One fetch budget for every record: each may re-export its subagent.
+	ctx = agent.WithSubagentFetchBudget(ctx, agent.SubagentFetchBudget)
 	inventoryPaths := resolveInventoryTaskTranscripts(ctx, ag, state)
 	payloads := make([]cpkg.TaskPayload, 0, len(state.TaskRecords))
 	for _, record := range state.TaskRecords {
@@ -388,35 +390,12 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			StartedAt:       record.StartedAt,
 			CompletedAt:     record.CompletedAt,
 		}
-		if record.TranscriptUnavailable {
+		raw, transcriptPath, readErr := readTaskTranscript(ctx, logCtx, ag, state, record, inventoryPaths[record.AgentID])
+		if transcriptPath == "" && readErr == nil {
 			payload.TranscriptUnavailableReason = taskTranscriptReasonUnresolvable
 			payloads = append(payloads, payload)
 			continue
 		}
-
-		// Candidate transcript paths, tried in order: the agent-declared path
-		// first, then the agent's verified inventory resolution, then the
-		// agent-layout fallback — declared paths are unreliable (agents
-		// relocate/clean up transcripts), which is why the fallback resolvers
-		// exist at all, so a declared-but-unreadable path must not
-		// short-circuit past them.
-		var candidates []string
-		if record.DeclaredTranscriptPath != "" {
-			candidates = append(candidates, record.DeclaredTranscriptPath)
-		}
-		if resolved := inventoryPaths[record.AgentID]; resolved != "" {
-			candidates = append(candidates, resolved)
-		}
-		if fallback := resolveTaskTranscriptPath(state, record.AgentID); fallback != "" && fallback != record.DeclaredTranscriptPath {
-			candidates = append(candidates, fallback)
-		}
-		if len(candidates) == 0 {
-			payload.TranscriptUnavailableReason = taskTranscriptReasonUnresolvable
-			payloads = append(payloads, payload)
-			continue
-		}
-
-		raw, transcriptPath, readErr := readFirstTranscript(candidates)
 		if readErr != nil {
 			logging.Warn(logCtx, "failed to read subagent transcript; storing task without it",
 				slog.String("session_id", state.SessionID),
@@ -457,6 +436,64 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 	}
 
 	return payloads, assets
+}
+
+// readTaskTranscript reads a task record's transcript: the agent-declared
+// path first, then the agent's verified inventory resolution (inventoryPath),
+// then the agent-layout fallback — declared paths are unreliable (agents
+// relocate/clean up transcripts), which is why the fallback resolvers exist at
+// all, so a declared-but-unreadable path must not short-circuit past them. A
+// record marked TranscriptUnavailable skips all three, since its agent said
+// nothing at those paths belongs to it.
+//
+// When none yields a transcript, an agent that can re-export its subagents
+// (SubagentTranscriptFetcher) is asked for one, for a completed record whose
+// stop hook's export failed. A live record is not fetched: its transcript is
+// partial, and the record is stored again once it completes. A fetch error is
+// logged and the earlier outcome stands.
+//
+// Returns an empty path and nil error when nothing could be resolved, and a
+// non-nil error when a candidate existed but could not be read.
+func readTaskTranscript(ctx, logCtx context.Context, ag agent.Agent, state *SessionState, record session.TaskRecord, inventoryPath string) ([]byte, string, error) {
+	var candidates []string
+	if !record.TranscriptUnavailable {
+		if record.DeclaredTranscriptPath != "" {
+			candidates = append(candidates, record.DeclaredTranscriptPath)
+		}
+		if inventoryPath != "" {
+			candidates = append(candidates, inventoryPath)
+		}
+		if fallback := resolveTaskTranscriptPath(state, record.AgentID); fallback != "" && fallback != record.DeclaredTranscriptPath {
+			candidates = append(candidates, fallback)
+		}
+	}
+	var readErr error
+	if len(candidates) > 0 {
+		raw, path, err := readFirstTranscript(candidates)
+		if err == nil {
+			return raw, path, nil
+		}
+		readErr = err
+	}
+
+	fetcher, ok := agent.AsSubagentTranscriptFetcher(ag)
+	if !ok || record.CompletedAt.IsZero() {
+		return nil, "", readErr
+	}
+	path, err := agent.FetchSubagentTranscript(ctx, fetcher, record.AgentID, record.ToolUseID, record.StartedAt, record.CompletedAt)
+	if err != nil {
+		logging.Warn(logCtx, "failed to fetch subagent transcript from the agent",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+			slog.String("error", err.Error()),
+		)
+		return nil, "", readErr
+	}
+	raw, err := agent.ReadTranscriptFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read fetched subagent transcript: %w", err)
+	}
+	return raw, path, nil
 }
 
 // condensedTaskTokenUsage returns the token usage to store for a task: its
@@ -906,7 +943,13 @@ func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[st
 			}
 		}
 		sessionData.FilesTouched = filtered
-		return
+		// A record of another worktree that shares nothing with a commit made
+		// there is not this commit's work: the session was linked otherwise
+		// (its agent made the commit, say from a shell edit), so treat it as
+		// having recorded nothing, as it would without that record.
+		if len(filtered) > 0 || state == nil || !state.InWorktreeView {
+			return
+		}
 	}
 	if !sessionHasEvidenceOfWork(sessionData, state) {
 		return
@@ -986,7 +1029,7 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 			// line count. Antigravity is listed only to keep the switch
 			// exhaustive — it scopes through its own metric above, and
 			// reaches this line only if its registry lookup fails.
-			scopedTranscript = transcript.SliceFromLine(transcriptBytes, state.CheckpointTranscriptStart)
+			scopedTranscript = transcriptlib.SliceFromLine(transcriptBytes, state.CheckpointTranscriptStart)
 		}
 	}
 
@@ -1662,12 +1705,12 @@ func splitPromptContent(content string) []string {
 // readPromptsFromFilesystem reads prompt.txt from the filesystem session metadata directory.
 // This file is written at turn start and backfilled at turn end, providing prompt data
 // even for mid-turn commits.
-func readPromptsFromFilesystem(ctx context.Context, sessionID string) []string {
-	root, err := entiredir.OpenForRead(ctx)
-	if err != nil {
+func readPromptsFromFilesystem(ctx context.Context, state *SessionState) []string {
+	root := storedSessionRootOrNil(ctx, state)
+	if root == nil {
 		return nil
 	}
-	return readPromptsIn(root, sessionID)
+	return readPromptsIn(root, state.SessionID)
 }
 
 // readPromptsIn is readPromptsFromFilesystem against an already-opened .entire
@@ -1694,12 +1737,12 @@ var storedTranscriptFileNames = stagedSessionFiles[1:]
 // (see lifecycle.go), or the legacy full.log. ok is false when no regular file
 // exists under either name, which is normal before the first Stop and after
 // condensation released it.
-func resolveStoredTranscript(ctx context.Context, sessionID string) (root *os.Root, name string, info fs.FileInfo, ok bool) {
-	root, err := entiredir.OpenForRead(ctx)
-	if err != nil {
+func resolveStoredTranscript(ctx context.Context, state *SessionState) (root *os.Root, name string, info fs.FileInfo, ok bool) {
+	root = storedSessionRootOrNil(ctx, state)
+	if root == nil {
 		return nil, "", nil, false
 	}
-	name, info, ok = resolveStoredTranscriptIn(root, sessionID)
+	name, info, ok = resolveStoredTranscriptIn(root, state.SessionID)
 	if !ok {
 		return nil, "", nil, false
 	}
@@ -1729,8 +1772,8 @@ func resolveStoredTranscriptIn(root *os.Root, sessionID string) (name string, in
 // The size is in the coordinate CheckpointTranscriptSize is measured in —
 // sanitized, not image-externalized (CondenseResult.TranscriptSizeBaseline) —
 // which is what makes the growth comparison in sessionHasNewContent sound.
-func storedTranscriptSize(ctx context.Context, sessionID string) (size int64, ok bool) {
-	_, _, info, ok := resolveStoredTranscript(ctx, sessionID)
+func storedTranscriptSize(ctx context.Context, state *SessionState) (size int64, ok bool) {
+	_, _, info, ok := resolveStoredTranscript(ctx, state)
 	if !ok {
 		return 0, false
 	}
@@ -1739,12 +1782,12 @@ func storedTranscriptSize(ctx context.Context, sessionID string) (size int64, ok
 
 // readStoredTranscript returns the session's stored turn-end transcript (see
 // resolveStoredTranscript), or nil when there is none or it is empty.
-func readStoredTranscript(ctx context.Context, sessionID string) []byte {
-	root, err := entiredir.OpenForRead(ctx)
-	if err != nil {
+func readStoredTranscript(ctx context.Context, state *SessionState) []byte {
+	root := storedSessionRootOrNil(ctx, state)
+	if root == nil {
 		return nil
 	}
-	return readStoredTranscriptIn(root, sessionID)
+	return readStoredTranscriptIn(root, state.SessionID)
 }
 
 // readStoredTranscriptIn is readStoredTranscript against an already-opened
@@ -1793,10 +1836,19 @@ func storedSessionFileName(sessionID, base string) (string, error) {
 // anything it does not positively accept falls back to the current worktree,
 // which is the behaviour before it existed.
 //
-// This is deliberately narrow: only the stored transcript and prompts reads of
-// a condensation go through it. Nothing else follows WorktreePath.
+// Every reader of the stored copy goes through it — condensation, the
+// commit-time content gate, prompts and the pending preview — and the
+// turn-end hooks write the copy through OpenSessionEntireDir, so a turn that
+// ends in another worktree of the repository adds to the same copy rather
+// than starting a second one there.
 func storedSessionRoot(ctx context.Context, state *SessionState) (*os.Root, error) {
-	if root, ok := foreignWorktreeEntireRoot(ctx, state.WorktreePath); ok {
+	home := state.WorktreePath
+	if state.InWorktreeView {
+		// WorktreePath names the committing worktree for the view; the copy
+		// is still the home's.
+		home = state.ViewHomePath
+	}
+	if root, ok := foreignWorktreeEntireRoot(ctx, home, entiredir.OpenAtForRead); ok {
 		return root, nil
 	}
 	return entiredir.OpenForRead(ctx) //nolint:wrapcheck // callers treat any failure as "no stored copy"
@@ -1829,7 +1881,7 @@ func storedSessionRootOrNil(ctx context.Context, state *SessionState) *os.Root {
 // the root is opened on. The comparison is lexical on cleaned paths: resolving
 // symlinks in recorded to make it match would let the state file pick the
 // directory.
-func foreignWorktreeEntireRoot(ctx context.Context, recorded string) (*os.Root, bool) {
+func foreignWorktreeEntireRoot(ctx context.Context, recorded string, open func(worktreeRoot string) (*os.Root, error)) (*os.Root, bool) {
 	if recorded == "" {
 		return nil, false
 	}
@@ -1867,11 +1919,34 @@ func foreignWorktreeEntireRoot(ctx context.Context, recorded string) (*os.Root, 
 	if err := paths.ValidateEntireDirAt(match); err != nil {
 		return refuse("recorded worktree's .entire failed validation", slog.String("error", err.Error()))
 	}
-	root, err := entiredir.OpenAtForRead(match)
+	root, err := open(match)
 	if err != nil {
 		return refuse("recorded worktree's .entire could not be opened", slog.String("error", err.Error()))
 	}
 	return root, true
+}
+
+// OpenSessionEntireDir opens, for writing, the .entire directory that holds
+// sessionID's stored transcript and prompt copy: its home worktree's, under
+// the same rules storedSessionRoot reads it by, else the current worktree's
+// (a session with no state yet, or whose home git no longer lists). A session
+// resumed in another worktree of the repository therefore keeps one copy, in
+// the place every reader looks.
+func OpenSessionEntireDir(ctx context.Context, sessionID string) (*os.Root, error) {
+	state, err := LoadSessionState(ctx, sessionID)
+	if err == nil && state != nil && state.WorktreePath != "" {
+		if root, ok := foreignWorktreeEntireRoot(ctx, state.WorktreePath, entiredir.OpenAt); ok {
+			return root, nil
+		}
+		if current, wtErr := paths.WorktreeRoot(ctx); wtErr == nil && !isSessionHomeWorktree(current, state) {
+			// The copy now starts over here, where readers of this session
+			// won't look while its home is registered: say so.
+			logging.Warn(logging.WithComponent(ctx, "checkpoint"), "session's home worktree .entire unavailable; storing its transcript and prompts in the current worktree",
+				slog.String("session_id", sessionID),
+				slog.String("home_worktree", state.WorktreePath))
+		}
+	}
+	return entiredir.Open(ctx) //nolint:wrapcheck // callers name the directory
 }
 
 // stagedSessionFiles are the files Entire writes into
@@ -1987,7 +2062,7 @@ func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.C
 // sessions or marks empty ENDED sessions fully condensed. File-bearing sessions
 // remain eligible for PostCommit.
 func PrepareSessionEndCondensation(ctx context.Context, state *SessionState) error {
-	if state.Phase != session.PhaseEnded || len(state.FilesTouched) > 0 {
+	if state.Phase != session.PhaseEnded || state.HasPendingFiles() {
 		return nil
 	}
 	if !state.HasPendingWork() {
@@ -2004,7 +2079,7 @@ func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) 
 	if err != nil {
 		return id.EmptyCheckpointID, err
 	}
-	if created && state.Phase == session.PhaseEnded && len(state.FilesTouched) == 0 {
+	if created && state.Phase == session.PhaseEnded && !state.HasPendingFiles() {
 		state.RequireCondensationRecovery()
 	}
 	return checkpointID, nil
@@ -2020,6 +2095,13 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
 	defer repo.Close()
+
+	// Records of worktrees removed since the session's last turn end are
+	// pruned first: no commit can carry those files, and salvaging them would
+	// fold them into this checkpoint.
+	if hookRoot, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
+		PruneRemovedWorktrees(ctx, sessionID, hookRoot)
+	}
 
 	var checkpointID id.CheckpointID
 	reserveErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
@@ -2077,7 +2159,13 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// Resolve the stored copy's root once: the condensation reads it, and
 		// a successful one releases it from the same root.
 		storedRoot := storedSessionRootOrNil(ctx, state)
+		// This checkpoint is the last record of the session's pending files,
+		// which are cleared below: include those pending in other worktrees,
+		// not only the home's.
+		homeFiles := state.FilesTouched
+		state.FilesTouched = state.PendingFiles()
 		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true, storedRoot: storedRoot})
+		state.FilesTouched = homeFiles
 		if err != nil {
 			return fmt.Errorf("failed to condense session: %w", err)
 		}
@@ -2111,6 +2199,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// and a resumed turn starts a fresh window.
 		state.FilesTouched = nil
 		state.TouchedFileHashes = nil
+		state.OtherWorktrees = nil
 		release = &storedCopyRelease{root: storedRoot, worktreePath: state.WorktreePath}
 		return nil
 	}, func() {
@@ -2153,7 +2242,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 // carry-forward path, and a session with no pending work is simply marked
 // fully condensed.
 func prepareEagerCondensation(state *SessionState) (shouldCondense bool, err error) {
-	if len(state.FilesTouched) > 0 {
+	if state.HasPendingFiles() {
 		return false, ErrMutationSkip
 	}
 	if !state.HasPendingWork() {
@@ -2202,7 +2291,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	// Files waiting for a commit belong to PostCommit; a fully condensed
 	// session proceeds only for work that arrived after its condensation.
-	if len(reservedState.FilesTouched) > 0 || (reservedState.FullyCondensed && !reservedState.HasPendingWork()) {
+	if reservedState.HasPendingFiles() || (reservedState.FullyCondensed && !reservedState.HasPendingWork()) {
 		return nil
 	}
 	checkpointID = reservedState.PendingCondensationID()

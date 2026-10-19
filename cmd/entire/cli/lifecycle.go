@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -658,11 +659,12 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	captureSpan.End()
 
 	// Append prompt to prompt.txt on filesystem so it's available for
-	// mid-turn commits and condensation.
+	// mid-turn commits and condensation. It goes to the session's home
+	// worktree, where its other prompts are (see OpenSessionEntireDir).
 	// Prompts are separated by "\n\n---\n\n" to support multiple turns.
 	if event.Prompt != "" {
 		sessionName := sessionMetadataName(sessionID)
-		if root, rootErr := entiredir.Open(ctx); rootErr == nil {
+		if root, rootErr := strategy.OpenSessionEntireDir(ctx, sessionID); rootErr == nil {
 			if mkErr := osroot.MkdirAllNoSymlink(root, sessionName, 0o750); mkErr == nil {
 				promptName := sessionName + "/" + paths.PromptFileName
 				existing, readErr := entiredir.ReadFile(root, promptName)
@@ -813,6 +815,19 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 	prepareSpan.End()
 
+	// An agent launched in one worktree fires its hooks there even when it
+	// edits another by absolute path. Those edits are recorded against the
+	// worktree they are in (strategy.SplitEditsByWorktree), so a commit there
+	// links them; the hook's own worktree is handled below as always.
+	hookRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get worktree root: %w", err)
+	}
+	var elsewhere map[string][]string
+	if sessionID != unknownSessionID {
+		elsewhere = uncommittedEditsElsewhere(ctx, strategy.SplitEditsByWorktree(ctx, hookRoot, turnEditedPaths(logCtx, ag, transcriptRef, sessionID)))
+	}
+
 	// Create session metadata directory
 	_, copySpan := perf.Start(ctx, "copy_transcript")
 	// sessionDir is the repo-relative path that ends up in commit trailers and
@@ -820,7 +835,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// the .entire root, which is what every read and write below uses.
 	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	sessionName := sessionMetadataName(sessionID)
-	entireRoot, err := entiredir.Open(ctx)
+	// The session's home worktree holds its stored copy, even when this turn
+	// ended in another worktree (see strategy.OpenSessionEntireDir).
+	entireRoot, err := strategy.OpenSessionEntireDir(ctx, sessionID)
 	if err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
@@ -958,12 +975,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Get worktree root for path normalization
 	_, detectSpan := perf.Start(ctx, "detect_file_changes")
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		detectSpan.RecordError(err)
-		detectSpan.End()
-		return fmt.Errorf("failed to get worktree root: %w", err)
-	}
+	repoRoot := hookRoot
 
 	var preUntrackedFiles []string
 	if preState != nil {
@@ -1040,9 +1052,43 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		codexInventoryUsage, codexLedgerVersion = refreshCodexInventory(ctx, ag, sessionID, transcriptData, inventoryOffset)
 	}
 
+	// Agents that run subagents as sessions of their own (Factory AI Droid's
+	// Workers) reach turn-end here for the subagent's own turn. Attribute that
+	// work to the parent task invocation instead of minting a top-level session
+	// checkpoint unrelated to the session the user is actually driving. This
+	// runs before the no-changes gate: a read-only Worker turn is still the
+	// parent's task, and a zero-file completed record is itself a condensation
+	// trigger (State.HasTaskContent), so its transcript and tokens reach the
+	// parent's next checkpoint. Its usage goes on that record only, never on
+	// the Worker's own session total, so it is counted once.
+	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
+		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
+			link:          link,
+			sessionID:     sessionID,
+			event:         event,
+			transcriptRef: transcriptRef,
+			modifiedFiles: relModifiedFiles,
+			newFiles:      relNewFiles,
+			deletedFiles:  relDeletedFiles,
+			turnUsage:     workerTurnTokenUsage(ctx, ag, event, preState, transcriptData),
+			ag:            ag,
+			strat:         GetStrategy(ctx),
+		})
+	}
+
 	// Check if there are any changes
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
-	if totalChanges == 0 {
+	if totalChanges == 0 && len(elsewhere) > 0 {
+		// Nothing git can see changed here, but the turn worked in another
+		// worktree and goes on to save that step. An untracked file it
+		// created here earlier and has now removed is still recorded, as in
+		// the branch below.
+		if recErr := GetStrategy(ctx).RecordVanishedUntrackedFiles(ctx, sessionID); recErr != nil {
+			logging.Warn(logCtx, "failed to record removed untracked files",
+				slog.String("error", recErr.Error()))
+		}
+	}
+	if totalChanges == 0 && len(elsewhere) == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
 		// A turn that only removed an untracked file the agent created
 		// earlier changes nothing git can see; record that deletion anyway.
@@ -1051,33 +1097,16 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 				slog.String("error", recErr.Error()))
 		}
 		recordCaptureDegraded(ctx, sessionID, captureDegraded)
-		// SaveStep is skipped, but out-of-band token usage must still be
-		// recorded: an Antigravity turn that commits ALL its work mid-turn
-		// (its normal flow) ends with a clean tree, and the mid-turn
-		// condensation ran with a zero delta (the baseline only re-snapshots
-		// at TurnStart). Without this, CleanupPrePromptState deletes the
-		// baseline and the turn's tokens are lost permanently.
-		if oobUsage := computeOutOfBandTokenUsage(ctx, ag, sessionID, preState); oobUsage != nil {
-			if accErr := strategy.AccumulateSessionTokenUsage(ctx, sessionID, oobUsage); accErr != nil {
-				// This is the only path that records a checkpoint-less turn's
-				// tokens, so a swallowed failure here is a permanent loss. Name
-				// the two causes apart: a session whose state was removed
-				// between the turn-end transition and this accumulate (nothing
-				// left to attribute to) versus an I/O or lock failure on state
-				// that still exists.
-				if errors.Is(accErr, strategy.ErrStateNotFound) {
-					logging.Warn(logCtx, "session state already removed; out-of-band token usage for checkpoint-less turn not recorded",
-						slog.String("session_id", sessionID),
-						slog.Int("input_tokens", oobUsage.InputTokens),
-						slog.Int("output_tokens", oobUsage.OutputTokens))
-				} else {
-					logging.Warn(logCtx, "failed to record out-of-band token usage for checkpoint-less turn",
-						slog.String("session_id", sessionID),
-						slog.String("error", accErr.Error()))
-				}
-			}
-		}
-		transitionSessionTurnEnd(ctx, sessionID, event)
+		// SaveStep is skipped, but the turn's tokens must still be recorded,
+		// resolved and accounted exactly as SaveStep would. Otherwise the
+		// session total misses the turn, and so does the next checkpoint for
+		// agents whose transcript carries no usage (Cursor's stop payload,
+		// Antigravity's out-of-band pipe). An Antigravity turn that commits ALL
+		// its work mid-turn (its normal flow) lands here with a clean tree.
+		// The tokens are applied by the turn-end transition itself, so a
+		// repeated or concurrent Stop for the same turn adds nothing.
+		turnUsage := resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
+		transitionSessionTurnEnd(ctx, sessionID, ag.Type(), event, &checkpointlessTurnUsage{usage: turnUsage, ledgerVersion: codexLedgerVersion})
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 				slog.String("error", cleanupErr.Error()))
@@ -1098,24 +1127,6 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	strat := GetStrategy(ctx)
 	agentType := ag.Type()
 
-	// Agents that run subagents as sessions of their own (Factory AI Droid's
-	// Workers) reach turn-end here for the subagent's own turn. Attribute that
-	// work to the parent task invocation instead of minting a top-level session
-	// checkpoint unrelated to the session the user is actually driving.
-	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
-		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
-			link:          link,
-			sessionID:     sessionID,
-			event:         event,
-			transcriptRef: transcriptRef,
-			modifiedFiles: relModifiedFiles,
-			newFiles:      relNewFiles,
-			deletedFiles:  relDeletedFiles,
-			agentType:     agentType,
-			strat:         strat,
-		})
-	}
-
 	// Get transcript position/identifier from pre-prompt state
 	var transcriptIdentifierAtStart string
 	var transcriptLinesAtStart int
@@ -1124,27 +1135,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		transcriptLinesAtStart = preState.TranscriptOffset
 	}
 
-	// Resolve token usage. Hook-provided counts (e.g., Cursor's stop hook,
-	// which is the only authoritative source for Cursor sessions because the
-	// JSONL transcript has no usage fields) take precedence; otherwise fall
-	// back to transcript-based computation, preferring SubagentAwareExtractor
-	// to include subagent tokens.
-	tokenUsage := event.TokenUsage
-	if tokenUsage == nil {
-		if codexInventoryUsage != nil {
-			tokenUsage = codexInventoryUsage
-		} else {
-			tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
-		}
-	}
-
-	// Out-of-band fallback: Antigravity exposes token usage only via its
-	// title/statusline pipe (captured by the title-tee shim), never in the
-	// transcript. Delta = current cumulative totals minus the TurnStart
-	// baseline stored in PrePromptState.
-	if tokenUsage == nil {
-		tokenUsage = computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
-	}
+	tokenUsage := resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
@@ -1164,9 +1155,28 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		SubagentLedgerVersion:    codexLedgerVersion,
 	}
 
-	if err := strat.SaveStep(ctx, stepCtx); err != nil {
-		return fmt.Errorf("failed to save step: %w", err)
+	// The hook's worktree, then each other worktree the turn edited: one
+	// step, counted once and carrying the turn's tokens once.
+	counted := false
+	if totalChanges > 0 {
+		if err := strat.SaveStep(ctx, stepCtx); err != nil {
+			return fmt.Errorf("failed to save step: %w", err)
+		}
+		counted = true
 	}
+	for _, root := range slices.Sorted(maps.Keys(elsewhere)) {
+		step := stepCtx
+		step.WorktreeRoot = root
+		step.ModifiedFiles, step.NewFiles, step.DeletedFiles = elsewhere[root], nil, nil
+		if counted {
+			step.SameTurn, step.TokenUsage = true, nil
+		}
+		if err := strat.SaveStep(ctx, step); err != nil {
+			return fmt.Errorf("failed to save step for %s: %w", root, err)
+		}
+		counted = true
+	}
+	strategy.PruneRemovedWorktrees(ctx, sessionID, hookRoot)
 
 	// The LastPrompt backfill must come after SaveStep because SaveStep may
 	// reinitialize session state, which would overwrite an earlier LastPrompt
@@ -1185,12 +1195,55 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 	recordCaptureDegraded(ctx, sessionID, captureDegraded)
-	transitionSessionTurnEnd(ctx, sessionID, event)
+	transitionSessionTurnEnd(ctx, sessionID, agentType, event, nil)
 	if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
 	}
 	return nil
+}
+
+// workerTurnTokenUsage returns a detached subagent session's usage for the
+// turn ending now: the hook-reported counts, or its transcript from the turn's
+// start offset. Its own subagents are not counted, since a task record holds
+// only the subagent's own usage.
+func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, preState *PrePromptState, transcriptData []byte) *agent.TokenUsage {
+	if event.TokenUsage != nil {
+		return event.TokenUsage
+	}
+	turnStart := 0
+	if preState != nil {
+		turnStart = preState.TranscriptOffset
+	}
+	return agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, "")
+}
+
+// resolveTurnTokenUsage returns the token usage of the turn ending now.
+// Hook-provided counts (e.g., Cursor's stop hook, which is the only
+// authoritative source for Cursor sessions because the JSONL transcript has no
+// usage fields) take precedence; otherwise fall back to Codex's child ledger,
+// then to transcript-based computation from the turn's start offset (preferring
+// SubagentAwareExtractor to include subagent tokens), and last to the
+// out-of-band source: Antigravity exposes token usage only via its
+// title/statusline pipe (captured by the title-tee shim), never in the
+// transcript, so its delta is the current cumulative totals minus the
+// TurnStart baseline stored in PrePromptState. Only one source is used, so a
+// turn is never counted twice.
+func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) *agent.TokenUsage {
+	if event.TokenUsage != nil {
+		return event.TokenUsage
+	}
+	if codexInventoryUsage != nil {
+		return codexInventoryUsage
+	}
+	turnStart := 0
+	if preState != nil {
+		turnStart = preState.TranscriptOffset
+	}
+	if usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, subagentsDir); usage != nil {
+		return usage
+	}
+	return computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
 }
 
 // handleLifecycleCompaction handles context compaction: saves current progress
@@ -1271,11 +1324,13 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 		_, _ = refreshCodexInventory(ctx, ag, event.SessionID, nil, 0)
 		finalizeCodexObservedAtSessionEnd(ctx, event.SessionID)
 		completeLiveTaskRecords(ctx, ag, event.SessionID, event.SessionRef)
+		pruneRemovedWorktreesAtEnd(ctx, event.SessionID)
 		condenseEndedSession(ctx, event.SessionID, deadline)
 		return nil
 	}
 
 	completeLiveTaskRecords(ctx, ag, event.SessionID, event.SessionRef)
+	pruneRemovedWorktreesAtEnd(ctx, event.SessionID)
 
 	if _, err := endSessionNow(ctx, event, event.SessionID, nil, sessionEndCondenseDeadline(ag), endedNow); err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
@@ -1283,6 +1338,17 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	}
 
 	return nil
+}
+
+// pruneRemovedWorktreesAtEnd drops the ending session's records of worktrees
+// removed since its last turn end, which pruned them last: no turn end follows
+// to do it, and those records would keep the ended session pending for ever.
+func pruneRemovedWorktreesAtEnd(ctx context.Context, sessionID string) {
+	hookRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	strategy.PruneRemovedWorktrees(ctx, sessionID, hookRoot)
 }
 
 // finalizeCodexObservedAtSessionEnd closes every observed turn of a VERIFIED
@@ -1491,6 +1557,29 @@ func sessionEndCondenseDeadline(ag agent.Agent) time.Time {
 	return processStart.Add(budget)
 }
 
+// defaultTurnEndHookTimeout is the turn-end hook timeout assumed for agents
+// that do not declare agent.TurnEndHookTimeouter, or declare a non-positive
+// one. Cursor documents only a "platform default", OpenCode applies none (its
+// plugin blocks on the hook), and external agents expose none, so it borrows
+// the limit Codex and Copilot CLI enforce (their defaultHookTimeoutSec and
+// hostDefaultHookTimeoutSec).
+const defaultTurnEndHookTimeout = 30 * time.Second
+
+// turnEndFinalizeDeadline returns when turn-end checkpoint finalization must
+// stop waiting on the network so the hook finishes inside its host's timeout,
+// measured from process start like the host's own clock.
+func turnEndFinalizeDeadline(agentType types.AgentType) time.Time {
+	hookTimeout := defaultTurnEndHookTimeout
+	if ag, err := agent.GetByAgentType(agentType); err == nil {
+		if timeouter, ok := agent.AsTurnEndHookTimeouter(ag); ok {
+			if declared := timeouter.TurnEndHookTimeout(); declared > 0 {
+				hookTimeout = declared
+			}
+		}
+	}
+	return processStart.Add(agent.TurnEndBudgetWithin(hookTimeout))
+}
+
 // endSessionNow runs the canonical "this session is over" sequence: it marks the
 // session ended (firing the SessionStop transition → PhaseEnded + EndedAt) and
 // eagerly condenses its pending work so PostCommit need not. This prevents
@@ -1554,7 +1643,9 @@ func condenseEndedSession(ctx context.Context, sessionID string, condenseDeadlin
 	}
 }
 
-// handleLifecycleSubagentStart handles subagent start: captures pre-task state.
+// handleLifecycleSubagentStart handles subagent start: it captures pre-task
+// state, or records a deferred launch marker (Event.DeferredCompletion), or
+// registers a Codex child — exactly one of the three, depending on the event.
 func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	logging.Info(logCtx, "subagent started",
@@ -1587,6 +1678,10 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 			logging.Warn(logCtx, "best-effort codex pre-task capture failed", slog.String("error", err.Error()))
 		}
 		return nil
+	}
+
+	if event.DeferredCompletion {
+		return recordDeferredTaskLaunch(logCtx, event)
 	}
 
 	// Capture pre-task state
@@ -1678,12 +1773,10 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	})
 }
 
-// recordInFlightTaskLaunch handles a background Task launch. It records an
-// in-flight marker on session state and completes nothing yet;
-// the real capture happens at SubagentStop (handleSubagentStopFinal), which
-// is the first point that sees the subagent's actual work. Tolerates
-// strategy.ErrStateNotFound the way the completion producers tolerate a launch
-// event arriving before session state exists.
+// recordInFlightTaskLaunch handles a background Task launch (Claude Code's
+// run_in_background post-task stub). The real capture happens at
+// SubagentStop (handleSubagentStopFinal), which is the first point that sees
+// the subagent's actual work.
 //
 // A launch replaces an existing record for its ToolUseID unless the event is
 // SubagentLaunchIdempotent: a launch keyed by the subagent itself (Claude
@@ -1696,30 +1789,75 @@ func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error 
 		slog.String("tool_use_id", event.ToolUseID),
 		slog.String("agent_id", event.SubagentID),
 	)
-
-	mutErr := strategy.MutateSessionState(logCtx, event.SessionID, func(state *strategy.SessionState) error {
-		record := session.TaskRecord{
-			ToolUseID:       event.ToolUseID,
-			AgentID:         event.SubagentID,
-			StartedAt:       time.Now(),
-			Background:      true,
-			SubagentType:    event.SubagentType,
-			TaskDescription: event.TaskDescription,
-		}
+	return recordTaskLaunchMarker(logCtx, event, func(state *strategy.SessionState, rec session.TaskRecord) {
 		if event.SubagentLaunchIdempotent {
-			state.EnsureTaskRecord(record)
-			return nil
+			state.EnsureTaskRecord(rec)
+			return
 		}
-		state.AddTaskRecord(record)
+		state.AddTaskRecord(rec)
+	})
+}
+
+// recordDeferredTaskLaunch handles a start hook that already carries full
+// identity and whose completion is a later Final event
+// (Event.DeferredCompletion). EnsureTaskRecord rather than AddTaskRecord: a
+// start replayed after the Final completed the record must enrich, never
+// overwrite, so a completed record is never reopened. A start reaching an
+// ended session records nothing: its stop is dropped for the ended parent
+// (handleSubagentStopFinal) and the SessionEnd sweep has run, so the record
+// would stay live forever.
+func recordDeferredTaskLaunch(logCtx context.Context, event *agent.Event) error {
+	logging.Debug(logCtx, "deferred-completion subagent start detected; deferring capture to subagent-stop",
+		slog.String("session_id", event.SessionID),
+		slog.String("tool_use_id", event.ToolUseID),
+		slog.String("agent_id", event.SubagentID),
+	)
+	return recordTaskLaunchMarker(logCtx, event, func(state *strategy.SessionState, rec session.TaskRecord) {
+		if state.IsEnded() {
+			logging.Info(logCtx, "skipping subagent start: parent session already ended",
+				slog.String("session_id", event.SessionID),
+				slog.String("tool_use_id", event.ToolUseID))
+			return
+		}
+		_ = state.EnsureTaskRecord(rec)
+	})
+}
+
+// taskStartedAt is the task record's StartedAt: the agent's own call start when
+// it reports one, else now.
+func taskStartedAt(event *agent.Event) time.Time {
+	if !event.SubagentStartedAt.IsZero() {
+		return event.SubagentStartedAt
+	}
+	return time.Now()
+}
+
+// recordTaskLaunchMarker writes the launch-time task record through mutate.
+// Both callers' records run until a later Final stop, so they are Background
+// (session.TaskRecord.Background) and overlapping tasks see them in flight.
+// Tolerates strategy.ErrStateNotFound the way the completion producers do: a
+// launch can arrive before session state exists, and the Final capture
+// creates the record itself in that case.
+func recordTaskLaunchMarker(logCtx context.Context, event *agent.Event, mutate func(*strategy.SessionState, session.TaskRecord)) error {
+	rec := session.TaskRecord{
+		ToolUseID:       event.ToolUseID,
+		AgentID:         event.SubagentID,
+		StartedAt:       taskStartedAt(event),
+		Background:      true,
+		SubagentType:    event.SubagentType,
+		TaskDescription: event.TaskDescription,
+	}
+	mutErr := strategy.MutateSessionState(logCtx, event.SessionID, func(state *strategy.SessionState) error {
+		mutate(state, rec)
 		return nil
 	})
 	switch {
 	case errors.Is(mutErr, strategy.ErrStateNotFound):
-		logging.Info(logCtx, "no session state to record in-flight marker on; background task will not be captured",
+		logging.Info(logCtx, "no session state to record task launch marker on",
 			slog.String("session_id", event.SessionID),
 			slog.String("tool_use_id", event.ToolUseID))
 	case mutErr != nil:
-		logging.Warn(logCtx, "failed to record in-flight task marker",
+		logging.Warn(logCtx, "failed to record task launch marker",
 			slog.String("session_id", event.SessionID),
 			slog.String("tool_use_id", event.ToolUseID),
 			slog.String("error", mutErr.Error()))
@@ -1782,6 +1920,17 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	if keyedByAgentID {
 		event.ToolUseID, newExecution = taskRecordKeyForStop(state, event)
 	}
+	if event.CompletionWithoutLaunch {
+		key := completionRecordKey(state, event)
+		if key != event.ToolUseID && state.FindTaskRecord(key) == nil {
+			logging.Info(logCtx, "subagent-stop reuses another call's tool_use_id; recording it under its own key",
+				slog.String("session_id", event.SessionID),
+				slog.String("tool_use_id", event.ToolUseID),
+				slog.String("task_key", key),
+				slog.String("agent_id", event.SubagentID))
+		}
+		event.ToolUseID = key
+	}
 
 	marker := state.FindTaskRecord(event.ToolUseID)
 	if event.CompletionWithoutLaunch && state.IsEnded() {
@@ -1838,18 +1987,13 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		event.SubagentID = marker.AgentID
 	}
 
-	// analyzerFilesOnly: true because reaching this point means a live marker
-	// WAS found above — every Final capture that runs through this function is
-	// a background task (foreground tasks complete immediately at launch and
-	// are never marked in-flight), so the worktree-wide DetectFileChanges scan
-	// would risk sweeping in the parent's or another agent's later edits. See
-	// subagentCaptureOptions.analyzerFilesOnly.
+	// analyzerFilesOnly: every capture reaching here is Final (marker or CompletionWithoutLaunch); see subagentCaptureOptions.analyzerFilesOnly.
 	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
 		bypassNoChangesSkip:     true,
 		analyzerFilesOnly:       true,
 		background:              true,
 		claimUnrecordedNewFiles: !event.CompletionWithoutLaunch,
-		eventFilesOnly:          event.CompletionWithoutLaunch,
+		eventFilesOnly:          event.SubagentTranscriptUnavailable,
 	})
 	if captureErr != nil {
 		return captureErr
@@ -1949,10 +2093,11 @@ type subagentCaptureOptions struct {
 	// analyzerFilesOnly, when true, skips the whole-worktree
 	// LoadPreTaskState/DetectFileChanges merge in completeSubagentTaskRecord and
 	// captures only event.ModifiedFiles plus the transcript-analyzer-extracted
-	// files. Set ONLY for background Final (SubagentStop) captures — see the
-	// comment on that skip in completeSubagentTaskRecord for the attribution
-	// rationale. Never set for the foreground launch-time path, which keeps
-	// its original (correct, worktree-scan-based) behavior unchanged.
+	// files. Set ONLY for any Final capture whose launch was recorded in flight
+	// or learned at stop time (SubagentStop) — see the comment on that skip in
+	// completeSubagentTaskRecord for the attribution rationale. Never set for
+	// the foreground launch-time path, which keeps its original (correct,
+	// worktree-scan-based) behavior unchanged.
 	analyzerFilesOnly bool
 
 	// background marks the record as a background task's
@@ -1966,8 +2111,12 @@ type subagentCaptureOptions struct {
 	// has recorded. See unrecordedNewFilesSinceLaunch.
 	claimUnrecordedNewFiles bool
 
-	// eventFilesOnly means the adapter already derived child-scoped files from
-	// a shared parent transcript. Do not resolve or scan a child transcript.
+	// eventFilesOnly means the agent has no standalone child transcript at all
+	// (Event.SubagentTranscriptUnavailable) — its child activity lives only in
+	// a shared parent transcript. Do not resolve or scan a child transcript;
+	// rely solely on event.ModifiedFiles. Keyed on transcript unavailability,
+	// not on CompletionWithoutLaunch: a completion whose identity was learned
+	// at stop time can still declare a real child transcript worth scanning.
 	eventFilesOnly bool
 
 	// ensureSessionState, when true, creates missing session state before
@@ -1975,6 +2124,44 @@ type subagentCaptureOptions struct {
 	// Set only for the foreground path; the Final path must never resurrect a
 	// swept session (handleSubagentStopFinal's zombie guard).
 	ensureSessionState bool
+}
+
+// fetchSubagentTranscriptForCapture asks an agent whose subagents are
+// re-exportable sessions (SubagentTranscriptFetcher) for the child transcript
+// when nothing declared or resolved one: OpenCode's subagent-stop, which
+// declares no path, or a record still in flight when SessionEnd completes it. Without it the
+// record completes with no files, and condensation's later fetch restores the
+// transcript but not the attribution. On success the event is updated to
+// match — transcript declared, available, and token usage filled when the hook
+// had none. Returns "" when the agent cannot fetch or the fetch fails.
+func fetchSubagentTranscriptForCapture(logCtx context.Context, ag agent.Agent, event *agent.Event) string {
+	fetcher, ok := agent.AsSubagentTranscriptFetcher(ag)
+	if !ok || event.SubagentID == "" {
+		return ""
+	}
+	path, err := agent.FetchSubagentTranscript(logCtx, fetcher, event.SubagentID, event.ToolUseID, event.SubagentStartedAt, time.Time{})
+	if err != nil {
+		logging.Warn(logCtx, "could not fetch subagent transcript for capture; completing the task without it",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("error", err.Error()))
+		// The child's transcript lives only in the agent's store, so no
+		// generic layout path can stand in for it; condensation fetches again.
+		event.SubagentTranscriptUnavailable = true
+		return ""
+	}
+	event.SubagentTranscriptPath = path
+	event.SubagentTranscriptUnavailable = false
+	if event.TokenUsage == nil {
+		if calc, ok := agent.AsTokenCalculator(ag); ok {
+			if data, rerr := ag.ReadTranscript(path); rerr == nil {
+				if usage, cerr := calc.CalculateTokenUsage(data, 0); cerr == nil {
+					event.TokenUsage = usage
+				}
+			}
+		}
+	}
+	return path
 }
 
 // subagentTranscriptAndFiles selects the capture's trusted file source. Some
@@ -1991,6 +2178,12 @@ func subagentTranscriptAndFiles(
 		transcriptPath = declaredSubagentTranscript(logCtx, event)
 		if transcriptPath == "" {
 			transcriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
+		}
+	}
+	if transcriptPath == "" {
+		if fetched := fetchSubagentTranscriptForCapture(logCtx, ag, event); fetched != "" {
+			transcriptPath = fetched
+			opts.eventFilesOnly = false
 		}
 	}
 
@@ -2190,7 +2383,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	rec := session.TaskRecord{
 		ToolUseID:                event.ToolUseID,
 		AgentID:                  event.SubagentID,
-		StartedAt:                time.Now(),
+		StartedAt:                taskStartedAt(event),
 		Background:               opts.background,
 		SubagentType:             event.SubagentType,
 		TaskDescription:          event.TaskDescription,
@@ -2309,6 +2502,8 @@ func loadLiveTaskRecords(logCtx context.Context, sessionID string) []session.Tas
 // condense materializes the just-completed records.
 // Best-effort: one task's failure does not stop the others.
 func completeLiveTaskRecords(ctx context.Context, ag agent.Agent, sessionID, sessionRef string) {
+	// One fetch budget for the whole sweep: each live record may re-export its child.
+	ctx = agent.WithSubagentFetchBudget(ctx, agent.SubagentFetchBudget)
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	for _, task := range loadLiveTaskRecords(logCtx, sessionID) {
 		captureInFlightTaskFinal(logCtx, ag, sessionID, sessionRef, task)
@@ -2332,8 +2527,10 @@ func captureInFlightTaskFinal(logCtx context.Context, ag agent.Agent, sessionID,
 		SubagentID:      task.AgentID,
 		SubagentType:    task.SubagentType,
 		TaskDescription: task.TaskDescription,
-		Final:           true,
-		Timestamp:       time.Now(),
+		// The record's start scopes a re-export to this call (OpenCode).
+		SubagentStartedAt: task.StartedAt,
+		Final:             true,
+		Timestamp:         time.Now(),
 	}
 	if err := handleSubagentStopFinal(logCtx, ag, event); err != nil {
 		logging.Warn(logCtx, "failed to finalize in-flight task at session end",
@@ -2400,7 +2597,8 @@ type subagentSessionStep struct {
 	modifiedFiles []string
 	newFiles      []string
 	deletedFiles  []string
-	agentType     types.AgentType
+	turnUsage     *agent.TokenUsage
+	ag            agent.Agent
 	strat         *strategy.ManualCommitStrategy
 }
 
@@ -2415,6 +2613,12 @@ type subagentSessionStep struct {
 // subagent's own session ID doubles as the agent ID; the declared transcript
 // path is the Worker session's transcript, known here at attribution time —
 // if it is gone by condensation, the materializer records it unavailable.
+//
+// The record also carries the Worker's token usage. Each turn adds its own
+// usage, scoped to the turn's transcript slice, and only the Stop that ends
+// the Worker's active turn adds it, so a turn condensed into one checkpoint is
+// never counted again by a later one, and none of it lands on the Worker's
+// own session total.
 func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) error {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	logging.Info(logCtx, "recording subagent session as task record",
@@ -2427,12 +2631,21 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 
 	// The parent may not have any session state yet when its Worker finishes
 	// first.
-	if err := step.strat.EnsureSessionExists(ctx, step.link.ParentSessionID, step.agentType); err != nil {
+	if err := step.strat.EnsureSessionExists(ctx, step.link.ParentSessionID, step.ag.Type()); err != nil {
 		return fmt.Errorf("failed to ensure parent session state: %w", err)
 	}
 
+	// Retire the subagent's own session the same way an ordinary turn-end does,
+	// so its phase and pre-prompt state do not linger as an active session.
+	// Ending it first is what claims the turn's usage: a repeated Stop finds
+	// the Worker already IDLE and adds none.
+	var turnUsage *agent.TokenUsage
+	if transitionSessionTurnEnd(ctx, step.sessionID, step.ag.Type(), step.event, nil) {
+		turnUsage = step.turnUsage
+	}
+
 	files := mergeUnique(mergeUnique(step.modifiedFiles, step.newFiles), step.deletedFiles)
-	if err := strategy.UpsertCompletedTaskRecord(ctx, step.link.ParentSessionID, session.TaskRecord{
+	if err := strategy.UpsertCompletedTaskRecordTurn(ctx, step.link.ParentSessionID, session.TaskRecord{
 		ToolUseID:              step.link.ToolUseID,
 		AgentID:                step.sessionID,
 		StartedAt:              time.Now(),
@@ -2440,13 +2653,11 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		TaskDescription:        step.link.TaskDescription,
 		DeclaredTranscriptPath: step.transcriptRef,
 		Files:                  files,
+		TokenUsage:             turnUsage,
 	}); err != nil {
 		return fmt.Errorf("failed to record subagent session task: %w", err)
 	}
 
-	// Retire the subagent's own session the same way an ordinary turn-end does,
-	// so its phase and pre-prompt state do not linger as an active session.
-	transitionSessionTurnEnd(ctx, step.sessionID, step.event)
 	if cleanupErr := CleanupPrePromptState(ctx, step.sessionID); cleanupErr != nil {
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
@@ -2520,11 +2731,22 @@ func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool)
 }
 
 // transitionSessionTurnEnd transitions the session phase to IDLE and dispatches turn-end actions.
-func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agent.Event) {
+// agentType is the agent running this hook: its host's timeout bounds the
+// finalize, while state.AgentType can be empty.
+func transitionSessionTurnEnd(ctx context.Context, sessionID string, agentType types.AgentType, event *agent.Event, turnUsage *checkpointlessTurnUsage) (endedActiveTurn bool) {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	var appendedSkillEvents []agent.SkillEvent
+	wasActive := false
 	mutErr := strategy.MutateSessionStateOnSaved(ctx, sessionID, func(state *strategy.SessionState) error {
 		appendedSkillEvents = persistEventMetadataToState(event, state)
+		// Only the Stop that ends the ACTIVE turn records its tokens. A
+		// repeated, retried, or concurrent Stop for the same turn finds the
+		// session already IDLE (this closure runs under the session lock), so
+		// it adds nothing.
+		wasActive = state.Phase.IsActive()
+		if turnUsage != nil && wasActive {
+			strategy.ApplyTurnTokenUsage(state, turnUsage.usage, turnUsage.ledgerVersion)
+		}
 		if err := strategy.TransitionAndLog(ctx, state, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
 			logging.Warn(logCtx, "turn-end transition failed",
 				slog.String("error", err.Error()))
@@ -2538,7 +2760,7 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agen
 		// and appends the new ones to state.SkillEvents — snapshot its growth
 		// so those events reach telemetry alongside the hook-provided ones.
 		skillEventsBefore := len(state.SkillEvents)
-		if err := strat.HandleTurnEnd(ctx, state); err != nil {
+		if err := strat.HandleTurnEnd(ctx, state, turnEndFinalizeDeadline(agentType)); err != nil {
 			logging.Warn(logCtx, "turn-end action dispatch failed",
 				slog.String("error", err.Error()))
 		}
@@ -2556,6 +2778,41 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agen
 		logging.Warn(logCtx, "failed to update session phase on turn end",
 			slog.String("error", mutErr.Error()))
 	}
+	// The closure's changes count only once they are saved.
+	endedActiveTurn = wasActive && mutErr == nil
+	if turnUsage != nil && turnUsage.usage != nil && !endedActiveTurn {
+		// This is the only path that records a checkpoint-less turn's tokens,
+		// so name why they were not: no state to attribute them to, a failed
+		// write, or no active turn to end.
+		switch {
+		case errors.Is(mutErr, strategy.ErrStateNotFound):
+			logging.Warn(logCtx, "session state already removed; token usage for checkpoint-less turn not recorded",
+				slog.String("session_id", sessionID),
+				slog.Int("input_tokens", turnUsage.usage.InputTokens),
+				slog.Int("output_tokens", turnUsage.usage.OutputTokens))
+		case mutErr != nil:
+			logging.Warn(logCtx, "failed to record token usage for checkpoint-less turn",
+				slog.String("session_id", sessionID),
+				slog.String("error", mutErr.Error()))
+		default:
+			// Either an earlier Stop already ended this turn, or no TurnStart
+			// was recorded for it. The two look alike here, and with no turn
+			// start there is no offset to scope the usage to, so neither
+			// records it.
+			logging.Info(logCtx, "no active turn to end; token usage for checkpoint-less turn not recorded",
+				slog.String("session_id", sessionID))
+		}
+	}
+	return endedActiveTurn
+}
+
+// checkpointlessTurnUsage is the token usage of a turn that ends without a
+// step, for transitionSessionTurnEnd to record when it ends the turn.
+// ledgerVersion is the subagent ledger version the usage was computed
+// against (Codex), or nil.
+type checkpointlessTurnUsage struct {
+	usage         *agent.TokenUsage
+	ledgerVersion *uint64
 }
 
 // sessionEndedAt resolves the EndedAt stamp for a session being finalized under
@@ -2661,7 +2918,7 @@ func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID s
 	// the session's first tracked turn (no snapshot existed yet). Mid-session
 	// — after earlier turns already accumulated deltas — it means the
 	// PrePromptState was lost or corrupt: counting from zero would return
-	// session-cumulative totals and AccumulateSessionTokenUsage would re-add
+	// session-cumulative totals and ApplyTurnTokenUsage would re-add
 	// tokens the earlier turns already recorded. Degrade to no-data instead.
 	if len(baseline) == 0 {
 		if state, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil &&
@@ -2894,4 +3151,41 @@ func adoptInvestigateEnv(ctx context.Context, state *session.State, expectedAgen
 				slog.String("run_id", state.InvestigateRunID))
 		},
 	})
+}
+
+// turnEditedPaths returns the files this turn's main transcript says the
+// agent edited, as recorded (usually absolute). Subagent transcripts are left
+// out: a subagent's edits in its own throwaway worktree belong to its task
+// record (see strategy.SplitEditsByWorktree). Failures yield none.
+func turnEditedPaths(ctx context.Context, ag agent.Agent, transcriptRef, sessionID string) []string {
+	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
+	if !ok {
+		return nil
+	}
+	preState, err := LoadPrePromptState(ctx, sessionID)
+	if err != nil {
+		preState = nil
+	}
+	files, _, err := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptRef, resolveTranscriptOffset(ctx, preState, sessionID))
+	if err != nil {
+		return nil
+	}
+	return files
+}
+
+// uncommittedEditsElsewhere keeps, of a turn's edits grouped by worktree, the
+// files that still differ from that worktree's HEAD: the agent may already
+// have committed them there mid-turn.
+func uncommittedEditsElsewhere(ctx context.Context, byWorktree map[string][]string) map[string][]string {
+	for root, rels := range byWorktree {
+		if kept := filterToUncommittedFiles(ctx, rels, root); len(kept) > 0 {
+			byWorktree[root] = kept
+		} else {
+			delete(byWorktree, root)
+		}
+	}
+	if len(byWorktree) == 0 {
+		return nil
+	}
+	return byWorktree
 }

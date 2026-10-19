@@ -77,15 +77,15 @@ func TestPiReviewer_ParseJSONEventStream(t *testing.T) {
 	if _, ok := events[0].(reviewtypes.Started); !ok {
 		t.Fatalf("events[0] = %T, want Started", events[0])
 	}
-	if got, ok := events[1].(reviewtypes.AssistantText); !ok || got.Text != "Finding " {
-		t.Fatalf("events[1] = %#v, want AssistantText{Finding }", events[1])
+	if got, ok := events[1].(reviewtypes.AssistantText); !ok || got.Text != "Finding " || got.Delta {
+		t.Fatalf("events[1] = %#v, want AssistantText{Finding } starting a message", events[1])
 	}
 	tool, ok := events[2].(reviewtypes.ToolCall)
 	if !ok || tool.Name != "bash" || !strings.Contains(tool.Args, "git diff --stat") {
 		t.Fatalf("events[2] = %#v, want ToolCall(bash)", events[2])
 	}
-	if got, ok := events[3].(reviewtypes.AssistantText); !ok || got.Text != "one" {
-		t.Fatalf("events[3] = %#v, want AssistantText{one}", events[3])
+	if got, ok := events[3].(reviewtypes.AssistantText); !ok || got.Text != "one" || !got.Delta {
+		t.Fatalf("events[3] = %#v, want AssistantText{one} continuing the message", events[3])
 	}
 	tokens, ok := events[4].(reviewtypes.Tokens)
 	if !ok || tokens.In != 10 || tokens.Out != 4 {
@@ -94,6 +94,45 @@ func TestPiReviewer_ParseJSONEventStream(t *testing.T) {
 	finished, ok := events[5].(reviewtypes.Finished)
 	if !ok || !finished.Success {
 		t.Fatalf("events[5] = %#v, want Finished{Success:true}", events[5])
+	}
+}
+
+// A delta continues the previous text only within one message, so separate
+// messages and retry attempts never join into one line.
+func TestPiReviewer_ParseDeltaStartsEachMessageAndRetry(t *testing.T) {
+	t.Parallel()
+	input := strings.Join([]string{
+		`{"type":"agent_start"}`,
+		`{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"I'll read "}}`,
+		`{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"the diff."}}`,
+		`{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse"}}`,
+		`{"type":"tool_execution_start","toolName":"bash","args":{"command":"git diff"}}`,
+		`{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"request changes"}}`,
+		`{"type":"auto_retry_start"}`,
+		`{"type":"message_update","message":{"role":"assistant"},"assistantMessageEvent":{"type":"text_delta","delta":"approve"}}`,
+		`{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}`,
+		`{"type":"agent_end"}`,
+	}, "\n")
+
+	var texts []reviewtypes.AssistantText
+	for _, ev := range collectPiReviewEvents(input) {
+		if text, ok := ev.(reviewtypes.AssistantText); ok {
+			texts = append(texts, text)
+		}
+	}
+	want := []reviewtypes.AssistantText{
+		{Text: "I'll read "},
+		{Text: "the diff.", Delta: true},
+		{Text: "request changes"},
+		{Text: "approve"},
+	}
+	if len(texts) != len(want) {
+		t.Fatalf("texts = %#v, want %#v", texts, want)
+	}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Errorf("texts[%d] = %#v, want %#v", i, texts[i], want[i])
+		}
 	}
 }
 
@@ -290,5 +329,83 @@ func TestPiReviewer_ParseErrorWithoutMessage(t *testing.T) {
 	}
 	if len(errs) != 1 || errs[0] != "pi: stopped with aborted" {
 		t.Fatalf("RunErrors = %q, want the stop reason", errs)
+	}
+}
+
+// Some Pi versions end the stream after the final turn without agent_end. A
+// turn that was not waiting on tool results still finishes the review; a
+// stream cut after a tool-use turn does not.
+func TestPiReviewer_ParseEndsWithoutAgentEnd(t *testing.T) {
+	t.Parallel()
+	finished := func(input string) (bool, bool) {
+		for _, ev := range collectPiReviewEvents(input) {
+			if f, ok := ev.(reviewtypes.Finished); ok {
+				return true, f.Success
+			}
+		}
+		return false, false
+	}
+	stopped := `{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}` + "\n"
+	if seen, ok := finished(stopped); !seen || !ok {
+		t.Errorf("final stop turn: finished=%v success=%v, want a successful finish", seen, ok)
+	}
+	errored := `{"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":"boom"}}` + "\n"
+	if _, ok := finished(errored); ok {
+		t.Error("stream ending on an error turn counted as success")
+	}
+	retrying := errored + `{"type":"auto_retry_start"}` + "\n"
+	if _, ok := finished(retrying); ok {
+		t.Error("stream cut off during a retry counted as success")
+	}
+	cutOff := stopped + `{"type":"turn_start"}` + "\n"
+	if _, ok := finished(cutOff); ok {
+		t.Error("stream cut off mid-turn counted as success")
+	}
+	toolUse := `{"type":"turn_end","message":{"role":"assistant","stopReason":"toolUse"}}` + "\n"
+	if _, ok := finished(toolUse); ok {
+		t.Error("stream cut after a tool-use turn counted as success")
+	}
+}
+
+// A turn cut off at the output token limit is a truncated review, with or
+// without agent_end, and says so.
+func TestPiReviewer_ParseLengthStopFails(t *testing.T) {
+	t.Parallel()
+	turn := `{"type":"turn_end","message":{"role":"assistant","stopReason":"length"}}` + "\n"
+	for _, input := range []string{turn, turn + `{"type":"agent_end"}` + "\n"} {
+		var errs []string
+		success := true
+		for _, ev := range collectPiReviewEvents(input) {
+			switch e := ev.(type) {
+			case reviewtypes.RunError:
+				errs = append(errs, e.Err.Error())
+			case reviewtypes.Finished:
+				success = e.Success
+			}
+		}
+		if success || len(errs) != 1 || !strings.Contains(errs[0], "output token limit") {
+			t.Errorf("success=%v errs=%q, want a token-limit failure", success, errs)
+		}
+	}
+}
+
+// Pi recovers from a tool call cut off at the token limit by asking the model
+// to re-issue it; a run that then finishes normally succeeds.
+func TestPiReviewer_ParseRecoveredLengthStopSucceeds(t *testing.T) {
+	t.Parallel()
+	recovered := `{"type":"turn_end","message":{"role":"assistant","stopReason":"length"}}` + "\n" +
+		`{"type":"turn_start"}` + "\n" +
+		`{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}` + "\n"
+	for _, input := range []string{recovered, recovered + `{"type":"agent_end"}` + "\n"} {
+		for _, ev := range collectPiReviewEvents(input) {
+			switch e := ev.(type) {
+			case reviewtypes.RunError:
+				t.Errorf("unexpected error %v", e.Err)
+			case reviewtypes.Finished:
+				if !e.Success {
+					t.Error("recovered length stop failed the review")
+				}
+			}
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -335,4 +336,50 @@ func TestPostCommit_NoTrailer_UpdatesBaseCommit(t *testing.T) {
 	// Phase should stay ACTIVE (no state machine transition, just BaseCommit update)
 	assert.Equal(t, session.PhaseActive, state.Phase,
 		"Phase should remain ACTIVE when commit has no trailer")
+}
+
+// After a carry-forward moves CheckpointTranscriptStart back to 0 (a session's
+// work split by commits in two worktrees), edits before TokenStart are already
+// in a checkpoint: a later commit of the same path must not claim them as new
+// work, while an edit since still does.
+func TestSessionHasNewContentFromLiveTranscript_IgnoresCheckpointedEdits(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	s := &ManualCommitStrategy{}
+	worktreePath, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+
+	write := func(name string) string {
+		return `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` + filepath.Join(worktreePath, name) + `","content":"x"}}]}}`
+	}
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(strings.Join([]string{
+		`{"type":"human","message":{"content":"first"}}`, write("old.go"),
+		`{"type":"human","message":{"content":"second"}}`, write("new.go"),
+	}, "\n")+"\n"), 0o644))
+	stale := time.Now().Add(-3 * time.Minute)
+	require.NoError(t, os.Chtimes(transcriptPath, stale, stale))
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	now := time.Now()
+	state := &SessionState{
+		SessionID: "checkpointed-edits", BaseCommit: head.Hash().String(), WorktreePath: worktreePath,
+		StartedAt: now, Phase: session.PhaseActive, LastInteractionTime: &now,
+		AgentType: agent.AgentTypeClaudeCode, TranscriptPath: transcriptPath,
+		CheckpointTranscriptStart: 0, // carried forward
+	}
+	state.SetTokenStart(2) // old.go is in an earlier checkpoint
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	hasNew, err := s.sessionHasNewContentFromLiveTranscript(context.Background(), state, []string{"old.go"})
+	require.NoError(t, err)
+	assert.False(t, hasNew, "an edit already in a checkpoint claimed a later commit")
+
+	hasNew, err = s.sessionHasNewContentFromLiveTranscript(context.Background(), state, []string{"new.go"})
+	require.NoError(t, err)
+	assert.True(t, hasNew, "the edit since the last checkpoint should still count")
 }

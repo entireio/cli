@@ -776,6 +776,20 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			fmt.Fprintf(stderrWriter, "[entire] pre-commit had moved Entire's %s hook to %s%s; Entire's hook is back and runs pre-commit's after it.\n", spec.name, spec.name, legacySuffix)
 			logging.Info(ctx, "git hook reclaimed from pre-commit", slog.String("hook", spec.name))
 		}
+		wrapped, err := reclaimFromWrappers(root, spec.name)
+		if err != nil {
+			return installedCount, fmt.Errorf("failed to take %s back from the hook manager that moved it: %w", spec.name, err)
+		}
+		if wrapped.changed() {
+			var older []string
+			if len(wrapped.placeholder) > 0 {
+				older = olderCopiesOf(root, spec.name)
+			}
+			fmt.Fprint(stderrWriter, wrapped.notice(spec.name, older))
+			logging.Info(ctx, "git hook reclaimed from a hook manager's wrapper", slog.String("hook", spec.name),
+				slog.String("user_hook_copies", strings.Join(wrapped.userHook, ",")),
+				slog.String("placeholder_copies", strings.Join(wrapped.placeholder, ",")))
+		}
 
 		// Back up existing non-Entire hooks. A symlinked hook is one of those:
 		// Entire never installs a link, so it belongs to the user or another
@@ -904,11 +918,11 @@ func RemoveGitHookDetailed(ctx context.Context) (GitHookRemoval, error) {
 		fmt.Fprintf(stderrWriter, "[entire] Warning: cannot open the git hooks lock directory (%v)\n", err)
 		lockRoot = nil // removeHooks goes ahead without the lock
 	}
-	return removeHooks(ctx, lockRoot, root, hooksDir, restoreLegacy)
+	return removeHooks(ctx, lockRoot, root, hooksDir, restoreMovedHooks)
 }
 
 // removeHooks is RemoveGitHookDetailed on an opened hooks root, under the hooks
-// lock. restore is restoreLegacy; tests pass a failing one.
+// lock. restore is restoreMovedHooks; tests pass a failing one.
 //
 // Uninstall is cleanup and must finish, so a lock that cannot be used at all
 // (nil lockRoot, or a lock file that will not open) is warned about and
@@ -950,7 +964,7 @@ func removeHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, 
 		hookExists := class != hookAbsent
 
 		if err := restore(root, hook); err != nil {
-			removeErrors = append(removeErrors, fmt.Sprintf("restore %s%s: %v", hook, legacySuffix, err))
+			removeErrors = append(removeErrors, fmt.Sprintf("restore copies of %s: %v", hook, err))
 			continue // leave this hook's files as they are, so a retry can finish
 		}
 		// pre-commit reinstalled over Entire's hook: its wrapper is at the path

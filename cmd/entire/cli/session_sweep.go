@@ -88,6 +88,10 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 func runSessionSweep(ctx context.Context) error {
 	logCtx := logging.WithComponent(ctx, "session-sweep")
 
+	// Both passes below write checkpoints. finalizeExitedSessions configures
+	// redaction only when it has a candidate, and an ENDED zombie never is one.
+	redactionErr := strategy.EnsureRedactionConfigured(ctx)
+
 	states, err := strategy.ListSessionStates(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list session states: %w", err)
@@ -96,9 +100,16 @@ func runSessionSweep(ctx context.Context) error {
 	// Non-ended sessions with a dead owner: finalize + eager condense. This
 	// command is detached, so a zero deadline lets the backlog drain in one pass
 	// instead of inheriting the interactive status/doctor budget. This also
-	// refreshes the matched entries in `states` from disk.
+	// refreshes the matched entries in `states` from disk. On a scanner-config
+	// failure it still marks them ended but skips their condense.
 	if n := finalizeExitedSessions(ctx, states, time.Time{}); n > 0 {
 		logging.Info(logCtx, "sweep finalized exited sessions", slog.Int("count", n))
+	}
+
+	// Condensing now would scan with a scanner set the settings did not
+	// choose. Leave the zombies for a sweep that can configure redaction.
+	if redactionErr != nil {
+		return fmt.Errorf("skipping ended-session condense: %w", redactionErr)
 	}
 
 	repo, err := openRepository(ctx)

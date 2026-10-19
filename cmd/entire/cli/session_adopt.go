@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -219,6 +220,7 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	retired.Owner = nil
 	retired.FilesTouched = nil
 	retired.TouchedFileHashes = nil
+	retired.OtherWorktrees = nil
 	retired.TurnID = ""
 	retired.TurnCheckpointIDs = nil
 	retired.AdoptedIntoWorktreePath = target.WorktreePath
@@ -702,6 +704,31 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, home a
 	// Recorded hashes describe the source worktree's files; the target's
 	// FilesTouched is recomputed from its own status, so none of them apply.
 	adopted.TouchedFileHashes = nil
+	adopted.OtherWorktrees = nil
+	// The new home is known by its marker (State.WorktreeIncarnation); the
+	// main worktree has none.
+	adopted.WorktreeIncarnation = ""
+	if targetMarker, markErr := strategy.MarkWorktree(ctx, worktreeRoot, worktreeID); markErr == nil {
+		adopted.WorktreeIncarnation = targetMarker
+	} else {
+		logging.Debug(logging.WithComponent(ctx, "session"), "could not mark the target worktree; the adopted session is matched by path",
+			slog.String("worktree", worktreeRoot), slog.String("error", markErr.Error()))
+	}
+	if worktreeRegistered(ctx, worktreeRoot, source.WorktreePath) {
+		// Same repository: the source's edits elsewhere still link from there.
+		// A source home git removed and re-added at the same path since is
+		// another worktree: its pending files went with the removed one.
+		if strategy.HomeReplaced(ctx, source) {
+			adopted.OtherWorktrees = adoptedOtherWorktrees(source, worktreeID, "", false)
+		} else {
+			sourceMarker, markErr := strategy.MarkWorktree(ctx, source.WorktreePath, source.WorktreeID)
+			if markErr != nil {
+				logging.Debug(logging.WithComponent(ctx, "session"), "could not mark the source worktree; its pending files stay unlinked there",
+					slog.String("worktree", source.WorktreePath), slog.String("error", markErr.Error()))
+			}
+			adopted.OtherWorktrees = adoptedOtherWorktrees(source, worktreeID, sourceMarker, markErr == nil)
+		}
+	}
 
 	// Reset target-local checkpoint bookkeeping. Source checkpoint IDs can point
 	// at metadata in another repository or checkpoint branch; carrying them into
@@ -837,4 +864,60 @@ func currentFilesTouched(ctx context.Context) ([]string, error) {
 	files = mergeUnique(files, changes.Deleted)
 	sort.Strings(files)
 	return files, nil
+}
+
+// worktreeRegistered reports whether path is a worktree git lists for the
+// repository worktreeRoot belongs to. Adopt can move a session across
+// repositories, whose worktree IDs mean nothing here.
+func worktreeRegistered(ctx context.Context, worktreeRoot, path string) bool {
+	if path == "" {
+		return false
+	}
+	registered, err := gitrepo.ListWorktreePaths(ctx, worktreeRoot)
+	if err != nil {
+		return false
+	}
+	want := filepath.Clean(path)
+	for _, p := range registered {
+		if filepath.Clean(p) == want {
+			return true
+		}
+		if resolved, err := filepath.EvalSymlinks(p); err == nil && resolved == want {
+			return true
+		}
+	}
+	return false
+}
+
+// adoptedOtherWorktrees is the adopted session's record of edits outside its
+// new home: the source's entries, minus any for the new home (whose files are
+// recomputed from its status above), plus the source home's pending files
+// when that was a different worktree, so they still link from there. Those
+// are recorded under sourceMarker (strategy.MarkWorktree), and left out when
+// the source worktree couldn't be marked or is no longer the source's home
+// (marked false).
+func adoptedOtherWorktrees(source *session.State, targetWorktreeID, sourceMarker string, marked bool) map[string]*session.WorktreeWork {
+	out := make(map[string]*session.WorktreeWork, len(source.OtherWorktrees)+1)
+	for key, work := range source.OtherWorktrees {
+		if work != nil && key != session.WorktreeKey(targetWorktreeID) {
+			clone := *work
+			clone.FilesTouched = slices.Clone(work.FilesTouched)
+			clone.TouchedFileHashes = maps.Clone(work.TouchedFileHashes)
+			out[key] = &clone
+		}
+	}
+	sourceKey := session.WorktreeKey(source.WorktreeID)
+	if marked && source.WorktreePath != "" && sourceKey != session.WorktreeKey(targetWorktreeID) && len(source.FilesTouched) > 0 {
+		out[sourceKey] = &session.WorktreeWork{
+			Path:              source.WorktreePath,
+			BaseCommit:        source.BaseCommit,
+			FilesTouched:      slices.Clone(source.FilesTouched),
+			TouchedFileHashes: maps.Clone(source.TouchedFileHashes),
+			Incarnation:       sourceMarker,
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

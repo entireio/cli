@@ -113,7 +113,11 @@ func run(args []string) int {
 
 	nodeCfg := replicas.Resolve(parsedURL)
 
-	httpClient := newAuthHTTPClient(skipTLS, httpUserAgent)
+	// One discovery transport serves both the auth client and the proxy's cold
+	// entry probe, so the probe reuses the /.well-known connection to the
+	// entry host.
+	discoveryTransport := httpclient.NewDiscoveryTransport(skipTLS)
+	httpClient := newAuthHTTPClient(discoveryTransport, httpUserAgent)
 
 	creds, onUnauthorized, err := resolveCreds(ctx, parsedURL, skipTLS, httpClient)
 	if err != nil {
@@ -136,6 +140,8 @@ func run(args []string) int {
 		OnUnauthorized: onUnauthorized,
 		OnNodeFailed:   onNodeFailed,
 		UserAgent:      httpUserAgent,
+
+		DiscoveryTransport: discoveryTransport,
 	})
 
 	protocolVersion := resolveProtocolVersion()
@@ -294,12 +300,12 @@ const httpUserAgentEnvVar = "GIT_HTTP_USER_AGENT"
 // overrides it) rather than the short failover one — a slow cold connect
 // here would otherwise fail the whole clone/fetch. Split out of run() so
 // tests exercise the same chain the helper ships.
-func newAuthHTTPClient(skipTLS bool, ua string) *http.Client {
+func newAuthHTTPClient(base http.RoundTripper, ua string) *http.Client {
 	return httpclient.New(httpclient.Options{
 		Timeout: 30 * time.Second,
 		Transport: &httpclient.UserAgentTransport{
 			Next: &httpdebug.TimingRoundTripper{
-				Next:  httpclient.NewDiscoveryTransport(skipTLS),
+				Next:  base,
 				Label: "auth",
 			},
 			UA: ua,

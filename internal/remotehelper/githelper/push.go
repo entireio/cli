@@ -54,6 +54,9 @@ func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine st
 	if err != nil {
 		return err
 	}
+	if err := opts.PushError(); err != nil {
+		return err
+	}
 
 	// Reuse the advertisement "list for-push" already fetched. Re-fetching
 	// here would observe refs the pre-push hook pushed after Git's ref

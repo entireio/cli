@@ -31,11 +31,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/redact"
+	transcriptlib "github.com/entireio/cli/transcript"
 
 	"charm.land/lipgloss/v2"
 	"github.com/go-git/go-git/v6"
@@ -1039,6 +1039,12 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 		}, fmt.Errorf("checkpoint %s already has a summary", checkpointID))
 	}
 
+	// The summary is written back into the checkpoint, and compaction below
+	// redacts what the provider sees, so both need the repo's rules.
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		return fmt.Errorf("configure redaction: %w", err)
+	}
+
 	// Check if transcript exists
 	if len(content.Transcript) == 0 {
 		return renderExplainFailure(errW, "Checkpoint has no transcript", []explainRow{
@@ -1756,9 +1762,9 @@ func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentT
 		}
 		return scoped
 	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
-		return transcript.SliceFromLine(fullTranscript, startOffset)
+		return transcriptlib.SliceFromLine(fullTranscript, startOffset)
 	}
-	return transcript.SliceFromLine(fullTranscript, startOffset)
+	return transcriptlib.SliceFromLine(fullTranscript, startOffset)
 }
 
 // extractPromptsFromTranscript extracts user prompts from transcript bytes.

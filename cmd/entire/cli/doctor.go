@@ -346,7 +346,7 @@ func classifySession(state *strategy.SessionState, now time.Time) *stuckSession 
 			State:             state,
 			Reason:            reason,
 			CheckpointCount:   state.StepCount + len(state.TaskRecords),
-			FilesTouchedCount: len(state.FilesTouched),
+			FilesTouchedCount: state.PendingFileCount(),
 		}
 	}
 
@@ -1413,11 +1413,12 @@ func checkRetiredDenyRule(cmd *cobra.Command) {
 }
 
 // checkHookTimeouts gives Entire's hooks the timeouts a config written by an
-// older CLI lacks, so a stalled `entire` launch cannot block the agent until
-// its own default timeout. It repairs without asking for the reason
-// checkRetiredDenyRule does: it only sets a timeout on a hook Entire wrote that
-// has none, so nothing the user chose is touched. As there, a repair error is
-// logged rather than printed.
+// older CLI lacks, so the agent's own default does not apply instead: a longer
+// one lets a stalled `entire` launch block the agent, and a shorter one (agy's
+// on Stop) kills a turn-end hook before it saves session state. It repairs
+// without asking for the reason checkRetiredDenyRule does: it only sets a
+// timeout on a hook Entire wrote that has none, so nothing the user chose is
+// touched. As there, a repair error is logged rather than printed.
 func checkHookTimeouts(cmd *cobra.Command) {
 	repairInstalledAgents(cmd, "could not add missing hook timeouts",
 		func(ctx context.Context, ag agent.Agent) (bool, error) {
@@ -1429,8 +1430,8 @@ func checkHookTimeouts(cmd *cobra.Command) {
 		},
 		func(w io.Writer, ag agent.Agent) {
 			fmt.Fprintf(w, "%s hooks: MISSING TIMEOUTS\n", ag.Type())
-			fmt.Fprintln(w, "  Some Entire hooks had no timeout, so a stalled `entire` launch could block")
-			fmt.Fprintln(w, "  the agent until its own default timeout.")
+			fmt.Fprintln(w, "  Some Entire hooks had no timeout, so the agent applied its own default,")
+			fmt.Fprintln(w, "  which can block the agent too long or stop a hook before it finishes.")
 			fmt.Fprintln(w, "  ✓ Fixed: timeouts added (your own hooks and timeouts are untouched).")
 		})
 }
@@ -1773,7 +1774,7 @@ func checkAntigravityHooksLoaded(cmd *cobra.Command) {
 	}
 	w := cmd.OutOrStdout()
 
-	if installed, current, err := ag.HooksEntryMatchesHost(cmd.Context()); err == nil && installed && !current {
+	if wrongHost, err := ag.HooksEntryWrongHost(cmd.Context()); err == nil && wrongHost {
 		fmt.Fprintln(w, "Antigravity hooks: STALE FOR THIS HOST")
 		fmt.Fprintln(w, "  The \"entire\" entry in .agents/hooks.json is not the command this host")
 		fmt.Fprintln(w, "  needs (agy runs hooks through cmd.exe on Windows and sh elsewhere), so")

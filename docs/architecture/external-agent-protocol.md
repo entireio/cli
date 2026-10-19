@@ -10,7 +10,7 @@ The CLI discovers external agents by scanning `$PATH` for executables matching t
 
 Two rules bound that scan, both because discovery *executes* what it finds (it calls each binary's `info` subcommand):
 
-- It is off unless `external_agents` is set in an untracked `.entire/settings.local.json`. The committed `.entire/settings.json` cannot grant it — see [Why `external_agents` is local-only](../security-and-privacy.md#why-external_agents-is-local-only). Interactive setup flows scan regardless, so you can still pick a plugin before the setting exists.
+- It is off unless `external_agents` is set in an untracked `.entire/settings.local.json`. The committed `.entire/settings.json` cannot grant it — see [Why `external_agents` is local-only](../security-and-privacy.md#why-external_agents-is-local-only). Interactive setup flows scan regardless, so you can still pick a plugin before the setting exists. Commands that name one agent (`entire enable --agent <name>`, `entire agent add <name>`, `entire agent remove <name>`) resolve only that binary, also regardless of the setting; `entire agent list` names none, so it scans only when the setting is on.
 - Only absolute `$PATH` entries are scanned. A relative entry resolves against the working directory, which for a git hook is whatever repository invoked it.
 
 - Binaries whose `<name>` conflicts with an already-registered built-in agent are skipped.

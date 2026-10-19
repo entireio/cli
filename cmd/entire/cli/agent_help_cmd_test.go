@@ -947,6 +947,54 @@ func TestAgentHelpGuidance_NeverLeaksIntoCobraHelp(t *testing.T) {
 	}
 }
 
+// Project-trail URLs exist only in the project model, so their mapping ships on
+// the project tree's `trail show` and never on the legacy one built at the same
+// path, while trail's group guidance is still inherited.
+func TestAgentHelpProjectTrailGuidance_OnlyInProjectTree(t *testing.T) {
+	t.Parallel()
+
+	const urlLine = "Users paste Entire trail URLs."
+	project := projectTrailsHelpTestRoot()
+	for path, guidance := range agentHelpProjectTrailGuidance {
+		cmd := project
+		for _, name := range strings.Fields(path) {
+			cmd = agentHelpFindChild(cmd, name)
+			if cmd == nil {
+				t.Fatalf("agentHelpProjectTrailGuidance names unknown project command %q", path)
+			}
+		}
+		firstLine := strings.SplitN(guidance, "\n", 2)[0]
+		if strings.Contains(cmd.Long, firstLine) || strings.Contains(cmd.Short, firstLine) {
+			t.Errorf("guidance for %q is duplicated into its cobra help; keep it agent-only", path)
+		}
+	}
+
+	show := agentHelpFindChild(agentHelpFindChild(project, "trail"), "show")
+	text := renderAgentHelpCommand(show, "", true)
+	trailFirstLine := strings.SplitN(agentHelpGuidance["trail"], "\n", 2)[0]
+	for _, want := range []string{urlLine, "<forge>/<project>/-/trails/<P>/changes/<repo>/<n>", "each changes[] entry is the change", trailFirstLine} {
+		if !strings.Contains(text, want) {
+			t.Errorf("project `agent-help trail show` missing %q:\n%s", want, text)
+		}
+	}
+	js, err := renderAgentHelpJSON(project, show, "", true)
+	if err != nil {
+		t.Fatalf("renderAgentHelpJSON: %v", err)
+	}
+	if !strings.Contains(js, urlLine) {
+		t.Errorf("project JSON agent-help for trail show is missing the URL guidance:\n%s", js)
+	}
+
+	legacy := NewRootCmd()
+	legacyTrail := agentHelpFindChild(legacy, "trail")
+	if usesProjectTrails(legacyTrail) {
+		t.Skip("default root built the project tree (ENTIRE_PROJECT_TRAILS=1 in the environment)")
+	}
+	if got := agentHelpGuidanceFor(agentHelpFindChild(legacyTrail, "show")); strings.Contains(got, urlLine) {
+		t.Errorf("legacy trail show must not carry project URL guidance:\n%s", got)
+	}
+}
+
 // Group guidance reaches the leaves agents actually look up: `agent-help trail
 // finding list` must carry trail's network/keyring explanation, in text and JSON.
 func TestAgentHelpGuidance_InheritedByLeafCommands(t *testing.T) {

@@ -23,6 +23,7 @@ type TrailParentReference struct {
 	Path                  string `json:"path"`
 	Jurisdiction          string `json:"jurisdiction"`
 	PrimaryProcessingCell string `json:"primary_processing_cell"`
+	URL                   string `json:"url,omitempty"`
 }
 
 // ProjectTrail is project intent, separate from branch-backed TrailResource.
@@ -34,6 +35,7 @@ type ProjectTrail struct {
 	ID                 string          `json:"id"`
 	ProjectID          string          `json:"projectId"`
 	Number             int             `json:"number"`
+	URL                string          `json:"url,omitempty"`
 	Title              string          `json:"title"`
 	Body               string          `json:"body"`
 	Status             string          `json:"status"`

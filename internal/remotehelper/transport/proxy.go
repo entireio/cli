@@ -60,6 +60,12 @@ type Config struct {
 	// helper. Empty sends no User-Agent header at all, which is what
 	// git does for GIT_HTTP_USER_AGENT="" — never Go's default.
 	UserAgent string
+	// DiscoveryTransport is the base RoundTripper for the cold info/refs
+	// probe to the entry domain. Pass the transport the auth client uses
+	// for /.well-known discovery so the probe reuses that pooled connection
+	// to the same host instead of paying a second TCP and TLS handshake.
+	// Nil builds a fresh discovery transport.
+	DiscoveryTransport http.RoundTripper
 }
 
 // Proxy is the HTTP transport the helper protocol uses to talk to the
@@ -156,7 +162,11 @@ func New(cfg Config) *Proxy {
 		Transport:     wrap(httpclient.NewTransport(cfg.SkipTLS)),
 		CheckRedirect: p.checkRedirect,
 	})
-	p.discoveryTransport = wrap(httpclient.NewDiscoveryTransport(cfg.SkipTLS))
+	discovery := cfg.DiscoveryTransport
+	if discovery == nil {
+		discovery = httpclient.NewDiscoveryTransport(cfg.SkipTLS)
+	}
+	p.discoveryTransport = wrap(discovery)
 	return p
 }
 

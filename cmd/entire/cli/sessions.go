@@ -645,7 +645,7 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		Checkpoints:    state.StepCount,
 		LastCheckpoint: string(state.LastCheckpointID),
 		LastPrompt:     state.LastPrompt,
-		FilesTouched:   state.FilesTouched,
+		FilesTouched:   state.PendingFiles(),
 	}
 	if state.TokenUsage != nil {
 		info.Tokens = &tokenInfoJSON{
@@ -743,9 +743,9 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 		fmt.Fprintf(w, "\nLast prompt: %q\n", state.LastPrompt)
 	}
 
-	if len(state.FilesTouched) > 0 {
+	if files := state.PendingFiles(); len(files) > 0 {
 		fmt.Fprintln(w, "\nFiles touched:")
-		for _, f := range state.FilesTouched {
+		for _, f := range files {
 			fmt.Fprintf(w, "  %s\n", f)
 		}
 	}

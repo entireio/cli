@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -413,7 +414,9 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 }
 
 // attachTokens returns the tokens the attach checkpoint stores, the session's
-// whole-transcript total for its state, and the token position to consume.
+// whole-transcript total for its state (of which a running session keeps only
+// the subagent total; see saveAttachSessionState), and the token position to
+// consume.
 // The checkpoint counts from the token offset rather than the displayed
 // window: carry-forward leaves the window at the session start while the
 // tokens before it are already in a checkpoint.
@@ -1406,6 +1409,13 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	tokenStartOnDisk := state.TokenStart()
 	pendingOnDisk := state.CheckpointTokenUsage
 	lastCheckpointOnDisk := state.LastCheckpointID
+	// Read before LastInteractionTime is refreshed below: a running session
+	// whose agent exited will send no Stop for its turn. Inactivity stands in
+	// for that only when the owner's liveness can't be checked, since a live
+	// agent's long turn still ends in a Stop.
+	ownerLiveness := state.OwnerLiveness()
+	noStopComing := ownerLiveness == proclive.LivenessDead ||
+		(ownerLiveness == proclive.LivenessUnknown && state.IsStuckActive())
 
 	// Populate BaseCommit from HEAD if not already set, so the session becomes
 	// active and future commits in the same session receive Entire-Checkpoint trailers.
@@ -1465,11 +1475,13 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		logging.Warn(ctx, "attach: session tokens changed while attach was waiting; leaving token state as the hooks set it",
 			slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))
 	default:
-		if state.Phase.IsActive() {
+		if state.Phase.IsActive() && !noStopComing {
 			// The running turn's Stop adds its tokens from turn start, including
 			// those before this attach, so the whole-transcript total would count
 			// them twice. Keep the hooks' total; take only the cumulative subagent
-			// total, which the re-baseline below must cover.
+			// total, which the re-baseline below must cover. An agent that exited
+			// or went quiet mid-turn sends no Stop, so its session takes the
+			// whole-transcript total below instead.
 			if sessionUsage != nil && sessionUsage.SubagentTokens != nil {
 				total := agent.TokenUsage{}
 				if state.TokenUsage != nil {

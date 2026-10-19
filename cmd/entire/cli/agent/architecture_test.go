@@ -231,7 +231,7 @@ func documentedBuiltinCapabilities(t *testing.T) ([]string, []string) {
 //
 // Agents should depend only on:
 //   - The agent contract package (agent, agent/types, agent/testutil)
-//   - Utility packages (logging, paths, jsonutil, textutil, transcript, etc.)
+//   - Utility packages (logging, paths, jsonutil, transcript, etc.)
 //   - Standard library and external dependencies
 func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 	t.Parallel()
@@ -261,7 +261,6 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 		repoPrefix + "entiredir",  // the shared .entire root; the only sanctioned way to read or write there
 		repoPrefix + "osroot",     // traversal-resistant os.Root helpers, used with the above
 		repoPrefix + "jsonutil",   // JSON utilities
-		repoPrefix + "textutil",   // text utilities
 		repoPrefix + "transcript", // transcript utilities
 		repoPrefix + "trailers",   // git trailer utilities
 		repoPrefix + "stringutil", // string utilities

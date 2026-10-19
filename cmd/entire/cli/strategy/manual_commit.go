@@ -35,6 +35,10 @@ type ManualCommitStrategy struct {
 	// t.Parallel() makes a data race (CLAUDE.md: "Tests that modify
 	// process-global state cannot be parallelized").
 	blobFetchBudget time.Duration
+
+	// checkpointRefFetcher overrides the hook ref fetcher in tests. Production
+	// uses remote.HookCheckpointRefFetcher.
+	checkpointRefFetcher checkpoint.RefFetchFunc
 }
 
 // getStateStore returns the session state store, initializing it lazily if needed.
@@ -89,8 +93,12 @@ func (s *ManualCommitStrategy) SetBlobFetcher(f checkpoint.BlobFetchFunc) {
 // then reads its filtered-out metadata.json as absent, reporting a checkpoint
 // that exists as missing.
 func (s *ManualCommitStrategy) hookCheckpointStoreOptions(ctx context.Context) checkpoint.OpenOptions {
+	refFetcher := s.checkpointRefFetcher
+	if refFetcher == nil {
+		refFetcher = remote.HookCheckpointRefFetcher()
+	}
 	return checkpoint.OpenOptions{
-		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		RefFetcher:  refFetcher,
 		BlobFetcher: s.hookBlobFetcher(),
 		ReadRemotes: CheckpointReadRemotes(ctx),
 	}
