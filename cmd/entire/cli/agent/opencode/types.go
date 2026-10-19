@@ -97,8 +97,9 @@ type Tokens struct {
 }
 
 // OutputWithReasoning returns output tokens with reasoning counted once.
-// OpenCode before 1.3.16 kept reasoning inside output; later versions report
-// it separately. A total of input + output + cache marks the older shape.
+// Before 1.3.16 OpenCode stored the provider's output, which includes reasoning
+// for most providers; later versions store them apart. A total of
+// input + output + cache marks reasoning already inside output.
 func (t Tokens) OutputWithReasoning() int {
 	if t.Total > 0 && t.Total == t.Input+t.Output+t.Cache.Read+t.Cache.Write {
 		return t.Output

@@ -22,7 +22,7 @@ func TestCumulativeTokenUsage(t *testing.T) {
 				{"info":{"id":"msg_2","role":"assistant","tokens":{"input":12,"output":80,"reasoning":40,"cache":{"read":9000,"write":300}}},"parts":[]},
 				{"info":{"id":"msg_3","role":"assistant","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[]}]}`,
 			&agent.TokenUsage{InputTokens: 12, OutputTokens: 120, CacheReadTokens: 9000, CacheCreationTokens: 300, APICallCount: 2}},
-		// OpenCode before 1.3.16 kept reasoning inside output; its total then
+		// Before 1.3.16 OpenCode usually kept reasoning inside output; its total then
 		// equals input + output + cache, without a separate reasoning term.
 		{"reasoning already inside output is counted once",
 			`{"info":{"id":"ses_1"},"messages":[
