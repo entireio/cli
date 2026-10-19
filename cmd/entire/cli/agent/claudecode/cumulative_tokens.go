@@ -3,6 +3,7 @@ package claudecode
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -17,7 +18,9 @@ var _ agent.CumulativeTokenSource = (*ClaudeCodeAgent)(nil)
 // a message's final usage on each of its content lines, and a window that
 // starts mid-message would otherwise count it twice. Children are the
 // subagent transcripts the session launched, each read from line 0 and keyed
-// by agent ID.
+// by agent ID, including subagents a subagent launched: their launch is in the
+// launching subagent's transcript, not the session's, and they share the
+// session's subagents directory.
 func (c *ClaudeCodeAgent) CumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
 	parsed, err := transcript.ParseFromBytes(in.TranscriptData)
 	if err != nil {
@@ -30,19 +33,38 @@ func (c *ClaudeCodeAgent) CumulativeTokenUsage(_ context.Context, in agent.Cumul
 
 	subagentsDir := paths.SubagentsDir(filepath.Dir(in.TranscriptPath), in.SessionID)
 	var children map[string]*agent.TokenUsage
-	for agentID, path := range launchedSubagentTranscripts(in.TranscriptData, parsed, subagentsDir) {
-		lines, err := transcript.ParseFromFileAtLine(path, 0)
-		if err != nil {
-			continue // not written yet, or already cleaned up
+	queue := launchedSubagentTranscripts(in.TranscriptData, parsed, subagentsDir)
+	seen := make(map[string]bool, len(queue))
+	for len(queue) > 0 {
+		next := make(map[string]string)
+		for agentID, path := range queue {
+			if seen[agentID] {
+				continue
+			}
+			seen[agentID] = true
+			data, err := os.ReadFile(path) //nolint:gosec // path is under the session's subagents dir
+			if err != nil {
+				continue // not written yet, or already cleaned up
+			}
+			lines, err := transcript.ParseFromBytes(data)
+			if err != nil {
+				continue
+			}
+			for nestedID, nestedPath := range launchedSubagentTranscripts(data, lines, subagentsDir) {
+				if !seen[nestedID] {
+					next[nestedID] = nestedPath
+				}
+			}
+			usage := usageOrNil(CalculateTokenUsage(lines))
+			if usage == nil {
+				continue
+			}
+			if children == nil {
+				children = make(map[string]*agent.TokenUsage)
+			}
+			children[agentID] = usage
 		}
-		usage := usageOrNil(CalculateTokenUsage(lines))
-		if usage == nil {
-			continue
-		}
-		if children == nil {
-			children = make(map[string]*agent.TokenUsage)
-		}
-		children[agentID] = usage
+		queue = next
 	}
 	return total, children, nil
 }
