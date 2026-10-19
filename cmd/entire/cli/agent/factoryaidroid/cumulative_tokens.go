@@ -17,11 +17,12 @@ import (
 var _ agent.CumulativeTokenSource = (*FactoryAIDroidAgent)(nil)
 
 // CumulativeTokenUsage prefers the session-cumulative tokenUsage Droid keeps in
-// the settings.json beside the transcript. Droid writes it debounced and not at
-// all for exec or BYOK sessions, and its shape is known only from the binary,
-// not from a captured session; when it is absent the transcript's own usage is
-// summed from line 0 (deduped by message ID), which covers versions that write
-// usage there. Children are the Worker sessions it launched, keyed by Worker
+// the settings.json beside the transcript (verified on captured Droid 0.243.0
+// sessions, BYOK included). Droid writes it debounced, so it can lag the
+// transcript; when it is absent the transcript's own usage is summed from
+// line 0 (deduped by message ID), which covers versions that write usage there.
+// A session's tokenUsage counts only its own calls, so the total excludes its
+// Workers. Children are the Worker sessions it launched, keyed by Worker
 // session ID and read the same way.
 func (f *FactoryAIDroidAgent) CumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
 	if in.TranscriptPath == "" {
