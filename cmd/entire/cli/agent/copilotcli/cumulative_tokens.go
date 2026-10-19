@@ -24,8 +24,10 @@ const eventTypeUsageRecord = "session.usage_record"
 // before the last shutdown; they also cover calls made before Copilot wrote
 // usage records. The total is the per-field max of the two over that span,
 // plus the records written after the last shutdown, which no aggregate covers
-// yet. Whatever exceeds the children's records is attributed to the main
-// agent, since the aggregates cannot be split.
+// yet. The main agent's aggregates include its subagents' usage (captured
+// sessions: main records + child records = shutdown total; subagents emit no
+// shutdown of their own), so whatever exceeds the children's records is
+// attributed to the main agent.
 func (c *CopilotCLIAgent) CumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
 	events, err := parseEventsFromBytes(in.TranscriptData)
 	if err != nil {
