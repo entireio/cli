@@ -52,4 +52,13 @@ func TestCumulativeTokenUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	testutil.AssertCumulative(t, total, children, nil, nil)
+
+	// A synthetic API-error entry has an ID but no usage: no call, no data.
+	total, children, err = c.CumulativeTokenUsage(context.Background(), agent.CumulativeTokenInput{
+		TranscriptData: buildJSONL(`{"type":"assistant","uuid":"e1","isApiErrorMessage":true,"message":{"id":"err1","content":[{"type":"text","text":"API Error"}]}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertCumulative(t, total, children, nil, nil)
 }

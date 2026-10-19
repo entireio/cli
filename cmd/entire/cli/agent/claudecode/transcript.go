@@ -97,7 +97,9 @@ func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
 			continue
 		}
 
-		if msg.ID == "" {
+		// Synthetic entries (API errors) carry an ID but no usage; they are
+		// not API calls.
+		if msg.ID == "" || msg.Usage == (messageUsage{}) {
 			continue
 		}
 

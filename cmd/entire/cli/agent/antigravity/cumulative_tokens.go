@@ -35,7 +35,7 @@ func (a *AntigravityAgent) CumulativeTokenUsage(_ context.Context, in agent.Cumu
 			CacheReadTokens int    `json:"cache_read_tokens"`
 			OutputTokens    int    `json:"output_tokens"`
 		}
-		if json.Unmarshal(raw, &step) != nil || step.Type != plannerResponse || step.InputTokens+step.OutputTokens == 0 {
+		if json.Unmarshal(raw, &step) != nil || step.Type != plannerResponse || step.InputTokens+step.CacheReadTokens+step.OutputTokens == 0 {
 			return
 		}
 		key := "line:" + strconv.Itoa(line)

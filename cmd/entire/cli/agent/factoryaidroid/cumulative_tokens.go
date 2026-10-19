@@ -82,10 +82,17 @@ func sessionTokenUsage(transcriptPath string, data []byte) (*agent.TokenUsage, e
 // is ignored: Droid estimates it from streamed text, and providers already
 // count thinking in outputTokens.
 func readSettingsTokenUsage(transcriptPath string) (*agent.TokenUsage, error) {
-	data, err := os.ReadFile(strings.TrimSuffix(transcriptPath, ".jsonl") + ".settings.json")
-	if errors.Is(err, fs.ErrNotExist) {
+	// Read only a regular file: the path is derived from the transcript's, so a
+	// symlink or FIFO in its place must not be followed or block the read.
+	settingsPath := strings.TrimSuffix(transcriptPath, ".jsonl") + ".settings.json"
+	info, err := os.Lstat(settingsPath)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
 		return nil, nil //nolint:nilnil // no settings file means no usage data
 	}
+	if err != nil {
+		return nil, fmt.Errorf("stat droid settings: %w", err)
+	}
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // regular file beside the resolved transcript
 	if err != nil {
 		return nil, fmt.Errorf("read droid settings: %w", err)
 	}
@@ -126,7 +133,9 @@ func findWorkerSessions(dirs []string, parentSessionID string) map[string]string
 		}
 		for _, entry := range entries {
 			workerID, ok := strings.CutSuffix(entry.Name(), ".jsonl")
-			if !ok || entry.IsDir() || workerID == parentSessionID || validation.ValidateAgentSessionID(workerID) != nil {
+			// Regular files only: no directories, symlinks out of the session
+			// store, or FIFOs that would block the open.
+			if !ok || !entry.Type().IsRegular() || workerID == parentSessionID || validation.ValidateAgentSessionID(workerID) != nil {
 				continue
 			}
 			path := filepath.Join(dir, entry.Name())
