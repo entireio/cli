@@ -45,6 +45,10 @@ type unattributedPromptDeps struct {
 // coreapi's http.Client carries a deadline of its own.
 const unattributedNetworkTimeout = 5 * time.Second
 
+// unattributedShortlogTimeout bounds doctor's history walk. Doctor is run on
+// purpose, so a large repo gets time to finish rather than reporting nothing.
+const unattributedShortlogTimeout = time.Minute
+
 // checkUnattributedAuthors is doctor's COR-1289 check: commits in this repo
 // that Entire indexed under a reserved-host address the current OS user
 // synthesized (you@Your-Laptop.local), offered for linking to the logged-in
@@ -53,7 +57,7 @@ const unattributedNetworkTimeout = 5 * time.Second
 // to fail"). --force does not auto-declare — see the Long text.
 func checkUnattributedAuthors(cmd *cobra.Command) {
 	ctx := cmd.Context()
-	out := detectUnattributedAuthors(ctx, defaultUnattributedAuthorsDeps(unattributedNetworkTimeout))
+	out := detectUnattributedAuthors(ctx, defaultUnattributedAuthorsDeps(unattributedNetworkTimeout, unattributedShortlogTimeout))
 	runUnattributedAuthorsCheck(ctx, cmd.OutOrStdout(), out, defaultUnattributedPromptDeps())
 }
 

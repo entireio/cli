@@ -231,6 +231,7 @@ func detectDepsForTest(t *testing.T, rec *detectRecorder) unattributedAuthorsDep
 		},
 		now:            time.Now,
 		networkTimeout: time.Second,
+		localTimeout:   time.Second,
 	}
 }
 
@@ -418,7 +419,7 @@ func TestDetectUnattributedAuthors_NoCandidatesCachedTransiently(t *testing.T) {
 
 // TestDetectUnattributedAuthors_LocalAuthorsTimeoutBounded proves both
 // localAuthors call sites — logged-out (immediate shortlog) and logged-in on
-// a cache miss — are bounded by networkTimeout. Production wraps `git
+// a cache miss — are bounded by localTimeout. Production wraps `git
 // shortlog` in its own subprocess timeout, but the deps seam itself must not
 // let an injected (or future) localAuthors implementation that ignores ctx
 // hang detection forever; a fake that only returns once its ctx is Done
@@ -444,7 +445,7 @@ func TestDetectUnattributedAuthors_LocalAuthorsTimeoutBounded(t *testing.T) {
 			var rec detectRecorder
 			d := detectDepsForTest(t, &rec)
 			d.localAuthors = blocking
-			d.networkTimeout = 50 * time.Millisecond
+			d.localTimeout = 50 * time.Millisecond
 			tc.mod(&d)
 
 			start := time.Now()
@@ -459,13 +460,48 @@ func TestDetectUnattributedAuthors_LocalAuthorsTimeoutBounded(t *testing.T) {
 	}
 }
 
+// The shortlog walk is local work: a slow history must not lose its
+// candidates to the network budget.
+func TestDetectUnattributedAuthors_LocalAuthorsNotBoundByNetworkTimeout(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		mod  func(*unattributedAuthorsDeps)
+	}{
+		{"logged out", func(d *unattributedAuthorsDeps) {
+			d.activeContext = func() (*contexts.Context, bool, error) { return nil, false, nil }
+		}},
+		{"logged in, cache miss", func(*unattributedAuthorsDeps) {}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var rec detectRecorder
+			d := detectDepsForTest(t, &rec)
+			d.networkTimeout = time.Nanosecond
+			d.localAuthors = func(ctx context.Context, _ string) []string {
+				if ctx.Err() != nil {
+					return nil
+				}
+				return []string{"me@h.local"}
+			}
+			tc.mod(&d)
+
+			out := detectUnattributedAuthors(t.Context(), d)
+			if len(out.Candidates) != 1 {
+				t.Fatalf("out.Candidates = %v, want the shortlog candidate", out.Candidates)
+			}
+		})
+	}
+}
+
 // A nil-field guard for the production wiring used by doctor and status;
 // `unused` (U1000) would fail the lint gate without a reference. This one
 // reference clears it for defaultUnattributedAuthorsDeps and, through it,
 // defaultOSUsername, localCandidateAuthors and originDefaultTip.
 func TestDefaultUnattributedAuthorsDeps_Wired(t *testing.T) {
 	t.Parallel()
-	d := defaultUnattributedAuthorsDeps(time.Second)
+	d := defaultUnattributedAuthorsDeps(time.Second, time.Minute)
 	if d.username == nil || d.localAuthors == nil || d.lookupEnv == nil || d.activeContext == nil ||
 		d.commonDir == nil || d.originTip == nil || d.readCache == nil || d.writeCache == nil ||
 		d.resolvePlacement == nil || d.cellClient == nil || d.fetch == nil || d.now == nil {
@@ -473,5 +509,8 @@ func TestDefaultUnattributedAuthorsDeps_Wired(t *testing.T) {
 	}
 	if d.networkTimeout != time.Second {
 		t.Fatalf("networkTimeout = %v, want 1s", d.networkTimeout)
+	}
+	if d.localTimeout != time.Minute {
+		t.Fatalf("localTimeout = %v, want 1m", d.localTimeout)
 	}
 }

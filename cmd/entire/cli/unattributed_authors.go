@@ -244,9 +244,12 @@ type unattributedAuthorsDeps struct {
 	fetch            func(ctx context.Context, c *api.Client, repoID string, emails []string) ([]unattributedAuthor, error)
 	now              func() time.Time
 	networkTimeout   time.Duration
+	// localTimeout bounds the shortlog walk. It is separate from
+	// networkTimeout so a large history is not cut short by a network budget.
+	localTimeout time.Duration
 }
 
-func defaultUnattributedAuthorsDeps(networkTimeout time.Duration) unattributedAuthorsDeps {
+func defaultUnattributedAuthorsDeps(networkTimeout, localTimeout time.Duration) unattributedAuthorsDeps {
 	return unattributedAuthorsDeps{
 		username:      defaultOSUsername,
 		localAuthors:  localCandidateAuthors,
@@ -275,6 +278,7 @@ func defaultUnattributedAuthorsDeps(networkTimeout time.Duration) unattributedAu
 		fetch:          fetchUnattributedAuthors,
 		now:            time.Now,
 		networkTimeout: networkTimeout,
+		localTimeout:   localTimeout,
 	}
 }
 
@@ -348,7 +352,7 @@ func detectUnattributedAuthors(ctx context.Context, d unattributedAuthorsDeps) d
 	}
 
 	if !loggedInVia(ctx, "unattributed authors", d.lookupEnv, d.activeContext) {
-		lctx, cancel := context.WithTimeout(ctx, d.networkTimeout)
+		lctx, cancel := context.WithTimeout(ctx, d.localTimeout)
 		cands := d.localAuthors(lctx, username)
 		cancel()
 		return detectionOutcome{Candidates: cands}
@@ -362,7 +366,7 @@ func detectUnattributedAuthors(ctx context.Context, d unattributedAuthorsDeps) d
 		return detectionOutcome{LoggedIn: true, Candidates: c.Candidates, RepoID: c.RepoID, Authors: c.Authors, Skipped: c.Skipped}
 	}
 
-	lctx, cancel := context.WithTimeout(ctx, d.networkTimeout)
+	lctx, cancel := context.WithTimeout(ctx, d.localTimeout)
 	cands := d.localAuthors(lctx, username)
 	cancel()
 	out := detectionOutcome{LoggedIn: true, Candidates: cands}

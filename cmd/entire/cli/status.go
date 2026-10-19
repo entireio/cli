@@ -119,6 +119,10 @@ const agentHelpCommand = "entire agent-help"
 // minutes when degraded (logged in but not onboarded/offline).
 const statusUnattributedNetworkTimeout = 3 * time.Second
 
+// statusUnattributedShortlogTimeout keeps a cache-miss history walk from
+// slowing status; a walk that runs out finds nothing this time.
+const statusUnattributedShortlogTimeout = 3 * time.Second
+
 // statusUnattributedOutcome runs unattributed-author detection for status,
 // short-circuiting first on the cheap (no shortlog, no network) login probe:
 // status prints nothing when logged out, so it must not pay for `git
@@ -129,7 +133,7 @@ func statusUnattributedOutcome(ctx context.Context) detectionOutcome {
 	if !unattributedAuthorsLoggedIn(ctx) {
 		return detectionOutcome{}
 	}
-	return detectUnattributedAuthors(ctx, defaultUnattributedAuthorsDeps(statusUnattributedNetworkTimeout))
+	return detectUnattributedAuthors(ctx, defaultUnattributedAuthorsDeps(statusUnattributedNetworkTimeout, statusUnattributedShortlogTimeout))
 }
 
 // writeUnattributedAuthorsLine prints one line per address Entire could not
