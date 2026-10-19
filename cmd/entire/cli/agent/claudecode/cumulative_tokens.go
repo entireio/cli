@@ -31,9 +31,13 @@ func (c *ClaudeCodeAgent) CumulativeTokenUsage(_ context.Context, in agent.Cumul
 	subagentsDir := paths.SubagentsDir(filepath.Dir(in.TranscriptPath), in.SessionID)
 	var children map[string]*agent.TokenUsage
 	for agentID, path := range launchedSubagentTranscripts(in.TranscriptData, parsed, subagentsDir) {
-		usage, err := CalculateTokenUsageFromFile(path, 0)
-		if err != nil || usageOrNil(usage) == nil {
+		lines, err := transcript.ParseFromFileAtLine(path, 0)
+		if err != nil {
 			continue // not written yet, or already cleaned up
+		}
+		usage := usageOrNil(CalculateTokenUsage(lines))
+		if usage == nil {
+			continue
 		}
 		if children == nil {
 			children = make(map[string]*agent.TokenUsage)
