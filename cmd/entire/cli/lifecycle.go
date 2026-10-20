@@ -2256,6 +2256,15 @@ func subagentTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event,
 // and completes its durable task record (#2058): files, labels, tokens, and the
 // declared transcript path land on the record; condensation later materializes
 // the transcript into the checkpoint.
+// resolveSubagentModel returns the model the stop event names, or else the one
+// the start hook recorded in the pre-task state.
+func resolveSubagentModel(event *agent.Event, preState *PreTaskState) string {
+	if event.SubagentModel != "" || preState == nil {
+		return event.SubagentModel
+	}
+	return preState.SubagentModel
+}
+
 func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
 	subagentTranscriptPath, modifiedFiles, err := subagentTranscriptAndFiles(logCtx, ag, event, opts)
 	if err != nil {
@@ -2298,19 +2307,18 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// which is worse and harder to notice. claimUnrecordedNewFiles narrows the
 	// shell side-effect gap for new files; see unrecordedNewFilesSinceLaunch.
 	var changes *FileChanges
-	subagentModel := event.SubagentModel
+	// Loaded on both paths: the analyzer-only path still needs the model the
+	// start hook recorded (Cursor names it only at subagentStart).
+	preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
+	if preErr != nil {
+		logging.Warn(logCtx, "failed to load pre-task state",
+			slog.String("error", preErr.Error()))
+	}
+	subagentModel := resolveSubagentModel(event, preState)
 	if !opts.analyzerFilesOnly {
-		preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
-		if preErr != nil {
-			logging.Warn(logCtx, "failed to load pre-task state",
-				slog.String("error", preErr.Error()))
-		}
 		var preUntrackedFiles []string
 		if preState != nil {
 			preUntrackedFiles = preState.PreUntrackedFiles()
-			if subagentModel == "" {
-				subagentModel = preState.SubagentModel
-			}
 		}
 		var changesErr error
 		changes, changesErr = DetectFileChanges(logCtx, preUntrackedFiles)
