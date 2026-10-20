@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
 // Compile-time interface assertions
@@ -303,6 +304,8 @@ func (a *OpenCodeAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]str
 	return prompts, nil
 }
 
+var _ agent.SubagentTokenCalculator = (*OpenCodeAgent)(nil)
+
 // CalculateTokenUsage computes token usage from assistant messages starting at the given offset.
 func (a *OpenCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
 	session, err := ParseExportSession(transcriptData)
@@ -313,9 +316,12 @@ func (a *OpenCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset in
 		return nil, nil //nolint:nilnil // nil usage for empty data is expected
 	}
 
+	return messagesTokenUsage(session.Messages[min(max(fromOffset, 0), len(session.Messages)):]), nil
+}
+
+func messagesTokenUsage(messages []ExportMessage) *agent.TokenUsage {
 	usage := &agent.TokenUsage{}
-	for i := fromOffset; i < len(session.Messages); i++ {
-		msg := session.Messages[i]
+	for _, msg := range messages {
 		if msg.Info.Role != roleAssistant || msg.Info.Tokens == nil {
 			continue
 		}
@@ -325,6 +331,34 @@ func (a *OpenCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset in
 		usage.CacheCreationTokens += msg.Info.Tokens.Cache.Write
 		usage.APICallCount++
 	}
+	return usage
+}
 
-	return usage, nil
+// CalculateSubagentTokenUsage returns a child session's usage split by the
+// model of each assistant message (agent.SubagentTokenCalculator), for its
+// task record.
+//
+// Messages are bucketed by modelID alone, not providerID+modelID: modelID is
+// the form the plugin reports as the session's model, so a child's label
+// matches its parent's. The same modelID served by two providers merges into
+// one bucket; pricing keys on the model, so the provider is not needed.
+func (a *OpenCodeAgent) CalculateSubagentTokenUsage(transcriptData []byte) (*agent.TokenUsage, error) {
+	session, err := ParseExportSession(transcriptData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript for token usage: %w", err)
+	}
+	if session == nil {
+		return nil, nil //nolint:nilnil // nil usage for empty data is expected
+	}
+	byModel := make(map[string][]ExportMessage)
+	for _, msg := range session.Messages {
+		byModel[msg.Info.ModelID] = append(byModel[msg.Info.ModelID], msg)
+	}
+	total := &agent.TokenUsage{}
+	for model, messages := range byModel {
+		usage := messagesTokenUsage(messages)
+		usage.Model = model
+		total = types.AddTokenUsage(total, usage)
+	}
+	return total, nil
 }

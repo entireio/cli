@@ -634,6 +634,18 @@ type RestoredSessionPathResolver interface {
 	ResolveRestoredSessionFile(sessionDir, agentSessionID string, transcript []byte) (string, error)
 }
 
+// SubagentTokenCalculator is implemented by agents that can compute a
+// subagent's own token usage from its transcript with the model recorded:
+// TokenUsage.Model, or ByModel when its calls ran on more than one model.
+// Task records use it so a subagent's tokens can be priced at its own model's
+// rate; session totals keep using TokenCalculator, whose top level carries no
+// model (the session metadata's model covers it).
+type SubagentTokenCalculator interface {
+	Agent
+
+	CalculateSubagentTokenUsage(transcriptData []byte) (*TokenUsage, error)
+}
+
 // TestOnly is implemented by agents that exist solely for testing (e.g., the Vogon canary agent).
 // These agents are excluded from the user-facing agent selection in `entire enable`.
 type TestOnly interface {

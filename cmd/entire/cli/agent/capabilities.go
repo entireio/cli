@@ -48,6 +48,7 @@ type CapabilityDeclarer interface {
 //   - SkillEventExtractor
 //   - StaleHookReporter
 //   - SubagentSessionResolver
+//   - SubagentTokenCalculator
 //   - SubagentTranscriptFetcher
 //   - TaskTranscriptMatcher
 //   - ToolInvocationScanner
@@ -172,6 +173,12 @@ func AsSidecarImageProvider(ag Agent) (SidecarImageProvider, bool) {
 // DeclaredCaps gate.
 func AsProtectedFilesProvider(ag Agent) (ProtectedFilesProvider, bool) {
 	return builtinCapability[ProtectedFilesProvider](ag)
+}
+
+// AsSubagentTokenCalculator returns the agent as SubagentTokenCalculator if it
+// implements the interface. Built-in only, so there is no DeclaredCaps gate.
+func AsSubagentTokenCalculator(ag Agent) (SubagentTokenCalculator, bool) {
+	return builtinCapability[SubagentTokenCalculator](ag)
 }
 
 // AsRestoredSessionPathResolver returns the agent as RestoredSessionPathResolver

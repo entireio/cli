@@ -210,6 +210,12 @@ type Event struct {
 	SubagentType    string
 	TaskDescription string
 
+	// SubagentModel is the model a subagent runs on, when a SubagentStart hook
+	// names it (Cursor's subagent_model). Placeholders that name no model
+	// ("auto", "default") are left empty by the parser. The framework keeps it
+	// with the pre-task state and records it on the task record at completion.
+	SubagentModel string
+
 	// ModifiedFiles is the list of file paths modified by a subagent (SubagentEnd)
 	// or a tool call (ToolUse). Paths may be absolute, cwd-relative, or
 	// repo-relative; lifecycle handlers normalize against the worktree root.

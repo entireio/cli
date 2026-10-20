@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -135,5 +136,229 @@ func TestAddTokenUsage_KeepsRealDepthIntact(t *testing.T) {
 	}
 	if got.SubagentTokens.SubagentTokens != nil {
 		t.Error("must not synthesize a nested level that the inputs did not have")
+	}
+}
+
+// Model on a subagent entry lets cost be weighted per model. A sum on one
+// model keeps it; a sum across models (an unrecorded model counts as its own)
+// clears it and records the split in ByModel, so no tokens are attributed to a
+// model that did not produce them.
+func TestAddTokenUsage_PerModel(t *testing.T) {
+	t.Parallel()
+
+	haiku := &TokenUsage{InputTokens: 10, OutputTokens: 4, APICallCount: 1, Model: "claude-haiku-4-5"}
+	opus := &TokenUsage{InputTokens: 100, OutputTokens: 40, APICallCount: 2, Model: "claude-opus-4-8"}
+	unknown := &TokenUsage{InputTokens: 7, OutputTokens: 3, APICallCount: 1}
+
+	same := AddTokenUsage(haiku, haiku)
+	if same.Model != "claude-haiku-4-5" || same.ByModel != nil {
+		t.Errorf("same model: Model %q ByModel %v, want kept and no split", same.Model, same.ByModel)
+	}
+	if got := AddTokenUsage(nil, haiku); got.Model != "claude-haiku-4-5" {
+		t.Errorf("copy of one operand must keep Model, got %q", got.Model)
+	}
+	if got := AddTokenUsage(&TokenUsage{}, haiku); got.Model != "claude-haiku-4-5" || got.ByModel != nil {
+		t.Errorf("a zero seed must not add an unrecorded bucket: Model %q ByModel %v", got.Model, got.ByModel)
+	}
+
+	mixed := AddTokenUsage(AddTokenUsage(opus, haiku), AddTokenUsage(unknown, haiku))
+	if mixed.Model != "" {
+		t.Errorf("mixed models must clear Model, got %q", mixed.Model)
+	}
+	want := []TokenUsage{
+		{InputTokens: 7, OutputTokens: 3, APICallCount: 1},
+		{InputTokens: 20, OutputTokens: 8, APICallCount: 2, Model: "claude-haiku-4-5"},
+		{InputTokens: 100, OutputTokens: 40, APICallCount: 2, Model: "claude-opus-4-8"},
+	}
+	if !reflect.DeepEqual(mixed.ByModel, want) {
+		t.Errorf("ByModel = %+v, want %+v", mixed.ByModel, want)
+	}
+	if mixed.InputTokens != 127 || mixed.OutputTokens != 51 || mixed.APICallCount != 5 {
+		t.Errorf("totals = %+v, want the sum of every model", mixed)
+	}
+
+	// The split survives a later sum with a single-model entry.
+	again := AddTokenUsage(mixed, opus)
+	if len(again.ByModel) != 3 || again.ByModel[2].InputTokens != 200 {
+		t.Errorf("ByModel after a further add = %+v", again.ByModel)
+	}
+
+	// Nested subagent levels keep their own split.
+	nested := AddTokenUsage(&TokenUsage{SubagentTokens: haiku}, &TokenUsage{SubagentTokens: opus})
+	if nested.SubagentTokens == nil || len(nested.SubagentTokens.ByModel) != 2 {
+		t.Errorf("subagent level = %+v, want a two-model split", nested.SubagentTokens)
+	}
+}
+
+// A delta between two cumulative snapshots keeps only the models that spent
+// tokens in between.
+func TestSubtractTokenUsage_PerModel(t *testing.T) {
+	t.Parallel()
+
+	baseline := &TokenUsage{InputTokens: 10, OutputTokens: 4, APICallCount: 1, Model: "claude-haiku-4-5"}
+	later := AddTokenUsage(baseline, &TokenUsage{InputTokens: 50, OutputTokens: 20, APICallCount: 1, Model: "claude-opus-4-8"})
+
+	diff := SubtractTokenUsage(later, baseline)
+	if diff.Model != "claude-opus-4-8" || diff.ByModel != nil {
+		t.Errorf("delta spent only on opus: Model %q ByModel %+v", diff.Model, diff.ByModel)
+	}
+	if diff.InputTokens != 50 || diff.APICallCount != 1 {
+		t.Errorf("delta = %+v", diff)
+	}
+
+	if got := SubtractTokenUsage(baseline, baseline); got.Model != "claude-haiku-4-5" {
+		t.Errorf("an empty delta keeps the single label, got %q", got.Model)
+	}
+}
+
+// A baseline that spent tokens on a model the snapshot lacks (one captured
+// before models were recorded, or after a child's transcript went away) says
+// nothing about which of the snapshot's models the delta belongs to, so the
+// delta is left unlabelled rather than credited to a guessed model.
+func TestSubtractTokenUsage_UnmatchedBaselineLeavesDeltaUnlabelled(t *testing.T) {
+	t.Parallel()
+
+	snapshot := AddTokenUsage(
+		&TokenUsage{InputTokens: 80, APICallCount: 3, Model: "claude-opus-4-8"},
+		&TokenUsage{InputTokens: 50, APICallCount: 2, Model: "claude-haiku-4-5"},
+	)
+	legacyBaseline := &TokenUsage{InputTokens: 100, APICallCount: 4} // no model recorded
+
+	diff := SubtractTokenUsage(snapshot, legacyBaseline)
+	want := &TokenUsage{InputTokens: 30, APICallCount: 1}
+	if !reflect.DeepEqual(diff, want) {
+		t.Errorf("delta = %+v, want unlabelled %+v", diff, want)
+	}
+
+	vanished := &TokenUsage{InputTokens: 20, APICallCount: 1, Model: "gpt-5.5"}
+	diff = SubtractTokenUsage(snapshot, AddTokenUsage(vanished, &TokenUsage{InputTokens: 10, APICallCount: 1, Model: "claude-opus-4-8"}))
+	if diff.Model != "" || diff.ByModel != nil || diff.InputTokens != 100 {
+		t.Errorf("delta against a vanished model = %+v, want 100 unlabelled", diff)
+	}
+}
+
+// When the same model shrank (a cumulative count went backwards), the excess
+// is drained from the snapshot's other models so the split still sums to the
+// clamped delta.
+func TestSubtractTokenUsage_ShrunkModelDrainsOtherModels(t *testing.T) {
+	t.Parallel()
+
+	snapshot := AddTokenUsage(
+		&TokenUsage{InputTokens: 80, APICallCount: 3, Model: "claude-opus-4-8"},
+		&TokenUsage{InputTokens: 50, APICallCount: 2, Model: "claude-haiku-4-5"},
+	)
+	baseline := &TokenUsage{InputTokens: 100, APICallCount: 4, Model: "claude-opus-4-8"}
+
+	diff := SubtractTokenUsage(snapshot, baseline)
+	want := &TokenUsage{InputTokens: 30, APICallCount: 1, Model: "claude-haiku-4-5"}
+	if !reflect.DeepEqual(diff, want) {
+		t.Errorf("delta = %+v, want %+v", diff, want)
+	}
+}
+
+// Usage is read back from pushed blobs. A split that does not sum to its
+// entry, sits beside a Model, or is longer than MaxModelsPerUsage is not one
+// this package wrote, so the entry is treated as counts under no model.
+func TestAddTokenUsage_DistrustsMalformedSplit(t *testing.T) {
+	t.Parallel()
+
+	tooMany := &TokenUsage{InputTokens: MaxModelsPerUsage + 1}
+	for i := range MaxModelsPerUsage + 1 {
+		tooMany.ByModel = append(tooMany.ByModel, TokenUsage{InputTokens: 1, Model: string(rune('a' + i))})
+	}
+	for name, blob := range map[string]*TokenUsage{
+		"overclaimed":     {InputTokens: 10, ByModel: []TokenUsage{{InputTokens: 500, Model: "a"}, {InputTokens: 1, Model: "b"}}},
+		"underclaimed":    {InputTokens: 10, ByModel: []TokenUsage{{InputTokens: 4, Model: "a"}, {InputTokens: 1, Model: "b"}}},
+		"negative":        {InputTokens: 10, ByModel: []TokenUsage{{InputTokens: 500, Model: "a"}, {InputTokens: -490, Model: "b"}}},
+		"model and split": {InputTokens: 10, Model: "a", ByModel: []TokenUsage{{InputTokens: 4, Model: "a"}, {InputTokens: 6, Model: "b"}}},
+		"too many":        tooMany,
+	} {
+		got := AddTokenUsage(blob, &TokenUsage{InputTokens: 1, Model: "c"})
+		if got.InputTokens != blob.InputTokens+1 {
+			t.Errorf("%s: total = %d, want %d", name, got.InputTokens, blob.InputTokens+1)
+		}
+		want := []TokenUsage{{InputTokens: blob.InputTokens}, {InputTokens: 1, Model: "c"}}
+		if got.Model != "" || !reflect.DeepEqual(got.ByModel, want) {
+			t.Errorf("%s: Model %q ByModel %+v, want the blob as unlabelled counts %+v", name, got.Model, got.ByModel, want)
+		}
+	}
+
+	valid := &TokenUsage{InputTokens: 10, ByModel: []TokenUsage{{InputTokens: 4, Model: "a"}, {InputTokens: 6, Model: "b"}}}
+	if got := AddTokenUsage(valid, nil); !reflect.DeepEqual(got.ByModel, valid.ByModel) {
+		t.Errorf("a consistent split must be kept, got %+v", got.ByModel)
+	}
+}
+
+// ByModel entries are flat: nested fields a hostile or malformed entry carries
+// are dropped, so the split cannot reintroduce a deep chain.
+func TestAddTokenUsage_ByModelEntriesStayFlat(t *testing.T) {
+	t.Parallel()
+
+	hostile := &TokenUsage{ByModel: []TokenUsage{
+		{InputTokens: 1, Model: "a", SubagentTokens: &TokenUsage{InputTokens: 99}, ByModel: []TokenUsage{{InputTokens: 99}}},
+		{InputTokens: 2, Model: "b"},
+	}}
+	got := AddTokenUsage(hostile, nil)
+	for _, e := range got.ByModel {
+		if e.SubagentTokens != nil || e.ByModel != nil {
+			t.Fatalf("ByModel entry kept nested fields: %+v", e)
+		}
+	}
+}
+
+// The JSON names are shared with the tokens rewrite (#2155), so the two
+// compose: "model" and "by_model", both omitted when unset.
+func TestTokenUsage_ModelJSONNames(t *testing.T) {
+	t.Parallel()
+
+	data, err := json.Marshal(&TokenUsage{Model: "m", ByModel: []TokenUsage{{Model: "a"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["model"]; !ok {
+		t.Errorf("missing \"model\" in %s", data)
+	}
+	if _, ok := fields["by_model"]; !ok {
+		t.Errorf("missing \"by_model\" in %s", data)
+	}
+	plain, err := json.Marshal(&TokenUsage{InputTokens: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear(fields)
+	if err := json.Unmarshal(plain, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["model"]; ok {
+		t.Errorf("unset Model must be omitted: %s", plain)
+	}
+}
+
+// LabelModel gives a hook-reported model to usage that records none of its
+// own, and never relabels usage that already says which model produced it.
+func TestLabelModel(t *testing.T) {
+	t.Parallel()
+
+	plain := &TokenUsage{InputTokens: 5, APICallCount: 1}
+	got := LabelModel(plain, "claude-haiku-4-5")
+	if got.Model != "claude-haiku-4-5" || got.InputTokens != 5 {
+		t.Errorf("unlabelled usage = %+v, want the model added", got)
+	}
+	if plain.Model != "" {
+		t.Error("LabelModel must not mutate its input")
+	}
+	if LabelModel(nil, "m") != nil {
+		t.Error("nil usage stays nil: no tokens is not zero tokens")
+	}
+	if got := LabelModel(&TokenUsage{InputTokens: 1, Model: "own"}, "hook"); got.Model != "own" {
+		t.Errorf("an entry's own model wins, got %q", got.Model)
+	}
+	split := AddTokenUsage(&TokenUsage{InputTokens: 1, Model: "a"}, &TokenUsage{InputTokens: 2, Model: "b"})
+	if got := LabelModel(split, "hook"); got.Model != "" || len(got.ByModel) != 2 {
+		t.Errorf("a split must not collapse to one model, got %+v", got)
 	}
 }

@@ -1674,7 +1674,7 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 		}); err != nil {
 			return fmt.Errorf("register codex subagent: %w", err)
 		}
-		if err := CapturePreTaskState(ctx, event.ToolUseID); err != nil {
+		if err := CapturePreTaskState(ctx, event.ToolUseID, event.SubagentModel); err != nil {
 			logging.Warn(logCtx, "best-effort codex pre-task capture failed", slog.String("error", err.Error()))
 		}
 		return nil
@@ -1685,7 +1685,7 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 	}
 
 	// Capture pre-task state
-	if err := CapturePreTaskState(ctx, event.ToolUseID); err != nil {
+	if err := CapturePreTaskState(ctx, event.ToolUseID, event.SubagentModel); err != nil {
 		return fmt.Errorf("failed to capture pre-task state: %w", err)
 	}
 
@@ -2153,12 +2153,8 @@ func fetchSubagentTranscriptForCapture(logCtx context.Context, ag agent.Agent, e
 	event.SubagentTranscriptPath = path
 	event.SubagentTranscriptUnavailable = false
 	if event.TokenUsage == nil {
-		if calc, ok := agent.AsTokenCalculator(ag); ok {
-			if data, rerr := ag.ReadTranscript(path); rerr == nil {
-				if usage, cerr := calc.CalculateTokenUsage(data, 0); cerr == nil {
-					event.TokenUsage = usage
-				}
-			}
+		if data, rerr := ag.ReadTranscript(path); rerr == nil {
+			event.TokenUsage = agent.CalculateSubagentTokenUsage(logCtx, ag, data)
 		}
 	}
 	return path
@@ -2253,7 +2249,7 @@ func subagentTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event,
 		// An empty transcript records no usage; exact zero would claim it.
 		return nil
 	}
-	return agent.CalculateTokenUsage(ctx, ag, data, 0, "")
+	return agent.CalculateSubagentTokenUsage(ctx, ag, data)
 }
 
 // completeSubagentTaskRecord detects a completed subagent invocation's changes
@@ -2302,6 +2298,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// which is worse and harder to notice. claimUnrecordedNewFiles narrows the
 	// shell side-effect gap for new files; see unrecordedNewFilesSinceLaunch.
 	var changes *FileChanges
+	subagentModel := event.SubagentModel
 	if !opts.analyzerFilesOnly {
 		preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
 		if preErr != nil {
@@ -2311,6 +2308,9 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		var preUntrackedFiles []string
 		if preState != nil {
 			preUntrackedFiles = preState.PreUntrackedFiles()
+			if subagentModel == "" {
+				subagentModel = preState.SubagentModel
+			}
 		}
 		var changesErr error
 		changes, changesErr = DetectFileChanges(logCtx, preUntrackedFiles)
@@ -2387,6 +2387,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		Background:               opts.background,
 		SubagentType:             event.SubagentType,
 		TaskDescription:          event.TaskDescription,
+		SubagentModel:            subagentModel,
 		DeclaredTranscriptPath:   subagentTranscriptPath,
 		TranscriptUnavailable:    event.SubagentTranscriptUnavailable,
 		Files:                    files,
@@ -2653,7 +2654,9 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		TaskDescription:        step.link.TaskDescription,
 		DeclaredTranscriptPath: step.transcriptRef,
 		Files:                  files,
-		TokenUsage:             turnUsage,
+		// The Worker's turn-end names its own model (Droid's session
+		// settings), so its tokens can be priced at the Worker's rate.
+		TokenUsage: types.LabelModel(turnUsage, step.event.Model),
 	}); err != nil {
 		return fmt.Errorf("failed to record subagent session task: %w", err)
 	}

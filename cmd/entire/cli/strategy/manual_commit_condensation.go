@@ -385,6 +385,7 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			AgentID:         record.AgentID,
 			SubagentType:    record.SubagentType,
 			TaskDescription: record.TaskDescription,
+			SubagentModel:   record.SubagentModel,
 			Files:           record.Files,
 			TokenUsage:      record.TokenUsage,
 			StartedAt:       record.StartedAt,
@@ -517,7 +518,7 @@ func condensedTaskTokenUsage(ctx context.Context, ag agent.Agent, record session
 	if !record.TokenUsageFromTranscript || record.CompletedAt.IsZero() || ag == nil || external.IsExternal(ag) {
 		return recorded
 	}
-	usage := agent.CalculateTokenUsage(ctx, ag, raw, 0, "")
+	usage := agent.CalculateSubagentTokenUsage(ctx, ag, raw)
 	if !hasTokenUsageData(usage) || (recorded != nil && usage.APICallCount < recorded.APICallCount) {
 		return recorded
 	}

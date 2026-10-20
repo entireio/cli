@@ -4,6 +4,8 @@ package integration
 
 import (
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -161,6 +163,10 @@ func TestFactoryDroidReadOnlyWorkerReachesParentCheckpoint(t *testing.T) {
 		`{"type":"message","id":"w1","message":{"role":"user","content":[{"type":"text","text":"Summarize the repo"}]}}`,
 		`{"type":"message","id":"w2","message":{"role":"assistant","id":"msg_w1","content":[{"type":"text","text":"It is a test repository."}],"usage":{"input_tokens":70,"output_tokens":7}}}`)
 	worker.MarkAsWorkerSession(parent.ID, toolUseID, "worker: Summarize the repo")
+	// Droid keeps the session's model in <session>.settings.json beside the
+	// transcript; the Worker's Stop reads it, so its tokens carry its model.
+	require.NoError(t, os.WriteFile(strings.TrimSuffix(worker.TranscriptPath, ".jsonl")+".settings.json",
+		[]byte(`{"model":"claude-haiku-4-5-20251001","reasoningEffort":"none"}`), 0o600))
 
 	// Twice: a repeated Stop must not count the Worker's usage again.
 	require.NoError(t, env.SimulateFactoryDroidStop(worker.ID, worker.TranscriptPath))
@@ -177,6 +183,7 @@ func TestFactoryDroidReadOnlyWorkerReachesParentCheckpoint(t *testing.T) {
 	require.NotNil(t, rec.TokenUsage, "the record must carry the Worker's usage")
 	require.Equal(t, 70, rec.TokenUsage.InputTokens, "the Worker's usage, once")
 	require.Equal(t, 7, rec.TokenUsage.OutputTokens, "the Worker's usage, once")
+	require.Equal(t, "claude-haiku-4-5-20251001", rec.TokenUsage.Model, "the Worker's usage carries the Worker's model")
 
 	if workerState, err := env.GetSessionState(worker.ID); err != nil {
 		t.Fatalf("GetSessionState(worker) failed: %v", err)
@@ -204,6 +211,7 @@ func TestFactoryDroidReadOnlyWorkerReachesParentCheckpoint(t *testing.T) {
 	require.NotNil(t, task.TokenUsage, "the stored task must carry the Worker's usage: %s", raw)
 	require.Equal(t, 70, task.TokenUsage.InputTokens, "the stored task holds the Worker's usage once: %s", raw)
 	require.Equal(t, 7, task.TokenUsage.OutputTokens, "the stored task holds the Worker's usage once: %s", raw)
+	require.Equal(t, "claude-haiku-4-5-20251001", task.TokenUsage.Model, "the stored task records the Worker's model: %s", raw)
 
 	transcript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
 		CheckpointTaskFilePath(checkpointID, toolUseID, paths.AgentTranscriptFileName(worker.ID)))

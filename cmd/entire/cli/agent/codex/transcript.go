@@ -64,6 +64,7 @@ const (
 	rolloutLineTypeResponseItem = "response_item"
 	rolloutLineTypeSessionMeta  = "session_meta"
 	rolloutLineTypeEventMsg     = "event_msg"
+	rolloutLineTypeTurnContext  = "turn_context"
 	eventMsgTypeTokenCount      = "token_count"
 	// itemTypeAgentMessage is the type of a multi-agent message item, both as a
 	// rollout response_item payload and as a `codex exec --json` event item.
@@ -502,6 +503,11 @@ func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []st
 	// its parent's, and with the Claude Code and Droid subagent rollups, which
 	// both sum their children's counts.
 	tokenSnapshots := 0
+	// The child's model comes from its own turn_context lines; a fork's
+	// inherited ones fall below the start ordinal and are skipped with the rest
+	// of the parent's history.
+	currentModel := ""
+	var segments []modelSegment
 	lines := splitJSONL(data)
 	var localStartOrdinal *int
 	inherited := false
@@ -551,6 +557,15 @@ func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []st
 				}
 			}
 		}
+		if line.Type == rolloutLineTypeTurnContext {
+			var turnContext struct {
+				Model string `json:"model"`
+			}
+			if json.Unmarshal(line.Payload, &turnContext) == nil {
+				currentModel = turnContext.Model
+			}
+			continue
+		}
 		if line.Type != rolloutLineTypeEventMsg {
 			continue
 		}
@@ -581,6 +596,7 @@ func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []st
 			lastTokenSnapshot = decodeTotalTokenUsage(event.Info)
 			if lastTokenSnapshot != nil {
 				tokenSnapshots++
+				segments = observeModelSegment(segments, currentModel, lastTokenSnapshot)
 			}
 		case "task_started":
 			// Forks copy an unfinished parent turn. A later explicit turn start
@@ -622,9 +638,76 @@ func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []st
 			// makes the child's whole total unavailable, and a bare call count
 			// with no tokens would read as a child that burned nothing.
 			result.ExactTokenUsage.APICallCount = tokenSnapshots
+			result.ExactTokenUsage = withChildModels(result.ExactTokenUsage, segments)
 		}
 	}
 	return result
+}
+
+// modelSegment is a run of consecutive token snapshots taken while one model
+// was current: last is the run's final cumulative snapshot.
+type modelSegment struct {
+	model string
+	last  *exactTokenUsageData
+	calls int
+}
+
+func observeModelSegment(segments []modelSegment, model string, snapshot *exactTokenUsageData) []modelSegment {
+	if n := len(segments); n > 0 && segments[n-1].model == model {
+		segments[n-1].last = snapshot
+		segments[n-1].calls++
+		return segments
+	}
+	return append(segments, modelSegment{model: model, last: snapshot, calls: 1})
+}
+
+// withChildModels records on exact (a child's whole-run usage) the model that
+// produced it. A child that stayed on one model gets that model on its exact
+// total, whatever its snapshots did. A child that switched model mid-run is
+// split: each model is credited the growth of the cumulative snapshot while it
+// was current. When that growth is not well-defined (a run's snapshot is
+// unusable or smaller than the one before), exact is returned with no model
+// rather than attributed to one.
+func withChildModels(exact *agent.TokenUsage, segments []modelSegment) *agent.TokenUsage {
+	if model, ok := singleModel(segments); ok {
+		return types.LabelModel(exact, model)
+	}
+	var split *agent.TokenUsage
+	prev := &agent.TokenUsage{}
+	for _, seg := range segments {
+		cur := exactUsageFromSnapshot(seg.last)
+		if cur == nil || cur.InputTokens < prev.InputTokens || cur.CacheReadTokens < prev.CacheReadTokens || cur.OutputTokens < prev.OutputTokens {
+			return exact
+		}
+		split = types.AddTokenUsage(split, &agent.TokenUsage{
+			InputTokens:     cur.InputTokens - prev.InputTokens,
+			CacheReadTokens: cur.CacheReadTokens - prev.CacheReadTokens,
+			OutputTokens:    cur.OutputTokens - prev.OutputTokens,
+			APICallCount:    seg.calls,
+			Model:           seg.model,
+		})
+		prev = cur
+	}
+	if split == nil || split.InputTokens != exact.InputTokens || split.CacheReadTokens != exact.CacheReadTokens ||
+		split.OutputTokens != exact.OutputTokens || split.APICallCount != exact.APICallCount {
+		return exact
+	}
+	labelled := *exact
+	labelled.Model, labelled.ByModel = split.Model, split.ByModel
+	return &labelled
+}
+
+// singleModel reports the one model every segment ran on, if there is one.
+func singleModel(segments []modelSegment) (string, bool) {
+	if len(segments) == 0 {
+		return "", false
+	}
+	for _, seg := range segments[1:] {
+		if seg.model != segments[0].model {
+			return "", false
+		}
+	}
+	return segments[0].model, true
 }
 
 func extractFilesFromParsedLine(line rolloutLine) []string {
