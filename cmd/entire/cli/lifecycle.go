@@ -114,6 +114,12 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 			// follow-up calls are where it can still be marked, which keeps its
 			// waiting parent's interaction time fresh.
 			markSubagentSession(ctx, ag, event.SessionID, event.SessionRef)
+			// The session runs again (a parent resumed by its subagent's reply):
+			// its own next Stop decides whether the turn has ended.
+			if err := recordAwaitingSubagents(ctx, event.SessionID, false); err != nil {
+				logging.Warn(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()), "failed to clear awaiting-subagents mark",
+					slog.String("session_id", event.SessionID), slog.String("error", err.Error()))
+			}
 			return nil
 		}
 	}
@@ -124,6 +130,15 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 	case agent.TurnStart:
 		return handleLifecycleTurnStart(ctx, ag, event)
 	case agent.TurnEnd:
+		if event.AwaitingSubagents {
+			if err := recordAwaitingSubagents(ctx, event.SessionID, true); err != nil {
+				return err
+			}
+			// The last subagent may have finished just before this Stop, in a
+			// hook that found no pause to act on; check from this side too.
+			endParentTurnIfSubagentsDone(ctx, ag, event.SessionID)
+			return nil
+		}
 		return handleLifecycleTurnEnd(ctx, ag, event)
 	case agent.Compaction:
 		return handleLifecycleCompaction(ctx, ag, event)
@@ -658,6 +673,12 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 			slog.String("error", err.Error()))
 	}
 	setupSpan.End()
+
+	// A new turn is not waiting on the previous one's subagents.
+	if err := recordAwaitingSubagents(ctx, sessionID, false); err != nil {
+		logging.Warn(logCtx, "failed to clear awaiting-subagents mark",
+			slog.String("error", err.Error()))
+	}
 
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
 	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
@@ -2781,7 +2802,97 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
 	}
+	endParentTurnIfSubagentsDone(ctx, step.ag, step.link.ParentSessionID)
 	return nil
+}
+
+// subagentCompletionWindow bounds how long after a subagent finished a paused
+// parent's turn may still be ended for it. The pause and the completion are
+// separate hook processes that land milliseconds apart in either order.
+const subagentCompletionWindow = time.Minute
+
+// claimAwaitingSubagents clears AwaitingSubagentsAt and reports whether this
+// call cleared it, so of the two hooks that can find the parent's subagents
+// done, exactly one ends its turn.
+func claimAwaitingSubagents(ctx context.Context, sessionID string) bool {
+	claimed := false
+	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if state.AwaitingSubagentsAt == nil || state.Phase != session.PhaseActive {
+			return strategy.ErrMutationSkip
+		}
+		state.AwaitingSubagentsAt = nil
+		claimed = true
+		return nil
+	})
+	return err == nil && claimed
+}
+
+// recordAwaitingSubagents sets or clears AwaitingSubagentsAt. Setting applies
+// only to an ACTIVE session: a pause reported after the turn already ended
+// marks nothing.
+func recordAwaitingSubagents(ctx context.Context, sessionID string, awaiting bool) error {
+	if sessionID == "" {
+		return nil
+	}
+	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if !awaiting {
+			if state.AwaitingSubagentsAt == nil {
+				return strategy.ErrMutationSkip
+			}
+			state.AwaitingSubagentsAt = nil
+			return nil
+		}
+		if state.Phase != session.PhaseActive || state.AwaitingSubagentsAt != nil {
+			return strategy.ErrMutationSkip
+		}
+		now := time.Now()
+		state.AwaitingSubagentsAt = &now
+		return nil
+	})
+	if errors.Is(err, strategy.ErrStateNotFound) {
+		return nil
+	}
+	return err //nolint:wrapcheck // callers log it with the session ID
+}
+
+// endParentTurnIfSubagentsDone ends the parent's turn when it stopped to wait
+// for its subagents and the last one has just finished: the agent will not
+// report the turn's end itself (Antigravity sends one fullyIdle=false Stop and
+// nothing after it). The turn ends exactly as a reported one would, from the
+// parent's own transcript and turn start, so its tokens and files count once.
+func endParentTurnIfSubagentsDone(ctx context.Context, ag agent.Agent, parentID string) {
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	parent, err := strategy.LoadSessionState(ctx, parentID)
+	if err != nil || parent == nil || parent.Phase != session.PhaseActive ||
+		parent.AwaitingSubagentsAt == nil || parent.TranscriptPath == "" {
+		return
+	}
+	// Act only for subagents that just finished: a pause with no subagent
+	// completing around it is waiting on something else (a background
+	// command), whose end the agent reports itself.
+	recent := false
+	for _, rec := range parent.TaskRecords {
+		if rec.CompletedAt.IsZero() {
+			return // another subagent is still running
+		}
+		if time.Since(rec.CompletedAt) < subagentCompletionWindow {
+			recent = true
+		}
+	}
+	if !recent || !claimAwaitingSubagents(ctx, parentID) {
+		return
+	}
+	logging.Info(logCtx, "ending turn of a session whose subagents finished after it stopped",
+		slog.String("session_id", parentID))
+	if err := handleLifecycleTurnEnd(ctx, ag, &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  parentID,
+		SessionRef: parent.TranscriptPath,
+		Timestamp:  time.Now(),
+	}); err != nil {
+		logging.Warn(logCtx, "failed to end the parent's turn",
+			slog.String("session_id", parentID), slog.String("error", err.Error()))
+	}
 }
 
 // --- Helper functions ---

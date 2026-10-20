@@ -497,6 +497,12 @@ type State struct {
 	// condenses on its own, or answers "which session is calling".
 	ParentSessionID string `json:"parent_session_id,omitempty"`
 
+	// AwaitingSubagentsAt is set while an ACTIVE session's agent has stopped
+	// with subagents still running (agent.Event.AwaitingSubagents) and cleared
+	// when the session runs again. When the last of its running subagents
+	// finishes while it is set, the lifecycle ends the session's turn.
+	AwaitingSubagentsAt *time.Time `json:"awaiting_subagents_at,omitempty"`
+
 	// TaskRecords tracks subagents dispatched by this session — the durable
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`

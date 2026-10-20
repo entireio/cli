@@ -175,14 +175,16 @@ func parseStop(stdin io.Reader) (*agent.Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !raw.FullyIdle {
-		return nil, nil //nolint:nilnil // Background tasks running — do not end session yet
-	}
+	// fullyIdle=false: the execution finished but subagents it started are
+	// still running. agy sends no further Stop when the last one finishes
+	// after this one, so the lifecycle records the pause and ends the turn
+	// when its subagents are done.
 	return &agent.Event{
-		Type:       agent.TurnEnd,
-		SessionID:  raw.ConversationID,
-		SessionRef: raw.TranscriptPath,
-		Timestamp:  time.Now(),
+		Type:              agent.TurnEnd,
+		SessionID:         raw.ConversationID,
+		SessionRef:        raw.TranscriptPath,
+		Timestamp:         time.Now(),
+		AwaitingSubagents: !raw.FullyIdle,
 	}, nil
 }
 

@@ -183,9 +183,10 @@ func TestParseHookEvent_Stop_FullyIdleTrueEmitsTurnEnd(t *testing.T) {
 	}
 }
 
-func TestParseHookEvent_Stop_FullyIdleFalseReturnsNil(t *testing.T) {
+// fullyIdle=false is a pause, not the turn's end: subagents are still running,
+// and agy may send no further Stop once they finish.
+func TestParseHookEvent_Stop_FullyIdleFalseIsAPause(t *testing.T) {
 	t.Parallel()
-	// Synthesize a stop payload with fullyIdle=false
 	payload := StopPayload{
 		CommonPayload: CommonPayload{
 			ConversationID: testConversationID,
@@ -202,8 +203,8 @@ func TestParseHookEvent_Stop_FullyIdleFalseReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseHookEvent: %v", err)
 	}
-	if ev != nil {
-		t.Errorf("expected nil event for stop with fullyIdle=false, got %+v", ev)
+	if ev == nil || ev.Type != agent.TurnEnd || !ev.AwaitingSubagents {
+		t.Errorf("expected a TurnEnd marked AwaitingSubagents for fullyIdle=false, got %+v", ev)
 	}
 }
 

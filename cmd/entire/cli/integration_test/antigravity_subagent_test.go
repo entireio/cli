@@ -135,3 +135,69 @@ func TestAntigravity_SubagentWorkBelongsToTheParent(t *testing.T) {
 	require.NotContains(t, task.Files, "child.txt", "the first commit already took child.txt: %s", raw)
 	require.Equal(t, 5846+6224+6449, task.TokenUsage.InputTokens, "%s", raw)
 }
+
+// When the parent's last Stop (fullyIdle=false) and its subagent's end land
+// in either order, agy sends the parent no further Stop. The parent's turn is
+// ended for it, once, with all its calls counted.
+func TestAntigravity_ParentTurnEndsWhenItsSubagentFinishes(t *testing.T) {
+	t.Parallel()
+	for name, parentStopsFirst := range map[string]bool{"parent stops first": true, "subagent ends first": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newAntigravityEnv(t)
+			extraEnv := []string{"ENTIRE_ANTIGRAVITY_STATUS_DIR=" + t.TempDir(), "ENTIRE_ANTIGRAVITY_CONFIG_DIR=" + t.TempDir()}
+			const parentID, childID = "a0528243-0000-4000-8000-000000000001", "a3a70f0a-0000-4000-8000-000000000002"
+			path := func(id string) string {
+				return filepath.Join(antigravityBrainDir(env.RepoDir), id, ".system_generated", "logs", "transcript_full.jsonl")
+			}
+			hook := func(id, name string, fields map[string]any) {
+				t.Helper()
+				base := map[string]any{"conversationId": id, "workspacePaths": []string{env.RepoDir}, "transcriptPath": path(id)}
+				require.NoError(t, runAntigravityHookWithEnv(t, env.RepoDir, name, mergeMaps(base, fields), extraEnv), name)
+			}
+			call := func(step, input, output int) string {
+				return fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE","input_tokens":%d,"cache_read_tokens":0,"output_tokens":%d}`, step, input, output)
+			}
+			paused := map[string]any{"executionNum": 0, "error": "", "fullyIdle": false}
+			idle := map[string]any{"executionNum": 0, "error": "", "fullyIdle": true}
+
+			appendLines(t, path(parentID), `{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\nDelegate\n</USER_REQUEST>"}`)
+			hook(parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 1})
+			appendLines(t, path(parentID),
+				`{"step_index":1,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"invoke_subagent","args":{"Role":"File Creator","TypeName":"self"}}],"input_tokens":6975,"cache_read_tokens":0,"output_tokens":161}`,
+				fmt.Sprintf(`{"step_index":2,"type":"GENERIC","content":"Created the following subagent:\n{\"conversationId\": \"%s\"}"}`, childID),
+				call(3, 7461, 25))
+			hook(parentID, "stop", paused)
+
+			hook(childID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 0})
+			appendLines(t, path(childID),
+				fmt.Sprintf(`{"step_index":0,"type":"SYSTEM_MESSAGE","content":"[Message] timestamp=2026-10-20T01:50:00Z sender=%s content=go"}`, parentID))
+			env.WriteFile("notes2.txt", "second note\n")
+			hook(childID, "pre-tool-use", map[string]any{"toolCall": map[string]any{"name": "write_to_file", "args": map[string]any{"TargetFile": "notes2.txt"}}})
+			appendLines(t, path(childID), call(1, 7300, 60), call(3, 7400, 70), call(5, 7548, 60))
+
+			// The child's reply resumes the parent, which answers.
+			hook(parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 4})
+			appendLines(t, path(parentID),
+				fmt.Sprintf(`{"step_index":4,"type":"SYSTEM_MESSAGE","content":"[Message] timestamp=2026-10-20T01:50:35Z sender=%s content=done"}`, childID),
+				call(5, 7618, 107))
+			if parentStopsFirst {
+				hook(parentID, "stop", paused)
+				hook(childID, "stop", idle)
+			} else {
+				hook(childID, "stop", idle)
+				hook(parentID, "stop", paused)
+			}
+
+			parent, err := env.GetSessionState(parentID)
+			require.NoError(t, err)
+			require.NotNil(t, parent)
+			require.Equal(t, "idle", string(parent.Phase), "the parent's turn is ended for it")
+			require.Nil(t, parent.AwaitingSubagentsAt)
+			require.Equal(t, &agent.TokenUsage{InputTokens: 6975 + 7461 + 7618, OutputTokens: 161 + 25 + 107, APICallCount: 3}, parent.TokenUsage)
+			rec := parent.FindTaskRecord(childID)
+			require.NotNil(t, rec)
+			require.Equal(t, &agent.TokenUsage{InputTokens: 7300 + 7400 + 7548, OutputTokens: 60 + 70 + 60, APICallCount: 3}, rec.TokenUsage)
+		})
+	}
+}

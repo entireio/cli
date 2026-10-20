@@ -73,7 +73,7 @@ hooks.json can never fail an agy turn.
 | `SessionStart` | once per **new** conversation, before its first model invocation (at the first prompt in the TUI); **not** on `agy --conversation` resumes | `SessionStart` — agent-type and model hints, state transition for existing state, and the detached zombie-session sweep; creates no state |
 | `PreInvocation` | before **every model invocation** (`invocationNum` is **0-indexed**) | `TurnStart` when `invocationNum == 0` and the transcript ends with the prompt's `USER_INPUT` step (or does not exist yet); otherwise — `> 0`, or a `0` that resumes a parent waiting on a subagent, whose message is not on disk yet — a `TurnStart` with `Event.SuppressIfSessionActive` — the dispatcher drops it only when a turn is genuinely mid-flight (`Phase == ACTIVE` and not stuck), so resumes (`agy --conversation`) are tracked while follow-up invocations don't clobber the pre-prompt baseline |
 | `PreToolUse` (matcher `*`) | before each tool call | `ToolUse` for mutating tools (`write_to_file`, `replace_file_content`, `multi_replace_file_content`) → `FilesTouched` (the parent's, for a subagent) |
-| `Stop` | at agent stop; payload carries `fullyIdle` | `TurnEnd` when `fullyIdle == true`; nil otherwise (background tasks still running) |
+| `Stop` | at agent stop; payload carries `fullyIdle` | `TurnEnd` when `fullyIdle == true`; otherwise a `TurnEnd` marked `AwaitingSubagents`, which records the pause without ending the turn (see Subagents) |
 
 `session-start` writes nothing to stdout: `AntigravityAgent` is not a
 `HookResponseWriter`, so there is no "tracked by entire" banner and no
@@ -223,19 +223,23 @@ and `Role`. Captured on agy 1.4.2:
   next prompt's `USER_INPUT` is on disk, so it still starts a new turn.
 - The child's calls are on its own steps only, so its usage goes to the task
   record and the parent's to its session, each counted once.
+- When the parent's last Stop (`fullyIdle=false`, a subagent still running)
+  lands before the subagent's turn ends, agy sends the parent no further Stop.
+  The pause is recorded (`AwaitingSubagentsAt`), and whichever hook sees both
+  the pause and the last subagent finished — the subagent's turn end or the
+  parent's Stop, which can land milliseconds apart in either order — claims it
+  and ends the parent's turn, exactly as a reported one.
 
 ## Gaps & Limitations (Preview)
 
 - **Silent tracking** in the agy UI by choice (SessionStart is installed but
   writes no banner); `entire status` is the visibility surface.
-- **Headless subagent runs leave a ghost parent session**: agy runs subagents
-  as separate conversations with their own hooks; in `-p` mode the parent
-  conversation only receives `fullyIdle=false` Stops before the process exits,
-  so its session stays ACTIVE (visible in `entire status` until the stale
-  threshold, or until the sweep that the next conversation's `session-start`
-  spawns finalizes it once the agy process has exited). The subagent's work
-  condenses normally, and ghost sessions with no tracked files no longer pin
-  shadow branches.
+- **Headless subagent runs**: in `-p` mode the parent conversation only
+  receives `fullyIdle=false` Stops before the process exits. Its turn now ends
+  when its last subagent finishes (see Subagents); a parent whose subagents
+  never finish still stays ACTIVE until the stale threshold or the exited-owner
+  sweep, and such ghost sessions with no tracked files do not pin shadow
+  branches.
 - **Mid-turn commit token scoping is coarse on the statusline fallback**: such
   checkpoints record zero tokens; the turn's delta lands on the next
   condensation (session totals stay correct). With per-step transcript usage the
