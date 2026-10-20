@@ -10,8 +10,14 @@ import "slices"
 //
 //nolint:gochecknoglobals // package-level allowlist; mutated by tests via snapshot/restore.
 var officialPlugins = []string{
-	// Add Entire-shipped plugin names here as they're released.
-	"ci", // entire-ci: customer-facing CI-integration management (entireio/entire-ci)
+	// Add Entire-shipped plugin names here as they're released. Alphabetical;
+	// each names the repository it ships from, since the binary on disk
+	// (`entire-<name>`) is the only other clue to where it came from.
+	"ci",          // entireio/entire-ci: customer-facing CI-integration management
+	"graph",       // entireio/entire-graph: local code graph for symbol search and impact analysis
+	"investigate", // entireio/entire-investigate: multi-agent investigation
+	"run",         // entireio/entire-run: launch an Entire-enabled agent
+	"upgrade",     // entireio/entire-upgrade: upgrade the installed Entire binary
 }
 
 func IsOfficialPlugin(name string) bool {
