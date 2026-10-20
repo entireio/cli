@@ -776,8 +776,8 @@ func TestReaders_TakeTheConversationLock(t *testing.T) {
 	}()
 
 	select {
-	case <-done:
-		t.Fatal("readers completed while another process held the conversation lock")
+	case err := <-done:
+		t.Fatalf("readers completed while another process held the conversation lock (err=%v)", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 	release()

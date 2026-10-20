@@ -6,31 +6,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
-func TestBuildApprovalRequestRequiresMessageForRequestChanges(t *testing.T) {
+func TestBuildApprovalRequestApproveAllowsEmptyMessage(t *testing.T) {
 	t.Parallel()
-	if _, err := buildApprovalRequest("request_changes", "  "); err == nil {
-		t.Error("request_changes without message should be rejected")
-	}
-	req, err := buildApprovalRequest("request_changes", "please fix")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Event != "request_changes" || req.Body != "please fix" {
+	req := buildApprovalRequest("approve", "  ")
+	if req.Event != "approve" || req.Body != "" {
 		t.Fatalf("req = %#v", req)
 	}
 }
 
-func TestBuildApprovalRequestApproveAllowsEmptyMessage(t *testing.T) {
+// request-changes was removed; the hidden name points to entire.io for every
+// argument shape it used to accept, without any request.
+func TestTrailRequestChangesIsRemoved(t *testing.T) {
 	t.Parallel()
-	req, err := buildApprovalRequest("approve", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Event != "approve" || req.Body != "" {
-		t.Fatalf("req = %#v", req)
+	for _, project := range []bool{false, true} {
+		cmd := newTrailCmdForMode(project)
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+		cmd.SetArgs([]string{"request-changes", "42", "-m", "Fix it", "--branch", "feature/work"})
+		require.ErrorIs(t, cmd.Execute(), errTrailRequestChangesRemoved)
+		sub, _, err := cmd.Find([]string{"request-changes"})
+		require.NoError(t, err)
+		require.True(t, sub.Hidden)
 	}
 }
 
@@ -47,9 +47,6 @@ func TestTrailApprovalCmdsHaveExpectedFlags(t *testing.T) {
 	t.Parallel()
 	if newTrailApproveCmd(legacyTrailMode).Flags().Lookup("message") == nil {
 		t.Error("approve missing --message")
-	}
-	if newTrailRequestChangesCmd(legacyTrailMode).Flags().Lookup("message") == nil {
-		t.Error("request-changes missing --message")
 	}
 	if newTrailApprovalsCmd(legacyTrailMode).Flags().Lookup("json") == nil {
 		t.Error("approvals missing --json")

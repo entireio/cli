@@ -819,8 +819,8 @@ func TestResolveCreateBranch(t *testing.T) {
 	}
 }
 
-// Trail deletion was removed; the command must fail and point at closing,
-// whichever legacy flags a script still passes.
+// Trail deletion was removed; the command must say so whichever legacy flags
+// a script still passes.
 func TestTrailDeleteRemoved(t *testing.T) {
 	t.Parallel()
 
@@ -833,8 +833,8 @@ func TestTrailDeleteRemoved(t *testing.T) {
 		if err == nil {
 			t.Fatalf("trail delete %v: expected error, got nil", args)
 		}
-		if !strings.Contains(err.Error(), "entire trail update --status closed") {
-			t.Fatalf("trail delete %v: error should point at closing, got: %v", args, err)
+		if !errors.Is(err, errTrailDeleteRemoved) {
+			t.Fatalf("trail delete %v: want the removal error, got: %v", args, err)
 		}
 	}
 }

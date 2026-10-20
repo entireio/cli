@@ -234,7 +234,7 @@ var (
 
 func getDetector() *detect.Detector {
 	betterleaksDetectorOnce.Do(func() {
-		d, err := detect.NewDetectorDefaultConfig()
+		d, err := newBetterleaksDetector()
 		if err != nil {
 			return
 		}
@@ -327,28 +327,30 @@ func detectAllLayers(s string) []taggedRegion {
 		if d := getDetector(); d != nil {
 			seenSecrets := make(map[string]struct{})
 			for _, f := range d.DetectString(s) {
-				// Placeholder-valued findings (changeme, secret_here, mask runs)
-				// stay visible — but only on an exact match: splitting a greedy
-				// finding at a placeholder head can leak a real secret in the tail.
-				if isPlaceholderSecretValue(f.Secret) {
-					continue
-				}
-				// A finding reports one occurrence, but the search below already
-				// covers every copy of its secret. Repeated findings must not
-				// rescan the input and accumulate quadratically many regions.
-				if _, seen := seenSecrets[f.Secret]; seen {
-					continue
-				}
-				seenSecrets[f.Secret] = struct{}{}
-				searchFrom := 0
-				for {
-					idx := strings.Index(s[searchFrom:], f.Secret)
-					if idx < 0 {
-						break
+				for _, secret := range betterleaksFindingSecrets(f) {
+					// Placeholder-valued findings (changeme, secret_here, mask runs)
+					// stay visible — but only on an exact match: splitting a greedy
+					// finding at a placeholder head can leak a real secret in the tail.
+					if isPlaceholderSecretValue(secret) {
+						continue
 					}
-					absIdx := searchFrom + idx
-					regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
-					searchFrom = absIdx + len(f.Secret)
+					// A finding reports one occurrence, but the search below already
+					// covers every copy of its secret. Repeated findings must not
+					// rescan the input and accumulate quadratically many regions.
+					if _, seen := seenSecrets[secret]; seen {
+						continue
+					}
+					seenSecrets[secret] = struct{}{}
+					searchFrom := 0
+					for {
+						idx := strings.Index(s[searchFrom:], secret)
+						if idx < 0 {
+							break
+						}
+						absIdx := searchFrom + idx
+						regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(secret)}})
+						searchFrom = absIdx + len(secret)
+					}
 				}
 			}
 		}

@@ -25,7 +25,7 @@ func projectTrailsEnabled() bool {
 // project-scoped trail models. Commands whose meaning differs between the two
 // are separate trees: trail_*.go for legacy, project_trail_*.go for project.
 // Commands that act on one repository branch in both models (checkout, resume,
-// finding, watch, approve, request-changes, approvals) are shared and take a
+// finding, watch, approve, approvals) are shared and take a
 // trailMode, which decides how a selector finds that branch and how help
 // describes the selector. Retiring the legacy model means deleting
 // legacyTrailMode, its tree, and the legacy argument of each help call.

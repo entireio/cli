@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 // CloudClient generates dispatches on an entire-api cell: the caller's home
@@ -227,8 +228,12 @@ func (c *CloudClient) waitForDispatch(ctx context.Context, run *APIRun) (*APIRun
 
 // pollIsTransient reports whether a failed status poll is worth repeating: the
 // run already exists and keeps generating on the cell, so a 5xx, a 429, or a
-// dropped connection must not abandon it.
+// dropped connection must not abandon it. A request refused by the redirect
+// policy also surfaces as a *url.Error, but repeating it is refused again.
 func pollIsTransient(err error) bool {
+	if errors.Is(err, httpclient.ErrRequestPolicy) {
+		return false
+	}
 	var httpErr *api.HTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr.StatusCode >= http.StatusInternalServerError || httpErr.StatusCode == http.StatusTooManyRequests

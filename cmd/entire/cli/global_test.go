@@ -6,11 +6,15 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/go-git/go-git/v6/x/plugin/config"
+	"github.com/stretchr/testify/require"
 	"github.com/zalando/go-keyring"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -64,6 +68,13 @@ func TestMain(m *testing.M) {
 	// keeps the empty orphan (ENCLI-378). Set process-wide (not per-test) so
 	// it covers spawned binaries and git hooks. Mirrors the e2e TestMains.
 	gitenv.IsolateMain()
+
+	// External agents are discovered by scanning PATH and registered in a
+	// process-wide registry that nothing resets. Tests that enable external
+	// agents extend PATH rather than replace it, so an entire-agent-* on the
+	// developer's PATH would register there and answer every later detection
+	// test. Hide them once for the whole package.
+	os.Setenv("PATH", pathWithoutExternalAgents(os.Getenv("PATH"), filepath.Join(isolationDir, "path")))
 
 	// ENTIRE_TOKEN is isolated by ABSENCE, not by a redirected path, so it is
 	// not in the block above. Left set, it outranks every stored context in
@@ -159,4 +170,61 @@ func TestUnsetEnv(t *testing.T) {
 			t.Fatalf("%s = %q after restore, want still absent", key, v)
 		}
 	})
+}
+
+// pathWithoutExternalAgents returns path with every entire-agent-* hidden. A
+// directory holding one is replaced by a directory of links to its other
+// entries under shadowRoot, so the git, sh or mise beside it stay reachable.
+// A directory that cannot be shadowed is kept as it is.
+func pathWithoutExternalAgents(path, shadowRoot string) string {
+	dirs := filepath.SplitList(path)
+	for i, dir := range dirs {
+		if matches, err := filepath.Glob(filepath.Join(dir, "entire-agent-*")); err != nil || len(matches) == 0 {
+			continue
+		}
+		if shadow, err := shadowWithoutExternalAgents(dir, filepath.Join(shadowRoot, strconv.Itoa(i))); err == nil {
+			dirs[i] = shadow
+		}
+	}
+	return strings.Join(dirs, string(os.PathListSeparator))
+}
+
+func shadowWithoutExternalAgents(dir, shadow string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(shadow, 0o700); err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "entire-agent-") {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(dir, entry.Name()), filepath.Join(shadow, entry.Name())); err != nil {
+			return "", err
+		}
+	}
+	return shadow, nil
+}
+
+func TestPathWithoutExternalAgents_KeepsTheRestOfTheDirectory(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	shared, plain := t.TempDir(), t.TempDir()
+	for _, name := range []string{"entire-agent-acme", "git"} {
+		require.NoError(t, os.WriteFile(filepath.Join(shared, name), []byte("#!/bin/sh\n"), 0o700))
+	}
+	path := shared + string(os.PathListSeparator) + plain
+
+	dirs := filepath.SplitList(pathWithoutExternalAgents(path, t.TempDir()))
+
+	require.Len(t, dirs, 2)
+	require.Equal(t, plain, dirs[1], "a directory without an external agent stays as it is")
+	_, err := os.Stat(filepath.Join(dirs[0], "git"))
+	require.NoError(t, err, "the external agent's neighbours stay reachable")
+	_, err = os.Stat(filepath.Join(dirs[0], "entire-agent-acme"))
+	require.ErrorIs(t, err, os.ErrNotExist, "the external agent is hidden")
 }

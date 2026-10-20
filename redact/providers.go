@@ -2,6 +2,7 @@ package redact
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -73,12 +74,59 @@ var providerTokenPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sbp_[a-z0-9_-]{20,}`),
 }
 
-// bareSKKeyPattern catches short sk- keys (e.g. LiteLLM virtual keys, sk- + 22
-// chars) that are too short for the entropy layer (#2728). The prefix must
-// follow a non-alphanumeric char ("_" included) or a literal JSON escape, so
-// "risk-" doesn't match; detectProviderTokens also requires a digit or
-// uppercase letter in the body.
-var bareSKKeyPattern = regexp.MustCompile(`(?:^|[^A-Za-z0-9]|\\[bfnrt]|\\u[0-9A-Fa-f]{4})(sk-[A-Za-z0-9_-]{20,})`)
+// tokenBoundary is the leading boundary for the bounded token rules below: the
+// token must follow a non-alphanumeric char ("_" included) or a literal JSON
+// escape, whose trailing letter or hex digit would otherwise read as part of a
+// word ("\nsk-…", ""AKIA…"). Each rule captures the token in group 1.
+const tokenBoundary = `(?:^|[^A-Za-z0-9]|\\[bfnrt]|\\u[0-9A-Fa-f]{4})` //nolint:gosec // regex literal, not a credential
+
+// boundedTokenRule is a token shape with a leading boundary and a check that
+// filters a match by the surrounding input and the token itself.
+//
+// A pattern that opens with tokenBoundary gives Go's regexp no literal prefix
+// to skip ahead to, so every rule costs a full pass over every input. literals
+// lists substrings at least one of which every match contains; inputs with
+// none of them skip the pass without changing what matches.
+type boundedTokenRule struct {
+	literals []string
+	pattern  *regexp.Regexp
+	keep     func(s string, start, end int) bool
+}
+
+var boundedTokenRules = []boundedTokenRule{
+	// Short sk- keys (e.g. LiteLLM virtual keys, sk- + 22 chars) that are too
+	// short for the entropy layer (#2728). The boundary keeps "risk-" out, and
+	// a digit or uppercase letter in the body keeps kebab-case names out.
+	{
+		literals: []string{"sk-"},
+		pattern:  regexp.MustCompile(tokenBoundary + `(sk-[A-Za-z0-9_-]{20,})`),
+		keep: func(s string, start, end int) bool {
+			return strings.ContainsFunc(s[start+len("sk-"):end], isDigitOrUpper)
+		},
+	},
+	// AWS access key IDs on their own (#2808). betterleaks' aws-access-token
+	// rule fired only beside a secret access key, and a 20-char ID can never
+	// clear the entropy threshold. The body is betterleaks' own regex; the
+	// filters are its documentation EXAMPLE keys and low-entropy placeholders.
+	{
+		literals: []string{"A3T", "AKIA", "ASIA", "ABIA", "ACCA"},
+		pattern:  regexp.MustCompile(tokenBoundary + `((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})`),
+		keep: func(s string, start, end int) bool {
+			id := s[start:end]
+			return endsAtBoundary(s, end) && !strings.HasSuffix(id, "EXAMPLE") && shannonEntropy(id) > 3.0
+		},
+	},
+	// Tableau personal access tokens ("<22 base64>==:<32 alnum>"). betterleaks
+	// only scans for them when "tableau" appears in the same text, and "/",
+	// "+" and ":" split them for the entropy layer.
+	{
+		literals: []string{"==:"},
+		pattern:  regexp.MustCompile(tokenBoundary + `([A-Za-z0-9+/]{22}==:[A-Za-z0-9]{32})`),
+		keep: func(s string, start, end int) bool {
+			return endsAtBoundary(s, end) && shannonEntropy(s[start:end]) >= 3.5
+		},
+	},
+}
 
 // detectProviderTokens returns tagged regions for every occurrence of a
 // known provider secret-token prefix in s. Regions use the empty label so
@@ -91,13 +139,73 @@ func detectProviderTokens(s string) []taggedRegion {
 			regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
 		}
 	}
-	for _, loc := range bareSKKeyPattern.FindAllStringSubmatchIndex(s, -1) {
-		start, end := loc[2], loc[3]
-		if strings.ContainsFunc(s[start+len("sk-"):end], isDigitOrUpper) {
+	regions = append(regions, detectSalesforceTokens(s)...)
+	for _, rule := range boundedTokenRules {
+		if !containsAny(s, rule.literals) {
+			continue
+		}
+		for _, loc := range rule.pattern.FindAllStringSubmatchIndex(s, -1) {
+			start, end := loc[2], loc[3]
+			if rule.keep(s, start, end) {
+				regions = append(regions, taggedRegion{region: region{start, end}})
+			}
+		}
+	}
+	return regions
+}
+
+// salesforceHeadPattern matches the head of a Salesforce access token: the
+// 15-char org ID and the "!" before the session body.
+var salesforceHeadPattern = regexp.MustCompile(tokenBoundary + `(00[A-Za-z0-9]{13}!)`)
+
+// detectSalesforceTokens catches Salesforce access tokens (org ID, "!", session
+// body of 80+ chars). betterleaks only scans for them when "salesforce.com"
+// appears in the same text, and "!" and "." split them into chunks the entropy
+// layer misses.
+//
+// The body charset includes "_", "." and "-", so a single greedy regex would
+// run a body into the org ID of a token joined to it ("<token>_<token>") and,
+// stopping at that token's "!", skip it. Heads cannot overlap, so they are
+// matched first and each body is extended by hand up to the next head.
+func detectSalesforceTokens(s string) []taggedRegion {
+	if !strings.Contains(s, "!") {
+		return nil
+	}
+	heads := salesforceHeadPattern.FindAllStringSubmatchIndex(s, -1)
+	var regions []taggedRegion
+	for i, head := range heads {
+		start, bodyStart := head[2], head[3]
+		limit := len(s)
+		if i+1 < len(heads) {
+			limit = heads[i+1][0]
+		}
+		end := bodyStart
+		for end < limit && isSalesforceBodyChar(s[end]) {
+			end++
+		}
+		if end-bodyStart >= 80 && shannonEntropy(s[start:end]) >= 3.3 {
 			regions = append(regions, taggedRegion{region: region{start, end}})
 		}
 	}
 	return regions
+}
+
+func isSalesforceBodyChar(b byte) bool {
+	return isASCIIAlnum(b) || b == '.' || b == '_' || b == '-'
+}
+
+func containsAny(s string, literals []string) bool {
+	return slices.ContainsFunc(literals, func(lit string) bool { return strings.Contains(s, lit) })
+}
+
+// endsAtBoundary reports whether the match ending at end is not followed by an
+// alphanumeric char. RE2 has no lookahead, so fixed-length rules check it here.
+func endsAtBoundary(s string, end int) bool {
+	return end == len(s) || !isASCIIAlnum(s[end])
+}
+
+func isASCIIAlnum(b byte) bool {
+	return ('0' <= b && b <= '9') || ('A' <= b && b <= 'Z') || ('a' <= b && b <= 'z')
 }
 
 func isDigitOrUpper(r rune) bool {
