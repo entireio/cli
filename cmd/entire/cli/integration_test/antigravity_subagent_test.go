@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -141,8 +143,18 @@ func TestAntigravity_SubagentWorkBelongsToTheParent(t *testing.T) {
 // ended for it, once, with all its calls counted.
 func TestAntigravity_ParentTurnEndsWhenItsSubagentFinishes(t *testing.T) {
 	t.Parallel()
-	for name, parentStopsFirst := range map[string]bool{"parent stops first": true, "subagent ends first": false} {
-		t.Run(name, func(t *testing.T) {
+	cases := []struct {
+		name             string
+		parentStopsFirst bool
+		deadSubagent     bool // an earlier subagent left its record open and died
+	}{
+		{"parent stops first", true, false},
+		{"subagent ends first", false, false},
+		{"another subagent died earlier", true, true},
+	}
+	for _, tc := range cases {
+		parentStopsFirst := tc.parentStopsFirst
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			env := newAntigravityEnv(t)
 			extraEnv := []string{"ENTIRE_ANTIGRAVITY_STATUS_DIR=" + t.TempDir(), "ENTIRE_ANTIGRAVITY_CONFIG_DIR=" + t.TempDir()}
@@ -168,6 +180,12 @@ func TestAntigravity_ParentTurnEndsWhenItsSubagentFinishes(t *testing.T) {
 				fmt.Sprintf(`{"step_index":2,"type":"GENERIC","content":"Created the following subagent:\n{\"conversationId\": \"%s\"}"}`, childID),
 				call(3, 7461, 25))
 			hook(parentID, "stop", paused)
+			if tc.deadSubagent {
+				state, err := env.GetSessionState(parentID)
+				require.NoError(t, err)
+				state.AddTaskRecord(session.TaskRecord{ToolUseID: "dead-subagent", AgentID: "dead-subagent", StartedAt: time.Now()})
+				require.NoError(t, env.WriteSessionState(parentID, state))
+			}
 
 			hook(childID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 0})
 			appendLines(t, path(childID),

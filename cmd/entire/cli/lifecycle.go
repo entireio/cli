@@ -2806,6 +2806,21 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 	return nil
 }
 
+// subagentStillRunning reports whether the subagent session behind an
+// uncompleted task record is still working: ACTIVE, with its agent process
+// alive and not stuck. A record whose subagent crashed, was killed, or never
+// had a session must not hold its parent's turn open.
+func subagentStillRunning(ctx context.Context, agentID string) bool {
+	if agentID == "" {
+		return false
+	}
+	state, err := strategy.LoadSessionState(ctx, agentID)
+	if err != nil || state == nil {
+		return false
+	}
+	return state.Phase.IsActive() && !state.OwnerExited() && !state.IsStuckActive()
+}
+
 // subagentCompletionWindow bounds how long after a subagent finished a paused
 // parent's turn may still be ended for it. The pause and the completion are
 // separate hook processes that land milliseconds apart in either order.
@@ -2873,7 +2888,10 @@ func endParentTurnIfSubagentsDone(ctx context.Context, ag agent.Agent, parentID 
 	recent := false
 	for _, rec := range parent.TaskRecords {
 		if rec.CompletedAt.IsZero() {
-			return // another subagent is still running
+			if subagentStillRunning(ctx, rec.AgentID) {
+				return // another subagent is still running
+			}
+			continue // left open by a subagent that crashed or was killed
 		}
 		if time.Since(rec.CompletedAt) < subagentCompletionWindow {
 			recent = true
