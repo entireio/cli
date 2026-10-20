@@ -2396,30 +2396,35 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 // releaseSubagentSessionWork is what condensing a subagent's own session means:
 // it never checkpoints on its own, so any files it still holds (recorded before
-// it was known to be a subagent) move to its parent, and it is marked fully
-// condensed so doctor and the sweeper stop offering it.
+// it was known to be a subagent) move to its parent, and it is then marked
+// fully condensed so doctor and the sweeper stop offering it. The parent gets
+// the files first; only the files it received leave the subagent, so a failed
+// handoff stays retryable and an edit recorded meanwhile is kept.
 func releaseSubagentSessionWork(ctx context.Context, sessionID string) error {
-	var parentID string
-	var files []string
-	err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		parentID = state.ParentSessionID
-		files = slices.Clone(state.FilesTouched)
-		state.FilesTouched = nil
-		state.FullyCondensed = true
+	child, err := LoadSessionState(ctx, sessionID)
+	if err != nil || child == nil || child.ParentSessionID == "" {
+		return err
+	}
+	handed := slices.Clone(child.FilesTouched)
+	if len(handed) > 0 {
+		err := MutateSessionState(ctx, child.ParentSessionID, func(state *SessionState) error {
+			MergeUnhashedFilesTouched(state, handed)
+			return nil
+		})
+		if err != nil {
+			// The parent is gone or unwritable: keep the files on the subagent.
+			return fmt.Errorf("hand subagent files to parent %s: %w", child.ParentSessionID, err)
+		}
+	}
+	err = MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		state.FilesTouched = slices.DeleteFunc(state.FilesTouched, func(f string) bool {
+			return slices.Contains(handed, f)
+		})
+		state.FullyCondensed = len(state.FilesTouched) == 0
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("release subagent session %s: %w", sessionID, err)
-	}
-	if len(files) == 0 || parentID == "" {
-		return nil
-	}
-	err = MutateSessionState(ctx, parentID, func(state *SessionState) error {
-		MergeUnhashedFilesTouched(state, files)
-		return nil
-	})
-	if err != nil && !errors.Is(err, ErrStateNotFound) {
-		return fmt.Errorf("hand subagent files to parent %s: %w", parentID, err)
 	}
 	return nil
 }

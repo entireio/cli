@@ -456,6 +456,14 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return nil
 	}
 
+	// Before any file filtering: a subagent's first tool call, of any kind, is
+	// the first point it can be marked, and a shell command can edit and commit
+	// without naming a file here.
+	target := event.SessionID
+	if link, isSubagent := markSubagentSession(ctx, ag, event.SessionID, event.SessionRef); isSubagent {
+		target = link.ParentSessionID
+	}
+
 	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
 	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
 	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
@@ -474,10 +482,6 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// A subagent's own session records nothing: its changes are the parent's,
 	// recorded on the parent so a commit made while it runs links them there.
-	target := event.SessionID
-	if link, isSubagent := markSubagentSession(ctx, ag, event.SessionID, event.SessionRef); isSubagent {
-		target = link.ParentSessionID
-	}
 	if err := strategy.RecordFilesTouched(ctx, target, modified, added, deleted); err != nil {
 		logging.Warn(logCtx, "tool-use: failed to record files touched",
 			slog.String("session_id", target),
@@ -675,7 +679,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	setupSpan.End()
 
 	// A new turn is not waiting on the previous one's subagents.
-	if err := recordAwaitingSubagents(ctx, sessionID, false); err != nil {
+	if err := resetSubagentPause(ctx, sessionID); err != nil {
 		logging.Warn(logCtx, "failed to clear awaiting-subagents mark",
 			slog.String("error", err.Error()))
 	}
@@ -2806,40 +2810,38 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 	return nil
 }
 
-// subagentStillRunning reports whether the subagent session behind an
-// uncompleted task record is still working: ACTIVE, with its agent process
-// alive and not stuck. A record whose subagent crashed, was killed, or never
-// had a session must not hold its parent's turn open.
-func subagentStillRunning(ctx context.Context, agentID string) bool {
-	if agentID == "" {
-		return false
-	}
-	state, err := strategy.LoadSessionState(ctx, agentID)
-	if err != nil || state == nil {
-		return false
-	}
-	return state.Phase.IsActive() && !state.OwnerExited() && !state.IsStuckActive()
-}
-
-// subagentCompletionWindow bounds how long after a subagent finished a paused
-// parent's turn may still be ended for it. The pause and the completion are
-// separate hook processes that land milliseconds apart in either order.
-const subagentCompletionWindow = time.Minute
-
-// claimAwaitingSubagents clears AwaitingSubagentsAt and reports whether this
-// call cleared it, so of the two hooks that can find the parent's subagents
-// done, exactly one ends its turn.
-func claimAwaitingSubagents(ctx context.Context, sessionID string) bool {
+// claimSubagentTurnEnd claims ending the session's current turn for its
+// subagents: it clears the pause and records the claim, and reports whether
+// this call made it, so of the hooks that can find the subagents done exactly
+// one ends the turn, and a pause reported afterwards cannot re-arm it.
+func claimSubagentTurnEnd(ctx context.Context, sessionID string) bool {
 	claimed := false
 	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
-		if state.AwaitingSubagentsAt == nil || state.Phase != session.PhaseActive {
+		if state.AwaitingSubagentsAt == nil || state.SubagentTurnEndClaimed || state.Phase != session.PhaseActive {
 			return strategy.ErrMutationSkip
 		}
 		state.AwaitingSubagentsAt = nil
+		state.SubagentTurnEndClaimed = true
 		claimed = true
 		return nil
 	})
 	return err == nil && claimed
+}
+
+// resetSubagentPause clears the pause and the claim at a new turn.
+func resetSubagentPause(ctx context.Context, sessionID string) error {
+	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if state.AwaitingSubagentsAt == nil && !state.SubagentTurnEndClaimed {
+			return strategy.ErrMutationSkip
+		}
+		state.AwaitingSubagentsAt = nil
+		state.SubagentTurnEndClaimed = false
+		return nil
+	})
+	if errors.Is(err, strategy.ErrStateNotFound) {
+		return nil
+	}
+	return err //nolint:wrapcheck // callers log it with the session ID
 }
 
 // recordAwaitingSubagents sets or clears AwaitingSubagentsAt. Setting applies
@@ -2857,7 +2859,7 @@ func recordAwaitingSubagents(ctx context.Context, sessionID string, awaiting boo
 			state.AwaitingSubagentsAt = nil
 			return nil
 		}
-		if state.Phase != session.PhaseActive || state.AwaitingSubagentsAt != nil {
+		if state.Phase != session.PhaseActive || state.AwaitingSubagentsAt != nil || state.SubagentTurnEndClaimed {
 			return strategy.ErrMutationSkip
 		}
 		now := time.Now()
@@ -2871,33 +2873,38 @@ func recordAwaitingSubagents(ctx context.Context, sessionID string, awaiting boo
 }
 
 // endParentTurnIfSubagentsDone ends the parent's turn when it stopped to wait
-// for its subagents and the last one has just finished: the agent will not
-// report the turn's end itself (Antigravity sends one fullyIdle=false Stop and
-// nothing after it). The turn ends exactly as a reported one would, from the
-// parent's own transcript and turn start, so its tokens and files count once.
+// for its subagents and they are done: the agent will not report the turn's
+// end itself (Antigravity sends one fullyIdle=false Stop and nothing after
+// it). Every subagent the turn involved must have stopped, and every reply it
+// sent must be in the parent's transcript: an unread reply wakes the parent,
+// so its turn is not over. A subagent whose agent died sends nothing more.
+// The turn then ends exactly as a reported one would, from the parent's own
+// transcript and turn start, so its tokens and files count once.
 func endParentTurnIfSubagentsDone(ctx context.Context, ag agent.Agent, parentID string) {
+	counter, ok := agent.AsSubagentReplyCounter(ag)
+	if !ok {
+		return
+	}
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	parent, err := strategy.LoadSessionState(ctx, parentID)
 	if err != nil || parent == nil || parent.Phase != session.PhaseActive ||
-		parent.AwaitingSubagentsAt == nil || parent.TranscriptPath == "" {
+		parent.AwaitingSubagentsAt == nil || parent.SubagentTurnEndClaimed || parent.TranscriptPath == "" {
 		return
 	}
-	// Act only for subagents that just finished: a pause with no subagent
-	// completing around it is waiting on something else (a background
-	// command), whose end the agent reports itself.
-	recent := false
-	for _, rec := range parent.TaskRecords {
-		if rec.CompletedAt.IsZero() {
-			if subagentStillRunning(ctx, rec.AgentID) {
-				return // another subagent is still running
-			}
-			continue // left open by a subagent that crashed or was killed
-		}
-		if time.Since(rec.CompletedAt) < subagentCompletionWindow {
-			recent = true
+	turnStart := 0
+	if pre, preErr := LoadPrePromptState(ctx, parentID); preErr == nil && pre != nil {
+		turnStart = pre.TranscriptOffset
+	}
+	subagents, err := counter.TurnSubagents(parent.TranscriptPath, turnStart)
+	if err != nil || len(subagents) == 0 {
+		return // not waiting on subagents (a background command), or unknown
+	}
+	for id, received := range subagents {
+		if !subagentDone(ctx, counter, id, parentID, received) {
+			return
 		}
 	}
-	if !recent || !claimAwaitingSubagents(ctx, parentID) {
+	if !claimSubagentTurnEnd(ctx, parentID) {
 		return
 	}
 	logging.Info(logCtx, "ending turn of a session whose subagents finished after it stopped",
@@ -2911,6 +2918,25 @@ func endParentTurnIfSubagentsDone(ctx context.Context, ag agent.Agent, parentID 
 		logging.Warn(logCtx, "failed to end the parent's turn",
 			slog.String("session_id", parentID), slog.String("error", err.Error()))
 	}
+}
+
+// subagentDone reports whether a subagent is finished from its parent's point
+// of view: its session is not running, and either its agent died or the parent
+// has received every reply it sent. A subagent without a session yet is
+// starting, not done.
+func subagentDone(ctx context.Context, counter agent.SubagentReplyCounter, subagentID, parentID string, received int) bool {
+	state, err := strategy.LoadSessionState(ctx, subagentID)
+	if err != nil || state == nil {
+		return false
+	}
+	if state.OwnerExited() || state.IsStuckActive() {
+		return true
+	}
+	if state.Phase.IsActive() || state.TranscriptPath == "" {
+		return false
+	}
+	sent, err := counter.RepliesSent(state.TranscriptPath, parentID)
+	return err == nil && sent <= received
 }
 
 // --- Helper functions ---

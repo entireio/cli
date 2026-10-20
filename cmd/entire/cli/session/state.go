@@ -503,6 +503,12 @@ type State struct {
 	// finishes while it is set, the lifecycle ends the session's turn.
 	AwaitingSubagentsAt *time.Time `json:"awaiting_subagents_at,omitempty"`
 
+	// SubagentTurnEndClaimed is set when the lifecycle has taken it on itself
+	// to end the current turn because its subagents finished, and cleared at the
+	// next turn start. A pause reported after the claim does not re-arm it, so
+	// the turn is ended once.
+	SubagentTurnEndClaimed bool `json:"subagent_turn_end_claimed,omitempty"`
+
 	// TaskRecords tracks subagents dispatched by this session — the durable
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`

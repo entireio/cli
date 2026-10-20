@@ -7,12 +7,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -94,7 +92,7 @@ func TestAntigravity_SubagentWorkBelongsToTheParent(t *testing.T) {
 	require.True(t, ok, "the parent's checkpoint carries the child's transcript so far")
 
 	// The child replies and finishes.
-	appendLines(t, transcript(childID), planner(3, 6224, 115, `,"tool_calls":[{"name":"send_message","args":{}}]`), planner(5, 6449, 20, ""))
+	appendLines(t, transcript(childID), planner(3, 6224, 115, fmt.Sprintf(`,"tool_calls":[{"name":"send_message","args":{"Recipient":"%s"}}]`, parentID)), planner(5, 6449, 20, ""))
 	hook(childID, "stop", mergeMaps(stop, map[string]any{"fullyIdle": true}))
 
 	// The parent resumes, before the child's message is in its transcript.
@@ -138,84 +136,188 @@ func TestAntigravity_SubagentWorkBelongsToTheParent(t *testing.T) {
 	require.Equal(t, 5846+6224+6449, task.TokenUsage.InputTokens, "%s", raw)
 }
 
+// agyParentChild drives one parent conversation and its subagent through the
+// hooks, with the step shapes agy 1.4.2 writes.
+type agyParentChild struct {
+	t                 *testing.T
+	env               *TestEnv
+	extraEnv          []string
+	parentID, childID string
+}
+
+func newAgyParentChild(t *testing.T) *agyParentChild {
+	t.Helper()
+	return &agyParentChild{
+		t:        t,
+		env:      newAntigravityEnv(t),
+		extraEnv: []string{"ENTIRE_ANTIGRAVITY_STATUS_DIR=" + t.TempDir(), "ENTIRE_ANTIGRAVITY_CONFIG_DIR=" + t.TempDir()},
+		parentID: "a0528243-0000-4000-8000-000000000001",
+		childID:  "a3a70f0a-0000-4000-8000-000000000002",
+	}
+}
+
+func (s *agyParentChild) path(id string) string {
+	return filepath.Join(antigravityBrainDir(s.env.RepoDir), id, ".system_generated", "logs", "transcript_full.jsonl")
+}
+
+func (s *agyParentChild) hook(id, name string, fields map[string]any) {
+	s.t.Helper()
+	base := map[string]any{"conversationId": id, "workspacePaths": []string{s.env.RepoDir}, "transcriptPath": s.path(id)}
+	require.NoError(s.t, runAntigravityHookWithEnv(s.t, s.env.RepoDir, name, mergeMaps(base, fields), s.extraEnv), name)
+}
+
+func (s *agyParentChild) stop(id string, fullyIdle bool) {
+	s.t.Helper()
+	s.hook(id, "stop", map[string]any{"executionNum": 0, "error": "", "fullyIdle": fullyIdle})
+}
+
+func agyCall(step, input, output int, extra string) string {
+	return fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE"%s,"input_tokens":%d,"cache_read_tokens":0,"output_tokens":%d}`, step, extra, input, output)
+}
+
+func agyMessage(step int, sender string) string {
+	return fmt.Sprintf(`{"step_index":%d,"type":"SYSTEM_MESSAGE","content":"[Message] timestamp=2026-10-20T01:50:00Z sender=%s content=hi"}`, step, sender)
+}
+
+// start runs the parent's prompt and invoke_subagent, the parent's first
+// pause, and the child's first call and tool call (which marks it).
+func (s *agyParentChild) start() {
+	s.t.Helper()
+	appendLines(s.t, s.path(s.parentID), `{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\nDelegate\n</USER_REQUEST>"}`)
+	s.hook(s.parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 1})
+	appendLines(s.t, s.path(s.parentID),
+		agyCall(1, 6975, 161, `,"tool_calls":[{"name":"invoke_subagent","args":{"Role":"File Creator","TypeName":"self"}}]`),
+		fmt.Sprintf(`{"step_index":2,"type":"GENERIC","content":"Created the following subagent:\n{\"conversationId\": \"%s\"}"}`, s.childID),
+		agyCall(3, 7461, 25, ""))
+	s.stop(s.parentID, false)
+
+	s.hook(s.childID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 0})
+	appendLines(s.t, s.path(s.childID), agyMessage(0, s.parentID))
+	s.env.WriteFile("notes2.txt", "second note\n")
+	s.hook(s.childID, "pre-tool-use", map[string]any{"toolCall": map[string]any{"name": "write_to_file", "args": map[string]any{"TargetFile": "notes2.txt"}}})
+}
+
+// childReplies writes the child's reply call and its last step.
+func (s *agyParentChild) childReplies() {
+	s.t.Helper()
+	appendLines(s.t, s.path(s.childID),
+		agyCall(1, 7300, 60, ""),
+		agyCall(3, 7400, 70, fmt.Sprintf(`,"tool_calls":[{"name":"send_message","args":{"Recipient":"%s"}}]`, s.parentID)),
+		agyCall(5, 7548, 60, ""))
+}
+
+// parentReadsReply is the parent resumed by the child's reply, answering it.
+func (s *agyParentChild) parentReadsReply() {
+	s.t.Helper()
+	s.hook(s.parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 4})
+	appendLines(s.t, s.path(s.parentID), agyMessage(4, s.childID), agyCall(5, 7618, 107, ""))
+}
+
+func (s *agyParentChild) requireParentEnded() {
+	s.t.Helper()
+	parent, err := s.env.GetSessionState(s.parentID)
+	require.NoError(s.t, err)
+	require.NotNil(s.t, parent)
+	require.Equal(s.t, "idle", string(parent.Phase), "the parent's turn is ended for it")
+	require.Equal(s.t, &agent.TokenUsage{InputTokens: 6975 + 7461 + 7618, OutputTokens: 161 + 25 + 107, APICallCount: 3}, parent.TokenUsage)
+	rec := parent.FindTaskRecord(s.childID)
+	require.NotNil(s.t, rec)
+	require.Equal(s.t, &agent.TokenUsage{InputTokens: 7300 + 7400 + 7548, OutputTokens: 60 + 70 + 60, APICallCount: 3}, rec.TokenUsage)
+}
+
+func (s *agyParentChild) requireParentActive(why string) {
+	s.t.Helper()
+	parent, err := s.env.GetSessionState(s.parentID)
+	require.NoError(s.t, err)
+	require.Equal(s.t, "active", string(parent.Phase), why)
+}
+
 // When the parent's last Stop (fullyIdle=false) and its subagent's end land
 // in either order, agy sends the parent no further Stop. The parent's turn is
 // ended for it, once, with all its calls counted.
 func TestAntigravity_ParentTurnEndsWhenItsSubagentFinishes(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name             string
-		parentStopsFirst bool
-		deadSubagent     bool // an earlier subagent left its record open and died
-	}{
-		{"parent stops first", true, false},
-		{"subagent ends first", false, false},
-		{"another subagent died earlier", true, true},
-	}
-	for _, tc := range cases {
-		parentStopsFirst := tc.parentStopsFirst
-		t.Run(tc.name, func(t *testing.T) {
+	for name, parentStopsFirst := range map[string]bool{"parent stops first": true, "subagent ends first": false} {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			env := newAntigravityEnv(t)
-			extraEnv := []string{"ENTIRE_ANTIGRAVITY_STATUS_DIR=" + t.TempDir(), "ENTIRE_ANTIGRAVITY_CONFIG_DIR=" + t.TempDir()}
-			const parentID, childID = "a0528243-0000-4000-8000-000000000001", "a3a70f0a-0000-4000-8000-000000000002"
-			path := func(id string) string {
-				return filepath.Join(antigravityBrainDir(env.RepoDir), id, ".system_generated", "logs", "transcript_full.jsonl")
-			}
-			hook := func(id, name string, fields map[string]any) {
-				t.Helper()
-				base := map[string]any{"conversationId": id, "workspacePaths": []string{env.RepoDir}, "transcriptPath": path(id)}
-				require.NoError(t, runAntigravityHookWithEnv(t, env.RepoDir, name, mergeMaps(base, fields), extraEnv), name)
-			}
-			call := func(step, input, output int) string {
-				return fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE","input_tokens":%d,"cache_read_tokens":0,"output_tokens":%d}`, step, input, output)
-			}
-			paused := map[string]any{"executionNum": 0, "error": "", "fullyIdle": false}
-			idle := map[string]any{"executionNum": 0, "error": "", "fullyIdle": true}
-
-			appendLines(t, path(parentID), `{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\nDelegate\n</USER_REQUEST>"}`)
-			hook(parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 1})
-			appendLines(t, path(parentID),
-				`{"step_index":1,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"invoke_subagent","args":{"Role":"File Creator","TypeName":"self"}}],"input_tokens":6975,"cache_read_tokens":0,"output_tokens":161}`,
-				fmt.Sprintf(`{"step_index":2,"type":"GENERIC","content":"Created the following subagent:\n{\"conversationId\": \"%s\"}"}`, childID),
-				call(3, 7461, 25))
-			hook(parentID, "stop", paused)
-			if tc.deadSubagent {
-				state, err := env.GetSessionState(parentID)
-				require.NoError(t, err)
-				state.AddTaskRecord(session.TaskRecord{ToolUseID: "dead-subagent", AgentID: "dead-subagent", StartedAt: time.Now()})
-				require.NoError(t, env.WriteSessionState(parentID, state))
-			}
-
-			hook(childID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 0})
-			appendLines(t, path(childID),
-				fmt.Sprintf(`{"step_index":0,"type":"SYSTEM_MESSAGE","content":"[Message] timestamp=2026-10-20T01:50:00Z sender=%s content=go"}`, parentID))
-			env.WriteFile("notes2.txt", "second note\n")
-			hook(childID, "pre-tool-use", map[string]any{"toolCall": map[string]any{"name": "write_to_file", "args": map[string]any{"TargetFile": "notes2.txt"}}})
-			appendLines(t, path(childID), call(1, 7300, 60), call(3, 7400, 70), call(5, 7548, 60))
-
-			// The child's reply resumes the parent, which answers.
-			hook(parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 4})
-			appendLines(t, path(parentID),
-				fmt.Sprintf(`{"step_index":4,"type":"SYSTEM_MESSAGE","content":"[Message] timestamp=2026-10-20T01:50:35Z sender=%s content=done"}`, childID),
-				call(5, 7618, 107))
+			s := newAgyParentChild(t)
+			s.start()
+			s.childReplies()
+			s.parentReadsReply()
 			if parentStopsFirst {
-				hook(parentID, "stop", paused)
-				hook(childID, "stop", idle)
+				s.stop(s.parentID, false)
+				s.stop(s.childID, true)
 			} else {
-				hook(childID, "stop", idle)
-				hook(parentID, "stop", paused)
+				s.stop(s.childID, true)
+				s.stop(s.parentID, false)
 			}
-
-			parent, err := env.GetSessionState(parentID)
-			require.NoError(t, err)
-			require.NotNil(t, parent)
-			require.Equal(t, "idle", string(parent.Phase), "the parent's turn is ended for it")
-			require.Nil(t, parent.AwaitingSubagentsAt)
-			require.Equal(t, &agent.TokenUsage{InputTokens: 6975 + 7461 + 7618, OutputTokens: 161 + 25 + 107, APICallCount: 3}, parent.TokenUsage)
-			rec := parent.FindTaskRecord(childID)
-			require.NotNil(t, rec)
-			require.Equal(t, &agent.TokenUsage{InputTokens: 7300 + 7400 + 7548, OutputTokens: 60 + 70 + 60, APICallCount: 3}, rec.TokenUsage)
+			s.requireParentEnded()
 		})
 	}
+}
+
+// A reply the parent has not read yet will wake it, so its turn is not over
+// even though the subagent has stopped.
+func TestAntigravity_ParentTurnWaitsForAnUnreadReply(t *testing.T) {
+	t.Parallel()
+	s := newAgyParentChild(t)
+	s.start()
+	s.childReplies()
+	s.stop(s.childID, true)
+	s.requireParentActive("the child's reply is still on its way to the parent")
+
+	s.parentReadsReply()
+	s.stop(s.parentID, false)
+	s.requireParentEnded()
+}
+
+// A subagent woken again by the parent is running, whatever its task record
+// says about its earlier turn.
+func TestAntigravity_ParentTurnWaitsForAReWokenSubagent(t *testing.T) {
+	t.Parallel()
+	s := newAgyParentChild(t)
+	s.start()
+	s.childReplies()
+	s.stop(s.childID, true)
+
+	// The parent reads the reply and messages the child again; the child wakes.
+	s.hook(s.parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 4})
+	appendLines(t, s.path(s.parentID), agyMessage(4, s.childID),
+		agyCall(5, 7618, 107, fmt.Sprintf(`,"tool_calls":[{"name":"send_message","args":{"Recipient":"%s"}}]`, s.childID)))
+	appendLines(t, s.path(s.childID), agyMessage(6, s.parentID))
+	s.hook(s.childID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 7})
+	s.stop(s.parentID, false)
+	s.requireParentActive("the woken subagent is still running")
+
+	appendLines(t, s.path(s.childID), agyCall(7, 100, 10, fmt.Sprintf(`,"tool_calls":[{"name":"send_message","args":{"Recipient":"%s"}}]`, s.parentID)))
+	s.stop(s.childID, true)
+	s.requireParentActive("its second reply is unread")
+
+	s.hook(s.parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 6})
+	appendLines(t, s.path(s.parentID), agyMessage(6, s.childID), agyCall(7, 50, 5, ""))
+	s.stop(s.parentID, false)
+	parent, err := s.env.GetSessionState(s.parentID)
+	require.NoError(t, err)
+	require.Equal(t, "idle", string(parent.Phase))
+	require.Equal(t, 3+1, parent.TokenUsage.APICallCount, "every parent call, once")
+}
+
+// A subagent's first tool call can be a shell command that edits and commits;
+// it is marked there, before any commit could link it on its own.
+func TestAntigravity_SubagentMarkedAtAShellCommand(t *testing.T) {
+	t.Parallel()
+	s := newAgyParentChild(t)
+	appendLines(t, s.path(s.parentID), `{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\nDelegate\n</USER_REQUEST>"}`)
+	s.hook(s.parentID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 1})
+	appendLines(t, s.path(s.parentID),
+		agyCall(1, 6975, 161, `,"tool_calls":[{"name":"invoke_subagent","args":{"TypeName":"self"}}]`),
+		fmt.Sprintf(`{"step_index":2,"type":"GENERIC","content":"Created the following subagent:\n{\"conversationId\": \"%s\"}"}`, s.childID))
+	s.hook(s.childID, "pre-invocation", map[string]any{"invocationNum": 0, "initialNumSteps": 0})
+	appendLines(t, s.path(s.childID), agyMessage(0, s.parentID))
+	s.hook(s.childID, "pre-tool-use", map[string]any{"toolCall": map[string]any{"name": "run_command", "args": map[string]any{"CommandLine": "git commit -am x"}}})
+
+	child, err := s.env.GetSessionState(s.childID)
+	require.NoError(t, err)
+	require.NotNil(t, child)
+	require.Equal(t, s.parentID, child.ParentSessionID)
 }

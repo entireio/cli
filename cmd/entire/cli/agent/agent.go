@@ -730,6 +730,25 @@ type SubagentSessionResolver interface {
 	ResolveSubagentSession(sessionRef string) (SubagentSessionLink, bool)
 }
 
+// SubagentReplyCounter is implemented by agents whose parent can stop while its
+// detached subagents still run and may not report its turn's end afterwards
+// (Antigravity: a fullyIdle=false Stop, then nothing). The lifecycle ends such a
+// turn itself once every subagent the turn involved has stopped and every
+// reply it sent has reached the parent, so a reply still in flight, which will
+// wake the parent, is never cut off.
+type SubagentReplyCounter interface {
+	Agent
+
+	// TurnSubagents returns the subagent session IDs the parent's turn involved
+	// after fromOffset (launched, messaged, or heard from), each with how many
+	// of its replies the parent's whole transcript holds.
+	TurnSubagents(parentRef string, fromOffset int) (map[string]int, error)
+
+	// RepliesSent returns how many replies the subagent's transcript sent to
+	// parentID.
+	RepliesSent(subagentRef, parentID string) (int, error)
+}
+
 // SubagentAwareExtractor provides methods for extracting files and tokens including subagents.
 // Agents that support spawning subagents (like Claude Code's Task tool) should implement this
 // to ensure subagent contributions are included in checkpoints.

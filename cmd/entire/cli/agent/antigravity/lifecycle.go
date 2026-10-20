@@ -188,17 +188,17 @@ func parseStop(stdin io.Reader) (*agent.Event, error) {
 	}, nil
 }
 
-// parsePreToolUse handles the PreToolUse hook → ToolUse for mutating tools.
-// Returns nil for non-mutating tools (no lifecycle action needed).
+// parsePreToolUse handles the PreToolUse hook → ToolUse, carrying the files a
+// mutating tool names (none for any other tool).
 func parsePreToolUse(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[PreToolUsePayload](stdin)
 	if err != nil {
 		return nil, err
 	}
+	// Every tool call is a ToolUse, not only file edits: a subagent's first
+	// tool call is the first point it can be marked as one, and that call can
+	// be a shell command that edits and commits.
 	modifiedFiles, newFiles := extractFilesFromToolCall(&raw.ToolCall)
-	if modifiedFiles == nil && newFiles == nil {
-		return nil, nil //nolint:nilnil // Non-mutating tool — no lifecycle action
-	}
 	return &agent.Event{
 		Type:          agent.ToolUse,
 		SessionID:     raw.ConversationID,

@@ -96,3 +96,24 @@ func TestCondense_SubagentSessionHandsItsFilesToTheParent(t *testing.T) {
 		})
 	}
 }
+
+// A handoff that cannot reach the parent leaves the files on the subagent, so
+// a later condense can retry it.
+//
+// Not parallel: uses t.Chdir()
+func TestCondense_SubagentSessionKeepsItsFilesWithoutAParent(t *testing.T) {
+	ctx := context.Background()
+	dir := identityTestRepo(t)
+	saveIdentitySession(t, "sess-orphan-subagent", func(st *SessionState) {
+		st.WorktreePath = dir
+		st.ParentSessionID = "sess-missing-parent"
+		st.FilesTouched = []string{"early.txt"}
+	})
+
+	require.Error(t, NewManualCommitStrategy().CondenseSessionByID(ctx, "sess-orphan-subagent"))
+
+	child, err := LoadSessionState(ctx, "sess-orphan-subagent")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"early.txt"}, child.FilesTouched)
+	assert.False(t, child.FullyCondensed)
+}

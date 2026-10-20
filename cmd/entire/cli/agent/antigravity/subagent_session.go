@@ -3,6 +3,9 @@ package antigravity
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"regexp"
 	"strings"
 
@@ -10,7 +13,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
-var _ agent.SubagentSessionResolver = (*AntigravityAgent)(nil)
+var (
+	_ agent.SubagentSessionResolver = (*AntigravityAgent)(nil)
+	_ agent.SubagentReplyCounter    = (*AntigravityAgent)(nil)
+)
 
 // agy runs a subagent as a conversation of its own, with its own hooks. The
 // parent calls invoke_subagent, and agy then writes two steps that link them:
@@ -34,6 +40,7 @@ const (
 	agyStepTypeGeneric       = "GENERIC"
 	agyStepTypeUserInput     = "USER_INPUT"
 	agyToolInvokeSubagent    = "invoke_subagent"
+	agyToolSendMessage       = "send_message"
 	agyCreatedSubagentMarker = "Created the following subagent:"
 
 	// subagentHeadScanLimit bounds how many leading steps of a child transcript
@@ -41,6 +48,10 @@ const (
 	subagentHeadScanLimit = 4
 	// subagentLabelMaxLen bounds a task description taken from a prompt.
 	subagentLabelMaxLen = 120
+	// subagentHeadBytes bounds the read of a transcript whose first steps are
+	// all that is needed. The resolver runs on every tool call of every
+	// session, top-level ones included.
+	subagentHeadBytes = 256 << 10
 )
 
 var agySenderRe = regexp.MustCompile(`\[Message\] timestamp=\S+ sender=([A-Za-z0-9_-]+)\s`)
@@ -55,7 +66,7 @@ func (a *AntigravityAgent) ResolveSubagentSession(sessionRef string) (agent.Suba
 	if err != nil {
 		return agent.SubagentSessionLink{}, false
 	}
-	childData, err := store.ReadFile(childName)
+	childData, err := store.ReadFileHead(childName, subagentHeadBytes)
 	if err != nil {
 		return agent.SubagentSessionLink{}, false
 	}
@@ -237,4 +248,99 @@ func lastNonBlankLine(data []byte) []byte {
 		data = data[:i]
 	}
 	return nil
+}
+
+// TurnSubagents implements agent.SubagentReplyCounter: the subagents whose IDs
+// appear in the parent's steps after fromOffset — created by invoke_subagent,
+// messaged by send_message, or heard from in a SYSTEM_MESSAGE — each with how
+// many messages from it the whole transcript holds.
+func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[string]int, error) {
+	data, err := a.readStoreTranscript(parentRef)
+	if err != nil {
+		return nil, err
+	}
+	turn := make(map[string]struct{})
+	received := make(map[string]int)
+	line := 0
+	forEachNonBlankLine(data, 0, func(raw []byte) {
+		line++
+		var step agyStep
+		if json.Unmarshal(raw, &step) != nil {
+			return
+		}
+		inTurn := line > fromOffset
+		switch step.Type {
+		case agyStepTypeSystemMessage:
+			if m := agySenderRe.FindStringSubmatch(step.Content); m != nil {
+				received[m[1]]++
+				if inTurn {
+					turn[m[1]] = struct{}{}
+				}
+			}
+		case agyStepTypeGeneric:
+			if id := createdSubagentID(step.Content); id != "" && inTurn {
+				turn[id] = struct{}{}
+			}
+		case agyStepTypePlannerResponse:
+			if !inTurn {
+				return
+			}
+			for _, call := range step.ToolCalls {
+				if call.Name == agyToolSendMessage {
+					if id := decodeAgyString(call.Args["Recipient"]); id != "" {
+						turn[id] = struct{}{}
+					}
+				}
+			}
+		}
+	})
+	out := make(map[string]int, len(turn))
+	for id := range turn {
+		if validation.ValidateAgentSessionID(id) == nil {
+			out[id] = received[id]
+		}
+	}
+	return out, nil
+}
+
+// RepliesSent implements agent.SubagentReplyCounter: the subagent's
+// send_message calls addressed to parentID.
+func (a *AntigravityAgent) RepliesSent(subagentRef, parentID string) (int, error) {
+	data, err := a.readStoreTranscript(subagentRef)
+	if err != nil {
+		return 0, err
+	}
+	sent := 0
+	forEachNonBlankLine(data, 0, func(raw []byte) {
+		if !bytes.Contains(raw, []byte(agyToolSendMessage)) {
+			return
+		}
+		var step agyStep
+		if json.Unmarshal(raw, &step) != nil || step.Type != agyStepTypePlannerResponse {
+			return
+		}
+		for _, call := range step.ToolCalls {
+			if call.Name == agyToolSendMessage && decodeAgyString(call.Args["Recipient"]) == parentID {
+				sent++
+			}
+		}
+	})
+	return sent, nil
+}
+
+// readStoreTranscript reads a transcript inside agy's brain directory. A
+// missing file is an empty transcript.
+func (a *AntigravityAgent) readStoreTranscript(ref string) ([]byte, error) {
+	store, name, err := a.transcriptStore(ref)
+	if err != nil {
+		return nil, err
+	}
+	data, err := store.ReadFile(name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("antigravity: read transcript: %w", err)
+	}
+	return data, nil
 }

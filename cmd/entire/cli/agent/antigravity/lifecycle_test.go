@@ -332,7 +332,9 @@ func TestParseHookEvent_PreToolUse_ReplaceFileContent(t *testing.T) {
 	}
 }
 
-func TestParseHookEvent_PreToolUse_NonMutatingToolReturnsNil(t *testing.T) {
+// A non-mutating tool is still a ToolUse, with no files: a subagent's first
+// tool call, whatever it is, is where it is first marked as one.
+func TestParseHookEvent_PreToolUse_NonMutatingToolHasNoFiles(t *testing.T) {
 	t.Parallel()
 	// Use the testdata fixture which uses run_command (non-mutating)
 	data, err := os.ReadFile("testdata/hook_stdin_pre_tool_use.json")
@@ -344,8 +346,8 @@ func TestParseHookEvent_PreToolUse_NonMutatingToolReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseHookEvent: %v", err)
 	}
-	if ev != nil {
-		t.Errorf("expected nil event for non-mutating tool run_command, got %+v", ev)
+	if ev == nil || ev.Type != agent.ToolUse || len(ev.ModifiedFiles)+len(ev.NewFiles) != 0 {
+		t.Errorf("expected a ToolUse without files for non-mutating tool run_command, got %+v", ev)
 	}
 }
 

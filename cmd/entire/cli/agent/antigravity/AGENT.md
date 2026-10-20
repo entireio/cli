@@ -72,7 +72,7 @@ hooks.json can never fail an agy turn.
 |----------|-------|--------------|
 | `SessionStart` | once per **new** conversation, before its first model invocation (at the first prompt in the TUI); **not** on `agy --conversation` resumes | `SessionStart` — agent-type and model hints, state transition for existing state, and the detached zombie-session sweep; creates no state |
 | `PreInvocation` | before **every model invocation** (`invocationNum` is **0-indexed**) | `TurnStart` when `invocationNum == 0` and the transcript ends with the prompt's `USER_INPUT` step (or does not exist yet); otherwise — `> 0`, or a `0` that resumes a parent waiting on a subagent, whose message is not on disk yet — a `TurnStart` with `Event.SuppressIfSessionActive` — the dispatcher drops it only when a turn is genuinely mid-flight (`Phase == ACTIVE` and not stuck), so resumes (`agy --conversation`) are tracked while follow-up invocations don't clobber the pre-prompt baseline |
-| `PreToolUse` (matcher `*`) | before each tool call | `ToolUse` for mutating tools (`write_to_file`, `replace_file_content`, `multi_replace_file_content`) → `FilesTouched` (the parent's, for a subagent) |
+| `PreToolUse` (matcher `*`) | before each tool call | `ToolUse` for every tool, naming files for mutating ones (`write_to_file`, `replace_file_content`, `multi_replace_file_content`) → `FilesTouched` (the parent's, for a subagent); a subagent is first marked here, whatever the tool |
 | `Stop` | at agent stop; payload carries `fullyIdle` | `TurnEnd` when `fullyIdle == true`; otherwise a `TurnEnd` marked `AwaitingSubagents`, which records the pause without ending the turn (see Subagents) |
 
 `session-start` writes nothing to stdout: `AntigravityAgent` is not a
@@ -225,10 +225,15 @@ and `Role`. Captured on agy 1.4.2:
   record and the parent's to its session, each counted once.
 - When the parent's last Stop (`fullyIdle=false`, a subagent still running)
   lands before the subagent's turn ends, agy sends the parent no further Stop.
-  The pause is recorded (`AwaitingSubagentsAt`), and whichever hook sees both
-  the pause and the last subagent finished — the subagent's turn end or the
-  parent's Stop, which can land milliseconds apart in either order — claims it
-  and ends the parent's turn, exactly as a reported one.
+  The pause is recorded (`AwaitingSubagentsAt`), and the parent's turn is ended
+  for it once every subagent the turn involved (launched, messaged, or heard
+  from, per the parent's transcript) has stopped and every reply it sent
+  (`send_message` with the parent as `Recipient`) is in the parent's transcript
+  — an unread reply will wake the parent, so its turn is not over. A subagent
+  whose agent died counts as stopped. The subagent's turn end and the parent's
+  Stop can land milliseconds apart in either order, so both check; the first to
+  find the turn done claims it (`SubagentTurnEndClaimed`, cleared at the next
+  turn start) and a pause reported afterwards cannot re-arm it.
 
 ## Gaps & Limitations (Preview)
 
