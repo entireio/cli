@@ -490,6 +490,13 @@ type State struct {
 	// timeout. Only meaningful on Owner.Host.
 	Owner *proclive.Identity `json:"owner,omitempty"`
 
+	// ParentSessionID is set on a subagent's own session (an agent whose
+	// subagents run as sessions of their own, resolved through
+	// agent.SubagentSessionResolver) once its parent is known. Its work belongs
+	// to the parent's task record, so such a session never links a commit,
+	// condenses on its own, or answers "which session is calling".
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+
 	// TaskRecords tracks subagents dispatched by this session — the durable
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
@@ -612,6 +619,12 @@ func (s *State) AddTaskRecord(task TaskRecord) {
 // EnsureTaskRecord adds a follow-up record only after an earlier completed
 // record was materialized and removed. Existing unmaterialized content wins,
 // but missing launch metadata is enriched for stop-before-start delivery.
+// IsSubagentSession reports whether this is a subagent's own session, whose
+// work is recorded on its parent's task record (see ParentSessionID).
+func (s *State) IsSubagentSession() bool {
+	return s != nil && s.ParentSessionID != ""
+}
+
 func (s *State) EnsureTaskRecord(task TaskRecord) bool {
 	if task.ToolUseID == "" {
 		return false

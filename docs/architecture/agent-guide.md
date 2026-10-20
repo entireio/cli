@@ -51,7 +51,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
-| `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
+| `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers, Antigravity's subagents) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
 | `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
@@ -576,6 +576,19 @@ firing a full SessionStart/UserPromptSubmit/Stop cycle for each. Factory AI
 Droid does this for Workers: its `PostToolUse` fires when the Worker is
 *dispatched*, not when it finishes, so the worktree is still untouched at
 `SubagentEnd` and only the Worker's own session boundary delimits its work.
+
+Antigravity does the same: `invoke_subagent` starts a conversation of its own,
+and only that conversation's hooks show its work.
+
+The lifecycle calls the resolver at the subagent's TurnStart, at each ToolUse,
+and at its turn end, and on the first success it marks the subagent's state
+(`ParentSessionID`) and records a live task record on the parent. A marked
+session never links a commit, condenses on its own, or answers caller
+resolution; its ToolUse changes go to the parent's `FilesTouched`, so a commit
+made while the subagent runs carries its transcript so far as the parent's
+task. Resolve as early as the agent's data allows: Droid's `session_start` line
+exists at the Worker's first hook, while agy writes a subagent's transcript
+only by its first tool call.
 
 **Do NOT implement** when subagents block the parent's turn (Claude Code's Task
 tool) — the `SubagentEnd` path already bounds that work correctly.

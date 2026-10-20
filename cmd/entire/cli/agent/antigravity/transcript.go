@@ -142,7 +142,7 @@ func extractPromptsFromContent(data []byte, fromOffset int) []string {
 		if json.Unmarshal(raw, &step) != nil {
 			return
 		}
-		if step.Type != "USER_INPUT" {
+		if step.Type != agyStepTypeUserInput {
 			return
 		}
 		if text := extractUserRequest(step.Content); text != "" {
@@ -187,7 +187,7 @@ func CondenseTranscript(content []byte) []CondensedStep {
 			return
 		}
 		switch step.Type {
-		case "USER_INPUT":
+		case agyStepTypeUserInput:
 			if text := extractUserRequest(step.Content); text != "" {
 				steps = append(steps, CondensedStep{Role: CondensedRoleUser, Text: text})
 			}

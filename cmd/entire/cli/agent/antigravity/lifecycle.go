@@ -43,7 +43,7 @@ func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, st
 	case HookNameSessionStart:
 		return parseSessionStart(stdin)
 	case HookNamePreInvocation:
-		return parsePreInvocation(stdin)
+		return a.parsePreInvocation(stdin)
 	case HookNameStop:
 		return parseStop(stdin)
 	case HookNamePreToolUse:
@@ -112,7 +112,7 @@ func parseSessionStart(stdin io.Reader) (*agent.Event, error) {
 //
 // SessionStart creates no session state, so the invocationNum == 0 TurnStart
 // is still the one that initializes the session.
-func parsePreInvocation(stdin io.Reader) (*agent.Event, error) {
+func (a *AntigravityAgent) parsePreInvocation(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[InvocationPayload](stdin)
 	if err != nil {
 		return nil, err
@@ -124,12 +124,28 @@ func parsePreInvocation(stdin io.Reader) (*agent.Event, error) {
 	// here (agent packages must not import strategy), so emit a conditional
 	// TurnStart and let the dispatcher fire it only when no active session
 	// exists.
+	//
+	// invocationNum==0 is ambiguous too. It starts every execution, and agy
+	// starts a new execution both for a new prompt and to resume a parent that
+	// was waiting on a subagent, when the subagent's message arrives. Treating
+	// a resume as a new turn would restart the turn at that point and drop
+	// everything before it from the turn's range. A new prompt's USER_INPUT
+	// step is already on disk at its PreInvocation, while the subagent's
+	// message is not, so only a transcript ending in USER_INPUT (or one that
+	// cannot be read: a conversation's very first call) starts a turn
+	// unconditionally.
+	conditional := raw.InvocationNum != 0
+	if !conditional {
+		if isPrompt, known := a.lastStepIsUserInput(raw.TranscriptPath); known && !isPrompt {
+			conditional = true
+		}
+	}
 	return &agent.Event{
 		Type:                    agent.TurnStart,
 		SessionID:               raw.ConversationID,
 		SessionRef:              raw.TranscriptPath,
 		Timestamp:               time.Now(),
-		SuppressIfSessionActive: raw.InvocationNum != 0,
+		SuppressIfSessionActive: conditional,
 	}, nil
 }
 

@@ -71,8 +71,8 @@ hooks.json can never fail an agy turn.
 | agy hook | Fires | Entire event |
 |----------|-------|--------------|
 | `SessionStart` | once per **new** conversation, before its first model invocation (at the first prompt in the TUI); **not** on `agy --conversation` resumes | `SessionStart` — agent-type and model hints, state transition for existing state, and the detached zombie-session sweep; creates no state |
-| `PreInvocation` | before **every model invocation** (`invocationNum` is **0-indexed**) | `TurnStart` when `invocationNum == 0`; for `> 0`, a `TurnStart` with `Event.SuppressIfSessionActive` — the dispatcher drops it only when a turn is genuinely mid-flight (`Phase == ACTIVE` and not stuck), so resumes (`agy --conversation`) are tracked while follow-up invocations don't clobber the pre-prompt baseline |
-| `PreToolUse` (matcher `*`) | before each tool call | `ToolUse` for mutating tools (`write_to_file`, `replace_file_content`, `multi_replace_file_content`) → `FilesTouched` |
+| `PreInvocation` | before **every model invocation** (`invocationNum` is **0-indexed**) | `TurnStart` when `invocationNum == 0` and the transcript ends with the prompt's `USER_INPUT` step (or does not exist yet); otherwise — `> 0`, or a `0` that resumes a parent waiting on a subagent, whose message is not on disk yet — a `TurnStart` with `Event.SuppressIfSessionActive` — the dispatcher drops it only when a turn is genuinely mid-flight (`Phase == ACTIVE` and not stuck), so resumes (`agy --conversation`) are tracked while follow-up invocations don't clobber the pre-prompt baseline |
+| `PreToolUse` (matcher `*`) | before each tool call | `ToolUse` for mutating tools (`write_to_file`, `replace_file_content`, `multi_replace_file_content`) → `FilesTouched` (the parent's, for a subagent) |
 | `Stop` | at agent stop; payload carries `fullyIdle` | `TurnEnd` when `fullyIdle == true`; nil otherwise (background tasks still running) |
 
 `session-start` writes nothing to stdout: `AntigravityAgent` is not a
@@ -201,6 +201,28 @@ preparation. Tests of the production resolver must override HOME/USERPROFILE,
 agy's config directory, and the ADC credential variable before calling it.
 Credential-carryover tests inspect prepared homes directly rather than launching
 agy or touching the developer's keychain.
+
+## Subagents
+
+`invoke_subagent` starts a separate conversation with its own hooks.
+`subagent_session.go` implements `SubagentSessionResolver` from two text
+formats agy writes, requiring both: the child transcript's step 0 is a
+`SYSTEM_MESSAGE` carrying `sender=<parent conversation id>`, and the parent's
+transcript has a `GENERIC` step "Created the following subagent: {conversationId:
+<child>}" after the call. The tool-use ID is the child's conversation ID (agy
+tool calls carry none); type and description come from the call's `TypeName`
+and `Role`. Captured on agy 1.4.2:
+
+- The child's transcript does not exist at its SessionStart or first
+  PreInvocation; it does by its first tool call, which is where the child is
+  first marked.
+- The parent waiting on a child gets a `fullyIdle=false` Stop; the child's
+  reply starts a new parent execution (`invocationNum` 0) before the reply
+  reaches the parent's transcript — hence the PreInvocation rule above, which
+  keeps the parent's turn whole. An Esc-interrupted turn fires no Stop, and the
+  next prompt's `USER_INPUT` is on disk, so it still starts a new turn.
+- The child's calls are on its own steps only, so its usage goes to the task
+  record and the parent's to its session, each counted once.
 
 ## Gaps & Limitations (Preview)
 

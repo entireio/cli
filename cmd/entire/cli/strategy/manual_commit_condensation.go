@@ -2090,6 +2090,13 @@ func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) 
 func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionID string) error {
 	logCtx := logging.WithComponent(ctx, "condense-by-id")
 
+	if state, loadErr := s.loadSessionState(ctx, sessionID); loadErr == nil && state.IsSubagentSession() {
+		logging.Info(logCtx, "skipping subagent session; its work condenses with its parent",
+			slog.String("session_id", sessionID),
+			slog.String("parent_session_id", state.ParentSessionID))
+		return nil
+	}
+
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
@@ -2287,6 +2294,10 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		return nil
 	}
 	if reservedState == nil {
+		return nil
+	}
+	if reservedState.IsSubagentSession() {
+		// Its work condenses with the parent's task record.
 		return nil
 	}
 	// Files waiting for a commit belong to PostCommit; a fully condensed

@@ -453,9 +453,15 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		slog.Int("deleted", len(deleted)),
 	)
 
-	if err := strategy.RecordFilesTouched(ctx, event.SessionID, modified, added, deleted); err != nil {
+	// A subagent's own session records nothing: its changes are the parent's,
+	// recorded on the parent so a commit made while it runs links them there.
+	target := event.SessionID
+	if link, isSubagent := markSubagentSession(ctx, ag, event.SessionID, event.SessionRef); isSubagent {
+		target = link.ParentSessionID
+	}
+	if err := strategy.RecordFilesTouched(ctx, target, modified, added, deleted); err != nil {
 		logging.Warn(logCtx, "tool-use: failed to record files touched",
-			slog.String("session_id", event.SessionID),
+			slog.String("session_id", target),
 			slog.String("error", err.Error()),
 		)
 	}
@@ -743,6 +749,11 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 			slog.String("error", mutErr.Error()))
 	}
 	initSpan.End()
+
+	// A subagent whose transcript already names its parent (a Droid Worker's
+	// session_start line) is marked now, before it can do any work. agy writes
+	// a subagent's transcript only after this, so its first ToolUse marks it.
+	markSubagentSession(ctx, ag, sessionID, event.SessionRef)
 
 	// Inject Entire's model-facing context (once per session) for agents whose
 	// transport supports it at TurnStart (e.g. Pi). Extension reads stdout.
@@ -1061,7 +1072,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// trigger (State.HasTaskContent), so its transcript and tokens reach the
 	// parent's next checkpoint. Its usage goes on that record only, never on
 	// the Worker's own session total, so it is counted once.
-	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
+	if link, isSubagent := markSubagentSession(ctx, ag, sessionID, transcriptRef); isSubagent {
 		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
 			link:          link,
 			sessionID:     sessionID,
@@ -2585,6 +2596,57 @@ func resolveSubagentSessionLink(
 		slog.String("parent_session_id", link.ParentSessionID),
 		slog.String("tool_use_id", link.ToolUseID),
 		slog.String("subagent_type", link.SubagentType))
+	return link, true
+}
+
+// markSubagentSession resolves whether sessionID is a subagent's own session
+// and, when it is, records that on both sides: ParentSessionID on the
+// subagent's state, which keeps it out of commit linking and standalone
+// condensation, and a live task record on the parent, so a commit made while
+// the subagent still runs carries its transcript so far. The live record holds
+// no files: the subagent's file changes go to the parent's FilesTouched as they
+// happen, and the record's own list is filled at turn end from changes no
+// commit has taken. Best effort: a failure leaves the session top-level.
+func markSubagentSession(ctx context.Context, ag agent.Agent, sessionID, transcriptRef string) (agent.SubagentSessionLink, bool) {
+	link, ok := resolveSubagentSessionLink(ctx, ag, transcriptRef)
+	if !ok || link.ParentSessionID == sessionID {
+		return agent.SubagentSessionLink{}, false
+	}
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if state.ParentSessionID == link.ParentSessionID {
+			return strategy.ErrMutationSkip
+		}
+		state.ParentSessionID = link.ParentSessionID
+		return nil
+	})
+	if err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to mark subagent session",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
+	if err := GetStrategy(ctx).EnsureSessionExists(ctx, link.ParentSessionID, ag.Type()); err != nil {
+		logging.Warn(logCtx, "failed to ensure parent session for subagent",
+			slog.String("parent_session_id", link.ParentSessionID), slog.String("error", err.Error()))
+		return link, true
+	}
+	now := time.Now()
+	if err := strategy.MutateSessionState(ctx, link.ParentSessionID, func(state *strategy.SessionState) error {
+		state.EnsureTaskRecord(session.TaskRecord{
+			ToolUseID:              link.ToolUseID,
+			AgentID:                sessionID,
+			StartedAt:              now,
+			SubagentType:           link.SubagentType,
+			TaskDescription:        link.TaskDescription,
+			DeclaredTranscriptPath: transcriptRef,
+		})
+		// A parent waiting on its subagent fires no hooks of its own; without
+		// this, a long-running subagent would age it into IsStuckActive.
+		state.LastInteractionTime = &now
+		return nil
+	}); err != nil {
+		logging.Warn(logCtx, "failed to record live subagent task on parent",
+			slog.String("parent_session_id", link.ParentSessionID), slog.String("error", err.Error()))
+	}
 	return link, true
 }
 
