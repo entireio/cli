@@ -2917,7 +2917,31 @@ func endParentTurnIfSubagentsDone(ctx context.Context, ag agent.Agent, parentID 
 	}); err != nil {
 		logging.Warn(logCtx, "failed to end the parent's turn",
 			slog.String("session_id", parentID), slog.String("error", err.Error()))
+		if rbErr := releaseSubagentTurnEndClaim(ctx, parentID); rbErr != nil {
+			logging.Warn(logCtx, "failed to release the parent's turn-end claim",
+				slog.String("session_id", parentID), slog.String("error", rbErr.Error()))
+		}
 	}
+}
+
+// releaseSubagentTurnEndClaim undoes claimSubagentTurnEnd after the turn end it
+// claimed failed, so a later hook can retry: the pause is restored and the
+// claim cleared. A turn that still reached IDLE is left alone; it ended, and a
+// retry would count it again.
+func releaseSubagentTurnEndClaim(ctx context.Context, sessionID string) error {
+	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		if !state.SubagentTurnEndClaimed || state.Phase != session.PhaseActive {
+			return strategy.ErrMutationSkip
+		}
+		now := time.Now()
+		state.AwaitingSubagentsAt = &now
+		state.SubagentTurnEndClaimed = false
+		return nil
+	})
+	if errors.Is(err, strategy.ErrStateNotFound) {
+		return nil
+	}
+	return err //nolint:wrapcheck // the caller logs it with the session ID
 }
 
 // subagentDone reports whether a subagent is finished from its parent's point
