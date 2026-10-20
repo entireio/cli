@@ -566,3 +566,19 @@ func TestBuildCodexReviewCmd_PromptOverrideVerbatim(t *testing.T) {
 		t.Errorf("PromptOverride modified: %q", got)
 	}
 }
+
+// An MCP call exec mode refused for approval is reported as blocked.
+func TestParseCodexOutput_ReportsToolBlockedForApproval(t *testing.T) {
+	t.Parallel()
+	stream := `{"type":"item.completed","item":{"type":"mcp_tool_call","server":"docs","tool":"search","status":"failed","error":{"message":"MCP tool call requires approval, but approval policy is never"}}}` + "\n" +
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}` + "\n"
+	var blocked []string
+	for ev := range parseCodexOutput(strings.NewReader(stream)) {
+		if e, ok := ev.(reviewtypes.ToolsBlocked); ok {
+			blocked = append(blocked, e.Names...)
+		}
+	}
+	if strings.Join(blocked, ",") != "docs.search" {
+		t.Fatalf("blocked = %v", blocked)
+	}
+}
