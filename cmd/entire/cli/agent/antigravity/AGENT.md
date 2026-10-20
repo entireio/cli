@@ -234,6 +234,14 @@ and `Role`. Captured on agy 1.4.2:
   Stop can land milliseconds apart in either order, so both check; the first to
   find the turn done claims it (`SubagentTurnEndClaimed`, cleared at the next
   turn start) and a pause reported afterwards cannot re-arm it.
+- agy can wake the parent once more after that: when a subagent kept calling
+  tools after its last reply, agy sends the parent a  notice
+  ("Subagent <id> has gone idle. ... most recent response: ..."). Observed once
+  in 13 captured parent transcripts, only in that shape; when the subagent's
+  last action was its reply, no notice came. The wake starts a new turn: tokens
+  and files still count once, and the parent's work is split across two turns.
+  Waiting for the notice instead would leave the parent open forever whenever
+  agy does not send one.
 
 ## Gaps & Limitations (Preview)
 

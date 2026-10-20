@@ -2880,6 +2880,11 @@ func recordAwaitingSubagents(ctx context.Context, sessionID string, awaiting boo
 // so its turn is not over. A subagent whose agent died sends nothing more.
 // The turn then ends exactly as a reported one would, from the parent's own
 // transcript and turn start, so its tokens and files count once.
+//
+// agy can still wake the parent afterwards: when a subagent keeps calling tools
+// after its last reply, agy sends the parent a system notice that it has gone
+// idle. That wake starts a new turn. Nothing is counted twice or lost; the
+// parent's work is only split across two turns.
 func endParentTurnIfSubagentsDone(ctx context.Context, ag agent.Agent, parentID string) {
 	counter, ok := agent.AsSubagentReplyCounter(ag)
 	if !ok {
