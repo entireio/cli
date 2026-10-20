@@ -93,29 +93,27 @@ func (a *AntigravityAgent) ResolveSubagentSession(sessionRef string) (agent.Suba
 // transcript opens with one, "" for a top-level conversation (which opens with
 // the user's prompt).
 func subagentSender(data []byte) string {
-	sender := ""
-	seen := 0
-	forEachNonBlankLine(data, 0, func(raw []byte) {
-		if sender != "" || seen >= subagentHeadScanLimit {
-			return
+	for seen := 0; seen < subagentHeadScanLimit && len(data) > 0; {
+		line, rest, _ := bytes.Cut(data, []byte("\n"))
+		data = rest
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
 		}
 		seen++
 		var step agyStep
-		if json.Unmarshal(raw, &step) != nil {
-			return
+		if json.Unmarshal(line, &step) != nil {
+			continue
 		}
-		if step.Type == agyStepTypeUserInput {
-			seen = subagentHeadScanLimit // a user's prompt first: not a subagent
-			return
+		switch step.Type {
+		case agyStepTypeUserInput:
+			return "" // a user's prompt first: not a subagent
+		case agyStepTypeSystemMessage:
+			if m := agySenderRe.FindStringSubmatch(step.Content); m != nil {
+				return m[1]
+			}
 		}
-		if step.Type != agyStepTypeSystemMessage {
-			return
-		}
-		if m := agySenderRe.FindStringSubmatch(step.Content); m != nil {
-			sender = m[1]
-		}
-	})
-	return sender
+	}
+	return ""
 }
 
 // subagentInvocation finds the parent step that created childID and returns
@@ -124,7 +122,10 @@ func subagentSender(data []byte) string {
 func subagentInvocation(parentData []byte, childID string) (subagentType, description string, found bool) {
 	var lastCall *agyStepToolCall
 	forEachNonBlankLine(parentData, 0, func(raw []byte) {
-		if found {
+		// Only the call and the step it creates matter, and agy writes the
+		// second right after the first; skip decoding the rest of what can be a
+		// long transcript.
+		if found || (!bytes.Contains(raw, []byte(agyToolInvokeSubagent)) && !bytes.Contains(raw, []byte(agyCreatedSubagentMarker))) {
 			return
 		}
 		var step agyStep
@@ -202,8 +203,7 @@ func (a *AntigravityAgent) lastStepIsUserInput(transcriptRef string) (isPrompt, 
 	if err != nil {
 		return false, false
 	}
-	var last []byte
-	forEachNonBlankLine(data, 0, func(raw []byte) { last = raw })
+	last := lastNonBlankLine(data)
 	if last == nil {
 		return false, false
 	}
@@ -220,4 +220,21 @@ func subagentLabel(s string, maxLen int) string {
 		s = strings.TrimSpace(string(r[:maxLen])) + "…"
 	}
 	return s
+}
+
+// lastNonBlankLine returns the last non-blank line of data, nil if none,
+// scanning back from the end rather than splitting the whole transcript.
+func lastNonBlankLine(data []byte) []byte {
+	for len(data) > 0 {
+		i := bytes.LastIndexByte(data, '\n')
+		line := data[i+1:]
+		if len(bytes.TrimSpace(line)) > 0 {
+			return line
+		}
+		if i < 0 {
+			return nil
+		}
+		data = data[:i]
+	}
+	return nil
 }

@@ -2091,10 +2091,10 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	logCtx := logging.WithComponent(ctx, "condense-by-id")
 
 	if state, loadErr := s.loadSessionState(ctx, sessionID); loadErr == nil && state.IsSubagentSession() {
-		logging.Info(logCtx, "skipping subagent session; its work condenses with its parent",
+		logging.Info(logCtx, "subagent session: handing its pending work to its parent",
 			slog.String("session_id", sessionID),
 			slog.String("parent_session_id", state.ParentSessionID))
-		return nil
+		return releaseSubagentSessionWork(ctx, sessionID)
 	}
 
 	repo, err := OpenRepository(ctx)
@@ -2298,6 +2298,10 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	if reservedState.IsSubagentSession() {
 		// Its work condenses with the parent's task record.
+		if err := releaseSubagentSessionWork(ctx, sessionID); err != nil {
+			logging.Warn(logCtx, "eager condense: failed to release subagent session",
+				slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		}
 		return nil
 	}
 	// Files waiting for a commit belong to PostCommit; a fully condensed
@@ -2386,6 +2390,36 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	if mutErr != nil {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
+	}
+	return nil
+}
+
+// releaseSubagentSessionWork is what condensing a subagent's own session means:
+// it never checkpoints on its own, so any files it still holds (recorded before
+// it was known to be a subagent) move to its parent, and it is marked fully
+// condensed so doctor and the sweeper stop offering it.
+func releaseSubagentSessionWork(ctx context.Context, sessionID string) error {
+	var parentID string
+	var files []string
+	err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		parentID = state.ParentSessionID
+		files = slices.Clone(state.FilesTouched)
+		state.FilesTouched = nil
+		state.FullyCondensed = true
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("release subagent session %s: %w", sessionID, err)
+	}
+	if len(files) == 0 || parentID == "" {
+		return nil
+	}
+	err = MutateSessionState(ctx, parentID, func(state *SessionState) error {
+		MergeUnhashedFilesTouched(state, files)
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrStateNotFound) {
+		return fmt.Errorf("hand subagent files to parent %s: %w", parentID, err)
 	}
 	return nil
 }

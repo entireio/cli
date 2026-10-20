@@ -619,12 +619,6 @@ func (s *State) AddTaskRecord(task TaskRecord) {
 // EnsureTaskRecord adds a follow-up record only after an earlier completed
 // record was materialized and removed. Existing unmaterialized content wins,
 // but missing launch metadata is enriched for stop-before-start delivery.
-// IsSubagentSession reports whether this is a subagent's own session, whose
-// work is recorded on its parent's task record (see ParentSessionID).
-func (s *State) IsSubagentSession() bool {
-	return s != nil && s.ParentSessionID != ""
-}
-
 func (s *State) EnsureTaskRecord(task TaskRecord) bool {
 	if task.ToolUseID == "" {
 		return false
@@ -649,6 +643,12 @@ func (s *State) EnsureTaskRecord(task TaskRecord) bool {
 	}
 	s.AddTaskRecord(task)
 	return true
+}
+
+// IsSubagentSession reports whether this is a subagent's own session, whose
+// work is recorded on its parent's task record (see ParentSessionID).
+func (s *State) IsSubagentSession() bool {
+	return s != nil && s.ParentSessionID != ""
 }
 
 // FindSubagentInventory returns an entry that aliases state. Callers must use

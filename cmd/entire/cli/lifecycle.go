@@ -110,6 +110,10 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
 				"dropping conditional TurnStart for active session (follow-up invocation)",
 				slog.String("session_id", event.SessionID))
+			// A subagent that never edits a file reaches no ToolUse; its
+			// follow-up calls are where it can still be marked, which keeps its
+			// waiting parent's interaction time fresh.
+			markSubagentSession(ctx, ag, event.SessionID, event.SessionRef)
 			return nil
 		}
 	}
@@ -2608,26 +2612,48 @@ func resolveSubagentSessionLink(
 // happen, and the record's own list is filled at turn end from changes no
 // commit has taken. Best effort: a failure leaves the session top-level.
 func markSubagentSession(ctx context.Context, ag agent.Agent, sessionID, transcriptRef string) (agent.SubagentSessionLink, bool) {
+	if _, ok := agent.AsSubagentSessionResolver(ag); !ok {
+		return agent.SubagentSessionLink{}, false
+	}
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	child, _ := strategy.LoadSessionState(ctx, sessionID) //nolint:errcheck // unreadable state resolves from the transcript below
+
+	// Already marked, with its live record on the parent: rebuild the link from
+	// that record instead of re-reading both transcripts on every hook.
+	if child.IsSubagentSession() {
+		if parent, err := strategy.LoadSessionState(ctx, child.ParentSessionID); err == nil && parent != nil {
+			if rec := findTaskRecordByAgent(parent, sessionID); rec != nil {
+				touchParentInteraction(ctx, logCtx, parent)
+				return agent.SubagentSessionLink{
+					ParentSessionID: child.ParentSessionID,
+					ToolUseID:       rec.ToolUseID,
+					SubagentType:    rec.SubagentType,
+					TaskDescription: rec.TaskDescription,
+				}, true
+			}
+		}
+	}
+
 	link, ok := resolveSubagentSessionLink(ctx, ag, transcriptRef)
 	if !ok || link.ParentSessionID == sessionID {
 		return agent.SubagentSessionLink{}, false
 	}
-	logCtx := logging.WithComponent(ctx, "lifecycle")
-	err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
-		if state.ParentSessionID == link.ParentSessionID {
-			return strategy.ErrMutationSkip
+	if child != nil && child.ParentSessionID != link.ParentSessionID {
+		err := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+			state.ParentSessionID = link.ParentSessionID
+			return nil
+		})
+		if err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to mark subagent session",
+				slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		}
-		state.ParentSessionID = link.ParentSessionID
-		return nil
-	})
-	if err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
-		logging.Warn(logCtx, "failed to mark subagent session",
-			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	}
-	if err := GetStrategy(ctx).EnsureSessionExists(ctx, link.ParentSessionID, ag.Type()); err != nil {
-		logging.Warn(logCtx, "failed to ensure parent session for subagent",
-			slog.String("parent_session_id", link.ParentSessionID), slog.String("error", err.Error()))
-		return link, true
+	if parent, err := strategy.LoadSessionState(ctx, link.ParentSessionID); err != nil || parent == nil {
+		if err := GetStrategy(ctx).EnsureSessionExists(ctx, link.ParentSessionID, ag.Type()); err != nil {
+			logging.Warn(logCtx, "failed to ensure parent session for subagent",
+				slog.String("parent_session_id", link.ParentSessionID), slog.String("error", err.Error()))
+			return link, true
+		}
 	}
 	now := time.Now()
 	if err := strategy.MutateSessionState(ctx, link.ParentSessionID, func(state *strategy.SessionState) error {
@@ -2639,8 +2665,6 @@ func markSubagentSession(ctx context.Context, ag agent.Agent, sessionID, transcr
 			TaskDescription:        link.TaskDescription,
 			DeclaredTranscriptPath: transcriptRef,
 		})
-		// A parent waiting on its subagent fires no hooks of its own; without
-		// this, a long-running subagent would age it into IsStuckActive.
 		state.LastInteractionTime = &now
 		return nil
 	}); err != nil {
@@ -2648,6 +2672,38 @@ func markSubagentSession(ctx context.Context, ag agent.Agent, sessionID, transcr
 			slog.String("parent_session_id", link.ParentSessionID), slog.String("error", err.Error()))
 	}
 	return link, true
+}
+
+// findTaskRecordByAgent returns the parent's task record for the subagent
+// session agentID, nil if none.
+func findTaskRecordByAgent(parent *strategy.SessionState, agentID string) *session.TaskRecord {
+	for i := range parent.TaskRecords {
+		if parent.TaskRecords[i].AgentID == agentID {
+			return &parent.TaskRecords[i]
+		}
+	}
+	return nil
+}
+
+// subagentInteractionRefresh bounds how often a subagent's hooks refresh its
+// parent's LastInteractionTime.
+const subagentInteractionRefresh = time.Minute
+
+// touchParentInteraction keeps a parent that waits on its subagent from aging
+// into IsStuckActive: the parent fires no hooks of its own meanwhile, and a
+// stuck parent's wake-up would restart its turn.
+func touchParentInteraction(ctx, logCtx context.Context, parent *strategy.SessionState) {
+	if parent.LastInteractionTime != nil && time.Since(*parent.LastInteractionTime) < subagentInteractionRefresh {
+		return
+	}
+	now := time.Now()
+	if err := strategy.MutateSessionState(ctx, parent.SessionID, func(state *strategy.SessionState) error {
+		state.LastInteractionTime = &now
+		return nil
+	}); err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to refresh parent interaction time",
+			slog.String("parent_session_id", parent.SessionID), slog.String("error", err.Error()))
+	}
 }
 
 // subagentSessionStep carries the turn-end inputs needed to record a detached
