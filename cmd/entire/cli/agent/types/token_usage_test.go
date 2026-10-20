@@ -206,8 +206,9 @@ func TestSubtractTokenUsage_PerModel(t *testing.T) {
 		t.Errorf("delta = %+v", diff)
 	}
 
-	if got := SubtractTokenUsage(baseline, baseline); got.Model != "claude-haiku-4-5" {
-		t.Errorf("an empty delta keeps the single label, got %q", got.Model)
+	// A checkpoint with no new subagent tokens must not name a model.
+	if got := SubtractTokenUsage(baseline, baseline); got.Model != "" || got.ByModel != nil {
+		t.Errorf("an empty delta carries no label, got Model %q ByModel %+v", got.Model, got.ByModel)
 	}
 }
 

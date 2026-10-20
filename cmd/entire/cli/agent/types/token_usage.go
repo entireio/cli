@@ -155,12 +155,10 @@ func subtractTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 		b = &TokenUsage{}
 	}
 	diff := subtractCounts(a, b)
+	// An empty delta carries no label: a checkpoint with no subagent tokens
+	// must not name a model.
 	if models, ok := subtractModels(modelBreakdown(a), modelBreakdown(b)); ok {
 		diff.setModels(models)
-		if diff.Model == "" && len(diff.ByModel) == 0 {
-			// Nothing left to attribute: keep a's label on the empty delta.
-			diff.Model = a.Model
-		}
 	}
 	diff.SubagentTokens = subtractTokenUsageAtDepth(a.SubagentTokens, b.SubagentTokens, depth+1)
 	if depth == 0 && a.SubagentTokensComplete != nil {

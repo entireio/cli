@@ -2252,10 +2252,6 @@ func subagentTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event,
 	return agent.CalculateSubagentTokenUsage(ctx, ag, data)
 }
 
-// completeSubagentTaskRecord detects a completed subagent invocation's changes
-// and completes its durable task record (#2058): files, labels, tokens, and the
-// declared transcript path land on the record; condensation later materializes
-// the transcript into the checkpoint.
 // resolveSubagentModel returns the model the stop event names, or else the one
 // the start hook recorded in the pre-task state.
 func resolveSubagentModel(event *agent.Event, preState *PreTaskState) string {
@@ -2265,6 +2261,10 @@ func resolveSubagentModel(event *agent.Event, preState *PreTaskState) string {
 	return preState.SubagentModel
 }
 
+// completeSubagentTaskRecord detects a completed subagent invocation's changes
+// and completes its durable task record (#2058): files, labels, tokens, and the
+// declared transcript path land on the record; condensation later materializes
+// the transcript into the checkpoint.
 func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
 	subagentTranscriptPath, modifiedFiles, err := subagentTranscriptAndFiles(logCtx, ag, event, opts)
 	if err != nil {
