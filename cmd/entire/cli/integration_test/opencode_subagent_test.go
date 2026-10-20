@@ -54,11 +54,11 @@ func TestOpenCodeSubagentTaskRecord(t *testing.T) {
 	require.NotEmpty(t, rec.DeclaredTranscriptPath)
 	require.False(t, rec.TranscriptUnavailable)
 	// Exact values, not just presence: CreateOpenCodeTranscript's single
-	// assistant message writes input=150, output=80, cache.read=5,
-	// cache.write=15 (see hooks.go).
+	// assistant message writes input=150, output=80, reasoning=10 (no
+	// total), cache.read=5, cache.write=15 (see hooks.go).
 	require.NotNil(t, rec.TokenUsage, "child tokens are exact and must be recorded")
 	require.Equal(t, 150, rec.TokenUsage.InputTokens)
-	require.Equal(t, 80, rec.TokenUsage.OutputTokens)
+	require.Equal(t, 90, rec.TokenUsage.OutputTokens, "80 output plus 10 reasoning")
 	require.Equal(t, 5, rec.TokenUsage.CacheReadTokens)
 	require.Equal(t, 15, rec.TokenUsage.CacheCreationTokens)
 	require.Equal(t, 1, rec.TokenUsage.APICallCount)
