@@ -1051,6 +1051,12 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 	if err != nil {
 		return err
 	}
+	// Refuse before the branch push: a doomed create would otherwise leave the
+	// pushed branch behind when it is the checked-out one.
+	if err := trailCreateRefusal(ctx, client, repoID, forge, owner, repoName); err != nil {
+		noteTrailCommandEnablement(ctx, client, err)
+		return err
+	}
 
 	pushRemote, err := resolveTrailPushRemote(ctx, branch)
 	if err != nil {
