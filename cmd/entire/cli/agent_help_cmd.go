@@ -134,6 +134,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail comment":         {agentHelpAudienceTaskDriven, false},
 	"trail finding":         {agentHelpAudienceTaskDriven, false},
 	"trail merge":           {agentHelpAudienceUserOwned, false},
+	"trail retarget":        {agentHelpAudienceUserOwned, false},
 	"trail request-changes": {agentHelpAudienceTaskDriven, false},
 	"trail resume":          {agentHelpAudienceTaskDriven, false},
 	"trail link":            {agentHelpAudienceUserOwned, false},
