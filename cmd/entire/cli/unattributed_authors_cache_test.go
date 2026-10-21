@@ -14,8 +14,13 @@ func TestUnattributedAuthorsCache(t *testing.T) {
 	if err := writeUnattributedAuthorsCache(dir, ok); err != nil {
 		t.Fatal(err)
 	}
-	if got, hit := readUnattributedAuthorsCache(dir, "tip-a", now.Add(time.Hour)); !hit || len(got.Authors) != 1 || got.RepoID != "01REPO" {
-		t.Fatalf("same tip, success outcome never expires: hit=%v got=%+v", hit, got)
+	if got, hit := readUnattributedAuthorsCache(dir, "tip-a", now.Add(30*time.Minute)); !hit || len(got.Authors) != 1 || got.RepoID != "01REPO" {
+		t.Fatalf("same key, success outcome within its TTL must hit: hit=%v got=%+v", hit, got)
+	}
+	// Linking is account-wide and can happen in another repo or on the web,
+	// so even a success entry is re-checked eventually.
+	if _, hit := readUnattributedAuthorsCache(dir, "tip-a", now.Add(2*time.Hour)); hit {
+		t.Fatal("success outcome past its TTL must miss")
 	}
 	if _, hit := readUnattributedAuthorsCache(dir, "tip-b", now); hit {
 		t.Fatal("moved tip must miss")

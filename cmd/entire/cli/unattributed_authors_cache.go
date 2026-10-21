@@ -21,8 +21,8 @@ import (
 
 // Cache — <git common dir>/entire-unattributed-authors.json, ONE entry, keyed
 // by unattributedAuthorsCacheKey: the login, the OS username, and every ref
-// the shortlog walk covers. A successful outcome with candidates is valid
-// while that key is unchanged; a no-candidates or skipped outcome only for
+// the shortlog walk covers. A successful outcome with candidates is served
+// for successCacheTTL; a no-candidates or skipped outcome only for
 // transientCacheTTL, so neither a clean history nor a failing network call is
 // re-paid (a `git shortlog` walk, or a cell round trip) by every
 // `entire status`. Best-effort: any I/O or decode error is a miss.
@@ -32,6 +32,10 @@ const (
 	// served before detection tries again: a later login or a recovered cell
 	// should be noticed without waiting for a ref to move.
 	transientCacheTTL = 10 * time.Minute
+	// successCacheTTL bounds a result that found candidates. Linking an
+	// address is account-wide and can happen in another repo or on the web,
+	// which no local key change reflects, so status re-checks hourly.
+	successCacheTTL = time.Hour
 )
 
 // cachedDetection is the on-disk cache entry. A placement-failed entry
@@ -69,7 +73,7 @@ func unattributedAuthorsCacheRoot(commonDir string) (*os.Root, error) {
 // reads the cache before placement is resolved, so there is no repo id yet to
 // filter by; the stored RepoID (if any) rides along on the returned entry
 // instead. A transient entry — no Candidates, or Skipped — misses once older
-// than transientCacheTTL.
+// than transientCacheTTL, any other entry once older than successCacheTTL.
 func readUnattributedAuthorsCache(commonDir, key string, now time.Time) (cachedDetection, bool) {
 	if key == "" {
 		return cachedDetection{}, false
@@ -86,7 +90,11 @@ func readUnattributedAuthorsCache(commonDir, key string, now time.Time) (cachedD
 	if json.Unmarshal(b, &c) != nil || c.Key != key {
 		return cachedDetection{}, false
 	}
-	if (c.Skipped != "" || len(c.Candidates) == 0) && now.Sub(c.FetchedAt) > transientCacheTTL {
+	ttl := successCacheTTL
+	if c.Skipped != "" || len(c.Candidates) == 0 {
+		ttl = transientCacheTTL
+	}
+	if now.Sub(c.FetchedAt) > ttl {
 		return cachedDetection{}, false
 	}
 	return c, true
