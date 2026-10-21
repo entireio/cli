@@ -69,3 +69,32 @@ func TestGlobalEnable_FlagOffLeavesClaudeSettingsAlone(t *testing.T) {
 		})
 	}
 }
+
+// Hook invocations run every turn and `entire disable` removes Entire; neither
+// (re)installs the user-level hooks.
+func TestGlobalEnable_HookAndDisableCommandsSkipInstall(t *testing.T) {
+	t.Parallel()
+	root := NewRootCmd()
+	for _, args := range [][]string{
+		{"hooks", "claude-code", "stop"},
+		{"hooks", "git", "pre-push"},
+		{"disable"},
+	} {
+		cmd, _, err := root.Find(args)
+		if err != nil {
+			t.Fatalf("find %v: %v", args, err)
+		}
+		if !skipsGlobalEnableHooks(cmd) {
+			t.Errorf("%v would install the user-level hooks", args)
+		}
+	}
+	for _, args := range [][]string{{"version"}, {"status"}, {"enable"}} {
+		cmd, _, err := root.Find(args)
+		if err != nil {
+			t.Fatalf("find %v: %v", args, err)
+		}
+		if skipsGlobalEnableHooks(cmd) {
+			t.Errorf("%v skips the user-level hooks", args)
+		}
+	}
+}

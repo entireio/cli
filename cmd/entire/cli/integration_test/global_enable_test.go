@@ -65,6 +65,13 @@ func TestGlobalEnable_NeverEnabledRepoIsTrackedAndPushed(t *testing.T) {
 	extra, claudeDir := userTierEnv(t, `{"preferences": {"enabled": true}}`)
 	env.ExtraEnv = extra
 
+	// Any foreground command installs the user-level hooks; hook calls don't.
+	env.RunCLI("version")
+	userHooks, err := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
+	if err != nil || !strings.Contains(string(userHooks), "entire hooks claude-code stop") {
+		t.Errorf("entire version did not install user-level Claude hooks (err=%v):\n%s", err, userHooks)
+	}
+
 	sessionID := runClaudeTurn(t, env, "feature.go", "package feature\n")
 
 	cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
@@ -85,11 +92,6 @@ func TestGlobalEnable_NeverEnabledRepoIsTrackedAndPushed(t *testing.T) {
 			t.Errorf("%s written into a never-enabled repo", rel)
 		}
 	}
-	userHooks, err := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
-	if err != nil || !strings.Contains(string(userHooks), "entire hooks claude-code stop") {
-		t.Errorf("first hook did not install user-level Claude hooks (err=%v):\n%s", err, userHooks)
-	}
-
 	env.GitPushWithHooks("origin", "feature/global")
 	out := gitOutput(t, bare, "for-each-ref", "--format=%(refname)")
 	t.Logf("remote refs after push:\n%s", out)

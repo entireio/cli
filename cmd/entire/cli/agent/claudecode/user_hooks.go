@@ -27,12 +27,14 @@ func EnsureUserHooks(ctx context.Context) (int, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
-	// Entire processes run this concurrently (parallel hooks), so the
-	// read-merge-write is serialised. The lock sits beside the file, as agy's
-	// does beside its settings.json.
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return 0, path, fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	// No Claude config directory means Claude Code is not in use here; do
+	// not create one for it.
+	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
+		return 0, path, nil
 	}
+	// Entire processes run this concurrently, so the read-merge-write is
+	// serialised. The lock sits beside the file, as agy's does beside its
+	// settings.json.
 	release, err := flock.AcquireContext(ctx, path+".lock")
 	if err != nil {
 		return 0, path, fmt.Errorf("lock %s: %w", path, err)

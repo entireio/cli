@@ -20,7 +20,7 @@ import (
 // in the user-level Claude settings. Best effort: this never fails a command.
 func ensureGlobalEnableHooks(cmd *cobra.Command) {
 	ctx := cmd.Context()
-	if !settings.UserTierEnablesEverywhere(ctx) {
+	if skipsGlobalEnableHooks(cmd) || !settings.UserTierEnablesEverywhere(ctx) {
 		return
 	}
 	n, path, err := claudecode.EnsureUserHooks(ctx)
@@ -32,4 +32,23 @@ func ensureGlobalEnableHooks(cmd *cobra.Command) {
 	if n > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Entire is enabled for all your repositories; added its Claude Code hooks to %s\n", path)
 	}
+}
+
+// hooksCommandName is the `entire hooks` group that agents and git invoke.
+const hooksCommandName = "hooks"
+
+// skipsGlobalEnableHooks reports commands that must not (re)install the
+// user-level hooks: agent and git hook invocations, which run on every turn
+// and only fire once hooks are already installed, and `entire disable`, which
+// is removing Entire rather than using it.
+func skipsGlobalEnableHooks(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case hooksCommandName, "disable":
+			if c.Parent() != nil && !c.Parent().HasParent() {
+				return true
+			}
+		}
+	}
+	return false
 }

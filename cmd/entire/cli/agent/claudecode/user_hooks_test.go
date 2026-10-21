@@ -3,6 +3,8 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -201,5 +203,24 @@ func TestEnsureUserHooks_ConcurrentCallsInstallOnce(t *testing.T) {
 	}
 	if installs != 1 {
 		t.Errorf("%d callers installed hooks, want exactly 1", installs)
+	}
+}
+
+// Without a Claude config directory Claude Code is not in use; nothing is
+// created for it.
+func TestEnsureUserHooks_NoClaudeConfigDirCreatesNothing(t *testing.T) {
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	t.Chdir(t.TempDir())
+
+	n, _, err := EnsureUserHooks(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureUserHooks() error = %v", err)
+	}
+	if n != 0 {
+		t.Errorf("EnsureUserHooks() added %d hooks, want 0", n)
+	}
+	if _, err := os.Stat(claudeDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Claude config dir was created (stat err = %v)", err)
 	}
 }
