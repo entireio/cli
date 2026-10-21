@@ -39,8 +39,8 @@ func TestCheckpointRemoteIsInherited_UserTierProvesOwnership(t *testing.T) {
 	config := &settings.CheckpointRemoteConfig{Provider: "github", Repo: "mydev/my-checkpoints"}
 	const originURL = "https://github.com/upstream/app.git"
 
-	inherited, reason := checkpointRemoteIsInherited(t.Context(), config, originURL, nil)
-	assert.True(t, inherited,
+	verdict, reason := checkpointRemoteIsInherited(t.Context(), config, originURL, nil)
+	assert.True(t, verdict.Refused(),
 		"sanity: a differently-owned destination with nothing vouching for it is inherited")
 	assert.Contains(t, reason, "upstream")
 
@@ -48,7 +48,7 @@ func TestCheckpointRemoteIsInherited_UserTierProvesOwnership(t *testing.T) {
 		`{"repos":{"gh/upstream/app":{"checkpoint_remote":{"provider":"github","repo":"mydev/my-checkpoints"}}}}`), 0o600))
 	settings.ClearOriginKeyCache()
 
-	inherited, _ = checkpointRemoteIsInherited(t.Context(), config, originURL, nil)
-	assert.False(t, inherited,
+	verdict, _ = checkpointRemoteIsInherited(t.Context(), config, originURL, nil)
+	assert.Equal(t, OwnershipOurs, verdict,
 		"a destination named in the user settings file is the developer's own, in every worktree")
 }

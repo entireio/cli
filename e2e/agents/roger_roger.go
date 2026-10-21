@@ -60,7 +60,7 @@ func (r *RogerRoger) RunPrompt(ctx context.Context, dir string, prompt string, o
 	cmd := exec.CommandContext(ctx, r.Binary())
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(prompt + "\n\n")
-	cmd.Env = filterEnv(os.Environ(), "ENTIRE_TEST_TTY")
+	cmd.Env = agentEnv(os.Environ())
 	setupProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
@@ -89,7 +89,7 @@ func (r *RogerRoger) RunPrompt(ctx context.Context, dir string, prompt string, o
 
 func (r *RogerRoger) StartSession(_ context.Context, dir string) (Session, error) {
 	name := fmt.Sprintf("rr-test-%d", time.Now().UnixNano())
-	s, err := NewTmuxSession(name, dir, []string{"ENTIRE_TEST_TTY"}, r.Binary())
+	s, err := NewTmuxSession(name, dir, nil, r.Binary())
 	if err != nil {
 		return nil, err
 	}

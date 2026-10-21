@@ -128,9 +128,8 @@ func TestResolve_PoisonedCacheIsRefusedOnRead(t *testing.T) {
 	cacheDir := t.TempDir()
 	require.NoError(t, discovery.ModifyClusterCores(cacheDir, func(c discovery.ClusterCoresCache) error {
 		c.SetEntry("git.evil.com", discovery.CoresEntry{
-			CoreURLs:             []string{"https://foo.auth.entire.io"},
-			JurisdictionAudience: "https://eu.entire.io",
-			FetchedAt:            time.Now(),
+			CoreURLs:  []string{"https://foo.auth.entire.io"},
+			FetchedAt: time.Now(),
 		})
 		return nil
 	}))

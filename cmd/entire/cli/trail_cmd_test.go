@@ -77,7 +77,7 @@ func TestPostTrailCreateUsesNativeRepoBasePath(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	_, err := postTrailCreate(t.Context(), api.NewClientWithBaseURL("token", srv.URL), basePath,
-		"et", "entirehq", "marvin", "Native trail", "", "feature/native", "main", "open", "", "", nil)
+		"et", "entirehq", "marvin", "Native trail", "", "feature/native", "main", "open", "", "", nil, true)
 	require.NoError(t, err)
 	require.Equal(t, http.MethodPost, gotMethod)
 	require.Equal(t, basePath, gotPath)
@@ -483,7 +483,7 @@ func TestRunTrailListAll_ValidatesOptionsBeforeAuth(t *testing.T) {
 
 func TestTrailRootPrintsHelp(t *testing.T) {
 	t.Parallel()
-	cmd := newTrailCmd()
+	cmd := newTrailCmdForMode(true)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(io.Discard)
@@ -492,7 +492,7 @@ func TestTrailRootPrintsHelp(t *testing.T) {
 		t.Fatalf("execute trail root: %v", err)
 	}
 	text := out.String()
-	for _, want := range []string{"A trail ties together the context for a branch", "`entire trail finding`", "show", "list", "create", "finding"} {
+	for _, want := range []string{"A trail captures project intent", "--repo and --branch", "show", "list", "create", "link", "unlink"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help output missing %q, got:\n%s", want, text)
 		}
@@ -819,131 +819,32 @@ func TestResolveCreateBranch(t *testing.T) {
 	}
 }
 
-func TestParseTrailNumberArg(t *testing.T) {
+// Trail deletion was removed; the command must say so whichever legacy flags
+// a script still passes.
+func TestTrailDeleteRemoved(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name    string
-		args    []string
-		want    int
-		wantErr bool
-	}{
-		{"no arg", nil, 0, false},
-		{"empty slice", []string{}, 0, false},
-		{"valid number", []string{"575"}, 575, false},
-		{"zero rejected", []string{"0"}, 0, true},
-		{"negative rejected", []string{"-3"}, 0, true},
-		{"non-numeric rejected", []string{"abc"}, 0, true},
-		{"uuid rejected", []string{"019ed3c9-7fd9-72d6-bd29-1130d2b2eec4"}, 0, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := parseTrailNumberArg(tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseTrailNumberArg(%v) err = %v, wantErr %v", tt.args, err, tt.wantErr)
-			}
-			if !tt.wantErr && got != tt.want {
-				t.Fatalf("parseTrailNumberArg(%v) = %d, want %d", tt.args, got, tt.want)
-			}
-		})
+
+	for _, args := range [][]string{{}, {"575"}, {"--force"}, {"--branch", "feat", "-f"}} {
+		cmd := newTrailDeleteCmd()
+		cmd.SetArgs(args)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatalf("trail delete %v: expected error, got nil", args)
+		}
+		if !errors.Is(err, errTrailDeleteRemoved) {
+			t.Fatalf("trail delete %v: want the removal error, got: %v", args, err)
+		}
 	}
 }
 
-func TestConfirmTrailDeletion(t *testing.T) {
-	t.Parallel()
-
-	// --force proceeds without prompting (no TTY needed).
-	var buf bytes.Buffer
-	proceed, err := confirmTrailDeletion(t.Context(), &buf, 575, "Some title", true, false)
-	if err != nil || !proceed {
-		t.Fatalf("force: got (proceed=%v, err=%v), want (true, nil)", proceed, err)
-	}
-
-	// Non-interactive without --force must refuse, not delete unprompted.
-	buf.Reset()
-	proceed, err = confirmTrailDeletion(t.Context(), &buf, 575, "Some title", false, false)
-	if err == nil {
-		t.Fatalf("non-interactive without --force: expected error, got nil (proceed=%v)", proceed)
-	}
-	if proceed {
-		t.Fatal("non-interactive without --force: must not proceed")
-	}
-	if !strings.Contains(err.Error(), "--force") {
-		t.Fatalf("error should mention --force, got: %v", err)
-	}
-
-	// An already-cancelled context is a clean cancel: no prompt, no error.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	buf.Reset()
-	proceed, err = confirmTrailDeletion(ctx, &buf, 575, "Some title", false, true)
-	if err != nil || proceed {
-		t.Fatalf("cancelled ctx: got (proceed=%v, err=%v), want (false, nil)", proceed, err)
-	}
-}
-
-func TestDeleteTrailByNumber(t *testing.T) {
-	t.Parallel()
-
-	t.Run("deletes via the integer number path and accepts 204", func(t *testing.T) {
-		t.Parallel()
-		var gotMethod, gotPath string
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			gotMethod, gotPath = r.Method, r.URL.Path
-			w.WriteHeader(http.StatusNoContent)
-		}))
-		defer srv.Close()
-
-		client := api.NewClientWithBaseURL("tok", srv.URL)
-		if err := deleteTrailByNumberAtPath(t.Context(), client, trailsBasePath("gh", "acme", "repo"), 575); err != nil {
-			t.Fatalf("deleteTrailByNumber: %v", err)
-		}
-		if gotMethod != http.MethodDelete {
-			t.Fatalf("method = %q, want DELETE", gotMethod)
-		}
-		if want := "/api/v1/trails/gh/acme/repo/575"; gotPath != want {
-			t.Fatalf("path = %q, want %q (integer number, not UUID)", gotPath, want)
-		}
-	})
-
-	t.Run("deletes Entire-native trail via repo ID path", func(t *testing.T) {
-		t.Parallel()
-		const basePath = "/api/v1/repos/native-repo-id/trails"
-		var gotMethod, gotPath string
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			gotMethod, gotPath = r.Method, r.URL.Path
-			w.WriteHeader(http.StatusNoContent)
-		}))
-		t.Cleanup(srv.Close)
-
-		err := deleteTrailByNumberAtPath(t.Context(), api.NewClientWithBaseURL("tok", srv.URL), basePath, 3)
-		require.NoError(t, err)
-		require.Equal(t, http.MethodDelete, gotMethod)
-		require.Equal(t, basePath+"/3", gotPath)
-	})
-
-	t.Run("surfaces a non-2xx status", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-			if err := json.NewEncoder(w).Encode(map[string]string{"error": "Trail not found"}); err != nil {
-				t.Errorf("encode response: %v", err)
-			}
-		}))
-		defer srv.Close()
-
-		client := api.NewClientWithBaseURL("tok", srv.URL)
-		if err := deleteTrailByNumberAtPath(t.Context(), client, trailsBasePath("gh", "acme", "repo"), 999); err == nil {
-			t.Fatal("expected error for 404, got nil")
-		}
-	})
-}
-
-// TestParseTrailRepoShape_GitSuffixIsForgeAware pins that a bare triple keeps
-// `.git` for a native ref and drops it for a mirror ref. `entire trail` refuses
-// native refs downstream (errTrailsNativeUnsupported), so this is about the
-// parser reporting the name it was given rather than a user-visible unlock.
-func TestParseTrailRepoShape_GitSuffixIsForgeAware(t *testing.T) {
+// TestParseTrailRepoShape_GitSuffixIsDroppedOnEveryForge pins that a bare
+// triple drops `.git` whichever forge it names. Both forges reach a trails
+// route — a mirror by forge/owner/repo, a native repo by ULID through
+// trailRepoBasePath — so this is user-visible normalization: `--repo
+// et/p/foo.git` and `--repo et/p/foo` name one repository.
+func TestParseTrailRepoShape_GitSuffixIsDroppedOnEveryForge(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name      string
@@ -952,9 +853,16 @@ func TestParseTrailRepoShape_GitSuffixIsForgeAware(t *testing.T) {
 		wantOwner string
 		wantRepo  string
 	}{
-		{name: "native keeps the suffix", raw: "et/audit1/foo.git", wantForge: "et", wantOwner: "audit1", wantRepo: "foo.git"},
+		{name: "native drops the suffix", raw: "et/audit1/foo.git", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
 		{name: "native without a suffix", raw: "et/audit1/foo", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
 		{name: "mirror drops the suffix", raw: "gh/acme/app.git", wantForge: "gh", wantOwner: "acme", wantRepo: "app"},
+		// Case is not part of the suffix. This value is typically pasted
+		// from a clone URL, and the server cuts the suffix with EqualFold,
+		// so a case-sensitive drop here forwards "foo.GIT" as a repo
+		// coordinate — a name the trails route cannot match.
+		{name: "native drops an uppercase suffix", raw: "et/audit1/foo.GIT", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
+		{name: "mirror drops a mixed-case suffix", raw: "gh/acme/app.Git", wantForge: "gh", wantOwner: "acme", wantRepo: "app"},
+		{name: "a longer dotted extension survives", raw: "gh/acme/app.gitignore", wantForge: "gh", wantOwner: "acme", wantRepo: "app.gitignore"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -963,6 +871,34 @@ func TestParseTrailRepoShape_GitSuffixIsForgeAware(t *testing.T) {
 			require.Equal(t, tc.wantForge, forge)
 			require.Equal(t, tc.wantOwner, owner)
 			require.Equal(t, tc.wantRepo, repo)
+		})
+	}
+}
+
+// TestParseTrailRepoShape_RefusesNamesTheTrimManufactures pins that the segment
+// check runs again AFTER the suffix is dropped. The emptiness check ahead of the
+// trim sees the name as typed, so ".git" and "..git" both passed it and then
+// became "" and "." — coordinates the trim invented, forwarded to a trails
+// route. Neither forge is exempt.
+func TestParseTrailRepoShape_RefusesNamesTheTrimManufactures(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{
+		"et/acme/.git",   // empties
+		"et/acme/..git",  // becomes "."
+		"et/acme/...git", // becomes ".."
+		"gh/acme/.git",
+		"gh/acme/..git",
+		// The manufactured-name guard has to cover every case of the
+		// suffix too, or the case-insensitive cut reopens exactly the hole
+		// the case-sensitive one had closed.
+		"et/acme/.GIT",
+		"et/acme/..GIT",
+		"gh/acme/..Git",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+			_, _, _, err := parseTrailRepoShape(raw)
+			require.Error(t, err)
 		})
 	}
 }
@@ -1748,7 +1684,7 @@ func TestPrintTrailDetailsOmitsWhitespacePhase(t *testing.T) {
 		Base:   "main",
 		Status: trail.StatusOpen,
 		Phase:  "   ",
-	}, "", "")
+	}, "", nil, "")
 
 	if text := out.String(); strings.Contains(text, "Phase:") {
 		t.Fatalf("expected whitespace phase to be omitted, got:\n%s", text)
@@ -1760,7 +1696,7 @@ func TestPrintTrailDetailsRendersURLAndDescription(t *testing.T) {
 	m := &trail.Metadata{Title: "T", Branch: "feat/a", Base: "main", Status: trail.StatusOpen}
 
 	var out bytes.Buffer
-	printTrailDetails(&out, m, "https://entire.io/gh/acme/repo/trails/5", "line one\nline two")
+	printTrailDetails(&out, m, "https://entire.io/gh/acme/repo/trails/5", nil, "line one\nline two")
 	text := out.String()
 	if !strings.Contains(text, "URL:") || !strings.Contains(text, "https://entire.io/gh/acme/repo/trails/5") {
 		t.Fatalf("expected a URL line, got:\n%s", text)
@@ -1771,9 +1707,18 @@ func TestPrintTrailDetailsRendersURLAndDescription(t *testing.T) {
 
 	// Empty URL and whitespace-only body are omitted.
 	out.Reset()
-	printTrailDetails(&out, m, "", "   ")
-	if text := out.String(); strings.Contains(text, "URL:") || strings.Contains(text, "Description:") {
-		t.Fatalf("expected URL/Description omitted for empty values, got:\n%s", text)
+	printTrailDetails(&out, m, "", nil, "   ")
+	if text := out.String(); strings.Contains(text, "URL:") || strings.Contains(text, "Description:") || strings.Contains(text, "Project trail:") {
+		t.Fatalf("expected URL/Description/Project trail omitted for empty values, got:\n%s", text)
+	}
+
+	// A Change prints its parent's page, the link agents otherwise guess.
+	// Both links are server text, so control characters never reach the terminal.
+	out.Reset()
+	m.ProjectTrailURL = "https://entire.io/gh/acme/-/trails/42\x1b[31m"
+	printTrailDetails(&out, m, "https://entire.io/gh/acme/repo/trails/5\x1b[0m", nil, "")
+	if text := out.String(); !strings.Contains(text, "Project trail: https://entire.io/gh/acme/-/trails/42") || strings.Contains(text, "\x1b") {
+		t.Fatalf("expected sanitized links, got:\n%q", text)
 	}
 }
 
@@ -2028,7 +1973,7 @@ func TestRunTrailShowJSONKeepsStdoutParseableWhenDescriptionFetchFails(t *testin
 	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: "feature/x", JSON: true})
 
 	require.NoError(t, err)
-	require.Contains(t, errOut.String(), "could not load trail description")
+	require.Contains(t, errOut.String(), "could not load trail detail")
 
 	var got trail.Metadata
 	require.NoError(t, json.Unmarshal(out.Bytes(), &got), "stdout must stay valid JSON: %s", out.String())
@@ -2839,7 +2784,7 @@ func TestPrintTrailDetailsShowsTypePriorityReviewers(t *testing.T) {
 		Type:      trail.TypeBug,
 		Priority:  trail.PriorityHigh,
 		Reviewers: []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}},
-	}, "", "")
+	}, "", nil, "")
 	s := out.String()
 	for _, want := range []string{"Type:", "bug", "Priority:", "high", "Reviewers:", "rev1", "approved"} {
 		if !strings.Contains(s, want) {

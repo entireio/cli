@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 // Release-asset download. The one irreducibly forge-specific piece of the
@@ -96,7 +97,7 @@ const maxAssetRedirects = 10
 // redirects *across schemes* and only the initial URL was ever validated, so an
 // https:// entry point could deliver both the asset and its checksums.txt over
 // plaintext — exactly the outcome requireSecureAssetURL exists to prevent.
-var pluginHTTPClient = &http.Client{
+var pluginHTTPClient = httpclient.New(httpclient.Options{
 	Timeout:   5 * time.Minute,
 	Transport: versioninfo.WrapTransport(nil),
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -105,7 +106,7 @@ var pluginHTTPClient = &http.Client{
 		}
 		return requireSecureAssetURL(req.URL.String())
 	},
-}
+})
 
 // maxPluginAssetSize caps a downloaded asset. Real plugin binaries are tens
 // of MB; the cap exists so a misconfigured URL serving an endless stream
@@ -523,27 +524,6 @@ func matchesPluginBinary(entryName, binName string) bool {
 func safeArchiveEntry(entryName string) bool {
 	clean := archiveEntryPath(entryName)
 	return !strings.HasPrefix(clean, "../") && !path.IsAbs(clean) && !strings.Contains(entryName, "\x00")
-}
-
-// preferredArchiveEntry picks among entries whose basename matches the plugin
-// binary. Shallowest path wins, then lexicographic order.
-//
-// Selection has to be deterministic and independent of archive order. Matching
-// is by basename, so an archive can legitimately hold more than one candidate —
-// goreleaser writes the binary at the root by default but nests it under a
-// versioned directory with wrap_in_directory, and archives also ship things like
-// completions/entire-<name>. Taking whichever came first meant the installed
-// binary depended on the order the author's tar happened to be built in.
-//
-// Shallowest-first encodes the convention: the real binary sits at the root, or
-// at worst one directory down; a same-named file deeper in the tree is a
-// completion script or a doc, not the command.
-func preferredArchiveEntry(names []string, binName string) string {
-	p := archiveEntryPicker{binName: binName}
-	for _, name := range names {
-		p.consider(name)
-	}
-	return p.best
 }
 
 // archiveEntryPicker keeps only the best candidate seen so far, so an archive

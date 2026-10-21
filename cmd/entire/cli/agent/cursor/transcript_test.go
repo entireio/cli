@@ -1,6 +1,7 @@
 package cursor
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // Compile-time interface check.
@@ -125,43 +127,6 @@ func TestCursorAgent_ExtractPrompts_EmptyFile(t *testing.T) {
 	}
 }
 
-// --- ExtractSummary ---
-
-func TestCursorAgent_ExtractSummary(t *testing.T) {
-	t.Parallel()
-	ag := &CursorAgent{}
-
-	tmpDir := t.TempDir()
-	path := writeSampleTranscript(t, tmpDir)
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("ExtractSummary() error = %v", err)
-	}
-	if summary != "Created one.txt with one and committed." {
-		t.Errorf("ExtractSummary() = %q, want %q", summary, "Created one.txt with one and committed.")
-	}
-}
-
-func TestCursorAgent_ExtractSummary_EmptyFile(t *testing.T) {
-	t.Parallel()
-	ag := &CursorAgent{}
-
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "empty.jsonl")
-	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
-		t.Fatalf("failed to write empty file: %v", err)
-	}
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("ExtractSummary() error = %v", err)
-	}
-	if summary != "" {
-		t.Errorf("ExtractSummary() = %q, want empty string", summary)
-	}
-}
-
 // --- ExtractModifiedFilesFromOffset ---
 
 func TestCursorAgent_ExtractModifiedFilesFromOffset(t *testing.T) {
@@ -174,7 +139,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset(t *testing.T) {
 	// The sample is a text-only conversation, so there is nothing to attribute --
 	// but the position must still advance to the sample's line count. Returning a
 	// constant 0 here is what the removed stub did.
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset() error = %v, want nil", err)
 	}
@@ -193,7 +158,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_NonexistentFile(t *testing.T
 	t.Parallel()
 	ag := &CursorAgent{}
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset("/nonexistent/path.jsonl", 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), "/nonexistent/path.jsonl", 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset() error = %v, want nil", err)
 	}
@@ -209,7 +174,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_EmptyPath(t *testing.T) {
 	t.Parallel()
 	ag := &CursorAgent{}
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset("", 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), "", 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset() error = %v", err)
 	}
@@ -283,7 +248,7 @@ func TestCursorAgent_RealSessionContainsToolUseBlocks(t *testing.T) {
 	// Tool name -> the input keys observed for it in the real session.
 	got := map[string]map[string]bool{}
 	for i := range lines {
-		if lines[i].Type != transcript.TypeAssistant {
+		if lines[i].Type != transcriptlib.TypeAssistant {
 			continue
 		}
 		var msg transcript.AssistantMessage
@@ -291,7 +256,7 @@ func TestCursorAgent_RealSessionContainsToolUseBlocks(t *testing.T) {
 			t.Fatalf("unmarshal assistant message: %v", err)
 		}
 		for _, block := range msg.Content {
-			if block.Type != transcript.ContentTypeToolUse {
+			if block.Type != transcriptlib.ContentTypeToolUse {
 				continue
 			}
 			var input map[string]json.RawMessage
@@ -349,7 +314,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_RealSession(t *testing.T) {
 	t.Parallel()
 	ag := &CursorAgent{}
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(realSessionFixture, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), realSessionFixture, 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset() error = %v", err)
 	}
@@ -381,7 +346,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_RealSessionOffsets(t *testin
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			files, pos, err := ag.ExtractModifiedFilesFromOffset(realSessionFixture, tt.offset)
+			files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), realSessionFixture, tt.offset)
 			if err != nil {
 				t.Fatalf("ExtractModifiedFilesFromOffset() error = %v", err)
 			}

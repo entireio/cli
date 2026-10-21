@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -314,6 +315,7 @@ type mirrorResult struct {
 	owner       string
 	repo        string
 	regionLabel string
+	clusterHost string // bare host, as `--cluster` takes it
 	cloneURL    string
 	status      string // ready | registered | empty | suspended | timed out | error
 	err         error
@@ -604,7 +606,7 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	if report == nil {
 		report = func(string, bool, bool) {}
 	}
-	res := mirrorResult{forge: t.forge, owner: t.owner, repo: t.repo, regionLabel: regionLabel(t.region)}
+	res := mirrorResult{forge: t.forge, owner: t.owner, repo: t.repo, regionLabel: regionLabel(t.region), clusterHost: t.region.host}
 	if t.forge == nativeCloneForge {
 		return createOneNativeMirror(ctx, t, c, clientErr, opts, report)
 	}
@@ -775,10 +777,10 @@ func terminalIcon(ok bool) string {
 	return "✗"
 }
 
-// reportMirrorResults renders the results table, a copy-pasteable git-clone
-// block for the ready mirrors, and per-failure detail. It returns a
-// SilentError (so the table isn't reprinted) when any mirror failed, giving the
-// command a non-zero exit while still showing what succeeded.
+// reportMirrorResults renders the results table, copy-pasteable git-clone and
+// `repo remote add` blocks for the ready mirrors, and per-failure detail. It
+// returns a SilentError (so the table isn't reprinted) when any mirror failed,
+// giving the command a non-zero exit while still showing what succeeded.
 func reportMirrorResults(outW, errW io.Writer, results []mirrorResult) error {
 	if len(results) == 0 {
 		return nil
@@ -789,11 +791,16 @@ func reportMirrorResults(outW, errW io.Writer, results []mirrorResult) error {
 		return err
 	}
 
-	var readyURLs []string
+	var readyURLs, readyHosts []string
+	seenHosts := make(map[string]bool)
 	var failures int
 	for _, r := range results {
 		if r.status == mirrorStatusReady && r.cloneURL != "" {
 			readyURLs = append(readyURLs, r.cloneURL)
+			if r.clusterHost != "" && !seenHosts[r.clusterHost] {
+				seenHosts[r.clusterHost] = true
+				readyHosts = append(readyHosts, r.clusterHost)
+			}
 		}
 		if r.err != nil {
 			failures++
@@ -802,7 +809,28 @@ func reportMirrorResults(outW, errW io.Writer, results []mirrorResult) error {
 	if len(readyURLs) > 0 {
 		fmt.Fprintln(outW, "\nClone them:")
 		for _, u := range readyURLs {
-			fmt.Fprintf(outW, "  git clone %s\n", u)
+			fmt.Fprintf(outW, "  git clone %s\n", strategy.ShellQuoteForDisplay(u))
+		}
+		// A `git remote set-url` line is only right inside its own repo's
+		// checkout. `repo remote add` reads the repo from the checkout's
+		// origin instead, and refuses one the cluster does not serve, so a
+		// line per cluster is safe to paste into any checkout.
+		//
+		// Both blocks quote what they interpolate: an IPv6 cluster host such
+		// as [::1]:8080 is valid, and zsh reads its brackets as a glob.
+		//
+		// Unlike the clone lines, these are alternatives: running two repoints
+		// origin twice. And --override replaces origin's URL, echoing the old
+		// one only with credentials redacted, so the header says both.
+		if len(readyHosts) > 0 {
+			header := "\nOr point an existing checkout's origin at the mirror (replaces its current URL):"
+			if len(readyHosts) > 1 {
+				header = "\nOr point an existing checkout's origin at one of them — run one line (replaces its current URL):"
+			}
+			fmt.Fprintln(outW, header)
+			for _, h := range readyHosts {
+				fmt.Fprintf(outW, "  entire repo remote add origin --override --cluster %s\n", strategy.ShellQuoteForDisplay(h))
+			}
 		}
 	}
 	if failures > 0 {

@@ -64,10 +64,11 @@ func TestTerminateOnCancel_KillsProcessGroup(t *testing.T) {
 		t.Fatalf("did not observe ready marker: line=%q err=%v", line, err)
 	}
 
-	done := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(io.Discard, br) //nolint:errcheck // draining to block until the pipe closes; copy errors are irrelevant
-		done <- cmd.Wait()
+		_ = cmd.Wait()                 //nolint:errcheck // the group was killed by cancel; the exit error is expected
+		close(done)
 	}()
 
 	cancel()

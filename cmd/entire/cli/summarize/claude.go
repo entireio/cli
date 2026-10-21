@@ -78,7 +78,7 @@ type ClaudeGenerator struct {
 // Generate creates a summary from checkpoint data by calling the Claude CLI.
 func (g *ClaudeGenerator) Generate(ctx context.Context, input Input) (*checkpoint.Summary, error) {
 	// Format the transcript for the prompt
-	transcriptText := FormatCondensedTranscript(input)
+	transcriptText := FormatCondensedTranscriptForPrompt(input)
 
 	// Build the prompt
 	prompt := buildSummarizationPrompt(transcriptText)

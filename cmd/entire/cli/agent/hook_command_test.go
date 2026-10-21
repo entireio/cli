@@ -369,3 +369,25 @@ func TestWrapProductionPlainTextWarningHookCommandForOS(t *testing.T) {
 		t.Fatalf("windows wrapper not recognised as a managed hook command: %q", windows)
 	}
 }
+
+func TestIsManagedHookCommand_RecognisesDirectWindowsSilentWrapper(t *testing.T) {
+	// No t.Parallel(): sibling tests in this file mutate the package-level OS seam.
+	cmd := WrapWindowsProductionSilentHookCommandDirect("entire hooks antigravity stop")
+	if !strings.HasPrefix(cmd, windowsProductionHookWrapperPrefix) {
+		t.Fatalf("direct wrapper must start with the bare Windows prefix, got %q", cmd)
+	}
+	if strings.HasPrefix(cmd, "cmd.exe") {
+		t.Fatalf("direct wrapper must not nest a cmd.exe invocation, got %q", cmd)
+	}
+	if !IsManagedHookCommand(cmd) {
+		t.Fatalf("IsManagedHookCommand must recognise the direct Windows wrapper: %q", cmd)
+	}
+	kept, dropped := DropStaleManagedHooks([]string{cmd}, func(s string) string { return s }, []string{cmd})
+	if dropped || len(kept) != 1 {
+		t.Fatalf("a wanted direct-wrapper command must survive DropStaleManagedHooks, kept=%v dropped=%v", kept, dropped)
+	}
+	_, dropped = DropStaleManagedHooks([]string{cmd}, func(s string) string { return s }, nil)
+	if !dropped {
+		t.Fatal("an unwanted direct-wrapper command must be dropped as Entire's own")
+	}
+}

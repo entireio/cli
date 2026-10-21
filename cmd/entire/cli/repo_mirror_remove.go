@@ -324,7 +324,7 @@ func removeOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	if report == nil {
 		report = func(string, bool, bool) {}
 	}
-	res := mirrorResult{forge: t.forge, owner: t.owner, repo: t.repo, regionLabel: regionLabel(t.region)}
+	res := mirrorResult{forge: t.forge, owner: t.owner, repo: t.repo, regionLabel: regionLabel(t.region), clusterHost: t.region.host}
 	if clientErr != nil {
 		res.status, res.err = mirrorStatusError, clientErr
 		report(mirrorStatusError, true, false)

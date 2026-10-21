@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,7 +21,8 @@ import (
 
 // NewReviewer returns the AgentReviewer for codex.
 //
-// Argv shape: codex exec --skip-git-repo-check --json -.
+// Argv shape: codex exec --skip-git-repo-check --json
+// -c developer_instructions=<guardrail> -.
 // Prompt is piped via stdin (the trailing "-" tells codex to read from stdin).
 // Stdout is newline-delimited JSON envelopes (one event per line); no chrome
 // filter needed — each line is parsed directly into an Event.
@@ -29,6 +31,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 		AgentName: "codex",
 		BuildCmd:  buildCodexReviewCmd,
 		Parser:    parseCodexOutput,
+		Prepare:   prepareCodexReviewConfig,
 	}
 }
 
@@ -52,11 +55,19 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	promptCfg := cfg
 	promptCfg.Skills = codexNativeSkillInvocations(cfg.Skills)
-	args := []string{codexExecCommand, "--skip-git-repo-check", "--json"}
+	args := []string{codexExecCommand, "--skip-git-repo-check", "--json", "-c", review.CodexGuardrailConfig()}
+	args = append(args, cfg.ExtraArgs...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	args = append(args, "-")
 	prompt := review.ComposeReviewPrompt(promptCfg)
 	cmd := exec.CommandContext(ctx, "codex", args...)
+	if cfg.AgentConfig != nil {
+		// Codex keys project trust on its working directory, so run from
+		// exactly the directory the untrusted override names.
+		if root, err := filepath.EvalSymlinks(cfg.WorkDir); err == nil && cfg.WorkDir != "" {
+			cmd.Dir = root
+		}
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "codex", cfg, prompt)
 	return cmd
@@ -193,8 +204,11 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 					out <- reviewtypes.ToolCall{Name: "exec", Args: env.Item.Command}
 				}
 			case "item.completed":
-				if env.Item.Type == "agent_message" && env.Item.Text != "" {
+				if env.Item.Type == itemTypeAgentMessage && env.Item.Text != "" {
 					out <- reviewtypes.AssistantText{Text: env.Item.Text}
+				}
+				if blockedForApproval(env.Item) {
+					out <- reviewtypes.ToolsBlocked{Names: []string{env.Item.Server + "." + env.Item.Tool}, Allow: codexAllowHint}
 				}
 				// command_execution completion is intentionally swallowed —
 				// item.started already announced it. aggregated_output is the
@@ -302,9 +316,21 @@ func firstNonEmptyString(values ...string) string {
 }
 
 type codexItem struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
-	Text    string `json:"text"`
+	Type    string          `json:"type"`
+	Command string          `json:"command"`
+	Text    string          `json:"text"`
+	Server  string          `json:"server"`
+	Tool    string          `json:"tool"`
+	Status  string          `json:"status"`
+	Error   codexErrorField `json:"error"`
+}
+
+const codexAllowHint = `set default_tools_approval_mode = "approve" on the MCP server (in its review profile config, or ~/.codex/config.toml)`
+
+// blockedForApproval reports an MCP tool call Codex refused because exec mode
+// can't ask for approval.
+func blockedForApproval(item codexItem) bool {
+	return item.Type == "mcp_tool_call" && item.Status == "failed" && strings.Contains(item.Error.Message, "requires approval")
 }
 
 type codexUsage struct {

@@ -121,6 +121,17 @@ func ValidateAgentID(id string) error {
 	return nil
 }
 
+// ValidateWorkflowRunID validates a Claude Code Workflow run ID (e.g.
+// "wf_e5264e60-494"), which names a directory under the session's subagents
+// directory. Unlike the optional IDs above, empty is rejected: a run ID is
+// only ever used to build that path.
+func ValidateWorkflowRunID(id string) error {
+	if !pathSafeRegex.MatchString(id) {
+		return fmt.Errorf("invalid workflow run ID %q: must be non-empty, alphanumeric with underscores/hyphens only", id)
+	}
+	return nil
+}
+
 // ValidateAgentSessionID validates that an agent session ID contains only safe characters for paths.
 // Agent session IDs can be UUIDs (Claude Code), test identifiers, or other formats depending on the agent.
 // This prevents path traversal attacks when the ID is used in file path construction.

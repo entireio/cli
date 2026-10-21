@@ -33,7 +33,6 @@ const (
 
 type trailResumeOptions struct {
 	Selector       string
-	ExpectedRepo   string
 	ExpectedBranch string
 	SessionID      string
 	CheckpointID   string
@@ -53,21 +52,15 @@ type trailResumeContext struct {
 }
 
 type trailResumeTrailContext struct {
-	ID     string `json:"id,omitempty"`
-	Number int    `json:"number,omitempty"`
-	Title  string `json:"title,omitempty"`
-	Repo   string `json:"repo,omitempty"`
-	Branch string `json:"branch"`
-	Base   string `json:"base,omitempty"`
-	Status string `json:"status,omitempty"`
-	Phase  string `json:"phase,omitempty"`
-	URL    string `json:"url,omitempty"`
-}
-
-type trailResumeRepository struct {
-	Forge string
-	Owner string
-	Repo  string
+	ID      string `json:"id,omitempty"`
+	Number  int    `json:"number,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Project string `json:"project,omitempty"`
+	Branch  string `json:"branch"`
+	Base    string `json:"base,omitempty"`
+	Status  string `json:"status,omitempty"`
+	Phase   string `json:"phase,omitempty"`
+	URL     string `json:"url,omitempty"`
 }
 
 type trailResumeSessionContext struct {
@@ -130,16 +123,16 @@ type trailResumeFindingCounts struct {
 	Stale      int `json:"stale"`
 }
 
-func newTrailResumeCmd() *cobra.Command {
+func newTrailResumeCmd(mode *trailMode) *cobra.Command {
 	var opts trailResumeOptions
 
 	cmd := &cobra.Command{
 		Use:   "resume [<trail>]",
 		Short: "Resume a trail's agent session",
-		Long: `Resume an agent session for a trail.
-
-The trail may be given as the first argument or via --trail, as a number, id, or
-branch. Without one, the trail for the current branch is used.
+		Long: "Resume an agent session for a trail.\n\n" + mode.help(`The trail may be given as the first argument or via --trail, as a number, id, or
+branch. Without one, the trail for the current branch is used.`, `The trail may be given as the first argument or via --trail, as a project number,
+ID, or <repo>/<number>. Without one, the current branch's parent is used. --branch selects its
+working branch in this repository. Multiple matches require an explicit branch.`) + `
 
 By default, interactive terminals show the trail context, restore the checkpoint
 sessions on the trail branch, and ask whether Entire should start the agent. If
@@ -148,10 +141,9 @@ start. Non-interactive runs show the same context and print resume commands for
 the latest checkpoint on the trail branch. Use --session or --checkpoint to
 resume an exact session or checkpoint.
 
-Use --repo to assert the GitHub repository for copied commands, and --branch
-with a trail number or id to assert the branch you expect the trail to be
-attached to. If either assertion does not match the current checkout or trail,
-resume stops before checking anything out.`,
+Use --branch with a trail number or id to assert the branch you expect the
+trail to be attached to. If it does not match, resume stops before checking
+anything out.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			selector, err := parseOptionalTrailSelector(args, opts.Selector)
@@ -159,22 +151,36 @@ resume stops before checking anything out.`,
 				return err
 			}
 			opts.Selector = selector
+			if cmd.Flags().Changed("repo") {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Flag --repo has been deprecated, it has no effect and will be removed")
+			}
 			if err := validateTrailResumeOptions(opts); err != nil {
 				return err
 			}
 			external.DiscoverAndRegister(cmd.Context())
-			return runTrailResume(cmd, opts)
+			return runTrailResume(cmd, mode, opts)
 		},
 	}
 
-	cmd.Flags().StringVar(&opts.Selector, "trail", "", "Trail to resume (number, id, or branch; defaults to the current branch's trail)")
-	cmd.Flags().StringVar(&opts.ExpectedRepo, "repo", "", "Expected GitHub repository (owner/name); fails if the current checkout points elsewhere")
+	cmd.Flags().StringVar(&opts.Selector, "trail", "", mode.help(
+		"Trail to resume (number, id, or branch; defaults to the current branch's trail)",
+		"Project trail number, ID, or <repo>/<number> (defaults to the current branch's parent)"))
 	cmd.Flags().StringVar(&opts.ExpectedBranch, "branch", "", "Expected trail branch; fails if the trail is attached to a different branch")
 	cmd.Flags().StringVar(&opts.SessionID, "session", "", "Resume a specific known local session on the trail branch")
 	cmd.Flags().StringVar(&opts.CheckpointID, "checkpoint", "", "Resume a specific checkpoint on the trail branch")
 	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "Skip prompts and overwrite existing session logs from checkpoints")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output trail resume context as JSON")
 	cmd.Flags().BoolVar(&opts.NoResume, "no-resume", false, "Show trail resume context without restoring or resuming a session")
+
+	// --repo once asserted the checkout's repository. It is accepted and
+	// ignored so previously copied resume commands keep working. The notice
+	// goes to stderr itself: cobra's MarkDeprecated writes to the output
+	// writer when one is set, which would corrupt --json.
+	var deprecatedRepo string
+	cmd.Flags().StringVar(&deprecatedRepo, "repo", "", "Deprecated; has no effect")
+	if err := cmd.Flags().MarkHidden("repo"); err != nil {
+		panic(fmt.Sprintf("hide repo flag: %v", err))
+	}
 
 	return cmd
 }
@@ -189,9 +195,6 @@ func validateTrailResumeOptions(opts trailResumeOptions) error {
 	if opts.NoResume && (strings.TrimSpace(opts.SessionID) != "" || strings.TrimSpace(opts.CheckpointID) != "") {
 		return errors.New("cannot combine --no-resume with --session or --checkpoint")
 	}
-	if _, err := parseTrailResumeRepoFlag(opts.ExpectedRepo); err != nil {
-		return fmt.Errorf("validate --repo: %w", err)
-	}
 	if checkpointID := strings.TrimSpace(opts.CheckpointID); checkpointID != "" {
 		if err := id.Validate(checkpointID); err != nil {
 			return fmt.Errorf("validate --checkpoint: %w", err)
@@ -200,105 +203,67 @@ func validateTrailResumeOptions(opts trailResumeOptions) error {
 	return nil
 }
 
-func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
-	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), "", func(ctx context.Context, client *api.Client, repoID string) error {
-		forge, owner, repo, err := resolveTrailRemote(ctx)
-		if err != nil {
-			return err
-		}
-		targetRepo := trailResumeRepository{Forge: forge, Owner: owner, Repo: repo}
-		expectedRepo, err := parseTrailResumeRepoFlag(opts.ExpectedRepo)
-		if err != nil {
-			return fmt.Errorf("validate --repo: %w", err)
-		}
-		if err := validateTrailResumeExpectedRepo(targetRepo, expectedRepo); err != nil {
-			return err
-		}
-		if expectedRepo.Repo != "" {
-			forge, owner, repo = expectedRepo.Forge, expectedRepo.Owner, expectedRepo.Repo
-		}
-
-		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
-		if err != nil {
-			return err
-		}
-		found, err := resolveTrailBySelectorAtPath(ctx, client, basePath, forge, owner, repo, opts.Selector, opts.ExpectedBranch)
-		if err != nil {
-			return err
-		}
-		branch := strings.TrimSpace(found.Branch)
-		if branch == "" {
-			return fmt.Errorf("%s has no branch to resume", describeTrailRef(found))
-		}
-		if err := validateTrailResumeExpectedBranch(found, opts.ExpectedBranch); err != nil {
-			return err
-		}
-
-		sessions, sessionsSkipped, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
-		sessions, sessionsSkipped, sessionsUnavailable := knownTrailResumeSessionsForContext(sessions, sessionsSkipped, sessionErr)
-		if sessionsUnavailable != "" {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %s\n", sessionsUnavailable)
-		}
-
-		client.SetTrailRoute(found.ID, trailNumberPathForBase(basePath, found.Number))
-		findings, findingsErr := loadTrailResumeFindingsContext(ctx, client, found.ID)
-		if findingsErr != nil {
-			findings.Unavailable = findingsErr.Error()
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail findings: %v\n", findingsErr)
-		}
-
-		resumeCtx := buildTrailResumeContextForRepoWithSkipped(*found, sessions, sessionsUnavailable, sessionsSkipped, findings, owner+"/"+repo)
-		if opts.JSON {
-			return encodeTrailResumeContextJSON(cmd.OutOrStdout(), resumeCtx)
-		}
-
-		printTrailResumeContext(cmd.OutOrStdout(), resumeCtx)
-		if opts.NoResume {
-			return nil
-		}
-
-		if opts.CheckpointID != "" {
-			return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(opts.CheckpointID), "", opts.Force)
-		}
-
-		if opts.SessionID != "" {
-			sessionCtx, ok := findTrailResumeSession(resumeCtx.Sessions, opts.SessionID)
-			if ok {
-				return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), opts.SessionID, opts.Force)
-			}
-			return resumeTrailLatest(ctx, cmd, branch, opts.Force, opts.SessionID)
-		}
-
-		if interactive.CanPromptInteractively() && len(resumeCtx.Sessions) > 1 {
-			return runTrailResumePicker(ctx, cmd, branch, resumeCtx.Sessions, opts.Force)
-		}
-
-		return resumeTrailLatest(ctx, cmd, branch, opts.Force, "")
-	})
-}
-
-func parseTrailResumeRepoFlag(value string) (trailResumeRepository, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return trailResumeRepository{}, nil
-	}
-	owner, repo, err := parseGitHubURL(value)
+func runTrailResume(cmd *cobra.Command, mode *trailMode, opts trailResumeOptions) error {
+	// Restores and looks up agent transcripts from the user's shell, where a
+	// home an agent reads from its own settings is invisible to the environment.
+	agent.EnableHomeProbes()
+	ctx := cmd.Context()
+	selected, err := mode.workingContext(cmd, opts.Selector, opts.ExpectedBranch, true)
 	if err != nil {
-		return trailResumeRepository{}, err
+		return err
 	}
-	return trailResumeRepository{Forge: "gh", Owner: owner, Repo: repo}, nil
-}
+	client, found := selected.Client, &selected.Work
+	branch := strings.TrimSpace(found.Branch)
+	if branch == "" {
+		return fmt.Errorf("%s has no branch to resume", describeTrailRef(found))
+	}
+	if err := validateTrailResumeExpectedBranch(found, opts.ExpectedBranch); err != nil {
+		return err
+	}
 
-func validateTrailResumeExpectedRepo(current, expected trailResumeRepository) error {
-	if strings.TrimSpace(expected.Repo) == "" {
+	sessions, sessionsSkipped, sessionErr := resolveTrailResumeSessionContexts(ctx, branch)
+	sessions, sessionsSkipped, sessionsUnavailable := knownTrailResumeSessionsForContext(sessions, sessionsSkipped, sessionErr)
+	if sessionsUnavailable != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %s\n", sessionsUnavailable)
+	}
+
+	findings, findingsErr := loadTrailResumeFindingsContext(ctx, client, found.ID)
+	if findingsErr != nil {
+		findings.Unavailable = findingsErr.Error()
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail findings: %v\n", findingsErr)
+	}
+
+	display := *found
+	if selected.Target != nil {
+		display.Title, display.Status = selected.Parent.Title, selected.Parent.Status
+	}
+	resumeCtx := buildTrailResumeContext(display, sessions, sessionsUnavailable, sessionsSkipped, findings)
+	if opts.JSON {
+		return encodeTrailResumeContextJSON(cmd.OutOrStdout(), resumeCtx)
+	}
+
+	printTrailResumeContext(cmd.OutOrStdout(), resumeCtx)
+	if opts.NoResume {
 		return nil
 	}
-	if current.Forge == expected.Forge &&
-		strings.EqualFold(current.Owner, expected.Owner) &&
-		strings.EqualFold(current.Repo, expected.Repo) {
-		return nil
+
+	if opts.CheckpointID != "" {
+		return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(opts.CheckpointID), "", opts.Force)
 	}
-	return fmt.Errorf("this command targets repository %s/%s, but the current checkout is %s/%s", expected.Owner, expected.Repo, current.Owner, current.Repo)
+
+	if opts.SessionID != "" {
+		sessionCtx, ok := findTrailResumeSession(resumeCtx.Sessions, opts.SessionID)
+		if ok {
+			return resumeTrailCheckpoint(ctx, cmd, branch, id.CheckpointID(sessionCtx.CheckpointID), opts.SessionID, opts.Force)
+		}
+		return resumeTrailLatest(ctx, cmd, branch, opts.Force, opts.SessionID)
+	}
+
+	if interactive.CanPromptInteractively() && len(resumeCtx.Sessions) > 1 {
+		return runTrailResumePicker(ctx, cmd, branch, resumeCtx.Sessions, opts.Force)
+	}
+
+	return resumeTrailLatest(ctx, cmd, branch, opts.Force, "")
 }
 
 func validateTrailResumeExpectedBranch(found *api.TrailResource, expectedBranch string) error {
@@ -473,9 +438,7 @@ func resolveTrailCheckpointSessions(ctx context.Context, branch string) ([]trail
 	}
 	store := stores.Persistent
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromRemote() {
-		promoteRemoteTrackingPrimary(ctx, repo, refs)
-	}
+	promoteRemoteTrackingPrimary(ctx, repo, refs)
 
 	sessions := make([]trailResumeSessionContext, 0)
 	skipped := 0
@@ -653,17 +616,20 @@ func trailResumeTopFindingOptions() trailReviewListOptions {
 	}
 }
 
-func buildTrailResumeContextForRepoWithSkipped(found api.TrailResource, sessions []trailResumeSessionContext, sessionsUnavailable string, sessionsSkipped int, findings trailResumeFindingsContext, repoFullName string) trailResumeContext {
+func buildTrailResumeContext(found api.TrailResource, sessions []trailResumeSessionContext, sessionsUnavailable string, sessionsSkipped int, findings trailResumeFindingsContext) trailResumeContext {
 	trailCtx := trailResumeTrailContext{
 		ID:     found.ID,
 		Number: found.Number,
 		Title:  strings.TrimSpace(found.Title),
-		Repo:   strings.TrimSpace(repoFullName),
 		Branch: strings.TrimSpace(found.Branch),
 		Base:   strings.TrimSpace(found.Base),
 		Status: strings.TrimSpace(found.Status),
 		Phase:  strings.TrimSpace(found.Phase),
 		URL:    strings.TrimSpace(found.URL),
+	}
+	if found.Parent != nil {
+		trailCtx.ID, trailCtx.Number = found.Parent.ID, found.Parent.Number
+		trailCtx.Project = found.Parent.Host + "/" + found.Parent.Project
 	}
 
 	sort.SliceStable(sessions, func(i, j int) bool {
@@ -699,15 +665,21 @@ func buildTrailResumeCommands(ctx trailResumeContext) []string {
 		return nil
 	}
 	arg := shellArg(selector)
-	resumeCommand := "entire trail resume " + arg
-	if repo := strings.TrimSpace(ctx.Trail.Repo); repo != "" {
-		resumeCommand += " --repo " + shellArg(repo)
+	if project := strings.TrimSpace(ctx.Trail.Project); project != "" {
+		arg += " --project " + shellArg(project)
 	}
+	findingArg := arg
 	if branch := strings.TrimSpace(ctx.Trail.Branch); branch != "" {
-		resumeCommand += " --branch " + shellArg(branch)
+		arg += " --branch " + shellArg(branch)
 	}
+	prefix := ""
+	if ctx.Trail.Project != "" {
+		prefix = projectTrailsEnv + "=1 "
+		findingArg = arg
+	}
+	resumeCommand := prefix + "entire trail resume " + arg
 	commands := []string{
-		"entire trail finding " + arg + " --json",
+		prefix + "entire trail finding " + findingArg + " --json",
 		resumeCommand,
 	}
 	if ctx.DefaultResume != nil && ctx.DefaultResume.CheckpointID != "" {
@@ -726,7 +698,10 @@ func trailResumeSelectorForCommands(trail trailResumeTrailContext) string {
 	if trail.ID != "" {
 		return trail.ID
 	}
-	return trail.Branch
+	if trail.Project == "" {
+		return trail.Branch
+	}
+	return "" // A branch name is context, never a project trail selector.
 }
 
 func shellArg(s string) string {
@@ -1163,7 +1138,7 @@ func trailResumeWorktreeClashMessage(branch, otherPath string) string {
 	fmt.Fprintf(&b, "Branch %q is already checked out in another worktree:\n", branch)
 	fmt.Fprintf(&b, "  %s\n\n", otherPath)
 	fmt.Fprintf(&b, "Resume from that worktree with:\n")
-	fmt.Fprintf(&b, "  cd %s && entire trail resume %s\n", shellQuote(otherPath), shellArg(branch))
+	fmt.Fprintf(&b, "  cd %s && entire trail resume --branch %s\n", shellQuote(otherPath), shellArg(branch))
 	return b.String()
 }
 

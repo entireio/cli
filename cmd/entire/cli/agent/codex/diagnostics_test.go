@@ -206,3 +206,9 @@ func writeDiagnosticHooks(t *testing.T, root, contents string) {
 	require.NoError(t, os.MkdirAll(projectDir, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, HooksFileName), []byte(contents), 0o600))
 }
+
+func inspectHookDiagnosticsAt(ctx context.Context, worktreeRoot string) HookDiagnostics {
+	diagnostics := HookDiagnostics{Discovery: resolveHookDiscovery(worktreeRoot)}
+	worktreeHooks, err := resolveWorktreeHooksPath(worktreeRoot)
+	return finishHookDiagnostics(ctx, diagnostics, worktreeHooks, err, false)
+}

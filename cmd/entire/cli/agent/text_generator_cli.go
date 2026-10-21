@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -30,24 +31,59 @@ func (e *TextGenerationError) Unwrap() error { return e.Err }
 // TextCommandRunner matches exec.CommandContext and allows tests to inject a runner.
 type TextCommandRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
 
-// RunIsolatedTextGeneratorCLI executes a text-generation CLI in an isolated temp
-// directory with all GIT_* environment variables removed. This avoids recursive
-// hook triggers and repo side effects while preserving provider-specific flags.
+// NewTextGenerationDir creates an empty working directory for one
+// text-generation run; cleanup removes it.
+//
+// A text generator's prompt carries untrusted transcript content, and the
+// agent CLIs let their file tools reach the working directory (Copilot also
+// the system temp directory) without approval. Running from the shared
+// system temp directory therefore exposed everything in it, including
+// credential files other tools and Entire itself leave there, to an
+// injected "read this file" instruction. Each generator also removes its
+// tools where the CLI allows it; an empty directory is what remains for the
+// ones that cannot (Antigravity) and a backstop for the rest.
+func NewTextGenerationDir() (string, func(), error) {
+	dir, err := os.MkdirTemp("", "entire-textgen-")
+	if err != nil {
+		return "", nil, fmt.Errorf("create text generation dir: %w", err)
+	}
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// RunIsolatedTextGeneratorCLI executes a text-generation CLI in a fresh empty
+// directory (NewTextGenerationDir) with all GIT_* environment variables
+// removed. This avoids recursive hook triggers and repo side effects while
+// preserving provider-specific flags.
 //
 // Optional envOverrides take precedence over inherited values; GIT_* entries
 // are removed even from overrides.
 //
 // Returns (result, capturedStderr, stdoutByteCount, err). capturedStderr and
-// stdoutByteCount are populated even on error so callers can wrap them into a
-// *agent.TextGenerationError for timeout diagnostics.
+// stdoutByteCount are populated whether or not the process failed, so callers
+// can wrap them into a *agent.TextGenerationError for timeout diagnostics, and
+// so can callers that parse a successful exit's output and find a failure in
+// it (OpenCode's and Antigravity's JSON results).
 func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string, envOverrides ...string) (string, string, int, error) {
+	dir, cleanup, err := NewTextGenerationDir()
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer cleanup()
+	return RunIsolatedTextGeneratorCLIIn(ctx, runner, dir, binary, displayName, args, stdin, envOverrides...)
+}
+
+// RunIsolatedTextGeneratorCLIIn is RunIsolatedTextGeneratorCLI in a directory
+// the caller already created with NewTextGenerationDir, for a CLI whose argv
+// or setup must name that directory (Cursor's --workspace and its
+// .cursor/cli.json).
+func RunIsolatedTextGeneratorCLIIn(ctx context.Context, runner TextCommandRunner, dir, binary, displayName string, args []string, stdin string, envOverrides ...string) (string, string, int, error) {
 	if runner == nil {
 		runner = exec.CommandContext
 	}
 
 	cmd := runner(ctx, binary, args...)
-	cmd.Dir = os.TempDir()
-	cmd.Env = StripGitEnv(append(os.Environ(), envOverrides...))
+	cmd.Dir = dir
+	cmd.Env = TextGenerationEnv(dir, append(os.Environ(), envOverrides...))
 	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
 	// output pipe open, which blocks cmd.Run past the ctx deadline. Bound it.
 	execx.TerminateOnCancel(cmd)
@@ -86,11 +122,12 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 		return "", capturedStderr, stdoutBytes, fmt.Errorf("failed to run %s CLI: %w", displayName, err)
 	}
 
+	capturedStderr := strings.TrimSpace(stderr.String())
 	result := strings.TrimSpace(stdout.String())
 	if result == "" {
-		return "", "", 0, fmt.Errorf("%s CLI returned empty output", displayName)
+		return "", capturedStderr, stdout.Len(), fmt.Errorf("%s CLI returned empty output", displayName)
 	}
-	return result, "", stdout.Len(), nil
+	return result, capturedStderr, stdout.Len(), nil
 }
 
 // summaryProviderBinaries maps agent names to the CLI binary that
@@ -108,13 +145,13 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 const openCodeBinary = "opencode"
 
 var summaryProviderBinaries = map[types.AgentName]string{
-	AgentNameClaudeCode: "claude",
-	AgentNameCodex:      "codex",
-	AgentNameCopilotCLI: "copilot",
-	AgentNameCursor:     "agent",
-	AgentNameGemini:     "gemini",
-	AgentNamePi:         "pi",
-	AgentNameOpenCode:   openCodeBinary,
+	AgentNameAntigravity: "agy",
+	AgentNameClaudeCode:  "claude",
+	AgentNameCodex:       "codex",
+	AgentNameCopilotCLI:  "copilot",
+	AgentNameCursor:      "agent",
+	AgentNamePi:          "pi",
+	AgentNameOpenCode:    openCodeBinary,
 }
 
 // SummaryCLIBinaryName returns the CLI binary name for a summary-capable
@@ -128,7 +165,7 @@ func SummaryCLIBinaryName(name types.AgentName) string {
 // IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable
 // agent is on PATH. This is distinct from DetectPresence, which checks
 // repo-level agent configuration — a repo configured with Claude Code for
-// development can still use Codex or Gemini for summary generation as long
+// development can still use Codex or Pi for summary generation as long
 // as the binary is installed.
 func IsSummaryCLIAvailable(name types.AgentName) bool {
 	binary := SummaryCLIBinaryName(name)
@@ -139,12 +176,27 @@ func IsSummaryCLIAvailable(name types.AgentName) bool {
 	return err == nil
 }
 
+// StripGitEnv removes every GIT_* variable. The match ignores case because
+// Windows environment names do, so git_dir names the same variable there.
 func StripGitEnv(env []string) []string {
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {
-		if !strings.HasPrefix(e, "GIT_") {
+		if len(e) < len("GIT_") || !strings.EqualFold(e[:len("GIT_")], "GIT_") {
 			filtered = append(filtered, e)
 		}
 	}
 	return filtered
+}
+
+// TextGenerationEnv is the environment for a text generator running in dir:
+// env without GIT_* variables (StripGitEnv) and without the caller's PWD and
+// OLDPWD, plus PWD=dir. The caller usually runs from the repository, and
+// exec.Cmd does not rewrite PWD when Env is set explicitly, so the inherited
+// value would tell the generator where the repository is.
+func TextGenerationEnv(dir string, env []string) []string {
+	filtered := slices.DeleteFunc(StripGitEnv(env), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return strings.EqualFold(name, "PWD") || strings.EqualFold(name, "OLDPWD")
+	})
+	return append(filtered, "PWD="+dir)
 }

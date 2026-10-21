@@ -1,0 +1,33 @@
+name: govulncheck
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+  # Advisories are published independently of our commits, so a tree that
+  # passed on merge can become vulnerable later. The daily run surfaces that
+  # against main instead of on whichever PR happens to run next.
+  schedule:
+    - cron: '17 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+
+      - name: Run govulncheck
+        run: mise run lint:vuln

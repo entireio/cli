@@ -27,13 +27,13 @@ func TestSummarizeTraces_DominanceIsTimeWeighted(t *testing.T) {
 	t.Parallel()
 
 	entries := []traceEntry{
-		slowEntry("stop", 4200, step("write_temporary_checkpoint", 3900), step("detect_file_changes", 120)),
-		{Op: "stop", DurationMs: 320, Steps: []traceStep{step("write_temporary_checkpoint", 90), step("detect_file_changes", 150)}},
+		slowEntry("stop", 4200, step("hash_touched_files", 3900), step("detect_file_changes", 120)),
+		{Op: "stop", DurationMs: 320, Steps: []traceStep{step("hash_touched_files", 90), step("detect_file_changes", 150)}},
 	}
 
 	s := summarizeTraces(entries)
 	require.Len(t, s.Ops, 1)
-	require.Equal(t, "write_temporary_checkpoint", s.Ops[0].Dominant,
+	require.Equal(t, "hash_touched_files", s.Ops[0].Dominant,
 		"per-hook dominance must follow time, not how many traces name a step")
 	require.Equal(t, 2, s.Ops[0].Count)
 	require.Equal(t, 1, s.Ops[0].Slow)
@@ -43,7 +43,7 @@ func TestSummarizeTraces_DominanceIsTimeWeighted(t *testing.T) {
 	// counts time accrued *while dominant*, which is what keeps it coherent with
 	// Count (= number of traces where the step was the culprit): the fast trace's
 	// 90ms is attributed to detect_file_changes, which dominated there.
-	require.Equal(t, "write_temporary_checkpoint", s.StepCounts[0].Step)
+	require.Equal(t, "hash_touched_files", s.StepCounts[0].Step)
 	require.Equal(t, int64(3900), s.StepCounts[0].TotalMs)
 	byStep := map[string]traceStepCount{}
 	for _, sc := range s.StepCounts {
@@ -126,7 +126,7 @@ func TestRenderTraceJSON_IsValidAndCarriesSlow(t *testing.T) {
 
 	var b bytes.Buffer
 	require.NoError(t, renderTraceJSON(&b, []traceEntry{
-		slowEntry("stop", 4200, step("write_temporary_checkpoint", 3900)),
+		slowEntry("stop", 4200, step("hash_touched_files", 3900)),
 	}))
 
 	var got []map[string]any

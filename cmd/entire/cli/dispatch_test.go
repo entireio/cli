@@ -638,12 +638,12 @@ func TestDispatchWizard_LocalWithoutConfiguredAgentPromptsAndPersistsSelection(t
 	}
 	discoverSummaryProvidersAlways = func(context.Context) {}
 	listRegisteredAgents = func() []types.AgentName {
-		return []types.AgentName{agent.AgentNameCodex, agent.AgentNameGemini}
+		return []types.AgentName{agent.AgentNameCodex, agent.AgentNameCursor}
 	}
 	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
 		kind := agent.AgentTypeCodex
-		if name == agent.AgentNameGemini {
-			kind = agent.AgentTypeGemini
+		if name == agent.AgentNameCursor {
+			kind = agent.AgentTypeCursor
 		}
 		return &stubTextAgent{name: name, kind: kind}, nil
 	}
@@ -651,10 +651,10 @@ func TestDispatchWizard_LocalWithoutConfiguredAgentPromptsAndPersistsSelection(t
 	canPromptForSummaryProvider = func() bool { return true }
 	promptSummaryProvider = func(providers []checkpointSummaryProvider) (types.AgentName, error) {
 		calls = append(calls, "picker")
-		if len(providers) != 2 || providers[0].Name != agent.AgentNameCodex || providers[1].Name != agent.AgentNameGemini {
-			t.Fatalf("picker providers = %+v, want enabled codex and gemini", providers)
+		if len(providers) != 2 || providers[0].Name != agent.AgentNameCodex || providers[1].Name != agent.AgentNameCursor {
+			t.Fatalf("picker providers = %+v, want enabled codex and cursor", providers)
 		}
-		return agent.AgentNameGemini, nil
+		return agent.AgentNameCursor, nil
 	}
 	var persistedProvider string
 	saveLocalSummarySettings = func(_ context.Context, s *settings.EntireSettings) error {
@@ -666,8 +666,8 @@ func TestDispatchWizard_LocalWithoutConfiguredAgentPromptsAndPersistsSelection(t
 	runDispatch = func(_ context.Context, opts dispatchpkg.Options) (*dispatchpkg.Dispatch, error) {
 		calls = append(calls, "dispatch")
 		selected, ok := opts.TextGenerator.(*stubTextAgent)
-		if !ok || selected.name != agent.AgentNameGemini {
-			t.Fatalf("dispatch generator = %#v, want selected gemini agent", opts.TextGenerator)
+		if !ok || selected.name != agent.AgentNameCursor {
+			t.Fatalf("dispatch generator = %#v, want selected cursor agent", opts.TextGenerator)
 		}
 		return &dispatchpkg.Dispatch{}, nil
 	}
@@ -681,8 +681,8 @@ func TestDispatchWizard_LocalWithoutConfiguredAgentPromptsAndPersistsSelection(t
 	if got := strings.Join(calls, ","); got != "wizard,picker,dispatch" {
 		t.Fatalf("call order = %q, want wizard,picker,dispatch", got)
 	}
-	if persistedProvider != string(agent.AgentNameGemini) {
-		t.Fatalf("persisted provider = %q, want %q", persistedProvider, agent.AgentNameGemini)
+	if persistedProvider != string(agent.AgentNameCursor) {
+		t.Fatalf("persisted provider = %q, want %q", persistedProvider, agent.AgentNameCursor)
 	}
 }
 

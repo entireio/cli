@@ -20,11 +20,9 @@ import (
 // is a different question with a different answer whenever more than one
 // session shares a checkpoint store (see strategy.ResolveCallerSession).
 //
-// Not every agent publishes one. Gemini CLI passes its session ID to its shell
-// executor for background-process bookkeeping but never into the child
-// environment, and opencode's shell tool performs no environment augmentation
-// at all; both are absent here on purpose rather than by omission, and callers
-// must degrade rather than assume.
+// Not every agent publishes one. opencode's shell tool performs no environment
+// augmentation at all; it is absent here on purpose rather than by omission,
+// and callers must degrade rather than assume.
 //
 // Deliberately built-in only, so it has no DeclaredCaps entry: the external
 // agent protocol has no field for it, and an external plugin already receives
@@ -113,18 +111,6 @@ var callerSessionEnvVars = []string{
 // derived from the registry.
 func CallerSessionEnvVars() []string {
 	return slices.Clone(callerSessionEnvVars)
-}
-
-// callerSessionEnvVarsFromRegistry enumerates the variable names of the agents
-// registered in THIS binary. Only the guard test uses it — production and test
-// isolation want the complete set above, not this binary's subset.
-func callerSessionEnvVarsFromRegistry() []string {
-	agents := callerSessionAgents()
-	names := make([]string, 0, len(agents))
-	for _, a := range agents {
-		names = append(names, a.ident.CallerSessionEnvVar())
-	}
-	return names
 }
 
 // callerSessionIDFromEnv reads a session ID an agent published under name.

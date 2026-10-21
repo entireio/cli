@@ -123,6 +123,48 @@ func TestAlreadyRedacted(t *testing.T) {
 	}
 }
 
+// TestApplyRegions_IgnoresZeroLengthRegions pins that a zero-length region
+// replaces nothing. Applied, it would insert a token into text no layer
+// flagged, whichever layer produced it.
+func TestApplyRegions_IgnoresZeroLengthRegions(t *testing.T) {
+	t.Parallel()
+	const s = "deploy ACME-1 now"
+	tests := []struct {
+		name    string
+		regions []taggedRegion
+		want    string
+	}{
+		{
+			name: "only zero-length",
+			regions: []taggedRegion{
+				{region: region{0, 0}},
+				{region: region{6, 6}, label: labelEmail},
+				{region: region{len(s), len(s)}},
+			},
+			want: s,
+		},
+		{
+			name: "zero-length around a real region",
+			regions: []taggedRegion{
+				{region: region{0, 0}},
+				{region: region{7, 7}},
+				{region: region{7, 13}},
+				{region: region{13, 13}},
+				{region: region{len(s), len(s)}},
+			},
+			want: "deploy REDACTED now",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := applyRegions(s, tt.regions); got != tt.want {
+				t.Errorf("applyRegions() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestJSONLContent_TopLevelArray(t *testing.T) {
 	// Top-level JSON arrays are valid JSONL and should be redacted.
 	input := `["` + highEntropySecret + `","normal text"]`
@@ -664,6 +706,306 @@ func TestJSONLContent_SupabaseSecretMalformedLineFallback(t *testing.T) {
 	}
 }
 
+func bareSKPrefix() string { return "s" + "k-" }
+
+// TestString_BareSKKeys covers issue #2728: an "sk-" key with a short body
+// (LiteLLM proxy virtual keys are sk- + 22 chars) written as a bare value in
+// prose was missed by every layer. The entropy layer structurally cannot catch
+// it (see providers.go), so the provider layer must, wherever it appears.
+func TestString_BareSKKeys(t *testing.T) {
+	t.Parallel()
+
+	issueKey := bareSKPrefix() + "Qm4Wn8Rt_bVcXzLkJhGfDs" // issue #2728 fake value
+	lowerDigitKey := bareSKPrefix() + "a1b2c3d4e5f6g7h8i9j0k1"
+	hyphenKey := bareSKPrefix() + "Qm4Wn8Rt-bVcXzLkJhGfDs"
+	body20 := bareSKPrefix() + "Qm4Wn8RtbVcXzLkJhGfD"
+	body19 := bareSKPrefix() + "Qm4Wn8RtbVcXzLkJhGf"
+	for _, low := range []string{issueKey, lowerDigitKey, body19} {
+		if e := shannonEntropy(low); e > entropyThreshold {
+			t.Fatalf("value %q has entropy %.3f > %.1f; not an entropy-miss regression case", low, e, entropyThreshold)
+		}
+	}
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "issue #2728 repro: bare key in prose",
+			input: "the first is " + issueKey + " the second",
+			want:  "the first is REDACTED the second",
+		},
+		{
+			name:  "lowercase body with digits",
+			input: "key " + lowerDigitKey + " here",
+			want:  "key REDACTED here",
+		},
+		{
+			name:  "body with a hyphen is redacted whole",
+			input: "key " + hyphenKey + " here",
+			want:  "key REDACTED here",
+		},
+		{
+			name:  "quoted value",
+			input: `"api_key": "` + issueKey + `"`,
+			want:  `"api_key": "REDACTED"`,
+		},
+		{
+			name:  "bearer header",
+			input: "Authorization: Bearer " + issueKey,
+			want:  "Authorization: Bearer REDACTED",
+		},
+		{
+			name:  "exactly 20-char body redacts",
+			input: body20,
+			want:  "REDACTED",
+		},
+		{
+			name:  "exactly 19-char body is preserved",
+			input: body19,
+			want:  body19,
+		},
+		{
+			// Raw-text fall-back shape: "\n" is a literal backslash-n, so the
+			// byte before the prefix is the word char 'n'.
+			name:  "preceded by a literal JSON escape letter",
+			input: `first line\n` + issueKey,
+			want:  `first line\nREDACTED`,
+		},
+	})
+}
+
+// TestDetectProviderTokens_BareSKKeyBoundaries pins the underscore and escape
+// boundaries on the provider layer alone: through String, the entropy layer can
+// swallow the preceding name or escape digits together with the key and mask a
+// missing boundary.
+func TestDetectProviderTokens_BareSKKeyBoundaries(t *testing.T) {
+	t.Parallel()
+
+	key := bareSKPrefix() + "Qm4Wn8Rt_bVcXzLkJhGfDs"
+	for _, prefix := range []string{`API_KEY_`, `first line\n`, `quote\u0022`} {
+		input := prefix + key
+		regions := detectProviderTokens(input)
+		if len(regions) != 1 || input[regions[0].start:regions[0].end] != key {
+			t.Errorf("detectProviderTokens(%q) = %v, want exactly the key", input, regions)
+		}
+	}
+}
+
+// TestString_BareSKKeyOverRedactionGuards pins the two guards that keep the
+// bare sk- rule off ordinary text: the prefix must not sit inside a word, and
+// an all-lowercase digit-free body is a kebab-case name, not a key.
+func TestString_BareSKKeyOverRedactionGuards(t *testing.T) {
+	t.Parallel()
+
+	inWord := "risk-assessment-2026-q4-planning-doc"
+	kebab := bareSKPrefix() + "learn-model-selection-guide"
+	for _, low := range []string{inWord, kebab} {
+		if e := shannonEntropy(low); e > entropyThreshold {
+			t.Fatalf("value %q has entropy %.3f > %.1f; entropy layer would mask the guard", low, e, entropyThreshold)
+		}
+	}
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "sk- inside a hyphenated word is preserved",
+			input: "see " + inWord + " for details",
+			want:  "see " + inWord + " for details",
+		},
+		{
+			name:  "all-lowercase digit-free body is preserved",
+			input: "read " + kebab,
+			want:  "read " + kebab,
+		},
+		{
+			name:  "bare prefix in prose is preserved",
+			input: "OpenAI keys start with " + bareSKPrefix(),
+			want:  "OpenAI keys start with " + bareSKPrefix(),
+		},
+	})
+}
+
+// TestJSONLContent_BareSKKeyRedacted drives the issue #2728 value through the
+// field-aware JSONL path used for transcript.jsonl and full.jsonl.
+func TestJSONLContent_BareSKKeyRedacted(t *testing.T) {
+	t.Parallel()
+	key := bareSKPrefix() + "Qm4Wn8Rt_bVcXzLkJhGfDs"
+	line := `{"type":"user","message":{"role":"user","content":"the first is ` + key + ` the second"}}`
+	got, err := JSONLContent(line)
+	if err != nil {
+		t.Fatalf("JSONLContent error: %v", err)
+	}
+	if strings.Contains(got, key) {
+		t.Fatalf("key survived JSONL redaction: %q", got)
+	}
+	if !strings.Contains(got, "REDACTED") {
+		t.Fatalf("expected REDACTED placeholder in %q", got)
+	}
+}
+
+// awsTempKeyFixture is an STS-shaped (ASIA) key ID, assembled like awsKeyFixture.
+const awsTempKeyFixture = "ASIAQ7XK2M" + "ZP4RLW6NTB"
+
+// TestString_BareAWSKeyIDs covers issue #2808: betterleaks' aws-access-token
+// rule only fires when an aws-secret-access-key component sits within five
+// lines, and a 20-char key ID can never clear the entropy threshold, so a key ID
+// alone in prose reached the checkpoint raw.
+func TestString_BareAWSKeyIDs(t *testing.T) {
+	t.Parallel()
+
+	for _, id := range []string{awsKeyFixture, awsTempKeyFixture} {
+		if e := shannonEntropy(id); e > entropyThreshold {
+			t.Fatalf("value %q has entropy %.3f > %.1f; not an entropy-miss regression case", id, e, entropyThreshold)
+		}
+	}
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "issue #2808 repro: bare key ID in prose",
+			input: "the access key is " + awsKeyFixture + " for staging",
+			want:  "the access key is REDACTED for staging",
+		},
+		{
+			name:  "temporary STS key ID alone on a line",
+			input: "creds:\n" + awsTempKeyFixture + "\nend",
+			want:  "creds:\nREDACTED\nend",
+		},
+		{
+			name:  "two key IDs separated by one space",
+			input: awsKeyFixture + " " + awsTempKeyFixture,
+			want:  "REDACTED REDACTED",
+		},
+		{
+			name:  "quoted value",
+			input: `"id": "` + awsKeyFixture + `"`,
+			want:  `"id": "REDACTED"`,
+		},
+		{
+			name:  "AWS documentation example key is preserved",
+			input: "e.g. AKIAIOSFODNN7" + "EXAMPLE",
+			want:  "e.g. AKIAIOSFODNN7" + "EXAMPLE",
+		},
+		{
+			name:  "prefix inside a longer uppercase word is preserved",
+			input: "TODAYIN" + "ASIAASACKOFRICEFELLOVER",
+			want:  "TODAYIN" + "ASIAASACKOFRICEFELLOVER",
+		},
+	})
+}
+
+// TestDetectProviderTokens_AWSKeyIDBoundaries pins the key-ID boundaries on the
+// provider layer alone; through String, the entropy layer can swallow a
+// preceding name or escape and mask a missing boundary.
+func TestDetectProviderTokens_AWSKeyIDBoundaries(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{
+		`AWS_ACCESS_KEY_ID_` + awsKeyFixture,
+		`first line\n` + awsKeyFixture,
+		`quote"` + awsKeyFixture,
+		awsKeyFixture + `_suffix`,
+		awsKeyFixture + `\n`,
+	} {
+		regions := detectProviderTokens(input)
+		if len(regions) != 1 || input[regions[0].start:regions[0].end] != awsKeyFixture {
+			t.Errorf("detectProviderTokens(%q) = %v, want exactly the key ID", input, regions)
+		}
+	}
+
+	for _, input := range []string{
+		"x" + awsKeyFixture,
+		awsKeyFixture + "Z",
+		awsKeyFixture + "2",
+		"AKIA" + strings.Repeat("X", 16),
+	} {
+		if regions := detectProviderTokens(input); len(regions) != 0 {
+			t.Errorf("detectProviderTokens(%q) = %v, want no regions", input, regions)
+		}
+	}
+}
+
+// TestJSONLContent_BareAWSKeyIDRedacted drives a bare key ID through the
+// field-aware JSONL path used for transcript.jsonl and full.jsonl.
+func TestJSONLContent_BareAWSKeyIDRedacted(t *testing.T) {
+	t.Parallel()
+	line := `{"type":"user","message":{"role":"user","content":"the access key is ` + awsKeyFixture + ` for staging"}}`
+	got, err := JSONLContent(line)
+	if err != nil {
+		t.Fatalf("JSONLContent error: %v", err)
+	}
+	if strings.Contains(got, awsKeyFixture) {
+		t.Fatalf("key ID survived JSONL redaction: %q", got)
+	}
+}
+
+// salesforceTokenFixture and tableauPATFixture have the provider shapes the
+// bounded token rules catch; assembled like awsKeyFixture.
+const (
+	salesforceTokenFixture = "00D5g000001" + "2aBc!AQ4AQ" + "Hk2.mP9vLq7sXz3RtY6wNb8cJf1dGh5eKu0iOa4lZ_Wn" + "Ex3Qr7Ty2Ui9Op6As1Df4Gh8Jk5Lz0Xc.Vb3Nm7Qw-Er2Ty6U"
+	tableauPATFixture      = "Kq7mZ2xR9vLp4nWb8cJf+/" + "==:" + "aB3dE7gH1jK5mN9pQ2sT6vX0yZ4cF8hL"
+)
+
+// TestString_KeywordGatedProviderTokens covers tokens betterleaks scans for
+// only when a vendor keyword ("salesforce.com", "tableau") appears in the same
+// text, and that the entropy layer misses because "!", ".", "/", "+" and ":"
+// split them.
+func TestString_KeywordGatedProviderTokens(t *testing.T) {
+	t.Parallel()
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "Salesforce access token in prose",
+			input: "use " + salesforceTokenFixture + " as the session",
+			want:  "use REDACTED as the session",
+		},
+		{
+			name:  "Tableau PAT in prose",
+			input: "use " + tableauPATFixture + " as the token",
+			want:  "use REDACTED as the token",
+		},
+	})
+}
+
+// TestDetectProviderTokens_JoinedSalesforceTokens covers tokens joined by a
+// body character: a greedy body would run into the second token's org ID, stop
+// at its "!", and leave the second body unredacted.
+func TestDetectProviderTokens_JoinedSalesforceTokens(t *testing.T) {
+	t.Parallel()
+
+	for _, sep := range []string{"_", ".", "-"} {
+		input := salesforceTokenFixture + sep + salesforceTokenFixture
+		want := "REDACTED" + sep + "REDACTED"
+		if got := applyRegions(input, detectProviderTokens(input)); got != want {
+			t.Errorf("provider layer on tokens joined by %q = %q, want %q", sep, got, want)
+		}
+	}
+}
+
+// TestDetectProviderTokens_KeywordGatedBoundaries pins boundaries and filters
+// of the Salesforce and Tableau rules on the provider layer alone.
+func TestDetectProviderTokens_KeywordGatedBoundaries(t *testing.T) {
+	t.Parallel()
+
+	for _, token := range []string{salesforceTokenFixture, tableauPATFixture} {
+		for _, input := range []string{`TOKEN_` + token, `first line\n` + token, token + `"`} {
+			regions := detectProviderTokens(input)
+			if len(regions) != 1 || input[regions[0].start:regions[0].end] != token {
+				t.Errorf("detectProviderTokens(%q) = %v, want exactly the token", input, regions)
+			}
+		}
+	}
+
+	for _, input := range []string{
+		"x" + salesforceTokenFixture,
+		"00" + strings.Repeat("X", 13) + "!" + strings.Repeat("x", 80),
+		salesforceTokenFixture[:len(salesforceTokenFixture)-19],
+		tableauPATFixture + "Z",
+		strings.Repeat("A", 22) + "==:" + strings.Repeat("a", 32),
+		"x" + tableauPATFixture,
+	} {
+		if regions := detectProviderTokens(input); len(regions) != 0 {
+			t.Errorf("detectProviderTokens(%q) = %v, want no regions", input, regions)
+		}
+	}
+}
+
 func TestString_CredentialedURIs(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -710,12 +1052,321 @@ func TestString_CredentialedURIs(t *testing.T) {
 			input: "url=https://example.com/a:b@c",
 			want:  "url=https://example.com/a:b@c",
 		},
+		{
+			name:  "placeholder password is preserved",
+			input: "DATABASE_URL=postgres://postgres:changeme@localhost:5432/app",
+			want:  "DATABASE_URL=postgres://postgres:changeme@localhost:5432/app",
+		},
+		{
+			name:  "shell expansions are preserved",
+			input: "postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/app",
+			want:  "postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/app",
+		},
+		{
+			name:  "printf verbs are preserved",
+			input: `fmt.Sprintf("postgres://%s:%s@%s:%d/%s", u, p, h, port, db)`,
+			want:  `fmt.Sprintf("postgres://%s:%s@%s:%d/%s", u, p, h, port, db)`,
+		},
+		{
+			name:  "python percent-format names are preserved",
+			input: `"postgresql://%(user)s:%(password)s@%(host)s/app" % cfg`,
+			want:  `"postgresql://%(user)s:%(password)s@%(host)s/app" % cfg`,
+		},
+		{
+			name:  "format fields are preserved",
+			input: `f"postgresql://{user}:{password}@{host}/{db}"`,
+			want:  `f"postgresql://{user}:{password}@{host}/{db}"`,
+		},
+		{
+			name:  "empty format fields are preserved",
+			input: `"postgresql://{}:{}@{}/{}".format(u, p, h, d)`,
+			want:  `"postgresql://{}:{}@{}/{}".format(u, p, h, d)`,
+		},
+		{
+			name:  "uppercase shell variable is preserved",
+			input: "postgres://app:$DB_PASSWORD@db:5432/app",
+			want:  "postgres://app:$DB_PASSWORD@db:5432/app",
+		},
+		{
+			name:  "mask run is preserved",
+			input: "postgres://app:****@db:5432/app",
+			want:  "postgres://app:****@db:5432/app",
+		},
+		{
+			name:  "placeholder userinfo with a query but no password is preserved",
+			input: "postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/app?sslmode=require",
+			want:  "postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/app?sslmode=require",
+		},
+		{
+			name:  "placeholder userinfo with a placeholder query password is preserved",
+			input: "postgres://app:changeme@db/app?password=${DB_PASSWORD}",
+			want:  "postgres://app:changeme@db/app?password=${DB_PASSWORD}",
+		},
+		{
+			name:  "placeholder head with real tail is redacted",
+			input: "postgres://postgres:changeme123@localhost:5432/app",
+			want:  "REDACTED",
+		},
+		{
+			name:  "format field with digits is redacted",
+			input: "postgres://app:{hunter2}@db/app",
+			want:  "REDACTED",
+		},
+		{
+			name:  "lowercase dollar value is redacted",
+			input: "postgres://app:$hunter2@db/app",
+			want:  "REDACTED",
+		},
+		{
+			name:  "placeholder userinfo with real query password is redacted",
+			input: "postgres://app:changeme@db/app?password=hunter2",
+			want:  "REDACTED",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := String(tt.input)
 			if got != tt.want {
 				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// Over-redaction guards for the keyword-DSN rule: KEY=value lines from env
+// output must not be read as a host/user/password connection string.
+func TestString_KeywordDSNOverRedactionGuards(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "env output with shell PWD is preserved",
+			input: "NODE_ENV=development\nHOST=0.0.0.0\nPORT=3000\nUSER=node\nHOME=/home/node\nPWD=/app\n",
+			want:  "NODE_ENV=development\nHOST=0.0.0.0\nPORT=3000\nUSER=node\nHOME=/home/node\nPWD=/app\n",
+		},
+		{
+			name:  "inline env assignments with shell PWD are preserved",
+			input: "env HOST=0.0.0.0 USER=node PWD=/app node server.js",
+			want:  "env HOST=0.0.0.0 USER=node PWD=/app node server.js",
+		},
+		{
+			name:  "uppercase PWD holding an absolute path is not a keyword DSN password",
+			input: "host=0.0.0.0 user=node PWD=/app",
+			want:  "host=0.0.0.0 user=node PWD=/app",
+		},
+		{
+			name:  "uppercase PWD holding a home path is not a keyword DSN password",
+			input: "host=0.0.0.0 user=node PWD=~/app",
+			want:  "host=0.0.0.0 user=node PWD=~/app",
+		},
+		{
+			name:  "env output without HOST is preserved",
+			input: "USER=node\nPWD=/app\nSHELL=/bin/bash\nLANG=C.UTF-8\n",
+			want:  "USER=node\nPWD=/app\nSHELL=/bin/bash\nLANG=C.UTF-8\n",
+		},
+	})
+}
+
+// Pins that the connection-string, URI, and key/value layers still catch real
+// passwords on their own, with no scanner engine to back them up. Not
+// parallel: scanner selection is process-global.
+func TestString_ConnectionSecretsCaughtWithoutScanners(t *testing.T) {
+	t.Cleanup(func() {
+		if err := ConfigureScanners(ScannersConfig{Betterleaks: true}); err != nil {
+			t.Fatalf("restore default scanners: %v", err)
+		}
+	})
+	if err := ConfigureScanners(ScannersConfig{}); err != nil {
+		t.Fatalf("ConfigureScanners(none): %v", err)
+	}
+	tests := []stringRedactionCase{
+		{
+			name:  "keyword DSN is redacted as a unit",
+			input: `dsn="host=db.example.com user=svc password=hunter2 dbname=app"`,
+			want:  `dsn="REDACTED"`,
+		},
+		{
+			name:  "keyword DSN with a pwd password",
+			input: "host=db user=svc pwd=Xk9vq2Lm",
+			want:  "REDACTED",
+		},
+		{
+			name:  "keyword DSN with a pwd password starting with a tilde",
+			input: "host=db user=svc pwd=~hunter2",
+			want:  "REDACTED",
+		},
+		{
+			name:  "keyword DSN with a lowercase pwd password starting with a slash",
+			input: "host=db user=app pwd=/s3cretPass",
+			want:  "REDACTED",
+		},
+		{
+			name:  "keyword DSN with a lowercase pwd password shaped like a home path",
+			input: "host=db user=app pwd=~/s3cretPass",
+			want:  "REDACTED",
+		},
+		{
+			name:  "keyword DSN with an uppercase PWD password that is not a path",
+			input: "host=db user=svc PWD=Xk9vq2Lm",
+			want:  "REDACTED",
+		},
+		{
+			name:  "placeholder userinfo with a real query password",
+			input: "https://app:changeme@example.com/app?password=hunter2",
+			want:  "REDACTED",
+		},
+		{
+			name:  "templated host with a real query password",
+			input: "postgres://app:changeme@${DB_HOST}/app?password=hunter2",
+			want:  "REDACTED",
+		},
+		{
+			name:  "credentialed URI with a literal between expansions",
+			input: "amqp://app:${P}hunter2${Q}@host/vhost",
+			want:  "REDACTED",
+		},
+		{
+			name:  "credentialed URI with a literal inside a nested default",
+			input: "amqp://app:${P:-${Q}hunter2${R}}@host/vhost",
+			want:  "REDACTED",
+		},
+		{
+			name:  "credential value with a literal between expansions",
+			input: "DB_PASSWORD=${P}hunter2${Q}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "credentialed URI with a literal in a pattern-removal expansion",
+			input: "amqp://app:${VAR%hunter2}@host/vhost",
+			want:  "REDACTED",
+		},
+		{
+			name:  "credential value with a literal in a substitution expansion",
+			input: "DB_PASSWORD=${VAR/x/hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "credential value with a literal in a prefix-removal expansion",
+			input: "DB_PASSWORD=${VAR#hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "env block with a bare password",
+			input: "HOST=db\nUSER=app\nPASSWORD=postgres\n",
+			want:  "REDACTED\n",
+		},
+		{
+			name:  "option file block",
+			input: "[client]\nhost=localhost\nuser=root\npassword=root\n",
+			want:  "[client]\nREDACTED\n",
+		},
+		{
+			name:  "odbc PWD still counts in semicolon strings",
+			input: "conn=Driver={ODBC Driver 18 for SQL Server};Server=db;UID=svc;PWD=hunter2;Database=app",
+			want:  "conn=REDACTED",
+		},
+		{
+			name:  "credentialed URI",
+			input: "postgres://app:hunter2@db:5432/app",
+			want:  "REDACTED",
+		},
+		{
+			name:  "credentialed URI with a real shell default",
+			input: "postgres://app:${DB_PASSWORD:-hunter2}@db/app",
+			want:  "REDACTED",
+		},
+		{
+			name:  "credential value with a real shell default",
+			input: "DB_PASSWORD=${DB_PASSWORD:-hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := String(tt.input); got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// Content digests (go.sum h1: hashes, Subresource Integrity values) are hashes
+// of public content. The entropy layer must leave them alone, but only when the
+// whole match is the digest.
+func TestString_ContentDigestsPreserved(t *testing.T) {
+	t.Parallel()
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "go.sum module hash",
+			input: "github.com/stretchr/testify v1.9.0 h1:kcj+ClqXiFC1clI9bJ9DPCmcSF0OopwqDYOTocnBi0U=",
+			want:  "github.com/stretchr/testify v1.9.0 h1:kcj+ClqXiFC1clI9bJ9DPCmcSF0OopwqDYOTocnBi0U=",
+		},
+		{
+			name:  "go.sum go.mod hash",
+			input: "github.com/stretchr/testify v1.9.0/go.mod h1:OP+PZHBRu1YXkVur4Jzyvl73RrGGmWvsWAbEWCFKYGg=",
+			want:  "github.com/stretchr/testify v1.9.0/go.mod h1:OP+PZHBRu1YXkVur4Jzyvl73RrGGmWvsWAbEWCFKYGg=",
+		},
+		{
+			name:  "package-lock sha512 integrity",
+			input: `"integrity": "sha512-V+Cu1AWSsxpqjQMOTazGG8sOGKWCyRowpjMMscqVu8Szrs1RcmQH0p3H+rPrcJdV6cwNweumkNyN+MUrRW32lg=="`,
+			want:  `"integrity": "sha512-V+Cu1AWSsxpqjQMOTazGG8sOGKWCyRowpjMMscqVu8Szrs1RcmQH0p3H+rPrcJdV6cwNweumkNyN+MUrRW32lg=="`,
+		},
+		{
+			name:  "script sha384 integrity containing a slash",
+			input: `<script src="b.js" integrity="sha384-u0KDATKxW9gkYb7bXw2KbKqvfS5Om9AbuB51MpH1J/GU9BxXwQ7fE8gD0sKuq4eE"></script>`,
+			want:  `<script src="b.js" integrity="sha384-u0KDATKxW9gkYb7bXw2KbKqvfS5Om9AbuB51MpH1J/GU9BxXwQ7fE8gD0sKuq4eE"></script>`,
+		},
+		{
+			name:  "csp sha256 source",
+			input: "script-src 'sha256-ZJunmw1Iu57ltG3ua5ahB3jnP7Xk2Y7Ctmgu6YyLHSA='",
+			want:  "script-src 'sha256-ZJunmw1Iu57ltG3ua5ahB3jnP7Xk2Y7Ctmgu6YyLHSA='",
+		},
+		{
+			name:  "secret glued onto a digest is redacted",
+			input: "h1:kcj+ClqXiFC1clI9bJ9DPCmcSF0OopwqDYOTocnBi0U=Xk9vq2LmPq7Rw3ZtB8",
+			want:  "h1:REDACTED",
+		},
+		{
+			name:  "digest prefix with the wrong length is redacted",
+			input: `"integrity": "sha256-V+Cu1AWSsxpqjQMOTazGG8sOGKWCyRowpjMMscqVu8Sz"`,
+			want:  `"integrity": "REDACTED"`,
+		},
+		{
+			// The first 64 characters have a sha384 digest's length, and the
+			// slash splits the entropy match inside them.
+			name:  "overlong digest is redacted",
+			input: `integrity="sha384-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/A"`,
+			want:  `integrity="REDACTED/A"`,
+		},
+		{
+			name:  "secret between two digests is redacted",
+			input: "github.com/a/b v1.0.0 h1:kcj+ClqXiFC1clI9bJ9DPCmcSF0OopwqDYOTocnBi0U=\nnote aB3dE5fG7hJ9kL2mN4pQ6rS8tU1vW0xY\ngithub.com/c/d v1.0.0 h1:OP+PZHBRu1YXkVur4Jzyvl73RrGGmWvsWAbEWCFKYGg=",
+			want:  "github.com/a/b v1.0.0 h1:kcj+ClqXiFC1clI9bJ9DPCmcSF0OopwqDYOTocnBi0U=\nnote REDACTED\ngithub.com/c/d v1.0.0 h1:OP+PZHBRu1YXkVur4Jzyvl73RrGGmWvsWAbEWCFKYGg=",
+		},
+	})
+}
+
+// The over-redaction shapes above, through the JSONL path checkpoints use.
+func TestJSONLContent_OverRedactionShapesPreserved(t *testing.T) {
+	t.Parallel()
+	values := []string{
+		"NODE_ENV=development\nHOST=0.0.0.0\nPORT=3000\nUSER=node\nHOME=/home/node\nPWD=/app\n",
+		"DB_PASSWORD=\nDB_HOST=localhost\n",
+		"postgres://postgres:changeme@localhost:5432/app",
+		"github.com/stretchr/testify v1.9.0 h1:kcj+ClqXiFC1clI9bJ9DPCmcSF0OopwqDYOTocnBi0U=",
+	}
+	for _, value := range values {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			line, err := json.Marshal(map[string]string{"type": "tool_result", "content": value})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got, err := JSONLContent(string(line))
+			if err != nil {
+				t.Fatalf("JSONLContent: %v", err)
+			}
+			if got != string(line) {
+				t.Errorf("JSONLContent(%s) = %s, want unchanged", line, got)
 			}
 		})
 	}
@@ -894,6 +1545,36 @@ func TestString_BoundedCredentialValueRedaction(t *testing.T) {
 			input: "DB__PASSWORD=secret123",
 			want:  "DB__PASSWORD=REDACTED",
 		},
+		{
+			name:  "spaces around equals",
+			input: "DB_PASSWORD = secret123",
+			want:  "DB_PASSWORD = REDACTED",
+		},
+		{
+			name:  "only the assigned line is redacted",
+			input: "DB_PASSWORD=secret123\nDB_HOST=localhost\n",
+			want:  "DB_PASSWORD=REDACTED\nDB_HOST=localhost\n",
+		},
+		{
+			name:  "shell default with a real value",
+			input: "DB_PASSWORD=${DB_PASSWORD:-hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "nested shell default with a real value",
+			input: "DB_PASSWORD=${DB_PASSWORD:-${FALLBACK_PASSWORD:-hunter2}}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "format field with digits",
+			input: "DB_PASSWORD={hunter2}",
+			want:  "DB_PASSWORD=REDACTED",
+		},
+		{
+			name:  "printf verb with a real tail",
+			input: "DB_PASSWORD=%s3cret",
+			want:  "DB_PASSWORD=REDACTED",
+		},
 	})
 }
 
@@ -1021,6 +1702,67 @@ func TestString_BoundedCredentialValueOverRedactionGuards(t *testing.T) {
 			name:  "placeholder literal is preserved",
 			input: "DB_PASSWORD=placeholder",
 			want:  "DB_PASSWORD=placeholder",
+		},
+		{
+			name:  "blank value does not take the next line",
+			input: "DB_PASSWORD=\nDB_HOST=localhost\n",
+			want:  "DB_PASSWORD=\nDB_HOST=localhost\n",
+		},
+		{
+			name:  "blank value with trailing space does not take the next line",
+			input: "DB_PASSWORD= \nDB_HOST=localhost\n",
+			want:  "DB_PASSWORD= \nDB_HOST=localhost\n",
+		},
+		{
+			name:  "printf verb is preserved",
+			input: "DB_PASSWORD=%s",
+			want:  "DB_PASSWORD=%s",
+		},
+		{
+			name:  "format field is preserved",
+			input: "DB_PASSWORD={db_password}",
+			want:  "DB_PASSWORD={db_password}",
+		},
+		{
+			name:  "uppercase shell variable is preserved",
+			input: "DB_PASSWORD=$DB_PASSWORD",
+			want:  "DB_PASSWORD=$DB_PASSWORD",
+		},
+		{
+			name:  "shell default with a placeholder value is preserved",
+			input: "DB_PASSWORD=${DB_PASSWORD:-changeme}",
+			want:  "DB_PASSWORD=${DB_PASSWORD:-changeme}",
+		},
+		{
+			name:  "shell default with an empty value is preserved",
+			input: "DB_PASSWORD=${DB_PASSWORD:-}",
+			want:  "DB_PASSWORD=${DB_PASSWORD:-}",
+		},
+		{
+			// The word after :? is an error message, never a value.
+			name:  "shell required-variable check is preserved",
+			input: "DB_PASSWORD=${DB_PASSWORD:?required}",
+			want:  "DB_PASSWORD=${DB_PASSWORD:?required}",
+		},
+		{
+			name:  "shell required-variable check without colon is preserved",
+			input: "DB_PASSWORD=${DB_PASSWORD?required}",
+			want:  "DB_PASSWORD=${DB_PASSWORD?required}",
+		},
+		{
+			name:  "shell default naming another variable is preserved",
+			input: "DB_PASSWORD=${DB_PASSWORD:-${FALLBACK_PASSWORD}}",
+			want:  "DB_PASSWORD=${DB_PASSWORD:-${FALLBACK_PASSWORD}}",
+		},
+		{
+			name:  "github actions expression is preserved",
+			input: "DB_PASSWORD=${{secrets.DB_PASSWORD}}",
+			want:  "DB_PASSWORD=${{secrets.DB_PASSWORD}}",
+		},
+		{
+			name:  "terraform variable reference is preserved",
+			input: "DB_PASSWORD=${var.db_password}",
+			want:  "DB_PASSWORD=${var.db_password}",
 		},
 	})
 }

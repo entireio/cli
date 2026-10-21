@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -106,29 +105,30 @@ func TestNewDispatchWizardScope(t *testing.T) {
 	}
 }
 
-func TestDefaultListDispatchWizardPlacements_ReadyOnlyKeyedBySlug(t *testing.T) {
+func TestDispatchWizardPlacements_ReadyOnlyKeyedBySlug(t *testing.T) {
 	withFakeCellCore(t, &fakeCellCore{repos: &coreapi.ListReposOutputBody{Repos: []coreapi.RepoIndexEntry{
-		{FullName: "Acme/Widget", Placements: []coreapi.RepoPlacement{
+		{FullName: "Acme/Widget", Provider: coreapi.NewOptString("github"), Placements: []coreapi.RepoPlacement{
 			{ID: "p1", Jurisdiction: "US", Status: coreapi.RepoPlacementStatusReady},
 			{ID: "p2", Jurisdiction: "eu", Status: coreapi.RepoPlacementStatusProcessing},
 		}},
 		{FullName: "", Placements: []coreapi.RepoPlacement{{ID: "p3", Jurisdiction: "us", Status: coreapi.RepoPlacementStatusReady}}},
 	}}})
 
-	got, err := defaultListDispatchWizardPlacements(context.Background())
+	entries, err := listCheckpointRepoIndex(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := dispatchWizardPlacements(entries)
 	if len(got) != 1 || strings.Join(got["gh/acme/widget"], ",") != "us" {
 		t.Fatalf("expected ready placements keyed by lowercased gh/ slug, got %v", got)
 	}
 }
 
 func TestLoadDispatchWizardScope_DegradesPerSource(t *testing.T) {
-	stubDispatchWizardScopeSources(t, []string{"a/one"}, errors.New("core down"), "au")
+	stubDispatchWizardScopeSources(t, []string{"gh/a/one"}, "au")
 
 	scope := loadDispatchWizardScope(context.Background(), t.TempDir())
-	if strings.Join(scope.repos, ",") != "a/one" || scope.home != "au" {
+	if strings.Join(scope.repos, ",") != "gh/a/one" || scope.home != "au" {
 		t.Fatalf("expected repos and home with placements degraded, got %+v", scope)
 	}
 	// Placements unavailable: every repo is attributed to the known home.
@@ -139,13 +139,18 @@ func TestLoadDispatchWizardScope_DegradesPerSource(t *testing.T) {
 
 // stubDispatchWizardScopeSources swaps the wizard's catalogue seams (no
 // placement data). Not parallel-safe: the seams are package globals.
-func stubDispatchWizardScopeSources(t *testing.T, repos []string, placementsErr error, home string) {
+func stubDispatchWizardScopeSources(t *testing.T, repos []string, home string) {
 	t.Helper()
-	oldRepos, oldPlacements, oldHome := listDispatchWizardRepos, listDispatchWizardPlacements, resolveDispatchWizardHome
-	listDispatchWizardRepos = func(context.Context) ([]string, error) { return repos, nil }
-	listDispatchWizardPlacements = func(context.Context) (map[string][]string, error) { return nil, placementsErr }
+	oldIndex, oldHome := listDispatchWizardIndex, resolveDispatchWizardHome
+	listDispatchWizardIndex = func(context.Context) ([]coreapi.RepoIndexEntry, error) {
+		entries := make([]coreapi.RepoIndexEntry, 0, len(repos))
+		for _, repo := range repos {
+			entries = append(entries, coreapi.RepoIndexEntry{FullName: repo, Provider: coreapi.NewOptString("github"), CheckpointCount: coreapi.NewOptInt64(1)})
+		}
+		return entries, nil
+	}
 	resolveDispatchWizardHome = func(context.Context) string { return home }
 	t.Cleanup(func() {
-		listDispatchWizardRepos, listDispatchWizardPlacements, resolveDispatchWizardHome = oldRepos, oldPlacements, oldHome
+		listDispatchWizardIndex, resolveDispatchWizardHome = oldIndex, oldHome
 	})
 }

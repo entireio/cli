@@ -10,7 +10,7 @@ The CLI discovers external agents by scanning `$PATH` for executables matching t
 
 Two rules bound that scan, both because discovery *executes* what it finds (it calls each binary's `info` subcommand):
 
-- It is off unless `external_agents` is set in an untracked `.entire/settings.local.json`. The committed `.entire/settings.json` cannot grant it — see [Why `external_agents` is local-only](../security-and-privacy.md#why-external_agents-is-local-only). Interactive setup flows scan regardless, so you can still pick a plugin before the setting exists.
+- It is off unless `external_agents` is set in an untracked `.entire/settings.local.json`. The committed `.entire/settings.json` cannot grant it — see [Why `external_agents` is local-only](../security-and-privacy.md#why-external_agents-is-local-only). Interactive setup flows scan regardless, so you can still pick a plugin before the setting exists. Commands that name one agent (`entire enable --agent <name>`, `entire agent add <name>`, `entire agent remove <name>`) resolve only that binary, also regardless of the setting; `entire agent list` names none, so it scans only when the setting is on.
 - Only absolute `$PATH` entries are scanned. A relative entry resolves against the working directory, which for a git hook is whatever repository invoked it.
 
 - Binaries whose `<name>` conflicts with an already-registered built-in agent are skipped.
@@ -19,7 +19,7 @@ Two rules bound that scan, both because discovery *executes* what it finds (it c
 
 ## Environment
 
-Every subcommand invocation sets:
+Every subcommand invocation except `generate-text` sets:
 
 | Variable | Description |
 |---|---|
@@ -27,6 +27,13 @@ Every subcommand invocation sets:
 | `ENTIRE_PROTOCOL_VERSION` | Protocol version (`1`) |
 
 The working directory is set to the repository root.
+
+`generate-text` is the exception. Its stdin is a summary prompt carrying
+untrusted transcript content, so it runs from a fresh empty temporary
+directory, without `ENTIRE_REPO_ROOT` and without `GIT_*` variables, the same
+isolation Entire gives its built-in summary generators. A plugin should not
+need the repository to generate text; if its model has tools, it should run
+them with none enabled, as the built-in generators do where their CLI allows.
 
 ## Communication Model
 
@@ -68,6 +75,8 @@ Returns agent metadata and declared capabilities.
 ```
 
 The `capabilities` object determines which optional subcommands the CLI will call. If a capability is `false` or missing, the CLI will never invoke the corresponding subcommands.
+
+Optional: `"caller_env_vars": ["MYAGENT_SESSION_ID"]` lists environment variables the agent sets for the commands it runs (uppercase names only). `entire review` uses them to recognise the agent as the caller, so it refuses to approve reviews of someone else's code on the user's behalf and names the agent when one passes `--trust-target`. Agents that set the cross-tool `AI_AGENT` variable are recognised without declaring it.
 
 #### `detect`
 
@@ -313,19 +322,6 @@ Extracts user prompts from a transcript.
 {"prompts": ["first prompt text", "second prompt text"]}
 ```
 
-#### `extract-summary --session-ref <path>`
-
-Extracts an AI-generated summary from a transcript.
-
-**Arguments:**
-- `--session-ref` — Path to the transcript file
-
-**Output (stdout):** JSON
-
-```json
-{"summary": "Summary text here", "has_summary": true}
-```
-
 ### Capability: `transcript_preparer`
 
 Required when `capabilities.transcript_preparer` is `true`.
@@ -338,6 +334,25 @@ Prepares/processes a transcript file (e.g., converting from raw format).
 - `--session-ref` — Path to the transcript file
 
 **Output:** Exit 0 on success.
+
+### Capability: `compact_transcript`
+
+Required when `capabilities.compact_transcript` is `true`.
+
+#### `compact-transcript --session-ref <path>`
+
+Converts a native transcript into Entire Transcript Format (the `transcript.jsonl` stored next to `full.jsonl` in each checkpoint).
+
+**Arguments:**
+- `--session-ref` — Path to a transcript file in the agent's native format. It may be a CLI temp file outside the agent's session store, so accept any regular file here.
+
+**Output (stdout):** JSON
+
+```json
+{"transcript": "<base64-encoded transcript.jsonl>", "assets": [{"name": "img-001.png", "media_type": "image/png", "data": "<base64>"}]}
+```
+
+`assets` is optional. The CLI calls this on each checkpoint write with a temp file of the already-redacted transcript, and redacts the result again. It also compacts the lines before the checkpoint's start to scope the checkpoint: only leading output lines identical in both runs count as earlier checkpoints' content, so a line that changes once later input arrives (for example a tool call that absorbs its result) stays in this checkpoint. Each run has a 5 second limit, and stdout may be up to the base64 size of a 50 MB transcript. On failure, timeout, empty output, or assets, the CLI uses its built-in compactor instead. `entire explain` also uses it for summaries.
 
 ### Capability: `token_calculator`
 

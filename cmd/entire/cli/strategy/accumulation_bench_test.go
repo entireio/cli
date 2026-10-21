@@ -39,7 +39,7 @@ func TestPostCommit_Issue591_SubagentScaleRegression(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 
-	// Create sessions with shadow branches, then mark them ENDED with FilesTouched.
+	// Create sessions with turn-end steps, then mark them ENDED with FilesTouched.
 	// FilesTouched prevents eager-condense-on-stop (CondenseAndMarkFullyCondensed
 	// skips sessions with FilesTouched), so these sessions remain for PostCommit.
 	for i := range sessionCount {

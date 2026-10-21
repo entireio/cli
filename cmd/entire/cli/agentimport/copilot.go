@@ -43,12 +43,8 @@ func (copilotImporter) Discover(repoRoot, overridePath string, now time.Time, se
 		if !e.IsDir() {
 			return "", "", false
 		}
-		path := filepath.Join(dir, e.Name(), "events.jsonl")
-		if !copilotSessionInRepo(path, repoRoot) {
-			return "", "", false
-		}
-		return e.Name(), path, true
-	})
+		return e.Name(), filepath.Join(dir, e.Name(), "events.jsonl"), true
+	}, func(path string) bool { return copilotSessionInRepo(path, repoRoot) })
 }
 
 // copilotSessionInRepo reports whether the session's session.start event places
