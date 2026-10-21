@@ -472,10 +472,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		findSessionsSpan.RecordError(err)
 		findSessionsSpan.End()
 		// No active sessions or error listing - silently skip (hooks must be resilient)
-		logging.Debug(logCtx, "prepare-commit-msg: no active sessions",
-			slog.String("strategy", "manual-commit"),
-			slog.String("source", source),
-		)
+		s.prepareWithoutLocalLink(ctx, commitMsgFile, source, inherited, nil, err == nil)
 		return nil
 	}
 	findSessionsSpan.End()
@@ -492,11 +489,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	if len(sessionsWithContent) == 0 {
 		// No new content — no trailer needed
-		logging.Debug(logCtx, "prepare-commit-msg: no content to link",
-			slog.String("strategy", "manual-commit"),
-			slog.String("source", source),
-			slog.Int("sessions_found", len(sessions)),
-		)
+		s.prepareWithoutLocalLink(ctx, commitMsgFile, source, inherited, sessions, true)
 		return nil
 	}
 
@@ -1334,10 +1327,13 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	findSessionsSpan.End()
 
 	if err != nil || len(sessions) == 0 {
-		logging.Warn(logCtx, "post-commit: no active sessions despite trailer",
-			slog.String("strategy", "manual-commit"),
-			slog.String("checkpoint_id", checkpointID.String()),
-		)
+		if !s.linkForeignAgentCommit(ctx, repo, head, commit, checkpointID, worktreePath, nil,
+			err == nil && !targetPreexisting && !isGitSequenceOperation(ctx)) {
+			logging.Warn(logCtx, "post-commit: no active sessions despite trailer",
+				slog.String("strategy", "manual-commit"),
+				slog.String("checkpoint_id", checkpointID.String()),
+			)
+		}
 		return nil
 	}
 	if beforeCondense != nil && beforeCondense(ctx, sessions) {
@@ -1445,6 +1441,11 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		iterSpan.End()
 	}
 	processSessionsLoop.End()
+
+	// No session of this repository claimed the trailer: it may be a foreign
+	// session's (tryForeignAgentCommit).
+	trailerOwned = trailerOwned || s.linkForeignAgentCommit(ctx, repo, head, commit, checkpointID, worktreePath,
+		committedFileSet, !isRebase && !targetPreexisting)
 
 	logUnclaimedCheckpointTrailer(logCtx, checkpointID, sessions, trailerOwned, isRebase)
 
@@ -2973,6 +2974,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 	// the initialize-new-session branch.
 	var remember string
 	var homeAgentType types.AgentType
+	var home session.SessionHome
 	turnStartErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.BaseCommit == "" {
 			return errPartialState
@@ -3027,6 +3029,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		homeAgentType = state.AgentType
 		captureSessionOwner(state)
 		reconcileWorktreePathForResumedTurn(ctx, state)
+		home = sessionHomeOf(state)
 
 		// A turn resumed in another worktree leaves the session's branch and
 		// base where its home has them (see hookInSessionHome).
@@ -3041,7 +3044,10 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		state.LastCheckpointID = ""
 		state.TurnCheckpointIDs = nil
 		return nil
-	}, func() { rememberAgentHome(ctx, homeAgentType, remember) })
+	}, func() {
+		rememberAgentHome(ctx, homeAgentType, remember)
+		recordSessionHome(ctx, home)
+	})
 	if turnStartErr == nil {
 		return nil
 	}
@@ -3056,7 +3062,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		return fmt.Errorf("failed to initialize session: %w", err)
 	}
 
-	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if transErr := TransitionAndLog(ctx, state, session.EventTurnStart, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "hooks"), "turn start transition failed",
 				slog.String("session_id", sessionID),
@@ -3064,8 +3070,9 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
+		home = sessionHomeOf(state)
 		return nil
-	})
+	}, func() { recordSessionHome(ctx, home) })
 	if mutErr != nil && !errors.Is(mutErr, ErrStateNotFound) {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}

@@ -28,17 +28,30 @@ func TestMain(m *testing.M) {
 	// hooks, and so t.Parallel tests are not excluded. Mirrors the e2e TestMains.
 	gitenv.IsolateMain()
 
+	// Turn start writes the per-user session-home index (session/home_index.go)
+	// under userdirs' cache dir, and an exported XDG_CACHE_HOME outranks the
+	// in-process testdirs fallback. Point it at a throwaway dir so tests never
+	// write into a developer's real cache. Tests that assert on the index set
+	// their own per-test dir on top of this.
+	cacheDir, err := os.MkdirTemp("", "entire-strategy-test-cache-*")
+	if err != nil {
+		panic(fmt.Errorf("failed to create test cache dir: %w", err))
+	}
+	os.Setenv("XDG_CACHE_HOME", cacheDir)
+
 	// Register a default ConfigSource so tests that call ConfigScoped
 	// (directly or indirectly via Commit/CreateTag) don't fail with
 	// "no config loader registered".
-	err := plugin.Register(plugin.ConfigLoader(), func() plugin.ConfigSource {
+	err = plugin.Register(plugin.ConfigLoader(), func() plugin.ConfigSource {
 		return config.NewEmpty()
 	})
 	if err != nil {
 		panic(fmt.Errorf("failed to register config storers: %w", err))
 	}
 
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(cacheDir)
+	os.Exit(code)
 }
 
 //go:linkname resetPluginEntry github.com/go-git/go-git/v6/x/plugin.resetEntry
