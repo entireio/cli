@@ -47,8 +47,8 @@ var committedHookConfigAgents = []struct {
 // only whoever happened to run `entire doctor` would see it. Running it here
 // fails the next template edit in CI instead of on a teammate's machine.
 //
-// When this fails: run `entire enable --force` at the repo root and commit the
-// regenerated files.
+// When this fails: run `entire agent add <agent>` at the repo root for each
+// stale agent and commit the regenerated files.
 func TestCommittedHookConfigsAreCurrent(t *testing.T) {
 	// t.Chdir is process-global, so this test must not be parallel. It is needed
 	// because CheckHookConfig resolves the config paths from the working
@@ -83,8 +83,8 @@ func TestCommittedHookConfigsAreCurrent(t *testing.T) {
 		checked[string(name)] = state
 		if state == agent.HooksOutdated {
 			t.Errorf("committed %s hook config is stale: it no longer matches what "+
-				"InstallHooks writes today. Regenerate with `entire enable --force` "+
-				"at the repo root and commit the result.", ag.Type())
+				"InstallHooks writes today. Regenerate with `entire agent add %s` "+
+				"at the repo root and commit the result.", ag.Type(), name)
 		}
 	}
 

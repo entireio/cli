@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 // ErrInsecureHTTP is returned when the base URL uses HTTP without an explicit opt-in.
@@ -35,8 +37,8 @@ const (
 	// pointing at `entire login --server`.
 	AuthBaseURLEnvVar = "ENTIRE_AUTH_BASE_URL"
 
-	schemeHTTP  = "http"
-	schemeHTTPS = "https"
+	schemeHTTP  = httpclient.SchemeHTTP
+	schemeHTTPS = httpclient.SchemeHTTPS
 )
 
 // RejectRemovedAuthEnv returns an error when ENTIRE_AUTH_BASE_URL is set

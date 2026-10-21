@@ -66,7 +66,7 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 		require.Contains(t, out, "MALFORMED CURRENT-WORKTREE CONFIGURATION")
 		require.Contains(t, out, "/repo-feature/.codex/hooks.json")
 		require.Contains(t, out, "redirected directory")
-		require.Contains(t, out, "run `entire enable --force`")
+		require.Contains(t, out, "run `entire agent add codex`")
 		require.Contains(t, out, "This may not be the file Codex reads")
 		require.Contains(t, out, "make sure the discovered project root has it too")
 		require.NotContains(t, out, "do not run `entire enable` from it")
@@ -83,6 +83,7 @@ func TestDoctorCodexWarningsNamePathOwnershipAndUserRemedies(t *testing.T) {
 
 		out := output.String()
 		require.Contains(t, out, "/repo-feature/.codex (missing)")
+		require.Contains(t, out, "Run `entire agent add codex` from this worktree")
 		require.Contains(t, out, "/repo-main/.codex/hooks.json")
 		require.Contains(t, out, ".codex/hooks.json is tracked — commit it and make sure the root worktree has it")
 		require.NotContains(t, out, "In a .bare layout")

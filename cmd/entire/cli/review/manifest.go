@@ -47,6 +47,9 @@ type LocalReviewManifest struct {
 	StartingSHA     string           `json:"starting_sha,omitempty"`
 	Sources         []ManifestSource `json:"sources"`
 	AggregateOutput string           `json:"aggregate_output,omitempty"`
+	// TrailFindingsJSON records that the run asked for the trail findings
+	// JSON line, so --findings hides it from the saved output.
+	TrailFindingsJSON bool `json:"trail_findings_json,omitempty"`
 }
 
 type ManifestSource struct {
@@ -439,7 +442,7 @@ func reviewTokenUsageForSession(ctx context.Context, st *session.State, lookup a
 			slog.String("error", err.Error()))
 		return nil
 	}
-	return agent.CalculateTokenUsage(ctx, ag, transcript, st.CheckpointTranscriptStart, reviewSubagentsDir(st))
+	return agent.CalculateTokenUsage(ctx, ag, transcript, st.TokenStart(), reviewSubagentsDir(st))
 }
 
 func reviewSubagentsDir(st *session.State) string {

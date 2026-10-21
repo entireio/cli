@@ -67,16 +67,18 @@ type SynthesisSink struct {
 	// RenderWriter is the writer whose terminal capabilities should be used for
 	// markdown rendering. It defaults to Writer. TTY review runs use this when
 	// Writer is a post-run buffer that will later flush to the real terminal.
-	RenderWriter    io.Writer
-	PerRunPrompt    string // if non-empty, included in the synthesis prompt for context
-	ProfileName     string
-	Task            string
-	MasterName      string
-	RunContext      context.Context // optional; nil falls back to context.Background()
-	ProviderTimeout time.Duration   // positive: use it; zero: defaultSynthesisProviderTimeout; negative: disabled (no deadline)
-	OnResult        func(result string)
-	OnStart         func()
-	OnComplete      func(error)
+	RenderWriter io.Writer
+	PerRunPrompt string // if non-empty, included in the synthesis prompt for context
+	ProfileName  string
+	Task         string
+	MasterName   string
+	// TrailFindingsJSON asks the judge for the trail findings JSON line.
+	TrailFindingsJSON bool
+	RunContext        context.Context // optional; nil falls back to context.Background()
+	ProviderTimeout   time.Duration   // positive: use it; zero: defaultSynthesisProviderTimeout; negative: disabled (no deadline)
+	OnResult          func(result string)
+	OnStart           func()
+	OnComplete        func(error)
 	// OnError is called when an attempted synthesis fails (provider error or
 	// timeout). It is NOT called when synthesis is skipped (cancelled run or
 	// fewer than two usable reviewers). Lets the caller surface a missing verdict
@@ -117,7 +119,12 @@ func (s SynthesisSink) RunFinished(summary reviewtypes.RunSummary) {
 		return
 	}
 
-	synthesisPrompt := composeSynthesisPrompt(summary, s.PerRunPrompt, s.ProfileName, s.Task)
+	synthesisPrompt := composeSynthesisPrompt(summary, synthesisPromptOptions{
+		perRunPrompt:      s.PerRunPrompt,
+		profileName:       s.ProfileName,
+		task:              s.Task,
+		trailFindingsJSON: s.TrailFindingsJSON,
+	})
 	providerCtx, cancelProvider := s.providerContext()
 	defer cancelProvider()
 	if s.MasterName != "" {
@@ -150,9 +157,10 @@ func (s SynthesisSink) RunFinished(summary reviewtypes.RunSummary) {
 	// already ends with a newline, and the raw-markdown fallback path has its
 	// own terminal newline from the LLM response. Adding Fprintln would double
 	// the trailing blank line.
-	rendered, err := mdrender.RenderForWriter(s.renderWriter(), result)
+	display := stripTrailJSON(result, s.TrailFindingsJSON)
+	rendered, err := mdrender.RenderForWriter(s.renderWriter(), display)
 	if err != nil {
-		rendered = result
+		rendered = display
 	}
 	fmt.Fprint(s.Writer, rendered)
 	if s.OnComplete != nil {

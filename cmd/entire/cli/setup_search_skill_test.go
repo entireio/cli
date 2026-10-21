@@ -15,7 +15,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -31,7 +30,6 @@ func TestScaffoldSearchSkill_CreatesManagedFiles(t *testing.T) {
 	}{
 		{"claude", claudecode.NewClaudeCodeAgent(), filepath.Join(".claude", "skills", "entire-search", "SKILL.md")},
 		{"codex", codex.NewCodexAgent(), filepath.Join(".agents", "skills", "entire-search", "SKILL.md")},
-		{"gemini", geminicli.NewGeminiCLIAgent(), filepath.Join(".gemini", "skills", "entire-search", "SKILL.md")},
 		{"opencode", opencode.NewOpenCodeAgent(), filepath.Join(".opencode", "skills", "entire-search", "SKILL.md")},
 		{"copilot", copilotcli.NewCopilotCLIAgent(), filepath.Join(".github", "skills", "entire-search", "SKILL.md")},
 		{"cursor", cursor.NewCursorAgent(), filepath.Join(".cursor", "skills", "entire-search", "SKILL.md")},
@@ -166,7 +164,6 @@ func TestScaffoldSearchSkill_RemovesManagedLegacySubagent(t *testing.T) {
 	}{
 		{"claude", claudecode.NewClaudeCodeAgent(), filepath.Join(".claude", "agents", "entire-search.md")},
 		{"codex", codex.NewCodexAgent(), filepath.Join(".codex", "agents", "entire-search.toml")},
-		{"gemini", geminicli.NewGeminiCLIAgent(), filepath.Join(".gemini", "agents", "entire-search.md")},
 	}
 
 	for _, tc := range testCases {
@@ -603,7 +600,20 @@ func assertStrictJSONSearchInstructions(t *testing.T, content string) {
 		t.Fatal("scaffolded file should escalate to `explain --full` for the session transcript")
 	}
 	if !strings.Contains(content, "summarize from the compact fields alone") {
-		t.Fatal("scaffolded file should tell agents repo/pr and cross-repo hits aren't explainable")
+		t.Fatal("scaffolded file should tell agents repo/pr and cross-repo session hits aren't explainable")
+	}
+	// ENT-2102: agents paste a commit hit's id (its SHA) into `explain --repo`.
+	if !strings.Contains(content, "For a checkpoint or commit hit from another repo") {
+		t.Fatal("scaffolded file should allow cross-repo explain for commit hits as well as checkpoint hits")
+	}
+	if !strings.Contains(content, "a commit SHA, which that repo's Entire API resolves to its checkpoint") {
+		t.Fatal("scaffolded file should explain that a cross-repo commit SHA resolves to its checkpoint")
+	}
+	if !strings.Contains(content, "never a prefix") {
+		t.Fatal("scaffolded file should forbid prefixes with --repo")
+	}
+	if strings.Contains(content, "other-repo commit and session") {
+		t.Fatal("scaffolded file must not claim other-repo commit hits are unexplainable")
 	}
 }
 
@@ -627,7 +637,6 @@ func TestSearchSkillTemplates_NameMatchesTelemetryProbe(t *testing.T) {
 		agent.AgentNameCopilotCLI,
 		agent.AgentNameCursor,
 		agent.AgentNameFactoryAIDroid,
-		agent.AgentNameGemini,
 		agent.AgentNameOpenCode,
 		agent.AgentNamePi,
 	} {

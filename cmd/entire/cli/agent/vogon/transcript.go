@@ -2,6 +2,7 @@ package vogon
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -41,7 +42,7 @@ func (v *Agent) GetTranscriptPosition(path string) (int, error) {
 // appear only in its own transcript. Without it, `entire hooks vogon post-task`
 // would fall back to worktree state alone and the canary could not see regressions
 // in subagent transcript resolution or file attribution.
-func (v *Agent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
+func (v *Agent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) ([]string, int, error) {
 	lines, err := readTranscriptLines(path)
 	if err != nil {
 		return nil, 0, err

@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +13,9 @@ import (
 
 // defaultBranchName is the normalised default branch name used by initRepoOnMain.
 const defaultBranchName = "main"
+
+// defaultBranchRef is what mainline detection returns for it: a full ref name.
+const defaultBranchRef = "refs/heads/" + defaultBranchName
 
 // openTestRepo opens a go-git repository from a directory.
 func openTestRepo(t *testing.T, dir string) *git.Repository {
@@ -131,8 +135,8 @@ func TestDetectScopeBaseRef_BranchOffMain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fallbackScopeRef: %v", err)
 	}
-	if baseRef != defaultBranchName {
-		t.Errorf("baseRef = %q, want %q", baseRef, defaultBranchName)
+	if baseRef != defaultBranchRef {
+		t.Errorf("baseRef = %q, want %q", baseRef, defaultBranchRef)
 	}
 
 	// Verify commit count.
@@ -228,8 +232,8 @@ func TestDetectScopeBaseRef_PrefersMainOverAncestorBranches(t *testing.T) {
 		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 	// Mainline must win even though feat/parent's tip is newer.
-	if baseRef != defaultBranchName {
-		t.Errorf("baseRef = %q, want %q (mainline-first, no timestamp heuristic)", baseRef, defaultBranchName)
+	if baseRef != defaultBranchRef {
+		t.Errorf("baseRef = %q, want %q (mainline-first, no timestamp heuristic)", baseRef, defaultBranchRef)
 	}
 }
 
@@ -254,8 +258,8 @@ func TestDetectScopeBaseRef_DetachedHEAD(t *testing.T) {
 		t.Fatalf("fallbackScopeRef: %v", err)
 	}
 	// With no ancestor branches (detached HEAD, no origin), falls back to "main".
-	if baseRef != defaultBranchName {
-		t.Errorf("baseRef = %q, want one of the fallback refs (e.g. %s)", baseRef, defaultBranchName)
+	if baseRef != defaultBranchRef {
+		t.Errorf("baseRef = %q, want one of the fallback refs (e.g. %s)", baseRef, defaultBranchRef)
 	}
 
 	// Banner should show "detached HEAD".
@@ -440,8 +444,8 @@ func TestComputeScopeStats_EmptyOverrideUsesMainlineDetection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeScopeStats with empty override: %v", err)
 	}
-	if stats.BaseRef != defaultBranchName {
-		t.Errorf("BaseRef = %q, want %q (empty override → mainline)", stats.BaseRef, defaultBranchName)
+	if stats.BaseRef != defaultBranchRef {
+		t.Errorf("BaseRef = %q, want %q (empty override → mainline)", stats.BaseRef, defaultBranchRef)
 	}
 }
 
@@ -468,8 +472,8 @@ func TestComputeScopeStats_Integration(t *testing.T) {
 		t.Fatalf("ComputeScopeStats: %v", err)
 	}
 
-	if stats.BaseRef != defaultBranchName {
-		t.Errorf("BaseRef = %q, want %q", stats.BaseRef, defaultBranchName)
+	if stats.BaseRef != defaultBranchRef {
+		t.Errorf("BaseRef = %q, want %q", stats.BaseRef, defaultBranchRef)
 	}
 	if stats.CurrentBranch != "feat/stats" {
 		t.Errorf("CurrentBranch = %q, want %q", stats.CurrentBranch, "feat/stats")
@@ -482,5 +486,35 @@ func TestComputeScopeStats_Integration(t *testing.T) {
 	}
 	if stats.Uncommitted != 0 {
 		t.Errorf("Uncommitted = %d, want 0", stats.Uncommitted)
+	}
+}
+
+// Mainline detection uses full ref names, so a tag or local branch called
+// origin/HEAD or origin/main can't stand in for the remote-tracking ref.
+func TestFallbackScopeRef_IgnoresLookalikeRefs(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	initRepoOnMain(t, upstream)
+	commitFile(t, upstream, "a.go", "package main", "base")
+
+	dir := filepath.Join(t.TempDir(), "clone")
+	testutil.RunGit(t, upstream, "clone", "-q", upstream, dir)
+	testutil.RunGit(t, dir, "config", "commit.gpgsign", "false") // a clone doesn't copy InitRepo's config
+	testutil.RunGit(t, dir, "checkout", "-q", "-b", "feature")
+	commitFile(t, dir, "b.go", "package main", "theirs")
+	testutil.RunGit(t, dir, "tag", "origin/HEAD", "HEAD")
+	testutil.RunGit(t, dir, "tag", "origin/main", "HEAD")
+	testutil.RunGit(t, dir, "branch", "origin/master", "HEAD")
+
+	repo := openTestRepo(t, dir)
+	ref, err := fallbackScopeRef(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "refs/remotes/origin/main" {
+		t.Fatalf("fallbackScopeRef = %q, want refs/remotes/origin/main", ref)
+	}
+	if got := displayRef(ref); got != "origin/main" {
+		t.Errorf("displayRef = %q, want origin/main", got)
 	}
 }

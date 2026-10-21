@@ -424,7 +424,12 @@ func TestEnableCheckpointPushRemote_MixedDedicatedAlternatives(t *testing.T) {
 			var output bytes.Buffer
 			choice.report(t.Context(), &output, nil)
 			if !called {
-				require.Empty(t, output.String(), "an untouched healthy destination is not reported")
+				// Checkpoints sync to a — the first remote, with no origin —
+				// whose owner disproves the store, even though pushing to b would
+				// still reach it. enable says so exactly as status does, rather
+				// than letting b's reachability silence what happens by default.
+				require.Contains(t, output.String(),
+					`Checkpoints sync to a, not to the configured checkpoint_remote org/checkpoints: push remote owner "other" differs from checkpoint owner "org".`)
 				return
 			}
 			require.Contains(t, output.String(), "Pushes to b still upload checkpoints to the dedicated destination: https://github.com/org/checkpoints.git")
@@ -559,4 +564,56 @@ func TestEnableCheckpointPushRemote_IneligibleSavedReport(t *testing.T) {
 	(&enableCheckpointRemoteChoice{}).report(t.Context(), &output, nil)
 	require.NotContains(t, output.String(), "Checkpoints will be uploaded")
 	require.Contains(t, output.String(), "--checkpoint-push-remote")
+}
+
+func TestParseCheckpointRemoteFlag(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		value        string
+		wantProvider string
+		wantRepo     string
+		wantErr      string
+	}{
+		{name: "github", value: "github:org/checkpoints", wantProvider: "github", wantRepo: "org/checkpoints"},
+		{name: "gitlab", value: "gitlab:org/checkpoints", wantProvider: "gitlab", wantRepo: "org/checkpoints"},
+		{name: "gitlab nested group", value: "gitlab:group/subgroup/project", wantProvider: "gitlab", wantRepo: "group/subgroup/project"},
+		{name: "provider is case-insensitive and stored lowercase", value: "GitLab:org/repo", wantProvider: "gitlab", wantRepo: "org/repo"},
+		{name: "provider whitespace is trimmed", value: " github :org/repo", wantProvider: "github", wantRepo: "org/repo"},
+		{name: "unsupported provider", value: "bitbucket:org/repo", wantErr: `unsupported provider "bitbucket" (supported: github, gitlab)`},
+		{name: "missing colon", value: "org/repo", wantErr: "expected format provider:owner/repo"},
+		{name: "missing repo slash", value: "github:repo", wantErr: "repo must be in owner/name format"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			provider, repo, err := parseCheckpointRemoteFlag(tc.value)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.wantProvider, provider)
+			require.Equal(t, tc.wantRepo, repo)
+		})
+	}
+}
+
+// The reason can quote the owner parsed out of the committed checkpoint_remote,
+// so it is as repo-controlled as the repo and must reach the terminal stripped
+// of escape and control sequences, as must the claim command.
+func TestIgnoredCheckpointRemoteWording_SanitizesRepoControlledParts(t *testing.T) {
+	t.Parallel()
+	hostile := "evil\x1b[2J\x1b]0;pwned\x07\r\x00"
+	sentence := ignoredCheckpointRemoteSentence("acme/"+hostile, "owned by "+hostile, "origin\x1b[31m")
+	fix := ignoredCheckpointRemoteFix("acme/"+hostile, "entire claim "+hostile)
+	for _, out := range []string{sentence, fix} {
+		for _, bad := range []string{"\x1b", "\x07", "\r", "\x00"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("%q still contains %q", out, bad)
+			}
+		}
+	}
+	if !strings.Contains(sentence, "owned by evil") {
+		t.Errorf("the reason's text must survive sanitizing: %q", sentence)
+	}
 }

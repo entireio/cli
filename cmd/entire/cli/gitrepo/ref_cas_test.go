@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +91,40 @@ func TestCompareAndSwapRef_RejectsSymbolicRef(t *testing.T) {
 	}
 }
 
+func TestCompareAndSwapRef_SymbolicRefAbortFailure(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("abort failure injection requires POSIX signals")
+	}
+	hooksDir := t.TempDir()
+	// Fail the owned Git process after it releases the prepared ref lock.
+	hook := `#!/bin/sh
+if [ "$1" = aborted ]; then
+    echo 'fatal: cannot lock references' >&2
+    kill -TERM "$PPID"
+fi
+`
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "reference-transaction"), []byte(hook), 0o755))
+	for _, backend := range refCASBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+			repoDir, initial, replacement := backend.init(t)
+			gitenv.Run(t, repoDir, "config", "core.hooksPath", hooksDir)
+
+			err := CompareAndSwapRef(t.Context(), repoDir, plumbing.HEAD, plumbing.NewHash(initial), plumbing.NewHash(replacement))
+			require.ErrorIs(t, err, ErrRefSymbolic)
+			require.ErrorContains(t, err, "cannot lock references", "retain the abort failure diagnosis")
+			require.NotErrorIs(t, err, ErrRefLocked, "cleanup must not make symbolic-ref rejection retryable")
+			require.NotErrorIs(t, err, ErrRefCASConflict)
+			require.Equal(t, "refs/heads/main", strings.TrimSpace(gitenv.Run(t, repoDir, "symbolic-ref", "HEAD")))
+			require.Equal(t, replacement, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", "HEAD")))
+
+			require.NoError(t, CompareAndSwapRef(t.Context(), repoDir, plumbing.NewBranchReferenceName("main"), plumbing.NewHash(initial), plumbing.NewHash(replacement)))
+			require.Equal(t, initial, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", "HEAD")))
+		})
+	}
+}
+
 func TestPreparedRefCASPreventsConcurrentSymbolicConversion(t *testing.T) {
 	t.Parallel()
 	for _, tt := range refCASBackends() {
@@ -147,6 +182,9 @@ func TestPreparedRefCASCancellationReleasesGitLock(t *testing.T) {
 			require.Equal(t, refCASWaitDelay, tx.cmd.WaitDelay)
 
 			cancel()
+			// wait reports the cancellation only once cmd.Cancel has run; under
+			// load git can exit on the closed stdin before os/exec gets there.
+			require.Eventually(t, tx.canceled.Load, time.Second, time.Millisecond)
 			require.ErrorIs(t, tx.wait(), context.Canceled)
 			require.Equal(t, initial, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", refName.String())))
 

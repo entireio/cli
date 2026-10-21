@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
@@ -19,8 +21,11 @@ const envelopeTypeAssistant = "assistant"
 
 // NewReviewer returns the AgentReviewer for claude-code.
 //
-// Argv shape: claude -p <prompt> --output-format stream-json --verbose.
-// The prompt is passed as a command-line argument; stdin is unused.
+// Argv shape: claude -p --output-format stream-json --verbose
+// --append-system-prompt <guardrail>.
+// The prompt is piped via stdin, which claude reads in print mode when no
+// prompt is given on the command line. argv is readable by other local users
+// through the process table (ps, /proc/<pid>/cmdline) for the life of the run.
 // Stdout is newline-delimited JSON envelopes (one event per line), which the
 // parser decodes into the review Event stream. This format gives the parser
 // per-message granularity (each assistant content block surfaces as it is
@@ -30,6 +35,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 		AgentName: "claude-code",
 		BuildCmd:  buildReviewCmd,
 		Parser:    parseClaudeOutput,
+		Prepare:   prepareReviewAgentConfig,
 	}
 }
 
@@ -37,9 +43,11 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 // Exposed at package level for test inspection of argv and env.
 func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
-	args := []string{"-p", prompt, flagOutputFormat, "stream-json", "--verbose"}
+	args := []string{"-p", flagOutputFormat, "stream-json", "--verbose", "--append-system-prompt", review.ReviewerGuardrail}
+	args = append(args, cfg.ExtraArgs...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)
 	return cmd
 }
@@ -113,7 +121,12 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			}
 			switch env.Type {
 			case envelopeTypeAssistant:
-				for _, block := range env.Message.Content {
+				var msg claudeMessage
+				if err := json.Unmarshal(env.Message, &msg); err != nil {
+					out <- reviewtypes.RunError{Err: fmt.Errorf("claude stream-json assistant message: %w", err)}
+					continue
+				}
+				for _, block := range msg.Content {
 					switch block.Type {
 					case "text":
 						if block.Text != "" {
@@ -133,12 +146,12 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 				// (see the parser doc). Emitting the running sum keeps
 				// mid-run values on the cumulative Tokens contract; the
 				// true {In, Out} tally comes from `result` below.
-				in := env.Message.Usage.InputTokens +
-					env.Message.Usage.CacheReadInputTokens +
-					env.Message.Usage.CacheCreationInputTokens
-				if in > 0 && env.Message.ID != "" {
-					if _, seen := seenMsgIDs[env.Message.ID]; !seen {
-						seenMsgIDs[env.Message.ID] = struct{}{}
+				in := msg.Usage.InputTokens +
+					msg.Usage.CacheReadInputTokens +
+					msg.Usage.CacheCreationInputTokens
+				if in > 0 && msg.ID != "" {
+					if _, seen := seenMsgIDs[msg.ID]; !seen {
+						seenMsgIDs[msg.ID] = struct{}{}
 						cumInputTokens += in
 						out <- reviewtypes.Tokens{In: cumInputTokens, Out: 0}
 					}
@@ -147,6 +160,9 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 				sawResult = true
 				resultErr = env.IsError
 				resultUsage = env.Usage
+				if names := deniedToolNames(env.PermissionDenials); len(names) > 0 {
+					out <- reviewtypes.ToolsBlocked{Names: names, Allow: claudeAllowHint}
+				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -172,14 +188,36 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 }
 
 type claudeEnvelope struct {
-	Type    string        `json:"type"`
-	Message claudeMessage `json:"message"`
-	IsError bool          `json:"is_error"`
+	Type string `json:"type"`
+	// Message is decoded only for assistant envelopes. Other event types may
+	// carry a different shape under the same key (some system events send a
+	// plain string), which must not fail the review.
+	Message json.RawMessage `json:"message"`
+	IsError bool            `json:"is_error"`
 	// Usage reuses the package-local messageUsage type (declared in types.go)
 	// rather than a duplicate ad-hoc struct, so the two consumers of the
 	// Claude API usage shape (transcript parsing + stream-json review parser)
 	// can't drift apart.
 	Usage messageUsage `json:"usage"`
+	// PermissionDenials lists tool calls the permission settings refused.
+	PermissionDenials []permissionDenial `json:"permission_denials"`
+}
+
+type permissionDenial struct {
+	ToolName string `json:"tool_name"`
+}
+
+const claudeAllowHint = "add them to permissions.allow in the reviewer's settings (its review profile config, or ~/.claude/settings.json)"
+
+// deniedToolNames returns the distinct denied tool names, in order.
+func deniedToolNames(denials []permissionDenial) []string {
+	var names []string
+	for _, d := range denials {
+		if d.ToolName != "" && !slices.Contains(names, d.ToolName) {
+			names = append(names, d.ToolName)
+		}
+	}
+	return names
 }
 
 type claudeMessage struct {

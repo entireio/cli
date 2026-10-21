@@ -51,18 +51,18 @@ func TestTrailListResponseDecodesEntireAPIContract(t *testing.T) {
 	payload := []byte(`{
 		"items":[{
 			"id":"01JTRAIL","number":7,"title":"Native trail","status":"open",
-			"branch":null,"originalBranch":"feature/native","base":"main",
-			"requestedReviewers":["reviewer"],"phase":"reviewing",
-			"createdAt":"2026-08-10T10:00:00.000Z","updatedAt":"2026-08-10T11:00:00.000Z"
+			"branch":null,"original_branch":"feature/native","base":"main",
+			"requested_reviewers":["reviewer"],"phase":"reviewing",
+			"created_at":"2026-08-10T10:00:00.000Z","updated_at":"2026-08-10T11:00:00.000Z"
 		}],
-		"nextPageToken":"cursor-2","totalCount":12
+		"next_cursor":"cursor-2","total_count":12
 	}`)
 	var got TrailListResponse
 	if err := json.Unmarshal(payload, &got); err != nil {
 		t.Fatalf("decode native list: %v", err)
 	}
-	if got.Total != 12 || got.NextPageToken == nil || *got.NextPageToken != "cursor-2" {
-		t.Fatalf("pagination = total %d token %v", got.Total, got.NextPageToken)
+	if got.Total != 12 || got.NextCursor == nil || *got.NextCursor != "cursor-2" {
+		t.Fatalf("pagination = total %d token %v", got.Total, got.NextCursor)
 	}
 	if len(got.Trails) != 1 || got.Trails[0].Branch != "" || got.Trails[0].OriginalBranch != "feature/native" || got.Trails[0].Phase != "reviewing" {
 		t.Fatalf("trail = %#v", got.Trails)
@@ -76,13 +76,10 @@ func TestTrailRequestsUseEntireAPICasing(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, want := range []string{`"branchName"`, `"branchAction"`} {
+	for _, want := range []string{`"branch_name"`, `"branch_action"`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("request %s missing %s", text, want)
 		}
-	}
-	if strings.Contains(text, "branch_name") || strings.Contains(text, "branch_action") {
-		t.Fatalf("request still uses snake_case: %s", text)
 	}
 }
 
@@ -134,10 +131,7 @@ func TestToMetadataMapsTypePriorityReviewers(t *testing.T) {
 }
 
 // TestTrailApprovalDecodesStringAuthor pins the current entire-api approvals
-// wire shape. Re-verified against entire-api's TrailApprovalWire: the HTTP
-// response uses commitSha/createdAt and a bare login string for author. The
-// server's similarly named storedTrailApproval remains snake_case, but is an
-// internal JSONB shape that is converted before the response is written.
+// wire shape: snake_case fields and a bare login string for author.
 //
 // Author deliberately remains a string rather than *trail.Author. A populated
 // approvals response otherwise fails to decode even though an empty response
@@ -147,25 +141,25 @@ func TestTrailApprovalDecodesStringAuthor(t *testing.T) {
 	t.Parallel()
 
 	const body = `{"approvals":[{"id":"59ef5b87","body":null,"event":"approved",` +
-		`"author":"nodo","commitSha":"e9a9dcbf1fbc55580e7212096824a01e1691853d",` +
-		`"createdAt":"2026-08-11T09:35:11.714Z"}]}`
+		`"author":"reviewer-example","commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",` +
+		`"created_at":"2026-08-11T09:35:11.714Z"}]}`
 
 	var got TrailApprovalsResponse
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
-		t.Fatalf("decoding a real approvals response failed: %v", err)
+		t.Fatalf("decoding an approvals response failed: %v", err)
 	}
 	if len(got.Approvals) != 1 {
 		t.Fatalf("Approvals len = %d, want 1", len(got.Approvals))
 	}
 
 	a := got.Approvals[0]
-	if a.Author != "nodo" {
-		t.Errorf("Author = %q, want %q", a.Author, "nodo")
+	if a.Author != "reviewer-example" {
+		t.Errorf("Author = %q, want %q", a.Author, "reviewer-example")
 	}
 	if a.Event != "approved" {
 		t.Errorf("Event = %q, want approved", a.Event)
 	}
-	if a.CommitSHA != "e9a9dcbf1fbc55580e7212096824a01e1691853d" {
+	if a.CommitSHA != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Errorf("CommitSHA = %q", a.CommitSHA)
 	}
 	// body:null must not become the string "null".
@@ -177,21 +171,53 @@ func TestTrailApprovalDecodesStringAuthor(t *testing.T) {
 	}
 }
 
-// The submit response embeds the same camelCase TrailApprovalWire shape.
+// The submit response embeds the same snake_case TrailApprovalWire shape.
 func TestTrailApprovalResponseDecodesStringAuthor(t *testing.T) {
 	t.Parallel()
 
 	const body = `{"ok":true,"approval":{"id":"9f65e574","event":"approved",` +
-		`"author":"nodo","createdAt":"2026-08-11T09:35:34.998Z"}}`
+		`"author":"reviewer-example","created_at":"2026-08-11T09:35:34.998Z"}}`
 
 	var got TrailApprovalResponse
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
-		t.Fatalf("decoding a real approve response failed: %v", err)
+		t.Fatalf("decoding an approve response failed: %v", err)
 	}
 	if !got.OK {
 		t.Error("OK = false, want true")
 	}
-	if got.Approval.Author != "nodo" {
-		t.Errorf("Approval.Author = %q, want nodo", got.Approval.Author)
+	if got.Approval.Author != "reviewer-example" {
+		t.Errorf("Approval.Author = %q, want reviewer-example", got.Approval.Author)
+	}
+}
+
+func TestTrailWriteContracts(t *testing.T) {
+	t.Parallel()
+	reviewers := []string{}
+	title := "Renamed"
+	no := false
+	for _, tc := range []struct {
+		name string
+		body any
+		want string
+	}{
+		{"update", TrailUpdateRequest{Title: &title, RequestedReviewers: &reviewers}, `{"title":"Renamed","requested_reviewers":[]}`},
+		{"clear body", TrailBodyRequest{Markdown: ""}, `{"markdown":""}`},
+		{"approve", TrailApprovalRequest{Event: "approve", Body: "Reviewed"}, `{"event":"approve","body":"Reviewed"}`},
+		{"request changes", TrailApprovalRequest{Event: "request_changes", Body: "Please fix"}, `{"event":"request_changes","body":"Please fix"}`},
+		{"discussion", TrailDiscussionCreateRequest{Title: "Design", Body: "Discuss"}, `{"title":"Design","body":"Discuss"}`},
+		{"reopen", TrailDiscussionUpdateRequest{Resolved: &no}, `{"resolved":false}`},
+		{"no-op update", TrailDiscussionUpdateRequest{}, `{}`},
+		{"message", TrailDiscussionMessageRequest{Body: "Reply"}, `{"body":"Reply"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body, err := json.Marshal(tc.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != tc.want {
+				t.Fatalf("body = %s, want %s", body, tc.want)
+			}
+		})
 	}
 }

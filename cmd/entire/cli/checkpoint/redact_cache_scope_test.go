@@ -93,6 +93,35 @@ func TestRedactTranscriptCached_ActuallyReusesPrefix(t *testing.T) {
 	requireMatchesFullRedaction(t, grown, got)
 }
 
+// TestRedactTranscriptCached_ScannerSwitchRedactsInFull: a prefix redacted
+// before goredact was enabled must not be reused after it, or the lines it
+// covers never get goredact's coverage.
+func TestRedactTranscriptCached_ScannerSwitchRedactsInFull(t *testing.T) {
+	// No t.Parallel: switches the process-global scanner selection.
+	withSmallRedactCacheThreshold(t)
+	t.Cleanup(func() {
+		require.NoError(t, redact.ConfigureScanners(redact.ScannersConfig{Betterleaks: true}))
+	})
+	repo, _ := newTestRepoForCache(t)
+	ctx := context.Background()
+	const session = "sess-scanners"
+
+	require.NoError(t, redact.ConfigureScanners(redact.ScannersConfig{Betterleaks: true}))
+	content := padPastCacheThreshold(t, transcriptLines(0, 100))
+	_, err := RedactTranscriptCached(ctx, repo, session, []byte(content), jsonlRedactor)
+	require.NoError(t, err)
+
+	require.NoError(t, redact.ConfigureScanners(redact.ScannersConfig{Betterleaks: true, Goredact: true}))
+	grown := content + transcriptLines(60_000, 40)
+	var sawBytes int
+	got, err := RedactTranscriptCached(ctx, repo, session, []byte(grown), countingRedactor(&sawBytes))
+	require.NoError(t, err)
+
+	require.Equal(t, len(grown), sawBytes,
+		"enabling a scanner must redact the whole transcript again, not only the appended lines")
+	requireMatchesFullRedaction(t, grown, got)
+}
+
 // TestRedactTranscriptCached_SessionsAreIsolated: two concurrent sessions in
 // one worktree must not share a prefix.
 func TestRedactTranscriptCached_SessionsAreIsolated(t *testing.T) {
@@ -224,7 +253,7 @@ func TestRedactTranscriptCached_PrefixSurvivesGC(t *testing.T) {
 // than a failed checkpoint.
 func TestRedactCache_EntryWithNoPayloadFallsBack(t *testing.T) {
 	withSmallRedactCacheThreshold(t)
-	repo, dir := newTestRepoForCache(t)
+	_, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 	require.NotNil(t, cache)
 	ctx := context.Background()
@@ -232,7 +261,7 @@ func TestRedactCache_EntryWithNoPayloadFallsBack(t *testing.T) {
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
 	const treePath = "full.jsonl"
 
-	// Hand-built: storePrefix always names a payload, so it cannot express this.
+	// Hand-built: storePrefixBytes always names a payload, so it cannot express this.
 	writeCacheEntry(t, cache, treePath, redactPrefixEntry{
 		Fingerprint: redactionFingerprint(),
 		SourceBytes: len(content) / 2,
@@ -240,7 +269,7 @@ func TestRedactCache_EntryWithNoPayloadFallsBack(t *testing.T) {
 	})
 	require.Nil(t, cache.load(treePath), "load must reject an entry with no payload")
 
-	got, err := redactIncrementally(ctx, repo, cache, []byte(content), treePath, testRedactor)
+	got, err := redactIncrementally(ctx, cache, []byte(content), treePath, testRedactor)
 	require.NoError(t, err)
 	want, wantErr := RedactBlobBytes(ctx, []byte(content), treePath, false)
 	require.NoError(t, wantErr)

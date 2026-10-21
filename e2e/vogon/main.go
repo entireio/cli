@@ -60,6 +60,8 @@ func main() {
 		runTurn(dir, cfg.sessionID, transcriptPath, cfg.prompt)
 	} else {
 		// Interactive mode: read prompts from stdin
+		restoreTerminal = holdTerminalLikeTUI()
+		defer restoreTerminal()
 		fmt.Fprint(os.Stdout, "> ")
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
@@ -171,9 +173,8 @@ func runTurn(dir, sessionID, transcriptPath, prompt string) {
 
 // subagentPromptRe matches the delegation phrasing the e2e prompts use ("use a
 // subagent: …", "using a subagent", "delegate to a subagent"). Vogon has no real
-// subagents; it simulates one so the pre-task/post-task hooks, the task
-// checkpoint, and the shadow-branch lifecycle around them are exercised on every
-// canary run. Before this, the canary fired no subagent hooks at all, so a whole
+// subagents; it simulates one so the pre-task/post-task hooks and the task
+// record they produce are exercised on every canary run. Before this, the canary fired no subagent hooks at all, so a whole
 // class of regression was invisible to it (see TestSubagentCommitFlow).
 var subagentPromptRe = regexp.MustCompile(`(?i)\b(use|using|via|with|delegate to)\s+(a\s+)?sub-?agent`)
 
@@ -616,10 +617,10 @@ func gitRun(dir string, args ...string) {
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	// Signal that this is a non-interactive agent — git hooks should not
-	// attempt TTY prompts. GIT_TERMINAL_PROMPT is the standard git env var
-	// for this (same approach used by Factory AI Droid).
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// No GIT_TERMINAL_PROMPT=0 or other "can't prompt" hint: Claude Code and
+	// Codex send none, so the hook has to tell from the terminal alone, as it
+	// does for their users. The terminal is whatever the harness started Vogon
+	// in (see setupProcessGroup in e2e/agents).
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "git %s: %v\n", strings.Join(args, " "), err)
 	}
@@ -718,7 +719,13 @@ func appendTranscriptEntry(path string, entry transcriptEntry) {
 	}
 }
 
+// restoreTerminal undoes holdTerminalLikeTUI. fatal calls it too, since
+// os.Exit skips the deferred restore and would leave the terminal out of
+// canonical mode.
+var restoreTerminal = func() {}
+
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "vogon: "+format+"\n", args...)
+	restoreTerminal()
 	os.Exit(1)
 }

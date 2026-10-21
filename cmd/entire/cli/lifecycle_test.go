@@ -25,14 +25,15 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
-	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -49,7 +50,6 @@ var _ agent.Agent = (*mockLifecycleAgent)(nil)
 func (m *mockLifecycleAgent) Name() types.AgentName                          { return m.name }
 func (m *mockLifecycleAgent) Type() types.AgentType                          { return m.agentType }
 func (m *mockLifecycleAgent) Description() string                            { return "Mock agent for lifecycle tests" }
-func (m *mockLifecycleAgent) IsPreview() bool                                { return false }
 func (m *mockLifecycleAgent) DetectPresence(_ context.Context) (bool, error) { return false, nil }
 func (m *mockLifecycleAgent) ProtectedDirs() []string                        { return nil }
 func (m *mockLifecycleAgent) GetSessionID(_ *agent.HookInput) string         { return "" }
@@ -118,13 +118,19 @@ type mockAnalyzerAgent struct {
 	// returns. Tests use it to simulate a racing SessionEnd landing exactly in
 	// that window.
 	onExtract func()
+
+	// scannedPath records the path ExtractModifiedFilesFromOffset was called
+	// with, so tests can prove which transcript (parent or declared child) the
+	// capture actually scanned.
+	scannedPath string
 }
 
 var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
 
 func (m *mockAnalyzerAgent) GetTranscriptPosition(_ string) (int, error) { return 0, nil }
 
-func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]string, int, error) {
+func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, _ int) ([]string, int, error) {
+	m.scannedPath = path
 	if m.onExtract != nil {
 		m.onExtract()
 	}
@@ -211,6 +217,64 @@ func TestRefreshCodexInventory_MultiTurnChildRefreshesCompletedTaskRecord(t *tes
 	assert.Equal(t, "/tmp/child-1.jsonl", record.DeclaredTranscriptPath)
 	assert.ElementsMatch(t, []string{"first.go", "second.go"}, state.FilesTouched)
 	assert.Contains(t, state.FindSubagentInventory(agentID).FinalizedTurnIDs, "turn-2")
+}
+
+// A Codex child-file merge does not hash what it adds, so a hash an earlier
+// turn-end step recorded for the same path must be dropped: the child may have
+// rewritten the file, and comparing a commit of the new content against the old
+// hash would read as "the human replaced the agent's work".
+func TestRefreshCodexInventory_ChildFilesDropStaleTouchedFileHashes(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes the process working directory.
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const (
+		sessionID = "codex-child-stale-hash"
+		agentID   = "child-1"
+	)
+	repoRoot, err := os.Getwd()
+	require.NoError(t, err)
+	complete := true
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:                 sessionID,
+		WorktreePath:              repoRoot,
+		StartedAt:                 time.Now(),
+		Phase:                     session.PhaseActive,
+		SubagentInventoryComplete: &complete,
+		SubagentLedgerVersion:     2,
+		SubagentInventory: []session.SubagentInventoryEntry{{
+			AgentID:         agentID,
+			ObservedTurnIDs: []string{"turn-1"},
+		}},
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID: agentID,
+			AgentID:   agentID,
+			StartedAt: time.Now().Add(-time.Minute),
+		}},
+		FilesTouched: []string{"rewritten.go", "untouched.go"},
+		TouchedFileHashes: map[string]string{
+			"rewritten.go": "1111111111111111111111111111111111111111",
+			"untouched.go": "2222222222222222222222222222222222222222",
+		},
+	}))
+
+	ag := &mockInventoryAgent{
+		mockLifecycleAgent: newMockAgent(),
+		extraction: agent.InventoryExtraction{Children: []agent.SubagentAnalysis{{
+			AgentID:         agentID,
+			ResolvedPath:    "/tmp/child-1.jsonl",
+			ModifiedFiles:   []string{filepath.Join(repoRoot, "rewritten.go")},
+			TerminalTurnIDs: []string{"turn-1"},
+		}}},
+	}
+
+	_, version := refreshCodexInventory(ctx, ag, sessionID, nil, 0)
+	require.NotNil(t, version)
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"rewritten.go", "untouched.go"}, state.FilesTouched)
+	assert.Equal(t, map[string]string{"untouched.go": "2222222222222222222222222222222222222222"}, state.TouchedFileHashes,
+		"the child-merged path falls back to name matching; other recorded hashes stay")
 }
 
 func TestFinalizeCodexObservedAtSessionEnd(t *testing.T) {
@@ -390,6 +454,59 @@ func TestDispatchLifecycleEvent_NilEvent(t *testing.T) {
 	if !strings.Contains(err.Error(), "event cannot be nil") {
 		t.Errorf("expected error message about nil event, got: %v", err)
 	}
+}
+
+// mockOOBTokenAgent implements OutOfBandTokenSource on top of the standard
+// lifecycle mock; CalculateTokenUsageSince returns a fixed value regardless of
+// baseline, mimicking the count-from-zero behavior of a nil baseline.
+type mockOOBTokenAgent struct {
+	mockLifecycleAgent
+
+	usage *agent.TokenUsage
+}
+
+func (m *mockOOBTokenAgent) SnapshotTokenBaseline(_ context.Context, _ string) (json.RawMessage, error) {
+	return nil, nil
+}
+
+//nolint:unparam // error return is fixed by the OutOfBandTokenSource interface
+func (m *mockOOBTokenAgent) CalculateTokenUsageSince(_ context.Context, _ string, _ json.RawMessage) (*agent.TokenUsage, error) {
+	return m.usage, nil
+}
+
+// TestComputeOutOfBandTokenUsage_MissingBaselineMidSession pins the nil-baseline
+// contract: a missing baseline is only legitimate on a session's first tracked
+// turn (count from zero). Mid-session — after earlier turns already accumulated
+// deltas — a lost/corrupt PrePromptState must degrade to no-data; counting from
+// zero would return session-cumulative totals and double-count every earlier
+// turn in entire status and the next checkpoint.
+func TestComputeOutOfBandTokenUsage_MissingBaselineMidSession(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	cumulative := &agent.TokenUsage{InputTokens: 700, OutputTokens: 500, APICallCount: 3}
+	ag := &mockOOBTokenAgent{usage: cumulative}
+
+	sessionID := "test-oob-midsession"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+		TokenUsage: &agent.TokenUsage{InputTokens: 250, OutputTokens: 280, APICallCount: 2},
+	}))
+
+	got := computeOutOfBandTokenUsage(ctx, ag, sessionID, nil)
+	require.Nil(t, got, "missing baseline mid-session must degrade to no-data, not count-from-zero")
+
+	// First tracked turn (nothing accumulated yet): count-from-zero is the
+	// documented, correct behavior — the guard must not break it.
+	freshID := "test-oob-first-turn"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  freshID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}))
+	require.Equal(t, cumulative, computeOutOfBandTokenUsage(ctx, ag, freshID, nil))
 }
 
 // TestDispatchLifecycleEvent_SkipsForwardedHookFromNonOwningAgent verifies the
@@ -725,7 +842,7 @@ func TestHandleLifecycleSessionStart_StoresAgentTypeHint(t *testing.T) {
 // TestHandleLifecycleSessionStart_AgentTypeHintFirstWriterWins verifies that
 // when multiple agents fire SessionStart for the same session ID, only the
 // first agent's claim is recorded AND only the first emits the banner. This
-// matches both the Cursor cross-agent and the Gemini repeat-source
+// matches both the Cursor cross-agent and the repeat-source
 // (startup → resume) cases — the user must see the banner only once.
 func TestHandleLifecycleSessionStart_AgentTypeHintFirstWriterWins(t *testing.T) {
 	setupStopTestRepo(t)
@@ -801,7 +918,7 @@ func TestHandleLifecycleSessionStart_BannerClaimedOnce(t *testing.T) {
 	require.NotEmpty(t, first.lastMessage)
 
 	second := newMockHookResponseAgent()
-	second.agentType = agent.AgentTypeGemini
+	second.agentType = agent.AgentTypeCodex
 	require.NoError(t, handleLifecycleSessionStart(ctx, second, &agent.Event{
 		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
 	}))
@@ -809,18 +926,17 @@ func TestHandleLifecycleSessionStart_BannerClaimedOnce(t *testing.T) {
 		"banner must not be re-emitted once a writer agent has shown it")
 }
 
-// TestHandleLifecycleSessionStart_GeminiRepeatSourceDoesNotDuplicate covers
-// the specific case the user reported: Gemini fires SessionStart twice for
-// the same session (e.g., source=startup followed by source=resume) and we
-// were emitting the banner both times.
-func TestHandleLifecycleSessionStart_GeminiRepeatSourceDoesNotDuplicate(t *testing.T) {
+// TestHandleLifecycleSessionStart_RepeatSourceDoesNotDuplicate covers an
+// agent firing SessionStart twice for the same session (e.g., source=startup
+// followed by source=resume): the banner must be emitted only the first time.
+func TestHandleLifecycleSessionStart_RepeatSourceDoesNotDuplicate(t *testing.T) {
 	setupStopTestRepo(t)
 
 	ctx := context.Background()
-	sessionID := "test-gemini-repeat"
+	sessionID := "test-repeat-source"
 
 	ag := newMockHookResponseAgent()
-	ag.agentType = agent.AgentTypeGemini
+	ag.agentType = agent.AgentTypeClaudeCode
 
 	require.NoError(t, handleLifecycleSessionStart(ctx, ag, &agent.Event{
 		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
@@ -1078,6 +1194,52 @@ func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	}
 }
 
+func TestShouldSuppressConditionalTurnStart(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	stuckAt := now.Add(-2 * session.StuckActiveThreshold)
+	active := &strategy.SessionState{Phase: session.PhaseActive, StartedAt: now, LastInteractionTime: &now}
+	stuckActive := &strategy.SessionState{Phase: session.PhaseActive, StartedAt: stuckAt, LastInteractionTime: &stuckAt}
+	idle := &strategy.SessionState{Phase: session.PhaseIdle, StartedAt: now, LastInteractionTime: &now}
+
+	// Conditional TurnStart (agy invocationNum>0) with an active mid-turn
+	// session is a follow-up model call — suppress so the baseline isn't clobbered.
+	if !shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, active) {
+		t.Error("conditional TurnStart with a recently-active session must be suppressed (follow-up invocation)")
+	}
+	// Stuck-ACTIVE (crashed session whose Stop never fired) => a resume must
+	// fire, or the crashed conversation is untracked forever.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, stuckActive) {
+		t.Error("conditional TurnStart with a stuck-ACTIVE session must fire (resume after crash)")
+	}
+	// Dead owner (crash detected via PID liveness) => a resume must fire
+	// immediately, without waiting out StuckActiveThreshold. A mismatched
+	// start fingerprint on our own PID is proclive's deterministic "dead
+	// owner" signal on supported platforms.
+	deadOwner := &strategy.SessionState{
+		Phase: session.PhaseActive, StartedAt: now, LastInteractionTime: &now,
+		Owner: &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+	}
+	if deadOwner.OwnerLiveness() != proclive.LivenessDead {
+		t.Logf("skipping dead-owner case: liveness = %v on this platform", deadOwner.OwnerLiveness())
+	} else if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, deadOwner) {
+		t.Error("conditional TurnStart with a dead-owner ACTIVE session must fire (resume within the stuck threshold)")
+	}
+	// Idle session => the prior turn finished; a new/resumed turn must fire.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, idle) {
+		t.Error("conditional TurnStart with an IDLE session must fire (new/resumed turn)")
+	}
+	// No session (condensed away / fresh) => resume must fire.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, nil) {
+		t.Error("conditional TurnStart with no session must fire (resume after condensation)")
+	}
+	// Unconditional TurnStart (invocationNum==0) must never be suppressed.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: false}, active) {
+		t.Error("unconditional TurnStart must never be suppressed")
+	}
+}
+
 // TestTurnFlow_StatusBudgetBreachDegradesGracefully pins the zombie-hook
 // incident regression (stray `git init` in $HOME): when the worktree status
 // walk breaches its wall-clock budget, both turn hooks must still succeed —
@@ -1166,70 +1328,6 @@ type mockPromptAgent struct {
 var _ agent.PromptExtractor = (*mockPromptAgent)(nil)
 
 func (m *mockPromptAgent) ExtractPrompts(string, int) ([]string, error) { return m.prompts, nil }
-
-// TestHandleLifecycleTurnEnd_SaveBreachStillBackfillsLastPrompt pins the
-// degrade-path bookkeeping: when the first-checkpoint status read inside
-// SaveStep breaches its budget, the checkpoint is skipped and the hook exits
-// 0 — but the turn-end tail must still run, backfilling LastPrompt (SaveStep
-// initialized session state before failing, wiping any earlier value) and
-// persisting the capture-degraded marker.
-func TestHandleLifecycleTurnEnd_SaveBreachStillBackfillsLastPrompt(t *testing.T) {
-	// Not parallel: t.Chdir plus the package-global git-status budget override.
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
-	testutil.GitAdd(t, tmpDir, "README.md")
-	testutil.GitCommit(t, tmpDir, "init")
-	t.Chdir(tmpDir)
-	paths.ClearWorktreeRootCache()
-
-	t.Cleanup(checkpoint.SetGitStatusBudgetForTesting(time.Nanosecond))
-
-	ctx := context.Background()
-	sessionID := "sess-save-breach-backfill"
-
-	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
-	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
-
-	resolvedDir, err := filepath.EvalSymlinks(tmpDir)
-	require.NoError(t, err)
-	ag := &mockPromptAgent{
-		mockAnalyzerAgent: mockAnalyzerAgent{
-			mockLifecycleAgent: &mockLifecycleAgent{
-				name:           "mock-prompt",
-				agentType:      "Mock Prompt Agent",
-				transcriptData: []byte(`{"type":"user","message":"test"}`),
-			},
-			analyzerFiles: []string{filepath.Join(resolvedDir, "agent.txt")},
-		},
-		prompts: []string{"write agent.txt"},
-	}
-
-	// Turn start without a prompt (exec-mode shape, e.g. Factory Droid):
-	// prompt.txt stays empty so turn-end must backfill from the transcript.
-	startEvent := &agent.Event{
-		Type:       agent.TurnStart,
-		SessionID:  sessionID,
-		SessionRef: transcriptPath,
-		Timestamp:  time.Now(),
-	}
-	require.NoError(t, handleLifecycleTurnStart(ctx, ag, startEvent))
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "agent.txt"), []byte("agent"), 0o600))
-
-	endEvent := &agent.Event{
-		Type:       agent.TurnEnd,
-		SessionID:  sessionID,
-		SessionRef: transcriptPath,
-		Timestamp:  time.Now(),
-	}
-	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, endEvent), "save breach must degrade, not fail the hook")
-
-	state, err := strategy.LoadSessionState(ctx, sessionID)
-	require.NoError(t, err)
-	require.Equal(t, 0, state.StepCount, "the breached save must not have produced a checkpoint")
-	require.Equal(t, "write agent.txt", state.LastPrompt, "the backfill must run on the degrade path too")
-	require.NotNil(t, state.CaptureDegradedAt, "the save breach must be persisted so `entire status` can surface it")
-}
 
 // TestHandleLifecycleTurnEnd_ScanSkippedMarkerSkipsNewFileDetection pins the
 // cross-process degrade shape the same-process test above cannot reach: turn
@@ -1374,53 +1472,18 @@ func TestHandleLifecycleSubagentEnd_ScanSkippedMarkerSkipsNewFileDetection(t *te
 		"marker must disable new-file detection on the subagent path")
 }
 
-// TestHandleClaudeCodePostTodo_ScanSkippedMarkerSkipsNewFileDetection is the
-// PostTodo twin of the turn-end/subagent-end marker tests: PostTodo detects
-// changes with a nil baseline (all untracked files classified New), so after
-// a pre-task scan breach (marker written in one process) a PostTodo whose own
-// walk succeeds would claim every pre-existing untracked file in the
-// incremental checkpoint. Deleting the PostTodo marker guard must fail this
-// test.
-func TestHandleClaudeCodePostTodo_ScanSkippedMarkerSkipsNewFileDetection(t *testing.T) {
-	// Not parallel: t.Chdir, the process-global status budget latch, and the
-	// currentHookAgentName hook-context global.
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "README.md", "# test\n")
-	testutil.GitAdd(t, tmpDir, "README.md")
-	testutil.GitCommit(t, tmpDir, "init")
-	// PostTodo skips on the default branch; incremental checkpoints only run
-	// on feature branches.
-	testutil.GitCheckoutNewBranch(t, tmpDir, "feature/posttodo")
-	t.Chdir(tmpDir)
-	paths.ClearWorktreeRootCache()
-
-	currentHookAgentName = agent.AgentNameClaudeCode
-	t.Cleanup(func() { currentHookAgentName = "" })
-
+// TestHandleClaudeCodePostTodo_IsANoOp pins that the PostToolUse[TodoWrite]
+// hook no longer records anything (it used to write an incremental subagent
+// checkpoint to the shadow branch): it only consumes its input, still
+// rejecting malformed JSON so a broken payload is visible.
+func TestHandleClaudeCodePostTodo_IsANoOp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	toolUseID := "toolu-posttodo-01"
-
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "preexisting.txt"), []byte("x"), 0o600))
-
-	// Process A: pre-task capture under a breached budget writes the marker.
-	gitrepo.SetStatusBudgetBreachedForTesting(true)
-	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
-	gitrepo.SetStatusBudgetBreachedForTesting(false)
-
-	// The subagent modifies a tracked file during the task, so the incremental
-	// checkpoint still has real content to save.
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# test\nmodified\n"), 0o600))
 
 	input := `{"session_id":"sess-posttodo","transcript_path":"","tool_name":"TodoWrite",` +
 		`"tool_use_id":"toolu-todowrite-01","tool_input":{"todos":[{"content":"do work","status":"completed"}]}}`
 	require.NoError(t, handleClaudeCodePostTodoFromReader(ctx, strings.NewReader(input)))
-
-	state, err := strategy.LoadSessionState(ctx, "sess-posttodo")
-	require.NoError(t, err)
-	require.Contains(t, state.FilesTouched, "README.md")
-	require.NotContains(t, state.FilesTouched, "preexisting.txt",
-		"marker must disable new-file detection on the PostTodo path")
+	require.Error(t, handleClaudeCodePostTodoFromReader(ctx, strings.NewReader("{not json")))
 }
 
 // --- handleLifecycleCompaction tests ---
@@ -1466,7 +1529,7 @@ func TestHandleLifecycleCompaction_PreservesTranscriptOffset(t *testing.T) {
 	}
 
 	// Compaction should NOT reset the transcript offset.
-	// Many agents (e.g., Gemini) fire pre-compress as a no-op after every tool call;
+	// Some agents fire pre-compress as a no-op after every tool call;
 	// resetting the offset causes stale files to re-appear in carry-forward.
 	err := handleLifecycleCompaction(context.Background(), ag, event)
 	if err != nil {
@@ -1548,7 +1611,7 @@ func TestDispatchLifecycleEvent_RoutesToCorrectHandler(t *testing.T) {
 	// NOT parallel: uses t.Chdir to isolate from real repo state.
 	// Without this, the SubagentEnd case creates .git/entire-sessions/test.json
 	// in the real repo whenever untracked files exist, because DetectFileChanges
-	// reports them as new files and SaveTaskStep falls back to initializeSession.
+	// reports them as new files and EnsureSessionExists creates the state.
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
 	testutil.WriteFile(t, tmpDir, "init.txt", "init")
@@ -2465,11 +2528,11 @@ const testInvestigateRunID = "abcdef012345"
 // the hook's agent for adoption to succeed.
 func setInvestigateEnv(t *testing.T, agentName, startingSHA, topic string) {
 	t.Helper()
-	t.Setenv(investigate.EnvSession, "1")
-	t.Setenv(investigate.EnvAgent, agentName)
-	t.Setenv(investigate.EnvStartingSHA, startingSHA)
-	t.Setenv(investigate.EnvRunID, testInvestigateRunID)
-	t.Setenv(investigate.EnvTopic, topic)
+	t.Setenv(provenance.InvestigateSession, "1")
+	t.Setenv(provenance.InvestigateAgent, agentName)
+	t.Setenv(provenance.InvestigateStartingSHA, startingSHA)
+	t.Setenv(provenance.InvestigateRunID, testInvestigateRunID)
+	t.Setenv(provenance.InvestigateTopic, topic)
 }
 
 // TestAdoptInvestigateEnv_Success verifies that adoptInvestigateEnv tags the
@@ -2618,11 +2681,11 @@ func TestAdoptInvestigateEnv_SessionEnvNotOne(t *testing.T) {
 
 	ag := newMockAgent()
 	headSHA := testutil.GetHeadHash(t, tmp)
-	t.Setenv(investigate.EnvSession, "0")
-	t.Setenv(investigate.EnvAgent, string(ag.Name()))
-	t.Setenv(investigate.EnvStartingSHA, headSHA)
-	t.Setenv(investigate.EnvRunID, testInvestigateRunID)
-	t.Setenv(investigate.EnvTopic, "topic")
+	t.Setenv(provenance.InvestigateSession, "0")
+	t.Setenv(provenance.InvestigateAgent, string(ag.Name()))
+	t.Setenv(provenance.InvestigateStartingSHA, headSHA)
+	t.Setenv(provenance.InvestigateRunID, testInvestigateRunID)
+	t.Setenv(provenance.InvestigateTopic, "topic")
 
 	state := &session.State{
 		SessionID:  "test-investigate-env-session-not-one",
@@ -2713,11 +2776,11 @@ func TestAdoptInvestigateEnv_RejectsBadRunID(t *testing.T) {
 
 			ag := newMockAgent()
 			headSHA := testutil.GetHeadHash(t, tmp)
-			t.Setenv(investigate.EnvSession, "1")
-			t.Setenv(investigate.EnvAgent, string(ag.Name()))
-			t.Setenv(investigate.EnvStartingSHA, headSHA)
-			t.Setenv(investigate.EnvRunID, tc.runID)
-			t.Setenv(investigate.EnvTopic, "topic")
+			t.Setenv(provenance.InvestigateSession, "1")
+			t.Setenv(provenance.InvestigateAgent, string(ag.Name()))
+			t.Setenv(provenance.InvestigateStartingSHA, headSHA)
+			t.Setenv(provenance.InvestigateRunID, tc.runID)
+			t.Setenv(provenance.InvestigateTopic, "topic")
 
 			state := &session.State{
 				SessionID:  "test-investigate-env-bad-run-id-" + tc.name,
@@ -2922,7 +2985,7 @@ func TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement(t *t
 // control plane.
 type blockingCellCore struct{}
 
-func (blockingCellCore) GetRepo(ctx context.Context, _ coreapi.GetRepoParams) (*coreapi.Repo, error) {
+func (blockingCellCore) GetRepo(ctx context.Context, _ coreapi.GetRepoParams) (*coreapi.RepoHeaders, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
@@ -3252,7 +3315,7 @@ func TestSaveSubagentSessionTaskStep_SecondTurn_MergesAndKeepsDeclaredPath(t *te
 		event:         &agent.Event{Type: agent.TurnEnd, SessionID: "droid-worker", Timestamp: time.Now()},
 		transcriptRef: "/tmp/worker.jsonl",
 		modifiedFiles: []string{"a.txt"},
-		agentType:     agent.AgentTypeClaudeCode,
+		ag:            &mockLifecycleAgent{name: "mock", agentType: agent.AgentTypeClaudeCode},
 		strat:         GetStrategy(ctx),
 	}
 	require.NoError(t, saveSubagentSessionTaskStep(ctx, step))
@@ -3275,8 +3338,7 @@ func TestSaveSubagentSessionTaskStep_SecondTurn_MergesAndKeepsDeclaredPath(t *te
 // --- handleLifecycleSubagentEnd: background launch marker + SubagentStop dispatch ---
 
 // setupSubagentEndTestRepo initializes a git repo with one commit and chdirs
-// into it, returning the repo dir and HEAD hash for building session state and
-// shadow-branch assertions.
+// into it, returning the repo dir and HEAD hash for building session state.
 func setupSubagentEndTestRepo(t *testing.T) (repoDir, headHash string) {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -3288,10 +3350,10 @@ func setupSubagentEndTestRepo(t *testing.T) (repoDir, headHash string) {
 	return tmpDir, testutil.GetHeadHash(t, tmpDir)
 }
 
-// readShadowBranchFile reads the file at treePath from the tree at the tip of
+// readBranchFile reads the file at treePath from the tree at the tip of
 // branchName, returning (content, true) if found or ("", false) otherwise
 // (branch missing or file missing at that path).
-func readShadowBranchFile(t *testing.T, repoDir, branchName, treePath string) (string, bool) {
+func readBranchFile(t *testing.T, repoDir, branchName, treePath string) (string, bool) {
 	t.Helper()
 	repo, err := gitrepo.OpenPath(repoDir)
 	require.NoError(t, err)
@@ -3375,6 +3437,25 @@ func writeSubagentTranscripts(t *testing.T, agentID string) (mainTranscriptPath,
 	return mainTranscriptPath, subagentTranscriptPath
 }
 
+// writeDeclaredOnlyChildTranscript writes a main transcript plus a child
+// transcript that the legacy same-directory/subagents-dir layout
+// (ResolveAgentTranscriptPath) cannot find: a differently-named file in its
+// own temp dir, unrelated to the main transcript's directory. A test
+// asserting the capture used this path proves the declared
+// SubagentTranscriptPath field was actually read, rather than the legacy
+// fallback happening to compute the same path independently.
+func writeDeclaredOnlyChildTranscript(t *testing.T) (mainTranscriptPath, childTranscriptPath string) {
+	t.Helper()
+	mainDir := t.TempDir()
+	mainTranscriptPath = filepath.Join(mainDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"do something"}}`+"\n"), 0o600))
+
+	childDir := t.TempDir()
+	childTranscriptPath = filepath.Join(childDir, "child.jsonl")
+	require.NoError(t, os.WriteFile(childTranscriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+	return mainTranscriptPath, childTranscriptPath
+}
+
 // findSessionCheckpoint returns the permanent checkpoint written for sessionID,
 // or false when none exists.
 func findSessionCheckpoint(ctx context.Context, t *testing.T, sessionID string) (strategy.CheckpointInfo, bool) {
@@ -3397,7 +3478,7 @@ func readCheckpointTaskFile(ctx context.Context, t *testing.T, repoDir, sessionI
 	if !found {
 		return "", false
 	}
-	return readShadowBranchFile(t, repoDir, paths.MetadataBranchName, cp.CheckpointID.Path()+"/"+relPath)
+	return readBranchFile(t, repoDir, paths.MetadataBranchName, cp.CheckpointID.Path()+"/"+relPath)
 }
 
 // makeNInFlightTasks returns n distinct live (uncompleted) task records.
@@ -3426,7 +3507,7 @@ func TestHandleLifecycleSubagentEnd_LaunchDispatch(t *testing.T) {
 	// since SubagentStop payloads have no tool_input to derive them from) and
 	// save nothing yet.
 	t.Run("background records marker without task step", func(t *testing.T) {
-		repoDir, headHash := setupSubagentEndTestRepo(t)
+		_, headHash := setupSubagentEndTestRepo(t)
 		ctx := context.Background()
 		sessionID := "bg-launch-session"
 
@@ -3455,11 +3536,6 @@ func TestHandleLifecycleSubagentEnd_LaunchDispatch(t *testing.T) {
 		assert.Equal(t, "agent-bg1", marker.AgentID)
 		assert.Equal(t, "reviewer", marker.SubagentType)
 		assert.Equal(t, "Review the PR", marker.TaskDescription)
-
-		shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-		if testutil.BranchExists(t, repoDir, shadowBranch) {
-			t.Error("background launch must defer capture to subagent-stop, not save a task step immediately")
-		}
 	})
 
 	// foreground guards invariant 2: a foreground Task invocation (no
@@ -3489,11 +3565,6 @@ func TestHandleLifecycleSubagentEnd_LaunchDispatch(t *testing.T) {
 		err := handleLifecycleSubagentEnd(ctx, ag, event)
 		require.NoError(t, err)
 
-		shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-		if testutil.BranchExists(t, repoDir, shadowBranch) {
-			t.Error("foreground completion must write a task record, not a shadow task step")
-		}
-
 		state, loadErr := strategy.LoadSessionState(ctx, sessionID)
 		require.NoError(t, loadErr)
 		require.NotNil(t, state)
@@ -3507,6 +3578,69 @@ func TestHandleLifecycleSubagentEnd_LaunchDispatch(t *testing.T) {
 		assert.Contains(t, rec.Files, "foreground.txt")
 		assert.Contains(t, state.FilesTouched, "foreground.txt",
 			"task files must merge into FilesTouched so carry-forward and PostCommit gating see them")
+	})
+
+	// Claude Code runs most Agent calls in the background without the model
+	// ever passing run_in_background; only tool_response says so. The launch
+	// must still defer to SubagentStop, or the record completes from the
+	// launch stub with no files and the real work is never captured.
+	t.Run("reported background launch records marker", func(t *testing.T) {
+		_, headHash := setupSubagentEndTestRepo(t)
+		ctx := context.Background()
+		sessionID := "async-launch-session"
+
+		saveInFlightSession(ctx, t, sessionID, headHash)
+
+		event := &agent.Event{
+			Type:           agent.SubagentEnd,
+			SessionID:      sessionID,
+			ToolUseID:      "toolu_async1",
+			SubagentID:     "agent-async1",
+			ToolInput:      json.RawMessage(`{"subagent_type":"general-purpose","description":"Add count subcommand"}`),
+			SubagentLaunch: agent.SubagentLaunchBackground,
+			Timestamp:      time.Now(),
+		}
+		require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), event))
+
+		state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+		require.NoError(t, loadErr)
+		require.NotNil(t, state)
+		require.Len(t, state.LiveTaskRecords(), 1, "a reported background launch must leave an in-flight marker")
+		marker := state.TaskRecords[0]
+		assert.Equal(t, "toolu_async1", marker.ToolUseID)
+		assert.Equal(t, "agent-async1", marker.AgentID, "SubagentStop can only find the marker by agent ID")
+		assert.Equal(t, "general-purpose", marker.SubagentType)
+	})
+
+	// The reverse: the subagent already finished when PostToolUse fires, so a
+	// run_in_background the harness did not honor must not leave a marker
+	// waiting for a SubagentStop that already fired.
+	t.Run("reported foreground overrides run_in_background", func(t *testing.T) {
+		repoDir, headHash := setupSubagentEndTestRepo(t)
+		ctx := context.Background()
+		sessionID := "fg-override-session"
+
+		saveInFlightSession(ctx, t, sessionID, headHash)
+		testutil.WriteFile(t, repoDir, "foreground.txt", "written by foreground subagent")
+
+		event := &agent.Event{
+			Type:           agent.SubagentEnd,
+			SessionID:      sessionID,
+			ToolUseID:      "toolu_fg2",
+			SubagentID:     "agent-fg2",
+			ToolInput:      json.RawMessage(`{"subagent_type":"dev","run_in_background":true}`),
+			SubagentLaunch: agent.SubagentLaunchForeground,
+			Timestamp:      time.Now(),
+		}
+		require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), event))
+
+		state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+		require.NoError(t, loadErr)
+		require.NotNil(t, state)
+		require.Len(t, state.TaskRecords, 1)
+		rec := state.TaskRecords[0]
+		assert.False(t, rec.CompletedAt.IsZero(), "a reported foreground completion must complete the record now")
+		assert.Contains(t, rec.Files, "foreground.txt")
 	})
 
 	// uncorrelated guards agents whose SubagentEnd carries no correlation ID at
@@ -3538,15 +3672,79 @@ func TestHandleLifecycleSubagentEnd_LaunchDispatch(t *testing.T) {
 	})
 }
 
+// TestHandleLifecycleSubagentStart_DeferredCompletion_RecordsInFlightMarker pins
+// the OpenCode launch shape: the start hook knows the tool call, the child ID and
+// the labels, and completion arrives later as a Final SubagentEnd. The start
+// must leave a live record (so `checkpoint list --pending` shows it and the
+// SessionEnd sweep can complete it) and must not disturb a record a racing
+// Final already completed.
+func TestHandleLifecycleSubagentStart_DeferredCompletion_RecordsInFlightMarker(t *testing.T) {
+	// NOT parallel: setupSubagentEndTestRepo uses t.Chdir.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "opencode-deferred-start"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	start := &agent.Event{
+		Type:               agent.SubagentStart,
+		SessionID:          sessionID,
+		ToolUseID:          "call_red",
+		SubagentID:         "ses_child_red",
+		SubagentType:       "general",
+		TaskDescription:    "Create docs/red.md",
+		DeferredCompletion: true,
+		Timestamp:          time.Now(),
+	}
+	require.NoError(t, handleLifecycleSubagentStart(ctx, newMockAgent(), start))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	rec := state.FindTaskRecord("call_red")
+	require.NotNil(t, rec, "deferred start must record an in-flight marker")
+	assert.True(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, "ses_child_red", rec.AgentID)
+	assert.Equal(t, "general", rec.SubagentType)
+	assert.Equal(t, "Create docs/red.md", rec.TaskDescription)
+	assert.True(t, rec.Background, "a deferred launch runs until a later stop, so overlap checks must see it")
+
+	preState, preErr := LoadPreTaskState(ctx, "call_red")
+	require.NoError(t, preErr)
+	assert.Nil(t, preState, "a deferred-completion start must not write a worktree pre-task baseline")
+
+	// A late duplicate start after completion must not reopen the record.
+	require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(s *strategy.SessionState) error {
+		require.True(t, s.CompleteTaskRecord("call_red", time.Now()))
+		return nil
+	}))
+	require.NoError(t, handleLifecycleSubagentStart(ctx, newMockAgent(), start))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, state.TaskRecords, 1)
+	assert.False(t, state.TaskRecords[0].CompletedAt.IsZero(), "duplicate start must not overwrite a completed record")
+
+	// A start reaching an ended session would leave a record nothing completes.
+	require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(s *strategy.SessionState) error {
+		s.Phase = session.PhaseEnded
+		return nil
+	}))
+	late := *start
+	late.ToolUseID = "call_blue"
+	require.NoError(t, handleLifecycleSubagentStart(ctx, newMockAgent(), &late))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assert.Nil(t, state.FindTaskRecord("call_blue"), "an ended session must not get a live record")
+}
+
 // TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabel
 // is the addendum from Task 1's code review: SubagentStop payloads carry no
 // tool_input, so a Final capture can't derive subagent_type/description from
 // the event itself (ParseSubagentTypeAndDescription yields empty strings on a
 // nil ToolInput). The launch-recorded labels must survive on the completed
-// record — exactly once — and no shadow task step may be written anymore.
+// record — exactly once.
 func TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabel(t *testing.T) {
 	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
-	repoDir, headHash := setupSubagentEndTestRepo(t)
+	_, headHash := setupSubagentEndTestRepo(t)
 	ctx := context.Background()
 	sessionID := "stop-capture-session"
 	toolUseID := "toolu_stop1"
@@ -3566,11 +3764,6 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabe
 	err := handleLifecycleSubagentEnd(ctx, ag, finalSubagentEvent(sessionID, toolUseID, "agent-stop1"))
 	require.NoError(t, err)
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-	if testutil.BranchExists(t, repoDir, shadowBranch) {
-		t.Error("a Final completion must write a task record, not a shadow task step")
-	}
-
 	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, loadErr)
 	require.NotNil(t, state)
@@ -3586,14 +3779,14 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabe
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect
-// pins Step 2.4b's late-arrival guard: SaveTaskStep's ensureSessionInitialized
-// re-creates session state unconditionally, so a late SubagentStop for a
-// session that was already ended and swept must never call it — that would
-// resurrect a zombie session and mint a shadow branch nothing condenses,
-// exactly the class of bug the session sweep feature exists to prevent.
+// pins Step 2.4b's late-arrival guard: EnsureSessionExists re-creates missing
+// session state unconditionally, so a late SubagentStop for a session that was
+// already ended and swept must never call it — that would resurrect a zombie
+// session that nothing condenses, exactly the class of bug the session sweep
+// feature exists to prevent.
 func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t *testing.T) {
 	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
-	repoDir, headHash := setupSubagentEndTestRepo(t)
+	setupSubagentEndTestRepo(t)
 	ctx := context.Background()
 	sessionID := "swept-session"
 	// Deliberately no strategy.SaveSessionState call: this session's state was
@@ -3609,11 +3802,6 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t
 	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, loadErr)
 	assert.Nil(t, state, "a late subagent-stop for a missing session must not resurrect session state")
-
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-	if testutil.BranchExists(t, repoDir, shadowBranch) {
-		t.Error("a late subagent-stop for a missing session must not mint a shadow branch")
-	}
 }
 
 func TestHandleLifecycleSubagentEnd_CorrelatedCompletionCreatesDistinctRecord(t *testing.T) {
@@ -3667,14 +3855,12 @@ func TestHandleLifecycleSubagentEnd_CorrelatedCompletionCreatesDistinctRecord(t 
 // pins the other half of Step 2.4b: when the session ended (PhaseEnded)
 // before this SubagentStop arrived, the Final capture must run and then
 // immediately trigger the same eager condense SessionEnd uses, so the
-// newly-captured task step doesn't linger as post-condensation zombie shadow
-// data.
+// newly-captured task record doesn't linger as post-condensation zombie data.
 //
 // Uses a read-only capture (no file changes) — the headline motivating case,
 // a background reviewer that edits nothing. Such a completion touches neither
 // FilesTouched nor StepCount, so the task record itself is what keeps
-// CondenseAndMarkFullyCondensed off its no-steps and no-shadow-branch
-// shortcuts. The session state carries a real transcript path and a
+// CondenseAndMarkFullyCondensed off its no-pending-work shortcut. The session state carries a real transcript path and a
 // registered agent type so CondenseSession has actual content to condense —
 // proving the record was genuinely materialized into a permanent checkpoint,
 // not merely that FullyCondensed flipped true via a shortcut.
@@ -3724,8 +3910,8 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondens
 // snapshot. If a racing SessionEnd flips the session to PhaseEnded during
 // that capture window (both serialize on the per-session gate, so the
 // interleaving reduces to ordering), the stale snapshot still said idle, the
-// eager condense was skipped, and the task step just captured became
-// post-condensation zombie shadow data.
+// eager condense was skipped, and the task record just captured became
+// post-condensation zombie data.
 //
 // The session here starts idle (PhaseActive, via saveInFlightTranscriptSession),
 // not ended — unlike the sibling PhaseEnded_TriggersEagerCondense test above,
@@ -3744,7 +3930,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_SessionEndsMidCapture_StillCond
 	agentID := "agent-midcapture1"
 
 	// Real transcript content so CondenseSession has something to condense —
-	// proving the shadow branch's content was genuinely consumed into a
+	// proving the session's pending content was genuinely consumed into a
 	// permanent checkpoint, not merely that FullyCondensed flipped true via
 	// CondenseAndMarkFullyCondensed's no-steps shortcut.
 	mainTranscriptPath, subagentTranscriptPath := writeSubagentTranscripts(t, agentID)
@@ -3823,6 +4009,218 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_ClaimPreventsDoubleCapture(t *t
 	assert.Len(t, state.TaskRecords, 1, "a duplicate Final event must not register a second record")
 }
 
+// TestHandleLifecycleSubagentEnd_SubagentStop_WithoutToolUseID_CompletesByAgentID
+// pins the real Claude Code SubagentStop shape: agent_id but no tool_use_id.
+// The stop must find the launch marker by agent ID and complete it under the
+// marker's ToolUseID, which keys the checkpoint's tasks/<tool_use_id>/ tree.
+func TestHandleLifecycleSubagentEnd_SubagentStop_WithoutToolUseID_CompletesByAgentID(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "stop-by-agent-session"
+
+	saveInFlightSession(ctx, t, sessionID, headHash, session.TaskRecord{
+		ToolUseID:    "toolu_bg_agent",
+		AgentID:      "a5d355711b87c5650",
+		StartedAt:    time.Now(),
+		SubagentType: "general-purpose",
+	})
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), finalSubagentEvent(sessionID, "", "a5d355711b87c5650")))
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	require.Len(t, state.TaskRecords, 1, "the stop must complete the launch record, not add one keyed on an empty ToolUseID")
+	rec := state.TaskRecords[0]
+	assert.Equal(t, "toolu_bg_agent", rec.ToolUseID)
+	assert.False(t, rec.CompletedAt.IsZero(), "the stop must complete the marker it matched by agent ID")
+	assert.Equal(t, "general-purpose", rec.SubagentType)
+}
+
+// TestHandleLifecycleSubagentEnd_WorkflowAgentLaunch_RepeatDoesNotResetRecord
+// covers Claude Code's SubagentStart for a Workflow agent (#2685): the launch
+// is keyed by the agent ID, so a SubagentStart seen again after the agent's
+// SubagentStop completed the record must leave that record as it is. Replacing
+// it (AddTaskRecord semantics) would drop the captured files and tokens and
+// leave a live record that nothing will complete again.
+func TestHandleLifecycleSubagentEnd_WorkflowAgentLaunch_RepeatDoesNotResetRecord(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "workflow-launch-session"
+	const agentID = "ae3d7b8f2930c8787"
+	completedAt := time.Now().Add(-time.Minute)
+
+	saveInFlightSession(ctx, t, sessionID, headHash, session.TaskRecord{
+		ToolUseID: agentID, AgentID: agentID, SubagentType: "workflow-subagent",
+		StartedAt: completedAt.Add(-time.Minute), CompletedAt: completedAt,
+		Files: []string{"a.txt"},
+	})
+
+	launch := &agent.Event{
+		Type:                     agent.SubagentEnd,
+		SessionID:                sessionID,
+		ToolUseID:                agentID,
+		SubagentID:               agentID,
+		SubagentType:             "workflow-subagent",
+		SubagentLaunch:           agent.SubagentLaunchBackground,
+		SubagentLaunchIdempotent: true,
+		Timestamp:                time.Now(),
+	}
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), launch))
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	require.Len(t, state.TaskRecords, 1)
+	rec := state.TaskRecords[0]
+	assert.True(t, rec.CompletedAt.Equal(completedAt), "a repeated launch must not reopen a completed record")
+	assert.Equal(t, []string{"a.txt"}, rec.Files, "a repeated launch must not drop the captured files")
+}
+
+// TestHandleLifecycleSubagentEnd_WorkflowAgent_RunsSharingAgentID covers a
+// resumed Workflow run reusing an agent ID before condensation has removed the
+// earlier run's completed record. Each run's stop must complete a record of its
+// own, whichever order the stops arrive in, and a repeated stop for a run must
+// not add a third.
+func TestHandleLifecycleSubagentEnd_WorkflowAgent_RunsSharingAgentID(t *testing.T) {
+	const agentID = "ae3d7b8f2930c8787"
+	runs := []string{"wf_e5264e60-494", "wf_0b9c1d22-781"}
+
+	for _, tc := range []struct {
+		name  string
+		order []string // event sequence: "start<i>" / "stop<i>"
+	}{
+		{name: "sequential", order: []string{"start0", "stop0", "start1", "stop1"}},
+		{name: "overlapping, reversed stops", order: []string{"start0", "start1", "stop1", "stop0"}},
+		{name: "earlier run condensed between start and stop", order: []string{"start0", "stop0", "start1", "condense", "stop1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+			_, headHash := setupSubagentEndTestRepo(t)
+			ctx := context.Background()
+			sessionID := "workflow-resume-session"
+			saveInFlightSession(ctx, t, sessionID, headHash)
+
+			transcriptDir := t.TempDir()
+			runTranscript := make([]string, len(runs))
+			for i, run := range runs {
+				runDir := filepath.Join(paths.SubagentsDir(transcriptDir, sessionID), paths.SubagentWorkflowsDirName, run)
+				require.NoError(t, os.MkdirAll(runDir, 0o700))
+				runTranscript[i] = filepath.Join(runDir, paths.AgentTranscriptFileName(agentID))
+				require.NoError(t, os.WriteFile(runTranscript[i], []byte(`{"type":"user"}`+"\n"), 0o600))
+			}
+			stop := func(i int) *agent.Event {
+				event := finalSubagentEvent(sessionID, "", agentID)
+				event.SessionRef = filepath.Join(transcriptDir, sessionID+".jsonl")
+				event.SubagentType = "workflow-subagent"
+				event.SubagentTranscriptPath = runTranscript[i]
+				event.SubagentRunID = runs[i]
+				return event
+			}
+			launch := func() *agent.Event {
+				return &agent.Event{
+					Type: agent.SubagentEnd, SessionID: sessionID, ToolUseID: agentID, SubagentID: agentID,
+					SubagentType: "workflow-subagent", SubagentLaunch: agent.SubagentLaunchBackground,
+					SubagentLaunchIdempotent: true, Timestamp: time.Now(),
+				}
+			}
+
+			var condensed []session.TaskRecord
+			for _, step := range tc.order {
+				switch {
+				case step == "condense":
+					// What condensation leaves behind: completed records
+					// materialized and removed, live ones kept.
+					require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+						live := state.LiveTaskRecords()
+						for _, rec := range state.TaskRecords {
+							if !rec.CompletedAt.IsZero() {
+								condensed = append(condensed, rec)
+							}
+						}
+						state.TaskRecords = live
+						return nil
+					}))
+				case strings.HasPrefix(step, "stop"):
+					require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), stop(int(step[4]-'0'))), step)
+				default:
+					require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), launch()), step)
+				}
+			}
+			// A repeated stop for a run already completed adds nothing.
+			require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), stop(1)))
+
+			state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+			require.NoError(t, loadErr)
+			require.NotNil(t, state)
+			records := append(append([]session.TaskRecord(nil), condensed...), state.TaskRecords...)
+			require.Len(t, records, 2, "each run's execution gets its own record")
+			assert.Empty(t, state.LiveTaskRecords())
+			assert.ElementsMatch(t, runTranscript,
+				[]string{records[0].DeclaredTranscriptPath, records[1].DeclaredTranscriptPath},
+				"each record holds its own run's transcript")
+			if len(condensed) == 0 {
+				assert.NotEqual(t, records[0].ToolUseID, records[1].ToolUseID, "records in one state need distinct keys")
+			}
+			for _, rec := range records {
+				assert.Equal(t, agentID, rec.AgentID)
+				assert.False(t, rec.CompletedAt.IsZero())
+				require.NoError(t, validation.ValidateToolUseID(rec.ToolUseID))
+			}
+		})
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_WithoutToolUseID_PrefersLiveRecord
+// covers two records sharing an agent ID before condensation, one completed
+// and one live. A stop matched by agent ID must complete the live record
+// rather than match the completed one and skip as a duplicate.
+func TestHandleLifecycleSubagentEnd_SubagentStop_WithoutToolUseID_PrefersLiveRecord(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "shared-agent-id-session"
+	firstCompletedAt := time.Now().Add(-time.Minute)
+
+	saveInFlightSession(ctx, t, sessionID, headHash,
+		session.TaskRecord{ToolUseID: "toolu_first", AgentID: "a5d355711b87c5650", StartedAt: firstCompletedAt, CompletedAt: firstCompletedAt},
+		session.TaskRecord{ToolUseID: "toolu_second", AgentID: "a5d355711b87c5650", StartedAt: time.Now()},
+	)
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), finalSubagentEvent(sessionID, "", "a5d355711b87c5650")))
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.LiveTaskRecords(), "the stop must complete the live record")
+	first := state.FindTaskRecord("toolu_first")
+	require.NotNil(t, first)
+	assert.True(t, first.CompletedAt.Equal(firstCompletedAt), "the completed record must not be re-completed")
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_WithoutToolUseID_NoMarker_IsNoOp
+// covers a Claude foreground subagent: its SubagentStop arrives before the
+// PostToolUse that links agent_id to tool_use_id, so no record exists yet.
+// The stop must not invent one (it would be keyed on "" and land under
+// tasks//); the PostToolUse that follows captures the subagent.
+func TestHandleLifecycleSubagentEnd_SubagentStop_WithoutToolUseID_NoMarker_IsNoOp(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "fg-stop-first-session"
+
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), finalSubagentEvent(sessionID, "", "a5d355711b87c5650")))
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	assert.Empty(t, state.TaskRecords)
+}
+
 // TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorktreeChanges
 // is the regression for a verified external-review finding: a background
 // Final (SubagentStop) capture used to merge DetectFileChanges' whole-worktree
@@ -3867,7 +4265,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorkt
 	})
 
 	// The subagent's own work: named by the transcript analyzer, and present
-	// on disk so it can actually be written into the shadow tree.
+	// on disk so it is a real file the turn can claim.
 	testutil.WriteFile(t, repoDir, "agent-work.txt", "written by the background subagent")
 
 	// A foreign file: written to the worktree after launch but NOT by this
@@ -3899,25 +4297,17 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorkt
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveStep_PreservesBaseline
 // is the regression for overloading StepCount with transcript-only task
-// steps: StepCount's ==0 value drives SaveStep's IsFirstCheckpoint (the FIRST
-// shadow checkpoint snapshots the user's whole pre-existing uncommitted
-// worktree state — checkpoint/ephemeral.go's collectChangedFiles baseline)
-// and its ==1 value anchors TranscriptIdentifierAtStart. A transcript-only
-// background Final landing BEFORE the session's first SaveStep must therefore
-// register only on the task record, not StepCount —
-// otherwise the subsequent first SaveStep sees StepCount==1, skips the
-// baseline capture (silently dropping the user's pre-existing dirt from every
-// checkpoint), and never sets the transcript anchor.
+// steps: StepCount's ==1 value anchors TranscriptIdentifierAtStart. A
+// transcript-only background Final landing BEFORE the session's first SaveStep
+// must therefore register only on the task record, not StepCount — otherwise
+// the subsequent first SaveStep sees StepCount==1 and never sets the
+// transcript anchor.
 func TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveStep_PreservesBaseline(t *testing.T) {
 	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
 	repoDir, headHash := setupSubagentEndTestRepo(t)
 	ctx := context.Background()
 	sessionID := "baseline-order-session"
 	toolUseID := "toolu_baseline1"
-
-	// The user's pre-existing uncommitted work, on disk BEFORE the session
-	// saves anything. Only the first SaveStep's baseline capture picks it up.
-	testutil.WriteFile(t, repoDir, "user-dirt.txt", "pre-existing uncommitted work")
 
 	saveInFlightSession(ctx, t, sessionID, headHash,
 		session.TaskRecord{ToolUseID: toolUseID, AgentID: "agent-baseline1", StartedAt: time.Now(), SubagentType: "reviewer"})
@@ -3935,7 +4325,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveSt
 	require.True(t, state.HasTaskContent(), "the completed record must register as pending task content")
 
 	// Now the session's FIRST SaveStep. It must still get first-checkpoint
-	// semantics: baseline capture of user-dirt.txt and the transcript anchor.
+	// semantics: the transcript anchor.
 	metadataDir := ".entire/metadata/" + sessionID
 	metadataDirAbs := filepath.Join(repoDir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
@@ -3960,12 +4350,113 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveSt
 	assert.Equal(t, 1, state.StepCount, "the first SaveStep must be checkpoint #1")
 	assert.Equal(t, "anchor-uuid-1", state.TranscriptIdentifierAtStart,
 		"the first SaveStep must set the transcript anchor (StepCount==1 semantics)")
+}
 
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-	content, gotDirt := readShadowBranchFile(t, repoDir, shadowBranch, "user-dirt.txt")
-	assert.True(t, gotDirt,
-		"the first SaveStep must snapshot pre-existing uncommitted state (IsFirstCheckpoint baseline) even after a transcript-only task step")
-	assert.Equal(t, "pre-existing uncommitted work", content)
+// TestHandleLifecycleSubagentEnd_CompletionWithoutLaunch_UsesDeclaredTranscript
+// pins the OpenCode stop shape: no launch marker is required, but a child
+// transcript IS declared, so the final capture must extract the child's files
+// from it instead of treating the completion as event-files-only (Copilot's
+// shape, which additionally sets SubagentTranscriptUnavailable).
+func TestHandleLifecycleSubagentEnd_CompletionWithoutLaunch_UsesDeclaredTranscript(t *testing.T) {
+	// NOT parallel: setupSubagentEndTestRepo uses t.Chdir.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "opencode-completion-declared"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	mainPath, childPath := writeDeclaredOnlyChildTranscript(t)
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"docs_red.md"},
+	}
+
+	event := finalSubagentEvent(sessionID, "call_red", "ses_child_red")
+	event.SessionRef = mainPath
+	event.SubagentTranscriptPath = childPath
+	event.CompletionWithoutLaunch = true
+	event.SubagentType = "general"
+	event.TokenUsage = &agent.TokenUsage{InputTokens: 12, OutputTokens: 3}
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, event))
+
+	assert.Equal(t, childPath, ag.scannedPath,
+		"files must be extracted from the declared child transcript, not the parent")
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	rec := state.FindTaskRecord("call_red")
+	require.NotNil(t, rec, "a completion learned at stop time creates the record when no launch marker exists")
+	assert.False(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, []string{"docs_red.md"}, rec.Files)
+	assert.Equal(t, childPath, rec.DeclaredTranscriptPath)
+	assert.False(t, rec.TranscriptUnavailable)
+	require.NotNil(t, rec.TokenUsage)
+	assert.Equal(t, 12, rec.TokenUsage.InputTokens)
+	assert.Contains(t, state.FilesTouched, "docs_red.md")
+}
+
+// TestHandleLifecycleSubagentStart_ThenFinalCompletion_CompletesTheDeferredRecord
+// pins the real OpenCode sequence end-to-end: a DeferredCompletion start
+// records the in-flight marker, and the later Final + CompletionWithoutLaunch
+// stop must complete THAT SAME record — not create a second one — preserving
+// the launch-time StartedAt and labels while attaching the stop-time capture
+// (files, declared transcript, tokens).
+func TestHandleLifecycleSubagentStart_ThenFinalCompletion_CompletesTheDeferredRecord(t *testing.T) {
+	// NOT parallel: setupSubagentEndTestRepo uses t.Chdir.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "opencode-deferred-then-final"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	start := &agent.Event{
+		Type:               agent.SubagentStart,
+		SessionID:          sessionID,
+		ToolUseID:          "call_red",
+		SubagentID:         "ses_child_red",
+		SubagentType:       "general",
+		TaskDescription:    "Create docs/red.md",
+		DeferredCompletion: true,
+		Timestamp:          time.Now(),
+	}
+	require.NoError(t, handleLifecycleSubagentStart(ctx, newMockAgent(), start))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	launchRec := state.FindTaskRecord("call_red")
+	require.NotNil(t, launchRec, "the deferred start must record the in-flight marker")
+	launchedAt := launchRec.StartedAt
+
+	mainPath, childPath := writeDeclaredOnlyChildTranscript(t)
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"docs_red.md"},
+	}
+	final := finalSubagentEvent(sessionID, "call_red", "ses_child_red")
+	final.SessionRef = mainPath
+	final.SubagentTranscriptPath = childPath
+	final.CompletionWithoutLaunch = true
+	final.TokenUsage = &agent.TokenUsage{InputTokens: 12, OutputTokens: 3}
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, final))
+
+	assert.Equal(t, childPath, ag.scannedPath, "files must be extracted from the declared child transcript")
+
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Len(t, state.TaskRecords, 1, "the Final completion must complete the deferred record, not create a second one")
+	rec := state.TaskRecords[0]
+	assert.False(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, launchedAt, rec.StartedAt, "completion must not re-stamp the launch-time StartedAt")
+	assert.Equal(t, "general", rec.SubagentType, "launch-time labels must survive completion")
+	assert.Equal(t, "Create docs/red.md", rec.TaskDescription)
+	assert.Equal(t, []string{"docs_red.md"}, rec.Files)
+	assert.Equal(t, childPath, rec.DeclaredTranscriptPath)
+	require.NotNil(t, rec.TokenUsage)
+	assert.Equal(t, 12, rec.TokenUsage.InputTokens)
+	assert.Contains(t, state.FilesTouched, "docs_red.md")
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_UnresolvableTranscript_SkipsParentAttribution
@@ -4025,7 +4516,7 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_UnresolvableTranscript_SkipsPar
 // completion, so the record stays LIVE and the SessionEnd sweep retries it.
 func TestHandleLifecycleSubagentEnd_SubagentStop_AnalyzerError_FailsInsteadOfEmptyStep(t *testing.T) {
 	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
-	repoDir, headHash := setupSubagentEndTestRepo(t)
+	_, headHash := setupSubagentEndTestRepo(t)
 	ctx := context.Background()
 	sessionID := "bg-analyzer-error-session"
 	toolUseID := "toolu_analyzererr1"
@@ -4045,11 +4536,6 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_AnalyzerError_FailsInsteadOfEmp
 	event.SubagentTranscriptPath = subagentTranscriptPath
 	err := handleLifecycleSubagentEnd(ctx, ag, event)
 	require.Error(t, err, "an analyzer error in analyzer-files-only mode must fail the capture, not complete a clean-looking empty record")
-
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
-	if testutil.BranchExists(t, repoDir, shadowBranch) {
-		t.Error("nothing may be written when the analyzer scan failed — a zero-file record would permanently misstate the task as read-only")
-	}
 
 	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, loadErr)
@@ -4248,4 +4734,83 @@ func TestCodexSessionEndPersistsEndedBeforeInventoryRead(t *testing.T) {
 	}}
 	ag.agentType = agent.AgentTypeCodex
 	require.NoError(t, handleLifecycleSessionEnd(ctx, ag, &agent.Event{SessionID: id}))
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_RecordsSubagentTokenUsage pins
+// that a completed task record carries the subagent's own token usage when
+// the stop payload has none, as Claude Code's never does: the subagent's
+// transcript is the source.
+func TestHandleLifecycleSubagentEnd_SubagentStop_RecordsSubagentTokenUsage(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "stop-tokens-session"
+	toolUseID := "toolu_tokens1"
+	agentID := "agent-tokens1"
+
+	saveInFlightSession(ctx, t, sessionID, headHash, session.TaskRecord{
+		ToolUseID: toolUseID,
+		AgentID:   agentID,
+		StartedAt: time.Now(),
+	})
+
+	mainTranscript, subagentTranscript := writeSubagentTranscripts(t, agentID)
+	require.NoError(t, os.WriteFile(subagentTranscript, []byte(
+		`{"type":"user","message":{"content":"subagent task"}}`+"\n"+
+			`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":120,"cache_read_input_tokens":30,"cache_creation_input_tokens":0,"output_tokens":40}}}`+"\n"+
+			`{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":80,"cache_read_input_tokens":0,"cache_creation_input_tokens":10,"output_tokens":5}}}`+"\n",
+	), 0o600))
+
+	ag, err := agent.Get(agent.AgentNameClaudeCode)
+	require.NoError(t, err)
+	event := finalSubagentEvent(sessionID, toolUseID, agentID)
+	event.SessionRef = mainTranscript
+	event.SubagentTranscriptPath = subagentTranscript
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, event))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	rec := state.FindTaskRecord(toolUseID)
+	require.NotNil(t, rec)
+	require.NotNil(t, rec.TokenUsage, "completed record must carry the subagent's token usage")
+	assert.Equal(t, 200, rec.TokenUsage.InputTokens)
+	assert.Equal(t, 45, rec.TokenUsage.OutputTokens)
+	assert.Equal(t, 30, rec.TokenUsage.CacheReadTokens)
+	assert.Equal(t, 10, rec.TokenUsage.CacheCreationTokens)
+	assert.Equal(t, 2, rec.TokenUsage.APICallCount)
+}
+
+// TestCodexRefreshCandidates pins which of the sessions PostCommit is about to
+// condense get their Codex child ledger refreshed first: Codex sessions with
+// in-flight task records that have not ended. Everything else is skipped, so
+// the refresh costs nothing for commits without such a session.
+func TestCodexRefreshCandidates(t *testing.T) {
+	t.Parallel()
+	live := []session.TaskRecord{{ToolUseID: "child", AgentID: "child", StartedAt: time.Now()}}
+	done := []session.TaskRecord{{ToolUseID: "child", AgentID: "child", StartedAt: time.Now(), CompletedAt: time.Now()}}
+	ended := time.Now()
+	sessions := []*strategy.SessionState{
+		{SessionID: "codex-live", AgentType: agent.AgentTypeCodex, Phase: session.PhaseActive, TaskRecords: live},
+		{SessionID: "codex-idle-live", AgentType: agent.AgentTypeCodex, Phase: session.PhaseIdle, TaskRecords: live},
+		{SessionID: "codex-no-live", AgentType: agent.AgentTypeCodex, Phase: session.PhaseActive, TaskRecords: done},
+		{SessionID: "codex-ended", AgentType: agent.AgentTypeCodex, Phase: session.PhaseEnded, EndedAt: &ended, TaskRecords: live},
+		{SessionID: "claude-live", AgentType: agent.AgentTypeClaudeCode, Phase: session.PhaseActive, TaskRecords: live},
+		nil,
+	}
+	var ids []string
+	for _, st := range codexRefreshCandidates(sessions) {
+		ids = append(ids, st.SessionID)
+	}
+	assert.Equal(t, []string{"codex-live", "codex-idle-live"}, ids)
+}
+
+// TestSubagentTokenUsage_EmptyTranscriptIsUnknown pins that an existing but
+// empty subagent transcript reports no token usage rather than exact zero.
+func TestSubagentTokenUsage_EmptyTranscriptIsUnknown(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "agent-empty.jsonl")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	ag, err := agent.Get(agent.AgentNameClaudeCode)
+	require.NoError(t, err)
+	assert.Nil(t, subagentTokenUsage(context.Background(), ag, &agent.Event{SessionID: "s", ToolUseID: "t"}, path))
 }

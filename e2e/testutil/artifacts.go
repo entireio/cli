@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/e2e/agents"
 )
 
 // ArtifactRoot is the absolute path to the artifact output directory.
@@ -83,6 +85,7 @@ func CaptureArtifacts(t *testing.T, s *RepoState) {
 
 	captureCheckpointMetadata(t, s, dir)
 	captureEntireLogs(t, s.Dir, dir)
+	captureAgentArtifacts(t, s, dir)
 
 	if os.Getenv("E2E_KEEP_REPOS") != "" {
 		if err := linkRepo(s.Dir, dir); err != nil {
@@ -146,6 +149,44 @@ func captureEntireLogs(t *testing.T, repoDir, outDir string) {
 			continue
 		}
 		writeArtifact(t, dst, e.Name(), string(data))
+	}
+}
+
+// captureAgentArtifacts copies whatever the agent declares via
+// agents.ArtifactCollector (e.g. the agent's own log directory in an isolated
+// HOME) into the artifact dir, so a CI failure inside the agent process is
+// diagnosable from artifacts alone.
+func captureAgentArtifacts(t *testing.T, s *RepoState, outDir string) {
+	t.Helper()
+	collector, ok := s.Agent.(agents.ArtifactCollector)
+	if !ok {
+		return
+	}
+	for name, src := range collector.ExtraArtifacts(s.Dir) {
+		info, err := os.Stat(src)
+		if err != nil {
+			continue
+		}
+		dst := filepath.Join(outDir, name)
+		if !info.IsDir() {
+			if data, err := os.ReadFile(src); err == nil {
+				writeArtifact(t, outDir, name, string(data))
+			}
+			continue
+		}
+		_ = os.MkdirAll(dst, 0o755)
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if data, err := os.ReadFile(filepath.Join(src, e.Name())); err == nil {
+				writeArtifact(t, dst, e.Name(), string(data))
+			}
+		}
 	}
 }
 

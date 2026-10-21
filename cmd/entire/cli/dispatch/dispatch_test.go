@@ -5,17 +5,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
 func TestRun_ServerAllowsRepos(t *testing.T) {
-	oldResource := lookupResourceToken
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return "", auth.ErrNotLoggedIn
+	old := newDispatchCellClient
+	newDispatchCellClient = func(context.Context, bool, string) (*api.Client, string, error) {
+		return nil, "", auth.ErrNotLoggedIn
 	}
-	t.Cleanup(func() {
-		lookupResourceToken = oldResource
-	})
+	t.Cleanup(func() { newDispatchCellClient = old })
 
 	_, err := Run(context.Background(), Options{
 		Mode:      ModeServer,

@@ -38,7 +38,7 @@ type Options struct {
 	Voice                 string
 	// Jurisdiction is the slug (e.g. "us") of the jurisdiction whose cell
 	// generates a cloud dispatch. Empty means the caller's home
-	// jurisdiction — the pre-selector behaviour. Cloud mode only.
+	// jurisdiction. Cloud mode only.
 	Jurisdiction     string
 	InsecureHTTPAuth bool
 	TextGenerator    TextGenerator

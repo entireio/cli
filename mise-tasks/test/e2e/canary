@@ -4,13 +4,27 @@
 
 set -eu
 
+exe=""
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) exe=".exe" ;;
+esac
+
 # Build entire CLI
 mise run build
+# go build -o adds no .exe even on Windows; the harness copies this to
+# entire.exe beside it (ensureHookEntireBinary), which is what hooks and
+# exec's extension lookup then find.
 export E2E_ENTIRE_BIN="$PWD/entire"
 
-# Build vogon binary
-go build -o vogon ./e2e/vogon
-E2E_PATH="$PWD:$PATH"
+# Build vogon binary. Go's PATH lookup on Windows only finds it with .exe.
+go build -o "vogon$exe" ./e2e/vogon
+# mise hands a Windows shell $PWD as D:/a/..., whose drive colon would split a
+# PATH entry; prepend the POSIX form, which the shell converts back for Go.
+bin_dir="$PWD"
+if [ -n "$exe" ]; then
+  bin_dir="$(cygpath -u "$PWD")"
+fi
+E2E_PATH="$bin_dir:$PATH"
 
 if [ -z "${E2E_ARTIFACT_DIR:-}" ]; then
   E2E_ARTIFACT_DIR="$PWD/e2e/artifacts/canary-$(date +%Y-%m-%dT%H-%M-%S)"
@@ -45,6 +59,14 @@ go run ./e2e/cmd/testreport -color \
   "$E2E_ARTIFACT_DIR/test-events-vogon.json"
 
 # --- roger-roger: external agent tests only (binaries from mise) ---
+# Unix only for now: its external-agent protocol tests have never run on
+# Windows, and the Windows canary exists to cover the hook paths Vogon drives.
+if [ -n "$exe" ]; then
+  echo "--- canary: roger-roger skipped on Windows ---"
+  cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
+  echo "artifacts: $E2E_ARTIFACT_DIR"
+  exit "$vogon_rc"
+fi
 echo "--- canary: roger-roger ---"
 
 # Preflight: ensure required roger-roger binaries are on PATH so tests don't silently skip

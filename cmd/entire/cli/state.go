@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,7 +20,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -40,6 +40,14 @@ type PrePromptState struct {
 	// untracked file in the worktree would be misreported as created by this
 	// turn.
 	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
+
+	// UntrackedFileStats records the size and modification time of each
+	// regular file in UntrackedFiles. Turn-end compares them to find
+	// pre-existing untracked files the turn changed: git status reports those
+	// as untracked both before and after, and an edit made through a shell
+	// command is never named in the transcript. Absent in state written by
+	// older versions, which then detect no such changes.
+	UntrackedFileStats map[string]UntrackedFileStat `json:"untracked_file_stats,omitempty"`
 
 	// TranscriptOffset is the unified transcript position when this state was captured.
 	// For Claude Code (JSONL), this is the line count.
@@ -62,6 +70,13 @@ type PrePromptState struct {
 	// Deprecated: LastTranscriptLineCount is the oldest name for transcript position.
 	// Migrated to TranscriptOffset on load.
 	LastTranscriptLineCount int `json:"last_transcript_line_count,omitempty"`
+
+	// TokenBaseline is an opaque, agent-defined token position captured at turn
+	// start for OutOfBandTokenSource agents (currently Antigravity). At TurnEnd
+	// the lifecycle passes it back to CalculateTokenUsageSince to compute the
+	// checkpoint-scoped token delta. Empty for agents with transcript-embedded
+	// token data.
+	TokenBaseline json.RawMessage `json:"token_baseline,omitempty"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -77,6 +92,108 @@ func (s *PrePromptState) PreUntrackedFiles() []string {
 		return []string{}
 	}
 	return s.UntrackedFiles
+}
+
+// UntrackedFileStat is enough of an untracked file's metadata to tell whether
+// it changed, without hashing its content on every prompt: the stat fields
+// git's index compares for the same purpose. Inode and ChangeTime are zero
+// where the platform does not expose them (see fileChangeStamp).
+type UntrackedFileStat struct {
+	Size       int64  `json:"size"`
+	ModTime    int64  `json:"mod_time_ns"`
+	Inode      uint64 `json:"ino,omitempty"`
+	ChangeTime int64  `json:"ctime_ns,omitempty"`
+}
+
+// Limits on the prompt-start stat pass, which runs inside UserPromptSubmit and
+// so delays every prompt. Above maxUntrackedFileStats files no stats are
+// recorded; past untrackedFileStatBudget the pass stops with what it has.
+// Either way turn end only loses detection of edits to the files left out, as
+// with state written before stats existed.
+const (
+	maxUntrackedFileStats   = 10_000
+	untrackedFileStatBudget = 500 * time.Millisecond
+)
+
+// statUntrackedFiles records an UntrackedFileStat for each of files that is a
+// regular file in the worktree. Fails open: a file it cannot stat is left out
+// and simply never reports a change.
+func statUntrackedFiles(ctx context.Context, files []string) map[string]UntrackedFileStat {
+	if len(files) == 0 {
+		return nil
+	}
+	logCtx := logging.WithComponent(ctx, "state")
+	if len(files) > maxUntrackedFileStats {
+		logging.Debug(logCtx, "skipping untracked file stats: too many untracked files",
+			slog.Int("untracked_files", len(files)), slog.Int("limit", maxUntrackedFileStats))
+		return nil
+	}
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		logging.Debug(logCtx, "skipping untracked file stats: no worktree root",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	stats, complete := statFilesWithin(repoRoot, files, untrackedFileStatBudget)
+	if !complete {
+		logging.Debug(logCtx, "untracked file stats stopped at time budget",
+			slog.Int("untracked_files", len(files)), slog.Int("recorded", len(stats)))
+	}
+	return stats
+}
+
+// statFilesWithin stats files until budget elapses. complete is false when it
+// stopped early; the stats gathered so far are still returned.
+func statFilesWithin(repoRoot string, files []string, budget time.Duration) (stats map[string]UntrackedFileStat, complete bool) {
+	deadline := time.Now().Add(budget)
+	stats = make(map[string]UntrackedFileStat, len(files))
+	for _, file := range files {
+		if time.Now().After(deadline) {
+			return stats, false
+		}
+		if stat, ok := statWorktreeFile(repoRoot, file); ok {
+			stats[file] = stat
+		}
+	}
+	return stats, true
+}
+
+// ChangedUntrackedFiles returns the files in UntrackedFileStats whose stat
+// fields no longer match: pre-existing untracked files changed
+// since the prompt started. A file that is gone or no longer a regular file is
+// not reported; one that was committed since is reported, and turn-end's
+// filterToUncommittedFiles drops it.
+func (s *PrePromptState) ChangedUntrackedFiles(repoRoot string) []string {
+	if s == nil || len(s.UntrackedFileStats) == 0 {
+		return nil
+	}
+	var changed []string
+	for file, before := range s.UntrackedFileStats {
+		if now, ok := statWorktreeFile(repoRoot, file); ok && now != before {
+			changed = append(changed, file)
+		}
+	}
+	slices.Sort(changed)
+	return changed
+}
+
+// statWorktreeFile stats file, a repo-relative path, through the worktree root
+// without following a final symlink. ok is false unless it is a regular file.
+func statWorktreeFile(repoRoot, file string) (UntrackedFileStat, bool) {
+	root, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return UntrackedFileStat{}, false
+	}
+	name, err := worktreedir.Name(repoRoot, file)
+	if err != nil {
+		return UntrackedFileStat{}, false
+	}
+	info, err := root.Lstat(name)
+	if err != nil || !info.Mode().IsRegular() {
+		return UntrackedFileStat{}, false
+	}
+	inode, changeTime := fileChangeStamp(info)
+	return UntrackedFileStat{Size: info.Size(), ModTime: info.ModTime().UnixNano(), Inode: inode, ChangeTime: changeTime}, true
 }
 
 // normalizePrePromptState migrates deprecated fields after loading from JSON.
@@ -149,7 +266,20 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		Timestamp:            time.Now().UTC().Format(time.RFC3339),
 		UntrackedFiles:       untrackedFiles,
 		UntrackedScanSkipped: scanSkipped,
+		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
 		TranscriptOffset:     transcriptOffset,
+	}
+
+	// Out-of-band token baseline: agents whose token usage lives outside the
+	// transcript (Antigravity) snapshot their cumulative token position now so
+	// TurnEnd can compute the per-checkpoint delta.
+	if src, ok := agent.AsOutOfBandTokenSource(ag); ok {
+		baseline, blErr := src.SnapshotTokenBaseline(ctx, sessionID)
+		if blErr != nil {
+			logging.Warn(logging.WithComponent(ctx, "state"), "failed to snapshot out-of-band token baseline", "error", blErr.Error())
+		} else {
+			state.TokenBaseline = baseline
+		}
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
@@ -339,16 +469,16 @@ func detectFileChanges(ctx context.Context, previouslyUntracked []string, status
 // default, and what e2e/testutil/repo.go sets — the working tree holds CRLF
 // while the blob holds LF, so a byte comparison reports every committed text
 // file as still modified. That defeats the caller's "no changes, skip" gate and
-// mints a fresh shadow branch on the new HEAD *after* PostCommit condensed and
-// deleted the old one; nothing condenses that one away, so it outlives the
-// session. The same reasoning applies to .gitattributes eol/text rules and to
+// records a fresh turn-end step for files PostCommit already condensed; no
+// commit ever claims them, so the session stays pending for nothing. The same reasoning applies to .gitattributes eol/text rules and to
 // clean filters such as Git LFS, which a byte comparison also gets wrong.
 func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot string) []string {
 	if len(files) == 0 {
 		return files
 	}
 
-	repo, err := openRepository(ctx)
+	// repoRoot's own HEAD: the turn's worktree may not be the hook's.
+	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		return files // fail open
 	}
@@ -739,42 +869,4 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 	toolUseID := strings.TrimPrefix(latestFile, preTaskFilePrefix)
 	toolUseID = strings.TrimSuffix(toolUseID, ".json")
 	return toolUseID, true
-}
-
-// GetNextCheckpointSequence returns the next sequence number for incremental checkpoints.
-// It counts existing checkpoint files in the task metadata checkpoints directory.
-// Returns 1 if no checkpoints exist yet.
-func GetNextCheckpointSequence(ctx context.Context, sessionID, taskToolUseID string) int {
-	// sessionID/taskToolUseID arrive from agent hook input and are used as path
-	// components below. Reject unsafe values so a crafted "../.." cannot redirect
-	// the os.ReadDir to an arbitrary directory; an invalid ID just starts at 1.
-	if validation.ValidateSessionID(sessionID) != nil || validation.ValidateToolUseID(taskToolUseID) != nil {
-		return 1
-	}
-
-	root, err := entiredir.OpenForRead(ctx)
-	if err != nil {
-		// No .entire yet - start at 1
-		return 1
-	}
-
-	// Use the session ID directly as the metadata directory name
-	sessionMetadataDir := sessionMetadataName(sessionID)
-	taskMetadataDir := strategy.TaskMetadataDir(sessionMetadataDir, taskToolUseID)
-
-	entries, err := osroot.ReadDirNoSymlinks(root, taskMetadataDir+"/checkpoints")
-	if err != nil {
-		// Directory doesn't exist or can't be read - start at 1
-		return 1
-	}
-
-	// Count JSON files (checkpoints)
-	count := 0
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
-			count++
-		}
-	}
-
-	return count + 1
 }

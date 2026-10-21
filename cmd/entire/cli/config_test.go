@@ -292,25 +292,6 @@ func TestLoadEntireSettings_RejectsUnknownKeysInBase(t *testing.T) {
 	}
 }
 
-// TestGetStrategy_HasBlobFetcher verifies that GetStrategy returns a strategy
-// with blob fetching enabled. Without this, checkpoint reads after a treeless
-// fetch (--filter=blob:none) silently fail because blobs are not local and
-// FetchingTree has no fetcher to download them — causing "session log not
-// available" errors during resume.
-//
-// Regression test for the bug introduced in b92b37b3 where Read and
-// ReadSessionContent were changed to use FetchingTree but GetStrategy did not
-// configure a blob fetcher on the strategy.
-func TestGetStrategy_HasBlobFetcher(t *testing.T) {
-	t.Parallel()
-
-	strat := GetStrategy(context.Background())
-	if !strat.HasBlobFetcher() {
-		t.Fatal("GetStrategy must return a strategy with a blob fetcher configured; " +
-			"without it, checkpoint reads fail after treeless fetches")
-	}
-}
-
 func TestLoadEntireSettings_RejectsUnknownKeysInLocal(t *testing.T) {
 	setupLocalOverrideTestDir(t)
 

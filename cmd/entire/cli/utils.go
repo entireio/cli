@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"strings"
 
 	"charm.land/huh/v2"
+	"github.com/spf13/cobra"
 
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
 
@@ -45,6 +45,87 @@ func handleFormCancellation(w io.Writer, action string, err error) error {
 	return fmt.Errorf("%s prompt failed: %w", action, err)
 }
 
+// promptTerminal is the controlling terminal a prompt falls back to when the
+// command's own stderr is not one: in is the terminal rather than os.Stdin, out
+// is its output handle, close releases both. All three are nil in tests that
+// replace the opener.
+type promptTerminal struct {
+	in    io.Reader
+	out   io.Writer
+	close func() error
+}
+
+// openPromptTerminal is a var so tests can drive an interactive path without a
+// real terminal. Prompt routing is otherwise unreachable under `go test`, where
+// CanPromptInteractively() is false.
+var openPromptTerminal = func() (promptTerminal, error) {
+	tty, err := interactive.OpenPromptTTY()
+	if err != nil {
+		return promptTerminal{}, fmt.Errorf("open prompt terminal: %w", err)
+	}
+	return promptTerminal{in: tty.Input(), out: tty.Output(), close: tty.Close}, nil
+}
+
+// runPromptForm runs form somewhere the user can actually see it, and returns
+// the writer it rendered on so the caller's own message about the outcome lands
+// on the same stream.
+//
+// Neither of a command's streams is guaranteed to be a terminal: stdout is
+// captured by design in places (a `--json` read piped into a parser) and
+// stderr is redirected often enough (`... 2>log`) that picking either
+// unconditionally just moves which redirect breaks the prompt. Bubble Tea makes
+// that failure silent rather than loud — it sets ttyOutput only when the writer
+// is a terminal and then cannot query the window size, so it renders into a 0x0
+// viewport while stdin is still in raw mode: an invisible prompt on an
+// apparently hung command. Its /dev/tty fallback covers input only.
+//
+// So prefer stderr when it IS a terminal, which keeps the escape sequences off
+// a captured stdout, and otherwise fall back to the controlling terminal for
+// both halves. interactive.OpenPromptTTY rather than tea.OpenTTY because its
+// Close releases the read Bubble Tea leaves pending, which otherwise costs a
+// second keypress on Windows.
+//
+// The render writer matters as much as the form: in the fallback branch stderr
+// is by definition not visible, so a cancellation message sent there would
+// explain a prompt the user watched disappear, into a stream they are not
+// reading.
+func runPromptForm(cmd *cobra.Command, form *huh.Form) (render io.Writer, err error) {
+	return runPromptFormWithPreamble(cmd, form, nil)
+}
+
+// runPromptFormWithPreamble is runPromptForm that first writes preamble, when
+// set, on the writer the form renders on: what the question asks about follows
+// the prompt rather than the command's output.
+func runPromptFormWithPreamble(cmd *cobra.Command, form *huh.Form, preamble func(io.Writer) error) (render io.Writer, err error) {
+	render = cmd.ErrOrStderr()
+	if !interactive.IsTerminalWriter(render) {
+		term, terr := openPromptTerminal()
+		if terr != nil {
+			return render, terr
+		}
+		if term.close != nil {
+			defer func() {
+				_ = term.close() //nolint:errcheck // best-effort cleanup after terminal interaction, as plugin_confirm.go does
+			}()
+		}
+		if term.out != nil {
+			render = term.out
+		}
+		if term.in != nil {
+			form = form.WithInput(term.in)
+		}
+	}
+	if preamble != nil {
+		if err := preamble(render); err != nil {
+			return render, err
+		}
+	}
+	// Returned unwrapped: every caller classifies it, matching huh's own
+	// sentinels through handleFormCancellation, and wraps whatever survives
+	// with the name of the thing being prompted for.
+	return render, form.WithOutput(render).RunWithContext(cmd.Context()) //nolint:wrapcheck // classified and wrapped by the caller
+}
+
 // printSessionCommand writes a single session resume command line to w.
 // It appends a "(most recent)" label to the last entry in a multi-session list,
 // and a "# prompt" comment when a prompt is available.
@@ -68,105 +149,48 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// copyFile copies a file from src to dst using os.Root for traversal-resistant
-// writes (Go 1.24+). dst must be absolute and reside under either the repo
-// worktree root, the user's home directory (for agent session dirs such as
-// ~/.claude/), or the system temp directory (used during tests).
-// The kernel enforces that the write cannot escape the allowed directory,
-// eliminating TOCTOU races and symlink escapes.
-func copyFile(src, dst string) error {
-	src = filepath.Clean(src)
-	dst = filepath.Clean(dst)
-
-	if !filepath.IsAbs(dst) {
-		return fmt.Errorf("copyFile: dst must be absolute, got %q", dst)
+// confirmPrompt asks one yes/no question through runPromptFormWithPreamble.
+// action names the operation in its messages ("Revocation", "Detach").
+// A decline, or an abort inside the form, is an answer: (false, nil), with
+// "<action> cancelled." on the prompt's writer. A context cancelled out from
+// under it is an interruption, not an answer: it comes back as an error
+// wrapping ctx.Err(), which main matches to exit the way every other Ctrl+C
+// does (quietly, 130, breaking an enclosing shell loop) rather than exiting 0
+// having done nothing. plugin_confirm.go has the same shape;
+// confirmControlPlaneDeletion's nilerr skip is the outlier. That is checked on both sides of the form, because huh opens the TTY
+// regardless of context state, and before the form error is classified,
+// because handleFormCancellation would read context.Canceled as an abort.
+func confirmPrompt(cmd *cobra.Command, action, title, description string, preamble func(io.Writer) error) (bool, error) {
+	if err := promptInterrupted(cmd, action); err != nil {
+		return false, err
 	}
-
-	input, err := os.ReadFile(src)
+	confirmed := false
+	prompt := huh.NewConfirm().Title(title).Value(&confirmed)
+	if description != "" {
+		prompt = prompt.Description(description)
+	}
+	render, err := runPromptFormWithPreamble(cmd, NewAccessibleForm(huh.NewGroup(prompt)), preamble)
+	if ierr := promptInterrupted(cmd, action); ierr != nil {
+		return false, ierr
+	}
 	if err != nil {
-		return err //nolint:wrapcheck // already present in codebase
+		if cerr := handleFormCancellation(render, action, err); cerr != nil {
+			return false, cerr
+		}
+		return false, nil
 	}
-
-	root, relPath, err := openAllowedRoot(dst)
-	if err != nil {
-		return err
+	if !confirmed {
+		fmt.Fprintf(render, "%s cancelled.\n", action)
+		return false, nil
 	}
-	defer root.Close()
+	return true, nil
+}
 
-	if err := jsonutil.WriteFileAtomicIn(root, relPath, input, 0o600); err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
+// promptInterrupted reports a command context cancelled out from under a
+// confirmation (see confirmPrompt).
+func promptInterrupted(cmd *cobra.Command, action string) error {
+	if err := cmd.Context().Err(); err != nil {
+		return fmt.Errorf("%s cancelled: %w", strings.ToLower(action), err)
 	}
 	return nil
-}
-
-// openAllowedRoot finds the allowed root directory that contains dst and returns
-// an os.Root handle along with the relative path within that root.
-//
-// The root's base is always one of three directories resolved independently of
-// dst — the worktree root, the user's home, the system temp dir — never
-// filepath.Dir(dst). dst only selects WHICH of them applies and supplies the
-// name inside it, so a dst that escapes every one of them is refused here rather
-// than opening a root wherever it points.
-// dst is resolved through symlinks before matching to handle macOS /var → /private/var.
-func openAllowedRoot(dst string) (*os.Root, string, error) {
-	allowed := allowedRootDirs()
-
-	// Resolve the directory portion of dst through symlinks so that e.g.
-	// /var/folders/... matches /private/var/folders/... on macOS.
-	// Only the parent directory is resolved; the final component may not exist yet.
-	resolvedDst := dst
-	if r, err := filepath.EvalSymlinks(filepath.Dir(dst)); err == nil {
-		resolvedDst = filepath.Join(r, filepath.Base(dst))
-	}
-
-	for _, dir := range allowed {
-		if !paths.IsSubpath(dir, resolvedDst) {
-			continue
-		}
-		rel, err := filepath.Rel(dir, resolvedDst)
-		if err != nil {
-			continue
-		}
-		// A PRIVATE root, deliberately not osroot.Shared. Two of the three
-		// candidate bases are the user's home and the system temp dir, which have
-		// no business sharing a lifecycle with .entire: ResetShared closes every
-		// cached root, so routing this through the registry let an unrelated
-		// `entire disable` — or, in tests, any parallel entiredir.Reset — close
-		// the handle out from under a copy in progress. The registry exists to
-		// memoize long-lived anchors, and this is a single write.
-		root, err := os.OpenRoot(dir)
-		if err != nil {
-			return nil, "", fmt.Errorf("openAllowedRoot: failed to open root %q: %w", dir, err)
-		}
-		return root, filepath.ToSlash(rel), nil
-	}
-
-	return nil, "", fmt.Errorf("openAllowedRoot: dst %q is outside allowed directories", dst)
-}
-
-// allowedRootDirs returns the list of directories that copyFile may write to.
-// Directories are resolved through symlinks so they match resolved dst paths.
-func allowedRootDirs() []string {
-	allowed := make([]string, 0, 3)
-
-	if repoRoot, err := paths.WorktreeRoot(context.Background()); err == nil {
-		allowed = appendResolved(allowed, repoRoot)
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		allowed = appendResolved(allowed, home)
-	}
-	if tmpDir := os.TempDir(); tmpDir != "" {
-		allowed = appendResolved(allowed, tmpDir)
-	}
-
-	return allowed
-}
-
-// appendResolved appends dir to the list after resolving symlinks.
-// Falls back to the original path if symlink resolution fails.
-func appendResolved(dirs []string, dir string) []string {
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		return append(dirs, resolved)
-	}
-	return append(dirs, dir)
 }

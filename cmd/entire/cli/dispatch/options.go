@@ -3,13 +3,10 @@ package dispatch
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
-
-var githubRepoSlugPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$`)
 
 func ResolveOptions(
 	flagLocal bool,
@@ -38,7 +35,8 @@ func ResolveOptions(
 		return Options{}, errors.New("--all-branches only applies to --local (cloud dispatch uses each repo's default branch)")
 	}
 	if !flagLocal {
-		if err := validateRepoSlugs(flagRepos); err != nil {
+		flagRepos, err = normalizeRepoSlugs(flagRepos)
+		if err != nil {
 			return Options{}, err
 		}
 	}
@@ -102,13 +100,4 @@ func normalizeScopeValues(values []string) []string {
 		normalized = append(normalized, value)
 	}
 	return normalized
-}
-
-func validateRepoSlugs(values []string) error {
-	for _, value := range values {
-		if !githubRepoSlugPattern.MatchString(value) {
-			return fmt.Errorf("invalid repo %q: expected owner/repo", value)
-		}
-	}
-	return nil
 }

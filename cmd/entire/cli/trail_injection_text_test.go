@@ -12,7 +12,7 @@ import (
 func TestEntireTrailContextInjection_PointsAtAgentHelpWithRepo(t *testing.T) {
 	t.Parallel()
 
-	got := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"})
+	got := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"}, false)
 
 	for _, want := range []string{"entire agent-help", "gh/acme/app", "never ask"} {
 		if !strings.Contains(got, want) {
@@ -46,7 +46,7 @@ func TestEntireTrailContextInjection_PointsAtAgentHelpWithRepo(t *testing.T) {
 func TestEntireTrailContextInjection_OmitsPerTaskCommandRecommendations(t *testing.T) {
 	t.Parallel()
 
-	got := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"})
+	got := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"}, false)
 
 	for _, unwanted := range []string{
 		"entire why",
@@ -77,7 +77,7 @@ func TestEntireTrailContextInjection_OmitsPerTaskCommandRecommendations(t *testi
 func TestEntireTrailContextInjection_NoRepo(t *testing.T) {
 	t.Parallel()
 
-	got := entireTrailContextInjection(trailEnablementScope{})
+	got := entireTrailContextInjection(trailEnablementScope{}, false)
 
 	if !strings.Contains(got, "entire agent-help") {
 		t.Fatalf("missing agent-help pointer:\n%s", got)
@@ -95,12 +95,29 @@ func TestEntireTrailContextInjection_NoRepo(t *testing.T) {
 func TestEntireTrailContextInjection_PartialScopeOmitsRepo(t *testing.T) {
 	t.Parallel()
 
-	got := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme"})
+	got := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme"}, false)
 
 	if strings.Contains(got, "gh/acme") {
 		t.Errorf("partial scope must not emit a repo line:\n%s", got)
 	}
 	if !strings.Contains(got, "entire agent-help") || !strings.Contains(got, "never ask") {
 		t.Errorf("partial scope must still point at agent-help with the no-ask rule:\n%s", got)
+	}
+}
+
+// Project trails add one sentence on what a trail number means; the
+// model-independent invariants stay.
+func TestEntireTrailContextInjection_ProjectTrailsKeepsInvariants(t *testing.T) {
+	t.Parallel()
+
+	legacy := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"}, false)
+	project := entireTrailContextInjection(trailEnablementScope{Forge: "gh", Owner: "acme", Repo: "app"}, true)
+	if strings.Contains(legacy, "project-scoped") {
+		t.Errorf("legacy injection must not describe project trails:\n%s", legacy)
+	}
+	for _, want := range []string{"project-scoped", "entire agent-help", "never create checkpoints by hand", "Leave setup and destructive commands", "gh/acme/app"} {
+		if !strings.Contains(project, want) {
+			t.Errorf("project injection missing %q:\n%s", want, project)
+		}
 	}
 }

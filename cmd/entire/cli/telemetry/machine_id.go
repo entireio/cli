@@ -38,10 +38,3 @@ var cachedMachineID = sync.OnceValues(func() (string, error) { return machineIDR
 func telemetryMachineID() (string, error) {
 	return cachedMachineID()
 }
-
-// resetMachineIDCacheForTest clears the memoized value so a test can install a
-// different resolver. Not safe for concurrent use; callers must not run in
-// parallel with anything that builds a payload.
-func resetMachineIDCacheForTest() {
-	cachedMachineID = sync.OnceValues(func() (string, error) { return machineIDResolver() })
-}

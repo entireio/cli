@@ -99,7 +99,12 @@ func newPluginRepo(t *testing.T, metadata string, tags ...string) string {
 	testutil.GitAdd(t, dir, "entire-plugin.yml")
 	testutil.GitCommit(t, dir, "init")
 	for _, tag := range tags {
-		if out, err := exec.CommandContext(t.Context(), "git", "-C", dir, "tag", tag).CombinedOutput(); err != nil {
+		cmd := exec.CommandContext(t.Context(), "git", "-C", dir, "tag", tag)
+		// Isolated like every other git call here: inheriting the developer's
+		// config turns this lightweight tag into a signed one wherever
+		// tag.gpgSign is set, and git then rejects it with "no tag message?".
+		cmd.Env = testutil.GitIsolatedEnv()
+		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git tag: %v: %s", err, out)
 		}
 	}

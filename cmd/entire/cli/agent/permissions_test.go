@@ -1,12 +1,38 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type mockPermissionConfigOwner struct {
+	mockFullAgent
+}
+
+func (m *mockPermissionConfigOwner) PermissionConfig(context.Context) (*HookConfigFile, error) {
+	return &HookConfigFile{}, nil
+}
+
+func TestAsPermissionConfigOwner(t *testing.T) {
+	t.Parallel()
+
+	if owner, ok := AsPermissionConfigOwner(nil); ok || owner != nil {
+		t.Fatalf("AsPermissionConfigOwner(nil) = (%v, %v), want (nil, false)", owner, ok)
+	}
+	if owner, ok := AsPermissionConfigOwner(&mockFullAgent{}); ok || owner != nil {
+		t.Fatalf("AsPermissionConfigOwner(unsupported) = (%v, %v), want (nil, false)", owner, ok)
+	}
+
+	agent := &mockPermissionConfigOwner{}
+	owner, ok := AsPermissionConfigOwner(agent)
+	if !ok || owner != agent {
+		t.Fatalf("AsPermissionConfigOwner(implemented) = (%v, %v), want (%v, true)", owner, ok, agent)
+	}
+}
 
 // perms builds a rawPermissions map from a JSON object literal.
 func perms(t *testing.T, body string) map[string]json.RawMessage {

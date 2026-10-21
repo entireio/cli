@@ -11,7 +11,7 @@ import (
 // experimental visibility flag. Names match cobra's Command.Name() (the first
 // token of Use).
 var experimentalRootCommands = []string{
-	"tokens", "import", "review", "investigate",
+	"tokens", "import", "review",
 	"blame", "why", "experts", "runner",
 }
 

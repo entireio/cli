@@ -6,7 +6,7 @@ Entire stores AI session transcripts and metadata in your git repository. This d
 
 ### Where data is stored
 
-When you use Entire with an AI agent (Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi), session transcripts, user prompts, and checkpoint metadata are committed to **your own git repository**. They stay out of your working branches' history, but they live in the same repo and travel with it.
+When you use Entire with an AI agent (Claude Code, Codex, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi), session transcripts, user prompts, and checkpoint metadata are committed to **your own git repository**. They stay out of your working branches' history, but they live in the same repo and travel with it.
 
 Exactly where depends on the [checkpoint backend](architecture/ref-checkpoint-backend.md) the repo uses:
 
@@ -17,7 +17,9 @@ Exactly where depends on the [checkpoint backend](architecture/ref-checkpoint-ba
 
 Which one a repo is on is recorded as `checkpoints.primary.type` in `.entire/settings.json` (or `settings.local.json`); an absent `checkpoints` block means `git-branch`. The redaction described in this document applies identically to both — the pipeline is shared, and only the destination differs. Where the distinction matters below, it is called out.
 
-Entire also creates temporary local **shadow branches** (e.g. `entire/<commit>-<worktree>`) as working storage during a session, on both backends. Metadata written there — transcripts, prompts, incremental checkpoint data, subagent transcripts — goes through the same redaction pipeline as a committed checkpoint. **Code-file snapshots, however, are written as raw blobs of your working tree without redaction**, so any hardcoded secrets in your source code would appear unredacted on the shadow branch. Gitignored files (e.g., `.env`) are filtered out of these snapshots as a partial defense. Shadow branches are **not** pushed by Entire; do not push them manually, because unredacted source content would be visible on the remote. They are cleaned up when session data is condensed into a checkpoint at commit time.
+Between commits, Entire writes nothing to git. At the end of each agent turn it records the paths the agent touched and their git blob hashes in local session state (`.git/entire-sessions/`), and keeps the sanitized transcript in `.entire/metadata/<session>/full.jsonl` (see [Local copies of transcript content](#local-copies-of-transcript-content)). Older Entire versions instead wrote local **shadow branches** (`entire/<commit>-<worktree>`) at turn end, whose code-file snapshots were raw, unredacted blobs of your working tree. Current versions do not delete them automatically: `entire doctor` reports them and `entire doctor --force` deletes the `entire/<commit>-<worktree>` form without touching session state. Plain `entire clean` deletes them too, but also clears the state of every session based on HEAD, which is now the only record of pending agent work. `entire disable --uninstall` deletes the `entire/<commit>-<worktree>` form as well, and lists the oldest `entire/<commit>` form by name without deleting it (a user's own branch named like a short SHA matches it); `entire clean --all` deletes that form after you confirm. Deleting a branch leaves its objects unreachable until git prunes them: `git gc` reclaims the space once they are two weeks old (git's default `gc.pruneExpire`). `git gc --prune=now` frees it at once but drops every unreachable object, recently dropped stashes included, and must only run when no other git process is active.
+
+**Antigravity title-tee (machine-global):** setting up the Antigravity agent installs `entire hooks antigravity title-tee` into agy's *global* settings (`~/.gemini/antigravity-cli/settings.json`), because agy exposes token usage only through its window-title/statusline feed. Once installed, the tee runs on every agy state change on the machine — including in repositories where Entire is not enabled — and persists **only** the conversation ID and token counts (`context_window` totals) to Entire's local cache directory; the rest of the payload is discarded and no prompt or file content is captured. Stale per-conversation snapshots are cleaned up after 14 days. Removing the Antigravity agent (`entire agent remove antigravity`) uninstalls the tee.
 
 Anyone with access to your repository can read committed checkpoint data: the full prompt/response history and session metadata. Note that transcripts capture all tool interactions — including file contents, MCP server calls, and other data exchanged during the session. Per-checkpoint refs are less *visible* than a branch, but they are not less accessible: a `git fetch` of `refs/entire/checkpoints/*` reads them just as well.
 
@@ -25,20 +27,20 @@ If your repository is **public**, this data is visible to the entire internet.
 
 ### What Entire redacts automatically
 
-Entire automatically scans transcript and metadata content before writing it to a git object. Five always-on secret detection methods plus a configurable scanner layer (pattern matching, method 2 below) run during condensation, plus a conditional seventh pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), an opt-in eighth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below), and an opt-in ninth pass that shells out to the OpenAI Privacy Filter model (see [Optional OpenAI Privacy Filter](#optional-openai-privacy-filter-opf) below):
+Entire automatically scans transcript and metadata content before writing it to a git object. Five always-on secret detection methods plus a configurable scanner layer (pattern matching, method 2 below) run during condensation, plus a conditional seventh pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), and an opt-in eighth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below):
 
-1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern.
-2. **Pattern matching** — Runs one or both configurable scanner engines against known secret formats: [Betterleaks](https://github.com/betterleaks/betterleaks) (default on) and/or [goredact](https://github.com/lastpersonlabs/goredact) (default off). See [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below.
-3. **Provider token prefixes** — Deterministically redacts known secret-key prefixes (e.g. Supabase `sb_secret_`, `sbp_`) regardless of entropy or surrounding context.
-4. **Credentialed URI detection** — Redacts URLs with embedded passwords, such as `scheme://user:password@host`.
-5. **Database connection-string detection** — Redacts JDBC, Postgres keyword DSN, SQL Server, and ODBC-style connection strings containing passwords.
-6. **Bounded credential value detection** — Redacts password-like config values such as `DB_PASSWORD=...` and `PGPASSWORD=...` while preserving the surrounding key.
+1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern. Two exact shapes are exempt from this layer only: a string that is, in its entirety, a Claude Code tool-use id (`toolu_01` plus 22 letters or digits), and a string that lies entirely inside a content digest of its exact encoded length (a go.sum `h1:` hash, or a `sha1-`, `sha256-`, `sha384-`, or `sha512-` integrity value as used by npm lockfiles, Subresource Integrity, and CSP). The other layers still scan them, and a secret attached to an id or digest forms a longer string that is not exempt. A base64 value that contains `/` is scored as one string rather than piece by piece, unless it reads as a file path: a word or a long hex name between slashes, or a value attached to a preceding `.`, `-`, `_`, `~` or `@`.
+2. **Pattern matching** — Runs one or both configurable scanner engines against known secret formats: [Betterleaks](https://github.com/betterleaks/betterleaks) (default on) and/or [goredact](https://github.com/lastpersonlabs/goredact) (default off). See [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below. Betterleaks multi-part rules (such as an AWS key ID with its secret access key) are adjusted for redaction: each credential part is redacted on its own, whether or not its partner appears nearby.
+3. **Provider token shapes** — Deterministically redacts known secret-key prefixes (Supabase `sb_secret_`, `sbp_`) regardless of entropy or surrounding context, plus bounded token shapes with boundary checks and false-positive filters: short `sk-` keys, AWS access key IDs (documentation `EXAMPLE` keys stay visible), Salesforce access tokens, and Tableau personal access tokens. These shapes are caught without a vendor keyword nearby.
+4. **Credentialed URI detection** — Redacts URLs with embedded passwords, such as `scheme://user:password@host`. A URL whose password is a placeholder (see [Secrets (always on)](#secrets-always-on) below) is left intact, unless its query also carries a real password. Only the password is checked; a credential used as the username is left to the other layers. In database URLs (`postgres://`, `mysql://`, `mariadb://`, `mongodb://`, `redis://`), a password containing `/` or `'` is caught too.
+5. **Database connection-string detection** — Redacts JDBC, Postgres keyword DSN (including Unix-socket DSNs without `host=`), SQL Server, and ODBC-style connection strings containing passwords, where values may contain spaces. Also redacts Oracle `user/password@` logins in `jdbc:oracle:` URLs and `sqlplus` commands.
+6. **Bounded credential value detection** — Redacts password-like config values such as `DB_PASSWORD=...` and `PGPASSWORD=...` while preserving the surrounding key, and the `sig` signature of Azure SAS URLs and tokens.
 
 Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. Of the six secret-detection passes above, the scanner layer (pass 2) is configurable — see [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below — while the other five are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add a seventh secret-detection pass that only runs when configured.
 
 ### What Entire does NOT understand: pasted images and screenshots
 
-**Every layer described above — all nine passes, including the opt-in PII and OpenAI Privacy Filter layers — reads transcript *text*. There is no OCR pass, no vision-model PII or secret scan, and no gate that holds an image back until someone reviews it. Nothing in Entire ever reads what an image depicts.**
+**Every layer described above — all eight passes, including the opt-in PII layer — reads transcript *text*. There is no OCR pass, no vision-model PII or secret scan, and no gate that holds an image back until someone reviews it. Nothing in Entire ever reads what an image depicts.**
 
 What that means for an image you paste is **not uniform across agents**, because it depends on how the agent writes the image into its transcript. There are three outcomes, and only the first is an exposure:
 
@@ -47,16 +49,16 @@ What that means for an image you paste is **not uniform across agents**, because
 | Claude Code | **Stored unredacted**, inline in the transcript as base64. The text scanner skips it (the `type: image` / `type: base64` skip rule below) rather than scanning it. | **Stored unredacted** as a raw binary blob under the checkpoint's `assets/` folder. |
 | Codex | **Destroyed.** Codex writes images as `data:` URIs inside `image_url` and tool-output strings, which the skip rule does not match, so the entropy layer treats the base64 as a secret and replaces it. The stored transcript keeps the surrounding message; the image is gone. | **Stored unredacted** under `assets/` (externalization runs before redaction, which is what preserves it). |
 | Cursor | **Not stored in the repository at all.** Cursor keeps images in its own per-session SQLite store, never in the transcript Entire reads. | **Stored unredacted** under `assets/`, captured from that store. |
-| Gemini CLI, OpenCode, Copilot CLI, Factory Droid, Pi | Depends on the agent's own transcript shape; Entire has no image handling for these. Assume the Claude Code row unless you have checked. | Unchanged — the setting only affects the three agents above. |
+| OpenCode, Copilot CLI, Factory Droid, Pi | Depends on the agent's own transcript shape; Entire has no image handling for these. Assume the Claude Code row unless you have checked. | Unchanged — the setting only affects the three agents above. |
 
 **Do not treat the Codex row as a protection.** It is a side effect of a skip rule not matching a shape, not a deliberate safeguard: it destroys data you may want, it does not apply to the `assets/` path, and a change to either the rule or Codex's format would flip it to the exposure case without notice.
 
 Where an image *is* stored, it is byte-for-byte what you pasted — completely unredacted — because byte-level regex and entropy redaction cannot inspect binary image data without corrupting it, so Entire does not attempt it. That is a deliberate design choice, not a bug.
 
-Two things about *when* those bytes reach git, both of which narrow the window you have to catch a mistake:
+Two things about *when* those bytes reach git:
 
 - **A checkpoint's copy** lands on `entire/checkpoints/v1` (or the equivalent per-checkpoint ref on the `git-refs` backend). Like all checkpoint data it is written locally and pushed separately, so it reaches your remote only when checkpoint data is pushed — see the **Review before pushing** bullet under [Recommendations](#recommendations).
-- **A shadow-branch copy** is written earlier, at the end of the agent turn, before you commit anything and regardless of the setting above. The shadow write does not externalize images, so for Claude Code the base64 is committed into your local git objects at turn end. Shadow branches are local-only and are never pushed (see [Where data is stored](#where-data-is-stored) above), but `entire checkpoint list` will not show this copy — it exists before any checkpoint does.
+- **Before you commit**, the image exists only in the agent's own transcript and in Entire's local sanitized copy (`.entire/metadata/<session>/full.jsonl`); nothing is written to git at turn end.
 
 **If you would not commit an image to your repository unredacted, do not paste it into an agent conversation.** This applies equally to a private repository — anyone with read access to checkpoint data can see it — and especially to a public one.
 
@@ -76,7 +78,7 @@ Configure them under `redaction.betterleaks` / `redaction.goredact` in `.entire/
 }
 ```
 
-Omitting either key, or the key's `enabled` field, keeps that engine at its default. All other redaction layers — entropy scoring, provider token prefixes, credentialed URI detection, connection-string detection, custom rules, bounded credential key/value detection, and PII — are unaffected by these two toggles; they keep running exactly as described elsewhere in this document regardless of which scanner engine(s) are selected.
+Omitting either key, or the key's `enabled` field, keeps that engine at its default. All other redaction layers — entropy scoring, provider token shapes, credentialed URI detection, connection-string detection, custom rules, bounded credential key/value detection, and PII — are unaffected by these two toggles; they keep running exactly as described elsewhere in this document regardless of which scanner engine(s) are selected.
 
 **Fail-closed rules:**
 
@@ -100,9 +102,11 @@ Built-in categories (when `enabled` is `true`):
 | `phone` (North American / NANP formats) | on | `[REDACTED_PHONE]` |
 | `address` (US street addresses) | off (more false-positive prone) | `[REDACTED_ADDRESS]` |
 
-Common bot/CI email addresses are not redacted (`noreply@*`, `actions@*`, `*@users.noreply.github.com`, `*@noreply.github.com`).
+Common bot/CI email addresses are not redacted (`noreply@*`, `actions@*`, `*@users.noreply.github.com`, `*@noreply.github.com`), and neither is the `git@` user in git remotes such as `git@github.com:org/repo.git`.
 
-Teams can add their own regex patterns via `custom_patterns`. Each key is a label (uppercased in the replacement token), each value is a regex string. Example: `{"employee_id": "EMP-\\d{6}"}` produces `[REDACTED_EMPLOYEE_ID]`.
+Phone and address matches must stand on their own: digits that are part of a longer number (`2024-123-4567890`) are not a phone number, and a street suffix must be a whole word, so `Plan` or `Started` does not end an address.
+
+Teams can add their own regex patterns via `custom_patterns`. Each key is a label (uppercased in the replacement token), each value is a regex string. Example: `{"employee_id": "EMP-\\d{6}"}` produces `[REDACTED_EMPLOYEE_ID]`. A pattern that fails to compile or can match the empty string is skipped with a warning, the same as for [custom redaction rules](#customizing-redaction).
 
 ```json
 {
@@ -122,263 +126,13 @@ Teams can add their own regex patterns via `custom_patterns`. Each key is a labe
 
 If a custom pattern itself reveals sensitive structure (e.g. an internal ID format), put it in `.entire/settings.local.json` (gitignored) instead of `.entire/settings.json`.
 
-### Optional OpenAI Privacy Filter (`opf`)
+### Local copies of transcript content
 
-A separate, **opt-in** layer that shells out to the [OpenAI Privacy Filter](https://github.com/openai/privacy-filter) (`opf`) — a 1.5B-parameter token-classification model that finds names, emails, phone numbers, addresses, dates, URLs, account numbers, and secrets that pure regex can miss. Disabled by default. Runs *in addition to* the eight built-in layers, **only at push time** — never per-turn and never at commit time. Local commits stay on the fast 8-layer pipeline so per-commit latency is unchanged; OPF only re-redacts checkpoints right before they leave the machine via `git push`.
+Two local copies of transcript content are never redacted and never reach the remote:
 
-Prerequisites:
-
-```bash
-pip install opf
-```
-
-Verify `opf --help` works; the CLI defaults to resolving the binary via `$PATH`. If you need a specific path, set `command` in `.entire/settings.local.json` — it is deliberately not honored from the committed `.entire/settings.json`. See [Why `command` is local-only](#why-command-is-local-only).
-
-Enable in `.entire/settings.json`:
-
-```json
-{
-  "redaction": {
-    "openai_privacy_filter": {
-      "enabled": true,
-      "categories": {
-        "private_person": true
-      }
-    }
-  }
-}
-```
-
-Available categories (set to `true` to enable, `false` or omit to skip):
-
-| Category | Replacement token | Notes |
-|---|---|---|
-| `private_person` | `[REDACTED_PERSON]` | Person names |
-| `private_email` | `[REDACTED_EMAIL]` | Email addresses |
-| `private_phone` | `[REDACTED_PHONE]` | Phone numbers |
-| `private_address` | `[REDACTED_ADDRESS]` | Street addresses |
-| `private_url` | `[REDACTED_URL]` | URLs that may identify a person/account |
-| `private_date` | `[REDACTED_DATE]` | Dates (DOB, etc.) |
-| `account_number` | `[REDACTED_ACCOUNT_NUMBER]` | Account / card / SSN-shaped numbers |
-| `secret` | `REDACTED` | Generic credential-shaped values |
-
-Unknown category names are rejected at settings load time so typos surface immediately instead of silently disabling a category.
-
-The filter needs at least one enabled category to run. This is enforced at push time, not settings load: with `enabled: true` and no effective category (`categories` omitted, empty, or all-false) the model scan cannot run. Rather than tagging commits as OPF-applied without a scan, it fails closed the same way a runtime failure does: `git-branch` aborts the push, `git-refs` withholds the checkpoint refs and lets your push through. Enable a category, set `enabled: false`, or pass `ENTIRE_OPF=no` on a push to skip the filter for that push only.
-
-Full settings reference:
-
-```json
-{
-  "redaction": {
-    "openai_privacy_filter": {
-      "enabled": true,
-      "categories": {
-        "private_person": true,
-        "private_email": true,
-        "private_phone": true,
-        "private_address": false,
-        "private_url": false,
-        "private_date": false,
-        "account_number": false,
-        "secret": false
-      },
-      "timeout_seconds": 30
-    }
-  }
-}
-```
-
-- `command` — path or PATH-resolvable name of the `opf` binary. Defaults to `opf`. **Only read from `.entire/settings.local.json`**, and only when that file is untracked; see [Why `command` is local-only](#why-command-is-local-only).
-- `timeout_seconds` — per-invocation timeout. Defaults to `30`.
-- `prompt_default` — `"ask"` (default), `"never"`, or `"always"`. Controls whether the pre-push hook surfaces an interactive prompt before running OPF. `ENTIRE_OPF=yes` or `ENTIRE_OPF=no` on a single `git push` invocation overrides this for that push only.
-
-### Why `command` is local-only
-
-`command` becomes `argv[0]` of a process Entire executes during `git push`, so whoever controls that string controls what runs on the developer's machine. `.entire/settings.json` is version-controlled, which would let an ordinary pull request pair a `command` with a payload committed alongside it — and a JSON settings diff does not read as executable to a reviewer. The pre-push prompt is no defense either: it never names the command, `prompt_default: "always"` skips it, and non-TTY pushes (CI, agent-driven) auto-run.
-
-Entire therefore honors `command` only when it is genuinely developer-owned:
-
-- it must come from `.entire/settings.local.json`, not `.entire/settings.json`
-- that file must be **untracked** — absent from both the git index and `HEAD`
-
-The second check matters because the filename alone proves nothing: `.gitignore` does not apply to a path that is already tracked, so `git add -f .entire/settings.local.json` commits it and a fresh clone materializes it with the committed content.
-
-This is enforced for the whole file, not just this setting: a tracked `.entire/settings.local.json` is ignored in its entirety, because it is not local to your clone — it arrives with the repository and would override project settings for everyone. Entire warns on stderr and tells you to run `git rm --cached .entire/settings.local.json`. The load still succeeds using project settings, so a committed file cannot brick the repository.
-
-The two checks also differ in depth. The layer check looks at the git index; the `command` check also looks at `HEAD`. A pull request that commits the file puts it in the index of every clone that checks the branch out, so the index is what catches a delivered attack — and checkout cannot produce a file that is absent from the index, so "committed, then `git rm --cached`" is a state you created locally, not one that arrived with the repository. Reading `HEAD` is the expensive half, so it is reserved for the setting that gets executed.
-
-The two checks fail in opposite directions on purpose. If the repository cannot be read at all, the local layer is still applied — losing every local preference over an unreadable repo is worse than the risk. The executed `command` is dropped in that case, because being wrong there means running someone else's binary. With no repository at all, nothing can have arrived by cloning, so the file is treated as yours.
-
-When a `command` fails these checks it is ignored with a warning in `.entire/logs/entire.log` and OPF falls back to resolving `opf` on `$PATH`. If that binary is missing, the pre-push rewrite fails closed rather than pushing content you believed OPF had scanned. Everything else in the OPF block (`enabled`, `categories`, `timeout_seconds`, `prompt_default`) is ordinary configuration and still works from the shared project file.
-
-The interactive prompt offers three options and reacts to **Ctrl-C** for cancellation:
-
-```
-Run OpenAI Privacy Filter on these checkpoints?
-Adds ~30s but redacts names/PII the regex layers can't catch.
-Ctrl-C to cancel the push.
-
-  ▸ Yes — run OPF this push
-    No — skip OPF, push as-is
-    Always — run OPF on every push from now on
-```
-
-- **Yes** runs OPF for this push only.
-- **No** skips OPF for this push only; the 8-layer-redacted content reaches the remote.
-- **Always** runs OPF this push AND writes `prompt_default: "always"` to `.entire/settings.local.json` so future pushes don't ask.
-- **Ctrl-C** cancels OPF. What that costs depends on the backend: on `git-branch` your `git push` aborts and exits non-zero; on `git-refs` your push completes and the checkpoint refs stay queued for a later push. Either way nothing under-redacted reaches the remote.
-
-Non-interactive contexts (CI, scripted pipes with no TTY) skip the prompt and run OPF automatically when enabled, printing `→ OpenAI Privacy Filter: scanning checkpoints before push (may take ~30s)…` to stderr so the wait isn't silent. Progress and completion are reported as `→ OpenAI Privacy Filter: scanning checkpoints…` and `✓ OpenAI Privacy Filter: done (12.4s, 37 blobs)`. Set `ENTIRE_OPF=no` to skip OPF in those contexts without disabling the feature globally.
-
-**CI consideration**: if you've enabled OPF locally and your CI runs `git push` (e.g. an agent-driven workflow), the CI push will attempt to run OPF too. If the `opf` binary isn't installed in CI, the failure is fail-closed rather than silently shipping under-redacted content — by design, since "I enabled OPF" should mean "no content leaves my machines without OPF." On `git-branch` that aborts the CI push; on `git-refs` the push succeeds but the checkpoints don't ship, which means they can accumulate unpushed until someone notices. The remedies are (a) install `opf` in CI, (b) set `ENTIRE_OPF=no` for CI pushes, or (c) set `prompt_default: "never"` if you only want OPF on interactive pushes.
-
-OPF failures at push time are **fail-closed**: if OPF is not on PATH, fails to start, or times out during the pre-push rewrite, the per-process circuit breaker trips and no under-redacted content reaches the remote. The intent is that "the user enabled OPF" means "I do not want unredacted content leaving this machine" — falling back to 8-layer silently on the push path would violate that contract. Fix the install or set `ENTIRE_OPF=no` for a one-off push.
-
-How that is enforced depends on the checkpoint backend, because they have different escape hatches:
-
-- **git-branch**: the rewrite aborts the push with `OPF runtime failed during pre-push rewrite (command=…); aborting push so regex-only content isn't tagged as OPF-applied`. Your `git push` exits non-zero. The checkpoint branch travels with that push, so refusing the push is the only way to withhold it.
-- **git-refs**: checkpoint refs are pushed separately from your branch and stay queued when they are not flushed, so the failure withholds the checkpoint push and lets your own `git push` succeed. Nothing under-redacted ships either way. This is not silent: a warning names the failure and states that checkpoint refs stayed queued for the next push.
-
-(The circuit breaker is per-process, so a broken install costs one warning instead of one timeout per blob — but the push still aborts.)
-
-Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre-push rewrite batches **every redactable leaf across every unpushed commit** — v1 commits on git-branch, every unpushed commit on every queued ref on git-refs — into a single inference pass, so a typical real-world push pays the model-load cost once (~6s) plus inference (~5s per 100KB of leaf content) — not multiplied by the number of commits or blobs. A 3-commit push with ~250KB of total prose content runs in ~12–15s, not the ~50–100s a per-blob flow would take. Per-commit latency is unaffected because OPF doesn't run at commit time.
-
-#### When OPF actually runs
-
-OPF execution lives in the pre-push hook. The flow:
-
-1. **Post-commit** writes the checkpoint with **8-layer-only** redaction to local git objects — per-checkpoint refs on `git-refs`, the `entire/checkpoints/v1` branch on `git-branch`. Fast, predictable, no OPF cost on the hot path.
-2. **Pre-push** (`git push`): if OPF is enabled, the hook re-reads each not-yet-OPF'd commit, runs the OpenAI Privacy Filter over its blobs to add the categories the regex layers don't catch (person names, addresses, etc.), and builds **new commits** carrying an `Entire-OPF-Applied: true` trailer. Each backend then points its own local ref at the new tip with a compare-and-swap, and the (now 9-layer-redacted) commits are what get pushed.
-3. The original 8-layer-only commits become **unreachable** in the local git object database and eventually get swept by `git gc`.
-
-The two backends differ in **how they find the commits to rewrite**:
-
-| | `git-refs` | `git-branch` |
-|---|---|---|
-| What it walks | Every ref in the push-discovery queue | The `entire/checkpoints/v1` commit chain |
-| Where it stops | The first ancestor already carrying `Entire-OPF-Applied: true` — the trailer is the watermark | The remote's v1 tip, fetched live (not a stale tracking ref) |
-| Already-OPF'd commits | Left byte-identical; they *are* the boundary | Re-parented onto the new chain, but not re-redacted |
-| Ref update | Each queued ref rewritten in place, CAS'd individually | One CAS on the local v1 ref |
-
-In steady state the `git-refs` walk stops at the last commit the previous push OPF'd. That is usually the tip's parent, but not always: each write to a checkpoint advances its ref by one commit, so a turn that creates a checkpoint and then backfills its transcript and summary leaves a three-commit chain to rewrite.
-
-Note that the local ref move is **not** a fast-forward on either backend — the rewritten chain replaces the old commits rather than descending from them, which is exactly why step 3 leaves them unreachable. The *push* is still fast-forward-only and never forced, because the new chain is parented on a commit the remote already has.
-
-This means:
-
-- **The remote only ever sees 9-layer-redacted content** when OPF is enabled.
-- **Local-only commits are 8-layer-redacted** until the moment you push. If you never push, OPF never runs.
-- **Re-running pre-push is idempotent** — commits already carrying the trailer are never re-redacted.
-
-#### Divergence, caps, and concurrent pushes
-
-The rewrite refuses to proceed in a divergent or oversized state rather than silently rebasing or shipping unscanned content. As always, `git-branch` enforces this by aborting your push and `git-refs` by withholding the checkpoint refs.
-
-**Divergence.** On `git-branch`, if local `entire/checkpoints/v1` has commits that aren't ancestors of the remote's v1, the hook exits with a `entire/checkpoints/v1 has diverged from remote` error. Fetch the remote and either reset local v1 to the remote tip or resolve manually before pushing.
-
-`git-refs` has no divergence pre-check, and doesn't need one: each checkpoint is its own ref, so divergence shows up at push time as a non-fast-forward rejection for that one ref. Recovery fetches the remote ref and replays the local-only commits on top, then retries — still without forcing, so the remote commit is preserved as an ancestor. A ref that can't be replayed stays queued.
-
-**Un-OPF'd commit cap: `100` by default.** Override per push:
-
-```fish
-set -x ENTIRE_OPF_BOOTSTRAP_LIMIT 500; git push
-# or fully unbounded:
-set -x ENTIRE_OPF_BOOTSTRAP_LIMIT unlimited; git push
-```
-
-The two backends trip this differently. On `git-branch` it applies **only on bootstrap** — the first push, when the remote has no v1 yet — counted across all unpushed commits. On `git-refs` it applies on **every** push, counted **per queued ref** over that ref's un-trailered ancestry. In practice the `git-refs` trigger is "OPF was enabled late" or "checkpoints were just migrated from the branch", not "first push".
-
-**Batch cap: `2 MiB` of cumulative prose-leaf content by default** (≈110s of inference), on both backends. An `OPF would run inference on …` error means you've hit it:
-
-```fish
-set -x ENTIRE_OPF_BATCH_LIMIT 10485760; git push   # 10 MiB
-# or fully unbounded:
-set -x ENTIRE_OPF_BATCH_LIMIT unlimited; git push
-```
-
-**Raw-byte cap: `200 MiB` of blob content buffered in memory**, on both backends. It has no env var of its own — it is derived as 100× the batch cap, so raising `ENTIRE_OPF_BATCH_LIMIT` raises it too. It is checked incrementally as blobs load, so on a pathological push (one commit carrying a huge pasted transcript) this is the cap that fires first.
-
-The three caps protect different failure modes: the commit cap stops "100 throwaway commits", the batch cap stops "one commit with 50 MB of prose", and the raw-byte cap stops the loader exhausting memory before either of the others can be evaluated. On `git-refs` the two byte caps are cumulative across the whole flush (all queued refs together) while the commit cap is per ref.
-
-**Concurrent push** from another worktree: both backends compare-and-swap the local ref. If another process moved it while OPF was running, `git-branch` exits with `entire/checkpoints/v1 moved during OPF rewrite …; re-run 'git push' (no fetch needed; the move was local)` and aborts. On `git-refs` the affected ref simply stays queued and the next push picks it up. Note that the `git-refs` rewrite rebuilds every commit before touching any ref, but the ref updates themselves are not atomic *across* refs: a conflict partway through leaves the earlier refs already rewritten. They stay queued and push OPF-applied next time, so this is safe — just not "nothing moved".
-
-#### Persistence of un-redacted-by-OPF content
-
-Several places retain content that OPF *didn't* redact, with different lifetimes. Understanding them matters if your threat model goes beyond "what reaches the remote":
-
-| Location | Redaction level | Lifetime | Reaches remote? |
-|---|---|---|---|
-| `.entire/metadata/<session>/full.jsonl` | **None** — sanitized, not redacted | Until the session's data is cleaned up (`entire clean`) | No |
-| The agent's own transcript (e.g. `~/.claude/projects/…`) | **None — raw** | Owned and managed by the agent | No |
-| Shadow branch `entire/<commit>-<worktree>` | 8-layer | Auto-deleted after the next successful push (only when its session has ended cleanly) | No |
-| Unreachable git objects after the pre-push rewrite | 8-layer | Until `git gc --prune` (default `gc.pruneExpire` is 2 weeks) | No |
-| Local `refs/entire/checkpoints/*` (`git-refs`) | 8-layer before push, 9-layer after the rewrite | Kept indefinitely — these refs are never deleted after pushing | Yes, once pushed |
-| Local `entire/checkpoints/v1` (`git-branch`) | 8-layer before push, 9-layer after the rewrite | Until you delete the branch | Yes, once pushed |
-| Reflog of `entire/checkpoints/v1` (`git-branch` only) | 8-layer tips | Default `gc.reflogExpire` is 90 days | No |
-| A configured `git-branch` **mirror** | 8-layer, indefinitely | Until you delete the branch | No — mirrors aren't pushed at pre-push |
-| A leftover `entire/checkpoints/v1` after migrating to `git-refs` | 8-layer | Until you delete the branch | No |
-| The remote's copy of the pushed refs/branch | 9-layer (after OPF rewrite) | Until you delete them on the remote | Yes |
-
-Two notes on the `git-refs` rows:
-
-- **There is no reflog concern for `refs/entire/checkpoints/*`.** Git's `core.logAllRefUpdates` default only auto-logs `refs/heads/*`, `refs/remotes/*`, `refs/notes/*`, and `HEAD`, and Entire's checkpoint-ref writes don't append reflog entries themselves. The reflog row above is genuinely branch-only (unless you've set `logAllRefUpdates=always`).
-- **The push queue holds no content.** `entire-checkpoint-push-queue.jsonl` in the git common dir stores one ref *name* per line, mode `0600`. Nothing in it is redactable.
-
-Two `git-branch`-shaped leftovers are easy to miss once a repo has moved on:
-
-- **A `git-branch` mirror never gets OPF'd.** Mirrors receive best-effort write fan-out only and never ref-level mutations, so a mirror branch keeps 8-layer content indefinitely. It isn't pushed at pre-push, so it doesn't reach the remote — but it is local content, and it has a `refs/heads/` reflog.
-- **Migration doesn't delete the old branch.** `entire doctor migrate-checkpoints` imports from `entire/checkpoints/v1` and leaves it in place, 8-layer, along with its reflog. Migrated refs also carry no OPF trailer, so the first push after a migration re-OPFs every migrated ref — one commit per ref keeps the commit cap happy, but the 2 MiB batch cap is the realistic trip point.
-
-`.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input the shadow-branch walk and condensation read from.
+`.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input condensation reads from when the live agent transcript is no longer available.
 
 The agent's own transcript is never modified at all. Entire reads from it and leaves it alone, because the agent is writing to it continuously and editing under the agent's feet would corrupt the session.
-
-To aggressively scrub the unreachable git objects from the pre-push rewrite (instead of waiting for the 2-week GC window):
-
-```fish
-# git-refs
-git reflog expire --expire-unreachable=now --all
-git gc --prune=now
-
-# git-branch
-git reflog expire --expire-unreachable=now refs/heads/entire/checkpoints/v1
-git gc --prune=now
-```
-
-This is I/O-heavy on large repositories; it's not run automatically. If you want it as part of your push workflow, wrap `git push` in a script that invokes it after a successful push.
-
-#### Verifying OPF is working
-
-After enabling OPF, run an agent turn whose prompt contains a name — e.g. *"Create notes.txt with: Alice Johnson reviewed the proposal."* — then commit (which stays on the fast 8-layer pipeline) and push, which is when OPF runs.
-
-```fish
-git commit -m "demo"
-git push   # → "OpenAI Privacy Filter: scanning checkpoints…"
-```
-
-Then confirm the redaction landed and the trailer is present. Note that `git log --oneline` **cannot** show a trailer — it prints only the subject line — so use a format that includes the body:
-
-```fish
-# git-refs: which checkpoint refs exist, and which are OPF-applied
-git for-each-ref --sort=-committerdate \
-  --format='%(refname)  %(trailers:key=Entire-OPF-Applied)' refs/entire/checkpoints/
-
-# git-branch: the trailer on the latest v1 commit
-git log -1 --format='%H%n%B' entire/checkpoints/v1
-
-# either backend: confirm the content itself was redacted
-entire checkpoint list
-entire checkpoint explain <checkpoint-id> | grep -i 'REDACTED_PERSON'
-```
-
-If `[REDACTED_PERSON]` appears in the prompt or transcript section and the checkpoint's commit carries `Entire-OPF-Applied: true`, OPF is active.
-
-On `git-refs` you can also confirm nothing was withheld — an absent or empty queue file means everything flushed:
-
-```fish
-cat "$(git rev-parse --git-common-dir)/entire-checkpoint-push-queue.jsonl"
-```
 
 ### Recommendations
 
@@ -387,7 +141,7 @@ If your AI sessions will touch sensitive data:
 - **Use a private repository.** This is the simplest and most complete protection. Committed checkpoints are then only visible to collaborators.
 - **Avoid passing sensitive files to your agent.** Content that never enters the agent conversation never appears in transcripts.
 - **Never paste a screenshot or image containing secrets or personal data.** Nothing in Entire reads what an image depicts, and on most agents the image is stored unredacted — see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots).
-- **Review before pushing.** Checkpoints are written locally at commit time and pushed separately, so there is always a window to inspect them:
+- **Review before pushing.** Checkpoints are written locally — at commit time, or when a session with no file changes is snapshotted with the hidden `entire checkpoint create` — and pushed separately, so there is always a window to inspect them:
 
   ```fish
   # git-refs: list local checkpoint refs, then read one
@@ -409,7 +163,7 @@ Secret detection as a whole is always on, though the pattern-matching scanner la
 
 All detected secrets are replaced with `REDACTED`. PII matches are replaced with category-tagged tokens like `[REDACTED_EMAIL]` (see [Optional PII redaction](#optional-pii-redaction)).
 
-To reduce over-redaction, Entire preserves structural transcript fields such as IDs and paths, leaves placeholder values alone, and redacts only credential values for bounded key/value forms. Placeholders are detected by exact match (e.g. `changeme`, `example`, `placeholder`, `your_password`, `your_secret`, prior `REDACTED`/`[REDACTED]`/`<REDACTED>` markers) or by shape: shell expansions like `${DB_PASSWORD}`, bracketed names like `<password>` or `<your-db-password>`, and mask runs of three or more `*`/`x`/`.`/`-` (so `***`, `xxxx`, `....`, `----` all match). When a connection string contains a real password, it is redacted as a unit because partial fragments can still expose sensitive material; connection strings whose passwords are placeholders are left intact.
+To reduce over-redaction, Entire preserves structural transcript fields such as IDs and paths, leaves placeholder values alone, and redacts only credential values for bounded key/value forms. In structured JSON, such as a tool call's input, a value under a key that names a credential (for example `api_key`, `token`, `client_secret` or `password`) is also scanned together with its key, so `{"api_key": "…"}` is caught by the same key-based rules that catch `api_key=…` in prose. When only the key reveals a secret, the whole value is replaced. Placeholders are detected by exact match (e.g. `changeme`, `example`, `placeholder`, `your_password`, `your_secret`, prior `REDACTED`/`[REDACTED]`/`<REDACTED>` markers) or by shape: shell expansions like `${DB_PASSWORD}`, template expressions such as `%s`, `%(password)s`, `{}`, `{password}`, or `$DB_PASSWORD`, bracketed names like `<password>` or `<your-db-password>`, and mask runs of three or more `*`/`x`/`.`/`-` (so `***`, `xxxx`, `....`, `----` all match). A shell expansion must be one complete expression, so `${A}hunter2${B}` is redacted, and one with a fallback value, such as `${DB_PASSWORD:-hunter2}`, is a placeholder only when the fallback is empty or itself a placeholder. Format-field names must be lowercase and shell variables uppercase, so `{hunter2}` and `$hunter2` are still redacted. When a connection string contains a real password, it is redacted as a unit because partial fragments can still expose sensitive material; connection strings and credentialed URLs whose passwords are placeholders are left intact. In a Postgres keyword DSN, an uppercase `PWD=` whose value is an absolute path (`/app`, `~/app`) is the shell's working directory, so `env` output is not mistaken for a connection string, while a lowercase `pwd=` always counts as a password; bounded key/value detection reads the value from the same line only, so a blank `DB_PASSWORD=` leaves the next line alone.
 
 ## Customizing redaction
 
@@ -433,7 +187,9 @@ Add a label → regex map under `redaction.custom_redactions` in `.entire/settin
 - The label is for diagnostics only; matches are replaced with the bare `REDACTED` token (matching the built-in secret layers, not the `[REDACTED_<LABEL>]` token used for PII).
 - Regexes follow [Go's RE2 syntax](https://pkg.go.dev/regexp/syntax). No lookarounds, no backreferences.
 - A failed compile is logged once at startup and the rule is skipped — it will never crash the redactor.
+- A pattern that can match the empty string is skipped the same way. That covers `""`, `x*`, a trailing `|` as in `ACME-[0-9]{8}|`, an optional group like `(EMP-\d{6})?`, and a bare `\b`. Left active, such a pattern would insert `REDACTED` between characters throughout the transcript. The warning names the label and the reason, never the pattern.
 - Override in `.entire/settings.local.json` for personal additions; entries merge per-key (override replaces the same key, leaves other keys intact).
+- An empty value is not a supported way to disable a rule. It is a pattern that matches the empty string, so it is skipped with a warning each time Entire loads the rules. Because the override replaces the rule with the same label, an empty value in `.entire/settings.local.json` still turns that `.entire/settings.json` rule off for you, and text only that rule would catch is stored unredacted.
 
 ### Surface 2: Rule packs
 
@@ -477,6 +233,8 @@ Equivalent JSON form:
 **Required fields:** `name` (must equal the filename stem — `acme-internal.yaml` → `acme-internal`), `version` (any string; semver recommended), and `rules[]` (at least one entry, each with `id` and `regex`).
 
 **Optional fields:** `description` (pack-level and rule-level), and `rules[].samples[]` (see "Self-tests" below).
+
+A rule whose regex fails to compile or can match the empty string is skipped with a warning, like an inline rule. The other rules in the pack still load.
 
 A pack does not have to target credentials. The same shape works for any string pattern you don't want stored in transcripts — for example, a project codename or a small word list:
 
@@ -529,7 +287,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 
 ### Troubleshooting
 
-- **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches are emitted by the redaction layer when Entire initializes it. In the hook path (where checkpoints are actually written) these go to `.entire/logs/entire.log` — `grep component=redaction` and look for lines mentioning your label or pack path. When a hard pack-discovery failure happens during an interactive command, Entire also prints a one-line breadcrumb on stderr pointing back at the log.
+- **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches are emitted by the redaction layer when Entire initializes it. In the hook path (where checkpoints are actually written) these go to `.entire/logs/entire.log` — `grep component=redaction` and look for lines mentioning your label or pack path. `error="pattern can match the empty string"` means the rule was skipped because it can match zero characters; change it so every match consumes at least one character, for example by dropping a trailing `|` or `?`, or using `+` instead of `*`. When a hard pack-discovery failure happens during an interactive command, Entire also prints a one-line breadcrumb on stderr pointing back at the log.
 - **My pack file is silently ignored.** Filenames must end in `.yaml`, `.yml`, or `.json`. Other extensions are skipped.
 - **I want to disable a rule temporarily.** Comment it out (prefix the YAML key with `#`) or remove the entry from `custom_redactions`. The rule reloads on the next CLI invocation.
 
@@ -537,9 +295,11 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 
 - **Best-effort.** Novel or low-entropy secrets (short passwords, predictable tokens) may not be caught.
 - **Filenames and binary data.** Secrets in filenames, binary files, or deeply nested structures may not be detected.
-- **JSONL skip rules.** Entire skips scanning fields whose name *ends in* `signature` (so `thinkingSignature` too), fields ending in `id`/`ids`, and structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`) to avoid false positives. Objects whose `type` starts with `image` or equals `base64` are also skipped — and that skip is what leaves a pasted image unredacted rather than merely unflagged. It matches some agents' image shapes and not others, which is why the outcome differs per agent: see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots) above.
+- **JSONL skip rules.** Entire skips scanning the string values of fields whose name *ends in* `signature` (so `thinkingSignature` too), fields ending in `id`/`ids`, and structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`) to avoid false positives. That includes strings in an array under such a field; objects nested under one are still scanned. Because the rule matches by suffix, a string directly under an unrelated name such as `valid` or `android` is skipped too. Objects whose `type` starts with `image` or equals `base64` are also skipped — and that skip is what leaves a pasted image unredacted rather than merely unflagged. It matches some agents' image shapes and not others, which is why the outcome differs per agent: see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots) above.
+- **JSON keys are not scanned.** Only values are. A secret used as an object key, such as a token as a header name, is stored as written.
+- **A secret recognized only by its key is redacted only there.** A value such as a hex string under `api_key` is replaced where it sits. The same value elsewhere, in another field, in prose, or on another line, is redacted only if a detector flags it there on its own.
 - **Built-in PII patterns are US-centric.** `phone` matches North American (NANP) formats only — international formats, including E.164 numbers outside `+1`, are not detected. `address` matches the street line only; city, state, and ZIP/postcode are preserved. If you handle personal data from other regions, add `custom_patterns` for your locale rather than relying on the built-in categories alone.
-- **Custom PII patterns are user-authored.** Teams own the correctness of their `custom_patterns`. An invalid regex is logged and skipped, not enforced.
+- **Custom PII patterns are user-authored.** Teams own the correctness of their `custom_patterns`. An invalid regex, or one that can match the empty string, is logged and skipped, not enforced.
 - **Users are ultimately responsible** for reviewing what they commit and push. Redaction is a safety net, not a guarantee.
 
 ## Telemetry
@@ -559,13 +319,22 @@ Opt out via any one of:
 `external_agents` turns on the `$PATH` scan that looks for `entire-agent-*`
 binaries and runs each one's `info` subcommand, then keeps running the ones it
 registered for every hook thereafter. It is an execution grant, not a
-preference, so it is honored under exactly the same rule as the OPF
-[`command`](#why-command-is-local-only): only from `.entire/settings.local.json`,
-and only when that file is untracked in both the index and `HEAD`. Reading it
-from the committed `.entire/settings.json` would let an ordinary pull request
-turn on execution of whatever `entire-agent-*` binary it could get onto a
-developer's `$PATH`, and — as with `command` — one line of JSON does not read as
-executable to a reviewer. There is no prompt in front of this one at all.
+preference, so it is honored only when it is genuinely developer-owned: only
+from `.entire/settings.local.json`, and only when that file is untracked in both
+the index and `HEAD`. Reading it from the committed `.entire/settings.json` would
+let an ordinary pull request turn on execution of whatever `entire-agent-*`
+binary it could get onto a developer's `$PATH`, and one line of JSON does not
+read as executable to a reviewer. There is no prompt in front of this one at all.
+
+The untracked check matters because the filename alone proves nothing:
+`.gitignore` does not apply to a path that is already tracked, so
+`git add -f .entire/settings.local.json` commits it and a fresh clone
+materializes it with the committed content. A tracked
+`.entire/settings.local.json` is ignored in its entirety, because it is not
+local to your clone — it arrives with the repository and would override project
+settings for everyone. Entire warns on stderr and tells you to run
+`git rm --cached .entire/settings.local.json`. The load still succeeds using
+project settings, so a committed file cannot brick the repository.
 
 Rejection is a downgrade, never an error: discovery simply does not run.
 `entire status` names the setting and where it has to move, and the same reason
@@ -582,10 +351,10 @@ repository would otherwise be a binary Entire executes.
 
 ## Why agent instruction fields are local-only
 
-`investigate.always_prompt`, every review `prompt` (per-agent and judge, in
-`review_profiles` and the legacy `review` map), and every review profile's
-`task` are placed verbatim in the prompts of agents that `entire investigate`
-and `entire review` spawn with approval checks disabled (claude-code's
+Every review `prompt` (per-agent and judge, in
+`review_profiles` and the legacy `review` map) and every review profile's
+`task` are placed verbatim in the prompts of agents that
+`entire review` spawns with approval checks disabled (claude-code's
 `bypassPermissions`, codex's `--dangerously-bypass-approvals-and-sandbox`). The
 prompt is the stated control for those spawns, so whoever writes these strings
 gets the last word in it. `task` and `prompt` are adjacent sections of the same
@@ -593,17 +362,23 @@ composed prompt, so they are gated together — a gate on one alone would just
 move the attacker's text to the other field. Honoring any of them from the
 committed `.entire/settings.json` would let an ordinary pull request steer an
 approvals-disabled agent on every developer who pulls — the same delivery route
-as the OPF [`command`](#why-command-is-local-only), carrying instructions
-instead of argv.
+as [`external_agents`](#why-external_agents-is-local-only), carrying
+instructions instead of an execution grant.
 
 They are therefore honored only from layers that are this developer's own:
 clone-local review preferences (stored inside `.git/`, which a clone never
 populates) or `.entire/settings.local.json` verified untracked in both the
 index and `HEAD`. Rejection is a downgrade, never an error — a dropped task
 falls back to the built-in text for conventional profile names, and
-`entire review` / `entire investigate` print a one-line notice naming the
+`entire review` prints a one-line notice naming the
 dropped field and where it has to move (suppressed when the dropped task equals
 the built-in default, since that drop changes nothing).
+
+The `entire-investigate` plugin applies the same reasoning to its own
+`always_prompt`, against its own `.entire/investigate.local.json`. That file
+has no committed counterpart at all, so there is no layer to gate — only a
+check that the file itself is untracked. It is outside this repository's
+control; see the plugin's `internal/config`.
 
 Deliberately not gated: `skills` (review validates every configured skill
 against the locally installed set before spawning, so free text there fails the

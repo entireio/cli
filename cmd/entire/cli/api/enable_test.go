@@ -33,8 +33,7 @@ func TestClient_ReportEnable_PostsRemoteAndDecodesResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	out, err := c.ReportEnable(context.Background(), "git@github.com:entireio/cli.git")
 	if err != nil {
@@ -70,8 +69,7 @@ func TestClient_ReportEnable_ReturnsInstallURLWhenNotConnected(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	out, err := c.ReportEnable(context.Background(), "https://github.com/secret/private.git")
 	if err != nil {
@@ -95,8 +93,7 @@ func TestClient_ReportEnable_ReturnsErrorOnFailureStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	if _, err := c.ReportEnable(context.Background(), "git@gitlab.com:foo/bar.git"); err == nil {
 		t.Fatal("expected error for 400 response, got nil")

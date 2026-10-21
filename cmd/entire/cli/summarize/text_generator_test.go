@@ -19,7 +19,6 @@ type mockTextGenerator struct {
 func (m *mockTextGenerator) Name() types.AgentName                        { return "mock" }
 func (m *mockTextGenerator) Type() types.AgentType                        { return "Mock" }
 func (m *mockTextGenerator) Description() string                          { return "mock" }
-func (m *mockTextGenerator) IsPreview() bool                              { return false }
 func (m *mockTextGenerator) DetectPresence(context.Context) (bool, error) { return false, nil }
 func (m *mockTextGenerator) ProtectedDirs() []string                      { return nil }
 func (m *mockTextGenerator) ReadTranscript(string) ([]byte, error)        { return nil, nil }

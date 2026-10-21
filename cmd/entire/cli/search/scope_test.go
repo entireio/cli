@@ -22,6 +22,12 @@ func TestConfig_ScopeSlugs(t *testing.T) {
 		{"repo:* filter", Config{Repos: []string{AllReposFilter}}, nil, true},
 		{"explicit repo", Config{Repos: []string{"o/r"}}, []string{"o/r"}, false},
 		{"current-repo default", Config{Owner: "o", Repo: "r"}, []string{"o/r"}, false},
+		// The default slug keeps its forge so a native repo and a same-named
+		// GitHub mirror cannot be conflated (the control plane reads a bare
+		// pair as "either forge").
+		{"current-repo default carries native forge", Config{Forge: "et", Owner: "proj", Repo: "r"}, []string{"et/proj/r"}, false},
+		{"current-repo default carries github forge", Config{Forge: "gh", Owner: "o", Repo: "r"}, []string{"gh/o/r"}, false},
+		{"explicit filters win over forged current repo", Config{Repos: []string{"a/b"}, Forge: "et", Owner: "proj", Repo: "r"}, []string{"a/b"}, false},
 		{"explicit filter wins over --all-repos", Config{AllRepos: true, Repos: []string{"o/r"}}, []string{"o/r"}, false},
 		{"explicit filter wins over repo:*", Config{Repos: []string{"o/r", AllReposFilter}}, []string{"o/r"}, false},
 		{"explicit filters win over current repo", Config{Repos: []string{"a/b", "c/d"}, Owner: "o", Repo: "r"}, []string{"a/b", "c/d"}, false},

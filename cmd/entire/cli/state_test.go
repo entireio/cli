@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -1032,4 +1033,27 @@ func TestFilterToUncommittedFiles_TypechangeToSymlinkIsKept(t *testing.T) {
 	if got := filterToUncommittedFiles(context.Background(), []string{relPath}, tmpDir); len(got) != 1 || got[0] != relPath {
 		t.Errorf("filterToUncommittedFiles() = %v, want [%s] — a typechange is an uncommitted change", got, relPath)
 	}
+}
+
+func TestStatUntrackedFiles_SkipsAboveFileLimit(t *testing.T) {
+	t.Parallel()
+	files := make([]string, maxUntrackedFileStats+1)
+	for i := range files {
+		files[i] = fmt.Sprintf("build/out-%d.o", i)
+	}
+	require.Nil(t, statUntrackedFiles(context.Background(), files))
+}
+
+func TestStatFilesWithin_StopsAtBudget(t *testing.T) {
+	t.Parallel()
+	// A missing root makes every stat fail fast, so only the budget decides
+	// whether the pass completes.
+	missingRoot := filepath.Join(t.TempDir(), "missing")
+	files := []string{"a.txt", "b.txt"}
+
+	_, complete := statFilesWithin(missingRoot, files, -time.Second)
+	require.False(t, complete)
+
+	_, complete = statFilesWithin(missingRoot, files, time.Minute)
+	require.True(t, complete)
 }

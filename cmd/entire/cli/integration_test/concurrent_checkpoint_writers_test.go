@@ -115,7 +115,7 @@ func runTwoStopHooksScenario(t *testing.T, backend string, concurrent bool) {
 	sessB.CreateTranscript("write file b", []FileChange{{Path: "agent_b.go", Content: contentB}})
 
 	// One commit, condensing both sessions into a single checkpoint.
-	env.GitCommitWithShadowHooksAsAgent("add agent files", "agent_a.go", "agent_b.go")
+	env.GitCommitWithHooksAsAgent("add agent files", "agent_a.go", "agent_b.go")
 
 	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if checkpointID == "" {

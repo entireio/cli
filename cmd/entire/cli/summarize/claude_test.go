@@ -25,8 +25,6 @@ func (s *stubTextGenerator) Type() types.AgentType { return "Stub" }
 
 func (s *stubTextGenerator) Description() string { return "stub" }
 
-func (s *stubTextGenerator) IsPreview() bool { return false }
-
 func (s *stubTextGenerator) DetectPresence(context.Context) (bool, error) { return true, nil }
 
 func (s *stubTextGenerator) ProtectedDirs() []string { return nil }

@@ -10,6 +10,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -17,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitexec"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
 // ScopeStats summarises the scope of a review for the banner.
@@ -53,7 +53,7 @@ func formatScopeBanner(stats ScopeStats) string {
 	return fmt.Sprintf(
 		"Reviewing %s vs %s: %d %s, %d %s changed, %d uncommitted",
 		subject,
-		stats.BaseRef,
+		displayRef(stats.BaseRef),
 		stats.Commits,
 		commitWord,
 		stats.FilesChanged,
@@ -154,34 +154,43 @@ func repoWorktreePath(repo *git.Repository) (string, error) {
 // Stacked PR review is now served by the explicit `--base <ref>` flag at
 // the command surface, not an inference. The default stays predictable
 // (always mainline); the override is explicit when users actually want it.
+//
+// The result is a full ref name. A short name like "origin/HEAD" also matches
+// a tag or local branch of that name, and git resolves the tag first; a tag
+// fetched along with someone's commits could then make their branch look like
+// the default branch to the trust gate.
 func fallbackScopeRef(repo *git.Repository) (string, error) {
-	chain := []string{"origin/HEAD", "origin/main", "origin/master", "main", "master"}
+	const originHEAD = plumbing.ReferenceName("refs/remotes/origin/HEAD")
+	if ref, err := repo.Reference(originHEAD, false); err == nil {
+		if ref.Type() != plumbing.SymbolicReference {
+			return originHEAD.String(), nil
+		}
+		if target := ref.Target(); target.IsRemote() && refExists(repo, target) {
+			return target.String(), nil
+		}
+	}
+	chain := []plumbing.ReferenceName{"refs/remotes/origin/main", "refs/remotes/origin/master", "refs/heads/main", "refs/heads/master"}
 	for _, name := range chain {
 		if refExists(repo, name) {
-			return name, nil
+			return name.String(), nil
 		}
 	}
-	return "", fmt.Errorf(
-		"no mainline ref found (tried %s); pass --base <ref> to scope the review explicitly, "+
-			"or run `git fetch` to populate origin refs",
-		strings.Join(chain, ", "))
+	return "", errors.New("no mainline ref found (tried origin/HEAD, origin/main, origin/master, main, master); " +
+		"pass --base <ref> to scope the review explicitly, or run `git fetch` to populate origin refs")
 }
 
-// refExists reports whether a ref with the given short name exists in repo.
-func refExists(repo *git.Repository, shortName string) bool {
-	refs, err := repo.References()
-	if err != nil {
-		return false
+// refExists reports whether the full ref name exists in repo.
+func refExists(repo *git.Repository, name plumbing.ReferenceName) bool {
+	_, err := repo.Reference(name, true)
+	return err == nil
+}
+
+// displayRef shortens a full ref name for the scope banner.
+func displayRef(ref string) string {
+	if strings.HasPrefix(ref, "refs/") {
+		return plumbing.ReferenceName(ref).Short()
 	}
-	found := false
-	_ = refs.ForEach(func(ref *plumbing.Reference) error { //nolint:errcheck // best-effort search
-		if ref.Name().Short() == shortName {
-			found = true
-			return storer.ErrStop
-		}
-		return nil
-	})
-	return found
+	return ref
 }
 
 // currentBranchName returns the short branch name for the current HEAD,

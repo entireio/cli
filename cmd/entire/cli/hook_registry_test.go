@@ -360,7 +360,7 @@ func TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly(t *testing.T) {
 func TestAgentHooksCmd_AttachesHookSessionContext(t *testing.T) {
 	hooksCmd := newHooksCmd()
 
-	for _, agentSubcommand := range []string{testAgentName, "gemini"} {
+	for _, agentSubcommand := range []string{testAgentName, string(agent.AgentNameCodex)} {
 		t.Run(agentSubcommand, func(t *testing.T) {
 			var agentCmd *cobra.Command
 			for _, sub := range hooksCmd.Commands() {
@@ -371,14 +371,26 @@ func TestAgentHooksCmd_AttachesHookSessionContext(t *testing.T) {
 			}
 			require.NotNil(t, agentCmd, "expected to find %s subcommand under hooks", agentSubcommand)
 
-			require.NotNil(t, agentCmd.PersistentPreRun,
-				"PersistentPreRun must attach the hook session context")
-			require.Nil(t, agentCmd.PersistentPreRunE,
-				"PersistentPreRunE must stay unset: cobra would run it instead of PersistentPreRun")
-			require.Nil(t, agentCmd.PersistentPostRun,
-				"PersistentPostRun must stay unset: main.go flushes the log sink")
-			require.Nil(t, agentCmd.PersistentPostRunE,
-				"PersistentPostRunE must stay unset: main.go flushes the log sink")
+			// The shared agent command must stay clear. cobra.EnableTraverseRunHooks
+			// runs every ancestor's PersistentPreRun, so anything attached to this
+			// command that is not a lifecycle verb — Antigravity's title-tee, which
+			// agy fires on every state change — would inherit the session scan and
+			// redactor construction with no way to opt out.
+			require.Nil(t, agentCmd.PersistentPreRun,
+				"the shared agent command must not define a PersistentPreRun; it is set per verb")
+
+			verbs := agentCmd.Commands()
+			require.NotEmpty(t, verbs, "expected hook verbs under %s", agentSubcommand)
+			for _, verb := range verbs {
+				require.NotNil(t, verb.PersistentPreRun,
+					"%s: PersistentPreRun must attach the hook session context", verb.Name())
+				require.Nil(t, verb.PersistentPreRunE,
+					"%s: PersistentPreRunE must stay unset: cobra would run it instead of PersistentPreRun", verb.Name())
+				require.Nil(t, verb.PersistentPostRun,
+					"%s: PersistentPostRun must stay unset: main.go flushes the log sink", verb.Name())
+				require.Nil(t, verb.PersistentPostRunE,
+					"%s: PersistentPostRunE must stay unset: main.go flushes the log sink", verb.Name())
+			}
 		})
 	}
 }
