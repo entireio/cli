@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- OpenCode 2: summary generation and `entire runner setup` tailoring work again; they failed with `Unrecognized flag: --dir` because OpenCode 2 removed `opencode run --dir` ([#2843](https://github.com/entireio/cli/pull/2843))
+
 ## [0.11.6] - 2026-10-20
 
 ### Breaking changes and migrations
