@@ -102,6 +102,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	writeRefusedAgentHomes(w)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
+		writeUnattributedAuthorsLine(w, sty, statusUnattributedOutcome(ctx))
 	}
 	writeAgentHelpHint(w, sty)
 
@@ -124,6 +125,40 @@ func writeRefusedAgentHomes(w io.Writer) {
 // Copilot CLI, Factory Droid, MCP hosts) can discover entire's surface by reading
 // either output.
 const agentHelpCommand = "entire agent-help"
+
+// statusUnattributedNetworkTimeout bounds status's one cell round trip; the
+// detection cache (unattributed_authors_cache.go) makes it at most one per 10
+// minutes when degraded (logged in but not onboarded/offline).
+const statusUnattributedNetworkTimeout = 3 * time.Second
+
+// statusUnattributedShortlogTimeout keeps a cache-miss history walk from
+// slowing status; a walk that runs out finds nothing this time.
+const statusUnattributedShortlogTimeout = 3 * time.Second
+
+// statusUnattributedOutcome runs unattributed-author detection for status,
+// short-circuiting first on the cheap (no shortlog, no network) login probe:
+// status prints nothing when logged out, so it must not pay for `git
+// shortlog` — or even the cache file — to find that out. All three status
+// renderers (text short, --detailed, --json) share this one call site so the
+// short-circuit can't be forgotten at one of them.
+func statusUnattributedOutcome(ctx context.Context) detectionOutcome {
+	if !unattributedAuthorsLoggedIn(ctx) {
+		return detectionOutcome{}
+	}
+	return detectUnattributedAuthors(ctx, defaultUnattributedAuthorsDeps(statusUnattributedNetworkTimeout, statusUnattributedShortlogTimeout))
+}
+
+// writeUnattributedAuthorsLine prints one line per address Entire could not
+// attribute to the current OS user (COR-1289). Any degrade — logged out,
+// skipped, no candidates, or no counts back from the cell — prints nothing;
+// `entire doctor` is where the reason is shown.
+func writeUnattributedAuthorsLine(w io.Writer, sty statusStyles, out detectionOutcome) {
+	for _, a := range out.linkableAuthors() {
+		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf(
+			"Entire has %d unattributed %s in this repo authored by %s. Run `entire doctor` to link that address to your account.",
+			a.Count, pluralize("commit", a.Count), a.Email)))
+	}
+}
 
 // writeAgentHelpHint prints a one-line pointer at `entire agent-help` for coding
 // agents that have no context-injection channel (Cursor, Copilot CLI, Factory
@@ -201,6 +236,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 
 	if effectiveSettings.Enabled {
 		writeActiveSessions(ctx, w, sty)
+		writeUnattributedAuthorsLine(w, sty, statusUnattributedOutcome(ctx))
 	}
 	writeAgentHelpHint(w, sty)
 
@@ -1101,6 +1137,12 @@ type statusJSON struct {
 	Enabled        bool               `json:"enabled"`
 	Agents         []string           `json:"agents"`
 	ActiveSessions []sessionBriefJSON `json:"active_sessions"`
+	// UnattributedAuthors lists reserved-host addresses (COR-1289) Entire
+	// counted unattributed commits for. Never null on the success path
+	// (initialized empty, populated only inside the Enabled branch); the
+	// early-return error paths above build a bare statusJSON{Error: ...}
+	// where every slice is null, same as agents today.
+	UnattributedAuthors []unattributedAuthor `json:"unattributed_authors"`
 	// AgentHelp is the machine-readable pointer for no-channel agents that parse
 	// `entire status --json` instead of the human footer. Set only on the
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
@@ -1238,10 +1280,11 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	}
 
 	result := statusJSON{
-		Enabled:        s.Enabled,
-		Agents:         []string{},
-		ActiveSessions: []sessionBriefJSON{},
-		AgentHelp:      agentHelpCommand,
+		Enabled:             s.Enabled,
+		Agents:              []string{},
+		ActiveSessions:      []sessionBriefJSON{},
+		AgentHelp:           agentHelpCommand,
+		UnattributedAuthors: make([]unattributedAuthor, 0),
 	}
 	for _, refusal := range agent.RefusedRelocationEnvVars() {
 		result.RefusedAgentHomes = append(result.RefusedAgentHomes, refusal.Error())
@@ -1250,6 +1293,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	if s.Enabled {
 		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
 			result.Agents = names
+		}
+
+		if authors := statusUnattributedOutcome(ctx).linkableAuthors(); len(authors) > 0 {
+			result.UnattributedAuthors = authors
 		}
 
 		result.SecretScanners = nonDefaultSecretScanners(s)
