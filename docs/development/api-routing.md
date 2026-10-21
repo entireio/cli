@@ -87,9 +87,13 @@ uses the following routing shapes, mirroring the entire.io BFF:
   forge-qualified `resolveForgeRepoCellPlacement`), by cross-repo checkpoint
   reads (`explain --repo`, `explain_repo.go`; the same placement id keys both
   `/checkpoints/{id}` and the commit→checkpoint resolution at
-  `/commits/{sha}/checkpoints`) and by `experts --repo owner/repo`, which sends
+  `/commits/{sha}/checkpoints`), by `experts --repo owner/repo`, which sends
   that placement id to entire-api
-  instead of re-deriving it from a data-plane repo listing.
+  instead of re-deriving it from a data-plane repo listing, and by `entire api`'s
+  `{repo_id}` placeholder. A `--to cell` request whose path (not query) names
+  `{repo_id}` dials that placement's cell; `/me/*` paths stay on the home cell
+  and an explicit `--jurisdiction` wins. Another cell answers a placement id it
+  does not host with an error or, for the processing id, an empty result.
 - **Project-scoped trails → assigned project cell**:
   Core resolves the required `--project`; list uses
   `GET /api/v1/trails?projectId=<ID>` at its assigned API URL, and a numeric
