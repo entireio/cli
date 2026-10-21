@@ -49,8 +49,11 @@ func TestMain(m *testing.M) {
 	// inherited GIT_CONFIG_* env; it proxies transport only (not url.insteadOf, which
 	// would corrupt origin-URL forge detection) and leaves loopback servers untouched.
 	isolation := map[string]string{
-		"ENTIRE_CONFIG_DIR":           filepath.Join(tmpDir, "entire-config"),
-		"XDG_CACHE_HOME":              filepath.Join(tmpDir, "entire-cache"),
+		"ENTIRE_CONFIG_DIR": filepath.Join(tmpDir, "entire-config"),
+		"XDG_CACHE_HOME":    filepath.Join(tmpDir, "entire-cache"),
+		// A user-tier preferences.enabled makes the binary install hooks into
+		// the user-level Claude settings; never let that reach ~/.claude.
+		"CLAUDE_CONFIG_DIR":           filepath.Join(tmpDir, "claude-config"),
 		"ENTIRE_TOKEN_STORE":          "file",
 		"ENTIRE_TOKEN_STORE_PATH":     filepath.Join(tmpDir, "entire-tokens.json"),
 		"ENTIRE_TEST_AUTH_STORE_FILE": filepath.Join(tmpDir, "entire-auth-tokens.json"),

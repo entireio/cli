@@ -431,3 +431,12 @@ func (s *EntireSettings) UserLayerRejections() []string {
 	}
 	return s.userLayerRejections
 }
+
+// UserTierEnablesEverywhere reports whether the user settings file turns
+// Entire on machine-wide (`preferences.enabled: true`). That is the one flag
+// that makes every repository the user touches behave as if `entire enable`
+// had run there.
+func UserTierEnablesEverywhere(ctx context.Context) bool {
+	prefs := loadUserOverlay(ctx).preferences
+	return prefs != nil && prefs.Enabled != nil && *prefs.Enabled
+}

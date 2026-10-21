@@ -466,3 +466,27 @@ func TestUserTier_PathKeyedEntryDoesNotReachAnotherClone(t *testing.T) {
 	assert.Empty(t, s.ReviewFixAgent,
 		"a path key naming one clone must not configure a different clone")
 }
+
+// Only a machine-wide `preferences.enabled: true` means "every repository".
+// An explicit false, an absent key, or a `repos` entry does not.
+func TestUserTierEnablesEverywhere(t *testing.T) {
+	cases := map[string]struct {
+		file string
+		want bool
+	}{
+		"on":         {`{"preferences": {"enabled": true}}`, true},
+		"off":        {`{"preferences": {"enabled": false}}`, false},
+		"absent":     {`{"preferences": {"telemetry": true}}`, false},
+		"repos only": {`{"repos": {"/somewhere": {"enabled": true}}}`, false},
+		"no file":    {"", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			newUserTierRepo(t)
+			if tc.file != "" {
+				writeUserSettings(t, tc.file)
+			}
+			assert.Equal(t, tc.want, UserTierEnablesEverywhere(t.Context()))
+		})
+	}
+}
