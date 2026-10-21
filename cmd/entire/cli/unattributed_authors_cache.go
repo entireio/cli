@@ -2,38 +2,35 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 	"time"
 
-	"github.com/go-git/go-git/v6/plumbing"
-
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// Cache — <git common dir>/entire-unattributed-authors.json, ONE entry. A
-// successful outcome with candidates is valid while the origin default-branch
-// tip, else HEAD, is unchanged; a no-candidates or skipped outcome only for
+// Cache — <git common dir>/entire-unattributed-authors.json, ONE entry, keyed
+// by unattributedAuthorsCacheKey: the login, the OS username, and every ref
+// the shortlog walk covers. A successful outcome with candidates is valid
+// while that key is unchanged; a no-candidates or skipped outcome only for
 // transientCacheTTL, so neither a clean history nor a failing network call is
 // re-paid (a `git shortlog` walk, or a cell round trip) by every
 // `entire status`. Best-effort: any I/O or decode error is a miss.
 const (
 	unattributedAuthorsCacheFile = "entire-unattributed-authors.json"
 	// transientCacheTTL bounds how long a no-candidates or skipped outcome is
-	// served before detection tries again. Both are transient for the same
-	// reason: candidates come from local refs, not just the cell, so keying a
-	// no-candidates entry to the tip alone would let status miss a brand-new
-	// local commit under a bad address for too long — a quiet repo's tip can
-	// go unchanged for weeks. An outcome that did find candidates and got a
-	// clean read from the cell keeps the until-tip-moves rule below.
+	// served before detection tries again: a later login or a recovered cell
+	// should be noticed without waiting for a ref to move.
 	transientCacheTTL = 10 * time.Minute
 )
 
@@ -46,13 +43,13 @@ const (
 // a future `entire login` hook) must call invalidateUnattributedAuthorsCache.
 //
 // Candidates rides along so a cache hit can be served without ever running
-// `git shortlog`: detection reads the cache by tip before it computes
+// `git shortlog`: detection reads the cache by key before it computes
 // Candidates, and a hit returns the stored list in its place. An entry with
 // no Candidates (logged-in, clean history) is written and read back the same
 // way, but — like a Skipped entry — only within transientCacheTTL; see
 // readUnattributedAuthorsCache.
 type cachedDetection struct {
-	Tip        string               `json:"tip"`
+	Key        string               `json:"key"`
 	RepoID     string               `json:"repo_id,omitempty"` // empty when placement failed
 	Candidates []string             `json:"candidates,omitempty"`
 	Authors    []unattributedAuthor `json:"authors,omitempty"`
@@ -68,19 +65,13 @@ func unattributedAuthorsCacheRoot(commonDir string) (*os.Root, error) {
 	return gitdir.OpenAt(commonDir) //nolint:wrapcheck // gitdir already names the directory and the failure
 }
 
-// readUnattributedAuthorsCache hits when the stored tip equals tip. Detection
+// readUnattributedAuthorsCache hits when the stored key equals key. Detection
 // reads the cache before placement is resolved, so there is no repo id yet to
 // filter by; the stored RepoID (if any) rides along on the returned entry
-// instead.
-//
-// A transient entry — no Candidates, or Skipped — is served only within
-// transientCacheTTL and misses beyond that: candidates come from local refs
-// too, so tip-only invalidation would let a brand-new local commit under a
-// bad address go unnoticed for as long as the tip doesn't move. An entry
-// that did find candidates and got a clean read from the cell has none of
-// that risk and keeps the plain until-tip-moves rule.
-func readUnattributedAuthorsCache(commonDir, tip string, now time.Time) (cachedDetection, bool) {
-	if tip == "" {
+// instead. A transient entry — no Candidates, or Skipped — misses once older
+// than transientCacheTTL.
+func readUnattributedAuthorsCache(commonDir, key string, now time.Time) (cachedDetection, bool) {
+	if key == "" {
 		return cachedDetection{}, false
 	}
 	root, err := unattributedAuthorsCacheRoot(commonDir)
@@ -92,7 +83,7 @@ func readUnattributedAuthorsCache(commonDir, tip string, now time.Time) (cachedD
 		return cachedDetection{}, false
 	}
 	var c cachedDetection
-	if json.Unmarshal(b, &c) != nil || c.Tip != tip {
+	if json.Unmarshal(b, &c) != nil || c.Key != key {
 		return cachedDetection{}, false
 	}
 	if (c.Skipped != "" || len(c.Candidates) == 0) && now.Sub(c.FetchedAt) > transientCacheTTL {
@@ -143,26 +134,52 @@ func invalidateUnattributedAuthorsCacheForRepo(ctx context.Context) {
 	}
 }
 
-// originDefaultTip is the SHA of origin's default-branch tip, else HEAD; ""
-// only when neither resolves. The default-branch chain is the existing one
-// (origin/HEAD → origin/main → origin/master, getDefaultBranchFromRemote); a
-// repo whose remote default branch is something else (e.g. a `develop`
-// default added via `git remote add`) falls back to the current HEAD hash so
-// the cache key still moves with the repo instead of being bypassed on every
-// call.
-func originDefaultTip(ctx context.Context) string {
-	repo, err := gitrepo.OpenCurrent(ctx) // caller owns and closes
-	if err != nil {
+// unattributedAuthorsCacheKey hashes everything a cached result depends on
+// locally: who is logged in (a different account or core sees different
+// counts and repo id), the OS username (it gates the candidates), and refs,
+// the state of every ref the shortlog walk covers (a new commit on any
+// branch can add a candidate). "" when refs is "", meaning no caching.
+func unattributedAuthorsCacheKey(identity, username, refs string) string {
+	if refs == "" {
 		return ""
 	}
-	defer repo.Close()
-	if branch := getDefaultBranchFromRemote(repo); branch != "" {
-		if ref, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branch), true); err == nil {
-			return ref.Hash().String()
+	h := sha256.New()
+	for _, part := range []string{identity, username, refs} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// localRefsState lists HEAD and every ref localCandidateAuthors walks, with
+// their hashes, as one string; "" when git fails or the repo has no refs.
+// Entire's own refs are left out for the same reason shortlog excludes them,
+// and so checkpoint writes do not throw the cache away.
+func localRefsState(ctx context.Context) string {
+	out, err := runGitQuiet(ctx, 16<<20, "show-ref", "--head")
+	if err != nil {
+		logging.Debug(ctx, "unattributed authors: git show-ref failed; cache disabled", "error", err)
+		return ""
+	}
+	var b strings.Builder
+	for line := range strings.Lines(string(out)) {
+		_, name, _ := strings.Cut(strings.TrimSpace(line), " ")
+		if isEntireOwnedRef(name) {
+			continue
 		}
+		b.WriteString(line)
 	}
-	if h, err := repo.Head(); err == nil {
-		return h.Hash().String()
+	return b.String()
+}
+
+// isEntireOwnedRef matches the --exclude patterns in localCandidateAuthors.
+func isEntireOwnedRef(name string) bool {
+	if strings.HasPrefix(name, "refs/entire/") || strings.HasPrefix(name, "refs/heads/entire/") {
+		return true
 	}
-	return ""
+	if rest, ok := strings.CutPrefix(name, "refs/remotes/"); ok {
+		_, branch, _ := strings.Cut(rest, "/")
+		return strings.HasPrefix(branch, "entire/")
+	}
+	return false
 }

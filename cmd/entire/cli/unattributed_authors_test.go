@@ -213,7 +213,7 @@ func detectDepsForTest(t *testing.T, rec *detectRecorder) unattributedAuthorsDep
 		lookupEnv:     func(string) (string, bool) { return "", false },
 		activeContext: func() (*contexts.Context, bool, error) { return &contexts.Context{}, true, nil },
 		commonDir:     func(context.Context) (string, error) { return t.TempDir(), nil },
-		originTip:     func(context.Context) string { return "tip" },
+		refsState:     func(context.Context) string { return "refs" },
 		readCache:     func(string, string, time.Time) (cachedDetection, bool) { return cachedDetection{}, false },
 		writeCache: func(_ string, c cachedDetection) error {
 			rec.wrote = &c
@@ -233,6 +233,13 @@ func detectDepsForTest(t *testing.T, rec *detectRecorder) unattributedAuthorsDep
 		networkTimeout: time.Second,
 		localTimeout:   time.Second,
 	}
+}
+
+// detectCacheKeyForTest is the cache key detection computes from d's fakes.
+func detectCacheKeyForTest(t *testing.T, d unattributedAuthorsDeps) string {
+	t.Helper()
+	identity := loginIdentity(t.Context(), "test", d.lookupEnv, d.activeContext)
+	return unattributedAuthorsCacheKey(identity, d.username(), d.refsState(t.Context()))
 }
 
 func TestDetectUnattributedAuthors(t *testing.T) {
@@ -308,8 +315,8 @@ func TestDetectUnattributedAuthors(t *testing.T) {
 				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
 			}
 		}},
-		{"no tip → nothing cached", func(d *unattributedAuthorsDeps) {
-			d.originTip = func(context.Context) string { return "" }
+		{"no refs → nothing cached", func(d *unattributedAuthorsDeps) {
+			d.refsState = func(context.Context) string { return "" }
 		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
 			if len(out.Authors) != 1 || rec.wrote != nil {
 				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
@@ -352,12 +359,13 @@ func TestDetectUnattributedAuthors_CacheHitSkipsNetworkKeepsRepoID(t *testing.T)
 		t.Fatal("shortlog must not run on a warm cache")
 		return nil
 	}
-	d.readCache = func(_, tip string, _ time.Time) (cachedDetection, bool) {
-		if tip != "tip" {
-			t.Fatalf("readCache(tip=%q), want \"tip\"", tip)
+	wantKey := detectCacheKeyForTest(t, d)
+	d.readCache = func(_, key string, _ time.Time) (cachedDetection, bool) {
+		if key != wantKey {
+			t.Fatalf("readCache(key=%q), want %q", key, wantKey)
 		}
 		return cachedDetection{
-			Tip:        "tip",
+			Key:        wantKey,
 			RepoID:     "01REPO",
 			Candidates: []string{"me@h.local"},
 			Authors:    []unattributedAuthor{{Email: "me@h.local", Count: 4}},
@@ -498,12 +506,12 @@ func TestDetectUnattributedAuthors_LocalAuthorsNotBoundByNetworkTimeout(t *testi
 // A nil-field guard for the production wiring used by doctor and status;
 // `unused` (U1000) would fail the lint gate without a reference. This one
 // reference clears it for defaultUnattributedAuthorsDeps and, through it,
-// defaultOSUsername, localCandidateAuthors and originDefaultTip.
+// defaultOSUsername, localCandidateAuthors and localRefsState.
 func TestDefaultUnattributedAuthorsDeps_Wired(t *testing.T) {
 	t.Parallel()
 	d := defaultUnattributedAuthorsDeps(time.Second, time.Minute)
 	if d.username == nil || d.localAuthors == nil || d.lookupEnv == nil || d.activeContext == nil ||
-		d.commonDir == nil || d.originTip == nil || d.readCache == nil || d.writeCache == nil ||
+		d.commonDir == nil || d.refsState == nil || d.readCache == nil || d.writeCache == nil ||
 		d.resolvePlacement == nil || d.cellClient == nil || d.fetch == nil || d.now == nil {
 		t.Fatal("defaultUnattributedAuthorsDeps left a func field nil")
 	}
@@ -522,16 +530,17 @@ func TestDoctorUnattributedAuthorsDeps_IgnoresCachedResult(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	now := time.Now()
-	statusResult := cachedDetection{Tip: "tip", Candidates: []string{"me@h.local"}, Skipped: "timed out reaching Entire", FetchedAt: now}
+	var rec detectRecorder
+	d := detectDepsForTest(t, &rec)
+	key := detectCacheKeyForTest(t, d)
+	statusResult := cachedDetection{Key: key, Candidates: []string{"me@h.local"}, Skipped: "timed out reaching Entire", FetchedAt: now}
 	if err := writeUnattributedAuthorsCache(dir, statusResult); err != nil {
 		t.Fatal(err)
 	}
-	if _, hit := readUnattributedAuthorsCache(dir, "tip", now); !hit {
+	if _, hit := readUnattributedAuthorsCache(dir, key, now); !hit {
 		t.Fatal("precondition: the status result should be a cache hit")
 	}
 
-	var rec detectRecorder
-	d := detectDepsForTest(t, &rec)
 	doctor := doctorUnattributedAuthorsDeps()
 	d.readCache, d.writeCache = doctor.readCache, doctor.writeCache
 	d.commonDir = func(context.Context) (string, error) { return dir, nil }
@@ -541,7 +550,122 @@ func TestDoctorUnattributedAuthorsDeps_IgnoresCachedResult(t *testing.T) {
 	if !rec.fetched || out.Skipped != "" || len(out.Authors) != 1 {
 		t.Fatalf("out = %+v, fetched = %v; want a fresh fetch, not the cached skip", out, rec.fetched)
 	}
-	if got, hit := readUnattributedAuthorsCache(dir, "tip", now); !hit || got.Skipped != "" || len(got.Authors) != 1 {
+	if got, hit := readUnattributedAuthorsCache(dir, key, now); !hit || got.Skipped != "" || len(got.Authors) != 1 {
 		t.Fatalf("cache after doctor = %+v (hit=%v), want doctor's fresh result", got, hit)
+	}
+}
+
+// A cached result belongs to the login and OS user that produced it. Logging
+// in as someone else (or running as another OS user) must not serve the
+// previous account's counts and repo id.
+func TestDetectUnattributedAuthors_CacheIsPerAccountAndUser(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		switchTo func(*unattributedAuthorsDeps)
+	}{
+		{"other handle, same core", func(d *unattributedAuthorsDeps) {
+			d.activeContext = func() (*contexts.Context, bool, error) {
+				return &contexts.Context{CoreURL: "https://core-a.example", Handle: "bob"}, true, nil
+			}
+		}},
+		{"same handle, other core", func(d *unattributedAuthorsDeps) {
+			d.activeContext = func() (*contexts.Context, bool, error) {
+				return &contexts.Context{CoreURL: "https://core-b.example", Handle: "alice"}, true, nil
+			}
+		}},
+		{"ENTIRE_TOKEN instead of the context", func(d *unattributedAuthorsDeps) {
+			d.lookupEnv = func(string) (string, bool) { return "other-token", true }
+		}},
+		{"other OS user", func(d *unattributedAuthorsDeps) {
+			d.username = func() string { return "you" }
+			d.localAuthors = func(context.Context, string) []string { return []string{"you@h.local"} }
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			var rec detectRecorder
+			d := detectDepsForTest(t, &rec)
+			d.commonDir = func(context.Context) (string, error) { return dir, nil }
+			d.readCache = readUnattributedAuthorsCache
+			d.writeCache = writeUnattributedAuthorsCache
+			d.activeContext = func() (*contexts.Context, bool, error) {
+				return &contexts.Context{CoreURL: "https://core-a.example", Handle: "alice"}, true, nil
+			}
+			if out := detectUnattributedAuthors(t.Context(), d); !rec.fetched || out.RepoID != "01REPO" {
+				t.Fatalf("first run: %+v fetched=%v", out, rec.fetched)
+			}
+
+			rec.fetched = false
+			d.resolvePlacement = func(context.Context) (repoCellPlacement, error) {
+				return repoCellPlacement{RepoID: "01OTHER", Target: &auth.CellTarget{}}, nil
+			}
+			tc.switchTo(&d)
+			out := detectUnattributedAuthors(t.Context(), d)
+			if !rec.fetched || out.RepoID != "01OTHER" {
+				t.Fatalf("after switching: %+v fetched=%v; want a fresh detection, not the first account's cache", out, rec.fetched)
+			}
+		})
+	}
+}
+
+// A new reserved-host commit on a feature branch leaves the origin default
+// tip where it was. The cached result must not hide it.
+func TestDetectUnattributedAuthors_NewCommitOnFeatureBranchMissesCache(t *testing.T) {
+	repoDir := t.TempDir()
+	gitRun(t, repoDir, "init", "-q", "-b", "main")
+	commitAs := func(email string) {
+		t.Helper()
+		gitRun(t, repoDir, "-c", "user.name=Me", "-c", "user.email="+email, "-c", "commit.gpgsign=false",
+			"commit", "-q", "--allow-empty", "-m", "c")
+	}
+	commitAs("me@first.local")
+	gitRun(t, repoDir, "update-ref", "refs/remotes/origin/main", "HEAD")
+	gitRun(t, repoDir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	t.Chdir(repoDir)
+
+	var rec detectRecorder
+	d := defaultUnattributedAuthorsDeps(5*time.Second, 30*time.Second)
+	d.username = func() string { return "me" }
+	d.lookupEnv = func(string) (string, bool) { return "", false }
+	d.activeContext = func() (*contexts.Context, bool, error) {
+		return &contexts.Context{CoreURL: "https://core.example", Handle: "me"}, true, nil
+	}
+	d.commonDir = func(context.Context) (string, error) { return repoDir + "/.git", nil }
+	d.resolvePlacement = func(context.Context) (repoCellPlacement, error) {
+		return repoCellPlacement{RepoID: "01REPO", Target: &auth.CellTarget{}}, nil
+	}
+	d.cellClient = func(context.Context, *auth.CellTarget) (*api.Client, error) {
+		return api.NewClientWithBaseURL("t", "http://unused"), nil
+	}
+	d.fetch = func(_ context.Context, _ *api.Client, _ string, emails []string) ([]unattributedAuthor, error) {
+		rec.fetched = true
+		out := make([]unattributedAuthor, 0, len(emails))
+		for _, e := range emails {
+			out = append(out, unattributedAuthor{Email: e, Count: 1})
+		}
+		return out, nil
+	}
+
+	if out := detectUnattributedAuthors(t.Context(), d); len(out.Candidates) != 1 {
+		t.Fatalf("first run: Candidates = %v, want [me@first.local]", out.Candidates)
+	}
+
+	gitRun(t, repoDir, "checkout", "-q", "-b", "feature")
+	commitAs("me@second.local")
+	out := detectUnattributedAuthors(t.Context(), d)
+	if !slices.Contains(out.Candidates, "me@second.local") {
+		t.Fatalf("after a feature-branch commit: Candidates = %v, want me@second.local included", out.Candidates)
+	}
+
+	// Entire's own refs are not walked for candidates, so writing one must
+	// not throw the cache away.
+	rec.fetched = false
+	gitRun(t, repoDir, "update-ref", "refs/entire/checkpoints/x", "HEAD")
+	gitRun(t, repoDir, "branch", "entire/abc-123")
+	if detectUnattributedAuthors(t.Context(), d); rec.fetched {
+		t.Fatal("an Entire-owned ref changed the cache key; want a cache hit")
 	}
 }

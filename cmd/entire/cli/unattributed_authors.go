@@ -236,8 +236,8 @@ type unattributedAuthorsDeps struct {
 	lookupEnv        func(string) (string, bool)
 	activeContext    func() (*contexts.Context, bool, error)
 	commonDir        func(ctx context.Context) (string, error)
-	originTip        func(ctx context.Context) string
-	readCache        func(commonDir, tip string, now time.Time) (cachedDetection, bool)
+	refsState        func(ctx context.Context) string
+	readCache        func(commonDir, key string, now time.Time) (cachedDetection, bool)
 	writeCache       func(commonDir string, c cachedDetection) error
 	resolvePlacement func(ctx context.Context) (repoCellPlacement, error)
 	cellClient       func(ctx context.Context, target *auth.CellTarget) (*api.Client, error)
@@ -256,7 +256,7 @@ func defaultUnattributedAuthorsDeps(networkTimeout, localTimeout time.Duration) 
 		lookupEnv:     os.LookupEnv,
 		activeContext: auth.ActiveContext,
 		commonDir:     strategy.GetGitCommonDir,
-		originTip:     originDefaultTip,
+		refsState:     localRefsState,
 		readCache:     readUnattributedAuthorsCache,
 		writeCache:    writeUnattributedAuthorsCache,
 		resolvePlacement: func(ctx context.Context) (repoCellPlacement, error) {
@@ -315,14 +315,29 @@ func (o detectionOutcome) linkableAuthors() []unattributedAuthor {
 // log. A context error is logged and treated as logged out, never as a
 // reason to fail the caller.
 func loggedInVia(ctx context.Context, logPrefix string, lookupEnv func(string) (string, bool), activeContext func() (*contexts.Context, bool, error)) bool {
-	if _, ok := lookupEnv(auth.EnvTokenVar); ok {
-		return true
+	return loginIdentity(ctx, logPrefix, lookupEnv, activeContext) != ""
+}
+
+// loginIdentity names who the caller is logged in as, "" when logged out. It
+// keys the detection cache, so it only has to differ between logins: the
+// ENTIRE_TOKEN value (hashed by the cache key, never stored), else the active
+// context's core and handle.
+func loginIdentity(ctx context.Context, logPrefix string, lookupEnv func(string) (string, bool), activeContext func() (*contexts.Context, bool, error)) string {
+	if tok, ok := lookupEnv(auth.EnvTokenVar); ok {
+		return "env\x00" + tok
 	}
-	_, ok, err := activeContext()
+	c, ok, err := activeContext()
 	if err != nil {
 		logging.Debug(ctx, logPrefix+": active context unavailable; treating as logged out", "error", err)
+		return ""
 	}
-	return err == nil && ok
+	if !ok {
+		return ""
+	}
+	if c == nil {
+		return "context"
+	}
+	return "context\x00" + c.CoreURL + "\x00" + c.Handle
 }
 
 // unattributedAuthorsLoggedIn is the cheap (no shortlog, no network) login
@@ -338,7 +353,7 @@ func unattributedAuthorsLoggedIn(ctx context.Context) bool {
 //
 // Order: logged-in (cheap; no shortlog, no network) → logged-out returns
 // Candidates via shortlog immediately, no cache, no network → logged-in
-// reads the cache by tip (stored Candidates/RepoID come back with it) →
+// reads the cache by key (stored Candidates/RepoID come back with it) →
 // local candidates (shortlog; only paid on a cache miss) → placement → cell
 // → cache write. Checking login before shortlog and the cache is what lets a
 // logged-in `entire status` on a warm cache return without ever walking
@@ -351,7 +366,8 @@ func detectUnattributedAuthors(ctx context.Context, d unattributedAuthorsDeps) d
 		return detectionOutcome{}
 	}
 
-	if !loggedInVia(ctx, "unattributed authors", d.lookupEnv, d.activeContext) {
+	identity := loginIdentity(ctx, "unattributed authors", d.lookupEnv, d.activeContext)
+	if identity == "" {
 		lctx, cancel := context.WithTimeout(ctx, d.localTimeout)
 		cands := d.localAuthors(lctx, username)
 		cancel()
@@ -359,10 +375,10 @@ func detectUnattributedAuthors(ctx context.Context, d unattributedAuthorsDeps) d
 	}
 
 	commonDir, cdErr := d.commonDir(ctx)
-	tip := d.originTip(ctx)
+	key := unattributedAuthorsCacheKey(identity, username, d.refsState(ctx))
 	if cdErr != nil {
 		logging.Debug(ctx, "unattributed authors: git common dir unavailable; cache disabled", "error", cdErr)
-	} else if c, hit := d.readCache(commonDir, tip, d.now()); hit {
+	} else if c, hit := d.readCache(commonDir, key, d.now()); hit {
 		return detectionOutcome{LoggedIn: true, Candidates: c.Candidates, RepoID: c.RepoID, Authors: c.Authors, Skipped: c.Skipped}
 	}
 
@@ -375,8 +391,8 @@ func detectUnattributedAuthors(ctx context.Context, d unattributedAuthorsDeps) d
 		// readUnattributedAuthorsCache): otherwise the common case, a
 		// logged-in user with no reserved-host authors, pays for a full
 		// `git shortlog --all` on every single `entire status`.
-		if cdErr == nil && tip != "" {
-			if err := d.writeCache(commonDir, cachedDetection{Tip: tip, FetchedAt: d.now()}); err != nil {
+		if cdErr == nil && key != "" {
+			if err := d.writeCache(commonDir, cachedDetection{Key: key, FetchedAt: d.now()}); err != nil {
 				logging.Debug(ctx, "unattributed authors: cache write failed", "error", err)
 			}
 		}
@@ -403,8 +419,8 @@ func detectUnattributedAuthors(ctx context.Context, d unattributedAuthorsDeps) d
 		}
 		out.Authors = authors
 	}
-	if cdErr == nil && tip != "" {
-		c := cachedDetection{Tip: tip, RepoID: out.RepoID, Candidates: out.Candidates, Authors: out.Authors, Skipped: out.Skipped, FetchedAt: d.now()}
+	if cdErr == nil && key != "" {
+		c := cachedDetection{Key: key, RepoID: out.RepoID, Candidates: out.Candidates, Authors: out.Authors, Skipped: out.Skipped, FetchedAt: d.now()}
 		if err := d.writeCache(commonDir, c); err != nil {
 			logging.Debug(ctx, "unattributed authors: cache write failed", "error", err)
 		}
