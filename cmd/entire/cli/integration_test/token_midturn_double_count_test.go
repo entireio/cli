@@ -38,6 +38,18 @@ func (r *tokenTurnRun) rewriteTranscriptEmpty() {
 	require.NoError(r.t, r.s.TranscriptBuilder.WriteToFile(r.s.TranscriptPath))
 }
 
+// requireLastCheckpointOut asserts the checkpoint the last step recorded
+// exists and holds out tokens, so a turn's pre-commit tokens cannot slide into
+// a later checkpoint and still sum correctly.
+func (r *tokenTurnRun) requireLastCheckpointOut(out int) {
+	r.t.Helper()
+	require.NotEmpty(r.t, r.want, "no checkpoint recorded")
+	last := r.want[len(r.want)-1]
+	u := readCommittedTokenUsage(r.t, r.env, last.id)
+	require.NotNil(r.t, u, "%s: checkpoint holds no token usage", last.step)
+	require.Equal(r.t, out, u.OutputTokens, "%s: checkpoint must hold the pre-commit tokens", last.step)
+}
+
 // dropPrePromptState removes the turn's pre-prompt state, as a lost or
 // unreadable one would be, so Stop counts the turn from the transcript start.
 func (r *tokenTurnRun) dropPrePromptState() {
@@ -173,6 +185,51 @@ func TestTokenScope_MidTurnConsumptionThenStop(t *testing.T) {
 				r.start(30, 0, "b.txt") // the offset lies past this turn's start, but no condensation moved it
 				r.stop()
 				r.commit("b.txt")
+			},
+		},
+		{
+			name: "transcript rewritten shorter, then an agent commit mid-turn",
+			run: func(r *tokenTurnRun) {
+				r.start(10, 0, "a.txt") // 6 lines: the token offset lands at 6
+				r.stop()
+				r.commit("a.txt")
+				r.rewriteTranscriptEmpty()
+				r.start(30, 0, "b.txt", "c.txt") // 8 lines, counted from 0
+				r.agentCommit("b.txt")
+				r.requireLastCheckpointOut(30)
+				r.stop()
+				r.commit("c.txt")
+			},
+		},
+		{
+			name: "transcript rewritten shorter, then two agent commits mid-turn",
+			run: func(r *tokenTurnRun) {
+				r.start(10, 0, "a.txt")
+				r.stop()
+				r.commit("a.txt")
+				r.rewriteTranscriptEmpty()
+				r.start(30, 0, "b.txt", "c.txt", "d.txt")
+				r.agentCommit("b.txt")
+				r.requireLastCheckpointOut(30)
+				r.more(5)
+				r.agentCommit("c.txt")
+				r.requireLastCheckpointOut(5)
+				r.stop()
+				r.commit("d.txt")
+			},
+		},
+		{
+			name: "transcript rewritten to as many lines as the token offset, then an agent commit",
+			run: func(r *tokenTurnRun) {
+				r.start(10, 0, "a.txt", "x.txt") // 8 lines: the token offset lands at 8
+				r.stop()
+				r.commit("a.txt", "x.txt")
+				r.rewriteTranscriptEmpty()
+				r.start(30, 0, "b.txt", "c.txt") // 8 lines again: the commit leaves the offset where it was
+				r.agentCommit("b.txt")
+				r.requireLastCheckpointOut(30)
+				r.stop()
+				r.commit("c.txt")
 			},
 		},
 		{

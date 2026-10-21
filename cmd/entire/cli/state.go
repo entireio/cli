@@ -255,8 +255,20 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 	// skipped-scan marker tells turn-end to disable new-file detection.
 	untrackedFiles, scanSkipped := untrackedFilesOrSkip(ctx)
 
-	// Get transcript position using TranscriptAnalyzer if available
+	// Read the token offset before measuring the transcript: a condensation
+	// that moves it in between then fails rebaseStaleTokenStart's
+	// compare-and-set instead of being rebased over.
+	var tokenStart *int
+	if session, loadErr := strategy.LoadSessionState(ctx, sessionID); loadErr == nil && session != nil {
+		start := session.TokenStart()
+		tokenStart = &start
+	}
+
+	// Get transcript position using TranscriptAnalyzer if available.
+	// positionKnown is false when the 0 offset only means "could not tell":
+	// agents report (0, nil) for a missing transcript too.
 	var transcriptOffset int
+	positionKnown := false
 	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok && sessionRef != "" {
 		pos, posErr := analyzer.GetTranscriptPosition(sessionRef)
 		if posErr != nil {
@@ -264,6 +276,8 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 				slog.String("error", posErr.Error()))
 		} else {
 			transcriptOffset = pos
+			_, statErr := os.Stat(sessionRef)
+			positionKnown = statErr == nil
 		}
 	}
 
@@ -277,10 +291,11 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		TranscriptOffset:     transcriptOffset,
 	}
 
-	if session, loadErr := strategy.LoadSessionState(ctx, sessionID); loadErr == nil && session != nil {
-		tokenStart := session.TokenStart()
-		state.TokenStart = &tokenStart
+	if tokenStart != nil && positionKnown && transcriptOffset < *tokenStart && recountsTurnTokensFromTranscript(ag) {
+		rebased := rebaseStaleTokenStart(ctx, sessionID, *tokenStart, transcriptOffset)
+		tokenStart = &rebased
 	}
+	state.TokenStart = tokenStart
 
 	// Out-of-band token baseline: agents whose token usage lives outside the
 	// transcript (Antigravity) snapshot their cumulative token position now so
@@ -307,6 +322,57 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		slog.Int("untracked_files", len(untrackedFiles)),
 		slog.Int("transcript_offset", transcriptOffset))
 	return nil
+}
+
+// recountsTurnTokensFromTranscript reports whether the agent's turn tokens
+// are counted from the transcript at the session's token offset. Out-of-band
+// usage (Antigravity) never reads the offset, and a late writer's transcript
+// can read short at turn start while its last turn is still being flushed.
+func recountsTurnTokensFromTranscript(ag agent.Agent) bool {
+	if _, ok := agent.AsOutOfBandTokenSource(ag); ok {
+		return false
+	}
+	_, late := agent.AsLateTranscriptWriter(ag)
+	return !late
+}
+
+// rebaseStaleTokenStart moves the session's token offset down to pos, the
+// transcript's length at turn start, and returns the offset the turn starts
+// from. A transcript rewritten shorter than the offset (a forced resume from
+// an older checkpoint) leaves the offset pointing past the transcript, so a
+// condensation during the turn would count from there, store none of the
+// turn's earlier tokens, and move the offset to the end; turn end would then
+// take those tokens as stored. Everything from pos on belongs to this turn.
+//
+// It only rebases while the offset is still tokenStart, the value the caller
+// read before measuring the transcript, so a condensation that moved it in
+// between wins. Any failure (the TurnStart lock wait expiring included) keeps
+// tokenStart: the turn then behaves as it did without the rebase.
+func rebaseStaleTokenStart(ctx context.Context, sessionID string, tokenStart, pos int) int {
+	rebased := false
+	err := strategy.MutateSessionState(ctx, sessionID, func(s *strategy.SessionState) error {
+		if s.TokenStart() != tokenStart || pos >= tokenStart {
+			return strategy.ErrMutationSkip
+		}
+		s.SetTokenStart(pos)
+		rebased = true
+		return nil
+	})
+	logCtx := logging.WithComponent(ctx, "state")
+	if err != nil {
+		logging.Warn(logCtx, "failed to rebase stale token offset",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		return tokenStart
+	}
+	if !rebased {
+		return tokenStart
+	}
+	logging.Info(logCtx, "rebased token offset past the transcript to turn start",
+		slog.String("session_id", sessionID),
+		slog.Int("token_start", tokenStart),
+		slog.Int("transcript_offset", pos))
+	return pos
 }
 
 // LoadPrePromptState loads previously captured state.
