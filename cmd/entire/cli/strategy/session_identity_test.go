@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -286,6 +287,28 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 		assert.Equal(t, "sess-live", got[0].SessionID)
 	})
 
+	t.Run("an ended session kept only for its tokens does not veto a live one", func(t *testing.T) {
+		// Headless automation in one worktree ended a no-change turn: its state
+		// is kept for the tokens, but it has nothing a commit could carry.
+		dir := identityTestRepo(t)
+		wtEnded := addSiblingWorktree(t, dir, "ended")
+		wtLive := addSiblingWorktree(t, dir, "live")
+		saveIdentitySession(t, "sess-ended-headless", func(st *SessionState) {
+			st.WorktreePath = wtEnded
+			st.Phase = session.PhaseEnded
+			st.CheckpointTokenUsage = &agent.TokenUsage{InputTokens: 20, APICallCount: 1}
+		})
+		saveIdentitySession(t, "sess-live", func(st *SessionState) {
+			st.WorktreePath = wtLive
+		})
+
+		s := NewManualCommitStrategy()
+		got, err := s.findSessionsForWorktree(ctx, dir)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "sess-live", got[0].SessionID)
+	})
+
 	t.Run("all candidates stale still declines", func(t *testing.T) {
 		// The liveness filter must not turn "everything is days idle" into a
 		// guess: with no recently-interacting session, spanning worktrees
@@ -529,5 +552,32 @@ func TestIsNearerOwner_Contract(t *testing.T) {
 					c.depth, c.bestDepth, c.state.SessionID, c.best.SessionID, got, c.want)
 			}
 		})
+	}
+}
+
+// A commit hook walks its process ancestry once, however many identity
+// decisions read it; outside a hook every read walks.
+func TestCommitAncestry_OneWalkPerHook(t *testing.T) { //nolint:paralleltest // swaps currentAncestry
+	walks := 0
+	old := currentAncestry
+	t.Cleanup(func() { currentAncestry = old })
+	currentAncestry = func() (proclive.Ancestry, bool) {
+		walks++
+		return proclive.Ancestry{}, true
+	}
+
+	ctx := withCommitAncestry(context.Background())
+	ctx = withCommitAncestry(ctx) // nested hook entry keeps the snapshot
+	commitAncestry(ctx)
+	commitAncestry(ctx)
+	newCommitProvenance(ctx, nil)
+	if walks != 1 {
+		t.Fatalf("walks in one hook = %d, want 1", walks)
+	}
+
+	commitAncestry(context.Background())
+	commitAncestry(context.Background())
+	if walks != 3 {
+		t.Fatalf("walks without a hook snapshot = %d, want 3", walks)
 	}
 }

@@ -3,6 +3,7 @@ package redact
 import (
 	"log/slog"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -113,7 +114,16 @@ var emailAllowPatterns = []string{
 	"actions@",                  // GitHub Actions bot
 	"@users.noreply.github.com", // GitHub user noreply
 	"@noreply.github.com",       // GitHub noreply
-	"git@",                      // SSH user of git hosts (git@github.com:org/repo.git)
+}
+
+// gitSSHHosts are public git hosts whose SSH login is git@<host>, so the
+// address names the login even without remote syntax (ssh -T git@github.com).
+var gitSSHHosts = []string{
+	"github.com", "ssh.github.com",
+	"gitlab.com", "altssh.gitlab.com",
+	"bitbucket.org", "altssh.bitbucket.org",
+	"codeberg.org",
+	"ssh.dev.azure.com",
 }
 
 // isAllowlistedEmail returns true if the email matches a known non-sensitive pattern.
@@ -137,6 +147,34 @@ func isAllowlistedEmail(email string) bool {
 		}
 	}
 	return false
+}
+
+// isGitSSHUser reports whether the email-shaped match s[start:end] is the git
+// SSH login of a remote rather than a mailbox: URL userinfo (ssh://git@host),
+// an scp-style remote (git@host:path), or a known git host.
+func isGitSSHUser(s string, start, end int) bool {
+	user, host, _ := strings.Cut(s[start:end], "@")
+	if !strings.EqualFold(user, "git") {
+		return false
+	}
+	if strings.HasSuffix(s[:start], "://") {
+		return true
+	}
+	if end < len(s) && s[end] == ':' && isSCPRemotePath(s[end+1:]) {
+		return true
+	}
+	return slices.Contains(gitSSHHosts, strings.ToLower(host))
+}
+
+// isSCPRemotePath reports whether rest, the text after git@host:, starts with
+// a repository path: one containing '/' or ending in .git. A word or a port
+// after the colon ("git@host: thanks", "git@host:8080") is not a remote.
+func isSCPRemotePath(rest string) bool {
+	if end := strings.IndexAny(rest, " \t\r\n\"'`\\"); end >= 0 {
+		rest = rest[:end]
+	}
+	path := strings.TrimRight(rest, ".,;:!?)]}>")
+	return strings.Contains(path, "/") || strings.HasSuffix(path, ".git")
 }
 
 // builtinPIIPattern associates a compiled regex with a category and label.
@@ -167,8 +205,9 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 	var regions []taggedRegion
 	for _, p := range patterns {
 		for _, loc := range p.regex.FindAllStringIndex(s, -1) {
-			// Skip allowlisted email addresses (noreply, bot accounts, etc.).
-			if p.label == labelEmail && isAllowlistedEmail(s[loc[0]:loc[1]]) {
+			// Skip allowlisted email addresses (noreply, bot accounts, etc.)
+			// and the git login of a remote.
+			if p.label == labelEmail && (isAllowlistedEmail(s[loc[0]:loc[1]]) || isGitSSHUser(s, loc[0], loc[1])) {
 				continue
 			}
 			// Skip phone-shaped digits that run on into a longer number.

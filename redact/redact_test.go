@@ -1311,6 +1311,11 @@ func TestString_ContentDigestsPreserved(t *testing.T) {
 			want:  `"integrity": "sha512-V+Cu1AWSsxpqjQMOTazGG8sOGKWCyRowpjMMscqVu8Szrs1RcmQH0p3H+rPrcJdV6cwNweumkNyN+MUrRW32lg=="`,
 		},
 		{
+			name:  "package-lock sha512 integrity containing a slash",
+			input: `"integrity": "sha512-XRcglhh3p2lHAu4gFg75i5owZ3/uttIZh11iKj+W2fqc4Iu8OvwIHkDSftaw4gURo0WA2fT2oguwTa4HChLwJw=="`,
+			want:  `"integrity": "sha512-XRcglhh3p2lHAu4gFg75i5owZ3/uttIZh11iKj+W2fqc4Iu8OvwIHkDSftaw4gURo0WA2fT2oguwTa4HChLwJw=="`,
+		},
+		{
 			name:  "script sha384 integrity containing a slash",
 			input: `<script src="b.js" integrity="sha384-u0KDATKxW9gkYb7bXw2KbKqvfS5Om9AbuB51MpH1J/GU9BxXwQ7fE8gD0sKuq4eE"></script>`,
 			want:  `<script src="b.js" integrity="sha384-u0KDATKxW9gkYb7bXw2KbKqvfS5Om9AbuB51MpH1J/GU9BxXwQ7fE8gD0sKuq4eE"></script>`,
@@ -1331,11 +1336,16 @@ func TestString_ContentDigestsPreserved(t *testing.T) {
 			want:  `"integrity": "REDACTED"`,
 		},
 		{
+			name:  "digest prefix with the wrong length containing a slash is redacted",
+			input: `"integrity": "sha512-XRcglhh3p2lHAu4gFg75i5owZ3/uttIZh11iKj+W2fqc4Iu8Ovw"`,
+			want:  `"integrity": "sha512-REDACTED"`,
+		},
+		{
 			// The first 64 characters have a sha384 digest's length, and the
 			// slash splits the entropy match inside them.
 			name:  "overlong digest is redacted",
 			input: `integrity="sha384-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/A"`,
-			want:  `integrity="REDACTED/A"`,
+			want:  `integrity="REDACTED"`,
 		},
 		{
 			name:  "secret between two digests is redacted",

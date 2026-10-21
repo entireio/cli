@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,7 +38,14 @@ func newTrailLinkCmd() *cobra.Command {
 			if err := validateProjectTrailBranch(cmd, branch, action); err != nil {
 				return err
 			}
-			target, err := resolveProjectTrailBySelector(cmd, args[0])
+			if err := validateProjectTrailSelector(args[0]); err != nil {
+				return err
+			}
+			target, repoID, err := resolveRepositoryProjectTrailTarget(cmd)
+			if err != nil {
+				return err
+			}
+			target, err = target.resolveSelector(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -45,24 +53,14 @@ func newTrailLinkCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if etag == "" {
-				return errors.New("trail read returned no ETag; refusing an unprotected link")
-			}
 			if fields.Title == "" {
 				fields.Title = branch // Stable across retries even if the parent's title changes.
 			}
-			request, err := projectTrailChangeRequest(cmd, fields, branch, base, action)
-			if err != nil {
-				return err
-			}
+			request := projectTrailChangeRequest(fields, repoID, branch, base, action)
 			key = projectTrailIdempotencyKey(cmd.ErrOrStderr(), key)
-			var out api.ChangeCreateResponse
-			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, target.path()+"/changes", request,
-				http.Header{"If-Match": {etag}, "Idempotency-Key": {key}}, &out); err != nil {
+			out, err := linkProjectTrailChange(cmd.Context(), target, request, etag, key)
+			if err != nil {
 				return fmt.Errorf("link branch (retry with --idempotency-key %s and the same fields): %w", key, err)
-			}
-			if !looksLikeULID(out.ID) || out.TrailID != target.TrailID || out.RepositoryID != request.RepositoryID {
-				return errors.New("branch link response identity does not match the request")
 			}
 			if jsonRequested(cmd) {
 				return printJSON(cmd.OutOrStdout(), map[string]string{"trailId": out.TrailID, "repositoryId": out.RepositoryID, "branch": branch})
@@ -75,6 +73,21 @@ func newTrailLinkCmd() *cobra.Command {
 	addProjectTrailCreationFlags(cmd, &branch, &base, &action, &key)
 	addJSONFlag(cmd)
 	return cmd
+}
+
+func linkProjectTrailChange(ctx context.Context, target *projectTrailTarget, request api.ChangeCreateRequest, etag, key string) (api.ChangeCreateResponse, error) {
+	var out api.ChangeCreateResponse
+	if etag == "" {
+		return out, errors.New("trail response returned no ETag; refusing an unprotected link")
+	}
+	if _, err := target.Client.ProjectTrailRequest(ctx, http.MethodPost, target.path()+"/changes", request,
+		http.Header{"If-Match": {etag}, "Idempotency-Key": {key}}, &out); err != nil {
+		return out, fmt.Errorf("create Change: %w", err)
+	}
+	if !looksLikeULID(out.ID) || out.TrailID != target.TrailID || out.RepositoryID != request.RepositoryID {
+		return out, errors.New("branch link response identity does not match the request")
+	}
+	return out, nil
 }
 
 func newTrailUnlinkCmd() *cobra.Command {

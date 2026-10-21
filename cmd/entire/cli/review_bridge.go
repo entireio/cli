@@ -350,20 +350,19 @@ func topLevelMarkedFindingText(line string) (string, bool) {
 	return trimmed, true
 }
 
-// trailWebURL builds the browser URL for a trail, matching the server's
-// `<base>/<forge>/<owner>/<repo>/trails/<number>/<branch>` layout (the web UI
-// shares the API origin). Returns "" when the target lacks the parts needed for
-// a stable link.
+// trailReviewWebURL builds the browser URL for a trail, matching the server's
+// `<web-origin>/<forge>/<owner>/<repo>/trails/<number>/<branch>` layout.
+// Returns "" when the target lacks the parts needed for a stable link.
 func trailReviewWebURL(target trailReviewTarget) string {
 	if target.Trail.Number <= 0 || target.Host == "" || target.Owner == "" || target.Repo == "" {
 		return ""
 	}
-	base, err := auth.DataBaseURL()
+	base, err := auth.WebBaseURL()
 	if err != nil {
 		return ""
 	}
 	return fmt.Sprintf("%s/%s/%s/%s/trails/%d/%s",
-		strings.TrimRight(base, "/"), target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.Branch)
+		base, target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.Branch)
 }
 
 // launchableReviewerFor returns the AgentReviewer for agents with a review-runner

@@ -31,6 +31,7 @@ type projectTrailTarget struct {
 	Project   string
 	BasePath  string
 	TrailID   string
+	RepoRef   string // Canonical destination when resolved through repository access.
 	// Number is the project-local trail number when the resolution path
 	// learned it (a numeric selector or a parent reference); 0 otherwise.
 	Number int

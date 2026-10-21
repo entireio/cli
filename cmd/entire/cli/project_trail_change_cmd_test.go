@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,48 +30,38 @@ func setupProjectTrailRepoPlacement(t *testing.T) {
 	t.Cleanup(func() { newCellCoreClient = old })
 }
 
-func TestProjectTrailCreateWithInitialChange(t *testing.T) {
-	setupProjectTrailRepoPlacement(t)
-	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "/api/v1/gh/acme/trails", r.URL.Path)
-		assert.NotEmpty(t, r.Header.Get("Idempotency-Key"))
-		assert.Empty(t, r.Header.Get("If-Match"))
-		var request api.ProjectTrailCreateRequest
-		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&request)) {
-			return
-		}
-		if !assert.Len(t, request.Changes, 1) {
-			return
-		}
-		assert.Equal(t, "feature/new", request.Changes[0].BranchName)
-		assert.Equal(t, "repo-id", request.Changes[0].RepositoryID)
-		assert.Equal(t, "link", request.Changes[0].BranchAction)
-		w.WriteHeader(http.StatusCreated)
-		assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
-	})
-	_, _, err := executeProjectTrailTest(t, "create", "--project", "gh/acme", "--repo", "gh/acme/widget", "--title", "Intent", "--branch", "feature/new")
-	require.NoError(t, err)
+func TestProjectTrailCreateWithChange(t *testing.T) {
+	for _, forge := range []string{"gh", "et"} {
+		t.Run(forge, func(t *testing.T) {
+			var methods []string
+			handler := repositoryTrailCreationHandler(t, forge, func(change api.ChangeCreateRequest) {
+				assert.Equal(t, "feature/new", change.BranchName)
+				assert.Equal(t, "Intent", change.Title)
+				assert.Equal(t, "link", change.BranchAction)
+			})
+			_, project := setupRepositoryTrailCreation(t, forge, func(w http.ResponseWriter, r *http.Request) {
+				methods = append(methods, r.Method)
+				if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/changes") {
+					assert.Equal(t, "change-key", r.Header.Get("Idempotency-Key"))
+				}
+				handler(w, r)
+			})
+			_, _, err := executeProjectTrailTest(t, "create", "--project", forge+"/acme", "--repo", forge+"/acme/widget", "--title", "Intent", "--branch", "feature/new", "--idempotency-key", "change-key")
+			require.NoError(t, err)
+			require.Zero(t, project.resolveCalls)
+			require.Equal(t, []string{http.MethodPost, http.MethodPost, http.MethodGet}, methods)
+		})
+	}
 }
 
 func TestProjectTrailCreateLinksCurrentBranchByDefault(t *testing.T) {
 	// Not parallel: isolates git CWD and replaces project/repository constructors.
 	dir, remote := setupProjectTrailPublication(t)
 	testutil.RunGit(t, dir, "checkout", "-b", "feature/current")
-	setupProjectTrailRepoPlacement(t)
-	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		var request api.ProjectTrailCreateRequest
-		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&request)) {
-			return
-		}
-		if !assert.Len(t, request.Changes, 1) {
-			return
-		}
-		assert.Equal(t, "feature/current", request.Changes[0].BranchName)
-		assert.Equal(t, "link", request.Changes[0].BranchAction)
-		assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
-	})
+	setupRepositoryTrailCreation(t, "gh", repositoryTrailCreationHandler(t, "gh", func(change api.ChangeCreateRequest) {
+		assert.Equal(t, "feature/current", change.BranchName)
+		assert.Equal(t, "link", change.BranchAction)
+	}))
 	_, _, err := executeProjectTrailTest(t, "create", "--title", "Intent")
 	require.NoError(t, err)
 	require.Equal(t, "feature/current\n", testutil.RunGit(t, dir, "branch", "--show-current"))
@@ -78,9 +69,8 @@ func TestProjectTrailCreateLinksCurrentBranchByDefault(t *testing.T) {
 }
 
 func TestProjectTrailLinkRequiresParentAndRetryHeaders(t *testing.T) {
-	setupProjectTrailRepoPlacement(t)
 	var methods []string
-	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+	_, project := setupRepositoryTrailCreation(t, "gh", func(w http.ResponseWriter, r *http.Request) {
 		methods = append(methods, r.Method)
 		if r.Method == http.MethodGet {
 			assert.Equal(t, projectTrailTestPath, r.URL.Path)
@@ -95,17 +85,18 @@ func TestProjectTrailLinkRequiresParentAndRetryHeaders(t *testing.T) {
 		assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 		assert.Equal(t, "link", request.BranchAction)
 		assert.Equal(t, "feature/existing", request.BranchName)
-		assert.Equal(t, "repo-id", request.RepositoryID)
+		assert.Equal(t, projectTrailTestChange, request.RepositoryID)
 		w.WriteHeader(http.StatusCreated)
-		assert.NoError(t, json.NewEncoder(w).Encode(api.ChangeCreateResponse{ID: projectTrailTestChange, TrailID: projectTrailTestID, RepositoryID: "repo-id"}))
+		assert.NoError(t, json.NewEncoder(w).Encode(api.ChangeCreateResponse{ID: projectTrailTestChange, TrailID: projectTrailTestID, RepositoryID: projectTrailTestChange}))
 	})
 	out, _, err := executeProjectTrailTest(t, "link", projectTrailTestID, "--project", "gh/acme", "--repo", "gh/acme/widget",
 		"--title", "Work", "--branch", "feature/existing", "--idempotency-key", "retry-link", "--json")
 	require.NoError(t, err)
 	require.Contains(t, out, projectTrailTestID)
 	require.Contains(t, out, "feature/existing")
-	require.NotContains(t, out, projectTrailTestChange)
+	require.NotContains(t, out, `"id":`)
 	require.Equal(t, []string{http.MethodGet, http.MethodPost}, methods)
+	require.Zero(t, project.resolveCalls)
 }
 
 func TestProjectTrailLinkSelectorGuidanceMatchesAcceptedForms(t *testing.T) {

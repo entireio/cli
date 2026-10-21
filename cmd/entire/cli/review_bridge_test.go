@@ -311,6 +311,7 @@ func TestSplitReviewVerdictFindingsNumberedList(t *testing.T) {
 
 func TestTrailReviewWebURL(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
+	t.Setenv(api.WebBaseURLEnvVar, "")
 
 	cases := []struct {
 		name   string
@@ -325,7 +326,7 @@ func TestTrailReviewWebURL(t *testing.T) {
 				Repo:  "cli",
 				Trail: api.TrailResource{Number: 466, Branch: "review-profiles"},
 			},
-			want: "https://entire.io/gh/entireio/cli/trails/466/review-profiles",
+			want: "https://entire.com/gh/entireio/cli/trails/466/review-profiles",
 		},
 		{
 			name: "no trail number yields no link",
@@ -358,6 +359,7 @@ func TestTrailReviewWebURL(t *testing.T) {
 
 func TestTrailReviewWebURL_HonorsCustomBase(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, "https://entire.example.com/")
+	t.Setenv(api.WebBaseURLEnvVar, "")
 	target := trailReviewTarget{
 		Host:  "gh",
 		Owner: "acme",
@@ -365,6 +367,21 @@ func TestTrailReviewWebURL_HonorsCustomBase(t *testing.T) {
 		Trail: api.TrailResource{Number: 7, Branch: "feat/x"},
 	}
 	want := "https://entire.example.com/gh/acme/app/trails/7/feat/x"
+	if got := trailReviewWebURL(target); got != want {
+		t.Errorf("trailReviewWebURL() = %q, want %q", got, want)
+	}
+}
+
+func TestTrailReviewWebURL_HonorsWebBaseOverride(t *testing.T) {
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
+	t.Setenv(api.WebBaseURLEnvVar, "http://localhost:5173/")
+	target := trailReviewTarget{
+		Host:  "gh",
+		Owner: "acme",
+		Repo:  "app",
+		Trail: api.TrailResource{Number: 7, Branch: "feat/x"},
+	}
+	want := "http://localhost:5173/gh/acme/app/trails/7/feat/x"
 	if got := trailReviewWebURL(target); got != want {
 		t.Errorf("trailReviewWebURL() = %q, want %q", got, want)
 	}
