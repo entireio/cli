@@ -112,8 +112,9 @@ func resolveTranscriptPath(ctx context.Context, state *SessionState) (string, er
 // would find no transcript and no stored copy, and leave its trailer pointing
 // at a checkpoint that is never written.
 //
-// It applies only where the recorded path is the one the agent derives for the
-// session's home, so a path from attach, import or an env override is never
+// It applies only where the recorded path is one the agent derives for the
+// session's home or a directory inside it (a session launched from a
+// subdirectory), so a path from attach, import or an env override is never
 // second-guessed, and never to external agents, whose session-dir lookup
 // starts a process. The worktree this process runs in is tried first, then
 // the repository's other worktrees. The file name is the session's own ID.
@@ -121,8 +122,14 @@ func movedTranscriptPath(ctx context.Context, ag agent.Agent, state *SessionStat
 	if state.WorktreePath == "" || external.IsExternal(ag) {
 		return ""
 	}
-	recordedDir := filepath.Dir(state.TranscriptPath)
-	if homeDir, err := ag.GetSessionDir(state.WorktreePath); err != nil || filepath.Clean(homeDir) != filepath.Clean(recordedDir) {
+	recordedDir := filepath.Clean(filepath.Dir(state.TranscriptPath))
+	homeDir, err := ag.GetSessionDir(state.WorktreePath)
+	if err != nil {
+		return ""
+	}
+	homeDir = filepath.Clean(homeDir)
+	projectsDir := filepath.Dir(homeDir)
+	if filepath.Dir(recordedDir) != projectsDir || !sessionDirWithin(filepath.Base(recordedDir), filepath.Base(homeDir)) {
 		return ""
 	}
 	current, err := paths.WorktreeRoot(ctx)
@@ -133,23 +140,48 @@ func movedTranscriptPath(ctx context.Context, ag agent.Agent, state *SessionStat
 	if others, err := gitrepo.ListWorktreePaths(ctx, current); err == nil {
 		roots = append(roots, others...)
 	}
-	seen := map[string]bool{filepath.Clean(recordedDir): true}
+	var worktreeDirs []string
 	for _, root := range roots {
-		dir, err := ag.GetSessionDir(root)
-		if err != nil || seen[filepath.Clean(dir)] {
-			continue
+		if dir, err := ag.GetSessionDir(root); err == nil && filepath.Dir(filepath.Clean(dir)) == projectsDir {
+			worktreeDirs = append(worktreeDirs, filepath.Base(dir))
 		}
-		seen[filepath.Clean(dir)] = true
-		store, err := agent.OpenSessionStoreAt(ag, dir)
-		if err != nil {
-			continue
-		}
-		name, resolved, err := store.SessionFile(agentSessionID)
-		if err == nil && store.Exists(name) {
-			return resolved
+	}
+	// The agent's session dirs share one parent, its projects dir, and the
+	// session may run in any directory of a worktree, so every dir named for a
+	// worktree or a directory inside it is a candidate.
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return ""
+	}
+	seen := map[string]bool{filepath.Base(recordedDir): true}
+	for _, worktreeDir := range worktreeDirs {
+		for _, entry := range entries {
+			name := entry.Name()
+			if !entry.IsDir() || seen[name] || !sessionDirWithin(name, worktreeDir) {
+				continue
+			}
+			seen[name] = true
+			store, err := agent.OpenSessionStoreAt(ag, filepath.Join(projectsDir, name))
+			if err != nil {
+				continue
+			}
+			file, resolved, err := store.SessionFile(agentSessionID)
+			if err == nil && store.Exists(file) {
+				return resolved
+			}
 		}
 	}
 	return ""
+}
+
+// sessionDirWithin reports whether the session dir named dir is the one for
+// the directory whose session dir is named base, or for a directory inside it.
+// Claude Code names a session dir by replacing each non-alphanumeric character
+// of the path with '-', so a directory inside base's is named base + "-" +
+// more. That also matches a sibling sharing the prefix (/x/cli-web for
+// /x/cli); the candidates are only ever probed for the session's own ID.
+func sessionDirWithin(dir, base string) bool {
+	return dir == base || strings.HasPrefix(dir, base+"-")
 }
 
 func logMovedTranscript(ctx context.Context, state *SessionState, path string) {
