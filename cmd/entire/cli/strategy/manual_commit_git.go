@@ -120,7 +120,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
-		applyTurnTokenUsage(state, step.TokenUsage)
+		applyTurnTokenUsage(state, step.TokenUsage, pendingTurnTokenUsage(state, step.TokenUsage, step.StepTranscriptStart, step.PendingTokenUsageFrom))
 
 		logCtx := logging.WithComponent(ctx, "checkpoint")
 		logging.Info(logCtx, "checkpoint saved",
@@ -155,19 +155,52 @@ func withoutStaleSubagentSnapshot(usage *agent.TokenUsage, ledgerVersion *uint64
 	return types.WithClearedSubagentTokens(usage, false)
 }
 
+// TurnTokenRecount recounts a turn's main-agent token usage from a transcript
+// offset, the way the turn's usage was counted from the turn start.
+type TurnTokenRecount func(from int) *agent.TokenUsage
+
+// pendingTurnTokenUsage returns the part of a turn's usage that no checkpoint
+// has stored. A condensation during the turn (an agent commit, an attach)
+// stored the turn up to the token offset and moved it past turnStart; counting
+// the whole turn as pending would store that part again whenever the next
+// condensation's own recount finds nothing and falls back to the pending
+// usage. The main-agent counters are then recounted from the token offset; the
+// cumulative subagent snapshot is kept, since applyTurnTokenUsage rescopes it
+// against the baseline. Without a recount (hook-reported or out-of-band usage,
+// which a mid-turn condensation stores none of) the whole turn stays pending.
+// It must run under the session lock that applies the result, so a concurrent
+// condensation cannot move the token offset in between.
+func pendingTurnTokenUsage(state *SessionState, usage *agent.TokenUsage, turnStart int, recount TurnTokenRecount) *agent.TokenUsage {
+	from := state.TokenStart()
+	if usage == nil || recount == nil || from <= turnStart {
+		return usage
+	}
+	pending := *usage
+	main := recount(from)
+	if main == nil {
+		main = &agent.TokenUsage{}
+	}
+	pending.InputTokens = main.InputTokens
+	pending.CacheCreationTokens = main.CacheCreationTokens
+	pending.CacheReadTokens = main.CacheReadTokens
+	pending.OutputTokens = main.OutputTokens
+	pending.APICallCount = main.APICallCount
+	return &pending
+}
+
 // applyTurnTokenUsage records one turn's token usage on state: it adds the
-// per-turn counters to both the session total (TokenUsage) and the pending
-// checkpoint window (CheckpointTokenUsage), and rescopes the window's
-// cumulative SubagentTokens against the baseline. SaveStep and
-// ApplyTurnTokenUsage (turns that change no files) both go through
-// here, so a turn is accounted the same way whichever path records it. A nil
-// usage is a no-op.
-func applyTurnTokenUsage(state *SessionState, usage *agent.TokenUsage) {
+// per-turn counters to the session total (TokenUsage) and the pending ones (see
+// pendingTurnTokenUsage) to the pending checkpoint window
+// (CheckpointTokenUsage), and rescopes the window's cumulative SubagentTokens
+// against the baseline. SaveStep and ApplyTurnTokenUsage (turns that change no
+// files) both go through here, so a turn is accounted the same way whichever
+// path records it. A nil usage is a no-op.
+func applyTurnTokenUsage(state *SessionState, usage, pending *agent.TokenUsage) {
 	if usage == nil {
 		return
 	}
 	state.TokenUsage = accumulateTokenUsage(state.TokenUsage, usage)
-	state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, usage)
+	state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, pending)
 	// usage.SubagentTokens is a cumulative-since-session-start
 	// snapshot (agent IDs are discovered from the full transcript and each
 	// subagent's own transcript is re-read from its start on every call —
