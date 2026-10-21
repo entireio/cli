@@ -55,8 +55,7 @@ type managedScaffoldResult struct {
 // root, not the caller-joined absolute path, is the API.
 //
 // Confinement alone is not the whole property. relPath names a file under an
-// agent's own directory (.claude/skills/, .claude/agents/, .codex/agents/,
-// .gemini/agents/), and those arrive with a checkout, so a repository can ship
+// agent's own directory (.claude/skills/, .claude/agents/, .codex/agents/), and those arrive with a checkout, so a repository can ship
 // a symlink at `.claude`. An os.Root refuses a component that escapes it but
 // silently follows one pointing elsewhere inside it. That is why
 // ReadFileNoFollow and MkdirAllNoSymlink reject every symlink component, while
@@ -117,7 +116,7 @@ type scaffoldTarget struct {
 //
 // The vouched-directory step is not optional here even though scaffolds are not
 // hook configs: they are written under the SAME agent directories
-// (.claude/skills, .claude/agents, .codex/agents, .gemini/agents), by the same
+// (.claude/skills, .claude/agents, .codex/agents), by the same
 // `entire enable`. A vouched `.claude` that hook installation follows and
 // scaffolding refuses would leave enable half-applied, with the hook config at
 // the link's target and the skill nowhere, reporting success for both.

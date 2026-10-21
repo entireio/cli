@@ -36,6 +36,5 @@ func TestInteractiveMultiStep(t *testing.T) {
 		testutil.WaitForSessionIdle(t, s.Dir, 15*time.Second)
 		testutil.WaitForCheckpoint(t, s, 30*time.Second)
 		testutil.AssertCommitLinkedToCheckpoint(t, s.Dir, "HEAD")
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

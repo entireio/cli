@@ -26,14 +26,13 @@ import (
 // plugin_index slipped past the second and put an index clone and its lock file
 // in the working directory. Prose cannot fail when someone adds a caller.
 var userDirConsumers = map[string]string{
-	"cmd/entire/cli/auth/cell_data_api.go":        "passes both directories to clusterdiscovery, which reaches contexts and discovery; neither creates before checking",
-	"cmd/entire/cli/auth/context_store.go":        "passes the config dir to contexts.Load/Modify, which check before EnsurePrivateDir",
-	"cmd/entire/cli/auth/contexts.go":             "passes the config dir to contexts.Modify",
-	"cmd/entire/cli/auth/control_plane.go":        "passes both to clusterdiscovery and contexts.Load",
-	"cmd/entire/cli/auth/data_api.go":             "passes both to clusterdiscovery",
-	"cmd/entire/cli/versioncheck/versioncheck.go": "only ever creates through userdirs.ConfigRoot, whose resolveUserRoot checks before creating",
-	"cmd/git-remote-entire/main.go":               "passes both to clusterdiscovery, which reaches contexts and discovery",
-	"internal/remotehelper/replicas/replicas.go":  "passes the cache dir to discovery.LoadCache/ModifyCache, which check before MkdirAll",
+	"cmd/entire/cli/auth/cell_data_api.go":       "passes both directories to clusterdiscovery, which reaches contexts and discovery; neither creates before checking",
+	"cmd/entire/cli/auth/context_store.go":       "passes the config dir to contexts.Load/Modify, which check before EnsurePrivateDir",
+	"cmd/entire/cli/auth/contexts.go":            "passes the config dir to contexts.Modify",
+	"cmd/entire/cli/auth/control_plane.go":       "passes both to clusterdiscovery and contexts.Load",
+	"cmd/entire/cli/auth/data_api.go":            "passes both to clusterdiscovery",
+	"cmd/git-remote-entire/main.go":              "passes both to clusterdiscovery, which reaches contexts and discovery",
+	"internal/remotehelper/replicas/replicas.go": "passes the cache dir to discovery.LoadCache/ModifyCache, which check before MkdirAll",
 }
 
 // TestUserDirConsumersAreAudited fails the build when a new caller of

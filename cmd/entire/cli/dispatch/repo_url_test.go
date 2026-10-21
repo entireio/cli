@@ -21,6 +21,31 @@ func TestGitHubRepoURL(t *testing.T) {
 			want:     "https://github.com/entireio/entire.io",
 		},
 		{
+			name:     "github forge prefix",
+			fullName: testRepoSlug,
+			want:     testRepoURL,
+		},
+		{
+			name:     "native forge has no github page",
+			fullName: "et/myproject/service",
+			want:     "",
+		},
+		{
+			name:     "unknown forge",
+			fullName: "gl/entireio/cli",
+			want:     "",
+		},
+		{
+			name:     "prefixed unsafe owner",
+			fullName: "gh/-entireio/cli",
+			want:     "",
+		},
+		{
+			name:     "prefixed dot repo",
+			fullName: "gh/entireio/..",
+			want:     "",
+		},
+		{
 			name:     "missing slash",
 			fullName: "entireio",
 			want:     "",

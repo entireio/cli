@@ -163,8 +163,7 @@ func (s *reftableStorer) execGit(args ...string) (string, []byte, error) {
 // matching translated text would silently misclassify CAS conflicts and delete
 // failures. GIT_TERMINAL_PROMPT=0 keeps git non-interactive. The forced values
 // are appended last so they override anything the caller's environment set
-// (os/exec keeps the last value for a duplicate key). Mirrors the sibling
-// shell-out in checkpoint/shadow_ref.go.
+// (os/exec keeps the last value for a duplicate key).
 func gitPlumbingEnv() []string {
 	return append(EnvWithoutRepoOverrides(),
 		"GIT_TERMINAL_PROMPT=0",
@@ -267,6 +266,14 @@ func (s *reftableStorer) Reference(name plumbing.ReferenceName) (*plumbing.Refer
 		return nil, fmt.Errorf("reftable probe symbolic ref %s: %s: %w", name, strings.TrimSpace(string(symStderr)), symErr)
 	}
 
+	// A full ref name must match exactly, as in the files backend. rev-parse
+	// would expand a missing refs/remotes/origin/main to a tag or branch named
+	// that (refs/tags/refs/remotes/origin/main), letting a fetched tag answer
+	// for a remote-tracking ref.
+	if strings.HasPrefix(name.String(), "refs/") {
+		return s.exactReference(name)
+	}
+
 	// Hash refs: rev-parse --verify resolves the ref to the object it points at.
 	// "^0" would peel tags; we want the ref's direct target, so verify the name
 	// as-is. A non-existent ref exits non-zero silently.
@@ -285,6 +292,29 @@ func (s *reftableStorer) Reference(name plumbing.ReferenceName) (*plumbing.Refer
 		return nil, plumbing.ErrReferenceNotFound
 	}
 	return plumbing.NewHashReference(name, h), nil
+}
+
+// exactReference looks up a full ref name without rev-parse's name expansion.
+// for-each-ref matches whole path components, so it also lists refs below the
+// name; only an exact match counts.
+func (s *reftableStorer) exactReference(name plumbing.ReferenceName) (*plumbing.Reference, error) {
+	out, stderr, err := s.runGit("for-each-ref", "--format=%(objectname) %(refname)", "--end-of-options", name.String())
+	if err != nil {
+		if refLookupAbsent(err, stderr) {
+			return nil, plumbing.ErrReferenceNotFound
+		}
+		return nil, fmt.Errorf("reftable resolve ref %s: %s: %w", name, strings.TrimSpace(string(stderr)), err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		hash, ref, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || ref != name.String() {
+			continue
+		}
+		if h := plumbing.NewHash(hash); !h.IsZero() {
+			return plumbing.NewHashReference(name, h), nil
+		}
+	}
+	return nil, plumbing.ErrReferenceNotFound
 }
 
 // IterReferences returns an iterator over every reference in the repository,

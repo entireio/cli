@@ -12,7 +12,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -21,10 +20,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// Shadow strategy session state methods.
+// Manual-commit strategy session state methods.
 // Uses session.StateStore for persistence.
 
 // loadSessionState loads session state using the StateStore.
@@ -106,7 +104,7 @@ func (s *ManualCommitStrategy) clearSessionState(ctx context.Context, sessionID 
 }
 
 // listAllSessionStates returns all active session states.
-// It filters out orphaned sessions whose shadow branch no longer exists.
+// It clears orphaned sessions (see isOrphanedSessionState) as it lists.
 func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*SessionState, error) {
 	store, err := s.getStateStore(ctx)
 	if err != nil {
@@ -122,12 +120,6 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		return nil, nil
 	}
 
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
 	var states []*SessionState
 	for _, sessionState := range sessionStates {
 		state := sessionState
@@ -138,29 +130,26 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 			continue
 		}
 
-		// Imported sessions are read-only historical records: no shadow branch
-		// and (by design) no BaseCommit. Keep them regardless of the
-		// shadow-branch orphan check below. Gate on Kind, not on commit
-		// presence, so this stays correct once imports are linked to a commit.
+		// Imported sessions are read-only historical records with (by design)
+		// no BaseCommit. Keep them regardless of the orphan check below. Gate
+		// on Kind, not on commit presence, so this stays correct once imports
+		// are linked to a commit.
 		if state.Kind.IsImported() {
 			states = append(states, state)
 			continue
 		}
 
-		// Skip and cleanup orphaned sessions whose shadow branch no longer exists.
-		// Keep active sessions (shadow branch may not be created yet) and sessions
-		// with LastCheckpointID (needed for checkpoint ID reuse on subsequent commits).
-		// Clean up everything else: stale pre-state-machine sessions (empty phase),
-		// IDLE/ENDED sessions that were never condensed, etc.
-		// Record-bearing sessions hold condensable content off the shadow branch — never orphaned.
-		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		refName := plumbing.NewBranchReferenceName(shadowBranch)
-		if _, err := repo.Reference(refName, true); err != nil {
-			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent() {
-				//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
-				store.Clear(ctx, state.SessionID)
-				continue
-			}
+		// Skip and clean up orphaned sessions: ended, never condensed, and
+		// holding no pending work. Keep non-ended sessions (including legacy
+		// empty phases normalized to IDLE) and sessions with LastCheckpointID
+		// (needed for checkpoint ID reuse on subsequent commits).
+		if isOrphanedSessionState(state) {
+			logging.Debug(logging.WithComponent(ctx, "session"), "removing orphaned session state with no pending work",
+				slog.String("session_id", state.SessionID),
+				slog.String("phase", string(state.Phase)))
+			//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
+			store.Clear(ctx, state.SessionID)
+			continue
 		}
 
 		states = append(states, state)
@@ -168,54 +157,23 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 	return states, nil
 }
 
-// IsCondensableEndedSession reports whether an ENDED session still carries
-// uncondensed content AND can be salvaged by condensing
-// (CondenseSessionByID). Two shapes qualify: checkpoint steps whose shadow
-// branch still exists, and record-bearing sessions (pending subagent task
-// records), whose content never lives on the shadow branch and so needs no
-// branch to condense. ENDED sessions with steps but no shadow branch and no
-// task records are NOT condensable; fixing those means discarding state,
-// which the background sweep never initiates — those sessions are left to
-// `entire doctor` (and the existing orphan cleanup in listAllSessionStates).
-// Used by the PostCommit stale-session warning and the background zombie
-// sweep.
-func IsCondensableEndedSession(repo *git.Repository, state *SessionState) bool {
-	if state.Phase != session.PhaseEnded || state.FullyCondensed ||
-		(state.StepCount <= 0 && !state.HasTaskContent()) {
-		return false
-	}
-
-	// Record-bearing sessions qualify without a shadow branch: task records
-	// are stored off-branch, so condensation can materialize them regardless.
-	if state.HasTaskContent() {
-		return true
-	}
-
-	// Check shadow branch existence. For PostCommit this is a re-check —
-	// its list arrives via listAllSessionStates, which already filters
-	// orphaned sessions — and it is intentional even there: condensation
-	// deletes shadow branches, so a branch that existed at list-load time may
-	// be gone by the time the warning re-checks here, and we'd otherwise warn
-	// about a session this commit (or a concurrent condense) just cleaned up.
-	// The background zombie sweep, by contrast, arrives via the raw
-	// ListSessionStates, so for the sweep this is the PRIMARY shadow-branch
-	// check, not a re-check — it is what keeps the sweep condense-only.
-	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, err := repo.Reference(refName, true)
-	return err == nil
+// isOrphanedSessionState reports whether a listed state may be deleted: only a
+// finalized session (State.IsEnded) that was never condensed and holds no
+// pending work (State.HasPendingWork). IDLE states — including legacy empty
+// phases, which normalize to IDLE — are live sessions between turns or belong
+// to the exited-owner finalizer, so they age out through StaleSessionThreshold.
+func isOrphanedSessionState(state *SessionState) bool {
+	return state.IsEnded() && state.LastCheckpointID.IsEmpty() && !state.HasPendingWork()
 }
 
-// countWarnableStaleEndedSessions returns the number of ENDED sessions that
-// still remain slow and fixable after PostCommit finishes processing.
-func countWarnableStaleEndedSessions(repo *git.Repository, sessions []*SessionState) int {
-	n := 0
-	for _, state := range sessions {
-		if IsCondensableEndedSession(repo, state) {
-			n++
-		}
-	}
-	return n
+// IsCondensableEndedSession reports whether an ENDED, not fully condensed
+// session still carries uncondensed content (State.HasPendingWork), which condensing
+// (CondenseSessionByID) can always salvage: turn-end steps condense from the
+// session's transcript and recorded files, task records from their own
+// transcripts. Used by the PostCommit stale-session warning and the
+// background zombie sweep.
+func IsCondensableEndedSession(state *SessionState) bool {
+	return state.Phase == session.PhaseEnded && !state.FullyCondensed && state.HasPendingWork()
 }
 
 // findExactSessionsForWorktree returns sessions recorded for exactly this
@@ -228,11 +186,25 @@ func (s *ManualCommitStrategy) findExactSessionsForWorktree(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	return exactWorktreeMatches(allStates, worktreePath), nil
+	return exactWorktreeMatches(ctx, allStates, worktreePath), nil
 }
 
-func exactWorktreeMatches(states []*SessionState, worktreePath string) []*SessionState {
-	var exact []*SessionState
+func exactWorktreeMatches(ctx context.Context, states []*SessionState, worktreePath string) []*SessionState {
+	exact, _ := matchWorktreeHomes(ctx, states, worktreePath)
+	return exact
+}
+
+// matchWorktreeHomes splits states by whether worktreePath is their home.
+// exact holds those homed there, a home moved there by `git worktree move`
+// included, with WorktreePath set to worktreePath in memory only (a moved
+// home's stored state follows under the session's lock: post-commit, turn
+// start; a home reached by another spelling of its path is not repointed, so
+// post-commit's path checks still treat that commit as a guest's, as before). notHome holds the IDs of those whose home
+// marker shows worktreePath is not their home even at their recorded path: a
+// worktree git re-added there. Sessions the marker can't judge are matched by
+// path, as before markers.
+func matchWorktreeHomes(ctx context.Context, states []*SessionState, worktreePath string) (exact []*SessionState, notHome map[string]bool) {
+	here := &worktreeAt{root: worktreePath}
 	for _, state := range states {
 		// Imported sessions are historical records reconstructed from
 		// transcripts; a fresh commit must never link to one (a leaked
@@ -241,11 +213,105 @@ func exactWorktreeMatches(states []*SessionState, worktreePath string) []*Sessio
 		if state.Kind.IsImported() {
 			continue
 		}
-		if state.WorktreePath == worktreePath {
+		switch here.home(ctx, state) {
+		case homeHere, homeMovedHere:
+			state.WorktreePath = worktreePath
 			exact = append(exact, state)
+		case homeNotHere, homeReplaced:
+			if notHome == nil {
+				notHome = make(map[string]bool)
+			}
+			notHome[state.SessionID] = true
+		case homeUnknown:
+			if state.WorktreePath == worktreePath {
+				exact = append(exact, state)
+			}
 		}
 	}
-	return exact
+	return exact, notHome
+}
+
+// BackgroundClaimContext is what a background task's SubagentStop needs to
+// decide which new untracked files it may claim.
+type BackgroundClaimContext struct {
+	// Recorded holds every path a session has pending in the task's
+	// worktree: in FilesTouched for one homed there, in its entry for that
+	// worktree for one that edited it from elsewhere.
+	Recorded map[string]struct{}
+
+	// Overlapped reports that another background task in the worktree was
+	// running at some point since this task launched: still running, or
+	// completed after this task's launch.
+	Overlapped bool
+}
+
+// LoadBackgroundClaimContext loads the BackgroundClaimContext for the task
+// toolUseID of sessionID. ok is false when the session has no state, no
+// recorded worktree, or no record for the task, so its launch time and the
+// files other sessions own are unknown.
+func LoadBackgroundClaimContext(ctx context.Context, sessionID, toolUseID string) (claims BackgroundClaimContext, ok bool, err error) {
+	states, err := ListSessionStates(ctx)
+	if err != nil {
+		return BackgroundClaimContext{}, false, err
+	}
+	var own *SessionState
+	for _, state := range states {
+		if state.SessionID == sessionID {
+			own = state
+			break
+		}
+	}
+	if own == nil || own.WorktreePath == "" {
+		return BackgroundClaimContext{}, false, nil
+	}
+	task := own.FindTaskRecord(toolUseID)
+	if task == nil || launchedBeforeRehome(own, task) {
+		// One launched before the session re-homed ran in the removed
+		// worktree: what is new here isn't its.
+		return BackgroundClaimContext{}, false, nil
+	}
+	claims.Recorded = make(map[string]struct{})
+	key := session.WorktreeKey(own.WorktreeID)
+	for _, state := range states {
+		work := state.OtherWorktrees[key]
+		if work == nil || state.Kind.IsImported() {
+			continue
+		}
+		// An entry from a worktree git removed before adding this one under
+		// its ID records nothing here; one that can't be checked still counts,
+		// so a failed check can't hand another session's file to the task.
+		if current, err := worktreeEntryCurrent(ctx, own.WorktreePath, key, work); err == nil && !current {
+			continue
+		}
+		for _, file := range work.FilesTouched {
+			claims.Recorded[file] = struct{}{}
+		}
+	}
+	for _, state := range exactWorktreeMatches(ctx, states, own.WorktreePath) {
+		for _, file := range state.FilesTouched {
+			claims.Recorded[file] = struct{}{}
+		}
+		for _, rec := range state.TaskRecords {
+			if !rec.Background || (state.SessionID == sessionID && rec.ToolUseID == toolUseID) || launchedBeforeRehome(state, &rec) {
+				continue
+			}
+			// SessionEnd completes every live record, so one left on an
+			// ended session was leaked, not running.
+			if rec.CompletedAt.IsZero() && state.IsEnded() {
+				continue
+			}
+			if rec.CompletedAt.IsZero() || rec.CompletedAt.After(task.StartedAt) {
+				claims.Overlapped = true
+			}
+		}
+	}
+	return claims, true, nil
+}
+
+// launchedBeforeRehome reports whether task, one of state's, was launched
+// before the session re-homed (State.RehomedAt), in the worktree git removed.
+func launchedBeforeRehome(state *SessionState, task *session.TaskRecord) bool {
+	return state.RehomedAt != nil && task.StartedAt.Before(*state.RehomedAt)
 }
 
 // findSessionsForWorktree finds all sessions for the given worktree path.
@@ -271,7 +337,8 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 // nothing was linked; findSessionsForCommitLinking surfaces it to the user
 // only when identity matching cannot rescue the commit either.
 func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) ([]*SessionState, bool) {
-	if exact := exactWorktreeMatches(allStates, worktreePath); len(exact) > 0 {
+	exact, notHome := matchWorktreeHomes(ctx, allStates, worktreePath)
+	if len(exact) > 0 {
 		return exact, false
 	}
 
@@ -287,7 +354,9 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 	var commonDirMatches []*SessionState
 	commonDirByPath := make(map[string]string)
 	for _, state := range allStates {
-		if state.WorktreePath == "" || state.Kind.IsImported() {
+		// A session whose home this worktree is known not to be can't be
+		// matched as a sibling of it either.
+		if state.WorktreePath == "" || state.Kind.IsImported() || notHome[state.SessionID] {
 			continue
 		}
 
@@ -396,26 +465,29 @@ func sessionsFromSingleWorktree(candidates []*SessionState) []*SessionState {
 	return candidates
 }
 
-// reconcileWorktreePathForResumedTurn repoints a main-worktree session's recorded
-// WorktreePath when a turn starts from a different main worktree AND the recorded
-// path no longer resolves to this repository's git common dir. That is the
-// repo-relocation case (#1890): the whole repo directory was renamed or moved
-// while the session was stopped, then the agent resumed the same session from the
-// new location. WorktreePath is matched by exact string equality at commit time
-// (findSessionsForWorktree), so without this the resumed session's commits
-// silently lose their Entire-Checkpoint trailer.
+// reconcileWorktreePathForResumedTurn keeps a session's recorded home
+// (WorktreePath) pointing at its worktree when a turn starts after that
+// worktree moved, since commits are matched to sessions by their home
+// (findSessionsForWorktree).
 //
-// Scope is deliberately restricted to relocations between MAIN worktrees
-// (WorktreeID == "" on both the recorded state and the current worktree). Doing
-// so keeps WorktreePath and WorktreeID aligned by construction: both stay "".
-// Repointing a linked-worktree session (WorktreeID != "") onto the main worktree
-// would leave WorktreeID describing a different worktree than WorktreePath, and
-// that disalignment breaks every consumer that re-derives the worktree id from
-// the current directory — `entire clean` and `entire explain` compute the wrong
-// shadow-branch name (orphaning or hiding the session's checkpoints), and the
-// post-commit base/attribution updates follow the wrong worktree's HEAD.
-// Linked-worktree relocation is a rare, documented non-goal; the zero-match path
-// still warns so the trailer loss is not silent.
+// A main-worktree session (WorktreeID "") is repointed when the turn starts
+// from a different main worktree AND the recorded path no longer resolves to
+// this repository's git common dir. That is the repo-relocation case (#1890):
+// the whole repo directory was renamed or moved while the session was
+// stopped, then the agent resumed the same session from the new location.
+// Repointing between main worktrees keeps WorktreePath and WorktreeID aligned
+// by construction: both stay "". A session resumed into a linked worktree is
+// left alone, or WorktreePath would name a different worktree than
+// WorktreeID, breaking every consumer that re-derives the worktree id from
+// the current directory.
+//
+// A linked-worktree session is judged by its home marker (homeAt), which git
+// keeps through `git worktree move`: a turn starting in its home moved there
+// repoints WorktreePath and keeps WorktreeID, which the move keeps too, so the
+// two stay aligned. A turn starting in a worktree git added at the home's
+// path after removing the home re-homes the session there (rehome): the agent
+// resumed in it. A session homed before markers were kept gains one here at
+// its next turn at home (stampLinkedHome), and with it this handling.
 //
 // The session store lives in the git common dir, so a state loaded here is by
 // construction the same repo; when its recorded worktree no longer maps back to
@@ -423,13 +495,15 @@ func sessionsFromSingleWorktree(candidates []*SessionState) []*SessionState {
 // recorded path (e.g. a concurrent sibling worktree that resolves to the same
 // common dir) is left untouched so we never steal a session from a live sibling.
 func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionState) {
-	// Only main-worktree sessions are reconciled — see the disalignment note above.
-	if state.WorktreeID != "" {
-		return
-	}
-
 	current, err := paths.WorktreeRoot(ctx)
 	if err != nil || current == "" || state.WorktreePath == "" {
+		return
+	}
+	if state.WorktreeID != "" {
+		if followMovedHome(ctx, state, current) == homeReplaced {
+			rehome(ctx, state, current)
+		}
+		stampLinkedHome(ctx, state, current)
 		return
 	}
 	if filepath.Clean(current) == filepath.Clean(state.WorktreePath) {
@@ -459,8 +533,7 @@ func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionStat
 	old := state.WorktreePath
 	state.WorktreePath = current
 	// WorktreeID stays "" — both the recorded and current worktrees are the main
-	// worktree, so WorktreePath and WorktreeID remain aligned and the shadow branch
-	// (entire/<base>-hash("")) is unchanged.
+	// worktree, so WorktreePath and WorktreeID remain aligned.
 	logging.Info(logging.WithComponent(ctx, "hooks"), "reconciled main-worktree session path after relocation",
 		slog.String("session_id", state.SessionID),
 		slog.String("from", old),
@@ -521,45 +594,40 @@ func remapRewriteSHA(sha string, rewrites []rewritePair) (string, bool) {
 	return sha, false
 }
 
-func shadowBranchExistsForBaseCommit(repo *git.Repository, baseCommit, worktreeID string) bool {
-	if repo == nil || baseCommit == "" {
-		return false
+// syncBaseCommitToHead moves state.BaseCommit to the current HEAD when HEAD
+// has moved since the session last saw it (a user commit, pull, rebase,
+// reset). BaseCommit records the commit a session's pending work sits on top
+// of; nothing else is keyed on it anymore, so following HEAD is all there is
+// to do. A state with no BaseCommit yet is left for initialization.
+func syncBaseCommitToHead(ctx context.Context, repo *git.Repository, state *SessionState) error {
+	if state == nil || state.BaseCommit == "" {
+		return nil
 	}
-
-	refName := plumbing.NewBranchReferenceName(checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID))
-	_, err := repo.Reference(refName, true)
-	return err == nil
+	head, err := repo.Head()
+	if err != nil {
+		return fmt.Errorf("failed to get HEAD: %w", err)
+	}
+	if currentHead := head.Hash().String(); state.BaseCommit != currentHead {
+		logging.Debug(logging.WithComponent(ctx, "session"), "updated session base commit",
+			slog.String("session_id", state.SessionID),
+			slog.String("new_base", truncateHash(currentHead)))
+		state.BaseCommit = currentHead
+	}
+	return nil
 }
 
-func (s *ManualCommitStrategy) remapSessionForRewrite(ctx context.Context, repo *git.Repository, state *SessionState, rewrites []rewritePair) (bool, error) {
+// remapSessionForRewrite moves a session's BaseCommit through an amend or
+// rebase rewrite. It reports whether the state changed.
+func remapSessionForRewrite(state *SessionState, rewrites []rewritePair) bool {
 	if state == nil {
-		return false, nil
+		return false
 	}
-
 	newBaseCommit, baseChanged := remapRewriteSHA(state.BaseCommit, rewrites)
-	newAttrBaseCommit, attrChanged := remapRewriteSHA(state.AttributionBaseCommit, rewrites)
-	if !baseChanged && !attrChanged {
-		return false, nil
+	if !baseChanged || newBaseCommit == state.BaseCommit {
+		return false
 	}
-
-	hadShadowBranch := shadowBranchExistsForBaseCommit(repo, state.BaseCommit, state.WorktreeID)
-	if baseChanged {
-		changed, err := s.migrateShadowBranchToBaseCommit(ctx, repo, state, newBaseCommit)
-		if err != nil {
-			return false, fmt.Errorf("failed to migrate rewritten shadow branch: %w", err)
-		}
-		baseChanged = changed
-	}
-
-	// If a shadow branch existed, preserve AttributionBaseCommit so future
-	// attribution still diffs against the original checkpoint base captured on
-	// that branch. Without a shadow branch, keep attribution in sync with the
-	// rewritten commit lineage.
-	if attrChanged && !hadShadowBranch {
-		state.AttributionBaseCommit = newAttrBaseCommit
-	}
-
-	return baseChanged || attrChanged, nil
+	state.BaseCommit = newBaseCommit
+	return true
 }
 
 // findSessionsForCommit finds all sessions where base_commit matches the given SHA.
@@ -644,10 +712,21 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		return fmt.Errorf("failed to get worktree path: %w", err)
 	}
 
-	// Get worktree ID for shadow branch naming
+	// Get the worktree ID that identifies this session's worktree
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	if err != nil {
 		return fmt.Errorf("failed to get worktree ID: %w", err)
+	}
+
+	// A linked home is known by its marker, which follows it through `git
+	// worktree move` (homeAt). Unmarked, the session is matched by path, as
+	// before markers.
+	worktreeIncarnation, err := MarkWorktree(ctx, worktreePath, worktreeID)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "session"), "could not mark the session's home worktree",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		worktreeIncarnation = ""
 	}
 
 	// Capture untracked files at session start so checkpoint bookkeeping can tell
@@ -670,9 +749,9 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		SessionID:             sessionID,
 		CLIVersion:            versioninfo.Version,
 		BaseCommit:            headHash,
-		AttributionBaseCommit: headHash,
 		WorktreePath:          worktreePath,
 		WorktreeID:            worktreeID,
+		WorktreeIncarnation:   worktreeIncarnation,
 		StartedAt:             now,
 		LastInteractionTime:   &now,
 		TurnID:                turnID.String(),
@@ -694,58 +773,126 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 	// between our caller's existence check and our save would have its
 	// fields (TranscriptPath, LastPrompt, ModelName, accumulated TurnID)
 	// overwritten with blanks here.
-	_, _, release, lockErr := acquireSessionGate(ctx, sessionID)
-	if lockErr != nil {
-		return fmt.Errorf("acquire state lock: %w", lockErr)
-	}
-	defer release()
-	existing, loadErr := s.loadSessionState(ctx, sessionID)
-	if loadErr != nil {
-		return fmt.Errorf("re-load session state under lock: %w", loadErr)
-	}
-	if existing != nil && existing.BaseCommit != "" {
-		return nil
-	}
-	if existing != nil && agentType == agent.AgentTypeCodex {
-		// Repair the partial state in place. A child hook can have recorded task
-		// content and accounting before the parent session initializes, so a
-		// fresh replacement would silently discard durable child state.
-		state = existing
-		state.CLIVersion = versioninfo.Version
-		state.BaseCommit = headHash
-		state.AttributionBaseCommit = headHash
-		state.WorktreePath = worktreePath
-		state.WorktreeID = worktreeID
-		if state.StartedAt.IsZero() {
-			state.StartedAt = now
+	//
+	// The agent home is remembered only after the gate is released, so the
+	// registry's I/O never extends the hold time for a concurrent hook.
+	remember, err := func() (string, error) {
+		_, _, release, lockErr := acquireSessionGate(ctx, sessionID)
+		if lockErr != nil {
+			return "", fmt.Errorf("acquire state lock: %w", lockErr)
 		}
-		state.LastInteractionTime = &now
-		state.TurnID = turnID.String()
-		state.AgentType = agentType
-		if model != "" {
-			state.ModelName = model
+		defer release()
+		existing, loadErr := s.loadSessionState(ctx, sessionID)
+		if loadErr != nil {
+			return "", fmt.Errorf("re-load session state under lock: %w", loadErr)
 		}
-		if transcriptPath != "" {
-			state.TranscriptPath = transcriptPath
+		if existing != nil && existing.BaseCommit != "" {
+			return "", nil
 		}
-		if userPrompt != "" {
-			state.LastPrompt = truncatePromptForStorage(userPrompt)
-		}
-		if state.UntrackedFilesAtStart == nil {
-			state.UntrackedFilesAtStart = untrackedFiles
-		}
+		if existing != nil && agentType == agent.AgentTypeCodex {
+			// Repair the partial state in place. A child hook can have
+			// recorded task content and accounting before the parent session
+			// initializes, so a fresh replacement would silently discard
+			// durable child state.
+			state = existing
+			state.CLIVersion = versioninfo.Version
+			state.BaseCommit = headHash
+			state.WorktreePath = worktreePath
+			state.WorktreeID = worktreeID
+			state.WorktreeIncarnation = worktreeIncarnation
+			if state.StartedAt.IsZero() {
+				state.StartedAt = now
+			}
+			state.LastInteractionTime = &now
+			state.TurnID = turnID.String()
+			state.AgentType = agentType
+			if model != "" {
+				state.ModelName = model
+			}
+			if transcriptPath != "" {
+				state.TranscriptPath = transcriptPath
+			}
+			if userPrompt != "" {
+				state.LastPrompt = truncatePromptForStorage(userPrompt)
+			}
+			if state.UntrackedFilesAtStart == nil {
+				state.UntrackedFilesAtStart = untrackedFiles
+			}
 
-		// This is a repair, not an authoritative SessionStart inventory. Keep
-		// the ledger and token data but retain conservative coverage markers.
-		incomplete := false
-		state.SubagentInventoryComplete = &incomplete
-		state.SubagentTokensBaselineComplete = &incomplete
+			// This is a repair, not an authoritative SessionStart inventory.
+			// Keep the ledger and token data but retain conservative coverage
+			// markers.
+			incomplete := false
+			state.SubagentInventoryComplete = &incomplete
+			state.SubagentTokensBaselineComplete = &incomplete
+		}
+		remember := updateSessionAgentHome(ctx, state)
+		return remember, s.saveSessionState(ctx, state)
+	}()
+	if err != nil {
+		return err
 	}
-	return s.saveSessionState(ctx, state)
+	rememberAgentHome(ctx, state.AgentType, remember)
+	return nil
 }
 
-// getShadowBranchNameForCommit returns the shadow branch name for the given base commit and worktree ID.
-// worktreeID should be empty for the main worktree or the internal git worktree name for linked worktrees.
-func getShadowBranchNameForCommit(baseCommit, worktreeID string) string {
-	return checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
+// updateSessionAgentHome sets state.AgentHome for state.AgentType and
+// state.TranscriptPath, and returns the home the caller should pass to
+// rememberAgentHome once state is saved, or "" when there is none.
+//
+// state.AgentHome becomes the agent's active home when one of that home's
+// stores holds the transcript, spelled as the environment sets it or in its
+// canonical form, whichever contains the transcript path; that home is
+// returned. Otherwise an existing state.AgentHome is kept while its stores hold
+// the transcript, and cleared when they do not. With no transcript path,
+// state.AgentHome is left unchanged. For an unknown agent, or one without a
+// home layout, it is cleared. A home read from state is never returned, so it
+// never reaches the registry.
+func updateSessionAgentHome(ctx context.Context, state *SessionState) (remember string) {
+	ag, err := agent.GetByAgentType(state.AgentType)
+	if err != nil {
+		state.AgentHome = ""
+		return ""
+	}
+	provider, ok := agent.AsHomeLayoutProvider(ag)
+	if !ok {
+		state.AgentHome = ""
+		return ""
+	}
+	if state.TranscriptPath == "" {
+		return ""
+	}
+	active, ok, err := agent.ActiveHomeHolding(provider, state.TranscriptPath)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "session"), "agent home unavailable",
+			slog.String("agent", string(state.AgentType)),
+			slog.String("error", err.Error()))
+	}
+	if ok {
+		state.AgentHome = active
+		return active
+	}
+	if state.AgentHome != "" {
+		transcript := filepath.Clean(state.TranscriptPath)
+		if provider.HomeLayout().Holds(filepath.Clean(state.AgentHome), transcript) {
+			return ""
+		}
+	}
+	state.AgentHome = ""
+	return ""
+}
+
+// rememberAgentHome records home, as returned by updateSessionAgentHome, in the
+// per-user registry of agentType's homes, and does nothing for "". A failure is
+// logged rather than returned: it only stops later lookups from trusting this
+// home.
+func rememberAgentHome(ctx context.Context, agentType types.AgentType, home string) {
+	if home == "" {
+		return
+	}
+	if err := agent.RememberAgentHome(agentType, home); err != nil {
+		logging.Warn(logging.WithComponent(ctx, "session"), "failed to record agent home",
+			slog.String("agent", string(agentType)),
+			slog.String("error", err.Error()))
+	}
 }

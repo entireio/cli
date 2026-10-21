@@ -2,11 +2,12 @@ package dispatch
 
 const (
 	testRepoFullName           = "entireio/cli"
+	testRepoSlug               = "gh/" + testRepoFullName
 	testRepoURL                = "https://github.com/" + testRepoFullName
 	testRepoRemoteURL          = "https://github.com/" + testRepoFullName + ".git"
 	testCheckpointID           = "a1b2c3d4e5f6"
 	testLocalFallbackText      = "local fallback summary"
-	testDispatchEndpoint       = "/api/v1/dispatches/generate"
+	testDispatchEndpoint       = "/api/v1/me/dispatches"
 	testCloudDispatchToken     = "test-token"
 	testVoicePresetMarvin      = "marvin"
 	testVoicePresetNeutral     = "neutral"

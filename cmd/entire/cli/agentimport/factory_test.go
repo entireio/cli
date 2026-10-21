@@ -11,10 +11,13 @@ import (
 func TestFactoryDiscover_LookbackAndFilter(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	repoRoot := t.TempDir()
 	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	// Every file records repoRoot as its cwd (in a Factory session_start line), so only
+	// the lookback and session filters decide what is discovered.
 	writeAged := func(name string, age time.Duration) {
 		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(`{"type":"session_start","id":"s0","version":2,"cwd":`+fixtureCwdJSON(t, repoRoot)+`}`+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		mt := now.Add(-age)
@@ -25,7 +28,7 @@ func TestFactoryDiscover_LookbackAndFilter(t *testing.T) {
 	writeAged("recent.jsonl", 5*24*time.Hour)
 	writeAged("old.jsonl", 60*24*time.Hour)
 
-	got, err := factoryImporter{}.Discover("", dir, now, nil)
+	got, err := factoryImporter{}.Discover(repoRoot, dir, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +36,7 @@ func TestFactoryDiscover_LookbackAndFilter(t *testing.T) {
 		t.Fatalf("lookback filter wrong: %v", got)
 	}
 
-	got, err = factoryImporter{}.Discover("", dir, now, []string{"old"})
+	got, err = factoryImporter{}.Discover(repoRoot, dir, now, []string{"old"})
 	if err != nil {
 		t.Fatal(err)
 	}

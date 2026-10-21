@@ -1,7 +1,7 @@
 // Package types defines the per-agent abstraction interfaces for `entire review`.
 //
 // AgentReviewer is the contract every supported agent (claude-code, codex,
-// gemini, future additions) implements in its own package. The orchestrator
+// pi, future additions) implements in its own package. The orchestrator
 // in cmd/entire/cli/review/run.go consumes this interface, never importing
 // concrete agent packages — that's how new agents land as additive files
 // without touching shared code.
@@ -9,7 +9,7 @@
 // Events flow as a stream: implementations spawn the agent process, parse
 // stdout into a sequence of typed Events (Started, AssistantText, ToolCall,
 // Tokens, Finished, RunError), and surface them via Process.Events. Per-agent
-// quirks (codex's JSONL envelope shape, gemini's stdin requirement, claude's
+// quirks (codex's JSONL envelope shape, pi's AgentSessionEvent stream, claude's
 // argv shape) are entirely encapsulated inside each agent's adapter — shared
 // code only sees the cleaned event stream.
 //
@@ -20,13 +20,14 @@ package types
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
 // AgentReviewer drives a single agent's review run.
 type AgentReviewer interface {
 	// Name returns the agent's registry key (e.g., "claude-code", "codex",
-	// "gemini"). Stable identifier; do not change after release without
+	// "pi"). Stable identifier; do not change after release without
 	// updating profile settings.
 	Name() string
 
@@ -80,6 +81,17 @@ type Process interface {
 // invocations (e.g., "/pr-review-toolkit:review-pr") the configured agent
 // should run.
 type RunConfig struct {
+	// AgentConfig, when set, replaces the reviewed checkout's agent config
+	// (hooks, MCP servers, extensions) with the review profile's.
+	AgentConfig *AgentConfig
+
+	// ExtraArgs are agent arguments a reviewer's Prepare produced (files it
+	// wrote for AgentConfig); BuildCmd places them.
+	ExtraArgs []string
+
+	// WorkDir, when set by Prepare, is the directory the agent runs in.
+	WorkDir string
+
 	// PromptOverride, when non-empty, is the exact prompt sent to the agent.
 	// It preserves settings.ReviewConfig.Prompt's existing verbatim-override
 	// contract: configured skills are still recorded as structured metadata,
@@ -123,6 +135,11 @@ type RunConfig struct {
 	// while reviewing. PromptOverride remains verbatim and does not receive
 	// this context.
 	CheckpointContext string
+
+	// TrailFindingsJSON asks the reviewer to end its output with the
+	// machine-read findings line that trail posting consumes. Set only when
+	// the run's output is posted to the trail.
+	TrailFindingsJSON bool
 
 	// StartingSHA is HEAD at invocation time, propagated to the lifecycle
 	// hook via ENTIRE_REVIEW_STARTING_SHA so checkpoint metadata records
@@ -185,6 +202,10 @@ func (Started) isEvent() {}
 // response, not tool-call chrome or session metadata).
 type AssistantText struct {
 	Text string
+	// Delta marks a streamed fragment that continues the previous
+	// AssistantText of the same message, so it joins without a separator and
+	// a line split across fragments stays whole.
+	Delta bool
 }
 
 func (AssistantText) isEvent() {}
@@ -236,3 +257,22 @@ type RunError struct {
 }
 
 func (RunError) isEvent() {}
+
+// ToolsBlocked reports tools the agent tried to call but its permission
+// settings denied. The review still completes; the run reports them so the
+// user can allow them.
+type ToolsBlocked struct {
+	Names []string
+	// Allow says how to allow them in this agent's settings.
+	Allow string
+}
+
+func (ToolsBlocked) isEvent() {}
+
+// AgentConfig is a reviewer's own agent config from a review profile, in each
+// agent's native shape. It mirrors settings.ReviewAgentConfig.
+type AgentConfig struct {
+	Settings   json.RawMessage
+	MCPServers map[string]json.RawMessage
+	Extensions []string
+}

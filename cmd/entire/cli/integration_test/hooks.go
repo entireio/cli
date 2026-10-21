@@ -109,6 +109,21 @@ func (r *HookRunner) SimulateStop(sessionID, transcriptPath string) error {
 	return r.runHookWithInput("stop", input)
 }
 
+// SimulateStopFailure simulates Claude Code's StopFailure hook, which fires
+// instead of Stop when a turn ends on an API error.
+func (r *HookRunner) SimulateStopFailure(sessionID, transcriptPath, errorType string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"hook_event_name": "StopFailure",
+		"error":           errorType,
+	}
+
+	return r.runHookWithInput("stop-failure", input)
+}
+
 // SimulateSessionEnd simulates the Claude Code session-end hook.
 // This transitions a session from IDLE (or ACTIVE) to ENDED phase.
 func (r *HookRunner) SimulateSessionEnd(sessionID string) error {
@@ -165,52 +180,101 @@ type PostTaskInput struct {
 	TranscriptPath string
 	ToolUseID      string
 	AgentID        string
-	// RunInBackground, when true, sets tool_input.run_in_background so the
-	// hook is parsed as a background subagent launch stub (isBackgroundLaunch)
-	// instead of a foreground completion.
-	RunInBackground bool
+	// Background, when true, sends the response Claude Code returns for an
+	// async launch (status "async_launched", isAsync) instead of a foreground
+	// completion (status "completed"). Real Agent calls rarely carry
+	// run_in_background, so the payload deliberately omits it either way.
+	Background bool
 }
 
 // SimulatePostTask simulates the PostToolUse[Task] hook.
 func (r *HookRunner) SimulatePostTask(input PostTaskInput) error {
 	r.T.Helper()
 
+	toolResponse := map[string]interface{}{
+		"status":  "completed",
+		"agentId": input.AgentID,
+	}
+	if input.Background {
+		toolResponse = map[string]interface{}{
+			"status":  "async_launched",
+			"isAsync": true,
+			"agentId": input.AgentID,
+		}
+	}
 	hookInput := map[string]interface{}{
 		"session_id":      input.SessionID,
 		"transcript_path": input.TranscriptPath,
 		"tool_use_id":     input.ToolUseID,
-		"tool_input": map[string]interface{}{
-			"run_in_background": input.RunInBackground,
-		},
-		"tool_response": map[string]string{
-			"agentId": input.AgentID,
-		},
+		"tool_name":       "Agent",
+		"tool_input":      map[string]interface{}{},
+		"tool_response":   toolResponse,
 	}
 
 	return r.runHookWithInput("post-task", hookInput)
 }
 
-// SubagentStopInput contains the input for the SubagentStop hook.
+// SubagentStartInput contains the input for Claude Code's SubagentStart hook.
+// Like SubagentStop it carries no tool_use_id; AgentType is what the installed
+// matcher filters on ("workflow-subagent" for agents a Workflow launched).
+type SubagentStartInput struct {
+	SessionID      string // Parent session ID.
+	TranscriptPath string // Parent session's transcript path.
+	AgentID        string
+	AgentType      string
+}
+
+// SimulateSubagentStart simulates Claude Code's SubagentStart hook, which fires
+// as each subagent launches. For a Workflow's agents it is the only launch
+// signal: the Workflow call's PostToolUse names a run, not its agents.
+func (r *HookRunner) SimulateSubagentStart(input SubagentStartInput) error {
+	r.T.Helper()
+
+	hookInput := map[string]interface{}{
+		"session_id":      input.SessionID,
+		"transcript_path": input.TranscriptPath,
+		"hook_event_name": "SubagentStart",
+		"agent_id":        input.AgentID,
+		"agent_type":      input.AgentType,
+	}
+
+	return r.runHookWithInput("subagent-start", hookInput)
+}
+
+// SimulateSubagentStart is a convenience method on TestEnv.
+func (env *TestEnv) SimulateSubagentStart(input SubagentStartInput) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateSubagentStart(input)
+}
+
+// SubagentStopInput contains the input for the SubagentStop hook. There is no
+// ToolUseID: Claude Code's SubagentStop payload never carries one, so the
+// lifecycle must correlate on AgentID.
 type SubagentStopInput struct {
 	SessionID           string // Parent session ID.
 	TranscriptPath      string // Parent session's transcript path.
 	AgentID             string
+	AgentType           string // Optional; Claude Code sends it, e.g. "workflow-subagent".
 	AgentTranscriptPath string // Path to the subagent's own transcript.
-	ToolUseID           string // The Task tool_use_id that launched this subagent.
 }
 
 // SimulateSubagentStop simulates Claude Code's SubagentStop hook: the true
-// completion signal for a subagent, including background subagents that
-// finish long after the launch-time PostToolUse (post-task) stub fired.
+// completion signal for a subagent. For a background subagent it fires long
+// after the launch-time PostToolUse (post-task); for a foreground subagent it
+// fires just BEFORE that PostToolUse.
 func (r *HookRunner) SimulateSubagentStop(input SubagentStopInput) error {
 	r.T.Helper()
 
 	hookInput := map[string]interface{}{
 		"session_id":            input.SessionID,
 		"transcript_path":       input.TranscriptPath,
+		"hook_event_name":       "SubagentStop",
 		"agent_id":              input.AgentID,
 		"agent_transcript_path": input.AgentTranscriptPath,
-		"tool_use_id":           input.ToolUseID,
+	}
+	if input.AgentType != "" {
+		hookInput["agent_type"] = input.AgentType
 	}
 
 	return r.runHookWithInput("subagent-stop", hookInput)
@@ -424,6 +488,13 @@ func (env *TestEnv) SimulateStop(sessionID, transcriptPath string) error {
 	env.T.Helper()
 	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
 	return runner.SimulateStop(sessionID, transcriptPath)
+}
+
+// SimulateStopFailure is a convenience method on TestEnv.
+func (env *TestEnv) SimulateStopFailure(sessionID, transcriptPath, errorType string) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateStopFailure(sessionID, transcriptPath, errorType)
 }
 
 // SimulateSessionEnd is a convenience method on TestEnv.
@@ -755,10 +826,17 @@ func (r *FactoryDroidHookRunner) runDroidHookInRepoDir(hookName string, inputJSO
 // SimulateUserPromptSubmit simulates the UserPromptSubmit hook for Factory Droid.
 func (r *FactoryDroidHookRunner) SimulateUserPromptSubmit(sessionID string) error {
 	r.T.Helper()
+	return r.SimulateUserPromptSubmitWithTranscript(sessionID, "")
+}
+
+// SimulateUserPromptSubmitWithTranscript simulates UserPromptSubmit with the
+// transcript path Droid reports, so turn start records the transcript offset.
+func (r *FactoryDroidHookRunner) SimulateUserPromptSubmitWithTranscript(sessionID, transcriptPath string) error {
+	r.T.Helper()
 
 	input := map[string]string{
 		"session_id":      sessionID,
-		"transcript_path": "",
+		"transcript_path": transcriptPath,
 		"prompt":          "test prompt",
 	}
 
@@ -928,6 +1006,13 @@ func (env *TestEnv) SimulateFactoryDroidUserPromptSubmit(sessionID string) error
 	return runner.SimulateUserPromptSubmit(sessionID)
 }
 
+// SimulateFactoryDroidUserPromptSubmitWithTranscript is a convenience method on TestEnv.
+func (env *TestEnv) SimulateFactoryDroidUserPromptSubmitWithTranscript(sessionID, transcriptPath string) error {
+	env.T.Helper()
+	runner := NewFactoryDroidHookRunner(env.RepoDir, env.T)
+	return runner.SimulateUserPromptSubmitWithTranscript(sessionID, transcriptPath)
+}
+
 // SimulateFactoryDroidStop is a convenience method on TestEnv.
 func (env *TestEnv) SimulateFactoryDroidStop(sessionID, transcriptPath string) error {
 	env.T.Helper()
@@ -1059,6 +1144,39 @@ func (r *OpenCodeHookRunner) SimulateOpenCodeSessionEnd(sessionID, _ string) err
 	}
 
 	return r.runOpenCodeHookWithInput("session-end", input)
+}
+
+// SimulateOpenCodeSubagentStart simulates the subagent-start hook: the parent's
+// task part bound callID to the child session. startedAtMs is the plugin's
+// tool.execute.before clock for the call; 0 means the plugin did not see it.
+func (r *OpenCodeHookRunner) SimulateOpenCodeSubagentStart(parentID, toolUseID, childID, subagentType, description string, startedAtMs int64) error {
+	r.T.Helper()
+	return r.runOpenCodeHookWithInput("subagent-start", map[string]any{
+		"session_id":       parentID,
+		"tool_use_id":      toolUseID,
+		"subagent_id":      childID,
+		"subagent_type":    subagentType,
+		"task_description": description,
+		"started_at":       startedAtMs,
+	})
+}
+
+// SimulateOpenCodeSubagentStop simulates the subagent-stop hook. The Go handler
+// exports the child with `opencode export`; under ENTIRE_TEST_OPENCODE_MOCK_EXPORT
+// it reads .entire/tmp/<childID>.json instead, so callers copy the child's
+// transcript there first with env.CopyTranscriptToEntireTmp (the same helper
+// mid-turn tests use for the parent). Omitting that copy exercises the
+// export-failure path.
+func (r *OpenCodeHookRunner) SimulateOpenCodeSubagentStop(parentID, toolUseID, childID, subagentType, description string, startedAtMs int64) error {
+	r.T.Helper()
+	return r.runOpenCodeHookWithInput("subagent-stop", map[string]any{
+		"session_id":       parentID,
+		"tool_use_id":      toolUseID,
+		"subagent_id":      childID,
+		"subagent_type":    subagentType,
+		"task_description": description,
+		"started_at":       startedAtMs,
+	})
 }
 
 // OpenCodeSession represents a simulated OpenCode session.
@@ -1198,6 +1316,36 @@ func (env *TestEnv) SimulateOpenCodeSessionEnd(sessionID, transcriptPath string)
 	env.T.Helper()
 	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
 	return runner.SimulateOpenCodeSessionEnd(sessionID, transcriptPath)
+}
+
+// SimulateOpenCodeSubagentStart is a convenience method on TestEnv, for a
+// call whose start the plugin did not report.
+func (env *TestEnv) SimulateOpenCodeSubagentStart(parentID, toolUseID, childID, subagentType, description string) error {
+	env.T.Helper()
+	return env.SimulateOpenCodeSubagentStartAt(parentID, toolUseID, childID, subagentType, description, 0)
+}
+
+// SimulateOpenCodeSubagentStartAt is SimulateOpenCodeSubagentStart with the
+// plugin's call start, in Unix ms.
+func (env *TestEnv) SimulateOpenCodeSubagentStartAt(parentID, toolUseID, childID, subagentType, description string, startedAtMs int64) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeSubagentStart(parentID, toolUseID, childID, subagentType, description, startedAtMs)
+}
+
+// SimulateOpenCodeSubagentStop is a convenience method on TestEnv, for a call
+// whose start the plugin did not report.
+func (env *TestEnv) SimulateOpenCodeSubagentStop(parentID, toolUseID, childID, subagentType, description string) error {
+	env.T.Helper()
+	return env.SimulateOpenCodeSubagentStopAt(parentID, toolUseID, childID, subagentType, description, 0)
+}
+
+// SimulateOpenCodeSubagentStopAt is SimulateOpenCodeSubagentStop with the
+// plugin's call start, in Unix ms.
+func (env *TestEnv) SimulateOpenCodeSubagentStopAt(parentID, toolUseID, childID, subagentType, description string, startedAtMs int64) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeSubagentStop(parentID, toolUseID, childID, subagentType, description, startedAtMs)
 }
 
 // CopyTranscriptToEntireTmp copies an OpenCode transcript to .entire/tmp/<sessionID>.json.

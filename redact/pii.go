@@ -86,16 +86,21 @@ var (
 	// strings like version numbers (1.234.567.8901) and IPs (192.168.001.0001).
 	// Dots are only allowed as separators when preceded by +1 (unambiguous intl prefix).
 	// Without +1, only dashes and spaces are accepted as separators.
+	// The leading \b keeps digits inside a longer number from starting a match;
+	// the trailing digit check lives in detectPII, because \b there would also
+	// reject an attached extension such as 555-123-4567x89.
 	phoneRegex = regexp.MustCompile(
 		`(?:` +
 			`\+1[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}` + // +1 intl prefix: any separator
 			`|` +
-			`(?:1[-\s])?\(\d{3}\)\s?\d{3}[-.\s]?\d{4}` + // parenthesized area code
+			`(?:\b1[-\s])?\(\d{3}\)\s?\d{3}[-.\s]?\d{4}` + // parenthesized area code
 			`|` +
-			`(?:1[-\s])?\d{3}[-\s]\d{3}[-\s]\d{4}` + // bare digits: dash/space only
+			`(?:\b1[-\s])?\b\d{3}[-\s]\d{3}[-\s]\d{4}` + // bare digits: dash/space only
 			`)`,
 	)
-	addressRegex = regexp.MustCompile(`\d{1,5}\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*\s+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Ln|Lane|Rd|Road|Ct|Court|Pl(?:ace)?|Way|Cir(?:cle)?|Ter(?:race)?|Pkwy|Parkway)\.?`)
+	// addressRegex is word-bounded at both ends so a suffix such as St or Pl
+	// cannot match the start of a longer word (Started, Plan).
+	addressRegex = regexp.MustCompile(`\b\d{1,5}\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*\s+(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Ln|Lane|Rd|Road|Ct|Court|Pl(?:ace)?|Way|Cir(?:cle)?|Ter(?:race)?|Pkwy|Parkway)\b\.?`)
 )
 
 // emailAllowPatterns are email patterns that should NOT be treated as PII.
@@ -108,6 +113,7 @@ var emailAllowPatterns = []string{
 	"actions@",                  // GitHub Actions bot
 	"@users.noreply.github.com", // GitHub user noreply
 	"@noreply.github.com",       // GitHub noreply
+	"git@",                      // SSH user of git hosts (git@github.com:org/repo.git)
 }
 
 // isAllowlistedEmail returns true if the email matches a known non-sensitive pattern.
@@ -165,6 +171,10 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 			if p.label == labelEmail && isAllowlistedEmail(s[loc[0]:loc[1]]) {
 				continue
 			}
+			// Skip phone-shaped digits that run on into a longer number.
+			if p.label == labelPhone && loc[1] < len(s) && s[loc[1]] >= '0' && s[loc[1]] <= '9' {
+				continue
+			}
 			regions = append(regions, taggedRegion{
 				region: region{loc[0], loc[1]},
 				label:  p.label,
@@ -178,7 +188,9 @@ func detectPII(cfg *PIIConfig, s string) []taggedRegion {
 // Builtin regexes are pre-compiled package vars; only custom patterns
 // need compilation here.
 func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
-	var patterns []piiPattern
+	// Non-nil even when every pattern is rejected: detectPII reads nil as
+	// "never compiled" and would recompile, re-warning, on every call.
+	patterns := []piiPattern{}
 	for _, bp := range builtinPIIPatterns {
 		if enabled, ok := cfg.Categories[bp.category]; ok && enabled {
 			patterns = append(patterns, piiPattern{regex: bp.regex, label: bp.label})
@@ -186,7 +198,7 @@ func compilePIIPatterns(cfg *PIIConfig) []piiPattern {
 	}
 	logger := loggerOrDefault(cfg.Logger)
 	for label, pattern := range cfg.CustomPatterns {
-		compiled, err := regexp.Compile(pattern)
+		compiled, err := compileUserPattern(pattern)
 		if err != nil {
 			logger.Warn("skipping invalid custom PII pattern",
 				componentAttr,

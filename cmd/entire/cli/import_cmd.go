@@ -39,7 +39,10 @@ func newImportAgentCmd(imp agentimport.Importer) *cobra.Command {
 		Short: fmt.Sprintf("Import existing %s transcripts as read-only checkpoints", imp.AgentType()),
 		Long: fmt.Sprintf(`Import pre-existing %s transcripts for this repo (the past month) as
 read-only checkpoints. Imported history is searchable and explainable, but
-read-only: imported sessions cannot be resumed.`, imp.AgentType()),
+read-only: imported sessions cannot be resumed.
+
+Import needs a commit to anchor imported sessions to, so it fails — including
+with --dry-run — in a repository with no resolvable commit.`, imp.AgentType()),
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			ctx := c.Context()
@@ -63,18 +66,24 @@ read-only: imported sessions cannot be resumed.`, imp.AgentType()),
 				return fmt.Errorf("configuring redaction: %w", err)
 			}
 
-			// Logged so support can tell why an import has no anchor (empty
-			// sha: nothing resolved) or a stale one (origin tip not fetched).
-			linkCommitSHA := resolveImportLinkCommitSHA(repo)
+			linkCommitSHA, err := resolveImportLinkCommitSHA(ctx, repo)
+			if err != nil {
+				return err
+			}
+			// Logged so support can tell a stale anchor (origin tip not
+			// fetched, so the import anchored to an older commit than the user
+			// expects) from a correct one. The resolver logs its rejections;
+			// this is the winner, which no rejection records.
 			logging.Debug(ctx, "import: resolved link commit", "commit_sha", linkCommitSHA)
 
 			progress, stopProgress := newImportProgressReporter(c.OutOrStdout(), string(imp.AgentType()))
 			res, err := agentimport.Run(ctx, repo, imp, agentimport.Options{
 				RepoRoot: repoRoot, OverridePath: pathFlag, SessionFilter: sessions,
 				Now: time.Now(), DryRun: dryRun,
-				LinkCommitSHA: linkCommitSHA,
-				Progress:      progress,
-				ReadRemotes:   strategy.CheckpointReadRemotes(ctx),
+				LinkCommitSHA:   linkCommitSHA,
+				Progress:        progress,
+				ReadRemotes:     strategy.CheckpointReadRemotes(ctx),
+				RemoteRefLister: ListCheckpointRefsOnRemote,
 			})
 			stopProgress(err == nil)
 			if err != nil {

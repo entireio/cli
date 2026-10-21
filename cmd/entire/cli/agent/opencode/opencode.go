@@ -39,7 +39,6 @@ func NewOpenCodeAgent() agent.Agent {
 func (a *OpenCodeAgent) Name() types.AgentName    { return agent.AgentNameOpenCode }
 func (a *OpenCodeAgent) Type() types.AgentType    { return agent.AgentTypeOpenCode }
 func (a *OpenCodeAgent) Description() string      { return "OpenCode - AI-powered terminal coding agent" }
-func (a *OpenCodeAgent) IsPreview() bool          { return true }
 func (a *OpenCodeAgent) ProtectedDirs() []string  { return []string{".opencode"} }
 func (a *OpenCodeAgent) ProtectedFiles() []string { return []string{"opencode.json"} }
 
@@ -275,7 +274,7 @@ func (a *OpenCodeAgent) FormatResumeCommand(sessionID string) string {
 var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
 
 // SanitizePathForOpenCode converts a path to a safe directory name.
-// Replaces any non-alphanumeric character with a dash (same approach as Claude/Gemini).
+// Replaces any non-alphanumeric character with a dash (same approach as Claude).
 func SanitizePathForOpenCode(path string) string {
 	return nonAlphanumericRegex.ReplaceAllString(path, "-")
 }

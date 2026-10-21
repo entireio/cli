@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/e2e/agents"
 	"github.com/entireio/cli/e2e/entire"
 	"github.com/entireio/cli/e2e/testutil"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
 func TestMain(m *testing.M) {
@@ -60,6 +61,10 @@ func TestMain(m *testing.M) {
 	for _, name := range agent.CallerSessionEnvVars() {
 		os.Unsetenv(name)
 	}
+	// Same for the developer's shell-scoped login selection: the spawned
+	// binary's ENTIRE_CONFIG_DIR is empty, so an inherited ENTIRE_CONTEXT names
+	// a login that is not saved there and fails every child up front.
+	os.Unsetenv(contexts.EnvContextVar)
 
 	// Select the checkpoint storage backend for the whole suite. E2E_CHECKPOINT_STORE
 	// (e.g. "git-refs") maps to the ENTIRE_CHECKPOINTS_PRIMARY override the spawned

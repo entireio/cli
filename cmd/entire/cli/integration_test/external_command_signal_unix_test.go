@@ -162,3 +162,59 @@ func TestExternalCommand_ParentsSignalOutranksTheChilds(t *testing.T) {
 			ws.Signal(), pStderr.String())
 	}
 }
+
+// agent-help's delegation runs the plugin inside a Cobra command, whose
+// errors main.go otherwise turns into a plain exit 1. The plugin's outcome
+// must come back the way a dispatched plugin's does: its exit code verbatim,
+// and a signal that reached only the plugin re-raised, so the parent is
+// genuinely WIFSIGNALED and an enclosing shell loop breaks.
+func TestExternalCommand_AgentHelpPropagatesThePluginsOutcome(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		script   string
+		wantCode int            // for an ordinary exit
+		wantSig  syscall.Signal // for a signalled plugin; 0 means none
+	}{
+		{name: "exit code", script: "exit 42", wantCode: 42},
+		{name: "own SIGTERM", script: "trap - TERM\nkill -TERM $$", wantSig: syscall.SIGTERM},
+		// Go's runtime ignores a SIGPIPE it did not get from a write to
+		// stdout/stderr, so dieFromSignal's re-raise is not delivered and it
+		// falls back to 128+13 — the dispatcher's own outcome for this case.
+		{name: "broken pipe", script: "trap - PIPE\nkill -PIPE $$", wantCode: 141},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "entire-outcome"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755); err != nil {
+				t.Fatalf("write plugin: %v", err)
+			}
+
+			cmd := execx.NonInteractive(context.Background(), getTestBinary(), "agent-help", "outcome")
+			cmd.Env = pathWith(dir)
+			var stderr bytes.Buffer
+			cmd.Stdout = &bytes.Buffer{}
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err == nil {
+				t.Fatal("expected agent-help to fail with the plugin")
+			}
+			ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if !ok {
+				t.Fatal("no wait status")
+			}
+			if tc.wantSig != 0 {
+				if !ws.Signaled() || ws.Signal() != tc.wantSig {
+					t.Errorf("parent: signaled=%v signal=%v exit=%d, want death by %v\nstderr: %s",
+						ws.Signaled(), ws.Signal(), cmd.ProcessState.ExitCode(), tc.wantSig, stderr.String())
+				}
+				return
+			}
+			if got := cmd.ProcessState.ExitCode(); got != tc.wantCode {
+				t.Errorf("exit code = %d, want the plugin's own %d\nstderr: %s", got, tc.wantCode, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "exited with code") {
+				t.Errorf("main printed its own message over the plugin's: %q", stderr.String())
+			}
+		})
+	}
+}

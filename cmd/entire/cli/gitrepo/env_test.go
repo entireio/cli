@@ -9,13 +9,14 @@ import (
 func TestEnvWithoutRepoOverrides_StripsRepoSelectors(t *testing.T) {
 	// Cannot be parallel: t.Setenv is process-global.
 	t.Setenv("GIT_DIR", "/decoy/.git")
+	t.Setenv("GIT_COMMON_DIR", "/decoy/.git")
 	t.Setenv("GIT_WORK_TREE", "/decoy")
 	t.Setenv("GIT_INDEX_FILE", "/decoy/.git/index")
 	t.Setenv("ENTIRE_ENV_TEST_KEEP", "keep-me")
 
 	env := EnvWithoutRepoOverrides()
 
-	for _, banned := range []string{"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE="} {
+	for _, banned := range []string{"GIT_DIR=", "GIT_COMMON_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE="} {
 		if slices.ContainsFunc(env, func(kv string) bool { return strings.HasPrefix(kv, banned) }) {
 			t.Errorf("EnvWithoutRepoOverrides kept %s", strings.TrimSuffix(banned, "="))
 		}

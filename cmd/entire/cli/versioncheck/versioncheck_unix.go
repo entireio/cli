@@ -38,7 +38,7 @@ var installProbes = []installProbe{brewProbe, miseProbe}
 // unimplemented there, so the command is only ever printed).
 func fallbackInstallCommand(_, currentVersion string) string {
 	if isNightly(currentVersion) {
-		return "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly"
+		return "curl -fsSL https://entire.com/install.sh | bash -s -- --channel nightly"
 	}
-	return "curl -fsSL https://entire.io/install.sh | bash"
+	return "curl -fsSL https://entire.com/install.sh | bash"
 }

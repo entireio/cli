@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -69,6 +70,17 @@ func TestResolveTargetForTokenAuth(t *testing.T) {
 		t.Parallel()
 		got, proto := resolveTargetForTokenAuth(ctx, "ssh://git@git.example.com:2222/org/repo.git")
 		assert.Equal(t, "https://git.example.com/org/repo.git", got)
+		assert.Equal(t, ProtocolHTTPS, proto)
+	})
+
+	t.Run("git+ssh alias URL rewrites to HTTPS", func(t *testing.T) {
+		t.Parallel()
+		// This call site reaches deriveTokenOriginURL only through its own
+		// ProtocolSSH check, so an alias admitted in that helper's allow-list
+		// alone would still reach newCommand's default branch: no token, and
+		// not even the SSH path's warning.
+		got, proto := resolveTargetForTokenAuth(ctx, "git+ssh://git@github.com/org/repo.git")
+		assert.Equal(t, "https://github.com/org/repo.git", got)
 		assert.Equal(t, ProtocolHTTPS, proto)
 	})
 
@@ -1309,6 +1321,47 @@ func TestFormatGitPushError_RedactsRemoteURL(t *testing.T) {
 	assert.Contains(t, msg, RedactURLOrPath(remote))
 }
 
+func TestFormatGitPushError_PreservesTerminalLayout(t *testing.T) {
+	t.Parallel()
+
+	const target = "https://user:password@github.com/example/checkpoints.git"
+	const unblockURL = "https://github.com/example/checkpoints/security/secret-scanning/unblock-secret/2mQ8vR5xL9nT3bW7kP4sH6jY0cF1dZ"
+	for _, longOutput := range []bool{false, true} {
+		name := "short"
+		if longOutput {
+			name = "elided"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := "remote: GITHUB PUSH PROTECTION\nremote:   locations:\nremote:     path: 0/full.jsonl:85\n"
+			if longOutput {
+				output += strings.Repeat("remote: additional policy detail —\n", 200)
+			}
+			output += "remote: " + unblockURL + "\n! [remote rejected] (repository rule violations)\nTo " + target
+			cause := errors.New("push exited")
+			err := fmt.Errorf("caller: %w", formatGitPushError(t.Context(), cause, []byte(output), target))
+			var pushErr *PushError
+			require.ErrorAs(t, err, &pushErr)
+			require.ErrorIs(t, err, cause)
+			assert.NotContains(t, err.Error(), "\n", "logs remain single-line")
+			assert.NotContains(t, err.Error(), "user:password")
+			terminal := pushErr.Output()
+			assert.NotContains(t, terminal, "user:password")
+			assert.Contains(t, terminal, RedactURLOrPath(target))
+			assert.Contains(t, terminal, unblockURL)
+			assert.Contains(t, terminal, "\nremote:   locations:\nremote:     path:")
+			assert.Contains(t, terminal, "repository rule violations")
+			assert.LessOrEqual(t, len([]rune(terminal)), maxPushErrorDetail)
+			assert.True(t, utf8.ValidString(terminal))
+			if longOutput {
+				assert.Contains(t, terminal, "[…]")
+			} else {
+				assert.Equal(t, strings.ReplaceAll(output, target, RedactURLOrPath(target)), terminal)
+			}
+		})
+	}
+}
+
 // Multi-line git output has to stay usable as a single log attribute.
 func TestFormatGitPushError_CollapsesAndCaps(t *testing.T) {
 	t.Parallel()
@@ -1402,4 +1455,37 @@ func TestPushWithOptions_ErrorCarriesRemoteRejectionReason(t *testing.T) {
 	assert.Contains(t, err.Error(), reason,
 		"the remote's reason must reach the caller, not just \"exit status 1\"")
 	assert.Contains(t, err.Error(), "remote rejected")
+}
+
+// A failed fetch used to return a bare "git fetch: exit status N", so the
+// strategy layer grew its own copy of this folding — without the URL redaction
+// that makes it safe to log. Both now live here, for every Fetch caller.
+func TestFetch_ErrorCarriesRedactedGitOutput(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	url := "https://user:s3cr3t@example.invalid/missing.git"
+
+	out, err := Fetch(t.Context(), FetchOptions{Dir: dir, Remote: url, RefSpecs: []string{"refs/heads/main"}, NoFilter: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "git fetch:", "the cause must stay wrapped")
+	assert.NotEmpty(t, out)
+	assert.NotContains(t, err.Error(), "s3cr3t", "a credential-bearing target must be redacted before it reaches a log")
+	assert.NotContains(t, err.Error(), "\n", "the detail must stay a single log-safe line")
+}
+
+// A process killed before it wrote anything must keep its cause rather than
+// being replaced by an empty detail — the regression that produced a bare
+// "fetch failed: " once per queued checkpoint ref.
+func TestErrWithGitOutput_KeepsCauseWhenGitIsSilent(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("signal: killed")
+
+	silent := errWithGitOutput(sentinel, nil, "origin")
+	require.ErrorIs(t, silent, sentinel)
+	assert.Equal(t, sentinel.Error(), silent.Error())
+
+	detailed := errWithGitOutput(sentinel, []byte("fatal: couldn't find remote ref\n"), "origin")
+	require.ErrorIs(t, detailed, sentinel, "detail must annotate the cause, not replace it")
+	assert.Contains(t, detailed.Error(), "couldn't find remote ref")
 }
