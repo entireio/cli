@@ -355,8 +355,10 @@ repository B links that commit in B (`strategy/foreign_session.go`).
   `session-homes/<id>.json` under `userdirs.CacheRoot`. B's hooks use it only
   to find A's store; the state loaded there decides.
 - It runs only when B's own sessions link nothing, never prompts (no TTY, or
-  `commit_linking: always`), and skips amends, merges, squashes and sequence
-  operations. The session must be the identified caller (`IsCaller()`),
+  `commit_linking: always`), and skips `--amend` without a new message,
+  merges, commits carrying inherited checkpoint trailers (squashes, redos)
+  and sequence operations. Like the local fast path, `--amend -m` and a
+  squash with no trailers to inherit are linked as new commits. The session must be the identified caller (`IsCaller()`),
   ranked together with B's local sessions.
 - prepare-commit-msg stamps a fresh checkpoint ID; post-commit condenses the
   session's transcript since its last checkpoint into B's store, through B's

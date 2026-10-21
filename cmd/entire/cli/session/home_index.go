@@ -65,8 +65,10 @@ func validateSessionHome(h SessionHome) error {
 	if err := validation.ValidateSessionID(h.SessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
-	if !filepath.IsAbs(h.WorktreePath) || filepath.Clean(h.WorktreePath) != h.WorktreePath {
-		return fmt.Errorf("session home worktree %q must be an absolute, clean path", h.WorktreePath)
+	// Absolute only: the path is git's own spelling (forward slashes from Git
+	// for Windows), which filepath.Clean would rewrite.
+	if !filepath.IsAbs(h.WorktreePath) {
+		return fmt.Errorf("session home worktree %q must be an absolute path", h.WorktreePath)
 	}
 	return nil
 }

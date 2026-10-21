@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,8 +30,10 @@ func foreignCommitFixture(t *testing.T, mutate func(*SessionState)) foreignRepos
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	transcript := filepath.Join(t.TempDir(), foreignTestSessionID+".jsonl")
-	line := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` +
-		filepath.Join(r.b, "b.txt") + `","content":"x"}}]}}`
+	bPath, err := json.Marshal(filepath.Join(r.b, "b.txt")) // backslashes on Windows
+	require.NoError(t, err)
+	line := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":` +
+		string(bPath) + `,"content":"x"}}]}}`
 	require.NoError(t, os.WriteFile(transcript, []byte(`{"type":"human","message":{"content":"make b"}}`+"\n"+line+"\n"), 0o600))
 	r.saveForeignState(t, func(s *SessionState) {
 		s.TranscriptPath = transcript
@@ -193,4 +196,24 @@ func TestForeignAgentCommit_HomeAmendKeepsOwnCheckpoint(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, homeID, cpID)
 	assert.Equal(t, aHead, loadForeignTestState(t, r).BaseCommit)
+}
+
+// The transcript wrote none of the committed files (here only A's README.md,
+// as a shell edit in B would look): the agent's own commit is attributed whole,
+// never re-resolved against A's paths.
+func TestPostCommit_ForeignAgentCommitWithoutTranscriptOverlap(t *testing.T) {
+	r := foreignCommitFixture(t, nil)
+	state := loadForeignTestState(t, r)
+	aPath, err := json.Marshal(filepath.Join(r.a, "README.md"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(state.TranscriptPath, []byte(`{"type":"human","message":{"content":"x"}}`+"\n"+
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":`+string(aPath)+`,"content":"x"}}]}}`+"\n"), 0o600))
+	testutil.WriteFile(t, r.b, "README.md", "b readme\n")
+	testutil.GitAdd(t, r.b, "README.md")
+
+	cpID := commitForeign(t, r, "add b and readme\n")
+	require.False(t, cpID.IsEmpty())
+	content := readBCheckpoint(t, r, cpID)
+	require.NotNil(t, content)
+	assert.ElementsMatch(t, []string{"README.md", "b.txt"}, content.Metadata.FilesTouched)
 }

@@ -234,9 +234,7 @@ func (s *ManualCommitStrategy) tryForeignAgentCommit(ctx context.Context, commit
 	if err != nil {
 		return
 	}
-	if err := os.WriteFile(commitMsgFile, []byte(addCheckpointTrailer(string(content), cpID)), 0o600); err != nil { //nolint:gosec // path from git hook arg
-		return
-	}
+	// The marker goes first: a trailer post-commit cannot condense would dangle.
 	root, err := perWorktreeGitRoot(ctx)
 	if err != nil {
 		return
@@ -248,6 +246,10 @@ func (s *ManualCommitStrategy) tryForeignAgentCommit(ctx context.Context, commit
 	if err != nil {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record foreign link",
 			slog.String("error", err.Error()))
+		return
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(addCheckpointTrailer(string(content), cpID)), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		_ = osroot.RemoveNoSymlinks(root, foreignLinkFile) //nolint:errcheck // best-effort; a marker never matches another commit's fresh ID
 		return
 	}
 	logging.Info(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: foreign agent commit trailer added",
@@ -340,7 +342,11 @@ func (s *ManualCommitStrategy) linkForeignAgentCommit(ctx context.Context, repo 
 }
 
 // foreignEditedFiles returns the committed files the session's transcript
-// wrote under worktreePath since its last checkpoint, sorted.
+// wrote under worktreePath since its last checkpoint, sorted. When it wrote
+// none of them (the agent edited through a shell, say), the agent's own
+// commit is attributed whole, as filterFilesTouched does for a session with
+// evidence of work. Never empty for a non-empty commit, so condensation never
+// re-resolves files against the home repository.
 func (s *ManualCommitStrategy) foreignEditedFiles(ctx context.Context, state *SessionState, worktreePath string, committed map[string]struct{}) []string {
 	view := *state
 	view.WorktreePath = worktreePath
@@ -350,6 +356,9 @@ func (s *ManualCommitStrategy) foreignEditedFiles(ctx context.Context, state *Se
 		if _, ok := committed[f]; ok && !slices.Contains(out, f) {
 			out = append(out, f)
 		}
+	}
+	if len(out) == 0 {
+		return committedFilesExcludingMetadata(committed)
 	}
 	slices.Sort(out)
 	return out
