@@ -30,7 +30,7 @@ const (
 	// transientCacheTTL bounds how long a no-candidates or skipped outcome is
 	// served before detection tries again. Both are transient for the same
 	// reason: candidates come from local refs, not just the cell, so keying a
-	// no-candidates entry to the tip alone would let doctor miss a brand-new
+	// no-candidates entry to the tip alone would let status miss a brand-new
 	// local commit under a bad address for too long — a quiet repo's tip can
 	// go unchanged for weeks. An outcome that did find candidates and got a
 	// clean read from the cell keeps the until-tip-moves rule below.

@@ -57,8 +57,18 @@ const unattributedShortlogTimeout = time.Minute
 // to fail"). --force does not auto-declare — see the Long text.
 func checkUnattributedAuthors(cmd *cobra.Command) {
 	ctx := cmd.Context()
-	out := detectUnattributedAuthors(ctx, defaultUnattributedAuthorsDeps(unattributedNetworkTimeout, unattributedShortlogTimeout))
+	out := detectUnattributedAuthors(ctx, doctorUnattributedAuthorsDeps())
 	runUnattributedAuthorsCheck(ctx, cmd.OutOrStdout(), out, defaultUnattributedPromptDeps())
+}
+
+// doctorUnattributedAuthorsDeps is detection with doctor's budgets. It never
+// reads the cache: status fills it on a few seconds' budget, timeouts
+// included, and doctor should not repeat that answer. It still writes, so
+// status picks up doctor's result.
+func doctorUnattributedAuthorsDeps() unattributedAuthorsDeps {
+	d := defaultUnattributedAuthorsDeps(unattributedNetworkTimeout, unattributedShortlogTimeout)
+	d.readCache = func(string, string, time.Time) (cachedDetection, bool) { return cachedDetection{}, false }
+	return d
 }
 
 // runUnattributedAuthorsCheck renders in doctor's own vocabulary: a

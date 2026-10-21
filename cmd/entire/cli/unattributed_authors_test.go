@@ -514,3 +514,34 @@ func TestDefaultUnattributedAuthorsDeps_Wired(t *testing.T) {
 		t.Fatalf("localTimeout = %v, want 1m", d.localTimeout)
 	}
 }
+
+// Status runs detection on a few seconds' budget and caches what it got,
+// timeouts included. Doctor must not serve that back: it runs its own longer
+// walk and network call, and refreshes the cache with the result.
+func TestDoctorUnattributedAuthorsDeps_IgnoresCachedResult(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Now()
+	statusResult := cachedDetection{Tip: "tip", Candidates: []string{"me@h.local"}, Skipped: "timed out reaching Entire", FetchedAt: now}
+	if err := writeUnattributedAuthorsCache(dir, statusResult); err != nil {
+		t.Fatal(err)
+	}
+	if _, hit := readUnattributedAuthorsCache(dir, "tip", now); !hit {
+		t.Fatal("precondition: the status result should be a cache hit")
+	}
+
+	var rec detectRecorder
+	d := detectDepsForTest(t, &rec)
+	doctor := doctorUnattributedAuthorsDeps()
+	d.readCache, d.writeCache = doctor.readCache, doctor.writeCache
+	d.commonDir = func(context.Context) (string, error) { return dir, nil }
+	d.now = func() time.Time { return now }
+
+	out := detectUnattributedAuthors(t.Context(), d)
+	if !rec.fetched || out.Skipped != "" || len(out.Authors) != 1 {
+		t.Fatalf("out = %+v, fetched = %v; want a fresh fetch, not the cached skip", out, rec.fetched)
+	}
+	if got, hit := readUnattributedAuthorsCache(dir, "tip", now); !hit || got.Skipped != "" || len(got.Authors) != 1 {
+		t.Fatalf("cache after doctor = %+v (hit=%v), want doctor's fresh result", got, hit)
+	}
+}
