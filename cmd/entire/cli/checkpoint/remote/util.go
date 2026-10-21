@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6"
@@ -638,6 +639,14 @@ func checkpointRemoteIsInherited(ctx context.Context, config *settings.Checkpoin
 		return OwnershipOurs, ""
 	}
 	if settings.CheckpointRemoteIsLocalOnly(ctx) {
+		return OwnershipOurs, ""
+	}
+	// The user settings file answers the same ownership question and needs no
+	// probe to do it: a repository cannot deliver content to ~/.config, so the
+	// destination found there is the developer's by construction. Only that
+	// destination: one a later layer overrides it with is still checked below.
+	if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil &&
+		settings.UserTierSuppliesCheckpointRemote(ctx, root, config) {
 		return OwnershipOurs, ""
 	}
 
