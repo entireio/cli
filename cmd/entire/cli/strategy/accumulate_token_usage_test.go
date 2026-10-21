@@ -25,7 +25,7 @@ func TestApplyTurnTokenUsage(t *testing.T) {
 		TokenUsage: &agent.TokenUsage{InputTokens: 100, OutputTokens: 10, APICallCount: 1},
 	}
 
-	ApplyTurnTokenUsage(state, &agent.TokenUsage{InputTokens: 50, OutputTokens: 5, APICallCount: 1}, nil, 0, nil)
+	ApplyTurnTokenUsage(state, &agent.TokenUsage{InputTokens: 50, OutputTokens: 5, APICallCount: 1}, nil, nil)
 
 	require.NotNil(t, state.TokenUsage)
 	require.Equal(t, 150, state.TokenUsage.InputTokens, "session-cumulative input")
@@ -35,7 +35,7 @@ func TestApplyTurnTokenUsage(t *testing.T) {
 	require.Equal(t, 50, state.CheckpointTokenUsage.InputTokens, "checkpoint-scoped input")
 
 	// Nil delta is a no-op.
-	ApplyTurnTokenUsage(state, nil, nil, 0, nil)
+	ApplyTurnTokenUsage(state, nil, nil, nil)
 	require.Equal(t, 150, state.TokenUsage.InputTokens)
 	require.Equal(t, 50, state.CheckpointTokenUsage.InputTokens)
 }
@@ -58,7 +58,7 @@ func TestApplyTurnTokenUsage_SubagentTokensMatchSaveStep(t *testing.T) {
 
 	ApplyTurnTokenUsage(state, &agent.TokenUsage{
 		InputTokens: 10, APICallCount: 1, SubagentTokens: &agent.TokenUsage{InputTokens: 45},
-	}, nil, 0, nil)
+	}, nil, nil)
 
 	require.Equal(t, 110, state.TokenUsage.InputTokens)
 	require.NotNil(t, state.TokenUsage.SubagentTokens)
@@ -71,7 +71,7 @@ func TestApplyTurnTokenUsage_SubagentTokensMatchSaveStep(t *testing.T) {
 	stale := uint64(1)
 	ApplyTurnTokenUsage(state, &agent.TokenUsage{
 		InputTokens: 5, APICallCount: 1, SubagentTokens: &agent.TokenUsage{InputTokens: 999},
-	}, &stale, 0, nil)
+	}, &stale, nil)
 
 	require.Equal(t, 115, state.TokenUsage.InputTokens, "main-agent tokens survive a stale ledger version")
 	if state.TokenUsage.SubagentTokens != nil {
@@ -91,19 +91,23 @@ func TestApplyTurnTokenUsage_ScopesPendingToTokenStart(t *testing.T) {
 		InputTokens: 30, OutputTokens: 30, APICallCount: 3,
 		SubagentTokens: &agent.TokenUsage{OutputTokens: 4}, SubagentTokensComplete: &complete,
 	}
+	six, eight := 6, 8
 
 	for _, tc := range []struct {
 		name        string
 		tokenStart  int
-		recount     TurnTokenRecount
+		baseline    *int
+		noRecount   bool
+		recounted   int
 		wantPending int
 		wantFrom    int
 	}{
-		{name: "token offset moved during the turn", tokenStart: 8, recount: fixedRecount(10), wantPending: 10, wantFrom: 8},
-		{name: "nothing after the token offset", tokenStart: 8, recount: fixedRecount(0), wantPending: 0, wantFrom: 8},
-		{name: "recount fails", tokenStart: 8, recount: func(int) *agent.TokenUsage { return nil }, wantPending: 0, wantFrom: 8},
-		{name: "token offset before the turn start", tokenStart: 3, recount: fixedRecount(10), wantPending: 30},
-		{name: "no recount (hook or out-of-band usage)", tokenStart: 8, wantPending: 30},
+		{name: "token offset moved during the turn", tokenStart: 8, recounted: 10, wantPending: 10, wantFrom: 8},
+		{name: "token offset moved past its turn-start value", tokenStart: 8, baseline: &six, recounted: 10, wantPending: 10, wantFrom: 8},
+		{name: "nothing after the token offset", tokenStart: 8, wantPending: 0, wantFrom: 8},
+		{name: "token offset before the turn start", tokenStart: 3, recounted: 10, wantPending: 30},
+		{name: "transcript shorter than an unmoved token offset", tokenStart: 8, baseline: &eight, recounted: 10, wantPending: 30},
+		{name: "no recount (hook or out-of-band usage)", tokenStart: 8, noRecount: true, wantPending: 30},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -111,14 +115,14 @@ func TestApplyTurnTokenUsage_ScopesPendingToTokenStart(t *testing.T) {
 			state.SetTokenStart(tc.tokenStart)
 			from := 0
 			var recount TurnTokenRecount
-			if tc.recount != nil {
-				recount = func(f int) *agent.TokenUsage {
+			if !tc.noRecount {
+				recount = NewTurnTokenRecount(5, tc.baseline, func(f int) *agent.TokenUsage {
 					from = f
-					return tc.recount(f)
-				}
+					return &agent.TokenUsage{InputTokens: tc.recounted, OutputTokens: tc.recounted, APICallCount: 1}
+				})
 			}
 
-			ApplyTurnTokenUsage(state, turn, nil, 5, recount)
+			ApplyTurnTokenUsage(state, turn, nil, recount)
 
 			require.NotNil(t, state.TokenUsage)
 			require.Equal(t, 30, state.TokenUsage.OutputTokens, "session total gets the whole turn")
@@ -132,16 +136,10 @@ func TestApplyTurnTokenUsage_ScopesPendingToTokenStart(t *testing.T) {
 	}
 }
 
-func fixedRecount(tokens int) TurnTokenRecount {
-	return func(int) *agent.TokenUsage {
-		return &agent.TokenUsage{InputTokens: tokens, OutputTokens: tokens, APICallCount: 1}
-	}
-}
-
-// TestSaveStep_ScopesPendingUnderSessionLock: the token offset is read inside
+// TestSaveStep_RescopesWithTokenStartAtApply: the token offset is read inside
 // SaveStep's state mutation, so a condensation that moves it after the hook
 // resolved the turn's usage still scopes the pending window.
-func TestSaveStep_ScopesPendingUnderSessionLock(t *testing.T) {
+func TestSaveStep_RescopesWithTokenStartAtApply(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "test.txt", "v1")
@@ -160,7 +158,7 @@ func TestSaveStep_ScopesPendingUnderSessionLock(t *testing.T) {
 		require.NoError(t, s.SaveStep(ctx, StepContext{
 			SessionID: sessionID, MetadataDir: metadataDir, ModifiedFiles: []string{"test.txt"},
 			CommitMessage: "step", AuthorName: "Test", AuthorEmail: "test@test.com",
-			AgentType: agent.AgentTypeClaudeCode, StepTranscriptStart: 5,
+			AgentType:  agent.AgentTypeClaudeCode,
 			TokenUsage: usage, PendingTokenUsageFrom: recount,
 		}))
 	}
@@ -173,10 +171,10 @@ func TestSaveStep_ScopesPendingUnderSessionLock(t *testing.T) {
 		return nil
 	}))
 	from := 0
-	step("v3", &agent.TokenUsage{InputTokens: 30, OutputTokens: 30, APICallCount: 3}, func(f int) *agent.TokenUsage {
+	step("v3", &agent.TokenUsage{InputTokens: 30, OutputTokens: 30, APICallCount: 3}, NewTurnTokenRecount(5, nil, func(f int) *agent.TokenUsage {
 		from = f
 		return &agent.TokenUsage{InputTokens: 10, OutputTokens: 10, APICallCount: 1}
-	})
+	}))
 
 	state, err := s.loadSessionState(ctx, sessionID)
 	require.NoError(t, err)

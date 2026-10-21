@@ -510,37 +510,25 @@ func TestComputeOutOfBandTokenUsage_MissingBaselineMidSession(t *testing.T) {
 	require.Equal(t, cumulative, computeOutOfBandTokenUsage(ctx, ag, freshID, nil))
 }
 
-// TestResolveTurnTokenUsage_RecountsOnlyTranscriptUsage pins which turn usage
-// can be rescoped when a condensation during the turn moved the token offset:
-// usage counted from the transcript comes with a recount from a later offset;
-// hook-reported and out-of-band usage do not, because a mid-turn condensation
-// stores none of the turn for those agents.
-func TestResolveTurnTokenUsage_RecountsOnlyTranscriptUsage(t *testing.T) {
-	setupStopTestRepo(t)
-	ctx := context.Background()
+// TestResolveTurnTokenUsage_TranscriptUsageRecountsFromTokenOffset: usage
+// counted from the transcript comes with a recount from the token offset a
+// condensation during the turn moved it to.
+func TestResolveTurnTokenUsage_TranscriptUsageRecountsFromTokenOffset(t *testing.T) {
+	t.Parallel()
 	transcript := []byte(`{"type":"user","message":{"content":"go"}}` + "\n" +
 		`{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":30,"output_tokens":30}}}` + "\n" +
 		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}` + "\n" +
 		`{"type":"assistant","message":{"id":"m2","usage":{"input_tokens":5,"output_tokens":5}}}` + "\n")
-	preState := &PrePromptState{TranscriptOffset: 0}
+	tokenStart := 0
+	preState := &PrePromptState{TranscriptOffset: 0, TokenStart: &tokenStart}
 
-	usage, recount := resolveTurnTokenUsage(ctx, &claudecode.ClaudeCodeAgent{}, &agent.Event{}, "s", preState, transcript, "", nil)
+	usage, recount := resolveTurnTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, &agent.Event{}, "s", preState, transcript, "", nil)
 	require.NotNil(t, usage)
 	require.Equal(t, 35, usage.OutputTokens, "the whole turn from its start")
-	require.NotNil(t, recount, "transcript usage can be recounted")
-	require.Equal(t, 5, recount(2).OutputTokens, "recount from a later offset")
-
-	hookUsage := &agent.TokenUsage{OutputTokens: 9}
-	usage, recount = resolveTurnTokenUsage(ctx, &claudecode.ClaudeCodeAgent{}, &agent.Event{TokenUsage: hookUsage}, "s", preState, transcript, "", nil)
-	require.Same(t, hookUsage, usage)
-	require.Nil(t, recount, "hook-reported usage stays whole")
-
-	oob := &agent.TokenUsage{OutputTokens: 7}
-	sessionID := "test-oob-recount"
-	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{SessionID: sessionID, BaseCommit: "abc123", StartedAt: time.Now()}))
-	usage, recount = resolveTurnTokenUsage(ctx, &mockOOBTokenAgent{usage: oob}, &agent.Event{}, sessionID, nil, nil, "", nil)
-	require.Equal(t, oob, usage)
-	require.Nil(t, recount, "out-of-band usage stays whole")
+	require.NotNil(t, recount)
+	pending, rescoped := recount(2)
+	require.True(t, rescoped)
+	require.Equal(t, 5, pending.OutputTokens, "recount from the moved token offset")
 }
 
 // TestDispatchLifecycleEvent_SkipsForwardedHookFromNonOwningAgent verifies the

@@ -120,7 +120,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
-		applyTurnTokenUsage(state, step.TokenUsage, pendingTurnTokenUsage(state, step.TokenUsage, step.StepTranscriptStart, step.PendingTokenUsageFrom))
+		applyTurnTokenUsage(state, step.TokenUsage, pendingTurnTokenUsage(state, step.TokenUsage, step.PendingTokenUsageFrom))
 
 		logCtx := logging.WithComponent(ctx, "checkpoint")
 		logging.Info(logCtx, "checkpoint saved",
@@ -155,37 +155,49 @@ func withoutStaleSubagentSnapshot(usage *agent.TokenUsage, ledgerVersion *uint64
 	return types.WithClearedSubagentTokens(usage, false)
 }
 
-// TurnTokenRecount recounts a turn's main-agent token usage from a transcript
-// offset, the way the turn's usage was counted from the turn start.
-type TurnTokenRecount func(from int) *agent.TokenUsage
+// TurnTokenRecount recounts a turn's main-agent usage from the session's
+// current token offset when a condensation during the turn moved it, and
+// reports whether it did (see NewTurnTokenRecount).
+type TurnTokenRecount func(tokenStart int) (pending *agent.TokenUsage, rescoped bool)
 
-// pendingTurnTokenUsage returns the part of a turn's usage that no checkpoint
-// has stored. A condensation during the turn (an agent commit, an attach)
-// stored the turn up to the token offset and moved it past turnStart; counting
-// the whole turn as pending would store that part again whenever the next
-// condensation's own recount finds nothing and falls back to the pending
-// usage. The main-agent counters are then recounted from the token offset; the
-// cumulative subagent snapshot is kept, since applyTurnTokenUsage rescopes it
-// against the baseline. Without a recount (hook-reported or out-of-band usage,
-// which a mid-turn condensation stores none of) the whole turn stays pending.
-// It must run under the session lock that applies the result, so a concurrent
-// condensation cannot move the token offset in between.
-func pendingTurnTokenUsage(state *SessionState, usage *agent.TokenUsage, turnStart int, recount TurnTokenRecount) *agent.TokenUsage {
-	from := state.TokenStart()
-	if usage == nil || recount == nil || from <= turnStart {
+// NewTurnTokenRecount returns the recount for a turn counted from turnStart.
+// The token offset moved during the turn when it differs from
+// tokenStartAtTurnStart and lies past turnStart; a transcript rewritten
+// shorter than an earlier offset (undo, a forced resume) leaves the offset past
+// turnStart without any condensation, so the baseline is what decides. Without
+// one (no state at turn start, older pre-prompt state) the offset lying past
+// turnStart is the signal. count counts the main-agent usage from an offset.
+func NewTurnTokenRecount(turnStart int, tokenStartAtTurnStart *int, count func(from int) *agent.TokenUsage) TurnTokenRecount {
+	return func(tokenStart int) (*agent.TokenUsage, bool) {
+		if tokenStart <= turnStart || (tokenStartAtTurnStart != nil && tokenStart == *tokenStartAtTurnStart) {
+			return nil, false
+		}
+		return count(tokenStart), true
+	}
+}
+
+// pendingTurnTokenUsage returns the part of a turn's usage no checkpoint has
+// stored. A condensation during the turn (an agent commit, an attach) stored
+// the turn up to the token offset; counting the whole turn as pending would
+// store that part again when the next condensation's own recount finds nothing
+// and falls back to the pending usage. The recount keeps the turn's cumulative
+// subagent snapshot, which applyTurnTokenUsage rescopes. Hook-reported (Cursor)
+// and out-of-band (Antigravity) usage have no recount and stay whole: a
+// mid-turn condensation stores none of it. Call it under the session lock that
+// applies the result, so a concurrent condensation cannot move the offset in
+// between.
+func pendingTurnTokenUsage(state *SessionState, usage *agent.TokenUsage, recount TurnTokenRecount) *agent.TokenUsage {
+	if usage == nil || recount == nil {
 		return usage
 	}
-	pending := *usage
-	main := recount(from)
-	if main == nil {
-		main = &agent.TokenUsage{}
+	recounted, rescoped := recount(state.TokenStart())
+	if !rescoped {
+		return usage
 	}
-	pending.InputTokens = main.InputTokens
-	pending.CacheCreationTokens = main.CacheCreationTokens
-	pending.CacheReadTokens = main.CacheReadTokens
-	pending.OutputTokens = main.OutputTokens
-	pending.APICallCount = main.APICallCount
-	return &pending
+	if recounted == nil {
+		recounted = &agent.TokenUsage{}
+	}
+	return replaceSubagentTokensFrom(recounted, usage)
 }
 
 // applyTurnTokenUsage records one turn's token usage on state: it adds the

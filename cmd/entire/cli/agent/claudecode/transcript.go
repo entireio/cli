@@ -595,8 +595,12 @@ func straddlingMessageID(transcriptData, sliced []byte) string {
 }
 
 // mainAssistantMessageID returns the message id of a main-agent (non-sidechain)
-// assistant transcript line, or "".
+// assistant transcript line, or "". Lines that cannot be assistant lines, such
+// as large tool results, are rejected before they are decoded.
 func mainAssistantMessageID(line []byte) string {
+	if !bytes.Contains(line, []byte(`"assistant"`)) {
+		return ""
+	}
 	var entry struct {
 		Type        string `json:"type"`
 		IsSidechain bool   `json:"isSidechain"`

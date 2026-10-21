@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -77,6 +78,12 @@ type PrePromptState struct {
 	// checkpoint-scoped token delta. Empty for agents with transcript-embedded
 	// token data.
 	TokenBaseline json.RawMessage `json:"token_baseline,omitempty"`
+
+	// TokenStart is the session's token offset (SessionState.TokenStart) at
+	// turn start, so turn end can tell whether a condensation during the turn
+	// moved it. nil when no session state existed yet, or in state written by
+	// older versions.
+	TokenStart *int `json:"token_start,omitempty"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -268,6 +275,11 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		UntrackedScanSkipped: scanSkipped,
 		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
 		TranscriptOffset:     transcriptOffset,
+	}
+
+	if session, loadErr := strategy.LoadSessionState(ctx, sessionID); loadErr == nil && session != nil {
+		tokenStart := session.TokenStart()
+		state.TokenStart = &tokenStart
 	}
 
 	// Out-of-band token baseline: agents whose token usage lives outside the

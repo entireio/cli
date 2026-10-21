@@ -1106,11 +1106,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// The tokens are applied by the turn-end transition itself, so a
 		// repeated or concurrent Stop for the same turn adds nothing.
 		turnUsage, recount := resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
-		turnStart := 0
-		if preState != nil {
-			turnStart = preState.TranscriptOffset
-		}
-		transitionSessionTurnEnd(ctx, sessionID, ag.Type(), event, &checkpointlessTurnUsage{usage: turnUsage, ledgerVersion: codexLedgerVersion, turnStart: turnStart, recount: recount})
+		transitionSessionTurnEnd(ctx, sessionID, ag.Type(), event, &checkpointlessTurnUsage{usage: turnUsage, ledgerVersion: codexLedgerVersion, recount: recount})
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 				slog.String("error", cleanupErr.Error()))
@@ -1235,24 +1231,23 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 // TurnStart baseline stored in PrePromptState. Only one source is used, so a
 // turn is never counted twice.
 //
-// For usage counted from the transcript (Codex's ledger counts its main part
-// there too), it also returns a recount of the main-agent usage from a later
-// offset, so the pending checkpoint usage can leave out what a condensation
-// during the turn already stored (see strategy.TurnTokenRecount). Hook-reported
-// and out-of-band usage get none: a mid-turn condensation stores none of it.
+// Usage counted from the transcript (Codex's ledger counts its main part there
+// too) comes with a recount that scopes the pending checkpoint usage; the
+// others come with none (see strategy.pendingTurnTokenUsage).
 func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) (*agent.TokenUsage, strategy.TurnTokenRecount) {
 	if event.TokenUsage != nil {
 		return event.TokenUsage, nil
 	}
-	recount := func(from int) *agent.TokenUsage {
-		return agent.CalculateTokenUsage(ctx, ag, transcriptData, from, "")
+	turnStart := 0
+	var tokenStartAtTurnStart *int
+	if preState != nil {
+		turnStart, tokenStartAtTurnStart = preState.TranscriptOffset, preState.TokenStart
 	}
+	recount := strategy.NewTurnTokenRecount(turnStart, tokenStartAtTurnStart, func(from int) *agent.TokenUsage {
+		return agent.CalculateTokenUsage(ctx, ag, transcriptData, from, "")
+	})
 	if codexInventoryUsage != nil {
 		return codexInventoryUsage, recount
-	}
-	turnStart := 0
-	if preState != nil {
-		turnStart = preState.TranscriptOffset
 	}
 	if usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, subagentsDir); usage != nil {
 		return usage, recount
@@ -2759,7 +2754,7 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, agentType t
 		// it adds nothing.
 		wasActive = state.Phase.IsActive()
 		if turnUsage != nil && wasActive {
-			strategy.ApplyTurnTokenUsage(state, turnUsage.usage, turnUsage.ledgerVersion, turnUsage.turnStart, turnUsage.recount)
+			strategy.ApplyTurnTokenUsage(state, turnUsage.usage, turnUsage.ledgerVersion, turnUsage.recount)
 		}
 		if err := strategy.TransitionAndLog(ctx, state, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
 			logging.Warn(logCtx, "turn-end transition failed",
@@ -2823,13 +2818,11 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, agentType t
 // checkpointlessTurnUsage is the token usage of a turn that ends without a
 // step, for transitionSessionTurnEnd to record when it ends the turn.
 // ledgerVersion is the subagent ledger version the usage was computed
-// against (Codex), or nil. turnStart is the transcript offset the usage was
-// counted from, and recount recounts it from a later one, or is nil (see
+// against (Codex), or nil. recount scopes the pending part, or is nil (see
 // strategy.ApplyTurnTokenUsage).
 type checkpointlessTurnUsage struct {
 	usage         *agent.TokenUsage
 	ledgerVersion *uint64
-	turnStart     int
 	recount       strategy.TurnTokenRecount
 }
 

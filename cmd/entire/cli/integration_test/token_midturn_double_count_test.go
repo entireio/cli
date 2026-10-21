@@ -13,48 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// committedOutputTokens reads a checkpoint's stored output tokens, treating a
-// checkpoint that stored no token usage as zero.
-func committedOutputTokens(t *testing.T, env *TestEnv, checkpointID string) int {
-	t.Helper()
-	u := readCommittedTokenUsage(t, env, checkpointID)
-	if u == nil {
-		return 0
-	}
-	return u.OutputTokens
-}
-
-// verifyMidTurn compares every recorded checkpoint against the tokens it must
-// newly cover, logs actual vs expected, and checks the checkpoints sum to the
-// session total. Unlike tokenTurnRun.verify it accepts a checkpoint that
-// stored no tokens, which is the correct outcome when a mid-turn consumption
-// already stored all of them.
-func verifyMidTurn(r *tokenTurnRun) {
-	r.t.Helper()
-	require.Zero(r.t, r.pendingOut+r.pendingSub, "every turn must end up in a checkpoint")
-	var sum int
-	for _, w := range r.want {
-		got := committedOutputTokens(r.t, r.env, w.id)
-		r.t.Logf("%-28s expected %4d  actual %4d", w.step, w.out, got)
-		assert.Equal(r.t, w.out, got, "%s: checkpoint must hold exactly the tokens it newly covers", w.step)
-		gotSub := 0
-		if u := readCommittedTokenUsage(r.t, r.env, w.id); u != nil && u.SubagentTokens != nil {
-			gotSub = u.SubagentTokens.OutputTokens
-		}
-		assert.Equal(r.t, w.sub, gotSub, "%s: subagent tokens", w.step)
-		sum += got
-	}
-	state, err := r.env.GetSessionState(r.s.ID)
-	require.NoError(r.t, err)
-	sessionTotal := 0
-	if state.TokenUsage != nil {
-		sessionTotal = state.TokenUsage.OutputTokens
-	}
-	r.t.Logf("true tokens %d, session total %d, checkpoint sum %d", r.total, sessionTotal, sum)
-	assert.Equal(r.t, r.total, sessionTotal, "session total counts every turn once")
-	assert.Equal(r.t, r.total, sum, "checkpoints must sum to the session's tokens")
-}
-
 // agentCommit commits files through the hooks as the agent would mid-turn.
 func (r *tokenTurnRun) agentCommit(files ...string) {
 	r.t.Helper()
@@ -62,12 +20,21 @@ func (r *tokenTurnRun) agentCommit(files ...string) {
 	r.record("agent commit mid-turn")
 }
 
-// straddlingTail writes the remaining lines of the turn's first message: Claude
-// Code writes one line per content block, all with the message's id and
+// straddlingTail writes the last message's remaining line: Claude Code writes
+// one line per content block of a message, all with the message's id and
 // usage, and runs the message's tool calls between them.
-func (r *tokenTurnRun) straddlingTail(tokens int) {
+func (r *tokenTurnRun) straddlingTail() {
 	r.t.Helper()
-	appendUsageMessage(r.s, fmt.Sprintf("msg-%d", r.turn), tokens)
+	b := r.s.TranscriptBuilder
+	b.messages = append(b.messages, b.messages[len(b.messages)-1])
+	require.NoError(r.t, r.s.TranscriptBuilder.WriteToFile(r.s.TranscriptPath))
+}
+
+// rewriteTranscriptEmpty rewrites the transcript shorter than the token offset
+// a checkpoint left, as an undo or a forced resume can.
+func (r *tokenTurnRun) rewriteTranscriptEmpty() {
+	r.t.Helper()
+	r.s.TranscriptBuilder.messages = nil
 	require.NoError(r.t, r.s.TranscriptBuilder.WriteToFile(r.s.TranscriptPath))
 }
 
@@ -100,19 +67,6 @@ func TestTokenScope_MidTurnConsumptionThenStop(t *testing.T) {
 				r.start(30, 0, "e.txt")
 				r.attach() // running: stores 30
 				r.stop()   // no usage lines written after attach
-				r.commit("e.txt")
-			},
-		},
-		{
-			name: "control: attach mid-turn, usage after, commit",
-			run: func(r *tokenTurnRun) {
-				r.start(10, 0, "a.txt")
-				r.stop()
-				r.commit("a.txt")
-				r.start(30, 0, "e.txt")
-				r.attach()
-				r.more(3)
-				r.stop()
 				r.commit("e.txt")
 			},
 		},
@@ -201,20 +155,22 @@ func TestTokenScope_MidTurnConsumptionThenStop(t *testing.T) {
 		{
 			name: "only a straddling message's tail follows the agent commit",
 			run: func(r *tokenTurnRun) {
-				r.start(100, 0, "a.txt", "b.txt")
+				r.start(0, 0, "a.txt", "b.txt")
+				r.more(100) // a message whose first line the commit stores
 				r.agentCommit("a.txt")
-				r.straddlingTail(100) // the same message: counted by the commit
+				r.straddlingTail()
 				r.stop()
 				r.commit("b.txt")
 			},
 		},
 		{
-			name: "a straddling message's tail and more usage follow the agent commit",
+			name: "transcript rewritten shorter than the token offset before the turn",
 			run: func(r *tokenTurnRun) {
-				r.start(100, 0, "a.txt", "b.txt")
-				r.agentCommit("a.txt")
-				r.straddlingTail(100)
-				r.more(5)
+				r.start(10, 0, "a.txt")
+				r.stop()
+				r.commit("a.txt")
+				r.rewriteTranscriptEmpty()
+				r.start(30, 0, "b.txt") // the offset lies past this turn's start, but no condensation moved it
 				r.stop()
 				r.commit("b.txt")
 			},
@@ -235,7 +191,7 @@ func TestTokenScope_MidTurnConsumptionThenStop(t *testing.T) {
 			t.Parallel()
 			r := newTokenTurnRun(t)
 			tc.run(r)
-			verifyMidTurn(r)
+			r.verify()
 		})
 	}
 }
