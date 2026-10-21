@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,6 +22,7 @@ const crossRepoSessionID = "0f0e0d0c-1111-4222-8333-444455556666"
 
 type crossRepoFixture struct {
 	a, b    *TestEnv
+	cache   []string
 	hooks   *HookRunner // A's Claude hooks
 	session *Session
 }
@@ -34,27 +36,34 @@ func newCrossRepoFixture(t *testing.T) *crossRepoFixture {
 	a := NewFeatureBranchEnv(t)
 	b := NewFeatureBranchEnv(t)
 	cache := []string{"XDG_CACHE_HOME=" + t.TempDir()}
-	a.ExtraEnv = append(a.ExtraEnv, cache...)
 	b.ExtraEnv = append(b.ExtraEnv, cache...)
 	installRealCommitHooks(b)
 
-	hooks := NewHookRunner(a.RepoDir, a.ClaudeProjectDir, t)
+	b.WriteFile("b.txt", "b\n")
+	a.WriteFile("a.txt", "a\n")
+	hooks, s := startSession(t, a, cache, crossRepoSessionID,
+		FileChange{Path: filepath.Join(a.RepoDir, "a.txt"), Content: "a\n"},
+		FileChange{Path: filepath.Join(b.RepoDir, "b.txt"), Content: "b\n"})
+	return &crossRepoFixture{a: a, b: b, cache: cache, hooks: hooks, session: s}
+}
+
+// startSession starts a turn of session id homed in env, recorded in cache,
+// whose transcript makes changes (absolute paths, in any repository).
+func startSession(t *testing.T, env *TestEnv, cache []string, id string, changes ...FileChange) (*HookRunner, *Session) {
+	t.Helper()
+	env.ExtraEnv = append(env.ExtraEnv, cache...)
+	hooks := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, t)
 	hooks.Env = cache
 	s := &Session{
-		ID:                crossRepoSessionID,
-		TranscriptPath:    filepath.Join(a.RepoDir, ".entire", "tmp", crossRepoSessionID+".jsonl"),
+		ID:                id,
+		TranscriptPath:    filepath.Join(env.RepoDir, ".entire", "tmp", id+".jsonl"),
 		TranscriptBuilder: NewTranscriptBuilder(),
-		env:               a,
+		env:               env,
 	}
-	const prompt = "write a.txt here and b.txt in the other repo, then commit both"
+	const prompt = "edit files here and in the other repo, then commit"
 	require.NoError(t, hooks.SimulateUserPromptSubmitWithPromptAndTranscriptPath(s.ID, prompt, s.TranscriptPath))
-	a.WriteFile("a.txt", "a\n")
-	b.WriteFile("b.txt", "b\n")
-	s.CreateTranscript(prompt, []FileChange{
-		{Path: filepath.Join(a.RepoDir, "a.txt"), Content: "a\n"},
-		{Path: filepath.Join(b.RepoDir, "b.txt"), Content: "b\n"},
-	})
-	return &crossRepoFixture{a: a, b: b, hooks: hooks, session: s}
+	s.CreateTranscript(prompt, changes)
+	return hooks, s
 }
 
 // installRealCommitHooks writes the commit hooks `entire enable` installs, run
@@ -122,4 +131,77 @@ func TestCrossRepoCommit_LinksAgentCommitInOtherRepo(t *testing.T) {
 	require.NoError(t, f.hooks.SimulateStop(f.session.ID, f.session.TranscriptPath))
 	_, found := f.a.ReadFileFromBranch(paths.MetadataBranchName, CheckpointSummaryPath(cpB))
 	require.False(t, found)
+}
+
+// moveOwnerOutOfAncestry gives session id an owner that is not an ancestor of
+// the commits these tests make. In the harness every recorded owner is the test
+// binary, which every hook descends from; real sessions in different agents
+// are owned by different processes, so only the caller variable can name them.
+func moveOwnerOutOfAncestry(t *testing.T, env *TestEnv, id string) {
+	t.Helper()
+	state, err := env.GetSessionState(id)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	state.Owner = &proclive.Identity{PID: 999999, Start: "never", Host: "elsewhere", Name: "claude"}
+	require.NoError(t, env.WriteSessionState(id, state))
+}
+
+// Two foreign sessions in different agents are recorded (homed in A and in C)
+// and both edited files in B. Each agent's commit links only its own session.
+func TestCrossRepoCommit_TwoForeignSessionsOnlyCommitterLinks(t *testing.T) {
+	t.Parallel()
+	f := newCrossRepoFixture(t)
+	c := NewFeatureBranchEnv(t)
+	const otherID = "1f1e1d1c-2222-4333-8444-555566667777"
+	f.b.WriteFile("c.txt", "c\n")
+	_, _ = startSession(t, c, f.cache, otherID,
+		FileChange{Path: filepath.Join(f.b.RepoDir, "c.txt"), Content: "c\n"})
+	moveOwnerOutOfAncestry(t, f.a, f.session.ID)
+	moveOwnerOutOfAncestry(t, c, otherID)
+	otherBefore, err := c.GetSessionState(otherID)
+	require.NoError(t, err)
+
+	agentGit(f.b, f.session.ID, "add", "b.txt")
+	agentGit(f.b, f.session.ID, "commit", "-m", "add b")
+	cp := f.b.GetCheckpointIDFromCommitMessage(f.b.GetHeadHash())
+	require.NotEmpty(t, cp)
+	require.Equal(t, f.session.ID, readSessionMetadata(t, f.b, cp).SessionID)
+
+	otherAfter, err := c.GetSessionState(otherID)
+	require.NoError(t, err)
+	require.Equal(t, otherBefore.CheckpointTranscriptStart, otherAfter.CheckpointTranscriptStart,
+		"the other foreign session is not condensed")
+
+	// Then the other agent commits its own file in B: its own checkpoint.
+	agentGit(f.b, otherID, "add", "c.txt")
+	agentGit(f.b, otherID, "commit", "-m", "add c")
+	cp2 := f.b.GetCheckpointIDFromCommitMessage(f.b.GetHeadHash())
+	require.NotEmpty(t, cp2)
+	require.NotEqual(t, cp, cp2)
+	meta := readSessionMetadata(t, f.b, cp2)
+	require.Equal(t, otherID, meta.SessionID)
+	require.Equal(t, []string{"c.txt"}, meta.FilesTouched)
+}
+
+// B has its own active session with work in the commit: it links the commit
+// the usual way, and the foreign session in A is not condensed.
+func TestCrossRepoCommit_LocalSessionWithContentTakesCommit(t *testing.T) {
+	t.Parallel()
+	f := newCrossRepoFixture(t)
+	const localID = "2f2e2d2c-3333-4444-8555-666677778888"
+	_, _ = startSession(t, f.b, f.cache, localID,
+		FileChange{Path: filepath.Join(f.b.RepoDir, "b.txt"), Content: "b\n"})
+	before, err := f.a.GetSessionState(f.session.ID)
+	require.NoError(t, err)
+
+	agentGit(f.b, localID, "add", "b.txt")
+	agentGit(f.b, localID, "commit", "-m", "add b")
+	cp := f.b.GetCheckpointIDFromCommitMessage(f.b.GetHeadHash())
+	require.NotEmpty(t, cp)
+	require.Equal(t, localID, readSessionMetadata(t, f.b, cp).SessionID)
+
+	after, err := f.a.GetSessionState(f.session.ID)
+	require.NoError(t, err)
+	require.Equal(t, before.CheckpointTranscriptStart, after.CheckpointTranscriptStart,
+		"the foreign session is not condensed into B's commit")
 }

@@ -57,11 +57,16 @@ func (r foreignRepos) aStore(t *testing.T) *session.StateStore {
 // in A's store and indexes it, after letting mutate adjust it.
 func (r foreignRepos) saveForeignState(t *testing.T, mutate func(*SessionState)) {
 	t.Helper()
+	r.saveForeignStateAs(t, foreignTestSessionID, mutate)
+}
+
+func (r foreignRepos) saveForeignStateAs(t *testing.T, sessionID string, mutate func(*SessionState)) {
+	t.Helper()
 	transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcript, []byte(`{"type":"user"}`+"\n"), 0o600))
 	now := time.Now()
 	state := &SessionState{
-		SessionID:           foreignTestSessionID,
+		SessionID:           sessionID,
 		BaseCommit:          "abc1234",
 		WorktreePath:        r.a,
 		StartedAt:           now,
@@ -178,4 +183,25 @@ func TestResolveForeignCallerSession_IgnoresHookRepoSelectors(t *testing.T) {
 	fs, ok := resolveForeignCallerSession(context.Background(), nil)
 	require.True(t, ok)
 	assert.True(t, sameDir(filepath.Join(r.a, ".git"), fs.commonDir))
+}
+
+// Two sessions owned by the same agent process (a /clear, say): the one that
+// interacted most recently is the caller, as the ranking decides locally.
+func TestResolveForeignCallerSession_SameOwnerMostRecentWins(t *testing.T) {
+	r := newForeignRepos(t)
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok || len(ancestry.Chain()) == 0 {
+		t.Skip("platform cannot introspect processes")
+	}
+	owner := ancestry.Chain()[0]
+	older := time.Now().Add(-time.Minute)
+	r.saveForeignStateAs(t, "foreign-older", func(s *SessionState) {
+		s.Owner = &owner
+		s.LastInteractionTime = &older
+	})
+	r.saveForeignState(t, func(s *SessionState) { s.Owner = &owner })
+
+	fs, ok := resolveForeignCallerSession(context.Background(), nil)
+	require.True(t, ok)
+	assert.Equal(t, foreignTestSessionID, fs.state.SessionID)
 }
