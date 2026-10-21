@@ -83,3 +83,26 @@ func TestStatusJSON_ReportsEnabledWhenOnlyTheUserTierConfiguresTheRepo(t *testin
 	assert.NotContains(t, after.String(), "not set up",
 		"the JSON path must agree with the text path about whether this repo is set up")
 }
+
+// A user settings file the CLI refuses to read (here a symlink) is otherwise
+// ignored silently, so every setting in it looks like it is not working.
+// Status says why.
+func TestStatus_NamesARefusedUserSettingsFile(t *testing.T) {
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+
+	configDir := t.TempDir()
+	t.Setenv(userdirs.EnvConfigDir, configDir)
+	t.Cleanup(settings.ClearOriginKeyCache)
+	t.Chdir(root)
+
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	require.NoError(t, os.WriteFile(target, []byte(`{"preferences":{"enabled":true}}`), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(configDir, usersettings.FileName)))
+
+	var out bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &out, false, false))
+	assert.Contains(t, out.String(), "ignoring user settings")
+	assert.Contains(t, out.String(), "symbolic link")
+	assert.Contains(t, out.String(), "not set up", "the refused file configures nothing")
+}

@@ -642,12 +642,11 @@ func checkpointRemoteIsInherited(ctx context.Context, config *settings.Checkpoin
 		return OwnershipOurs, ""
 	}
 	// The user settings file answers the same ownership question and needs no
-	// probe to do it: a repository cannot deliver content to ~/.config, so a
-	// destination found there is the developer's by construction. Without this
-	// the value loads into settings and is then refused as inherited, which
-	// reads to a user as the setting being ignored for no reason.
+	// probe to do it: a repository cannot deliver content to ~/.config, so the
+	// destination found there is the developer's by construction. Only that
+	// destination: one a later layer overrides it with is still checked below.
 	if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil &&
-		settings.UserTierSetsCheckpointRemote(ctx, root) {
+		settings.UserTierSuppliesCheckpointRemote(ctx, root, config) {
 		return OwnershipOurs, ""
 	}
 

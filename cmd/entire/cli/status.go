@@ -65,6 +65,10 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return nil //nolint:nilerr // Not being in a git repo is a valid status, not an error
 	}
 
+	if err := settings.UserSettingsReadError(ctx); err != nil {
+		fmt.Fprintf(w, "  ignoring user settings: %v\n", err)
+	}
+
 	// Get absolute paths for settings files
 	settingsPath, err := paths.AbsPath(ctx, EntireSettingsFile)
 	if err != nil {

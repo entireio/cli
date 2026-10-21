@@ -36,8 +36,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
-	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -78,20 +77,14 @@ func resolvePath() (string, error) {
 }
 
 // UserSettings is the decoded user-global settings file.
-//
-// MarshalJSON has a VALUE receiver so that both a UserSettings and a
-// *UserSettings encode through it; a pointer receiver would silently fall back
-// to struct-field encoding for a value, dropping every preserved block.
-//
-//nolint:recvcheck // MarshalJSON is deliberately a value receiver; see above.
 type UserSettings struct {
 	// extra holds every top-level block this package does not decode: the
 	// preference blocks the settings package owns (`preferences`, `repos` —
 	// their types live there; read them with Block) and any block a newer
-	// binary wrote. All are preserved across read-modify-write so a newer
-	// binary's settings survive an older one's write. This is also what lets
-	// this file coexist with the separate global-activation work, which adds
-	// a `global` block this binary neither reads nor disturbs.
+	// binary wrote, such as the `global` block of the separate
+	// global-activation work. There is no write path yet; a future one goes
+	// through jsonutil.WriteFileAtomicIn under the config root and must keep
+	// these blocks.
 	extra map[string]json.RawMessage
 }
 
@@ -105,22 +98,6 @@ func (us *UserSettings) Block(key string) (json.RawMessage, bool) {
 	return raw, ok
 }
 
-// SetBlock stores a raw top-level block, for a writer in the settings package
-// that owns a block this package does not decode. A nil raw removes it.
-func (us *UserSettings) SetBlock(key string, raw json.RawMessage) {
-	if us == nil {
-		return
-	}
-	if raw == nil {
-		delete(us.extra, key)
-		return
-	}
-	if us.extra == nil {
-		us.extra = make(map[string]json.RawMessage, 1)
-	}
-	us.extra[key] = raw
-}
-
 // IsJSONNull reports whether raw is the JSON null literal. Exported because
 // the settings package applies the same "null means unset" rule to the blocks
 // it decodes itself.
@@ -132,8 +109,8 @@ func IsJSONNull(raw json.RawMessage) bool {
 //
 // This package decodes none of them itself. The preference blocks are typed by
 // the settings package, which cannot be imported from here, and the blocks a
-// newer binary writes are not ours to interpret — so all of them round-trip
-// untouched and Block hands them to their owner. A block whose contents this
+// newer binary writes are not ours to interpret — so all of them are kept
+// verbatim and Block hands them to their owner. A block whose contents this
 // binary must fail closed on (an executable name, say) would need a strict
 // decoder registered here; there is none yet, and adding one before there is a
 // consumer would be surface with nothing behind it.
@@ -152,20 +129,6 @@ func (us *UserSettings) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON writes back every preserved block. Value receiver on purpose —
-// see the UserSettings comment.
-func (us UserSettings) MarshalJSON() ([]byte, error) {
-	out := make(map[string]json.RawMessage, len(us.extra))
-	for key, raw := range us.extra {
-		out[key] = raw
-	}
-	data, err := json.Marshal(out)
-	if err != nil {
-		return nil, fmt.Errorf("encoding user settings: %w", err)
-	}
-	return data, nil
-}
-
 // Load decodes user-global settings with per-block strictness. A missing file
 // is an unconfigured tier, not an error; malformed JSON, or an unknown key
 // inside a decoded block, returns an error so callers can fail closed.
@@ -176,16 +139,12 @@ func (us UserSettings) MarshalJSON() ([]byte, error) {
 // readable when none of that is available, which is why the OPF command is
 // more reliably found here than in the file it is moving from.
 func Load(_ context.Context) (*UserSettings, error) {
-	path, err := resolvePath()
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path) //nolint:gosec // path is resolved by the userdirs trust boundary
+	data, err := readFile()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return &UserSettings{}, nil
 		}
-		return nil, fmt.Errorf("reading user settings: %w", err)
+		return nil, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var settings UserSettings
@@ -205,64 +164,33 @@ func Load(_ context.Context) (*UserSettings, error) {
 	return &settings, nil
 }
 
-// Modify performs the only supported read-modify-write operation for user
-// settings. A cross-process lock prevents concurrent writers from losing one
-// another's changes — the file is machine-wide, so writers in different
-// repositories genuinely race.
-func Modify(ctx context.Context, fn func(*UserSettings) error) error {
-	path, err := resolvePath()
+// readFile reads the settings file through the per-user config root, without
+// creating the directory. A symlinked file is refused, as a symlinked
+// .entire/settings.local.json is: nothing documents an exception for this
+// file, and following the link would read whatever it names.
+func readFile() ([]byte, error) {
+	root, err := userdirs.ConfigRootForRead()
 	if err != nil {
-		return err
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, err //nolint:wrapcheck // the caller classifies a missing directory as an unconfigured tier
+		}
+		return nil, fmt.Errorf("opening user settings directory: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("creating config directory: %w", err)
+	data, err := osroot.ReadFileNoFollow(root, FileName)
+	if err == nil {
+		return data, nil
 	}
-	release, err := flock.Acquire(path + ".lock")
-	if err != nil {
-		return fmt.Errorf("lock user settings: %w", err)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, err //nolint:wrapcheck // the caller classifies a missing file as an unconfigured tier
 	}
-	defer release()
-	settings, err := Load(ctx)
-	if err != nil {
-		return err
+	path := filepath.Join(root.Name(), FileName)
+	if errors.Is(err, osroot.ErrSymlinkedPath) {
+		if target, linkErr := os.Readlink(path); linkErr == nil {
+			return nil, fmt.Errorf("user settings %s is a symbolic link to %s; it must be a regular file: %w", path, target, err)
+		}
+		return nil, fmt.Errorf("user settings %s is a symbolic link; it must be a regular file: %w", path, err)
 	}
-	if err := fn(settings); err != nil {
-		return err
-	}
-	return persist(path, settings)
-}
-
-func persist(path string, settings *UserSettings) error {
-	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encoding user settings: %w", err)
-	}
-	if err := writeAtomicThroughSymlink(path, data, 0o600); err != nil {
-		return fmt.Errorf("writing user settings: %w", err)
-	}
-	return nil
-}
-
-// writeAtomicThroughSymlink is jsonutil.WriteFileAtomic's behaviour with one
-// deliberate difference: a symlink AT the destination is resolved first, so
-// the write lands on the link's target rather than replacing the link.
-//
-// This is the opposite of the rule for .entire and the git hooks directory,
-// and the reason is that the trust direction is reversed. There, a link is
-// something a repository might have planted, so replacing it is the safe
-// answer. Here the file is the user's own config, and ~/.config symlinked into
-// a dotfiles checkout (chezmoi, stow, yadm) is an ordinary arrangement among
-// exactly the people who run coding agents — the same population
-// allow_symlinked_agent_dirs exists for. Replacing that link would silently
-// detach the file from the dotfiles repo the user manages it in.
-//
-// A dangling or non-symlink destination falls through to the plain path.
-func writeAtomicThroughSymlink(path string, data []byte, perm fs.FileMode) error {
-	target := path
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		target = resolved
-	}
-	return jsonutil.WriteFileAtomic(target, data, perm) //nolint:wrapcheck // caller names the file
+	return nil, fmt.Errorf("reading user settings %s: %w", path, err)
 }
 
 // NormalizeOrigin reduces a git remote URL to the lowercase key shape `repos`

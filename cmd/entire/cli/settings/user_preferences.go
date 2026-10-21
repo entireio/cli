@@ -308,26 +308,42 @@ func applyUserPreferences(settings *EntireSettings, prefs *UserPreferences) {
 	}
 }
 
-// UserTierSetsCheckpointRemote reports whether the matching user tier supplies
-// a checkpoint_remote. Callers check CheckpointRemoteIsLocalOnly first, so a
-// higher-precedence local destination short-circuits before this lower layer.
+// UserTierSuppliesCheckpointRemote reports whether config is the
+// checkpoint_remote the matching user tier supplies. Callers check
+// CheckpointRemoteIsLocalOnly first, so a higher-precedence local destination
+// short-circuits before this lower layer.
 //
 // This is the user-tier half of the ownership question CheckpointRemoteIsLocalOnly
 // answers for .entire/settings.local.json: "did this developer choose this
 // destination, or did they inherit it from a repository they cloned?" The user
 // file needs no probe to answer it — a repository cannot deliver content to
 // ~/.config, so a destination found there is the developer's by construction.
-func UserTierSetsCheckpointRemote(ctx context.Context, worktreeRoot string) bool {
+// It vouches only for that destination: a later layer that overrides it with
+// a different one needs its own proof.
+func UserTierSuppliesCheckpointRemote(ctx context.Context, worktreeRoot string, config *CheckpointRemoteConfig) bool {
+	if config == nil {
+		return false
+	}
 	overlay := loadUserOverlay(ctx)
+	// Same order applyUserTier applies them in, so the last one wins.
+	var supplied *CheckpointRemoteConfig
 	if overlay.preferences != nil && overlay.preferences.CheckpointRemote != nil {
-		return true
+		supplied = overlay.preferences.CheckpointRemote
 	}
 	for _, prefs := range overlay.repoPreferences(ctx, worktreeRoot) {
 		if prefs.CheckpointRemote != nil {
-			return true
+			supplied = prefs.CheckpointRemote
 		}
 	}
-	return false
+	return supplied != nil && supplied.Provider == config.Provider && supplied.Repo == config.Repo
+}
+
+// UserSettingsReadError reports why the user settings file cannot be read,
+// or nil when it is readable or absent. Load skips an unreadable file so a
+// repository keeps working; this is how a consumer tells the user it did.
+func UserSettingsReadError(ctx context.Context) error {
+	_, err := usersettings.Load(ctx)
+	return err //nolint:wrapcheck // usersettings names the file and the reason
 }
 
 // UserTierConfiguresRepo reports whether the user settings file says anything

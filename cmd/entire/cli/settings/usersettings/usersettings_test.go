@@ -1,7 +1,6 @@
 package usersettings
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -23,37 +23,24 @@ func writeUserFile(t *testing.T, content string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, FileName), []byte(content), 0o600))
 }
 
-// The property the decision to build this alongside the separate global-tier
-// work rests on: a block this binary does not know is preserved byte for byte
-// across a read-modify-write. Without it, a binary carrying only this change
-// would silently delete a `global` block the other work wrote, and the two
-// could not share one file on disk.
-func TestUnknownBlocksSurviveReadModifyWrite(t *testing.T) {
+// A block this binary does not decode is still handed back to its owner:
+// the settings package reads `preferences` and `repos` this way, and a newer
+// binary's blocks must not make the file unreadable.
+func TestUnknownBlocksAreReadVerbatim(t *testing.T) {
 	writeUserFile(t, `{
-	  "global": {"enabled": true, "trusted_origins": ["github.com/acme/widgets"]},
-	  "preferences": {"telemetry": false},
-	  "redaction": {"openai_privacy_filter": {"command": "/opt/opf/bin/opf"}}
+	  "global": {"enabled": true},
+	  "preferences": {"telemetry": false}
 	}`)
 
-	require.NoError(t, Modify(t.Context(), func(us *UserSettings) error {
-		us.SetBlock("preferences", json.RawMessage(`{"telemetry": true}`))
-		return nil
-	}))
-
-	reloaded, err := Load(t.Context())
+	us, err := Load(t.Context())
 	require.NoError(t, err)
 
-	global, ok := reloaded.Block("global")
-	require.True(t, ok, "an unknown block must survive a write by a binary that does not decode it")
-	assert.JSONEq(t, `{"enabled": true, "trusted_origins": ["github.com/acme/widgets"]}`, string(global))
-
-	prefs, ok := reloaded.Block("preferences")
+	global, ok := us.Block("global")
 	require.True(t, ok)
-	assert.JSONEq(t, `{"telemetry": true}`, string(prefs), "the edit itself landed")
-
-	redaction, ok := reloaded.Block("redaction")
-	require.True(t, ok, "a sibling block must survive an edit to another one")
-	assert.Contains(t, string(redaction), "/opt/opf/bin/opf")
+	assert.JSONEq(t, `{"enabled": true}`, string(global))
+	prefs, ok := us.Block("preferences")
+	require.True(t, ok)
+	assert.JSONEq(t, `{"telemetry": false}`, string(prefs))
 }
 
 func TestMissingFileIsAnUnconfiguredTier(t *testing.T) {
@@ -94,31 +81,35 @@ func TestExpandTildeRefusesRelativePaths(t *testing.T) {
 	assert.Contains(t, err.Error(), "absolute")
 }
 
-// The write must land on a symlink's target, not replace the link: ~/.config
-// managed by a dotfiles tool is the population this file serves.
-func TestWriteFollowsASymlinkedSettingsFile(t *testing.T) {
-	realDir := t.TempDir()
-	realPath := filepath.Join(realDir, "dotfiles-settings.json")
-	require.NoError(t, os.WriteFile(realPath, []byte(`{"redaction":{}}`), 0o600))
+// A symlinked settings file is refused, the same as a symlinked
+// .entire/settings.local.json: the read must not follow a link to whatever it
+// names.
+func TestLoadRefusesASymlinkedSettingsFile(t *testing.T) {
+	realPath := filepath.Join(t.TempDir(), "elsewhere.json")
+	require.NoError(t, os.WriteFile(realPath, []byte(`{"preferences":{"telemetry":true}}`), 0o600))
 
 	configDir := t.TempDir()
 	t.Setenv(userdirs.EnvConfigDir, configDir)
 	require.NoError(t, os.Symlink(realPath, filepath.Join(configDir, FileName)))
 
-	require.NoError(t, Modify(t.Context(), func(us *UserSettings) error {
-		us.SetBlock("preferences", json.RawMessage(`{"telemetry": true}`))
-		return nil
-	}))
+	_, err := Load(t.Context())
+	require.Error(t, err)
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	assert.Contains(t, err.Error(), "symbolic link")
+	assert.Contains(t, err.Error(), realPath, "the message names the link target")
+}
 
-	info, err := os.Lstat(filepath.Join(configDir, FileName))
-	require.NoError(t, err)
-	assert.NotZero(t, info.Mode()&os.ModeSymlink, "the link must survive the write, not be replaced by a regular file")
+// A config directory that does not exist yet is an unconfigured tier, and
+// reading it must not create it.
+func TestLoadDoesNotCreateTheConfigDirectory(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), "missing")
+	t.Setenv(userdirs.EnvConfigDir, configDir)
 
-	data, err := os.ReadFile(realPath)
+	us, err := Load(t.Context())
 	require.NoError(t, err)
-	var got map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(data, &got))
-	assert.Contains(t, string(got["preferences"]), "telemetry", "the write landed on the link's target")
+	_, ok := us.Block("preferences")
+	assert.False(t, ok)
+	assert.NoDirExists(t, configDir)
 }
 
 func TestNormalizeOrigin(t *testing.T) {
