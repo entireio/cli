@@ -431,8 +431,14 @@ func TestSubagentCheckpoints_BackgroundTaskCompletesMidTurn_ParentCommitLinks(t 
 // transcript before treating the parent as read-only.
 func TestSubagentCheckpoints_JointCommitWithRunningSubagent_KeepsBothSessions(t *testing.T) {
 	t.Parallel()
-	env := NewFeatureBranchEnv(t)
+	jointCommitWithRunningSubagent(t, NewFeatureBranchEnv(t), nil)
+}
 
+// jointCommitWithRunningSubagent runs the joint-commit scenario above;
+// beforeCommit, when set, adjusts the IDLE parent's state just before the
+// commit.
+func jointCommitWithRunningSubagent(t *testing.T, env *TestEnv, beforeCommit func(parentID string)) {
+	t.Helper()
 	const (
 		taskToolUseID = "toolu_01JointCommit"
 		subagentID    = "f4444555566667777"
@@ -442,6 +448,50 @@ func TestSubagentCheckpoints_JointCommitWithRunningSubagent_KeepsBothSessions(t 
 		codingBody    = "package main\n\nfunc Feature() {}\n"
 	)
 
+	parent := idleParentWithRunningSubagent(t, env, taskToolUseID, subagentID, subagentFile, subagentBody)
+
+	coding := env.NewSession()
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(coding.ID, coding.TranscriptPath); err != nil {
+		t.Fatalf("coding user-prompt-submit failed: %v", err)
+	}
+	env.WriteFile(codingFile, codingBody)
+	coding.CreateTranscript("Add the feature and commit everything", []FileChange{{Path: codingFile, Content: codingBody}})
+
+	if beforeCommit != nil {
+		beforeCommit(parent.ID)
+	}
+	env.GitCommitWithHooksAsAgent("Add feature and joint doc", codingFile, subagentFile)
+
+	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	if checkpointID == "" {
+		t.Fatal("joint commit should carry an Entire-Checkpoint trailer")
+	}
+	summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointSummaryPath(checkpointID))
+	if !found {
+		t.Fatalf("CheckpointSummary not found for %s", checkpointID)
+	}
+	var summary checkpoint.CheckpointSummary
+	if err := json.Unmarshal([]byte(summaryContent), &summary); err != nil {
+		t.Fatalf("Failed to parse CheckpointSummary: %v", err)
+	}
+	env.AssertCheckpointContainsSession(t, summary, coding.ID)
+	env.AssertCheckpointContainsSession(t, summary, parent.ID)
+
+	storedTranscript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+		CheckpointTaskFilePath(checkpointID, taskToolUseID, "agent-"+subagentID+".jsonl"))
+	if !ok {
+		t.Fatalf("running subagent's transcript not materialized under the checkpoint's tasks/ subtree")
+	}
+	if !strings.Contains(storedTranscript, subagentFile) {
+		t.Errorf("materialized subagent transcript does not reference %q", subagentFile)
+	}
+}
+
+// idleParentWithRunningSubagent starts a session that delegated a background
+// task and went IDLE; the subagent wrote file and is still running, so the
+// file is not yet in the parent's FilesTouched.
+func idleParentWithRunningSubagent(t *testing.T, env *TestEnv, taskToolUseID, subagentID, subagentFile, subagentBody string) *Session {
+	t.Helper()
 	parent := env.NewSession()
 	parent.CreateTranscript("delegate a background task", nil)
 	if err := env.SimulateUserPromptSubmitWithTranscriptPath(parent.ID, parent.TranscriptPath); err != nil {
@@ -474,37 +524,5 @@ func TestSubagentCheckpoints_JointCommitWithRunningSubagent_KeepsBothSessions(t 
 		t.Fatalf("precondition: want IDLE parent with a live record and empty FilesTouched, got phase=%s files=%v records=%+v",
 			parentState.Phase, parentState.FilesTouched, parentState.TaskRecords)
 	}
-
-	coding := env.NewSession()
-	if err := env.SimulateUserPromptSubmitWithTranscriptPath(coding.ID, coding.TranscriptPath); err != nil {
-		t.Fatalf("coding user-prompt-submit failed: %v", err)
-	}
-	env.WriteFile(codingFile, codingBody)
-	coding.CreateTranscript("Add the feature and commit everything", []FileChange{{Path: codingFile, Content: codingBody}})
-
-	env.GitCommitWithHooksAsAgent("Add feature and joint doc", codingFile, subagentFile)
-
-	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
-	if checkpointID == "" {
-		t.Fatal("joint commit should carry an Entire-Checkpoint trailer")
-	}
-	summaryContent, found := env.ReadFileFromBranch(paths.MetadataBranchName, CheckpointSummaryPath(checkpointID))
-	if !found {
-		t.Fatalf("CheckpointSummary not found for %s", checkpointID)
-	}
-	var summary checkpoint.CheckpointSummary
-	if err := json.Unmarshal([]byte(summaryContent), &summary); err != nil {
-		t.Fatalf("Failed to parse CheckpointSummary: %v", err)
-	}
-	env.AssertCheckpointContainsSession(t, summary, coding.ID)
-	env.AssertCheckpointContainsSession(t, summary, parent.ID)
-
-	storedTranscript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
-		CheckpointTaskFilePath(checkpointID, taskToolUseID, "agent-"+subagentID+".jsonl"))
-	if !ok {
-		t.Fatalf("running subagent's transcript not materialized under the checkpoint's tasks/ subtree")
-	}
-	if !strings.Contains(storedTranscript, subagentFile) {
-		t.Errorf("materialized subagent transcript does not reference %q", subagentFile)
-	}
+	return parent
 }

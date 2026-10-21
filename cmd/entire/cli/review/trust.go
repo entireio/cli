@@ -56,9 +56,21 @@ type TrustEntry struct {
 	Entire  bool   `json:"entire"`
 }
 
+// TrustAgent is a reviewer agent whose checkout config the gate inspects.
+// Isolated agents run with their review profile's config, so only the
+// checkout content they still load (skills, commands, Pi settings) counts.
+type TrustAgent struct {
+	Name     string
+	Isolated bool
+}
+
 // TrustInventory lists what a checkout would run during a review.
 type TrustInventory struct {
-	Entries []TrustEntry
+	// Isolated is set when every inspected agent uses its profile's config.
+	Isolated bool
+	// IsolatedAgents lists the agents that use their profile's config.
+	IsolatedAgents []string
+	Entries        []TrustEntry
 	// Instructions are files like CLAUDE.md the reviewer reads; informational.
 	Instructions []string
 }
@@ -373,7 +385,7 @@ func (g trustGate) run(ctx context.Context, errOut io.Writer) error {
 	// Agents can hold a PTY, so they never get the confirm. No terminal gets the
 	// same text, so an undetected agent isn't invited to approve itself.
 	if g.AgentCaller != "" || !g.Interactive || g.Confirm == nil {
-		printTrustRefusal(errOut, what, g.Command, g.Subject.HeadSHA)
+		printTrustRefusal(errOut, what, g.Inventory, g.Command, g.Subject.HeadSHA)
 		return errTrustRefused
 	}
 	title, description := trustConfirmText(g.Subject, g.Inventory, g.Command)
@@ -388,11 +400,15 @@ func (g trustGate) run(ctx context.Context, errOut io.Writer) error {
 	return nil
 }
 
-func printTrustRefusal(errOut io.Writer, what, command, head string) {
+func printTrustRefusal(errOut io.Writer, what string, inv TrustInventory, command, head string) {
+	isolated := inv.Isolated
 	fmt.Fprintln(errOut, "Not run: this review needs the user's approval.")
-	if what == trustWhatNothing {
+	switch {
+	case isolated && what != trustWhatNothing:
+		fmt.Fprintf(errOut, "The code is by someone else; the review agent uses the profile's config but would still load the branch's skills and commands%s (%s --show-config lists them).\n", inv.piSettingsNote(", and Pi's settings"), command)
+	case what == trustWhatNothing:
 		fmt.Fprintf(errOut, "The code is by someone else (%s --show-config shows what the review reads).\n", command)
-	} else {
+	default:
 		fmt.Fprintf(errOut, "The code is by someone else, and the review agent would load its hooks, MCP servers and settings, running %s on this machine (%s --show-config lists them).\n", what, command)
 	}
 	fmt.Fprintln(errOut, "Stop and show the user this message. Do not approve on their behalf.")
@@ -416,10 +432,17 @@ func trustConfirmText(subject TrustSubject, inv TrustInventory, command string) 
 	entries := inv.orderedEntries()
 	var title string
 	switch {
+	case len(entries) == 0 && inv.Isolated:
+		title = "Review this branch?"
+		b.WriteString("The review agent uses your profile's config, so this branch's hooks, MCP servers and extensions are not loaded. It reads this branch's code and instructions. Your own hooks and MCP servers run in this checkout as you configured them.")
+		return title, b.String()
 	case len(entries) == 0:
 		title = "Review this branch?"
 		b.WriteString("The review agent reads this branch's code and instructions; nothing from it runs on your machine.")
 		return title, b.String()
+	case inv.Isolated:
+		title = "Load this branch's skills during the review?"
+		b.WriteString("The review agent uses your profile's config, so this branch's hooks, MCP servers and extensions are not loaded. It still loads this branch's skills and commands" + inv.piSettingsNote(" (and Pi settings)") + ", which can run commands:\n")
 	case inv.onlyEntireHooks():
 		title = "Run this branch's hooks during the review?"
 		b.WriteString("The review agent loads this branch's hooks. These run on your machine:\n")
@@ -533,6 +556,9 @@ type trustConfigJSON struct {
 	Yours        bool         `json:"yours"`
 	Entries      []TrustEntry `json:"entries"`
 	Instructions []string     `json:"instructions"`
+	// IsolatedAgents use their review profile's config instead of the
+	// checkout's hooks, MCP servers and extensions.
+	IsolatedAgents []string `json:"isolated_agents"`
 }
 
 // printTrustConfig lists everything a review would run, without truncation.
@@ -540,12 +566,16 @@ func printTrustConfig(out io.Writer, subject TrustSubject, inv TrustInventory, a
 	entries := inv.orderedEntries()
 	if asJSON {
 		payload := trustConfigJSON{
-			Target:       subject.Label,
-			Head:         subject.HeadSHA,
-			Commits:      subject.Commits,
-			Yours:        subject.Yours,
-			Entries:      entries,
-			Instructions: inv.Instructions,
+			Target:         subject.Label,
+			Head:           subject.HeadSHA,
+			Commits:        subject.Commits,
+			Yours:          subject.Yours,
+			Entries:        entries,
+			Instructions:   inv.Instructions,
+			IsolatedAgents: inv.IsolatedAgents,
+		}
+		if payload.IsolatedAgents == nil {
+			payload.IsolatedAgents = []string{}
 		}
 		if payload.Entries == nil {
 			payload.Entries = []TrustEntry{}
@@ -571,10 +601,16 @@ func printTrustConfig(out io.Writer, subject TrustSubject, inv TrustInventory, a
 	}
 	fmt.Fprintf(out, "%s @ %s by %s (%s)\n", sanitizeDisplay(label), shortSHA(subject.HeadSHA), by,
 		pluralCount(subject.Commits, "commit", "commits"))
+	if len(inv.IsolatedAgents) > 0 {
+		fmt.Fprintf(out, "Using your profile's agent config (the checkout's hooks, MCP servers and extensions are not loaded): %s\n", strings.Join(inv.IsolatedAgents, ", "))
+	}
 	if agents := inv.entireAgents(); len(agents) > 0 {
 		fmt.Fprintf(out, "Entire session tracking: %s\n", strings.Join(agents, ", "))
 	}
-	if len(entries) == 0 {
+	switch {
+	case len(entries) == 0 && len(inv.IsolatedAgents) > 0:
+		fmt.Fprintln(out, "Nothing from this checkout is loaded; your profile's own hooks and MCP servers run in it as you configured them.")
+	case len(entries) == 0:
 		fmt.Fprintln(out, "Nothing from this checkout runs during the review.")
 	}
 	for _, e := range entries {
@@ -593,4 +629,13 @@ func printTrustConfig(out io.Writer, subject TrustSubject, inv TrustInventory, a
 		fmt.Fprintf(out, "Instructions the reviewer reads: %s\n", strings.Join(inv.Instructions, ", "))
 	}
 	return nil
+}
+
+// piSettingsNote returns note when an isolated Pi reviewer runs: Pi still
+// loads the branch's .pi/settings.json, the other agents load no settings.
+func (inv TrustInventory) piSettingsNote(note string) string {
+	if slices.Contains(inv.IsolatedAgents, "pi") {
+		return note
+	}
+	return ""
 }

@@ -25,6 +25,19 @@ jobs:
           GO_TEST_PARALLEL: "16"
         run: mise run test:ci:core
 
+  # The installer reads our own release origin first and falls back to GitHub.
+  # A fallback that only runs during an incident is a fallback nobody knows
+  # works, so both tiers are exercised here against local fake origins.
+  test-release-origins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - name: Release origin tests
+        run: mise run test:release-origins
+
   test-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -117,6 +130,7 @@ jobs:
     permissions: {}
     needs:
       - test-core
+      - test-release-origins
       - test-integration
       - test-codex-hooks
       - test-canary
@@ -127,6 +141,7 @@ jobs:
       - name: Check dependencies
         run: |
           [ "${{ needs.test-core.result }}" = "success" ]
+          [ "${{ needs.test-release-origins.result }}" = "success" ]
           [ "${{ needs.test-integration.result }}" = "success" ]
           [ "${{ needs.test-codex-hooks.result }}" = "success" ]
           [ "${{ needs.test-canary.result }}" = "success" ]

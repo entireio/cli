@@ -717,7 +717,10 @@ The marker rounds toward inclusion when a streaming message straddles the
 boundary (compaction merges same-ID fragments into one line that cannot be
 split), so the slice never drops this checkpoint's content but its head may
 repeat at most one merged line from the previous checkpoint — segmenters must
-tolerate that bounded overlap. A nil/absent `compact_transcript_start` marks a
+tolerate that bounded overlap. For an external agent that compacts its own
+format, the marker is the number of leading lines its compaction of the raw
+prefix shares byte-for-byte with the full compaction, which keeps the same
+inclusion rule when the plugin merges lines across the boundary. A nil/absent `compact_transcript_start` marks a
 legacy checkpoint whose `transcript.jsonl` holds only its own delta (pre-change
 CLI versions); read it as-is from line 0.
 

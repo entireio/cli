@@ -304,11 +304,11 @@ and recovery instructions go to stderr.`,
 					return err
 				}
 				req.projectID, req.projectName = project.ID, project.Name
-				created, err := createRepo(ctx, c, req)
+				created, commitToken, err := createRepo(ctx, c, req)
 				if err != nil {
 					return err
 				}
-				return finishRepoCreate(ctx, cmd, c, req, created, opts)
+				return finishRepoCreate(ctx, cmd, c, req, created, commitToken, opts)
 			})
 		},
 	}

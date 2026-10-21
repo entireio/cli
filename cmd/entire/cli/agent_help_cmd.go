@@ -121,23 +121,22 @@ var agentHelpClassification = map[string]agentHelpFacts{
 
 	// trail is the highest-traffic family by a wide margin, so its read-only
 	// subcommands must not disappear behind the group's write-capable label.
-	"trail":                 {agentHelpAudienceTaskDriven, true},
-	"trail list":            {agentHelpAudienceReadOnly, false},
-	"trail show":            {agentHelpAudienceReadOnly, false},
-	"trail create":          {agentHelpAudienceTaskDriven, false},
-	"trail delete":          {agentHelpAudienceTaskDriven, false},
-	"trail update":          {agentHelpAudienceTaskDriven, false},
-	"trail approvals":       {agentHelpAudienceReadOnly, false},
-	"trail watch":           {agentHelpAudienceReadOnly, false},
-	"trail approve":         {agentHelpAudienceTaskDriven, false},
-	"trail checkout":        {agentHelpAudienceTaskDriven, false},
-	"trail comment":         {agentHelpAudienceTaskDriven, false},
-	"trail finding":         {agentHelpAudienceTaskDriven, false},
-	"trail merge":           {agentHelpAudienceUserOwned, false},
-	"trail request-changes": {agentHelpAudienceTaskDriven, false},
-	"trail resume":          {agentHelpAudienceTaskDriven, false},
-	"trail link":            {agentHelpAudienceUserOwned, false},
-	"trail unlink":          {agentHelpAudienceUserOwned, false},
+	"trail":           {agentHelpAudienceTaskDriven, true},
+	"trail list":      {agentHelpAudienceReadOnly, false},
+	"trail show":      {agentHelpAudienceReadOnly, false},
+	"trail create":    {agentHelpAudienceTaskDriven, false},
+	"trail delete":    {agentHelpAudienceTaskDriven, false},
+	"trail update":    {agentHelpAudienceTaskDriven, false},
+	"trail approvals": {agentHelpAudienceReadOnly, false},
+	"trail watch":     {agentHelpAudienceReadOnly, false},
+	"trail approve":   {agentHelpAudienceTaskDriven, false},
+	"trail checkout":  {agentHelpAudienceTaskDriven, false},
+	"trail comment":   {agentHelpAudienceTaskDriven, false},
+	"trail finding":   {agentHelpAudienceTaskDriven, false},
+	"trail merge":     {agentHelpAudienceUserOwned, false},
+	"trail resume":    {agentHelpAudienceTaskDriven, false},
+	"trail link":      {agentHelpAudienceUserOwned, false},
+	"trail unlink":    {agentHelpAudienceUserOwned, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
@@ -265,7 +264,7 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"Add --project <forge>/<project> unless <project> is origin's owner.\n" +
 		"A project trail spans repositories; each change is its branch in one\n" +
 		"repository. Pass <repo>/<n> to checkout, resume, finding, watch,\n" +
-		"approvals, approve or request-changes; given to show, it shows the parent\n" +
+		"approvals or approve; given to show, it shows the parent\n" +
 		"project trail. Project trails and changes are numbered separately: never\n" +
 		"pass <P> where a change is expected, or <n> where a project trail is.\n" +
 		"To list a project trail's changes, run `entire trail show <P>\n" +

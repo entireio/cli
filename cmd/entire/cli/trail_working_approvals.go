@@ -9,10 +9,7 @@ import (
 )
 
 func submitWorkingTrailApproval(cmd *cobra.Command, mode *trailMode, selector, branch, event, message, verb string) error {
-	request, err := buildApprovalRequest(event, message)
-	if err != nil {
-		return err
-	}
+	request := buildApprovalRequest(event, message)
 	selected, err := mode.workingContext(cmd, selector, branch, false)
 	if err != nil {
 		return err

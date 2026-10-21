@@ -84,7 +84,7 @@ function Test-FullLanguageMode {
 
 function Assert-Prerequisite {
     if (-not (Test-IsWindows)) {
-        throw "install.ps1 supports Windows only. On macOS and Linux, run: curl -fsSL https://entire.io/install.sh | bash"
+        throw "install.ps1 supports Windows only. On macOS and Linux, run: curl -fsSL https://entire.com/install.sh | bash"
     }
     # No TLS 1.2 check follows: Windows PowerShell 5.1 needs .NET Framework
     # 4.5.2 or later, which has had Tls12 since 4.5, so a host that passes this

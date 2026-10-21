@@ -1078,11 +1078,15 @@ func (s *treeWriter) writeCompactTranscript(ctx context.Context, agentType types
 	compactCtx, compactSpan := perf.Start(ctx, "write_compact_transcript")
 	defer compactSpan.End()
 
-	compacted, boundary, err := transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), transcriptcompact.MetadataFields{
-		Agent:      compactAgentName(agentType),
-		CLIVersion: versioninfo.Version,
-		StartLine:  startLine,
-	})
+	compacted, boundary, usedAgent := compactWithAgent(compactCtx, agentType, startLine, transcriptBytes)
+	var err error
+	if !usedAgent {
+		compacted, boundary, err = transcriptcompact.FullWithBoundary(redact.AlreadyRedacted(transcriptBytes), transcriptcompact.MetadataFields{
+			Agent:      compactAgentName(agentType),
+			CLIVersion: versioninfo.Version,
+			StartLine:  startLine,
+		})
+	}
 	if err != nil {
 		compactSpan.RecordError(err)
 		logging.Warn(compactCtx, "compact transcript generation failed, skipping transcript.jsonl",

@@ -95,10 +95,10 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	}
 	cmd := buildReviewCmd(context.Background(), cfg)
 
-	// Expect: claude -p <prompt> --output-format stream-json --verbose --append-system-prompt <guardrail>
+	// Expect: claude -p --output-format stream-json --verbose --append-system-prompt <guardrail>
 	wantSuffix := []string{"--output-format", "stream-json", "--verbose", "--append-system-prompt", review.ReviewerGuardrail}
-	if len(cmd.Args) != 3+len(wantSuffix) {
-		t.Fatalf("expected %d args, got %d: %v", 3+len(wantSuffix), len(cmd.Args), cmd.Args)
+	if len(cmd.Args) != 2+len(wantSuffix) {
+		t.Fatalf("expected %d args, got %d: %v", 2+len(wantSuffix), len(cmd.Args), cmd.Args)
 	}
 	if cmd.Args[0] != "claude" {
 		t.Errorf("Args[0] = %q, want %q", cmd.Args[0], "claude")
@@ -106,24 +106,30 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	if cmd.Args[1] != "-p" {
 		t.Errorf("Args[1] = %q, want %q", cmd.Args[1], "-p")
 	}
-	// Args[2] is the composed prompt — must be non-empty.
-	if cmd.Args[2] == "" {
-		t.Error("Args[2] (prompt) is empty")
-	}
 	for i, want := range wantSuffix {
-		got := cmd.Args[3+i]
+		got := cmd.Args[2+i]
 		if got != want {
-			t.Errorf("Args[%d] = %q, want %q", 3+i, got, want)
+			t.Errorf("Args[%d] = %q, want %q", 2+i, got, want)
 		}
 	}
 	for _, arg := range cmd.Args {
 		if arg == "--continue" || arg == "-c" || arg == "--resume" || arg == "-r" {
 			t.Fatalf("Args must start a fresh Claude review, got resume/continue flag in %v", cmd.Args)
 		}
+		if strings.Contains(arg, "extra context") {
+			t.Fatalf("prompt must not be in argv (readable by other local users), got %v", cmd.Args)
+		}
 	}
-	// Stdin must be nil — claude receives prompt via argv, not stdin.
-	if cmd.Stdin != nil {
-		t.Errorf("cmd.Stdin = %v, want nil (claude uses argv, not stdin)", cmd.Stdin)
+	// The prompt travels on stdin.
+	if cmd.Stdin == nil {
+		t.Fatal("cmd.Stdin is nil, want the composed prompt")
+	}
+	stdin, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatalf("read stdin: %v", err)
+	}
+	if got := string(stdin); !strings.HasPrefix(got, "/skill-a") || !strings.Contains(got, "extra context") {
+		t.Errorf("stdin = %q, want the composed prompt starting with the skill", got)
 	}
 }
 
@@ -524,5 +530,21 @@ func TestParseClaudeOutput_IgnoresNonObjectMessageOnOtherEvents(t *testing.T) {
 	}
 	if finished == nil || !finished.Success {
 		t.Fatalf("Finished = %+v, want success", finished)
+	}
+}
+
+// Tool calls the permission settings denied are reported once per tool.
+func TestParseClaudeOutput_ReportsPermissionDenials(t *testing.T) {
+	t.Parallel()
+	stream := `{"type":"result","subtype":"success","is_error":false,"permission_denials":[` +
+		`{"tool_name":"mcp__docs__search","tool_use_id":"a"},{"tool_name":"mcp__docs__search","tool_use_id":"b"},{"tool_name":"WebFetch","tool_use_id":"c"}]}` + "\n"
+	var blocked []string
+	for _, ev := range collectEvents(parseClaudeOutput(strings.NewReader(stream))) {
+		if e, ok := ev.(reviewtypes.ToolsBlocked); ok {
+			blocked = append(blocked, e.Names...)
+		}
+	}
+	if strings.Join(blocked, ",") != "mcp__docs__search,WebFetch" {
+		t.Fatalf("blocked = %v", blocked)
 	}
 }

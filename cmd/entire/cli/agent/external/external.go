@@ -3,6 +3,7 @@ package external
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -526,7 +527,11 @@ func (e *Agent) runIn(ctx context.Context, isolatedDir string, stdin []byte, arg
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 
-	const maxOutputBytes = 10 * 1024 * 1024 // 10 MB
+	maxOutputBytes := 10 * 1024 * 1024 // 10 MB
+	if len(args) > 0 && args[0] == "compact-transcript" {
+		// Room for a base64 transcript up to the compact blob cap, plus JSON.
+		maxOutputBytes = base64.StdEncoding.EncodedLen(agent.MaxChunkSize) + 1024*1024
+	}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	stdoutLW := &limitedWriter{buf: &stdoutBuf, limit: maxOutputBytes}

@@ -10,6 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
+
+	"golang.org/x/mod/semver"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -19,9 +22,11 @@ import (
 // NewReviewer returns the AgentReviewer for Pi.
 //
 // Argv shape: pi --mode json --print --append-system-prompt <guardrail>
-// [--model <model>] <prompt>.
-// The prompt is passed as a positional message because Pi's CLI accepts prompts
-// as message arguments in non-interactive mode. Stdout is newline-delimited JSON
+// [--model <model>].
+// The prompt is piped via stdin, which Pi reads as the initial message in every
+// non-RPC mode, the same as a positional message. argv is readable by other
+// local users through the process table (ps, /proc/<pid>/cmdline) for the life
+// of the run. Stdout is newline-delimited JSON
 // session events; the parser maps Pi's AgentSessionEvent stream into Entire's
 // review Event stream.
 func NewReviewer() *reviewtypes.ReviewerTemplate {
@@ -29,7 +34,58 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 		AgentName: string(agent.AgentNamePi),
 		BuildCmd:  buildPiReviewCmd,
 		Parser:    parsePiReviewOutput,
+		Prepare:   preparePiReviewConfig,
+		Preflight: func(ctx context.Context) error {
+			return checkPiReviewVersion(ctx, piVersion)
+		},
 	}
+}
+
+// MinPiStdinJSONVersion is the first Pi release that keeps --mode json output
+// for a prompt piped on stdin. Earlier releases fall back to plain text, which
+// the review parser cannot read.
+const MinPiStdinJSONVersion = "0.65.1"
+
+// piVersionTimeout bounds the `pi --version` probe; it reads no config and
+// makes no network call, so a slow answer means something is wrong.
+const piVersionTimeout = 10 * time.Second
+
+// piVersion returns what `pi --version` prints (Pi writes it to stderr).
+func piVersion(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, piVersionTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "pi", "--version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("pi --version: %w", err)
+	}
+	return string(out), nil
+}
+
+// checkPiReviewVersion refuses a Pi too old to read the review prompt from
+// stdin in --mode json. A version it cannot run or parse is let through: the
+// review then fails or succeeds on its own, as it did before this check.
+func checkPiReviewVersion(ctx context.Context, version func(context.Context) (string, error)) error {
+	raw, err := version(ctx)
+	if err != nil {
+		return nil //nolint:nilerr // best-effort probe; a missing pi fails at Start with its own error
+	}
+	// Pi 0.70 prints just the version; take the first full x.y.z token so a
+	// prefix ("pi 0.64.0"), a trailing notice, or a bare number in a settings
+	// warning printed first ("...position 25...") can't hide an old release.
+	// semver alone would accept shorthand such as v25.
+	have := ""
+	for _, field := range strings.Fields(raw) {
+		v := "v" + strings.TrimPrefix(field, "v")
+		if semver.Canonical(v) == v {
+			have = v[1:]
+			break
+		}
+	}
+	if have == "" || semver.Compare("v"+have, "v"+MinPiStdinJSONVersion) >= 0 {
+		return nil
+	}
+	// Start prefixes the agent name.
+	return fmt.Errorf("version %s is too old for review: it needs pi >= %s to keep JSON output for a prompt piped on stdin; upgrade pi and retry", have, MinPiStdinJSONVersion)
 }
 
 func buildPiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
@@ -38,8 +94,9 @@ func buildPiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd 
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
-	args = append(args, prompt)
+	args = append(args, cfg.ExtraArgs...)
 	cmd := exec.CommandContext(ctx, "pi", args...)
+	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), string(agent.AgentNamePi), cfg, prompt)
 	return cmd
 }

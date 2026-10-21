@@ -357,7 +357,11 @@ func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string
 }
 
 func runTrailReviewCommentAdd(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewCommentAddOptions) error {
-	client, target, err := mode.reviewTarget(cmd, selector, false)
+	// A patch or file location is read from this worktree, so without an
+	// explicit --repo the finding must land on this clone's change, never a
+	// sole change in another repository that happens to share the path.
+	localAnchor := opts.Patch != "" || opts.PatchFile != "" || opts.FilePath != ""
+	client, target, err := mode.reviewTarget(cmd, selector, localAnchor && trailRepoFlag(cmd) == "")
 	if err != nil {
 		return err
 	}

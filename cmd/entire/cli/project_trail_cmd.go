@@ -231,7 +231,7 @@ func newProjectTrailCreateCmd() *cobra.Command {
 	var noBranch bool
 	cmd := &cobra.Command{
 		Use: cmdCreate, Short: "Create a trail and publish its branch",
-		Long: "Create project intent and link a branch atomically. In the current repository, publish the local branch first; no separate commit or push is required. Uses the current feature branch, or derives a new branch from the title when on the base branch. Use --branch to choose a branch, or --no-branch for intent only. With --repo, no local branch is published: link existing remote work or use --branch-action create to create it on the server from --base. This command does not commit changes or change the local checkout. Branches are preserved if creation fails.",
+		Long: "Create a repository-scoped project trail, then link its branch. In the current repository, publish the local branch first; no separate commit or push is required. Uses the current feature branch, or derives a new branch from the title when on the base branch. Use --branch to choose a branch, or --no-branch for intent only. With --no-branch, the current or --repo repository becomes the Trail scope and requires repository write access; --project without --repo creates unscoped intent instead. Repository writers can create scoped trails and link branches. Unscoped creation requires project management. With a branch, --idempotency-key applies only to linking; if linking fails, retry with trail link rather than creating another trail. With --repo, no local branch is published: link existing remote work or use --branch-action create to create it on the server from --base. This command does not commit changes or change the local checkout. Branches are preserved if creation fails.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := fields.validate(cmd, true); err != nil {
@@ -239,6 +239,10 @@ func newProjectTrailCreateCmd() *cobra.Command {
 			}
 			if noBranch && (cmd.Flags().Changed("branch") || cmd.Flags().Changed("base") || cmd.Flags().Changed("branch-action")) {
 				return errors.New("--no-branch cannot be combined with --branch, --base, or --branch-action")
+			}
+			request := api.ProjectTrailCreateRequest{
+				Title: fields.Title, Body: fields.Body, Status: fields.Status,
+				Type: fields.Type, Priority: fields.Priority, Assignees: fields.Assignees,
 			}
 			if !noBranch {
 				var err error
@@ -250,27 +254,15 @@ func newProjectTrailCreateCmd() *cobra.Command {
 			if err := validateProjectTrailBranch(cmd, branch, action); err != nil {
 				return err
 			}
+			if !noBranch || trailRepoFlag(cmd) != "" || projectTrailProjectFlag(cmd) == "" {
+				change := projectTrailChangeRequest(fields, "", branch, base, action)
+				return createRepositoryScopedProjectTrail(cmd, request, change, key)
+			}
 			target, err := resolveProjectTrailCollection(cmd)
 			if err != nil {
 				return err
 			}
-			request := api.ProjectTrailCreateRequest{
-				Title: fields.Title, Body: fields.Body, Status: fields.Status,
-				Type: fields.Type, Priority: fields.Priority, Assignees: fields.Assignees,
-			}
-			if branch != "" {
-				change, err := projectTrailChangeRequest(cmd, fields, branch, base, action)
-				if err != nil {
-					return err
-				}
-				request.Changes = []api.ChangeCreateRequest{change}
-			}
 			key = projectTrailIdempotencyKey(cmd.ErrOrStderr(), key)
-			if branch != "" && action == trailBranchActionLink && trailRepoFlag(cmd) == "" {
-				if err := publishProjectTrailBranch(cmd, branch); err != nil {
-					return err
-				}
-			}
 			var out api.ProjectTrail
 			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, target.BasePath, request, http.Header{"Idempotency-Key": {key}}, &out); err != nil {
 				return fmt.Errorf("create project trail (retry with --idempotency-key %s and the same fields): %w", key, err)
@@ -282,7 +274,7 @@ func newProjectTrailCreateCmd() *cobra.Command {
 		},
 	}
 	fields.flags(cmd)
-	cmd.Flags().BoolVar(&noBranch, "no-branch", false, "Create intent without linking a repository branch")
+	cmd.Flags().BoolVar(&noBranch, "no-branch", false, "Create intent scoped to the current or --repo repository; --project alone creates unscoped intent")
 	addProjectTrailCreationFlags(cmd, &branch, &base, &action, &key)
 	addJSONFlag(cmd)
 	return cmd
@@ -292,7 +284,7 @@ func addProjectTrailCreationFlags(cmd *cobra.Command, branch, base, action, key 
 	cmd.Flags().StringVar(branch, "branch", "", "Branch to use (defaults to the current feature branch; create derives one from the title on the base branch)")
 	cmd.Flags().StringVar(base, "base", "", "Base branch for new code work")
 	cmd.Flags().StringVar(action, "branch-action", trailBranchActionLink, "Branch action: link existing remote work, or create a new branch")
-	cmd.Flags().StringVar(key, "idempotency-key", "", "Creation retry key; generated and printed to stderr if omitted (reuse with identical fields)")
+	cmd.Flags().StringVar(key, "idempotency-key", "", "Retry key for linking a branch; with intent-only creation, requires project management")
 }
 
 func validateProjectTrailBranch(cmd *cobra.Command, branch, action string) error {
@@ -313,14 +305,10 @@ func projectTrailIdempotencyKey(w io.Writer, key string) string {
 	return key
 }
 
-func projectTrailChangeRequest(cmd *cobra.Command, fields projectTrailFields, branch, base, action string) (api.ChangeCreateRequest, error) {
-	repoID, err := resolveTrailRepoID(cmd.Context(), trailRepoFlag(cmd))
-	if err != nil {
-		return api.ChangeCreateRequest{}, err
-	}
+func projectTrailChangeRequest(fields projectTrailFields, repoID, branch, base, action string) api.ChangeCreateRequest {
 	return api.ChangeCreateRequest{
 		RepositoryID: repoID,
 		Title:        fields.Title, Body: fields.Body, BranchName: branch, Base: base, BranchAction: action,
 		Status: fields.Status, Type: fields.Type, Priority: fields.Priority, Assignees: fields.Assignees,
-	}, nil
+	}
 }

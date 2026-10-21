@@ -1324,3 +1324,30 @@ esac
 		t.Errorf("get-session-dir saw %q, want %q", dir, want)
 	}
 }
+
+// compact-transcript returns a base64 transcript that can legitimately exceed
+// the 10 MB cap other subcommands get.
+func TestCompactTranscript_AllowsOutputOverDefaultCap(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	script := `#!/bin/sh
+case "$1" in
+  info)
+    echo '` + validInfoJSON + `'
+    ;;
+  compact-transcript)
+    printf '{"transcript":"%s"}' "$(head -c 9000000 /dev/zero | base64 | tr -d '\n')"
+    ;;
+esac
+`
+	ea := newExternalAgent(t, testBinaryDir(t, script))
+	got, err := ea.CompactTranscript(context.Background(), "/dev/null")
+	if err != nil {
+		t.Fatalf("CompactTranscript() error = %v", err)
+	}
+	if len(got.Transcript) != 9000000 {
+		t.Fatalf("transcript length = %d, want 9000000", len(got.Transcript))
+	}
+}

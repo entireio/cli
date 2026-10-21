@@ -106,7 +106,7 @@ func newTrailCmdForMode(project bool) *cobra.Command {
 		cmd.AddCommand(newTrailShowCmd(), newTrailListCmd(), newTrailCreateCmd(), newTrailUpdateCmd(), newTrailDeleteCmd(), newTrailCommentCmd(), newTrailMergeCmd())
 	}
 	cmd.AddCommand(newTrailCheckoutCmd(mode), newTrailResumeCmd(mode), newTrailFindingCmd(mode), newTrailWatchCmd(mode))
-	cmd.AddCommand(newTrailApproveCmd(mode), newTrailRequestChangesCmd(mode), newTrailApprovalsCmd(mode))
+	cmd.AddCommand(newTrailApproveCmd(mode), newTrailRequestChangesCmd(), newTrailApprovalsCmd(mode))
 
 	return cmd
 }
@@ -1797,7 +1797,8 @@ branch. Without one, the trail for the current branch is used. The trail's branc
 is checked out, fetching it from origin first when it only exists there.`, `The trail may be given as the first argument or via --trail, as a project number,
 ID, or <repo>/<number>. Without one, the current branch's parent is used. --branch selects the
 working branch; otherwise the current branch or sole branch in this repository
-is selected. Ambiguity requires --branch. Remote-only branches are fetched.`) + `
+is selected. Otherwise the open changes are listed; pass one as <repo>/<number>.
+Remote-only branches are fetched.`) + `
 
 With --worktree, the branch is checked out into a git worktree under
 .entire/worktrees at the repo root instead of switching this checkout, and the
@@ -1899,7 +1900,7 @@ func describeTrailRef(t *api.TrailResource) string {
 func newTrailDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "delete [<number>]",
-		Short:  "Deprecated: Mark the trail as Closed instead",
+		Short:  "Removed from the CLI",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(*cobra.Command, []string) error {
@@ -1907,14 +1908,13 @@ func newTrailDeleteCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().String("branch", "", "Unused; trail deletion was removed")
-	cmd.Flags().BoolP("force", "f", false, "Unused; trail deletion was removed")
+	cmd.Flags().String("branch", "", "Unused")
+	cmd.Flags().BoolP("force", "f", false, "Unused")
 
 	return cmd
 }
 
-var errTrailDeleteRemoved = errors.New(
-	"trails can no longer be deleted; close the trail instead: entire trail update --status closed")
+var errTrailDeleteRemoved = errors.New("trail delete was removed from the CLI")
 
 // defaultBaseBranch is the fallback base branch name when it cannot be determined.
 const defaultBaseBranch = "main"

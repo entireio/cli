@@ -138,3 +138,38 @@ func TestTrailCheckoutPreservesBranchSelectionByMode(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyResumeIgnoresDeprecatedRepoFlag(t *testing.T) {
+	// Serial: isolates CWD and replaces the repository client constructor.
+	setupTrailBranchSelectionTest(t)
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/trails/gh/acme/widget/7":
+			assert.NoError(t, json.NewEncoder(w).Encode(api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/work"}))
+		case "/api/v1/trails/gh/acme/widget/7/reviews/comments":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"comments": []any{}}))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	cmd := newTrailResumeCmd(legacyTrailMode)
+	require.True(t, cmd.Flags().Lookup("repo").Hidden, "--repo must be hidden")
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	// A repository other than this checkout's must not stop resume.
+	cmd.SetArgs([]string{"7", "--repo", "other/elsewhere", "--branch", "feature/work", "--no-resume", "--json"})
+	require.NoError(t, cmd.ExecuteContext(t.Context()))
+	var resumed trailResumeContext
+	require.NoError(t, json.Unmarshal(out.Bytes(), &resumed))
+	for _, command := range resumed.Commands {
+		require.NotContains(t, command, "--repo")
+	}
+	var raw struct {
+		Trail map[string]any `json:"trail"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &raw))
+	require.NotContains(t, raw.Trail, "repo", "resume context no longer reports a repository")
+	require.Contains(t, errOut.String(), "--repo has been deprecated")
+}

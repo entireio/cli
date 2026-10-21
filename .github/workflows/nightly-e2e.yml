@@ -85,7 +85,7 @@ jobs:
             done
           }
 
-          retry 'curl -fsSL --compressed https://entire.io/install.sh | bash -s -- --channel nightly'
+          retry 'curl -fsSL --compressed https://entire.com/install.sh | bash -s -- --channel nightly'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install nightly CLI (macOS)
@@ -147,7 +147,7 @@ jobs:
             }
           }
 
-          Invoke-WithRetry { iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly" }
+          Invoke-WithRetry { iex "& {$(irm https://entire.com/install.ps1)} -Channel nightly" }
           "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # Pin the checkout to the tag that produced the installed binary, so the

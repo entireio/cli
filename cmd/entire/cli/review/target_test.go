@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -25,9 +26,45 @@ func TestReviewTargetChildArgsUsesParsedCommandFlags(t *testing.T) {
 		t.Fatalf("parse flags: %v", err)
 	}
 	head := strings.Repeat("a", 40)
-	want := []string{"review", "general", "--base=main", "--prompt=focus here", "--trust-target=" + head}
+	// --prompt travels in the child's environment, not its argv.
+	want := []string{"review", "general", "--base=main", "--trust-target=" + head}
 	if got := reviewTargetChildArgs(cmd, []string{"general"}, head, ""); !reflect.DeepEqual(got, want) {
 		t.Fatalf("reviewTargetChildArgs() = %q, want %q", got, want)
+	}
+	wantEnv := []string{envReviewFindingsWorktree + "=/caller", envReviewTargetPrompt + "=focus here"}
+	if got := reviewTargetChildEnv(cmd, "/caller"); !reflect.DeepEqual(got, wantEnv) {
+		t.Fatalf("reviewTargetChildEnv() = %q, want %q", got, wantEnv)
+	}
+}
+
+func TestReviewTargetChildEnvOmitsUnsetPrompt(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("prompt", "", "")
+	want := []string{envReviewFindingsWorktree + "=/caller"}
+	if got := reviewTargetChildEnv(cmd, "/caller"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reviewTargetChildEnv() = %q, want %q", got, want)
+	}
+}
+
+func TestTakeTargetChildPrompt(t *testing.T) {
+	t.Setenv(envReviewFindingsWorktree, "/caller")
+	t.Setenv(envReviewTargetPrompt, "focus here")
+	if got := takeTargetChildPrompt(); got != "focus here" {
+		t.Fatalf("takeTargetChildPrompt() = %q, want %q", got, "focus here")
+	}
+	// Unset so the reviewer agents the child starts don't inherit it.
+	if _, ok := os.LookupEnv(envReviewTargetPrompt); ok {
+		t.Fatalf("%s still set after takeTargetChildPrompt", envReviewTargetPrompt)
+	}
+}
+
+func TestTakeTargetChildPromptIgnoredOutsideTargetChild(t *testing.T) {
+	t.Setenv(envReviewFindingsWorktree, "")
+	t.Setenv(envReviewTargetPrompt, "injected")
+	if got := takeTargetChildPrompt(); got != "" {
+		t.Fatalf("takeTargetChildPrompt() = %q outside a target child, want empty", got)
 	}
 }
 

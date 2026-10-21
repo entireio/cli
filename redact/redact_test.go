@@ -840,6 +840,172 @@ func TestJSONLContent_BareSKKeyRedacted(t *testing.T) {
 	}
 }
 
+// awsTempKeyFixture is an STS-shaped (ASIA) key ID, assembled like awsKeyFixture.
+const awsTempKeyFixture = "ASIAQ7XK2M" + "ZP4RLW6NTB"
+
+// TestString_BareAWSKeyIDs covers issue #2808: betterleaks' aws-access-token
+// rule only fires when an aws-secret-access-key component sits within five
+// lines, and a 20-char key ID can never clear the entropy threshold, so a key ID
+// alone in prose reached the checkpoint raw.
+func TestString_BareAWSKeyIDs(t *testing.T) {
+	t.Parallel()
+
+	for _, id := range []string{awsKeyFixture, awsTempKeyFixture} {
+		if e := shannonEntropy(id); e > entropyThreshold {
+			t.Fatalf("value %q has entropy %.3f > %.1f; not an entropy-miss regression case", id, e, entropyThreshold)
+		}
+	}
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "issue #2808 repro: bare key ID in prose",
+			input: "the access key is " + awsKeyFixture + " for staging",
+			want:  "the access key is REDACTED for staging",
+		},
+		{
+			name:  "temporary STS key ID alone on a line",
+			input: "creds:\n" + awsTempKeyFixture + "\nend",
+			want:  "creds:\nREDACTED\nend",
+		},
+		{
+			name:  "two key IDs separated by one space",
+			input: awsKeyFixture + " " + awsTempKeyFixture,
+			want:  "REDACTED REDACTED",
+		},
+		{
+			name:  "quoted value",
+			input: `"id": "` + awsKeyFixture + `"`,
+			want:  `"id": "REDACTED"`,
+		},
+		{
+			name:  "AWS documentation example key is preserved",
+			input: "e.g. AKIAIOSFODNN7" + "EXAMPLE",
+			want:  "e.g. AKIAIOSFODNN7" + "EXAMPLE",
+		},
+		{
+			name:  "prefix inside a longer uppercase word is preserved",
+			input: "TODAYIN" + "ASIAASACKOFRICEFELLOVER",
+			want:  "TODAYIN" + "ASIAASACKOFRICEFELLOVER",
+		},
+	})
+}
+
+// TestDetectProviderTokens_AWSKeyIDBoundaries pins the key-ID boundaries on the
+// provider layer alone; through String, the entropy layer can swallow a
+// preceding name or escape and mask a missing boundary.
+func TestDetectProviderTokens_AWSKeyIDBoundaries(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{
+		`AWS_ACCESS_KEY_ID_` + awsKeyFixture,
+		`first line\n` + awsKeyFixture,
+		`quote"` + awsKeyFixture,
+		awsKeyFixture + `_suffix`,
+		awsKeyFixture + `\n`,
+	} {
+		regions := detectProviderTokens(input)
+		if len(regions) != 1 || input[regions[0].start:regions[0].end] != awsKeyFixture {
+			t.Errorf("detectProviderTokens(%q) = %v, want exactly the key ID", input, regions)
+		}
+	}
+
+	for _, input := range []string{
+		"x" + awsKeyFixture,
+		awsKeyFixture + "Z",
+		awsKeyFixture + "2",
+		"AKIA" + strings.Repeat("X", 16),
+	} {
+		if regions := detectProviderTokens(input); len(regions) != 0 {
+			t.Errorf("detectProviderTokens(%q) = %v, want no regions", input, regions)
+		}
+	}
+}
+
+// TestJSONLContent_BareAWSKeyIDRedacted drives a bare key ID through the
+// field-aware JSONL path used for transcript.jsonl and full.jsonl.
+func TestJSONLContent_BareAWSKeyIDRedacted(t *testing.T) {
+	t.Parallel()
+	line := `{"type":"user","message":{"role":"user","content":"the access key is ` + awsKeyFixture + ` for staging"}}`
+	got, err := JSONLContent(line)
+	if err != nil {
+		t.Fatalf("JSONLContent error: %v", err)
+	}
+	if strings.Contains(got, awsKeyFixture) {
+		t.Fatalf("key ID survived JSONL redaction: %q", got)
+	}
+}
+
+// salesforceTokenFixture and tableauPATFixture have the provider shapes the
+// bounded token rules catch; assembled like awsKeyFixture.
+const (
+	salesforceTokenFixture = "00D5g000001" + "2aBc!AQ4AQ" + "Hk2.mP9vLq7sXz3RtY6wNb8cJf1dGh5eKu0iOa4lZ_Wn" + "Ex3Qr7Ty2Ui9Op6As1Df4Gh8Jk5Lz0Xc.Vb3Nm7Qw-Er2Ty6U"
+	tableauPATFixture      = "Kq7mZ2xR9vLp4nWb8cJf+/" + "==:" + "aB3dE7gH1jK5mN9pQ2sT6vX0yZ4cF8hL"
+)
+
+// TestString_KeywordGatedProviderTokens covers tokens betterleaks scans for
+// only when a vendor keyword ("salesforce.com", "tableau") appears in the same
+// text, and that the entropy layer misses because "!", ".", "/", "+" and ":"
+// split them.
+func TestString_KeywordGatedProviderTokens(t *testing.T) {
+	t.Parallel()
+
+	assertStringRedactionCases(t, []stringRedactionCase{
+		{
+			name:  "Salesforce access token in prose",
+			input: "use " + salesforceTokenFixture + " as the session",
+			want:  "use REDACTED as the session",
+		},
+		{
+			name:  "Tableau PAT in prose",
+			input: "use " + tableauPATFixture + " as the token",
+			want:  "use REDACTED as the token",
+		},
+	})
+}
+
+// TestDetectProviderTokens_JoinedSalesforceTokens covers tokens joined by a
+// body character: a greedy body would run into the second token's org ID, stop
+// at its "!", and leave the second body unredacted.
+func TestDetectProviderTokens_JoinedSalesforceTokens(t *testing.T) {
+	t.Parallel()
+
+	for _, sep := range []string{"_", ".", "-"} {
+		input := salesforceTokenFixture + sep + salesforceTokenFixture
+		want := "REDACTED" + sep + "REDACTED"
+		if got := applyRegions(input, detectProviderTokens(input)); got != want {
+			t.Errorf("provider layer on tokens joined by %q = %q, want %q", sep, got, want)
+		}
+	}
+}
+
+// TestDetectProviderTokens_KeywordGatedBoundaries pins boundaries and filters
+// of the Salesforce and Tableau rules on the provider layer alone.
+func TestDetectProviderTokens_KeywordGatedBoundaries(t *testing.T) {
+	t.Parallel()
+
+	for _, token := range []string{salesforceTokenFixture, tableauPATFixture} {
+		for _, input := range []string{`TOKEN_` + token, `first line\n` + token, token + `"`} {
+			regions := detectProviderTokens(input)
+			if len(regions) != 1 || input[regions[0].start:regions[0].end] != token {
+				t.Errorf("detectProviderTokens(%q) = %v, want exactly the token", input, regions)
+			}
+		}
+	}
+
+	for _, input := range []string{
+		"x" + salesforceTokenFixture,
+		"00" + strings.Repeat("X", 13) + "!" + strings.Repeat("x", 80),
+		salesforceTokenFixture[:len(salesforceTokenFixture)-19],
+		tableauPATFixture + "Z",
+		strings.Repeat("A", 22) + "==:" + strings.Repeat("a", 32),
+		"x" + tableauPATFixture,
+	} {
+		if regions := detectProviderTokens(input); len(regions) != 0 {
+			t.Errorf("detectProviderTokens(%q) = %v, want no regions", input, regions)
+		}
+	}
+}
+
 func TestString_CredentialedURIs(t *testing.T) {
 	tests := []struct {
 		name  string

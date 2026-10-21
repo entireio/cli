@@ -2,6 +2,8 @@ package pi
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -33,16 +35,23 @@ func TestPiReviewer_BuildCmd(t *testing.T) {
 		t.Fatalf("Args[0] = %q, want pi; args=%v", cmd.Args[0], cmd.Args)
 	}
 	wantPrefix := []string{"pi", "--mode", "json", "--print", "--append-system-prompt", review.ReviewerGuardrail, "--model", "anthropic/claude-sonnet-4-5:high"}
-	if len(cmd.Args) != len(wantPrefix)+1 {
-		t.Fatalf("args len = %d, want %d: %v", len(cmd.Args), len(wantPrefix)+1, cmd.Args)
+	if len(cmd.Args) != len(wantPrefix) {
+		t.Fatalf("args len = %d, want %d (prompt must not be in argv): %v", len(cmd.Args), len(wantPrefix), cmd.Args)
 	}
 	for i, want := range wantPrefix {
 		if cmd.Args[i] != want {
 			t.Fatalf("Args[%d] = %q, want %q; args=%v", i, cmd.Args[i], want, cmd.Args)
 		}
 	}
-	if prompt := cmd.Args[len(cmd.Args)-1]; !strings.Contains(prompt, "Review the change.") || !strings.Contains(prompt, "Focus on API regressions.") {
-		t.Fatalf("prompt arg missing composed review content: %q", prompt)
+	if cmd.Stdin == nil {
+		t.Fatal("cmd.Stdin is nil, want the composed prompt")
+	}
+	stdin, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatalf("read stdin: %v", err)
+	}
+	if prompt := string(stdin); !strings.Contains(prompt, "Review the change.") || !strings.Contains(prompt, "Focus on API regressions.") {
+		t.Fatalf("stdin missing composed review content: %q", prompt)
 	}
 
 	env := envMap(cmd.Env)
@@ -329,6 +338,55 @@ func TestPiReviewer_ParseErrorWithoutMessage(t *testing.T) {
 	}
 	if len(errs) != 1 || errs[0] != "pi: stopped with aborted" {
 		t.Fatalf("RunErrors = %q, want the stop reason", errs)
+	}
+}
+
+func TestCheckPiReviewVersion(t *testing.T) {
+	t.Parallel()
+
+	errNoPi := errors.New("pi: executable file not found")
+	tests := []struct {
+		name    string
+		out     string
+		err     error
+		wantErr bool
+	}{
+		// Before 0.65.1, piped stdin with --mode json printed plain text, which
+		// parsePiReviewOutput reports as malformed JSON and a failed review.
+		{name: "too old", out: "0.64.3\n", wantErr: true},
+		{name: "minimum", out: MinPiStdinJSONVersion + "\n"},
+		{name: "newer", out: "0.70.2\n"},
+		{name: "v prefix", out: "v0.60.0", wantErr: true},
+		{name: "name prefix", out: "pi 0.64.0\n", wantErr: true},
+		{name: "trailing notice", out: "0.64.0\nUpdate available: 0.70.2\n", wantErr: true},
+		// A settings warning printed before the version must not be read as
+		// one (semver accepts the shorthand v25).
+		{name: "settings warning first", out: "Unexpected token in JSON at position 25 (line 3 column 1)\n0.64.0\n", wantErr: true},
+		{name: "shorthand only", out: "pi 1.2\n"},
+		{name: "unparseable", out: "pi dev build\n"},
+		{name: "empty", out: ""},
+		{name: "probe failed", err: errNoPi},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkPiReviewVersion(context.Background(), func(context.Context) (string, error) {
+				return tt.out, tt.err
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkPiReviewVersion(%q) = %v, wantErr %v", tt.out, err, tt.wantErr)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), MinPiStdinJSONVersion) {
+				t.Errorf("error %q should name the minimum version", err)
+			}
+		})
+	}
+}
+
+func TestPiReviewer_HasVersionPreflight(t *testing.T) {
+	t.Parallel()
+	if NewReviewer().Preflight == nil {
+		t.Fatal("pi reviewer must check the pi version before piping the prompt on stdin")
 	}
 }
 

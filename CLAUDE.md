@@ -40,6 +40,7 @@ at session start. Follow its related links when the task crosses those boundarie
 | External commands or agents | [External commands](docs/architecture/external-commands.md), [agent protocol](docs/architecture/external-agent-protocol.md) |
 | Security, privacy, scanners | [Security and privacy](docs/security-and-privacy.md), [implementation contracts](docs/development/checkpoint-implementation.md) |
 | Review command | [Review architecture](docs/architecture/review-command.md) |
+| Release artifacts, install scripts, version-check origins | [Release origins](docs/architecture/release-origins.md) |
 | E2E tests | [E2E guide](e2e/README.md) |
 
 ## Verification
