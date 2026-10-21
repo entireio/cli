@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
 var _ agent.CumulativeTokenSource = (*CodexAgent)(nil)
@@ -39,7 +40,10 @@ func (u rolloutUsage) tokenUsage(calls int) *agent.TokenUsage {
 // CumulativeTokenUsage takes the per-field max of two lower bounds: per-call
 // token_usage_record lines deduped by response_id (exact, immune to a counter
 // restarted on resume), and segment-summed token_count running totals, which
-// also cover calls made before Codex began writing records.
+// also cover calls made before Codex began writing records. The max spans only
+// the records written before the last token_count; a record after it (Codex
+// writes a call's record before that call's token_count) is added on top, so a
+// total that predates records never hides a newer call.
 //
 // Children come from the session's authoritative inventory, keyed by child
 // agent ID. They keep the inventory's own rule — the child's last token_count
@@ -68,9 +72,14 @@ func (c *CodexAgent) CumulativeTokenUsage(ctx context.Context, in agent.Cumulati
 }
 
 func cumulativeRolloutUsage(data []byte) *agent.TokenUsage {
-	records := make(map[string]*agent.TokenUsage)
+	type callUsage struct {
+		usage *agent.TokenUsage
+		index int // first occurrence, so a replayed record keeps its place
+	}
+	records := make(map[string]callUsage)
 	var snapshots []*agent.TokenUsage
 	snapshotCalls := 0
+	lastSnapshot := -1
 	for index, raw := range splitJSONL(data) {
 		if !bytes.Contains(raw, []byte(rolloutLineTypeTokenUsageRecord)) && !bytes.Contains(raw, []byte(eventMsgTypeTokenCount)) {
 			continue
@@ -92,7 +101,11 @@ func cumulativeRolloutUsage(data []byte) *agent.TokenUsage {
 			if key == "" {
 				key = "line:" + strconv.Itoa(index)
 			}
-			records[key] = record.Usage.tokenUsage(1)
+			at := index
+			if prev, ok := records[key]; ok {
+				at = prev.index
+			}
+			records[key] = callUsage{usage: record.Usage.tokenUsage(1), index: at}
 		case rolloutLineTypeEventMsg:
 			var event struct {
 				Type string `json:"type"`
@@ -109,11 +122,21 @@ func cumulativeRolloutUsage(data []byte) *agent.TokenUsage {
 				snapshotCalls++ // a replayed total is not a new call
 			}
 			snapshots = append(snapshots, snapshot)
+			lastSnapshot = index
 		}
 	}
 	segments := agent.SumCumulativeSegments(snapshots)
 	if segments != nil {
 		segments.APICallCount = snapshotCalls
 	}
-	return agent.MaxTokenUsage(agent.SumTokenUsageByKey(records), segments)
+	covered := make(map[string]*agent.TokenUsage)
+	tail := make(map[string]*agent.TokenUsage)
+	for key, r := range records {
+		if r.index < lastSnapshot {
+			covered[key] = r.usage
+		} else {
+			tail[key] = r.usage
+		}
+	}
+	return agent.UsageOrNil(types.AddTokenUsage(agent.MaxTokenUsage(agent.SumTokenUsageByKey(covered), segments), agent.SumTokenUsageByKey(tail)))
 }

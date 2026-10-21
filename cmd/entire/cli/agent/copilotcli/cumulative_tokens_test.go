@@ -49,6 +49,17 @@ func TestCumulativeTokenUsage(t *testing.T) {
 			[]string{shutdown(1000, 50, 800, 100, 2), record("sub-1", "msg_9", 500, 20, 400, 0)},
 			&agent.TokenUsage{InputTokens: 100, CacheReadTokens: 800, CacheCreationTokens: 100, OutputTokens: 50, APICallCount: 2},
 			map[string]*agent.TokenUsage{"sub-1": {InputTokens: 100, CacheReadTokens: 400, OutputTokens: 20, APICallCount: 1}}},
+		{"shutdown covers the children and main calls with no record",
+			// As captured: the shutdown total is main + children. One main call
+			// has no usage record, so the main agent gets the shutdown less the
+			// children, never less than its own records.
+			[]string{
+				record("", "msg_1", 500, 20, 400, 0),
+				record("sub-1", "msg_2", 300, 10, 200, 0),
+				shutdown(1300, 50, 1000, 0, 3),
+			},
+			&agent.TokenUsage{InputTokens: 200, CacheReadTokens: 800, OutputTokens: 40, APICallCount: 2},
+			map[string]*agent.TokenUsage{"sub-1": {InputTokens: 100, CacheReadTokens: 200, OutputTokens: 10, APICallCount: 1}}},
 		{"a subagent's shutdown is not the main agent's",
 			[]string{
 				record("", "msg_1", 500, 20, 400, 0),
