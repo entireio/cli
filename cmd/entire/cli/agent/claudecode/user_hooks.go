@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
 
@@ -21,11 +22,22 @@ import (
 // commands are byte-identical and Claude Code runs a hook present in both
 // files once. Returns the number of hooks added (0 when already present) and
 // the file's path.
-func EnsureUserHooks(_ context.Context) (int, string, error) {
+func EnsureUserHooks(ctx context.Context) (int, string, error) {
 	path, err := userClaudeSettingsPath()
 	if err != nil {
 		return 0, "", err
 	}
+	// Entire processes run this concurrently (parallel hooks), so the
+	// read-merge-write is serialised. The lock sits beside the file, as agy's
+	// does beside its settings.json.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return 0, path, fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+	release, err := flock.AcquireContext(ctx, path+".lock")
+	if err != nil {
+		return 0, path, fmt.Errorf("lock %s: %w", path, err)
+	}
+	defer release()
 	// A file that exists but cannot be read must not be mistaken for an
 	// absent one: the install merge would then replace everything in it.
 	if _, err := os.ReadFile(path); err != nil && !errors.Is(err, fs.ErrNotExist) { //nolint:gosec // the user's own Claude config
@@ -49,7 +61,13 @@ func (u userClaudeSettings) Read() ([]byte, error) {
 
 func (u userClaudeSettings) Write(data []byte, perm os.FileMode) error {
 	target := u.path
-	if resolved, err := filepath.EvalSymlinks(u.path); err == nil {
+	if info, err := os.Lstat(u.path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		// A link that does not resolve (a dotfiles checkout not there yet)
+		// is refused rather than replaced by a regular file.
+		resolved, err := filepath.EvalSymlinks(u.path)
+		if err != nil {
+			return fmt.Errorf("resolve symlink %s: %w", u.path, err)
+		}
 		target = resolved
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {

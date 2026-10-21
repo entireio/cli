@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -147,5 +148,58 @@ func TestEnsureUserHooks_WritesThroughASymlinkedSettingsFile(t *testing.T) {
 	}
 	if _, ok := raw["hooks"]; !ok {
 		t.Errorf("symlink target not updated: %s", data)
+	}
+}
+
+func TestEnsureUserHooks_RefusesADanglingSymlink(t *testing.T) {
+	userDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	t.Chdir(t.TempDir())
+	link := filepath.Join(userDir, ClaudeSettingsFileName)
+	if err := os.Symlink(filepath.Join(t.TempDir(), "not-there-yet.json"), link); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := EnsureUserHooks(context.Background()); err == nil {
+		t.Fatal("EnsureUserHooks() succeeded through a dangling symlink")
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("dangling settings.json symlink was replaced by a regular file")
+	}
+}
+
+func TestEnsureUserHooks_ConcurrentCallsInstallOnce(t *testing.T) {
+	userDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	t.Chdir(t.TempDir())
+
+	const callers = 8
+	added := make(chan int, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n, _, err := EnsureUserHooks(context.Background())
+			if err != nil {
+				t.Errorf("EnsureUserHooks() error = %v", err)
+			}
+			added <- n
+		}()
+	}
+	wg.Wait()
+	close(added)
+	installs := 0
+	for n := range added {
+		if n > 0 {
+			installs++
+		}
+	}
+	if installs != 1 {
+		t.Errorf("%d callers installed hooks, want exactly 1", installs)
 	}
 }

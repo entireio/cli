@@ -283,6 +283,12 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 			// agent's transport has that shape.
 			repoPrefix + "internal/flock",
 		},
+		"claudecode": {
+			// Cross-process advisory locks. With preferences.enabled every
+			// Entire process (including parallel hooks) may add hooks to the
+			// user-level settings.json, so the read-merge-write is locked.
+			repoPrefix + "internal/flock",
+		},
 		"opencode": {
 			// Process-group kill on cancel. opencode's npm launcher runs the
 			// real binary as a child with inherited stdio, so killing the
