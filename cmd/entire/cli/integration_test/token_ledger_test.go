@@ -5,6 +5,8 @@ package integration
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -143,4 +145,126 @@ func TestTokenLedger_ClaudeCode_EachCallCountedOnce(t *testing.T) {
 			r.verify()
 		})
 	}
+}
+
+// writeDroidTokenUsage writes the running total Droid keeps in the session's
+// settings.json beside its transcript.
+func writeDroidTokenUsage(t *testing.T, transcriptPath string, input, output int) {
+	t.Helper()
+	settings := fmt.Sprintf(`{"tokenUsage":{"inputTokens":%d,"outputTokens":%d,"cacheCreationTokens":0,"cacheReadTokens":0,"thinkingTokens":0}}`, input, output)
+	require.NoError(t, os.WriteFile(strings.TrimSuffix(transcriptPath, ".jsonl")+".settings.json", []byte(settings), 0o600))
+}
+
+// TestTokenLedger_FactoryDroid_WorkerAndSecondStop: a prompt that launches a
+// Worker ends with two Stops and no turn start between them; the second
+// counts what the parent used after the Worker returned. The Worker's usage
+// reaches the parent as a child, never as a session total of its own.
+func TestTokenLedger_FactoryDroid_WorkerAndSecondStop(t *testing.T) {
+	t.Parallel()
+	env := NewTestEnv(t)
+	env.InitRepo()
+	env.InitEntire()
+	env.WriteFile(".gitignore", ".entire/\n")
+	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd(".gitignore")
+	env.GitAdd("README.md")
+	env.GitCommit("Initial commit")
+
+	parent := env.NewFactoryDroidSession()
+	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmitWithTranscript(parent.ID, parent.TranscriptPath))
+	parent.CreateDroidTranscript("Run a Worker that writes docs/summary.md", nil)
+	writeDroidTokenUsage(t, parent.TranscriptPath, 100, 10)
+	require.NoError(t, env.SimulateFactoryDroidStop(parent.ID, parent.TranscriptPath))
+
+	worker := env.NewFactoryDroidSession()
+	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmitWithTranscript(worker.ID, worker.TranscriptPath))
+	env.WriteFile("docs/summary.md", "A short summary.\n")
+	worker.CreateDroidTranscript("# Task Tool Invocation", []FileChange{{Path: "docs/summary.md", Content: "A short summary.\n"}})
+	worker.MarkAsWorkerSession(parent.ID, "toolu_worker_01", "worker: Summarize the repo")
+	writeDroidTokenUsage(t, worker.TranscriptPath, 40, 4)
+	require.NoError(t, env.SimulateFactoryDroidStop(worker.ID, worker.TranscriptPath))
+
+	// The Worker's result wakes the parent, which stops again.
+	writeDroidTokenUsage(t, parent.TranscriptPath, 130, 15)
+	require.NoError(t, env.SimulateFactoryDroidStop(parent.ID, parent.TranscriptPath))
+	require.NoError(t, env.SimulateFactoryDroidStop(parent.ID, parent.TranscriptPath), "a repeated Stop")
+
+	total := sessionTokenTotal(t, env, parent.ID)
+	require.Equal(t, 130, total.InputTokens, "the second Stop's usage is counted once")
+	require.Equal(t, 15, total.OutputTokens)
+	require.NotNil(t, total.SubagentTokens, "the Worker is the parent's child")
+	require.Equal(t, 40, total.SubagentTokens.InputTokens)
+
+	workerState, err := env.GetSessionState(worker.ID)
+	require.NoError(t, err)
+	if workerState != nil {
+		require.Nil(t, workerState.TokenLedger, "a Worker's session keeps no total of its own")
+		require.Nil(t, workerState.TokenUsage, "a Worker's session keeps no total of its own")
+	}
+
+	env.GitCommitWithHooks("Add summary", "docs/summary.md")
+	cp := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, cp)
+	usage := readCommittedTokenUsage(t, env, cp)
+	require.NotNil(t, usage)
+	require.Equal(t, 130, usage.InputTokens)
+	require.Equal(t, 15, usage.OutputTokens)
+	require.NotNil(t, usage.SubagentTokens)
+	require.Equal(t, 40, usage.SubagentTokens.InputTokens)
+}
+
+// TestTokenLedger_Codex_RepeatedStopAndMidTurnCommit: Codex reports running
+// totals, so a repeated Stop on a turn that changed files, and an agent commit
+// in the middle of a turn, each leave every call counted once.
+func TestTokenLedger_Codex_RepeatedStopAndMidTurnCommit(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	const sessionID = "codex-ledger-session"
+	rollout := filepath.Join(env.RepoDir, ".entire", "tmp", "codex-ledger-rollout.jsonl")
+	appendLines(t, rollout,
+		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"`+sessionID+`","thread_source":"user","cwd":"`+env.RepoDir+`"}}`)
+	hook := codexHooker(t, env.RepoDir, sessionID, rollout)
+
+	var cumInput, cumOutput, calls int
+	call := func(input, output int) {
+		t.Helper()
+		calls++
+		cumInput += input
+		cumOutput += output
+		appendLines(t, rollout, fmt.Sprintf(`{"timestamp":"2026-01-01T00:00:%02dZ","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":0,"output_tokens":%d}}}}`, calls, cumInput, cumOutput))
+	}
+	write := func(name string) {
+		t.Helper()
+		env.WriteFile(name, name+"\n")
+		applyPatchHook(hook, "call_"+strings.TrimSuffix(name, ".txt"), "*** Begin Patch\n*** Add File: "+name+"\n+"+name+"\n*** End Patch\n")
+	}
+	stop := func() { hook("stop", map[string]any{"hook_event_name": "Stop"}) }
+
+	hook("user-prompt-submit", map[string]any{"prompt": "turn 1", "hook_event_name": "UserPromptSubmit"})
+	call(100, 10)
+	write("a.txt")
+	stop()
+	stop()
+	require.Equal(t, 100, sessionTokenTotal(t, env, sessionID).InputTokens, "a repeated Stop adds nothing")
+
+	hook("user-prompt-submit", map[string]any{"prompt": "turn 2", "hook_event_name": "UserPromptSubmit"})
+	call(40, 4)
+	write("b.txt")
+	env.GitCommitWithHooksAsAgent("agent commit", "a.txt", "b.txt")
+	cp1 := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, cp1)
+	call(7, 1) // after the commit, in the same turn
+	stop()
+
+	hook("user-prompt-submit", map[string]any{"prompt": "turn 3", "hook_event_name": "UserPromptSubmit"})
+	call(5, 1)
+	write("c.txt")
+	stop()
+	_, usage2 := commitCheckpointTokens(t, env, cp1, "user commit", "c.txt")
+	usage1 := readCommittedTokenUsage(t, env, cp1)
+	require.NotNil(t, usage1)
+	require.Equal(t, 140, usage1.InputTokens, "the mid-turn checkpoint holds everything before it")
+	require.Equal(t, 12, usage2.InputTokens, "the next checkpoint holds turn 2's tail and turn 3")
+	require.Equal(t, 152, sessionTokenTotal(t, env, sessionID).InputTokens)
+	require.Equal(t, 16, sessionTokenTotal(t, env, sessionID).OutputTokens)
 }

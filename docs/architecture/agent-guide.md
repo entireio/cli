@@ -50,7 +50,8 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
-| `CumulativeTokenSource` | `CumulativeTokenUsage` | Agent can report the session's running token total (main agent plus per-child totals) from its whole transcript or session files. Not yet consumed; see below |
+| `CumulativeTokenSource` | `CumulativeTokenUsage` | Agent can report the session's running token total (main agent plus per-child totals) from its whole transcript or session files. Sessions of such agents count tokens with the token ledger; see below |
+| `ResumableCumulativeTokenSource` | `ResumeCumulativeTokenUsage` | A `CumulativeTokenSource` that continues from a cursor instead of re-reading the whole transcript on every hook (Claude Code, Codex). Built-in agents only |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
 | `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
@@ -552,12 +553,14 @@ A launch-time `SubagentEnd` needs `ToolUseID`, and should carry `SubagentID` whe
 
 ### `CumulativeTokenSource`
 
-**What it enables:** A session-cumulative token total that callers turn into per-checkpoint deltas by subtracting an earlier total, instead of re-scoping each read to a transcript offset. Nothing consumes it yet.
+**What it enables:** The token ledger (`session.TokenLedger`, `strategy.ObserveTokenLedger`): the session's token usage is the agent's own running total, and each checkpoint stores what it grew by since the last checkpoint, instead of re-scoping each read to a transcript offset. Readings happen under the session lock at turn start, every Stop and every condensation, so a repeated Stop or a commit in the middle of a turn cannot count a call twice.
 
 **Implement when:** Your agent records usage somewhere Entire can read in full on every hook.
 
 **Method:**
 - `CumulativeTokenUsage(ctx, CumulativeTokenInput) (total, children, error)` - `total` is the main agent's usage since the session began and never carries `SubagentTokens`; `children` maps a stable child ID to that subagent's own running total. Both are nil when there is no usage. Count every API call once per call ID (sum per-call records, or segment-sum running totals with `agent.SumCumulativeSegments`), report `InputTokens` without cache shares, and include reasoning in `OutputTokens`. External agents get it from `calculate-tokens` at offset 0 when they declare `token_calculator`.
+
+The ledger calls this on every hook, so for an agent whose transcripts grow large also implement `ResumableCumulativeTokenSource`: `ResumeCumulativeTokenUsage(ctx, in, cursor)` returns the same totals plus a cursor, reading only what was appended since the cursor. Fingerprint the consumed prefix with `agent.TranscriptCursor`; when it no longer matches, read from the start and set `Restarted`, which is how the ledger tells a rewritten transcript (a total that drops after a restart) from a stale copy (a drop without one).
 
 ### `SubagentAwareExtractor`
 

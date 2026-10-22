@@ -1106,7 +1106,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// The tokens are applied by the turn-end transition itself, so a
 		// repeated or concurrent Stop for the same turn adds nothing.
 		turnUsage := resolveTurnTokenUsage(ctx, ag, event, sessionID, preState, transcriptData, subagentsDir, codexInventoryUsage)
-		transitionSessionTurnEnd(ctx, sessionID, ag.Type(), event, &checkpointlessTurnUsage{usage: turnUsage, ledgerVersion: codexLedgerVersion}, true)
+		transitionSessionTurnEnd(ctx, sessionID, ag.Type(), event, &checkpointlessTurnUsage{usage: turnUsage, ledgerVersion: codexLedgerVersion}, false)
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 				slog.String("error", cleanupErr.Error()))
@@ -1195,7 +1195,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 	recordCaptureDegraded(ctx, sessionID, captureDegraded)
-	transitionSessionTurnEnd(ctx, sessionID, agentType, event, nil, true)
+	transitionSessionTurnEnd(ctx, sessionID, agentType, event, nil, false)
 	if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
@@ -2637,9 +2637,7 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 	// Ending it first is what claims the turn's usage: a repeated Stop finds
 	// the Worker already IDLE and adds none.
 	var turnUsage *agent.TokenUsage
-	// A Worker's usage reaches the parent as one of its children, so the
-	// Worker's own session never reads its running total.
-	if transitionSessionTurnEnd(ctx, step.sessionID, step.ag.Type(), step.event, nil, false) {
+	if transitionSessionTurnEnd(ctx, step.sessionID, step.ag.Type(), step.event, nil, true) {
 		turnUsage = step.turnUsage
 	}
 
@@ -2732,7 +2730,7 @@ func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool)
 // transitionSessionTurnEnd transitions the session phase to IDLE and dispatches turn-end actions.
 // agentType is the agent running this hook: its host's timeout bounds the
 // finalize, while state.AgentType can be empty.
-func transitionSessionTurnEnd(ctx context.Context, sessionID string, agentType types.AgentType, event *agent.Event, turnUsage *checkpointlessTurnUsage, observeTokens bool) (endedActiveTurn bool) {
+func transitionSessionTurnEnd(ctx context.Context, sessionID string, agentType types.AgentType, event *agent.Event, turnUsage *checkpointlessTurnUsage, subagentSession bool) (endedActiveTurn bool) {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	var appendedSkillEvents []agent.SkillEvent
 	wasActive := false
@@ -2744,8 +2742,13 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, agentType t
 		// it adds nothing.
 		wasActive = state.Phase.IsActive()
 		// A ledger session records the agent's running total, so every Stop
-		// can read it: a repeated one changes nothing.
-		ledgerActive := observeTokens && strategy.ObserveTokenLedger(ctx, state)
+		// can read it: a repeated one changes nothing. A subagent's own
+		// session (a Droid Worker) has no total of its own: its usage reaches
+		// the parent as one of the parent's children.
+		if subagentSession {
+			state.TokenLedger = nil
+		}
+		ledgerActive := strategy.ObserveTokenLedger(ctx, state)
 		if !ledgerActive && turnUsage != nil && wasActive {
 			strategy.ApplyTurnTokenUsage(state, turnUsage.usage, turnUsage.ledgerVersion)
 		}
