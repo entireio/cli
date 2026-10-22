@@ -50,13 +50,17 @@ func (u rolloutUsage) tokenUsage(calls int) *agent.TokenUsage {
 // snapshot, without the cache-write split — because a forked child copies its
 // parent's history and only that analysis knows which lines are its own.
 func (c *CodexAgent) CumulativeTokenUsage(ctx context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
-	total := cumulativeRolloutUsage(in.TranscriptData)
+	return cumulativeRolloutUsage(in.TranscriptData), c.cumulativeChildren(ctx, in), nil
+}
+
+// cumulativeChildren returns each inventoried child's running total.
+func (c *CodexAgent) cumulativeChildren(ctx context.Context, in agent.CumulativeTokenInput) map[string]*agent.TokenUsage {
 	if len(in.Subagents) == 0 {
-		return total, nil, nil
+		return nil
 	}
 	extraction, ok := agent.ExtractWithSubagentInventory(ctx, c, in.TranscriptData, 0, in.Subagents, in.Home)
 	if !ok {
-		return total, nil, nil
+		return nil
 	}
 	var children map[string]*agent.TokenUsage
 	for _, child := range extraction.Children {
@@ -68,7 +72,7 @@ func (c *CodexAgent) CumulativeTokenUsage(ctx context.Context, in agent.Cumulati
 		}
 		children[child.AgentID] = child.TokenUsage
 	}
-	return total, children, nil
+	return children
 }
 
 func cumulativeRolloutUsage(data []byte) *agent.TokenUsage {

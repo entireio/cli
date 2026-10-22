@@ -41,6 +41,7 @@ type CapabilityDeclarer interface {
 //   - PermissionConfigOwner
 //   - ProtectedFilesProvider
 //   - RestoredSessionPathResolver
+//   - ResumableCumulativeTokenSource (refuses CapabilityDeclarer agents)
 //   - SessionBaseDirProvider
 //   - SessionEndBudgeter
 //   - SessionFileCandidatesProvider
@@ -251,6 +252,14 @@ func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
 // calculation over the whole transcript, so the same declaration gates both.
 func AsCumulativeTokenSource(ag Agent) (CumulativeTokenSource, bool) {
 	return declaredCapability[CumulativeTokenSource](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
+}
+
+// AsResumableCumulativeTokenSource returns the agent as
+// ResumableCumulativeTokenSource if supported. External (CapabilityDeclarer)
+// agents are excluded: the protocol has no resumable token call, and their
+// whole-transcript total is reached through AsCumulativeTokenSource.
+func AsResumableCumulativeTokenSource(ag Agent) (ResumableCumulativeTokenSource, bool) {
+	return nonDeclarerCapability[ResumableCumulativeTokenSource](ag)
 }
 
 // AsLateTranscriptWriter returns the agent as LateTranscriptWriter if supported.
