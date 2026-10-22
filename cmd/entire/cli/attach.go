@@ -1469,6 +1469,13 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		lastCheckpointRead = existingState.LastCheckpointID
 	}
 	switch {
+	case state.TokenLedger.IsActive() && existingState != nil && existingState.TokenLedger.IsActive():
+		// The checkpoint stored what the ledger had grown by when attach read
+		// it. Readings only move forward, so whatever a hook recorded since is
+		// kept and the checkpointed mark never moves back.
+		state.TokenLedger.CatchUp(existingState.TokenLedger)
+		strategy.ConsumeAttachTokenWindow(state, tokenPos)
+		state.TokenUsage = state.TokenLedger.Total()
 	case tokenStartOnDisk != countedFrom,
 		!reflect.DeepEqual(pendingOnDisk, pendingRead),
 		lastCheckpointOnDisk != "" && lastCheckpointOnDisk != lastCheckpointRead:

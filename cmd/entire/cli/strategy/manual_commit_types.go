@@ -82,6 +82,7 @@ type ExtractedSessionData struct {
 	Prompts             []string // User prompts from the current checkpoint portion
 	FilesTouched        []string
 	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since the token offset, TokenStart)
+	SessionTokenUsage   *agent.TokenUsage // The session's running total, for token-ledger sessions
 	// SkillEvents are this condensation's extracted events. Transient — the
 	// durable ledger, and the per-hook cost of carrying it, is
 	// session.SessionState.SkillEvents; see its size note.

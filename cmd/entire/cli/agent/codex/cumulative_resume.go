@@ -40,9 +40,11 @@ type codexCursor struct {
 
 // ResumeCumulativeTokenUsage returns what CumulativeTokenUsage returns, reading
 // only the lines appended since cursor. Children still come from the inventory.
-func (c *CodexAgent) ResumeCumulativeTokenUsage(ctx context.Context, in agent.CumulativeTokenInput, cursor json.RawMessage) (*agent.TokenUsage, map[string]*agent.TokenUsage, json.RawMessage, error) {
+func (c *CodexAgent) ResumeCumulativeTokenUsage(ctx context.Context, in agent.CumulativeTokenInput, cursor json.RawMessage) (agent.CumulativeObservation, error) {
 	var cur codexCursor
-	if len(cursor) == 0 || json.Unmarshal(cursor, &cur) != nil || cur.Version != codexCursorVersion || !cur.Resumes(in.TranscriptData) {
+	known := len(cursor) > 0 && json.Unmarshal(cursor, &cur) == nil && cur.Version == codexCursorVersion
+	restarted := known && !cur.Resumes(in.TranscriptData)
+	if !known || restarted {
 		cur = codexCursor{Version: codexCursorVersion}
 	}
 	end := agent.CompleteLinesEnd(in.TranscriptData, cur.Offset)
@@ -54,9 +56,9 @@ func (c *CodexAgent) ResumeCumulativeTokenUsage(ctx context.Context, in agent.Cu
 
 	next, err := json.Marshal(cur)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to encode token cursor: %w", err)
+		return agent.CumulativeObservation{}, fmt.Errorf("failed to encode token cursor: %w", err)
 	}
-	return cur.total(), c.cumulativeChildren(ctx, in), next, nil
+	return agent.CumulativeObservation{Total: cur.total(), Children: c.cumulativeChildren(ctx, in), Cursor: next, Restarted: restarted}, nil
 }
 
 func (cur *codexCursor) add(raw []byte) {

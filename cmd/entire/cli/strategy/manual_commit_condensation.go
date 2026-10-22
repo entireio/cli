@@ -632,7 +632,14 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
 
-	resolveCondensedTokenUsage(ctx, ag, state, sessionData)
+	// Read the live transcript now, so a commit in the middle of a turn
+	// stores everything used up to it.
+	if ObserveTokenLedger(ctx, state) {
+		sessionData.TokenUsage = state.TokenLedger.Pending()
+		sessionData.SessionTokenUsage = state.TokenUsage
+	} else {
+		resolveCondensedTokenUsage(ctx, ag, state, sessionData)
+	}
 
 	// Backfill the model from the transcript for agents that don't report it via
 	// hooks (e.g., Pi records message.model but its hook events carry no model
@@ -815,6 +822,7 @@ func buildCondensationWriteOptions(
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
+		SessionTokenUsage:           sessionData.SessionTokenUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
 		Summary:                     summary,
@@ -1178,6 +1186,9 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 // that also moves state.TokenUsage's cumulative subagent total, which the
 // caller must keep so the re-baseline covers what this checkpoint stored.
 func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, transcriptPath string) (*agent.TokenUsage, int) {
+	if ObserveTokenLedger(ctx, state) {
+		return state.TokenLedger.Pending(), countTranscriptItems(ag.Type(), string(transcript))
+	}
 	var usage *agent.TokenUsage
 	if state == nil {
 		usage = agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
@@ -1202,6 +1213,9 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 // transcript window (CheckpointTranscriptStart) is left alone.
 func ConsumeAttachTokenWindow(state *SessionState, pos int) {
 	state.CheckpointTokenUsage = nil
+	if state.TokenLedger.IsActive() {
+		state.TokenLedger.MarkCheckpointed()
+	}
 	state.RebaselineSubagentTokens()
 	state.SetTokenStart(pos)
 }

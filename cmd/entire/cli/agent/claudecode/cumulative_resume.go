@@ -57,16 +57,18 @@ type childCursor struct {
 // ResumeCumulativeTokenUsage returns what CumulativeTokenUsage returns, reading
 // only the lines appended since cursor. A subagent transcript is re-read only
 // when it changed.
-func (c *ClaudeCodeAgent) ResumeCumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput, cursor json.RawMessage) (*agent.TokenUsage, map[string]*agent.TokenUsage, json.RawMessage, error) {
+func (c *ClaudeCodeAgent) ResumeCumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput, cursor json.RawMessage) (agent.CumulativeObservation, error) {
 	var cur claudeCursor
-	if len(cursor) == 0 || json.Unmarshal(cursor, &cur) != nil || cur.Version != claudeCursorVersion || !cur.Resumes(in.TranscriptData) {
+	known := len(cursor) > 0 && json.Unmarshal(cursor, &cur) == nil && cur.Version == claudeCursorVersion
+	restarted := known && !cur.Resumes(in.TranscriptData)
+	if !known || restarted {
 		cur = claudeCursor{Version: claudeCursorVersion}
 	}
 	end := agent.CompleteLinesEnd(in.TranscriptData, cur.Offset)
 	appended := in.TranscriptData[cur.Offset:end]
 	parsed, err := transcript.ParseFromBytes(appended)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to parse transcript: %w", err)
+		return agent.CumulativeObservation{}, fmt.Errorf("failed to parse transcript: %w", err)
 	}
 	cur.addMessages(parsed)
 	cur.TranscriptCursor = agent.NewTranscriptCursor(in.TranscriptData, end)
@@ -80,9 +82,9 @@ func (c *ClaudeCodeAgent) ResumeCumulativeTokenUsage(_ context.Context, in agent
 
 	next, err := json.Marshal(cur)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to encode token cursor: %w", err)
+		return agent.CumulativeObservation{}, fmt.Errorf("failed to encode token cursor: %w", err)
 	}
-	return cur.total(), children, next, nil
+	return agent.CumulativeObservation{Total: cur.total(), Children: children, Cursor: next, Restarted: restarted}, nil
 }
 
 // addMessages folds each assistant message's usage in, keeping per open

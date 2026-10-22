@@ -9,42 +9,56 @@ import (
 	"fmt"
 )
 
+// CumulativeObservation is one reading of a session's running totals.
+type CumulativeObservation struct {
+	// Total and Children are what CumulativeTokenSource returns.
+	Total    *TokenUsage
+	Children map[string]*TokenUsage
+	// Cursor lets the next reading continue from this one; nil for agents
+	// that cannot resume.
+	Cursor json.RawMessage
+	// Restarted reports that the previous cursor no longer described a prefix
+	// of the transcript, so the transcript was rewritten (a resume restoring an
+	// older copy) and Total was read again from its start. A Total below an
+	// earlier one is a rewrite only then; otherwise it is a stale read.
+	Restarted bool
+}
+
 // ResumableCumulativeTokenSource is a CumulativeTokenSource that can continue
-// from where an earlier call stopped, so a session's running total costs the
+// from where an earlier reading stopped, so a session's running total costs the
 // bytes appended since then rather than a parse of the whole transcript. The
-// totals it returns are the same running totals CumulativeTokenUsage returns.
+// totals it returns are the ones CumulativeTokenUsage returns.
 //
-// cursor is the value an earlier call returned as next, or nil to start from
-// the beginning. The agent owns its encoding. A cursor that does not describe a
-// prefix of the current transcript (rewritten by a resume, compacted, or written
-// by an older encoding) must be ignored, starting over from the beginning,
-// never trusted.
+// cursor is an earlier observation's Cursor, or nil to start from the
+// beginning. The agent owns its encoding. A cursor that does not describe a
+// prefix of the current transcript must not be trusted: the agent reads from
+// the beginning and sets Restarted.
 type ResumableCumulativeTokenSource interface {
 	CumulativeTokenSource
 
-	ResumeCumulativeTokenUsage(ctx context.Context, in CumulativeTokenInput, cursor json.RawMessage) (total *TokenUsage, children map[string]*TokenUsage, next json.RawMessage, err error)
+	ResumeCumulativeTokenUsage(ctx context.Context, in CumulativeTokenInput, cursor json.RawMessage) (CumulativeObservation, error)
 }
 
 // ObserveCumulativeTokenUsage reads a session's running totals, continuing from
-// cursor when the agent can resume. ok is false for an agent with no cumulative
-// source; next is nil for one that cannot resume.
-func ObserveCumulativeTokenUsage(ctx context.Context, ag Agent, in CumulativeTokenInput, cursor json.RawMessage) (total *TokenUsage, children map[string]*TokenUsage, next json.RawMessage, ok bool, err error) {
+// cursor when the agent can resume. ok is false for an agent with no
+// cumulative source.
+func ObserveCumulativeTokenUsage(ctx context.Context, ag Agent, in CumulativeTokenInput, cursor json.RawMessage) (obs CumulativeObservation, ok bool, err error) {
 	if resumable, isResumable := AsResumableCumulativeTokenSource(ag); isResumable {
-		total, children, next, err = resumable.ResumeCumulativeTokenUsage(ctx, in, cursor)
+		obs, err = resumable.ResumeCumulativeTokenUsage(ctx, in, cursor)
 		if err != nil {
-			return nil, nil, nil, true, fmt.Errorf("resume cumulative token usage: %w", err)
+			return CumulativeObservation{}, true, fmt.Errorf("resume cumulative token usage: %w", err)
 		}
-		return total, children, next, true, nil
+		return obs, true, nil
 	}
 	src, isSource := AsCumulativeTokenSource(ag)
 	if !isSource {
-		return nil, nil, nil, false, nil
+		return CumulativeObservation{}, false, nil
 	}
-	total, children, err = src.CumulativeTokenUsage(ctx, in)
+	total, children, err := src.CumulativeTokenUsage(ctx, in)
 	if err != nil {
-		return nil, nil, nil, true, fmt.Errorf("cumulative token usage: %w", err)
+		return CumulativeObservation{}, true, fmt.Errorf("cumulative token usage: %w", err)
 	}
-	return total, children, nil, true, nil
+	return CumulativeObservation{Total: total, Children: children}, true, nil
 }
 
 // cursorCheckBytes is how much of the consumed prefix a TranscriptCursor

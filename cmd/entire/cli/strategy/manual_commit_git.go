@@ -120,7 +120,10 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
-		applyTurnTokenUsage(state, step.TokenUsage)
+		if !state.TokenLedger.IsActive() {
+			// A ledger session's tokens are read at the turn-end transition.
+			applyTurnTokenUsage(state, step.TokenUsage)
+		}
 
 		logCtx := logging.WithComponent(ctx, "checkpoint")
 		logging.Info(logCtx, "checkpoint saved",
@@ -455,6 +458,9 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
+	if state.TokenLedger.IsActive() {
+		state.TokenLedger.MarkCheckpointed()
+	}
 	state.ClearCondensationAttempt()
 	state.RebaselineSubagentTokens()
 	removeCompletedTaskRecords(state)
