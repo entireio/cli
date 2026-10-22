@@ -350,6 +350,21 @@ func takeForeignLink(ctx context.Context, cpID id.CheckpointID) (foreignLink, bo
 	return l, true
 }
 
+// postCommitWithoutLocalSessions handles a stamped commit no session of this
+// repository can claim: the trailer may be a foreign session's. eligible is
+// false when listing sessions failed or the target checkpoint already existed.
+func (s *ManualCommitStrategy) postCommitWithoutLocalSessions(ctx context.Context, repo *git.Repository, head *plumbing.Reference,
+	commit *object.Commit, checkpointID id.CheckpointID, worktreePath string, eligible bool,
+) {
+	if s.linkForeignAgentCommit(ctx, repo, head, commit, checkpointID, worktreePath, nil, eligible && !isGitSequenceOperation(ctx)) {
+		return
+	}
+	logging.Warn(logging.WithComponent(ctx, "checkpoint"), "post-commit: no active sessions despite trailer",
+		slog.String("strategy", "manual-commit"),
+		slog.String("checkpoint_id", checkpointID.String()),
+	)
+}
+
 // linkForeignAgentCommit condenses the foreign session prepare-commit-msg
 // stamped this commit for into cpID, in this repository's store, and saves the
 // session back to its home under the home's lock. committed is the commit's

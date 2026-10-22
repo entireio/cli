@@ -1408,13 +1408,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	findSessionsSpan.End()
 
 	if err != nil || len(sessions) == 0 {
-		if !s.linkForeignAgentCommit(ctx, repo, head, commit, checkpointID, worktreePath, nil,
-			err == nil && !targetPreexisting && !isGitSequenceOperation(ctx)) {
-			logging.Warn(logCtx, "post-commit: no active sessions despite trailer",
-				slog.String("strategy", "manual-commit"),
-				slog.String("checkpoint_id", checkpointID.String()),
-			)
-		}
+		s.postCommitWithoutLocalSessions(ctx, repo, head, commit, checkpointID, worktreePath,
+			err == nil && !targetPreexisting)
 		return nil
 	}
 	if beforeCondense != nil && beforeCondense(ctx, sessions) {
