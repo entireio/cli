@@ -157,13 +157,15 @@ func TestReserveDoctorCondensationAttempt_PreservesLegacyRecoveryAcrossRetries(t
 		SessionID: "legacy-interrupted-session",
 		Phase:     session.PhaseEnded,
 	}
-	firstID, err := reserveDoctorCondensationAttempt(context.Background(), state)
+	firstID, created, err := reserveDoctorCondensationAttempt(context.Background(), state)
 	require.NoError(t, err)
 	require.False(t, firstID.IsEmpty())
+	require.True(t, created)
 	require.True(t, state.NeedsCondensationRecovery())
 
-	secondID, err := reserveDoctorCondensationAttempt(context.Background(), state)
+	secondID, created, err := reserveDoctorCondensationAttempt(context.Background(), state)
 	require.NoError(t, err)
 	require.Equal(t, firstID, secondID)
+	require.False(t, created, "a pending reservation is reused, not minted")
 	require.True(t, state.NeedsCondensationRecovery())
 }

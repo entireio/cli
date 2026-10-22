@@ -73,12 +73,15 @@ type condenseOpts struct {
 
 	// transcriptRequired makes a condensation whose transcript is unavailable
 	// skip instead of degrading to a files/prompt-only checkpoint. Commit-less
-	// salvage (sweep, doctor) sets it: no commit names the checkpoint, so a
-	// metadata-only one records nothing a reader could use — the session's
-	// turns are in its earlier checkpoints, and its pending files hold only
-	// paths. Commit-driven condensation must not: prepare-commit-msg already
-	// stamped the trailer, and a skipped write would leave it dangling.
-	// Task records still write: each materializes its own transcript.
+	// salvage (sweep, doctor) sets it for an ID it minted itself: no commit
+	// names that checkpoint, so a metadata-only one records nothing a reader
+	// could use — the session's turns are in its earlier checkpoints, and its
+	// pending files hold only paths. It must stay unset wherever a commit may
+	// already name the ID: commit-driven condensation (prepare-commit-msg
+	// stamped the trailer) and a salvage of a reservation it found pending
+	// (prepare-commit-msg reuses those too); a skipped write would leave the
+	// trailer dangling. Task records still write: each materializes its own
+	// transcript.
 	transcriptRequired bool
 
 	// reconcileInterrupted allows this condensation to return a *different*
@@ -2118,15 +2121,21 @@ func PrepareSessionEndCondensation(ctx context.Context, state *SessionState) err
 	return err
 }
 
-func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) (id.CheckpointID, error) {
-	checkpointID, created, err := ensureCondensationAttemptID(ctx, state)
+// reserveDoctorCondensationAttempt returns the session's pending checkpoint
+// ID, minting one when none is reserved. created reports a minted ID: a
+// reservation that pre-existed this call may already be stamped on a commit
+// (prepare-commit-msg reuses a pending reservation, checkpointIDForSessions),
+// so it must be written even without a transcript, where a minted one may be
+// abandoned.
+func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) (checkpointID id.CheckpointID, created bool, err error) {
+	checkpointID, created, err = ensureCondensationAttemptID(ctx, state)
 	if err != nil {
-		return id.EmptyCheckpointID, err
+		return id.EmptyCheckpointID, false, err
 	}
 	if created && state.Phase == session.PhaseEnded && !state.HasPendingFiles() {
 		state.RequireCondensationRecovery()
 	}
-	return checkpointID, nil
+	return checkpointID, created, nil
 }
 
 // openSessionCondensationRepository uses the session's recorded worktree when
@@ -2177,9 +2186,14 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	}
 
 	var checkpointID id.CheckpointID
+	// A reservation this call did not mint may already name a commit's
+	// trailer (an earlier salvage interrupted before writing, then reused by
+	// prepare-commit-msg): it is written even without a transcript, as a
+	// commit-driven condensation would be, rather than abandoned.
+	var minted bool
 	reserveErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		var reserveErr error
-		checkpointID, reserveErr = reserveDoctorCondensationAttempt(ctx, state)
+		checkpointID, minted, reserveErr = reserveDoctorCondensationAttempt(ctx, state)
 		return reserveErr
 	})
 	if errors.Is(reserveErr, ErrStateNotFound) {
@@ -2247,7 +2261,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			reconcileInterrupted: true,
 			storedRoot:           storedRoot,
 			recordedBranch:       &state.Branch,
-			transcriptRequired:   true,
+			transcriptRequired:   minted,
 		})
 		state.FilesTouched = homeFiles
 		if err != nil {
