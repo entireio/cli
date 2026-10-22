@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
@@ -373,6 +374,9 @@ func isConfiguredRemote(ctx context.Context, name string) bool {
 		cmd := exec.CommandContext(ctx, "git", "remote", "get-url", name)
 		if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
 			cmd.Dir = worktreeRoot
+			// Dir alone does not override GIT_DIR/GIT_WORK_TREE exported to a
+			// hook, and this probe runs inside pre-push.
+			cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 		}
 		err := cmd.Run()
 		if err == nil {
