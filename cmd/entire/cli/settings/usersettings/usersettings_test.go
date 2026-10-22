@@ -28,16 +28,16 @@ func writeUserFile(t *testing.T, content string) {
 // binary's blocks must not make the file unreadable.
 func TestUnknownBlocksAreReadVerbatim(t *testing.T) {
 	writeUserFile(t, `{
-	  "global": {"enabled": true},
+	  "newer_block": {"enabled": true},
 	  "preferences": {"telemetry": false}
 	}`)
 
 	us, err := Load(t.Context())
 	require.NoError(t, err)
 
-	global, ok := us.Block("global")
+	newer, ok := us.Block("newer_block")
 	require.True(t, ok)
-	assert.JSONEq(t, `{"enabled": true}`, string(global))
+	assert.JSONEq(t, `{"enabled": true}`, string(newer))
 	prefs, ok := us.Block("preferences")
 	require.True(t, ok)
 	assert.JSONEq(t, `{"telemetry": false}`, string(prefs))

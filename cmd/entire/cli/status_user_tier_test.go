@@ -97,7 +97,7 @@ func TestStatus_NamesARefusedUserSettingsFile(t *testing.T) {
 	t.Chdir(root)
 
 	target := filepath.Join(t.TempDir(), "elsewhere.json")
-	require.NoError(t, os.WriteFile(target, []byte(`{"preferences":{"enabled":true}}`), 0o600))
+	require.NoError(t, os.WriteFile(target, []byte(`{"global_enable":true}`), 0o600))
 	require.NoError(t, os.Symlink(target, filepath.Join(configDir, usersettings.FileName)))
 
 	var out bytes.Buffer

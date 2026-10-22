@@ -72,9 +72,12 @@ type UserPreferences struct {
 
 // userOverlay is everything the user tier contributes to one settings load.
 type userOverlay struct {
-	preferences *UserPreferences
-	repos       map[string]json.RawMessage
-	rejections  []string
+	// globalEnable is the top-level `global_enable` key `entire enable
+	// --global` writes; nil when absent, null, or not a boolean.
+	globalEnable *bool
+	preferences  *UserPreferences
+	repos        map[string]json.RawMessage
+	rejections   []string
 }
 
 // loadUserOverlay reads the user settings file. An unreadable or invalid file
@@ -90,11 +93,26 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 			slog.String("error", err.Error()))
 		return overlay
 	}
+	if raw, ok := us.Block(usersettings.GlobalEnableKey); ok && !usersettings.IsJSONNull(raw) {
+		var enabled bool
+		if err := json.Unmarshal(raw, &enabled); err != nil {
+			overlay.reject(ctx, usersettings.GlobalEnableKey+": must be true or false")
+		} else {
+			overlay.globalEnable = &enabled
+		}
+	}
 	if raw, ok := us.Block(userPreferencesBlock); ok {
 		prefs, err := decodeUserPreferences(raw)
 		if err != nil {
 			overlay.reject(ctx, fmt.Sprintf("%s: %v", userPreferencesBlock, err))
 		} else {
+			// The machine-wide switch is `global_enable`; one in preferences
+			// is dropped on its own so the rest of the block still applies.
+			if prefs != nil && prefs.Enabled != nil {
+				overlay.reject(ctx, fmt.Sprintf("%s: enabled is not read here; run `entire enable --global` to set %s",
+					userPreferencesBlock, usersettings.GlobalEnableKey))
+				prefs.Enabled = nil
+			}
 			overlay.preferences = prefs
 		}
 	}
@@ -347,8 +365,9 @@ func UserSettingsReadError(ctx context.Context) error {
 }
 
 // UserTierConfiguresRepo reports whether the user settings file says anything
-// about this repository — a matching `repos` entry, or a machine-wide
-// `enabled`.
+// about this repository — a matching `repos` entry, or `global_enable: true`.
+// A false global_enable configures nothing: it is the absence of the switch,
+// and counting it would make every repository on the machine read as set up.
 //
 // IsSetUpAny uses this. Without it, a linked worktree of a repository enabled
 // only through this tier has no .entire directory of its own, reads as "never
@@ -356,7 +375,7 @@ func UserSettingsReadError(ctx context.Context) error {
 // IsSetUpAny guard exists to prevent, reached through a different door.
 func UserTierConfiguresRepo(ctx context.Context, worktreeRoot string) bool {
 	overlay := loadUserOverlay(ctx)
-	if overlay.preferences != nil && overlay.preferences.Enabled != nil {
+	if overlay.enablesEverywhere() {
 		return true
 	}
 	return len(overlay.repoPreferences(ctx, worktreeRoot)) > 0
@@ -382,6 +401,11 @@ func applyUserTier(ctx context.Context, settings *EntireSettings, worktreeRoot s
 	}
 
 	apply(overlay.preferences)
+	// global_enable sits in the preferences slot: above the repository's own
+	// settings file, below its `repos` entry and settings.local.json.
+	if overlay.enablesEverywhere() {
+		settings.Enabled = true
+	}
 	for _, prefs := range overlay.repoPreferences(ctx, worktreeRoot) {
 		apply(prefs)
 	}
@@ -433,10 +457,14 @@ func (s *EntireSettings) UserLayerRejections() []string {
 }
 
 // UserTierEnablesEverywhere reports whether the user settings file turns
-// Entire on machine-wide (`preferences.enabled: true`). That is the one flag
-// that makes every repository the user touches behave as if `entire enable`
-// had run there.
+// Entire on machine-wide (`global_enable: true`, set by `entire enable
+// --global`). That is the one flag that makes every repository the user
+// touches behave as if `entire enable` had run there.
 func UserTierEnablesEverywhere(ctx context.Context) bool {
-	prefs := loadUserOverlay(ctx).preferences
-	return prefs != nil && prefs.Enabled != nil && *prefs.Enabled
+	overlay := loadUserOverlay(ctx)
+	return overlay.enablesEverywhere()
+}
+
+func (o *userOverlay) enablesEverywhere() bool {
+	return o.globalEnable != nil && *o.globalEnable
 }

@@ -36,12 +36,18 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // FileName is the basename of the user-global settings file.
 const FileName = "settings.json"
+
+// GlobalEnableKey is the top-level key `entire enable --global` sets: true
+// makes every repository behave as if `entire enable` had run there.
+const GlobalEnableKey = "global_enable"
 
 // caseInsensitivePaths mirrors the platforms whose filesystems fold case by
 // default. Used only to compare a `repos` path key against a worktree root;
@@ -79,12 +85,9 @@ func resolvePath() (string, error) {
 // UserSettings is the decoded user-global settings file.
 type UserSettings struct {
 	// extra holds every top-level block this package does not decode: the
-	// preference blocks the settings package owns (`preferences`, `repos` —
-	// their types live there; read them with Block) and any block a newer
-	// binary wrote, such as the `global` block of the separate
-	// global-activation work. There is no write path yet; a future one goes
-	// through jsonutil.WriteFileAtomicIn under the config root and must keep
-	// these blocks.
+	// blocks the settings package owns (`preferences`, `repos`,
+	// `global_enable` — read them with Block) and any block a newer binary
+	// wrote. SetGlobalEnable, the only writer, keeps all of them.
 	extra map[string]json.RawMessage
 }
 
@@ -146,14 +149,19 @@ func Load(_ context.Context) (*UserSettings, error) {
 		}
 		return nil, err
 	}
+	return decode(data)
+}
+
+// decode parses the file's contents. A second value after the first means the
+// file is not one JSON object — concatenated writes, or an editor that
+// appended. Reading only the first would silently honor half a configuration,
+// and writing it back would discard the rest.
+func decode(data []byte) (*UserSettings, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var settings UserSettings
 	if err := decoder.Decode(&settings); err != nil {
 		return nil, fmt.Errorf("parsing user settings: %w", err)
 	}
-	// A second value after the first means the file is not one JSON object —
-	// concatenated writes, or an editor that appended. Reading only the first
-	// would silently honor half a configuration.
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
@@ -162,6 +170,59 @@ func Load(_ context.Context) (*UserSettings, error) {
 		return nil, fmt.Errorf("parsing user settings: trailing data: %w", err)
 	}
 	return &settings, nil
+}
+
+// SetGlobalEnable writes GlobalEnableKey into the user settings file, keeping
+// every other block, and returns the file's path. It is the file's only
+// writer, used by `entire enable --global` and `entire disable --global`.
+//
+// The read and the write happen under one lock and through one root, so two
+// concurrent writers cannot lose each other's change and a symlink swapped in
+// between cannot redirect the write. A file that does not parse is refused
+// rather than replaced.
+func SetGlobalEnable(_ context.Context, enabled bool) (string, error) {
+	root, err := userdirs.ConfigRoot()
+	if err != nil {
+		return "", fmt.Errorf("opening user settings directory: %w", err)
+	}
+	path := filepath.Join(root.Name(), FileName)
+	release, err := flock.AcquireIn(root, FileName+".lock")
+	if err != nil {
+		return path, fmt.Errorf("locking user settings %s: %w", path, err)
+	}
+	defer release()
+
+	settings := &UserSettings{}
+	data, err := osroot.ReadFileNoFollow(root, FileName)
+	switch {
+	case err == nil:
+		if settings, err = decode(data); err != nil {
+			return path, fmt.Errorf("%s: %w", path, err)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, osroot.ErrSymlinkedPath):
+		return path, fmt.Errorf("user settings %s is a symbolic link; it must be a regular file: %w", path, err)
+	default:
+		return path, fmt.Errorf("reading user settings %s: %w", path, err)
+	}
+
+	blocks := settings.extra
+	if blocks == nil {
+		blocks = map[string]json.RawMessage{}
+	}
+	value, err := json.Marshal(enabled)
+	if err != nil {
+		return path, fmt.Errorf("encoding %s: %w", GlobalEnableKey, err)
+	}
+	blocks[GlobalEnableKey] = value
+	out, err := jsonutil.MarshalIndentWithNewline(blocks, "", "  ")
+	if err != nil {
+		return path, fmt.Errorf("encoding user settings: %w", err)
+	}
+	if err := jsonutil.WriteFileAtomicIn(root, FileName, out, 0o600); err != nil {
+		return path, fmt.Errorf("writing user settings %s: %w", path, err)
+	}
+	return path, nil
 }
 
 // readFile reads the settings file through the per-user config root, without

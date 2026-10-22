@@ -12,16 +12,21 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
 
+// ErrClaudeNotInUse is EnsureUserHooks finding no Claude config directory:
+// nothing was installed, and nothing needed to be.
+var ErrClaudeNotInUse = errors.New("no Claude Code config directory")
+
 // EnsureUserHooks installs Entire's hooks into the user-level Claude Code
 // settings ($CLAUDE_CONFIG_DIR/settings.json, else ~/.claude/settings.json),
-// which Claude Code reads in every project. It is how a machine-wide
-// `preferences.enabled` reaches repositories that were never enabled: without
-// a hook, Claude never calls Entire there.
+// which Claude Code reads in every project. It is how `global_enable` (set by
+// `entire enable --global`) reaches repositories that were never enabled:
+// without a hook, Claude never calls Entire there.
 //
 // The merge is the one `entire enable` uses for the project file, so the
 // commands are byte-identical and Claude Code runs a hook present in both
 // files once. Returns the number of hooks added (0 when already present) and
-// the file's path.
+// the file's path, or ErrClaudeNotInUse when there is no Claude config
+// directory.
 func EnsureUserHooks(ctx context.Context) (int, string, error) {
 	path, err := userClaudeSettingsPath()
 	if err != nil {
@@ -30,7 +35,7 @@ func EnsureUserHooks(ctx context.Context) (int, string, error) {
 	// No Claude config directory means Claude Code is not in use here; do
 	// not create one for it.
 	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
-		return 0, path, nil
+		return 0, path, ErrClaudeNotInUse
 	}
 	// Entire processes run this concurrently, so the read-merge-write is
 	// serialised. The lock sits beside the file, as agy's does beside its
@@ -51,8 +56,8 @@ func EnsureUserHooks(ctx context.Context) (int, string, error) {
 
 // userClaudeSettings is the user's own config file. Unlike a worktree file, a
 // symlink here is the user's arrangement (a dotfiles checkout), so the write
-// goes through it rather than replacing it — the same rule usersettings
-// applies to ~/.config/entire/settings.json.
+// goes through it rather than replacing it. A link that does not resolve is
+// refused.
 type userClaudeSettings struct{ path string }
 
 func (u userClaudeSettings) Path() string { return u.path }

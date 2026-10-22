@@ -54,7 +54,7 @@ func runClaudeTurn(t *testing.T, env *TestEnv, path, content string) string {
 	return session.ID
 }
 
-// The whole design: with `preferences.enabled: true` in the user settings file,
+// The whole design: with `global_enable: true` in the user settings file,
 // a repository nobody ran `entire enable` in is tracked like an enabled one —
 // the commit is linked to a checkpoint carrying the session, and a push
 // carries the checkpoint. No project settings or project hooks are written.
@@ -62,7 +62,7 @@ func TestGlobalEnable_NeverEnabledRepoIsTrackedAndPushed(t *testing.T) {
 	t.Parallel()
 	env := newNeverEnabledRepo(t)
 	bare := env.SetupBareRemote()
-	extra, claudeDir := userTierEnv(t, `{"preferences": {"enabled": true}}`)
+	extra, claudeDir := userTierEnv(t, `{"global_enable": true}`)
 	env.ExtraEnv = extra
 
 	// Any foreground command installs the user-level hooks; hook calls don't.
@@ -124,7 +124,7 @@ func TestGlobalEnable_FlagOffLeavesNeverEnabledRepoUntracked(t *testing.T) {
 func TestGlobalEnable_EnabledRepoToleratesEveryHookTwice(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
-	extra, _ := userTierEnv(t, `{"preferences": {"enabled": true}}`)
+	extra, _ := userTierEnv(t, `{"global_enable": true}`)
 	env.ExtraEnv = extra
 
 	session := env.NewSession()

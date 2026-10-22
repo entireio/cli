@@ -917,6 +917,7 @@ func newEnableCmdWithIdentityResolverFactory(identityFactory identityResolverFac
 	var agentName string
 	var bootstrapOpts BootstrapOptions
 	var insecureHTTPAuth bool
+	var enableGlobal bool
 
 	cmd := &cobra.Command{
 		Use:   "enable",
@@ -933,6 +934,11 @@ If the current directory is not a git repository, Entire can initialize one
 for you and create an initial commit. It never creates or pushes to a remote —
 publish the repository yourself when you're ready.`,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
+			// First, before the defers below: they report the current
+			// repository as enabled, and --global does not enable it.
+			if enableGlobal {
+				return runEnableGlobal(cmd)
+			}
 			ctx := cmd.Context()
 			// The destination report needs the choice pointer, not the answer,
 			// so it can be registered here (first, therefore run last) while
@@ -1059,6 +1065,7 @@ publish the repository yourself when you're ready.`,
 		},
 	}
 
+	cmd.Flags().BoolVar(&enableGlobal, flagGlobal, false, "Enable Entire in every repository you work in (sets global_enable in ~/.config/entire/settings.json)")
 	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
 	cmd.Flags().StringVar(&opts.CheckpointPushRemote, flagCheckpointPushRemote, "", "Git remote for checkpoint uploads (saved to .entire/settings.local.json, even with --project)")
 	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
@@ -1302,6 +1309,7 @@ func newDisableCmd() *cobra.Command {
 	var useProjectSettings bool
 	var uninstall bool
 	var force bool
+	var disableGlobal bool
 
 	cmd := &cobra.Command{
 		Use:   "disable",
@@ -1326,6 +1334,10 @@ plugin to do it. Any removal step that fails - built-in agent, external plugin, 
 hooks, or repository state - makes the uninstall exit non-zero and report that Entire
 was not fully uninstalled.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Before --uninstall: --global with it is refused, not ignored.
+			if disableGlobal {
+				return runDisableGlobal(cmd)
+			}
 			ctx := cmd.Context()
 			if uninstall {
 				return runUninstall(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), force)
@@ -1341,6 +1353,7 @@ was not fully uninstalled.`,
 	cmd.Flags().BoolVar(&useProjectSettings, "project", false, "Update .entire/settings.json instead of .entire/settings.local.json")
 	cmd.Flags().BoolVar(&uninstall, "uninstall", false, "Completely remove Entire from this repository")
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
+	cmd.Flags().BoolVar(&disableGlobal, flagGlobal, false, "Stop enabling Entire in every repository (sets global_enable to false); repositories enabled with `entire enable` stay enabled")
 
 	return cmd
 }

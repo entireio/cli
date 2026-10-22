@@ -214,8 +214,8 @@ func TestEnsureUserHooks_NoClaudeConfigDirCreatesNothing(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	n, _, err := EnsureUserHooks(context.Background())
-	if err != nil {
-		t.Fatalf("EnsureUserHooks() error = %v", err)
+	if !errors.Is(err, ErrClaudeNotInUse) {
+		t.Fatalf("EnsureUserHooks() error = %v, want ErrClaudeNotInUse", err)
 	}
 	if n != 0 {
 		t.Errorf("EnsureUserHooks() added %d hooks, want 0", n)

@@ -467,18 +467,22 @@ func TestUserTier_PathKeyedEntryDoesNotReachAnotherClone(t *testing.T) {
 		"a path key naming one clone must not configure a different clone")
 }
 
-// Only a machine-wide `preferences.enabled: true` means "every repository".
-// An explicit false, an absent key, or a `repos` entry does not.
+// Only `global_enable: true` means "every repository". An explicit false, an
+// absent key, a value that is not a boolean, a `repos` entry, or the
+// `preferences.enabled` key this replaced does not.
 func TestUserTierEnablesEverywhere(t *testing.T) {
 	cases := map[string]struct {
 		file string
 		want bool
 	}{
-		"on":         {`{"preferences": {"enabled": true}}`, true},
-		"off":        {`{"preferences": {"enabled": false}}`, false},
-		"absent":     {`{"preferences": {"telemetry": true}}`, false},
-		"repos only": {`{"repos": {"/somewhere": {"enabled": true}}}`, false},
-		"no file":    {"", false},
+		"on":                  {`{"global_enable": true}`, true},
+		"off":                 {`{"global_enable": false}`, false},
+		"null":                {`{"global_enable": null}`, false},
+		"not a boolean":       {`{"global_enable": "yes"}`, false},
+		"absent":              {`{"preferences": {"telemetry": true}}`, false},
+		"repos only":          {`{"repos": {"/somewhere": {"enabled": true}}}`, false},
+		"preferences.enabled": {`{"preferences": {"enabled": true}}`, false},
+		"no file":             {"", false},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -489,4 +493,61 @@ func TestUserTierEnablesEverywhere(t *testing.T) {
 			assert.Equal(t, tc.want, UserTierEnablesEverywhere(t.Context()))
 		})
 	}
+}
+
+// newNeverEnabledRepo is a git repository with no Entire settings of its own,
+// so only the user tier can turn it on.
+func newNeverEnabledRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Cleanup(ClearOriginKeyCache)
+	return root
+}
+
+// `global_enable: true` configures a repository that never ran `entire
+// enable` (IsSetUpAny's gate); false configures nothing, so turning it off
+// does not make every repository on the machine read as set up.
+func TestGlobalEnable_ConfiguresEveryRepoOnlyWhenTrue(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file       string
+		configured bool
+	}{
+		"on":  {`{"global_enable": true}`, true},
+		"off": {`{"global_enable": false}`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := newNeverEnabledRepo(t)
+			writeUserSettings(t, tc.file)
+			assert.Equal(t, tc.configured, UserTierConfiguresRepo(t.Context(), root))
+		})
+	}
+}
+
+// A repository's own `repos` entry still turns it off under global_enable,
+// as the preferences layer it replaces allowed.
+func TestGlobalEnable_ReposEntryStillTurnsARepoOff(t *testing.T) {
+	root := newNeverEnabledRepo(t)
+	writeUserSettings(t, `{"global_enable": true, "repos": {`+jsonString(root)+`: {"enabled": false}}}`)
+
+	s, err := loadMergedSettings(t.Context(),
+		filepath.Join(root, EntireSettingsFile), "", filepath.Join(root, EntireSettingsLocalFile))
+	require.NoError(t, err)
+	assert.False(t, s.Enabled)
+}
+
+// `preferences.enabled` is no longer a switch: it is reported and dropped on
+// its own, and the rest of the preferences block still applies.
+func TestPreferencesEnabled_IsRejectedAloneAndTheBlockStillApplies(t *testing.T) {
+	root := newNeverEnabledRepo(t)
+	writeUserSettings(t, `{"preferences": {"enabled": true, "review_fix_agent": "codex"}}`)
+
+	s, err := loadMergedSettings(t.Context(),
+		filepath.Join(root, EntireSettingsFile), "", filepath.Join(root, EntireSettingsLocalFile))
+	require.NoError(t, err)
+	assert.Equal(t, "codex", s.ReviewFixAgent)
+	require.Len(t, s.UserLayerRejections(), 1)
+	assert.Contains(t, s.UserLayerRejections()[0], "global_enable")
+	assert.False(t, UserTierConfiguresRepo(t.Context(), root))
 }

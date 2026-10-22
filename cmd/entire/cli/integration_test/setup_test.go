@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 	isolation := map[string]string{
 		"ENTIRE_CONFIG_DIR": filepath.Join(tmpDir, "entire-config"),
 		"XDG_CACHE_HOME":    filepath.Join(tmpDir, "entire-cache"),
-		// A user-tier preferences.enabled makes the binary install hooks into
+		// A user-tier global_enable makes the binary install hooks into
 		// the user-level Claude settings; never let that reach ~/.claude.
 		"CLAUDE_CONFIG_DIR":           filepath.Join(tmpDir, "claude-config"),
 		"ENTIRE_TOKEN_STORE":          "file",

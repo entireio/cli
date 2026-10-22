@@ -284,7 +284,7 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 			repoPrefix + "internal/flock",
 		},
 		"claudecode": {
-			// Cross-process advisory locks. With preferences.enabled every
+			// Cross-process advisory locks. With global_enable every
 			// Entire process (including parallel hooks) may add hooks to the
 			// user-level settings.json, so the read-merge-write is locked.
 			repoPrefix + "internal/flock",
