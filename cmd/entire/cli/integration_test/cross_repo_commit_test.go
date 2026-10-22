@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -204,4 +205,30 @@ func TestCrossRepoCommit_LocalSessionWithContentTakesCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, before.CheckpointTranscriptStart, after.CheckpointTranscriptStart,
 		"the foreign session is not condensed into B's commit")
+}
+
+// B's origin has a different owner than A's: the commit is left unlinked and
+// the agent's git output says why.
+func TestCrossRepoCommit_DifferentOwnerNotLinkedWithNotice(t *testing.T) {
+	t.Parallel()
+	f := newCrossRepoFixture(t)
+	testutil.RunGit(t, f.a.RepoDir, "remote", "add", "origin", "git@github.com:acme/a.git")
+	testutil.RunGit(t, f.b.RepoDir, "remote", "add", "origin", "git@github.com:other/b.git")
+	f.a.setGitConfigBaseline()
+	f.b.setGitConfigBaseline()
+	before, err := f.a.GetSessionState(f.session.ID)
+	require.NoError(t, err)
+
+	agentGit(f.b, f.session.ID, "add", "b.txt")
+	cmd := execx.NonInteractive(t.Context(), "git", "commit", "-m", "add b")
+	cmd.Dir = f.b.RepoDir
+	cmd.Env = f.b.gitHookEnv("CLAUDE_CODE_SESSION_ID=" + f.session.ID)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	require.Contains(t, string(out), "This commit is not linked to agent session "+f.session.ID)
+	require.Empty(t, f.b.GetCheckpointIDFromCommitMessage(f.b.GetHeadHash()))
+	after, err := f.a.GetSessionState(f.session.ID)
+	require.NoError(t, err)
+	require.Equal(t, before.CheckpointTranscriptStart, after.CheckpointTranscriptStart)
 }

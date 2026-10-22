@@ -185,7 +185,10 @@ func saveCommitLinkingAlways(ctx context.Context) error {
 // If the message contains only our trailer (no actual user content), strip it
 // so git will abort the commit due to empty message.
 
-func (s *ManualCommitStrategy) CommitMsg(_ context.Context, commitMsgFile string) error { //nolint:unparam // error return is part of the hook contract; callers check it
+func (s *ManualCommitStrategy) CommitMsg(ctx context.Context, commitMsgFile string) error { //nolint:unparam // error return is part of the hook contract; callers check it
+	if notice := takeForeignNotice(ctx); notice != "" {
+		fmt.Fprint(os.Stderr, notice)
+	}
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // Path comes from git hook
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
@@ -419,6 +422,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		)
 		return nil
 	}
+
+	takeForeignNotice(ctx) // a notice speaks only for the commit prepared now
 
 	// A trailer naming a checkpoint deleted from this clone goes first: kept,
 	// post-commit would condense into the dead ID and re-create it.

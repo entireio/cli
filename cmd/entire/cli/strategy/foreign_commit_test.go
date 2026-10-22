@@ -217,3 +217,41 @@ func TestPostCommit_ForeignAgentCommitWithoutTranscriptOverlap(t *testing.T) {
 	require.NotNil(t, content)
 	assert.ElementsMatch(t, []string{"README.md", "b.txt"}, content.Metadata.FilesTouched)
 }
+
+// Linking copies A's transcript into B's checkpoints, so it needs B to have no
+// origin (covered above) or both origins to share an owner.
+func TestPrepareCommitMsg_ForeignAgentCommitOwnerGate(t *testing.T) {
+	cases := []struct {
+		name         string
+		originA      string
+		originB      string
+		stamped      bool
+		noticeOwners []string
+	}{
+		{"same owner", "git@github.com:acme/a.git", "https://github.com/acme/b.git", true, nil},
+		{"different owner", "git@github.com:acme/a.git", "git@github.com:other/b.git", false,
+			[]string{"github.com/acme", "github.com/other"}},
+		{"home has no origin", "", "git@github.com:other/b.git", false, []string{"an unknown owner", "github.com/other"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := foreignCommitFixture(t, nil)
+			if tc.originA != "" {
+				testutil.RunGit(t, r.a, "remote", "add", "origin", tc.originA)
+			}
+			testutil.RunGit(t, r.b, "remote", "add", "origin", tc.originB)
+
+			_, found := trailers.ParseCheckpoint(prepareForeign(t, "add b\n", commitSourceMessage))
+			assert.Equal(t, tc.stamped, found)
+			notice := takeForeignNotice(context.Background())
+			if tc.stamped {
+				assert.Empty(t, notice)
+				return
+			}
+			assert.Contains(t, notice, foreignTestSessionID)
+			for _, owner := range tc.noticeOwners {
+				assert.Contains(t, notice, owner)
+			}
+		})
+	}
+}

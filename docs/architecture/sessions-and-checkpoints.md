@@ -360,6 +360,11 @@ repository B links that commit in B (`strategy/foreign_session.go`).
   and sequence operations. Like the local fast path, `--amend -m` and a
   squash with no trailers to inherit are linked as new commits. The session must be the identified caller (`IsCaller()`),
   ranked together with B's local sessions.
+- Linking copies the session's transcript into B's checkpoints, so it is
+  allowed only when B has no `origin` or both `origin` remotes have the same
+  owner (host and org/user). Otherwise the commit stays unlinked and the
+  commit-msg hook prints why (prepare-commit-msg's stderr is discarded by
+  the installed hook).
 - prepare-commit-msg stamps a fresh checkpoint ID; post-commit condenses the
   session's transcript since its last checkpoint into B's store, through B's
   normal pipeline and settings, so A's session content reaches B's checkpoint

@@ -3,9 +3,11 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -16,6 +18,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -223,6 +227,10 @@ func (s *ManualCommitStrategy) tryForeignAgentCommit(ctx context.Context, commit
 	if !ok {
 		return
 	}
+	if notice := foreignOwnerNotice(ctx, fs); notice != "" {
+		recordForeignNotice(ctx, fs.state.SessionID, notice)
+		return
+	}
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
 	if err != nil {
 		return
@@ -256,6 +264,71 @@ func (s *ManualCommitStrategy) tryForeignAgentCommit(ctx context.Context, commit
 		slog.String("source", source),
 		slog.String("checkpoint_id", cpID.String()),
 		slog.String("session_id", fs.state.SessionID))
+}
+
+// foreignNoticeFile carries a notice from prepare-commit-msg to commit-msg,
+// whose stderr reaches the committer (the installed prepare-commit-msg hook
+// discards its own).
+const foreignNoticeFile = "entire-foreign-notice.txt"
+
+// repoOwner returns the host/owner of the origin remote of the repository at
+// dir (the current one when dir is empty), and whether it has an origin at all.
+func repoOwner(ctx context.Context, dir string, env []string) (owner string, hasOrigin bool) {
+	url, err := gitremote.GetRemoteURLInDirEnv(ctx, dir, env, "origin")
+	if err != nil {
+		return "", false
+	}
+	info, err := gitremote.ParseURL(url)
+	if err != nil || info.Owner == "" {
+		return "", true
+	}
+	return strings.ToLower(info.CanonicalHost() + "/" + info.Owner), true
+}
+
+// foreignOwnerNotice returns why the foreign session must not link this
+// commit, or "" when it may. Linking copies the session's transcript into this
+// repository's checkpoints, which are pushed with it, so it is allowed only
+// when this repository has no origin or both origins have the same owner: a
+// session in a private repository must not publish into someone else's.
+func foreignOwnerNotice(ctx context.Context, fs *foreignSession) string {
+	here, hasOrigin := repoOwner(ctx, "", nil)
+	if !hasOrigin {
+		return ""
+	}
+	home, _ := repoOwner(ctx, fs.state.WorktreePath, gitrepo.EnvWithoutRepoOverrides())
+	if here != "" && here == home {
+		return ""
+	}
+	if home == "" {
+		home = "an unknown owner"
+	}
+	if here == "" {
+		here = "an unknown owner"
+	}
+	return fmt.Sprintf("[entire] This commit is not linked to agent session %s: the session started in a repository owned by %s, "+
+		"and this repository (owned by %s) would publish its transcript in its checkpoints.", fs.state.SessionID, home, here)
+}
+
+func recordForeignNotice(ctx context.Context, sessionID, notice string) {
+	logging.Info(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: foreign agent commit not linked: different owner",
+		slog.String("session_id", sessionID))
+	if root, err := perWorktreeGitRoot(ctx); err == nil {
+		_ = jsonutil.WriteFileAtomicIn(root, foreignNoticeFile, []byte(notice+"\n"), 0o600) //nolint:errcheck // best-effort notice
+	}
+}
+
+// takeForeignNotice returns and removes the notice prepare-commit-msg left.
+func takeForeignNotice(ctx context.Context) string {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return ""
+	}
+	data, err := osroot.ReadFileNoFollow(root, foreignNoticeFile)
+	if err != nil {
+		return ""
+	}
+	_ = osroot.RemoveNoSymlinks(root, foreignNoticeFile) //nolint:errcheck // a leftover only repeats the notice once
+	return string(data)
 }
 
 // takeForeignLink consumes the marker and returns it when prepare-commit-msg
