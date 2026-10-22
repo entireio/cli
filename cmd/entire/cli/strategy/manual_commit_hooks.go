@@ -3203,6 +3203,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 
 		state.LastCheckpointID = ""
 		state.TurnCheckpointIDs = nil
+		state.ForeignTurnCheckpoints = nil
 		return nil
 	}, func() {
 		rememberAgentHome(ctx, homeAgentType, remember)
@@ -3453,6 +3454,11 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 			slog.String("session_id", state.SessionID),
 			slog.Int("error_count", errCount),
 		)
+	}
+	// Checkpoints this turn wrote in other repositories, once all of them hold
+	// the turn too, count as mid-turn commits for the advance below.
+	if s.finalizeForeignTurnCheckpoints(ctx, state, finalizeDeadline) {
+		hadMidTurnCommits = true
 	}
 
 	// Advance CheckpointTranscriptStart to the actual transcript end after

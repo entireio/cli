@@ -1,12 +1,15 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -25,6 +29,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -441,6 +446,8 @@ func (s *ManualCommitStrategy) condenseForeignLink(ctx context.Context, repo *gi
 	if !condensed {
 		return false
 	}
+	state.ForeignTurnCheckpoints = append(state.ForeignTurnCheckpoints,
+		session.ForeignTurnCheckpoint{CheckpointID: cpID.String(), WorktreePath: worktreePath})
 	if err := store.Save(ctx, state); err != nil {
 		logging.Warn(logCtx, "post-commit: could not save foreign session state",
 			slog.String("session_id", link.SessionID),
@@ -470,4 +477,136 @@ func (s *ManualCommitStrategy) foreignEditedFiles(ctx context.Context, state *Se
 	}
 	slices.Sort(out)
 	return out
+}
+
+// foreignFinalizeWait bounds finalize-foreign when the turn end set no deadline.
+const foreignFinalizeWait = time.Minute
+
+// runForeignFinalize runs args with this executable in worktreePath, with the
+// caller's repo-selecting git variables scrubbed. A var so tests can stand in
+// for the subprocess.
+var runForeignFinalize = func(ctx context.Context, worktreePath string, args []string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve entire executable: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, exe, args...)
+	// The child may start git fetches; kill the whole tree at the deadline and
+	// bound the wait for pipes they hold.
+	execx.TerminateOnCancel(cmd)
+	cmd.Dir = worktreePath
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+	}
+	return nil
+}
+
+// finalizeForeignTurnCheckpoints finalizes the checkpoints this turn wrote in
+// other repositories, by running `entire hooks git finalize-foreign` in each:
+// that repository's settings, store and redaction then apply, as they did at
+// the commit. Entries that fail stay for a repeated turn end; turn start
+// clears them. It reports whether all of them were finalized: only then does
+// every foreign checkpoint hold the rest of the turn.
+func (s *ManualCommitStrategy) finalizeForeignTurnCheckpoints(ctx context.Context, state *SessionState, deadline time.Time) bool {
+	if len(state.ForeignTurnCheckpoints) == 0 {
+		return false
+	}
+	if deadline.IsZero() {
+		deadline = time.Now().Add(foreignFinalizeWait)
+	}
+	runCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	var trees []string
+	byTree := make(map[string][]string)
+	for _, cp := range state.ForeignTurnCheckpoints {
+		if _, seen := byTree[cp.WorktreePath]; !seen {
+			trees = append(trees, cp.WorktreePath)
+		}
+		byTree[cp.WorktreePath] = append(byTree[cp.WorktreePath], cp.CheckpointID)
+	}
+	var failed []session.ForeignTurnCheckpoint
+	for _, tree := range trees {
+		args := append([]string{"hooks", "git", "finalize-foreign", "--session", state.SessionID, "--home", state.WorktreePath,
+			"--deadline", strconv.FormatInt(deadline.UnixMilli(), 10)}, byTree[tree]...)
+		if err := runForeignFinalize(runCtx, tree, args); err != nil {
+			logging.Warn(logging.WithComponent(ctx, "checkpoint"), "turn end: could not finalize checkpoints in another repository",
+				slog.String("session_id", state.SessionID),
+				slog.Int("checkpoints", len(byTree[tree])),
+				slog.String("error", err.Error()))
+			for _, cpID := range byTree[tree] {
+				failed = append(failed, session.ForeignTurnCheckpoint{CheckpointID: cpID, WorktreePath: tree})
+			}
+		}
+	}
+	state.ForeignTurnCheckpoints = failed
+	return len(failed) == 0
+}
+
+// FinalizeForeignTurnCheckpoints is finalize-foreign's work, run in the
+// repository holding checkpointIDs: it rewrites them with the full turn
+// transcript of sessionID, whose state lives in the repository of
+// homeWorktree. The state is read there and never written back; the turn end
+// that ran this saves its own.
+//
+// Only checkpoints that hold sessionID are written: the backfill would
+// otherwise overwrite another session's transcript. deadline bounds the
+// store's network phase, as at a local turn end; zero means none.
+func (s *ManualCommitStrategy) FinalizeForeignTurnCheckpoints(ctx context.Context, sessionID, homeWorktree string, checkpointIDs []string, deadline time.Time) error {
+	store, _, err := openForeignStore(ctx, homeWorktree)
+	if err != nil {
+		return fmt.Errorf("open home session store: %w", err)
+	}
+	state, err := store.LoadReadOnly(ctx, sessionID)
+	if err != nil || state == nil || state.SessionID != sessionID {
+		return fmt.Errorf("session %s has no state in %s", sessionID, homeWorktree)
+	}
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve worktree: %w", err)
+	}
+	// Read as this worktree's session, so nothing resolves to the home's
+	// .entire, and finalize exactly the checkpoints asked for.
+	state.WorktreePath, state.InWorktreeView = root, false
+	state.TurnCheckpointIDs = s.checkpointsHoldingSession(ctx, sessionID, checkpointIDs)
+	if len(state.TurnCheckpointIDs) != len(checkpointIDs) {
+		return fmt.Errorf("session %s is not in every checkpoint asked for", sessionID)
+	}
+	if n := s.finalizeAllTurnCheckpoints(ctx, state, deadline); n > 0 {
+		return fmt.Errorf("%d checkpoint(s) of session %s not finalized", n, sessionID)
+	}
+	return nil
+}
+
+// checkpointsHoldingSession returns the IDs whose checkpoint in this
+// repository's store holds a session sessionID.
+func (s *ManualCommitStrategy) checkpointsHoldingSession(ctx context.Context, sessionID string, checkpointIDs []string) []string {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil
+	}
+	defer repo.Close()
+	store, err := s.getPersistentStore(ctx, repo)
+	if err != nil {
+		return nil
+	}
+	var held []string
+	for _, raw := range checkpointIDs {
+		cpID, err := id.NewCheckpointID(raw)
+		if err != nil {
+			continue
+		}
+		summary, err := store.Read(ctx, cpID)
+		if err != nil || summary == nil {
+			continue
+		}
+		for i := range summary.Sessions {
+			if content, err := store.ReadSessionContent(ctx, cpID, i); err == nil && content.Metadata.SessionID == sessionID {
+				held = append(held, raw)
+				break
+			}
+		}
+	}
+	return held
 }

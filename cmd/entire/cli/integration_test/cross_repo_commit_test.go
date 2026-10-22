@@ -128,10 +128,24 @@ func TestCrossRepoCommit_LinksAgentCommitInOtherRepo(t *testing.T) {
 	require.NotContains(t, metaA.FilesTouched, "b.txt")
 	require.GreaterOrEqual(t, metaA.CheckpointTranscriptStart, after.CheckpointTranscriptStart)
 
-	// Turn end in A never writes B's checkpoint into A's store.
+	// Turn end in A finalizes B's checkpoint with the rest of the turn, in B,
+	// and never writes it into A's store.
+	bTranscript := func() string {
+		content, ok := f.b.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(cpB, paths.TranscriptFileName))
+		require.True(t, ok)
+		return content
+	}
+	const tail = "final reply after both commits"
+	require.NotContains(t, bTranscript(), tail)
+	f.session.TranscriptBuilder.AddAssistantMessage(tail)
+	require.NoError(t, f.session.TranscriptBuilder.WriteToFile(f.session.TranscriptPath))
 	require.NoError(t, f.hooks.SimulateStop(f.session.ID, f.session.TranscriptPath))
+	require.Contains(t, bTranscript(), tail)
 	_, found := f.a.ReadFileFromBranch(paths.MetadataBranchName, CheckpointSummaryPath(cpB))
 	require.False(t, found)
+	ended, err := f.a.GetSessionState(f.session.ID)
+	require.NoError(t, err)
+	require.Empty(t, ended.ForeignTurnCheckpoints)
 }
 
 // moveOwnerOutOfAncestry gives session id an owner that is not an ancestor of

@@ -370,9 +370,12 @@ repository B links that commit in B (`strategy/foreign_session.go`).
   normal pipeline and settings, so A's session content reaches B's checkpoint
   remote. A's state advances as for a guest-linked commit, under A's lock with
   a bounded wait; A keeps its own base, files and `LastCheckpointID`.
-- B's checkpoint is not finalized at turn end; the rest of the turn goes into
-  A's next checkpoint. The window B's checkpoint takes includes any earlier
-  turns that edited files in A, so A's next checkpoint starts after them.
+- At turn end, A's hook finalizes B's checkpoint with the full turn, as it
+  does its own mid-turn checkpoints, by running `entire hooks git
+  finalize-foreign` in B so B's settings and store apply. A failure leaves
+  B's checkpoint as of the commit (logged). The window B's checkpoint takes
+  includes any earlier turns that edited files in A, so A's next checkpoint
+  starts after them.
 - If post-commit cannot condense (A's lock is busy past its bound, or the
   session stopped being eligible), B's commit keeps a trailer with no
   checkpoint; this is logged.

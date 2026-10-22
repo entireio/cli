@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -127,6 +128,7 @@ func newHooksGitCmd() *cobra.Command {
 	cmd.AddCommand(newHooksGitPostCommitCmd())
 	cmd.AddCommand(newHooksGitPostRewriteCmd())
 	cmd.AddCommand(newHooksGitPrePushCmd())
+	cmd.AddCommand(newHooksGitFinalizeForeignCmd())
 
 	return cmd
 }
@@ -270,4 +272,42 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			return fmt.Errorf("pre-push: %w", hookErr)
 		},
 	}
+}
+
+// newHooksGitFinalizeForeignCmd is run by a session's turn end, in another
+// repository where the session's agent committed, to finalize the checkpoints
+// it wrote there (see strategy.FinalizeForeignTurnCheckpoints).
+func newHooksGitFinalizeForeignCmd() *cobra.Command {
+	var sessionID, home string
+	var deadlineMS int64
+	cmd := &cobra.Command{
+		Use:   "finalize-foreign <checkpoint-id>...",
+		Short: "Finalize checkpoints a session from another repository wrote here",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if gitHooksDisabled {
+				// Nothing is written; the caller must not count it finalized.
+				return errors.New("finalize-foreign: Entire is not enabled in this repository")
+			}
+			var deadline time.Time
+			if deadlineMS > 0 {
+				deadline = time.UnixMilli(deadlineMS)
+			}
+			g := newGitHookContext(cmd.Context(), "finalize-foreign")
+			defer g.span.End()
+			g.logInvoked(slog.String("session_id", sessionID))
+			err := g.strategy.FinalizeForeignTurnCheckpoints(g.ctx, sessionID, home, args, deadline)
+			g.logCompleted(err)
+			if err != nil {
+				return fmt.Errorf("finalize-foreign: %w", err)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&sessionID, "session", "", "session ID")
+	cmd.Flags().StringVar(&home, "home", "", "the session's home worktree")
+	cmd.Flags().Int64Var(&deadlineMS, "deadline", 0, "turn-end deadline, Unix milliseconds")
+	_ = cmd.MarkFlagRequired("session") //nolint:errcheck // flag is defined above
+	_ = cmd.MarkFlagRequired("home")    //nolint:errcheck // flag is defined above
+	return cmd
 }
