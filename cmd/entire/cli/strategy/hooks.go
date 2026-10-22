@@ -506,6 +506,23 @@ const bareEntireHookCmd = "entire"
 // Current, which is what makes EnsureSetup reinstall it rather than leaving a
 // broken hook in place forever.
 func gitHookStateInHooksDir(hooksDir string) GitHookState {
+	return gitHookStateYielding(hooksDir, false)
+}
+
+// nativeHooksCurrent reports whether the hook files Entire should own are
+// current. When Lefthook delivers Entire, a hook carrying Lefthook's launcher
+// is not Entire's to own (see installSkipsHook), so it is not counted as
+// missing. Without that, a Lefthook repo read as "not installed" on every
+// turn and EnsureSetup re-ran the whole native install to change nothing.
+func nativeHooksCurrent(ctx context.Context, lefthookDelivers bool) bool {
+	hooksDir, err := GetHooksDir(ctx)
+	if err != nil {
+		return false
+	}
+	return gitHookStateYielding(hooksDir, lefthookDelivers) == GitHooksCurrent
+}
+
+func gitHookStateYielding(hooksDir string, yieldToLefthook bool) GitHookState {
 	// ForRemoval: this is a read, and reporting GitHooksAbsent for a symlinked
 	// hooks directory is what sent EnsureSetup to InstallGitHook on every agent
 	// turn, to fail on a refusal only `entire enable` should ever hit. Seeing
@@ -516,6 +533,9 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	}
 	outdated := false
 	for _, hook := range gitHookNames {
+		if yieldToLefthook && isLefthookLauncher(root, hook, hook) {
+			continue
+		}
 		// NoFollow: a hook that is a symlink is not one Entire wrote, whatever
 		// is at the far end. Reporting Absent is what sends EnsureSetup to
 		// InstallGitHook, which backs the link up and chains to it.
@@ -730,14 +750,33 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 		lockRoot = nil // installHooks goes ahead without the lock
 	}
 
-	installedCount, err := installHooks(ctx, lockRoot, root, hooksDir, buildHookSpecs(cmdPrefix), time.Now())
+	// In a Lefthook repo the hooks Lefthook owns already run Entire from its
+	// own config; see installSkipsHook. Resolved from settings, not from this
+	// call's absolutePath: the question is what the repository's own installed
+	// integration says.
+	lefthookDelivers := lefthookDeliversHooks(ctx)
+	allSpecs := buildHookSpecs(cmdPrefix)
+	specs := make([]hookSpec, 0, len(allSpecs))
+	for _, spec := range allSpecs {
+		if !installSkipsHook(root, spec.name, lefthookDelivers) {
+			specs = append(specs, spec)
+		}
+	}
+
+	installedCount, err := installHooks(ctx, lockRoot, root, hooksDir, specs, time.Now())
 	if err != nil {
 		return installedCount, err
 	}
 
 	if !silent {
-		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push)")
-		fmt.Println("  Hooks delegate to the current strategy at runtime")
+		// Claiming an install Entire deliberately skipped is the same kind of
+		// false report this integration exists to stop.
+		if len(specs) == 0 {
+			fmt.Printf("✓ Git hooks run through %s (Entire is registered in its config)\n", LefthookManagerName)
+		} else {
+			fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push)")
+			fmt.Println("  Hooks delegate to the current strategy at runtime")
+		}
 	}
 
 	return installedCount, nil

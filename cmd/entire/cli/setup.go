@@ -2871,6 +2871,9 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// version is stale but still ours, and uninstall must still offer to remove
 	// it rather than reporting that Entire is not installed here.
 	gitHooksInstalled := strategy.AnyGitHookInstalled(ctx)
+	// Checked on its own: in a Lefthook repo .git/hooks/* are Lefthook's, so
+	// the check above misses the config files uninstall will still edit.
+	lefthookRegistered := strategy.LefthookIntegrationPresent(ctx)
 	// One sweep, threaded onwards: each external plugin costs a subprocess to ask,
 	// and the removal below must act on exactly what the summary showed.
 	agHookState := getAgentHookState(ctx)
@@ -2888,7 +2891,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// reports it with its remedy, and the run exits non-zero rather than
 	// asserting an absence it could not verify. The retired Gemini hooks get
 	// the same treatment when their config could not be read.
-	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
+	if !entireDirExists && !gitHooksInstalled && !lefthookRegistered && sessionStateCount == 0 &&
 		shadowBranchCount == 0 && len(agHookState.installed) == 0 &&
 		len(agHookState.unchecked) == 0 && !geminiHooks && geminiHooksErr == nil {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
@@ -2898,13 +2901,14 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// Show confirmation prompt unless --force
 	if !force {
 		confirmed, err := confirmUninstall(p, uninstallSummary{
-			entireDirExists:   entireDirExists,
-			gitHooksInstalled: gitHooksInstalled,
-			sessionStateCount: sessionStateCount,
-			shadowBranchCount: shadowBranchCount,
-			hookState:         agHookState,
-			geminiHooks:       geminiHooks,
-			geminiHooksErr:    geminiHooksErr,
+			entireDirExists:    entireDirExists,
+			gitHooksInstalled:  gitHooksInstalled,
+			lefthookRegistered: lefthookRegistered,
+			sessionStateCount:  sessionStateCount,
+			shadowBranchCount:  shadowBranchCount,
+			hookState:          agHookState,
+			geminiHooks:        geminiHooks,
+			geminiHooksErr:     geminiHooksErr,
 		})
 		if err != nil {
 			return err
@@ -2948,8 +2952,16 @@ func uninstallGitHooks(ctx context.Context, p *uninstallPrinter) bool {
 		p.warnUnder("failed to remove git hooks: %v", err)
 		return false
 	}
-	if res.Removed > 0 {
-		p.step("Removed git hooks (%d)", res.Removed)
+	// The Lefthook registration is separate from the hook files, so uninstall
+	// has to take both. Only artifacts carrying Entire's marker are removed.
+	lefthookRemoved, err := strategy.RemoveLefthookIntegration(ctx)
+	if err != nil {
+		p.stepFailed("Failed to remove the Lefthook integration")
+		p.warnUnder("failed to remove the Lefthook integration: %v", err)
+		return false
+	}
+	if removed := res.Removed + lefthookRemoved; removed > 0 {
+		p.step("Removed git hooks (%d)", removed)
 	} else {
 		p.noop("No git hooks to remove")
 	}
@@ -3040,9 +3052,11 @@ func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
 type uninstallSummary struct {
 	entireDirExists   bool
 	gitHooksInstalled bool
-	sessionStateCount int
-	shadowBranchCount int
-	hookState         agentHookState
+	// lefthookRegistered: Entire's Lefthook config, scripts or extends entry.
+	lefthookRegistered bool
+	sessionStateCount  int
+	shadowBranchCount  int
+	hookState          agentHookState
 	// geminiHooks reports Entire hooks left in .gemini/settings.json by removed
 	// Gemini CLI support; geminiHooksErr is set when that file could not be
 	// checked.
@@ -3057,7 +3071,7 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	p.blank()
 	p.plain("This will completely remove Entire from this repository:")
 	p.blank()
-	rows := make([]explainRow, 0, 7)
+	rows := make([]explainRow, 0, 8)
 	if len(summary.hookState.installed) > 0 {
 		rows = append(rows, explainRow{Label: "agent hooks", Value: strings.Join(agentDisplayNames(summary.hookState.installed), ", ")})
 	}
@@ -3074,6 +3088,9 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	}
 	if summary.gitHooksInstalled {
 		rows = append(rows, explainRow{Label: "git hooks", Value: "prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push"})
+	}
+	if summary.lefthookRegistered {
+		rows = append(rows, explainRow{Label: "Lefthook", Value: "entire-lefthook.yml, .lefthook-local/, and Entire's extends entry in the Lefthook local config"})
 	}
 	if summary.sessionStateCount > 0 {
 		rows = append(rows, explainRow{Label: "session states", Value: strconv.Itoa(summary.sessionStateCount)})

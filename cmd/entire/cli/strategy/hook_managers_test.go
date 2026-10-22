@@ -38,9 +38,6 @@ func TestDetectHookManagers_Husky(t *testing.T) {
 	if managers[0].ConfigPath != ".husky/" {
 		t.Errorf("expected .husky/, got %s", managers[0].ConfigPath)
 	}
-	if !managers[0].OverwritesHooks {
-		t.Error("Husky should have OverwritesHooks=true")
-	}
 }
 
 func TestDetectHookManagers_Lefthook(t *testing.T) {
@@ -60,9 +57,6 @@ func TestDetectHookManagers_Lefthook(t *testing.T) {
 	}
 	if managers[0].ConfigPath != "lefthook.yml" {
 		t.Errorf("expected lefthook.yml, got %s", managers[0].ConfigPath)
-	}
-	if managers[0].OverwritesHooks {
-		t.Error("Lefthook should have OverwritesHooks=false")
 	}
 }
 
@@ -165,9 +159,6 @@ func TestDetectHookManagers_PreCommit(t *testing.T) {
 	if managers[0].ConfigPath != ".pre-commit-config.yaml" {
 		t.Errorf("expected .pre-commit-config.yaml, got %s", managers[0].ConfigPath)
 	}
-	if managers[0].OverwritesHooks {
-		t.Error("pre-commit should have OverwritesHooks=false")
-	}
 }
 
 func TestDetectHookManagers_Overcommit(t *testing.T) {
@@ -188,9 +179,6 @@ func TestDetectHookManagers_Overcommit(t *testing.T) {
 	if managers[0].ConfigPath != ".overcommit.yml" {
 		t.Errorf("expected .overcommit.yml, got %s", managers[0].ConfigPath)
 	}
-	if managers[0].OverwritesHooks {
-		t.Error("Overcommit should have OverwritesHooks=false")
-	}
 }
 
 func TestDetectHookManagers_Hk(t *testing.T) {
@@ -210,9 +198,6 @@ func TestDetectHookManagers_Hk(t *testing.T) {
 	}
 	if managers[0].ConfigPath != "hk.pkl" {
 		t.Errorf("expected hk.pkl, got %s", managers[0].ConfigPath)
-	}
-	if managers[0].OverwritesHooks {
-		t.Error("hk should have OverwritesHooks=false")
 	}
 }
 
@@ -314,10 +299,10 @@ func TestHookManagerWarning_Husky(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
+		{Name: "Husky", ConfigPath: ".husky/"},
 	}
 
-	warning := hookManagerWarning(managers, "entire")
+	warning := hookManagerWarning(managers, "entire", "")
 
 	// Should contain all 4 hook file references
 	for _, hook := range gitHookNames {
@@ -348,38 +333,123 @@ func TestHookManagerWarning_Husky(t *testing.T) {
 	}
 }
 
-func TestHookManagerWarning_GitHooksManager(t *testing.T) {
+func TestHookManagerWarning_Lefthook(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
+		{Name: "Lefthook", ConfigPath: "lefthook.yml"},
 	}
 
-	warning := hookManagerWarning(managers, "entire")
+	warning := hookManagerWarning(managers, "entire", "")
 
-	// Category B: should be a Note, not a Warning
+	// Lefthook is the one manager Entire integrates with at the config level,
+	// so the message must not ask the user to do anything.
 	if !strings.Contains(warning, "Note: Lefthook detected") {
 		t.Error("warning should contain 'Note: Lefthook detected'")
 	}
-	if !strings.Contains(warning, "run 'entire enable' to restore") {
-		t.Error("warning should mention running 'entire enable'")
+	if !strings.Contains(warning, "No action needed") {
+		t.Error("warning should say no action is needed")
 	}
-
-	// Should NOT contain hook file copy-paste instructions
+	if strings.Contains(warning, "entire enable") {
+		t.Error("warning should not tell the user to re-run entire enable")
+	}
 	if strings.Contains(warning, "prepare-commit-msg:") {
-		t.Error("category B warning should not contain hook file instructions")
+		t.Error("warning should not contain hook file instructions")
+	}
+}
+
+// pre-commit, Overcommit and hk each overwrite Entire's hooks at install time
+// but do not reclaim them afterwards, so the next agent turn repairs it.
+func TestHookManagerWarning_OverwritesAtInstall(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"pre-commit", "Overcommit", "hk"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			warning := hookManagerWarning([]hookManager{{Name: name, ConfigPath: "cfg"}}, "entire", "")
+
+			if !strings.Contains(warning, "Warning: "+name+" detected") {
+				t.Errorf("warning should name %s, got %q", name, warning)
+			}
+			if !strings.Contains(warning, "next agent turn") {
+				t.Error("warning should say Entire reinstalls on the next agent turn")
+			}
+			if !strings.Contains(warning, "entire enable") {
+				t.Error("warning should offer 'entire enable' to restore now")
+			}
+		})
+	}
+}
+
+// On Git 2.54+ hk installs config-based hooks (hook.<name>.command), which git
+// runs alongside .git/hooks/* — so hk does not touch Entire's hooks, and
+// warning that it overwrites them is the false advice #2263 was about.
+func TestHookManagerWarning_HkComposes(t *testing.T) {
+	t.Parallel()
+	warning := hookManagerWarning([]hookManager{{Name: "hk", ConfigPath: "hk.pkl", ComposesWithEntire: true}}, "entire", "")
+	if !strings.Contains(warning, "Note: hk detected (hk.pkl)") {
+		t.Errorf("composing hk should get a note, got %q", warning)
+	}
+	if strings.Contains(warning, "overwrites") || strings.Contains(warning, "Warning:") {
+		t.Errorf("composing hk must not be described as overwriting, got %q", warning)
+	}
+	if !strings.Contains(warning, "--legacy") {
+		t.Errorf("note should name the install mode that does overwrite, got %q", warning)
+	}
+}
+
+func TestHkComposesWithEntire(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		legacyShim bool
+		gitVersion string
+		want       bool
+	}{
+		{"config hooks available", false, "2.54.0", true},
+		{"newer git", false, "2.55.0", true},
+		{"windows build suffix", false, "2.54.1.windows.1", true},
+		{"major above 2", false, "3.0.0", true},
+		{"too old for config hooks", false, "2.53.9", false},
+		{"apple git", false, "2.50.1", false},
+		{"unknown version", false, "", false},
+		{"unparseable version", false, "garbage", false},
+		// A shim in .git/hooks means hk is in legacy mode here, whatever git
+		// could do: the next `hk install` rewrites those files.
+		{"legacy shim installed", true, "2.55.0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hkComposesWithEntire(tc.legacyShim, tc.gitVersion); got != tc.want {
+				t.Errorf("hkComposesWithEntire(%v, %q) = %v, want %v", tc.legacyShim, tc.gitVersion, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsHkShim(t *testing.T) {
+	t.Parallel()
+	shim := "#!/bin/sh\ntest \"${HK:-1}\" = \"0\" || exec hk run pre-commit --from-hook \"$@\"\n"
+	if !isHkShim(shim) {
+		t.Error("hk's legacy shim must be recognised")
+	}
+	for _, other := range []string{"#!/bin/sh\n# Entire CLI hooks\nentire hooks git pre-push \"$1\"\n", "#!/bin/sh\nhk check\n"} {
+		if isHkShim(other) {
+			t.Errorf("not an hk shim: %q", other)
+		}
 	}
 }
 
 func TestHookManagerWarning_Empty(t *testing.T) {
 	t.Parallel()
 
-	warning := hookManagerWarning(nil, "entire")
+	warning := hookManagerWarning(nil, "entire", "")
 	if warning != "" {
 		t.Errorf("expected empty string for nil managers, got %q", warning)
 	}
 
-	warning = hookManagerWarning([]hookManager{}, "entire")
+	warning = hookManagerWarning([]hookManager{}, "entire", "")
 	if warning != "" {
 		t.Errorf("expected empty string for empty managers, got %q", warning)
 	}
@@ -389,7 +459,7 @@ func TestHookManagerWarning_AbsolutePathPrefix(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
+		{Name: "Husky", ConfigPath: ".husky/"},
 	}
 
 	// The prefix is whatever hookCmdPrefix resolved to — bare "entire" or, with
@@ -397,7 +467,7 @@ func TestHookManagerWarning_AbsolutePathPrefix(t *testing.T) {
 	// warning must quote it verbatim so the command it tells the user to add is
 	// the one Entire actually installs.
 	const prefix = "'/opt/homebrew/bin/entire'"
-	warning := hookManagerWarning(managers, prefix)
+	warning := hookManagerWarning(managers, prefix, "")
 
 	if !strings.Contains(warning, prefix+" hooks git") {
 		t.Errorf("warning should use the resolved command prefix, got %q", warning)
@@ -408,11 +478,11 @@ func TestHookManagerWarning_Multiple(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
-		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
+		{Name: "Husky", ConfigPath: ".husky/"},
+		{Name: "Lefthook", ConfigPath: "lefthook.yml"},
 	}
 
-	warning := hookManagerWarning(managers, "entire")
+	warning := hookManagerWarning(managers, "entire", "")
 
 	if !strings.Contains(warning, "Warning: Husky detected") {
 		t.Error("should contain Husky warning")
@@ -495,5 +565,29 @@ func TestCheckAndWarnHookManagers_WithHusky(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Warning: Husky detected") {
 		t.Errorf("expected warning output, got %q", output)
+	}
+}
+
+// "No action needed" is true only where Entire can register. Where it has
+// declined, the repo runs on native hooks that Lefthook reclaims, and saying
+// otherwise is the false advice this integration set out to remove.
+func TestHookManagerWarning_LefthookDeclined(t *testing.T) {
+	t.Parallel()
+
+	managers := []hookManager{{Name: LefthookManagerName, ConfigPath: "lefthook.yml"}}
+	warning := hookManagerWarning(managers, "entire", "lefthook-local.toml is not YAML")
+
+	if strings.Contains(warning, "No action needed") {
+		t.Errorf("a declined registration must not claim there is nothing to do, got:\n%s", warning)
+	}
+	for _, want := range []string{
+		"Warning: Lefthook detected",
+		"lefthook-local.toml is not YAML",
+		"reclaims the hooks it manages",
+		"not captured",
+	} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning should explain %q, got:\n%s", want, warning)
+		}
 	}
 }
