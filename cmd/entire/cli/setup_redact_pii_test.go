@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -204,5 +206,36 @@ func TestChooseRedactPII(t *testing.T) {
 				t.Errorf("pii enabled = %v, want %v", tt.settings.Redaction.PII.Enabled, tt.wantEnabled)
 			}
 		})
+	}
+}
+
+// A local file written by --redact-pii must hold only the PII key, so it
+// cannot override the project file's "enabled": false and resume capture.
+func TestConfigureCmd_LocalRedactPII_DoesNotReenable(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": false}`)
+
+	cmd := newSetupCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--local", "--redact-pii"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --local --redact-pii error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(".entire", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("read local settings: %v", err)
+	}
+	if got, want := strings.Join(strings.Fields(string(data)), ""), `{"redaction":{"pii":{"enabled":true}}}`; got != want {
+		t.Errorf("local settings = %s, want only the pii key %s", got, want)
+	}
+	s, err := LoadEntireSettings(context.Background())
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if s.Enabled {
+		t.Error("configure --local --redact-pii re-enabled a disabled repo")
 	}
 }

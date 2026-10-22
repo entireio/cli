@@ -2759,20 +2759,25 @@ func applyRedactPII(s *EntireSettings, enabled bool) {
 	s.Redaction.PII.Enabled = enabled
 }
 
-// updateRedactPIISetting persists --redact-pii on a configured repo. Loads and
-// writes only the target file, like the other configure updates.
+// updateRedactPIISetting persists --redact-pii on a configured repo. It edits
+// only redaction.pii.enabled in the target file's raw JSON: re-saving the
+// decoded struct would also write fields the file never set, such as
+// "enabled": true into a new local file, which re-enables a repo the project
+// file disabled.
 func updateRedactPIISetting(ctx context.Context, w io.Writer, opts EnableOptions) error {
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
-	if err != nil {
-		targetFileAbs = targetFile
+	load, save := settings.LoadProjectRaw, settings.SaveProjectRaw
+	if targetFile == settings.EntireSettingsLocalFile {
+		load, save = settings.LoadLocalRaw, settings.SaveLocalRaw
 	}
-	s, err := settings.LoadFromFile(targetFileAbs)
+	path, raw, _, err := load(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
-	applyRedactPII(s, opts.RedactPII)
-	if err := saveSettingsToTarget(ctx, s, targetFile); err != nil {
+	if err := setRawPIIEnabled(raw, opts.RedactPII); err != nil {
+		return fmt.Errorf("failed to update settings: %w", err)
+	}
+	if err := save(path, raw); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 	state := "off"
@@ -2781,6 +2786,41 @@ func updateRedactPIISetting(ctx context.Context, w io.Writer, opts EnableOptions
 	}
 	fmt.Fprintf(w, "✓ PII redaction %s (%s)\n", state, configDisplay)
 	return nil
+}
+
+// setRawPIIEnabled sets redaction.pii.enabled in a raw settings object,
+// keeping every other key at each level.
+func setRawPIIEnabled(raw map[string]json.RawMessage, enabled bool) error {
+	redaction, err := rawSettingsObject(raw, "redaction")
+	if err != nil {
+		return err
+	}
+	pii, err := rawSettingsObject(redaction, "pii")
+	if err != nil {
+		return err
+	}
+	if pii["enabled"], err = json.Marshal(enabled); err != nil {
+		return fmt.Errorf("marshal pii.enabled: %w", err)
+	}
+	if redaction["pii"], err = json.Marshal(pii); err != nil {
+		return fmt.Errorf("marshal redaction.pii: %w", err)
+	}
+	if raw["redaction"], err = json.Marshal(redaction); err != nil {
+		return fmt.Errorf("marshal redaction: %w", err)
+	}
+	return nil
+}
+
+// rawSettingsObject decodes parent[key] as a JSON object, or returns an empty
+// one when the key is absent or null.
+func rawSettingsObject(parent map[string]json.RawMessage, key string) (map[string]json.RawMessage, error) {
+	obj := map[string]json.RawMessage{}
+	if v, ok := parent[key]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &obj); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", key, err)
+		}
+	}
+	return obj, nil
 }
 
 // worktreeFileName reports the name to read a working-tree file by, following a
