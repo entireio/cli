@@ -140,9 +140,9 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		}
 
 		// Skip and clean up orphaned sessions: ended, never condensed, and
-		// holding no pending work. Keep non-ended sessions (including legacy
-		// empty phases normalized to IDLE) and sessions with LastCheckpointID
-		// (needed for checkpoint ID reuse on subsequent commits).
+		// holding no pending work or tokens. Keep non-ended sessions (including
+		// legacy empty phases normalized to IDLE) and sessions with
+		// LastCheckpointID (needed for checkpoint ID reuse on subsequent commits).
 		if isOrphanedSessionState(state) {
 			logging.Debug(logging.WithComponent(ctx, "session"), "removing orphaned session state with no pending work",
 				slog.String("session_id", state.SessionID),
@@ -162,7 +162,24 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // pending work (State.HasPendingWork). IDLE states — including legacy empty
 // phases, which normalize to IDLE — are live sessions between turns or belong
 // to the exited-owner finalizer, so they age out through StaleSessionThreshold.
+//
+// A state that holds uncommitted tokens, or transcript offsets or a subagent
+// baseline from an earlier checkpoint, is kept until it is stale too. A
+// headless agent ends its session after every prompt, and a turn that changes
+// no files clears LastCheckpointID without adding pending work. Deleting that
+// state would lose the turn's tokens and restart the offsets at 0, so the next
+// checkpoint would store the earlier turns a second time.
 func isOrphanedSessionState(state *SessionState) bool {
+	return isEndedWithoutContent(state) &&
+		!hasTokenUsageData(state.CheckpointTokenUsage) && !hasTokenUsageData(state.SubagentTokensBaseline) &&
+		state.TokenStart() == 0 && state.CheckpointTranscriptStart == 0
+}
+
+// isEndedWithoutContent reports a finalized session that was never condensed
+// and holds nothing a commit could carry. isOrphanedSessionState keeps some of
+// these for their tokens and offsets; they still never count as candidates for
+// another worktree's commit, where they could only make it look ambiguous.
+func isEndedWithoutContent(state *SessionState) bool {
 	return state.IsEnded() && state.LastCheckpointID.IsEmpty() && !state.HasPendingWork()
 }
 
@@ -356,7 +373,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 	for _, state := range allStates {
 		// A session whose home this worktree is known not to be can't be
 		// matched as a sibling of it either.
-		if state.WorktreePath == "" || state.Kind.IsImported() || notHome[state.SessionID] {
+		if state.WorktreePath == "" || state.Kind.IsImported() || notHome[state.SessionID] || isEndedWithoutContent(state) {
 			continue
 		}
 

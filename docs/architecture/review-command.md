@@ -23,7 +23,7 @@ entire review --timeout 15m
 entire review --agent claude-code --model opus
 entire review general --target feature/my-change
 entire review general --target feature/my-change --cleanup-worktree
-entire review general --target https://entire.io/gh/acme/app/trails/42/my-change
+entire review general --target https://entire.com/gh/acme/app/trails/42/my-change
 ```
 
 `--target` accepts a branch name, trail ID/number, or Entire trail URL. It

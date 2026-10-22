@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -274,6 +275,28 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 		saveIdentitySession(t, "sess-stale", func(st *SessionState) {
 			st.WorktreePath = wtStale
 			st.LastInteractionTime = &stale
+		})
+		saveIdentitySession(t, "sess-live", func(st *SessionState) {
+			st.WorktreePath = wtLive
+		})
+
+		s := NewManualCommitStrategy()
+		got, err := s.findSessionsForWorktree(ctx, dir)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "sess-live", got[0].SessionID)
+	})
+
+	t.Run("an ended session kept only for its tokens does not veto a live one", func(t *testing.T) {
+		// Headless automation in one worktree ended a no-change turn: its state
+		// is kept for the tokens, but it has nothing a commit could carry.
+		dir := identityTestRepo(t)
+		wtEnded := addSiblingWorktree(t, dir, "ended")
+		wtLive := addSiblingWorktree(t, dir, "live")
+		saveIdentitySession(t, "sess-ended-headless", func(st *SessionState) {
+			st.WorktreePath = wtEnded
+			st.Phase = session.PhaseEnded
+			st.CheckpointTokenUsage = &agent.TokenUsage{InputTokens: 20, APICallCount: 1}
 		})
 		saveIdentitySession(t, "sess-live", func(st *SessionState) {
 			st.WorktreePath = wtLive

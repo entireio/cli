@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -1066,14 +1067,17 @@ func (h *postCommitActionHandler) searchProbeGate() func() bool {
 
 func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	hasLiveTask := idleWithLiveTaskRecord(state, time.Now())
-	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, hasLiveTask)
+	now := time.Now()
+	hasLiveTask := idleWithLiveTaskRecord(state, now)
+	liveTaskEvidence := hasFreshLiveTaskRecord(state, now)
+	shouldCondense := h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, hasLiveTask, liveTaskEvidence)
 
 	logging.Debug(logCtx, "post-commit: HandleCondense decision",
 		slog.String("session_id", state.SessionID),
 		slog.String("phase", string(state.Phase)),
 		slog.Bool("has_new", h.hasNew),
 		slog.Bool("idle_with_live_task", hasLiveTask),
+		slog.Bool("live_task_evidence", liveTaskEvidence),
 		slog.Int("task_records", len(state.TaskRecords)),
 		slog.Bool("should_condense", shouldCondense),
 	)
@@ -1093,7 +1097,8 @@ func (h *postCommitActionHandler) HandleCondense(state *session.State) error {
 
 func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.State) error {
 	logCtx := logging.WithComponent(h.ctx, "checkpoint")
-	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithLiveTaskRecord(state, time.Now()))
+	now := time.Now()
+	shouldCondense := len(state.FilesTouched) > 0 && h.shouldCondenseWithOverlapCheck(state.Phase.IsActive(), state.LastInteractionTime, idleWithLiveTaskRecord(state, now), hasFreshLiveTaskRecord(state, now))
 
 	logging.Debug(logCtx, "post-commit: HandleCondenseIfFilesTouched decision",
 		slog.String("session_id", state.SessionID),
@@ -1120,12 +1125,14 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 // into this commit. Two shapes skip the overlap check: an ACTIVE session with
 // recent interaction, and an IDLE session with a fresh in-flight task record.
 // Both are still subject to the read-only gate — a session with no tracked files while
-// another session claims the committed files is somebody else's commit. Every
+// another session claims the committed files is somebody else's commit, unless
+// a running subagent of the session wrote one of them (liveTaskEvidence; an
+// ACTIVE session counts too, since it keeps working while its subagent runs). Every
 // other session (a stale ACTIVE one, an IDLE one with no fresh in-flight
 // record, an ENDED one) must show file-overlap evidence between its tracked files and the
 // committed files, and so must a session whose agent provably did not make the
 // commit, though for that one a running subagent's committed edit counts.
-func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasLiveTask bool) bool {
+func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasLiveTask, liveTaskEvidence bool) bool {
 	if !h.hasNew {
 		return false
 	}
@@ -1134,7 +1141,7 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// LastInteractionTime keeps a stale ACTIVE session (agent killed without a
 	// Stop hook) from condensing into every subsequent commit.
 	if !h.foreign && ((isActive && isRecentInteraction(lastInteraction)) || hasLiveTask) {
-		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 && !h.liveTaskCoauthored(hasLiveTask) {
+		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 && !h.liveTaskCoauthored(liveTaskEvidence) {
 			logging.Debug(logging.WithComponent(h.ctx, "checkpoint"), "post-commit: skipping read-only session (no tracked files, other sessions claim committed files)",
 				slog.Bool("is_active", isActive),
 				slog.Int("sessions_with_committed_files", h.sessionsWithCommittedFiles),
@@ -1146,7 +1153,7 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// A running subagent's edit is overlap too: its files reach
 	// filesTouchedBefore only when it completes. This keeps a foreign parent
 	// whose subagent wrote a committed file.
-	if h.liveTaskCoauthored(hasLiveTask) {
+	if h.liveTaskCoauthored(liveTaskEvidence) {
 		return true
 	}
 	if len(h.filesTouchedBefore) == 0 {
@@ -1173,12 +1180,48 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	})
 }
 
+// liveTaskFetchBudget is how long the co-authorship checks of all a commit's
+// sessions may spend together, counted from the start of the commit's session
+// loop. They are best-effort, and a running subagent's files are recorded when
+// it completes anyway. Condensation's re-exports of completed tasks, which
+// cannot be redone, are not bounded by it: each session's condensation keeps
+// its own agent.SubagentFetchBudget.
+const liveTaskFetchBudget = 10 * time.Second
+
+type liveTaskFetchDeadlineKey struct{}
+
+// withCoauthorshipFetchDeadline sets the deadline the commit's co-authorship
+// checks share. It sets no fetch budget on ctx itself, so condensation's
+// re-exports still start their own per session.
+func withCoauthorshipFetchDeadline(ctx context.Context, now time.Time) context.Context {
+	return context.WithValue(ctx, liveTaskFetchDeadlineKey{}, now.Add(liveTaskFetchBudget))
+}
+
+// ensureCoauthorshipFetchDeadline is withCoauthorshipFetchDeadline unless ctx
+// already carries one, which it never extends.
+func ensureCoauthorshipFetchDeadline(ctx context.Context, now time.Time) context.Context {
+	if _, ok := ctx.Value(liveTaskFetchDeadlineKey{}).(time.Time); ok {
+		return ctx
+	}
+	return withCoauthorshipFetchDeadline(ctx, now)
+}
+
+// withLiveTaskFetchDeadline caps ctx's fetch budget at the commit's
+// co-authorship deadline, when one is set.
+func withLiveTaskFetchDeadline(ctx context.Context) context.Context {
+	if deadline, ok := ctx.Value(liveTaskFetchDeadlineKey{}).(time.Time); ok {
+		return agent.WithSubagentFetchDeadline(ctx, deadline)
+	}
+	return ctx
+}
+
 // liveTaskCoauthored reports whether a session with a live task record
 // contributed to this commit through a running subagent. The subagent's edits
-// are not in FilesTouched until it completes, so without this an IDLE session
+// are not in FilesTouched until it completes, so without this a session
 // co-authoring a commit that another session also claims looks read-only.
-func (h *postCommitActionHandler) liveTaskCoauthored(hasLiveTask bool) bool {
-	return hasLiveTask && h.liveTaskClaimsCommit != nil && h.liveTaskClaimsCommit()
+// liveTaskEvidence is hasFreshLiveTaskRecord's answer for the session.
+func (h *postCommitActionHandler) liveTaskCoauthored(liveTaskEvidence bool) bool {
+	return liveTaskEvidence && h.liveTaskClaimsCommit != nil && h.liveTaskClaimsCommit()
 }
 
 const (
@@ -1252,7 +1295,17 @@ func isRecentInteraction(lastInteraction *time.Time) bool {
 // shouldCondenseWithOverlapCheck's overlap-check bypass so the trigger and
 // the condensation trust can never drift apart into two different rules.
 func idleWithLiveTaskRecord(state *SessionState, now time.Time) bool {
-	if state.Phase != session.PhaseIdle {
+	return state.Phase == session.PhaseIdle && hasFreshLiveTaskRecord(state, now)
+}
+
+// hasFreshLiveTaskRecord reports whether a session that has not ENDED has a
+// task record in flight that started within activeSessionInteractionThreshold.
+// It decides only whether a running subagent's edits are evidence for a
+// commit, never whether to skip the overlap check (idleWithLiveTaskRecord):
+// an ACTIVE session keeps working while its background subagent runs, so the
+// evidence applies in either phase.
+func hasFreshLiveTaskRecord(state *SessionState, now time.Time) bool {
+	if state.Phase == session.PhaseEnded {
 		return false
 	}
 	for _, task := range state.LiveTaskRecords() {
@@ -1423,7 +1476,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// pre-loop snapshot would warn about sessions this commit just condensed.
 	staleEnded := 0
 
-	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
+	loopCtx, processSessionsLoop := perf.StartLoop(withCoauthorshipFetchDeadline(ctx, time.Now()), "process_sessions")
 	for _, sess := range sessions {
 		if sess.FullyCondensed && sess.Phase == session.PhaseEnded {
 			continue
@@ -1554,37 +1607,67 @@ func logUnclaimedCheckpointTrailer(logCtx context.Context, checkpointID id.Check
 // evidence that a record-bearing IDLE session co-authored a commit another
 // session also claims. Each record's transcript is resolved the way
 // materializeTaskRecords resolves it: the declared path, then the agent-layout
-// fallback.
+// fallback. A record with neither (OpenCode's, until its stop hook runs) is
+// asked of the agent itself (agent.LiveSubagentFileReporter), within the
+// commit's co-authorship fetch budget; a report that fails or runs out of
+// budget is no evidence.
 func (s *ManualCommitStrategy) liveTaskFilesInCommit(ctx context.Context, state *SessionState, committedFileSet map[string]struct{}) bool {
 	ag, err := agent.GetByAgentType(state.AgentType)
 	if err != nil {
 		return false
 	}
-	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
-	if !ok {
+	return liveTaskFilesInCommitFor(ctx, ag, state, committedFileSet)
+}
+
+func liveTaskFilesInCommitFor(ctx context.Context, ag agent.Agent, state *SessionState, committedFileSet map[string]struct{}) bool {
+	analyzer, hasAnalyzer := agent.AsTranscriptAnalyzer(ag)
+	reporter, hasReporter := agent.AsLiveSubagentFileReporter(ag)
+	if !hasAnalyzer && !hasReporter {
 		return false
 	}
 	for _, record := range state.LiveTaskRecords() {
-		if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil {
+		if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil ||
+			validation.ValidateToolUseID(record.ToolUseID) != nil {
 			continue
 		}
-		for _, transcriptPath := range []string{record.DeclaredTranscriptPath, resolveTaskTranscriptPath(state, record.AgentID)} {
-			if transcriptPath == "" || !fileExists(transcriptPath) {
+		files, found := liveTaskTranscriptFiles(ctx, analyzer, state, record)
+		if !found && hasReporter {
+			var reportErr error
+			files, reportErr = agent.LiveSubagentModifiedFiles(ctx, reporter, record.AgentID, record.ToolUseID, record.StartedAt)
+			if reportErr != nil {
+				logging.Debug(logging.WithComponent(ctx, "checkpoint"), "post-commit: no live subagent report for the co-authorship check",
+					slog.String("session_id", state.SessionID),
+					slog.String("tool_use_id", record.ToolUseID),
+					slog.String("error", reportErr.Error()))
 				continue
 			}
-			files, _, extractErr := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptPath, 0)
-			if extractErr != nil {
-				continue
+		}
+		for _, f := range normalizeTranscriptFilePaths(ctx, state, files) {
+			if _, committed := committedFileSet[f]; committed {
+				return true
 			}
-			for _, f := range normalizeTranscriptFilePaths(ctx, state, files) {
-				if _, committed := committedFileSet[f]; committed {
-					return true
-				}
-			}
-			break
 		}
 	}
 	return false
+}
+
+// liveTaskTranscriptFiles returns the files a live record's transcript on
+// disk names, and whether one was found.
+func liveTaskTranscriptFiles(ctx context.Context, analyzer agent.TranscriptAnalyzer, state *SessionState, record session.TaskRecord) ([]string, bool) {
+	if analyzer == nil {
+		return nil, false
+	}
+	for _, transcriptPath := range []string{record.DeclaredTranscriptPath, resolveTaskTranscriptPath(state, record.AgentID)} {
+		if transcriptPath == "" || !fileExists(transcriptPath) {
+			continue
+		}
+		files, _, extractErr := analyzer.ExtractModifiedFilesFromOffset(ctx, transcriptPath, 0)
+		if extractErr != nil {
+			continue
+		}
+		return files, true
+	}
+	return nil, false
 }
 
 // collectCommittedFileClaims counts sessions whose tracked files overlap with
@@ -1753,9 +1836,11 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		headTree:                   headTree,
 		parentTree:                 parentTree,
 		sessionsWithCommittedFiles: sessionsWithCommittedFiles,
-		liveTaskClaimsCommit: func() bool {
-			return s.liveTaskFilesInCommit(ctx, state, committedFileSet)
-		},
+		// Memoized: the gate can be consulted more than once per session, and
+		// each consultation may export a running subagent.
+		liveTaskClaimsCommit: sync.OnceValue(func() bool {
+			return s.liveTaskFilesInCommit(withLiveTaskFetchDeadline(ctx), state, committedFileSet)
+		}),
 		condensedTelemetry: condensedTelemetry,
 		foreign:            foreign,
 	}
@@ -2069,6 +2154,10 @@ func truncateHash(h string) string {
 // agent did not make, though a running subagent that wrote a staged file is.
 func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context, repo *git.Repository, sessions []*SessionState, redone redo, provenance commitProvenance) []*SessionState {
 	logCtx := logging.WithComponent(ctx, "manual-commit")
+	// A running subagent's evidence can mean an agent export per live task
+	// record; they share the commit's co-authorship deadline so a slow or hung
+	// export cannot hold up the user's git commit.
+	ctx = ensureCoauthorshipFetchDeadline(ctx, time.Now())
 	var result []*SessionState
 
 	// Compute staged files once for all sessions.
@@ -2104,7 +2193,7 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 			}
 			// A running subagent's edit is staged-file overlap, as in
 			// post-commit's shouldCondenseWithOverlapCheck.
-			if idleWithLiveTaskRecord(state, time.Now()) && s.liveTaskFilesInCommit(ctx, state, fileSet(stagedFiles)) {
+			if hasFreshLiveTaskRecord(state, time.Now()) && s.liveTaskFilesInCommit(withLiveTaskFetchDeadline(ctx), state, fileSet(stagedFiles)) {
 				result = append(result, state)
 				continue
 			}
@@ -3331,7 +3420,17 @@ var errPartialState = errors.New("partial session state")
 //
 // finalizeDeadline bounds that rewrite's network phase so the hook finishes
 // before its host kills it; the zero time means no deadline.
-func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *SessionState, finalizeDeadline time.Time) error { //nolint:unparam // error return is part of the hook contract; callers check it
+func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *SessionState, finalizeDeadline time.Time) error {
+	// A turn can switch branches after TurnStart. Only the recorded home's
+	// hook may refresh this attribution; foreign or unavailable homes retain
+	// the last known branch for later sweep/doctor salvage.
+	if root, err := paths.WorktreeRoot(ctx); err == nil && isSessionHomeWorktree(root, state) {
+		if repo, err := OpenRepository(ctx); err == nil {
+			defer repo.Close()
+			captureSessionBranch(repo, state)
+		}
+	}
+
 	hadMidTurnCommits := len(state.TurnCheckpointIDs) > 0
 
 	// Finalize all checkpoints from this turn with the full transcript.

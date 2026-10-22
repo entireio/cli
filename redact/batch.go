@@ -29,7 +29,7 @@ type NamedBlob struct {
 // operations (e.g. the pre-push rewrite) must abort rather than
 // proceed with partially-redacted content. The per-blob
 // JSONLContentWithPrivacyFilter falls back to the regex-only pipeline
-// (the eight always-on/opt-in layers, no OPF) on batch failure; this
+// (the nine always-on/opt-in layers, no OPF) on batch failure; this
 // batched variant intentionally does not, because the only caller
 // (cross-blob walker) needs an explicit signal that OPF did not
 // finish.

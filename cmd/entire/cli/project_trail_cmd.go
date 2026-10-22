@@ -91,7 +91,7 @@ func newProjectTrailListCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if status != "" && !validProjectTrailStatus(status) {
-				return errors.New("project trail status must be draft, open, or closed")
+				return errors.New("project trail status must be open or closed")
 			}
 			if pageSize < 1 || pageSize > trailListServerMaxLimit {
 				return errors.New("--limit must be between 1 and 100")
@@ -119,7 +119,7 @@ func newProjectTrailListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status before pagination (draft, open, closed)")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status before pagination (open, closed)")
 	cmd.Flags().IntVar(&pageSize, "limit", 50, "Page size (1-100)")
 	cmd.Flags().StringVar(&cursor, "page-token", "", "Continue from nextPageToken")
 	addJSONFlag(cmd)
@@ -127,7 +127,7 @@ func newProjectTrailListCmd() *cobra.Command {
 }
 
 func validProjectTrailStatus(status string) bool {
-	return status == string(trail.StatusDraft) || status == string(trail.StatusOpen) || status == string(trail.StatusClosed)
+	return status == string(trail.StatusOpen) || status == string(trail.StatusClosed)
 }
 
 type projectTrailFields struct {
@@ -138,7 +138,7 @@ type projectTrailFields struct {
 func (f *projectTrailFields) flags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.Title, "title", "", "Trail title")
 	cmd.Flags().StringVar(&f.Body, "body", "", "Trail description (--body= clears it on update)")
-	cmd.Flags().StringVar(&f.Status, "status", "", "Lifecycle status (draft, open, closed)")
+	cmd.Flags().StringVar(&f.Status, "status", "", "Lifecycle status (open, closed)")
 	cmd.Flags().StringVar(&f.Type, "type", "", fmt.Sprintf("Type (%s)", formatValidTypes()))
 	cmd.Flags().StringVar(&f.Priority, "priority", "", fmt.Sprintf("Priority (%s)", formatValidPriorities()))
 	cmd.Flags().StringSliceVar(&f.Assignees, "assignee", nil, "Assignee logins; replaces the complete list (--assignee= clears it)")
@@ -149,7 +149,7 @@ func (f *projectTrailFields) validate(cmd *cobra.Command, creating bool) error {
 		return errors.New("--title is required and must not be empty")
 	}
 	if cmd.Flags().Changed("status") && !validProjectTrailStatus(f.Status) {
-		return errors.New("project trail status must be draft, open, or closed (merged belongs to a change)")
+		return errors.New("project trail status must be open or closed (merged belongs to a change)")
 	}
 	return validateTrailCreateEnums(cmd, f.Type, f.Priority)
 }
@@ -197,7 +197,12 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 				if cmd.Flags().Changed("assignee") {
 					assignees = fields.Assignees
 				}
-				assignees = mergeStringSet(assignees, add, remove)
+				if len(add) > 0 || len(remove) > 0 {
+					assignees, err = mergeProjectTrailAssignees(cmd.Context(), current, add, remove)
+					if err != nil {
+						return err
+					}
+				}
 				if assignees == nil {
 					assignees = []string{}
 				}

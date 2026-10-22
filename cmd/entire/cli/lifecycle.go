@@ -502,8 +502,8 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // task is agent-help's job, where it is pulled on demand and grouped by who
 // should initiate the command (see agentHelpAudience); this string carries only
 // invariants that hold on every turn of every session. The one model-dependent
-// invariant is what a trail is: under project trails (ENTIRE_PROJECT_TRAILS=1)
-// a trail number names project intent, not one branch, so say so once.
+// invariant is what a trail is: under project trails a trail number names
+// project intent, not one branch, so say so once.
 func entireTrailContextInjection(scope trailEnablementScope, projectTrails bool) string {
 	repo := ""
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {

@@ -471,6 +471,12 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// The Entire sites EntireSite recognises.
+const (
+	siteEntire  = "entire.io"
+	sitePartial = "partial.to"
+)
+
 // EntireSite returns the Entire site ("entire.io" / "partial.to") a login
 // server or data host belongs to, or "" for loopback and custom hosts.
 func EntireSite(coreURL string) string {
@@ -480,10 +486,10 @@ func EntireSite(coreURL string) string {
 	}
 	host := strings.ToLower(u.Hostname())
 	switch {
-	case host == "partial.to" || strings.HasSuffix(host, ".partial.to"):
-		return "partial.to"
-	case host == "entire.io" || strings.HasSuffix(host, ".entire.io"):
-		return "entire.io"
+	case host == sitePartial || strings.HasSuffix(host, "."+sitePartial):
+		return sitePartial
+	case host == siteEntire || strings.HasSuffix(host, "."+siteEntire):
+		return siteEntire
 	default:
 		return ""
 	}

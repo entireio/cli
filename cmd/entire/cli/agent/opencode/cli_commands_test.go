@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClassifyOpenCodeExportError(t *testing.T) {
@@ -136,6 +137,34 @@ func TestRunOpenCodeExportToFile_WritesStdoutToPath(t *testing.T) {
 	}
 	if string(got) != export {
 		t.Fatalf("exported transcript = %q, want %q", string(got), export)
+	}
+}
+
+// TestRunOpenCodeExportToFile_CancelKillsTheLaunchersChild pins that the
+// deadline also stops a child the launcher started (opencode's npm launcher
+// runs the real binary with inherited stdio), not only the launcher.
+func TestRunOpenCodeExportToFile_CancelKillsTheLaunchersChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub opencode is a shell script")
+	}
+	// No t.Parallel: t.Setenv.
+	root := mustOpenRoot(t, t.TempDir())
+	stubDir := t.TempDir()
+	// The trailing ":" keeps sh from exec'ing sleep in its own place.
+	script := "#!/bin/sh\n/bin/sleep 30\n:\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "opencode"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := runOpenCodeExportToFile(ctx, root, "ses_hang", ".export-ses_hang.json-1"); err == nil {
+		t.Fatal("runOpenCodeExportToFile succeeded; want the deadline's error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("export returned after %s; the launcher's child outlived the deadline", elapsed)
 	}
 }
 

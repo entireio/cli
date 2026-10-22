@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-10-21
+
+### Breaking changes and migrations
+
+- Project trails are the default: `entire trail` always uses project-scoped trails, and `ENTIRE_PROJECT_TRAILS` is no longer read. `entire trail merge` now works on project trails too. It merges one open change and lists the candidates when there are several (narrow with `--repo` / `--branch`), and its hints name the change (`entire trail merge widget/7 --force`) ([#2840](https://github.com/entireio/cli/pull/2840))
+- Project trail `--status` accepts only `open` and `closed`; `draft` is rejected ([#2847](https://github.com/entireio/cli/pull/2847))
+
+### Changed
+
+- Browser links (trail, review and experts links) point at `entire.com`, where the web app now lives; API calls stay on `entire.io`. `ENTIRE_WEB_BASE_URL` overrides the web origin, `entire review --target` accepts `entire.com` trail URLs as well as `entire.io` ones, and help text that refers to the website names `entire.com` ([#2849](https://github.com/entireio/cli/pull/2849), [#2851](https://github.com/entireio/cli/pull/2851))
+- `git-remote-entire` errors print one readable line (repository not found, no access, login rejected, server error, no reachable server) instead of the whole protocol error chain, and credentials in invalid URLs are masked. The full chain is still in the `ENTIRE_DEBUG` trace ([#2802](https://github.com/entireio/cli/pull/2802))
+- The Windows installer reads releases from `install.entire.com` first, with GitHub as the fallback, matching the Unix installer. It also accepts a `-Version` pin and honors `ENTIRE_INSTALL_BASE_URL`, and a checksum mismatch aborts instead of falling back to another origin ([#2845](https://github.com/entireio/cli/pull/2845))
+- Project trail `--add-assignee` / `--remove-assignee` resolve GitHub logins to accounts before updating, so an unknown login aborts the update instead of applying part of it. A retried `entire trail finding add` with the same `--client-id` reuses the same finding instead of duplicating it ([#2847](https://github.com/entireio/cli/pull/2847))
+
+### Fixed
+
+- Redaction catches `Authorization` and `Proxy-Authorization` header credentials whatever their entropy (UUIDs, hex tokens, short base62 tokens), in raw requests, header maps and common language idioms, and leaves the header name and scheme visible ([#2837](https://github.com/entireio/cli/pull/2837))
+- Redaction no longer lets `git@company.com`-style mailboxes or base64 secrets that follow punctuation (`token_<secret>`, `-p<secret>`, `user@<secret>`) through; the `git@` exemption now applies only to git remotes ([#2846](https://github.com/entireio/cli/pull/2846))
+- Headless agents (`claude -p`, `codex exec`, `droid exec`) no longer lose earlier turns' tokens, or store them twice, after a turn that changes no files: an ended session's state is kept while it holds uncommitted tokens or transcript offsets ([#2822](https://github.com/entireio/cli/pull/2822))
+- OpenCode: a commit made while a background subagent is still running links to the parent session, because the subagent's edits so far count toward co-authorship. The check shares a 10s budget, so a hung export cannot hold up the commit ([#2807](https://github.com/entireio/cli/pull/2807))
+- OpenCode summaries and `entire runner setup` work with OpenCode 2, where they failed with `Unrecognized flag: --dir`. Generation now runs standalone so it no longer attaches to a running OpenCode service or leaves one behind. Note: OpenCode 2's plugin API and `opencode export` changes are not yet supported ([#2843](https://github.com/entireio/cli/pull/2843))
+
+### Housekeeping
+
+- Bump `aws-actions/configure-aws-credentials` to 6.3.0 ([#2841](https://github.com/entireio/cli/pull/2841))
+
 ## [0.11.6] - 2026-10-20
 
 ### Breaking changes and migrations

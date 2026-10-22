@@ -67,6 +67,10 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 type condenseOpts struct {
 	repoDir string // Worktree root of the committing worktree (home-worktree check)
 
+	// recordedBranch overrides HEAD for ID-based salvage, including an empty
+	// branch recorded at detached HEAD. Commit-driven condensation keeps HEAD.
+	recordedBranch *string
+
 	// reconcileInterrupted allows this condensation to return a *different*
 	// checkpoint ID than the caller passed, when it recognises the transcript
 	// range in a checkpoint left behind by an interrupted write from a CLI that
@@ -696,6 +700,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		ctx, repo, state, sessionData, redactedTranscript, extractedAssets,
 		taskPayloads, checkpointID,
 	)
+	if o.recordedBranch != nil {
+		writeOpts.Branch = *o.recordedBranch
+	}
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
@@ -2085,16 +2092,45 @@ func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) 
 	return checkpointID, nil
 }
 
+// openSessionCondensationRepository uses the session's recorded worktree when
+// it is still available. The state path only selects a registered worktree of
+// this repository; a removed or replaced worktree falls back to the caller's
+// repository. Registration alone does not establish the repository's identity.
+// The caller owns the returned repository.
+func openSessionCondensationRepository(ctx context.Context, state *SessionState) (*git.Repository, error) {
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve current worktree: %w", err)
+	}
+	if filepath.IsAbs(state.WorktreePath) && filepath.Clean(state.WorktreePath) != filepath.Clean(current) {
+		currentMetadata, err := gitrepo.ResolveWorktreeMetadata(current)
+		if err != nil {
+			return nil, fmt.Errorf("resolve current repository metadata: %w", err)
+		}
+		sessionMetadata, err := gitrepo.ResolveWorktreeMetadata(state.WorktreePath)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, gitrepo.ErrWorktreeMetadataNotFound) {
+			return nil, fmt.Errorf("resolve session repository metadata: %w", err)
+		}
+		// The metadata resolver validates linked-worktree registration. Compare
+		// the validated common directories without spawning git under the lock.
+		if err == nil && sameDir(currentMetadata.CommonDir, sessionMetadata.CommonDir) {
+			repo, err := gitrepo.OpenPath(state.WorktreePath)
+			if err == nil {
+				return repo, nil
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("open session worktree repository: %w", err)
+			}
+		}
+	}
+	return gitrepo.OpenPath(current) //nolint:wrapcheck // OpenPath provides repository context
+}
+
 // CondenseSessionByID condenses a session by its ID and cleans up.
-// This is used by "entire doctor" to salvage stuck sessions.
+// Sweep and doctor salvage pending work using the session's recorded branch,
+// not the caller's HEAD (nor a later checkout in the session's worktree).
 func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionID string) error {
 	logCtx := logging.WithComponent(ctx, "condense-by-id")
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
 
 	// Records of worktrees removed since the session's last turn end are
 	// pruned first: no commit can carry those files, and salvaging them would
@@ -2156,6 +2192,12 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			return ErrMutationSkip
 		}
 
+		repo, err := openSessionCondensationRepository(ctx, state)
+		if err != nil {
+			return fmt.Errorf("failed to open repository: %w", err)
+		}
+		defer repo.Close()
+
 		// Resolve the stored copy's root once: the condensation reads it, and
 		// a successful one releases it from the same root.
 		storedRoot := storedSessionRootOrNil(ctx, state)
@@ -2164,7 +2206,11 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// not only the home's.
 		homeFiles := state.FilesTouched
 		state.FilesTouched = state.PendingFiles()
-		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true, storedRoot: storedRoot})
+		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{
+			reconcileInterrupted: true,
+			storedRoot:           storedRoot,
+			recordedBranch:       &state.Branch,
+		})
 		state.FilesTouched = homeFiles
 		if err != nil {
 			return fmt.Errorf("failed to condense session: %w", err)

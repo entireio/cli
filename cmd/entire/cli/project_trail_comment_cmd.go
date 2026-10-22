@@ -168,7 +168,7 @@ func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body
 		return nil
 	}
 	if jsonRequested(cmd) {
-		return printJSON(cmd.OutOrStdout(), toTrailDiscussionCreateResponseJSON(api.TrailDiscussionCreateResponse{Discussion: out.Discussion, Message: out.Message}))
+		return printProjectDiscussionWriteJSON(cmd, out)
 	}
 	if out.Message != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "Message %s saved\n", tuiutil.SanitizeTerminalLabel(out.Message.ID))
@@ -177,6 +177,24 @@ func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body
 		fmt.Fprintf(cmd.OutOrStdout(), "Discussion %s saved\n", tuiutil.SanitizeTerminalLabel(out.Discussion.ID))
 	}
 	return nil
+}
+
+// Reply and edit return only a message. Keep absent resources absent rather
+// than serializing a zero-valued discussion, while still withholding ETags.
+func printProjectDiscussionWriteJSON(cmd *cobra.Command, out projectDiscussionResponse) error {
+	var payload struct {
+		Discussion *trailDiscussionSummaryJSON `json:"discussion,omitempty"`
+		Message    *trailDiscussionMessageJSON `json:"message,omitempty"`
+	}
+	if out.Discussion.ID != "" {
+		discussion := toTrailDiscussionSummaryJSON(out.Discussion)
+		payload.Discussion = &discussion
+	}
+	if out.Message != nil {
+		message := toTrailDiscussionMessageJSON(*out.Message)
+		payload.Message = &message
+	}
+	return printJSON(cmd.OutOrStdout(), payload)
 }
 
 func projectDiscussionMessageETag(messages []api.TrailDiscussionMessage, id string) string {

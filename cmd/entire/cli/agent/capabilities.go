@@ -34,6 +34,7 @@ type CapabilityDeclarer interface {
 //   - HookTimeoutRepairer
 //   - InventoryAwareExtractor
 //   - LateTranscriptWriter (refuses CapabilityDeclarer agents)
+//   - LiveSubagentFileReporter
 //   - ModelExtractor
 //   - ModelLister
 //   - OutOfBandTokenSource (refuses CapabilityDeclarer agents)
@@ -230,6 +231,12 @@ func AsTranscriptFetcher(ag Agent) (TranscriptFetcher, bool) {
 // it implements the interface. Built-in only, like TranscriptFetcher.
 func AsSubagentTranscriptFetcher(ag Agent) (SubagentTranscriptFetcher, bool) {
 	return builtinCapability[SubagentTranscriptFetcher](ag)
+}
+
+// AsLiveSubagentFileReporter returns the agent as LiveSubagentFileReporter if
+// it implements the interface. Built-in only, like SubagentTranscriptFetcher.
+func AsLiveSubagentFileReporter(ag Agent) (LiveSubagentFileReporter, bool) {
+	return builtinCapability[LiveSubagentFileReporter](ag)
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both

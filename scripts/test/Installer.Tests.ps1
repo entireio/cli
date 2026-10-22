@@ -473,34 +473,34 @@ Describe 'Install-EntireWithScoop' {
     }
 }
 
-Describe 'Get-ReleaseVersion' {
+Describe 'Get-GitHubReleaseVersion' {
     BeforeAll {
         . (Join-Path (Split-Path -Parent $PSScriptRoot) 'install.ps1')
     }
 
     It 'names the missing nightly when GitHub returns no releases' {
         Mock Invoke-GitHubApi { $null }
-        { Get-ReleaseVersion -ReleaseChannel nightly } | Should -Throw -ExpectedMessage '*No nightly release found among the 0 most recent releases*'
+        { Get-GitHubReleaseVersion -ReleaseChannel nightly } | Should -Throw -ExpectedMessage '*No nightly release found among the 0 most recent releases*'
     }
 
     It 'names the missing nightly when every release is stable' {
-        Mock Invoke-GitHubApi { @(@{ tag_name = 'v1.2.0' }, @{ tag_name = 'v1.1.0' }, @{ tag_name = 'v1.0.0' }) }
-        { Get-ReleaseVersion -ReleaseChannel nightly } | Should -Throw -ExpectedMessage '*No nightly release found among the 3 most recent releases*'
+        Mock Invoke-GitHubApi { '[{"tag_name":"v1.2.0"},{"tag_name":"v1.1.0"},{"tag_name":"v1.0.0"}]' | ConvertFrom-Json }
+        { Get-GitHubReleaseVersion -ReleaseChannel nightly } | Should -Throw -ExpectedMessage '*No nightly release found among the 3 most recent releases*'
     }
 
     It 'returns the first nightly tag' {
-        Mock Invoke-GitHubApi { @(@{ tag_name = 'v1.2.0' }, @{ tag_name = 'v1.2.1-nightly.202609040000.abc1234' }, @{ tag_name = 'v1.1.0-nightly.1' }) }
-        Get-ReleaseVersion -ReleaseChannel nightly | Should -Be '1.2.1-nightly.202609040000.abc1234'
+        Mock Invoke-GitHubApi { '[{"tag_name":"v1.2.0"},{"tag_name":"v1.2.1-nightly.202609040000.abc1234"},{"tag_name":"v1.1.0-nightly.1"}]' | ConvertFrom-Json }
+        Get-GitHubReleaseVersion -ReleaseChannel nightly | Should -Be '1.2.1-nightly.202609040000.abc1234'
     }
 
     It 'names a stable release without a tag' {
-        Mock Invoke-GitHubApi { @{ tag_name = '' } }
-        { Get-ReleaseVersion -ReleaseChannel stable } | Should -Throw -ExpectedMessage '*without a tag name*'
+        Mock Invoke-GitHubApi { '{"tag_name":""}' | ConvertFrom-Json }
+        { Get-GitHubReleaseVersion -ReleaseChannel stable } | Should -Throw -ExpectedMessage '*without a tag name*'
     }
 
     It 'returns the stable version without its v prefix' {
-        Mock Invoke-GitHubApi { @{ tag_name = 'v1.2.3' } }
-        Get-ReleaseVersion -ReleaseChannel stable | Should -Be '1.2.3'
+        Mock Invoke-GitHubApi { '{"tag_name":"v1.2.3"}' | ConvertFrom-Json }
+        Get-GitHubReleaseVersion -ReleaseChannel stable | Should -Be '1.2.3'
     }
 }
 
@@ -552,12 +552,18 @@ Describe 'Scoop or archive selection' {
     }
 
     BeforeEach {
+        $script:savedBaseUrl = $env:ENTIRE_INSTALL_BASE_URL
+        $env:ENTIRE_INSTALL_BASE_URL = $null
         Mock Assert-Prerequisite {}
         Mock Write-Info {}
         Mock Install-EntireWithScoop {}
         Mock Get-PlatformArchitecture { 'amd64' }
         # The archive branch's first step after the directory is resolved; stop there.
         Mock Get-ReleaseVersion { throw 'stop-here' }
+    }
+
+    AfterEach {
+        $env:ENTIRE_INSTALL_BASE_URL = $script:savedBaseUrl
     }
 
     It 'takes the archive path when -InstallDir is explicit even with Scoop on PATH' {

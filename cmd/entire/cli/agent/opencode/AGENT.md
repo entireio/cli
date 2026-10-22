@@ -88,6 +88,15 @@ SessionEnd sweep share one 30s budget (`agent.SubagentFetchBudget`).
 The background result that OpenCode injects into the parent is synthetic
 text, so prompt extraction and the summary skip it.
 
+A running child's edits reach the parent's files only at its stop. When an
+IDLE parent with no tracked files of its own commits alongside another
+session, post-commit's co-authorship check asks the agent what the running
+call has modified so far (`LiveSubagentModifiedFiles`): it exports the child
+to a private staging file, cut to the running call, and removes it, writing
+nothing a capture reads. These checks share 10s of the commit's 30s fetch
+budget. The commit stores the live record without a transcript; it is
+stored in full once the call completes.
+
 ## Gaps & Limitations
 
 - macOS unresolved-symlink paths (`/var/…` vs `/private/var/…`) drop from a task's `files`; the parent's turn end still covers them.
@@ -97,4 +106,3 @@ text, so prompt extraction and the summary skip it.
 - A reused-`callID` call has no live marker while it runs (its start finds the earlier call's record under the same key, and the Go start path does not re-key), so commit overlap checks and the SessionEnd sweep miss it; if the parent ends before its stop, the call is lost.
 - A reused-`callID` stop with no `started_at` (the plugin restarted between the call's before and after hooks) for a child already recorded under that `callID` is indistinguishable from a duplicate, so it is skipped and that call's work is not recorded; deliberate, to avoid double-counting a real duplicate.
 - entire.io joins task records to task calls on exact `tool_use_id`, so mapped or re-keyed records show as unmatched until its subagent view joins as above.
-- A running background child's edits reach the parent's files only at its stop. Until then, an IDLE parent with no tracked files of its own is left out of a commit that another session also claims; otherwise it condenses and stores the child's export so far.

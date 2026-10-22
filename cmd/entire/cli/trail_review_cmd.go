@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -197,7 +198,7 @@ func newTrailFindingAddCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 	cmd.Flags().IntVar(&opts.Line, "line", 0, "Line number for the finding location")
 	cmd.Flags().IntVar(&opts.StartLine, "start-line", 0, "Start line for the finding location")
 	cmd.Flags().IntVar(&opts.EndLine, "end-line", 0, "End line for the finding location")
-	cmd.Flags().StringVar(&opts.ClientID, "client-id", "", "Client-provided idempotency key for this finding")
+	cmd.Flags().StringVar(&opts.ClientID, "client-id", "", "Retry key for this finding and its review (24-hour server retention; reuse with the same fields)")
 	cmd.Flags().StringVar(&opts.Patch, "patch", "", "Unified-diff suggested change to attach; must modify a single existing file in this worktree")
 	cmd.Flags().StringVar(&opts.PatchFile, "patch-file", "", "Read unified-diff suggested change from file; use '-' for stdin")
 	cmd.Flags().StringVar(&opts.Instruction, "instruction", "", "Manual suggested-change instruction to attach")
@@ -1056,7 +1057,11 @@ func createTrailReviewFindings(ctx context.Context, client *api.Client, trailID 
 		worktreeRoot = ""
 	}
 	inputs = prepareTrailReviewCommentInputsForCreate(worktreeRoot, inputs)
-	review, err := startTrailReview(ctx, client, trailID)
+	key, err := trailReviewStartKey(inputs)
+	if err != nil {
+		return nil, err
+	}
+	review, err := startTrailReview(ctx, client, trailID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -1116,8 +1121,9 @@ func postTrailReviewFindingBatch(ctx context.Context, client *api.Client, trailI
 // The API rejects a lone head_sha — base_sha and head_sha must be supplied
 // together or not at all — and computing a correct base SHA client-side is out
 // of scope for a single-finding add, so neither is sent.
-func startTrailReview(ctx context.Context, client *api.Client, trailID string) (api.TrailReviewStartResponse, error) {
-	resp, err := client.Post(ctx, trailReviewStartPath(trailID), api.TrailReviewStartRequest{})
+func startTrailReview(ctx context.Context, client *api.Client, trailID, key string) (api.TrailReviewStartResponse, error) {
+	resp, err := client.Request(ctx, http.MethodPost, trailReviewStartPath(trailID),
+		http.Header{"Idempotency-Key": {key}}, strings.NewReader("{}"))
 	if err != nil {
 		return api.TrailReviewStartResponse{}, fmt.Errorf("start review: %w", err)
 	}

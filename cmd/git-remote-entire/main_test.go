@@ -1,10 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
+	"github.com/entireio/cli/internal/remotehelper/transport"
 )
 
 func TestInfoFlagText(t *testing.T) {
@@ -56,35 +57,26 @@ func TestInfoFlagText(t *testing.T) {
 func TestParseProtocolVersion(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		env      string
-		want     int
-		wantWarn string
+		name string
+		env  string
+		want int
 	}{
-		{"unset", "", 2, ""},
-		{"version_0", "version=0", 0, ""},
-		{"version_1", "version=1", 1, ""},
-		{"version_2", "version=2", 2, ""},
-		{"unknown_version_warns", "version=3", 2, "ignoring unrecognised protocol.version"},
-		{"malformed_value_warns", "version=abc", 2, "ignoring unrecognised protocol.version"},
-		{"empty_value_warns", "version=", 2, "ignoring unrecognised protocol.version"},
-		{"no_version_key", "foo=bar", 2, ""},
-		{"version_after_other_key", "foo=bar:version=1", 1, ""},
-		{"version_before_other_key", "version=2:foo=bar", 2, ""},
+		{"unset", "", 2},
+		{"version_0", "version=0", 0},
+		{"version_1", "version=1", 1},
+		{"version_2", "version=2", 2},
+		{"unknown_version_defaults", "version=3", 2},
+		{"malformed_value_defaults", "version=abc", 2},
+		{"empty_value_defaults", "version=", 2},
+		{"no_version_key", "foo=bar", 2},
+		{"version_after_other_key", "foo=bar:version=1", 1},
+		{"version_before_other_key", "version=2:foo=bar", 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var buf bytes.Buffer
-			got := parseProtocolVersion(tc.env, &buf)
-			if got != tc.want {
+			if got := parseProtocolVersion(tc.env); got != tc.want {
 				t.Errorf("parseProtocolVersion(%q) = %d, want %d", tc.env, got, tc.want)
-			}
-			switch {
-			case tc.wantWarn == "" && buf.Len() != 0:
-				t.Errorf("expected no warning, got %q", buf.String())
-			case tc.wantWarn != "" && !strings.Contains(buf.String(), tc.wantWarn):
-				t.Errorf("expected warning containing %q, got %q", tc.wantWarn, buf.String())
 			}
 		})
 	}
@@ -214,6 +206,24 @@ func TestMissingClusterHostMessage(t *testing.T) {
 		contains    []string
 		notContains []string
 	}{
+		{
+			name:        "credentials redacted in fallback",
+			rawURL:      "entire://alice:s3cret@/not-a-forge/owner/repo",
+			contains:    []string{`fatal: missing host in URL "entire://xxxxx:xxxxx@/not-a-forge/owner/repo"`},
+			notContains: []string{"alice", "s3cret"},
+		},
+		{
+			name:        "username-only userinfo redacted in fallback",
+			rawURL:      "entire://ghp_token@/not-a-forge/owner/repo",
+			contains:    []string{`fatal: missing host in URL "entire://xxxxx@/not-a-forge/owner/repo"`},
+			notContains: []string{"ghp_token"},
+		},
+		{
+			name:        "credentials absent from repo clone hint",
+			rawURL:      "entire://alice:s3cret@/gh/owner/repo",
+			contains:    []string{"entire repo clone /gh/owner/repo"},
+			notContains: []string{"alice", "s3cret"},
+		},
 		{
 			// The motivating case: forge id typed where the cluster host belongs.
 			name:     "forge id in host slot points at repo clone",
@@ -679,5 +689,134 @@ func TestResolveEnvTokenCreds_MalformedTokenAborts(t *testing.T) {
 	}
 	if creds != nil {
 		t.Fatal("expected nil creds for invalid aud")
+	}
+}
+
+func TestUserMessage(t *testing.T) {
+	t.Parallel()
+	status := func(code int, msg string) error {
+		return &transport.HTTPStatusError{StatusCode: code, ServerMsg: msg, BaseURL: "https://node.example/gh/o/r"}
+	}
+	wrapV2 := func(err error) error { return fmt.Errorf("stateless-connect v2 info/refs: %w", err) }
+	tooLarge := errors.New("entire: push too large: size 10 exceeds limit 5")
+	downgrade := &url.Error{Op: "Get", URL: "https://a.c.example/gh/o/r/info/refs", Err: httpclient.ErrInsecureRedirect}
+	policyExhausted := wrapV2(fmt.Errorf("%w: %w", transport.ErrNoNodeSucceeded, downgrade))
+	policyAndStatus := wrapV2(fmt.Errorf("%w: %w; %w", transport.ErrNoNodeSucceeded, downgrade, status(http.StatusBadGateway, "")))
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"404", wrapV2(status(http.StatusNotFound, "")), "repository gh/o/r not found on c.example"},
+		{"404 keeps server reason", wrapV2(status(http.StatusNotFound, "repository is being migrated")), "repository gh/o/r not found on c.example (repository is being migrated)"},
+		{"403", wrapV2(status(http.StatusForbidden, "")), "you do not have access to gh/o/r on c.example"},
+		{"403 keeps server reason", wrapV2(status(http.StatusForbidden, "read access required")), "you do not have access to gh/o/r on c.example (read access required)"},
+		{"401", wrapV2(status(http.StatusUnauthorized, "")), "c.example rejected your login. Run `entire login`, then try again"},
+		{"401 keeps server reason", wrapV2(status(http.StatusUnauthorized, "token revoked")), "c.example rejected your login (token revoked). Run `entire login`, then try again"},
+		{"5xx keeps server wording", wrapV2(status(http.StatusServiceUnavailable, "db timeout")), "c.example could not handle the request (HTTP 503: db timeout). Try again later"},
+		{"5xx bare", wrapV2(status(http.StatusInternalServerError, "")), "c.example could not handle the request (HTTP 500). Try again later"},
+		{"other 4xx", wrapV2(status(http.StatusBadRequest, "bad want line")), "c.example rejected the request (HTTP 400): bad want line"},
+		{"other 4xx bare", wrapV2(status(http.StatusConflict, "")), "c.example rejected the request (HTTP 409)"},
+		{
+			"nodes exhausted on 5xx",
+			wrapV2(fmt.Errorf("%w: all 2 attempted nodes failed, last error: node https://n: %w", transport.ErrNoNodeSucceeded, status(http.StatusBadGateway, ""))),
+			"c.example could not handle the request (HTTP 502). Try again later",
+		},
+		{
+			"nodes exhausted on connect",
+			wrapV2(fmt.Errorf("%w: all 2 attempted nodes failed, last error: %w", transport.ErrNoNodeSucceeded, errors.New("dial tcp: connection refused"))),
+			"could not reach any server for gh/o/r on c.example. Check your connection and try again",
+		},
+		{
+			"fallback 404 wins over cached replica 503",
+			wrapV2(fmt.Errorf("%w (cached replicas: %v)", status(http.StatusNotFound, ""), status(http.StatusServiceUnavailable, ""))), //nolint:errorlint // mirrors transport's context-only cached error
+			"repository gh/o/r not found on c.example",
+		},
+		{"policy rejection stays verbatim", policyExhausted, policyExhausted.Error()},
+		{"policy rejection beats a 5xx on another node", policyAndStatus, policyAndStatus.Error()},
+		{
+			"entry domain unreachable",
+			wrapV2(fmt.Errorf("fetching info/refs from entry domain: %w: doing request: %w", transport.ErrUnreachable, errors.New("dial tcp: connection refused"))),
+			"could not reach any server for gh/o/r on c.example. Check your connection and try again",
+		},
+		{"interrupted", wrapV2(context.Canceled), "interrupted"},
+		{"interrupted while dialing", wrapV2(fmt.Errorf("%w: doing request: %w", transport.ErrUnreachable, context.Canceled)), "interrupted"},
+		{"push too large stays verbatim", fmt.Errorf("posting receive-pack: calling git-receive-pack: %w", &transport.PushTooLargeError{Size: 10, Limit: 5}), tooLarge.Error()},
+		{"low disk stays verbatim", fmt.Errorf("calling git-receive-pack: %w", &transport.InsufficientStorageError{}), (&transport.InsufficientStorageError{}).Error()},
+		{"unknown stays verbatim", errors.New("send-pack exited with error: exit status 128"), "send-pack exited with error: exit status 128"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := userMessage(tc.err, &url.URL{Scheme: "entire", Host: "c.example", Path: "/gh/o/r"}, false); got != tc.want {
+				t.Errorf("userMessage() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUserMessage_OmitsURLCredentials(t *testing.T) {
+	t.Parallel()
+	remote, err := url.Parse("entire://alice:s3cret@c.example:8443/gh/o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusErr := &transport.HTTPStatusError{StatusCode: http.StatusNotFound}
+	got := userMessage(statusErr, remote, false)
+	if want := "repository gh/o/r not found on c.example:8443"; got != want {
+		t.Errorf("userMessage() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "alice") || strings.Contains(got, "s3cret") {
+		t.Errorf("credentials leaked: %q", got)
+	}
+}
+
+func TestInvalidURLMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		rawURL string
+		want   string
+	}{
+		{"bad port with credentials", "entire://alice:s3cret@c.example:bad/gh/o/r", `fatal: invalid URL: invalid port ":bad" after host` + "\n"},
+		{"control character with credentials", "entire://alice:s3cret@c.example/gh/o/r\x7f", "fatal: invalid URL: net/url: invalid control character in URL\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := url.Parse(tc.rawURL)
+			if err == nil {
+				t.Fatal("expected parse error")
+			}
+			got := invalidURLMessage(err)
+			if got != tc.want {
+				t.Errorf("invalidURLMessage() = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(got, "alice") || strings.Contains(got, "s3cret") {
+				t.Errorf("credentials leaked: %q", got)
+			}
+		})
+	}
+}
+
+func TestUserMessage_EnvTokenRejected(t *testing.T) {
+	t.Parallel()
+	remote := &url.URL{Scheme: "entire", Host: "c.example", Path: "/gh/o/r"}
+	tests := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{"bare", "", "c.example rejected ENTIRE_TOKEN"},
+		{"with server reason", "token expired", "c.example rejected ENTIRE_TOKEN (token expired)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := fmt.Errorf("stateless-connect v2 info/refs: %w", &transport.HTTPStatusError{StatusCode: http.StatusUnauthorized, ServerMsg: tc.msg})
+			if got := userMessage(err, remote, true); got != tc.want {
+				t.Errorf("userMessage() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
