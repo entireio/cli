@@ -803,17 +803,9 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 	// log at Warn so users debugging "my saved skills aren't pre-checked" can
 	// see why, but keep going with an empty prefill — runReview already
 	// surfaces the same error distinctly when it's the first load.
-	existing := map[string]settings.ReviewConfig{}
-	existingJudge := ""
-	if s, err := settings.Load(ctx); err != nil {
-		logging.Warn(ctx, "settings.Load failed when pre-filling picker", slog.String("error", err.Error()))
-	} else if s != nil {
-		if profile, ok := s.ReviewProfiles[profileName]; ok {
-			existing = profile.Agents
-			if j, jok := profileJudge(profile); jok {
-				existingJudge = j.agent
-			}
-		}
+	existing, existingJudge, err := pickerPrefill(ctx, profileName)
+	if err != nil {
+		return err
 	}
 
 	// Up-front header: make the order and count obvious so users can spot
@@ -828,6 +820,7 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 	fmt.Fprintln(out)
 
 	selected := map[string]settings.ReviewConfig{}
+	configs := map[string]*settings.ReviewAgentConfig{}
 	for i, c := range configurable {
 		curated := skilldiscovery.CuratedBuiltinsFor(string(c.name))
 
@@ -892,6 +885,14 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 			Skills: dedupeStrings(append(builtinPicks, discoveredPicks...)),
 			Prompt: strings.TrimSpace(prompt),
 		}
+		agentCfg, changed, err := promptReviewAgentConfig(ctx, out, string(c.name), existing[string(c.name)].Config)
+		if err != nil {
+			return err
+		}
+		if changed {
+			configs[string(c.name)] = agentCfg
+		}
+		cfg.Config = agentCfg
 		if !cfg.IsZero() {
 			selected[string(c.name)] = cfg
 		}
@@ -923,6 +924,13 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 		return err
 	}
 	fmt.Fprintf(out, "Saved review profile %q to %s. Edit later with `entire review --edit --profile %s`.\n", profileName, scope.file(), profileName)
+	if len(configs) > 0 {
+		where, err := saveReviewAgentConfigs(ctx, profileName, configs)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Saved reviewer agent config to %s (agent config is never written to the shared settings file).\n", where)
+	}
 	return nil
 }
 
@@ -965,6 +973,10 @@ func saveReviewProfileConfig(ctx context.Context, profileName string, agents map
 	// clobbered with built-in defaults.
 	profile := profiles[profileName]
 	profile.Agents = agents
+	// The shared file never holds reviewer configs; the local file keeps them.
+	if scope == reviewScopeProject {
+		profile = stripAgentConfigs(profile)
+	}
 	if strings.TrimSpace(judgeAgent) != "" {
 		profile.Judge = &settings.ReviewConfig{Agent: strings.TrimSpace(judgeAgent)}
 	} else {
@@ -1344,4 +1356,80 @@ func dedupeStrings(xs []string) []string {
 		out = append(out, x)
 	}
 	return out
+}
+
+// promptReviewAgentConfig asks which agent config a reviewer runs with. It
+// reports whether the choice changed anything.
+func promptReviewAgentConfig(ctx context.Context, out io.Writer, agentName string, current *settings.ReviewAgentConfig) (*settings.ReviewAgentConfig, bool, error) {
+	if _, supported := agentConfigFields[agentName]; !supported {
+		return current, false, nil
+	}
+	choice := agentConfigCheckout
+	options := []huh.Option[string]{
+		huh.NewOption("Use the reviewed checkout's config (hooks, MCP servers, settings)", agentConfigCheckout),
+		huh.NewOption("Use my own config, with nothing extra", agentConfigIsolated),
+		huh.NewOption("Use my own config, loaded from a file…", agentConfigFile),
+	}
+	if current != nil {
+		choice = agentConfigKeep
+		options = append([]huh.Option[string]{huh.NewOption("Keep my current config", agentConfigKeep)}, options...)
+	}
+	form := newAccessibleForm(huh.NewGroup(huh.NewSelect[string]().
+		Title("Agent config for " + agentName).
+		Description("Your own config replaces the checkout's hooks, MCP servers and extensions; the checkout's skills still load.").
+		Options(options...).
+		Value(&choice)))
+	if err := form.RunWithContext(ctx); err != nil {
+		return nil, false, fmt.Errorf("agent config for %s: %w", agentName, err)
+	}
+	switch choice {
+	case agentConfigKeep:
+		return current, false, nil
+	case agentConfigCheckout:
+		return nil, current != nil, nil
+	case agentConfigIsolated:
+		return &settings.ReviewAgentConfig{}, true, nil
+	}
+	var path string
+	input := newAccessibleForm(huh.NewGroup(huh.NewInput().
+		Title("Config file for " + agentName).
+		Description(`JSON: {"settings": {...}, "mcp_servers": {...}, "extensions": [...]}`).
+		Value(&path)))
+	if err := input.RunWithContext(ctx); err != nil {
+		return nil, false, fmt.Errorf("agent config file for %s: %w", agentName, err)
+	}
+	cfg, err := loadAgentConfigFile(strings.TrimSpace(path))
+	if err != nil {
+		return nil, false, err
+	}
+	if err := validateAgentConfigForSave(ctx, out, agentName, cfg); err != nil {
+		return nil, false, fmt.Errorf("agent config for %s: %w", agentName, err)
+	}
+	return cfg, true, nil
+}
+
+// pickerPrefill returns the saved reviewers and judge for profileName. It
+// refuses a profile whose prompts or configs Load dropped as unverified: the
+// picker would show them blank and saving would erase them from the file.
+func pickerPrefill(ctx context.Context, profileName string) (map[string]settings.ReviewConfig, string, error) {
+	s, err := settings.Load(ctx)
+	if err != nil {
+		logging.Warn(ctx, "settings.Load failed when pre-filling picker", slog.String("error", err.Error()))
+		return map[string]settings.ReviewConfig{}, "", nil
+	}
+	if s == nil {
+		return map[string]settings.ReviewConfig{}, "", nil
+	}
+	profile, ok := s.ReviewProfiles[profileName]
+	if !ok {
+		return map[string]settings.ReviewConfig{}, "", nil
+	}
+	if profileHasUnverifiedFields(s, profileName, profile) {
+		return nil, "", errUnverifiedLocalProfile(profileName, "--edit")
+	}
+	judge := ""
+	if j, jok := profileJudge(profile); jok {
+		judge = j.agent
+	}
+	return profile.Agents, judge, nil
 }

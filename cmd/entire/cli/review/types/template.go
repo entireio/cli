@@ -42,6 +42,12 @@ type ReviewerTemplate struct {
 	// and check scanner.Err() before emitting Finished{Success: true}.
 	Parser func(stdout io.Reader) <-chan Event
 
+	// Prepare, when set, runs before BuildCmd. It may return an updated
+	// RunConfig (ExtraArgs naming files it wrote) and a cleanup that runs
+	// after the process exits. An error aborts the run before anything is
+	// spawned.
+	Prepare func(ctx context.Context, cfg RunConfig) (RunConfig, func(), error)
+
 	// Preflight, when set, runs before BuildCmd and refuses an environment the
 	// command cannot work in (for example an agent CLI too old for the argv
 	// shape BuildCmd produces), so the review fails before any paid run.
@@ -77,6 +83,23 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 			return nil, fmt.Errorf("%s: %w", t.AgentName, err)
 		}
 	}
+	cleanup := func() {}
+	if t.Prepare != nil {
+		prepared, done, err := t.Prepare(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", t.AgentName, err)
+		}
+		cfg = prepared
+		if done != nil {
+			cleanup = done
+		}
+	}
+	started := false
+	defer func() {
+		if !started {
+			cleanup()
+		}
+	}()
 	cmd := t.BuildCmd(ctx, cfg)
 	if cmd == nil {
 		return nil, fmt.Errorf("ReviewerTemplate.Start: %w (BuildCmd returned nil for agent %q)", ErrTemplateMisconfigured, t.AgentName)
@@ -96,7 +119,9 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("%s: start: %w", t.AgentName, err)
 	}
+	started = true
 	p := &templateProcess{
+		cleanup:    cleanup,
 		ctx:        ctx,
 		agentName:  t.AgentName,
 		cmd:        cmd,
@@ -118,6 +143,7 @@ var ErrTemplateMisconfigured = errors.New("ReviewerTemplate misconfigured")
 
 // templateProcess is the shared Process implementation for ReviewerTemplate.
 type templateProcess struct {
+	cleanup    func()
 	ctx        context.Context
 	agentName  string
 	cmd        *exec.Cmd
@@ -140,6 +166,10 @@ func (p *templateProcess) Wait() error {
 		<-p.stderrDone
 	}
 	err := p.cmd.Wait()
+	if p.cleanup != nil {
+		p.cleanup()
+		p.cleanup = nil
+	}
 	if err != nil && p.ctx.Err() != nil {
 		return p.ctx.Err() //nolint:wrapcheck // preserve Process cancellation contract
 	}

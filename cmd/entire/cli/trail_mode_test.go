@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -16,18 +17,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTrailModeEnvironment(t *testing.T) {
-	for _, value := range []string{"", "0", "false", "true", "typo", "1"} {
+// Project trails are the only model the CLI builds; the retired opt-in
+// variable no longer selects the legacy tree, whatever it is set to.
+func TestTrailCommandIsAlwaysProjectScoped(t *testing.T) {
+	for _, value := range []string{"", "0", "1"} {
 		t.Run(value, func(t *testing.T) {
-			t.Setenv(projectTrailsEnv, value)
+			t.Setenv("ENTIRE_PROJECT_TRAILS", value)
 			cmd := newTrailCmd()
-			wantProject := value == "1"
-			require.Equal(t, wantProject, usesProjectTrails(cmd))
-			require.Equal(t, wantProject, cmd.PersistentFlags().Lookup("project") != nil)
-			t.Setenv(projectTrailsEnv, "changed")
+			require.True(t, usesProjectTrails(cmd))
+			require.NotNil(t, cmd.PersistentFlags().Lookup("project"))
 			child, _, err := cmd.Find([]string{"finding", "resolve"})
 			require.NoError(t, err)
-			require.Equal(t, wantProject, usesProjectTrails(child))
+			require.True(t, usesProjectTrails(child))
 		})
 	}
 }
@@ -47,9 +48,8 @@ func TestTrailModeCommandSurface(t *testing.T) {
 			for _, name := range []string{"link", "unlink"} {
 				require.Equal(t, project, contains(names, name))
 			}
-			for _, name := range []string{"delete", "merge"} {
-				require.Equal(t, !project, contains(names, name))
-			}
+			require.Contains(t, names, "merge")
+			require.Equal(t, !project, contains(names, "delete"))
 			list, _, err := cmd.Find([]string{"list"})
 			require.NoError(t, err)
 			require.Equal(t, project, list.Flags().Lookup("page-token") != nil)
@@ -139,14 +139,15 @@ func TestLegacyTrailRequestsDoNotResolveProject(t *testing.T) {
 	}
 }
 
-func TestProjectResumeCommandsKeepOptIn(t *testing.T) {
+// Resume hints are plain commands: project trails need no opt-in prefix.
+func TestProjectResumeCommandsNeedNoOptIn(t *testing.T) {
 	t.Parallel()
 	ctx := buildTrailResumeContext(api.TrailResource{
 		ID: projectTrailTestChange, Number: 7, Branch: "feature/work",
 		Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, Host: "gh", Project: "acme"},
 	}, nil, "", 0, trailResumeFindingsContext{})
 	for _, command := range ctx.Commands {
-		require.Contains(t, command, "ENTIRE_PROJECT_TRAILS=1 entire trail")
+		require.True(t, strings.HasPrefix(command, "entire trail "), command)
 		require.Contains(t, command, "42 --project gh/acme --branch feature/work")
 	}
 }

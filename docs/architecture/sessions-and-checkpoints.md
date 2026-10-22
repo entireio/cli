@@ -59,7 +59,7 @@ A checkpoint is only ever written in one form: the persistent record on `entire/
 | Pending (between commits) | `.git/entire-sessions/<id>.json` and `.entire/metadata/<id>/` | Step count, touched files and their blob hashes, task records; sanitized transcript copy and prompts |
 | Persistent (after commit) | `entire/checkpoints/v1` or `refs/entire/checkpoints/...` | Metadata, redacted transcripts, commit reference |
 
-Most persistent checkpoints are written when a commit condenses a session, but some have no commit: eager condensation at session end, `entire doctor` and the session sweeper, and snapshots from the hidden `entire checkpoint create`. Snapshots exist for sessions that change no files (research, planning, review), which no other path checkpoints; see [implementation contracts](../development/checkpoint-implementation.md).
+Most persistent checkpoints are written when a commit condenses a session, but some have no commit: eager condensation at session end, `entire doctor` and the session sweeper, and snapshots from the hidden `entire checkpoint create`. Doctor and sweep's ID-based salvage records the session's stored branch, refreshed at turn end only in its recorded home worktree (otherwise retaining the last recorded value), using its recorded worktree's repository when still registered and sharing the caller's resolved Git common directory; a removed or replaced worktree falls back to the caller's repository without borrowing its branch. Commit-driven condensation continues to record the committing worktree's HEAD branch. Snapshots exist for sessions that change no files (research, planning, review), which no other path checkpoints; see [implementation contracts](../development/checkpoint-implementation.md).
 
 ## Interface
 
@@ -588,7 +588,18 @@ commits. The same predicate feeds `shouldCondenseWithOverlapCheck`'s
 overlap-check bypass, so the trigger and the condensation trust share one
 rule. The trailer's content guarantee is the materializer itself: the
 commit's condensation stores each record's transcript-so-far under the
-checkpoint's `tasks/` subtree, so no separate commit-time capture is needed.
+checkpoint's `tasks/` subtree (where one is on disk; an agent whose live
+transcript needs a re-export, OpenCode, gets it once the task completes), so
+no separate commit-time capture is needed. When another session also claims
+the committed files and the session (IDLE, or ACTIVE while its background
+subagent runs) has none of its own, it condenses only if a live record
+modified a committed file (`liveTaskFilesInCommit`):
+per the transcript on disk, or, for an agent with none yet, its own report
+(`agent.LiveSubagentFileReporter`) within 10s for all of a commit's
+sessions together (condensation's re-exports keep their own 30s per
+session). The check reads the whole running call, so while it
+runs, a later commit of the same file by another session credits the session
+again even when the subagent added nothing since.
 Ordinary idle commits with no task records are unaffected — they stay exactly
 as before.
 
@@ -808,9 +819,17 @@ the compact transcript is regenerable from it.
   "branch": "main",
   "checkpoints_count": 3,
   "save_step_count": 3,
-  "files_touched": ["file1.txt", "file2.txt"]
+  "files_touched": ["file1.txt", "file2.txt"],
+  "redaction": {
+    "replacements": 3,
+    "layers": {"entropy": 2, "betterleaks": 1, "custom": 1, "pii": 0},
+    "custom_rules_active": 2,
+    "pii": {"EMAIL": 0}
+  }
 }
 ```
+
+`redaction` records what redaction replaced in the session's `full.jsonl`: placeholders written and matches per detection layer, never the values or custom rule names (see [Redaction counts in checkpoint metadata](../security-and-privacy.md#redaction-counts-in-checkpoint-metadata)). `full.jsonl` holds the whole session up to this checkpoint, so the counts grow across a session's checkpoints; take each session's latest checkpoint instead of adding them up. The example is abbreviated: every layer that ran is listed, with 0 when it found nothing. It is absent on checkpoints from older CLIs. The root `CheckpointSummary` carries the sum over its sessions under the same key, omitted when any session stored a transcript without counts.
 
 In session metadata, `checkpoints_count` is the displayed prompt-window count for that session. `save_step_count` records the session's turn-end steps (`StepCount`) and is the conservative "real checkpoint work happened" signal; it is omitted when zero (for example, commit-only/fallback sessions). `save_step_count` is not aggregated into the root `CheckpointSummary`.
 
@@ -1030,7 +1049,7 @@ What it means for the domain model:
   none of a long session's content: any remaining checkpoint of that session
   can rebuild it. The command lists other local checkpoints of the same
   sessions (a local, capped scan) and deletes none of them; the session stays
-  visible on entire.io while any remain.
+  visible on entire.com while any remain.
 - **Token totals.** Each session entry stores the token delta since the previous
   condensation, so removing a checkpoint subtracts its delta from server-side
   session sums. Local `SessionState` token offsets, usage and baselines are

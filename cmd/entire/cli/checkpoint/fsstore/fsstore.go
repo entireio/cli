@@ -21,6 +21,7 @@
 package fsstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -173,6 +174,9 @@ func (s *Store) backfillTranscript(opts cp.UpdateOptions) error {
 	}
 	// Replace semantics, but do not clobber sibling fields (matches the git
 	// store's stop-time transcript backfill).
+	if counts := opts.Transcript.Counts(); counts != nil || !bytes.Equal(sc.Sessions[idx].Transcript, opts.Transcript.Bytes()) {
+		sc.Sessions[idx].Metadata.Redaction = counts
+	}
 	sc.Sessions[idx].Transcript = opts.Transcript.Bytes()
 	sc.Sessions[idx].Prompts = checkpoint.RedactedJoinedPrompts(opts.Prompts)
 	if len(opts.SkillEvents) > 0 {
@@ -392,6 +396,10 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		// Contract: a zero CreatedAt means "use the current time".
 		createdAt = time.Now()
 	}
+	var redaction *redact.Counts
+	if opts.Transcript.Len() > 0 {
+		redaction = opts.Transcript.Counts()
+	}
 	return cp.Metadata{
 		CheckpointID:                opts.CheckpointID,
 		SessionID:                   opts.SessionID,
@@ -408,6 +416,7 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, //nolint:staticcheck // deliberate: git writes both so older CLIs can still read the metadata
 		TokenUsage:                  opts.TokenUsage,
+		Redaction:                   redaction,
 		SkillEvents:                 opts.SkillEvents,
 		SessionMetrics:              opts.SessionMetrics,
 		Summary:                     checkpoint.RedactSummary(opts.Summary),

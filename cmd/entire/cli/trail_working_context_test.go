@@ -347,7 +347,7 @@ func serveWorkingProjectRead(t *testing.T, w http.ResponseWriter, r *http.Reques
 		w.Header().Set("ETag", `W/"parent-version"`)
 		assert.NoError(t, json.NewEncoder(w).Encode(workingProjectTestResource()))
 	case projectTrailTestPath + "/changes/" + projectTrailTestChange:
-		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": projectTrailTestChange, "number": 7, "trailId": projectTrailTestID, "repositoryId": "repo-id", "branch": "feature/work", "status": "open"}))
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": projectTrailTestChange, "number": 7, "trailId": projectTrailTestID, "repositoryId": "repo-id", "branch": "feature/work", "base": "main", "status": "open"}))
 	default:
 		return false
 	}

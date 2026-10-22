@@ -28,6 +28,7 @@ var runOpenCodeExportToFileFn = runOpenCodeExportToFile
 var (
 	_ agent.ContextInjector           = (*OpenCodeAgent)(nil)
 	_ agent.SubagentTranscriptFetcher = (*OpenCodeAgent)(nil)
+	_ agent.LiveSubagentFileReporter  = (*OpenCodeAgent)(nil)
 )
 
 // InjectionEvent reports that OpenCode injects model context at TurnStart. The
@@ -317,6 +318,18 @@ func sessionTranscriptPath(ctx context.Context, sessionID string) (string, error
 // entireTmpName is .entire/tmp relative to the .entire root.
 var entireTmpName = entiredir.MustName(paths.EntireTmpDir)
 
+// mockExportName reports whether integration tests replace every
+// `opencode export` with a pre-written file (ENTIRE_TEST_OPENCODE_MOCK_EXPORT),
+// and names that file for sessionID: .entire/tmp/<sessionID>.json, relative to
+// the .entire root. Every export path asks here, so the test hook and its file
+// name live in one place.
+func mockExportName(sessionID string) (string, bool) {
+	if os.Getenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT") == "" {
+		return "", false
+	}
+	return entireTmpName + "/" + sessionID + ".json", true
+}
+
 // fetchAndCacheExport calls `opencode export <sessionID>` and writes the result
 // to a temporary file. Returns the path to the temp file.
 //
@@ -348,8 +361,8 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 	tmpFile := filepath.Join(entireDirAbs, filepath.FromSlash(tmpName))
 
 	// Integration test mode: use pre-written mock file without calling opencode export
-	if os.Getenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT") != "" {
-		if _, err := root.Stat(tmpName); err == nil {
+	if mockName, ok := mockExportName(sessionID); ok {
+		if _, err := root.Stat(mockName); err == nil {
 			return tmpFile, nil
 		}
 		return "", fmt.Errorf("mock export file not found: %s (ENTIRE_TEST_OPENCODE_MOCK_EXPORT is set)", tmpFile)
