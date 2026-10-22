@@ -36,9 +36,11 @@ import (
 // which turn start writes. See "Agent commits in another repository" in
 // docs/architecture/sessions-and-checkpoints.md.
 
-// foreignLockWait bounds the wait for A's state lock: a commit in B must not
-// block behind A's own session work.
-const foreignLockWait = 2 * time.Second
+// foreignLockWait bounds the wait for A's state lock. The agent is inside its
+// own commit, so A's lock is normally free; this covers parallel subagents'
+// hooks without letting a commit in B hang. Giving up leaves the trailer
+// without a checkpoint (logged). A var so tests can shorten it.
+var foreignLockWait = 30 * time.Second
 
 // foreignLinkFile carries a foreign session's link from prepare-commit-msg to
 // post-commit, in the per-worktree git dir like inheritedTrailersFile.

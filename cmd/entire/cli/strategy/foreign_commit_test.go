@@ -164,6 +164,9 @@ func TestPostCommit_ForeignTrailerWithoutMarker(t *testing.T) {
 // left unlinked rather than blocked.
 func TestPostCommit_ForeignLockHeld(t *testing.T) {
 	r := foreignCommitFixture(t, nil)
+	orig := foreignLockWait
+	foreignLockWait = 200 * time.Millisecond
+	t.Cleanup(func() { foreignLockWait = orig })
 	before := loadForeignTestState(t, r)
 	lock, err := stateLockInCommonDir(filepath.Join(r.a, ".git"), foreignTestSessionID)
 	require.NoError(t, err)
