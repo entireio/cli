@@ -33,7 +33,7 @@ func TestCompact_SimpleConversation(t *testing.T) {
 
 	expected := []string{
 		`{"v":1,"agent":"claude-code","cli_version":"0.5.1","type":"user","ts":"2026-01-01T00:00:00Z","content":[{"text":"hello"}]}`,
-		`{"v":1,"agent":"claude-code","cli_version":"0.5.1","type":"assistant","ts":"2026-01-01T00:00:01Z","id":"msg-1","input_tokens":100,"output_tokens":50,"content":[{"type":"text","text":"Hi!"}]}`,
+		`{"v":1,"agent":"claude-code","cli_version":"0.5.1","type":"assistant","ts":"2026-01-01T00:00:01Z","id":"msg-1","model":"unknown","input_tokens":100,"output_tokens":50,"content":[{"type":"text","text":"Hi!"}]}`,
 	}
 
 	result, err := Convert(input, defaultOpts)
@@ -196,7 +196,7 @@ func TestCompact_AssistantTokenUsage(t *testing.T) {
 
 	expected := []string{
 		`{"v":1,"agent":"claude-code","cli_version":"0.5.1","type":"user","ts":"t0","content":[{"text":"hello"}]}`,
-		`{"v":1,"agent":"claude-code","cli_version":"0.5.1","type":"assistant","ts":"t1","id":"m1","input_tokens":200,"output_tokens":75,"content":[{"type":"text","text":"Hi!"}]}`,
+		`{"v":1,"agent":"claude-code","cli_version":"0.5.1","type":"assistant","ts":"t1","id":"m1","model":"unknown","input_tokens":200,"output_tokens":75,"content":[{"type":"text","text":"Hi!"}]}`,
 	}
 
 	result, err := Convert(input, defaultOpts)
@@ -215,7 +215,7 @@ func TestCompact_StreamingFragmentTokenMerge(t *testing.T) {
 `)
 
 	expected := []string{
-		`{"v":1,"agent":"claude-code","cli_version":"0.5.1","type":"assistant","ts":"t2","id":"m1","input_tokens":100,"output_tokens":42,"content":[{"type":"text","text":"done"}]}`,
+		`{"v":1,"agent":"claude-code","cli_version":"0.5.1","type":"assistant","ts":"t2","id":"m1","model":"unknown","input_tokens":100,"output_tokens":42,"content":[{"type":"text","text":"done"}]}`,
 	}
 
 	result, err := Convert(input, defaultOpts)

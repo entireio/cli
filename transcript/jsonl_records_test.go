@@ -287,17 +287,56 @@ func TestJSONLAdapter_AlternatingFragmentRecordsGrowLinearly(t *testing.T) {
 func assertMatchesLegacy(t *testing.T, input []byte, preprocess linePreprocessor) {
 	t.Helper()
 
-	want, err := legacyCompactJSONLWith(input, defaultOpts, preprocess)
+	opts := defaultOpts
+	opts.Agent = "cursor" // claude-code lines carry per-call usage the oracle predates
+	want, err := legacyCompactJSONLWith(input, opts, preprocess)
 	if err != nil {
 		t.Fatalf("legacy: %v", err)
 	}
-	got, err := compactJSONLWith(input, defaultOpts, preprocess)
+	got, err := compactJSONLWith(input, opts, preprocess)
 	if err != nil {
 		t.Fatalf("compactJSONLWith: %v", err)
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("output differs from legacy compactor\ninput:\n%s\ngot:\n%s\nwant:\n%s", input, got, want)
 	}
+
+	opts.Agent = agentClaudeCode
+	want, err = legacyCompactJSONLWith(input, opts, preprocess)
+	if err != nil {
+		t.Fatalf("legacy: %v", err)
+	}
+	got, err = compactJSONLWith(input, opts, preprocess)
+	if err != nil {
+		t.Fatalf("compactJSONLWith: %v", err)
+	}
+	if got, want := withoutUsageFields(t, got), withoutUsageFields(t, want); !bytes.Equal(got, want) {
+		t.Fatalf("claude-code output differs from legacy compactor outside usage fields\ninput:\n%s\ngot:\n%s\nwant:\n%s", input, got, want)
+	}
+}
+
+func withoutUsageFields(t *testing.T, out []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	for _, line := range bytes.SplitAfter(out, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []string{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens", "reasoning_tokens"} {
+			delete(m, k)
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes()
 }
 
 // adapterRecords feeds chunks (or the whole input when chunks is nil) to a
@@ -307,6 +346,7 @@ func adapterRecords(input []byte, preprocess linePreprocessor, chunks [][]byte) 
 		chunks = [][]byte{input}
 	}
 	a := newJSONLAdapter(preprocess)
+	a.perCallUsage = true
 	var recs []Record
 	for _, c := range chunks {
 		recs = append(recs, a.Feed(c)...)

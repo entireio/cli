@@ -207,6 +207,8 @@ type parsedEntry struct {
 	userID       string            // prompt ID (user only, e.g. Claude's promptId)
 	inputTokens  int               // API input tokens (assistant only)
 	outputTokens int               // API output tokens (assistant only)
+	model        string            // message model (assistant only)
+	usage        *CallUsage        // per-call usage, nil when absent or malformed (assistant only)
 	content      json.RawMessage   // stripped assistant content array, or nil
 	userText     string            // extracted user text
 	userImages   []json.RawMessage // image blocks from user messages
@@ -223,6 +225,7 @@ func compactJSONL(content []byte, opts Options) ([]byte, error) {
 // folds the records, so checkpoints and live streams share one fold.
 func compactJSONLWith(content []byte, opts Options, preprocess linePreprocessor) ([]byte, error) {
 	a := newJSONLAdapter(preprocess)
+	a.perCallUsage = opts.Agent == agentClaudeCode
 	records := a.Feed(content)
 	records = append(records, a.Flush()...)
 	out, err := Fold(records, opts)
@@ -295,6 +298,8 @@ func parseLine(lineBytes []byte, preprocess linePreprocessor) (parsedEntry, bool
 				e.content = stripAssistantContent(contentRaw)
 			}
 			e.inputTokens, e.outputTokens = extractUsageTokens(msg)
+			e.model = unquote(msg["model"])
+			e.usage = extractCallUsage(msg)
 		}
 
 	case TypeUser:
@@ -387,6 +392,39 @@ func extractUsageTokens(msg map[string]json.RawMessage) (inputTokens, outputToke
 		return 0, 0
 	}
 	return usage.InputTokens, usage.OutputTokens
+}
+
+// extractCallUsage parses a Claude message's whole "usage" object. It returns
+// nil if usage is absent or malformed. The cache-write split is kept only when
+// both durations are reported.
+func extractCallUsage(msg map[string]json.RawMessage) *CallUsage {
+	usageRaw, ok := msg["usage"]
+	if !ok || string(bytes.TrimSpace(usageRaw)) == "null" {
+		return nil
+	}
+	var usage struct {
+		Input         int64 `json:"input_tokens"`
+		CacheRead     int64 `json:"cache_read_input_tokens"`
+		CacheWrite    int64 `json:"cache_creation_input_tokens"`
+		Output        int64 `json:"output_tokens"`
+		CacheCreation *struct {
+			FiveMinutes *int64 `json:"ephemeral_5m_input_tokens"`
+			OneHour     *int64 `json:"ephemeral_1h_input_tokens"`
+		} `json:"cache_creation"`
+	}
+	if json.Unmarshal(usageRaw, &usage) != nil {
+		return nil
+	}
+	u := &CallUsage{
+		InputTokens:      usage.Input,
+		OutputTokens:     usage.Output,
+		CacheReadTokens:  usage.CacheRead,
+		CacheWriteTokens: usage.CacheWrite,
+	}
+	if c := usage.CacheCreation; c != nil && c.FiveMinutes != nil && c.OneHour != nil {
+		u.CacheWrite5mTokens, u.CacheWrite1hTokens = c.FiveMinutes, c.OneHour
+	}
+	return u
 }
 
 // isEmptyContentArray returns true if raw is a JSON empty array (`[]`).

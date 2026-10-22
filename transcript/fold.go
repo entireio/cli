@@ -29,6 +29,7 @@ type message struct {
 	rekeyed      int            // blocks[:rekeyed] are written with sorted keys
 	inputTokens  int
 	outputTokens int
+	usage        *CallUsage
 	dropped      bool
 }
 
@@ -135,6 +136,19 @@ func (f *Folder) line(m *message) ([]byte, bool) {
 	line.ID = m.sourceID
 	line.InputTokens = int64(m.inputTokens)
 	line.OutputTokens = int64(m.outputTokens)
+	if u := m.usage; u != nil && m.role == TypeAssistant {
+		line.Model = u.Model
+		if line.Model == "" {
+			line.Model = unknownModel
+		}
+		line.InputTokens = u.InputTokens
+		line.OutputTokens = u.OutputTokens
+		line.CacheReadTokens = u.CacheReadTokens
+		line.CacheWriteTokens = u.CacheWriteTokens
+		line.CacheWrite5mTokens = u.CacheWrite5mTokens
+		line.CacheWrite1hTokens = u.CacheWrite1hTokens
+		line.ReasoningTokens = u.ReasoningTokens
+	}
 	line.Content = content
 	b, err := json.Marshal(line)
 	if err != nil {
@@ -226,8 +240,9 @@ func cloneRaw(raw json.RawMessage) json.RawMessage {
 	return json.RawMessage(bytes.Clone(raw))
 }
 
-// setTokens applies the record's non-zero token counts. Agents report
-// cumulative usage, so the latest non-zero value is the total.
+// setTokens applies the record's non-zero token counts, and its usage snapshot
+// if it has one. Agents report cumulative usage, so the latest non-zero value
+// is the total.
 func (m *message) setTokens(r Record) {
 	if r.InputTokens > 0 {
 		m.inputTokens = r.InputTokens
@@ -235,6 +250,22 @@ func (m *message) setTokens(r Record) {
 	if r.OutputTokens > 0 {
 		m.outputTokens = r.OutputTokens
 	}
+	if r.Usage != nil {
+		m.usage = cloneCallUsage(r.Usage)
+	}
+}
+
+func cloneCallUsage(u *CallUsage) *CallUsage {
+	c := *u
+	if u.CacheWrite5mTokens != nil {
+		v := *u.CacheWrite5mTokens
+		c.CacheWrite5mTokens = &v
+	}
+	if u.CacheWrite1hTokens != nil {
+		v := *u.CacheWrite1hTokens
+		c.CacheWrite1hTokens = &v
+	}
+	return &c
 }
 
 // setContent replaces the content with raw, undecoded.
