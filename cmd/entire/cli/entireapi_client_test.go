@@ -26,7 +26,7 @@ func TestCurrentRepoRef_UsesProcessingPlacement(t *testing.T) {
 		clusters: clustersWithSlugs(),
 	})
 
-	repoID, slug := currentRepoRef(t.Context())
+	repoID, slug, _ := currentRepoRef(t.Context())
 	if repoID != "mirror-us" || slug != "entirehq/entire.io" {
 		t.Errorf("currentRepoRef = (%q, %q), want (mirror-us, entirehq/entire.io)", repoID, slug)
 	}
@@ -37,7 +37,7 @@ func TestCurrentRepoRef_LookupFailureIsBestEffort(t *testing.T) {
 	setupRecapRepo(t, "https://github.com/entirehq/entire.io.git")
 	withFakeCellCore(t, &fakeCellCore{reposErr: errors.New("control plane down")})
 
-	if repoID, slug := currentRepoRef(t.Context()); repoID != "" || slug != "" {
+	if repoID, slug, _ := currentRepoRef(t.Context()); repoID != "" || slug != "" {
 		t.Errorf("currentRepoRef = (%q, %q), want empty so recap shows the personal side only", repoID, slug)
 	}
 }

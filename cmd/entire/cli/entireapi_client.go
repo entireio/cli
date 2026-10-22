@@ -35,19 +35,20 @@ func runAuthenticatedActivityAPI(ctx context.Context, errW io.Writer, insecureHT
 // resolution (the caller needs both; resolving twice would double the git and
 // control-plane work). The ULID is the repo's processing placement id: a repo
 // mirrored in several regions has a different id per placement, and only the
-// processing one holds its data. Any failure returns "", "" — recap then shows
+// processing one holds its data. cell is that placement's cell, where the
+// repo's team data lives. Any failure returns zero values — recap then shows
 // the personal side only rather than erroring.
-func currentRepoRef(ctx context.Context) (repoID, repoSlug string) {
+func currentRepoRef(ctx context.Context) (repoID, repoSlug string, cell *auth.CellTarget) {
 	ctx, cancel := context.WithTimeout(ctx, currentRepoRefTimeout)
 	defer cancel()
 
 	forge, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
 	if err != nil || owner == "" || repo == "" {
-		return "", ""
+		return "", "", nil
 	}
 	placement, err := resolveForgeRepoCellPlacement(ctx, forge, owner, repo)
 	if err != nil || placement.RepoID == "" {
-		return "", ""
+		return "", "", nil
 	}
-	return placement.RepoID, owner + "/" + repo
+	return placement.RepoID, owner + "/" + repo, placement.Target
 }
