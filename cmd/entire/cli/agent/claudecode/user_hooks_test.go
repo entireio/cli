@@ -224,3 +224,27 @@ func TestEnsureUserHooks_NoClaudeConfigDirCreatesNothing(t *testing.T) {
 		t.Errorf("Claude config dir was created (stat err = %v)", err)
 	}
 }
+
+func TestEnsureUserHooks_KeepsTheFileMode(t *testing.T) {
+	userDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	t.Chdir(t.TempDir())
+	path := filepath.Join(userDir, ClaudeSettingsFileName)
+	if err := os.WriteFile(path, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := EnsureUserHooks(context.Background()); err != nil {
+		t.Fatalf("EnsureUserHooks() error = %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("settings.json mode = %o, want 644", got)
+	}
+}

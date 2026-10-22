@@ -80,6 +80,11 @@ func (u userClaudeSettings) Write(data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(target), err)
 	}
+	// The user chose this file's mode; keep it rather than imposing the
+	// project file's 0o600.
+	if info, err := os.Stat(target); err == nil {
+		perm = info.Mode().Perm()
+	}
 	if err := jsonutil.WriteFileAtomic(target, data, perm); err != nil {
 		return fmt.Errorf("write %s: %w", u.path, err)
 	}
