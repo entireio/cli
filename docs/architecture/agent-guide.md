@@ -51,7 +51,8 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
-| `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
+| `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers, Antigravity's subagents) |
+| `SubagentReplyCounter` | `TurnSubagents`, `RepliesSent` | A parent can stop while its detached subagents run and may never report its turn's end afterwards (Antigravity's `fullyIdle=false` Stop); the lifecycle ends the turn once every subagent stopped and every reply reached the parent |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
 | `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
@@ -577,6 +578,19 @@ Droid does this for Workers: its `PostToolUse` fires when the Worker is
 *dispatched*, not when it finishes, so the worktree is still untouched at
 `SubagentEnd` and only the Worker's own session boundary delimits its work.
 
+Antigravity does the same: `invoke_subagent` starts a conversation of its own,
+and only that conversation's hooks show its work.
+
+The lifecycle calls the resolver at the subagent's TurnStart, at each ToolUse,
+and at its turn end, and on the first success it marks the subagent's state
+(`ParentSessionID`) and records a live task record on the parent. A marked
+session never links a commit, condenses on its own, or answers caller
+resolution; its ToolUse changes go to the parent's `FilesTouched`, so a commit
+made while the subagent runs carries its transcript so far as the parent's
+task. Resolve as early as the agent's data allows: Droid's `session_start` line
+exists at the Worker's first hook, while agy writes a subagent's transcript
+only by its first tool call.
+
 **Do NOT implement** when subagents block the parent's turn (Claude Code's Task
 tool) — the `SubagentEnd` path already bounds that work correctly.
 
@@ -996,7 +1010,7 @@ Captured from real agy stdin (1.0.x); all enforced by tests in `agent/antigravit
 - **`invocationNum` is 0-indexed** — the first model invocation of a conversation is `0`. PreInvocation fires per *model invocation*, not per user prompt, so only `invocationNum == 0` maps directly to TurnStart; `invocationNum > 0` emits a TurnStart with `Event.SuppressIfSessionActive` and the dispatcher drops it when a turn is genuinely mid-flight (resumes via `agy --conversation` start at `> 0` and must still be tracked).
 - **Transcript is written AFTER the Stop hook** — `PrepareTranscript` briefly waits, then materialises an empty placeholder; condensation degrades to a files/prompt-only checkpoint and re-extracts prompts late (`resolvePromptsFromLateFlushedTranscript`). The hook payload's `transcriptPath` points at `transcript_full.jsonl` under `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/`.
 - **Tool args can be double-encoded** — `toolCall.args` values sometimes arrive as JSON strings containing JSON; see `decodeAgyString`/`decodeAgyBool`.
-- **Token usage has exactly one surface** — the statusline/title JSON payload (`context_window`). The integration tees it to disk via the global settings.json `title` slot (`entire hooks antigravity title-tee`) and implements `OutOfBandTokenSource`.
+- **Token usage comes from per-step transcript fields** — current agy writes `input_tokens`/`output_tokens`/`cache_read_tokens` on each `PLANNER_RESPONSE` step, read by `TokenCalculator`. Older agy has only the statusline/title JSON payload (`context_window`), which the integration tees to disk via the global settings.json `title` slot (`entire hooks antigravity title-tee`) and reads as the `OutOfBandTokenSource` fallback.
 - **SessionStart is installed but silent** — `session-start` (agy 1.1.1+) fires once per new conversation, not on `agy --conversation` resumes, and maps to `SessionStart` for the model hint and the zombie-session sweep. `AntigravityAgent` is not a `HookResponseWriter`, so no banner is written and agy tracks silently like Cursor/OpenCode/Copilot/Pi. Only SessionStart, PreToolUse, PreInvocation, and Stop are installed — agy's PostToolUse/PostInvocation have no lifecycle mapping and are deliberately not installed.
 
 #### Antigravity status: Preview
@@ -1007,9 +1021,10 @@ nothing in the CLI renders a label. Known limitations while in preview:
 
 - **No in-agy banner**: tracking is silent inside the agy UI (SessionStart is
   installed but writes no banner). `entire status` is the visibility surface.
-- **Mid-turn commit token scoping is coarse**: a checkpoint created by a
-  mid-turn agy commit records zero tokens; the turn's delta lands on the next
-  condensation. Session totals stay correct.
+- **Mid-turn commit token scoping is coarse on the statusline fallback**
+  (older agy): a checkpoint created by a mid-turn agy commit records zero
+  tokens; the turn's delta lands on the next condensation. With per-step
+  transcript usage the commit counts the calls already written.
 - **First-turn mid-turn commits may checkpoint without transcript content**
   (files + prompt only): agy writes its transcript after the Stop hook, so the
   condensation can run against the empty placeholder. Prompts are recovered on

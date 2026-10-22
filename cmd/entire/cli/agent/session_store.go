@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -426,6 +427,26 @@ func (s *SessionStore) ReadFile(name string) ([]byte, error) {
 	}
 	defer root.Close()
 	return osroot.ReadFileNoFollow(root, name) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
+}
+
+// ReadFileHead reads at most maxBytes from the start of name, for callers that
+// only look at a file's first lines.
+func (s *SessionStore) ReadFileHead(name string, maxBytes int64) ([]byte, error) {
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	f, err := osroot.OpenNoFollow(root, name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserved for os.IsNotExist at call sites
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", name, err)
+	}
+	return data, nil
 }
 
 // WriteFile writes name in the store, creating parent directories. Session

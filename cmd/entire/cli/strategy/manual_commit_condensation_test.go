@@ -692,7 +692,8 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 }
 
 // TestCondenseSession_OutOfBandTokenFallback verifies that for an agent without
-// transcript-embedded token data (Antigravity is not a TokenCalculator), a
+// transcript-embedded token data (an Antigravity transcript without per-step
+// usage, so its TokenCalculator returns nil), a
 // populated SessionState.TokenUsage flows through to the per-session
 // CommittedMetadata.token_usage on the metadata branch. This is the out-of-band
 // fallback: agy accumulates per-turn deltas into SessionState.TokenUsage at

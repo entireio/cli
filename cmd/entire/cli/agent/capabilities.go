@@ -48,6 +48,7 @@ type CapabilityDeclarer interface {
 //   - SkillDiscoverer
 //   - SkillEventExtractor
 //   - StaleHookReporter
+//   - SubagentReplyCounter
 //   - SubagentSessionResolver
 //   - SubagentTranscriptFetcher
 //   - TaskTranscriptMatcher
@@ -330,6 +331,12 @@ func AsSubagentAwareExtractor(ag Agent) (SubagentAwareExtractor, bool) {
 // subagent boundaries through their own hooks.
 func AsSubagentSessionResolver(ag Agent) (SubagentSessionResolver, bool) {
 	return builtinCapability[SubagentSessionResolver](ag)
+}
+
+// AsSubagentReplyCounter returns the agent as SubagentReplyCounter if it
+// implements the interface. Built-in only.
+func AsSubagentReplyCounter(ag Agent) (SubagentReplyCounter, bool) {
+	return builtinCapability[SubagentReplyCounter](ag)
 }
 
 // AsSessionBaseDirProvider returns the agent as SessionBaseDirProvider if it implements

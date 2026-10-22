@@ -256,6 +256,13 @@ type Event struct {
 	// and the dispatcher resolves it against session state (which agent packages
 	// may not read directly).
 	SuppressIfSessionActive bool
+
+	// AwaitingSubagents marks a TurnEnd that does not end the turn: the agent
+	// stopped while subagents it started are still running (Antigravity's
+	// Stop with fullyIdle=false). The lifecycle records the pause, and ends
+	// the turn itself when the last of those subagents finishes, because the
+	// agent may never report the turn's real end.
+	AwaitingSubagents bool
 }
 
 // SubagentLaunchMode is how an agent ran a subagent, as reported by the agent
