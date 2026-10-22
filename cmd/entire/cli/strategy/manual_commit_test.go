@@ -326,6 +326,13 @@ func TestManualCommit_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
 		SubagentTokensBaseline: &agent.TokenUsage{OutputTokens: 4},
 	}
 
+	// A rewrite rebased the offsets to 0 and carried the pending usage.
+	endedWithRewrittenTokens := &SessionState{
+		SessionID: "ended-with-rewritten-tokens", BaseCommit: "ggg7783", StartedAt: now.Add(-2 * time.Hour), Phase: "ended",
+		RewrittenTokenUsage: &agent.TokenUsage{InputTokens: 7, APICallCount: 1},
+	}
+	endedWithRewrittenTokens.SetTokenStart(0)
+
 	// Session 7d: ENDED with an all-zero token usage and no offsets: nothing to
 	// keep, so cleaned up.
 	endedWithZeroTokens := &SessionState{
@@ -334,9 +341,9 @@ func TestManualCommit_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
 	}
 
 	fixtures := []*SessionState{legacyEmpty, idleUnknownOwner, idleDeadOwner, staleEnded, idleWithEndedAt, endedWithSteps, activeNoShadow, condensedIdle, recordEnded,
-		endedWithTokens, endedWithSubagentTokens, endedWithOffsets, endedWithTokenOffset, endedWithSubagentBaseline, endedWithZeroTokens}
+		endedWithTokens, endedWithSubagentTokens, endedWithOffsets, endedWithTokenOffset, endedWithSubagentBaseline, endedWithRewrittenTokens, endedWithZeroTokens}
 	wantKept := []string{"active-no-shadow", "condensed-idle", "ended-with-steps", "record-ended", "idle-dead-owner", "idle-unknown-owner", "legacy-empty-phase",
-		"ended-with-tokens", "ended-with-subagent-tokens", "ended-with-offsets", "ended-with-token-offset", "ended-with-subagent-baseline"}
+		"ended-with-tokens", "ended-with-subagent-tokens", "ended-with-offsets", "ended-with-token-offset", "ended-with-subagent-baseline", "ended-with-rewritten-tokens"}
 	for _, state := range fixtures {
 		if err := s.saveSessionState(context.Background(), state); err != nil {
 			t.Fatalf("saveSessionState(%s) error = %v", state.SessionID, err)

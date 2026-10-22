@@ -163,7 +163,8 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // phases, which normalize to IDLE — are live sessions between turns or belong
 // to the exited-owner finalizer, so they age out through StaleSessionThreshold.
 //
-// A state that holds uncommitted tokens, or transcript offsets or a subagent
+// A state that holds uncommitted tokens (pending, or carried past a transcript
+// rewrite in RewrittenTokenUsage), or transcript offsets or a subagent
 // baseline from an earlier checkpoint, is kept until it is stale too. A
 // headless agent ends its session after every prompt, and a turn that changes
 // no files clears LastCheckpointID without adding pending work. Deleting that
@@ -171,7 +172,8 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // checkpoint would store the earlier turns a second time.
 func isOrphanedSessionState(state *SessionState) bool {
 	return isEndedWithoutContent(state) &&
-		!hasTokenUsageData(state.CheckpointTokenUsage) && !hasTokenUsageData(state.SubagentTokensBaseline) &&
+		!hasTokenUsageData(state.CheckpointTokenUsage) && !hasTokenUsageData(state.RewrittenTokenUsage) &&
+		!hasTokenUsageData(state.SubagentTokensBaseline) &&
 		state.TokenStart() == 0 && state.CheckpointTranscriptStart == 0
 }
 
