@@ -4,6 +4,8 @@ package integration
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -67,6 +69,15 @@ func TestCrossWorktreeCondenseSessionByID(t *testing.T) {
 			require.NoError(t, caller.WriteSessionState(sess.ID, state))
 
 			if tc.removed {
+				// The agent's transcript lives outside the worktree (as Claude
+				// Code's does), so it survives the removal; only the stored
+				// turn-end copy under the home's .entire goes with it.
+				kept := filepath.Join(t.TempDir(), "transcript.jsonl")
+				transcript, err := os.ReadFile(sess.TranscriptPath)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(kept, transcript, 0o600))
+				state.TranscriptPath = kept
+				require.NoError(t, caller.WriteSessionState(sess.ID, state))
 				testutil.RunGit(t, caller.RepoDir, "worktree", "remove", "--force", home.RepoDir)
 			} else {
 				// Even the home worktree's current HEAD is not authoritative:
@@ -86,6 +97,8 @@ func TestCrossWorktreeCondenseSessionByID(t *testing.T) {
 			require.NoError(t, json.Unmarshal([]byte(data), &summary))
 			assert.Equal(t, tc.wantBranch, summary.Branch, "checkpoint must use the target session's recorded branch, not either worktree's HEAD")
 			assert.Equal(t, []string{"pending.go"}, summary.FilesTouched)
+			_, found = caller.ReadFileFromBranch(paths.MetadataBranchName, SessionFilePath(state.LastCheckpointID.String(), paths.TranscriptFileName))
+			assert.True(t, found, "condensation must store the transcript")
 		})
 	}
 }
