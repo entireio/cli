@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v6"
@@ -156,7 +157,7 @@ func TestPostCommit_UnclaimedCheckpointTrailer(t *testing.T) {
 func captureStrategyLogs(t *testing.T, fn func(ctx context.Context)) string {
 	t.Helper()
 
-	worktree := t.TempDir()
+	worktree := testutil.TempDir(t)
 	logger, err := logging.New(logging.Config{
 		Root:  entiredir.OpenerAt(worktree),
 		Dir:   logging.LogsName,

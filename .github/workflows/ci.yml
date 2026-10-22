@@ -112,7 +112,7 @@ jobs:
 
   test-windows:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -124,6 +124,10 @@ jobs:
       # test name so this job selects them without running POSIX-only harnesses.
       - name: Windows unit tests
         run: go test ./cmd/entire/cli/... -run '(Windows|MSYS)' -count=1 -v
+      # Whole packages that pass on Windows run unfiltered, so a POSIX
+      # assumption in them fails here instead of building up unseen.
+      - name: Windows package tests
+        run: go test ./cmd/entire/cli/strategy/ -count=1 -timeout 15m
 
   test:
     runs-on: ubuntu-latest

@@ -41,12 +41,13 @@ func TestWorktreeRoot_Cache(t *testing.T) {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) first call error: %v", err)
 	}
 
-	// Resolve symlinks for comparison (macOS /var -> /private/var).
+	// Resolve symlinks for comparison (macOS /var -> /private/var). Clean got:
+	// git prints the root with forward slashes on Windows.
 	want, err := filepath.EvalSymlinks(tmpDir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks error: %v", err)
 	}
-	if got != want {
+	if filepath.Clean(got) != want {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) = %q, want %q", got, want)
 	}
 
@@ -59,7 +60,7 @@ func TestWorktreeRoot_Cache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) cached call should succeed, got error: %v", err)
 	}
-	if got2 != want {
+	if filepath.Clean(got2) != want {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) cached = %q, want %q", got2, want)
 	}
 
@@ -96,7 +97,7 @@ func TestWorktreeRoot_MainRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) error: %v", err)
 	}
-	if got != tmpDir {
+	if filepath.Clean(got) != tmpDir {
 		t.Errorf("paths.WorktreeRoot(context.Background()) = %q, want repo root %q", got, tmpDir)
 	}
 
@@ -112,7 +113,7 @@ func TestWorktreeRoot_MainRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) from subdir error: %v", err)
 	}
-	if got != tmpDir {
+	if filepath.Clean(got) != tmpDir {
 		t.Errorf("paths.WorktreeRoot(context.Background()) from subdir = %q, want repo root %q", got, tmpDir)
 	}
 }
@@ -154,7 +155,7 @@ func TestWorktreeRoot_Worktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) error: %v", err)
 	}
-	if got != worktreeDir {
+	if filepath.Clean(got) != worktreeDir {
 		t.Errorf("paths.WorktreeRoot(context.Background()) = %q, want worktree root %q", got, worktreeDir)
 	}
 	if got == mainDir {
@@ -173,7 +174,7 @@ func TestWorktreeRoot_Worktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) from worktree subdir error: %v", err)
 	}
-	if got != worktreeDir {
+	if filepath.Clean(got) != worktreeDir {
 		t.Errorf("paths.WorktreeRoot(context.Background()) from worktree subdir = %q, want %q", got, worktreeDir)
 	}
 	if got == mainDir {
@@ -758,6 +759,7 @@ func TestGetGitAuthorFromRepo(t *testing.T) {
 			// Isolate global git config by pointing HOME to a temp dir
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home) // Windows' home for git and os.UserHomeDir
 			t.Setenv("XDG_CONFIG_HOME", "")
 
 			// Write global .gitconfig if needed
@@ -877,7 +879,7 @@ func TestEnsurePrimaryRef(t *testing.T) {
 
 	t.Run("creates from remote on fresh clone", func(t *testing.T) {
 		bareDir := initBareWithMetadataBranch(t)
-		cloneDir := filepath.Join(t.TempDir(), "clone")
+		cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 		cmd := exec.CommandContext(context.Background(), "git", "clone", bareDir, cloneDir)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("clone failed: %v\n%s", err, out)
@@ -913,7 +915,7 @@ func TestEnsurePrimaryRef(t *testing.T) {
 	t.Run("updates empty orphan from remote", func(t *testing.T) {
 		t.Parallel()
 		bareDir := initBareWithMetadataBranch(t)
-		cloneDir := filepath.Join(t.TempDir(), "clone")
+		cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 		cmd := exec.CommandContext(context.Background(), "git", "clone", bareDir, cloneDir)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("clone failed: %v\n%s", err, out)
@@ -1104,7 +1106,7 @@ func TestEnsurePrimaryRef_SeedsV1FromRemote(t *testing.T) {
 // and returns the clone path and a git runner function.
 func cloneWithConfig(t *testing.T, bareDir string) (string, func(args ...string)) {
 	t.Helper()
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	// GitIsolatedEnv on every invocation, matching initBareWithMetadataBranch:
 	// without it these commands inherit the developer's or CI's global git
 	// config, and a global gc.autoDetach=true lets a background `git gc` write
@@ -1792,4 +1794,13 @@ func TestEnsureRedactionConfigured_NarrowedScanners(t *testing.T) {
 	if !info2.ModTime().Equal(info.ModTime()) {
 		t.Fatal("marker rewritten on re-run; narrowed-coverage notice re-emitted")
 	}
+}
+
+// jsonQuote returns s as a JSON string literal, for paths spliced into
+// transcript fixtures: a Windows path's backslashes are escapes in JSON.
+func jsonQuote(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	require.NoError(t, err)
+	return string(b)
 }

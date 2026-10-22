@@ -31,7 +31,7 @@ func relocateClaudeHome(t *testing.T) string {
 	home := canonicalTempDir(t)
 	t.Setenv("CLAUDE_CONFIG_DIR", home)
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", "")
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("ENTIRE_CONFIG_DIR", testutil.TempDir(t))
 	return home
 }
 

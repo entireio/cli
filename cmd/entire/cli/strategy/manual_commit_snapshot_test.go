@@ -115,8 +115,8 @@ func TestCreateSnapshotCheckpoint_SeesEditsFromTheCurrentTurn(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, state.FilesTouched, "premise: the edit has not reached FilesTouched")
 
-			writeLine := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` +
-				tc.writtenPath(state.WorktreePath) + `","content":"x"}}]}}` + "\n"
+			writeLine := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":` +
+				jsonQuote(t, tc.writtenPath(state.WorktreePath)) + `,"content":"x"}}]}}` + "\n"
 			require.NoError(t, os.WriteFile(state.TranscriptPath, []byte(researchTranscript+writeLine), 0o644))
 
 			_, err = (&ManualCommitStrategy{}).CreateSnapshotCheckpoint(context.Background(), sessionID)

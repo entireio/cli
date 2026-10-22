@@ -294,7 +294,7 @@ func TestFetchAndRebase_NonBranchRefDisconnected(t *testing.T) {
 	gitRun(setupDir, "push", "origin", customRef.String()+":"+customRef.String())
 	gitRun(setupDir, "checkout", "main")
 
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")
@@ -378,7 +378,7 @@ func TestFetchAndRebase_DivergedBranches(t *testing.T) {
 	gitRun(workDir, "checkout", "main")
 
 	// 2. Clone into two separate working directories
-	cloneA := filepath.Join(t.TempDir(), "cloneA")
+	cloneA := filepath.Join(testutil.TempDir(t), "cloneA")
 	cloneB := filepath.Join(t.TempDir(), "cloneB")
 	require.NoError(t, os.MkdirAll(cloneA, 0o755))
 	require.NoError(t, os.MkdirAll(cloneB, 0o755))
@@ -473,7 +473,7 @@ func TestFetchAndRebase_SharedCloneLocalCommitInAlternate(t *testing.T) {
 	bareDir := t.TempDir()
 	sourceDir := filepath.Join(t.TempDir(), "source")
 	remoteWorkDir := filepath.Join(t.TempDir(), "remote-work")
-	cloneDir := filepath.Join(t.TempDir(), "shared-clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "shared-clone")
 	gitRun := func(dir string, args ...string) string {
 		return testutil.RunGit(t, dir, args...)
 	}
@@ -573,7 +573,7 @@ func TestFetchAndRebase_LocalBehind(t *testing.T) {
 	gitRun(workDir, "checkout", "main")
 
 	// Clone
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")
@@ -652,7 +652,7 @@ func TestFetchAndRebase_MergeBaseOnSecondParent_DoesNotReplayAncestors(t *testin
 	gitRun(setupDir, "checkout", "main")
 
 	// Clone twice: local gets the old merge-commit history, remote advances later.
-	cloneLocal := filepath.Join(t.TempDir(), "clone-local")
+	cloneLocal := filepath.Join(testutil.TempDir(t), "clone-local")
 	cloneRemote := filepath.Join(t.TempDir(), "clone-remote")
 	require.NoError(t, os.MkdirAll(cloneLocal, 0o755))
 	require.NoError(t, os.MkdirAll(cloneRemote, 0o755))
@@ -777,7 +777,7 @@ func TestFetchAndRebase_DoesNotResurrectRemoteOnlyCheckpointFromMerge(t *testing
 	gitRun(setupDir, "push", "origin", branchName)
 	gitRun(setupDir, "checkout", "main")
 
-	cloneLocal := filepath.Join(t.TempDir(), "clone-local")
+	cloneLocal := filepath.Join(testutil.TempDir(t), "clone-local")
 	cloneRemote := filepath.Join(t.TempDir(), "clone-remote")
 	require.NoError(t, os.MkdirAll(cloneLocal, 0o755))
 	require.NoError(t, os.MkdirAll(cloneRemote, 0o755))
@@ -889,7 +889,7 @@ func TestFetchAndRebase_NonOriginRemote_ReconcilesFetchedRef(t *testing.T) {
 	gitRun(setupDir, "push", "origin", branchName)
 	gitRun(setupDir, "checkout", "main")
 
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")
@@ -986,7 +986,7 @@ func TestFetchAndRebase_URLTarget_ReconcilesFetchedTempRef(t *testing.T) {
 	gitRun(setupDir, "push", "origin", branchName)
 	gitRun(setupDir, "checkout", "main")
 
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")
@@ -1080,7 +1080,7 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 	gitRun(setupDir, "push", "origin", branchName)
 	gitRun(setupDir, "checkout", "main")
 
-	cloneDir := filepath.Join(t.TempDir(), "clone")
+	cloneDir := filepath.Join(testutil.TempDir(t), "clone")
 	require.NoError(t, os.MkdirAll(cloneDir, 0o755))
 	gitRun(cloneDir, "clone", bareDir, ".")
 	gitRun(cloneDir, "config", "user.email", "test@test.com")

@@ -103,8 +103,8 @@ func setupIgnoreAndSubmoduleRepo(t *testing.T) (dir, worktreePath string) {
 func saveMidTurnSession(t *testing.T, s *ManualCommitStrategy, dir, worktreePath, sessionID string, files ...string) {
 	t.Helper()
 	writeLine := func(path string) string {
-		return `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` +
-			filepath.Join(worktreePath, path) + `","content":"x"}}]}}` + "\n"
+		return `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":` +
+			jsonQuote(t, filepath.Join(worktreePath, path)) + `,"content":"x"}}]}}` + "\n"
 	}
 	var transcript strings.Builder
 	transcript.WriteString(`{"type":"human","message":{"content":"write files"}}` + "\n")

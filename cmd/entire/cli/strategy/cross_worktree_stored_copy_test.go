@@ -34,7 +34,7 @@ func writeStoredCopy(t *testing.T, worktreeRoot, sessionID, marker string) {
 // transcript once the agent's live file is gone.
 func TestCondenseSessionByID_ReadsStoredCopyFromLinkedWorktree(t *testing.T) { //nolint:paralleltest // uses t.Chdir
 	mainDir := setupGitRepo(t)
-	worktreeDir := filepath.Join(t.TempDir(), "linked")
+	worktreeDir := filepath.Join(testutil.TempDir(t), "linked")
 	testutil.RunGit(t, mainDir, "worktree", "add", worktreeDir, "-b", "linked-branch")
 
 	s := &ManualCommitStrategy{}
@@ -148,7 +148,7 @@ func TestStoredSessionRoot_RefusesUntrustedWorktreePaths(t *testing.T) { //nolin
 	writeStoredCopy(t, unregistered, sessionID, "unregistered-copy")
 
 	// A registered worktree with a genuine stored copy, named relatively.
-	linked := filepath.Join(t.TempDir(), "linked")
+	linked := filepath.Join(testutil.TempDir(t), "linked")
 	testutil.RunGit(t, mainDir, "worktree", "add", linked, "-b", "linked-branch")
 	linked = gitToplevel(t, linked)
 	writeStoredCopy(t, linked, sessionID, "linked-copy")

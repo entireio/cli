@@ -135,6 +135,12 @@ t.Chdir(tmpDir)                                 // redirect CWD-based git resolu
 
 **Do NOT** shell out to `git init`/`git commit` directly without setting user config and `--no-gpg-sign`, and **do NOT** run lifecycle/strategy handlers from the real repo CWD in tests.
 
+#### Temp repositories on Windows
+
+Windows cannot delete a directory while a handle to it is open, and the `osroot.Shared` registry deliberately keeps the roots it opens for the life of the process. A test whose code under test anchors a root in its temp directory therefore fails `t.TempDir` cleanup on Windows with "being used by another process", and the leaked handles also make the package run several times slower there. `testutil.InitRepo` releases every root opened in the repository before the directory is removed. A test that builds its directory another way (a `git clone` or `git worktree add` target, a bare hooks or `.entire` directory) creates it with `testutil.TempDir(t)` instead of `t.TempDir()`, or calls `testutil.ReleaseRootsOnCleanup` after creating it. Never reach for `osroot.ResetShared` here: it closes roots that parallel tests are still using.
+
+The `test-windows` CI job runs whole packages (currently `strategy`) on Windows unfiltered, so a test that misses this, or that assumes POSIX paths or permission bits, fails there. Spell paths the way production records them: session state stores worktree paths as `git rev-parse --show-toplevel` prints them, which on Windows uses forward slashes, and paths spliced into JSON fixtures must be JSON-encoded because backslashes are escapes.
+
 #### Keeping the developer's git config out
 
 An isolated temp repo is not the same as an isolated git *config*. `testutil.InitRepo` writes repo-local settings, but `~/.gitconfig` still applies on top of them, so a host that sets `commit.gpgSign`, `tag.gpgSign` or `transfer.fsckObjects` can decide test outcomes. Isolation has two layers, and most packages need both:

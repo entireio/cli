@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -149,7 +148,10 @@ func getHooksDirInPath(ctx context.Context, dir string) (string, error) {
 	}
 
 	hooksDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(hooksDir) {
+	// A rooted path such as core.hooksPath=/dev/null is not IsAbs on Windows
+	// (it has no drive), but it is not relative to dir either; joining it
+	// would turn /dev/null into <repo>/dev/null.
+	if !filepath.IsAbs(hooksDir) && !strings.HasPrefix(filepath.ToSlash(hooksDir), "/") {
 		hooksDir = filepath.Join(dir, hooksDir)
 	}
 
@@ -678,6 +680,39 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 	return path[2] == '\\' || path[2] == '/'
 }
 
+// hooksDirBlockedByFile reports whether hooksDir, or the nearest of its
+// ancestors that exists, is a non-directory: core.hooksPath=/dev/null, or
+// /dev/null/hooks below it. Either way MkdirAll cannot create it.
+//
+// It walks up rather than testing the error from one Stat for ENOTDIR, because
+// Windows has no distinct "component is a file" error: its syscall.ENOTDIR is
+// ERROR_PATH_NOT_FOUND, which is also what a plain missing parent returns. That
+// made a relative core.hooksPath whose parent did not exist yet (Husky's
+// .husky/_ before .husky is created) read as misconfigured on Windows.
+//
+// /dev/null is matched by name first. On Windows it is not a device path at
+// all, just \dev\null on the current drive, which usually does not exist; the
+// walk would reach the drive root and MkdirAll would create the directory,
+// reporting hooks installed for a user who set this to turn hooks off.
+func hooksDirBlockedByFile(hooksDir string) bool {
+	clean := filepath.Clean(hooksDir)
+	slashed := filepath.ToSlash(strings.TrimPrefix(clean, filepath.VolumeName(clean)))
+	if slashed == "/dev/null" || strings.HasPrefix(slashed, "/dev/null/") {
+		return true
+	}
+	for dir := hooksDir; ; {
+		info, err := os.Stat(dir)
+		if err == nil {
+			return !info.IsDir()
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
+}
+
 // InstallGitHook installs generic git hooks that delegate to `entire hook` commands.
 // These hooks work with any strategy - the strategy is determined at runtime.
 // If silent is true, no output is printed (except backup notifications, which always print).
@@ -695,11 +730,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 		return 0, err
 	}
 
-	info, statErr := os.Stat(hooksDir)
-	notDir := statErr == nil && !info.IsDir()
-	// ENOTDIR: a path component of hooksDir is itself a non-directory
-	// (e.g. core.hooksPath=/dev/null/hooks) — same misconfiguration.
-	if notDir || errors.Is(statErr, syscall.ENOTDIR) {
+	if hooksDirBlockedByFile(hooksDir) {
 		return 0, fmt.Errorf("git resolves the hooks directory to %s, which is not a directory — core.hooksPath is likely set to disable git hooks\n"+
 			"Entire requires git hooks to capture sessions. See where it is set with:\n"+
 			"  git config --show-origin --get-all core.hooksPath\n"+
