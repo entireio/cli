@@ -71,6 +71,16 @@ type condenseOpts struct {
 	// branch recorded at detached HEAD. Commit-driven condensation keeps HEAD.
 	recordedBranch *string
 
+	// transcriptRequired makes a condensation whose transcript is unavailable
+	// skip instead of degrading to a files/prompt-only checkpoint. Commit-less
+	// salvage (sweep, doctor) sets it: no commit names the checkpoint, so a
+	// metadata-only one records nothing a reader could use — the session's
+	// turns are in its earlier checkpoints, and its pending files hold only
+	// paths. Commit-driven condensation must not: prepare-commit-msg already
+	// stamped the trailer, and a skipped write would leave it dangling.
+	// Task records still write: each materializes its own transcript.
+	transcriptRequired bool
+
 	// reconcileInterrupted allows this condensation to return a *different*
 	// checkpoint ID than the caller passed, when it recognises the transcript
 	// range in a checkpoint left behind by an interrupted write from a CLI that
@@ -647,6 +657,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	if skipped := skipIfNothingToCondense(logCtx, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
 	}
+	if skipped := skipIfTranscriptRequired(logCtx, o, sessionData, state, checkpointID); skipped != nil {
+		return skipped, nil
+	}
 
 	filterFilesTouched(sessionData, committedFiles, state)
 
@@ -870,6 +883,29 @@ func skipIfNothingToCondense(logCtx context.Context, sessionData *ExtractedSessi
 		slog.String("checkpoint_id", checkpointID.String()),
 		slog.Int("step_count", state.StepCount),
 		slog.String("transcript_path", state.TranscriptPath),
+	)
+	return newSkippedResult(checkpointID, state.SessionID)
+}
+
+// skipIfTranscriptRequired returns a Skipped result when the caller required
+// a transcript (condenseOpts.transcriptRequired) and none could be read from
+// either the live file or the stored turn-end copy — typically a session whose
+// home worktree was removed, taking the copy with it. Without this, a
+// commit-less salvage of such a session writes a checkpoint holding only
+// metadata and file paths, which no commit references and no reader can use.
+// A session with task records still writes: their transcripts are
+// materialized separately.
+func skipIfTranscriptRequired(logCtx context.Context, o condenseOpts, sessionData *ExtractedSessionData, state *SessionState, checkpointID id.CheckpointID) *CondenseResult {
+	if !o.transcriptRequired || len(sessionData.Transcript) > 0 || state.HasTaskContent() {
+		return nil
+	}
+	logging.Warn(logCtx, "session skipped: transcript unavailable and no commit names this checkpoint; not writing a transcript-less checkpoint",
+		slog.String("session_id", state.SessionID),
+		slog.String("agent_type", string(state.AgentType)),
+		slog.String("checkpoint_id", checkpointID.String()),
+		slog.String("transcript_path", state.TranscriptPath),
+		slog.String("worktree", state.WorktreePath),
+		slog.Int("files_touched", len(sessionData.FilesTouched)),
 	)
 	return newSkippedResult(checkpointID, state.SessionID)
 }
@@ -2211,6 +2247,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			reconcileInterrupted: true,
 			storedRoot:           storedRoot,
 			recordedBranch:       &state.Branch,
+			transcriptRequired:   true,
 		})
 		state.FilesTouched = homeFiles
 		if err != nil {
@@ -2219,7 +2256,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		newSkillEvents = result.NewSkillEvents
 
 		if result.Skipped {
-			logging.Info(logCtx, "session condensation skipped (no transcript or files), marking fully condensed",
+			logging.Info(logCtx, "session condensation skipped (no transcript, or nothing to condense), marking fully condensed",
 				slog.String("session_id", sessionID),
 			)
 			state.FullyCondensed = true
@@ -2314,16 +2351,6 @@ func prepareEagerCondensation(state *SessionState) (shouldCondense bool, err err
 func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context, sessionID string) error {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		logging.Warn(logCtx, "eager condense: failed to open repository",
-			slog.String("session_id", sessionID),
-			slog.String("error", err.Error()),
-		)
-		return nil
-	}
-	defer repo.Close()
-
 	var checkpointID id.CheckpointID
 	reservedState, loadErr := s.loadSessionState(ctx, sessionID)
 	if loadErr != nil {
@@ -2381,7 +2408,24 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			return ErrMutationSkip
 		}
 
-		result, condErr := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true})
+		// The sweep finalizes a dead-owner session from whichever worktree
+		// the next session starts in: like CondenseSessionByID, condense in
+		// the session's own worktree and stamp its recorded branch, not the
+		// caller's HEAD.
+		repo, repoErr := openSessionCondensationRepository(ctx, state)
+		if repoErr != nil {
+			logging.Warn(logCtx, "eager condense: failed to open repository",
+				slog.String("session_id", sessionID),
+				slog.String("error", repoErr.Error()),
+			)
+			return ErrMutationSkip // fail-open
+		}
+		defer repo.Close()
+
+		result, condErr := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{
+			reconcileInterrupted: true,
+			recordedBranch:       &state.Branch,
+		})
 		if condErr != nil {
 			logging.Warn(logCtx, "eager condense on session stop failed, doctor will retry",
 				slog.String("session_id", sessionID),

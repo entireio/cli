@@ -234,7 +234,10 @@ worktree keep the session pending and the next checkpoint self-contained
 when nothing is pending anywhere. Entries for worktrees git no longer lists
 are pruned at turn end, at session end, and before a commit-less salvage
 (`CondenseSessionByID`), so a worktree removed after the last turn doesn't
-keep an ended session pending or fold its files into the salvage. Known effects: when one window is split across
+keep an ended session pending or fold its files into the salvage. A salvage
+that finds no transcript at all (the home worktree removed with its stored
+copy) writes nothing: a checkpoint of file paths alone, referenced by no
+commit, is not worth a record no reader can use. Known effects: when one window is split across
 commits in two worktrees, the second checkpoint repeats the transcript (and
 transcript-derived tokens) from the start, as split commits always have, and
 hook-reported tokens go to the first; files written only through shell
