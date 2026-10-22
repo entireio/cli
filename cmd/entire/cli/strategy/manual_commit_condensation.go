@@ -1158,6 +1158,24 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 		// applyBackfilledSessionTokenUsage, which needs the usage without it.
 		sessionData.TokenUsage = fillMissingSubagentTokensFrom(sessionData.TokenUsage, state.CheckpointTokenUsage)
 	}
+	sessionData.TokenUsage = withRewrittenTokenUsage(sessionData.TokenUsage, state)
+}
+
+// withRewrittenTokenUsage adds the pending usage a transcript rewrite removed
+// (state.RewrittenTokenUsage) to a checkpoint's usage. Neither recount nor
+// fallback can include it: its lines are gone, and the rebase moved it out of
+// CheckpointTokenUsage. Only the returned usage gets it; the state keeps it
+// until the window reset, so a failed checkpoint write retries with it. It
+// carries no subagent coverage, so usage's coverage marker is kept.
+func withRewrittenTokenUsage(usage *agent.TokenUsage, state *SessionState) *agent.TokenUsage {
+	if !hasTokenUsageData(state.RewrittenTokenUsage) {
+		return usage
+	}
+	sum := types.AddTokenUsage(usage, state.RewrittenTokenUsage)
+	if usage != nil {
+		sum.SubagentTokensComplete = usage.SubagentTokensComplete
+	}
+	return sum
 }
 
 // AttachTokenUsage returns the tokens `entire session attach` stores for a
@@ -1185,6 +1203,7 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 			// pending window's subagent total, as condensation does.
 			usage = fillMissingSubagentTokensFrom(usage, state.CheckpointTokenUsage)
 		}
+		usage = withRewrittenTokenUsage(usage, state)
 	}
 	return usage, countTranscriptItems(ag.Type(), string(transcript))
 }
@@ -1195,6 +1214,7 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 // transcript window (CheckpointTranscriptStart) is left alone.
 func ConsumeAttachTokenWindow(state *SessionState, pos int) {
 	state.CheckpointTokenUsage = nil
+	state.RewrittenTokenUsage = nil
 	state.RebaselineSubagentTokens()
 	state.SetTokenStart(pos)
 }

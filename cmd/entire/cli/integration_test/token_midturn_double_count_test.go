@@ -219,6 +219,22 @@ func TestTokenScope_MidTurnConsumptionThenStop(t *testing.T) {
 			},
 		},
 		{
+			name: "pending turn rewritten away, then an agent commit mid-turn",
+			run: func(r *tokenTurnRun) {
+				r.start(10, 0, "a.txt")
+				r.stop()
+				r.commit("a.txt") // the token offset lands at 6
+				r.start(20, 0, "b.txt")
+				r.stop() // pending: its lines lie past the offset
+				r.rewriteTranscriptEmpty()
+				r.start(30, 0, "c.txt", "d.txt")
+				r.agentCommit("c.txt")
+				r.requireLastCheckpointOut(50) // the rewritten turn's pending tokens and this turn's
+				r.stop()
+				r.commit("b.txt", "d.txt")
+			},
+		},
+		{
 			name: "transcript rewritten to as many lines as the token offset, then an agent commit",
 			run: func(r *tokenTurnRun) {
 				r.start(10, 0, "a.txt", "x.txt") // 8 lines: the token offset lands at 8

@@ -10,6 +10,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -117,9 +120,11 @@ func TestCapturePrePromptState_LockTimeoutKeepsTokenStart(t *testing.T) {
 	require.Equal(t, 8, *pre.TokenStart)
 }
 
-// A condensation that moved the offset after the caller read it wins.
+// A condensation that moved the offset after the caller read it wins, and the
+// pending usage stays where it is.
 func TestRebaseStaleTokenStart_ConcurrentAdvanceWins(t *testing.T) {
 	setupTokenRebaseRepo(t, 10, 3)
+	setPendingTokenUsage(t, 10, &agent.TokenUsage{OutputTokens: 44, APICallCount: 1})
 
 	got := rebaseStaleTokenStart(context.Background(), tokenRebaseSessionID, 8, 3)
 
@@ -127,4 +132,72 @@ func TestRebaseStaleTokenStart_ConcurrentAdvanceWins(t *testing.T) {
 	state, err := strategy.LoadSessionState(context.Background(), tokenRebaseSessionID)
 	require.NoError(t, err)
 	require.Equal(t, 10, state.TokenStart(), "the concurrent advance is not overwritten")
+	require.Equal(t, &agent.TokenUsage{OutputTokens: 44, APICallCount: 1}, state.CheckpointTokenUsage)
+	require.Nil(t, state.RewrittenTokenUsage)
+}
+
+// setPendingTokenUsage sets the session's token offset and pending usage.
+func setPendingTokenUsage(t *testing.T, tokenStart int, pending *agent.TokenUsage) {
+	t.Helper()
+	require.NoError(t, strategy.MutateSessionState(context.Background(), tokenRebaseSessionID, func(s *strategy.SessionState) error {
+		s.SetTokenStart(tokenStart)
+		s.CheckpointTokenUsage = pending
+		return nil
+	}))
+}
+
+// The pending usage was counted from lines the rewrite removed, so a rebase
+// moves its main-agent counters out of the recount path; the subagent total
+// stays pending. A second rewrite before any checkpoint adds to the first.
+func TestRebaseStaleTokenStart_CarriesPendingUsage(t *testing.T) {
+	setupTokenRebaseRepo(t, 8, 3)
+	sub := &agent.TokenUsage{OutputTokens: 50}
+	setPendingTokenUsage(t, 8, &agent.TokenUsage{OutputTokens: 44, APICallCount: 1, SubagentTokens: sub})
+
+	require.Equal(t, 3, rebaseStaleTokenStart(context.Background(), tokenRebaseSessionID, 8, 3))
+
+	state, err := strategy.LoadSessionState(context.Background(), tokenRebaseSessionID)
+	require.NoError(t, err)
+	require.Equal(t, &agent.TokenUsage{OutputTokens: 44, APICallCount: 1}, state.RewrittenTokenUsage)
+	require.Equal(t, &agent.TokenUsage{SubagentTokens: sub}, state.CheckpointTokenUsage)
+
+	setPendingTokenUsage(t, 8, &agent.TokenUsage{OutputTokens: 6, APICallCount: 1})
+	require.Equal(t, 3, rebaseStaleTokenStart(context.Background(), tokenRebaseSessionID, 8, 3))
+
+	state, err = strategy.LoadSessionState(context.Background(), tokenRebaseSessionID)
+	require.NoError(t, err)
+	require.Equal(t, &agent.TokenUsage{OutputTokens: 50, APICallCount: 2}, state.RewrittenTokenUsage)
+	require.Nil(t, state.CheckpointTokenUsage)
+}
+
+// Only agents whose turn tokens are a per-line sum of a transcript that a
+// forced resume rewrites are rebased.
+func TestRecountsTurnTokensFromTranscript_AllowList(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		ag   agent.Agent
+		want bool
+	}{
+		{claudecode.NewClaudeCodeAgent(), true},
+		{pi.NewPiAgent(), true},
+		{codex.NewCodexAgent(), false},
+		{cursor.NewCursorAgent(), false},
+	} {
+		require.Equal(t, tc.want, recountsTurnTokensFromTranscript(tc.ag), tc.ag.Type())
+	}
+}
+
+// A Cursor session's offset past the transcript is left alone, pending usage
+// included.
+func TestCapturePrePromptState_CursorKeepsTokenStart(t *testing.T) {
+	transcriptPath := setupTokenRebaseRepo(t, 8, 3)
+	setPendingTokenUsage(t, 8, &agent.TokenUsage{OutputTokens: 44})
+
+	require.NoError(t, CapturePrePromptState(context.Background(), cursor.NewCursorAgent(), tokenRebaseSessionID, transcriptPath))
+
+	state, err := strategy.LoadSessionState(context.Background(), tokenRebaseSessionID)
+	require.NoError(t, err)
+	require.Equal(t, 8, state.TokenStart())
+	require.Equal(t, &agent.TokenUsage{OutputTokens: 44}, state.CheckpointTokenUsage)
+	require.Nil(t, state.RewrittenTokenUsage)
 }

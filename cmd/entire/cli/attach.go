@@ -1408,6 +1408,7 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	// for state written before the token offset existed.
 	tokenStartOnDisk := state.TokenStart()
 	pendingOnDisk := state.CheckpointTokenUsage
+	rewrittenOnDisk := state.RewrittenTokenUsage
 	lastCheckpointOnDisk := state.LastCheckpointID
 	// Read before LastInteractionTime is refreshed below: a running session
 	// whose agent exited will send no Stop for its turn. Inactivity stands in
@@ -1461,16 +1462,18 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	// would drop a hook-only agent's turn. Turn start clears LastCheckpointID,
 	// which is not a checkpoint, so only a new non-empty ID counts.
 	countedFrom := 0
-	var pendingRead *agent.TokenUsage
+	var pendingRead, rewrittenRead *agent.TokenUsage
 	var lastCheckpointRead id.CheckpointID
 	if existingState != nil {
 		countedFrom = existingState.TokenStart()
 		pendingRead = existingState.CheckpointTokenUsage
+		rewrittenRead = existingState.RewrittenTokenUsage
 		lastCheckpointRead = existingState.LastCheckpointID
 	}
 	switch {
 	case tokenStartOnDisk != countedFrom,
 		!reflect.DeepEqual(pendingOnDisk, pendingRead),
+		!reflect.DeepEqual(rewrittenOnDisk, rewrittenRead),
 		lastCheckpointOnDisk != "" && lastCheckpointOnDisk != lastCheckpointRead:
 		logging.Warn(ctx, "attach: session tokens changed while attach was waiting; leaving token state as the hooks set it",
 			slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))

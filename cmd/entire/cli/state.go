@@ -324,16 +324,23 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 	return nil
 }
 
-// recountsTurnTokensFromTranscript reports whether the agent's turn tokens
-// are counted from the transcript at the session's token offset. Out-of-band
-// usage (Antigravity) never reads the offset, and a late writer's transcript
-// can read short at turn start while its last turn is still being flushed.
+// recountsTurnTokensFromTranscript reports whether a stale token offset may be
+// rebased for the agent: its turn tokens are a per-line sum counted from the
+// offset, and a forced resume rewrites its transcript shorter. That holds for
+// Claude Code and Pi only. The rest are excluded: Codex counts a delta of a
+// cumulative total, so the pending usage carried past a rebase could count
+// twice; OpenCode's transcript is an export that can read short while stale,
+// which would rebase falsely; Cursor's usage comes from its Stop hook, and the
+// pending fallback already stores it; Copilot CLI backfills the session total
+// by recounting the whole transcript; out-of-band agents (Antigravity) never
+// read the offset, and late writers' transcripts read short mid-flush.
 func recountsTurnTokensFromTranscript(ag agent.Agent) bool {
-	if _, ok := agent.AsOutOfBandTokenSource(ag); ok {
+	switch ag.Type() {
+	case agent.AgentTypeClaudeCode, agent.AgentTypePi:
+		return true
+	default:
 		return false
 	}
-	_, late := agent.AsLateTranscriptWriter(ag)
-	return !late
 }
 
 // rebaseStaleTokenStart moves the session's token offset down to pos, the
@@ -343,6 +350,10 @@ func recountsTurnTokensFromTranscript(ag agent.Agent) bool {
 // condensation during the turn would count from there, store none of the
 // turn's earlier tokens, and move the offset to the end; turn end would then
 // take those tokens as stored. Everything from pos on belongs to this turn.
+//
+// The pending usage moves to RewrittenTokenUsage in the same mutation: it was
+// counted from lines at or past tokenStart, which the rewrite removed, so the
+// next checkpoint must add it rather than expect a recount to find it.
 //
 // It only rebases while the offset is still tokenStart, the value the caller
 // read before measuring the transcript, so a condensation that moved it in
@@ -355,6 +366,7 @@ func rebaseStaleTokenStart(ctx context.Context, sessionID string, tokenStart, po
 			return strategy.ErrMutationSkip
 		}
 		s.SetTokenStart(pos)
+		s.CarryRewrittenTokenUsage()
 		rebased = true
 		return nil
 	})

@@ -500,6 +500,7 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
+	state.RewrittenTokenUsage = nil
 	state.ClearCondensationAttempt()
 	state.RebaselineSubagentTokens()
 	removeCompletedTaskRecords(state)

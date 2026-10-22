@@ -380,6 +380,13 @@ type State struct {
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
 	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
 
+	// RewrittenTokenUsage holds pending main-agent usage whose transcript lines
+	// a rewrite removed (a forced resume from an older checkpoint), moved out of
+	// CheckpointTokenUsage when turn start rebased the token offset. No recount
+	// can find those lines again, so the next checkpoint adds it as-is; it is
+	// cleared only once a checkpoint has stored it.
+	RewrittenTokenUsage *agent.TokenUsage `json:"rewritten_token_usage,omitempty"`
+
 	// SubagentTokensBaseline is a snapshot of TokenUsage.SubagentTokens captured
 	// at the last condensation reset. Subagent token usage is always re-read
 	// from the start of each subagent transcript (agent IDs are discovered from
@@ -1059,6 +1066,33 @@ func (s *State) AdvanceCheckpointWindow(pos int) {
 func (s *State) AdvanceDisplayWindow(pos int) {
 	s.SetTokenStart(s.TokenStart())
 	s.CheckpointTranscriptStart = pos
+}
+
+// CarryRewrittenTokenUsage moves CheckpointTokenUsage's main-agent counters
+// into RewrittenTokenUsage, for a token offset rebased because the transcript
+// was rewritten shorter than it: the lines those counters came from are gone,
+// so a recount from the rebased offset cannot find them. The subagent total
+// stays in CheckpointTokenUsage; it is a cumulative snapshot rescoped against
+// the baseline, not counted from those lines.
+func (s *State) CarryRewrittenTokenUsage() {
+	pending := s.CheckpointTokenUsage
+	if pending == nil {
+		return
+	}
+	mainAgent := *pending
+	mainAgent.SubagentTokens = nil
+	mainAgent.SubagentTokensComplete = nil
+	if mainAgent != (agent.TokenUsage{}) {
+		s.RewrittenTokenUsage = types.AddTokenUsage(s.RewrittenTokenUsage, &mainAgent)
+	}
+	if pending.SubagentTokens == nil && pending.SubagentTokensComplete == nil {
+		s.CheckpointTokenUsage = nil
+		return
+	}
+	s.CheckpointTokenUsage = &agent.TokenUsage{
+		SubagentTokens:         pending.SubagentTokens,
+		SubagentTokensComplete: pending.SubagentTokensComplete,
+	}
 }
 
 // RebaselineSubagentTokens snapshots the current cumulative subagent total
