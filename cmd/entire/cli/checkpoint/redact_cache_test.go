@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/require"
@@ -73,10 +74,10 @@ func newTestRepoForCache(t *testing.T) (*git.Repository, string) {
 func writeAndRedact(t *testing.T, cache *redactCache, name, content string) []byte {
 	t.Helper()
 	ctx := context.Background()
-	res, err := redactIncrementally(ctx, cache, []byte(content), name, testRedactor)
+	res, err := redactIncrementally(ctx, cache, []byte(content), name, jsonlRedactor)
 	require.NoError(t, err)
 	if res.StorePrefix {
-		cache.storePrefixBytes(ctx, name, res.SourceHash, len(content), res.Redacted)
+		cache.storePrefixBytes(ctx, name, res.SourceHash, len(content), res.Redacted, res.Counts)
 	}
 	return res.Redacted
 }
@@ -215,24 +216,13 @@ func TestIncrementalRedaction_SkippedUnlessLargeSessionTranscript(t *testing.T) 
 	// A nil cache disables reuse but must still return a correct full redaction:
 	// the whole-content fallback lives inside redactIncrementally so both callers
 	// cannot spell it differently.
-	noCacheResult, noCacheErr := redactIncrementally(ctx, nil, []byte(big), "full.jsonl", testRedactor)
+	noCacheResult, noCacheErr := redactIncrementally(ctx, nil, []byte(big), "full.jsonl", jsonlRedactor)
 	require.NoError(t, noCacheErr)
 	require.False(t, noCacheResult.StorePrefix, "a nil cache must not record a prefix")
 	want, wantErr := RedactBlobBytes(ctx, []byte(big), "full.jsonl", false)
 	require.NoError(t, wantErr)
 	require.Equal(t, string(want), string(noCacheResult.Redacted),
 		"a nil cache must still redact the whole content")
-}
-
-// testRedactor adapts jsonlRedactor to redactIncrementally's []byte signature.
-// Same pipeline RedactBlobBytes uses for a .jsonl blob, so cached prefixes and
-// freshly redacted suffixes agree.
-func testRedactor(ctx context.Context, b []byte) ([]byte, error) {
-	out, err := jsonlRedactor(ctx, b)
-	if err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
 }
 
 // TestRedactCache_IgnoresCorruptEntry proves a damaged cache file degrades to a
@@ -324,9 +314,9 @@ func requireReusesIntactPrefix(t *testing.T, cache *redactCache, key, content st
 	t.Helper()
 	ctx := context.Background()
 	var sawBytes int
-	res, err := redactIncrementally(ctx, cache, []byte(content), key, func(ctx context.Context, b []byte) ([]byte, error) {
+	res, err := redactIncrementally(ctx, cache, []byte(content), key, func(ctx context.Context, b []byte) (redact.RedactedBytes, error) {
 		sawBytes += len(b)
-		return testRedactor(ctx, b)
+		return jsonlRedactor(ctx, b)
 	})
 	require.NoError(t, err)
 	want, err := RedactBlobBytes(ctx, []byte(content), key, false)
@@ -396,7 +386,7 @@ func TestRedactCache_ShortPayloadFallsBack(t *testing.T) {
 	firstLine := full[:bytes.IndexByte(full, '\n')+1]
 	for _, short := range [][]byte{nil, firstLine} {
 		require.NoError(t, osroot.WriteFile(cache.root, payload, short, 0o600))
-		res, err := redactIncrementally(ctx, cache, []byte(grown), key, testRedactor)
+		res, err := redactIncrementally(ctx, cache, []byte(grown), key, jsonlRedactor)
 		require.NoError(t, err)
 		require.Equal(t, string(want), string(res.Redacted),
 			"a %d-byte payload under an entry for %d bytes must not be reused", len(short), len(full))

@@ -20,23 +20,23 @@ func TestCumulativeTokenUsage(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	parent := writeDroidSession(t, projectDir, "parent-1", `{"type":"session_start","id":"parent-1"}`,
+	parent := writeCumulativeDroidSession(t, projectDir, "parent-1", `{"type":"session_start","id":"parent-1"}`,
 		`{"model":"m","tokenUsage":{"inputTokens":40,"outputTokens":300,"cacheCreationTokens":2000,"cacheReadTokens":15000,"thinkingTokens":25}}`)
-	writeDroidSession(t, root, "worker-1",
+	writeCumulativeDroidSession(t, root, "worker-1",
 		`{"type":"session_start","id":"worker-1","sessionTitle":"worker: read","callingSessionId":"parent-1","callingToolUseId":"call-1"}`,
 		`{"model":"m","tokenUsage":{"inputTokens":7,"outputTokens":3,"cacheCreationTokens":0,"cacheReadTokens":0,"thinkingTokens":0}}`)
-	writeDroidSession(t, root, "other-1",
+	writeCumulativeDroidSession(t, root, "other-1",
 		`{"type":"session_start","id":"other-1","callingSessionId":"someone-else","callingToolUseId":"call-2"}`,
 		`{"model":"m","tokenUsage":{"inputTokens":99,"outputTokens":99,"cacheCreationTokens":0,"cacheReadTokens":0,"thinkingTokens":0}}`)
 	// No tokenUsage in settings.json (exec/BYOK): fall back to transcript usage.
 	usageLine := `{"type":"message","id":"e1","message":{"role":"assistant","id":"msg_1","content":[],"usage":{"input_tokens":6,"cache_read_input_tokens":50,"output_tokens":4}}}`
-	fallback := writeDroidSession(t, projectDir, "exec-1", `{"type":"session_start","id":"exec-1"}`+"\n"+usageLine+"\n"+usageLine, `{"model":"m"}`)
-	quiet := writeDroidSession(t, projectDir, "quiet-1", `{"type":"session_start","id":"quiet-1"}`, `{"model":"m"}`)
-	placeholder := writeDroidSession(t, projectDir, "zero-1", `{"type":"session_start","id":"zero-1"}`,
+	fallback := writeCumulativeDroidSession(t, projectDir, "exec-1", `{"type":"session_start","id":"exec-1"}`+"\n"+usageLine+"\n"+usageLine, `{"model":"m"}`)
+	quiet := writeCumulativeDroidSession(t, projectDir, "quiet-1", `{"type":"session_start","id":"quiet-1"}`, `{"model":"m"}`)
+	placeholder := writeCumulativeDroidSession(t, projectDir, "zero-1", `{"type":"session_start","id":"zero-1"}`,
 		`{"model":"m","tokenUsage":{"inputTokens":0,"outputTokens":0,"cacheCreationTokens":0,"cacheReadTokens":0,"thinkingTokens":0}}`)
 	// settings.json is written on a debounce and can lag the transcript: each
 	// field takes the larger source, so the total never goes down.
-	lagging := writeDroidSession(t, projectDir, "lag-1", `{"type":"session_start","id":"lag-1"}`+"\n"+usageLine,
+	lagging := writeCumulativeDroidSession(t, projectDir, "lag-1", `{"type":"session_start","id":"lag-1"}`+"\n"+usageLine,
 		`{"model":"m","tokenUsage":{"inputTokens":3,"outputTokens":9,"cacheCreationTokens":0,"cacheReadTokens":20,"thinkingTokens":0}}`)
 	droid := &FactoryAIDroidAgent{}
 
@@ -61,8 +61,8 @@ func TestCumulativeTokenUsage(t *testing.T) {
 	}
 }
 
-// writeDroidSession writes <id>.jsonl and <id>.settings.json beside it.
-func writeDroidSession(t *testing.T, dir, id, transcriptLines, settings string) string {
+// writeCumulativeDroidSession writes <id>.jsonl and <id>.settings.json beside it.
+func writeCumulativeDroidSession(t *testing.T, dir, id, transcriptLines, settings string) string {
 	t.Helper()
 	transcript := filepath.Join(dir, id+".jsonl")
 	if err := os.WriteFile(transcript, []byte(transcriptLines+"\n"), 0o600); err != nil {

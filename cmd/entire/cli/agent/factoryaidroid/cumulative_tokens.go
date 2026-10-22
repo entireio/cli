@@ -2,7 +2,6 @@ package factoryaidroid
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -24,11 +23,11 @@ var _ agent.CumulativeTokenSource = (*FactoryAIDroidAgent)(nil)
 // A session's tokenUsage counts only its own calls, so the total excludes its
 // Workers. Children are the Worker sessions it launched, keyed by Worker
 // session ID and read the same way.
-func (f *FactoryAIDroidAgent) CumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
+func (f *FactoryAIDroidAgent) CumulativeTokenUsage(ctx context.Context, in agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage, error) {
 	if in.TranscriptPath == "" {
 		return nil, nil, nil
 	}
-	total, err := sessionTokenUsage(in.TranscriptPath, in.TranscriptData)
+	total, err := sessionTokenUsage(ctx, in.TranscriptPath, in.TranscriptData)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -42,7 +41,7 @@ func (f *FactoryAIDroidAgent) CumulativeTokenUsage(_ context.Context, in agent.C
 	dir := filepath.Dir(in.TranscriptPath)
 	var children map[string]*agent.TokenUsage
 	for workerID, workerPath := range findWorkerSessions([]string{dir, filepath.Dir(dir)}, sessionID) {
-		if usage, err := sessionTokenUsage(workerPath, nil); err == nil && usage != nil {
+		if usage, err := sessionTokenUsage(ctx, workerPath, nil); err == nil && usage != nil {
 			if children == nil {
 				children = make(map[string]*agent.TokenUsage)
 			}
@@ -57,8 +56,8 @@ func (f *FactoryAIDroidAgent) CumulativeTokenUsage(_ context.Context, in agent.C
 // is nil). Droid writes settings.json on a debounce, so it can lag the
 // transcript; taking the max keeps the total from going down when it does.
 // nil means no data in either.
-func sessionTokenUsage(transcriptPath string, data []byte) (*agent.TokenUsage, error) {
-	settings, err := readSettingsTokenUsage(transcriptPath)
+func sessionTokenUsage(ctx context.Context, transcriptPath string, data []byte) (*agent.TokenUsage, error) {
+	settings, err := readSettingsTokenUsage(ctx, transcriptPath)
 	if err != nil {
 		return nil, err
 	}
@@ -75,38 +74,23 @@ func sessionTokenUsage(transcriptPath string, data []byte) (*agent.TokenUsage, e
 	if transcript.APICallCount == 0 {
 		transcript = nil
 	}
+	if settings != nil {
+		// The settings file has no call count: one per assistant message.
+		settings.APICallCount = countAssistantMessages(lines)
+	}
 	return agent.MaxTokenUsage(settings, transcript), nil
 }
 
 // readSettingsTokenUsage returns the tokenUsage from the settings.json beside
-// transcriptPath, or nil when the file or the field is absent. thinkingTokens
-// is ignored: Droid estimates it from streamed text, and providers already
-// count thinking in outputTokens.
-func readSettingsTokenUsage(transcriptPath string) (*agent.TokenUsage, error) {
-	// Read only a regular file: the path is derived from the transcript's, so a
-	// symlink or FIFO in its place must not be followed or block the read.
-	settingsPath := strings.TrimSuffix(transcriptPath, ".jsonl") + ".settings.json"
-	info, err := os.Lstat(settingsPath)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
+// transcriptPath (see droidTokenUsage for what it counts), or nil when the
+// file or the field is absent.
+func readSettingsTokenUsage(ctx context.Context, transcriptPath string) (*agent.TokenUsage, error) {
+	settings, err := readSessionSettings(ctx, transcriptPath)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil //nolint:nilnil // no settings file means no usage data
 	}
 	if err != nil {
-		return nil, fmt.Errorf("stat droid settings: %w", err)
-	}
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // regular file beside the resolved transcript
-	if err != nil {
-		return nil, fmt.Errorf("read droid settings: %w", err)
-	}
-	var settings struct {
-		TokenUsage *struct {
-			InputTokens         int `json:"inputTokens"`
-			OutputTokens        int `json:"outputTokens"`
-			CacheCreationTokens int `json:"cacheCreationTokens"`
-			CacheReadTokens     int `json:"cacheReadTokens"`
-		} `json:"tokenUsage"`
-	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil, fmt.Errorf("parse droid settings: %w", err)
+		return nil, err
 	}
 	u := settings.TokenUsage
 	if u == nil {

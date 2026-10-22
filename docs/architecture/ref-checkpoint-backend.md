@@ -91,6 +91,7 @@ Semantics:
 
 - **Enqueue** appends under the lock; enqueuing an already-present or already-pushed ref is safe (drain de-dups, the push is idempotent).
 - **Drain** returns the de-duplicated queued refs *without* removing them, and compacts the file in place when it held redundant lines (so a long-lived session that keeps re-enqueuing the same ref cannot grow the file unboundedly).
+- **Peek** reads the queue without compacting it. `entire checkpoint list --outgoing` lists it and `entire status` counts it after dropping refs missing locally, the same split pre-push makes, so both name what the next push sends.
 - **Remove** deletes refs only **after a confirmed push**, preserving any entry appended during the push. An interrupted or failed push therefore leaves its refs queued for the next pre-push — the queue degrades toward "will retry", never toward silent loss.
 
 Rewrites are atomic (temp file + rename under the lock) so a concurrent reader never sees a half-written queue.

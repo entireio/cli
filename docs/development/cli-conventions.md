@@ -11,15 +11,18 @@ top-level verbs. The groups are the canonical home for each verb. Newer
 experimental command families are discoverable through `entire labs` and
 their canonical paths are always runnable.
 
-Experimental commands are gated by a build-time visibility flag (the
+Experimental commands are gated by the build's version (the
 `cmd/entire/cli/experimental` package): they are shown — grouped under an
 "Experimental commands:" help section — in developer and nightly builds, and
-hidden in stable release builds. Visibility is toggled by `experimental.Visible`
-(default `"true"`), which GoReleaser stamps `"false"` only on stable tags
-(`.Prerelease` empty); nightly (`vX.Y.Z-nightly.*`) and local builds leave it at
-the default. Register a command as experimental with `experimental.Register(parent,
-child)` instead of `parent.AddCommand(child)`. Gating only controls visibility —
-the commands are always runnable in every build.
+hidden in stable release builds. `experimental.IsVisible()` derives this from
+`versioninfo.Version` after `versioninfo.Load()`: a plain semver release
+(`X.Y.Z`, no prerelease, no build metadata) hides them; `dev`, nightly
+(`X.Y.Z-nightly.*`), and commit-stamped (`0.0.0+<commit>`) builds show them.
+There is no separate ldflag, so any packager that stamps the version (GoReleaser,
+nixpkgs, `go install @<tag>`) gets release behavior. Register a command as
+experimental with `experimental.Register(parent, child)` instead of
+`parent.AddCommand(child)`. Gating only controls visibility — the commands are
+always runnable in every build.
 
 - `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
@@ -59,6 +62,10 @@ the commands are always runnable in every build.
   transcript; both read through `checkpoint.TaskReader`. The cell does not
   serve task records, so under `--repo` the `tasks` key is omitted (not
   reported empty) and `--task` fails with `ErrTaskRecordsUnsupported`.
+  `list --outgoing` lists what the next push sends, from local state only: the
+  git-refs push queue, minus refs missing locally, which pre-push drops
+  (`strategy.ListOutgoingCheckpoints`). It refuses the git-branch backend, whose
+  push sends `entire/checkpoints/v1` as one branch rather than per checkpoint.
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
@@ -781,7 +788,7 @@ ref with no resolved repo ID fails there rather than at the grammar. That
 narrowing has to cover *both* ways a forge reaches the API — named in `--repo`
 and inferred from the origin remote — and the inferred one is the common path.
 
-Experimental commands (gated by the build-time visibility flag above — visible
+Experimental commands (gated by the build version as described above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
 `blame`, `why`, `experts`, and `runner`.

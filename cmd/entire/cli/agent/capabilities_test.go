@@ -97,10 +97,10 @@ func (m *mockFullAgent) GenerateText(context.Context, string, string) (string, e
 
 // OutOfBandTokenSource (mockFullAgent is a CapabilityDeclarer, so AsOutOfBandTokenSource
 // must still exclude it — verifies the nonDeclarerCapability refusal).
-func (m *mockFullAgent) SnapshotTokenBaseline(context.Context, string) (json.RawMessage, error) {
+func (m *mockFullAgent) SnapshotTokenBaseline(context.Context, string, string) (json.RawMessage, error) {
 	return nil, nil
 }
-func (m *mockFullAgent) CalculateTokenUsageSince(context.Context, string, json.RawMessage) (*TokenUsage, error) {
+func (m *mockFullAgent) CalculateTokenUsageSince(context.Context, string, string, json.RawMessage) (*TokenUsage, error) {
 	return nil, nil //nolint:nilnil // test mock
 }
 
@@ -154,10 +154,10 @@ type mockBuiltinOOBAgent struct {
 	mockBaseAgent
 }
 
-func (m *mockBuiltinOOBAgent) SnapshotTokenBaseline(context.Context, string) (json.RawMessage, error) {
+func (m *mockBuiltinOOBAgent) SnapshotTokenBaseline(context.Context, string, string) (json.RawMessage, error) {
 	return nil, nil
 }
-func (m *mockBuiltinOOBAgent) CalculateTokenUsageSince(context.Context, string, json.RawMessage) (*TokenUsage, error) {
+func (m *mockBuiltinOOBAgent) CalculateTokenUsageSince(context.Context, string, string, json.RawMessage) (*TokenUsage, error) {
 	return nil, nil //nolint:nilnil // test mock
 }
 

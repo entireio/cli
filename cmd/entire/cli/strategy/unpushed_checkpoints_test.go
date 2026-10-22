@@ -98,20 +98,24 @@ func TestCountUnpushedCheckpoints_GitRefs_EmptyQueue(t *testing.T) {
 }
 
 // Not parallel: uses t.Chdir()
-func TestCountUnpushedCheckpoints_GitRefs_QueueLength(t *testing.T) {
-	dir, _, _ := initCountTestRepo(t)
+func TestCountUnpushedCheckpoints_GitRefs_CountsQueuedRefsThatExist(t *testing.T) {
+	dir, _, second := initCountTestRepo(t)
 	writeGitRefsBackendSetting(t, dir)
 
 	// The v1 branch exists but must NOT be counted: the git-refs backend
 	// counts the push queue, not v1 commits.
 	testutil.GitUpdateRef(t, dir, v1LocalRef, testutil.GetHeadHash(t, dir))
 
+	// A queued ref deleted locally is dropped by the push, not sent.
+	const kept = "refs/entire/checkpoints/aa/bb0000000001"
+	const stale = "refs/entire/checkpoints/aa/bb0000000002"
+	testutil.GitUpdateRef(t, dir, kept, second)
 	queue := checkpoint.NewPushQueue(filepath.Join(dir, ".git"))
-	require.NoError(t, queue.Enqueue(plumbing.ReferenceName("refs/entire/checkpoints/aa/bb0000000001")))
-	require.NoError(t, queue.Enqueue(plumbing.ReferenceName("refs/entire/checkpoints/aa/bb0000000002")))
+	require.NoError(t, queue.Enqueue(plumbing.ReferenceName(kept)))
+	require.NoError(t, queue.Enqueue(plumbing.ReferenceName(stale)))
 	t.Chdir(dir)
 
 	got, err := CountUnpushedCheckpoints(context.Background(), "origin")
 	require.NoError(t, err)
-	assert.Equal(t, 2, got, "git-refs backend counts queued refs")
+	assert.Equal(t, 1, got, "git-refs counts queued refs that still exist locally")
 }

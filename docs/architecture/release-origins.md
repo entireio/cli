@@ -283,8 +283,8 @@ The `go install` route works today, with no infrastructure at all:
 `proxy.golang.org` serves module content from its own cache and
 `versioninfo.Resolve` recovers the real version from build info. Pin an explicit
 version — `@latest` re-resolves against GitHub. The caveats are real but small:
-no PostHog key is stamped in, so telemetry is off, and `experimental.Visible`
-keeps its default, so experimental commands are visible.
+no PostHog key is stamped in, so telemetry is off. Experimental commands follow
+the resolved version, so a pinned stable tag hides them as a release does.
 
 ## Remaining work
 

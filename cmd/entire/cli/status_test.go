@@ -2676,6 +2676,8 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 				queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
 				if backend == "git-refs" {
 					for _, ref := range []string{"refs/entire/checkpoints/aa/bb0000000001", "refs/entire/checkpoints/aa/bb0000000002"} {
+						// Only refs that exist locally count: the push drops the rest.
+						testutil.GitUpdateRef(t, ".", ref, head)
 						if err := queue.Enqueue(plumbing.ReferenceName(ref)); err != nil {
 							t.Fatal(err)
 						}
@@ -3076,6 +3078,9 @@ func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
 	if !strings.Contains(out, "2 checkpoints not yet on origin — they sync with your next 'git push origin'") {
 		t.Errorf("expected unpushed counter line, got:\n%s", out)
 	}
+	if strings.Contains(out, "checkpoint list --outgoing") {
+		t.Errorf("git-branch: --outgoing is git-refs only, so the counter must not point at it, got:\n%s", out)
+	}
 }
 
 func TestRunStatus_CheckpointSyncCounterOmitted_WhenSynced(t *testing.T) {
@@ -3133,7 +3138,9 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
 	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
-	checkpointSyncTestCommit(t, "a.txt", "one")
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	testutil.GitUpdateRef(t, ".", "refs/entire/checkpoints/aa/bb0000000001", head)
+	testutil.GitUpdateRef(t, ".", "refs/entire/checkpoints/aa/bb0000000002", head)
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -3157,8 +3164,8 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 		t.Errorf("expected dedicated destination line, got:\n%s", out)
 	}
 	// Dedicated mode has no remote name to phrase the counter around.
-	if !strings.Contains(out, "2 checkpoints not yet pushed") {
-		t.Errorf("expected queue-length counter without a remote name, got:\n%s", out)
+	if !strings.Contains(out, "2 checkpoints not yet pushed · see 'entire checkpoint list --outgoing'") {
+		t.Errorf("expected queue counter without a remote name, pointing at the listing, got:\n%s", out)
 	}
 	if strings.Contains(out, "not yet on") {
 		t.Errorf("dedicated counter must not name a git remote, got:\n%s", out)

@@ -522,7 +522,7 @@ func condensedTaskTokenUsage(ctx context.Context, ag agent.Agent, record session
 		return recorded
 	}
 	usage := agent.CalculateTokenUsage(ctx, ag, raw, 0, "")
-	if !hasTokenUsageData(usage) || (recorded != nil && usage.APICallCount < recorded.APICallCount) {
+	if !HasTokenUsageData(usage) || (recorded != nil && usage.APICallCount < recorded.APICallCount) {
 		return recorded
 	}
 	return usage
@@ -1165,7 +1165,7 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 	// baseline does not regress to nil (finding 019f5ebf-a57e).
 	applyBackfilledSessionTokenUsage(ctx, ag, state, sessionData.Transcript, sessionData.TokenUsage)
 
-	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+	if !HasTokenUsageData(sessionData.TokenUsage) && HasTokenUsageData(state.CheckpointTokenUsage) {
 		// Whole-value fallback: accumulateTokenUsage already carries SubagentTokens.
 		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 	} else {
@@ -1196,7 +1196,7 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 		usage = calculateLiveTranscriptTokenUsage(ctx, ag, transcript, state, transcriptPath)
 	}
 	if state != nil {
-		if !hasTokenUsageData(usage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+		if !HasTokenUsageData(usage) && HasTokenUsageData(state.CheckpointTokenUsage) {
 			usage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 		} else {
 			// The transcript recompute reads no subagent transcripts; take the
@@ -1218,7 +1218,8 @@ func ConsumeAttachTokenWindow(state *SessionState, pos int) {
 	state.SetTokenStart(pos)
 }
 
-func hasTokenUsageData(usage *agent.TokenUsage) bool {
+// HasTokenUsageData reports whether usage, or its subagent usage, carries any counts.
+func HasTokenUsageData(usage *agent.TokenUsage) bool {
 	if usage == nil {
 		return false
 	}
@@ -1227,7 +1228,7 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 		return true
 	}
 
-	return hasTokenUsageData(usage.SubagentTokens)
+	return HasTokenUsageData(usage.SubagentTokens)
 }
 
 // fillMissingSubagentTokensFrom fills absent child coverage from this checkpoint
@@ -1289,13 +1290,13 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 
 	if len(transcript) > 0 {
 		fullSessionUsage := agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
-		if hasTokenUsageData(fullSessionUsage) {
+		if HasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
 		}
 		logging.Debug(ctx, "copilot-cli: full-session token read produced no data, falling back to checkpoint usage")
 	}
 
-	if hasTokenUsageData(checkpointUsage) {
+	if HasTokenUsageData(checkpointUsage) {
 		return checkpointUsage
 	}
 
@@ -1623,7 +1624,7 @@ func calculateLiveTranscriptTokenUsage(
 	state.TokenUsage = replaceSubagentTokensFrom(state.TokenUsage, usage)
 	scoped := *usage
 	scoped.SubagentTokens = types.SubtractTokenUsage(usage.SubagentTokens, state.SubagentTokensBaseline)
-	if !hasTokenUsageData(scoped.SubagentTokens) {
+	if !HasTokenUsageData(scoped.SubagentTokens) {
 		// A zero delta is absence, not a checkpoint subagent total. Keeping an
 		// all-zero pointer would both change the JSON shape and prevent the normal
 		// SaveStep-computed window delta from filling this value later.
@@ -2106,9 +2107,9 @@ func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) 
 
 // openSessionCondensationRepository uses the session's recorded worktree when
 // it is still available. The state path only selects a registered worktree of
-// this repository; a removed or replaced worktree falls back to the caller's
-// repository. Registration alone does not establish the repository's identity.
-// The caller owns the returned repository.
+// this repository; a removed, replaced, or unusable worktree falls back to the
+// caller's repository. Registration alone does not establish the repository's
+// identity. The caller owns the returned repository.
 func openSessionCondensationRepository(ctx context.Context, state *SessionState) (*git.Repository, error) {
 	current, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -2120,19 +2121,22 @@ func openSessionCondensationRepository(ctx context.Context, state *SessionState)
 			return nil, fmt.Errorf("resolve current repository metadata: %w", err)
 		}
 		sessionMetadata, err := gitrepo.ResolveWorktreeMetadata(state.WorktreePath)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, gitrepo.ErrWorktreeMetadataNotFound) {
-			return nil, fmt.Errorf("resolve session repository metadata: %w", err)
-		}
 		// The metadata resolver validates linked-worktree registration. Compare
 		// the validated common directories without spawning git under the lock.
 		if err == nil && sameDir(currentMetadata.CommonDir, sessionMetadata.CommonDir) {
-			repo, err := gitrepo.OpenPath(state.WorktreePath)
+			var repo *git.Repository
+			repo, err = gitrepo.OpenPath(state.WorktreePath)
 			if err == nil {
 				return repo, nil
 			}
-			if !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("open session worktree repository: %w", err)
-			}
+		}
+		// A home that exists but cannot be used falls back like a removed one;
+		// failing here would leave the session's work pending on every retry.
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, gitrepo.ErrWorktreeMetadataNotFound) {
+			logging.Warn(logging.WithComponent(ctx, "checkpoint"), "session's recorded worktree is unusable; condensing from the current worktree's repository",
+				slog.String("session_id", state.SessionID),
+				slog.String("recorded_worktree", state.WorktreePath),
+				slog.String("error", err.Error()))
 		}
 	}
 	return gitrepo.OpenPath(current) //nolint:wrapcheck // OpenPath provides repository context

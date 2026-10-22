@@ -145,6 +145,10 @@ If your AI sessions will touch sensitive data:
 - **Review before pushing.** Checkpoints are written locally — at commit time, or when a session with no file changes is snapshotted with the hidden `entire checkpoint create` — and pushed separately, so there is always a window to inspect them:
 
   ```fish
+  # git-refs: what your next git push sends, read locally with no network call
+  entire checkpoint list --outgoing
+  entire checkpoint explain <id>
+
   # git-refs: list local checkpoint refs, then read one
   git for-each-ref refs/entire/checkpoints
   entire checkpoint list
@@ -154,7 +158,7 @@ If your AI sessions will touch sensitive data:
   git log --oneline entire/checkpoints/v1
   ```
 
-- **Know your push destination.** Checkpoint data syncs to exactly one elected remote; `entire status` names it and reports how many checkpoints are still unpushed.
+- **Know your push destination.** Checkpoint data syncs to exactly one elected remote; `entire status` names it and reports how many checkpoints are still unpushed, and on the git-refs backend `entire checkpoint list --outgoing` lists them.
 
 ## What Gets Redacted
 
@@ -165,6 +169,14 @@ Secret detection as a whole is always on, though the pattern-matching scanner la
 All detected secrets are replaced with `REDACTED`. PII matches are replaced with category-tagged tokens like `[REDACTED_EMAIL]` (see [Optional PII redaction](#optional-pii-redaction)).
 
 To reduce over-redaction, Entire preserves structural transcript fields such as IDs and paths, leaves placeholder values alone, and redacts only credential values for bounded key/value forms. In structured JSON, such as a tool call's input, a value under a key that names a credential (for example `api_key`, `token`, `client_secret` or `password`) is also scanned together with its key, so `{"api_key": "…"}` is caught by the same key-based rules that catch `api_key=…` in prose. When only the key reveals a secret, the whole value is replaced. Placeholders are detected by exact match (e.g. `changeme`, `example`, `placeholder`, `your_password`, `your_secret`, prior `REDACTED`/`[REDACTED]`/`<REDACTED>` markers) or by shape: shell expansions like `${DB_PASSWORD}`, template expressions such as `%s`, `%(password)s`, `{}`, `{password}`, or `$DB_PASSWORD`, bracketed names like `<password>` or `<your-db-password>`, and mask runs of three or more `*`/`x`/`.`/`-` (so `***`, `xxxx`, `....`, `----` all match). A shell expansion must be one complete expression, so `${A}hunter2${B}` is redacted, and one with a fallback value, such as `${DB_PASSWORD:-hunter2}`, is a placeholder only when the fallback is empty or itself a placeholder. Format-field names must be lowercase and shell variables uppercase, so `{hunter2}` and `$hunter2` are still redacted. Bounded key/value captures additionally treat as placeholders: command substitutions that run a known secret-fetching command without quotes or redirection (`$(cat token)`, `$(gh auth token)`) unless single-quoted, documentation fill-ins that name a credential (`your_api_key_here`), short letter-only vendor prefixes ending in an ellipsis (`sk-ant-...`), uppercase bracketed names (`<ENTIRE_TOKEN>`), Go template references, and, for non-password keys only, code literals (`None`, `null`, `false`) and the exact masks `hidden` / `(value hidden)`; inside single quotes only the literal placeholder words and shapes apply. Secret-scanner findings, credentialed URLs and connection strings use only the shared placeholder rules. When a connection string contains a real password, it is redacted as a unit because partial fragments can still expose sensitive material; connection strings and credentialed URLs whose passwords are placeholders are left intact. In a Postgres keyword DSN, an uppercase `PWD=` whose value is an absolute path (`/app`, `~/app`) is the shell's working directory, so `env` output is not mistaken for a connection string, while a lowercase `pwd=` always counts as a password; bounded key/value detection reads the value from the same line only, so a blank `DB_PASSWORD=` leaves the next line alone.
+
+### Redaction counts in checkpoint metadata
+
+Each checkpoint records how many values redaction replaced in its stored transcript (`full.jsonl`) and how many matches each detection layer found. That transcript holds the whole session up to the checkpoint, so a session's counts grow from one checkpoint to the next; to total what a push sends, take each session's latest checkpoint rather than adding its checkpoints together. The layers are `entropy`, `betterleaks`, `goredact`, `provider_token`, `credentialed_uri`, `connection_string`, `custom`, `shell_stdin` (a literal piped into a secret-management command), `credential_value`, `pii`, `key_context` (a JSON value redacted because of its key), and `credential_key` (a password value under a credential key). A layer that ran and found nothing reports 0. A layer that did not run, such as custom rules when none are configured, is left out. A layer counts each place it flags once, however many of its rules match there. Overlapping matches count in every layer that found them but are replaced once, so the layer counts can add up to more than the number of replacements. A value found in one JSON field is also replaced where the same text appears in a field redaction does not scan, such as an ID, so the layer counts can also add up to less.
+
+The counts never include the redacted values. Custom rules are reported as one total plus the number of rules that ran, without their names, because a rule's label can name something a team keeps out of shared metadata. PII is counted per built-in category (`EMAIL`, `PHONE`, `ADDRESS`), and custom PII patterns share one `custom` bucket.
+
+`entire checkpoint explain` shows the counts in its header, for example `redacted 5 replacements in this session so far · matches: entropy 2, betterleaks 1, custom 2 (1 rule)`, and `--json` includes them for each session and for the whole checkpoint. Checkpoints written by older versions have no counts and show no row. Prompts (`prompt.txt`), summaries, and subagent transcripts are not counted.
 
 ## Customizing redaction
 
@@ -288,7 +300,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 
 ### Troubleshooting
 
-- **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches are emitted by the redaction layer when Entire initializes it. In the hook path (where checkpoints are actually written) these go to `.entire/logs/entire.log` — `grep component=redaction` and look for lines mentioning your label or pack path. `error="pattern can match the empty string"` means the rule was skipped because it can match zero characters; change it so every match consumes at least one character, for example by dropping a trailing `|` or `?`, or using `+` instead of `*`. When a hard pack-discovery failure happens during an interactive command, Entire also prints a one-line breadcrumb on stderr pointing back at the log.
+- **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches are emitted by the redaction layer when Entire initializes it. In the hook path (where checkpoints are actually written) these go to `.entire/logs/entire.log` — `grep component=redaction` and look for lines mentioning your label or pack path. `error="pattern can match the empty string"` means the rule was skipped because it can match zero characters; change it so every match consumes at least one character, for example by dropping a trailing `|` or `?`, or using `+` instead of `*`. When a hard pack-discovery failure happens during an interactive command, Entire also prints a one-line breadcrumb on stderr pointing back at the log. `entire checkpoint explain` on a recent checkpoint tells the cases apart: `custom 0 (2 rules)` means your rules ran and matched nothing, and no `custom` entry means no rule loaded.
 - **My pack file is silently ignored.** Filenames must end in `.yaml`, `.yml`, or `.json`. Other extensions are skipped.
 - **I want to disable a rule temporarily.** Comment it out (prefix the YAML key with `#`) or remove the entry from `custom_redactions`. The rule reloads on the next CLI invocation.
 
