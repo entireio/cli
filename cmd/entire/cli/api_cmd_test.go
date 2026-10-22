@@ -437,3 +437,27 @@ func TestResolveAPIClientAndPath_RepoIDNeedsSupportedForge(t *testing.T) {
 		t.Error("unsupported forge reached the placement lookup")
 	}
 }
+
+// Not parallel: chdirs, sets env, and swaps package-level client seams.
+func TestResolveAPIClientAndPath_BaseURLOverrideKeepsItsHost(t *testing.T) {
+	backend, trailCalled, _ := setupAPIPlaceholderRepo(t, "https://github.com/entirehq/entire.io.git")
+	t.Setenv(api.BaseURLEnvVar, "http://127.0.0.1:8082")
+	withFakeCellCore(t, &fakeCellCore{
+		repos:    reposOutput(fourRegionFixtureProcessingInMiddle()),
+		clusters: clustersWithSlugs(),
+	})
+
+	_, path, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/trails")
+	if err != nil {
+		t.Fatalf("resolveAPIClientAndPath: %v", err)
+	}
+	if *trailCalled {
+		t.Error("request was rerouted past ENTIRE_API_BASE_URL to the placement cell")
+	}
+	if !backend.called || backend.to != apiTargetCell {
+		t.Errorf("backend = %+v, want the --to cell client that honors the override", backend)
+	}
+	if want := "/api/v1/repos/mirror-us/trails"; path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+}

@@ -91,8 +91,8 @@ uses the following routing shapes, mirroring the entire.io BFF:
   that placement id to entire-api
   instead of re-deriving it from a data-plane repo listing, and by `entire api`'s
   `{repo_id}` placeholder. A `--to cell` request whose path (not query) names
-  `{repo_id}` dials that placement's cell; `/me/*` paths stay on the home cell
-  and an explicit `--jurisdiction` wins. Another cell answers a placement id it
+  `{repo_id}` dials that placement's cell; `/me/*` paths stay on the home cell,
+  and an explicit `--jurisdiction` or `ENTIRE_API_BASE_URL` wins. Another cell answers a placement id it
   does not host with an error or, for the processing id, an empty result.
 - **Project-scoped trails → assigned project cell**:
   Core resolves the required `--project`; list uses

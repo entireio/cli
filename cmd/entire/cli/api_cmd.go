@@ -72,7 +72,8 @@ func newAPICmd() *cobra.Command {
 			"  {repo_id}        the repo's Entire ULID (its processing placement) — cells key on this\n\n" +
 			"With --to cell, a request whose path names {repo_id} goes to the cell that\n" +
 			"hosts the repo instead of your home cell. /me/* paths and {repo_id} in the\n" +
-			"query string stay on the home cell; --jurisdiction always wins.\n\n" +
+			"query string stay on the home cell; --jurisdiction and ENTIRE_API_BASE_URL\n" +
+			"always win.\n\n" +
 			"The method is GET unless a field/body is given (then POST); override with -X.",
 		Example: "  entire api /api/v1/clusters\n" +
 			"  entire api --to cell /api/v1/me/activity\n" +
@@ -242,9 +243,12 @@ func resolveAPIClientAndPath(ctx context.Context, to, jurisdiction string, insec
 		origin = apiOrigin{forge: forge, owner: owner, repo: repo}
 	}
 
-	// An explicit --jurisdiction is the user's choice of cell and wins; the
-	// placement then supplies only the id.
-	if needRepoID && jurisdiction == "" && isAPICellTarget(to) && isRepoScopedAPIPath(rawPath) {
+	// An explicit --jurisdiction or ENTIRE_API_BASE_URL is the user's choice
+	// of cell and wins; the placement then supplies only the id. Rerouting
+	// past an override would send a request meant for a local or direct cell,
+	// mutations included, to the hosted one.
+	_, baseURLOverridden := api.BaseURLOverride()
+	if needRepoID && jurisdiction == "" && !baseURLOverridden && isAPICellTarget(to) && isRepoScopedAPIPath(rawPath) {
 		if err := checkAPIRepoIDForge(origin.forge); err != nil {
 			return nil, "", err
 		}
