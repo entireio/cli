@@ -218,8 +218,8 @@ func TestPostCommit_ForeignAgentCommitWithoutTranscriptOverlap(t *testing.T) {
 	assert.ElementsMatch(t, []string{"README.md", "b.txt"}, content.Metadata.FilesTouched)
 }
 
-// Linking copies A's transcript into B's checkpoints, so it needs B to have no
-// origin (covered above) or both origins to share an owner.
+// Linking copies A's transcript into B's checkpoints, so it needs neither repo
+// to have an origin (covered above) or both origins to share an owner.
 func TestPrepareCommitMsg_ForeignAgentCommitOwnerGate(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -231,7 +231,8 @@ func TestPrepareCommitMsg_ForeignAgentCommitOwnerGate(t *testing.T) {
 		{"same owner", "git@github.com:acme/a.git", "https://github.com/acme/b.git", true, nil},
 		{"different owner", "git@github.com:acme/a.git", "git@github.com:other/b.git", false,
 			[]string{"github.com/acme", "github.com/other"}},
-		{"home has no origin", "", "git@github.com:other/b.git", false, []string{"an unknown owner", "github.com/other"}},
+		{"home has no origin", "", "git@github.com:other/b.git", false, []string{"no origin remote", "github.com/other"}},
+		{"this repo has no origin", "git@github.com:acme/a.git", "", false, []string{"github.com/acme", "no origin remote"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -239,7 +240,9 @@ func TestPrepareCommitMsg_ForeignAgentCommitOwnerGate(t *testing.T) {
 			if tc.originA != "" {
 				testutil.RunGit(t, r.a, "remote", "add", "origin", tc.originA)
 			}
-			testutil.RunGit(t, r.b, "remote", "add", "origin", tc.originB)
+			if tc.originB != "" {
+				testutil.RunGit(t, r.b, "remote", "add", "origin", tc.originB)
+			}
 
 			_, found := trailers.ParseCheckpoint(prepareForeign(t, "add b\n", commitSourceMessage))
 			assert.Equal(t, tc.stamped, found)

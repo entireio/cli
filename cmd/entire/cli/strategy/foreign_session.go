@@ -287,26 +287,32 @@ func repoOwner(ctx context.Context, dir string, env []string) (owner string, has
 
 // foreignOwnerNotice returns why the foreign session must not link this
 // commit, or "" when it may. Linking copies the session's transcript into this
-// repository's checkpoints, which are pushed with it, so it is allowed only
-// when this repository has no origin or both origins have the same owner: a
-// session in a private repository must not publish into someone else's.
+// repository's checkpoints, which are pushed with it (now, or once a remote is
+// added), so it is allowed only when neither repository has an origin or both
+// origins have the same owner: a session in a private repository must not
+// publish into someone else's.
 func foreignOwnerNotice(ctx context.Context, fs *foreignSession) string {
-	here, hasOrigin := repoOwner(ctx, "", nil)
-	if !hasOrigin {
+	here, hereHasOrigin := repoOwner(ctx, "", nil)
+	home, homeHasOrigin := repoOwner(ctx, fs.state.WorktreePath, gitrepo.EnvWithoutRepoOverrides())
+	if !hereHasOrigin && !homeHasOrigin {
 		return ""
 	}
-	home, _ := repoOwner(ctx, fs.state.WorktreePath, gitrepo.EnvWithoutRepoOverrides())
 	if here != "" && here == home {
 		return ""
 	}
-	if home == "" {
-		home = "an unknown owner"
-	}
-	if here == "" {
-		here = "an unknown owner"
-	}
 	return fmt.Sprintf("[entire] This commit is not linked to agent session %s: the session started in a repository owned by %s, "+
-		"and this repository (owned by %s) would publish its transcript in its checkpoints.", fs.state.SessionID, home, here)
+		"and this repository (owned by %s) would publish its transcript in its checkpoints.",
+		fs.state.SessionID, ownerLabel(home, homeHasOrigin), ownerLabel(here, hereHasOrigin))
+}
+
+func ownerLabel(owner string, hasOrigin bool) string {
+	switch {
+	case !hasOrigin:
+		return "no one (no origin remote)"
+	case owner == "":
+		return "an unknown owner"
+	}
+	return owner
 }
 
 func recordForeignNotice(ctx context.Context, sessionID, notice string) {
