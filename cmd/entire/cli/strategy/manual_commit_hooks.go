@@ -3455,10 +3455,12 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 			slog.Int("error_count", errCount),
 		)
 	}
-	// Checkpoints this turn wrote in other repositories, once all of them hold
-	// the turn too, count as mid-turn commits for the advance below.
-	if s.finalizeForeignTurnCheckpoints(ctx, state, finalizeDeadline) {
-		hadMidTurnCommits = true
+	// Checkpoints this turn wrote in other repositories count as mid-turn
+	// commits for the advance below once all of them hold the turn. If any
+	// could not be finalized, the home keeps the tail for its next checkpoint
+	// instead, even when its own mid-turn checkpoints also hold it.
+	if len(state.ForeignTurnCheckpoints) > 0 {
+		hadMidTurnCommits = s.finalizeForeignTurnCheckpoints(ctx, state, finalizeDeadline)
 	}
 
 	// Advance CheckpointTranscriptStart to the actual transcript end after

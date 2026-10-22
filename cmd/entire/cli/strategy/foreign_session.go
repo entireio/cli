@@ -482,6 +482,11 @@ func (s *ManualCommitStrategy) foreignEditedFiles(ctx context.Context, state *Se
 // foreignFinalizeWait bounds finalize-foreign when the turn end set no deadline.
 const foreignFinalizeWait = time.Minute
 
+// foreignFinalizeMargin is how much earlier than the parent's kill the child's
+// own deadline falls, so the child cancels its git fetches itself: the kill
+// reaches only the child's process group, not the groups its fetches run in.
+const foreignFinalizeMargin = 3 * time.Second
+
 // runForeignFinalize runs args with this executable in worktreePath, with the
 // caller's repo-selecting git variables scrubbed. A var so tests can stand in
 // for the subprocess.
@@ -529,7 +534,7 @@ func (s *ManualCommitStrategy) finalizeForeignTurnCheckpoints(ctx context.Contex
 	var failed []session.ForeignTurnCheckpoint
 	for _, tree := range trees {
 		args := append([]string{"hooks", "git", "finalize-foreign", "--session", state.SessionID, "--home", state.WorktreePath,
-			"--deadline", strconv.FormatInt(deadline.UnixMilli(), 10)}, byTree[tree]...)
+			"--deadline", strconv.FormatInt(deadline.Add(-foreignFinalizeMargin).UnixMilli(), 10)}, byTree[tree]...)
 		if err := runForeignFinalize(runCtx, tree, args); err != nil {
 			logging.Warn(logging.WithComponent(ctx, "checkpoint"), "turn end: could not finalize checkpoints in another repository",
 				slog.String("session_id", state.SessionID),
@@ -573,8 +578,9 @@ func (s *ManualCommitStrategy) FinalizeForeignTurnCheckpoints(ctx context.Contex
 	if len(state.TurnCheckpointIDs) != len(checkpointIDs) {
 		return fmt.Errorf("session %s is not in every checkpoint asked for", sessionID)
 	}
-	if n := s.finalizeAllTurnCheckpoints(ctx, state, deadline); n > 0 {
-		return fmt.Errorf("%d checkpoint(s) of session %s not finalized", n, sessionID)
+	// An interrupted finalize returns no errors but leaves the unwritten IDs.
+	if n := s.finalizeAllTurnCheckpoints(ctx, state, deadline); n > 0 || len(state.TurnCheckpointIDs) > 0 {
+		return fmt.Errorf("checkpoints of session %s not finalized (%d errors, %d unwritten)", sessionID, n, len(state.TurnCheckpointIDs))
 	}
 	return nil
 }
@@ -602,7 +608,8 @@ func (s *ManualCommitStrategy) checkpointsHoldingSession(ctx context.Context, se
 			continue
 		}
 		for i := range summary.Sessions {
-			if content, err := store.ReadSessionContent(ctx, cpID, i); err == nil && content.Metadata.SessionID == sessionID {
+			// Metadata only: a files/prompt-only checkpoint has no transcript yet.
+			if meta, err := store.ReadSessionMetadata(ctx, cpID, i); err == nil && meta != nil && meta.SessionID == sessionID {
 				held = append(held, raw)
 				break
 			}

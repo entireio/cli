@@ -337,3 +337,44 @@ func TestFinalizeForeignTurnCheckpoints_TurnEnd(t *testing.T) {
 	assert.Equal(t, "/repo/c", calls[0].tree)
 	assert.Empty(t, state.ForeignTurnCheckpoints)
 }
+
+// A finalize cut off by its deadline is not success: nothing is written.
+func TestFinalizeForeignTurnCheckpoints_Interrupted(t *testing.T) {
+	r := foreignCommitFixture(t, nil)
+	cpID := commitForeign(t, r, "add b\n")
+	require.False(t, cpID.IsEmpty())
+	require.Error(t, NewManualCommitStrategy().FinalizeForeignTurnCheckpoints(context.Background(), foreignTestSessionID, r.a,
+		[]string{cpID.String()}, time.Now().Add(-time.Second)))
+}
+
+// The home's transcript start advances to the turn end only when every
+// foreign checkpoint was finalized, even when it has its own mid-turn
+// checkpoints: otherwise the tail would be in no checkpoint.
+func TestHandleTurnEnd_ForeignFinalizeFailureKeepsTail(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fail     bool
+		advanced bool
+	}{{"finalized", false, true}, {"failed", true, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := foreignCommitFixture(t, nil)
+			t.Chdir(r.a)
+			paths.ClearWorktreeRootCache()
+			orig := runForeignFinalize
+			runForeignFinalize = func(context.Context, string, []string) error {
+				if tc.fail {
+					return errors.New("boom")
+				}
+				return nil
+			}
+			t.Cleanup(func() { runForeignFinalize = orig })
+
+			state := loadForeignTestState(t, r)
+			state.TurnCheckpointIDs = []string{"not-a-checkpoint"} // a home mid-turn commit
+			state.ForeignTurnCheckpoints = []session.ForeignTurnCheckpoint{{CheckpointID: "aaaaaaaaaaa1", WorktreePath: r.b}}
+			start := state.CheckpointTranscriptStart
+			require.NoError(t, NewManualCommitStrategy().HandleTurnEnd(context.Background(), state, time.Time{}))
+			assert.Equal(t, tc.advanced, state.CheckpointTranscriptStart > start)
+		})
+	}
+}
