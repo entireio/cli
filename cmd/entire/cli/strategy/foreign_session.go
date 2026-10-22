@@ -294,6 +294,19 @@ func (s *ManualCommitStrategy) linkForeignAgentCommit(ctx context.Context, repo 
 	if !ok || !eligible {
 		return false
 	}
+	if s.condenseForeignLink(ctx, repo, head, commit, cpID, worktreePath, committed, link) {
+		return true
+	}
+	// The trailer is already in the commit; say so rather than leave it silent.
+	logging.Warn(logging.WithComponent(ctx, "checkpoint"), "post-commit: foreign agent commit trailer has no checkpoint",
+		slog.String("session_id", link.SessionID),
+		slog.String("checkpoint_id", cpID.String()))
+	return false
+}
+
+func (s *ManualCommitStrategy) condenseForeignLink(ctx context.Context, repo *git.Repository, head *plumbing.Reference, commit *object.Commit,
+	cpID id.CheckpointID, worktreePath string, committed map[string]struct{}, link foreignLink,
+) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	store, commonDir, err := openForeignStore(ctx, link.WorktreePath)
 	if err != nil {
@@ -307,9 +320,8 @@ func (s *ManualCommitStrategy) linkForeignAgentCommit(ctx context.Context, repo 
 	release, err := flock.AcquireContextIn(acqCtx, lock.root, lock.name)
 	cancel()
 	if err != nil {
-		logging.Warn(logCtx, "post-commit: foreign session lock unavailable; commit not condensed",
-			slog.String("session_id", link.SessionID),
-			slog.String("checkpoint_id", cpID.String()))
+		logging.Debug(logCtx, "post-commit: foreign session lock unavailable",
+			slog.String("session_id", link.SessionID))
 		return false
 	}
 	defer release()

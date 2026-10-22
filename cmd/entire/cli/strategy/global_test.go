@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	_ "unsafe"
@@ -29,15 +30,22 @@ func TestMain(m *testing.M) {
 	gitenv.IsolateMain()
 
 	// Turn start writes the per-user session-home index (session/home_index.go)
-	// under userdirs' cache dir, and an exported XDG_CACHE_HOME outranks the
-	// in-process testdirs fallback. Point it at a throwaway dir so tests never
-	// write into a developer's real cache. Tests that assert on the index set
-	// their own per-test dir on top of this.
+	// under userdirs' cache dir. Point the cache at a throwaway dir, and block
+	// the index there: every in-process session's owner is an ancestor of every
+	// test, so a shared index would let one test's session claim another's
+	// commit. Tests that exercise the index set their own per-test cache.
 	cacheDir, err := os.MkdirTemp("", "entire-strategy-test-cache-*")
 	if err != nil {
 		panic(fmt.Errorf("failed to create test cache dir: %w", err))
 	}
 	os.Setenv("XDG_CACHE_HOME", cacheDir)
+	blocked := filepath.Join(cacheDir, "entire", "session-homes")
+	if err := os.MkdirAll(filepath.Dir(blocked), 0o700); err != nil {
+		panic(fmt.Errorf("failed to create test cache dir: %w", err))
+	}
+	if err := os.WriteFile(blocked, nil, 0o400); err != nil {
+		panic(fmt.Errorf("failed to block the shared session-home index: %w", err))
+	}
 
 	// Register a default ConfigSource so tests that call ConfigScoped
 	// (directly or indirectly via Commit/CreateTag) don't fail with

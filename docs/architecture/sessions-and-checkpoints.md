@@ -366,7 +366,11 @@ repository B links that commit in B (`strategy/foreign_session.go`).
   remote. A's state advances as for a guest-linked commit, under A's lock with
   a bounded wait; A keeps its own base, files and `LastCheckpointID`.
 - B's checkpoint is not finalized at turn end; the rest of the turn goes into
-  A's next checkpoint.
+  A's next checkpoint. The window B's checkpoint takes includes any earlier
+  turns that edited files in A, so A's next checkpoint starts after them.
+- If post-commit cannot condense (A's lock is busy past its bound, or the
+  session stopped being eligible), B's commit keeps a trailer with no
+  checkpoint; this is logged.
 
 Under `go test`, the session state store refuses to open outside the temp
 root (both `session.NewStateStore` and `NewStateStoreForWorktree`), so a test
