@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -55,6 +56,11 @@ func newStatusCmd() *cobra.Command {
 }
 
 func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) error {
+	// Gated: the Agents line reads the registry, so an installed external
+	// agent only appears once discovered, and status may only run
+	// entire-agent-* binaries in a repo that opted into external_agents.
+	external.DiscoverAndRegister(ctx)
+
 	if jsonOutput {
 		return runStatusJSON(ctx, w)
 	}
