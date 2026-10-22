@@ -46,7 +46,10 @@ type TokenLedger struct {
 // an older copy): the difference moves to Base so the session total carries
 // on from where it was, and calls made after the rewrite add on top. A lower
 // total without a restart is a reading of a stale copy of the transcript
-// (OpenCode's export) and is ignored.
+// (OpenCode's export) and is ignored. Only resumable sources (Claude Code,
+// Codex) can report a restart, so for the others a real rewrite to a lower
+// total (an OpenCode undo) is ignored too: calls after it count only once the
+// total passes the old one, an undercount rather than a double count.
 func (l *TokenLedger) Observe(obs agent.CumulativeObservation) {
 	switch {
 	case usageTotal(obs.Total) >= usageTotal(l.Main):
@@ -115,17 +118,19 @@ func (l *TokenLedger) MarkCheckpointed() {
 	l.CheckpointedChildren = maxUsage(l.CheckpointedChildren, l.childrenTotal())
 }
 
-// CatchUp takes o's readings when they are newer than l's: o is a copy of
-// this ledger that read the transcript later (attach reads outside the
-// session lock, then saves into the state hooks may have moved on).
-func (l *TokenLedger) CatchUp(o *TokenLedger) {
-	if o == nil {
-		return
-	}
-	if usageTotal(clampUsage(addSigned(o.Base, o.Main))) > usageTotal(clampUsage(addSigned(l.Base, l.Main))) {
-		l.Main, l.Base, l.Cursor = cloneUsage(o.Main), cloneUsage(o.Base), bytes.Clone(o.Cursor)
-	}
-	l.Observe(agent.CumulativeObservation{Total: l.Main, Children: o.Children})
+// MarkCheckpointedUpTo records that a checkpoint holds everything o, an
+// earlier copy of this ledger, had read. Readings this ledger made since stay
+// pending. Like MarkCheckpointed, it never moves back.
+func (l *TokenLedger) MarkCheckpointedUpTo(o *TokenLedger) {
+	l.Checkpointed = maxUsage(l.Checkpointed, clampUsage(addSigned(o.Base, o.Main)))
+	l.CheckpointedChildren = maxUsage(l.CheckpointedChildren, o.childrenTotal())
+}
+
+// CheckpointedBeyond reports whether a checkpoint marked tokens since o, an
+// earlier copy of this ledger, was taken.
+func (l *TokenLedger) CheckpointedBeyond(o *TokenLedger) bool {
+	return usageTotal(l.Checkpointed) > usageTotal(o.Checkpointed) ||
+		usageTotal(l.CheckpointedChildren) > usageTotal(o.CheckpointedChildren)
 }
 
 // Clone returns a deep copy.

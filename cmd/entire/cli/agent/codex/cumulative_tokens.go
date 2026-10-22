@@ -105,11 +105,10 @@ func cumulativeRolloutUsage(data []byte) *agent.TokenUsage {
 			if key == "" {
 				key = "line:" + strconv.Itoa(index)
 			}
-			at := index
-			if prev, ok := records[key]; ok {
-				at = prev.index
+			if _, replayed := records[key]; replayed {
+				continue // a replayed record keeps its first place and usage
 			}
-			records[key] = callUsage{usage: record.Usage.tokenUsage(1), index: at}
+			records[key] = callUsage{usage: record.Usage.tokenUsage(1), index: index}
 		case rolloutLineTypeEventMsg:
 			var event struct {
 				Type string `json:"type"`

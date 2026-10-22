@@ -1208,14 +1208,12 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 }
 
 // ConsumeAttachTokenWindow marks the tokens an attach checkpoint stored as
-// counted: the token offset moves to pos and the pending window is reset, so
+// counted (a token ledger is marked by the caller, up to the reading attach
+// stored): the token offset moves to pos and the pending window is reset, so
 // the session's next checkpoint does not count them again. The displayed
 // transcript window (CheckpointTranscriptStart) is left alone.
 func ConsumeAttachTokenWindow(state *SessionState, pos int) {
 	state.CheckpointTokenUsage = nil
-	if state.TokenLedger.IsActive() {
-		state.TokenLedger.MarkCheckpointed()
-	}
 	state.RebaselineSubagentTokens()
 	state.SetTokenStart(pos)
 }

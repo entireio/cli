@@ -20,7 +20,7 @@ func newTokenLedger(ctx context.Context, agentType types.AgentType, sessionID, t
 	if err != nil || transcriptPath == "" {
 		return nil
 	}
-	if _, ok := agent.AsCumulativeTokenSource(ag); !ok {
+	if _, ok := agent.AsCumulativeTokenSource(ag); !ok || isSubagentSession(ag, transcriptPath) {
 		return nil
 	}
 	ledger := &session.TokenLedger{}
@@ -44,6 +44,12 @@ func ObserveTokenLedger(ctx context.Context, state *SessionState) bool {
 	ag, err := agent.GetByAgentType(state.AgentType)
 	if err != nil {
 		return state.TokenLedger.IsActive()
+	}
+	if isSubagentSession(ag, state.TranscriptPath) {
+		// A subagent's own session (a Droid Worker) reaches the parent as one
+		// of the parent's children; a total of its own would count it twice.
+		state.TokenLedger = nil
+		return false
 	}
 	observeTokenLedger(ctx, ag, state.TokenLedger, agent.CumulativeTokenInput{
 		SessionID:      state.SessionID,
@@ -110,4 +116,15 @@ func SubagentReferences(state *SessionState) []agent.SubagentReference {
 		})
 	}
 	return refs
+}
+
+// isSubagentSession reports whether the session behind transcriptPath is a
+// subagent's own session, linked to a parent that counts it.
+func isSubagentSession(ag agent.Agent, transcriptPath string) bool {
+	resolver, ok := agent.AsSubagentSessionResolver(ag)
+	if !ok || transcriptPath == "" {
+		return false
+	}
+	_, isSubagent := resolver.ResolveSubagentSession(transcriptPath)
+	return isSubagent
 }

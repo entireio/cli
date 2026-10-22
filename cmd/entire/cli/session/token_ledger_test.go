@@ -1,7 +1,6 @@
 package session
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -101,31 +100,31 @@ func TestTokenLedger(t *testing.T) {
 		assertUsage(t, "pending", l.Pending(), withKids(&agent.TokenUsage{}, usage(7, 1, 1)))
 	})
 
+	t.Run("a checkpoint from an older reading marks only what it read", func(t *testing.T) {
+		t.Parallel()
+		var onDisk TokenLedger
+		onDisk.Observe(reading(usage(100, 10, 1), nil))
+		attachRead := onDisk.Clone()
+		// A Stop records more while attach waits to save.
+		onDisk.Observe(reading(usage(150, 15, 2), nil))
+		if onDisk.CheckpointedBeyond(attachRead) {
+			t.Fatal("no other checkpoint moved the mark")
+		}
+		onDisk.MarkCheckpointedUpTo(attachRead)
+		assertUsage(t, "pending", onDisk.Pending(), usage(50, 5, 1))
+	})
+
 	t.Run("the checkpointed mark never moves back", func(t *testing.T) {
 		t.Parallel()
 		var l TokenLedger
+		l.Observe(reading(usage(100, 10, 1), nil))
+		older := l.Clone()
 		l.Observe(reading(usage(250, 30, 3), nil))
 		l.MarkCheckpointed()
-		older := TokenLedger{Main: usage(100, 10, 1)}
-		older.MarkCheckpointed()
-		l.Checkpointed = maxUsage(l.Checkpointed, older.Checkpointed)
+		l.MarkCheckpointedUpTo(older)
 		assertUsage(t, "checkpointed", l.Checkpointed, usage(250, 30, 3))
-	})
-
-	t.Run("catching up takes the newer reading", func(t *testing.T) {
-		t.Parallel()
-		onDisk := TokenLedger{}
-		onDisk.Observe(reading(usage(100, 10, 1), nil))
-		attached := onDisk.Clone()
-		attached.Observe(agent.CumulativeObservation{Total: usage(180, 20, 2), Cursor: json.RawMessage(`{"offset":9}`)})
-		onDisk.CatchUp(attached)
-		onDisk.MarkCheckpointed()
-		assertUsage(t, "total", onDisk.Total(), usage(180, 20, 2))
-		if onDisk.HasPending() {
-			t.Fatalf("pending = %+v", onDisk.Pending())
-		}
-		if string(onDisk.Cursor) != `{"offset":9}` {
-			t.Fatalf("cursor = %s", onDisk.Cursor)
+		if !l.CheckpointedBeyond(older) {
+			t.Fatal("a later checkpoint moved the mark past the older reading")
 		}
 	})
 

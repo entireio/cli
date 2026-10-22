@@ -25,10 +25,16 @@ const openMessageWindow = 64
 // cursor from another version is ignored and the transcript read from the start.
 const claudeCursorVersion = 1
 
+// claudeCursorAgent tags the cursor, so a session whose agent type changes
+// never resumes another agent's cursor.
+const claudeCursorAgent = "claude-code"
+
 type claudeCursor struct {
 	agent.TranscriptCursor
 
 	Version int `json:"v"`
+	// Agent names the agent that wrote the cursor.
+	Agent string `json:"agent"`
 	// Closed is the usage of messages no later line can extend.
 	Closed agent.TokenUsage `json:"closed"`
 	// Open are the latest messages, oldest first, still matched by ID.
@@ -59,10 +65,11 @@ type childCursor struct {
 // when it changed.
 func (c *ClaudeCodeAgent) ResumeCumulativeTokenUsage(_ context.Context, in agent.CumulativeTokenInput, cursor json.RawMessage) (agent.CumulativeObservation, error) {
 	var cur claudeCursor
-	known := len(cursor) > 0 && json.Unmarshal(cursor, &cur) == nil && cur.Version == claudeCursorVersion
-	restarted := known && !cur.Resumes(in.TranscriptData)
-	if !known || restarted {
-		cur = claudeCursor{Version: claudeCursorVersion}
+	known := len(cursor) > 0 && json.Unmarshal(cursor, &cur) == nil && cur.Version == claudeCursorVersion && cur.Agent == claudeCursorAgent
+	// A cursor that consumed nothing cannot tell a rewrite from growth.
+	restarted := known && cur.Offset > 0 && !cur.Resumes(in.TranscriptData)
+	if !known || cur.Offset == 0 || restarted {
+		cur = claudeCursor{Version: claudeCursorVersion, Agent: claudeCursorAgent, Children: cur.Children}
 	}
 	end := agent.CompleteLinesEnd(in.TranscriptData, cur.Offset)
 	appended := in.TranscriptData[cur.Offset:end]

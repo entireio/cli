@@ -3,6 +3,8 @@ package codex
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -16,6 +18,10 @@ var _ agent.ResumableCumulativeTokenSource = (*CodexAgent)(nil)
 // codexCursorVersion changes whenever codexCursor's meaning does.
 const codexCursorVersion = 1
 
+// codexCursorAgent tags the cursor, so a session whose agent type changes never
+// resumes another agent's cursor.
+const codexCursorAgent = "codex"
+
 // codexCursor holds cumulativeRolloutUsage's running state, so a resumed call
 // reads only the lines appended since.
 type codexCursor struct {
@@ -24,8 +30,10 @@ type codexCursor struct {
 	Version int `json:"v"`
 	// Lines counts the non-blank lines consumed: a record's position.
 	Lines int `json:"lines"`
-	// Seen holds every response_id already counted, so a replayed record is not
-	// counted again.
+	// Agent names the agent that wrote the cursor.
+	Agent string `json:"agent"`
+	// Seen holds a short hash of every response_id already counted, so a
+	// replayed record is not counted again without storing every ID in full.
 	Seen map[string]bool `json:"seen,omitempty"`
 	// Covered sums the records written before the last token_count; Tail holds
 	// the records after it, keyed by response_id.
@@ -42,10 +50,11 @@ type codexCursor struct {
 // only the lines appended since cursor. Children still come from the inventory.
 func (c *CodexAgent) ResumeCumulativeTokenUsage(ctx context.Context, in agent.CumulativeTokenInput, cursor json.RawMessage) (agent.CumulativeObservation, error) {
 	var cur codexCursor
-	known := len(cursor) > 0 && json.Unmarshal(cursor, &cur) == nil && cur.Version == codexCursorVersion
-	restarted := known && !cur.Resumes(in.TranscriptData)
-	if !known || restarted {
-		cur = codexCursor{Version: codexCursorVersion}
+	known := len(cursor) > 0 && json.Unmarshal(cursor, &cur) == nil && cur.Version == codexCursorVersion && cur.Agent == codexCursorAgent
+	// A cursor that consumed nothing cannot tell a rewrite from growth.
+	restarted := known && cur.Offset > 0 && !cur.Resumes(in.TranscriptData)
+	if !known || cur.Offset == 0 || restarted {
+		cur = codexCursor{Version: codexCursorVersion, Agent: codexCursorAgent}
 	}
 	end := agent.CompleteLinesEnd(in.TranscriptData, cur.Offset)
 	for _, raw := range splitJSONL(in.TranscriptData[cur.Offset:end]) {
@@ -82,13 +91,14 @@ func (cur *codexCursor) add(raw []byte) {
 		if key == "" {
 			key = "line:" + strconv.Itoa(cur.Lines)
 		}
-		if cur.Seen[key] {
+		seen := responseKeyHash(key)
+		if cur.Seen[seen] {
 			return // a replayed record keeps its first place and usage
 		}
 		if cur.Seen == nil {
 			cur.Seen = make(map[string]bool)
 		}
-		cur.Seen[key] = true
+		cur.Seen[seen] = true
 		if cur.Tail == nil {
 			cur.Tail = make(map[string]*agent.TokenUsage)
 		}
@@ -129,4 +139,10 @@ func (cur *codexCursor) total() *agent.TokenUsage {
 
 func tokenTotal(u *agent.TokenUsage) int {
 	return u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens + u.OutputTokens
+}
+
+// responseKeyHash shortens a record key for the cursor's seen set.
+func responseKeyHash(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:6])
 }

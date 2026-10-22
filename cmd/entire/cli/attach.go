@@ -1392,129 +1392,149 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	}
 
 	now := time.Now()
-	state := existingState
-	// A trailer rewrite remaps stored state to the new commits; start from
-	// that rather than the copy loaded before it.
-	if fresh, loadErr := stateStore.Load(ctx, sessionID); loadErr == nil && fresh != nil {
-		state = fresh
+	apply := func(state *session.State) {
+		// Read before the display offset below moves: TokenStart falls back to it
+		// for state written before the token offset existed.
+		tokenStartOnDisk := state.TokenStart()
+		pendingOnDisk := state.CheckpointTokenUsage
+		lastCheckpointOnDisk := state.LastCheckpointID
+		// Read before LastInteractionTime is refreshed below: a running session
+		// whose agent exited will send no Stop for its turn. Inactivity stands in
+		// for that only when the owner's liveness can't be checked, since a live
+		// agent's long turn still ends in a Stop.
+		ownerLiveness := state.OwnerLiveness()
+		noStopComing := ownerLiveness == proclive.LivenessDead ||
+			(ownerLiveness == proclive.LivenessUnknown && state.IsStuckActive())
+
+		// Populate BaseCommit from HEAD if not already set, so the session becomes
+		// active and future commits in the same session receive Entire-Checkpoint trailers.
+		if seedBase && state.BaseCommit == "" {
+			if head, headErr := repo.Head(); headErr == nil {
+				state.BaseCommit = head.Hash().String()
+			}
+		}
+
+		state.CLIVersion = versioninfo.Version
+		state.AttachedManually = true
+		state.AgentHome = agentHome
+		state.AgentType = agentType
+		state.TranscriptPath = transcriptPath
+		state.LastCheckpointID = checkpointID
+		// Only transition to Ended if the session is not already active — avoid
+		// breaking an ongoing session whose BaseCommit has just been restored above.
+		// An ended session's next attach starts after these turns. A running
+		// session's offset belongs to its hooks: moving it would take turns from
+		// the checkpoint its next commit makes.
+		if !state.Phase.IsActive() {
+			state.Phase = session.PhaseEnded
+			if transcriptEnd >= 0 {
+				state.CheckpointTranscriptStart = transcriptEnd
+			}
+		}
+		state.LastInteractionTime = &now
+		if meta.TurnCount > 0 {
+			state.SessionTurnCount = meta.TurnCount
+		}
+		if meta.Model != "" {
+			state.ModelName = meta.Model
+		}
+		if meta.FirstPrompt != "" {
+			state.LastPrompt = meta.FirstPrompt
+		}
+		// A hook that ran while attach waited at its prompt recorded newer token
+		// state than attach read: a condensation moved the offset or stored the
+		// pending total (a new checkpoint ID), or a Stop added a turn to the
+		// pending total. Attach's figures are older than the hook's, so they are
+		// left out: consuming from the stale position would move the offset back
+		// and have the next checkpoint recount, and clearing the pending total
+		// would drop a hook-only agent's turn. Turn start clears LastCheckpointID,
+		// which is not a checkpoint, so only a new non-empty ID counts.
+		countedFrom := 0
+		var pendingRead *agent.TokenUsage
+		var lastCheckpointRead id.CheckpointID
+		if existingState != nil {
+			countedFrom = existingState.TokenStart()
+			pendingRead = existingState.CheckpointTokenUsage
+			lastCheckpointRead = existingState.LastCheckpointID
+		}
+		switch {
+		case existingState != nil && existingState.TokenLedger.IsActive():
+			// The checkpoint stored what attach's reading of the ledger had grown
+			// by. Mark exactly that as checkpointed: the ledger on disk may have
+			// read further since (a Stop while attach waited), and those tokens
+			// are in no checkpoint yet.
+			read := existingState.TokenLedger
+			if !state.TokenLedger.IsActive() {
+				// Attach's reading activated the ledger; hooks have not yet.
+				state.TokenLedger = read.Clone()
+				state.CheckpointTokenUsage = nil
+			} else if state.TokenLedger.CheckpointedBeyond(read) {
+				logging.Warn(ctx, "attach: a checkpoint stored session tokens while attach was waiting; they may be in both checkpoints")
+			}
+			state.TokenLedger.MarkCheckpointedUpTo(read)
+			strategy.ConsumeAttachTokenWindow(state, tokenPos)
+			state.TokenUsage = state.TokenLedger.Total()
+		case tokenStartOnDisk != countedFrom,
+			!reflect.DeepEqual(pendingOnDisk, pendingRead),
+			lastCheckpointOnDisk != "" && lastCheckpointOnDisk != lastCheckpointRead:
+			logging.Warn(ctx, "attach: session tokens changed while attach was waiting; leaving token state as the hooks set it",
+				slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))
+		default:
+			if state.Phase.IsActive() && !noStopComing {
+				// The running turn's Stop adds its tokens from turn start, including
+				// those before this attach, so the whole-transcript total would count
+				// them twice. Keep the hooks' total; take only the cumulative subagent
+				// total, which the re-baseline below must cover. An agent that exited
+				// or went quiet mid-turn sends no Stop, so its session takes the
+				// whole-transcript total below instead.
+				if sessionUsage != nil && sessionUsage.SubagentTokens != nil {
+					total := agent.TokenUsage{}
+					if state.TokenUsage != nil {
+						total = *state.TokenUsage
+					}
+					total.SubagentTokens = sessionUsage.SubagentTokens
+					total.SubagentTokensComplete = sessionUsage.SubagentTokensComplete
+					state.TokenUsage = &total
+				}
+			} else if sessionUsage != nil {
+				// Without a cumulative subagent total of its own, keep the one hooks
+				// recorded so the re-baseline doesn't drop it.
+				if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {
+					sessionUsage.SubagentTokens = state.TokenUsage.SubagentTokens
+					sessionUsage.SubagentTokensComplete = state.TokenUsage.SubagentTokensComplete
+				}
+				state.TokenUsage = sessionUsage
+			}
+			strategy.ConsumeAttachTokenWindow(state, tokenPos)
+		}
+		if opts.Review {
+			state.Kind = session.KindAgentReview
+			state.ReviewSkills = reviewSkills
+			state.ReviewPrompt = reviewPromptForAttach(meta, opts)
+		}
 	}
+
+	// A trailer rewrite remaps stored state to the new commits, and hooks may
+	// have moved it on while attach waited: update the state on disk under the
+	// session lock, so a concurrent hook's write is neither lost nor lost to.
+	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		apply(state)
+		return nil
+	})
+	if mutErr == nil {
+		return nil
+	}
+	if !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		return fmt.Errorf("failed to save session state: %w", mutErr)
+	}
+	state := existingState
 	if state == nil {
 		state = &session.State{
 			SessionID: sessionID,
 			StartedAt: now,
 		}
 	}
-	// Read before the display offset below moves: TokenStart falls back to it
-	// for state written before the token offset existed.
-	tokenStartOnDisk := state.TokenStart()
-	pendingOnDisk := state.CheckpointTokenUsage
-	lastCheckpointOnDisk := state.LastCheckpointID
-	// Read before LastInteractionTime is refreshed below: a running session
-	// whose agent exited will send no Stop for its turn. Inactivity stands in
-	// for that only when the owner's liveness can't be checked, since a live
-	// agent's long turn still ends in a Stop.
-	ownerLiveness := state.OwnerLiveness()
-	noStopComing := ownerLiveness == proclive.LivenessDead ||
-		(ownerLiveness == proclive.LivenessUnknown && state.IsStuckActive())
-
-	// Populate BaseCommit from HEAD if not already set, so the session becomes
-	// active and future commits in the same session receive Entire-Checkpoint trailers.
-	if seedBase && state.BaseCommit == "" {
-		if head, headErr := repo.Head(); headErr == nil {
-			state.BaseCommit = head.Hash().String()
-		}
-	}
-
-	state.CLIVersion = versioninfo.Version
-	state.AttachedManually = true
-	state.AgentHome = agentHome
-	state.AgentType = agentType
-	state.TranscriptPath = transcriptPath
-	state.LastCheckpointID = checkpointID
-	// Only transition to Ended if the session is not already active — avoid
-	// breaking an ongoing session whose BaseCommit has just been restored above.
-	// An ended session's next attach starts after these turns. A running
-	// session's offset belongs to its hooks: moving it would take turns from
-	// the checkpoint its next commit makes.
-	if !state.Phase.IsActive() {
-		state.Phase = session.PhaseEnded
-		if transcriptEnd >= 0 {
-			state.CheckpointTranscriptStart = transcriptEnd
-		}
-	}
-	state.LastInteractionTime = &now
-	if meta.TurnCount > 0 {
-		state.SessionTurnCount = meta.TurnCount
-	}
-	if meta.Model != "" {
-		state.ModelName = meta.Model
-	}
-	if meta.FirstPrompt != "" {
-		state.LastPrompt = meta.FirstPrompt
-	}
-	// A hook that ran while attach waited at its prompt recorded newer token
-	// state than attach read: a condensation moved the offset or stored the
-	// pending total (a new checkpoint ID), or a Stop added a turn to the
-	// pending total. Attach's figures are older than the hook's, so they are
-	// left out: consuming from the stale position would move the offset back
-	// and have the next checkpoint recount, and clearing the pending total
-	// would drop a hook-only agent's turn. Turn start clears LastCheckpointID,
-	// which is not a checkpoint, so only a new non-empty ID counts.
-	countedFrom := 0
-	var pendingRead *agent.TokenUsage
-	var lastCheckpointRead id.CheckpointID
-	if existingState != nil {
-		countedFrom = existingState.TokenStart()
-		pendingRead = existingState.CheckpointTokenUsage
-		lastCheckpointRead = existingState.LastCheckpointID
-	}
-	switch {
-	case state.TokenLedger.IsActive() && existingState != nil && existingState.TokenLedger.IsActive():
-		// The checkpoint stored what the ledger had grown by when attach read
-		// it. Readings only move forward, so whatever a hook recorded since is
-		// kept and the checkpointed mark never moves back.
-		state.TokenLedger.CatchUp(existingState.TokenLedger)
-		strategy.ConsumeAttachTokenWindow(state, tokenPos)
-		state.TokenUsage = state.TokenLedger.Total()
-	case tokenStartOnDisk != countedFrom,
-		!reflect.DeepEqual(pendingOnDisk, pendingRead),
-		lastCheckpointOnDisk != "" && lastCheckpointOnDisk != lastCheckpointRead:
-		logging.Warn(ctx, "attach: session tokens changed while attach was waiting; leaving token state as the hooks set it",
-			slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))
-	default:
-		if state.Phase.IsActive() && !noStopComing {
-			// The running turn's Stop adds its tokens from turn start, including
-			// those before this attach, so the whole-transcript total would count
-			// them twice. Keep the hooks' total; take only the cumulative subagent
-			// total, which the re-baseline below must cover. An agent that exited
-			// or went quiet mid-turn sends no Stop, so its session takes the
-			// whole-transcript total below instead.
-			if sessionUsage != nil && sessionUsage.SubagentTokens != nil {
-				total := agent.TokenUsage{}
-				if state.TokenUsage != nil {
-					total = *state.TokenUsage
-				}
-				total.SubagentTokens = sessionUsage.SubagentTokens
-				total.SubagentTokensComplete = sessionUsage.SubagentTokensComplete
-				state.TokenUsage = &total
-			}
-		} else if sessionUsage != nil {
-			// Without a cumulative subagent total of its own, keep the one hooks
-			// recorded so the re-baseline doesn't drop it.
-			if sessionUsage.SubagentTokens == nil && state.TokenUsage != nil {
-				sessionUsage.SubagentTokens = state.TokenUsage.SubagentTokens
-				sessionUsage.SubagentTokensComplete = state.TokenUsage.SubagentTokensComplete
-			}
-			state.TokenUsage = sessionUsage
-		}
-		strategy.ConsumeAttachTokenWindow(state, tokenPos)
-	}
-	if opts.Review {
-		state.Kind = session.KindAgentReview
-		state.ReviewSkills = reviewSkills
-		state.ReviewPrompt = reviewPromptForAttach(meta, opts)
-	}
-
+	apply(state)
 	if err := stateStore.Save(ctx, state); err != nil {
 		return fmt.Errorf("failed to save session state: %w", err)
 	}
