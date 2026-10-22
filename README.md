@@ -175,7 +175,7 @@ After setup:
 
 - Use `entire enable` to turn Entire back on if the repo is currently disabled.
 - Use `entire agent` to add or remove agents.
-- Use `entire configure` to update non-agent settings (telemetry, hooks, checkpoint remote, summary provider).
+- Use `entire configure` to update non-agent settings (telemetry, PII redaction, hooks, checkpoint remote, summary provider).
 
 The hooks capture session data as you work. Checkpoints are created when you or the agent make a git commit. Your code commits stay clean, Entire never creates commits on your active branch. Session metadata is stored outside your branch's history, in the checkpoint storage described under [Checkpoint Storage](#checkpoint-storage).
 
@@ -414,6 +414,7 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | `--search-skill`                            | Install the optional Entire search skill for the selected agent(s)                                                |
 | `--agent-help-skill`                        | Install the Entire agent-help skill (points agents at `entire agent-help`) for the selected agent(s)              |
 | `--telemetry=false`                         | Disable anonymous usage analytics                                                                                 |
+| `--redact-pii`                              | Redact email addresses and phone numbers from saved transcripts (also asked on first interactive enable)        |
 
 Run in a directory that is not a git repository, `entire enable` offers to initialize one and make an initial commit. It is local-only — no remote is created or pushed to, so publish the repository yourself when you are ready (`gh repo create`, `entire repo create`, or your forge's web UI). That path is driven by `--init-repo` / `--no-init-repo`, `--skip-initial-commit`, and `--initial-commit-message`. See `entire enable --help` for the full list.
 
@@ -439,6 +440,7 @@ Use `entire configure` to update non-agent settings on a repo that's already set
 Typical uses:
 
 - Toggle telemetry
+- Turn PII redaction on or off (`--redact-pii`, `--redact-pii=false`)
 - Reinstall the Entire git hook (`--force`, `--absolute-git-hook-path`)
 - Update strategy options such as `--checkpoint-remote` or `--skip-push-sessions`
 - Pick the provider, model, and timeout for `entire checkpoint explain --generate` (`--summarize-provider`, `--summarize-model`, `--summarize-timeout-seconds`)
@@ -451,6 +453,9 @@ entire configure
 
 # Opt out of telemetry
 entire configure --telemetry=false
+
+# Redact email addresses and phone numbers from saved transcripts
+entire configure --redact-pii
 
 # Reinstall the Entire git hook with an absolute binary path
 entire configure --absolute-git-hook-path

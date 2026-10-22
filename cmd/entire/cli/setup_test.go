@@ -2661,6 +2661,7 @@ func TestEnableUsesSetupFlow(t *testing.T) {
 		{name: "force", args: []string{"--force"}, want: true},
 		{name: "absolute hook path", args: []string{"--absolute-git-hook-path"}, want: true},
 		{name: "telemetry changed", args: []string{"--telemetry=false"}, want: true},
+		{name: "redact pii", args: []string{"--redact-pii"}, want: true},
 		{name: "checkpoint remote", args: []string{"--checkpoint-remote", "github:org/repo"}, want: true},
 		{name: "skip push sessions", args: []string{"--skip-push-sessions"}, want: true},
 		{name: "search skill", args: []string{"--search-skill"}, want: true},

@@ -95,6 +95,8 @@ Omitting either key, or the key's `enabled` field, keeps that engine at its defa
 
 PII redaction is a separate, **opt-in** layer that runs in addition to the always-on secret detection. Disabled by default. Configured under `redaction.pii` in `.entire/settings.json` (team-shared) or `.entire/settings.local.json` (personal, gitignored).
 
+The first interactive `entire enable` in a repository asks whether to turn it on (the default answer is no, and declining writes nothing). `entire enable --redact-pii` or `entire configure --redact-pii` turns it on without the prompt, and `--redact-pii=false` turns it off; both write `redaction.pii.enabled` to the settings file the command targets, which is `.entire/settings.json` unless `--local` is given. `--yes` and runs without a terminal never ask.
+
 Built-in categories (when `enabled` is `true`):
 
 | Category | Default | Replacement token |

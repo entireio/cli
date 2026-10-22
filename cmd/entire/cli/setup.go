@@ -53,6 +53,7 @@ const (
 	flagSummarizeAgent       = "summarize-provider"
 	flagSummarizeTimeout     = "summarize-timeout-seconds"
 	flagTelemetry            = "telemetry"
+	flagRedactPII            = "redact-pii"
 	flagAbsoluteGitHookPath  = "absolute-git-hook-path"
 	flagForce                = "force"
 	flagSearchSkill          = "search-skill"
@@ -89,6 +90,10 @@ type EnableOptions struct {
 	CheckpointBackend   string
 	Telemetry           bool
 	AbsoluteGitHookPath bool
+	// RedactPII is --redact-pii's value; RedactPIISet records that the flag
+	// was given, since false is both its default and an explicit choice.
+	RedactPII    bool
+	RedactPIISet bool
 	// SuppressDoneMessage tells `runEnableInteractive` to skip its final
 	// "Ready." line and the "commit the configuration files" hint. Set
 	// when the caller is running the bootstrap flow, which takes over
@@ -152,10 +157,17 @@ func hasGlobalSettingsFlags(cmd *cobra.Command) bool {
 		cmd.Flags().Changed(flagForce)
 }
 
+// hasRedactPIIFlag reports whether --redact-pii was given. It is kept out of
+// hasGlobalSettingsFlags because that set also opens agent management on a
+// configured repo, which has nothing to do with redaction.
+func hasRedactPIIFlag(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed(flagRedactPII)
+}
+
 // hasConfigureSettingsFlags reports whether configure was invoked with any
 // flag that mutates settings or hooks. Bare invocation prints help instead.
 func hasConfigureSettingsFlags(cmd *cobra.Command) bool {
-	return hasStrategyFlags(cmd) || hasCheckpointBackendFlag(cmd) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd)
+	return hasStrategyFlags(cmd) || hasCheckpointBackendFlag(cmd) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd) || hasRedactPIIFlag(cmd)
 }
 
 // enableUsesSetupFlow reports whether `entire enable` should delegate to the
@@ -166,7 +178,7 @@ func enableUsesSetupFlow(cmd *cobra.Command, agentName string) bool {
 	if agentName != "" || hasStrategyFlags(cmd) || hasCheckpointBackendFlag(cmd) || cmd.Flags().Changed(flagSearchSkill) || cmd.Flags().Changed(flagAgentHelpSkill) {
 		return true
 	}
-	return hasGlobalSettingsFlags(cmd) || cmd.Flags().Changed("yes")
+	return hasGlobalSettingsFlags(cmd) || hasRedactPIIFlag(cmd) || cmd.Flags().Changed("yes")
 }
 
 func enableNeedsAgentManagement(cmd *cobra.Command) bool {
@@ -828,12 +840,13 @@ func newSetupCmd() *cobra.Command {
 		Short: "Update Entire settings in the current repository",
 		Long: `Update non-agent Entire settings in the current repository.
 
-Manages telemetry, git-hook installation mode, strategy options, and summary
-provider configuration. Agent installation is handled by 'entire agent'.
+Manages telemetry, PII redaction, git-hook installation mode, strategy options,
+and summary provider configuration. Agent installation is handled by 'entire agent'.
 
 Examples:
   entire configure                                # Show this help
   entire configure --telemetry=false              # Opt out of telemetry
+  entire configure --redact-pii                   # Redact emails and phone numbers from transcripts
   entire configure --absolute-git-hook-path       # Reinstall git hook with absolute path
   entire configure --force                        # Reinstall git hook
   entire configure --checkpoint-remote github:org/checkpoints   # or gitlab:org/checkpoints
@@ -888,6 +901,11 @@ Examples:
 					return err
 				}
 			}
+			if hasRedactPIIFlag(cmd) {
+				if err := updateRedactPIISetting(ctx, cmd.OutOrStdout(), opts); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 	}
@@ -902,6 +920,7 @@ Examples:
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears the setting, leaving summary generation unbounded.")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
+	cmd.Flags().BoolVar(&opts.RedactPII, flagRedactPII, false, redactPIIFlagUsage)
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 
 	return cmd
@@ -939,6 +958,7 @@ publish the repository yourself when you're ready.`,
 			// the picker itself waits until every flag has been accepted.
 			opts.checkpointRemoteChoice = &enableCheckpointRemoteChoice{}
 			defer func() { opts.checkpointRemoteChoice.report(cmd.Context(), cmd.OutOrStdout(), runErr) }()
+			opts.RedactPIISet = hasRedactPIIFlag(cmd)
 			// Best-effort: after a successful enable, tell the backend which repo
 			// was enabled so the web onboarding reflects it (and we can warn when
 			// the GitHub App can't reach it). A freshly bootstrapped repo has no
@@ -1070,10 +1090,11 @@ publish the repository yourself when you're ready.`,
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", checkpointRemoteFlagUsage)
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
+	cmd.Flags().BoolVar(&opts.RedactPII, flagRedactPII, false, redactPIIFlagUsage)
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory+" — or turn on PII redaction — see --"+flagRedactPII)
 	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
@@ -1395,6 +1416,11 @@ func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Comm
 				return err
 			}
 		}
+		if hasRedactPIIFlag(cmd) {
+			if err := updateRedactPIISetting(ctx, w, opts); err != nil {
+				return err
+			}
+		}
 	} else if err := runPreflight(); err != nil {
 		return err
 	}
@@ -1604,6 +1630,9 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		}
 	} else if err := promptTelemetryConsent(settings, opts.Telemetry); err != nil {
 		return fmt.Errorf("telemetry consent: %w", err)
+	}
+	if err := chooseRedactPII(settings, opts); err != nil {
+		return err
 	}
 	// Save again to persist telemetry choice
 	if err := saveSettings(); err != nil {
@@ -2336,6 +2365,9 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		f := false
 		targetSettings.Telemetry = &f
 	}
+	if opts.RedactPIISet {
+		applyRedactPII(targetSettings, opts.RedactPII)
+	}
 
 	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
@@ -2662,6 +2694,92 @@ func promptTelemetryConsent(settings *EntireSettings, telemetryFlag bool) error 
 	}
 
 	settings.Telemetry = &consent
+	return nil
+}
+
+// redactPIIFlagUsage describes --redact-pii on enable and configure.
+const redactPIIFlagUsage = "Redact email addresses and phone numbers from saved transcripts (redaction.pii.enabled); --redact-pii=false turns it off"
+
+// promptRedactPII asks whether to turn on PII redaction. A package seam so
+// tests can answer without a terminal.
+var promptRedactPII = func() (bool, error) {
+	enable := false // Default to today's opt-in behavior.
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Redact personal info from saved transcripts?").
+				Description("Replaces email addresses and phone numbers with placeholders before\n" +
+					"checkpoints are saved, in this repo's .entire settings.\n" +
+					"Change it later with 'entire configure --redact-pii'.").
+				Affirmative("Yes").
+				Negative("No").
+				Value(&enable),
+		),
+	)
+	if err := form.Run(); err != nil {
+		return false, fmt.Errorf("pii prompt: %w", err)
+	}
+	return enable, nil
+}
+
+// canPromptRedactPII is a package seam over interactive.CanPromptInteractively,
+// which is always false under go test.
+var canPromptRedactPII = interactive.CanPromptInteractively
+
+// chooseRedactPII applies --redact-pii, or on a first interactive enable asks
+// once. Declining writes nothing, leaving the setting as it was before this
+// prompt existed; first-run enable is never reached again, so there is
+// nothing to remember. No terminal, or --yes, also writes nothing.
+func chooseRedactPII(s *EntireSettings, opts EnableOptions) error {
+	if opts.RedactPIISet {
+		applyRedactPII(s, opts.RedactPII)
+		return nil
+	}
+	if opts.Yes || (s.Redaction != nil && s.Redaction.PII != nil) || !canPromptRedactPII() {
+		return nil
+	}
+	enable, err := promptRedactPII()
+	if err != nil {
+		return err
+	}
+	if enable {
+		applyRedactPII(s, true)
+	}
+	return nil
+}
+
+// applyRedactPII sets redaction.pii.enabled, keeping any category settings.
+func applyRedactPII(s *EntireSettings, enabled bool) {
+	if s.Redaction == nil {
+		s.Redaction = &settings.RedactionSettings{}
+	}
+	if s.Redaction.PII == nil {
+		s.Redaction.PII = &settings.PIISettings{}
+	}
+	s.Redaction.PII.Enabled = enabled
+}
+
+// updateRedactPIISetting persists --redact-pii on a configured repo. Loads and
+// writes only the target file, like the other configure updates.
+func updateRedactPIISetting(ctx context.Context, w io.Writer, opts EnableOptions) error {
+	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	if err != nil {
+		targetFileAbs = targetFile
+	}
+	s, err := settings.LoadFromFile(targetFileAbs)
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+	applyRedactPII(s, opts.RedactPII)
+	if err := saveSettingsToTarget(ctx, s, targetFile); err != nil {
+		return fmt.Errorf("failed to save settings: %w", err)
+	}
+	state := "off"
+	if opts.RedactPII {
+		state = "on"
+	}
+	fmt.Fprintf(w, "✓ PII redaction %s (%s)\n", state, configDisplay)
 	return nil
 }
 
