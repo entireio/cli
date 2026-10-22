@@ -67,8 +67,9 @@ func Convert(content []byte, opts Options) ([]byte, error) {
 	// Formats that need detection on raw content before line truncation:
 	// - Single-object formats (OpenCode, Gemini): SliceFromLine would cut
 	//   a JSON object mid-value. They handle StartLine as a message-index offset.
-	// - Codex: session_meta header is only on the first line. Codex handles
-	//   StartLine as a response_item index offset.
+	// - Codex: session_meta header is only on the first line. Codex slices
+	//   by physical line itself, after seeding its usage baseline from the
+	//   skipped lines.
 	if isOpenCodeFormat(content) {
 		return compactOpenCode(content, opts)
 	}
@@ -116,9 +117,8 @@ func Convert(content []byte, opts Options) ([]byte, error) {
 // boundary is derived as lineCount(full) - lineCount(delta), where delta is the
 // existing per-checkpoint sliced compaction (Convert with the original
 // StartLine). This reuses each format's existing, independently-tested slicing
-// behavior — line offsets for JSONL/Copilot/Droid/pi, message-index for
-// OpenCode/Gemini, response-item index for Codex — rather than threading source
-// indices through every emitter.
+// behavior (line offsets for JSONL/Copilot/Droid/pi/Codex, message-index for
+// OpenCode/Gemini) rather than threading source indices through every emitter.
 //
 // A single compact line can carry content from both sides of StartLine when its
 // source straddles the boundary — most notably same-ID streaming assistant
