@@ -859,3 +859,47 @@ func statusSyncJSONOutput(t *testing.T, env *TestEnv) statusSyncJSON {
 	}
 	return parsed
 }
+
+// TestCheckpointSyncRemote_PartialDeliveryCapturesElection: a chunked git-refs
+// flush can land some checkpoints and fail others. The landed ones reached the
+// declared destination, so the push captures the election even though the
+// flush as a whole reported an error — reading any error as "nothing synced"
+// would leave the election on a remote that received nothing.
+func TestCheckpointSyncRemote_PartialDeliveryCapturesElection(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	env.CheckpointStore = StoreGitRefs
+	env.SetupBareRemote()
+	bareFork := env.SetupNamedBareRemote(forkRemote) // `-u`: branch declares fork
+
+	first := createCheckpointedCommit(t, env, "Add first module", "first.go", "package first", "Add first module")
+	second := createCheckpointedCommit(t, env, "Add second module", "second.go", "package second", "Add second module")
+	if first == "" || second == "" || first == second {
+		t.Fatalf("need two checkpoints, got %q and %q", first, second)
+	}
+	firstRef := "refs/entire/checkpoints/" + first[len(first)-2:] + "/" + first
+
+	// One ref per push, so the first checkpoint lands on its own; the fork
+	// then refuses any push carrying another checkpoint ref.
+	if err := os.WriteFile(filepath.Join(env.RepoDir, ".git", "entire-checkpoint-push-chunk-size"), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hook := "#!/bin/sh\nwhile read -r old new ref; do\n" +
+		"  case \"$ref\" in refs/entire/checkpoints/*) [ \"$ref\" = '" + firstRef + "' ] || { echo 'declined' >&2; exit 1; } ;; esac\n" +
+		"done\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bareFork, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env.RunPrePush(forkRemote)
+
+	if !env.CheckpointExistsOnRemote(bareFork, first) {
+		t.Fatalf("precondition: checkpoint %s should have landed on fork", first)
+	}
+	if env.CheckpointExistsOnRemote(bareFork, second) {
+		t.Fatalf("precondition: checkpoint %s should have been refused", second)
+	}
+	if got := capturedSyncRemotesOnDisk(t, env); len(got) != 1 || got[0] != forkRemote {
+		t.Errorf("a push that landed checkpoints on the declared destination should capture it, got %v", got)
+	}
+}

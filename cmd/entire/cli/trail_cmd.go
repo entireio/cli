@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"reflect"
 	"strconv"
@@ -2469,11 +2470,21 @@ func pushBranchToRemote(ctx context.Context, out, errOut io.Writer, remote, bran
 	cmd := exec.CommandContext(ctx, "git", "push", "-u", remote, branchName)
 	cmd.Stdout = out
 	cmd.Stderr = errOut
+	// The hook only records the checkpoint upload; it runs here once git push
+	// has returned, so "Pushed branch" means the checkpoints went too, and they
+	// never land just before the branch (GitHub rejects the later of two
+	// back-to-back pushes).
+	cmd.Env = append(os.Environ(), strategy.CheckpointUploadAfterPushEnv+"=1")
+	pushStart := time.Now()
 	if err := cmd.Run(); err != nil {
+		// Nothing uploads for a failed push; its refs stay queued for the next.
+		// Not under ctx: a push that timed out has spent it.
+		strategy.DiscardRequestedCheckpointUpload(context.WithoutCancel(ctx), remote, pushStart)
 		// git's own message already reached errOut, so this names the command
 		// and carries the exit status rather than repeating the diagnostic.
 		return fmt.Errorf("git push: %w", err)
 	}
+	strategy.UploadRequestedCheckpoints(ctx, errOut)
 	return nil
 }
 

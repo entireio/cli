@@ -410,6 +410,11 @@ type checkpointSyncInfo struct {
 	// when none, when counting failed, or when the count would be a lie
 	// (dedicated URL mode on the git-branch backend).
 	Unpushed int
+	// UploadRunning and UploadLastError report the background checkpoint
+	// upload (git-refs): one in progress now, or why the last one stopped
+	// short with refs still queued.
+	UploadRunning   bool
+	UploadLastError string
 	// IgnoredRemote and IgnoredReason report a configured checkpoint_remote
 	// that the ownership check rejected as inherited with the clone. Both
 	// reads and pushes then fall back to the elected remote, and status is
@@ -546,6 +551,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 			// unpushed".
 			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
 				info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
+				info.UploadRunning, info.UploadLastError = strategy.CheckpointUploadStatus(ctx)
 			}
 			return info
 		}
@@ -554,6 +560,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	info.Remote = elected.Name
 	info.Source = string(elected.Source)
 	info.Unpushed = countUnpushedCheckpointsForStatus(ctx, elected.Name)
+	info.UploadRunning, info.UploadLastError = strategy.CheckpointUploadStatus(ctx)
 	// A configured checkpoint_remote that did not enable above is being
 	// ignored. When the ownership check is what rejected it, say so: this is
 	// the one trust-gate rejection a user otherwise experiences only as
@@ -682,6 +689,10 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString("\n  ")
 		b.WriteString(sty.render(sty.dim, formatUnpushedCheckpointsLine(info)))
 	}
+	if info.Unpushed > 0 && info.UploadLastError != "" {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.yellow, "  ! Last background checkpoint upload stopped: "+info.UploadLastError))
+	}
 }
 
 // formatUnpushedCheckpointsLine phrases the unpushed counter. Dedicated URL
@@ -710,6 +721,9 @@ func formatUnpushedCheckpointsLine(info checkpointSyncInfo) string {
 			return fmt.Sprintf("%d %s not pushed to the checkpoint remote", info.Unpushed, noun)
 		}
 		return fmt.Sprintf("%d %s not on %s", info.Unpushed, noun, info.Remote)
+	}
+	if info.UploadRunning {
+		return fmt.Sprintf("%d %s uploading in the background", info.Unpushed, noun)
 	}
 	if info.Source == checkpointSyncSourceDedicated {
 		return fmt.Sprintf("%d %s not yet pushed", info.Unpushed, noun)
@@ -1152,6 +1166,10 @@ type statusJSON struct {
 	// not mean reads fall open to nothing.
 	CheckpointReadFallback string `json:"checkpoint_read_fallback,omitempty"`
 	UnpushedCheckpoints    int    `json:"unpushed_checkpoints,omitempty"`
+	// CheckpointUploadRunning/-LastError mirror the text path's background
+	// upload lines (git-refs).
+	CheckpointUploadRunning   bool   `json:"checkpoint_upload_running,omitempty"`
+	CheckpointUploadLastError string `json:"checkpoint_upload_last_error,omitempty"`
 	// CheckpointRemoteIgnored/-Reason report a configured checkpoint_remote the
 	// ownership check rejected as inherited with the clone (reads and pushes
 	// fall back to the elected remote). Mirrors the text path's warning line.
@@ -1270,6 +1288,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointReadFallback = syncInfo.ReadFallback
 		result.CheckpointReadSourceUnknown = syncInfo.ReadSourceUnknown
 		result.UnpushedCheckpoints = syncInfo.Unpushed
+		result.CheckpointUploadRunning = syncInfo.UploadRunning
+		if syncInfo.Unpushed > 0 {
+			result.CheckpointUploadLastError = syncInfo.UploadLastError
+		}
 		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
 		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
 		result.CheckpointRemoteIgnoredRemedy = syncInfo.IgnoredRemedy
