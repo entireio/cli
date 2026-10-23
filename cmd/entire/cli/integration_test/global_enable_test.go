@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -257,6 +259,74 @@ func TestGlobalEnable_FirstCheckpointPushNotice(t *testing.T) {
 			marker := filepath.Join(env.RepoDir, ".git", "entire-global-enable-push-notice")
 			if _, err := os.Stat(marker); (err == nil) != tc.wantNotice {
 				t.Errorf("marker present = %v, want %v", err == nil, tc.wantNotice)
+			}
+		})
+	}
+}
+
+// A repository on only through global enable gets Entire's git hooks on the
+// first prompt, without anyone running `entire enable` there. The SessionStart
+// banner says so (Claude shows it; it hides a successful hook's stderr), and
+// the prompt that installs them says so on stderr for agents that show it.
+// Neither appears once the hooks are in, nor in a repository the developer
+// enabled, nor with global enable off.
+func TestGlobalEnable_SaysWhenItInstallsGitHooks(t *testing.T) {
+	t.Parallel()
+	const banner = "through global enable (you have not run `entire enable` here)"
+	const installLine = "Installed Entire's git hooks in"
+	for name, tc := range map[string]struct {
+		newEnv func(t *testing.T) *TestEnv
+		user   string
+		claim  bool
+		want   bool
+	}{
+		"global only": {newEnv: newNeverEnabledRepo, user: `{"global_enable": true}`, want: true},
+		"claimed":     {newEnv: newNeverEnabledRepo, user: `{"global_enable": true}`, claim: true},
+		"global off":  {newEnv: NewFeatureBranchEnv, user: `{"global_enable": false}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := tc.newEnv(t)
+			extra, _ := userTierEnv(t, tc.user)
+			env.ExtraEnv = extra
+			if tc.claim {
+				env.WriteFile(".entire/settings.local.json", `{"enabled": true}`)
+			}
+			runner := env.newHookRunner()
+			session := env.NewSession()
+
+			start := env.SimulateSessionStartWithOutput(session.ID)
+			if start.Err != nil {
+				t.Fatalf("session-start: %v\n%s", start.Err, start.Stderr)
+			}
+			if got := strings.Contains(string(start.Stdout), banner); got != tc.want {
+				t.Errorf("session-start banner mentions global enable = %v, want %v:\n%s", got, tc.want, start.Stdout)
+			}
+
+			prompt := func() HookOutput {
+				t.Helper()
+				input, err := json.Marshal(map[string]string{"session_id": session.ID, "transcript_path": "", "prompt": "hi"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				out := runner.runHookWithOutput("user-prompt-submit", input)
+				if out.Err != nil {
+					t.Fatalf("user-prompt-submit: %v\n%s", out.Err, out.Stderr)
+				}
+				if len(bytes.TrimSpace(out.Stdout)) > 0 && !json.Valid(out.Stdout) {
+					t.Errorf("user-prompt-submit stdout is not valid JSON:\n%s", out.Stdout)
+				}
+				return out
+			}
+			first := prompt()
+			if got := strings.Contains(string(first.Stderr), installLine); got != tc.want {
+				t.Errorf("first prompt reports the install = %v, want %v:\n%s", got, tc.want, first.Stderr)
+			}
+			if second := prompt(); strings.Contains(string(second.Stderr), installLine) {
+				t.Errorf("second prompt repeated the install line:\n%s", second.Stderr)
+			}
+			if again := env.SimulateSessionStartWithOutput(env.NewSession().ID); strings.Contains(string(again.Stdout), banner) {
+				t.Errorf("a later session repeated the banner once the hooks are in:\n%s", again.Stdout)
 			}
 		})
 	}
