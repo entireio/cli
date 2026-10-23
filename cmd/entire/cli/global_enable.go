@@ -1,16 +1,20 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
@@ -23,12 +27,19 @@ const flagGlobal = "global"
 // `global_enable: true` in the user settings file and installs Claude Code's
 // user-level hooks now rather than on the next command. It does not set up the
 // repository it runs in; the hooks do that the first time an agent runs there.
-func runEnableGlobal(cmd *cobra.Command) error {
-	if err := rejectFlagsWithGlobal(cmd); err != nil {
+func runEnableGlobal(cmd *cobra.Command, yes bool) error {
+	if err := rejectFlagsWithGlobal(cmd, "yes"); err != nil {
 		return err
 	}
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
+	// Turning it on again adds nothing to agree to.
+	if !settings.UserTierEnablesEverywhere(ctx) {
+		confirmed, err := confirmGlobalEnable(cmd, yes)
+		if err != nil || !confirmed {
+			return err
+		}
+	}
 	path, err := usersettings.SetGlobalEnable(ctx, true)
 	if err != nil {
 		return err //nolint:wrapcheck // usersettings names the file and the reason
@@ -67,14 +78,65 @@ func runDisableGlobal(cmd *cobra.Command) error {
 	return nil
 }
 
+// globalEnableDisclosure is what `entire enable --global` asks the developer
+// to agree to.
+const globalEnableDisclosure = "With global enable on, Entire records your agent sessions in every git repository you work in, " +
+	"not just ones you ran `entire enable` in. Session checkpoints are pushed alongside your normal git pushes to that " +
+	"repository's remote — including public repositories and forks. Run `entire disable` in a repository to stop it " +
+	"there, or `entire disable --global` to turn this off."
+
+// confirmGlobalEnable asks the developer to agree to global enable. --yes
+// accepts, and still prints what was accepted; with no terminal to ask in it
+// refuses, since the answer must be the developer's.
+func confirmGlobalEnable(cmd *cobra.Command, yes bool) (bool, error) {
+	if yes {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Accepted with --yes: %s\n", globalEnableDisclosure)
+		return true, nil
+	}
+	if !interactive.CanPromptInteractively() {
+		cmd.SilenceUsage = true
+		return false, errors.New("refusing to enable Entire in every repository without confirmation; run it in a terminal or pass --yes")
+	}
+	return confirmPrompt(cmd, "Global enable", "Enable Entire in every repository you work in?", "",
+		func(w io.Writer) error {
+			_, err := fmt.Fprintf(w, "%s\n\n", globalEnableDisclosure)
+			return err //nolint:wrapcheck // a write to the prompt's own terminal
+		})
+}
+
+// claimRepoFromGlobalEnable records, after a successful `entire enable`, that
+// the developer enabled this repository themselves when it was on only through
+// global enable: once global enable is not the only reason, the committed
+// settings it set aside apply and the global-enable notices stop. It writes
+// `enabled` to this worktree's settings.local.json, unless that file is
+// tracked and so not the developer's own.
+func claimRepoFromGlobalEnable(ctx context.Context, w io.Writer) error {
+	s, err := LoadEntireSettings(ctx)
+	if err != nil || !s.EnabledOnlyByGlobal() {
+		return nil //nolint:nilerr // enable already succeeded; the claim is a refinement of it
+	}
+	if reason := s.LocalLayerRejection(); reason != "" {
+		fmt.Fprintf(w, "Entire stays enabled here only through global enable: %s is not written because %s.\n",
+			settings.EntireSettingsLocalFile, reason)
+		return nil
+	}
+	if err := setEnabledFlag(ctx, true, false); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "Entire is now enabled in this repository itself (%s), not only through global enable.\n",
+		settings.EntireSettingsLocalFile)
+	return nil
+}
+
 // rejectFlagsWithGlobal refuses any other flag of this command beside
-// --global: they all configure one repository, and --global covers every one.
-// Changed, not value, so a default-true flag such as --telemetry still counts.
-func rejectFlagsWithGlobal(cmd *cobra.Command) error {
+// --global and allowed: they all configure one repository, and --global covers
+// every one. Changed, not value, so a default-true flag such as --telemetry
+// still counts.
+func rejectFlagsWithGlobal(cmd *cobra.Command, allowed ...string) error {
 	var others []string
 	inherited := cmd.InheritedFlags()
 	cmd.Flags().Visit(func(f *pflag.Flag) {
-		if f.Name != flagGlobal && inherited.Lookup(f.Name) == nil {
+		if f.Name != flagGlobal && !slices.Contains(allowed, f.Name) && inherited.Lookup(f.Name) == nil {
 			others = append(others, "--"+f.Name)
 		}
 	})

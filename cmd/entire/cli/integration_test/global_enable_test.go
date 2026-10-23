@@ -181,3 +181,32 @@ func TestGlobalEnable_DisabledRepoStaysUntracked(t *testing.T) {
 		})
 	}
 }
+
+// `entire enable --global` asks first. A subprocess has no terminal, so
+// without --yes it refuses and writes nothing; with --yes it writes the flag.
+func TestEnableGlobal_NeedsConfirmation(t *testing.T) {
+	t.Parallel()
+	env := newNeverEnabledRepo(t)
+	extra, _ := userTierEnv(t, `{}`)
+	env.ExtraEnv = extra
+	userFile := filepath.Join(strings.TrimPrefix(extra[0], "ENTIRE_CONFIG_DIR="), usersettings.FileName)
+
+	out, err := env.RunCLIWithError("enable", "--global")
+	if err == nil {
+		t.Fatalf("enable --global without a terminal or --yes succeeded:\n%s", out)
+	}
+	if !strings.Contains(out, "--yes") {
+		t.Errorf("refusal does not say how to confirm:\n%s", out)
+	}
+	if data, readErr := os.ReadFile(userFile); readErr != nil || strings.Contains(string(data), "global_enable") {
+		t.Errorf("user settings written despite the refusal (err=%v):\n%s", readErr, data)
+	}
+
+	out = env.RunCLI("enable", "--global", "--yes")
+	if !strings.Contains(out, "public repositories and forks") {
+		t.Errorf("--yes did not print what it accepted:\n%s", out)
+	}
+	if data, readErr := os.ReadFile(userFile); readErr != nil || !strings.Contains(string(data), `"global_enable": true`) {
+		t.Errorf("user settings lack global_enable after --yes (err=%v):\n%s", readErr, data)
+	}
+}

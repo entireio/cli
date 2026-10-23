@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -937,7 +938,7 @@ publish the repository yourself when you're ready.`,
 			// First, before the defers below: they report the current
 			// repository as enabled, and --global does not enable it.
 			if enableGlobal {
-				return runEnableGlobal(cmd)
+				return runEnableGlobal(cmd, opts.Yes)
 			}
 			ctx := cmd.Context()
 			// The destination report needs the choice pointer, not the answer,
@@ -954,6 +955,13 @@ publish the repository yourself when you're ready.`,
 					return
 				}
 				reportRepoEnabled(ctx, insecureHTTPAuth)
+			}()
+			// Whichever path enable takes below, the developer has now enabled
+			// this repository themselves.
+			defer func() {
+				if runErr == nil {
+					runErr = claimRepoFromGlobalEnable(cmd.Context(), cmd.OutOrStdout())
+				}
 			}()
 
 			// Validate --checkpoint-backend up front so a bad value fails before we
@@ -1741,11 +1749,25 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 		configDisplay = configDisplayProject
 	}
 
+	// A repository on only through global enable may have no .entire yet, and
+	// the local file written below must not be committable from it. Only then:
+	// with global enable off, disable writes nothing else.
+	globalOnly := false
+	if s, err := LoadEntireSettings(ctx); err == nil && s.EnabledOnlyByGlobal() {
+		globalOnly = true
+		if err := strategy.EnsureEntireGitignore(ctx); err != nil {
+			logging.Debug(ctx, "disable: could not update .entire/.gitignore", slog.String("error", err.Error()))
+		}
+	}
+
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
 	}
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
+	if globalOnly && !useProjectSettings {
+		fmt.Fprintln(w, "global enable stays on for your other repositories and other worktrees of this one.")
+	}
 	return nil
 }
 
