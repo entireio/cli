@@ -194,8 +194,7 @@ func newRecapSource(ctx context.Context, insecureHTTP bool) (recapSource, string
 	}
 	repoID, repoSlug, repoCell := currentRepoRef(ctx)
 	source := recapSource{home: home, repo: repoID, teamTimeout: recapTeamTimeout}
-	_, overridden := api.BaseURLOverride()
-	if cell := recapTeamCell(home.BaseURL(), repoCell, overridden); cell != nil && repoID != "" {
+	if cell := recapTeamCell(home.BaseURL(), repoCell, auth.BaseURLOverridePinsCell()); cell != nil && repoID != "" {
 		team, err := factory.ClientFor(ctx, cell)
 		if err != nil {
 			logging.Debug(ctx, "recap cannot reach the repo's cell; showing the personal side only", "error", err.Error())

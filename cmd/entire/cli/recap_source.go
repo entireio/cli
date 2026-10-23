@@ -59,10 +59,10 @@ func (s recapSource) fetch(ctx context.Context, since, until time.Time) (*recap.
 
 // recapTeamCell returns the repo cell to read the team side from, or nil when
 // recap should keep to the home cell: the repo is unknown, it is processed on
-// the home cell, or ENTIRE_API_BASE_URL names the one host to talk to (the same
-// rule as entire api's repo routing).
-func recapTeamCell(homeBaseURL string, repoCell *auth.CellTarget, baseURLOverridden bool) *auth.CellTarget {
-	if baseURLOverridden || repoCell == nil || repoCell.BaseURL == "" {
+// the home cell, or ENTIRE_API_BASE_URL pins one cell (the same rule as entire
+// api's repo routing; see auth.BaseURLOverridePinsCell).
+func recapTeamCell(homeBaseURL string, repoCell *auth.CellTarget, baseURLPinsCell bool) *auth.CellTarget {
+	if baseURLPinsCell || repoCell == nil || repoCell.BaseURL == "" {
 		return nil
 	}
 	if normalizeCellURL(homeBaseURL) == normalizeCellURL(repoCell.BaseURL) {

@@ -120,22 +120,22 @@ func TestRecapTeamCell(t *testing.T) {
 	t.Parallel()
 	eu := &auth.CellTarget{BaseURL: "https://aws-eu-central-1.api.entire.io", Jurisdiction: "eu"}
 	tests := []struct {
-		name       string
-		home       string
-		cell       *auth.CellTarget
-		overridden bool
-		want       *auth.CellTarget
+		name     string
+		home     string
+		cell     *auth.CellTarget
+		pinsCell bool
+		want     *auth.CellTarget
 	}{
 		{"repo on another cell", "https://aws-us-east-2.api.entire.io", eu, false, eu},
 		{"same cell", "https://aws-eu-central-1.api.entire.io", eu, false, nil},
 		{"same cell, different spelling", "HTTPS://aws-eu-central-1.api.entire.io/", eu, false, nil},
 		{"unknown repo", "https://aws-us-east-2.api.entire.io", nil, false, nil},
-		{"base URL override", "http://127.0.0.1:8082", eu, true, nil},
+		{"override pins a cell", "http://127.0.0.1:8082", eu, true, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := recapTeamCell(tt.home, tt.cell, tt.overridden); got != tt.want {
+			if got := recapTeamCell(tt.home, tt.cell, tt.pinsCell); got != tt.want {
 				t.Errorf("recapTeamCell = %+v, want %+v", got, tt.want)
 			}
 		})

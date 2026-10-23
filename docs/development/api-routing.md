@@ -92,7 +92,9 @@ uses the following routing shapes, mirroring the entire.io BFF:
   instead of re-deriving it from a data-plane repo listing, and by `entire api`'s
   `{repo_id}` placeholder. A `--to cell` request whose path (not query) names
   `{repo_id}` dials that placement's cell; `/me/*` paths stay on the home cell,
-  and an explicit `--jurisdiction` or `ENTIRE_API_BASE_URL` wins. Another cell answers a placement id it
+  and an explicit `--jurisdiction`, or an `ENTIRE_API_BASE_URL` naming a direct
+  cell or loopback host (`auth.BaseURLOverridePinsCell`), wins; an override naming
+  a BFF/apex still routes by catalog. Another cell answers a placement id it
   does not host with an error or, for the processing id, an empty result.
 - **Project-scoped trails → assigned project cell**:
   Core resolves the required `--project`; list uses
@@ -113,7 +115,7 @@ uses the following routing shapes, mirroring the entire.io BFF:
   same window and takes only the team fields from it (`recapSource` in
   `recap_source.go`, `recap.MergeTeam`). The personal side always comes from
   the home cell, both calls share one `CellClientFactory`, and an
-  `ENTIRE_API_BASE_URL` override keeps recap on that one host.
+  `ENTIRE_API_BASE_URL` that pins a cell keeps recap on that one host.
 - **Cloud dispatch → one jurisdiction's cell**: `entire dispatch` builds one
   `CellClientFactory` (`newDispatchCellClient` in `dispatch/mode_cloud.go`)
   and dials the `--jurisdiction` cell, else the home cell. It posts to

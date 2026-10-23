@@ -461,3 +461,23 @@ func TestResolveAPIClientAndPath_BaseURLOverrideKeepsItsHost(t *testing.T) {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 }
+
+// An override naming a BFF/apex (the staging setup) still resolves cells from
+// the catalog, so it must not stop repo-scoped requests reaching the repo's cell.
+//
+// Not parallel: chdirs, sets env, and swaps package-level client seams.
+func TestResolveAPIClientAndPath_ApexBaseURLOverrideStillRoutesToRepoCell(t *testing.T) {
+	backend, trailCalled, placementClient := setupAPIPlaceholderRepo(t, "https://github.com/entirehq/entire.io.git")
+	t.Setenv(api.BaseURLEnvVar, "https://partial.to")
+
+	client, path, err := resolveAPIClientAndPath(t.Context(), apiTargetCell, "", false, "/api/v1/repos/{repo_id}/trails")
+	if err != nil {
+		t.Fatalf("resolveAPIClientAndPath: %v", err)
+	}
+	if !*trailCalled || backend.called || client != placementClient {
+		t.Errorf("trail client called=%v backend=%+v; want the repo's placement cell", *trailCalled, backend)
+	}
+	if want := "/api/v1/repos/mirror-us/trails"; path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+}
