@@ -1166,6 +1166,9 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 		sessionData.TokenUsage = fillMissingSubagentTokensFrom(sessionData.TokenUsage, state.CheckpointTokenUsage)
 	}
 	sessionData.TokenUsage = withRewrittenTokenUsage(sessionData.TokenUsage, state)
+	// Child sessions' usage is credited outside the sources above, so it
+	// is added exactly here; resetCheckpointWindow then rebaselines it.
+	sessionData.TokenUsage = session.WithChildSessionTokens(sessionData.TokenUsage, state.PendingChildSessionTokens())
 }
 
 // withRewrittenTokenUsage adds the pending usage a transcript rewrite removed
@@ -1211,6 +1214,9 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 			usage = fillMissingSubagentTokensFrom(usage, state.CheckpointTokenUsage)
 		}
 		usage = withRewrittenTokenUsage(usage, state)
+		// As condensation does, store the credited child-session share; see
+		// CompleteChildSessionTaskRecord for where its task record lands.
+		usage = session.WithChildSessionTokens(usage, state.PendingChildSessionTokens())
 	}
 	return usage, countTranscriptItems(ag.Type(), string(transcript))
 }
@@ -1219,6 +1225,11 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 // counted: the token offset moves to pos and the pending window is reset, so
 // the session's next checkpoint does not count them again. The displayed
 // transcript window (CheckpointTranscriptStart) is left alone.
+//
+// Credited child-session usage (PendingChildSessionTokens) is consumed too,
+// because AttachTokenUsage stored it, while that child's completed task record
+// stays in state and its task.json lands in the session's next checkpoint.
+// That checkpoint lists the task without its tokens; nothing is counted twice.
 func ConsumeAttachTokenWindow(state *SessionState, pos int) {
 	state.CheckpointTokenUsage = nil
 	state.RewrittenTokenUsage = nil

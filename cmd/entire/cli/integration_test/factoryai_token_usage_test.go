@@ -119,11 +119,20 @@ func TestFactoryDroidWorkerTokensComeFromItsOwnSettings(t *testing.T) {
 	require.NotNil(t, rec, "the Worker's turn must be a task on the parent")
 	require.Equal(t, &agent.TokenUsage{InputTokens: 8612, OutputTokens: 109, CacheReadTokens: 8026, APICallCount: 1}, rec.TokenUsage)
 
-	// The parent's own total excludes the Worker, which counts in the task.
+	// The parent's own TokenUsage excludes the Worker, which counts in the task.
 	appendLines(t, parent.TranscriptPath,
 		`{"type":"message","id":"p1","message":{"role":"assistant","content":[{"type":"text","text":"The Worker is done."}]}}`)
 	writeDroidSettings(t, parent.TranscriptPath, 56099, 1276, 139199)
 	require.NoError(t, env.SimulateFactoryDroidStop(parent.ID, parent.TranscriptPath))
 	require.Equal(t, &agent.TokenUsage{InputTokens: 56099, OutputTokens: 1276, CacheReadTokens: 139199, APICallCount: 1},
 		sessionTokenTotal(t, env, parent.ID))
+
+	// The displayed total adds the Worker once, despite its repeated Stop.
+	state, err = env.GetSessionState(parent.ID)
+	require.NoError(t, err)
+	total := state.TotalTokenUsage()
+	require.NotNil(t, total.SubagentTokens)
+	require.Equal(t, 8612, total.SubagentTokens.InputTokens)
+	require.Equal(t, 8026, total.SubagentTokens.CacheReadTokens)
+	require.Equal(t, 1, total.SubagentTokens.APICallCount)
 }
