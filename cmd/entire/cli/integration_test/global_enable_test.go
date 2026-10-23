@@ -210,3 +210,54 @@ func TestEnableGlobal_NeedsConfirmation(t *testing.T) {
 		t.Errorf("user settings lack global_enable after --yes (err=%v):\n%s", readErr, data)
 	}
 }
+
+// The first push that carries checkpoints from a repository on only through
+// global enable says so, once per clone. A repository the developer enabled
+// themselves, or any repository with global enable off, never sees it.
+func TestGlobalEnable_FirstCheckpointPushNotice(t *testing.T) {
+	t.Parallel()
+	const notice = "This repository is enabled through global enable"
+	for name, tc := range map[string]struct {
+		newEnv     func(t *testing.T) *TestEnv
+		user       string
+		claim      bool
+		wantNotice bool
+	}{
+		"global only": {newEnv: newNeverEnabledRepo, user: `{"global_enable": true}`, wantNotice: true},
+		"claimed":     {newEnv: newNeverEnabledRepo, user: `{"global_enable": true}`, claim: true},
+		"global off":  {newEnv: NewFeatureBranchEnv, user: `{"global_enable": false}`},
+		// Committed settings are anyone's to write, so they do not count as
+		// this developer enabling the repository.
+		"committed settings only": {newEnv: NewFeatureBranchEnv, user: `{"global_enable": true}`, wantNotice: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := tc.newEnv(t)
+			env.SetupBareRemote()
+			extra, _ := userTierEnv(t, tc.user)
+			env.ExtraEnv = extra
+			if tc.claim {
+				env.WriteFile(".entire/settings.local.json", `{"enabled": true}`)
+			}
+
+			runClaudeTurn(t, env, "a.go", "package a\n")
+			first := env.RunPrePushOutput("origin")
+			if got := strings.Contains(first, notice); got != tc.wantNotice {
+				t.Errorf("first push notice = %v, want %v:\n%s", got, tc.wantNotice, first)
+			}
+			if tc.wantNotice && strings.Contains(first, env.RepoDir) {
+				t.Errorf("notice names a path:\n%s", first)
+			}
+
+			runClaudeTurn(t, env, "b.go", "package b\n")
+			if second := env.RunPrePushOutput("origin"); strings.Contains(second, notice) {
+				t.Errorf("notice repeated on the second push:\n%s", second)
+			}
+
+			marker := filepath.Join(env.RepoDir, ".git", "entire-global-enable-push-notice")
+			if _, err := os.Stat(marker); (err == nil) != tc.wantNotice {
+				t.Errorf("marker present = %v, want %v", err == nil, tc.wantNotice)
+			}
+		})
+	}
+}
