@@ -60,7 +60,7 @@ func runCoreCmd(t *testing.T, newCmd func() *cobra.Command, srvURL string, args 
 	return out.String(), errW.String(), err
 }
 
-// TestControlPlaneDelete_Wiring exercises the org/project/repo delete commands
+// TestControlPlaneDelete_Wiring exercises the org/project delete commands
 // end-to-end through cobra: that --force bypasses the prompt and issues DELETE
 // against the right path, that an already-gone resource (404) is idempotent,
 // and that a non-interactive run without --force refuses rather than deleting
@@ -75,7 +75,9 @@ func TestControlPlaneDelete_Wiring(t *testing.T) {
 	}{
 		{"org", newOrgDeleteCmd, "/api/v1/orgs/" + testDeleteULID},
 		{"project", newProjectDeleteCmd, "/api/v1/projects/" + testDeleteULID},
-		{"repo", newRepoDeleteCmd, "/api/v1/repos/" + testDeleteULID},
+		// repo delete is absent: it takes only the /et/<project>/<repo> path,
+		// never the ULID this table addresses by. repo_delete_test.go covers
+		// the same three behaviors through the path.
 	}
 
 	for _, tc := range cases {

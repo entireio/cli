@@ -425,7 +425,12 @@ func TestRepoGrant_RefErrorsMatchTheAcceptedGrammar(t *testing.T) {
 	err = run("list", "https://github.com/acme/widget.git")
 	require.ErrorContains(t, err, "pass GitHub repositories as /gh/acme/widget")
 
+	// add takes only the native path, so the native reading is the one
+	// suggestion that can work on the next run.
 	err = run("add", "acme/widget", "github:alice", "--role", "reader")
+	require.EqualError(t, err, `repo ref "acme/widget" must name its forge — did you mean /et/acme/widget?`)
+
+	err = run("add", "widget", "github:alice", "--role", "reader")
 	require.ErrorContains(t, err, "must be a /et/<project>/<repo> path")
 
 	require.Empty(t, paths, "a ref that names no repo costs no round trip")

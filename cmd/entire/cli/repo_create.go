@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -24,8 +22,7 @@ import (
 type repoCreateRequest struct {
 	projectID string
 	// projectName is the server's name for the project, used for display and
-	// to spell the /et/<project>/<repo> ref in the next steps. Empty when the
-	// project was given as a ULID and never looked up.
+	// to spell the /et/<project>/<repo> ref in the next steps.
 	projectName  string
 	name         string
 	objectFormat coreapi.CreateRepoInputBodyObjectFormat
@@ -48,44 +45,85 @@ type repoCreateOptions struct {
 // the one typed. The server refuses it too; saying so here costs no round trip
 // and names the spelling to use instead, when there is one the server would
 // accept (suggestRepoName). An empty name passes: it is a missing one.
-func refuseGitSuffixRepoName(name string) error {
+//
+// prefix is what the suggestion is spelled under: "" for a bare name, or the
+// /et/<project>/ the user typed it in, so the advice is a ref they can paste.
+func refuseGitSuffixRepoName(prefix, name string) error {
 	rest, had := gitremote.CutGitDirSuffix(name)
 	if !had {
 		return nil
 	}
 	err := fmt.Errorf("repo name %q must not end in %s, in any case: the suffix is never part of a repo name, so Entire could not address the repo by the name you typed", name, gitDirSuffix)
 	if use, ok := suggestRepoName(rest); ok {
-		err = fmt.Errorf("%w (use %q)", err, use)
+		err = fmt.Errorf("%w (use %q)", err, prefix+use)
 	}
 	return err
 }
 
 // errRepoCreateNeedsInput refuses a run that cannot be prompted and was not
-// given everything a create needs, naming the flag form instead. It is the
-// tail of the message repoCreateMissingInput builds.
-var errRepoCreateNeedsInput = errors.New("required without an interactive terminal: " +
-	"entire repo create <name> --project <project> ('entire project list' shows project names)")
+// given the path a create needs. It is the tail of the message
+// repoCreateMissingInput builds.
+var errRepoCreateNeedsInput = errors.New("required without an interactive terminal")
 
-// errRepoCreateFlagsNeedInput refuses a create flag given with an input
-// missing. The wizard takes only the positional name, so a flag would be
-// silently dropped; flags mean the flag form. Worded as `project create`
-// words its own.
-var errRepoCreateFlagsNeedInput = errors.New("required when create flags are given: " +
-	"entire repo create <name> --project <project> (or, in a terminal and without flags, run 'entire repo create' or 'entire repo create <name>' to be asked)")
+// errRepoCreateFlagsNeedInput refuses a create flag given without a path. The
+// wizard takes only a positional name to start from, so a flag would be
+// silently dropped; flags mean the path form. Worded as `project create` words
+// its own.
+var errRepoCreateFlagsNeedInput = errors.New("required when create flags are given")
 
-// repoCreateMissingInput names what is missing ahead of the refusal reason,
-// so `--project acme` alone is not told that --project is required.
-func repoCreateMissingInput(name, projectRef string, reason error) error {
-	var missing string
-	switch {
-	case name == "" && projectRef == "":
-		missing = "a repository name and --project are"
-	case name == "":
-		missing = "a repository name is"
-	default:
-		missing = "--project is"
+// repoCreatePathShape is the one spelling that creates without the wizard.
+var repoCreatePathShape = nativeRepoRef("<project>", "<repo>")
+
+// repoCreateMissingInput refuses a create given no path, naming the path form
+// with the typed name already in it, so `entire repo create web` is shown the
+// command it was one project away from.
+func repoCreateMissingInput(name string, reason error) error {
+	want := repoCreatePathShape
+	if name != "" {
+		// Quoted as the wizard's summary quotes it: the line is pasted into
+		// a shell.
+		want = nativeRepoRef("<project>", shellArg(name))
 	}
-	return fmt.Errorf("%s %w", missing, reason)
+	hint := "'entire project list' shows project names"
+	if errors.Is(reason, errRepoCreateFlagsNeedInput) {
+		hint = "or, in a terminal and without flags, run 'entire repo create' or 'entire repo create <name>' to be asked"
+	}
+	return fmt.Errorf("a %s path is %w: entire repo create %s (%s)", repoCreatePathShape, reason, want, hint)
+}
+
+// parseRepoCreateRef reads the positional of `repo create`. A
+// /et/<project>/<repo> path names everything a create needs. A bare name only
+// starts the wizard, which asks for the project; it never creates on its own,
+// since a repo name is unique only within a project. Anything else with a
+// slash, or another forge, is no spelling this verb takes.
+//
+// A `.git` suffix is refused rather than dropped, as the bare name refuses it:
+// the clone parser treats the suffix as an alias of the suffix-free repo, but a
+// create would make the repo under the name the user did NOT type. The suffix
+// is judged only once the path has its shape — two names after et/, the first
+// a project name — so the suggestion it makes is a path that parses;
+// `/et/web.git` is told about its missing project instead. The repo name's own
+// rules come after it, so a name refused for the suffix hears about the
+// suffix first.
+func parseRepoCreateRef(ref string) (project, name string, err error) {
+	ref = strings.TrimSpace(ref)
+	if !declaresForge(ref, nativeCloneForge) {
+		if strings.Contains(ref, "/") {
+			return "", "", fmt.Errorf("repo %q must be a %s path, or a bare name to start the wizard with", ref, repoCreatePathShape)
+		}
+		return "", ref, refuseGitSuffixRepoName("", ref)
+	}
+	if segs := strings.Split(trimRefPrefix(ref), "/"); len(segs) == 3 && nativeProjectRe.MatchString(segs[1]) {
+		cut := strings.LastIndex(ref, "/") + 1
+		if err := refuseGitSuffixRepoName(ref[:cut], ref[cut:]); err != nil {
+			return "", "", err
+		}
+	}
+	project, name, err = parseNativeCloneRef(ref)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid repo ref %q: %w", ref, err)
+	}
+	return project, name, nil
 }
 
 // The flags that describe the repo itself. Readiness and output flags
@@ -95,7 +133,7 @@ const (
 	repoCreateFlagObjectFormat = "object-format"
 )
 
-var repoCreateFlags = []string{projectFlagName, repoCreateFlagVisibility, repoCreateFlagObjectFormat}
+var repoCreateFlags = []string{repoCreateFlagVisibility, repoCreateFlagObjectFormat}
 
 // repoCreateFlagsGiven reports whether any create flag was passed, even with
 // an empty value.
@@ -179,18 +217,6 @@ func finishRepoCreate(ctx context.Context, cmd *cobra.Command, c *coreapi.Client
 		defer cancel()
 	}
 	ref := repoCreateRef(created, req.projectName)
-	// --json on a confirmed repo prints only the wire object, which names
-	// nothing the lookup would add; every other outcome prints the repo's
-	// name or a command that needs it.
-	outputNamesRepo := !jsonRequested(cmd) || waitErr != nil || opts.noWait
-	if ref == "" && req.projectName == "" && outputNamesRepo {
-		// Nothing names the repo: the project was given as a ULID and the
-		// server returned neither a full name nor an /et/ path. One lookup
-		// names the project, only in this case, so the common path costs no
-		// extra request.
-		req.projectName = lookupRepoCreateProjectName(visCtx, c, req.projectID)
-		ref = repoCreateRef(created, req.projectName)
-	}
 	// The visibility is applied before the report, so the report (and
 	// --json) shows what now holds, but explained after it: the last thing on
 	// screen must be the problem the nonzero exit is about, not a success
@@ -208,14 +234,13 @@ func finishRepoCreate(ctx context.Context, cmd *cobra.Command, c *coreapi.Client
 		visErr = applyRepoVisibility(visCtx, c, created, req.visibility)
 	}
 	reportErr := reportRepoCreation(cmd, created, ref, opts.noWait, waitErr)
-	finish := shellArg(cmp.Or(ref, created.ID))
+	finish := repoEditVisibilityHint(ref, created.ID, req.visibility)
 	if visSkipped {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Visibility was not set. Once the repository is active, set it with: entire repo edit %s --visibility %s\n",
-			finish, req.visibility)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Visibility was not set. Once the repository is active, set it with%s\n", finish)
 	}
 	if visErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "The repository was created, but setting its visibility to %s failed: %v\nSet it with: entire repo edit %s --visibility %s\n",
-			req.visibility, renderCoreError(visErr), finish, req.visibility)
+		fmt.Fprintf(cmd.ErrOrStderr(), "The repository was created, but setting its visibility to %s failed: %v\nSet it with%s\n",
+			req.visibility, renderCoreError(visErr), finish)
 		return NewSilentError(errors.Join(visErr, reportErr))
 	}
 	if reportErr == nil && !jsonRequested(cmd) {
@@ -224,19 +249,16 @@ func finishRepoCreate(ctx context.Context, cmd *cobra.Command, c *coreapi.Client
 	return reportErr
 }
 
-// lookupRepoCreateProjectName is the project's name for the output, or ""
-// when it cannot be had: the output then falls back to the repo ID rather than
-// failing a create that succeeded.
-func lookupRepoCreateProjectName(ctx context.Context, c *coreapi.Client, projectID string) string {
-	if projectID == "" || ctx.Err() != nil {
-		return ""
+// repoEditVisibilityHint completes "set it with" with the command that
+// finishes a visibility the create could not set. `repo edit` takes only the
+// repo's path, so without one there is no command to offer — a ULID would be
+// refused — and the ID is named for support instead, as reportRepoCreation
+// does.
+func repoEditVisibilityHint(ref, id string, vis coreapi.SetRepoVisibilityInputBodyVisibility) string {
+	if ref == "" {
+		return fmt.Sprintf(" `entire repo edit %s --visibility %s` when the server reports the repository's path (repository ID: %s)", repoCreatePathShape, vis, id)
 	}
-	p, err := c.GetProject(ctx, coreapi.GetProjectParams{ProjectId: projectID})
-	if err != nil {
-		logging.Debug(ctx, "repo create: could not name the project for the output", "error", err.Error())
-		return ""
-	}
-	return p.Name
+	return fmt.Sprintf(": entire repo edit %s --visibility %s", shellArg(ref), vis)
 }
 
 // applyRepoVisibility sets the requested visibility on a freshly created repo.
@@ -276,7 +298,7 @@ func repoCreateRef(r *coreapi.Repo, projectName string) string {
 	if projectName == "" || r.Name == "" {
 		return ""
 	}
-	return "/" + nativeCloneForge + "/" + projectName + "/" + r.Name
+	return nativeRepoRef(projectName, r.Name)
 }
 
 // printRepoCreateNextSteps prints the commands that put a new repo to use:
