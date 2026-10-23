@@ -314,6 +314,8 @@ Opt out via any one of:
 - `"telemetry": false` in `.entire/settings.json` or `.entire/settings.local.json`.
 - `ENTIRE_TELEMETRY_OPTOUT=1` in the environment.
 
+In a repository enabled only through [global enable](#global-enable-entire-enable---global), a committed `"telemetry": true` is ignored; a committed `false` still applies.
+
 ## Why `external_agents` is local-only
 
 `external_agents` turns on the `$PATH` scan that looks for `entire-agent-*`
@@ -385,6 +387,50 @@ against the locally installed set before spawning, so free text there fails the
 run rather than reaching an agent), `agent` and `model` (registry keys and
 routing hints, not instruction text), and `review_default_profile` (it only
 selects among profiles whose instruction content is itself gated).
+
+## Global enable (`entire enable --global`)
+
+`entire enable --global` sets `global_enable: true` in your user settings
+file (`~/.config/entire/settings.json`) and adds Entire's hooks to Claude
+Code's user-level settings. From then on, Entire records your agent sessions in
+every git repository you work in, not only the ones you ran `entire enable` in.
+The first prompt in such a repository installs Entire's git hooks there and
+gives `.entire/` a `.gitignore` that keeps its local files out of git, and
+Entire contacts entire.io from that repository the way it does from any enabled
+one.
+
+**Consent.** The command explains this and asks you to confirm. `--yes` accepts
+without asking and prints what was accepted; without a terminal and without
+`--yes` it refuses and writes nothing. Coding agents are told never to accept it
+on your behalf. Editing the user settings file by hand bypasses the prompt.
+
+**Pushes.** Session checkpoints are pushed alongside your normal git pushes to
+that repository's remote, including public repositories and forks. The first
+push from a clone that carries checkpoints from a repository on only through
+global enable prints one line naming the remote (never a URL) and how to stop.
+Agents that show a session banner also say so when a session is about to
+install the git hooks.
+
+**Precedence.**
+
+- A committed `"enabled": false` in `.entire/settings.json` keeps Entire off.
+  Global enable turns on repositories nobody configured, not ones whose team
+  turned it off.
+- `entire disable` writes `"enabled": false` to `.entire/settings.local.json`,
+  which belongs to one worktree. `entire disable --global` turns the flag off
+  everywhere; repositories you enabled yourself stay enabled.
+- A `repos` entry for the repository in the user settings file applies to every
+  worktree of the clone, and is the clone-wide way to turn one repository on or
+  off.
+- In a repository enabled only through global enable (no `repos` entry, and no
+  `enabled` key in an untracked `.entire/settings.local.json`), the committed
+  `strategy_options.summarize`, `summary_generation`, `summary_timeout_seconds`
+  and `"telemetry": true` are ignored: you never opted into them there, and
+  summarization sends transcripts to a model provider. `entire status` names
+  what was ignored. Redaction settings are always honored.
+- Running `entire enable` in such a repository claims it: it writes
+  `"enabled": true` to this worktree's `.entire/settings.local.json`, after which
+  the committed settings apply in full and the global-enable notices stop.
 
 ## Reporting a vulnerability
 
