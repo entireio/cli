@@ -307,6 +307,24 @@ func TestUserTier_InstructionFieldsSurviveTheAgentPromptGate(t *testing.T) {
 	assert.Equal(t, "Be terse.", profile.Agents["claude-code"].Prompt)
 }
 
+// Profile names may contain dots, so a field path cannot say which profile it
+// belongs to: "review_profiles.a.b.task" reads as profile "a" as easily as
+// "a.b". A user-owned "a" must not vouch for a committed "a.b".
+func TestUserTier_UserProfileDoesNotVouchForADottedCommittedOne(t *testing.T) {
+	_, project, local := newUserTierRepo(t)
+	require.NoError(t, os.WriteFile(project, []byte(`{"enabled": true,
+	  "review_profiles": {"a.b": {"task": "Committed instructions."}}}`), 0o644))
+	writeUserSettings(t, `{"preferences": {"review_profiles": {"a": {"task": "Mine."}}}}`)
+
+	s, err := loadMergedSettings(t.Context(), project, "", local)
+	require.NoError(t, err)
+
+	assert.Equal(t, "Mine.", s.ReviewProfiles["a"].Task)
+	assert.Empty(t, s.ReviewProfiles["a.b"].Task, "the committed profile's task is not the user's")
+	require.Len(t, s.AgentPromptRejections(), 1)
+	assert.Equal(t, "review_profiles.a.b.task", s.AgentPromptRejections()[0].Field)
+}
+
 // A local profile merges after the user tier, so its provenance must be
 // checked before the lower user-owned profile. If the local file is still
 // reachable from HEAD after git rm --cached, the deep check fails closed; the
