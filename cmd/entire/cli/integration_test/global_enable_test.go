@@ -150,3 +150,34 @@ func TestGlobalEnable_EnabledRepoToleratesEveryHookTwice(t *testing.T) {
 	}
 	env.AssertCheckpointContainsSession(t, summary, session.ID)
 }
+
+// Global enable turns on repositories nobody configured, not ones turned off:
+// a committed enabled:false stays a floor, and `entire disable` in a
+// repository on only through global enable stops it there.
+func TestGlobalEnable_DisabledRepoStaysUntracked(t *testing.T) {
+	t.Parallel()
+	for name, disable := range map[string]func(env *TestEnv){
+		"committed enabled false": func(env *TestEnv) {
+			env.WriteFile(".entire/settings.json", `{"enabled": false}`)
+			env.GitAdd(".entire/settings.json")
+			env.GitCommit("Turn Entire off for this repository")
+		},
+		"entire disable": func(env *TestEnv) {
+			env.RunCLI("disable")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newNeverEnabledRepo(t)
+			extra, _ := userTierEnv(t, `{"global_enable": true}`)
+			env.ExtraEnv = extra
+			disable(env)
+
+			runClaudeTurn(t, env, "feature.go", "package feature\n")
+
+			if cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); cpID != "" {
+				t.Errorf("commit linked to checkpoint %s in a disabled repository", cpID)
+			}
+		})
+	}
+}

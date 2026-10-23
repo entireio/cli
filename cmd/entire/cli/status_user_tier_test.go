@@ -106,3 +106,21 @@ func TestStatus_NamesARefusedUserSettingsFile(t *testing.T) {
 	assert.Contains(t, out.String(), "symbolic link")
 	assert.Contains(t, out.String(), "not set up", "the refused file configures nothing")
 }
+
+// Status names the committed keys a global-only repository ignores, so a team
+// setting the developer can see in the file is not silently inert.
+func TestStatus_NamesCommittedKeysIgnoredForGlobalEnable(t *testing.T) {
+	setupTestRepo(t)
+	configDir := t.TempDir()
+	t.Setenv(userdirs.EnvConfigDir, configDir)
+	t.Cleanup(settings.ClearOriginKeyCache)
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName), []byte(`{"global_enable": true}`), 0o600))
+	writeSettings(t, `{"enabled": true, "telemetry": true, "strategy_options": {"summarize": {"enabled": true}}}`)
+
+	for _, detailed := range []bool{false, true} {
+		var out bytes.Buffer
+		require.NoError(t, runStatus(t.Context(), &out, detailed, false))
+		assert.Contains(t, out.String(), "ignoring strategy_options.summarize, telemetry from .entire/settings.json")
+		assert.Contains(t, out.String(), "run 'entire enable' here to use them")
+	}
+}

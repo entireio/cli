@@ -387,9 +387,15 @@ func UserTierConfiguresRepo(ctx context.Context, worktreeRoot string) bool {
 //
 // Called between the clone-preferences layer and the local-file merge, which
 // is what puts the user tier above a preference the developer set for the
-// clone and below one they set for this worktree.
-func applyUserTier(ctx context.Context, settings *EntireSettings, worktreeRoot string) {
-	overlay := loadUserOverlay(ctx)
+// clone and below one they set for this worktree. repoPrefs is
+// overlay.repoPreferences for this worktree, resolved once by the caller.
+//
+// global_enable is deliberately not applied here. It makes every repository
+// set up (UserTierConfiguresRepo), and a repository with no settings of its
+// own is enabled by default, but it never raises a committed enabled:false: a
+// team that turned Entire off in its repository did not agree to it coming
+// back on for everyone who flips the machine-wide switch.
+func applyUserTier(settings *EntireSettings, overlay userOverlay, repoPrefs []*UserPreferences) {
 	owned := userPromptOwnership{profiles: map[string]bool{}}
 
 	apply := func(prefs *UserPreferences) {
@@ -401,12 +407,7 @@ func applyUserTier(ctx context.Context, settings *EntireSettings, worktreeRoot s
 	}
 
 	apply(overlay.preferences)
-	// global_enable sits in the preferences slot: above the repository's own
-	// settings file, below its `repos` entry and settings.local.json.
-	if overlay.enablesEverywhere() {
-		settings.Enabled = true
-	}
-	for _, prefs := range overlay.repoPreferences(ctx, worktreeRoot) {
+	for _, prefs := range repoPrefs {
 		apply(prefs)
 	}
 	settings.userPromptOwnership = owned
@@ -458,8 +459,8 @@ func (s *EntireSettings) UserLayerRejections() []string {
 
 // UserTierEnablesEverywhere reports whether the user settings file turns
 // Entire on machine-wide (`global_enable: true`, set by `entire enable
-// --global`). That is the one flag that makes every repository the user
-// touches behave as if `entire enable` had run there.
+// --global`). That is the one flag that sets up every repository the user
+// touches, short of one whose committed settings turn Entire off.
 func UserTierEnablesEverywhere(ctx context.Context) bool {
 	overlay := loadUserOverlay(ctx)
 	return overlay.enablesEverywhere()
@@ -467,4 +468,73 @@ func UserTierEnablesEverywhere(ctx context.Context) bool {
 
 func (o *userOverlay) enablesEverywhere() bool {
 	return o.globalEnable != nil && *o.globalEnable
+}
+
+// EnabledOnlyByGlobal reports whether this repository is on only because of
+// `global_enable`: the developer never enabled it here. That is, no matching
+// `repos` entry and no honored settings.local.json carrying `enabled`. The
+// committed settings.json never counts — whoever can push to the repository
+// can write it — and neither do the other keys Entire writes to the local file
+// on its own (commit_linking and the like).
+//
+// The local file belongs to one worktree, so `entire enable` and `entire
+// disable` claim one worktree; a `repos` entry claims the whole clone.
+func (s *EntireSettings) EnabledOnlyByGlobal() bool {
+	return s != nil && s.enabledOnlyByGlobal
+}
+
+// CommittedKeysIgnoredForGlobalEnable names the keys of the committed
+// settings.json that Load set aside because the repository is enabled only
+// through global_enable, or nil. See ignoreCommittedForGlobalOnly.
+func (s *EntireSettings) CommittedKeysIgnoredForGlobalEnable() []string {
+	if s == nil {
+		return nil
+	}
+	return s.committedKeysIgnoredForGlobalEnable
+}
+
+// ignoreCommittedForGlobalOnly clears the committed settings that would act on
+// the developer's behalf in a repository they never enabled, and returns the
+// keys it cleared. Summarization sends transcripts to a model provider and
+// telemetry reports usage; neither should start because a repository's
+// committed file asks for it. A committed telemetry:false is kept, since it
+// only turns something off. Redaction is never touched: it only removes data.
+// checkpoint_remote has its own ownership gate.
+//
+// Called with only the committed layer (and clone preferences, which set none
+// of these) applied, so the developer's own layers still apply on top.
+func ignoreCommittedForGlobalOnly(settings *EntireSettings) []string {
+	var ignored []string
+	if _, ok := settings.StrategyOptions["summarize"]; ok {
+		delete(settings.StrategyOptions, "summarize")
+		ignored = append(ignored, "strategy_options.summarize")
+	}
+	if settings.SummaryGeneration != nil {
+		settings.SummaryGeneration = nil
+		ignored = append(ignored, "summary_generation")
+	}
+	if settings.SummaryTimeoutSeconds != 0 {
+		settings.SummaryTimeoutSeconds = 0
+		ignored = append(ignored, "summary_timeout_seconds")
+	}
+	if settings.Telemetry != nil && *settings.Telemetry {
+		settings.Telemetry = nil
+		ignored = append(ignored, "telemetry")
+	}
+	return ignored
+}
+
+// localSetsEnabled reports whether an honored local settings file carries an
+// `enabled` key, which is what `entire enable` and `entire disable` write. A
+// file that does not parse is reported by the merge that follows.
+func localSetsEnabled(localData []byte) bool {
+	if localData == nil {
+		return false
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(localData, &raw); err != nil {
+		return false
+	}
+	_, ok := raw["enabled"]
+	return ok
 }

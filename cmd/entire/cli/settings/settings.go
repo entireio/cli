@@ -112,6 +112,13 @@ type EntireSettings struct {
 	// Surfaced via UserLayerRejections.
 	userLayerRejections []string
 
+	// enabledOnlyByGlobal and committedKeysIgnoredForGlobalEnable record that
+	// this repository is on only through `global_enable`, and which committed
+	// keys were set aside because of it. Unexported so they never serialize.
+	// See EnabledOnlyByGlobal.
+	enabledOnlyByGlobal                 bool
+	committedKeysIgnoredForGlobalEnable []string
+
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
@@ -772,6 +779,39 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		applyClonePreferences(settings, preferences)
 	}
 
+	// Local overrides apply last, and only from a file that is genuinely
+	// local (see localLayerTrackedReason). It is read here, ahead of the user
+	// tier, because whether global_enable alone turns this repository on
+	// depends on it.
+	applyLocal := false
+	localData, err := readConfined(localSettingsFileAbs)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// Local file doesn't exist, continue without overrides
+	case err != nil:
+		return nil, fmt.Errorf("reading local settings file: %w", err)
+	case classifyLocalSettings(ctx, localSettingsFileAbs) == localTracked:
+		// Dropped only on PROOF that the file is tracked. Discarding every
+		// local setting because a repository could not be read would be a
+		// worse failure than the one being guarded against — the exec-bearing
+		// OPF command applies the stricter policy for itself.
+		settings.localLayerRejection = localLayerTrackedReason
+		localData = nil
+	default:
+		applyLocal = true
+	}
+
+	overlay := loadUserOverlay(ctx)
+	repoPrefs := overlay.repoPreferences(ctx, worktreeRootOfSettingsFile(settingsFileAbs))
+	if overlay.enablesEverywhere() && settings.Enabled && len(repoPrefs) == 0 && !localSetsEnabled(localData) {
+		settings.enabledOnlyByGlobal = true
+		settings.committedKeysIgnoredForGlobalEnable = ignoreCommittedForGlobalOnly(settings)
+		if ignored := settings.committedKeysIgnoredForGlobalEnable; len(ignored) > 0 {
+			logging.Debug(ctx, "global enable: ignoring committed settings this developer has not opted into",
+				slog.String("keys", strings.Join(ignored, ", ")))
+		}
+	}
+
 	// The user tier (~/.config/entire/settings.json) applies above clone
 	// preferences and below the per-worktree local file: machine-wide
 	// preferences first, then this repository's entry.
@@ -779,25 +819,12 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// Unlike every layer around it, this one resolves without a git repository
 	// at all, so it is also the only tier readable when repository resolution
 	// itself fails.
-	applyUserTier(ctx, settings, worktreeRootOfSettingsFile(settingsFileAbs))
+	applyUserTier(settings, overlay, repoPrefs)
 
-	// Apply local overrides if they exist — but only from a file that is
-	// genuinely local. See localLayerTrackedReason.
-	localData, err := readConfined(localSettingsFileAbs)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("reading local settings file: %w", err)
+	if applyLocal {
+		if err := mergeJSON(settings, localData); err != nil {
+			return nil, fmt.Errorf("merging local settings: %w", err)
 		}
-		// Local file doesn't exist, continue without overrides
-	} else if classifyLocalSettings(ctx, localSettingsFileAbs) == localTracked {
-		// Dropped only on PROOF that the file is tracked. Discarding every
-		// local setting because a repository could not be read would be a
-		// worse failure than the one being guarded against — the exec-bearing
-		// OPF command applies the stricter policy for itself.
-		settings.localLayerRejection = localLayerTrackedReason
-		localData = nil
-	} else if err := mergeJSON(settings, localData); err != nil {
-		return nil, fmt.Errorf("merging local settings: %w", err)
 	}
 
 	// openai_privacy_filter.command is executed, so it is honored only from a

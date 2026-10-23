@@ -116,6 +116,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
 	writeRefusedAgentHomes(w)
+	writeCommittedKeysIgnoredForGlobalEnable(w, s)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
@@ -131,6 +132,16 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 func writeRefusedAgentHomes(w io.Writer) {
 	for _, err := range agent.RefusedRelocationEnvVars() {
 		fmt.Fprintf(w, "  ignoring agent home: %v\n", err)
+	}
+}
+
+// writeCommittedKeysIgnoredForGlobalEnable names the committed settings a
+// repository enabled only through global enable does not apply. Without it a
+// setting the user can read in .entire/settings.json is silently inert.
+func writeCommittedKeysIgnoredForGlobalEnable(w io.Writer, s *EntireSettings) {
+	if keys := s.CommittedKeysIgnoredForGlobalEnable(); len(keys) > 0 {
+		fmt.Fprintf(w, "  ignoring %s from %s: this repository is enabled only through global enable (run 'entire enable' here to use them)\n",
+			strings.Join(keys, ", "), EntireSettingsFile)
 	}
 }
 
@@ -157,6 +168,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	}
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
 	writeRefusedAgentHomes(w)
+	writeCommittedKeysIgnoredForGlobalEnable(w, effectiveSettings)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
