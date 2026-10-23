@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/coreapi"
 )
 
 func TestInferFieldValue(t *testing.T) {
@@ -142,7 +145,7 @@ func TestValidateAPIPath(t *testing.T) {
 
 func TestResolveAPIClient_UnknownTarget(t *testing.T) {
 	t.Parallel()
-	if _, err := resolveAPIClient(context.Background(), "banana", "", false); err == nil {
+	if _, err := resolveAPIClient(context.Background(), "banana", nil, false); err == nil {
 		t.Error("expected error for unknown --to")
 	}
 }
@@ -247,5 +250,118 @@ func TestReadWithinLimit(t *testing.T) {
 	// Over the limit: error rather than silent truncation.
 	if _, err := readWithinLimit(strings.NewReader("hello world"), 5); err == nil {
 		t.Error("readWithinLimit over limit = nil error, want limit error (must not truncate)")
+	}
+}
+
+// No t.Parallel in the {repo_id} tests: withFakeCellCore swaps package-global
+// control-plane constructors.
+
+func TestResolveCurrentRepoPlacement_GitHubMirrorUsesProcessingPlacement(t *testing.T) {
+	// The processing placement is deliberately NOT first: {repo_id} must be
+	// picked by primaries.processing, not by list position.
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu",
+			placementFixture{id: "mirror-us", slug: usClusterSlug},
+			placementFixture{id: "mirror-eu", slug: euClusterSlug},
+		)),
+		clusters: clustersWithSlugs(),
+	})
+
+	got, err := resolveCurrentRepoPlacement(t.Context(), mirrorCloneForge, "acme", "widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RepoID != "mirror-eu" || got.Target.BaseURL != euCellAPIURL {
+		t.Fatalf("placement = {%q, %+v}, want processing placement %q on %s", got.RepoID, got.Target, "mirror-eu", euCellAPIURL)
+	}
+}
+
+func TestResolveCurrentRepoPlacement_NativeRepo(t *testing.T) {
+	const (
+		projectID = "01NATIVEPROJECT00000000000"
+		nativeID  = "01NATIVEREPOSITORY00000000"
+	)
+	withFakeCellCore(t, &fakeCellCore{
+		resolution: nativeResolution("entirehq/marvin", nativeID),
+		repo: &coreapi.Repo{
+			ID: nativeID, Name: "marvin", OwningProjectId: projectID,
+			ClusterHost: coreapi.NewOptString("eu.entire.io"),
+		},
+		clusters: euClusters(),
+	})
+
+	got, err := resolveCurrentRepoPlacement(t.Context(), nativeCloneForge, "entirehq", "marvin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RepoID != nativeID || got.Target.BaseURL != euCellAPIURL {
+		t.Fatalf("placement = {%q, %+v}, want native repo %q on %s", got.RepoID, got.Target, nativeID, euCellAPIURL)
+	}
+}
+
+func TestResolveCurrentRepoPlacement_UnsupportedForge(t *testing.T) {
+	t.Parallel()
+
+	_, err := resolveCurrentRepoPlacement(t.Context(), "gl", "acme", "widget")
+	if err == nil || !strings.Contains(err.Error(), "{repo_id}") || !strings.Contains(err.Error(), "unsupported forge") {
+		t.Fatalf("err = %v, want an unsupported-forge error naming {repo_id}", err)
+	}
+}
+
+func TestAPICellTarget(t *testing.T) {
+	t.Parallel()
+
+	euRepo := &repoCellPlacement{
+		RepoID: "mirror-eu",
+		Target: &auth.CellTarget{BaseURL: euCellAPIURL, Jurisdiction: "eu"},
+	}
+	cases := []struct {
+		name         string
+		path         string
+		jurisdiction string
+		placement    *repoCellPlacement
+		want         *auth.CellTarget
+		wantErr      string
+	}{
+		{name: "no repo_id goes home", path: "/api/v1/clusters"},
+		{name: "no repo_id honors jurisdiction", path: "/api/v1/clusters", jurisdiction: "us",
+			want: &auth.CellTarget{Jurisdiction: "us"}},
+		{name: "repo path goes to repo cell", path: "/api/v1/repos/mirror-eu/checkpoints", placement: euRepo,
+			want: euRepo.Target},
+		{name: "repo_id in query of non-me path goes to repo cell", path: "/api/v1/search?repo=mirror-eu", placement: euRepo,
+			want: euRepo.Target},
+		{name: "matching jurisdiction is allowed", path: "/api/v1/repos/mirror-eu", jurisdiction: "eu", placement: euRepo,
+			want: euRepo.Target},
+		{name: "conflicting jurisdiction is refused", path: "/api/v1/repos/mirror-eu", jurisdiction: "us", placement: euRepo,
+			wantErr: "conflicts with {repo_id}"},
+		{name: "me path with repo_id stays home", path: "/api/v1/me/recap?repo=mirror-eu", placement: euRepo},
+		{name: "bare me stays home", path: "/api/v1/me", placement: euRepo},
+		{name: "me path honors jurisdiction over repo cell", path: "/api/v1/me/recap?repo=mirror-eu", jurisdiction: "us",
+			placement: euRepo, want: &auth.CellTarget{Jurisdiction: "us"}},
+		{name: "me-prefixed sibling is not me", path: "/api/v1/members/x", placement: euRepo,
+			want: euRepo.Target},
+		{name: "relative me path stays home", path: "api/v1/me/recap?repo=mirror-eu", placement: euRepo},
+		{name: "me path that dot-segments into repos goes to repo cell", path: "/api/v1/me/../repos/mirror-eu/checkpoints",
+			placement: euRepo, want: euRepo.Target},
+		{name: "repo path that dot-segments into me stays home", path: "/api/v1/repos/../me/recap?repo=mirror-eu",
+			placement: euRepo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := apiCellTarget(tc.path, tc.jurisdiction, tc.placement)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+				t.Fatalf("target = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
