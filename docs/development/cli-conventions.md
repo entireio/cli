@@ -356,7 +356,30 @@ always runnable in every build.
   native-mirror routes are home-core-scoped and answer 421 for a repo in another
   jurisdiction, which `coreapi`'s transport follows and re-authenticates on its
   own, so they run on the plain active-context client with no cluster-fronting
-  detour. `mirror detach <repo> --into /et/<project>/<repo>` serves
+  detour. `mirror resync <repo>` (`/gh/` only, `POST /mirrors/resync`) queues one
+  publish that fans out to every placement, and doubles as the check after an
+  org fixes a GitHub-side block: the server probes GitHub first and answers
+  409 with the reason at `errors[].location == "body.owner"` while the block
+  holds, which `resyncError` renders with the same wording `repo view` uses.
+  That block (`Mirror.syncBlock`: an org IP allow list, or a suspension core
+  hit while minting a token — a suspension GitHub reports by webhook is NOT
+  a block, it is placement status `suspended`) is per GitHub installation
+  and the `/repos` placements do not carry it, so only `repo view` reads it,
+  with one exact read scoped to the repo (`lookupMirrorSyncBlock`:
+  `GET /mirrors/{id}` by the entry's own `id`, its canonical home-jurisdiction
+  placement, falling back to the first placement ID — not `/mirrors/placements`,
+  which is pull-gated and would withhold the block from a metadata-only
+  viewer), and prints a `Sync:` section with the fix and the resync command;
+  `--json` adds `syncBlock` on the row, or `syncStatus: "unavailable"` when
+  the read failed. `mirror list` shows
+  no block: a per-repo read per row is too much for a directory, and
+  `GET /mirrors` cannot answer "mirrors of owner X" cheaply (core applies its
+  owner filter *after* cutting the page from the caller's whole visible set).
+  Revisit when core puts `syncBlock` on `RepoPlacement`. A failed read is a
+  stderr note, never a failed view — except a cancelled context, which
+  `noteSyncStatusUnavailable` returns so an interrupted command still exits as
+  interrupted.
+  `mirror detach <repo> --into /et/<project>/<repo>` serves
   `/gh/` refs only and is the one mirror verb that converts rather than places:
   it turns the mirror's sole placement into the native repo `--into` names
   (one native ref instead of `--project`/`--name`: its project is resolved

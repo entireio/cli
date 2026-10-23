@@ -120,6 +120,52 @@ func TestJSONLBytesCounts_OverlapsCountInEachLayerButReplaceOnce(t *testing.T) {
 	require.Equal(t, 2, got.Layers["entropy"])
 }
 
+// IP matches count in their own bucket, including the ones found through a
+// JSON key that names an address, which bypass the text scan.
+func TestJSONLBytesCounts_IP(t *testing.T) {
+	ConfigurePII(PIIConfig{Enabled: true, Categories: map[PIICategory]bool{PIIIP: true}})
+	t.Cleanup(resetPIIConfig)
+
+	for _, tc := range []struct{ name, content string }{
+		{"address in text", textLine(t, "ssh deploy@10.24.3.17 failed")},
+		{"address under a network key", `{"host":"34.117.59.81"}` + "\n"},
+		{"ipv4-mapped address", textLine(t, "peer ::ffff:10.0.0.1")},
+		{"ipv4-mapped address under a network key", `{"host":"::ffff:34.117.59.81"}` + "\n"},
+		{"network key with a credential stem", `{"api-host":"34.117.59.81"}` + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := countsOf(t, tc.content)
+			require.Equal(t, 1, got.Replacements)
+			require.Equal(t, 1, got.Layers["pii"])
+			require.Equal(t, map[string]int{"IP": 1}, got.PII)
+		})
+	}
+}
+
+// A credential value replaced whole counts its placeholder, not the PII
+// matches inside it, which are not written.
+func TestJSONLBytesCounts_CredentialValueWithIP(t *testing.T) {
+	ConfigurePII(PIIConfig{Enabled: true, Categories: map[PIICategory]bool{PIIIP: true}})
+	t.Cleanup(resetPIIConfig)
+
+	got := countsOf(t, `{"client_secret":"Hunter2pass for 10.0.0.5"}`+"\n")
+	require.Equal(t, 1, got.Replacements)
+	require.Equal(t, 1, got.Layers["credential_key"])
+	require.Equal(t, 0, got.Layers["pii"])
+	require.Equal(t, map[string]int{"IP": 0}, got.PII)
+}
+
+// Counts do not depend on the order the splice visits keyed and array copies.
+func TestJSONLBytesCounts_KeyedAndArrayCopiesAreStable(t *testing.T) {
+	ConfigurePII(PIIConfig{Enabled: true, Categories: map[PIICategory]bool{PIIIP: true}})
+	t.Cleanup(resetPIIConfig)
+
+	for range 20 {
+		got := countsOf(t, `{"hosts":"10.0.0.5 34.117.59.81","notes":["10.0.0.5 34.117.59.81"]}`+"\n")
+		require.Equal(t, 3, got.Replacements, "two in the hosts copy, one in the notes copy")
+	}
+}
+
 // A layer that did not run is absent, which is different from a layer that ran
 // and found nothing.
 func TestJSONLBytesCounts_AbsentInactiveAndZeroAreDistinct(t *testing.T) {

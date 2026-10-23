@@ -1059,8 +1059,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// runs before the no-changes gate: a read-only Worker turn is still the
 	// parent's task, and a zero-file completed record is itself a condensation
 	// trigger (State.HasTaskContent), so its transcript and tokens reach the
-	// parent's next checkpoint. Its usage goes on that record only, never on
-	// the Worker's own session total, so it is counted once.
+	// parent's next checkpoint. Its usage goes on that record and the parent's
+	// subagent total, never on the Worker's own session total, so it is
+	// counted once.
 	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
 		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
 			link:          link,
@@ -2242,8 +2243,15 @@ func subagentTranscriptAndFiles(
 // reported, nor for Codex: a Codex child's usage comes from its rollout
 // inventory, which leaves it nil on purpose for a forked child whose rollout
 // carries the parent's history, and recounting that rollout from its start
-// would add the parent's tokens.
+// would add the parent's tokens. Nor for a child session
+// (agent.ChildSessionSubagents): its usage is credited to the parent's total at
+// completion, and the task entry must show the same figure. A child that stops
+// only at true completion has its full usage by then; one whose export failed
+// keeps no usage in either place.
 func taskUsageRecountable(ag agent.Agent, event *agent.Event) bool {
+	if _, childSession := agent.AsChildSessionSubagents(ag); childSession {
+		return false
+	}
 	return event.TokenUsage == nil && ag.Type() != agent.AgentTypeCodex
 }
 
@@ -2418,7 +2426,16 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 		return nil
 	}
-	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
+	var completed bool
+	if _, ok := agent.AsChildSessionSubagents(ag); ok {
+		callStartedAt := event.SubagentStartedAt
+		if event.SessionEndSweep {
+			callStartedAt = time.Time{}
+		}
+		completed, err = strategy.CompleteChildSessionTaskRecord(logCtx, event.SessionID, rec, callStartedAt)
+	} else {
+		completed, err = strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to complete task record: %w", err)
 	}
@@ -2543,6 +2560,7 @@ func captureInFlightTaskFinal(logCtx context.Context, ag agent.Agent, sessionID,
 		// The record's start scopes a re-export to this call (OpenCode).
 		SubagentStartedAt: task.StartedAt,
 		Final:             true,
+		SessionEndSweep:   true,
 		Timestamp:         time.Now(),
 	}
 	if err := handleSubagentStopFinal(logCtx, ag, event); err != nil {
@@ -2630,8 +2648,9 @@ type subagentSessionStep struct {
 // The record also carries the Worker's token usage. Each turn adds its own
 // usage, scoped to the turn's transcript slice, and only the Stop that ends
 // the Worker's active turn adds it, so a turn condensed into one checkpoint is
-// never counted again by a later one, and none of it lands on the Worker's
-// own session total.
+// never counted again by a later one. The same usage is credited to the
+// parent's subagent total, and none of it lands on the Worker's own session
+// total.
 func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) error {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	logging.Info(logCtx, "recording subagent session as task record",

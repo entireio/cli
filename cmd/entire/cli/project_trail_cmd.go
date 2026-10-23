@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
@@ -43,7 +44,7 @@ func newProjectTrailShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printProjectTrail(cmd, out)
+			return printProjectTrail(cmd, out, target.Change)
 		},
 	}
 	addProjectTrailSelectorFlags(cmd)
@@ -51,35 +52,158 @@ func newProjectTrailShowCmd() *cobra.Command {
 	return cmd
 }
 
-func printProjectTrail(cmd *cobra.Command, item api.ProjectTrail) error {
-	if jsonRequested(cmd) {
-		return printJSON(cmd.OutOrStdout(), item)
+// projectTrailJSON is a project trail as `--json` prints it: each change
+// gains its page inside the trail, and the change the trail was reached
+// through is marked current. URL stays the whole trail's page.
+type projectTrailJSON struct {
+	api.ProjectTrail
+
+	Changes []projectTrailChangeJSON `json:"changes,omitempty"`
+}
+
+type projectTrailChangeJSON struct {
+	api.ChangeSummary
+
+	URL     string `json:"url,omitempty"`
+	Current bool   `json:"current,omitempty"`
+
+	// selector is the change as <repo>/<number>, from the summary's repository
+	// or, for the current change, the one the CLI resolved when the summary
+	// has none; empty when no valid repository name is known.
+	selector string
+}
+
+// projectTrailChangeURL is a change's page under its trail's server-supplied
+// URL, <trail URL>/changes/<repo>/<number>; empty when either is unknown.
+// The selector is validated, so it is safe as path segments.
+func projectTrailChangeURL(trailURL, selector string) string {
+	trailURL = strings.TrimRight(strings.TrimSpace(trailURL), "/")
+	if trailURL == "" || selector == "" {
+		return ""
 	}
-	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "Trail #%d: %s\n", item.Number, tuiutil.SanitizeTerminalLabel(item.Title))
-	if url := strings.TrimSpace(item.URL); url != "" {
-		fmt.Fprintf(w, "URL: %s\n", tuiutil.SanitizeTerminalText(url))
-	}
-	fmt.Fprintf(w, "ID: %s\nProject: %s\nStatus: %s\nType: %s\nPriority: %s\nAssignees: %s\n",
-		tuiutil.SanitizeTerminalLabel(item.ID), tuiutil.SanitizeTerminalLabel(item.ProjectID), tuiutil.SanitizeTerminalLabel(item.Status),
-		tuiutil.SanitizeTerminalLabel(item.Type), tuiutil.SanitizeTerminalLabel(item.Priority), tuiutil.SanitizeTerminalLabel(strings.Join(item.Assignees, ", ")))
-	if item.Body != "" {
-		fmt.Fprintf(w, "\n%s\n", tuiutil.SanitizeTerminalText(item.Body))
-	}
-	if item.IsPossiblyPartial {
-		fmt.Fprintln(w, "\nRepository and branch information may be incomplete due to access filtering.")
-	}
-	if len(item.Changes) > 0 {
-		fmt.Fprintln(w, "\nRepositories and branches:")
-		return printTable(w, []string{"REPOSITORY", colHeaderBranch, colHeaderStatus, colHeaderTitle}, item.Changes, func(c api.ChangeSummary) []string {
-			repository := c.Repository
-			if repository == "" {
-				repository = c.RepositoryID
+	return trailURL + "/changes/" + selector
+}
+
+// printProjectTrail renders a project trail. current is the change the trail
+// was reached through, or nil when it was selected directly.
+func printProjectTrail(cmd *cobra.Command, item api.ProjectTrail, current *projectTrailCurrentChange) error {
+	out := projectTrailJSON{ProjectTrail: item, Changes: mapSlice(item.Changes, func(c api.ChangeSummary) projectTrailChangeJSON {
+		entry := projectTrailChangeJSON{ChangeSummary: c}
+		named := c
+		if current != nil && c.ID == current.ID {
+			entry.Current = true
+			if named.Repository == "" {
+				named.Repository = current.Repo
 			}
-			return []string{tuiutil.SanitizeTerminalLabel(repository), tuiutil.SanitizeTerminalLabel(c.Branch), tuiutil.SanitizeTerminalLabel(c.Status), tuiutil.SanitizeTerminalLabel(c.Title)}
-		})
+		}
+		entry.selector, _ = trailChangeSelectorFor(named)
+		entry.URL = projectTrailChangeURL(item.URL, entry.selector)
+		return entry
+	})}
+	if jsonRequested(cmd) {
+		return printJSON(cmd.OutOrStdout(), out)
 	}
+	printProjectTrailDetails(cmd.OutOrStdout(), item, out.Changes)
 	return nil
+}
+
+// printProjectTrailDetails renders the human project `trail show` view in the
+// legacy view's style: a yellow title, indented fields with aligned yellow
+// labels, colored statuses, then the changes and the description.
+func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []projectTrailChangeJSON) {
+	styles := newStatusStyles(w)
+	label := func(s string) string { return styles.render(styles.yellow, s) }
+	status := func(s string) string {
+		if style, ok := trailStatusColor(styles, trail.Status(s)); ok {
+			return styles.render(style, s)
+		}
+		return s
+	}
+
+	project := item.ProjectID
+	if item.Project != nil && item.Project.Reference.Forge != "" && item.Project.Reference.Project != "" {
+		project = item.Project.Reference.Forge + "/" + item.Project.Reference.Project
+	}
+	type field struct{ name, value string }
+	fields := []field{
+		{"ID:", tuiutil.SanitizeTerminalLabel(item.ID)},
+		{"Project:", tuiutil.SanitizeTerminalLabel(project)},
+		{"Status:", status(tuiutil.SanitizeTerminalLabel(item.Status))},
+	}
+	if trailURL := strings.TrimSpace(item.URL); trailURL != "" {
+		fields = append(fields, field{"URL:", tuiutil.SanitizeTerminalText(trailURL)})
+	}
+	if len(item.Assignees) > 0 {
+		fields = append(fields, field{"Assignees:", tuiutil.SanitizeTerminalLabel(strings.Join(item.Assignees, ", "))})
+	}
+	if t := strings.TrimSpace(item.Type); t != "" {
+		fields = append(fields, field{"Type:", tuiutil.SanitizeTerminalLabel(t)})
+	}
+	if p := strings.TrimSpace(item.Priority); p != "" && p != string(trail.PriorityNone) {
+		fields = append(fields, field{"Priority:", tuiutil.SanitizeTerminalLabel(p)})
+	}
+	const timeLayout = "2006-01-02T15:04:05Z07:00"
+	if !item.CreatedAt.IsZero() {
+		fields = append(fields, field{"Created:", item.CreatedAt.Format(timeLayout)})
+	}
+	if !item.UpdatedAt.IsZero() {
+		fields = append(fields, field{"Updated:", item.UpdatedAt.Format(timeLayout)})
+	}
+	if item.ClosedAt != nil {
+		fields = append(fields, field{"Closed:", item.ClosedAt.Format(timeLayout)})
+	}
+	width := 0
+	for _, f := range fields {
+		width = max(width, len(f.name))
+	}
+
+	fmt.Fprintln(w, label(fmt.Sprintf("Trail #%d: %s", item.Number, tuiutil.SanitizeTerminalLabel(item.Title))))
+	for _, f := range fields {
+		fmt.Fprintf(w, "  %s %s\n", label(f.name+strings.Repeat(" ", width-len(f.name))), f.value)
+	}
+	if len(changes) > 0 {
+		fmt.Fprintf(w, "  %s\n", label("Changes:"))
+		headers := []string{colHeaderChange, colHeaderBranch, colHeaderStatus, colHeaderURL}
+		rows := make([][]string, len(changes))
+		for i, c := range changes {
+			// Without a valid repository name there is no selector to show;
+			// the branch still identifies the change.
+			change := c.selector
+			if change == "" {
+				change = "-"
+			}
+			if c.Current {
+				change += " (current)"
+			}
+			rows[i] = []string{change, tuiutil.SanitizeTerminalLabel(c.Branch), tuiutil.SanitizeTerminalLabel(c.Status), tuiutil.SanitizeTerminalText(c.URL)}
+		}
+		// Pad on the plain text, then style, so color codes do not skew alignment.
+		widths := columnWidths(headers, rows)
+		writeRow := func(cells []string, style func(col int, cell string) string) {
+			var b strings.Builder
+			b.WriteString("    ")
+			for i, cell := range cells {
+				padded := cell
+				if i < len(cells)-1 {
+					padded += strings.Repeat(" ", widths[i]-lipgloss.Width(cell)+2)
+				}
+				b.WriteString(style(i, padded))
+			}
+			fmt.Fprintln(w, strings.TrimRight(b.String(), " "))
+		}
+		writeRow(headers, func(_ int, cell string) string { return label(cell) })
+		for _, r := range rows {
+			writeRow(r, func(col int, cell string) string {
+				if col == 2 {
+					return strings.Replace(cell, strings.TrimSpace(cell), status(strings.TrimSpace(cell)), 1)
+				}
+				return cell
+			})
+		}
+	}
+	if item.Body != "" {
+		fmt.Fprintf(w, "\n%s\n%s\n", label("Description:"), tuiutil.SanitizeTerminalText(item.Body))
+	}
 }
 
 func newProjectTrailListCmd() *cobra.Command {
@@ -144,12 +268,19 @@ func (f *projectTrailFields) flags(cmd *cobra.Command) {
 	cmd.Flags().StringSliceVar(&f.Assignees, "assignee", nil, "Assignee logins; replaces the complete list (--assignee= clears it)")
 }
 
+func validateProjectTrailStatusFlag(cmd *cobra.Command, status string) error {
+	if cmd.Flags().Changed(cmdStatus) && !validProjectTrailStatus(status) {
+		return errors.New("project trail status must be open or closed (merged belongs to a change)")
+	}
+	return nil
+}
+
 func (f *projectTrailFields) validate(cmd *cobra.Command, creating bool) error {
 	if (creating || cmd.Flags().Changed("title")) && strings.TrimSpace(f.Title) == "" {
 		return errors.New("--title is required and must not be empty")
 	}
-	if cmd.Flags().Changed("status") && !validProjectTrailStatus(f.Status) {
-		return errors.New("project trail status must be open or closed (merged belongs to a change)")
+	if err := validateProjectTrailStatusFlag(cmd, f.Status); err != nil {
+		return err
 	}
 	return validateTrailCreateEnums(cmd, f.Type, f.Priority)
 }
@@ -215,7 +346,7 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			if err := target.validateResponse(out); err != nil {
 				return err
 			}
-			return printProjectTrail(cmd, out)
+			return printProjectTrail(cmd, out, target.Change)
 		},
 	}
 	fields.flags(cmd)
@@ -260,7 +391,7 @@ func newProjectTrailCreateCmd() *cobra.Command {
 				return err
 			}
 			if !noBranch || trailRepoFlag(cmd) != "" || projectTrailProjectFlag(cmd) == "" {
-				change := projectTrailChangeRequest(fields, "", branch, base, action)
+				change := projectTrailChangeRequest(fields.Status, "", branch, base, action)
 				return createRepositoryScopedProjectTrail(cmd, request, change, key)
 			}
 			target, err := resolveProjectTrailCollection(cmd)
@@ -275,7 +406,7 @@ func newProjectTrailCreateCmd() *cobra.Command {
 			if err := target.validateResponse(out); err != nil {
 				return err
 			}
-			return printProjectTrail(cmd, out)
+			return printProjectTrail(cmd, out, nil)
 		},
 	}
 	fields.flags(cmd)
@@ -310,10 +441,7 @@ func projectTrailIdempotencyKey(w io.Writer, key string) string {
 	return key
 }
 
-func projectTrailChangeRequest(fields projectTrailFields, repoID, branch, base, action string) api.ChangeCreateRequest {
-	return api.ChangeCreateRequest{
-		RepositoryID: repoID,
-		Title:        fields.Title, Body: fields.Body, BranchName: branch, Base: base, BranchAction: action,
-		Status: fields.Status, Type: fields.Type, Priority: fields.Priority, Assignees: fields.Assignees,
-	}
+// The branch name is the Change title, so create and its link retry agree.
+func projectTrailChangeRequest(status, repoID, branch, base, action string) api.ChangeCreateRequest {
+	return api.ChangeCreateRequest{RepositoryID: repoID, Title: branch, BranchName: branch, Base: base, BranchAction: action, Status: status}
 }

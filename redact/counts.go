@@ -120,11 +120,12 @@ const (
 	piiEmail = iota
 	piiPhone
 	piiAddress
+	piiIP
 	piiCustom
 	piiBucketCount
 )
 
-var piiBucketNames = [piiBucketCount]string{labelEmail, labelPhone, labelAddress, "custom"}
+var piiBucketNames = [piiBucketCount]string{labelEmail, labelPhone, labelAddress, labelIP, "custom"}
 
 func piiBucket(label string) int {
 	switch label {
@@ -134,6 +135,8 @@ func piiBucket(label string) int {
 		return piiPhone
 	case labelAddress:
 		return piiAddress
+	case labelIP:
+		return piiIP
 	default:
 		return piiCustom
 	}

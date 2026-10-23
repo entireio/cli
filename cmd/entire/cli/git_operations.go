@@ -659,7 +659,9 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 // `entire checkpoint list` / branch explain. Kept short (not a full fetch
 // budget): discovery is best-effort and additive — on timeout or unreachable
 // remote the store falls back to local refs rather than stalling a previously
-// instant command for tens of seconds.
+// instant command for tens of seconds. It is the default only:
+// strategy_options.checkpoint_ref_list_timeout_seconds overrides it for remotes
+// that need longer (see settings.CheckpointRefListTimeoutValue).
 const checkpointRefListTimeout = 5 * time.Second
 
 // ListCheckpointRefsOnRemote enumerates the per-checkpoint refs
@@ -685,15 +687,19 @@ const checkpointRefListTimeout = 5 * time.Second
 //     candidate fails, the first error is returned so the store warns before
 //     showing local-only results. No candidates (remoteless repo) → (nil, nil).
 //
-// Each candidate gets its own checkpointRefListTimeout budget so a hung elected
-// remote cannot starve the legacy origin tier.
+// Each candidate gets its own checkpointRefListTimeout budget (or the
+// strategy_options.checkpoint_ref_list_timeout_seconds override) so a hung
+// elected remote cannot starve the legacy origin tier.
 // Resolution and ls-remote are pinned to the worktree root (not process cwd) so
 // repo-local git config (url.*.insteadOf, credential helpers, remotes) applies.
 func ListCheckpointRefsOnRemote(ctx context.Context) ([]plumbing.ReferenceName, error) {
 	return listCheckpointRefsOnRemote(ctx, checkpointRefListTimeout)
 }
 
-func listCheckpointRefsOnRemote(ctx context.Context, candidateTimeout time.Duration) ([]plumbing.ReferenceName, error) {
+// listCheckpointRefsOnRemote is ListCheckpointRefsOnRemote with the default
+// per-candidate budget injected; a configured
+// strategy_options.checkpoint_ref_list_timeout_seconds replaces it.
+func listCheckpointRefsOnRemote(ctx context.Context, defaultTimeout time.Duration) ([]plumbing.ReferenceName, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
@@ -704,6 +710,10 @@ func listCheckpointRefsOnRemote(ctx context.Context, candidateTimeout time.Durat
 		logging.Warn(ctx, "checkpoint ref discovery: settings unavailable; leaving list local-only",
 			slog.String("error", settingsErr.Error()))
 		return nil, nil
+	}
+	candidateTimeout := defaultTimeout
+	if v := s.CheckpointRefListTimeoutValue(); v > 0 {
+		candidateTimeout = v
 	}
 	if s.GetCheckpointRemote() != nil {
 		// The elected remote joins FetchURL's ownership vote (see

@@ -333,6 +333,9 @@ type taggedRegion struct {
 
 	label string
 	layer layer
+	// builtinIP marks a match of the built-in IP rules. A custom PII pattern
+	// named ip shares the IP label but not the rules that depend on context.
+	builtinIP bool
 }
 
 type jsonReplacement struct {
@@ -369,7 +372,7 @@ var connectionStringRules = []connectionStringRule{
 //  6. User-defined custom rules: configured via ConfigureCustomRules
 //  7. Shell stdin literals piped into secret-management commands
 //  8. Bounded credential key/value pairs: DB_PASSWORD=..., GITHUB_CLIENT_SECRET=..., Azure SAS sig=...
-//  9. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
+//  9. PII detection: email, phone, address, IP patterns (only when configured via ConfigurePII)
 //
 // A string is redacted if ANY method flags it.
 func String(s string) string {
@@ -1954,6 +1957,20 @@ func applyJSONReplacements(s string, repls []jsonReplacement) (result string, wr
 	if len(repls) == 0 {
 		return s, 0, nil
 	}
+	// Keyed replacements go first. An unkeyed one replaces every copy of its
+	// text, so applied earlier it would also rewrite a keyed copy that needs
+	// a different result (a password under a credential key, an address under
+	// a network key), and the outcome would follow the walk's map order.
+	repls = slices.Clone(repls)
+	slices.SortStableFunc(repls, func(a, b jsonReplacement) int {
+		switch {
+		case a.key != "" && b.key == "":
+			return -1
+		case a.key == "" && b.key != "":
+			return 1
+		}
+		return 0
+	})
 	for _, r := range repls {
 		origJSON, err := jsonEncodeString(r.original)
 		if err != nil {
@@ -2119,7 +2136,8 @@ func walkRedactableStrings(v any, transform func(key, spliceKey string, credenti
 // redactLeafValue is the per-leaf redaction rule shared by the splice
 // collection pass and the structural re-encode fallback: the placeholder for
 // a value whose key reveals a secret the value alone does not, otherwise the
-// redactor, then the credential-key placeholder for values it left alone.
+// redactor, then the credential-key placeholder for values it left alone or
+// in which it found only PII, then IP addresses under a key that names one.
 //
 // The redactor always sees the unchanged value. Rewriting part of it first
 // would stop a rule that needs the whole value, such as an anchored custom
@@ -2129,13 +2147,34 @@ func redactLeafValue(key string, credentialContext bool, val string, redactor le
 		redactor.counts.addPlaceholder(layerKeyContext)
 		return RedactedPlaceholder
 	}
-	redacted := redactor.redact(val)
-	if redacted == val && isCredentialJSONSecretKey(key, credentialContext) &&
+	version := isVersionValue(key, val)
+	regions := redactor.detect(val)
+	if version {
+		regions = slices.DeleteFunc(slices.Clone(regions), func(r taggedRegion) bool { return r.builtinIP })
+	}
+	// PII inside a credential value (an address or email next to the
+	// password) does not make the rest of it safe to keep.
+	if onlyPIIRegions(regions) && isCredentialJSONSecretKey(key, credentialContext) &&
 		hasNonPlaceholderKeyValue(key, val, false) && !isNonPasswordCodeLiteral(key, val) {
 		redactor.counts.addPlaceholder(layerCredentialKey)
-		redacted = RedactedPlaceholder
+		return RedactedPlaceholder
 	}
-	return redacted
+	redacted := redactRegions(val, regions, redactor.counts)
+	if version {
+		return redacted
+	}
+	return redactIPsUnderNetworkKey(key, redacted, redactor.counts)
+}
+
+// onlyPIIRegions reports whether every non-empty region is a PII match, true
+// when there are none.
+func onlyPIIRegions(regions []taggedRegion) bool {
+	for _, r := range regions {
+		if r.end > r.start && r.layer != layerPII {
+			return false
+		}
+	}
+	return true
 }
 
 // credentialKeyWords are stems of the keywords of betterleaks' generic-api-key
@@ -2158,6 +2197,12 @@ func keyContextFindsMore(key, val string) bool {
 	start, end := len(prefix), len(prefix)+len(val)
 	var coveredAlone []bool
 	for _, r := range detectAllLayers(prefix + val + `"`) {
+		// A network word in the key makes an IP look key-dependent, but
+		// redactIPsUnderNetworkKey owns that case and keeps the IP token
+		// instead of replacing the whole value.
+		if r.builtinIP && isNetworkKey(key) {
+			continue
+		}
 		s, e := max(r.start, start)-start, min(r.end, end)-start
 		if s >= e {
 			continue
@@ -2199,19 +2244,26 @@ type replKey struct {
 // passes the regex layers; the OPF-enabled flow combines them with cached
 // batched OPF spans.
 func collectJSONLReplacements(v any, redactor leafRedactor) []jsonReplacement {
-	seen := make(map[replKey]bool)
+	seen := make(map[replKey]int)
 	var repls []jsonReplacement
 	walkRedactableStrings(v, func(key, spliceKey string, credentialContext bool, val string) string {
 		before := redactor.replacements()
 		redacted := redactLeafValue(key, credentialContext, val, redactor)
 		if redacted != val {
 			k := replKey{key: spliceKey, original: val}
-			if !seen[k] {
-				seen[k] = true
-				repls = append(repls, jsonReplacement{
-					key: spliceKey, original: val, redacted: redacted,
-					placeholders: redactor.replacements() - before,
-				})
+			repl := jsonReplacement{
+				key: spliceKey, original: val, redacted: redacted,
+				placeholders: redactor.replacements() - before,
+			}
+			if i, ok := seen[k]; !ok {
+				seen[k] = len(repls)
+				repls = append(repls, repl)
+			} else if hidesMore(redacted, repls[i].redacted) {
+				// The same text can redact differently under another key: an
+				// address under a network key, a password under a credential
+				// key. The splice writes one result into every copy, so keep
+				// the one that hides more.
+				repls[i] = repl
 			}
 		}
 		// Collection only. The fast path splices the raw text, so the tree is
@@ -2219,6 +2271,16 @@ func collectJSONLReplacements(v any, redactor leafRedactor) []jsonReplacement {
 		return val
 	})
 	return repls
+}
+
+// hidesMore reports whether redacted result a hides more than b: a
+// whole-value placeholder hides everything, otherwise more placeholders hide
+// more.
+func hidesMore(a, b string) bool {
+	if b == RedactedPlaceholder {
+		return false
+	}
+	return a == RedactedPlaceholder || strings.Count(a, RedactedPlaceholder) > strings.Count(b, RedactedPlaceholder)
 }
 
 // hasDuplicateJSONKeys reports whether any object in the JSON document spells

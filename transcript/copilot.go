@@ -39,6 +39,9 @@ type copilotLine struct {
 	Type      string          `json:"type"`
 	Timestamp string          `json:"timestamp"`
 	Data      json.RawMessage `json:"data"`
+	// AgentID is set on the events of a subagent; on subagent.started it
+	// names the child.
+	AgentID string `json:"agentId"`
 }
 
 type copilotAssistantData struct {
@@ -67,6 +70,7 @@ func compactCopilot(content []byte, opts Options) ([]byte, error) {
 	base := newTranscriptLine(opts)
 	var result []byte
 	var pending *transcriptLine
+	subagents := copilotSubagents(content)
 
 	flushPending := func() {
 		if pending == nil {
@@ -98,7 +102,7 @@ func compactCopilot(content []byte, opts Options) ([]byte, error) {
 					pending = copilotAssistantLine(base, line)
 				case "tool.execution_complete":
 					if pending != nil {
-						copilotInlineToolResult(pending, line)
+						copilotInlineToolResult(pending, line, subagents)
 					}
 				}
 			}
@@ -214,7 +218,34 @@ func copilotAssistantLine(base transcriptLine, line copilotLine) *transcriptLine
 	return &out
 }
 
-func copilotInlineToolResult(pending *transcriptLine, line copilotLine) {
+// copilotSubagents maps each task tool call ID to the subagent it started,
+// from subagent.started events.
+func copilotSubagents(content []byte) map[string]string {
+	if !bytes.Contains(content, []byte(`"subagent.started"`)) {
+		return nil
+	}
+	agents := make(map[string]string)
+	reader := bufio.NewReader(bytes.NewReader(content))
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if bytes.Contains(lineBytes, []byte(`"subagent.started"`)) {
+			var line copilotLine
+			var data struct {
+				ToolCallID string `json:"toolCallId"`
+			}
+			if json.Unmarshal(lineBytes, &line) == nil && line.Type == "subagent.started" && line.AgentID != "" &&
+				json.Unmarshal(line.Data, &data) == nil && data.ToolCallID != "" {
+				agents[data.ToolCallID] = line.AgentID
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return agents
+}
+
+func copilotInlineToolResult(pending *transcriptLine, line copilotLine, subagents map[string]string) {
 	var data copilotToolResultData
 	if json.Unmarshal(line.Data, &data) != nil || data.ToolCallID == "" {
 		return
@@ -240,6 +271,7 @@ func copilotInlineToolResult(pending *transcriptLine, line copilotLine) {
 		blocks[i]["result"] = buildToolResult(toolResultEntry{
 			output:  output,
 			isError: !data.Success,
+			agentID: subagents[data.ToolCallID],
 		})
 		break
 	}

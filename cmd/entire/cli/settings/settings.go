@@ -386,12 +386,14 @@ type ScannerSettings struct {
 }
 
 // PIISettings configures PII detection categories.
-// When Enabled is true, email and phone default to true; address defaults to false.
+// When Enabled is true, email, phone and ip default to true; address defaults
+// to false.
 type PIISettings struct {
 	Enabled        bool              `json:"enabled"`
 	Email          *bool             `json:"email,omitempty"`
 	Phone          *bool             `json:"phone,omitempty"`
 	Address        *bool             `json:"address,omitempty"`
+	IP             *bool             `json:"ip,omitempty"`
 	CustomPatterns map[string]string `json:"custom_patterns,omitempty"`
 }
 
@@ -1753,6 +1755,13 @@ func mergePIISettings(dst *PIISettings, data json.RawMessage) error {
 		}
 		dst.Address = &b
 	}
+	if v, ok := raw["ip"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			return fmt.Errorf("parsing pii.ip: %w", err)
+		}
+		dst.IP = &b
+	}
 	if v, ok := raw["custom_patterns"]; ok {
 		if err := mergeStringMap(&dst.CustomPatterns, v, "pii.custom_patterns"); err != nil {
 			return err
@@ -2126,6 +2135,31 @@ func (s *EntireSettings) IsFilteredFetchesEnabled() bool {
 	}
 	val, ok := s.StrategyOptions["filtered_fetches"].(bool)
 	return ok && val
+}
+
+// maxCheckpointRefListTimeout caps
+// strategy_options.checkpoint_ref_list_timeout_seconds. The setting usually
+// comes from a committed settings.json, so a cloned repository must not be able
+// to make a names-only listing wait longer than one full checkpoint read fetch
+// (remote.ReadFetchTimeout).
+const maxCheckpointRefListTimeout = 2 * time.Minute
+
+// CheckpointRefListTimeoutValue returns how long remote checkpoint discovery
+// waits for each remote to list checkpoint refs, from
+// strategy_options.checkpoint_ref_list_timeout_seconds. Zero means unset (the
+// option is absent, not a number, or not positive) and the caller uses its
+// default. Values above maxCheckpointRefListTimeout are capped to it.
+func (s *EntireSettings) CheckpointRefListTimeoutValue() time.Duration {
+	if s.StrategyOptions == nil {
+		return 0
+	}
+	// JSON numbers decode into map[string]any as float64.
+	secs, ok := s.StrategyOptions["checkpoint_ref_list_timeout_seconds"].(float64)
+	if !ok || secs <= 0 {
+		return 0
+	}
+	// Cap in seconds before converting so a huge value cannot overflow Duration.
+	return time.Duration(min(secs, maxCheckpointRefListTimeout.Seconds()) * float64(time.Second))
 }
 
 // IsPushSessionsDisabled checks if push_sessions is disabled in settings.

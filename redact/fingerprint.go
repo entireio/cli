@@ -16,7 +16,7 @@ import (
 //
 // Forgetting to bump it means a caller can reuse output redacted by the old
 // pipeline, so treat it as part of the pipeline's public contract.
-const configFingerprintVersion = 11
+const configFingerprintVersion = 12
 
 // ConfigFingerprint returns a stable hash over everything that affects the
 // output of String and JSONLContent (the nine regex layers and the scanner

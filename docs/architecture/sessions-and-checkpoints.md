@@ -664,10 +664,17 @@ same as keeping the current destination. An explicit remote flag is still
 honored without prompting and does not enable disabled pushing. Destination
 selection does not migrate, publish, or delete existing remote checkpoint data.
 Alternatives that still resolve to dedicated storage are not offered as
-ordinary named destinations. The closing destination report is printed only
-when the destination was touched (explicit flag, picker shown, or
-`--checkpoint-remote`) or is unusable; a healthy destination nobody asked about
-ends at `Ready.`, and the multi-remote ambiguity note covers the rest.
+ordinary named destinations. The closing destination report runs after every
+successful enable, with or without a terminal. It names the destination and
+follows it with a privacy notice: checkpoints contain the agent transcripts, a
+public destination makes them public, redaction is best effort, and how to stop
+uploads or move them to a private repository. An unusable destination is
+reported instead of the notice, unless pushes still upload to a dedicated
+`checkpoint_remote`, which the remote election does not gate; the notice then
+follows the report. How the destination was chosen, fan-out, and
+alternatives are reported only when the destination was touched (explicit flag,
+picker shown, or `--checkpoint-remote`); the multi-remote ambiguity note covers
+the rest.
 
 The pre-push hook carries checkpoint data only when the push targets the
 elected remote; pushes to any other remote or to a raw URL sync nothing, on

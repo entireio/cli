@@ -915,7 +915,7 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				stats = append(stats, activeTimeDisplay(st.LastInteractionTime))
 			}
 
-			if t := totalTokens(st.TokenUsage); t > 0 {
+			if t := totalTokens(st.TotalTokenUsage()); t > 0 {
 				stats = append(stats, "tokens "+formatTokenCount(t))
 			}
 

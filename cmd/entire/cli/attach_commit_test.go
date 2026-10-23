@@ -105,6 +105,17 @@ func pushToOrigin(t *testing.T) string {
 	return remote
 }
 
+// pushFromAnotherClone pushes refspec to remote from a fresh clone of this
+// repository, so none of this repository's remote-tracking refs learn of it.
+// Pushing by URL from here is not the same: since git 2.56 that updates the
+// tracking refs of a configured remote whose URL matches.
+func pushFromAnotherClone(t *testing.T, remote, refspec string) {
+	t.Helper()
+	other := t.TempDir()
+	testutil.RunGit(t, other, "clone", "-q", mustGetwd(t), ".")
+	testutil.RunGit(t, other, "push", "-q", remote, refspec)
+}
+
 func attachHeadless(t *testing.T, sessionID string, opts attachOptions) (string, error) {
 	t.Helper()
 	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
@@ -556,8 +567,7 @@ func TestAttachCommit_FetchesBeforeDecidingAHeadIsUnpushed(t *testing.T) {
 	remote := t.TempDir()
 	testutil.RunGit(t, remote, "init", "--bare", "-q")
 	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
-	// Pushed by URL, as another clone would: this repo's origin/* refs don't move.
-	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD:refs/heads/main")
+	pushFromAnotherClone(t, remote, "HEAD:refs/heads/main")
 	if refs := testutil.RunGit(t, dir, "branch", "-r"); strings.TrimSpace(refs) != "" {
 		t.Fatalf("expected no remote-tracking refs before attach, got %q", refs)
 	}
@@ -960,9 +970,9 @@ func TestAttachCommit_PushedWhileConfirmationIsOpenIsNotRewritten(t *testing.T) 
 	old := askAttachConfirmation
 	t.Cleanup(func() { askAttachConfirmation = old })
 	askAttachConfirmation = func() (bool, error) {
-		// Another clone pushes the commit: by URL, so none of this clone's
-		// tracking refs learn about it.
-		testutil.RunGit(t, mustGetwd(t), "push", "-q", remote, head.Hash.String()+":refs/heads/someone-else")
+		// Another clone pushes the commit, so none of this clone's tracking
+		// refs learn about it.
+		pushFromAnotherClone(t, remote, head.Hash.String()+":refs/heads/someone-else")
 		return true, nil
 	}
 

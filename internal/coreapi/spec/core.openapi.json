@@ -4060,6 +4060,10 @@
           "suspendedAt": {
             "format": "date-time",
             "type": "string"
+          },
+          "syncBlock": {
+            "$ref": "#/components/schemas/MirrorSyncBlock",
+            "description": "Present while GitHub blocks the upstream's GitHub App installation, so the mirror cannot sync. The block is per installation: every placement of the upstream carries the same value."
           }
         },
         "required": [
@@ -6471,6 +6475,88 @@
         "required": [
           "grants",
           "memberships"
+        ],
+        "type": "object"
+      },
+      "MirrorSyncBlock": {
+        "additionalProperties": true,
+        "properties": {
+          "observedAt": {
+            "description": "When Core last observed the block. The periodic re-probe and a customer resync both refresh it.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why GitHub refused the mint: org_ip_allowlist or installation_suspended. Other values may be added.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "observedAt"
+        ],
+        "type": "object"
+      },
+      "ResyncMirrorInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResyncMirrorInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "owner": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "github"
+            ],
+            "type": "string"
+          },
+          "repo": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "owner",
+          "repo"
+        ],
+        "type": "object"
+      },
+      "ResyncMirrorOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResyncMirrorOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "mirrorId": {
+            "description": "The placement the resync was published for.",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "mirrorId",
+          "status"
         ],
         "type": "object"
       }
@@ -21564,6 +21650,131 @@
         "summary": "Get the server version and mode",
         "tags": [
           "meta"
+        ]
+      }
+    },
+    "/mirrors/resync": {
+      "post": {
+        "operationId": "resyncMirror",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResyncMirrorInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResyncMirrorOutputBody"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resync every placement of a mirrored upstream (live GitHub write-access gated)",
+        "tags": [
+          "mirrors"
         ]
       }
     }

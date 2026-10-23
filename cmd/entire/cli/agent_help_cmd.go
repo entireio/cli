@@ -269,10 +269,14 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"pass <P> where a change is expected, or <n> where a project trail is.\n" +
 		"To list a project trail's changes, run `entire trail show <P>\n" +
 		"--project <forge>/<project> --json`; each changes[] entry is the change\n" +
-		"<repository>/<number>. When asked to act on (e.g. review) a whole project\n" +
-		"trail, cover every change. Checkout and review need a clone of that\n" +
-		"repository: do the ones in this clone and tell the user which changes\n" +
-		"need another clone instead of skipping them silently.",
+		"<repository>/<number> with its own url. When show reaches the trail\n" +
+		"through a change (the current branch, --branch, or <repo>/<n>), that\n" +
+		"entry has current: true; link its url, the change's page, in preference\n" +
+		"to the top-level url, the whole trail's page. When asked to act on\n" +
+		"(e.g. review) a whole project trail, cover every change. Checkout and\n" +
+		"review need a clone of that repository: do the ones in this clone and\n" +
+		"tell the user which changes need another clone instead of skipping\n" +
+		"them silently.",
 }
 
 // agentHelpFactsFor classifies one command path, defaulting the unclassified

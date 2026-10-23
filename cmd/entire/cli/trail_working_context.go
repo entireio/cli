@@ -93,7 +93,7 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 		if err != nil {
 			return nil, err
 		}
-		target, err = openTrailParentTarget(cmd, work, fmt.Sprintf("branch %q", branch))
+		target, err = openTrailParentTarget(cmd, work, repo, fmt.Sprintf("branch %q", branch))
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +180,7 @@ func resolveProjectTrailChangeContext(cmd *cobra.Command, sel projectTrailChange
 	if err != nil {
 		return nil, err
 	}
-	target, err := openTrailParentTarget(cmd, change.Work, "change "+sel.String())
+	target, err := openTrailParentTarget(cmd, change.Work, change.Repo, "change "+sel.String())
 	if err != nil {
 		return nil, err
 	}
