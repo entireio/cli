@@ -56,19 +56,19 @@ func TestUpdateCommandForCurrentBinary_Unix(t *testing.T) {
 			name:           "unknown path stable falls back to stable curl command",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return plainBinPath, nil },
-			want:           "curl -fsSL https://entire.io/install.sh | bash",
+			want:           "curl -fsSL https://entire.com/install.sh | bash",
 		},
 		{
 			name:           "unknown path nightly falls back to nightly curl command",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
 			execPath:       func() (string, error) { return plainBinPath, nil },
-			want:           "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly",
+			want:           "curl -fsSL https://entire.com/install.sh | bash -s -- --channel nightly",
 		},
 		{
 			name:           "executable error falls back to stable curl command",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return "", errors.New("not found") },
-			want:           "curl -fsSL https://entire.io/install.sh | bash",
+			want:           "curl -fsSL https://entire.com/install.sh | bash",
 		},
 	}
 
@@ -261,8 +261,8 @@ var knownUpdateCommands = map[string]struct{}{
 	brewUpgradeCmd:                      {},
 	"brew upgrade --yes entire@nightly": {},
 	miseUpgradeCmd:                      {},
-	"curl -fsSL https://entire.io/install.sh | bash":                         {},
-	"curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly": {},
+	"curl -fsSL https://entire.com/install.sh | bash":                         {},
+	"curl -fsSL https://entire.com/install.sh | bash -s -- --channel nightly": {},
 }
 
 // TestUpdateCommandIsAlwaysALiteral is the guard behind realRunInstaller's

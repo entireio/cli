@@ -283,6 +283,12 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 			// agent's transport has that shape.
 			repoPrefix + "internal/flock",
 		},
+		"opencode": {
+			// Process-group kill on cancel. opencode's npm launcher runs the
+			// real binary as a child with inherited stdio, so killing the
+			// launcher alone leaves an export blocking past its deadline.
+			repoPrefix + "execx",
+		},
 	}
 
 	agentDir := findAgentDir(t)

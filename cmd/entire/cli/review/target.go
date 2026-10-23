@@ -80,18 +80,18 @@ func runTargetReview(ctx context.Context, cmd *cobra.Command, req targetReviewRe
 	if len(req.Positional) == 1 {
 		profileName = req.Positional[0]
 	}
-	var agents []string
+	var agents []TrustAgent
 	forwardProfile := ""
 	if req.ShowConfig {
 		agents = showConfigAgents(ctx, profileName, req.Gate.AgentOverride)
 	} else {
 		// Resolve the profile in the user's checkout, never the branch's worktree;
 		// the gate also needs its agents.
-		selection, selErr := resolveReviewProfile(ctx, cmd, profileName, deps)
+		selection, selErr := resolveReviewProfile(ctx, cmd, profileName, req.Gate.AgentOverride, deps)
 		if selErr != nil || selection.done {
 			return selErr
 		}
-		agents = profileAgentNames(selection.profile, req.Gate.AgentOverride)
+		agents = profileTrustAgents(selection.profile, req.Gate.AgentOverride)
 		if profileName == "" {
 			forwardProfile = selection.name
 		}

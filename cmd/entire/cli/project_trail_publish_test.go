@@ -35,21 +35,19 @@ func TestProjectTrailCreatePublishesBeforePOSTWithoutCommitting(t *testing.T) {
 	before := testutil.RunGit(t, dir, "rev-parse", "HEAD")
 	testutil.WriteFile(t, dir, "work-in-progress.txt", "not committed\n")
 	writeTrailCreatePrePushHook(t, dir, "#!/bin/sh\necho checkpoint-hook-ran >&2\n")
-	setupProjectTrailRepoPlacement(t)
 	var publishedAtPOST []byte
-	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		var request api.ProjectTrailCreateRequest
-		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&request)) || !assert.Len(t, request.Changes, 1) {
-			return
+	handler := repositoryTrailCreationHandler(t, "gh", func(change api.ChangeCreateRequest) {
+		assert.Equal(t, "start-work", change.BranchName)
+		assert.Equal(t, "main", change.Base)
+		assert.Equal(t, "link", change.BranchAction)
+	})
+	setupRepositoryTrailCreation(t, "gh", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			var err error
+			publishedAtPOST, err = os.ReadFile(filepath.Join(remote, "refs", "heads", "start-work"))
+			assert.NoError(t, err)
 		}
-		assert.Equal(t, "start-work", request.Changes[0].BranchName)
-		assert.Equal(t, "main", request.Changes[0].Base)
-		assert.Equal(t, "link", request.Changes[0].BranchAction)
-		var err error
-		publishedAtPOST, err = os.ReadFile(filepath.Join(remote, "refs", "heads", "start-work"))
-		assert.NoError(t, err)
-		assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
+		handler(w, r)
 	})
 	out, errOut, err := executeProjectTrailTest(t, "create", "--title", "Start work", "--json")
 	require.NoError(t, err, errOut)
@@ -71,8 +69,7 @@ func mustProjectTrailJSON(t *testing.T) string {
 func TestProjectTrailCreatePushRejectionStopsBeforePOST(t *testing.T) {
 	dir, remote := setupProjectTrailPublication(t)
 	writeTrailCreatePrePushHook(t, dir, "#!/bin/sh\necho checkpoint-hook-rejected >&2\nexit 1\n")
-	setupProjectTrailRepoPlacement(t)
-	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+	setupRepositoryTrailCreation(t, "gh", func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("API must not be called after rejected push: %s", r.Method)
 		http.Error(w, "unexpected request", http.StatusInternalServerError)
 	})
@@ -86,8 +83,7 @@ func TestProjectTrailCreatePushRejectionStopsBeforePOST(t *testing.T) {
 
 func TestProjectTrailCreateAPIFailurePreservesPublishedBranch(t *testing.T) {
 	dir, remote := setupProjectTrailPublication(t)
-	setupProjectTrailRepoPlacement(t)
-	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
+	setupRepositoryTrailCreation(t, "gh", func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"detail":"uncertain outcome"}`, http.StatusServiceUnavailable)
 	})
 	_, _, err := executeProjectTrailTest(t, "create", "--title", "Preserve work")
@@ -101,22 +97,21 @@ func TestProjectTrailCreateNoBranchOrServerCreationDoesNotPush(t *testing.T) {
 		t.Run(map[bool]string{true: "intent only", false: "server creation"}[noBranch], func(t *testing.T) {
 			dir, _ := setupProjectTrailPublication(t)
 			writeTrailCreatePrePushHook(t, dir, "#!/bin/sh\necho unexpected-push >&2\nexit 1\n")
-			setupProjectTrailRepoPlacement(t)
-			setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
-				var request api.ProjectTrailCreateRequest
-				if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&request)) {
-					return
-				}
-				if noBranch {
+			if noBranch {
+				setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+					var request api.ProjectTrailCreateRequest
+					assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 					assert.Empty(t, request.Changes)
-				} else if assert.Len(t, request.Changes, 1) {
-					assert.Equal(t, cmdCreate, request.Changes[0].BranchAction)
-				}
-				assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
-			})
+					assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
+				})
+			} else {
+				setupRepositoryTrailCreation(t, "gh", repositoryTrailCreationHandler(t, "gh", func(change api.ChangeCreateRequest) {
+					assert.Equal(t, cmdCreate, change.BranchAction)
+				}))
+			}
 			args := []string{"create", "--title", "Remote work"}
 			if noBranch {
-				args = append(args, "--no-branch")
+				args = append(args, "--no-branch", "--project", "gh/acme")
 			} else {
 				args = append(args, "--branch-action", "create")
 			}

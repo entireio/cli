@@ -155,7 +155,10 @@ func TestFactoryDroidReadOnlyWorkerReachesParentCheckpoint(t *testing.T) {
 	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmit(parent.ID))
 
 	// A read-only Worker: it reads and reports, consuming tokens, and writes
-	// nothing.
+	// nothing. Real Droid transcripts carry no usage: Droid writes it to the
+	// session's .settings.json, which only #2820 reads. Until then the
+	// adapter counts transcript usage, so the fixture puts it there; the
+	// accounting under test is the same wherever the Worker's usage is read.
 	const toolUseID = "toolu_reader_01"
 	worker := env.NewFactoryDroidSession()
 	require.NoError(t, env.SimulateFactoryDroidUserPromptSubmit(worker.ID))
@@ -218,9 +221,10 @@ func TestFactoryDroidReadOnlyWorkerReachesParentCheckpoint(t *testing.T) {
 	require.True(t, ok, "the Worker's transcript must be stored with its task")
 	require.Contains(t, transcript, "It is a test repository.")
 
-	if usage := readCommittedTokenUsage(t, env, checkpointID); usage != nil {
-		require.NotEqual(t, 70, usage.InputTokens, "the parent session's own usage must not absorb the Worker's")
-	}
+	usage := readCommittedTokenUsage(t, env, checkpointID)
+	require.NotNil(t, usage)
+	require.NotEqual(t, 70, usage.InputTokens, "the parent session's own usage must not absorb the Worker's")
+	requireCheckpointSubagentTokens(t, env, checkpointID, 70, 7)
 
 	// A second Worker turn after that commit: the next checkpoint's task must
 	// hold only the second turn, not the first again.
@@ -246,6 +250,26 @@ func TestFactoryDroidReadOnlyWorkerReachesParentCheckpoint(t *testing.T) {
 	require.NotNil(t, task2.TokenUsage, "the second stored task must carry the Worker's usage: %s", raw)
 	require.Equal(t, 30, task2.TokenUsage.InputTokens, "the first Worker turn is already in the first checkpoint: %s", raw)
 	require.Equal(t, 3, task2.TokenUsage.OutputTokens, "the first Worker turn is already in the first checkpoint: %s", raw)
+	requireCheckpointSubagentTokens(t, env, checkpoint2, 30, 3)
+
+	state, err = env.GetSessionState(parent.ID)
+	require.NoError(t, err)
+	total := state.TotalTokenUsage()
+	require.NotNil(t, total)
+	require.NotNil(t, total.SubagentTokens, "the parent's total counts its Worker")
+	require.Equal(t, 100, total.SubagentTokens.InputTokens, "each Worker turn once")
+	require.Equal(t, 10, total.SubagentTokens.OutputTokens, "each Worker turn once")
+}
+
+// requireCheckpointSubagentTokens checks the subagent usage a checkpoint's
+// session metadata holds: only what completed since the previous checkpoint.
+func requireCheckpointSubagentTokens(t *testing.T, env *TestEnv, checkpointID string, input, output int) {
+	t.Helper()
+	usage := readCommittedTokenUsage(t, env, checkpointID)
+	require.NotNil(t, usage)
+	require.NotNil(t, usage.SubagentTokens, "checkpoint %s must count the Worker", checkpointID)
+	require.Equal(t, input, usage.SubagentTokens.InputTokens)
+	require.Equal(t, output, usage.SubagentTokens.OutputTokens)
 }
 
 // TestFactoryDroidTopLevelSessionStillCheckpoints guards the fallback: an

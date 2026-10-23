@@ -228,13 +228,19 @@ type TrailApprovalsResponse struct {
 
 // TrailMergeabilityResponse is the full mergeability snapshot the detail
 // resource serves (TrailMergeability, as `trail show` reads it) plus the
-// fields the merge command needs to decide on and explain a bypass.
+// fields the merge command needs to decide on and explain a bypass and to say
+// what the merge will do with the trail's branch.
 type TrailMergeabilityResponse struct {
 	TrailMergeability
 
 	BypassPolicy     string `json:"bypass_policy"`
 	BehindBy         int    `json:"behind_by"`
 	ComparisonStatus string `json:"comparison_status"`
+	// DeleteBranchOnMerge is the repo's default for the merge request's
+	// deleteBranch. It is nil for a GitHub-backed repo, whose branch GitHub
+	// manages, when readiness is unavailable, and from a server that predates
+	// the setting.
+	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge"`
 }
 
 // TrailMergeDetail is the part of GET .../trails/{number} the merge command
@@ -262,10 +268,21 @@ type TrailActionAvailability struct {
 type TrailMergeRequest struct {
 	ExpectedHeadSha string `json:"expectedHeadSha,omitempty"`
 	Bypass          bool   `json:"bypass,omitempty"`
+	// DeleteBranch overrides the repo's delete-branch-on-merge setting for a
+	// native trail; nil leaves it to the setting. A pointer, because an
+	// explicit false must reach the server.
+	DeleteBranch *bool `json:"deleteBranch,omitempty"`
 }
 
 type TrailMergeResponse struct {
 	OK bool `json:"ok"`
 	// Empty when the merge fast-forwarded or the base was already up to date.
 	MergeCommitSha string `json:"mergeCommitSha"`
+	// BranchDeleted reports whether the server deleted the trail's branch
+	// after the merge. It is always false for a GitHub-backed trail, whose
+	// branch GitHub manages.
+	BranchDeleted bool `json:"branchDeleted"`
+	// BranchKeptReason says why a native trail's branch was kept; empty when
+	// it was deleted and for a GitHub-backed trail.
+	BranchKeptReason string `json:"branchKeptReason,omitempty"`
 }

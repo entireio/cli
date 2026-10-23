@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -161,4 +162,188 @@ func TestCondensedTaskTokenUsage_RecordsModel(t *testing.T) {
 	got := condensedTaskTokenUsage(context.Background(), claudecode.NewClaudeCodeAgent(),
 		session.TaskRecord{TokenUsageFromTranscript: true, CompletedAt: time.Now()}, []byte(withModel))
 	require.Equal(t, &agent.TokenUsage{InputTokens: 3, OutputTokens: 40, APICallCount: 1, Model: "claude-haiku-4-5"}, got)
+}
+
+// TestChildSessionTokens_EachChildCountsOnceAcrossWindows walks two
+// checkpoint windows: a foreground child credited during turn 1, then a
+// background child credited after turn 2 ended. Each checkpoint stores only
+// the child credited in its window, and the session total holds each once.
+func TestChildSessionTokens_EachChildCountsOnceAcrossWindows(t *testing.T) {
+	t.Parallel()
+
+	turn := &agent.TokenUsage{InputTokens: 100, OutputTokens: 10, APICallCount: 1}
+	foreground := &agent.TokenUsage{InputTokens: 150, OutputTokens: 80, CacheReadTokens: 5, CacheCreationTokens: 15, APICallCount: 1}
+	background := &agent.TokenUsage{InputTokens: 300, OutputTokens: 160, APICallCount: 2}
+	state := &SessionState{SessionID: "s", AgentType: agent.AgentTypeOpenCode}
+
+	applyTurnTokenUsage(state, turn)
+	state.AddChildSessionTokens(foreground)
+	require.Equal(t, foreground, condensedTokenUsage(t, state).SubagentTokens)
+	resetCheckpointWindow(state) // checkpoint 1
+
+	applyTurnTokenUsage(state, turn)
+	require.Nil(t, condensedTokenUsage(t, state).SubagentTokens, "turn 2 has no child of its own")
+	state.AddChildSessionTokens(background) // the turn ended, then the child went idle
+	require.Equal(t, background, condensedTokenUsage(t, state).SubagentTokens,
+		"the late child lands in the next checkpoint, and only it")
+	resetCheckpointWindow(state) // checkpoint 2
+
+	state.AddChildSessionTokens(nil)
+	state.AddChildSessionTokens(&agent.TokenUsage{})
+	require.Nil(t, state.PendingChildSessionTokens(), "a child with no usage adds nothing")
+
+	total := state.TotalTokenUsage()
+	require.Equal(t, 200, total.InputTokens)
+	require.Equal(t, &agent.TokenUsage{InputTokens: 450, OutputTokens: 240, CacheReadTokens: 5, CacheCreationTokens: 15, APICallCount: 3},
+		total.SubagentTokens)
+}
+
+// TestChildSessionTokens_SurviveSubagentSnapshots credits a Droid Worker and
+// then records turns whose usage carries a subagent snapshot, which replaces
+// TokenUsage.SubagentTokens. The Worker must still count once, both in the
+// session total and in the checkpoint, alongside the snapshot's own window.
+func TestChildSessionTokens_SurviveSubagentSnapshots(t *testing.T) {
+	t.Parallel()
+
+	worker := &agent.TokenUsage{InputTokens: 8612, OutputTokens: 109, CacheReadTokens: 8026, APICallCount: 1}
+	snapshot := func(input int) *agent.TokenUsage {
+		return &agent.TokenUsage{
+			InputTokens: 10, APICallCount: 1,
+			SubagentTokens: &agent.TokenUsage{InputTokens: input, APICallCount: 1},
+		}
+	}
+	state := &SessionState{SessionID: "s", AgentType: agent.AgentTypeFactoryAIDroid}
+
+	applyTurnTokenUsage(state, snapshot(40))
+	state.AddChildSessionTokens(worker)
+	applyTurnTokenUsage(state, snapshot(70))
+
+	wantSubagents := &agent.TokenUsage{InputTokens: 8682, OutputTokens: 109, CacheReadTokens: 8026, APICallCount: 2}
+	require.Equal(t, wantSubagents, state.TotalTokenUsage().SubagentTokens)
+	require.Equal(t, wantSubagents, condensedTokenUsage(t, state).SubagentTokens)
+	resetCheckpointWindow(state)
+
+	applyTurnTokenUsage(state, snapshot(90))
+	require.Equal(t, &agent.TokenUsage{InputTokens: 20, APICallCount: 0}, condensedTokenUsage(t, state).SubagentTokens,
+		"the next checkpoint holds the snapshot's growth and not the Worker again")
+	require.Equal(t, 8702, state.TotalTokenUsage().SubagentTokens.InputTokens)
+}
+
+// condensedTokenUsage is the usage condensation would store for state's
+// pending window, for an agent whose transcript recompute found no usage.
+func condensedTokenUsage(t *testing.T, state *SessionState) *agent.TokenUsage {
+	t.Helper()
+	data := &ExtractedSessionData{}
+	resolveCondensedTokenUsage(context.Background(), nil, state, data)
+	require.NotNil(t, data.TokenUsage)
+	return data.TokenUsage
+}
+
+// TestCompleteChildSessionTaskRecord_CreditsEachCallOnce checks that a child
+// call is credited by the completion that claims its record and never again:
+// not by a repeated stop, nor by one arriving after condensation removed the
+// record, nor by one with no start. A later call that reuses the call ID with
+// a new start is a new call and is credited. A record completed through
+// CompleteTaskRecord (Claude Code, whose turns read their subagents) adds none.
+func TestCompleteChildSessionTaskRecord_CreditsEachCallOnce(t *testing.T) {
+	ctx := context.Background()
+	_, state := setupCondensableSessionWithTranscript(t, "2026-10-19-child-session-credit")
+	parentUsage := &agent.TokenUsage{InputTokens: 500, OutputTokens: 50, APICallCount: 2}
+	state.TokenUsage = parentUsage
+	require.NoError(t, SaveSessionState(ctx, state))
+
+	started := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+	rec := session.TaskRecord{ToolUseID: "call_child", AgentID: "ses_child", StartedAt: started, TokenUsage: oneCallUsage()}
+	stop := func(rec session.TaskRecord, callStartedAt time.Time) {
+		t.Helper()
+		_, err := CompleteChildSessionTaskRecord(ctx, state.SessionID, rec, callStartedAt)
+		require.NoError(t, err)
+	}
+	condense := func() {
+		t.Helper()
+		require.NoError(t, MutateSessionState(ctx, state.SessionID, func(state *SessionState) error {
+			resetCheckpointWindow(state)
+			return nil
+		}))
+	}
+
+	stop(rec, started)
+	stop(rec, started) // a repeated stop
+	condense()
+	stop(rec, started)     // repeated after condensation removed the record
+	stop(rec, time.Time{}) // repeated by a plugin that lost the call's start
+	_, err := CompleteTaskRecord(ctx, state.SessionID, session.TaskRecord{ToolUseID: "toolu_claude", AgentID: "aclaude", TokenUsage: oneCallUsage()})
+	require.NoError(t, err)
+
+	loaded, err := LoadSessionState(ctx, state.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, oneCallUsage(), loaded.ChildSessionTokens)
+	require.Nil(t, loaded.PendingChildSessionTokens(), "nothing after the first stop is pending")
+	require.Equal(t, parentUsage, loaded.TokenUsage, "the parent's own usage is unchanged")
+
+	resumed := rec
+	resumed.ToolUseID = "call_child-ses_child-" + strconv.FormatInt(started.Add(time.Minute).UnixMilli(), 10)
+	resumed.StartedAt = started.Add(time.Minute)
+	stop(resumed, resumed.StartedAt) // a later call that reused the call ID
+
+	loaded, err = LoadSessionState(ctx, state.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, oneCallUsage(), loaded.PendingChildSessionTokens())
+	require.Equal(t, 2, loaded.ChildSessionTokens.APICallCount)
+}
+
+// TestCompleteChildSessionTaskRecord_ZeroStartAfterReuseIsSkipped covers a
+// call ID reused for the same child, whose stops are keyed apart by start,
+// followed by a stop with no start after condensation removed both records.
+// The start-less stop cannot be told from a repeat, so it is not credited.
+func TestCompleteChildSessionTaskRecord_ZeroStartAfterReuseIsSkipped(t *testing.T) {
+	ctx := context.Background()
+	_, state := setupCondensableSessionWithTranscript(t, "2026-10-19-child-session-zero-start")
+	require.NoError(t, SaveSessionState(ctx, state))
+
+	first := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+	for _, rec := range []session.TaskRecord{
+		{ToolUseID: "call_1", AgentID: "ses_child", StartedAt: first, TokenUsage: oneCallUsage()},
+		{ToolUseID: "call_1-ses_child-" + strconv.FormatInt(second.UnixMilli(), 10), AgentID: "ses_child", StartedAt: second, TokenUsage: oneCallUsage()},
+	} {
+		_, err := CompleteChildSessionTaskRecord(ctx, state.SessionID, rec, rec.StartedAt)
+		require.NoError(t, err)
+	}
+	require.NoError(t, MutateSessionState(ctx, state.SessionID, func(state *SessionState) error {
+		resetCheckpointWindow(state)
+		return nil
+	}))
+	_, err := CompleteChildSessionTaskRecord(ctx, state.SessionID,
+		session.TaskRecord{ToolUseID: "call_1", AgentID: "ses_child", StartedAt: time.Now(), TokenUsage: oneCallUsage()}, time.Time{})
+	require.NoError(t, err)
+
+	loaded, err := LoadSessionState(ctx, state.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, 2, loaded.ChildSessionTokens.APICallCount)
+	require.Nil(t, loaded.PendingChildSessionTokens())
+}
+
+// TestUpsertCompletedTaskRecordTurn_CreditsEachTurnOnce covers a Droid Worker
+// that reaches turn-end twice under one parent tool use: the record and the
+// parent's child-session total both hold the two turns, each once.
+func TestUpsertCompletedTaskRecordTurn_CreditsEachTurnOnce(t *testing.T) {
+	ctx := context.Background()
+	_, state := setupCondensableSessionWithTranscript(t, "2026-10-19-worker-credit")
+	require.NoError(t, SaveSessionState(ctx, state))
+
+	first := &agent.TokenUsage{InputTokens: 8612, OutputTokens: 109, CacheReadTokens: 8026, APICallCount: 1}
+	second := &agent.TokenUsage{InputTokens: 100, OutputTokens: 10, APICallCount: 1}
+	for _, usage := range []*agent.TokenUsage{first, second} {
+		require.NoError(t, UpsertCompletedTaskRecordTurn(ctx, state.SessionID, session.TaskRecord{
+			ToolUseID: "tc-worker", AgentID: "worker-session", StartedAt: time.Now(), TokenUsage: usage,
+		}))
+	}
+
+	loaded, err := LoadSessionState(ctx, state.SessionID)
+	require.NoError(t, err)
+	both := &agent.TokenUsage{InputTokens: 8712, OutputTokens: 119, CacheReadTokens: 8026, APICallCount: 2}
+	require.Equal(t, both, loaded.FindTaskRecord("tc-worker").TokenUsage)
+	require.Equal(t, both, loaded.ChildSessionTokens)
+	require.Equal(t, both, loaded.PendingChildSessionTokens())
 }

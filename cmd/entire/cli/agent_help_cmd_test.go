@@ -518,7 +518,7 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("drill: unexpected error: %v", err)
 	}
-	if !strings.Contains(drill, "Manage trails for your branches") || !strings.Contains(drill, "--repo") {
+	if !strings.Contains(drill, "Manage trails across repositories and branches") || !strings.Contains(drill, "--repo") {
 		t.Fatalf("drill output unexpected:\n%s", drill)
 	}
 
@@ -972,7 +972,7 @@ func TestAgentHelpProjectTrailGuidance_OnlyInProjectTree(t *testing.T) {
 	show := agentHelpFindChild(agentHelpFindChild(project, "trail"), "show")
 	text := renderAgentHelpCommand(show, "", true)
 	trailFirstLine := strings.SplitN(agentHelpGuidance["trail"], "\n", 2)[0]
-	for _, want := range []string{urlLine, "<forge>/<project>/-/trails/<P>/changes/<repo>/<n>", "each changes[] entry is the change", trailFirstLine} {
+	for _, want := range []string{urlLine, "<forge>/<project>/-/trails/<P>/changes/<repo>/<n>", "each changes[] entry is the change", "entry has current: true", trailFirstLine} {
 		if !strings.Contains(text, want) {
 			t.Errorf("project `agent-help trail show` missing %q:\n%s", want, text)
 		}
@@ -985,11 +985,9 @@ func TestAgentHelpProjectTrailGuidance_OnlyInProjectTree(t *testing.T) {
 		t.Errorf("project JSON agent-help for trail show is missing the URL guidance:\n%s", js)
 	}
 
-	legacy := NewRootCmd()
+	legacy := &cobra.Command{Use: "entire"}
+	legacy.AddCommand(newTrailCmdForMode(false))
 	legacyTrail := agentHelpFindChild(legacy, "trail")
-	if usesProjectTrails(legacyTrail) {
-		t.Skip("default root built the project tree (ENTIRE_PROJECT_TRAILS=1 in the environment)")
-	}
 	if got := agentHelpGuidanceFor(agentHelpFindChild(legacyTrail, "show")); strings.Contains(got, urlLine) {
 		t.Errorf("legacy trail show must not carry project URL guidance:\n%s", got)
 	}

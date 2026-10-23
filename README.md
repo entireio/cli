@@ -45,7 +45,7 @@ With Entire, you can:
 - Git
 - macOS, Linux or Windows
 - [Supported agent](#agent-hook-configuration) installed and authenticated
-- Go 1.27.1+ only if you install with `go install` (the packaged installs bundle their own runtime)
+- Go 1.27.3+ only if you install with `go install` (the packaged installs bundle their own runtime)
 
 ## Quick Start
 
@@ -62,8 +62,8 @@ Use the fully-qualified cask name (`entireio/tap/entire`, not `entire`). Homebre
 Or with the install script:
 
 ```bash
-curl -fsSL https://entire.io/install.sh | bash                          # stable
-# curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly  # or nightly
+curl -fsSL https://entire.com/install.sh | bash                          # stable
+# curl -fsSL https://entire.com/install.sh | bash -s -- --channel nightly  # or nightly
 ```
 
 ### Windows
@@ -71,9 +71,9 @@ curl -fsSL https://entire.io/install.sh | bash                          # stable
 Install with Windows PowerShell 5.1 or later:
 
 ```powershell
-irm https://entire.io/install.ps1 | iex  # stable
+irm https://entire.com/install.ps1 | iex  # stable
 # or nightly:
-# iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly"
+# iex "& {$(irm https://entire.com/install.ps1)} -Channel nightly"
 ```
 
 For stable releases, the PowerShell installer uses Scoop when it is available,
@@ -138,11 +138,28 @@ How to use each channel:
 
 - Homebrew stable: `brew install --cask entireio/tap/entire`
 - Homebrew nightly: `brew install --cask entireio/tap/entire@nightly`
-- `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
-- `install.sh` nightly: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly`
-- `install.ps1` stable (uses Scoop when available): `irm https://entire.io/install.ps1 | iex`
-- `install.ps1` nightly: `iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly"`
+- `install.sh` stable: `curl -fsSL https://entire.com/install.sh | bash`
+- `install.sh` nightly: `curl -fsSL https://entire.com/install.sh | bash -s -- --channel nightly`
+- `install.ps1` stable (uses Scoop when available): `irm https://entire.com/install.ps1 | iex`
+- `install.ps1` nightly: `iex "& {$(irm https://entire.com/install.ps1)} -Channel nightly"`
 - Scoop: currently supports `stable` only via `scoop install entire/entire`
+
+### If GitHub is down
+
+Release artifacts are published to `install.entire.com` as well as to GitHub, and
+`install.sh` reads that origin first — so the normal install command keeps
+working through a GitHub outage. If you need to bypass version discovery
+entirely, pin a version or fetch the archive directly:
+
+```bash
+curl -fsSL https://entire.com/install.sh | bash -s -- --version 0.10.0
+curl -fsSL https://install.entire.com/v0.10.0/entire_darwin_arm64.tar.gz | tar -xz
+```
+
+Homebrew and Scoop still resolve their manifests from GitHub, so use one of the
+commands above (or `go install github.com/entireio/cli/cmd/entire@v0.10.0`, which
+is served from the Go module proxy) while GitHub is unavailable. See
+[Release Origins](docs/architecture/release-origins.md).
 
 ## Typical Workflow
 
@@ -519,6 +536,7 @@ Personal overrides, gitignored by default:
 | `strategy_options.checkpoint_remote`      | `{"provider": "github", "repo": "org/repo"}` | Push checkpoint data to a separate repo (see below)                               |
 | `strategy_options.checkpoint_push_remote` | remote name, e.g. `"upstream"`               | Pin which single remote carries checkpoint data (see below)                       |
 | `strategy_options.filtered_fetches`       | `true`, `false`                              | Use `--filter=blob:none` on checkpoint fetches                                    |
+| `strategy_options.checkpoint_ref_list_timeout_seconds` | seconds (default `5`, max `120`) | How long `entire checkpoint list` waits for each remote to list checkpoints that aren't local yet. Raise it if checkpoints pushed from another machine are missing because the remote answers slowly |
 | `strategy_options.summarize.enabled`      | `true`, `false`                              | Auto-generate AI summaries at commit time                                         |
 | `summary_generation.provider`             | e.g. `claude-code`, `codex`, `pi`            | Which agent generates summaries (defaults to Claude)                              |
 | `summary_generation.model`                | provider-specific model hint                 | Model hint for summary generation (requires `provider`)                            |
@@ -554,7 +572,7 @@ By default, checkpoint data rides along with your own pushes — but only to **o
 4. The sole remote, if the repo has exactly one
 5. The first remote in `.git/config` order
 
-A push to any *other* remote carries no checkpoint data — unless every push URL of that remote names the same GitHub repository as the elected one, such as `git@github.com:acme/widgets.git` and its Entire mirror `entire://<cluster>/gh/acme/widgets`. Both reach the same repository, so either push carries the checkpoints. An SSH host alias from `~/.ssh/config` (`git@github-work:acme/widgets.git`) counts as GitHub when git runs plain `ssh`; with a custom `GIT_SSH_COMMAND` or `core.sshCommand` the alias cannot be resolved, so it does not match. `entire status` shows the current destination, where it came from, and how many checkpoints are unpushed. This matters if you push code to several remotes: checkpoints go to exactly one of them.
+A push to any *other* remote carries no checkpoint data — unless every push URL of that remote names the same GitHub repository as the elected one, such as `git@github.com:acme/widgets.git` and its Entire mirror `entire://<cluster>/gh/acme/widgets`. Both reach the same repository, so either push carries the checkpoints. An SSH host alias from `~/.ssh/config` (`git@github-work:acme/widgets.git`) counts as GitHub when git runs plain `ssh`; with a custom `GIT_SSH_COMMAND` or `core.sshCommand` the alias cannot be resolved, so it does not match. `entire status` shows the current destination, where it came from, and how many checkpoints are unpushed; on the git-refs backend, `entire checkpoint list --outgoing` lists them. This matters if you push code to several remotes: checkpoints go to exactly one of them.
 
 When a repository has several remotes that could receive checkpoints, interactive first-time `entire enable` asks which one to use, after agent selection and before any hooks or settings are written. Re-running `entire enable` in an enabled repository does not ask again. Choosing a remote saves `strategy_options.checkpoint_push_remote` in `.entire/settings.local.json`, so teammates do not inherit a remote name specific to your clone; keeping the current destination writes nothing.
 
@@ -564,7 +582,7 @@ To select a remote without the picker:
 entire enable --yes --checkpoint-push-remote fork
 ```
 
-The remote must already exist, and this is also how to change the destination later or repair a saved selection that names a missing remote. An explicit flag pins the named remote, even if it is currently selected automatically. `--yes` alone does not change the checkpoint destination. The command confirms the destination when you chose one or when the saved one is unusable; otherwise it ends at `Ready.` Selecting a destination does not re-enable disabled checkpoint pushing, upload existing checkpoints immediately, or move or delete checkpoint history from other remotes.
+The remote must already exist, and this is also how to change the destination later or repair a saved selection that names a missing remote. An explicit flag pins the named remote, even if it is currently selected automatically. `--yes` alone does not change the checkpoint destination. Every run ends by naming where checkpoints will be uploaded, followed by a short privacy notice. When you chose a destination, it also says how; a saved destination that is unusable is reported instead of the notice, unless checkpoints still upload to a dedicated `checkpoint_remote`. Selecting a destination does not re-enable disabled checkpoint pushing, upload existing checkpoints immediately, or move or delete checkpoint history from other remotes.
 
 If instead you want checkpoint data in a separate repo (e.g., a private repo for a public project), configure `checkpoint_remote` with a structured provider and repo. A dedicated `checkpoint_remote` is addressed directly and is exempt from the single-remote election above:
 
@@ -657,7 +675,9 @@ Two exceptions to field-by-field merging:
 
 **Your session transcripts are stored in your git repository**, in the [per-checkpoint refs](#checkpoint-storage) described above. If your repository is public, this data is visible to anyone.
 
-Entire automatically redacts detected secrets (API keys, tokens, credentials) from transcripts and metadata before writing a checkpoint, but redaction is best-effort.
+Entire automatically redacts detected secrets (API keys, tokens, credentials) from transcripts and metadata before writing a checkpoint, but redaction is best effort, not bulletproof. Review checkpoints with `entire checkpoint explain` before you push.
+
+To keep transcripts out of a public repository, upload checkpoints to a separate private repo with [`checkpoint_remote`](#checkpoint-remote) (`entire configure --local --checkpoint-remote github:<owner>/<repo>`), or stop uploading them with `entire configure --local --skip-push-sessions`. `--local` makes the setting take effect for your clone: a project `checkpoint_remote` owned by a different account than `origin` is ignored, and a local `push_sessions` overrides the project one. `entire enable` names the checkpoint destination every time it runs.
 
 Older Entire versions also kept local `entire/<commit>-<worktree>` shadow branches whose code-file snapshots were raw blobs of your working tree. Current versions no longer create them, but do not delete leftover ones automatically: `entire doctor` reports them and `entire doctor --force` deletes them, leaving pending agent work alone (plain `entire clean` would also clear the session state that records it). `entire disable --uninstall` deletes the `entire/<commit>-<worktree>` form too, and lists any oldest-form `entire/<commit>` branches without deleting them, since a branch of yours named after a short SHA looks the same; `entire clean --all` covers that form after you confirm. See [docs/security-and-privacy.md](docs/security-and-privacy.md) for the full picture, including the configurable scanner layers and opt-in PII redaction.
 

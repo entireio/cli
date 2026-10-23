@@ -121,23 +121,22 @@ var agentHelpClassification = map[string]agentHelpFacts{
 
 	// trail is the highest-traffic family by a wide margin, so its read-only
 	// subcommands must not disappear behind the group's write-capable label.
-	"trail":                 {agentHelpAudienceTaskDriven, true},
-	"trail list":            {agentHelpAudienceReadOnly, false},
-	"trail show":            {agentHelpAudienceReadOnly, false},
-	"trail create":          {agentHelpAudienceTaskDriven, false},
-	"trail delete":          {agentHelpAudienceTaskDriven, false},
-	"trail update":          {agentHelpAudienceTaskDriven, false},
-	"trail approvals":       {agentHelpAudienceReadOnly, false},
-	"trail watch":           {agentHelpAudienceReadOnly, false},
-	"trail approve":         {agentHelpAudienceTaskDriven, false},
-	"trail checkout":        {agentHelpAudienceTaskDriven, false},
-	"trail comment":         {agentHelpAudienceTaskDriven, false},
-	"trail finding":         {agentHelpAudienceTaskDriven, false},
-	"trail merge":           {agentHelpAudienceUserOwned, false},
-	"trail request-changes": {agentHelpAudienceTaskDriven, false},
-	"trail resume":          {agentHelpAudienceTaskDriven, false},
-	"trail link":            {agentHelpAudienceUserOwned, false},
-	"trail unlink":          {agentHelpAudienceUserOwned, false},
+	"trail":           {agentHelpAudienceTaskDriven, true},
+	"trail list":      {agentHelpAudienceReadOnly, false},
+	"trail show":      {agentHelpAudienceReadOnly, false},
+	"trail create":    {agentHelpAudienceTaskDriven, false},
+	"trail delete":    {agentHelpAudienceTaskDriven, false},
+	"trail update":    {agentHelpAudienceTaskDriven, false},
+	"trail approvals": {agentHelpAudienceReadOnly, false},
+	"trail watch":     {agentHelpAudienceReadOnly, false},
+	"trail approve":   {agentHelpAudienceTaskDriven, false},
+	"trail checkout":  {agentHelpAudienceTaskDriven, false},
+	"trail comment":   {agentHelpAudienceTaskDriven, false},
+	"trail finding":   {agentHelpAudienceTaskDriven, false},
+	"trail merge":     {agentHelpAudienceUserOwned, false},
+	"trail resume":    {agentHelpAudienceTaskDriven, false},
+	"trail link":      {agentHelpAudienceUserOwned, false},
+	"trail unlink":    {agentHelpAudienceUserOwned, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
@@ -265,15 +264,19 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"Add --project <forge>/<project> unless <project> is origin's owner.\n" +
 		"A project trail spans repositories; each change is its branch in one\n" +
 		"repository. Pass <repo>/<n> to checkout, resume, finding, watch,\n" +
-		"approvals, approve or request-changes; given to show, it shows the parent\n" +
+		"approvals or approve; given to show, it shows the parent\n" +
 		"project trail. Project trails and changes are numbered separately: never\n" +
 		"pass <P> where a change is expected, or <n> where a project trail is.\n" +
 		"To list a project trail's changes, run `entire trail show <P>\n" +
 		"--project <forge>/<project> --json`; each changes[] entry is the change\n" +
-		"<repository>/<number>. When asked to act on (e.g. review) a whole project\n" +
-		"trail, cover every change. Checkout and review need a clone of that\n" +
-		"repository: do the ones in this clone and tell the user which changes\n" +
-		"need another clone instead of skipping them silently.",
+		"<repository>/<number> with its own url. When show reaches the trail\n" +
+		"through a change (the current branch, --branch, or <repo>/<n>), that\n" +
+		"entry has current: true; link its url, the change's page, in preference\n" +
+		"to the top-level url, the whole trail's page. When asked to act on\n" +
+		"(e.g. review) a whole project trail, cover every change. Checkout and\n" +
+		"review need a clone of that repository: do the ones in this clone and\n" +
+		"tell the user which changes need another clone instead of skipping\n" +
+		"them silently.",
 }
 
 // agentHelpFactsFor classifies one command path, defaulting the unclassified
@@ -819,7 +822,7 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 	var b strings.Builder
 	b.WriteString(agentHelpOverview)
 	if trailCmd, _, err := rootCmd.Find([]string{"trail"}); err == nil && usesProjectTrails(trailCmd) {
-		b.WriteString("\nProject trails are enabled by ENTIRE_PROJECT_TRAILS=1. Trail listing requires an explicit --project; --repo only filters within it.")
+		b.WriteString("\nTrails are project-scoped. Trail listing requires an explicit --project; --repo only filters within it.")
 	}
 	b.WriteString("\n\n")
 	b.WriteString(agentHelpRepoBlock(repoLine))

@@ -527,17 +527,7 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 
 		// PII detection (opt-in).
 		if s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled {
-			pii := s.Redaction.PII
-			cfg := redact.PIIConfig{
-				Enabled:        true,
-				Categories:     make(map[redact.PIICategory]bool),
-				CustomPatterns: pii.CustomPatterns,
-				Logger:         logger,
-			}
-			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
-			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
-			cfg.Categories[redact.PIIAddress] = pii.Address != nil && *pii.Address
-			redact.ConfigurePII(cfg)
+			redact.ConfigurePII(piiConfigFromSettings(s.Redaction.PII, logger))
 		}
 
 		// Custom rules: inline + packs.
@@ -1728,5 +1718,21 @@ func prepareTranscriptIfNeeded(ctx context.Context, ag agent.Agent, transcriptPa
 		// Best-effort: callers handle missing files gracefully.
 		// Transcript may not be available yet (e.g., agent not installed).
 		_ = preparer.PrepareTranscript(ctx, transcriptPath) //nolint:errcheck // Best-effort in hook path
+	}
+}
+
+// piiConfigFromSettings maps enabled PII settings to the redaction config.
+// Email, phone and ip default on when unset; address defaults off.
+func piiConfigFromSettings(pii *settings.PIISettings, logger *slog.Logger) redact.PIIConfig {
+	return redact.PIIConfig{
+		Enabled: true,
+		Categories: map[redact.PIICategory]bool{
+			redact.PIIEmail:   pii.Email == nil || *pii.Email,
+			redact.PIIPhone:   pii.Phone == nil || *pii.Phone,
+			redact.PIIAddress: pii.Address != nil && *pii.Address,
+			redact.PIIIP:      pii.IP == nil || *pii.IP,
+		},
+		CustomPatterns: pii.CustomPatterns,
+		Logger:         logger,
 	}
 }

@@ -1793,3 +1793,39 @@ func TestEnsureRedactionConfigured_NarrowedScanners(t *testing.T) {
 		t.Fatal("marker rewritten on re-run; narrowed-coverage notice re-emitted")
 	}
 }
+
+func TestPIIConfigFromSettings_CategoryDefaults(t *testing.T) {
+	t.Parallel()
+	off := false
+	on := true
+	tests := []struct {
+		name string
+		pii  settings.PIISettings
+		want map[redact.PIICategory]bool
+	}{
+		{
+			name: "unset categories use defaults",
+			pii:  settings.PIISettings{Enabled: true},
+			want: map[redact.PIICategory]bool{redact.PIIEmail: true, redact.PIIPhone: true, redact.PIIAddress: false, redact.PIIIP: true},
+		},
+		{
+			name: "explicit values win",
+			pii:  settings.PIISettings{Enabled: true, Email: &off, Phone: &off, Address: &on, IP: &off},
+			want: map[redact.PIICategory]bool{redact.PIIEmail: false, redact.PIIPhone: false, redact.PIIAddress: true, redact.PIIIP: false},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := piiConfigFromSettings(&tt.pii, nil)
+			if !got.Enabled {
+				t.Error("Enabled = false, want true")
+			}
+			for category, want := range tt.want {
+				if got.Categories[category] != want {
+					t.Errorf("Categories[%s] = %v, want %v", category, got.Categories[category], want)
+				}
+			}
+		})
+	}
+}

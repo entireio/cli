@@ -473,6 +473,13 @@ func resolveDedicatedReadSource(ctx context.Context, s *EntireSettings, lead str
 }
 
 func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
+	return computeCheckpointSyncInfoCounting(ctx, s, countUnpushedCheckpointsForStatus)
+}
+
+// computeCheckpointSyncInfoCounting is computeCheckpointSyncInfo with the
+// unpushed counter supplied, so a caller that already listed the outgoing
+// checkpoints does not list them again.
+func computeCheckpointSyncInfoCounting(ctx context.Context, s *EntireSettings, countUnpushed func(ctx context.Context, remoteName string) int) checkpointSyncInfo {
 	info := checkpointSyncInfo{PushDisabled: s.IsPushSessionsDisabled()}
 
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
@@ -545,7 +552,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 			// no remote-tracking ref, so it would permanently read "all
 			// unpushed".
 			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
-				info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
+				info.Unpushed = countUnpushed(ctx, "")
 			}
 			return info
 		}
@@ -553,7 +560,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 
 	info.Remote = elected.Name
 	info.Source = string(elected.Source)
-	info.Unpushed = countUnpushedCheckpointsForStatus(ctx, elected.Name)
+	info.Unpushed = countUnpushed(ctx, elected.Name)
 	// A configured checkpoint_remote that did not enable above is being
 	// ignored. When the ownership check is what rejected it, say so: this is
 	// the one trust-gate rejection a user otherwise experiences only as
@@ -679,8 +686,14 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		}
 	}
 	if info.Unpushed > 0 {
+		line := formatUnpushedCheckpointsLine(info)
+		// --outgoing lists the git-refs push queue; git-branch has no
+		// per-checkpoint answer to point at.
+		if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
+			line += " · see 'entire checkpoint list --outgoing'"
+		}
 		b.WriteString("\n  ")
-		b.WriteString(sty.render(sty.dim, formatUnpushedCheckpointsLine(info)))
+		b.WriteString(sty.render(sty.dim, line))
 	}
 }
 
@@ -902,7 +915,7 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				stats = append(stats, activeTimeDisplay(st.LastInteractionTime))
 			}
 
-			if t := totalTokens(st.TokenUsage); t > 0 {
+			if t := totalTokens(st.TotalTokenUsage()); t > 0 {
 				stats = append(stats, "tokens "+formatTokenCount(t))
 			}
 

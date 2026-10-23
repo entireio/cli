@@ -300,7 +300,7 @@ func runRepoCreateWizard(cmd *cobra.Command, name string, opts repoCreateOptions
 			}
 			req := s.request()
 			createCtx, done := budget.phase(ctx)
-			created, err := createRepo(createCtx, c, req)
+			created, commitToken, err := createRepo(createCtx, c, req)
 			if err != nil {
 				done()
 				// Typically the name was taken since it was checked (409), or
@@ -317,7 +317,7 @@ func runRepoCreateWizard(cmd *cobra.Command, name string, opts repoCreateOptions
 				}
 				return err
 			}
-			err = finishRepoCreate(createCtx, cmd, c, req, created, opts)
+			err = finishRepoCreate(createCtx, cmd, c, req, created, commitToken, opts)
 			done()
 			return err
 		}

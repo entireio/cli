@@ -38,7 +38,6 @@ func TestProjectTrailRepoAuthErrorsAreActionable(t *testing.T) {
 				repo string
 			}{
 				{[]string{"approve", "42", "--repo", "gh/acme/foreign"}, "foreign"},
-				{[]string{"request-changes", "42", "--repo", "gh/acme/foreign", "-m", "Fix it"}, "foreign"},
 				{[]string{"approvals", "42", "--repo", "gh/acme/foreign"}, "foreign"},
 				{[]string{"finding", "list", "42", "--repo", "gh/acme/foreign"}, "foreign"},
 				{[]string{"watch", "42", "--repo", "gh/acme/foreign"}, "foreign"},

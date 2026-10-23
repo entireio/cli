@@ -269,7 +269,7 @@ func TestRedactCache_EntryWithNoPayloadFallsBack(t *testing.T) {
 	})
 	require.Nil(t, cache.load(treePath), "load must reject an entry with no payload")
 
-	got, err := redactIncrementally(ctx, cache, []byte(content), treePath, testRedactor)
+	got, err := redactIncrementally(ctx, cache, []byte(content), treePath, jsonlRedactor)
 	require.NoError(t, err)
 	want, wantErr := RedactBlobBytes(ctx, []byte(content), treePath, false)
 	require.NoError(t, wantErr)

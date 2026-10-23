@@ -103,10 +103,10 @@ func newTrailCmdForMode(project bool) *cobra.Command {
 		// Advertised to agents only when trails are enabled for the repo, so
 		// we never point agents at trails they can't use.
 		cmd.Annotations[agentHelpRequiresTrailsAnnotation] = agentHelpAnnotationEnabled
-		cmd.AddCommand(newTrailShowCmd(), newTrailListCmd(), newTrailCreateCmd(), newTrailUpdateCmd(), newTrailDeleteCmd(), newTrailCommentCmd(), newTrailMergeCmd())
+		cmd.AddCommand(newTrailShowCmd(), newTrailListCmd(), newTrailCreateCmd(), newTrailUpdateCmd(), newTrailDeleteCmd(), newTrailCommentCmd())
 	}
 	cmd.AddCommand(newTrailCheckoutCmd(mode), newTrailResumeCmd(mode), newTrailFindingCmd(mode), newTrailWatchCmd(mode))
-	cmd.AddCommand(newTrailApproveCmd(mode), newTrailRequestChangesCmd(mode), newTrailApprovalsCmd(mode))
+	cmd.AddCommand(newTrailApproveCmd(mode), newTrailRequestChangesCmd(), newTrailApprovalsCmd(mode), newTrailMergeCmd(mode))
 
 	return cmd
 }
@@ -448,7 +448,7 @@ func trailDisplayURL(t api.TrailResource, forge, owner, repo string) string {
 	if strings.TrimSpace(t.URL) != "" {
 		return t.URL
 	}
-	base, err := auth.DataBaseURL()
+	base, err := auth.WebBaseURL()
 	if t.Number > 0 && err == nil {
 		return trailWebURL(base, forge, owner, repo, t.Number)
 	}
@@ -457,10 +457,9 @@ func trailDisplayURL(t api.TrailResource, forge, owner, repo string) string {
 
 // trailWebURL builds a fallback browser URL for a trail used only when the
 // server does not supply one (older servers):
-// <web-origin>/<forge>/<owner>/<repo>/trails/<number>. The web app is served
-// from the same origin as the data API, so that base doubles as the web
-// origin. A split local-dev setup (API and frontend on different ports) would
-// point this at the API port rather than the dev frontend.
+// <web-origin>/<forge>/<owner>/<repo>/trails/<number>. The web origin comes
+// from auth.WebBaseURL; a split local-dev setup (API and frontend on different
+// ports) sets ENTIRE_WEB_BASE_URL to reach the dev frontend.
 func trailWebURL(base, forge, owner, repo string, number int) string {
 	return strings.TrimRight(base, "/") + "/" + forge + "/" + owner + "/" + repo + "/trails/" + strconv.Itoa(number)
 }
@@ -1797,7 +1796,8 @@ branch. Without one, the trail for the current branch is used. The trail's branc
 is checked out, fetching it from origin first when it only exists there.`, `The trail may be given as the first argument or via --trail, as a project number,
 ID, or <repo>/<number>. Without one, the current branch's parent is used. --branch selects the
 working branch; otherwise the current branch or sole branch in this repository
-is selected. Ambiguity requires --branch. Remote-only branches are fetched.`) + `
+is selected. Otherwise the open changes are listed; pass one as <repo>/<number>.
+Remote-only branches are fetched.`) + `
 
 With --worktree, the branch is checked out into a git worktree under
 .entire/worktrees at the repo root instead of switching this checkout, and the
@@ -1899,7 +1899,7 @@ func describeTrailRef(t *api.TrailResource) string {
 func newTrailDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "delete [<number>]",
-		Short:  "Deprecated: Mark the trail as Closed instead",
+		Short:  "Removed from the CLI",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(*cobra.Command, []string) error {
@@ -1907,14 +1907,13 @@ func newTrailDeleteCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().String("branch", "", "Unused; trail deletion was removed")
-	cmd.Flags().BoolP("force", "f", false, "Unused; trail deletion was removed")
+	cmd.Flags().String("branch", "", "Unused")
+	cmd.Flags().BoolP("force", "f", false, "Unused")
 
 	return cmd
 }
 
-var errTrailDeleteRemoved = errors.New(
-	"trails can no longer be deleted; close the trail instead: entire trail update --status closed")
+var errTrailDeleteRemoved = errors.New("trail delete was removed from the CLI")
 
 // defaultBaseBranch is the fallback base branch name when it cannot be determined.
 const defaultBaseBranch = "main"

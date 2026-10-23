@@ -12275,8 +12275,11 @@ type Mirror struct {
 	Repo                string    `json:"repo"`
 	// Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or
 	// suspended.
-	Status          OptMirrorStatus `json:"status"`
-	SuspendedAt     OptDateTime     `json:"suspendedAt"`
+	Status      OptMirrorStatus `json:"status"`
+	SuspendedAt OptDateTime     `json:"suspendedAt"`
+	// Present while GitHub blocks the upstream's GitHub App installation, so the mirror cannot sync. The
+	// block is per installation: every placement of the upstream carries the same value.
+	SyncBlock       OptMirrorSyncBlock `json:"syncBlock"`
 	AdditionalProps MirrorAdditional
 }
 
@@ -12348,6 +12351,11 @@ func (s *Mirror) GetStatus() OptMirrorStatus {
 // GetSuspendedAt returns the value of SuspendedAt.
 func (s *Mirror) GetSuspendedAt() OptDateTime {
 	return s.SuspendedAt
+}
+
+// GetSyncBlock returns the value of SyncBlock.
+func (s *Mirror) GetSyncBlock() OptMirrorSyncBlock {
+	return s.SyncBlock
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -12423,6 +12431,11 @@ func (s *Mirror) SetStatus(val OptMirrorStatus) {
 // SetSuspendedAt sets the value of SuspendedAt.
 func (s *Mirror) SetSuspendedAt(val OptDateTime) {
 	s.SuspendedAt = val
+}
+
+// SetSyncBlock sets the value of SyncBlock.
+func (s *Mirror) SetSyncBlock(val OptMirrorSyncBlock) {
+	s.SyncBlock = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -12840,6 +12853,56 @@ func (s *MirrorStatus) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/MirrorSyncBlock
+type MirrorSyncBlock struct {
+	// When Core last observed the block. The periodic re-probe and a customer resync both refresh it.
+	ObservedAt time.Time `json:"observedAt"`
+	// Why GitHub refused the mint: org_ip_allowlist or installation_suspended. Other values may be added.
+	Reason          string `json:"reason"`
+	AdditionalProps MirrorSyncBlockAdditional
+}
+
+// GetObservedAt returns the value of ObservedAt.
+func (s *MirrorSyncBlock) GetObservedAt() time.Time {
+	return s.ObservedAt
+}
+
+// GetReason returns the value of Reason.
+func (s *MirrorSyncBlock) GetReason() string {
+	return s.Reason
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MirrorSyncBlock) GetAdditionalProps() MirrorSyncBlockAdditional {
+	return s.AdditionalProps
+}
+
+// SetObservedAt sets the value of ObservedAt.
+func (s *MirrorSyncBlock) SetObservedAt(val time.Time) {
+	s.ObservedAt = val
+}
+
+// SetReason sets the value of Reason.
+func (s *MirrorSyncBlock) SetReason(val string) {
+	s.Reason = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MirrorSyncBlock) SetAdditionalProps(val MirrorSyncBlockAdditional) {
+	s.AdditionalProps = val
+}
+
+type MirrorSyncBlockAdditional map[string]jx.Raw
+
+func (s *MirrorSyncBlockAdditional) init() MirrorSyncBlockAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Ref: #/components/schemas/NativeMirrorPlacement
@@ -15535,6 +15598,52 @@ func (o OptMirrorStatus) Get() (v MirrorStatus, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptMirrorStatus) Or(d MirrorStatus) MirrorStatus {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptMirrorSyncBlock returns new OptMirrorSyncBlock with value set to v.
+func NewOptMirrorSyncBlock(v MirrorSyncBlock) OptMirrorSyncBlock {
+	return OptMirrorSyncBlock{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptMirrorSyncBlock is optional MirrorSyncBlock.
+type OptMirrorSyncBlock struct {
+	Value MirrorSyncBlock
+	Set   bool
+}
+
+// IsSet returns true if OptMirrorSyncBlock was set.
+func (o OptMirrorSyncBlock) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptMirrorSyncBlock) Reset() {
+	var v MirrorSyncBlock
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptMirrorSyncBlock) SetTo(v MirrorSyncBlock) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptMirrorSyncBlock) Get() (v MirrorSyncBlock, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptMirrorSyncBlock) Or(d MirrorSyncBlock) MirrorSyncBlock {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -21665,6 +21774,172 @@ func (s *ResourcePersonSourceSource) UnmarshalText(data []byte) error {
 
 // RestorePluginInstallationRepositoryNoContent is response for RestorePluginInstallationRepository operation.
 type RestorePluginInstallationRepositoryNoContent struct{}
+
+// Ref: #/components/schemas/ResyncMirrorInputBody
+type ResyncMirrorInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                        `json:"$schema"`
+	Owner           string                        `json:"owner"`
+	Provider        ResyncMirrorInputBodyProvider `json:"provider"`
+	Repo            string                        `json:"repo"`
+	AdditionalProps ResyncMirrorInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ResyncMirrorInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetOwner returns the value of Owner.
+func (s *ResyncMirrorInputBody) GetOwner() string {
+	return s.Owner
+}
+
+// GetProvider returns the value of Provider.
+func (s *ResyncMirrorInputBody) GetProvider() ResyncMirrorInputBodyProvider {
+	return s.Provider
+}
+
+// GetRepo returns the value of Repo.
+func (s *ResyncMirrorInputBody) GetRepo() string {
+	return s.Repo
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResyncMirrorInputBody) GetAdditionalProps() ResyncMirrorInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ResyncMirrorInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetOwner sets the value of Owner.
+func (s *ResyncMirrorInputBody) SetOwner(val string) {
+	s.Owner = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *ResyncMirrorInputBody) SetProvider(val ResyncMirrorInputBodyProvider) {
+	s.Provider = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *ResyncMirrorInputBody) SetRepo(val string) {
+	s.Repo = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResyncMirrorInputBody) SetAdditionalProps(val ResyncMirrorInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResyncMirrorInputBodyAdditional map[string]jx.Raw
+
+func (s *ResyncMirrorInputBodyAdditional) init() ResyncMirrorInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type ResyncMirrorInputBodyProvider string
+
+const (
+	ResyncMirrorInputBodyProviderGithub ResyncMirrorInputBodyProvider = "github"
+)
+
+// AllValues returns all ResyncMirrorInputBodyProvider values.
+func (ResyncMirrorInputBodyProvider) AllValues() []ResyncMirrorInputBodyProvider {
+	return []ResyncMirrorInputBodyProvider{
+		ResyncMirrorInputBodyProviderGithub,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ResyncMirrorInputBodyProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case ResyncMirrorInputBodyProviderGithub:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ResyncMirrorInputBodyProvider) UnmarshalText(data []byte) error {
+	switch ResyncMirrorInputBodyProvider(data) {
+	case ResyncMirrorInputBodyProviderGithub:
+		*s = ResyncMirrorInputBodyProviderGithub
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/ResyncMirrorOutputBody
+type ResyncMirrorOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// The placement the resync was published for.
+	MirrorId        string `json:"mirrorId"`
+	Status          string `json:"status"`
+	AdditionalProps ResyncMirrorOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ResyncMirrorOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetMirrorId returns the value of MirrorId.
+func (s *ResyncMirrorOutputBody) GetMirrorId() string {
+	return s.MirrorId
+}
+
+// GetStatus returns the value of Status.
+func (s *ResyncMirrorOutputBody) GetStatus() string {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResyncMirrorOutputBody) GetAdditionalProps() ResyncMirrorOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ResyncMirrorOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetMirrorId sets the value of MirrorId.
+func (s *ResyncMirrorOutputBody) SetMirrorId(val string) {
+	s.MirrorId = val
+}
+
+// SetStatus sets the value of Status.
+func (s *ResyncMirrorOutputBody) SetStatus(val string) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResyncMirrorOutputBody) SetAdditionalProps(val ResyncMirrorOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResyncMirrorOutputBodyAdditional map[string]jx.Raw
+
+func (s *ResyncMirrorOutputBodyAdditional) init() ResyncMirrorOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
 
 // RevokeOrgInvitationNoContent is response for RevokeOrgInvitation operation.
 type RevokeOrgInvitationNoContent struct{}

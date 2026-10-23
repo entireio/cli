@@ -104,7 +104,7 @@ sequenceDiagram
 ```
 
 ### Key Points
-- Agent commits detected by no TTY → fast path adds trailer directly
+- Agent commits detected by no TTY → fast path adds trailer directly, except for a session whose live agent is provably not an ancestor of the commit (a hookless agent, script or GUI client committing while Claude is mid-turn); that session links only on staged-file overlap
 - **Deferred finalization**: PostCommit saves provisional transcript, HandleTurnEnd updates with full transcript
 - TurnCheckpointIDs tracks mid-turn checkpoints for finalization at stop
 - If finalize is cut short (deadline, cancellation, late transcript, degraded scanner), the unfinalized IDs stay so a repeated Stop in the same turn retries them; the next turn start clears them

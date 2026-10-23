@@ -1,31 +1,28 @@
 package cli
 
 import (
-	"os"
-
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
-// projectTrailsEnv opts into project-scoped trails. Read it only through
-// projectTrailsEnabled, at the two places that choose a model: building the
-// trail command tree and rendering the first-turn context injection.
-const projectTrailsEnv = "ENTIRE_PROJECT_TRAILS"
-
 // projectTrailsAnnotation marks a project-model trail tree so agent-help
 // describes the tree that was actually built, not the current environment.
 const projectTrailsAnnotation = "entire_project_trails"
 
+// projectTrailsEnabled chooses the model at the two places that do: building
+// the trail command tree and rendering the first-turn context injection.
+// Project trails are the only model offered; the legacy tree is still built by
+// newTrailCmdForMode(false) until it is deleted.
 func projectTrailsEnabled() bool {
-	return os.Getenv(projectTrailsEnv) == "1"
+	return true
 }
 
 // trailMode is the only seam between the repository-scoped (legacy) and the
 // project-scoped trail models. Commands whose meaning differs between the two
 // are separate trees: trail_*.go for legacy, project_trail_*.go for project.
 // Commands that act on one repository branch in both models (checkout, resume,
-// finding, watch, approve, request-changes, approvals) are shared and take a
+// finding, watch, approve, approvals) are shared and take a
 // trailMode, which decides how a selector finds that branch and how help
 // describes the selector. Retiring the legacy model means deleting
 // legacyTrailMode, its tree, and the legacy argument of each help call.

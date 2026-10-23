@@ -37,10 +37,26 @@ not json
 {"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]}}
 {"type":"assistant","timestamp":"t3","message":{"id":"m1","content":[{"type":"text","text":"done"}]}}
 `,
-	"result only from the immediately following user entry": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}
+	"parallel results in separate user entries": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}
+{"type":"assistant","timestamp":"t1","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu2","name":"Read","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu2","content":"second"}]},"toolUseResult":{"file":{"filePath":"/a","numLines":2}}}
+{"type":"user","timestamp":"t3","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"first"}]},"toolUseResult":{"stdout":"first"}}
+{"type":"assistant","timestamp":"t4","message":{"id":"m2","content":[{"type":"text","text":"done"}]}}
+`,
+	"result after the next assistant message began": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"mcp__slack__read","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu0","content":"earlier"}]}}
+{"type":"assistant","timestamp":"t3","message":{"id":"m2","content":[{"type":"tool_use","id":"tu2","name":"mcp__slack__read","input":{}}]}}
+{"type":"user","timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"late"},{"type":"tool_result","content":"no id: last message"}]}}
+`,
+	"results by ID attach after injected text": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Skill","input":{}},{"type":"tool_use","id":"tu2","name":"Bash","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"loaded"}]}}
+{"type":"user","isMeta":true,"timestamp":"t3","message":{"content":[{"type":"text","text":"Base directory for this skill"}]}}
+{"type":"user","timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"tu2","content":"late"}]}}
+`,
+	"results by ID attach after a prompt": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}
 {"type":"user","timestamp":"t2","message":{"content":"interrupt"}}
 {"type":"user","timestamp":"t3","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"late"}]}}
-{"type":"user","timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"late"},{"type":"text","text":"kept"}]}}
+{"type":"user","timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"later"},{"type":"text","text":"kept"}]}}
 `,
 	"unmatched and empty tool_use_id results": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"A","input":{}},{"type":"tool_use","id":"tu2","name":"B","input":{}}]}}
 {"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"nope","content":"x"},{"type":"tool_result","content":"last","is_error":true}]},"toolUseResult":{"stdout":"ignored for two results"}}
@@ -82,6 +98,10 @@ not json
 	"orphan tool-result user entries": `{"type":"user","timestamp":"t1","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"x"}]}}
 {"type":"human","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"x"},{"type":"text","text":"hello"}]}}
 {"type":"user","timestamp":"t3","message":{"content":""}}
+`,
+	"results without an ID only until the next prompt": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"content":"interrupt"}}
+{"type":"user","timestamp":"t3","message":{"content":[{"type":"tool_result","content":"anon"}]}}
 `,
 	"no trailing newline": `{"type":"user","timestamp":"t1","message":{"content":"hi"}}
 {"type":"assistant","timestamp":"t2","message":{"id":"m1","content":[{"type":"text","text":"yo"}]}}`,
@@ -194,6 +214,55 @@ func TestJSONLAdapter_FeedHoldsPartialLineUntilComplete(t *testing.T) {
 	}
 	if recs := a.Flush(); len(recs) != 0 {
 		t.Fatalf("Flush after a complete line emitted records: %+v", recs)
+	}
+}
+
+// The exported constructors are what live streams use, so folding their
+// line-by-line records must match Convert on the same bytes.
+func TestJSONLAdapter_ExportedConstructorsMatchConvert(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		path    string
+		adapter func() *JSONLAdapter
+	}{
+		{"testdata/claude_full.jsonl", NewClaudeAdapter},
+		{"testdata/claude_full2.jsonl", NewClaudeAdapter},
+		{"testdata/claude_full.jsonl", NewCursorAdapter},
+		{"testdata/droid_full.jsonl", NewDroidAdapter},
+	} {
+		input, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := Convert(input, defaultOpts)
+		if err != nil {
+			t.Fatalf("%s: Convert: %v", tc.path, err)
+		}
+		a := tc.adapter()
+		var recs []Record
+		for _, line := range bytes.SplitAfter(input, []byte("\n")) {
+			recs = append(recs, a.Feed(line)...)
+		}
+		recs = append(recs, a.Flush()...)
+		if got := foldRecords(t, recs); !bytes.Equal(got, want) {
+			t.Fatalf("%s: fold differs from Convert\ngot:\n%s\nwant:\n%s", tc.path, got, want)
+		}
+	}
+}
+
+func TestJSONLAdapter_LinesCountsConsumedLines(t *testing.T) {
+	t.Parallel()
+
+	a := NewClaudeAdapter()
+	line := `{"type":"user","timestamp":"t1","message":{"content":"hi"}}`
+	a.Feed([]byte(line + "\n\n" + `{"type":"progress"}` + "\n" + line[:20]))
+	if got := a.Lines(); got != 3 {
+		t.Fatalf("Lines after three complete lines and a partial one = %d, want 3", got)
+	}
+	a.Flush()
+	if got := a.Lines(); got != 4 {
+		t.Fatalf("Lines after Flush = %d, want 4", got)
 	}
 }
 

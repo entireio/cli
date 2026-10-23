@@ -502,8 +502,8 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // task is agent-help's job, where it is pulled on demand and grouped by who
 // should initiate the command (see agentHelpAudience); this string carries only
 // invariants that hold on every turn of every session. The one model-dependent
-// invariant is what a trail is: under project trails (ENTIRE_PROJECT_TRAILS=1)
-// a trail number names project intent, not one branch, so say so once.
+// invariant is what a trail is: under project trails a trail number names
+// project intent, not one branch, so say so once.
 func entireTrailContextInjection(scope trailEnablementScope, projectTrails bool) string {
 	repo := ""
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
@@ -1059,8 +1059,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// runs before the no-changes gate: a read-only Worker turn is still the
 	// parent's task, and a zero-file completed record is itself a condensation
 	// trigger (State.HasTaskContent), so its transcript and tokens reach the
-	// parent's next checkpoint. Its usage goes on that record only, never on
-	// the Worker's own session total, so it is counted once.
+	// parent's next checkpoint. Its usage goes on that record and the parent's
+	// subagent total, never on the Worker's own session total, so it is
+	// counted once.
 	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
 		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
 			link:          link,
@@ -1204,9 +1205,11 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 }
 
 // workerTurnTokenUsage returns a detached subagent session's usage for the
-// turn ending now: the hook-reported counts, or its transcript from the turn's
-// start offset. Its own subagents are not counted, since a task record holds
-// only the subagent's own usage.
+// turn ending now: the hook-reported counts, its transcript from the turn's
+// start offset, or else its own out-of-band total since the turn started
+// (Factory AI Droid, whose Worker keeps a token total of its own that the
+// parent's excludes). Its own subagents are not counted, since a task record
+// holds only the subagent's own usage.
 func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, preState *PrePromptState, transcriptData []byte) *agent.TokenUsage {
 	if event.TokenUsage != nil {
 		return event.TokenUsage
@@ -1215,7 +1218,10 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 	if preState != nil {
 		turnStart = preState.TranscriptOffset
 	}
-	return agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, "")
+	if usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, ""); strategy.HasTokenUsageData(usage) {
+		return usage
+	}
+	return computeOutOfBandTokenUsage(ctx, ag, event.SessionID, event.SessionRef, preState)
 }
 
 // resolveTurnTokenUsage returns the token usage of the turn ending now.
@@ -1227,8 +1233,10 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 // out-of-band source: Antigravity exposes token usage only via its
 // title/statusline pipe (captured by the title-tee shim), never in the
 // transcript, so its delta is the current cumulative totals minus the
-// TurnStart baseline stored in PrePromptState. Only one source is used, so a
-// turn is never counted twice.
+// TurnStart baseline stored in PrePromptState. Factory AI Droid is the same
+// shape: its transcript carries no usage, and its running total lives in the
+// session's .settings.json. Only one source is used, so a turn is never
+// counted twice.
 func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) *agent.TokenUsage {
 	if event.TokenUsage != nil {
 		return event.TokenUsage
@@ -1240,10 +1248,16 @@ func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Eve
 	if preState != nil {
 		turnStart = preState.TranscriptOffset
 	}
-	if usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, subagentsDir); usage != nil {
+	usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, subagentsDir)
+	if strategy.HasTokenUsageData(usage) {
 		return usage
 	}
-	return computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
+	// A transcript without usage reports zeros rather than nil, so an empty
+	// result also falls through to the out-of-band source.
+	if oob := computeOutOfBandTokenUsage(ctx, ag, sessionID, event.SessionRef, preState); oob != nil {
+		return oob
+	}
+	return usage
 }
 
 // handleLifecycleCompaction handles context compaction: saves current progress
@@ -2225,8 +2239,15 @@ func subagentTranscriptAndFiles(
 // reported, nor for Codex: a Codex child's usage comes from its rollout
 // inventory, which leaves it nil on purpose for a forked child whose rollout
 // carries the parent's history, and recounting that rollout from its start
-// would add the parent's tokens.
+// would add the parent's tokens. Nor for a child session
+// (agent.ChildSessionSubagents): its usage is credited to the parent's total at
+// completion, and the task entry must show the same figure. A child that stops
+// only at true completion has its full usage by then; one whose export failed
+// keeps no usage in either place.
 func taskUsageRecountable(ag agent.Agent, event *agent.Event) bool {
+	if _, childSession := agent.AsChildSessionSubagents(ag); childSession {
+		return false
+	}
 	return event.TokenUsage == nil && ag.Type() != agent.AgentTypeCodex
 }
 
@@ -2414,7 +2435,16 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 		return nil
 	}
-	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
+	var completed bool
+	if _, ok := agent.AsChildSessionSubagents(ag); ok {
+		callStartedAt := event.SubagentStartedAt
+		if event.SessionEndSweep {
+			callStartedAt = time.Time{}
+		}
+		completed, err = strategy.CompleteChildSessionTaskRecord(logCtx, event.SessionID, rec, callStartedAt)
+	} else {
+		completed, err = strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to complete task record: %w", err)
 	}
@@ -2539,6 +2569,7 @@ func captureInFlightTaskFinal(logCtx context.Context, ag agent.Agent, sessionID,
 		// The record's start scopes a re-export to this call (OpenCode).
 		SubagentStartedAt: task.StartedAt,
 		Final:             true,
+		SessionEndSweep:   true,
 		Timestamp:         time.Now(),
 	}
 	if err := handleSubagentStopFinal(logCtx, ag, event); err != nil {
@@ -2626,8 +2657,9 @@ type subagentSessionStep struct {
 // The record also carries the Worker's token usage. Each turn adds its own
 // usage, scoped to the turn's transcript slice, and only the Stop that ends
 // the Worker's active turn adds it, so a turn condensed into one checkpoint is
-// never counted again by a later one, and none of it lands on the Worker's
-// own session total.
+// never counted again by a later one. The same usage is credited to the
+// parent's subagent total, and none of it lands on the Worker's own session
+// total.
 func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) error {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	logging.Info(logCtx, "recording subagent session as task record",
@@ -2913,10 +2945,11 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 
 // computeOutOfBandTokenUsage returns the turn's token delta for
 // OutOfBandTokenSource agents (e.g. Antigravity, whose only token surface is
-// the title/statusline pipe captured by the title-tee shim): current
+// the title/statusline pipe captured by the title-tee shim, and Factory AI
+// Droid, which keeps a running total beside its transcript): current
 // cumulative totals minus the TurnStart baseline stored in PrePromptState.
 // Returns nil for other agents, on error (logged), or when no data exists.
-func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID string, preState *PrePromptState) *agent.TokenUsage {
+func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID, sessionRef string, preState *PrePromptState) *agent.TokenUsage {
 	src, ok := agent.AsOutOfBandTokenSource(ag)
 	if !ok {
 		return nil
@@ -2940,7 +2973,7 @@ func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID s
 			return nil
 		}
 	}
-	oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, baseline)
+	oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, sessionRef, baseline)
 	if oobErr != nil {
 		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to compute out-of-band token usage",
 			slog.String("error", oobErr.Error()))

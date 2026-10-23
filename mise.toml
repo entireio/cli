@@ -1,12 +1,13 @@
 [tools]
 # Please also keep the version aligned in the go.mod file
-go = { version = '1.27.1', postinstall = "go install github.com/go-delve/delve/cmd/dlv@latest && go install gotest.tools/gotestsum@latest" }
-golangci-lint = '2.13.2'
+go = { version = '1.27.3', postinstall = "go install github.com/go-delve/delve/cmd/dlv@latest && go install gotest.tools/gotestsum@latest" }
+golangci-lint = '2.15.0'
 shellcheck = 'latest'
 tmux = 'latest'
 "go:github.com/entireio/roger-roger/cmd/roger-roger" = 'latest'
 "go:github.com/entireio/roger-roger/cmd/entire-agent-roger-roger" = 'latest'
 "go:github.com/josephspurrier/goversioninfo/cmd/goversioninfo" = 'v1.7.0'
+"go:golang.org/x/vuln/cmd/govulncheck" = 'v1.9.0'
 
 [tasks.fmt]
 description = "Run gofmt"
@@ -26,6 +27,10 @@ run = """
 go test -tags=integration -race ./...
 mise run test:e2e:canary
 """
+
+[tasks."test:release-origins"]
+description = "Test the two-origin install path against local fake origins"
+run = "scripts/test-release-origins.sh"
 
 [tasks.check]
 description = "Run formatting, linting, and CI tests"
