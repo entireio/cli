@@ -235,6 +235,7 @@ func ClearOriginKeyCache() {
 	originKeysMu.Lock()
 	defer originKeysMu.Unlock()
 	clear(originKeysByRoot)
+	usersettings.ClearCommonDirCache()
 }
 
 func originKeysCached(ctx context.Context, worktreeRoot string) ([]string, bool, error) {

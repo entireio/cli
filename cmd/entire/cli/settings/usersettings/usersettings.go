@@ -32,6 +32,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -360,15 +361,51 @@ func PathNamesThisClone(ctx context.Context, key, worktreeRoot string) bool {
 	if err != nil || expanded == "" {
 		return false
 	}
-	keyCommon, err := gitdir.CommonDirForWorktree(ctx, expanded)
+	keyCommon, err := commonDirCached(ctx, expanded)
 	if err != nil {
 		return false
 	}
-	ourCommon, err := gitdir.CommonDirForWorktree(ctx, worktreeRoot)
+	ourCommon, err := commonDirCached(ctx, worktreeRoot)
 	if err != nil {
 		return false
 	}
 	return pathsEquivalent(keyCommon, ourCommon)
+}
+
+// commonDirByPath memoizes gitdir.CommonDirForPath for the process lifetime.
+// settings.Load runs several times per hook and checks every path-keyed
+// `repos` entry each time, so without it N such entries cost 2N git
+// subprocesses per Load. Only successes are cached: a failure may be a
+// directory that becomes a repository later in a long-lived process.
+var (
+	commonDirMu     sync.Mutex
+	commonDirByPath = map[string]string{}
+)
+
+// ClearCommonDirCache drops the memoized common directories. Tests that
+// create or remove repositories at a reused path within one process call it.
+func ClearCommonDirCache() {
+	commonDirMu.Lock()
+	defer commonDirMu.Unlock()
+	clear(commonDirByPath)
+}
+
+func commonDirCached(ctx context.Context, dir string) (string, error) {
+	key := filepath.Clean(dir)
+	commonDirMu.Lock()
+	cached, ok := commonDirByPath[key]
+	commonDirMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+	common, err := gitdir.CommonDirForPath(ctx, key)
+	if err != nil {
+		return "", err //nolint:wrapcheck // the caller treats any failure as "not a match"
+	}
+	commonDirMu.Lock()
+	commonDirByPath[key] = common
+	commonDirMu.Unlock()
+	return common, nil
 }
 
 func pathsEquivalent(a, b string) bool {
