@@ -39,55 +39,12 @@ func withKids(main, kids *agent.TokenUsage) *agent.TokenUsage {
 	return &out
 }
 
+// Repeated readings, growth, stale reads and rewrites are covered through the
+// hooks (integration_test/token_ledger_test.go) and attach's partial mark by
+// TestSaveAttachSessionState_LedgerMarksOnlyWhatAttachRead; these cover the
+// rest.
 func TestTokenLedger(t *testing.T) {
 	t.Parallel()
-
-	t.Run("a repeated reading changes nothing", func(t *testing.T) {
-		t.Parallel()
-		var l TokenLedger
-		l.Observe(reading(usage(100, 10, 1), nil))
-		l.Observe(reading(usage(100, 10, 1), nil))
-		assertUsage(t, "total", l.Total(), usage(100, 10, 1))
-		assertUsage(t, "pending", l.Pending(), usage(100, 10, 1))
-	})
-
-	t.Run("a checkpoint stores only growth since the last one", func(t *testing.T) {
-		t.Parallel()
-		var l TokenLedger
-		l.Observe(reading(usage(100, 10, 1), nil))
-		l.MarkCheckpointed()
-		if l.HasPending() {
-			t.Fatalf("pending after checkpoint = %+v", l.Pending())
-		}
-		l.Observe(reading(usage(250, 30, 3), nil))
-		assertUsage(t, "pending", l.Pending(), usage(150, 20, 2))
-		assertUsage(t, "total", l.Total(), usage(250, 30, 3))
-	})
-
-	t.Run("a lower reading without a restart is a stale copy and is ignored", func(t *testing.T) {
-		t.Parallel()
-		var l TokenLedger
-		l.Observe(reading(usage(250, 30, 3), nil))
-		l.Observe(reading(usage(100, 10, 1), nil))
-		assertUsage(t, "total", l.Total(), usage(250, 30, 3))
-	})
-
-	t.Run("a rewritten transcript carries the total on", func(t *testing.T) {
-		t.Parallel()
-		var l TokenLedger
-		l.Observe(reading(usage(250, 30, 3), nil))
-		l.MarkCheckpointed()
-		// A resume restored an older copy holding one call.
-		l.Observe(agent.CumulativeObservation{Total: usage(100, 10, 1), Restarted: true})
-		assertUsage(t, "total after rewrite", l.Total(), usage(250, 30, 3))
-		if l.HasPending() {
-			t.Fatalf("pending after rewrite = %+v", l.Pending())
-		}
-		// One more call on the rewritten transcript.
-		l.Observe(reading(usage(140, 15, 2), nil))
-		assertUsage(t, "total", l.Total(), usage(290, 35, 4))
-		assertUsage(t, "pending", l.Pending(), usage(40, 5, 1))
-	})
 
 	t.Run("a child keeps its highest total after its file is gone", func(t *testing.T) {
 		t.Parallel()
@@ -98,20 +55,6 @@ func TestTokenLedger(t *testing.T) {
 		l.MarkCheckpointed()
 		l.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(7, 1, 1)}))
 		assertUsage(t, "pending", l.Pending(), withKids(&agent.TokenUsage{}, usage(7, 1, 1)))
-	})
-
-	t.Run("a checkpoint from an older reading marks only what it read", func(t *testing.T) {
-		t.Parallel()
-		var onDisk TokenLedger
-		onDisk.Observe(reading(usage(100, 10, 1), nil))
-		attachRead := onDisk.Clone()
-		// A Stop records more while attach waits to save.
-		onDisk.Observe(reading(usage(150, 15, 2), nil))
-		if onDisk.CheckpointedBeyond(attachRead) {
-			t.Fatal("no other checkpoint moved the mark")
-		}
-		onDisk.MarkCheckpointedUpTo(attachRead)
-		assertUsage(t, "pending", onDisk.Pending(), usage(50, 5, 1))
 	})
 
 	t.Run("the checkpointed mark never moves back", func(t *testing.T) {

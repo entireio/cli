@@ -104,12 +104,6 @@ func TestAttachTokenUsage_LedgerSessionStoresItsPending(t *testing.T) {
 	usage, pos := AttachTokenUsage(ctx, &claudecode.ClaudeCodeAgent{}, state, transcript, state.TranscriptPath)
 	require.Equal(t, 20, usage.OutputTokens, "attach stores what no checkpoint holds")
 	require.Equal(t, 2, pos)
-
-	read := state.TokenLedger.Clone()
-	ConsumeAttachTokenWindow(state, pos)
-	require.True(t, state.TokenLedger.HasPending(), "the caller marks the ledger, up to what attach read")
-	state.TokenLedger.MarkCheckpointedUpTo(read)
-	require.False(t, state.TokenLedger.HasPending())
 }
 
 // A transcript rewritten to an older copy between turns (a resume restoring

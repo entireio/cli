@@ -16,16 +16,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 )
 
-// CumulativeTokenInput identifies the session whose running token total is
-// read. Counters use the fields their native layout needs and ignore the rest.
+// CumulativeTokenInput identifies the session whose running token total is read.
 type CumulativeTokenInput struct {
-	SessionID string
-	// TranscriptPath is the session's live transcript; counters find files
-	// beside it (Claude Code subagents, Droid settings.json and Workers).
+	SessionID      string
 	TranscriptPath string
-	// Subagents and Home are the session's authoritative child inventory and
-	// recorded agent home (see ExtractWithSubagentInventory), for agents whose
-	// children are not discoverable from the transcript (Codex).
+	// Subagents and Home are the session's child inventory and agent home, for
+	// children not discoverable from the transcript (Codex).
 	Subagents []SubagentReference
 	Home      string
 }
@@ -33,19 +29,16 @@ type CumulativeTokenInput struct {
 // CumulativeObservation is one reading of a session's running totals.
 type CumulativeObservation struct {
 	// Total is the main agent's usage since the session began, without
-	// SubagentTokens. Children holds each subagent's own running total keyed by
-	// a stable child ID; a child can vanish from a later reading when its file
-	// is deleted, so callers keep a per-child high-water mark. nil means no
-	// data, not zero. Fields follow types.TokenUsage: InputTokens excludes
-	// cache reads and writes, OutputTokens includes reasoning.
+	// SubagentTokens; Children each subagent's, by a stable child ID (a child
+	// can vanish when its file is deleted). nil means no data. InputTokens
+	// excludes cache, OutputTokens includes reasoning.
 	Total    *TokenUsage
 	Children map[string]*TokenUsage
 	// Cursor lets the next reading continue where this one stopped.
 	Cursor json.RawMessage
-	// Restarted reports that the main transcript no longer begins with what
-	// the previous reading consumed, so it was rewritten (a resume restoring an
-	// older copy) and read again from its start. A Total below an earlier one
-	// is a rewrite only then; otherwise it is a stale read.
+	// Restarted reports that the main transcript was rewritten (a resume
+	// restoring an older copy) and read again from its start. A lower Total is
+	// a rewrite only then; otherwise it is a stale read.
 	Restarted bool
 }
 
@@ -53,44 +46,34 @@ type CumulativeObservation struct {
 type UsageFile struct {
 	Path string
 	// ID names what the file holds when its path can change (a Claude Code
-	// subagent found first in a Workflow run directory, later at its direct
-	// location); it defaults to Path. A new path for an ID is read from its
-	// start, after Reset.
+	// Workflow agent found later at its direct location); default Path. A new
+	// path for an ID is read from its start, after Reset.
 	ID string
-	// Whole marks a file read whole whenever it changes: one rewritten rather
-	// than appended to (OpenCode's export, Droid's settings.json), or a small
-	// one whose total is all the counter keeps (a Claude Code subagent). A
-	// change, seen in its size or last bytes, is never reported as a restart:
-	// a lower total there is a stale copy, not a rewrite.
+	// Whole marks a file read whole when its size or last bytes change: one
+	// rewritten rather than appended (OpenCode's export, Droid's
+	// settings.json), or one whose total is all the counter keeps (a Claude
+	// Code subagent). It never reports a restart.
 	Whole bool
-	// NoRestart keeps a rewrite of the main transcript from being reported:
-	// the counter's total also rests on a file that does not shrink with it
-	// (Droid's settings.json), so a lower total is not a rewritten session.
+	// NoRestart keeps a rewrite of the main transcript from being reported,
+	// for a total that also rests on a file that does not shrink with it.
 	NoRestart bool
 }
 
 // UsageCounter is an agent's running token count. ReadCumulativeUsage owns
-// the files: it reads only what was appended since the last reading, hands
-// over complete lines, and detects rewrites. The counter owns the meaning of
-// the lines. It is saved between readings as JSON, so its state lives in
-// exported fields; settings that are not state (a merge policy) are set by
-// the agent's NewUsageCounter and survive decoding.
+// the files (only appended, complete lines; rewrites detected); the counter
+// owns what the lines mean. It is saved between readings as JSON: state in
+// exported fields, settings (a merge policy) set by NewUsageCounter.
 type UsageCounter interface {
-	// Files returns the files to read: the main transcript first, then files
-	// beside it. It is called again after the files it returned were read, so
-	// a counter can name files it learned about from their lines (Claude
-	// Code subagents); a file is read once per reading.
+	// Files returns the files to read, the main transcript first. It is called
+	// again after they were read, so it can name files their lines revealed.
 	Files(in CumulativeTokenInput) []UsageFile
-	// Add folds data, complete lines appended to path, into the count.
-	// firstLine is the zero-based line number of data's first line in the
-	// file, for records identified only by their position.
+	// Add folds complete lines appended to path in; firstLine is the first
+	// one's zero-based line number, for records identified by position.
 	Add(path string, data []byte, firstLine int)
 	// Reset forgets what was read from path: it is read again from its start.
 	Reset(path string)
-	// Totals returns the main agent's total and each child's. A counter whose
-	// children are not files it reads line by line finds them here: Codex's
-	// come from the session's subagent inventory, whose analysis decides which
-	// lines of a forked child are its own.
+	// Totals returns the main agent's total and each child's (Codex reads its
+	// children from the subagent inventory here).
 	Totals(ctx context.Context, in CumulativeTokenInput) (total *TokenUsage, children map[string]*TokenUsage)
 }
 
@@ -103,13 +86,12 @@ type UsageCounterSource interface {
 	NewUsageCounter() UsageCounter
 }
 
-// usageCursorVersion changes whenever the cursor's meaning does, so a cursor
-// from another version is ignored and the files read from their start.
+// usageCursorVersion changes with the cursor's meaning; another version's
+// cursor is ignored.
 const usageCursorVersion = 3
 
 // usageCursorCheckBytes is how many bytes before a file's offset a cursor
-// fingerprints. A rewrite that keeps these bytes and the length is not
-// detected; a transcript rewritten by a resume or compaction does not.
+// fingerprints to detect a rewrite.
 const usageCursorCheckBytes = 512
 
 // maxUsageFilePasses bounds how many rounds of newly named files one reading
@@ -123,10 +105,9 @@ type usageCursor struct {
 	State   json.RawMessage          `json:"state,omitempty"`
 }
 
-// usageFileMark is how far a file was read: Path is where it was read,
-// Offset the end of the last complete line consumed, Lines how many lines that
-// was, and Check fingerprints the 512 bytes before Offset (a whole file: all
-// of it).
+// usageFileMark is how far a file was read: where, the end of the last
+// complete line consumed, how many lines, and a fingerprint of the bytes
+// before that end.
 type usageFileMark struct {
 	Path   string `json:"p"`
 	Offset int    `json:"o"`

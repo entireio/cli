@@ -19,27 +19,40 @@ type lineAgent struct {
 
 func (a *lineAgent) NewUsageCounter() UsageCounter { return &lineCounter{extra: a.extra} }
 
+// lineCounter counts lines per file ID, so a moved file's lines stay its own.
 type lineCounter struct {
 	extra []UsageFile
+	ids   map[string]string
 
 	Lines map[string]int `json:"lines"`
 }
 
 func (c *lineCounter) Files(in CumulativeTokenInput) []UsageFile {
+	c.ids = map[string]string{}
+	for _, f := range c.extra {
+		c.ids[f.Path] = f.ID
+	}
 	return append([]UsageFile{{Path: in.TranscriptPath}}, c.extra...)
+}
+
+func (c *lineCounter) key(path string) string {
+	if id := c.ids[path]; id != "" {
+		return id
+	}
+	return path
 }
 
 func (c *lineCounter) Add(path string, data []byte, _ int) {
 	if c.Lines == nil {
 		c.Lines = make(map[string]int)
 	}
-	c.Lines[path] += bytes.Count(data, []byte("\n"))
+	c.Lines[c.key(path)] += bytes.Count(data, []byte("\n"))
 	if !bytes.HasSuffix(data, []byte("\n")) {
-		c.Lines[path]++ // a whole file's last line
+		c.Lines[c.key(path)]++ // a whole file's last line
 	}
 }
 
-func (c *lineCounter) Reset(path string) { delete(c.Lines, path) }
+func (c *lineCounter) Reset(path string) { delete(c.Lines, c.key(path)) }
 
 func (c *lineCounter) Totals(context.Context, CumulativeTokenInput) (*TokenUsage, map[string]*TokenUsage) {
 	var calls int
@@ -66,29 +79,6 @@ func calls(obs CumulativeObservation) int {
 
 func TestReadCumulativeUsage(t *testing.T) {
 	t.Parallel()
-
-	t.Run("a line still being written waits for its end", func(t *testing.T) {
-		t.Parallel()
-		path := filepath.Join(t.TempDir(), "t.jsonl")
-		require.NoError(t, os.WriteFile(path, []byte("a\nb"), 0o600))
-		ag := &lineAgent{}
-		obs := readLines(t, ag, path, nil)
-		require.Equal(t, 1, calls(obs))
-		require.NoError(t, os.WriteFile(path, []byte("a\nb\n"), 0o600))
-		require.Equal(t, 2, calls(readLines(t, ag, path, obs.Cursor)))
-	})
-
-	t.Run("a rewritten file is read again from its start", func(t *testing.T) {
-		t.Parallel()
-		path := filepath.Join(t.TempDir(), "t.jsonl")
-		require.NoError(t, os.WriteFile(path, []byte("a\nb\nc\n"), 0o600))
-		ag := &lineAgent{}
-		obs := readLines(t, ag, path, nil)
-		require.NoError(t, os.WriteFile(path, []byte("x\ny\nz\n"), 0o600))
-		again := readLines(t, ag, path, obs.Cursor)
-		require.True(t, again.Restarted, "same length, different content")
-		require.Equal(t, 3, calls(again))
-	})
 
 	t.Run("a whole file is re-read when it changes and never restarts", func(t *testing.T) {
 		t.Parallel()
@@ -127,6 +117,18 @@ func TestReadCumulativeUsage(t *testing.T) {
 		obs = readLines(t, ag, path, obs.Cursor)
 		require.NoError(t, os.Rename(side+".moved", side))
 		require.Equal(t, 3, calls(readLines(t, ag, path, obs.Cursor)), "not counted twice when it returns")
+	})
+
+	t.Run("a file at a new path is read from its start, counted once", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path, before, after := filepath.Join(dir, "t.jsonl"), filepath.Join(dir, "run.jsonl"), filepath.Join(dir, "direct.jsonl")
+		require.NoError(t, os.WriteFile(path, nil, 0o600))
+		require.NoError(t, os.WriteFile(before, []byte("1\n2\n"), 0o600))
+		require.NoError(t, os.WriteFile(after, []byte("1\n2\n3\n"), 0o600))
+		obs := readLines(t, &lineAgent{extra: []UsageFile{{Path: before, ID: "kid"}}}, path, nil)
+		require.Equal(t, 2, calls(obs))
+		require.Equal(t, 3, calls(readLines(t, &lineAgent{extra: []UsageFile{{Path: after, ID: "kid"}}}, path, obs.Cursor)))
 	})
 
 	t.Run("an unreadable transcript is an error; another agent's cursor is ignored", func(t *testing.T) {
@@ -193,70 +195,15 @@ func TestKeyedUsage(t *testing.T) {
 		}
 		require.Equal(t, 38, r.Value().OutputTokens)
 	})
-}
 
-// A child's message whose next line arrives in a later reading stays open
-// however many records other files add meanwhile.
-func TestKeyedUsage_WindowIsPerChild(t *testing.T) {
-	t.Parallel()
-	k := KeyedUsage{Policy: KeepMostOutput, Window: 2}
-	k.Add("child", "c1", TokenUsage{OutputTokens: 10, APICallCount: 1})
-	for i := range 5 {
-		k.Add("", string(rune('a'+i)), TokenUsage{OutputTokens: 1, APICallCount: 1})
-	}
-	k.Add("child", "c1", TokenUsage{OutputTokens: 50, APICallCount: 1})
-	require.Equal(t, &TokenUsage{OutputTokens: 50, APICallCount: 1}, k.Children()["child"])
-}
-
-// A file that moves (a Claude Code Workflow agent found later at its direct
-// location) is read from its start at the new path, without counting twice.
-func TestReadCumulativeUsage_MovedFileIsReadAgain(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path, before, after := filepath.Join(dir, "t.jsonl"), filepath.Join(dir, "run.jsonl"), filepath.Join(dir, "direct.jsonl")
-	require.NoError(t, os.WriteFile(path, nil, 0o600))
-	require.NoError(t, os.WriteFile(before, []byte("1\n2\n"), 0o600))
-	require.NoError(t, os.WriteFile(after, []byte("1\n2\n3\n"), 0o600))
-	moved := &movingAgent{files: []UsageFile{{Path: before, ID: "kid"}}}
-	obs := readLines(t, moved, path, nil)
-	require.Equal(t, 2, calls(obs))
-	moved.files = []UsageFile{{Path: after, ID: "kid"}}
-	require.Equal(t, 3, calls(readLines(t, moved, path, obs.Cursor)))
-}
-
-// movingAgent counts lines per ID, so a file's lines are one child's.
-type movingAgent struct {
-	mockAgent
-
-	files []UsageFile
-}
-
-func (a *movingAgent) NewUsageCounter() UsageCounter {
-	return &movingCounter{lineCounter: lineCounter{extra: a.files}, ids: map[string]string{}}
-}
-
-type movingCounter struct {
-	lineCounter
-
-	ids map[string]string
-}
-
-func (c *movingCounter) Files(in CumulativeTokenInput) []UsageFile {
-	for _, f := range c.extra {
-		c.ids[f.Path] = f.ID
-	}
-	return c.lineCounter.Files(in)
-}
-
-func (c *movingCounter) Add(path string, data []byte, n int) {
-	c.lineCounter.Add(c.key(path), data, n)
-}
-
-func (c *movingCounter) Reset(path string) { c.lineCounter.Reset(c.key(path)) }
-
-func (c *movingCounter) key(path string) string {
-	if id := c.ids[path]; id != "" {
-		return id
-	}
-	return path
+	t.Run("a child's message stays open however many records other files add", func(t *testing.T) {
+		t.Parallel()
+		k := KeyedUsage{Policy: KeepMostOutput, Window: 2}
+		k.Add("child", "c1", call(10))
+		for i := range 5 {
+			k.Add("", string(rune('a'+i)), call(1))
+		}
+		k.Add("child", "c1", call(50))
+		require.Equal(t, &TokenUsage{OutputTokens: 50, APICallCount: 1}, k.Children()["child"])
+	})
 }

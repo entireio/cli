@@ -7,12 +7,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
-// The building blocks UsageCounters are made of. Agents record usage in two
-// shapes: per-call records, written once or repeated (Claude Code repeats a
-// message's usage on each of its lines; Codex and Copilot replay records on
-// resume), and running totals (Codex token_count, Copilot session.shutdown,
-// Droid's settings.json).
-
 // MergePolicy says which copy of a repeated per-call record holds its usage.
 type MergePolicy uint8
 
@@ -27,12 +21,11 @@ const (
 	KeepMostOutput
 )
 
-// KeyedUsage sums per-call records once per (child, key). The child is ""
-// for the main agent. Records stay open to later copies while they are among
-// their child's latest Window; older ones are closed into a sum. With Remember, a
-// closed record's key is kept (hashed) so a replay long after is skipped.
-// Policy, Window and Remember are set by the counter's constructor; the rest
-// is saved state.
+// KeyedUsage sums per-call records once per (child, key); the main agent's
+// child is "". A record stays open to later copies while among its child's
+// latest Window, then is closed into a sum; with Remember its key is kept
+// (hashed) so a later replay is skipped. Policy, Window and Remember are set
+// by the counter's constructor; the rest is saved state.
 type KeyedUsage struct {
 	Policy   MergePolicy `json:"-"`
 	Window   int         `json:"-"`
