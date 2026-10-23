@@ -162,6 +162,11 @@ func isCallPrompt(info MessageInfo, parts []Part) bool {
 	return true
 }
 
+// SubagentUsageOutsideParent marks OpenCode as agent.ChildSessionSubagents:
+// a task's child is a session of its own, and the parent's messages never
+// include its usage.
+func (a *OpenCodeAgent) SubagentUsageOutsideParent() {}
+
 // LiveSubagentModifiedFiles exports a running child to a private staging file
 // and returns the files its task call has modified so far. Unlike
 // exportSubagent it writes neither the shared export cache nor the call's

@@ -11,15 +11,18 @@ top-level verbs. The groups are the canonical home for each verb. Newer
 experimental command families are discoverable through `entire labs` and
 their canonical paths are always runnable.
 
-Experimental commands are gated by a build-time visibility flag (the
+Experimental commands are gated by the build's version (the
 `cmd/entire/cli/experimental` package): they are shown — grouped under an
 "Experimental commands:" help section — in developer and nightly builds, and
-hidden in stable release builds. Visibility is toggled by `experimental.Visible`
-(default `"true"`), which GoReleaser stamps `"false"` only on stable tags
-(`.Prerelease` empty); nightly (`vX.Y.Z-nightly.*`) and local builds leave it at
-the default. Register a command as experimental with `experimental.Register(parent,
-child)` instead of `parent.AddCommand(child)`. Gating only controls visibility —
-the commands are always runnable in every build.
+hidden in stable release builds. `experimental.IsVisible()` derives this from
+`versioninfo.Version` after `versioninfo.Load()`: a plain semver release
+(`X.Y.Z`, no prerelease, no build metadata) hides them; `dev`, nightly
+(`X.Y.Z-nightly.*`), and commit-stamped (`0.0.0+<commit>`) builds show them.
+There is no separate ldflag, so any packager that stamps the version (GoReleaser,
+nixpkgs, `go install @<tag>`) gets release behavior. Register a command as
+experimental with `experimental.Register(parent, child)` instead of
+`parent.AddCommand(child)`. Gating only controls visibility — the commands are
+always runnable in every build.
 
 - `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
@@ -59,6 +62,10 @@ the commands are always runnable in every build.
   transcript; both read through `checkpoint.TaskReader`. The cell does not
   serve task records, so under `--repo` the `tasks` key is omitted (not
   reported empty) and `--task` fails with `ErrTaskRecordsUnsupported`.
+  `list --outgoing` lists what the next push sends, from local state only: the
+  git-refs push queue, minus refs missing locally, which pre-push drops
+  (`strategy.ListOutgoingCheckpoints`). It refuses the git-branch backend, whose
+  push sends `entire/checkpoints/v1` as one branch rather than per checkpoint.
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
@@ -349,7 +356,30 @@ the commands are always runnable in every build.
   native-mirror routes are home-core-scoped and answer 421 for a repo in another
   jurisdiction, which `coreapi`'s transport follows and re-authenticates on its
   own, so they run on the plain active-context client with no cluster-fronting
-  detour. `mirror detach <repo> --into /et/<project>/<repo>` serves
+  detour. `mirror resync <repo>` (`/gh/` only, `POST /mirrors/resync`) queues one
+  publish that fans out to every placement, and doubles as the check after an
+  org fixes a GitHub-side block: the server probes GitHub first and answers
+  409 with the reason at `errors[].location == "body.owner"` while the block
+  holds, which `resyncError` renders with the same wording `repo view` uses.
+  That block (`Mirror.syncBlock`: an org IP allow list, or a suspension core
+  hit while minting a token — a suspension GitHub reports by webhook is NOT
+  a block, it is placement status `suspended`) is per GitHub installation
+  and the `/repos` placements do not carry it, so only `repo view` reads it,
+  with one exact read scoped to the repo (`lookupMirrorSyncBlock`:
+  `GET /mirrors/{id}` by the entry's own `id`, its canonical home-jurisdiction
+  placement, falling back to the first placement ID — not `/mirrors/placements`,
+  which is pull-gated and would withhold the block from a metadata-only
+  viewer), and prints a `Sync:` section with the fix and the resync command;
+  `--json` adds `syncBlock` on the row, or `syncStatus: "unavailable"` when
+  the read failed. `mirror list` shows
+  no block: a per-repo read per row is too much for a directory, and
+  `GET /mirrors` cannot answer "mirrors of owner X" cheaply (core applies its
+  owner filter *after* cutting the page from the caller's whole visible set).
+  Revisit when core puts `syncBlock` on `RepoPlacement`. A failed read is a
+  stderr note, never a failed view — except a cancelled context, which
+  `noteSyncStatusUnavailable` returns so an interrupted command still exits as
+  interrupted.
+  `mirror detach <repo> --into /et/<project>/<repo>` serves
   `/gh/` refs only and is the one mirror verb that converts rather than places:
   it turns the mirror's sole placement into the native repo `--into` names
   (one native ref instead of `--project`/`--name`: its project is resolved
@@ -781,7 +811,7 @@ ref with no resolved repo ID fails there rather than at the grammar. That
 narrowing has to cover *both* ways a forge reaches the API — named in `--repo`
 and inferred from the origin remote — and the inferred one is the common path.
 
-Experimental commands (gated by the build-time visibility flag above — visible
+Experimental commands (gated by the build version as described above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
 `blame`, `why`, `experts`, and `runner`.

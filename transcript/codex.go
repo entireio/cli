@@ -12,6 +12,7 @@ import (
 const (
 	transcriptTypeMessage         = "message"
 	codexTypeResponseItem         = "response_item"
+	codexTypeEventMsg             = "event_msg"
 	codexTypeFunctionCall         = "function_call"
 	codexTypeFunctionCallOutput   = "function_call_output"
 	codexTypeCustomToolCall       = "custom_tool_call"
@@ -34,7 +35,7 @@ func isCodexFormat(content []byte) bool {
 			continue
 		}
 		switch probe.Type {
-		case "session_meta", codexTypeResponseItem, "event_msg", "turn_context":
+		case "session_meta", codexTypeResponseItem, codexTypeEventMsg, "turn_context":
 			return true
 		default:
 			return false
@@ -68,6 +69,7 @@ type codexPayload struct {
 
 // compactCodex converts a Codex JSONL transcript into the compact format.
 func compactCodex(content []byte, opts Options) ([]byte, error) {
+	subagents := codexSubagentThreads(content)
 	if opts.StartLine > 0 {
 		content = SliceFromLine(content, opts.StartLine)
 		if content == nil {
@@ -142,7 +144,7 @@ func compactCodex(content []byte, opts Options) ([]byte, error) {
 				}
 				if np.Type == codexTypeFunctionCall || np.Type == codexTypeCustomToolCall {
 					i++ // consume the tool call line
-					tb := codexConsumeToolCall(np, lines, &i, &inTok, &outTok)
+					tb := codexConsumeToolCall(np, lines, &i, &inTok, &outTok, subagents)
 					toolBlocks = append(toolBlocks, tb)
 					continue
 				}
@@ -167,7 +169,7 @@ func compactCodex(content []byte, opts Options) ([]byte, error) {
 			// Standalone tool call not preceded by assistant text.
 			inTok, outTok := pendingInTok, pendingOutTok
 			pendingInTok, pendingOutTok = 0, 0
-			tb := codexConsumeToolCall(p, lines, &i, &inTok, &outTok)
+			tb := codexConsumeToolCall(p, lines, &i, &inTok, &outTok, subagents)
 			// Also consume any trailing token_count.
 			for i+1 < len(lines) && isCodexTokenCountLine(lines[i+1]) {
 				inTok, outTok = codexTokenCount(lines[i+1].Payload)
@@ -218,9 +220,45 @@ func parseCodexLines(content []byte) ([]codexLine, error) {
 	return lines, nil
 }
 
+// codexSubagentThreads maps each spawn_agent call ID to the thread of the
+// subagent it started, from item_completed SubAgentActivity events.
+func codexSubagentThreads(content []byte) map[string]string {
+	if !bytes.Contains(content, []byte(`"SubAgentActivity"`)) {
+		return nil
+	}
+	threads := make(map[string]string)
+	reader := bufio.NewReader(bytes.NewReader(content))
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if bytes.Contains(lineBytes, []byte(`"SubAgentActivity"`)) {
+			var line struct {
+				Type    string `json:"type"`
+				Payload struct {
+					Type string `json:"type"`
+					Item struct {
+						Type          string `json:"type"`
+						Kind          string `json:"kind"`
+						ID            string `json:"id"`
+						AgentThreadID string `json:"agent_thread_id"`
+					} `json:"item"`
+				} `json:"payload"`
+			}
+			if json.Unmarshal(lineBytes, &line) == nil && line.Type == codexTypeEventMsg &&
+				line.Payload.Type == "item_completed" && line.Payload.Item.Type == "SubAgentActivity" &&
+				line.Payload.Item.Kind == "started" && line.Payload.Item.ID != "" && line.Payload.Item.AgentThreadID != "" {
+				threads[line.Payload.Item.ID] = line.Payload.Item.AgentThreadID
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return threads
+}
+
 // isCodexTokenCountLine checks if a codexLine is an event_msg with token_count payload.
 func isCodexTokenCountLine(cl codexLine) bool {
-	if cl.Type != "event_msg" {
+	if cl.Type != codexTypeEventMsg {
 		return false
 	}
 	var p struct {
@@ -319,7 +357,7 @@ func codexToolUseBlock(p codexPayload) map[string]json.RawMessage {
 // consuming any trailing token_count lines and the matching output line.
 // The caller must advance i past the tool call line itself before calling this function,
 // and must verify p.Type is a tool call type.
-func codexConsumeToolCall(p codexPayload, lines []codexLine, i *int, inTok, outTok *int) map[string]json.RawMessage {
+func codexConsumeToolCall(p codexPayload, lines []codexLine, i *int, inTok, outTok *int, subagents map[string]string) map[string]json.RawMessage {
 	var tb map[string]json.RawMessage
 	var outputType string
 
@@ -343,7 +381,7 @@ func codexConsumeToolCall(p codexPayload, lines []codexLine, i *int, inTok, outT
 		callID, typ := codexCallIDAndType(lines[*i+1].Payload)
 		if typ == outputType && callID == p.CallID {
 			output := codexToolOutputText(lines[*i+1].Payload, outputType)
-			tb["result"] = buildToolResult(toolResultEntry{output: output})
+			tb["result"] = buildToolResult(toolResultEntry{output: output, agentID: subagents[p.CallID]})
 			*i++
 		}
 	}

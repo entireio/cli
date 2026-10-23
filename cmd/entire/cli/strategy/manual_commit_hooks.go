@@ -3420,7 +3420,17 @@ var errPartialState = errors.New("partial session state")
 //
 // finalizeDeadline bounds that rewrite's network phase so the hook finishes
 // before its host kills it; the zero time means no deadline.
-func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *SessionState, finalizeDeadline time.Time) error { //nolint:unparam // error return is part of the hook contract; callers check it
+func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *SessionState, finalizeDeadline time.Time) error {
+	// A turn can switch branches after TurnStart. Only the recorded home's
+	// hook may refresh this attribution; foreign or unavailable homes retain
+	// the last known branch for later sweep/doctor salvage.
+	if root, err := paths.WorktreeRoot(ctx); err == nil && isSessionHomeWorktree(root, state) {
+		if repo, err := OpenRepository(ctx); err == nil {
+			defer repo.Close()
+			captureSessionBranch(repo, state)
+		}
+	}
+
 	hadMidTurnCommits := len(state.TurnCheckpointIDs) > 0
 
 	// Finalize all checkpoints from this turn with the full transcript.

@@ -49,10 +49,16 @@ func TestProjectTrailLinkRetryPreservesExecutionOptions(t *testing.T) {
 	_, command, found := strings.Cut(hint, ":\n")
 	require.True(t, found)
 	args := executeTrailRetryShell(t, command)
-	for _, arg := range []string{"--context=test 'context'", "--insecure-http-auth", "--json", "--idempotency-key=" + key, "--repo=et/acme/widget", "--project=et/acme", "--body=", "--base=", "--assignee="} {
+	for _, arg := range []string{"--context=test 'context'", "--insecure-http-auth", "--json", "--idempotency-key=" + key, "--repo=et/acme/widget", "--project=et/acme", "--base="} {
 		require.Contains(t, args, arg)
 	}
-	for _, name := range []string{"status", "type", "priority"} {
-		require.NotContains(t, args, "--"+name+"=", "empty enum flags fail validation")
+	for _, arg := range args {
+		// Trail-level fields are not link flags; an empty --status= fails validation.
+		for _, name := range []string{"title", "body", "status", "type", "priority", "assignee"} {
+			require.NotContains(t, arg, "--"+name+"=")
+		}
 	}
+	hint = projectTrailLinkRetry(cmd, target, api.ChangeCreateRequest{Title: "Intent", BranchName: "feature/work", BranchAction: "link", Status: "closed"}, key)
+	_, command, _ = strings.Cut(hint, ":\n")
+	require.Contains(t, executeTrailRetryShell(t, command), "--status=closed")
 }

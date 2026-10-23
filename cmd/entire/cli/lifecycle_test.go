@@ -465,12 +465,12 @@ type mockOOBTokenAgent struct {
 	usage *agent.TokenUsage
 }
 
-func (m *mockOOBTokenAgent) SnapshotTokenBaseline(_ context.Context, _ string) (json.RawMessage, error) {
+func (m *mockOOBTokenAgent) SnapshotTokenBaseline(_ context.Context, _, _ string) (json.RawMessage, error) {
 	return nil, nil
 }
 
 //nolint:unparam // error return is fixed by the OutOfBandTokenSource interface
-func (m *mockOOBTokenAgent) CalculateTokenUsageSince(_ context.Context, _ string, _ json.RawMessage) (*agent.TokenUsage, error) {
+func (m *mockOOBTokenAgent) CalculateTokenUsageSince(_ context.Context, _, _ string, _ json.RawMessage) (*agent.TokenUsage, error) {
 	return m.usage, nil
 }
 
@@ -495,7 +495,7 @@ func TestComputeOutOfBandTokenUsage_MissingBaselineMidSession(t *testing.T) {
 		TokenUsage: &agent.TokenUsage{InputTokens: 250, OutputTokens: 280, APICallCount: 2},
 	}))
 
-	got := computeOutOfBandTokenUsage(ctx, ag, sessionID, nil)
+	got := computeOutOfBandTokenUsage(ctx, ag, sessionID, "", nil)
 	require.Nil(t, got, "missing baseline mid-session must degrade to no-data, not count-from-zero")
 
 	// First tracked turn (nothing accumulated yet): count-from-zero is the
@@ -506,7 +506,7 @@ func TestComputeOutOfBandTokenUsage_MissingBaselineMidSession(t *testing.T) {
 		BaseCommit: "abc123",
 		StartedAt:  time.Now(),
 	}))
-	require.Equal(t, cumulative, computeOutOfBandTokenUsage(ctx, ag, freshID, nil))
+	require.Equal(t, cumulative, computeOutOfBandTokenUsage(ctx, ag, freshID, "", nil))
 }
 
 // TestDispatchLifecycleEvent_SkipsForwardedHookFromNonOwningAgent verifies the

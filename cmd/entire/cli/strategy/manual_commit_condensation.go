@@ -67,6 +67,10 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 type condenseOpts struct {
 	repoDir string // Worktree root of the committing worktree (home-worktree check)
 
+	// recordedBranch overrides HEAD for ID-based salvage, including an empty
+	// branch recorded at detached HEAD. Commit-driven condensation keeps HEAD.
+	recordedBranch *string
+
 	// reconcileInterrupted allows this condensation to return a *different*
 	// checkpoint ID than the caller passed, when it recognises the transcript
 	// range in a checkpoint left behind by an interrupted write from a CLI that
@@ -518,7 +522,7 @@ func condensedTaskTokenUsage(ctx context.Context, ag agent.Agent, record session
 		return recorded
 	}
 	usage := agent.CalculateTokenUsage(ctx, ag, raw, 0, "")
-	if !hasTokenUsageData(usage) || (recorded != nil && usage.APICallCount < recorded.APICallCount) {
+	if !HasTokenUsageData(usage) || (recorded != nil && usage.APICallCount < recorded.APICallCount) {
 		return recorded
 	}
 	return usage
@@ -696,6 +700,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		ctx, repo, state, sessionData, redactedTranscript, extractedAssets,
 		taskPayloads, checkpointID,
 	)
+	if o.recordedBranch != nil {
+		writeOpts.Branch = *o.recordedBranch
+	}
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
@@ -1150,7 +1157,7 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 	// baseline does not regress to nil (finding 019f5ebf-a57e).
 	applyBackfilledSessionTokenUsage(ctx, ag, state, sessionData.Transcript, sessionData.TokenUsage)
 
-	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+	if !HasTokenUsageData(sessionData.TokenUsage) && HasTokenUsageData(state.CheckpointTokenUsage) {
 		// Whole-value fallback: accumulateTokenUsage already carries SubagentTokens.
 		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 	} else {
@@ -1158,6 +1165,9 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 		// applyBackfilledSessionTokenUsage, which needs the usage without it.
 		sessionData.TokenUsage = fillMissingSubagentTokensFrom(sessionData.TokenUsage, state.CheckpointTokenUsage)
 	}
+	// Child sessions' usage is credited outside both sources above, so it
+	// is added exactly here; resetCheckpointWindow then rebaselines it.
+	sessionData.TokenUsage = session.WithChildSessionTokens(sessionData.TokenUsage, state.PendingChildSessionTokens())
 }
 
 // AttachTokenUsage returns the tokens `entire session attach` stores for a
@@ -1178,13 +1188,16 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 		usage = calculateLiveTranscriptTokenUsage(ctx, ag, transcript, state, transcriptPath)
 	}
 	if state != nil {
-		if !hasTokenUsageData(usage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+		if !HasTokenUsageData(usage) && HasTokenUsageData(state.CheckpointTokenUsage) {
 			usage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 		} else {
 			// The transcript recompute reads no subagent transcripts; take the
 			// pending window's subagent total, as condensation does.
 			usage = fillMissingSubagentTokensFrom(usage, state.CheckpointTokenUsage)
 		}
+		// As condensation does, store the credited child-session share; see
+		// CompleteChildSessionTaskRecord for where its task record lands.
+		usage = session.WithChildSessionTokens(usage, state.PendingChildSessionTokens())
 	}
 	return usage, countTranscriptItems(ag.Type(), string(transcript))
 }
@@ -1193,13 +1206,19 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 // counted: the token offset moves to pos and the pending window is reset, so
 // the session's next checkpoint does not count them again. The displayed
 // transcript window (CheckpointTranscriptStart) is left alone.
+//
+// Credited child-session usage (PendingChildSessionTokens) is consumed too,
+// because AttachTokenUsage stored it, while that child's completed task record
+// stays in state and its task.json lands in the session's next checkpoint.
+// That checkpoint lists the task without its tokens; nothing is counted twice.
 func ConsumeAttachTokenWindow(state *SessionState, pos int) {
 	state.CheckpointTokenUsage = nil
 	state.RebaselineSubagentTokens()
 	state.SetTokenStart(pos)
 }
 
-func hasTokenUsageData(usage *agent.TokenUsage) bool {
+// HasTokenUsageData reports whether usage, or its subagent usage, carries any counts.
+func HasTokenUsageData(usage *agent.TokenUsage) bool {
 	if usage == nil {
 		return false
 	}
@@ -1208,7 +1227,7 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 		return true
 	}
 
-	return hasTokenUsageData(usage.SubagentTokens)
+	return HasTokenUsageData(usage.SubagentTokens)
 }
 
 // fillMissingSubagentTokensFrom fills absent child coverage from this checkpoint
@@ -1270,13 +1289,13 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 
 	if len(transcript) > 0 {
 		fullSessionUsage := agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
-		if hasTokenUsageData(fullSessionUsage) {
+		if HasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
 		}
 		logging.Debug(ctx, "copilot-cli: full-session token read produced no data, falling back to checkpoint usage")
 	}
 
-	if hasTokenUsageData(checkpointUsage) {
+	if HasTokenUsageData(checkpointUsage) {
 		return checkpointUsage
 	}
 
@@ -1604,7 +1623,7 @@ func calculateLiveTranscriptTokenUsage(
 	state.TokenUsage = replaceSubagentTokensFrom(state.TokenUsage, usage)
 	scoped := *usage
 	scoped.SubagentTokens = types.SubtractTokenUsage(usage.SubagentTokens, state.SubagentTokensBaseline)
-	if !hasTokenUsageData(scoped.SubagentTokens) {
+	if !HasTokenUsageData(scoped.SubagentTokens) {
 		// A zero delta is absence, not a checkpoint subagent total. Keeping an
 		// all-zero pointer would both change the JSON shape and prevent the normal
 		// SaveStep-computed window delta from filling this value later.
@@ -2085,16 +2104,48 @@ func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) 
 	return checkpointID, nil
 }
 
+// openSessionCondensationRepository uses the session's recorded worktree when
+// it is still available. The state path only selects a registered worktree of
+// this repository; a removed, replaced, or unusable worktree falls back to the
+// caller's repository. Registration alone does not establish the repository's
+// identity. The caller owns the returned repository.
+func openSessionCondensationRepository(ctx context.Context, state *SessionState) (*git.Repository, error) {
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve current worktree: %w", err)
+	}
+	if filepath.IsAbs(state.WorktreePath) && filepath.Clean(state.WorktreePath) != filepath.Clean(current) {
+		currentMetadata, err := gitrepo.ResolveWorktreeMetadata(current)
+		if err != nil {
+			return nil, fmt.Errorf("resolve current repository metadata: %w", err)
+		}
+		sessionMetadata, err := gitrepo.ResolveWorktreeMetadata(state.WorktreePath)
+		// The metadata resolver validates linked-worktree registration. Compare
+		// the validated common directories without spawning git under the lock.
+		if err == nil && sameDir(currentMetadata.CommonDir, sessionMetadata.CommonDir) {
+			var repo *git.Repository
+			repo, err = gitrepo.OpenPath(state.WorktreePath)
+			if err == nil {
+				return repo, nil
+			}
+		}
+		// A home that exists but cannot be used falls back like a removed one;
+		// failing here would leave the session's work pending on every retry.
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, gitrepo.ErrWorktreeMetadataNotFound) {
+			logging.Warn(logging.WithComponent(ctx, "checkpoint"), "session's recorded worktree is unusable; condensing from the current worktree's repository",
+				slog.String("session_id", state.SessionID),
+				slog.String("recorded_worktree", state.WorktreePath),
+				slog.String("error", err.Error()))
+		}
+	}
+	return gitrepo.OpenPath(current) //nolint:wrapcheck // OpenPath provides repository context
+}
+
 // CondenseSessionByID condenses a session by its ID and cleans up.
-// This is used by "entire doctor" to salvage stuck sessions.
+// Sweep and doctor salvage pending work using the session's recorded branch,
+// not the caller's HEAD (nor a later checkout in the session's worktree).
 func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionID string) error {
 	logCtx := logging.WithComponent(ctx, "condense-by-id")
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
 
 	// Records of worktrees removed since the session's last turn end are
 	// pruned first: no commit can carry those files, and salvaging them would
@@ -2156,6 +2207,12 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			return ErrMutationSkip
 		}
 
+		repo, err := openSessionCondensationRepository(ctx, state)
+		if err != nil {
+			return fmt.Errorf("failed to open repository: %w", err)
+		}
+		defer repo.Close()
+
 		// Resolve the stored copy's root once: the condensation reads it, and
 		// a successful one releases it from the same root.
 		storedRoot := storedSessionRootOrNil(ctx, state)
@@ -2164,7 +2221,11 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// not only the home's.
 		homeFiles := state.FilesTouched
 		state.FilesTouched = state.PendingFiles()
-		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true, storedRoot: storedRoot})
+		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{
+			reconcileInterrupted: true,
+			storedRoot:           storedRoot,
+			recordedBranch:       &state.Branch,
+		})
 		state.FilesTouched = homeFiles
 		if err != nil {
 			return fmt.Errorf("failed to condense session: %w", err)

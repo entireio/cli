@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/redact"
 )
 
 // checkpointMatchesSessionFilter returns true when any session that
@@ -480,6 +481,7 @@ type checkpointExportJSON struct {
 	HasReview        bool                    `json:"has_review,omitempty"`
 	HasInvestigation bool                    `json:"has_investigation,omitempty"`
 	SessionCount     int                     `json:"session_count"`
+	Redaction        *redact.Counts          `json:"redaction,omitempty"`
 	Sessions         []checkpointSessionJSON `json:"sessions"`
 	Tasks            []checkpointTaskJSON    `json:"tasks,omitzero"`
 	TasksError       string                  `json:"tasks_error,omitempty"`
@@ -528,6 +530,7 @@ type checkpointSessionJSON struct {
 	ToolUseID    string                    `json:"tool_use_id,omitempty"`
 	FilesTouched []string                  `json:"files_touched,omitempty"`
 	TokenUsage   *types.TokenUsage         `json:"token_usage,omitempty"`
+	Redaction    *redact.Counts            `json:"redaction,omitempty"`
 	Summary      *checkpointSessionSummary `json:"summary,omitempty"`
 
 	// Investigation tagging — set only on sessions whose Kind is an
@@ -639,6 +642,7 @@ func buildCheckpointJSONEnvelope(ctx context.Context, reader checkpointExportRea
 		HasReview:        summary.HasReview,
 		HasInvestigation: summary.HasInvestigation,
 		SessionCount:     len(summary.Sessions),
+		Redaction:        summary.Redaction,
 	}
 
 	envelope.Sessions = make([]checkpointSessionJSON, 0, len(summary.Sessions))
@@ -749,6 +753,7 @@ func sessionMetadataToJSON(idx int, meta *checkpoint.Metadata) checkpointSession
 	// The persisted shape, subagent totals and completeness marker included,
 	// with the subagent chain bounded (see boundedTokenUsage).
 	out.TokenUsage = boundedTokenUsage(meta.TokenUsage)
+	out.Redaction = meta.Redaction
 	if meta.Summary != nil {
 		out.Summary = summaryToExportJSON(meta.Summary)
 	}

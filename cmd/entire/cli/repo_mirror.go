@@ -189,6 +189,13 @@ type repoDirRow struct {
 	State           string             `json:"state,omitempty"`
 	ProvisionReason string             `json:"provisionReason,omitempty"`
 	Placements      []repoDirPlacement `json:"placements,omitempty"`
+	// SyncBlock is set when GitHub blocks the Entire installation serving this
+	// repo's owner, so no placement is being kept current. It sits on the row
+	// rather than on a placement because the block is per installation. Only
+	// `repo view` reads it (lookupMirrorSyncBlock: the repo's own mirror
+	// record, since the /repos placements do not carry it); the directory
+	// never sets it, so `mirror list --json` rows omit the key.
+	SyncBlock *mirrorSyncBlock `json:"syncBlock,omitempty"`
 }
 
 // visibilityOf renders a wire visibility string as the tri-state Private field:
@@ -650,6 +657,7 @@ func newRepoMirrorCmd() *cobra.Command {
 	cmd.AddCommand(newRepoMirrorAddCmd())
 	cmd.AddCommand(newRepoMirrorListCmd())
 	cmd.AddCommand(newRepoMirrorRemoveCmd())
+	cmd.AddCommand(newRepoMirrorResyncCmd())
 	cmd.AddCommand(newRepoMirrorDetachCmd())
 	return requireSubcommand(cmd)
 }
@@ -1346,8 +1354,24 @@ func runRepoMirrorViewByName(cmd *cobra.Command, ref, clusterHost string) error 
 			return err
 		}
 		row := mirrorRepoDetailRow(entry, clusterHostBySlug(clusters.Clusters))
+		// The block rides on the mirror record, not the directory entry, so
+		// it is one more exact read for this repo, by the placement ID the
+		// entry carries. A failed read is a note: the record is still right
+		// about everything else it shows — and --json says the read failed,
+		// since an absent block there would read as "not blocked".
+		block, blocked, berr := lookupMirrorSyncBlock(ctx, c, entry)
+		syncNoted, err := noteSyncStatusUnavailable(ctx, cmd.ErrOrStderr(), berr)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			row.SyncBlock = &block
+		}
 		if jsonRequested(cmd) {
 			view := mirrorRepoViewJSON{repoDirRow: row}
+			if syncNoted {
+				view.SyncStatus = syncStatusUnavailable
+			}
 			view.RepoID, view.APIURL, err = repoViewCoords(entry, clusters.Clusters)
 			if err != nil {
 				logging.Debug(ctx, "repo view: API coordinates unavailable", "error", err)
@@ -1366,6 +1390,9 @@ type mirrorRepoViewJSON struct {
 
 	RepoID string `json:"repoId,omitempty"`
 	APIURL string `json:"apiUrl,omitempty"`
+	// SyncStatus is "unavailable" when the block could not be read, and
+	// absent otherwise: with it absent, no syncBlock means not blocked.
+	SyncStatus string `json:"syncStatus,omitempty"`
 }
 
 // repoViewCoords reuses the routing resolver's selection and catalog join.
@@ -1433,6 +1460,9 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 	// for (reportNativeMirrorNotes).
 	if row.Access != "" {
 		section("Access", row.Access)
+	}
+	if row.SyncBlock != nil {
+		renderSyncBlock(w, st, row.Repo, row.SyncBlock)
 	}
 	fmt.Fprintln(w)
 

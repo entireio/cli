@@ -50,6 +50,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
+| `OutOfBandTokenSource` | `SnapshotTokenBaseline`, `CalculateTokenUsageSince` | Agent keeps token usage only outside its transcript, as a running total: the lifecycle snapshots it at turn start and records the difference at turn end, falling back to it when the transcript reports no usage (Antigravity's title tee, Factory AI Droid's per-session `.settings.json`). Built-in agents only |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
 | `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |

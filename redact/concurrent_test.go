@@ -65,10 +65,10 @@ func TestJSONLContentSharded_MatchesSequential(t *testing.T) {
 	// Comfortably above jsonlConcurrentMinBytes so sharding actually engages.
 	content := buildJSONLFixture(t, 4<<20)
 
-	sequential, err := jsonlContentImpl(content, String, concurrencyUnsafeRedactor)
+	sequential, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 	require.NoError(t, err)
 
-	concurrent, err := jsonlContentImpl(content, String, concurrencySafeRedactor)
+	concurrent, err := jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 	require.NoError(t, err)
 
 	require.Equal(t, sequential, concurrent,
@@ -82,7 +82,7 @@ func TestJSONLContentSharded_ShardBoundariesPreserveLines(t *testing.T) {
 	t.Parallel()
 
 	content := buildJSONLFixture(t, 3<<20)
-	out, err := jsonlContentImpl(content, String, concurrencySafeRedactor)
+	out, err := jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 	require.NoError(t, err)
 
 	require.Equal(t, strings.Count(content, "\n"), strings.Count(out, "\n"),
@@ -97,9 +97,9 @@ func TestJSONLContentSharded_SmallContentStaysSequential(t *testing.T) {
 	t.Parallel()
 
 	content := "{\"a\":\"hello\"}\n{\"b\":\"world\"}\n"
-	got, err := jsonlContentImpl(content, String, concurrencySafeRedactor)
+	got, err := jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 	require.NoError(t, err)
-	want, err := jsonlContentImpl(content, String, concurrencyUnsafeRedactor)
+	want, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 }
@@ -121,9 +121,9 @@ func TestJSONLContentSharded_EdgeShapes(t *testing.T) {
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			want, err := jsonlContentImpl(content, String, concurrencyUnsafeRedactor)
+			want, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 			require.NoError(t, err)
-			got, err := jsonlContentImpl(content, String, concurrencySafeRedactor)
+			got, err := jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 			require.NoError(t, err)
 			require.Equal(t, want, got)
 		})
@@ -136,7 +136,7 @@ func TestJSONLContent_ConcurrentCallsAreRaceFree(t *testing.T) {
 	t.Parallel()
 
 	content := buildJSONLFixture(t, 2<<20)
-	want, err := jsonlContentImpl(content, String, concurrencyUnsafeRedactor)
+	want, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 	require.NoError(t, err)
 
 	const callers = 8
@@ -260,7 +260,7 @@ func TestIsLineDelimited_AgreesWithRouting(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, handled, err := redactSingleJSONValue(content, String)
+			_, handled, err := redactSingleJSONValue(content, regexLayers)
 			require.NoError(t, err)
 			require.Equal(t, !handled, IsLineDelimited([]byte(content)),
 				"IsLineDelimited must mirror the redactor's own routing decision")

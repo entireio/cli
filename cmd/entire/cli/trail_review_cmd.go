@@ -950,7 +950,7 @@ func prepareTrailReviewCommentInputsForCreate(worktreeRoot string, inputs []api.
 func prepareTrailReviewLocationForCreate(worktreeRoot string, loc api.TrailReviewLocationCreateRequest) api.TrailReviewLocationCreateRequest {
 	switch loc.Granularity {
 	case reviewTrailGranularityLine, reviewTrailGranularityRange:
-		if loc.SelectedText != nil && strings.TrimSpace(*loc.SelectedText) != "" {
+		if loc.SelectedText != nil && strings.TrimSpace(*loc.SelectedText) != "" && withinPostedFindingCap(*loc.SelectedText) {
 			return loc
 		}
 		filePath := ""
@@ -966,7 +966,7 @@ func prepareTrailReviewLocationForCreate(worktreeRoot string, loc api.TrailRevie
 			endLine = *loc.EndLine
 		}
 		selected, fileOK, selectedOK := trailReviewSelectedTextFromWorktree(worktreeRoot, filePath, startLine, endLine)
-		if selectedOK {
+		if selectedOK && withinPostedFindingCap(selected) {
 			loc.SelectedText = stringPtr(selected)
 			return loc
 		}

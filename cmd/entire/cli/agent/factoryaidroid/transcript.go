@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -36,6 +37,9 @@ type droidEnvelope struct {
 type droidMessageRole struct {
 	Role string `json:"role"`
 }
+
+// roleAssistant is the role of a model reply in a normalized transcript line.
+const roleAssistant = "assistant"
 
 // ParseDroidTranscript parses a Droid JSONL file into normalized transcript.Line entries.
 // It transforms the Droid envelope format (type="message", role inside message) into the
@@ -125,7 +129,7 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 	var files []string
 
 	for _, line := range lines {
-		if line.Type != "assistant" {
+		if line.Type != roleAssistant {
 			continue
 		}
 
@@ -167,7 +171,7 @@ func CalculateTokenUsage(transcriptLines []TranscriptLine) *agent.TokenUsage {
 	usageByMessageID := make(map[string]messageUsage)
 
 	for _, line := range transcriptLines {
-		if line.Type != "assistant" {
+		if line.Type != roleAssistant {
 			continue
 		}
 
@@ -290,34 +294,53 @@ func ExtractSpawnedAgentIDs(transcriptLines []TranscriptLine) map[string]string 
 // droidSettings represents the .settings.json file that Factory AI Droid
 // stores alongside each session transcript JSONL.
 type droidSettings struct {
-	Model string `json:"model"`
+	Model      string           `json:"model"`
+	TokenUsage *droidTokenUsage `json:"tokenUsage"`
 }
 
-// ExtractModelFromTranscript extracts the LLM model name from the Factory AI Droid
-// session settings file. Factory AI Droid stores a .settings.json file alongside
-// each transcript JSONL (e.g., <session-id>.settings.json next to <session-id>.jsonl).
-// The settings file contains the actual model being used, unlike the transcript's
-// system-reminder text which can be stale after provider switches.
-// Returns empty string if the settings file cannot be read or has no model.
-func ExtractModelFromTranscript(ctx context.Context, transcriptPath string) string {
+// readSessionSettings reads the .settings.json Factory AI Droid stores beside
+// each transcript (<session-id>.settings.json next to <session-id>.jsonl).
+// It is the one read of a path derived from the hook's transcript path, and it
+// reads only a regular file, so a symlink or FIFO in its place is not followed.
+// A missing file returns an error wrapping fs.ErrNotExist; callers that must
+// tell "not written yet" from "unreadable" check for it.
+func readSessionSettings(ctx context.Context, transcriptPath string) (droidSettings, error) {
 	if transcriptPath == "" {
-		return ""
+		return droidSettings{}, fmt.Errorf("droid settings: %w", fs.ErrNotExist)
 	}
 
 	settingsPath := strings.TrimSuffix(transcriptPath, ".jsonl") + ".settings.json"
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // Path derived from agent hook input
+	info, err := os.Lstat(settingsPath)
 	if err != nil {
-		return ""
+		return droidSettings{}, fmt.Errorf("stat droid settings: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return droidSettings{}, fmt.Errorf("droid settings %s is not a regular file", settingsPath)
+	}
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // regular file beside the hook's transcript
+	if err != nil {
+		return droidSettings{}, fmt.Errorf("read droid settings: %w", err)
 	}
 
 	var settings droidSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		logging.Warn(ctx, "factoryai-droid: corrupt settings file, cannot extract model",
+		logging.Warn(ctx, "factoryai-droid: corrupt settings file",
 			slog.String("path", settingsPath),
 			slog.String("error", err.Error()))
+		return droidSettings{}, fmt.Errorf("parse droid settings: %w", err)
+	}
+	return settings, nil
+}
+
+// ExtractModelFromTranscript extracts the LLM model name from the Factory AI Droid
+// session settings file. The settings file contains the actual model being used,
+// unlike the transcript's system-reminder text which can be stale after provider
+// switches. Returns empty string if the settings file cannot be read or has no model.
+func ExtractModelFromTranscript(ctx context.Context, transcriptPath string) string {
+	settings, err := readSessionSettings(ctx, transcriptPath)
+	if err != nil {
 		return ""
 	}
-
 	return cleanModelName(settings.Model)
 }
 
