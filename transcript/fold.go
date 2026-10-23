@@ -136,18 +136,8 @@ func (f *Folder) line(m *message) ([]byte, bool) {
 	line.ID = m.sourceID
 	line.InputTokens = int64(m.inputTokens)
 	line.OutputTokens = int64(m.outputTokens)
-	if u := m.usage; u != nil && m.role == TypeAssistant {
-		line.Model = u.Model
-		if line.Model == "" {
-			line.Model = unknownModel
-		}
-		line.InputTokens = u.InputTokens
-		line.OutputTokens = u.OutputTokens
-		line.CacheReadTokens = u.CacheReadTokens
-		line.CacheWriteTokens = u.CacheWriteTokens
-		line.CacheWrite5mTokens = u.CacheWrite5mTokens
-		line.CacheWrite1hTokens = u.CacheWrite1hTokens
-		line.ReasoningTokens = u.ReasoningTokens
+	if m.usage != nil && m.role == TypeAssistant {
+		applyCallUsage(&line, m.usage)
 	}
 	line.Content = content
 	b, err := json.Marshal(line)

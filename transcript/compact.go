@@ -50,6 +50,22 @@ func newTranscriptLine(opts Options) transcriptLine {
 	}
 }
 
+// applyCallUsage sets the per-call model and usage fields of an assistant line
+// from u, reporting unknownModel when u names none.
+func applyCallUsage(line *transcriptLine, u *CallUsage) {
+	line.Model = u.Model
+	if line.Model == "" {
+		line.Model = unknownModel
+	}
+	line.InputTokens = u.InputTokens
+	line.OutputTokens = u.OutputTokens
+	line.CacheReadTokens = u.CacheReadTokens
+	line.CacheWriteTokens = u.CacheWriteTokens
+	line.CacheWrite5mTokens = u.CacheWrite5mTokens
+	line.CacheWrite1hTokens = u.CacheWrite1hTokens
+	line.ReasoningTokens = u.ReasoningTokens
+}
+
 // userTextBlock is a text block within user message content.
 type userTextBlock struct {
 	ID   string `json:"id,omitempty"`
