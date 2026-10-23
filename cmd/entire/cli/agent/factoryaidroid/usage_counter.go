@@ -45,8 +45,10 @@ type usageCounter struct {
 	Messages agent.KeyedUsage `json:"messages"`
 	// Settings is each session's latest settings.json total.
 	Settings map[string]*agent.TokenUsage `json:"settings,omitempty"`
-	// Sessions maps each file Files returned to its session ("" = this one).
-	Sessions map[string]string `json:"sessions,omitempty"`
+	// sessions maps each file Files returned to its session ("" = this one),
+	// rebuilt each reading; workers caches the reading's Worker scan.
+	sessions map[string]string
+	workers  map[string]string
 }
 
 // Files are the session's transcript and settings.json, and the same pair for
@@ -58,24 +60,31 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	if sessionID == "" {
 		sessionID = strings.TrimSuffix(filepath.Base(in.TranscriptPath), ".jsonl")
 	}
-	u.Sessions = map[string]string{}
-	var files []agent.UsageFile
+	u.sessions = map[string]string{}
+	// The session's own transcript is not the only source of its total, so a
+	// rewrite of it is not reported (see UsageFile.NoRestart).
+	files := []agent.UsageFile{{Path: in.TranscriptPath, NoRestart: true}}
 	add := func(child, transcriptPath string) {
 		settingsPath := strings.TrimSuffix(transcriptPath, ".jsonl") + settingsSuffix
-		u.Sessions[transcriptPath], u.Sessions[settingsPath] = child, child
-		files = append(files, agent.UsageFile{Path: transcriptPath}, agent.UsageFile{Path: settingsPath, Whole: true})
+		u.sessions[transcriptPath], u.sessions[settingsPath] = child, child
+		if child != "" {
+			files = append(files, agent.UsageFile{Path: transcriptPath, ID: "worker:" + child})
+		}
+		files = append(files, agent.UsageFile{Path: settingsPath, ID: "settings:" + child, Whole: true})
 	}
 	add("", in.TranscriptPath)
-	dir := filepath.Dir(in.TranscriptPath)
-	workers := findWorkerSessions([]string{dir, filepath.Dir(dir)}, sessionID)
-	for _, workerID := range slices.Sorted(maps.Keys(workers)) {
-		add(workerID, workers[workerID])
+	if u.workers == nil {
+		dir := filepath.Dir(in.TranscriptPath)
+		u.workers = findWorkerSessions([]string{dir, filepath.Dir(dir)}, sessionID)
+	}
+	for _, workerID := range slices.Sorted(maps.Keys(u.workers)) {
+		add(workerID, u.workers[workerID])
 	}
 	return files
 }
 
 func (u *usageCounter) Add(path string, data []byte, firstLine int) {
-	child := u.Sessions[path]
+	child := u.sessions[path]
 	if strings.HasSuffix(path, settingsSuffix) {
 		var settings droidSettings
 		if json.Unmarshal(data, &settings) != nil || settings.TokenUsage == nil {
@@ -100,7 +109,7 @@ func (u *usageCounter) Add(path string, data []byte, firstLine int) {
 		}
 		key := line.UUID
 		if key == "" {
-			key = "line:" + strconv.Itoa(firstLine+i)
+			key = "entry:" + strconv.Itoa(firstLine+i)
 		}
 		u.Messages.Add(child, key, agent.TokenUsage{APICallCount: 1})
 		var msg messageWithUsage
@@ -118,7 +127,7 @@ func (u *usageCounter) Add(path string, data []byte, firstLine int) {
 }
 
 func (u *usageCounter) Reset(path string) {
-	child := u.Sessions[path]
+	child := u.sessions[path]
 	if strings.HasSuffix(path, settingsSuffix) {
 		delete(u.Settings, child)
 		return
@@ -129,7 +138,7 @@ func (u *usageCounter) Reset(path string) {
 
 func (u *usageCounter) Totals(context.Context, agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage) {
 	var children map[string]*agent.TokenUsage
-	for _, child := range slices.Sorted(maps.Values(u.Sessions)) {
+	for _, child := range slices.Sorted(maps.Values(u.sessions)) {
 		if child == "" || children[child] != nil {
 			continue
 		}

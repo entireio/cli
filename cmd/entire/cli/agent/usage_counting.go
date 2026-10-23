@@ -29,7 +29,7 @@ const (
 
 // KeyedUsage sums per-call records once per (child, key). The child is ""
 // for the main agent. Records stay open to later copies while they are among
-// the latest Window; older ones are closed into a sum. With Remember, a
+// their child's latest Window; older ones are closed into a sum. With Remember, a
 // closed record's key is kept (hashed) so a replay long after is skipped.
 // Policy, Window and Remember are set by the counter's constructor; the rest
 // is saved state.
@@ -64,9 +64,20 @@ func (k *KeyedUsage) Add(child, key string, usage TokenUsage) {
 		return
 	}
 	k.Open = append(k.Open, keyedRecord{Child: child, Key: key, Usage: usage})
-	for len(k.Open) > k.Window {
-		k.close(k.Open[0])
-		k.Open = k.Open[1:]
+	// The window is per child: files are read one after another, so another
+	// file's records must not close a message whose next line is still to come.
+	open, oldest := 0, -1
+	for i, r := range k.Open {
+		if r.Child == child {
+			if oldest < 0 {
+				oldest = i
+			}
+			open++
+		}
+	}
+	if open > k.Window {
+		k.close(k.Open[oldest])
+		k.Open = append(k.Open[:oldest], k.Open[oldest+1:]...)
 	}
 }
 
@@ -141,6 +152,23 @@ func (k *KeyedUsage) Mark() { k.Marked = k.All() }
 // total covers yet.
 func (k *KeyedUsage) CoveredBy(total *TokenUsage) *TokenUsage {
 	return types.AddTokenUsage(MaxTokenUsage(k.Marked, total), types.SubtractTokenUsage(k.All(), k.Marked))
+}
+
+// CloseChild closes child's open records: its file was read whole, so no
+// later line can extend them.
+func (k *KeyedUsage) CloseChild(child string) {
+	open := k.Open[:0]
+	for _, r := range k.Open {
+		if r.Child == child {
+			if k.Closed == nil {
+				k.Closed = make(map[string]*TokenUsage)
+			}
+			k.Closed[child] = types.AddTokenUsage(k.Closed[child], &r.Usage)
+		} else {
+			open = append(open, r)
+		}
+	}
+	k.Open = open
 }
 
 // ResetChild forgets child's records, for a file read again from its start.

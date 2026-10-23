@@ -19,6 +19,7 @@ type usageCase struct {
 	SessionID  string                       `json:"session_id"`
 	Transcript string                       `json:"transcript"`
 	Whole      bool                         `json:"whole"`
+	NoRestart  bool                         `json:"no_restart"`
 	Total      *agent.TokenUsage            `json:"total"`
 	Children   map[string]*agent.TokenUsage `json:"children"`
 }
@@ -94,7 +95,7 @@ func TestUsageCounters_Conformance(t *testing.T) {
 			older := bytes.Join(lines[:len(lines)/2], nil)
 			require.NoError(t, os.WriteFile(in.TranscriptPath, older, 0o600))
 			rewritten := read(whole.Cursor)
-			require.True(t, rewritten.Restarted, "a shorter transcript was rewritten")
+			require.Equal(t, !c.NoRestart, rewritten.Restarted, "a shorter transcript was rewritten")
 			fresh := read(nil)
 			require.Equal(t, fresh.Total, rewritten.Total, "after a rewrite the total is the older copy's")
 		})

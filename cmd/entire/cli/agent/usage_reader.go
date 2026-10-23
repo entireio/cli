@@ -52,11 +52,21 @@ type CumulativeObservation struct {
 // UsageFile is one file a UsageCounter reads.
 type UsageFile struct {
 	Path string
-	// Whole marks a file rewritten rather than appended to (OpenCode's export,
-	// Droid's settings.json). It is read whole whenever it changes, and a
-	// change is never reported as a restart: a lower total there is a stale
-	// copy, not a rewrite.
+	// ID names what the file holds when its path can change (a Claude Code
+	// subagent found first in a Workflow run directory, later at its direct
+	// location); it defaults to Path. A new path for an ID is read from its
+	// start, after Reset.
+	ID string
+	// Whole marks a file read whole whenever it changes: one rewritten rather
+	// than appended to (OpenCode's export, Droid's settings.json), or a small
+	// one whose total is all the counter keeps (a Claude Code subagent). A
+	// change, seen in its size or last bytes, is never reported as a restart:
+	// a lower total there is a stale copy, not a rewrite.
 	Whole bool
+	// NoRestart keeps a rewrite of the main transcript from being reported:
+	// the counter's total also rests on a file that does not shrink with it
+	// (Droid's settings.json), so a lower total is not a rewritten session.
+	NoRestart bool
 }
 
 // UsageCounter is an agent's running token count. ReadCumulativeUsage owns
@@ -95,9 +105,9 @@ type UsageCounterSource interface {
 
 // usageCursorVersion changes whenever the cursor's meaning does, so a cursor
 // from another version is ignored and the files read from their start.
-const usageCursorVersion = 2
+const usageCursorVersion = 3
 
-// usageCursorCheckBytes is how much of a file's consumed prefix a cursor
+// usageCursorCheckBytes is how many bytes before a file's offset a cursor
 // fingerprints. A rewrite that keeps these bytes and the length is not
 // detected; a transcript rewritten by a resume or compaction does not.
 const usageCursorCheckBytes = 512
@@ -113,10 +123,12 @@ type usageCursor struct {
 	State   json.RawMessage          `json:"state,omitempty"`
 }
 
-// usageFileMark is how far a file was read: Offset is the end of the last
-// complete line consumed, Lines how many lines that was, and Check
-// fingerprints the bytes before Offset (a whole file: all of them).
+// usageFileMark is how far a file was read: Path is where it was read,
+// Offset the end of the last complete line consumed, Lines how many lines that
+// was, and Check fingerprints the 512 bytes before Offset (a whole file: all
+// of it).
 type usageFileMark struct {
+	Path   string `json:"p"`
 	Offset int    `json:"o"`
 	Lines  int    `json:"l,omitempty"`
 	Check  string `json:"c,omitempty"`
@@ -157,21 +169,25 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 	for pass := range maxUsageFilePasses {
 		progressed := false
 		for i, f := range counter.Files(in) {
-			if read[f.Path] {
+			id := f.ID
+			if id == "" {
+				id = f.Path
+			}
+			if read[id] {
 				continue
 			}
-			read[f.Path] = true
+			read[id] = true
 			progressed = true
 			main := pass == 0 && i == 0
-			mark, restarted, readErr := readUsageFile(counter, f, cur.Files[f.Path], main)
+			mark, restarted, readErr := readUsageFile(counter, f, cur.Files[id], main)
 			if readErr != nil {
 				if main {
 					return CumulativeObservation{}, true, readErr
 				}
 				continue // not written yet, or already cleaned up
 			}
-			marks[f.Path] = mark
-			obs.Restarted = obs.Restarted || (main && restarted)
+			marks[id] = mark
+			obs.Restarted = obs.Restarted || (main && restarted && !f.NoRestart)
 		}
 		if !progressed {
 			break
@@ -195,17 +211,31 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 // file that no longer begins with what prev consumed; a cursor that consumed
 // nothing cannot tell a rewrite from growth, and a whole file never restarts.
 func readUsageFile(counter UsageCounter, f UsageFile, prev usageFileMark, main bool) (usageFileMark, bool, error) {
+	if prev.Path != f.Path {
+		// Read before, at another path or never: start over.
+		if prev.Path != "" {
+			counter.Reset(f.Path)
+		}
+		prev = usageFileMark{}
+	}
 	if f.Whole {
+		if prev.Offset > 0 {
+			// Unchanged when its size and last bytes are: skip the read.
+			tail, size, err := readUsageBytes(f.Path, max(prev.Offset-usageCursorCheckBytes, 0), main)
+			if err != nil {
+				return usageFileMark{}, false, err
+			}
+			if size == prev.Offset && fingerprint(tail) == prev.Check {
+				return prev, false, nil
+			}
+		}
 		data, _, err := readUsageBytes(f.Path, 0, main)
 		if err != nil {
 			return usageFileMark{}, false, err
 		}
-		mark := usageFileMark{Offset: len(data), Check: fingerprint(data)}
-		if mark != prev {
-			counter.Reset(f.Path)
-			counter.Add(f.Path, data, 0)
-		}
-		return mark, false, nil
+		counter.Reset(f.Path)
+		counter.Add(f.Path, data, 0)
+		return usageFileMark{Path: f.Path, Offset: len(data), Check: fingerprint(data[max(len(data)-usageCursorCheckBytes, 0):])}, false, nil
 	}
 
 	start := max(prev.Offset-usageCursorCheckBytes, 0)
@@ -215,21 +245,23 @@ func readUsageFile(counter UsageCounter, f UsageFile, prev usageFileMark, main b
 	}
 	restarted := false
 	if prev.Offset > 0 && (size < prev.Offset || fingerprint(data[:prev.Offset-start]) != prev.Check) {
-		restarted = true
-		counter.Reset(f.Path)
-		prev, start = usageFileMark{}, 0
 		if data, _, err = readUsageBytes(f.Path, 0, main); err != nil {
 			return usageFileMark{}, false, err
 		}
+		restarted = true
+		counter.Reset(f.Path)
+		prev, start = usageFileMark{}, 0
 	}
 	appended := data[prev.Offset-start:]
 	end := bytes.LastIndexByte(appended, '\n') + 1 // a line still being written waits
 	if end == 0 {
+		prev.Path = f.Path
 		return prev, restarted, nil
 	}
 	counter.Add(f.Path, appended[:end], prev.Lines)
 	offset := prev.Offset + end
 	return usageFileMark{
+		Path:   f.Path,
 		Offset: offset,
 		Lines:  prev.Lines + bytes.Count(appended[:end], []byte("\n")),
 		Check:  fingerprint(data[max(offset-usageCursorCheckBytes, start)-start : offset-start]),

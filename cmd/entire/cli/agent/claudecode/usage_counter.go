@@ -24,21 +24,26 @@ const openMessageWindow = 64
 // the line with the most output (its final streaming state). Children are the
 // subagent transcripts the session launched, keyed by agent ID, including
 // subagents a subagent launched: their launch is in the launching subagent's
-// transcript, and they share the session's subagents directory.
+// transcript, and they share the session's subagents directory. A subagent's
+// transcript is read whole when it changed and only its total kept, so a
+// session with hundreds of subagents keeps a small cursor.
 func (c *ClaudeCodeAgent) NewUsageCounter() agent.UsageCounter {
 	return &usageCounter{Calls: agent.KeyedUsage{Policy: agent.KeepMostOutput, Window: openMessageWindow}}
 }
 
 type usageCounter struct {
 	Calls agent.KeyedUsage `json:"calls"`
-	// Launched maps each subagent a transcript launched to its transcript;
-	// RunIDs are the Workflow runs launched, whose agents are found on disk.
-	Launched map[string]string `json:"launched,omitempty"`
-	RunIDs   []string          `json:"run_ids,omitempty"`
-	// Dir is the session's subagents directory; Agents maps each subagent
-	// transcript Files returned to its agent ID.
-	Dir    string            `json:"dir,omitempty"`
-	Agents map[string]string `json:"agents,omitempty"`
+	// Launched are the subagents a transcript launched, found at
+	// <dir>/agent-<id>.jsonl; RunIDs are the Workflow runs launched, whose
+	// agents are found on disk.
+	Launched []string `json:"launched,omitempty"`
+	RunIDs   []string `json:"run_ids,omitempty"`
+	// dir is the session's subagents directory and agents maps each subagent
+	// transcript Files returned to its agent ID: both rebuilt each reading.
+	// runs caches each Workflow run's agents for the reading.
+	dir    string
+	agents map[string]string
+	runs   map[string]map[string]string
 }
 
 func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
@@ -46,9 +51,19 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	if in.SessionID == "" {
 		return files
 	}
-	u.Dir = paths.SubagentsDir(filepath.Dir(in.TranscriptPath), in.SessionID)
-	children := subagentTranscriptPaths(nil, u.RunIDs, u.Dir)
-	for agentID, path := range u.Launched {
+	u.dir = paths.SubagentsDir(filepath.Dir(in.TranscriptPath), in.SessionID)
+	if u.runs == nil {
+		u.runs = make(map[string]map[string]string)
+	}
+	children := make(map[string]string)
+	for _, runID := range u.RunIDs {
+		if _, listed := u.runs[runID]; !listed {
+			u.runs[runID] = paths.WorkflowRunAgentTranscripts(u.dir, runID)
+		}
+		paths.MergeWorkflowAgentTranscripts(children, u.runs[runID])
+	}
+	for _, agentID := range u.Launched {
+		path := filepath.Join(u.dir, paths.AgentTranscriptFileName(agentID))
 		// A Workflow agent's direct location wins only when it exists, as in
 		// subagentTranscriptPaths.
 		if _, inRun := children[agentID]; inRun && !fileExists(path) {
@@ -56,10 +71,10 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 		}
 		children[agentID] = path
 	}
-	u.Agents = make(map[string]string, len(children))
+	u.agents = make(map[string]string, len(children))
 	for _, agentID := range slices.Sorted(maps.Keys(children)) {
-		u.Agents[children[agentID]] = agentID
-		files = append(files, agent.UsageFile{Path: children[agentID]})
+		u.agents[children[agentID]] = agentID
+		files = append(files, agent.UsageFile{Path: children[agentID], ID: "agent:" + agentID, Whole: true})
 	}
 	return files
 }
@@ -69,7 +84,7 @@ func (u *usageCounter) Add(path string, data []byte, _ int) {
 	if err != nil {
 		return
 	}
-	child := u.Agents[path]
+	child := u.agents[path]
 	for _, line := range lines {
 		if line.Type != envelopeTypeAssistant {
 			continue
@@ -88,7 +103,11 @@ func (u *usageCounter) Add(path string, data []byte, _ int) {
 			APICallCount:        1,
 		})
 	}
-	if u.Dir == "" {
+	if child != "" {
+		// A subagent's transcript is read whole: keep only its total.
+		u.Calls.CloseChild(child)
+	}
+	if u.dir == "" {
 		return
 	}
 	for _, runID := range workflowRunIDsFromToolUseResults(data) {
@@ -97,15 +116,14 @@ func (u *usageCounter) Add(path string, data []byte, _ int) {
 	for _, runID := range ExtractWorkflowRunIDs(lines) {
 		u.RunIDs = appendWorkflowRunID(u.RunIDs, runID)
 	}
-	for agentID, launched := range subagentTranscriptPaths(spawnedAgentIDs(data, lines), nil, u.Dir) {
-		if u.Launched == nil {
-			u.Launched = make(map[string]string)
+	for agentID := range spawnedAgentIDs(data, lines) {
+		if !slices.Contains(u.Launched, agentID) {
+			u.Launched = append(u.Launched, agentID)
 		}
-		u.Launched[agentID] = launched
 	}
 }
 
-func (u *usageCounter) Reset(path string) { u.Calls.ResetChild(u.Agents[path]) }
+func (u *usageCounter) Reset(path string) { u.Calls.ResetChild(u.agents[path]) }
 
 func (u *usageCounter) Totals(context.Context, agent.CumulativeTokenInput) (*agent.TokenUsage, map[string]*agent.TokenUsage) {
 	return u.Calls.Sum(""), u.Calls.Children()

@@ -46,10 +46,12 @@ type TokenLedger struct {
 // an older copy): the difference moves to Base so the session total carries
 // on from where it was, and calls made after the rewrite add on top. A lower
 // total without a restart is a reading of a stale copy of the transcript
-// (OpenCode's export) and is ignored. Only resumable sources (Claude Code,
-// Codex) can report a restart, so for the others a real rewrite to a lower
-// total (an OpenCode undo) is ignored too: calls after it count only once the
-// total passes the old one, an undercount rather than a double count.
+// (OpenCode's export) and is ignored. Only an appended transcript can report
+// a restart, so for a rewritten file (an OpenCode undo) or a total that also
+// rests on a file that does not shrink with the transcript (Droid's
+// settings.json), a real rewrite to a lower total is ignored too: calls after
+// it count only once the total passes the old one, an undercount rather than
+// a double count.
 func (l *TokenLedger) Observe(obs agent.CumulativeObservation) {
 	switch {
 	case usageTotal(obs.Total) >= usageTotal(l.Main):

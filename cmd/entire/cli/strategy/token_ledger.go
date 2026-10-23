@@ -45,6 +45,12 @@ func ObserveTokenLedger(ctx context.Context, state *SessionState) bool {
 	if err != nil {
 		return state.TokenLedger.IsActive()
 	}
+	if _, ok := agent.AsUsageCounterSource(ag); !ok {
+		// The session's agent changed to one that reports no running totals:
+		// hand back to the per-turn accounting rather than freeze the total.
+		state.TokenLedger = nil
+		return false
+	}
 	if isSubagentSession(ag, state.TranscriptPath) {
 		// A subagent's own session (a Droid Worker) reaches the parent as one
 		// of the parent's children; a total of its own would count it twice.

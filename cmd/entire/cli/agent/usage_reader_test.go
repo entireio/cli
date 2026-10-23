@@ -194,3 +194,69 @@ func TestKeyedUsage(t *testing.T) {
 		require.Equal(t, 38, r.Value().OutputTokens)
 	})
 }
+
+// A child's message whose next line arrives in a later reading stays open
+// however many records other files add meanwhile.
+func TestKeyedUsage_WindowIsPerChild(t *testing.T) {
+	t.Parallel()
+	k := KeyedUsage{Policy: KeepMostOutput, Window: 2}
+	k.Add("child", "c1", TokenUsage{OutputTokens: 10, APICallCount: 1})
+	for i := range 5 {
+		k.Add("", string(rune('a'+i)), TokenUsage{OutputTokens: 1, APICallCount: 1})
+	}
+	k.Add("child", "c1", TokenUsage{OutputTokens: 50, APICallCount: 1})
+	require.Equal(t, &TokenUsage{OutputTokens: 50, APICallCount: 1}, k.Children()["child"])
+}
+
+// A file that moves (a Claude Code Workflow agent found later at its direct
+// location) is read from its start at the new path, without counting twice.
+func TestReadCumulativeUsage_MovedFileIsReadAgain(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, before, after := filepath.Join(dir, "t.jsonl"), filepath.Join(dir, "run.jsonl"), filepath.Join(dir, "direct.jsonl")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	require.NoError(t, os.WriteFile(before, []byte("1\n2\n"), 0o600))
+	require.NoError(t, os.WriteFile(after, []byte("1\n2\n3\n"), 0o600))
+	moved := &movingAgent{files: []UsageFile{{Path: before, ID: "kid"}}}
+	obs := readLines(t, moved, path, nil)
+	require.Equal(t, 2, calls(obs))
+	moved.files = []UsageFile{{Path: after, ID: "kid"}}
+	require.Equal(t, 3, calls(readLines(t, moved, path, obs.Cursor)))
+}
+
+// movingAgent counts lines per ID, so a file's lines are one child's.
+type movingAgent struct {
+	mockAgent
+
+	files []UsageFile
+}
+
+func (a *movingAgent) NewUsageCounter() UsageCounter {
+	return &movingCounter{lineCounter: lineCounter{extra: a.files}, ids: map[string]string{}}
+}
+
+type movingCounter struct {
+	lineCounter
+
+	ids map[string]string
+}
+
+func (c *movingCounter) Files(in CumulativeTokenInput) []UsageFile {
+	for _, f := range c.extra {
+		c.ids[f.Path] = f.ID
+	}
+	return c.lineCounter.Files(in)
+}
+
+func (c *movingCounter) Add(path string, data []byte, n int) {
+	c.lineCounter.Add(c.key(path), data, n)
+}
+
+func (c *movingCounter) Reset(path string) { c.lineCounter.Reset(c.key(path)) }
+
+func (c *movingCounter) key(path string) string {
+	if id := c.ids[path]; id != "" {
+		return id
+	}
+	return path
+}
