@@ -248,6 +248,39 @@ func TestIsSetUpAny_IgnoresAUserEntryForAnotherRepo(t *testing.T) {
 		"an entry naming a different origin must not activate this repository")
 }
 
+// Whether Entire is on is a per-repository fact. A machine-wide `enabled`
+// would make every repository on the machine read as set up, so status, a
+// first `entire enable`, and bare `entire` would all skip first-run setup.
+func TestIsSetUpAny_IgnoresAMachineWideEnabled(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			root := t.TempDir()
+			testutil.InitRepo(t, root)
+			t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+			t.Cleanup(ClearOriginKeyCache)
+			t.Chdir(root)
+
+			writeUserSettings(t, `{"preferences": {"enabled": `+value+`}}`)
+
+			assert.False(t, IsSetUpAny(t.Context()),
+				"a machine-wide enabled must not make a never-enabled repository read as set up")
+		})
+	}
+}
+
+func TestUserTier_MachineWideEnabledIsDroppedAndTheRestApplies(t *testing.T) {
+	_, project, local := newUserTierRepo(t)
+	writeUserSettings(t, `{"preferences": {"enabled": false, "log_level": "debug"}}`)
+
+	s, err := loadMergedSettings(t.Context(), project, "", local)
+	require.NoError(t, err)
+
+	assert.True(t, s.Enabled, "the repository's own settings decide whether it is on")
+	assert.Equal(t, "debug", s.LogLevel, "the rest of the block still applies")
+	require.Len(t, s.UserLayerRejections(), 1)
+	assert.Contains(t, s.UserLayerRejections()[0], "enabled")
+}
+
 // Instruction fields set in the user settings file must survive the agent
 // prompt gate. That gate drops any field it cannot attribute to a
 // developer-owned layer, and it knew about two: a verified settings.local.json

@@ -95,6 +95,14 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 		if err != nil {
 			overlay.reject(ctx, fmt.Sprintf("%s: %v", userPreferencesBlock, err))
 		} else {
+			// Whether Entire is on is a per-repository fact. A machine-wide
+			// one would make every repository on the machine read as set up,
+			// so it is dropped on its own and the rest of the block applies.
+			if prefs != nil && prefs.Enabled != nil {
+				overlay.reject(ctx, fmt.Sprintf("%s: enabled is not read here; set it for one repository under %s",
+					userPreferencesBlock, userReposBlock))
+				prefs.Enabled = nil
+			}
 			overlay.preferences = prefs
 		}
 	}
@@ -217,6 +225,7 @@ func ClearOriginKeyCache() {
 	originKeysMu.Lock()
 	defer originKeysMu.Unlock()
 	clear(originKeysByRoot)
+	usersettings.ClearCommonDirCache()
 }
 
 func originKeysCached(ctx context.Context, worktreeRoot string) ([]string, bool, error) {
@@ -347,8 +356,8 @@ func UserSettingsReadError(ctx context.Context) error {
 }
 
 // UserTierConfiguresRepo reports whether the user settings file says anything
-// about this repository — a matching `repos` entry, or a machine-wide
-// `enabled`.
+// about this repository: a matching `repos` entry. Machine-wide preferences
+// configure no repository in particular, so they never count.
 //
 // IsSetUpAny uses this. Without it, a linked worktree of a repository enabled
 // only through this tier has no .entire directory of its own, reads as "never
@@ -356,9 +365,6 @@ func UserSettingsReadError(ctx context.Context) error {
 // IsSetUpAny guard exists to prevent, reached through a different door.
 func UserTierConfiguresRepo(ctx context.Context, worktreeRoot string) bool {
 	overlay := loadUserOverlay(ctx)
-	if overlay.preferences != nil && overlay.preferences.Enabled != nil {
-		return true
-	}
 	return len(overlay.repoPreferences(ctx, worktreeRoot)) > 0
 }
 
