@@ -158,7 +158,8 @@ func writeDroidTokenUsage(t *testing.T, transcriptPath string, input, output int
 // TestTokenLedger_FactoryDroid_WorkerAndSecondStop: a prompt that launches a
 // Worker ends with two Stops and no turn start between them; the second
 // counts what the parent used after the Worker returned. The Worker's usage
-// reaches the parent as a child, never as a session total of its own.
+// reaches the parent once, credited as child-session tokens, never as a
+// session total of its own.
 func TestTokenLedger_FactoryDroid_WorkerAndSecondStop(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
@@ -189,10 +190,12 @@ func TestTokenLedger_FactoryDroid_WorkerAndSecondStop(t *testing.T) {
 	require.NoError(t, env.SimulateFactoryDroidStop(parent.ID, parent.TranscriptPath))
 	require.NoError(t, env.SimulateFactoryDroidStop(parent.ID, parent.TranscriptPath), "a repeated Stop")
 
-	total := sessionTokenTotal(t, env, parent.ID)
+	parentState, err := env.GetSessionState(parent.ID)
+	require.NoError(t, err)
+	total := parentState.TotalTokenUsage()
 	require.Equal(t, 130, total.InputTokens, "the second Stop's usage is counted once")
 	require.Equal(t, 15, total.OutputTokens)
-	require.NotNil(t, total.SubagentTokens, "the Worker is the parent's child")
+	require.NotNil(t, total.SubagentTokens, "the Worker is credited to the parent once")
 	require.Equal(t, 40, total.SubagentTokens.InputTokens)
 
 	workerState, err := env.GetSessionState(worker.ID)

@@ -3987,6 +3987,10 @@
           "suspendedAt": {
             "format": "date-time",
             "type": "string"
+          },
+          "syncBlock": {
+            "$ref": "#/components/schemas/MirrorSyncBlock",
+            "description": "Present while GitHub blocks the upstream's GitHub App installation, so the mirror cannot sync. The block is per installation: every placement of the upstream carries the same value."
           }
         },
         "required": [
@@ -4097,6 +4101,25 @@
           "mirrorId",
           "mirrorUrl",
           "publicUrl"
+        ],
+        "type": "object"
+      },
+      "MirrorSyncBlock": {
+        "additionalProperties": true,
+        "properties": {
+          "observedAt": {
+            "description": "When Core last observed the block. The periodic re-probe and a customer resync both refresh it.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why GitHub refused the mint: org_ip_allowlist or installation_suspended. Other values may be added.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "observedAt"
         ],
         "type": "object"
       },
@@ -5955,6 +5978,66 @@
         ],
         "type": "object"
       },
+      "ResyncMirrorInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResyncMirrorInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "owner": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "github"
+            ],
+            "type": "string"
+          },
+          "repo": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "owner",
+          "repo"
+        ],
+        "type": "object"
+      },
+      "ResyncMirrorOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResyncMirrorOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "mirrorId": {
+            "description": "The placement the resync was published for.",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mirrorId",
+          "status"
+        ],
+        "type": "object"
+      },
       "ServiceAccount": {
         "additionalProperties": true,
         "properties": {
@@ -7552,6 +7635,55 @@
           }
         ],
         "summary": "Resolve the pullable cluster placements of a mirrored upstream (clone discovery)",
+        "tags": [
+          "mirrors"
+        ]
+      }
+    },
+    "/mirrors/resync": {
+      "post": {
+        "operationId": "resyncMirror",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResyncMirrorInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResyncMirrorOutputBody"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resync every placement of a mirrored upstream (live GitHub write-access gated)",
         "tags": [
           "mirrors"
         ]

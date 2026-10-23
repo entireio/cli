@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/remotehelper/transport"
 )
@@ -77,6 +78,38 @@ func TestParseProtocolVersion(t *testing.T) {
 			t.Parallel()
 			if got := parseProtocolVersion(tc.env); got != tc.want {
 				t.Errorf("parseProtocolVersion(%q) = %d, want %d", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+// Not parallel: sets env and changes directory.
+func TestResolveProtocolVersion(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      string
+		gitProtocol string
+		want        int
+	}{
+		{"unset", "", "", 2},
+		{"config_0", "0", "", 0},
+		{"config_1", "1", "", 1},
+		{"config_2", "2", "", 2},
+		{"config_beats_env", "0", "version=2", 0},
+		{"env_fallback", "", "version=0", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			gitenv.IsolateRepository(t)
+			if tc.config != "" {
+				t.Setenv("GIT_CONFIG_COUNT", "1")
+				t.Setenv("GIT_CONFIG_KEY_0", "protocol.version")
+				t.Setenv("GIT_CONFIG_VALUE_0", tc.config)
+			}
+			t.Setenv("GIT_PROTOCOL", tc.gitProtocol)
+			if got := resolveProtocolVersion(t.Context()); got != tc.want {
+				t.Errorf("resolveProtocolVersion() = %d, want %d", got, tc.want)
 			}
 		})
 	}

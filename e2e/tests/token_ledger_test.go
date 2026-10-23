@@ -60,8 +60,10 @@ func TestTokenLedger_EveryCallCountedOnce(t *testing.T) {
 				continue
 			}
 			checked++
-			total := ledger.Total()
-			sum := addUsage(stored[state.SessionID], ledger.Pending())
+			// Child sessions (Droid Workers, OpenCode children) are credited
+			// beside the ledger and stored with it.
+			total := session.WithChildSessionTokens(ledger.Total(), state.ChildSessionTokens)
+			sum := addUsage(stored[state.SessionID], session.WithChildSessionTokens(ledger.Pending(), state.PendingChildSessionTokens()))
 			assertSameTokens(t, state.SessionID+": checkpoints + pending vs session total", total, sum)
 
 			fresh, _, err := agent.ReadCumulativeUsage(ctx, ag, agent.CumulativeTokenInput{
@@ -83,7 +85,7 @@ func TestTokenLedger_EveryCallCountedOnce(t *testing.T) {
 				}
 				read.SubagentTokens = types.AddTokenUsage(read.SubagentTokens, child)
 			}
-			assertSameTokens(t, state.SessionID+": session total vs a fresh read of the agent's files", total, read)
+			assertSameTokens(t, state.SessionID+": session total vs a fresh read of the agent's files", ledger.Total(), read)
 			t.Logf("%s: %+v", state.SessionID, total)
 		}
 		if checked == 0 {

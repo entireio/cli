@@ -31,8 +31,16 @@ One JSON object per line, each line terminated by `\n`.
 
 - User text: `{"id"?: string, "text": string}`. There is no `type` field (a v1 quirk).
 - Assistant text: `{"type": "text", "text": string}`.
-- Tool use: `{"type": "tool_use", "id"?: string, "name": string, "input": any, "result"?: {"output": string, "status": "success"|"error", "file"?: {"filePath": string, "numLines"?: int}, "matchCount"?: int}}`.
-  Tool results are inlined into the `tool_use` block that requested them.
+- Tool use: `{"type": "tool_use", "id"?: string, "name": string, "input": any, "result"?: {"output": string, "status": "success"|"error", "file"?: {"filePath": string, "numLines"?: int}, "matchCount"?: int, "agent"?: {"id": string}}}`.
+  Tool results are inlined into the `tool_use` block that requested them,
+  matched by tool call ID where the agent records one, including the results
+  of parallel calls that the agent writes separately.
+  `agent.id` is the agent's own ID for the subagent session or thread the call
+  launched (never the tool call ID, which is the block's `id`), when the parent
+  transcript records one: Claude Code's `toolUseResult.agentId` (Agent, and
+  forked Skill calls), Codex's `SubAgentActivity` thread for a `spawn_agent`
+  call, OpenCode's `task` session (`state.metadata.sessionId`), and Copilot's
+  `subagent.started` agent for a task call.
 - Image: passed through from the source verbatim. The image source is either
   inline base64 or an `entire-asset:assets/…` placeholder left by image
   externalization.
@@ -120,11 +128,20 @@ once emitted, so they can be streamed and stored as plain appends. `Fold`
 applies records in order and returns the transcript lines.
 
 In this repository the fold is used by `Convert`: for Claude Code, Cursor and
-Droid, it runs an adapter that turns the native transcript into records and then
-folds them. The other converters still write lines directly. The fold is meant
-to be shared with a backend that folds the same records to show a live session,
-so that a live view and a checkpoint's `transcript.jsonl` match byte for byte;
-that integration does not exist yet.
+Droid, it runs a `JSONLAdapter` that turns the native transcript into records
+and then folds them. The other converters still write lines directly. The fold
+is meant to be shared with a backend that folds the same records to show a live
+session, so that a live view and a checkpoint's `transcript.jsonl` match byte
+for byte.
+
+A live producer uses the same adapter (`NewClaudeAdapter`, `NewCursorAdapter`,
+`NewDroidAdapter`). `Feed` accepts the transcript in chunks split anywhere and
+returns the records for the lines it completed; `Flush` consumes a trailing
+partial line and is called only once the transcript is final. Fold keys are
+stable only when the adapter is fed from the transcript's first line, so a
+producer that restarts replays from line 1. `Lines` reports how many source
+lines have been consumed. Records carry the transcript's bytes as fed: redact
+before feeding.
 
 ### Record wire format v1
 

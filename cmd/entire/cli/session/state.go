@@ -400,6 +400,24 @@ type State struct {
 	// SubagentTokensBaselineComplete records whether the baseline is exact.
 	SubagentTokensBaselineComplete *bool `json:"subagent_tokens_baseline_complete,omitempty"`
 
+	// ChildSessionTokens is the usage of subagents that run as sessions of
+	// their own (OpenCode child sessions, Factory AI Droid Workers), credited
+	// once per completion. The parent's transcript never carries it, so unlike
+	// TokenUsage.SubagentTokens it is summed rather than replaced by each
+	// turn's snapshot. TotalTokenUsage folds it into the subagent total.
+	ChildSessionTokens *agent.TokenUsage `json:"child_session_tokens,omitempty"`
+
+	// ChildSessionTokensBaseline is ChildSessionTokens at the last checkpoint
+	// window reset (RebaselineSubagentTokens); the difference is the share the
+	// next checkpoint stores (PendingChildSessionTokens).
+	ChildSessionTokensBaseline *agent.TokenUsage `json:"child_session_tokens_baseline,omitempty"`
+
+	// CreditedChildCalls lists the child task calls whose usage is already in
+	// ChildSessionTokens. It outlives the task records condensation removes,
+	// so a stop repeated after condensation is not credited again. Bounded to
+	// the most recent MaxCreditedChildCalls entries.
+	CreditedChildCalls []CreditedChildCall `json:"credited_child_calls,omitempty"`
+
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
 	// without mutating the raw agent transcript.
@@ -1077,6 +1095,7 @@ func (s *State) AdvanceDisplayWindow(pos int) {
 // helper (resetCheckpointWindow) and attach. Session adoption deliberately does
 // not: it continues the source's token window.
 func (s *State) RebaselineSubagentTokens() {
+	s.ChildSessionTokensBaseline = s.ChildSessionTokens
 	// Legacy agents without a snapshot retain their existing window baseline.
 	if s.TokenUsage == nil && s.AgentType != agent.AgentTypeCodex {
 		return
@@ -1093,6 +1112,101 @@ func (s *State) RebaselineSubagentTokens() {
 	complete := true
 	s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
 	s.SubagentTokensBaselineComplete = &complete
+}
+
+// MaxCreditedChildCalls bounds State.CreditedChildCalls. A repeated stop
+// arrives within moments of the first, so only recent calls need remembering.
+const MaxCreditedChildCalls = 256
+
+// CreditedChildCall identifies a child task call whose usage was credited to
+// ChildSessionTokens. ToolUseID is the task record key: the call ID, or a key
+// minted from it ("<callID>-...") when a provider reused the call ID.
+// StartedAtMs is the call's start in Unix milliseconds, 0 when unknown.
+type CreditedChildCall struct {
+	ToolUseID   string `json:"tool_use_id"`
+	AgentID     string `json:"agent_id,omitempty"`
+	StartedAtMs int64  `json:"started_at_ms,omitempty"`
+}
+
+// matches reports whether a stop for call repeats this credited call. It
+// mirrors the CLI's completion-record keying: the same child under the same
+// call ID (or a key minted from it), with the same start. An unknown start on
+// either side cannot tell a repeat from a new call on the child, so it
+// matches, as completion-record keying skips it rather than double count.
+func (c CreditedChildCall) matches(call CreditedChildCall) bool {
+	if c.AgentID != call.AgentID || !sameCallKey(c.ToolUseID, call.ToolUseID) {
+		return false
+	}
+	return c.StartedAtMs == 0 || call.StartedAtMs == 0 || c.StartedAtMs == call.StartedAtMs
+}
+
+func sameCallKey(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"-") || strings.HasPrefix(b, a+"-")
+}
+
+// ClaimChildCallCredit records call as credited and reports true, or reports
+// false when an earlier stop already credited it. Callers check and credit in
+// the same session-state mutation.
+func (s *State) ClaimChildCallCredit(call CreditedChildCall) bool {
+	for _, credited := range s.CreditedChildCalls {
+		if credited.matches(call) {
+			return false
+		}
+	}
+	s.CreditedChildCalls = append(s.CreditedChildCalls, call)
+	if excess := len(s.CreditedChildCalls) - MaxCreditedChildCalls; excess > 0 {
+		s.CreditedChildCalls = slices.Clone(s.CreditedChildCalls[excess:])
+	}
+	return true
+}
+
+// AddChildSessionTokens adds a child session's usage to ChildSessionTokens.
+func (s *State) AddChildSessionTokens(usage *agent.TokenUsage) {
+	if !usageHasTokens(usage) {
+		return
+	}
+	s.ChildSessionTokens = types.AddTokenUsage(s.ChildSessionTokens, usage)
+}
+
+// PendingChildSessionTokens is the child-session usage no checkpoint has
+// stored yet: ChildSessionTokens since the last window reset. nil when none.
+func (s *State) PendingChildSessionTokens() *agent.TokenUsage {
+	pending := types.SubtractTokenUsage(s.ChildSessionTokens, s.ChildSessionTokensBaseline)
+	if !usageHasTokens(pending) {
+		return nil
+	}
+	return pending
+}
+
+// TotalTokenUsage is the session's token total for display: TokenUsage with
+// ChildSessionTokens folded into its subagent total.
+func (s *State) TotalTokenUsage() *agent.TokenUsage {
+	return WithChildSessionTokens(s.TokenUsage, s.ChildSessionTokens)
+}
+
+// WithChildSessionTokens returns usage with child added to its subagent
+// total, leaving usage itself untouched. usage is returned as is when child
+// holds no tokens.
+func WithChildSessionTokens(usage, child *agent.TokenUsage) *agent.TokenUsage {
+	if !usageHasTokens(child) {
+		return usage
+	}
+	var combined agent.TokenUsage
+	if usage != nil {
+		combined = *usage
+	}
+	combined.SubagentTokens = types.AddTokenUsage(combined.SubagentTokens, child)
+	return &combined
+}
+
+func usageHasTokens(usage *agent.TokenUsage) bool {
+	if usage == nil {
+		return false
+	}
+	if usage.InputTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheReadTokens > 0 || usage.OutputTokens > 0 || usage.APICallCount > 0 {
+		return true
+	}
+	return usageHasTokens(usage.SubagentTokens)
 }
 
 // IsStale returns true when a session hasn't seen interaction for longer than

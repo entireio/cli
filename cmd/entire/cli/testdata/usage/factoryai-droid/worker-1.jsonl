@@ -1,2 +1,0 @@
-{"type":"session_start","id":"worker-1","sessionTitle":"worker: read","callingSessionId":"parent-1","callingToolUseId":"call-1"}
-{"type":"message","id":"w1","message":{"role":"assistant","id":"msg_9","content":[{"type":"text","text":"read it"}]}}

@@ -46,6 +46,30 @@ func TestDecode_Blocks(t *testing.T) {
 			},
 		},
 		{
+			name:  "tool_use result naming its subagent",
+			input: `{"v":1,"type":"assistant","content":[{"type":"tool_use","id":"tu-1","name":"Agent","input":{},"result":{"output":"","status":"success","agent":{"id":"a17"}}}]}`,
+			want: Line{
+				Version: 1, Type: TypeAssistant,
+				Blocks: []Block{{
+					Type: BlockToolUse, ID: "tu-1", Name: "Agent", Input: json.RawMessage(`{}`),
+					Result: &ToolResult{Status: ToolStatusSuccess, Agent: &ToolResultAgent{ID: "a17"}},
+					Raw:    json.RawMessage(`{"type":"tool_use","id":"tu-1","name":"Agent","input":{},"result":{"output":"","status":"success","agent":{"id":"a17"}}}`),
+				}},
+			},
+		},
+		{
+			name:  "tool_use result with a malformed agent keeps the block",
+			input: `{"v":1,"type":"assistant","content":[{"type":"tool_use","id":"tu-1","name":"Agent","input":{},"result":{"output":"x","status":"success","agent":"a17"}}]}`,
+			want: Line{
+				Version: 1, Type: TypeAssistant,
+				Blocks: []Block{{
+					Type: BlockToolUse, ID: "tu-1", Name: "Agent", Input: json.RawMessage(`{}`),
+					Result: &ToolResult{Output: "x", Status: ToolStatusSuccess},
+					Raw:    json.RawMessage(`{"type":"tool_use","id":"tu-1","name":"Agent","input":{},"result":{"output":"x","status":"success","agent":"a17"}}`),
+				}},
+			},
+		},
+		{
 			name:  "tool_use with error result and no file",
 			input: `{"v":1,"type":"assistant","content":[{"type":"tool_use","name":"Bash","input":{},"result":{"output":"boom","status":"error"}}]}`,
 			want: Line{

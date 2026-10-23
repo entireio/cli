@@ -361,6 +361,20 @@ type LiveSubagentFileReporter interface {
 	LiveSubagentModifiedFiles(ctx context.Context, agentID, toolUseID string, startedAt time.Time) ([]string, error)
 }
 
+// ChildSessionSubagents is implemented by agents whose subagents run as
+// sessions of their own (OpenCode child sessions): a child's token usage is
+// recorded only in its own session, never in the parent's transcript or its
+// subagent snapshot. The completion that claims a child's task record, whether
+// a real stop or the SessionEnd sweep, credits that usage to the parent
+// session's total, once per call. Do not implement it when the parent's
+// transcript already counts its children, or each child would count twice.
+type ChildSessionSubagents interface {
+	Agent
+
+	// SubagentUsageOutsideParent marks the capability; it does nothing.
+	SubagentUsageOutsideParent()
+}
+
 // SidecarImageProvider is implemented by agents that keep images OUTSIDE the
 // transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
 // SQLite blob store, not the JSONL transcript. The strategy layer calls this

@@ -1,8 +1,7 @@
 {
-  "about": "tokens come from settings.json (thinking is already in output), one call per assistant message; a Worker is a child read the same way; settings.json does not shrink with a rewritten transcript, so no rewrite is reported",
+  "about": "tokens come from settings.json (thinking is already in output), one call per assistant message; settings.json does not shrink with a rewritten transcript, so no rewrite is reported",
   "session_id": "parent-1",
-  "no_restart": true,
   "transcript": "parent-1.jsonl",
-  "total": {"input_tokens": 40, "cache_creation_tokens": 2000, "cache_read_tokens": 15000, "output_tokens": 300, "api_call_count": 2},
-  "children": {"worker-1": {"input_tokens": 7, "output_tokens": 3, "api_call_count": 1}}
+  "no_restart": true,
+  "total": {"input_tokens": 40, "cache_creation_tokens": 2000, "cache_read_tokens": 15000, "output_tokens": 300, "api_call_count": 2}
 }

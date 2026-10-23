@@ -972,7 +972,7 @@ func TestAgentHelpProjectTrailGuidance_OnlyInProjectTree(t *testing.T) {
 	show := agentHelpFindChild(agentHelpFindChild(project, "trail"), "show")
 	text := renderAgentHelpCommand(show, "", true)
 	trailFirstLine := strings.SplitN(agentHelpGuidance["trail"], "\n", 2)[0]
-	for _, want := range []string{urlLine, "<forge>/<project>/-/trails/<P>/changes/<repo>/<n>", "each changes[] entry is the change", trailFirstLine} {
+	for _, want := range []string{urlLine, "<forge>/<project>/-/trails/<P>/changes/<repo>/<n>", "each changes[] entry is the change", "entry has current: true", trailFirstLine} {
 		if !strings.Contains(text, want) {
 			t.Errorf("project `agent-help trail show` missing %q:\n%s", want, text)
 		}

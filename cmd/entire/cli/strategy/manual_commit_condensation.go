@@ -635,8 +635,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// Read the live transcript now, so a commit in the middle of a turn
 	// stores everything used up to it.
 	if ObserveTokenLedger(ctx, state) {
-		sessionData.TokenUsage = state.TokenLedger.Pending()
-		sessionData.SessionTokenUsage = state.TokenUsage
+		// Child sessions' usage is credited outside the ledger; add it here as
+		// resolveCondensedTokenUsage does, and resetCheckpointWindow rebaselines it.
+		sessionData.TokenUsage = session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
+		sessionData.SessionTokenUsage = state.TotalTokenUsage()
 	} else {
 		resolveCondensedTokenUsage(ctx, ag, state, sessionData)
 	}
@@ -1173,6 +1175,9 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 		// applyBackfilledSessionTokenUsage, which needs the usage without it.
 		sessionData.TokenUsage = fillMissingSubagentTokensFrom(sessionData.TokenUsage, state.CheckpointTokenUsage)
 	}
+	// Child sessions' usage is credited outside both sources above, so it
+	// is added exactly here; resetCheckpointWindow then rebaselines it.
+	sessionData.TokenUsage = session.WithChildSessionTokens(sessionData.TokenUsage, state.PendingChildSessionTokens())
 }
 
 // AttachTokenUsage returns the tokens `entire session attach` stores for a
@@ -1187,7 +1192,8 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 // caller must keep so the re-baseline covers what this checkpoint stored.
 func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, transcriptPath string) (*agent.TokenUsage, int) {
 	if ObserveTokenLedger(ctx, state) {
-		return state.TokenLedger.Pending(), countTranscriptItems(ag.Type(), string(transcript))
+		usage := session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
+		return usage, countTranscriptItems(ag.Type(), string(transcript))
 	}
 	var usage *agent.TokenUsage
 	if state == nil {
@@ -1203,6 +1209,9 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 			// pending window's subagent total, as condensation does.
 			usage = fillMissingSubagentTokensFrom(usage, state.CheckpointTokenUsage)
 		}
+		// As condensation does, store the credited child-session share; see
+		// CompleteChildSessionTaskRecord for where its task record lands.
+		usage = session.WithChildSessionTokens(usage, state.PendingChildSessionTokens())
 	}
 	return usage, countTranscriptItems(ag.Type(), string(transcript))
 }
@@ -1212,6 +1221,11 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 // stored): the token offset moves to pos and the pending window is reset, so
 // the session's next checkpoint does not count them again. The displayed
 // transcript window (CheckpointTranscriptStart) is left alone.
+//
+// Credited child-session usage (PendingChildSessionTokens) is consumed too,
+// because AttachTokenUsage stored it, while that child's completed task record
+// stays in state and its task.json lands in the session's next checkpoint.
+// That checkpoint lists the task without its tokens; nothing is counted twice.
 func ConsumeAttachTokenWindow(state *SessionState, pos int) {
 	state.CheckpointTokenUsage = nil
 	state.RebaselineSubagentTokens()

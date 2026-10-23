@@ -2155,9 +2155,7 @@ func formatCheckpointHeader(
 		tokenUsage = summary.TokenUsage
 	}
 	if tokenUsage != nil {
-		total := tokenUsage.InputTokens + tokenUsage.CacheCreationTokens +
-			tokenUsage.CacheReadTokens + tokenUsage.OutputTokens
-		tokensVal := formatTokenCount(total)
+		tokensVal := formatTokenCount(totalTokens(tokenUsage))
 		if styles.colorEnabled {
 			tokensVal = styles.render(styles.yellow, tokensVal)
 		}

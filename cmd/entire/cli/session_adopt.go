@@ -746,7 +746,8 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, home a
 	// Token accounting continues from the source's last checkpoint, unlike the
 	// transcript window above: the retired source never condenses again, so
 	// tokens it used but never checkpointed (TokenTranscriptStart, pending
-	// CheckpointTokenUsage, the subagent baseline) are counted once here, and
+	// CheckpointTokenUsage, the subagent and child-session baselines) are
+	// counted once here, and
 	// tokens it did checkpoint are not counted again.
 	adopted.SetTokenStart(source.TokenStart())
 
@@ -778,6 +779,9 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	adopted.TaskRecords = cloneTaskRecords(source.TaskRecords)
 	adopted.SubagentInventory = cloneSubagentInventory(source.SubagentInventory)
 	adopted.TokenUsage = cloneTokenUsage(source.TokenUsage)
+	adopted.ChildSessionTokens = cloneTokenUsage(source.ChildSessionTokens)
+	adopted.ChildSessionTokensBaseline = cloneTokenUsage(source.ChildSessionTokensBaseline)
+	adopted.CreditedChildCalls = slices.Clone(source.CreditedChildCalls)
 	adopted.SkillEvents = cloneSkillEvents(source.SkillEvents)
 	return adopted
 }

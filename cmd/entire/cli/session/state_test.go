@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1372,5 +1373,94 @@ func TestState_HasPendingWork(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, tt.state.HasPendingWork())
 		})
+	}
+}
+
+func TestClaimChildCallCredit(t *testing.T) {
+	t.Parallel()
+
+	credited := CreditedChildCall{ToolUseID: "call_1-ses_a", AgentID: "ses_a", StartedAtMs: 1000}
+	tests := []struct {
+		name string
+		call CreditedChildCall
+		want bool
+	}{
+		{"the same call", credited, false},
+		{"the bare call ID after its record was removed", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a", StartedAtMs: 1000}, false},
+		{"no start", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a"}, false},
+		{"a later start under the reused call ID", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a", StartedAtMs: 2000}, true},
+		{"another child", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_b", StartedAtMs: 1000}, true},
+		{"another call", CreditedChildCall{ToolUseID: "call_10", AgentID: "ses_a", StartedAtMs: 1000}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &State{CreditedChildCalls: []CreditedChildCall{credited}}
+			if got := state.ClaimChildCallCredit(tt.call); got != tt.want {
+				t.Fatalf("ClaimChildCallCredit() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A call first credited with no start (a completion without a launch, or the
+// SessionEnd sweep) cannot be told apart from a later stop for the same child
+// that carries one, so that stop is not credited again.
+func TestClaimChildCallCredit_UnknownCreditedStartMatches(t *testing.T) {
+	t.Parallel()
+
+	credited := CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a"}
+	tests := []struct {
+		name string
+		call CreditedChildCall
+		want bool
+	}{
+		{"the same call with a start", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a", StartedAtMs: 1000}, false},
+		{"a minted key with a start", CreditedChildCall{ToolUseID: "call_1-ses_a", AgentID: "ses_a", StartedAtMs: 2000}, false},
+		{"another child", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_b", StartedAtMs: 1000}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &State{CreditedChildCalls: []CreditedChildCall{credited}}
+			if got := state.ClaimChildCallCredit(tt.call); got != tt.want {
+				t.Fatalf("ClaimChildCallCredit() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaimChildCallCredit_KeepsTheMostRecentCalls(t *testing.T) {
+	t.Parallel()
+
+	state := &State{}
+	for i := range MaxCreditedChildCalls + 10 {
+		if !state.ClaimChildCallCredit(CreditedChildCall{ToolUseID: "call_" + strconv.Itoa(i), AgentID: "ses_a"}) {
+			t.Fatalf("call %d was not credited", i)
+		}
+	}
+	if len(state.CreditedChildCalls) != MaxCreditedChildCalls {
+		t.Fatalf("ledger holds %d calls, want %d", len(state.CreditedChildCalls), MaxCreditedChildCalls)
+	}
+	if got := state.CreditedChildCalls[0].ToolUseID; got != "call_10" {
+		t.Fatalf("oldest kept call = %s, want call_10", got)
+	}
+}
+
+func TestTotalTokenUsage_AddsChildSessionsToSubagents(t *testing.T) {
+	t.Parallel()
+
+	state := &State{TokenUsage: &agent.TokenUsage{InputTokens: 10, SubagentTokens: &agent.TokenUsage{InputTokens: 5}}}
+	state.AddChildSessionTokens(&agent.TokenUsage{InputTokens: 7, APICallCount: 1})
+
+	got := state.TotalTokenUsage()
+	if got.InputTokens != 10 || got.SubagentTokens.InputTokens != 12 || got.SubagentTokens.APICallCount != 1 {
+		t.Fatalf("TotalTokenUsage() = %+v (subagents %+v)", got, got.SubagentTokens)
+	}
+	if state.TokenUsage.SubagentTokens.InputTokens != 5 {
+		t.Fatal("TotalTokenUsage must not change TokenUsage")
+	}
+	if (&State{}).TotalTokenUsage() != nil {
+		t.Fatal("a session with no usage has no total")
 	}
 }

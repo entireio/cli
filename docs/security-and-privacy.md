@@ -102,10 +102,29 @@ Built-in categories (when `enabled` is `true`):
 | `email` | on | `[REDACTED_EMAIL]` |
 | `phone` (North American / NANP formats) | on | `[REDACTED_PHONE]` |
 | `address` (US street addresses) | off (more false-positive prone) | `[REDACTED_ADDRESS]` |
+| `ip` (IPv4 and IPv6 addresses, see below) | on | `[REDACTED_IP]` |
 
 Common bot/CI email addresses are not redacted (`noreply@*`, `actions@*`, `*@users.noreply.github.com`, `*@noreply.github.com`), and neither is the `git@` login of a git remote: a remote URL (`ssh://git@host/org/repo`), an scp-style remote whose path contains `/` or ends in `.git` (`git@host:org/repo.git`), or a bare `git@` on GitHub, GitLab, Bitbucket, Codeberg, or Azure DevOps (`ssh -T git@github.com`). Any other `git@` address, such as `git@company.com` in prose or `ssh -T git@gitlab.company.com`, is redacted like any other email.
 
 Phone and address matches must stand on their own: digits that are part of a longer number (`2024-123-4567890`) are not a phone number, and a street suffix must be a whole word, so `Plan` or `Started` does not end an address.
+
+IP addresses are redacted when they look like an address in use, because version numbers (`1.17.2.3`) and user agents (`Chrome/154.0.0.0`) share the dotted-quad shape. An address is redacted when any of these hold:
+
+- it is private, link-local, or shared address space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `100.64.0.0/10`, `fc00::/7`, `fe80::/10`);
+- network syntax surrounds it: a scheme (`https://<ip>`), userinfo (`deploy@<ip>`), a port (`<ip>:443`, which stays visible as `[REDACTED_IP]:443`), a CIDR prefix (`<ip>/32`), or a connection arrow (`->`);
+- a network word (such as `ip`, `host`, `server`, `ssh`, `tcp`, `dns`, `connect`) appears shortly before or after it on the same line, or it is the value of a JSON key that names an address (`host`, `remote_addr`, `peerIP`, `HOST_IP`).
+
+These are never redacted:
+
+- loopback (`127.0.0.1`, `::1`), unspecified (`0.0.0.0`, `::`), `0.0.0.0/8`, and `255.255.255.255`;
+- documentation addresses, which no network uses (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`, `3fff::/20`);
+- the first address of each private block, as written in code that handles those ranges (`10.0.0.0/8`, `172.16.0.0/12`, `fe80::/10`), and any `N.0.0.0`;
+- the value of a version label, even in a private range (`Version=10.0.0.0`, `AssemblyVersion("10.1.2.3")`, `"version": "10.1.2.3"`), unless the same text is redacted elsewhere in the line, since a value redacted in one field is redacted wherever it appears;
+- an address that continues a longer token (`v1.2.3.4`, `go1.2.3.4`, `1.2.3.4-rc1`, an OID such as `1.3.6.1.4.1`, or code such as `u64::from` and `a[1::2]`).
+
+A public address printed bare with no such context, such as one line in a plain list, is not redacted; add a `custom_patterns` entry if you need every address. Path fields in transcripts (`cwd`, `file_path`, `path`) are not scanned by any redaction layer, so an address in a Windows share path there (`\\10.0.0.5\share`) stays. A version number that sits next to a network word on the same line, or in a private range without a version label (`from 10.2.0.0 to 10.3.0.0`), can be redacted.
+
+Older CLI versions reject unknown `pii` keys, so set `"ip": false` in a committed `.entire/settings.json` only after everyone on the team has upgraded. Turning on `enabled` is enough to get IP redaction.
 
 Teams can add their own regex patterns via `custom_patterns`. Each key is a label (uppercased in the replacement token), each value is a regex string. Example: `{"employee_id": "EMP-\\d{6}"}` produces `[REDACTED_EMPLOYEE_ID]`. A pattern that fails to compile or can match the empty string is skipped with a warning, the same as for [custom redaction rules](#customizing-redaction).
 
@@ -140,6 +159,7 @@ The agent's own transcript is never modified at all. Entire reads from it and le
 If your AI sessions will touch sensitive data:
 
 - **Use a private repository.** This is the simplest and most complete protection. Committed checkpoints are then only visible to collaborators.
+- **Keep checkpoints out of a public repository.** If the code must stay public, upload checkpoints to a separate private repository with `entire configure --local --checkpoint-remote github:<owner>/<repo>` (`strategy_options.checkpoint_remote`, see [Checkpoint Remote](../README.md#checkpoint-remote)), or stop uploading them with `entire configure --local --skip-push-sessions` (`strategy_options.push_sessions: false`). `--local` makes the setting take effect for your clone: a project `checkpoint_remote` owned by a different account than `origin` is ignored, and a local `push_sessions` overrides the project one.
 - **Avoid passing sensitive files to your agent.** Content that never enters the agent conversation never appears in transcripts.
 - **Never paste a screenshot or image containing secrets or personal data.** Nothing in Entire reads what an image depicts, and on most agents the image is stored unredacted — see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots).
 - **Review before pushing.** Checkpoints are written locally — at commit time, or when a session with no file changes is snapshotted with the hidden `entire checkpoint create` — and pushed separately, so there is always a window to inspect them:
@@ -158,7 +178,7 @@ If your AI sessions will touch sensitive data:
   git log --oneline entire/checkpoints/v1
   ```
 
-- **Know your push destination.** Checkpoint data syncs to exactly one elected remote; `entire status` names it and reports how many checkpoints are still unpushed, and on the git-refs backend `entire checkpoint list --outgoing` lists them.
+- **Know your push destination.** Checkpoint data syncs to exactly one elected remote; `entire status` names it and reports how many checkpoints are still unpushed, and on the git-refs backend `entire checkpoint list --outgoing` lists them. `entire enable` also names the destination every time it runs.
 
 ## What Gets Redacted
 
@@ -174,7 +194,7 @@ To reduce over-redaction, Entire preserves structural transcript fields such as 
 
 Each checkpoint records how many values redaction replaced in its stored transcript (`full.jsonl`) and how many matches each detection layer found. That transcript holds the whole session up to the checkpoint, so a session's counts grow from one checkpoint to the next; to total what a push sends, take each session's latest checkpoint rather than adding its checkpoints together. The layers are `entropy`, `betterleaks`, `goredact`, `provider_token`, `credentialed_uri`, `connection_string`, `custom`, `shell_stdin` (a literal piped into a secret-management command), `credential_value`, `pii`, `key_context` (a JSON value redacted because of its key), and `credential_key` (a password value under a credential key). A layer that ran and found nothing reports 0. A layer that did not run, such as custom rules when none are configured, is left out. A layer counts each place it flags once, however many of its rules match there. Overlapping matches count in every layer that found them but are replaced once, so the layer counts can add up to more than the number of replacements. A value found in one JSON field is also replaced where the same text appears in a field redaction does not scan, such as an ID, so the layer counts can also add up to less.
 
-The counts never include the redacted values. Custom rules are reported as one total plus the number of rules that ran, without their names, because a rule's label can name something a team keeps out of shared metadata. PII is counted per built-in category (`EMAIL`, `PHONE`, `ADDRESS`), and custom PII patterns share one `custom` bucket.
+The counts never include the redacted values. Custom rules are reported as one total plus the number of rules that ran, without their names, because a rule's label can name something a team keeps out of shared metadata. PII is counted per built-in category (`EMAIL`, `PHONE`, `ADDRESS`, `IP`), and custom PII patterns share one `custom` bucket, except a pattern named after a built-in category (such as `ip`), which counts under that category.
 
 `entire checkpoint explain` shows the counts in its header, for example `redacted 5 replacements in this session so far · matches: entropy 2, betterleaks 1, custom 2 (1 rule)`, and `--json` includes them for each session and for the whole checkpoint. Checkpoints written by older versions have no counts and show no row. Prompts (`prompt.txt`), summaries, and subagent transcripts are not counted.
 

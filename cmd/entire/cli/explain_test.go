@@ -3097,6 +3097,27 @@ func TestFormatCheckpointHeader_TokensFromSummaryFallback(t *testing.T) {
 	}
 }
 
+func TestFormatCheckpointHeader_TokensIncludeSubagents(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("a3b2c4d5e6f7")
+	meta := checkpoint.Metadata{
+		SessionID: "s",
+		CreatedAt: time.Date(2026, 4, 29, 14, 22, 8, 0, time.UTC),
+		TokenUsage: &agent.TokenUsage{
+			InputTokens:    1000,
+			SubagentTokens: &agent.TokenUsage{InputTokens: 2000, OutputTokens: 500},
+		},
+	}
+	styles := statusStyles{colorEnabled: false, width: 60}
+
+	got := formatCheckpointHeader(nil, meta, cpID, nil, checkpoint.Author{}, styles)
+
+	if !strings.Contains(got, "  tokens   3.5k") {
+		t.Errorf("expected the tokens row to count subagents, got:\n%s", got)
+	}
+}
+
 func TestFormatCheckpointHeader_ColorEnabledRenders(t *testing.T) {
 	t.Parallel()
 
