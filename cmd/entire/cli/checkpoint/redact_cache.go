@@ -107,6 +107,10 @@ type redactPrefixEntry struct {
 	// fsync, so a power loss can leave the file empty or short; a payload of any
 	// other length is not reused.
 	RedactedBytes int `json:"redacted_bytes"`
+	// Counts is what redacting the prefix replaced; a reuse adds the suffix's
+	// counts to it. An entry without counts cannot give a total, so it is not
+	// reused.
+	Counts *redact.Counts `json:"counts,omitempty"`
 }
 
 // redactCache reads and writes redactPrefixEntry records under a directory in
@@ -188,7 +192,7 @@ func (c *redactCache) load(treePath string) *redactPrefixEntry {
 	if entry.SourceBytes <= 0 || entry.SourceHash == "" {
 		return nil
 	}
-	if entry.RedactedFile == "" || entry.RedactedBytes <= 0 {
+	if entry.RedactedFile == "" || entry.RedactedBytes <= 0 || entry.Counts == nil {
 		return nil
 	}
 	return &entry
@@ -206,7 +210,7 @@ func (c *redactCache) load(treePath string) *redactPrefixEntry {
 //
 // Failures are silent: losing a cache entry only costs a full redaction next
 // time.
-func (c *redactCache) storePrefixBytes(ctx context.Context, treePath, sourceHash string, sourceBytes int, redacted []byte) {
+func (c *redactCache) storePrefixBytes(ctx context.Context, treePath, sourceHash string, sourceBytes int, redacted []byte, counts *redact.Counts) {
 	if c == nil {
 		return
 	}
@@ -223,6 +227,7 @@ func (c *redactCache) storePrefixBytes(ctx context.Context, treePath, sourceHash
 		SourceHash:    sourceHash,
 		RedactedFile:  name,
 		RedactedBytes: len(redacted),
+		Counts:        counts,
 	})
 	if err == nil {
 		err = writeCacheFile(c.root, c.entryName(treePath), entry, 0o600)
@@ -277,6 +282,8 @@ type redactResult struct {
 	// Redacted is the content to store. Nil means the caller must redact the
 	// whole content itself.
 	Redacted []byte
+	// Counts is what producing Redacted replaced, nil when unknown.
+	Counts *redact.Counts
 	// SourceHash is the digest of the whole source, computed as a side effect of
 	// prefix validation so the caller never hashes the content a second time.
 	SourceHash string
@@ -310,7 +317,7 @@ func incrementalRedactionCandidate(content []byte, treePath string) bool {
 // appended suffix and, on a cache miss, the whole content -- passing one redactor
 // for both is what makes it impossible to splice a prefix produced by one
 // pipeline onto a suffix produced by another.
-type transcriptRedactor func(ctx context.Context, content []byte) ([]byte, error)
+type transcriptRedactor func(ctx context.Context, content []byte) (redact.RedactedBytes, error)
 
 // redactIncrementally redacts content, reusing a previously redacted prefix when
 // one is available and still valid.
@@ -329,10 +336,11 @@ func redactIncrementally(
 	// would have handled the suffix. Doing this here rather than at each call
 	// site is what makes "one pipeline for prefix and suffix" structural instead
 	// of a convention two callers happen to follow.
-	res.Redacted, err = redactor(ctx, content)
+	out, err := redactor(ctx, content)
 	if err != nil {
 		return redactResult{}, err
 	}
+	res.Redacted, res.Counts = out.Bytes(), out.Counts()
 	return res, nil
 }
 
@@ -386,7 +394,7 @@ func reusePrefix(
 	//
 	// A degraded scanner must not be spliced onto the reused prefix: fail the
 	// write instead of persisting an under-scanned suffix.
-	var redactedSuffix []byte
+	var redactedSuffix redact.RedactedBytes
 	if len(suffix) > 0 {
 		var err error
 		if redactedSuffix, err = redactor(ctx, suffix); err != nil {
@@ -394,7 +402,7 @@ func reusePrefix(
 		}
 	}
 
-	prefix, readErr := cache.readPrefix(entry, len(redactedSuffix))
+	prefix, readErr := cache.readPrefix(entry, redactedSuffix.Len())
 	if readErr != nil {
 		logging.Debug(logCtx, "cached redacted prefix unreadable, redacting in full",
 			slog.String("path", treePath), slog.String("error", readErr.Error()))
@@ -411,7 +419,7 @@ func reusePrefix(
 	if len(suffix) == 0 {
 		// Nothing appended since the last checkpoint: the stored entry already
 		// describes exactly this content, so there is nothing to re-record.
-		return redactResult{Redacted: prefix}, nil
+		return redactResult{Redacted: prefix, Counts: entry.Counts}, nil
 	}
 
 	logging.Debug(logCtx, "redacted transcript incrementally",
@@ -419,7 +427,12 @@ func reusePrefix(
 		slog.Int("reused_bytes", entry.SourceBytes),
 		slog.Int("redacted_bytes", len(suffix)))
 
-	return redactResult{Redacted: append(prefix, redactedSuffix...), SourceHash: fullHash, StorePrefix: true}, nil
+	return redactResult{
+		Redacted:    append(prefix, redactedSuffix.Bytes()...),
+		Counts:      entry.Counts.Add(redactedSuffix.Counts()),
+		SourceHash:  fullHash,
+		StorePrefix: true,
+	}, nil
 }
 
 func hashBytes(b []byte) string {
@@ -501,22 +514,15 @@ func RedactTranscriptCached(
 	}
 
 	cache := repoRedactCache(repo)
-	result, err := redactIncrementally(ctx, cache, content, treePath,
-		func(ctx context.Context, b []byte) ([]byte, error) {
-			out, redErr := redactor(ctx, b)
-			if redErr != nil {
-				return nil, redErr
-			}
-			return out.Bytes(), nil
-		})
+	result, err := redactIncrementally(ctx, cache, content, treePath, redactor)
 	if err != nil {
 		return redact.RedactedBytes{}, err
 	}
 
 	if result.StorePrefix {
 		// Stored as bytes rather than a git blob: see redactPrefixEntry.
-		cache.storePrefixBytes(ctx, treePath, result.SourceHash, len(content), result.Redacted)
+		cache.storePrefixBytes(ctx, treePath, result.SourceHash, len(content), result.Redacted, result.Counts)
 	}
 
-	return redact.AlreadyRedacted(result.Redacted), nil
+	return redact.AlreadyRedacted(result.Redacted).WithCounts(result.Counts), nil
 }

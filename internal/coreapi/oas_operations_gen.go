@@ -109,6 +109,7 @@ const (
 	ResolveRepoIDsOperation                      OperationName = "ResolveRepoIDs"
 	ResolveReposOperation                        OperationName = "ResolveRepos"
 	RestorePluginInstallationRepositoryOperation OperationName = "RestorePluginInstallationRepository"
+	ResyncMirrorOperation                        OperationName = "ResyncMirror"
 	RevokeOrgInvitationOperation                 OperationName = "RevokeOrgInvitation"
 	RevokeProjectAccessOperation                 OperationName = "RevokeProjectAccess"
 	RevokeProjectAccessByProviderOperation       OperationName = "RevokeProjectAccessByProvider"

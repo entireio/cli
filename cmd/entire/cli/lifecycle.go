@@ -1205,9 +1205,11 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 }
 
 // workerTurnTokenUsage returns a detached subagent session's usage for the
-// turn ending now: the hook-reported counts, or its transcript from the turn's
-// start offset. Its own subagents are not counted, since a task record holds
-// only the subagent's own usage.
+// turn ending now: the hook-reported counts, its transcript from the turn's
+// start offset, or else its own out-of-band total since the turn started
+// (Factory AI Droid, whose Worker keeps a token total of its own that the
+// parent's excludes). Its own subagents are not counted, since a task record
+// holds only the subagent's own usage.
 func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, preState *PrePromptState, transcriptData []byte) *agent.TokenUsage {
 	if event.TokenUsage != nil {
 		return event.TokenUsage
@@ -1216,7 +1218,10 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 	if preState != nil {
 		turnStart = preState.TranscriptOffset
 	}
-	return agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, "")
+	if usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, ""); strategy.HasTokenUsageData(usage) {
+		return usage
+	}
+	return computeOutOfBandTokenUsage(ctx, ag, event.SessionID, event.SessionRef, preState)
 }
 
 // resolveTurnTokenUsage returns the token usage of the turn ending now.
@@ -1228,8 +1233,10 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 // out-of-band source: Antigravity exposes token usage only via its
 // title/statusline pipe (captured by the title-tee shim), never in the
 // transcript, so its delta is the current cumulative totals minus the
-// TurnStart baseline stored in PrePromptState. Only one source is used, so a
-// turn is never counted twice.
+// TurnStart baseline stored in PrePromptState. Factory AI Droid is the same
+// shape: its transcript carries no usage, and its running total lives in the
+// session's .settings.json. Only one source is used, so a turn is never
+// counted twice.
 //
 // Usage counted from the transcript (Codex's ledger counts its main part there
 // too) comes with a recount that scopes the pending checkpoint usage; the
@@ -1249,10 +1256,16 @@ func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Eve
 	if codexInventoryUsage != nil {
 		return codexInventoryUsage, recount
 	}
-	if usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, subagentsDir); usage != nil {
+	usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, subagentsDir)
+	if strategy.HasTokenUsageData(usage) {
 		return usage, recount
 	}
-	return computeOutOfBandTokenUsage(ctx, ag, sessionID, preState), nil
+	// A transcript without usage reports zeros rather than nil, so an empty
+	// result also falls through to the out-of-band source.
+	if oob := computeOutOfBandTokenUsage(ctx, ag, sessionID, event.SessionRef, preState); oob != nil {
+		return oob, nil
+	}
+	return usage, nil
 }
 
 // handleLifecycleCompaction handles context compaction: saves current progress
@@ -2913,10 +2926,11 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 
 // computeOutOfBandTokenUsage returns the turn's token delta for
 // OutOfBandTokenSource agents (e.g. Antigravity, whose only token surface is
-// the title/statusline pipe captured by the title-tee shim): current
+// the title/statusline pipe captured by the title-tee shim, and Factory AI
+// Droid, which keeps a running total beside its transcript): current
 // cumulative totals minus the TurnStart baseline stored in PrePromptState.
 // Returns nil for other agents, on error (logged), or when no data exists.
-func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID string, preState *PrePromptState) *agent.TokenUsage {
+func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID, sessionRef string, preState *PrePromptState) *agent.TokenUsage {
 	src, ok := agent.AsOutOfBandTokenSource(ag)
 	if !ok {
 		return nil
@@ -2940,7 +2954,7 @@ func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID s
 			return nil
 		}
 	}
-	oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, baseline)
+	oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, sessionRef, baseline)
 	if oobErr != nil {
 		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to compute out-of-band token usage",
 			slog.String("error", oobErr.Error()))

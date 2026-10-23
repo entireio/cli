@@ -140,7 +140,7 @@ func TestFindSessionsForWorktree_FindsAMovedHome(t *testing.T) {
 
 	chdirWorktree(t, moved)
 	states := mustListStates(t.Context(), t, s)
-	matches, ambiguous := s.findSessionsForWorktreeFromStates(t.Context(), states, moved)
+	matches, ambiguous, _ := s.findSessionsForWorktreeFromStates(t.Context(), states, moved)
 	require.False(t, ambiguous)
 	require.Len(t, matches, 1, "the moved home's commit found no session")
 	assert.Equal(t, moved, matches[0].WorktreePath, "the moved home isn't seen as the session's home")

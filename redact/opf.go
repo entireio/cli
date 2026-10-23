@@ -549,8 +549,14 @@ func (b *limitedOutputBuffer) Exceeded() bool {
 	return b.exceeded
 }
 
+// sanitizeOPFBatchInput flattens line breaks and separator collisions to a
+// single space each, 1-byte → 1-byte, so splitBatchSpan's byte offsets stay
+// valid (see RedactBatch). '\r' gets the same treatment as '\n': left alone,
+// a CRLF or bare-CR input leaves a bare '\r' in the batched text that opf
+// treats as its own line boundary, splitting what should be one inference
+// pass into multiple JSON documents that RedactBatch cannot parse.
 func sanitizeOPFBatchInput(in string) string {
-	replacer := strings.NewReplacer("\n", " ", opfBatchSeparator, " ")
+	replacer := strings.NewReplacer("\n", " ", "\r", " ", opfBatchSeparator, " ")
 	return replacer.Replace(in)
 }
 

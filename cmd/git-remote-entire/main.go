@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"strings"
@@ -144,7 +145,7 @@ func run(args []string) int {
 		DiscoveryTransport: discoveryTransport,
 	})
 
-	protocolVersion := resolveProtocolVersion()
+	protocolVersion := resolveProtocolVersion(ctx)
 	debuglog.Printf("git protocol.version=%d (v2 advertises stateless-connect + push; v0/v1 advertises connect)", protocolVersion)
 
 	helperStart := time.Now()
@@ -429,12 +430,12 @@ func resolveHTTPUserAgent(defaultUA string, lookup func(string) (string, bool)) 
 	return ua, nil
 }
 
-// resolveProtocolVersion reads the effective protocol.version from
-// the GIT_PROTOCOL environment variable. The value is a colon-
-// separated list of key=value pairs (e.g. "version=2"). We accept
-// 0, 1, or 2; any other value is noted in the debug trace and falls
-// back to 2 — upstream Git's default since 2.26.
-func resolveProtocolVersion() int {
+// resolveProtocolVersion reads protocol.version, then GIT_PROTOCOL.
+func resolveProtocolVersion(ctx context.Context) int {
+	out, err := exec.CommandContext(ctx, "git", "config", "--get", "protocol.version").Output()
+	if err == nil {
+		return parseProtocolVersion("version=" + strings.TrimSpace(string(out)))
+	}
 	return parseProtocolVersion(os.Getenv("GIT_PROTOCOL"))
 }
 

@@ -122,6 +122,11 @@ func Convert(content []byte, opts Options) ([]byte, error) {
 // up to one merged line that began in the previous checkpoint. Downstream
 // segmenters must tolerate this bounded head overlap. See the straddle case in
 // TestFullWithBoundary_StraddlingAssistantFragments_RoundsToInclusion.
+//
+// Likewise, a tool result can arrive after StartLine for a call made before
+// it, even after a later prompt. The full conversion inlines it into that
+// earlier line, which is before the boundary; the delta, which lacks the
+// call, drops it.
 func ConvertWithBoundary(content []byte, opts Options) (full []byte, boundary int, err error) {
 	fullOpts := opts
 	fullOpts.StartLine = 0
@@ -192,7 +197,7 @@ func normalizeKind(raw map[string]json.RawMessage) string {
 type linePreprocessor func(map[string]json.RawMessage) map[string]json.RawMessage
 
 // parsedEntry is an intermediate representation of a JSONL line, consumed by
-// jsonlAdapter.
+// JSONLAdapter.
 type parsedEntry struct {
 	kind         string // "user" or "assistant"
 	ts           json.RawMessage
@@ -201,6 +206,7 @@ type parsedEntry struct {
 	inputTokens  int               // API input tokens (assistant only)
 	outputTokens int               // API output tokens (assistant only)
 	content      json.RawMessage   // stripped assistant content array, or nil
+	toolUseIDs   []string          // IDs of the tool_use blocks in content
 	userText     string            // extracted user text
 	userImages   []json.RawMessage // image blocks from user messages
 	toolResults  []toolResultEntry // user tool_result entries
@@ -285,7 +291,7 @@ func parseLine(lineBytes []byte, preprocess linePreprocessor) (parsedEntry, bool
 		if msg != nil {
 			e.id = unquote(msg["id"])
 			if contentRaw, ok := msg["content"]; ok {
-				e.content = stripAssistantContent(contentRaw)
+				e.content, e.toolUseIDs = stripAssistantContent(contentRaw)
 			}
 			e.inputTokens, e.outputTokens = extractUsageTokens(msg)
 		}
@@ -362,6 +368,9 @@ func toolResult(tr toolResultEntry) *ToolResult {
 			NumLines: tr.file.numLines,
 		}
 	}
+	if tr.agentID != "" {
+		r.Agent = &ToolResultAgent{ID: tr.agentID}
+	}
 	return r
 }
 
@@ -399,6 +408,7 @@ type toolResultEntry struct {
 	// Rich metadata extracted from toolUseResult (optional).
 	file       *toolResultFile // Read/Edit: file path and line count
 	matchCount int             // Grep: number of matching files
+	agentID    string          // the subagent the call launched
 }
 
 // toolResultFile carries structured file metadata from Read/Edit tool results.
@@ -415,6 +425,7 @@ type toolResultFile struct {
 //   - Read:  {type:"text", file:{filePath, numLines, content, ...}}
 //   - Grep:  {numFiles, numLines, filenames, content, mode}
 //   - Edit:  {filePath, oldString, newString, structuredPatch, ...}
+//   - Agent, and Skill when forked: {agentId, status, ...}
 func enrichToolResults(results []toolResultEntry, tur map[string]json.RawMessage) []toolResultEntry {
 	// Bash-style: stdout provides the output text.
 	if stdout := unquote(tur["stdout"]); stdout != "" {
@@ -445,6 +456,13 @@ func enrichToolResults(results []toolResultEntry, tur map[string]json.RawMessage
 		applyToSingleResult(results, func(tr *toolResultEntry) {
 			// Edit results don't have numLines.
 			tr.file = &toolResultFile{filePath: filePath}
+		})
+	}
+
+	// Agent-style: the launched subagent's ID.
+	if agentID := unquote(tur["agentId"]); agentID != "" {
+		applyToSingleResult(results, func(tr *toolResultEntry) {
+			tr.agentID = agentID
 		})
 	}
 
@@ -540,17 +558,20 @@ func extractUserContent(contentRaw json.RawMessage) userContent {
 	return uc
 }
 
-func stripAssistantContent(contentRaw json.RawMessage) json.RawMessage {
+// stripAssistantContent drops thinking blocks and trims tool_use blocks to
+// their compact fields. It also returns the tool_use blocks' IDs.
+func stripAssistantContent(contentRaw json.RawMessage) (json.RawMessage, []string) {
 	var str string
 	if json.Unmarshal(contentRaw, &str) == nil {
-		return contentRaw
+		return contentRaw, nil
 	}
 
 	var blocks []map[string]json.RawMessage
 	if json.Unmarshal(contentRaw, &blocks) != nil {
-		return contentRaw
+		return contentRaw, nil
 	}
 
+	var toolUseIDs []string
 	result := make([]map[string]json.RawMessage, 0, len(blocks))
 	for _, block := range blocks {
 		blockType := unquote(block["type"])
@@ -560,6 +581,9 @@ func stripAssistantContent(contentRaw json.RawMessage) json.RawMessage {
 		}
 
 		if blockType == ContentTypeToolUse {
+			if id := unquote(block["id"]); id != "" {
+				toolUseIDs = append(toolUseIDs, id)
+			}
 			stripped := make(map[string]json.RawMessage)
 			copyField(stripped, block, "type")
 			copyField(stripped, block, "id")
@@ -574,9 +598,9 @@ func stripAssistantContent(contentRaw json.RawMessage) json.RawMessage {
 
 	b, err := json.Marshal(result)
 	if err != nil {
-		return contentRaw
+		return contentRaw, nil
 	}
-	return b
+	return b, toolUseIDs
 }
 
 // copyField copies a single key from src to dst if it exists.
