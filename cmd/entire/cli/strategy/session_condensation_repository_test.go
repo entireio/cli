@@ -28,13 +28,36 @@ func TestOpenSessionCondensationRepository_NoGitAfterRootResolution(t *testing.T
 	assert.Equal(t, linkedDir, worktree.Filesystem().Root())
 }
 
-func TestOpenSessionCondensationRepository_MetadataErrors(t *testing.T) { //nolint:paralleltest // uses t.Chdir
-	mainDir, linkedDir := twoWorktrees(t)
-	chdirWorktree(t, mainDir)
-	require.NoError(t, os.WriteFile(filepath.Join(linkedDir, ".git"), []byte("invalid metadata\n"), 0o600))
-	repo, err := openSessionCondensationRepository(t.Context(), &SessionState{WorktreePath: linkedDir})
-	require.Error(t, err, "unexpected metadata errors must not silently fall back")
-	assert.Nil(t, repo)
+func TestOpenSessionCondensationRepository_UnusableHome(t *testing.T) { //nolint:paralleltest // subtests use t.Chdir
+	for _, tc := range []struct {
+		name      string
+		breakHome func(t *testing.T, linkedDir string)
+	}{
+		{name: "malformed .git file", breakHome: func(t *testing.T, linkedDir string) {
+			t.Helper()
+			require.NoError(t, os.WriteFile(filepath.Join(linkedDir, ".git"), []byte("invalid metadata\n"), 0o600))
+		}},
+		{name: "repository does not open", breakHome: func(t *testing.T, linkedDir string) {
+			t.Helper()
+			// Metadata resolution never reads HEAD; opening the repository does.
+			metadata, err := gitrepo.ResolveWorktreeMetadata(linkedDir)
+			require.NoError(t, err)
+			require.NoError(t, os.Remove(filepath.Join(metadata.GitDir, "HEAD")))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+			mainDir, linkedDir := twoWorktrees(t)
+			chdirWorktree(t, mainDir)
+			tc.breakHome(t, linkedDir)
+
+			repo, err := openSessionCondensationRepository(t.Context(), &SessionState{WorktreePath: linkedDir})
+			require.NoError(t, err, "an unusable home must not block condensation")
+			defer repo.Close()
+			worktree, err := repo.Worktree()
+			require.NoError(t, err)
+			assert.Equal(t, mainDir, worktree.Filesystem().Root())
+		})
+	}
 }
 
 func TestOpenSessionCondensationRepository_ReusedRegisteredPath(t *testing.T) { //nolint:paralleltest // uses t.Chdir

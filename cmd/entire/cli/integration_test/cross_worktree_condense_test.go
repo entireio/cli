@@ -4,6 +4,8 @@ package integration
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -22,12 +24,14 @@ func TestCrossWorktreeCondenseSessionByID(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		removed      bool
+		malformed    bool
 		detached     bool
 		switchBranch bool
 		wantBranch   string
 	}{
 		{name: "existing worktree", wantBranch: "wt/session-a"},
 		{name: "removed worktree", removed: true, wantBranch: "wt/session-a"},
+		{name: "malformed worktree metadata", malformed: true, wantBranch: "wt/session-a"},
 		{name: "detached session", detached: true},
 		{name: "branch switched during turn", switchBranch: true, wantBranch: "wt/during-turn"},
 	} {
@@ -72,6 +76,9 @@ func TestCrossWorktreeCondenseSessionByID(t *testing.T) {
 				// Even the home worktree's current HEAD is not authoritative:
 				// the session recorded its branch before this checkout.
 				home.GitCheckoutNewBranch("wt/after-session")
+			}
+			if tc.malformed {
+				require.NoError(t, os.WriteFile(filepath.Join(home.RepoDir, ".git"), []byte("invalid metadata\n"), 0o600))
 			}
 			t.Chdir(caller.RepoDir)
 			require.NoError(t, strategy.NewManualCommitStrategy().CondenseSessionByID(t.Context(), sess.ID))

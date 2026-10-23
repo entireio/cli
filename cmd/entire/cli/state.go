@@ -271,10 +271,10 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 	}
 
 	// Out-of-band token baseline: agents whose token usage lives outside the
-	// transcript (Antigravity) snapshot their cumulative token position now so
+	// transcript (Antigravity, Factory AI Droid) snapshot their cumulative token position now so
 	// TurnEnd can compute the per-checkpoint delta.
 	if src, ok := agent.AsOutOfBandTokenSource(ag); ok {
-		baseline, blErr := src.SnapshotTokenBaseline(ctx, sessionID)
+		baseline, blErr := src.SnapshotTokenBaseline(ctx, sessionID, sessionRef)
 		if blErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "state"), "failed to snapshot out-of-band token baseline", "error", blErr.Error())
 		} else {

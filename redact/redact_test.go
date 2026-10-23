@@ -247,11 +247,11 @@ func TestCollectJSONLReplacements_Succeeds(t *testing.T) {
 	obj := map[string]any{
 		"content": "token=" + highEntropySecret,
 	}
-	repls := collectJSONLReplacements(obj, String)
+	repls := collectJSONLReplacements(obj, regexLayers)
 	// expect one replacement for high-entropy secret
 	want := []jsonReplacement{{key: "content", original: "token=" + highEntropySecret, redacted: "REDACTED"}}
 	if !slices.Equal(repls, want) {
-		t.Errorf("got %q, want %q", repls, want)
+		t.Errorf("got %+v, want %+v", repls, want)
 	}
 }
 
@@ -323,7 +323,7 @@ func TestShouldSkipJSONLField_RedactionBehavior(t *testing.T) {
 		"session_id": highEntropySecret,
 		"content":    highEntropySecret,
 	}
-	repls := collectJSONLReplacements(obj, String)
+	repls := collectJSONLReplacements(obj, regexLayers)
 	// Only "content" should produce a replacement; "session_id" should be skipped.
 	if len(repls) != 1 {
 		t.Fatalf("expected 1 replacement, got %d", len(repls))
@@ -2144,12 +2144,12 @@ func TestShouldSkipJSONLObject_RedactionBehavior(t *testing.T) {
 		"type": "image",
 		"data": highEntropySecret,
 	}
-	repls := collectJSONLReplacements(obj, String)
+	repls := collectJSONLReplacements(obj, regexLayers)
 
 	// expect no replacements, it's an image which is skipped.
 	var wantRepls []jsonReplacement
 	if !slices.Equal(repls, wantRepls) {
-		t.Errorf("got %q, want %q", repls, wantRepls)
+		t.Errorf("got %+v, want %+v", repls, wantRepls)
 	}
 
 	// Verify that secrets inside non-image objects ARE redacted.
@@ -2157,10 +2157,10 @@ func TestShouldSkipJSONLObject_RedactionBehavior(t *testing.T) {
 		"type":    "text",
 		"content": highEntropySecret,
 	}
-	repls2 := collectJSONLReplacements(obj2, String)
+	repls2 := collectJSONLReplacements(obj2, regexLayers)
 	wantRepls2 := []jsonReplacement{{key: "content", original: highEntropySecret, redacted: "REDACTED"}}
 	if !slices.Equal(repls2, wantRepls2) {
-		t.Errorf("got %q, want %q", repls2, wantRepls2)
+		t.Errorf("got %+v, want %+v", repls2, wantRepls2)
 	}
 }
 
