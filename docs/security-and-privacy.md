@@ -453,9 +453,10 @@ install the git hooks.
   which belongs to one worktree. `entire disable --global` turns the flag off
   everywhere; repositories you enabled yourself stay enabled.
 - A `repos` entry for the repository in the user settings file applies to every
-  worktree of the clone, and is the clone-wide way to turn one repository on or
-  off.
-- In a repository enabled only through global enable (no `repos` entry, and no
+  worktree of the clone, and one that sets `enabled` is the clone-wide way to
+  turn one repository on or off.
+- In a repository enabled only through global enable (no `repos` entry that
+  sets `enabled`, and no
   `enabled` key in an untracked `.entire/settings.local.json`), the committed
   `strategy_options.summarize`, `summary_generation`, `summary_timeout_seconds`
   and `"telemetry": true` are ignored: you never opted into them there, and

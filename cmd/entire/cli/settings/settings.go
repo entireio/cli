@@ -805,7 +805,7 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 
 	overlay := loadUserOverlay(ctx)
 	repoPrefs := overlay.repoPreferences(ctx, worktreeRootOfSettingsFile(settingsFileAbs))
-	if overlay.enablesEverywhere() && settings.Enabled && len(repoPrefs) == 0 && !localSetsEnabled(localData) {
+	if overlay.enablesEverywhere() && settings.Enabled && !reposSetEnabled(repoPrefs) && !localSetsEnabled(localData) {
 		settings.enabledOnlyByGlobal = true
 		settings.committedKeysIgnoredForGlobalEnable = ignoreCommittedForGlobalOnly(settings)
 		if ignored := settings.committedKeysIgnoredForGlobalEnable; len(ignored) > 0 {

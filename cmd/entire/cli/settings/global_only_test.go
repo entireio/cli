@@ -43,7 +43,8 @@ func loadGlobalOnlyCase(t *testing.T, committed, local string, trackLocal bool, 
 
 // A repository is enabled only by global enable when global_enable is on, the
 // result is enabled, and nothing the developer wrote for this repository says
-// so: no matching repos entry, and no honored local file carrying `enabled`.
+// so: no matching repos entry that sets `enabled`, and no honored local file
+// carrying `enabled`. A repos entry with only other preferences is not a claim.
 // The committed file never counts — anyone can commit it. Neither do the local
 // keys Entire writes on its own (commit_linking and the like), which would
 // otherwise make the first commit prompt read as the developer opting in.
@@ -62,7 +63,8 @@ func TestEnabledOnlyByGlobal(t *testing.T) {
 		"local enabled false":         {local: `{"enabled": false}`, user: global},
 		"local without enabled":       {local: `{"commit_linking": "always"}`, user: global, wantGlobalOnly: true, wantEnabled: true},
 		"tracked local enabled":       {local: `{"enabled": true}`, trackLocal: true, user: global, wantGlobalOnly: true, wantEnabled: true},
-		"repos entry":                 {user: `{"global_enable": true, "repos": {ROOT: {"log_level": "debug"}}}`, wantEnabled: true},
+		"repos entry without enabled": {user: `{"global_enable": true, "repos": {ROOT: {"log_level": "debug"}}}`, wantGlobalOnly: true, wantEnabled: true},
+		"repos entry with enabled":    {user: `{"global_enable": true, "repos": {ROOT: {"enabled": true}}}`, wantEnabled: true},
 		"repos entry null":            {user: `{"global_enable": true, "repos": {ROOT: null}}`, wantGlobalOnly: true, wantEnabled: true},
 		"repos entry fails to decode": {user: `{"global_enable": true, "repos": {ROOT: {"nope": 1}}}`, wantGlobalOnly: true, wantEnabled: true},
 		"repos enabled false":         {user: `{"global_enable": true, "repos": {ROOT: {"enabled": false}}}`},

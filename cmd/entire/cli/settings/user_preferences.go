@@ -472,13 +472,15 @@ func (o *userOverlay) enablesEverywhere() bool {
 
 // EnabledOnlyByGlobal reports whether this repository is on only because of
 // `global_enable`: the developer never enabled it here. That is, no matching
-// `repos` entry and no honored settings.local.json carrying `enabled`. The
+// `repos` entry that sets `enabled` and no honored settings.local.json
+// carrying `enabled`. The
 // committed settings.json never counts — whoever can push to the repository
 // can write it — and neither do the other keys Entire writes to the local file
 // on its own (commit_linking and the like).
 //
 // The local file belongs to one worktree, so `entire enable` and `entire
-// disable` claim one worktree; a `repos` entry claims the whole clone.
+// disable` claim one worktree; a `repos` entry that sets `enabled` claims the
+// whole clone.
 func (s *EntireSettings) EnabledOnlyByGlobal() bool {
 	return s != nil && s.enabledOnlyByGlobal
 }
@@ -522,6 +524,18 @@ func ignoreCommittedForGlobalOnly(settings *EntireSettings) []string {
 		ignored = append(ignored, "telemetry")
 	}
 	return ignored
+}
+
+// reposSetEnabled reports whether a matching `repos` entry sets `enabled`. An
+// entry that only sets, say, a log level or a review profile is a preference
+// for the repository, not the developer turning Entire on there.
+func reposSetEnabled(repoPrefs []*UserPreferences) bool {
+	for _, prefs := range repoPrefs {
+		if prefs.Enabled != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // localSetsEnabled reports whether an honored local settings file carries an
