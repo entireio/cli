@@ -556,7 +556,7 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 | Copilot CLI      | `.github/hooks/entire.json`   | JSON hooks config |
 | Cursor           | `.cursor/hooks.json`          | JSON hooks config |
 | Factory AI Droid | `.factory/settings.json`      | JSON hooks config |
-| OpenCode         | `.opencode/plugins/entire.ts` | TypeScript plugin |
+| OpenCode         | `.opencode/plugin/entire.ts`  | TypeScript plugin |
 | Pi               | `.pi/extensions/entire/index.ts` | TypeScript extension |
 
 You can enable multiple agents at the same time — each agent's hooks are independent. Entire detects which agents are active by checking for installed hooks, not by a setting in `settings.json`.

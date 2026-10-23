@@ -31,8 +31,10 @@ type openCodeExportError struct {
 func (e *openCodeExportError) Error() string { return e.message }
 func (e *openCodeExportError) Unwrap() error { return e.cause }
 
-// runOpenCodeExportToFile runs `opencode export <sessionID>` and redirects stdout
-// to outputPath. This avoids pipe/stdout capture truncation bugs in some opencode versions.
+// runOpenCodeExportToFile runs the session export for the installed OpenCode
+// (`opencode export <id>` on 1.x, `opencode session export --standalone <id>`
+// on 2.x; see detectOpenCodeCLI) and redirects stdout to outputPath. This
+// avoids pipe/stdout capture truncation bugs in some opencode versions.
 //
 // outputName is relative to root, the shared .entire root, and must be a staging
 // name, never a live transcript: `opencode export` can fail after writing a
@@ -62,7 +64,7 @@ func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outp
 		}
 	}()
 
-	cmd := exec.CommandContext(ctx, "opencode", "export", sessionID)
+	cmd := exec.CommandContext(ctx, "opencode", detectOpenCodeCLI(ctx).exportArgs(sessionID)...)
 	// The npm launcher runs the real binary as a child that inherits stderr;
 	// killing only the launcher would leave Run waiting on that pipe past the
 	// deadline, and a commit's fetch budget depends on this cut-off. The new
@@ -116,7 +118,7 @@ func classifyOpenCodeExportError(ctx context.Context, err error, stderr, session
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		detail := formatOpenCodeErrorDetail(stderr)
-		if strings.HasPrefix(strings.ToLower(detail), "session not found") {
+		if strings.HasPrefix(strings.ToLower(detail), "session not found") || reportsSessionNotFound(stderr) {
 			return &openCodeExportError{
 				message: fmt.Sprintf("OpenCode session %q was not found. Check the session ID and try again.", sessionID),
 				cause:   err,
@@ -135,6 +137,17 @@ func classifyOpenCodeExportError(ctx context.Context, err error, stderr, session
 	}
 
 	return &openCodeExportError{message: "OpenCode export could not be started.", cause: err}
+}
+
+// reportsSessionNotFound reports OpenCode 2's missing-session line, which
+// carries no "Error:" prefix ("Session not found: ses_…").
+func reportsSessionNotFound(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(ansi.Strip(line))), "session not found") {
+			return true
+		}
+	}
+	return false
 }
 
 func formatOpenCodeErrorDetail(stderr string) string {
@@ -197,5 +210,47 @@ func runOpenCodeImport(ctx context.Context, exportFilePath string) error {
 		return fmt.Errorf("opencode import failed: %w (output: %s)", err, string(output))
 	}
 
+	return nil
+}
+
+// openCodeSessionExists reports whether OpenCode has sessionID, by exporting
+// it and discarding the output.
+func openCodeSessionExists(ctx context.Context, sessionID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "opencode", detectOpenCodeCLI(ctx).exportArgs(sessionID)...)
+	execx.TerminateOnCancel(cmd)
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && reportsSessionNotFound(stderr.String()) {
+			return false, nil
+		}
+		return false, classifyOpenCodeExportError(ctx, err, stderr.String(), sessionID)
+	}
+	return true, nil
+}
+
+// runOpenCodeSessionImport runs OpenCode 2's `opencode session import
+// --standalone <file>` from dir, which becomes the session's location. A
+// session that already exists is left as it is (OpenCode reports it and
+// exits 0).
+func runOpenCodeSessionImport(ctx context.Context, exportFilePath, dir string) error {
+	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "opencode", "session", "import", "--standalone", exportFilePath)
+	execx.TerminateOnCancel(cmd)
+	cmd.Dir = dir
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("opencode session import timed out after %s", openCodeCommandTimeout)
+		}
+		return fmt.Errorf("opencode session import failed: %w (output: %s)", err, formatOpenCodeErrorDetail(string(output)))
+	}
 	return nil
 }
