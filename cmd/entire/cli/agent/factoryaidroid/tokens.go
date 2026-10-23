@@ -144,12 +144,6 @@ func assistantMessagesSince(sessionRef string, startLine int, restarted bool) in
 			return 0
 		}
 	}
-	return countAssistantMessages(lines)
-}
-
-// countAssistantMessages returns the number of distinct assistant messages in
-// lines, one per model call.
-func countAssistantMessages(lines []TranscriptLine) int {
 	seen := make(map[string]struct{})
 	count := 0
 	for _, line := range lines {

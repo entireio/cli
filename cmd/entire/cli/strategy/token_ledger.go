@@ -20,7 +20,7 @@ func newTokenLedger(ctx context.Context, agentType types.AgentType, sessionID, t
 	if err != nil || transcriptPath == "" {
 		return nil
 	}
-	if _, ok := agent.AsCumulativeTokenSource(ag); !ok || isSubagentSession(ag, transcriptPath) {
+	if _, ok := agent.AsUsageCounterSource(ag); !ok || isSubagentSession(ag, transcriptPath) {
 		return nil
 	}
 	ledger := &session.TokenLedger{}
@@ -72,27 +72,19 @@ func ObserveTokenLedger(ctx context.Context, state *SessionState) bool {
 	return true
 }
 
-// observeTokenLedger reads in.TranscriptPath and folds one reading into
+// observeTokenLedger folds one reading of the session's running totals into
 // ledger. A transcript that cannot be read is skipped rather than read as
 // empty: a missing file is not a rewrite to nothing.
 func observeTokenLedger(ctx context.Context, ag agent.Agent, ledger *session.TokenLedger, in agent.CumulativeTokenInput) {
 	if in.TranscriptPath == "" {
 		return
 	}
-	data, err := agent.ReadTranscriptFile(in.TranscriptPath)
-	if err != nil {
-		logging.Debug(logging.WithComponent(ctx, "tokens"), "token ledger: transcript not readable",
-			slog.String("session_id", in.SessionID),
-			slog.String("error", err.Error()))
-		return
-	}
-	in.TranscriptData = data
-	obs, ok, err := agent.ObserveCumulativeTokenUsage(ctx, ag, in, ledger.Cursor)
+	obs, ok, err := agent.ReadCumulativeUsage(ctx, ag, in, ledger.Cursor)
 	if !ok {
 		return
 	}
 	if err != nil {
-		logging.Warn(logging.WithComponent(ctx, "tokens"), "token ledger: reading running totals failed",
+		logging.Debug(logging.WithComponent(ctx, "tokens"), "token ledger: reading running totals failed",
 			slog.String("session_id", in.SessionID),
 			slog.String("error", err.Error()))
 		return

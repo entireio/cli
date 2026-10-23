@@ -1,0 +1,5 @@
+{"info":{"id":"ses_1"},"messages":[
+{"info":{"id":"msg_1","role":"user"},"parts":[]},
+{"info":{"id":"msg_2","role":"assistant","tokens":{"input":12,"output":80,"reasoning":40,"cache":{"read":9000,"write":300}}},"parts":[]},
+{"info":{"id":"msg_3","role":"assistant","tokens":{"total":9512,"input":12,"output":200,"reasoning":40,"cache":{"read":9000,"write":300}}},"parts":[]},
+{"info":{"id":"msg_4","role":"assistant","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}},"parts":[]}]}

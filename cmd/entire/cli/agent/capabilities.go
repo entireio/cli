@@ -41,7 +41,6 @@ type CapabilityDeclarer interface {
 //   - PermissionConfigOwner
 //   - ProtectedFilesProvider
 //   - RestoredSessionPathResolver
-//   - ResumableCumulativeTokenSource (refuses CapabilityDeclarer agents)
 //   - SessionBaseDirProvider
 //   - SessionEndBudgeter
 //   - SessionFileCandidatesProvider
@@ -56,6 +55,7 @@ type CapabilityDeclarer interface {
 //   - TranscriptFetcher
 //   - TranscriptSanitizer
 //   - TurnEndHookTimeouter
+//   - UsageCounterSource (refuses CapabilityDeclarer agents)
 //
 // Their As* helpers resolve through builtinCapability, or through
 // nonDeclarerCapability for the entries marked as refusing CapabilityDeclarer
@@ -246,20 +246,11 @@ func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
 	return declaredCapability[TokenCalculator](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
 }
 
-// AsCumulativeTokenSource returns the agent as CumulativeTokenSource if it
-// implements the interface and (for CapabilityDeclarer agents) has declared
-// token_calculator: an external agent's cumulative total is its protocol token
-// calculation over the whole transcript, so the same declaration gates both.
-func AsCumulativeTokenSource(ag Agent) (CumulativeTokenSource, bool) {
-	return declaredCapability[CumulativeTokenSource](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
-}
-
-// AsResumableCumulativeTokenSource returns the agent as
-// ResumableCumulativeTokenSource if supported. External (CapabilityDeclarer)
-// agents are excluded: the protocol has no resumable token call, and their
-// whole-transcript total is reached through AsCumulativeTokenSource.
-func AsResumableCumulativeTokenSource(ag Agent) (ResumableCumulativeTokenSource, bool) {
-	return nonDeclarerCapability[ResumableCumulativeTokenSource](ag)
+// AsUsageCounterSource returns the agent as UsageCounterSource if supported.
+// External (CapabilityDeclarer) agents are excluded: the protocol has no
+// incremental token call, so they keep the per-turn accounting.
+func AsUsageCounterSource(ag Agent) (UsageCounterSource, bool) {
+	return nonDeclarerCapability[UsageCounterSource](ag)
 }
 
 // AsLateTranscriptWriter returns the agent as LateTranscriptWriter if supported.

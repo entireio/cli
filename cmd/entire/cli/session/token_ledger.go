@@ -9,7 +9,7 @@ import (
 )
 
 // TokenLedger keeps a session's token usage as the agent's own running total,
-// read from the agent's records (agent.CumulativeTokenSource), instead of
+// read from the agent's records (agent.ReadCumulativeUsage), instead of
 // summing per-turn slices of the transcript. Every reading replaces the last,
 // so a repeated or concurrent Stop, a commit in the middle of a turn, or a
 // message whose lines straddle a checkpoint cannot count anything twice. A
