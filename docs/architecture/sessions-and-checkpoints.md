@@ -346,6 +346,37 @@ some cases the old code declined outright into a best-candidate link. The
 in a long-running build or tool call can age out, allowing the remaining recent
 worktree to win.
 
+##### Agent commits in another repository
+
+A session homed in repository A whose agent commits in another Entire-enabled
+repository B links that commit in B (`strategy/foreign_session.go`).
+
+- Turn start records the session's worktree and owner in a per-user index,
+  `session-homes/<id>.json` under `userdirs.CacheRoot`. B's hooks use it only
+  to find A's store; the state loaded there decides.
+- It runs only when B's own sessions link nothing, never prompts (no TTY, or
+  `commit_linking: always`), and skips `--amend` without a new message,
+  merges, commits carrying inherited checkpoint trailers (squashes, redos)
+  and sequence operations. Like the local fast path, `--amend -m` and a
+  squash with no trailers to inherit are linked as new commits. The session must be the identified caller (`IsCaller()`),
+  ranked together with B's local sessions.
+- Linking copies the session's transcript into B's checkpoints, so it is
+  allowed only when neither repository has an `origin`, or both `origin`
+  remotes have the same owner (host and org/user). Otherwise the commit stays unlinked and the
+  commit-msg hook prints why (prepare-commit-msg's stderr is discarded by
+  the installed hook).
+- prepare-commit-msg stamps a fresh checkpoint ID; post-commit condenses the
+  session's transcript since its last checkpoint into B's store, through B's
+  normal pipeline and settings, so A's session content reaches B's checkpoint
+  remote. A's state advances as for a guest-linked commit, under A's lock with
+  a bounded wait; A keeps its own base, files and `LastCheckpointID`.
+- B's checkpoint is not finalized at turn end; the rest of the turn goes into
+  A's next checkpoint. The window B's checkpoint takes includes any earlier
+  turns that edited files in A, so A's next checkpoint starts after them.
+- If post-commit cannot condense (A's lock is busy past its bound, or the
+  session stopped being eligible), B's commit keeps a trailer with no
+  checkpoint; this is logged.
+
 Under `go test`, the session state store refuses to open outside the temp
 root (both `session.NewStateStore` and `NewStateStoreForWorktree`), so a test
 missing repo isolation fails loudly instead of leaking fixture sessions into
