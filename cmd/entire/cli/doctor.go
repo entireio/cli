@@ -616,7 +616,8 @@ func confirmDoctorFix(ctx context.Context, w io.Writer, title string) (bool, err
 // looks installed while naming a launcher inside the working tree that no longer
 // exists — and because that shape got no availability guard while pre-push
 // deliberately propagates exit codes, the symptom a user actually sees is `git
-// push` being rejected.
+// push` being rejected. Entire's own pre-push hook from before it passed git's
+// ref list is out of date too: it still runs, but does not pass that list.
 //
 // Unlike the agent hook checks this one repairs rather than only warning: the
 // reinstall is content-idempotent, backs up any foreign hook it displaces, and
@@ -655,10 +656,11 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		// means this repo opted in at some point, and a stale one is actively
 		// broken rather than merely missing.
 		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
-		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
-		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
+		fmt.Fprintln(w, "  A hook is in a shape this version replaces. Either it runs Entire from the")
+		fmt.Fprintln(w, "  working tree, which can reject `git push` once that path is gone, or it is a")
+		fmt.Fprintln(w, "  pre-push hook from before Entire read the refs `git push` sends.")
 	}
-	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
+	fmt.Fprintln(w, "  Fix: reinstall the missing or out-of-date git hooks (any non-Entire hook is backed up).")
 
 	if !force {
 		// Degrade to warn-only when there is nobody to ask. An agent or CI run
