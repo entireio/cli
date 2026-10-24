@@ -307,6 +307,9 @@ func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) erro
 	if rec.TokenUsageFromTranscript {
 		live.TokenUsageFromTranscript = true
 	}
+	if rec.SubagentModel != "" {
+		live.SubagentModel = rec.SubagentModel
+	}
 	if rec.Background {
 		live.Background = true
 	}
@@ -430,16 +433,11 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	if incoming == nil {
 		return existing
 	}
+	// Main-agent counts are deltas, summed through AddTokenUsage so a model
+	// split on either side keeps summing to the totals.
+	result := types.AddTokenUsage(ownUsage(existing), ownUsage(incoming))
 	if existing == nil {
-		// Return a copy to avoid sharing the pointer
-		result := &agent.TokenUsage{
-			InputTokens:         incoming.InputTokens,
-			CacheCreationTokens: incoming.CacheCreationTokens,
-			CacheReadTokens:     incoming.CacheReadTokens,
-			OutputTokens:        incoming.OutputTokens,
-			APICallCount:        incoming.APICallCount,
-			SubagentTokens:      incoming.SubagentTokens,
-		}
+		result.SubagentTokens = incoming.SubagentTokens
 		if incoming.SubagentTokensComplete != nil {
 			complete := *incoming.SubagentTokensComplete
 			result.SubagentTokensComplete = &complete
@@ -450,27 +448,34 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 		return result
 	}
 
-	// Accumulate values
-	existing.InputTokens += incoming.InputTokens
-	existing.CacheCreationTokens += incoming.CacheCreationTokens
-	existing.CacheReadTokens += incoming.CacheReadTokens
-	existing.OutputTokens += incoming.OutputTokens
-	existing.APICallCount += incoming.APICallCount
-
+	result.SubagentTokens = existing.SubagentTokens
+	result.SubagentTokensComplete = existing.SubagentTokensComplete
 	// Replace (not add) subagent tokens: incoming.SubagentTokens is already
 	// the cumulative total as of this step, so the latest snapshot supersedes
 	// whatever was recorded before rather than stacking on top of it.
 	if incoming.SubagentTokensComplete != nil {
 		complete := *incoming.SubagentTokensComplete
-		existing.SubagentTokensComplete = &complete
+		result.SubagentTokensComplete = &complete
 		// An explicit inventory result is authoritative, including exact empty
 		// (complete with nil) and unavailable (incomplete with nil).
-		existing.SubagentTokens = incoming.SubagentTokens
+		result.SubagentTokens = incoming.SubagentTokens
 	} else if incoming.SubagentTokens != nil {
-		existing.SubagentTokens = incoming.SubagentTokens
+		result.SubagentTokens = incoming.SubagentTokens
 	}
 
-	return existing
+	return result
+}
+
+// ownUsage returns a copy of u's own counts and model, without its subagent
+// usage or coverage marker, which accumulateTokenUsage handles separately.
+func ownUsage(u *agent.TokenUsage) *agent.TokenUsage {
+	if u == nil {
+		return nil
+	}
+	own := *u
+	own.SubagentTokens = nil
+	own.SubagentTokensComplete = nil
+	return &own
 }
 
 // resetCheckpointWindow resets the per-checkpoint accumulation window after a

@@ -1264,3 +1264,102 @@ func TestStructuredAgentCountsTowardSession(t *testing.T) {
 		})
 	}
 }
+
+// Subagent tokens record the model that produced them. One model labels the
+// entry; a <synthetic> zero-usage row (an API error) is not a model call and
+// does not make it mixed.
+func TestCalculateTotalTokenUsage_SubagentSingleModel(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := t.TempDir()
+	transcriptData := buildJSONL(
+		makeTaskToolUseLine(t, "a1", "toolu_A"),
+		makeTaskResultLine(t, "uA", "toolu_A", "subA"),
+	)
+	writeJSONLFile(t, subagentsDir+"/agent-subA.jsonl",
+		`{"type":"assistant","uuid":"s1","message":{"id":"sm1","model":"claude-haiku-4-5","usage":{"input_tokens":50,"output_tokens":25}}}`,
+		`{"type":"assistant","uuid":"s2","message":{"id":"sm2","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}`,
+	)
+
+	usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(transcriptData, 0, subagentsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := usage.SubagentTokens
+	if sub == nil || sub.Model != "claude-haiku-4-5" || sub.ByModel != nil {
+		t.Fatalf("SubagentTokens = %+v, want Model claude-haiku-4-5 and no split", sub)
+	}
+	if sub.InputTokens != 50 || sub.APICallCount != 1 {
+		t.Errorf("SubagentTokens counts = %+v", sub)
+	}
+	if usage.Model != "" {
+		t.Errorf("the main transcript's model lives in session metadata, got %q", usage.Model)
+	}
+}
+
+// Subagents on different models are split per model rather than recorded
+// under no model, so each model's tokens can be priced at its own rate.
+func TestCalculateTotalTokenUsage_SubagentsOnDifferentModels(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := t.TempDir()
+	transcriptData := buildJSONL(
+		makeTaskToolUseLine(t, "a1", "toolu_A"),
+		makeTaskResultLine(t, "uA", "toolu_A", "subA"),
+		makeTaskToolUseLine(t, "a2", "toolu_B"),
+		makeTaskResultLine(t, "uB", "toolu_B", "subB"),
+	)
+	writeJSONLFile(t, subagentsDir+"/agent-subA.jsonl",
+		`{"type":"assistant","uuid":"s1","message":{"id":"sm1","model":"claude-haiku-4-5","usage":{"input_tokens":50,"output_tokens":25}}}`,
+	)
+	writeJSONLFile(t, subagentsDir+"/agent-subB.jsonl",
+		`{"type":"assistant","uuid":"s2","message":{"id":"sm2","model":"claude-opus-4-8","usage":{"input_tokens":500,"output_tokens":250}}}`,
+		`{"type":"assistant","uuid":"s3","message":{"id":"sm3","model":"claude-opus-4-8","usage":{"input_tokens":5,"output_tokens":2}}}`,
+	)
+
+	usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(transcriptData, 0, subagentsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := usage.SubagentTokens
+	if sub == nil || sub.Model != "" || len(sub.ByModel) != 2 {
+		t.Fatalf("SubagentTokens = %+v, want no single model and a two-model split", sub)
+	}
+	haiku, opus := sub.ByModel[0], sub.ByModel[1]
+	if haiku.Model != "claude-haiku-4-5" || haiku.InputTokens != 50 || haiku.APICallCount != 1 {
+		t.Errorf("haiku entry = %+v", haiku)
+	}
+	if opus.Model != "claude-opus-4-8" || opus.InputTokens != 505 || opus.APICallCount != 2 {
+		t.Errorf("opus entry = %+v", opus)
+	}
+	if sub.InputTokens != 555 || sub.APICallCount != 3 {
+		t.Errorf("subagent totals = %+v, want the sum of both models", sub)
+	}
+}
+
+// A task record's usage comes from the subagent's own transcript; it carries
+// the model like SubagentTokens does, while the main-transcript calculation
+// (the session total) stays unlabelled.
+func TestCalculateSubagentTokenUsage_RecordsModel(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"assistant","uuid":"s1","message":{"id":"m1","model":"claude-haiku-4-5","usage":{"input_tokens":3,"output_tokens":5}}}
+{"type":"assistant","uuid":"s2","message":{"id":"m1","model":"claude-haiku-4-5","usage":{"input_tokens":3,"output_tokens":9}}}
+{"type":"assistant","uuid":"s3","message":{"id":"m2","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
+`)
+	ag := &ClaudeCodeAgent{}
+	usage, err := ag.CalculateSubagentTokenUsage(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Model != "claude-haiku-4-5" || usage.OutputTokens != 9 || usage.APICallCount != 1 {
+		t.Errorf("subagent usage = %+v, want haiku, 9 output, 1 call", usage)
+	}
+	main, err := ag.CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if main.Model != "" {
+		t.Errorf("CalculateTokenUsage must stay unlabelled, got %q", main.Model)
+	}
+}

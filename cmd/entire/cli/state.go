@@ -723,6 +723,10 @@ type PreTaskState struct {
 	// UntrackedScanSkipped mirrors PrePromptState.UntrackedScanSkipped for the
 	// subagent path: when set, subagent-end must skip new-file detection.
 	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
+
+	// SubagentModel is the model the start hook named for the subagent
+	// (agent.Event.SubagentModel), carried to its task record at completion.
+	SubagentModel string `json:"subagent_model,omitempty"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -738,9 +742,10 @@ func (s *PreTaskState) PreUntrackedFiles() []string {
 }
 
 // CapturePreTaskState captures current untracked files before a Task execution
-// and saves them to a state file.
+// and saves them, with the subagent's model when its start hook named one, to
+// a state file.
 // Works correctly from any subdirectory within the repository.
-func CapturePreTaskState(ctx context.Context, toolUseID string) error {
+func CapturePreTaskState(ctx context.Context, toolUseID, subagentModel string) error {
 	if toolUseID == "" {
 		return errors.New("tool_use_id is required")
 	}
@@ -765,6 +770,7 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 		Timestamp:            time.Now().UTC().Format(time.RFC3339),
 		UntrackedFiles:       untrackedFiles,
 		UntrackedScanSkipped: scanSkipped,
+		SubagentModel:        subagentModel,
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
