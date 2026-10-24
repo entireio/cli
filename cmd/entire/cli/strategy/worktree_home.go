@@ -177,7 +177,7 @@ func rehome(ctx context.Context, state *SessionState, root string) {
 	state.FilesTouched, state.TouchedFileHashes = nil, nil
 	state.LastCheckpointID = ""
 	state.StepCount = 0
-	if pos, ok := currentTranscriptPosition(state); ok {
+	if pos, ok := currentTranscriptPosition(ctx, state); ok {
 		state.AdvanceDisplayWindow(pos)
 	} else {
 		// Re-homed anyway: left at the removed worktree, the session could
@@ -192,7 +192,7 @@ func rehome(ctx context.Context, state *SessionState, root string) {
 
 // currentTranscriptPosition returns the end of state's live transcript in the
 // agent's own position units, when the agent can tell.
-func currentTranscriptPosition(state *SessionState) (int, bool) {
+func currentTranscriptPosition(ctx context.Context, state *SessionState) (int, bool) {
 	ag, err := agent.GetByAgentType(state.AgentType)
 	if err != nil {
 		return 0, false
@@ -201,7 +201,7 @@ func currentTranscriptPosition(state *SessionState) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	transcriptPath, err := resolveTranscriptPath(state)
+	transcriptPath, err := resolveTranscriptPath(ctx, state)
 	if err != nil {
 		return 0, false
 	}
