@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -149,6 +151,8 @@ func TestPostCommit_ForeignAgentCommitCondensed(t *testing.T) {
 	assert.Equal(t, before.FilesTouched, after.FilesTouched)
 	assert.Equal(t, before.TurnCheckpointIDs, after.TurnCheckpointIDs)
 	assert.False(t, after.HomeNotHere)
+	assert.Equal(t, []session.ForeignTurnCheckpoint{{CheckpointID: cpID.String(), WorktreePath: r.b}}, after.ForeignTurnCheckpoints,
+		"the turn end finalizes it in B")
 }
 
 // A trailer typed by hand has no marker and is not condensed.
@@ -258,6 +262,119 @@ func TestPrepareCommitMsg_ForeignAgentCommitOwnerGate(t *testing.T) {
 			for _, owner := range tc.noticeOwners {
 				assert.Contains(t, notice, owner)
 			}
+		})
+	}
+}
+
+// finalize-foreign's work, run in B: B's checkpoint takes the rest of the turn.
+func TestFinalizeForeignTurnCheckpoints(t *testing.T) {
+	r := foreignCommitFixture(t, nil)
+	cpID := commitForeign(t, r, "add b\n")
+	require.False(t, cpID.IsEmpty())
+	require.NotContains(t, string(readBCheckpoint(t, r, cpID).Transcript), "reply after the commit")
+
+	state := loadForeignTestState(t, r)
+	f, err := os.OpenFile(state.TranscriptPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.WriteString(`{"type":"assistant","message":{"content":"reply after the commit"}}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	require.NoError(t, NewManualCommitStrategy().FinalizeForeignTurnCheckpoints(context.Background(), foreignTestSessionID, r.a, []string{cpID.String()}, time.Time{}))
+	assert.Contains(t, string(readBCheckpoint(t, r, cpID).Transcript), "reply after the commit")
+	assert.Equal(t, state.CheckpointTranscriptStart, loadForeignTestState(t, r).CheckpointTranscriptStart,
+		"finalize-foreign never writes the home state")
+
+	require.Error(t, NewManualCommitStrategy().FinalizeForeignTurnCheckpoints(context.Background(), "no-such-session", r.a, []string{cpID.String()}, time.Time{}))
+
+	// A checkpoint that does not hold the session is never written.
+	const other = "foreign-other"
+	r.saveForeignStateAs(t, other, nil)
+	before := readBCheckpoint(t, r, cpID).Transcript
+	require.Error(t, NewManualCommitStrategy().FinalizeForeignTurnCheckpoints(context.Background(), other, r.a, []string{cpID.String()}, time.Time{}))
+	assert.Equal(t, before, readBCheckpoint(t, r, cpID).Transcript)
+}
+
+// The turn end runs finalize-foreign once per repository and keeps only the
+// entries that failed, for a repeated turn end.
+func TestFinalizeForeignTurnCheckpoints_TurnEnd(t *testing.T) {
+	type call struct {
+		tree string
+		args []string
+	}
+	var calls []call
+	orig := runForeignFinalize
+	runForeignFinalize = func(_ context.Context, tree string, args []string) error {
+		calls = append(calls, call{tree, args})
+		if tree == "/repo/c" {
+			return errors.New("boom")
+		}
+		return nil
+	}
+	t.Cleanup(func() { runForeignFinalize = orig })
+
+	state := &SessionState{SessionID: "s1", WorktreePath: "/repo/a", ForeignTurnCheckpoints: []session.ForeignTurnCheckpoint{
+		{CheckpointID: "aaaaaaaaaaa1", WorktreePath: "/repo/b"},
+		{CheckpointID: "ccccccccccc1", WorktreePath: "/repo/c"},
+		{CheckpointID: "aaaaaaaaaaa2", WorktreePath: "/repo/b"},
+	}}
+	assert.False(t, NewManualCommitStrategy().finalizeForeignTurnCheckpoints(context.Background(), state, time.Time{}),
+		"one repository failed, so the turn's tail is not in every foreign checkpoint")
+	require.Len(t, calls, 2)
+	assert.Equal(t, "/repo/b", calls[0].tree)
+	assert.Equal(t, []string{"hooks", "git", "finalize-foreign", "--session", "s1", "--home", "/repo/a", "--deadline"}, calls[0].args[:8])
+	assert.Equal(t, []string{"aaaaaaaaaaa1", "aaaaaaaaaaa2"}, calls[0].args[9:])
+	assert.Equal(t, []session.ForeignTurnCheckpoint{{CheckpointID: "ccccccccccc1", WorktreePath: "/repo/c"}}, state.ForeignTurnCheckpoints)
+
+	// The repeated turn end retries only the failure.
+	calls = nil
+	runForeignFinalize = func(_ context.Context, tree string, args []string) error {
+		calls = append(calls, call{tree, args})
+		return nil
+	}
+	assert.True(t, NewManualCommitStrategy().finalizeForeignTurnCheckpoints(context.Background(), state, time.Time{}))
+	require.Len(t, calls, 1)
+	assert.Equal(t, "/repo/c", calls[0].tree)
+	assert.Empty(t, state.ForeignTurnCheckpoints)
+}
+
+// A finalize cut off by its deadline is not success: nothing is written.
+func TestFinalizeForeignTurnCheckpoints_Interrupted(t *testing.T) {
+	r := foreignCommitFixture(t, nil)
+	cpID := commitForeign(t, r, "add b\n")
+	require.False(t, cpID.IsEmpty())
+	require.Error(t, NewManualCommitStrategy().FinalizeForeignTurnCheckpoints(context.Background(), foreignTestSessionID, r.a,
+		[]string{cpID.String()}, time.Now().Add(-time.Second)))
+}
+
+// The home's transcript start advances to the turn end only when every
+// foreign checkpoint was finalized, even when it has its own mid-turn
+// checkpoints: otherwise the tail would be in no checkpoint.
+func TestHandleTurnEnd_ForeignFinalizeFailureKeepsTail(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fail     bool
+		advanced bool
+	}{{"finalized", false, true}, {"failed", true, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := foreignCommitFixture(t, nil)
+			t.Chdir(r.a)
+			paths.ClearWorktreeRootCache()
+			orig := runForeignFinalize
+			runForeignFinalize = func(context.Context, string, []string) error {
+				if tc.fail {
+					return errors.New("boom")
+				}
+				return nil
+			}
+			t.Cleanup(func() { runForeignFinalize = orig })
+
+			state := loadForeignTestState(t, r)
+			state.TurnCheckpointIDs = []string{"not-a-checkpoint"} // a home mid-turn commit
+			state.ForeignTurnCheckpoints = []session.ForeignTurnCheckpoint{{CheckpointID: "aaaaaaaaaaa1", WorktreePath: r.b}}
+			start := state.CheckpointTranscriptStart
+			require.NoError(t, NewManualCommitStrategy().HandleTurnEnd(context.Background(), state, time.Time{}))
+			assert.Equal(t, tc.advanced, state.CheckpointTranscriptStart > start)
 		})
 	}
 }
