@@ -368,10 +368,10 @@ func (r *apiCheckpointReader) readRawTranscript(ctx context.Context, checkpointI
 // resolveCommitCheckpoint maps a full commit SHA to the checkpoint that
 // produced it, through the owning repo's cell. Exactly one linked checkpoint
 // is required: the listing's order is not a contract, so several cannot be
-// picked from and are named instead (the local path reads the first trailer,
-// so a squash commit explains locally but not from here). Only the listing's
-// repo identity is verified; loadDetail verifies repo and checkpoint ID
-// against an independent response before anything is rendered.
+// picked from and are named instead (the local path reads the last trailer of
+// the final block, so a squash commit explains locally but not from here).
+// Only the listing's repo identity is verified; loadDetail verifies repo and
+// checkpoint ID against an independent response before anything is rendered.
 func (r *apiCheckpointReader) resolveCommitCheckpoint(ctx context.Context, sha string) (id.CheckpointID, error) {
 	// Lowercase: the server canonicalizes SHAs and the route is not case-blind.
 	sha = strings.ToLower(sha)

@@ -69,6 +69,24 @@ func TestGetGitDirInPath_RegularRepo(t *testing.T) {
 	}
 }
 
+// A commit hook asks git for its git dir once, but a failed lookup must not
+// stand for the rest of the hook: a later call under a live ctx asks again.
+func TestGetGitDir_HookDoesNotCacheAFailure(t *testing.T) {
+	dir := t.TempDir()
+	testutil.RunGit(t, dir, "init")
+	t.Chdir(dir)
+	ctx := withGitDir(context.Background())
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	_, err := GetGitDir(cancelled)
+	require.Error(t, err, "precondition: git cannot run under a cancelled ctx")
+
+	gitDir, err := GetGitDir(ctx)
+	require.NoError(t, err, "the failure must not be cached")
+	require.Equal(t, ".git", gitDir)
+}
+
 func TestGetGitDirInPath_Worktree(t *testing.T) {
 	t.Parallel()
 

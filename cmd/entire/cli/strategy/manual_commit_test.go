@@ -841,7 +841,7 @@ func TestAddCheckpointTrailerWithComment_HasComment(t *testing.T) {
 	// Test that addCheckpointTrailerWithComment includes the explanatory comment
 	message := "Test commit message\n"
 
-	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "add password hashing")
+	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "add password hashing", "#")
 
 	// Should contain the trailer
 	if !strings.Contains(result, trailers.CheckpointTrailerKey+": "+testTrailerCheckpointID.String()) {
@@ -873,7 +873,7 @@ func TestAddCheckpointTrailerWithComment_NoPrompt(t *testing.T) {
 	// Test that addCheckpointTrailerWithComment works without a prompt
 	message := "Test commit message\n"
 
-	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "")
+	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "", "#")
 
 	// Should contain the trailer
 	if !strings.Contains(result, trailers.CheckpointTrailerKey+": "+testTrailerCheckpointID.String()) {
@@ -889,6 +889,210 @@ func TestAddCheckpointTrailerWithComment_NoPrompt(t *testing.T) {
 	if !strings.Contains(result, "# Remove the Entire-Checkpoint") {
 		t.Errorf("addCheckpointTrailerWithComment() should contain comment, got: %q", result)
 	}
+}
+
+// A template's own comment line is not git's comment block: the trailer goes
+// above the block that ends the message, below every line the user may keep.
+func TestAddCheckpointTrailerWithComment_AnchorsToTheEndingBlock(t *testing.T) {
+	t.Parallel()
+	message := "Summary:\n# what changed\n\nDetails:\n\n# Please enter the commit message for your changes.\n#\n"
+
+	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "", "#")
+
+	require.Equal(t, []id.CheckpointID{testTrailerCheckpointID},
+		trailers.ParseAllCheckpointsFromFinalTrailerBlock(trailers.StripEditorComments(result, "#"), "#"), "%q", result)
+}
+
+// hasUserContent decides whether commit-msg may leave Entire's trailer in, so
+// it must count exactly what git's cleanup will keep: git drops comment lines
+// from a message it opened in the editor, and keeps every line of one it did
+// not (-m/-F, --no-edit).
+func TestHasUserContent(t *testing.T) {
+	t.Parallel()
+
+	const (
+		trailer   = "Entire-Checkpoint: a1b2c3d4e5f6"
+		scissors  = "------------------------ >8 ------------------------"
+		hashBlock = "# Please enter the commit message for your changes.\n#\n"
+	)
+	explained := func(prefix string) string {
+		return prefix + trailerExplanation + "Claude Code session context.\n\n" + trailer + "\n\n"
+	}
+	tests := []struct {
+		name          string
+		message       string
+		commentPrefix string
+		edited        bool
+		want          bool
+	}{
+		{
+			name:          "untouched editor message",
+			message:       "\n\n" + explained("#") + hashBlock,
+			commentPrefix: "#",
+			edited:        true,
+			want:          false,
+		},
+		{
+			name:          "untouched editor message with a semicolon prefix",
+			message:       "\n\n" + explained(";") + "; Please enter the commit message for your changes.\n;\n",
+			commentPrefix: ";",
+			edited:        true,
+			want:          false,
+		},
+		{
+			name:          "untouched editor message with a multi-character prefix",
+			message:       "\n\n" + explained("//") + "// Please enter the commit message for your changes.\n",
+			commentPrefix: "//",
+			edited:        true,
+			want:          false,
+		},
+		{
+			name:          "untouched verbose message: the diff below the scissors line is not content",
+			message:       "\n\n" + explained("#") + hashBlock + "# " + scissors + "\n# Do not modify or remove the line above.\ndiff --git a/f b/f\n+line\n",
+			commentPrefix: "#",
+			edited:        true,
+			want:          false,
+		},
+		{
+			name:          "typed subject in the editor",
+			message:       "Fix login\n\n" + explained("#") + hashBlock,
+			commentPrefix: "#",
+			edited:        true,
+			want:          true,
+		},
+		{
+			name:          "hash heading is content under a semicolon prefix",
+			message:       "# Release notes\n\n" + explained(";") + "; Please enter the commit message for your changes.\n",
+			commentPrefix: ";",
+			edited:        true,
+			want:          true,
+		},
+		{
+			name:          "git's block deleted, Entire's explanation kept",
+			message:       "\n\n" + explained("#"),
+			commentPrefix: "#",
+			edited:        true,
+			want:          false,
+		},
+		{
+			// `-m … -e`: prepare writes no explanation, and git still strips.
+			name:          "-m message cleared in the editor",
+			message:       "\n" + trailer + "\n\n" + hashBlock,
+			commentPrefix: "#",
+			edited:        true,
+			want:          false,
+		},
+		{
+			name:          "-m subject starting with a hash",
+			message:       "#42 fix login\n\n" + trailer + "\n",
+			commentPrefix: "#",
+			want:          true,
+		},
+		{
+			name:          "empty -m message",
+			message:       "\n\n" + trailer + "\n",
+			commentPrefix: "#",
+			want:          false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasUserContent(tt.message, commentConfig{prefix: tt.commentPrefix, status: true}, tt.edited); got != tt.want {
+				t.Errorf("hasUserContent(%q, %q, %v) = %v, want %v", tt.message, tt.commentPrefix, tt.edited, got, tt.want)
+			}
+		})
+	}
+}
+
+// With a repository comment prefix other than "#", git keeps "#" lines, so the
+// explanation must use the prefix git strips or it lands in the commit.
+func TestAddCheckpointTrailerWithComment_UsesCommentPrefix(t *testing.T) {
+	t.Parallel()
+	message := "\n; Please enter the commit message for your changes.\n;\n"
+
+	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "add password hashing", ";")
+
+	require.Contains(t, result, "; Remove the Entire-Checkpoint")
+	require.Contains(t, result, "; Last Prompt: add password hashing")
+	require.NotContains(t, result, "# ")
+	require.Equal(t, []id.CheckpointID{testTrailerCheckpointID},
+		trailers.ParseAllCheckpointsFromFinalTrailerBlock(trailers.StripEditorComments("Subject"+result, ";"), ";"),
+		"the trailer must end the cleaned message: %q", result)
+}
+
+// Git 2.51 changed how core.commentChar=auto picks its character, so the rule
+// follows the installed git's version; one that cannot be read is current.
+func TestAutoRuleForGitVersion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		out  string
+		want trailers.AutoRule
+	}{
+		{"2.50.0", trailers.AutoCountsEveryLine},
+		{"2.50.1", trailers.AutoCountsEveryLine},
+		{"2.45.1.windows.1", trailers.AutoCountsEveryLine},
+		{"2.51.0", trailers.AutoSkipsTrailingComments},
+		{"2.55.0", trailers.AutoSkipsTrailingComments},
+		{"3.0.0", trailers.AutoSkipsTrailingComments},
+		{"", trailers.AutoSkipsTrailingComments},
+	}
+	for _, tt := range tests {
+		t.Run(tt.out, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, autoRuleForGitVersion(tt.out))
+		})
+	}
+}
+
+// prefixFor must name the prefix git's own cleanup uses, or prepare reads a
+// different final trailer block than the commit records.
+func TestCommentConfigPrefixFor(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := resolvedTempDir(t)
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	ctx := context.Background()
+	const semicolonBlock = "# Release notes\n\n; Please enter the commit message for your changes.\n;\n"
+
+	require.Equal(t, "#", gitCommentConfig(ctx).prefixFor("Subject\n", true), "unset")
+
+	testutil.RunGit(t, dir, "config", "core.commentChar", ";")
+	require.Equal(t, ";", gitCommentConfig(ctx).prefixFor("Subject\n", true))
+
+	testutil.RunGit(t, dir, "config", "core.commentString", "//")
+	require.Equal(t, "//", gitCommentConfig(ctx).prefixFor("Subject\n", true), "the two keys are aliases: the last one set wins")
+
+	testutil.RunGit(t, dir, "config", "--unset", "core.commentChar")
+	testutil.RunGit(t, dir, "config", "core.commentChar", "@")
+	require.Equal(t, "@", gitCommentConfig(ctx).prefixFor("Subject\n", true), "the two keys are aliases: the last one set wins")
+
+	testutil.RunGit(t, dir, "config", "--unset", "core.commentString")
+	testutil.RunGit(t, dir, "config", "core.commentChar", "auto")
+	require.Equal(t, ";", gitCommentConfig(ctx).prefixFor(semicolonBlock, true), "auto: the prefix git's comment block was written with")
+	require.Equal(t, "#", gitCommentConfig(ctx).prefixFor("Subject\n", true), "auto without a comment block")
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	require.Equal(t, "#", gitCommentConfig(cancelled).prefixFor(semicolonBlock, true), "an unreadable config falls back to git's default")
+}
+
+// A commit hook reads its comment config once, but a read under a done ctx
+// yields git's defaults, not the config: a later call under a live ctx must
+// read the config.
+func TestGitCommentConfig_HookDoesNotCacheAReadUnderADoneContext(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := resolvedTempDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.RunGit(t, dir, "config", "core.commentChar", ";")
+	t.Chdir(dir)
+	ctx := WithCommentConfig(context.Background())
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	require.Equal(t, "#", gitCommentConfig(cancelled).prefix, "precondition: a read under a done ctx falls back to git's default")
+	require.Equal(t, ";", gitCommentConfig(ctx).prefix, "the fallback must not be cached")
 }
 
 func TestAddCheckpointTrailer_ConventionalCommitSubject(t *testing.T) {

@@ -62,9 +62,41 @@ type hookSpec struct {
 
 // GetGitDir returns the actual git directory path by delegating to git itself.
 // This handles both regular repositories and worktrees, and inherits git's
-// security validation for gitdir references.
+// security validation for gitdir references. Inside a commit hook (withGitDir)
+// git is asked until it answers once.
 func GetGitDir(ctx context.Context) (string, error) {
-	return getGitDirInPath(ctx, ".")
+	snap, ok := ctx.Value(gitDirKey{}).(*gitDirSnapshot)
+	if !ok {
+		return getGitDirInPath(ctx, ".")
+	}
+	snap.mu.Lock()
+	defer snap.mu.Unlock()
+	if snap.dir == "" {
+		dir, err := getGitDirInPath(ctx, ".")
+		if err != nil {
+			return "", err // not cached: a later call, under a live ctx, asks again
+		}
+		snap.dir = dir
+	}
+	return snap.dir, nil
+}
+
+// gitDirKey holds a commit hook's git dir (withGitDir).
+type gitDirKey struct{}
+
+type gitDirSnapshot struct {
+	mu  sync.Mutex
+	dir string
+}
+
+// withGitDir gives a commit hook one successful `git rev-parse --git-dir`:
+// its operation checks and marker reads and writes each need the git dir,
+// which does not change while the hook runs.
+func withGitDir(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(gitDirKey{}).(*gitDirSnapshot); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, gitDirKey{}, &gitDirSnapshot{})
 }
 
 // hooksDirCache caches the hooks directory to avoid repeated git subprocess spawns.

@@ -269,11 +269,114 @@ they rely on turn start having followed or re-homed first. A sibling
 worktree's hook that runs between a move and the moved home's next hook
 still reads the stored transcript copy from the hook's own worktree.
 
+**Only the final trailer block links a commit** (`stampedTrailer` in
+prepare-commit-msg; `FinalCheckpointTrailers` in post-commit, attach, and
+`explain --generate`). An `Entire-Checkpoint:` line anywhere else in the
+message (pasted, quoted, indented, or mentioned in prose) names a checkpoint
+the commit did not stamp, so prepare-commit-msg stamps a fresh trailer and
+post-commit condenses there. Prepare judges the message it is handed by the
+same rules, after applying git's cleanup, so it reads the final block
+post-commit will read:
+
+- **Grammar.** The block is read as git reads trailers: no leading
+  whitespace, a key of letters, digits and dashes with optional spaces or
+  tabs before its colon, indented lines only as continuations of a trailer,
+  lines starting with git's comment prefix skipped (trailing ones too), and
+  never the subject paragraph. Other lines are allowed only in a block
+  holding a line git generates (`Signed-off-by: `,
+  `(cherry picked from commit `), at most three per trailer line. Attach and
+  `explain --generate` take the block's last ID.
+- **Editor or not.** Git runs its commit hooks with `GIT_EDITOR=:` when it
+  opens no editor (`-m`/`-F` without `-e`, `--no-edit`, `-C`). The source
+  word cannot tell: `-m -e` reports `message`, and an amend reports `commit`
+  either way. A `GIT_EDITOR=:` the user exports looks the same, so such a
+  commit is treated as one git does not open: its trailer goes after git's
+  comment block (below the diff with `-v`, where git discards it), and a
+  message saved untouched is recorded holding only the trailer instead of
+  aborting.
+- **Cleanup.** A message git opens loses the lines starting with git's
+  comment prefix and everything from the exact scissors line down; any other
+  message keeps its comment lines, which git's trailer grammar still skips.
+  `commit.cleanup=strip` drops comment lines from every message, and
+  `whitespace`, `verbatim` and `scissors` keep them in editor messages too.
+- **Comment prefix.** `core.commentChar` or `core.commentString` (aliases;
+  the last one set wins), `#` when unset. For `auto`, prepare reads the prefix
+  back from the comment block git wrote, which sits right below the message
+  (after a blank line only when the message ends with a newline). With no
+  block (`commit.status=false`) it applies git's rule: the first of
+  `#;@!$%^&|:` that starts no line. Git 2.51 changed that rule: the empty
+  and `#` lines that end the message no longer count, as when git places a
+  sign-off, so under `auto` the hooks read `git --version` once to apply the
+  installed git's rule. A recorded commit is read with the configured
+  prefix, and `auto` reads as `#`, as in `git interpret-trailers`.
+- **Command-line flags.** The hooks read `commit.cleanup` and `commit.status`
+  from git config only: `git commit --cleanup=<mode>`, `--status` and
+  `--no-status` are invisible to them. With `--cleanup=whitespace`, for
+  example, prepare still writes its explanation, which git then records with
+  the prompt it quotes, and under `auto` git's kept block can end the
+  recorded commit below the trailer, leaving the commit unlinked.
+- **Placement.** Git's comment block is the run of comment lines after a
+  blank line that ends the message, or the part above the scissors line,
+  which can also start it. Every trailer prepare adds to a message git opens
+  goes above that block, so `commit -v` cannot cut it off, except when `auto`
+  picked a prefix other than `#` under a cleanup that keeps comment lines:
+  the block would then end the recorded commit unskipped, so the trailer goes
+  below it, above any scissors line, without the explanation. When no blank
+  line separates git's block from the lines above it (a message without a
+  final newline), the trailer goes after the block. A message git does not
+  open gets its trailer appended, so its own lines stay where the user put
+  them.
+- **Explanation.** In an editor message whose comment lines git's cleanup
+  drops, prepare writes its explanation with git's prefix, in a paragraph of
+  its own between the user's lines and the trailer, so a line typed just
+  above the trailer cannot join the subject paragraph. Any other message gets
+  no explanation, because git would record it and the prompt it quotes: one
+  git does not open, and one under `whitespace`, `verbatim` or `scissors`
+  cleanup. Commit-msg judges an emptied message by the same editor signal,
+  prefix and scissors line.
+- **Stamp.** Prepare records each trailer it stamps (an ID it generates, a
+  session's reserved one, or the one an amend restores) in the per-worktree
+  git dir until the next post-commit (`recordStampedTrailer`). Any other ID
+  in the final block (pasted, reused with `commit -C`, typed in the editor) is
+  a link only: prepare stamps its own trailer after it, and post-commit
+  creates a checkpoint only for a trailer prepare stamped
+  (`pickCondensationTarget`). Without a stamp (an amend keeping its trailer,
+  a sequence operation) post-commit condenses only into the last trailer
+  whose checkpoint exists, and only for the session that owns it
+  (`stampedByAnotherCommit`), so a teammate's checkpoint this clone has not
+  fetched is never created with local work.
+- **Moved trailers.** A trailer the user's edits move out of the final
+  block, such as a body typed below it or the line commented out under a
+  cleanup mode that keeps comment lines, no longer links the commit.
+  Post-commit, attach and `explain` agree: the commit is treated as one whose
+  trailer the user removed, and `entire attach` can link it.
+- **Read-only views.** `explain <commit>`, `explain --commit`, the branch
+  listing, the export and the review re-run guard show the checkpoint attach
+  and `--generate` use (`CommitCheckpoint`), falling back to the first ID
+  anywhere only when the final block names none. `explain --checkpoint`
+  lists a commit under every ID that view reads from it
+  (`CommitCheckpoints`): any ID of its final block, or that first ID. Other
+  read-only
+  lookups (resume, status, attribution, other history listings) still scan
+  the whole message, because squash commits carry their squashed commits'
+  trailers in the body.
+- **Inheritance.** Squash and redo inheritance take their IDs from the final
+  block of each squashed or redone commit, read from the recorded commit (git
+  indents the squashed messages in SQUASH_MSG), and add each to the final
+  block unless it is already there: a copy indented in the body, as git seeds
+  an editor squash message, does not count.
+- **Writer.** The trailer writer joins the final paragraph when it is a
+  trailer block read without a comment prefix, the strictest reading, so
+  every reader accepts the trailer it appends and a mixed block keeps its
+  trailers in the final block. Any other paragraph gets the trailer in a new
+  block.
+
 **Squashes inherit their trailers** (`inheritSquashedCheckpointTrailers`). A
 commit made while `git merge --squash` is in progress (SQUASH_MSG present in
-the per-worktree git dir) contains the squashed commits' work, so every
-`Entire-Checkpoint` trailer in SQUASH_MSG is carried into the message when
-missing when a staged path is one a commit Git recorded there changed; a file
+the per-worktree git dir) contains the squashed commits' work, so the
+final-block trailers of every commit Git recorded in SQUASH_MSG are carried
+into the message's final block when missing there, when a staged path is one
+a commit Git recorded there changed; a file
 touched up before committing still counts. An abandoned squash can leave
 SQUASH_MSG behind; staged work on other paths therefore inherits nothing, and inherited trailers in Git's seeded message are
 removed. git only reports source `squash` when its seeded message is accepted;
@@ -281,13 +384,12 @@ a squash committed with `-m` reports `message`, which used to run ordinary
 matching and either refuse or mint a fresh, empty checkpoint. Inherited
 trailers are links to checkpoints that already exist. Matching still runs, so
 work a session holds at squash time is stamped as its own trailer after the
-inherited ones, and post-commit condenses only into the trailer that has no
-checkpoint yet (`pickCondensationTarget`) among those prepare stamped: prepare
-records the inherited IDs in the per-worktree git dir, tied to the commit's
-parent (`recordInheritedTrailers`), so an inherited trailer whose checkpoint
-simply is not in this clone's store yet is never mistaken for a fresh one, rechecks whether that target appeared
-between selection and condensation, and never writes into an inherited one; a
-write into a checkpoint the session did not stamp for this commit is refused
+inherited ones, and post-commit condenses only into the trailer prepare
+stamped (`pickCondensationTarget`). Prepare also records the inherited IDs in
+the per-worktree git dir, tied to the commit's parent
+(`recordInheritedTrailers`), so post-commit never writes into an inherited
+one, even when its checkpoint is not in this clone's store yet; a write into
+a checkpoint the session did not stamp for this commit is refused
 (`stampedByAnotherCommit`). Merge commits stay unlinked by design; the
 merged commits keep their own trailers.
 
@@ -299,8 +401,8 @@ last real reset left is where the dropped work starts. Dropped means only that
 tip reaches it: commits HEAD, a remote or another branch still reach (merged-in
 main, a teammate's commit an undone rebase brought in) are never inherited,
 while a backup branch pointing at the tip itself does not count. A dropped
-commit's trailers are carried into the new message when every staged file it
-changed has exactly the content it had at that tip (read from the index git is
+commit's final-block trailers are carried into the new message when every
+staged file it changed has exactly the content it had at that tip (read from the index git is
 preparing the commit in, so `git commit -a` and path-limited commits compare
 what they commit), so an agent's ten commits
 redone as three logical ones keep every checkpoint, each on the commit that now

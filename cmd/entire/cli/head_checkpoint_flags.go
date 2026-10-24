@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 )
@@ -53,7 +52,7 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		logging.Debug(ctx, "head checkpoint flags: read HEAD commit message", slog.String("error", err.Error()))
 		return false, false, ""
 	}
-	cpID, ok := trailers.ParseCheckpoint(message)
+	cpID, ok := strategy.CommitCheckpoint(ctx, message)
 	if !ok {
 		logging.Debug(ctx, "head checkpoint flags: no Entire-Checkpoint trailer on HEAD")
 		return false, false, ""

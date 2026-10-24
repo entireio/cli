@@ -1316,7 +1316,7 @@ func commitDrivingGitHooksVerbosely(t *testing.T, env *TestEnv, path, msg string
 
 	prepCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
 	prepCmd.Dir = env.RepoDir
-	prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+	prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1", gitNoEditorEnv)
 	prepOutput, prepErr := prepCmd.CombinedOutput()
 	t.Logf("prepare-commit-msg output: %s (err: %v)", prepOutput, prepErr)
 

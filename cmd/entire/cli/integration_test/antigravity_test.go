@@ -325,7 +325,9 @@ func gitCLICommitWithEntireHooks(t *testing.T, env *TestEnv, message string, fil
 
 	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
 	require.NoError(t, os.WriteFile(msgFile, []byte(message), 0o600))
-	if output, err := env.prepareCommitMsgCmd(false, msgFile, "message").CombinedOutput(); err != nil {
+	prepCmd := env.prepareCommitMsgCmd(false, msgFile, "message")
+	prepCmd.Env = append(prepCmd.Env, gitNoEditorEnv)
+	if output, err := prepCmd.CombinedOutput(); err != nil {
 		t.Fatalf("prepare-commit-msg failed: %v\nOutput: %s", err, output)
 	}
 

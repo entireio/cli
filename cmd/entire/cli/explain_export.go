@@ -16,7 +16,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
 )
 
@@ -203,7 +202,7 @@ func resolveCheckpointFromCommitRef(ctx context.Context, errW io.Writer, commitR
 	if err != nil {
 		return id.CheckpointID(""), nil, fmt.Errorf("failed to read commit: %w", err)
 	}
-	cpID, found := trailers.ParseCheckpoint(commit.Message)
+	cpID, found := strategy.CommitCheckpoint(ctx, commit.Message)
 	if !found {
 		return id.CheckpointID(""), nil, fmt.Errorf("commit %s has no Entire-Checkpoint trailer", commit.Hash)
 	}

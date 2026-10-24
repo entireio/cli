@@ -28,7 +28,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
@@ -248,6 +247,8 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	// resume/clean/reset/explain do not either. Only the session is attach's to
 	// add, so its lines are filterable.
 	ctx = logging.WithSessionID(ctx, sessionID)
+	// Planning and checkpoint resolution both read the commit's trailers.
+	ctx = strategy.WithCommentConfig(ctx)
 
 	logCtx := logging.WithComponent(ctx, "attach")
 
@@ -642,8 +643,9 @@ func redeliverAttachedCheckpoint(ctx context.Context, w, errW io.Writer, plan at
 type attachLinkMode int
 
 const (
-	// attachJoinExisting: the commit already carries an Entire-Checkpoint
-	// trailer; the session joins that checkpoint and history is unchanged.
+	// attachJoinExisting: the commit's final trailer block already carries an
+	// Entire-Checkpoint trailer; the session joins that checkpoint and history
+	// is unchanged.
 	attachJoinExisting attachLinkMode = iota
 	// attachAddTrailer: no remote branch holds the commit. The trailer is
 	// added, rewriting the commit and any after it: nobody else has them, and
@@ -683,7 +685,7 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 		}
 	}
 	remotes := attachRemotesToCheck(ctx)
-	if len(trailers.ParseAllCheckpoints(target.Message)) > 0 {
+	if len(strategy.FinalCheckpointTrailers(ctx, target.Message)) > 0 {
 		// Joining changes no history, so whether the commit is pushed only
 		// decides when the checkpoint goes out: now if it is, since there may be
 		// no later push of it, else with the next git push. A remote that can't
@@ -1366,8 +1368,11 @@ func suggestFetchCommand(ctx context.Context, refspec string) string {
 	return fmt.Sprintf("git fetch %s %s", resolveCheckpointFetchTarget(ctx), refspec)
 }
 
+// resolveCheckpointID returns the checkpoint the commit's final trailer block
+// names, or a new ID. An ID elsewhere in the message is not the commit's link,
+// so attach must not write the session into it.
 func resolveCheckpointID(ctx context.Context, headCommit *object.Commit) (id.CheckpointID, bool) {
-	existing := trailers.ParseAllCheckpoints(headCommit.Message)
+	existing := strategy.FinalCheckpointTrailers(ctx, headCommit.Message)
 	if len(existing) > 0 {
 		return existing[len(existing)-1], true
 	}

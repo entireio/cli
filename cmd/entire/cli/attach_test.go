@@ -1862,6 +1862,122 @@ func TestAttach_NonInteractiveNeedsForce(t *testing.T) {
 	}
 }
 
+// A checkpoint ID that appears in the body of a commit message, rather than in
+// its final trailer block, does not link the commit to that checkpoint: attach
+// must not write the attached session into it.
+func TestAttach_BodyCheckpointLineDoesNotSelectCheckpoint(t *testing.T) {
+	assertAttachIgnoresBodyCheckpoint(t, "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nSigned-off-by: Test User <test@example.com>\n")
+}
+
+func TestAttach_IndentedCheckpointLineDoesNotSelectCheckpoint(t *testing.T) {
+	assertAttachIgnoresBodyCheckpoint(t, "Subject\n\n  Entire-Checkpoint: a1b2c3d4e5f6\n")
+}
+
+func TestAttach_CheckpointMentionedInProseDoesNotSelectCheckpoint(t *testing.T) {
+	assertAttachIgnoresBodyCheckpoint(t, "Subject\n\nFollow-up to Entire-Checkpoint: a1b2c3d4e5f6 from last week.\n")
+}
+
+// Git reads "Entire-Checkpoint:<id>" (no space after the colon) as a trailer,
+// so attach joins that checkpoint as it would a canonical trailer.
+func TestAttach_NoSpaceTrailerJoinsCheckpoint(t *testing.T) {
+	assertAttachJoinsNamedCheckpoint(t, "Subject\n\nEntire-Checkpoint:a1b2c3d4e5f6\n")
+}
+
+// commit.cleanup=scissors keeps Entire's explanation below the trailer. Git's
+// trailer grammar skips comment lines, so the trailer still links the commit.
+func TestAttach_TrailerFollowedByCommentLinesJoinsCheckpoint(t *testing.T) {
+	assertAttachJoinsNamedCheckpoint(t, "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n"+
+		"# Remove the Entire-Checkpoint trailer above if you don't want to link this commit to Claude Code session context.\n"+
+		"# The trailer will be added to your next commit based on this branch.\n")
+}
+
+func assertAttachJoinsNamedCheckpoint(t *testing.T, commitMessage string) {
+	t.Helper()
+	setupAttachTestRepo(t)
+	named, state := attachToCommitNamingCheckpoint(t, commitMessage)
+	if state.LastCheckpointID != named {
+		t.Fatalf("attach wrote the session into %s, want the trailer's checkpoint %s", state.LastCheckpointID, named)
+	}
+	if summary := readSummary(t, named.String()); len(summary.Sessions) != 2 {
+		t.Errorf("joined checkpoint sessions: got %d, want 2", len(summary.Sessions))
+	}
+}
+
+// attachToCommitNamingCheckpoint stores a checkpoint for an unrelated session,
+// commits with commitMessage (which names that checkpoint somewhere), and
+// attaches a new session to the commit. Returns the named checkpoint and the
+// attached session's state. Requires setupAttachTestRepo.
+func attachToCommitNamingCheckpoint(t *testing.T, commitMessage string) (id.CheckpointID, *session.State) {
+	t.Helper()
+	ctx := context.Background()
+	repoDir := mustGetwd(t)
+	named := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs()).Write(ctx, cpkg.Session{
+		CheckpointID: named,
+		SessionID:    "unrelated-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":"unrelated"}` + "\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}); err != nil {
+		t.Fatalf("seed unrelated checkpoint: %v", err)
+	}
+
+	testutil.WriteFile(t, repoDir, "change.txt", "change")
+	testutil.GitAdd(t, repoDir, "change.txt")
+	testutil.GitCommit(t, repoDir, commitMessage)
+
+	const sessionID = "attach-body-checkpoint"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+	var out bytes.Buffer
+	if err := runAttach(ctx, &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out.String())
+	}
+
+	state, err := loadAttachState(t, sessionID)
+	if err != nil || state == nil {
+		t.Fatalf("load attached session state: %+v (%v)", state, err)
+	}
+	return named, state
+}
+
+func assertAttachIgnoresBodyCheckpoint(t *testing.T, commitMessage string) {
+	t.Helper()
+	setupAttachTestRepo(t)
+	named, state := attachToCommitNamingCheckpoint(t, commitMessage)
+	if state.LastCheckpointID == named {
+		t.Fatalf("attach wrote the session into checkpoint %s, which the commit only mentions in its body", named)
+	}
+
+	headMessage := headCommitOf(t).Message
+	if linked := trailers.ParseAllCheckpointsFromFinalTrailerBlock(headMessage, ""); len(linked) == 0 || linked[0] != state.LastCheckpointID {
+		t.Errorf("HEAD's final trailer block should name the attached checkpoint %s, got %v:\n%s",
+			state.LastCheckpointID, linked, headMessage)
+	}
+
+	if summary := readSummary(t, named.String()); len(summary.Sessions) != 1 {
+		t.Errorf("unrelated checkpoint gained sessions: got %d, want 1", len(summary.Sessions))
+	}
+	repo, err := git.PlainOpen(mustGetwd(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs()).ReadSessionContent(context.Background(), named, 0)
+	if err != nil {
+		t.Fatalf("read unrelated checkpoint session: %v", err)
+	}
+	if content.Metadata.SessionID != "unrelated-session" {
+		t.Errorf("unrelated checkpoint session = %q, want unrelated-session", content.Metadata.SessionID)
+	}
+}
+
 // setupAttachTestRepo creates a temp git repo with one commit and enables Entire.
 // Returns the repo directory. Caller must not use t.Parallel() (uses t.Chdir).
 func setupAttachTestRepo(t *testing.T) {

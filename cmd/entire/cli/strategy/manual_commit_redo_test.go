@@ -99,6 +99,25 @@ func TestPrepareCommitMsg_RedoWithBackupBranchAtTipStillInherits(t *testing.T) {
 	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, checkpointIDs(got), "%q", got)
 }
 
+// A dropped commit links the checkpoint its final trailer block names; one its
+// body only mentions is not inherited.
+func TestPrepareCommitMsg_RedoInheritsOnlyFinalBlockTrailers(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := resolvedTempDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "base\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "init")
+	testutil.WriteFile(t, dir, "feature.txt", "agent work\n")
+	testutil.GitAdd(t, dir, "feature.txt")
+	testutil.GitCommit(t, dir, "agent: feature\n\nFollow-up to\nEntire-Checkpoint: "+redoCheckpointTwo+"\n\nEntire-Checkpoint: "+redoCheckpointOne)
+	testutil.RunGit(t, dir, "reset", "-q", "--soft", "HEAD~1")
+	t.Chdir(dir)
+
+	got := prepareMessage(t, "feat: the feature\n")
+	require.Equal(t, []string{redoCheckpointOne}, checkpointIDs(got), "%q", got)
+}
+
 func TestPrepareCommitMsg_RedoDeletedFileInheritsTrailer(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	dir := resolvedTempDir(t)
@@ -252,6 +271,15 @@ func TestPrepareCommitMsg_RedoKeepsAnAlreadyPresentTrailerOnce(t *testing.T) {
 	testutil.RunGit(t, dir, "reset", "-q", "--soft", "HEAD~2")
 	got := prepareMessage(t, "feat: the feature\n\nEntire-Checkpoint: "+redoCheckpointOne+"\n")
 	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, checkpointIDs(got), "%q", got)
+}
+
+// A message that quotes a redone commit's trailer indented in its body still
+// gets that trailer in its final block: git reads no trailer in the body.
+func TestPrepareCommitMsg_RedoTrailerQuotedInTheBodyLinksInTheFinalBlock(t *testing.T) {
+	dir := redoFixture(t)
+	testutil.RunGit(t, dir, "reset", "-q", "--soft", "HEAD~2")
+	got := prepareMessage(t, "feat: the feature\n\nRedoes:\n\n    agent: part one\n\n    Entire-Checkpoint: "+redoCheckpointOne+"\n")
+	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, finalBlockIDs(got), "%q", got)
 }
 
 // A redo split into several commits keeps inheriting: the reset is still the

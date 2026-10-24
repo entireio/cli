@@ -4,11 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -59,8 +59,9 @@ func TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers(t *testi
 	require.Equal(t, branchCheckpoint, ids[0].String(), "inherited trailers come first; the stamp is appended")
 }
 
-// Editor flow: the seeded message already carries the trailer; keep it once.
-func TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce(t *testing.T) {
+// Editor flow: the seeded message lists the squashed commit's trailer indented
+// in its body, where git reads no trailer; the final block must name it, once.
+func TestPrepareCommitMsg_SquashDefaultMessageLinksInheritedTrailerInTheFinalBlock(t *testing.T) {
 	dir, branchCheckpoint := squashFixture(t)
 	squashMsg, err := os.ReadFile(filepath.Join(dir, ".git", "SQUASH_MSG"))
 	require.NoError(t, err)
@@ -74,8 +75,41 @@ func TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce(t *testi
 
 	got, err := os.ReadFile(msgFile)
 	require.NoError(t, err)
-	require.Equal(t, 1, strings.Count(string(got), "Entire-Checkpoint:"))
-	require.Contains(t, string(got), branchCheckpoint)
+	recorded := trailers.StripEditorComments(string(got), trailers.DefaultCommentPrefix)
+	require.Equal(t, []string{branchCheckpoint}, finalBlockIDs(recorded), "%q", got)
+}
+
+// finalBlockIDs returns the checkpoint IDs in message's final trailer block.
+func finalBlockIDs(message string) []string {
+	var out []string
+	for _, cpID := range trailers.ParseAllCheckpointsFromFinalTrailerBlock(message, trailers.DefaultCommentPrefix) {
+		out = append(out, cpID.String())
+	}
+	return out
+}
+
+// A squashed commit links the checkpoint its final trailer block names; one
+// its body only mentions is not inherited.
+func TestInheritSquashedCheckpointTrailers_TakesOnlyFinalBlockTrailers(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := resolvedTempDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "base\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "init")
+	testutil.RunGit(t, dir, "checkout", "-q", "-b", "feature")
+	testutil.WriteFile(t, dir, "feature.txt", "agent work\n")
+	testutil.GitAdd(t, dir, "feature.txt")
+	const mentioned, linked = "01M2VBJBJQZ2BP1W2PBWDF3J40", "01M2VBJBJQZ2BP1W2PBWDF3J41"
+	testutil.GitCommit(t, dir, "agent: feature work\n\nFollow-up to\nEntire-Checkpoint: "+mentioned+"\n\nEntire-Checkpoint: "+linked)
+	testutil.RunGit(t, dir, "checkout", "-q", "-")
+	testutil.RunGit(t, dir, "merge", "--squash", "feature")
+	t.Chdir(dir)
+
+	msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(msgFile, []byte("Feature work (squashed)\n"), 0o600))
+	s := NewManualCommitStrategy()
+	require.Equal(t, []id.CheckpointID{linked}, s.inheritSquashedCheckpointTrailers(context.Background(), msgFile, "message"))
 }
 
 // No trailers to inherit: ordinary matching must run.

@@ -634,7 +634,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 	if commitErr != nil {
 		return fmt.Errorf("failed to get commit %s: %w", abbreviateCommitHash(lookup.repo, hash), commitErr)
 	}
-	cpID, hasCheckpoint := trailers.ParseCheckpoint(commit.Message)
+	cpID, hasCheckpoint := checkpointForCommit(ctx, commit.Message, generate)
 	linkVia := "its Entire-Checkpoint trailer"
 	if !hasCheckpoint {
 		// A commit linked by `entire session attach --commit` carries no
@@ -649,7 +649,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		// Side-effect modes must error — silently succeeding would leave
 		// scripts unable to distinguish "done" from "didn't happen".
 		if generate || rawTranscript {
-			return fmt.Errorf("cannot %s: commit %s has no Entire-Checkpoint trailer", generateOrRawLabel(generate), abbreviateCommitHash(lookup.repo, hash))
+			return noCheckpointTrailerError(lookup.repo, hash, commit.Message, generate)
 		}
 		printNoTrailerMessage(w, lookup.repo, hash)
 		return nil
@@ -1688,10 +1688,15 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 	}
 
 	commits := []associatedCommit{} // Initialize as empty slice, not nil (nil means "not searched")
-	targetID := checkpointID.String()
 
+	// Any checkpoint the commit links, as explain <commit> reads it: a squash
+	// commit's final block names its squashed commits' checkpoints before the
+	// one it stamped. One comment config read serves every commit.
+	trailerCtx := strategy.WithCommentConfig(ctx)
 	collectCommit := func(c *object.Commit) {
-		commits = append(commits, newAssociatedCommit(c))
+		if slices.Contains(strategy.CommitCheckpoints(trailerCtx, c.Message), checkpointID) {
+			commits = append(commits, newAssociatedCommit(c))
+		}
 	}
 
 	if searchAll {
@@ -1710,10 +1715,7 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 			if err := ctx.Err(); err != nil {
 				return err //nolint:wrapcheck // Propagating context cancellation
 			}
-			cpID, found := trailers.ParseCheckpoint(c.Message)
-			if found && cpID.String() == targetID {
-				collectCommit(c)
-			}
+			collectCommit(c)
 			return nil
 		})
 	} else {
@@ -1728,10 +1730,7 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 				return errStopIteration
 			}
 
-			cpID, found := trailers.ParseCheckpoint(c.Message)
-			if found && cpID.String() == targetID {
-				collectCommit(c)
-			}
+			collectCommit(c)
 			return nil
 		})
 	}
@@ -2465,8 +2464,11 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 
 	var points []strategy.PendingCheckpoint
 
+	// The checkpoint explain <commit> shows; one comment config read serves
+	// every commit.
+	trailerCtx := strategy.WithCommentConfig(ctx)
 	collectCheckpoint := func(c *object.Commit) {
-		cpID, found := trailers.ParseCheckpoint(c.Message)
+		cpID, found := strategy.CommitCheckpoint(trailerCtx, c.Message)
 		if !found {
 			return
 		}
@@ -2798,12 +2800,12 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 	}
 
 	// Extract Entire-Checkpoint trailer
-	checkpointID, hasCheckpoint := trailers.ParseCheckpoint(commit.Message)
+	checkpointID, hasCheckpoint := checkpointForCommit(ctx, commit.Message, generate)
 	if !hasCheckpoint {
 		// Side-effect modes must error so scripts can distinguish "done"
 		// from "didn't happen"; read-only modes print a friendly message.
 		if generate || rawTranscript {
-			return fmt.Errorf("cannot %s: commit %s has no Entire-Checkpoint trailer", generateOrRawLabel(generate), abbreviateCommitHash(repo, hash))
+			return noCheckpointTrailerError(repo, hash, commit.Message, generate)
 		}
 		printNoTrailerMessage(w, repo, hash)
 		return nil
@@ -2815,6 +2817,36 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 		return trailerCheckpointError(ctx, repo, hash, checkpointID, "its Entire-Checkpoint trailer", err)
 	}
 	return nil
+}
+
+// checkpointForCommit returns the checkpoint a commit's trailer names (see
+// strategy.CommitCheckpoint). --generate writes a summary into it, so only the
+// final trailer block counts there.
+func checkpointForCommit(ctx context.Context, message string, generate bool) (id.CheckpointID, bool) {
+	if generate {
+		if ids := strategy.FinalCheckpointTrailers(ctx, message); len(ids) > 0 {
+			return ids[len(ids)-1], true
+		}
+		return id.EmptyCheckpointID, false
+	}
+	return strategy.CommitCheckpoint(ctx, message)
+}
+
+// noCheckpointTrailerError is what --generate and --raw-transcript return for
+// a commit that resolves to no checkpoint. git log shows a checkpoint line
+// outside the final trailer block, which --generate does not accept, so the
+// error names it.
+func noCheckpointTrailerError(repo *git.Repository, hash plumbing.Hash, message string, generate bool) error {
+	commit := abbreviateCommitHash(repo, hash)
+	if mentioned := trailers.ParseAllCheckpoints(message); generate && len(mentioned) > 0 {
+		names := make([]string, len(mentioned))
+		for i, cpID := range mentioned {
+			names[i] = cpID.String()
+		}
+		return fmt.Errorf("cannot %s: commit %s names %s %s only outside its final trailer block, and only that block links a commit to a checkpoint",
+			generateOrRawLabel(generate), commit, pluralize("checkpoint", len(mentioned)), strings.Join(names, ", "))
+	}
+	return fmt.Errorf("cannot %s: commit %s has no Entire-Checkpoint trailer", generateOrRawLabel(generate), commit)
 }
 
 // trailerCheckpointError attributes a checkpoint failure to the commit whose

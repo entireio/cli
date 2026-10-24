@@ -134,3 +134,17 @@ func TestHeadHasInvestigateCheckpoint_WrapperPreservesContract(t *testing.T) {
 	require.False(t, hasInvestigation, "wrapper must not piggyback on HasReview")
 	require.Empty(t, info, "info must be empty when the wrapper returns false")
 }
+
+// Attach writes into the last trailer of HEAD's final block, or stamps a new
+// one there, so the review re-run guard must read that checkpoint and not one
+// HEAD's body mentions.
+func TestHeadCheckpointFlags_ReadsTheFinalBlockTrailer(t *testing.T) {
+	reviewed := writeHeadCheckpointWithFlags(t, setupHeadFlagsRepo(t), true, false)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	runGitInDir(t, cwd, "commit", "--amend", "-m", "init\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nFollow-up body\n\nEntire-Checkpoint: "+reviewed.String())
+
+	hasReview, _, info := headCheckpointFlags(context.Background())
+	require.True(t, hasReview, "the guard must read the checkpoint attach wrote the review into")
+	require.Contains(t, info, reviewed.String())
+}

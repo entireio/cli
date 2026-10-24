@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -35,6 +36,7 @@ func TestPostCommit_MidTurnCarryForward_DropsIgnoredAndSubmodulePaths(t *testing
 	saveMidTurnSession(t, s, dir, worktreePath, sessionID, "committed.txt", "pending.txt", "ignored.env", "sub")
 
 	testutil.GitAdd(t, dir, "committed.txt")
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("ef12ab34cd56"))
 	testutil.GitCommit(t, dir, "commit one file\n\n"+trailers.CheckpointTrailerKey+": "+"ef12ab34cd56")
 	require.NoError(t, s.PostCommit(context.Background()))
 

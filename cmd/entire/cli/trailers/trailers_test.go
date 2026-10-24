@@ -1,6 +1,7 @@
 package trailers
 
 import (
+	"slices"
 	"testing"
 
 	checkpointID "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -39,6 +40,60 @@ func TestAppendCheckpointTrailer(t *testing.T) {
 			msg:  "fix: login\n\nThis fixes the error: connection refused\n",
 			want: "fix: login\n\nThis fixes the error: connection refused\n\nEntire-Checkpoint: abc123def456\n",
 		},
+		{
+			name: "indented pseudo-trailer paragraph starts a new block",
+			msg:  "Message\n\nBody.\n\n  Entire-Checkpoint: deadbeefcafe\n",
+			want: "Message\n\nBody.\n\n  Entire-Checkpoint: deadbeefcafe\n\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "tab-indented pseudo-trailer paragraph starts a new block",
+			msg:  "Message\n\nBody.\n\n\tEntire-Checkpoint: deadbeefcafe\n",
+			want: "Message\n\nBody.\n\n\tEntire-Checkpoint: deadbeefcafe\n\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "trailer block ending in a continuation line is joined",
+			msg:  "Message\n\nSigned-off-by: Test User <test@example.com>\n continuation text\n",
+			want: "Message\n\nSigned-off-by: Test User <test@example.com>\n continuation text\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "checkpoint-shaped body line starts a new block",
+			msg:  "Message\n\nEntire-Checkpoint: deadbeefcafe\n\nBody continues here.\n",
+			want: "Message\n\nEntire-Checkpoint: deadbeefcafe\n\nBody continues here.\n\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			// git reads a block holding a line it generates as trailers even
+			// with other lines in it; a new paragraph would push them out.
+			name: "mixed block with a git-generated line is joined",
+			msg:  "Message\n\nSigned-off-by: Test User <test@example.com>\nReviewed on the call\n",
+			want: "Message\n\nSigned-off-by: Test User <test@example.com>\nReviewed on the call\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "hash line in a mixed block is joined",
+			msg:  "Message\n\nSigned-off-by: Test User <test@example.com>\n# retained message text\n",
+			want: "Message\n\nSigned-off-by: Test User <test@example.com>\n# retained message text\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			// Read without a comment prefix the hash line is prose, which only
+			// a block holding a git-generated line may contain.
+			name: "hash line in a block without a git-generated line starts a new block",
+			msg:  "Message\n\nReviewed-by: Test User <test@example.com>\n# retained message text\n",
+			want: "Message\n\nReviewed-by: Test User <test@example.com>\n# retained message text\n\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "trailer without a space after the colon is joined",
+			msg:  "Message\n\nEntire-Checkpoint:deadbeefcafe\n",
+			want: "Message\n\nEntire-Checkpoint:deadbeefcafe\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "trailer-shaped subject starts a new block",
+			msg:  "Entire-Checkpoint: deadbeefcafe\n",
+			want: "Entire-Checkpoint: deadbeefcafe\n\nEntire-Checkpoint: abc123def456\n",
+		},
+		{
+			name: "cherry-pick note block is joined",
+			msg:  "Message\n\nEntire-Checkpoint: deadbeefcafe\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\n",
+			want: "Message\n\nEntire-Checkpoint: deadbeefcafe\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\nEntire-Checkpoint: abc123def456\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -47,6 +102,11 @@ func TestAppendCheckpointTrailer(t *testing.T) {
 			got := AppendCheckpointTrailer(tt.msg, "abc123def456")
 			if got != tt.want {
 				t.Errorf("AppendCheckpointTrailer() = %q, want %q", got, tt.want)
+			}
+			for _, commentPrefix := range []string{"", DefaultCommentPrefix} {
+				if !slices.Contains(ParseAllCheckpointsFromFinalTrailerBlock(got, commentPrefix), checkpointID.MustCheckpointID("abc123def456")) {
+					t.Errorf("ParseAllCheckpointsFromFinalTrailerBlock(%q) does not see the checkpoint AppendCheckpointTrailer just appended:\n%q", commentPrefix, got)
+				}
 			}
 		})
 	}
@@ -61,6 +121,20 @@ func TestIsTrailerLine(t *testing.T) {
 	}{
 		{"Signed-off-by: User <user@example.com>", true},
 		{"Entire-Checkpoint: abc123def456", true},
+		{"  Entire-Checkpoint: abc123def456", false},
+		{"\tEntire-Checkpoint: abc123def456", false},
+		{"Entire-Checkpoint:abc123def456", true},
+		{"Entire-Checkpoint:\tabc123def456", true},
+		{"  Entire-Checkpoint:abc123def456", false},
+		{"https://example.com/issue/1", true}, // git parses it as key "https" too
+		// git's key is letters, digits and dashes, then optional spaces or
+		// tabs before the colon.
+		{"Reviewed-by : User <user@example.com>", true},
+		{"Reviewed-by\t: User <user@example.com>", true},
+		{"1st-reviewer: User", true},
+		{"-x: y", true},
+		{"Reviewed by: User", false},
+		{": value", false},
 		{"not a trailer", false},
 		{"error: connection refused", true}, // "error" is a valid trailer key format
 		{"", false},
@@ -228,6 +302,8 @@ func TestParseAllCheckpoints(t *testing.T) {
 }
 
 func TestParseCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		message   string
@@ -286,12 +362,430 @@ func TestParseCheckpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			gotID, gotFound := ParseCheckpoint(tt.message)
 			if gotFound != tt.wantFound {
 				t.Errorf("ParseCheckpoint() found = %v, want %v", gotFound, tt.wantFound)
 			}
 			if gotID.String() != tt.wantID {
 				t.Errorf("ParseCheckpoint() id = %v, want %v", gotID.String(), tt.wantID)
+			}
+		})
+	}
+}
+
+func TestParseAllCheckpointsFromFinalTrailerBlock(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		message       string
+		commentPrefix string
+		want          []string
+	}{
+		{
+			name:    "checkpoint-shaped body line ignored",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nSigned-off-by: Test User <test@example.com>\n",
+			want:    nil,
+		},
+		{
+			name:    "final trailer accepted after checkpoint-shaped body line",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nBody continues here.\n\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			want:    []string{"b2c3d4e5f6a1"},
+		},
+		{
+			name:    "multiple final checkpoint trailers",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\nEntire-Checkpoint: b2c3d4e5f6a1\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"},
+		},
+		{
+			name:    "checkpoint key embedded in another trailer value ignored",
+			message: "Message\n\nNotes: Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "indented checkpoint is not a trailer",
+			message: "Message\n\n  Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "tab-indented checkpoint is not a trailer",
+			message: "Message\n\n\tEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "no space after the colon",
+			message: "Message\n\nEntire-Checkpoint:a1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:    "tab after the colon",
+			message: "Message\n\nSigned-off-by: Test User <test@example.com>\nEntire-Checkpoint:\ta1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			// git accepts whitespace between a trailer's key and its colon.
+			name:    "another trailer spaced before its colon",
+			message: "Message\n\nReviewed-by : Test User <test@example.com>\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:    "continuation after checkpoint remains in trailer block",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n continuation text\nSigned-off-by: Test User <test@example.com>\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:    "continuation of another trailer does not become checkpoint",
+			message: "Message\n\nNotes: details\n  Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "subject line is never a trailer block",
+			message: "Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "trailer-shaped subject paragraph is not a trailer block",
+			message: "Entire-Checkpoint: a1b2c3d4e5f6\nSigned-off-by: Test User <test@example.com>\n",
+			want:    nil,
+		},
+		{
+			name:    "leading blank line leaves an empty subject",
+			message: "\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			// Earlier versions recorded Entire's explanation below the trailer
+			// under commit.cleanup=scissors.
+			name:          "comment lines in the block are skipped",
+			message:       "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# Remove the Entire-Checkpoint trailer above if you want.\n# Last Prompt: add login\n",
+			commentPrefix: "#",
+			want:          []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:          "comment lines between trailers are skipped",
+			message:       "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# note\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			commentPrefix: "#",
+			want:          []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"},
+		},
+		{
+			// commit.cleanup=whitespace keeps git's own comment block too.
+			name:          "trailing comment paragraphs are ignored",
+			message:       "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n# Please enter the commit message for your changes.\n#\n# On branch main\n",
+			commentPrefix: "#",
+			want:          []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:          "an indented line after a comment continues nothing",
+			message:       "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# note\n  continuation text\n",
+			commentPrefix: "#",
+			want:          nil,
+		},
+		{
+			name:          "configured prefix",
+			message:       "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n; Remove the Entire-Checkpoint trailer above if you want.\n",
+			commentPrefix: ";",
+			want:          []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:          "another prefix's lines are content",
+			message:       "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# note\n",
+			commentPrefix: ";",
+			want:          nil,
+		},
+		{
+			name:          "comment lines do not lift a trailer out of the subject",
+			message:       "# note\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			commentPrefix: "#",
+			want:          nil,
+		},
+		{
+			// git cherry-pick -x appends this line to the commit's trailer block.
+			name:    "cherry-pick note belongs to the block",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:    "a quarter trailers with a git-generated one is a block",
+			message: "Message\n\nSigned-off-by: A <a@example.com>\np1\np2\np3\np4\np5\np6\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:    "under a quarter trailers is not a block",
+			message: "Message\n\nSigned-off-by: A <a@example.com>\np1\np2\np3\np4\np5\np6\np7\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "prose needs a git-generated trailer in the block",
+			message: "Message\n\nNotes: A\nsome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "Signed-off-by is git-generated only with its space",
+			message: "Message\n\nSigned-off-by:A\nsome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "a continuation is not prose",
+			message: "Message\n\nSigned-off-by: A <a@example.com>\n  wrapped value\nsome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:    "a git-generated block is still never the subject",
+			message: "Signed-off-by: A <a@example.com>\nsome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "empty prefix reads comment-shaped lines as content",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# note\n",
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ParseAllCheckpointsFromFinalTrailerBlock(tt.message, tt.commentPrefix)
+			if len(got) != len(tt.want) {
+				t.Fatalf("ParseAllCheckpointsFromFinalTrailerBlock() = %v, want %v", got, tt.want)
+			}
+			for i, wantID := range tt.want {
+				if got[i].String() != wantID {
+					t.Errorf("ParseAllCheckpointsFromFinalTrailerBlock()[%d] = %v, want %v", i, got[i], wantID)
+				}
+			}
+		})
+	}
+}
+
+// StripEditorComments must leave exactly what git's cleanup records, so the
+// final trailer block it exposes is the one the commit will carry.
+func TestStripEditorComments(t *testing.T) {
+	t.Parallel()
+
+	const scissors = "------------------------ >8 ------------------------"
+	tests := []struct {
+		name          string
+		message       string
+		commentPrefix string
+		want          string
+	}{
+		{
+			name:          "default prefix drops hash lines",
+			message:       "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n# Please enter the commit message\n#\n",
+			commentPrefix: "#",
+			want:          "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n",
+		},
+		{
+			name:          "configured prefix drops its lines and keeps hash lines",
+			message:       "# Release notes\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n; Please enter the commit message\n;\n",
+			commentPrefix: ";",
+			want:          "# Release notes\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n",
+		},
+		{
+			name:          "multi-character prefix",
+			message:       "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n// Please enter the commit message\n",
+			commentPrefix: "//",
+			want:          "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+		},
+		{
+			name:          "everything from the scissors line down is dropped",
+			message:       "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n# " + scissors + "\ndiff --git a/f b/f\n+Entire-Checkpoint: b2c3d4e5f6a1\n",
+			commentPrefix: "#",
+			want:          "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+		},
+		{
+			name:          "scissors line with the configured prefix",
+			message:       "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n; " + scissors + "\ndiff --git a/f b/f\n",
+			commentPrefix: ";",
+			want:          "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+		},
+		{
+			// git cuts only at a scissors line ending in "\n", so it keeps the
+			// diff below a CRLF one and drops just the comment lines.
+			name:          "a CRLF scissors line is not a cut",
+			message:       "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n# " + scissors + "\r\ndiff --git a/f b/f\n",
+			commentPrefix: "#",
+			want:          "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\ndiff --git a/f b/f\n",
+		},
+		{
+			name:          "prose mentioning the marker is not a scissors line",
+			message:       "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nExplain " + scissors + " here.\n",
+			commentPrefix: "#",
+			want:          "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nExplain " + scissors + " here.\n",
+		},
+		{
+			name:          "another prefix's scissors line is content",
+			message:       "Subject\n\n# " + scissors + "\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			commentPrefix: ";",
+			want:          "Subject\n\n# " + scissors + "\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+		},
+		{
+			name:          "empty prefix keeps the message as written",
+			message:       "Subject\n\n# not a comment\n",
+			commentPrefix: "",
+			want:          "Subject\n\n# not a comment\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := StripEditorComments(tt.message, tt.commentPrefix); got != tt.want {
+				t.Errorf("StripEditorComments(%q, %q) = %q, want %q", tt.message, tt.commentPrefix, got, tt.want)
+			}
+		})
+	}
+}
+
+// A prose line that mentions the scissors marker must neither hide a real
+// final trailer below it nor expose a body trailer above it.
+func TestStripEditorComments_ProseMarkerKeepsTheFinalBlock(t *testing.T) {
+	t.Parallel()
+
+	const prose = "Explain ------------------------ >8 ------------------------ here."
+	below := "Subject\n\n" + prose + "\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n# Please enter the commit message\n"
+	if got := ParseAllCheckpointsFromFinalTrailerBlock(StripEditorComments(below, "#"), "#"); len(got) != 1 || got[0].String() != "a1b2c3d4e5f6" {
+		t.Errorf("final trailer below the prose line: got %v, want [a1b2c3d4e5f6]", got)
+	}
+	above := "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n" + prose + "\n\n# Please enter the commit message\n"
+	if got := ParseAllCheckpointsFromFinalTrailerBlock(StripEditorComments(above, "#"), "#"); len(got) != 0 {
+		t.Errorf("body trailer above the prose line must stay body text: got %v", got)
+	}
+}
+
+// With core.commentChar=auto git picks the prefix before it writes its comment
+// block, so the prefix is read back from git's own lines.
+func TestAutoCommentPrefix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{
+			name:    "comment block written with semicolons",
+			message: "# Release notes\n\n; Please enter the commit message for your changes.\n;\n; On branch main\n",
+			want:    ";",
+		},
+		{
+			name:    "comment block written with hashes",
+			message: "\n# Please enter the commit message for your changes.\n#\n",
+			want:    "#",
+		},
+		{
+			name:    "scissors line names the prefix above a diff",
+			message: "Subject\n\n@ Please enter the commit message\n@ ------------------------ >8 ------------------------\n@ Do not modify or remove the line above.\ndiff --git a/f b/f\n+line\n",
+			want:    "@",
+		},
+		{
+			name:    "no comment block falls back to the default",
+			message: "Subject\n\nBody text\n",
+			want:    "#",
+		},
+		{
+			// git puts no blank line above its block when the message lacks
+			// a final newline.
+			name:    "comment block right below a message without a final newline",
+			message: "Subject\n\n#42 is the issue\n; Please enter the commit message for your changes.\n;\n",
+			want:    ";",
+		},
+		{
+			// git writes its block below the message, never as all of it.
+			name:    "a message of comment lines alone has no block",
+			message: "#42 fix login\n",
+			want:    ";",
+		},
+		{
+			// git would have picked "#" for "Fix build".
+			name:    "a trailing paragraph git could not have written is the user's",
+			message: "Fix build\n\n$ make test passes\n",
+			want:    "#",
+		},
+		{
+			name:    "empty message falls back to the default",
+			message: "",
+			want:    "#",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AutoCommentPrefix(tt.message, true, AutoCountsEveryLine); got != tt.want {
+				t.Errorf("AutoCommentPrefix(%q, true) = %q, want %q", tt.message, got, tt.want)
+			}
+		})
+	}
+}
+
+// Without a comment block to read back (commit.status=false, a -m message),
+// git's own rule decides: the first of "#;@!$%^&|:" that starts no line.
+func TestAutoCommentPrefix_WithoutBlockFollowsGitsRule(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{name: "a trailing ; line is the user's", message: "Release notes\n\n; reviewer note\n", want: "#"},
+		{name: "a # line moves git to ;", message: "# Release notes\n\nBody\n", want: ";"},
+		{name: "# and ; lines move git to @", message: "# Release notes\n; note\n", want: "@"},
+		{name: "# inside a line does not count", message: "Fix issue #42\n", want: "#"},
+		{name: "a CR also starts a line", message: "Subject\r\n#42 is the issue\r\n", want: ";"},
+		{name: "empty message", message: "", want: "#"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AutoCommentPrefix(tt.message, false, AutoCountsEveryLine); got != tt.want {
+				t.Errorf("AutoCommentPrefix(%q, false) = %q, want %q", tt.message, got, tt.want)
+			}
+		})
+	}
+}
+
+// Git 2.51 and later pick auto's character without looking at the empty and
+// "#" lines that end the message, or an old "Conflicts:" block, as when git
+// places a sign-off; the first line always counts. Each message is one git
+// 2.51 writes or is handed, with the block it would add where mayHaveBlock.
+func TestAutoCommentPrefix_SkipsTrailingCommentsSince251(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		message      string
+		mayHaveBlock bool
+		want         string
+	}{
+		{
+			name:         "block below a trailing # paragraph",
+			message:      "Subject\n\n#42 is the issue\n\n# Please enter the commit message for your changes.\n#\n",
+			mayHaveBlock: true,
+			want:         "#",
+		},
+		{
+			name:         "block right below a trailing # line without a final newline",
+			message:      "Subject\n\n#42 is the issue\n# Please enter the commit message for your changes.\n#\n",
+			mayHaveBlock: true,
+			want:         "#",
+		},
+		{name: "no block, trailing # paragraph", message: "Subject\n\n#42 is the issue\n", want: "#"},
+		{name: "a # paragraph followed by prose counts", message: "Subject\n\n#42 is the issue\n\nBody\n", want: ";"},
+		{name: "the first line always counts", message: "# Release notes\n\nBody\n", want: ";"},
+		{name: "a message of one # line counts", message: "#42 fix login\n", want: ";"},
+		{name: "an old Conflicts block is trailing too", message: "Subject\n\n#42 is the issue\n\nConflicts:\n\tfile\n", want: "#"},
+		{name: "nothing below a scissors line counts", message: "Subject\n\n# ------------------------ >8 ------------------------\n#42 below the cut\n", want: "#"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AutoCommentPrefix(tt.message, tt.mayHaveBlock, AutoSkipsTrailingComments); got != tt.want {
+				t.Errorf("AutoCommentPrefix(%q, %v) = %q, want %q", tt.message, tt.mayHaveBlock, got, tt.want)
 			}
 		})
 	}
@@ -317,6 +811,10 @@ func TestHasOPFApplied(t *testing.T) {
 		{"empty_message", "", false},
 		{"trailer_with_extra_spaces", "msg\n\nEntire-OPF-Applied:   true   \n", true},
 		{"body_mention_not_trailer", "msg\n\nThis paragraph mentions a string that looks like metadata.\nEntire-OPF-Applied: true\n\nSigned-off-by: Test User <test@example.com>\n", false},
+		{"indented_trailer_not_applied", "msg\n\n  Entire-OPF-Applied: true\n", false},
+		{"trailer_only_message_applied", "Entire-OPF-Applied: true\n", true},
+		{"trailer_only_message_without_newline_applied", "Entire-OPF-Applied: true", true},
+		{"subject_not_a_trailer_not_applied", "Rewrite blobs\nEntire-OPF-Applied: true\n", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
