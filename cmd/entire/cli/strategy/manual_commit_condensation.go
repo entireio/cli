@@ -632,7 +632,16 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
 
-	resolveCondensedTokenUsage(ctx, ag, state, sessionData)
+	// Read the live transcript now, so a commit in the middle of a turn
+	// stores everything used up to it.
+	if ObserveTokenLedger(ctx, state) {
+		// Child sessions' usage is credited outside the ledger; add it here as
+		// resolveCondensedTokenUsage does, and resetCheckpointWindow rebaselines it.
+		sessionData.TokenUsage = session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
+		sessionData.SessionTokenUsage = state.TotalTokenUsage()
+	} else {
+		resolveCondensedTokenUsage(ctx, ag, state, sessionData)
+	}
 
 	// Backfill the model from the transcript for agents that don't report it via
 	// hooks (e.g., Pi records message.model but its hook events carry no model
@@ -815,6 +824,7 @@ func buildCondensationWriteOptions(
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
+		SessionTokenUsage:           sessionData.SessionTokenUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
 		Summary:                     summary,
@@ -1181,6 +1191,10 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 // that also moves state.TokenUsage's cumulative subagent total, which the
 // caller must keep so the re-baseline covers what this checkpoint stored.
 func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, transcriptPath string) (*agent.TokenUsage, int) {
+	if ObserveTokenLedger(ctx, state) {
+		usage := session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
+		return usage, countTranscriptItems(ag.Type(), string(transcript))
+	}
 	var usage *agent.TokenUsage
 	if state == nil {
 		usage = agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
@@ -1203,7 +1217,8 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 }
 
 // ConsumeAttachTokenWindow marks the tokens an attach checkpoint stored as
-// counted: the token offset moves to pos and the pending window is reset, so
+// counted (a token ledger is marked by the caller, up to the reading attach
+// stored): the token offset moves to pos and the pending window is reset, so
 // the session's next checkpoint does not count them again. The displayed
 // transcript window (CheckpointTranscriptStart) is left alone.
 //

@@ -1234,7 +1234,10 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 		},
 	}
 
+	source.TokenLedger = &session.TokenLedger{Active: true, Main: &agent.TokenUsage{InputTokens: 10}, Children: map[string]*agent.TokenUsage{"child": {InputTokens: 5}}}
 	adopted := cloneAdoptSourceState(source)
+	adopted.TokenLedger.Main.InputTokens = 99
+	adopted.TokenLedger.Children["child"].InputTokens = 99
 	*adopted.EndedAt = endedAt.Add(1 * time.Hour)
 	*adopted.LastInteractionTime = lastInteraction.Add(1 * time.Hour)
 	adopted.ReviewSkills[0] = "/changed"
@@ -1249,6 +1252,9 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 	adopted.SkillEvents[0].TranscriptAnchor.EntryIDs[0] = "changed-entry"
 	adopted.SkillEvents[0].Native["tool"] = "changed-skill"
 
+	if source.TokenLedger.Main.InputTokens != 10 || source.TokenLedger.Children["child"].InputTokens != 5 {
+		t.Fatalf("source TokenLedger was mutated: %+v", source.TokenLedger)
+	}
 	if !source.EndedAt.Equal(endedAt) {
 		t.Fatalf("source EndedAt was mutated: %v", source.EndedAt)
 	}

@@ -1,0 +1,5 @@
+{
+  "about": "a re-written step counts once, its latest copy; a step without usage is no call",
+  "transcript": "transcript_full.jsonl",
+  "total": {"input_tokens": 13133, "cache_read_tokens": 11000, "output_tokens": 266, "api_call_count": 2}
+}
