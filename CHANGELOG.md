@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] - 2026-10-24
+
+### Added
+
+- On the git-refs backend, `entire checkpoint list --outgoing` shows which checkpoints the next `git push` will upload (ID, age, agent, first prompt and files touched) and where they go, reading only local state. The count in `entire status` now matches that list and no longer includes queued refs that were deleted locally. `--outgoing` is not supported on the git-branch backend ([#2866](https://github.com/entireio/cli/pull/2866))
+- `entire enable` ends with a checkpoint privacy notice: where checkpoints will be uploaded, that they contain agent transcripts readable by anyone if the destination is public, that secret redaction is best effort, and how to stop uploads or use a separate private repo ([#2865](https://github.com/entireio/cli/pull/2865))
+- `entire repo view` shows a `Sync:` section when GitHub blocks the owner's installation (for example an org IP allow list), including the fix and the resync command. The new `entire repo mirror resync` queues a resync for every placement once the block is cleared. `--json` adds `syncBlock` and `syncStatus` ([#2870](https://github.com/entireio/cli/pull/2870))
+- PII redaction has a new `ip` category (`[REDACTED_IP]`), on by default when `redaction.pii.enabled` is true. It redacts private and link-local addresses, and public ones only when they appear in a network context, so version numbers and user agents are kept ([#2861](https://github.com/entireio/cli/pull/2861))
+- Redaction catches `*_CLIENT_SECRET`, `*_API_KEY` and `*_TOKEN` assignments in text and JSONL fields, and low-entropy secrets piped into credential commands (`printf 'value' | examplectl secret put EXAMPLE_API_KEY`). Identifier-shaped values (`*_id`, `*_account`) and placeholders are left alone ([#1203](https://github.com/entireio/cli/pull/1203))
+- Checkpoints record how many values redaction replaced, per layer, and `entire checkpoint explain` shows them. Only counts and layer names are stored ([#2850](https://github.com/entireio/cli/pull/2850))
+- `strategy_options.checkpoint_ref_list_timeout_seconds` sets how long `entire checkpoint list` waits for each remote (default 5s, capped at 2 minutes), for remotes that are too slow to list their checkpoint refs in time ([#2875](https://github.com/entireio/cli/pull/2875))
+- Factory AI Droid sessions record token usage, read from the session's settings file, because Droid writes none to its transcript. Before this, every Droid session recorded 0 tokens ([#2820](https://github.com/entireio/cli/pull/2820))
+- `entire brain` offers to install the entire-brain plugin when it is missing, like `graph` and `investigate` do, instead of failing with "unknown command" ([#2883](https://github.com/entireio/cli/pull/2883))
+
+### Changed
+
+- `entire trail link` no longer accepts `--title`, `--body`, `--type`, `--priority` or `--assignee`; those are trail-level fields, so set them with `entire trail update <trail>`. A linked change's title is always its branch name, and `--status` is validated the same way as in `create`. `entire trail create --branch` still sets all of them on the project trail ([#2882](https://github.com/entireio/cli/pull/2882))
+- `entire trail show` links the change a project trail was reached through. In `--json`, each `changes[]` entry gains a `url` and the current change is marked `current: true`. The text view is aligned and colored like the other `show` commands ([#2877](https://github.com/entireio/cli/pull/2877))
+- `entire enable` no longer reports the enabled repository to entire.io ([#2881](https://github.com/entireio/cli/pull/2881))
+- `entire review` posts at most 50 findings, highest severity first, and shortens finding bodies over 16,384 characters. It reports how many it left out or shortened. Judge prompts fence each reviewer report with a per-prompt token, so a report can no longer close its own fence ([#2817](https://github.com/entireio/cli/pull/2817))
+
+### Fixed
+
+- OpenCode child sessions and Factory AI Droid Workers count toward the parent session's tokens in status, sessions, attach and checkpoint metadata, each counted exactly once. The `entire checkpoint explain` header total includes subagents ([#2824](https://github.com/entireio/cli/pull/2824))
+- A commit from a linked worktree by an agent that started in the main checkout (for example after Claude Code's `EnterWorktree`) no longer pulls the main checkout's unrelated mid-turn sessions into its checkpoint ([#2821](https://github.com/entireio/cli/pull/2821))
+- The background session sweep and `entire doctor` write a salvaged checkpoint on the session's recorded branch instead of the sweeping worktree's branch. If the session's original worktree is unusable, they fall back to the current repository instead of failing. Existing misattributed checkpoints are not rewritten ([#2833](https://github.com/entireio/cli/pull/2833), [#2863](https://github.com/entireio/cli/pull/2863))
+- `git-remote-entire` honors `protocol.version` from git config, so fetches over `entire://` with protocol v0 or v1 no longer exit 1 without a message ([#2869](https://github.com/entireio/cli/pull/2869))
+- OPF PII redaction no longer withholds a checkpoint when the transcript contains CRLF or bare carriage returns ([#2813](https://github.com/entireio/cli/pull/2813))
+
+### Housekeeping
+
+- Experimental commands are shown or hidden in help based on the build version alone: stable `X.Y.Z` releases hide them, while dev, nightly and commit-stamped builds show them ([#2860](https://github.com/entireio/cli/pull/2860))
+- The `transcript` package exports its JSONL records adapter for live streams ([#2848](https://github.com/entireio/cli/pull/2848))
+- `ci` is removed from the official plugin telemetry list ([#2864](https://github.com/entireio/cli/pull/2864))
+- Test isolation: unset the legacy `GIT_CONFIG` variable, keep the developer's git config out of the Antigravity tests, and make the attach tests pass on git 2.56 ([#2880](https://github.com/entireio/cli/pull/2880), [#2874](https://github.com/entireio/cli/pull/2874), [#2879](https://github.com/entireio/cli/pull/2879))
+
+### Thanks
+
+Thanks to @jaysomani for fixing OPF batch redaction on CRLF transcripts!
+
 ## [0.12.0] - 2026-10-21
 
 ### Breaking changes and migrations
