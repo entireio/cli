@@ -1,8 +1,8 @@
 package cli
 
 import (
-	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -61,7 +61,12 @@ func localOriginHEADBranch(repo *git.Repository) string {
 	if err != nil || ref == nil || ref.Type() != plumbing.SymbolicReference {
 		return ""
 	}
-	name, _ := strings.CutPrefix(ref.Target().String(), "refs/remotes/origin/")
+	// A hand-set origin/HEAD can point anywhere; only a branch of origin
+	// names origin's default.
+	name, ok := strings.CutPrefix(ref.Target().String(), "refs/remotes/origin/")
+	if !ok {
+		return ""
+	}
 	return name
 }
 
@@ -75,17 +80,18 @@ func remoteDefaultBranch(ctx context.Context, remote string) (string, bool) {
 	cmd := execx.NonInteractive(ctx, "git", "ls-remote", "--symref", remote, "HEAD")
 	cmd.WaitDelay = trailBranchCheckWaitDelay
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	// Bound both streams while git writes them: the remote and its transport
+	// helper control this output, and the timeout limits time, not bytes.
+	stdout := &limitedWriter{limit: trailRemoteDefaultBranchMaxOutput, failOnOverflow: true}
+	stderr := &limitedWriter{limit: maxGitStderr}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Run(); err != nil || stdout.exceeded {
 		logging.Debug(ctx, "trail create: could not read the remote's default branch",
-			"remote", remote, "error", err.Error(), "stderr", redactGitStderr(stderr.String()))
+			"remote", remote, "error", fmt.Sprint(err), "stdout_too_large", stdout.exceeded,
+			"stderr", redactGitStderr(stderr.buf.String()))
 		return "", false
 	}
-	if stdout.Len() > trailRemoteDefaultBranchMaxOutput {
-		return "", false
-	}
-	return parseSymrefHEAD(stdout.String())
+	return parseSymrefHEAD(stdout.buf.String())
 }
 
 // parseSymrefHEAD reads `ref: refs/heads/<name>\tHEAD` from ls-remote --symref

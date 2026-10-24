@@ -109,6 +109,14 @@ func TestResolveTrailCreateBase(t *testing.T) {
 			t.Fatalf("send = %q, want an invalid name dropped", send)
 		}
 	})
+	t.Run("origin/HEAD outside origin's branches is ignored", func(t *testing.T) {
+		stubRemote(t, "", false)
+		testutil.RunGit(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/release")
+		t.Cleanup(func() { testutil.RunGit(t, dir, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD") })
+		if send, _ := resolveTrailCreateBase(t.Context(), repo, ""); send != "" {
+			t.Fatalf("send = %q, want a hand-set origin/HEAD outside refs/remotes/origin ignored", send)
+		}
+	})
 	t.Run("local origin/HEAD is used without asking", func(t *testing.T) {
 		stubRemote(t, "", false)
 		testutil.RunGit(t, dir, "remote", "set-head", "origin", "release")
