@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/entireio/cli/transcript/pijsonl"
+	"github.com/entireio/cli/internal/transcript/pijsonl"
 )
 
 // --- pi format support ---
@@ -23,7 +23,7 @@ import (
 //
 // Parsing primitives (Entry/Message/ContentItem types, ResolveActiveBranch,
 // SkipLines, NewScanner) are shared with the pi agent package via
-// transcript/pijsonl so a fix applied here also lands there.
+// internal/transcript/pijsonl so a fix applied here also lands there.
 
 // piToolNameMap normalises Pi's lowercase tool names to the title-cased names
 // used elsewhere in Entire's compact format (matching Claude's "Read"/"Write"/"Edit").
