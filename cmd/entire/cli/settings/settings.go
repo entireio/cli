@@ -98,6 +98,27 @@ type EntireSettings struct {
 	// if the user had removed it. See enforceAgentPromptTrust.
 	agentPromptRejections []AgentPromptRejection
 
+	// userPromptOwnership records which agent instruction fields the user
+	// settings file supplied, so enforceAgentPromptTrust can recognise them.
+	// That file cannot be written by a repository, so it is a trusted source
+	// exactly as clone preferences are — but the gate only knew about two
+	// layers, and an unrecognised source is dropped.
+	userPromptOwnership userPromptOwnership
+
+	// userLayerRejections records preference blocks (or this repository's
+	// repos entries) dropped from the user settings file, one human-readable
+	// line each. Unexported for the same reason as its siblings: a block that
+	// was ignored must not be written back as if the user had removed it.
+	// Surfaced via UserLayerRejections.
+	userLayerRejections []string
+
+	// enabledOnlyByGlobal and committedKeysIgnoredForGlobalEnable record that
+	// this repository is on only through `global_enable`, and which committed
+	// keys were set aside because of it. Unexported so they never serialize.
+	// See EnabledOnlyByGlobal.
+	enabledOnlyByGlobal                 bool
+	committedKeysIgnoredForGlobalEnable []string
+
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
@@ -651,8 +672,8 @@ func validateScannerSettings(s *EntireSettings) error {
 }
 
 // Load loads the Entire settings from .entire/settings.json, then applies
-// clone-local preferences from the git common dir, then applies any overrides
-// from .entire/settings.local.json if it exists.
+// clone-local preferences from the git common dir, the user settings tier,
+// and finally any overrides from .entire/settings.local.json if it exists.
 // Returns default settings if no settings or preferences file exists.
 // Works correctly from any subdirectory within the repository.
 func Load(ctx context.Context) (*EntireSettings, error) {
@@ -760,23 +781,52 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		applyClonePreferences(settings, preferences)
 	}
 
-	// Apply local overrides if they exist — but only from a file that is
-	// genuinely local. See localLayerTrackedReason.
+	// Local overrides apply last, and only from a file that is genuinely
+	// local (see localLayerTrackedReason). It is read here, ahead of the user
+	// tier, because whether global_enable alone turns this repository on
+	// depends on it.
+	applyLocal := false
 	localData, err := readConfined(localSettingsFileAbs)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("reading local settings file: %w", err)
-		}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		// Local file doesn't exist, continue without overrides
-	} else if classifyLocalSettings(ctx, localSettingsFileAbs) == localTracked {
+	case err != nil:
+		return nil, fmt.Errorf("reading local settings file: %w", err)
+	case classifyLocalSettings(ctx, localSettingsFileAbs) == localTracked:
 		// Dropped only on PROOF that the file is tracked. Discarding every
 		// local setting because a repository could not be read would be a
 		// worse failure than the one being guarded against — the exec-bearing
 		// OPF command applies the stricter policy for itself.
 		settings.localLayerRejection = localLayerTrackedReason
 		localData = nil
-	} else if err := mergeJSON(settings, localData); err != nil {
-		return nil, fmt.Errorf("merging local settings: %w", err)
+	default:
+		applyLocal = true
+	}
+
+	overlay := loadUserOverlay(ctx)
+	repoPrefs := overlay.repoPreferences(ctx, worktreeRootOfSettingsFile(settingsFileAbs))
+	if overlay.enablesEverywhere() && settings.Enabled && !reposSetEnabled(repoPrefs) && !localSetsEnabled(localData) {
+		settings.enabledOnlyByGlobal = true
+		settings.committedKeysIgnoredForGlobalEnable = ignoreCommittedForGlobalOnly(settings)
+		if ignored := settings.committedKeysIgnoredForGlobalEnable; len(ignored) > 0 {
+			logging.Debug(ctx, "global enable: ignoring committed settings this developer has not opted into",
+				slog.String("keys", strings.Join(ignored, ", ")))
+		}
+	}
+
+	// The user tier (~/.config/entire/settings.json) applies above clone
+	// preferences and below the per-worktree local file: machine-wide
+	// preferences first, then this repository's entry.
+	//
+	// Unlike every layer around it, this one resolves without a git repository
+	// at all, so it is also the only tier readable when repository resolution
+	// itself fails.
+	applyUserTier(settings, overlay, repoPrefs)
+
+	if applyLocal {
+		if err := mergeJSON(settings, localData); err != nil {
+			return nil, fmt.Errorf("merging local settings: %w", err)
+		}
 	}
 
 	// openai_privacy_filter.command is executed, so it is honored only from a
@@ -1835,11 +1885,36 @@ func IsSetUpLocal(ctx context.Context) bool {
 	return entireFileExists(ctx, SettingsLocalName)
 }
 
-// IsSetUpAny returns true if Entire has been set up in the current repository,
-// checking both .entire/settings.json and .entire/settings.local.json.
-// Use this to detect any prior setup, even if only local settings exist.
+// IsSetUpAny returns true if Entire has been set up for the current
+// repository, in any tier: .entire/settings.json, .entire/settings.local.json,
+// or the user settings file.
+//
+// The third one is not optional. Both .entire files live in the WORKTREE, and
+// a linked worktree of a repository configured only outside it has neither —
+// `git worktree add` copies no untracked file, and there is no hook that fires
+// when a worktree is created. Answering from those two alone therefore reports
+// "never set up" in a tree whose hooks are installed and firing (they live in
+// the git common dir, which every worktree shares), and every one of them
+// becomes a silent no-op that drops all capture. That is the same failure
+// IsSetUpAndEnabled's doc comment describes for `enable --local`, reached by
+// adding a worktree instead of by checking the wrong file.
+//
+// Ordered cheapest first. The two Lstat calls answer for every repository with
+// an .entire directory without reading the user file at all, so the added cost
+// falls only on repositories that have no local settings to find — where the
+// alternative is being wrong.
 func IsSetUpAny(ctx context.Context) bool {
-	return IsSetUp(ctx) || IsSetUpLocal(ctx)
+	if IsSetUp(ctx) || IsSetUpLocal(ctx) {
+		return true
+	}
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// No resolvable worktree means nothing to match a repos entry
+		// against. Reporting "not set up" here matches what the two file
+		// checks above already did on the same failure.
+		return false
+	}
+	return UserTierConfiguresRepo(ctx, root)
 }
 
 // entireFileExists reports whether name exists directly under .entire. Lstat,
@@ -1941,9 +2016,14 @@ func (s *EntireSettings) IsSummarizeEnabled() bool {
 
 // CheckpointRemoteConfig holds the structured checkpoint remote configuration.
 // Stored in strategy_options.checkpoint_remote as {"provider": "github", "repo": "org/repo"}.
+// The json tags are load bearing even though GetCheckpointRemote builds this
+// by hand from strategy_options: the user settings file decodes INTO it
+// directly, under DisallowUnknownFields. Without tags, Go's case-insensitive
+// field matching would accept "Provider" and "provider" alike, so the schema a
+// user is told to write would not be the only one that works.
 type CheckpointRemoteConfig struct {
-	Provider string // e.g., "github"
-	Repo     string // e.g., "org/checkpoints-repo"
+	Provider string `json:"provider"` // e.g., "github"
+	Repo     string `json:"repo"`     // e.g., "org/checkpoints-repo"
 }
 
 // Owner returns the owner portion of the repo field (before the slash).

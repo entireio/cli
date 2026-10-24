@@ -210,6 +210,13 @@ var agentHelpGuidance = map[string]string{
 		"need it, use this rather than hand-rolling curl — it attaches the right\n" +
 		"bearer and dials the right host for you.",
 
+	// Global enable records sessions and pushes checkpoints in every repository
+	// the user works in, so agreeing to it belongs to the user.
+	"enable": "Never run `entire enable --global` on the user's behalf, and never pass\n" +
+		"--yes to it: it turns Entire on in every repository they work in and pushes\n" +
+		"session checkpoints with their git pushes, so it asks the user to agree, and\n" +
+		"that answer must be theirs.",
+
 	// Reviewing someone else's branch loads its hooks, MCP servers, and
 	// settings, so approval belongs to the user. The refusal text says the same;
 	// this is the copy an agent reads before it ever runs the command.

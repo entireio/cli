@@ -124,6 +124,7 @@ func NewRootCmd() *cobra.Command {
 			if err := validateContextFlag(cmd); err != nil {
 				return err
 			}
+			ensureGlobalEnableHooks(cmd)
 			safe, err := checkEntireDirBeforeRun(cmd)
 			if err != nil {
 				return err

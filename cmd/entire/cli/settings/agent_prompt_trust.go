@@ -22,7 +22,7 @@ type AgentPromptRejection struct {
 // an agent that runs with approvals disabled does not read as executable to a
 // reviewer.
 const (
-	agentPromptRejectionNotLocal   = "it did not come from .entire/settings.local.json or clone-local preferences"
+	agentPromptRejectionNotLocal   = "it did not come from the user settings file, .entire/settings.local.json, or clone-local preferences"
 	agentPromptRejectionUnverified = "the local settings file could not be verified as untracked"
 	// agentConfigRejectionUnsupported marks a reviewer config where none is supported
 	// (the legacy review map, the judge).
@@ -56,9 +56,10 @@ func (s *EntireSettings) AgentPromptRejections() []AgentPromptRejection {
 }
 
 // enforceAgentPromptTrust drops agent instruction fields unless they came from
-// a layer that is this developer's own: clone-local preferences (which live in
-// the git common dir and cannot arrive by cloning), or a local settings file
-// positively verified as untracked.
+// a layer that is this developer's own: the user settings file (which lives
+// outside the repository), clone-local preferences (which live in the git
+// common dir and cannot arrive by cloning), or a local settings file positively
+// verified as untracked.
 //
 // The gated fields are the free-text instruction channels: every
 // ReviewConfig.Prompt and every review profile's Task. Both land verbatim in
@@ -127,10 +128,13 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 	}
 
 	// decide returns the field's surviving value, recording a rejection when
-	// it is dropped. setLocally must win over prefsOwned: a key present in the
-	// local file merged last, so the effective value is the local file's even
-	// when preferences also carried one.
-	decide := func(field, value string, setLocally, prefsOwned bool) string {
+	// it is dropped. setLocally must win over every lower layer: a key present
+	// in the local file merged last, so the effective value is the local file's
+	// even when the user tier or clone preferences also carried one.
+	// userOwned is passed by the caller, which knows the profile name, rather
+	// than recovered from field: profile names may contain dots, so
+	// "review_profiles.a.b.task" cannot say whether the profile is "a" or "a.b".
+	decide := func(field, value string, setLocally, userOwned, prefsOwned bool) string {
 		if value == "" {
 			return ""
 		}
@@ -142,6 +146,10 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 			s.agentPromptRejections = append(s.agentPromptRejections,
 				AgentPromptRejection{Field: field, Value: value, Reason: agentPromptRejectionUnverified})
 			return ""
+		case userOwned:
+			// The user settings file needs no trackedness probe: nothing a
+			// repository can do puts content under ~/.config.
+			return value
 		case prefsOwned:
 			return value
 		default:
@@ -166,11 +174,11 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 
 	// decideConfig gates a reviewer config like decide gates text. The
 	// rejection carries no value: the config can hold secrets.
-	decideConfig := func(field string, cfg *ReviewAgentConfig, setLocally, prefsOwned bool) *ReviewAgentConfig {
+	decideConfig := func(field string, cfg *ReviewAgentConfig, setLocally, userOwned, prefsOwned bool) *ReviewAgentConfig {
 		if cfg == nil {
 			return nil
 		}
-		if decide(field, "set", setLocally, prefsOwned) == "" {
+		if decide(field, "set", setLocally, userOwned, prefsOwned) == "" {
 			for i := range s.agentPromptRejections {
 				if s.agentPromptRejections[i].Field == field {
 					s.agentPromptRejections[i].Value = ""
@@ -197,7 +205,7 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 		cfg := s.Review[worker]
 		hadPrompt := cfg.Prompt != ""
 		cfg.Prompt = decide("review."+worker+".prompt", cfg.Prompt,
-			rawHasKey(localRaw, "review", worker, "prompt"), prefsOwnReview)
+			rawHasKey(localRaw, "review", worker, "prompt"), false, prefsOwnReview)
 		hadConfig := cfg.Config != nil
 		rejectConfig("review."+worker+".config", cfg.Config)
 		cfg.Config = nil
@@ -212,21 +220,22 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 		profile := s.ReviewProfiles[name]
 		localSetsProfile := rawHasKey(localRaw, "review_profiles", name)
 		prefsOwnProfile := !localSetsProfile && prefs != nil && prefsHaveProfile(prefs, name)
+		userOwnsProfile := s.userPromptOwnership.ownsProfile(name)
 		// The task is the primary instruction channel: it lands in the same
 		// composed prompt the per-agent Prompt is appended to, so leaving it
 		// ungated would make the prompt gate a formality. A dropped task falls
 		// back to the built-in text for conventional profile names, so the
 		// stock profiles keep working.
 		profile.Task = decide("review_profiles."+name+".task", profile.Task,
-			rawHasKey(localRaw, "review_profiles", name, "task"), prefsOwnProfile)
+			rawHasKey(localRaw, "review_profiles", name, "task"), userOwnsProfile, prefsOwnProfile)
 		for _, worker := range sortedKeys(profile.Agents) {
 			cfg := profile.Agents[worker]
 			hadPrompt := cfg.Prompt != ""
 			cfg.Prompt = decide("review_profiles."+name+".agents."+worker+".prompt", cfg.Prompt,
-				rawHasKey(localRaw, "review_profiles", name, "agents", worker, "prompt"), prefsOwnProfile)
+				rawHasKey(localRaw, "review_profiles", name, "agents", worker, "prompt"), userOwnsProfile, prefsOwnProfile)
 			hadConfig := cfg.Config != nil
 			cfg.Config = decideConfig("review_profiles."+name+".agents."+worker+".config", cfg.Config,
-				rawHasKey(localRaw, "review_profiles", name, "agents", worker, "config"),
+				rawHasKey(localRaw, "review_profiles", name, "agents", worker, "config"), userOwnsProfile,
 				prefsOwnProfile || (prefs != nil && prefs.ReviewAgentConfigs[name][worker] != nil))
 			keepWorkerPresent(&cfg, worker, hadPrompt || hadConfig)
 			profile.Agents[worker] = cfg
@@ -238,7 +247,7 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 			// already degenerate. Reading as zero sends it to review's
 			// auto-select-a-judge fallback, which is the sane degradation.
 			profile.Judge.Prompt = decide("review_profiles."+name+".judge.prompt", profile.Judge.Prompt,
-				rawHasKey(localRaw, "review_profiles", name, "judge", "prompt"), prefsOwnProfile)
+				rawHasKey(localRaw, "review_profiles", name, "judge", "prompt"), userOwnsProfile, prefsOwnProfile)
 			rejectConfig("review_profiles."+name+".judge.config", profile.Judge.Config)
 			profile.Judge.Config = nil
 		}

@@ -20,7 +20,10 @@ import (
 type HookRunner struct {
 	RepoDir          string
 	ClaudeProjectDir string
-	T                interface {
+	// ExtraEnv is appended to every hook subprocess's environment (from
+	// TestEnv.ExtraEnv), so per-test overrides reach agent hooks too.
+	ExtraEnv []string
+	T        interface {
 		Helper()
 		Fatalf(format string, args ...interface{})
 		Logf(format string, args ...interface{})
@@ -283,7 +286,7 @@ func (r *HookRunner) SimulateSubagentStop(input SubagentStopInput) error {
 // SimulateSubagentStop is a convenience method on TestEnv.
 func (env *TestEnv) SimulateSubagentStop(input SubagentStopInput) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulateSubagentStop(input)
 }
 
@@ -314,6 +317,7 @@ func (r *HookRunner) runHookInRepoDirWithExtraEnv(hookName string, inputJSON []b
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+r.ClaudeProjectDir,
 	)
+	cmd.Env = append(cmd.Env, r.ExtraEnv...)
 	cmd.Env = append(cmd.Env, extraEnv...)
 
 	output, err := cmd.CombinedOutput()
@@ -448,14 +452,14 @@ func (s *Session) writeSubagentTranscriptTo(path string, changes []FileChange) {
 // SimulateUserPromptSubmit is a convenience method on TestEnv.
 func (env *TestEnv) SimulateUserPromptSubmit(sessionID string) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulateUserPromptSubmit(sessionID)
 }
 
 // SimulateUserPromptSubmitWithPrompt is a convenience method on TestEnv.
 func (env *TestEnv) SimulateUserPromptSubmitWithPrompt(sessionID, prompt string) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulateUserPromptSubmitWithPrompt(sessionID, prompt)
 }
 
@@ -464,7 +468,7 @@ func (env *TestEnv) SimulateUserPromptSubmitWithPrompt(sessionID, prompt string)
 // the subprocess, reproducing what `entire review` does before spawning the agent.
 func (env *TestEnv) SimulateUserPromptSubmitWithReviewEnvVars(sessionID, prompt string, extraEnv []string) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulateUserPromptSubmitWithReviewEnvVars(sessionID, prompt, extraEnv)
 }
 
@@ -472,21 +476,21 @@ func (env *TestEnv) SimulateUserPromptSubmitWithReviewEnvVars(sessionID, prompt 
 // This is needed for mid-session commit detection which reads the live transcript.
 func (env *TestEnv) SimulateUserPromptSubmitWithTranscriptPath(sessionID, transcriptPath string) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulateUserPromptSubmitWithTranscriptPath(sessionID, transcriptPath)
 }
 
 // SimulateUserPromptSubmitWithPromptAndTranscriptPath is a convenience method on TestEnv.
 func (env *TestEnv) SimulateUserPromptSubmitWithPromptAndTranscriptPath(sessionID, prompt, transcriptPath string) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sessionID, prompt, transcriptPath)
 }
 
 // SimulateStop is a convenience method on TestEnv.
 func (env *TestEnv) SimulateStop(sessionID, transcriptPath string) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulateStop(sessionID, transcriptPath)
 }
 
@@ -500,21 +504,21 @@ func (env *TestEnv) SimulateStopFailure(sessionID, transcriptPath, errorType str
 // SimulateSessionEnd is a convenience method on TestEnv.
 func (env *TestEnv) SimulateSessionEnd(sessionID string) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulateSessionEnd(sessionID)
 }
 
 // SimulatePreTask is a convenience method on TestEnv.
 func (env *TestEnv) SimulatePreTask(sessionID, transcriptPath, toolUseID string) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulatePreTask(sessionID, transcriptPath, toolUseID)
 }
 
 // SimulatePostTask is a convenience method on TestEnv.
 func (env *TestEnv) SimulatePostTask(input PostTaskInput) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulatePostTask(input)
 }
 
@@ -554,7 +558,7 @@ func (r *HookRunner) SimulatePostTodo(input PostTodoInput) error {
 // SimulatePostTodo is a convenience method on TestEnv.
 func (env *TestEnv) SimulatePostTodo(input PostTodoInput) error {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulatePostTodo(input)
 }
 
@@ -589,6 +593,7 @@ func (r *HookRunner) runAgentHookWithOutput(agentName, hookName string, inputJSO
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+r.ClaudeProjectDir,
 		"GOCACHE=/tmp/go-build",
 	)
+	cmd.Env = append(cmd.Env, r.ExtraEnv...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -651,7 +656,7 @@ func (r *HookRunner) SimulateSessionStartWithOutput(sessionID string) HookOutput
 // SimulateSessionStartWithOutput is a convenience method on TestEnv.
 func (env *TestEnv) SimulateSessionStartWithOutput(sessionID string) HookOutput {
 	env.T.Helper()
-	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	runner := env.newHookRunner()
 	return runner.SimulateSessionStartWithOutput(sessionID)
 }
 
@@ -1375,4 +1380,11 @@ func (env *TestEnv) CopyTranscriptToEntireTmp(sessionID, transcriptPath string) 
 	if err := os.WriteFile(destPath, srcData, 0o644); err != nil {
 		env.T.Fatalf("CopyTranscriptToEntireTmp: failed to write transcript to %q: %v", destPath, err)
 	}
+}
+
+// newHookRunner returns a HookRunner carrying this env's ExtraEnv.
+func (env *TestEnv) newHookRunner() *HookRunner {
+	r := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	r.ExtraEnv = env.ExtraEnv
+	return r
 }

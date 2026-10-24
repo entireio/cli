@@ -93,30 +93,39 @@ func IsEmptyRepository(repo *git.Repository) bool {
 
 // EnsureSetup ensures the strategy is properly set up.
 func EnsureSetup(ctx context.Context) error {
+	_, err := EnsureSetupReport(ctx)
+	return err
+}
+
+// EnsureSetupReport is EnsureSetup that also reports whether it installed
+// Entire's git hooks where there were none. Reinstalling hooks that were
+// already there (an upgrade, a repair) does not count.
+func EnsureSetupReport(ctx context.Context) (installedGitHooks bool, err error) {
 	if err := EnsureEntireGitignore(ctx); err != nil {
-		return err
+		return false, err
 	}
 
 	// Ensure the entire/checkpoints/v1 orphan branch exists for permanent session storage
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to open git repository: %w", err)
+		return false, fmt.Errorf("failed to open git repository: %w", err)
 	}
 	defer repo.Close()
 	if err := vercelconfig.InitSettings(ctx); err != nil {
-		return fmt.Errorf("failed to initialize vercel settings: %w", err)
+		return false, fmt.Errorf("failed to initialize vercel settings: %w", err)
 	}
 	if err := EnsurePrimaryRef(ctx, repo); err != nil {
-		return fmt.Errorf("failed to ensure primary metadata ref: %w", err)
+		return false, fmt.Errorf("failed to ensure primary metadata ref: %w", err)
 	}
 
 	// Install generic hooks (they delegate to strategy at runtime)
 	if !IsGitHookInstalled(ctx) {
 		if _, err := ReinstallGitHooks(ctx); err != nil {
-			return fmt.Errorf("failed to install git hooks: %w", err)
+			return false, fmt.Errorf("failed to install git hooks: %w", err)
 		}
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 // FetchTmpRefPrefix is the namespace for temporary refs used by fetch helpers

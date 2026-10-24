@@ -229,6 +229,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// none, and hintGatedCheckpointSync speaks for the gated case.
 	if deliveredCount > 0 {
 		warnIgnoredCheckpointRemote(ctx, ps)
+		noticeGlobalEnablePush(ctx, ps)
 	}
 	return nil
 }
@@ -440,6 +441,7 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		// was misdirected — see warnIgnoredCheckpointRemote.
 		if flushed > 0 {
 			warnIgnoredCheckpointRemote(ctx, ps)
+			noticeGlobalEnablePush(ctx, ps)
 		}
 	} else {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
