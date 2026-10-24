@@ -475,8 +475,14 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
 
-	// Calculate token usage from parsed transcript
-	mainUsage := CalculateTokenUsage(parsed)
+	// Calculate token usage from parsed transcript. A message whose first line
+	// precedes startLine was counted by the window that holds that line.
+	usageByMessageID := make(map[string]messageUsage)
+	addUsageByMessageID(usageByMessageID, parsed)
+	if id := straddlingMessageID(transcriptData, sliced); id != "" {
+		delete(usageByMessageID, id)
+	}
+	mainUsage := sumUsage(usageByMessageID)
 
 	if subagentsDir == "" {
 		return mainUsage, nil
@@ -545,6 +551,67 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	}
 
 	return mainUsage, nil
+}
+
+// straddlingMessageID returns the id of the main-agent message that has lines
+// on both sides of a transcript slice's start, or "". Claude Code writes one
+// line per content block of a message, all with the same message.id and usage,
+// and runs the message's tool calls between those lines, so a commit made by
+// an earlier tool call can land inside the message. The id is the first
+// main-agent message at or after the start; it straddles when the scan back
+// from the start meets that id before any other main-agent message.
+// Sidechain lines (a subagent's conversation, which older versions
+// interleaved) never decide the outcome.
+func straddlingMessageID(transcriptData, sliced []byte) string {
+	if len(sliced) == 0 || len(sliced) == len(transcriptData) {
+		return ""
+	}
+	var first string
+	for rest := sliced; first == "" && len(rest) > 0; {
+		line := rest
+		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+			line, rest = rest[:i], rest[i+1:]
+		} else {
+			rest = nil
+		}
+		first = mainAssistantMessageID(line)
+	}
+	if first == "" {
+		return ""
+	}
+	// sliced is a suffix of transcriptData that starts right after a newline.
+	before := transcriptData[:len(transcriptData)-len(sliced)-1]
+	for len(before) > 0 {
+		start := bytes.LastIndexByte(before, '\n') + 1
+		if id := mainAssistantMessageID(before[start:]); id != "" {
+			if id == first {
+				return first
+			}
+			return ""
+		}
+		before = before[:max(start-1, 0)]
+	}
+	return ""
+}
+
+// mainAssistantMessageID returns the message id of a main-agent (non-sidechain)
+// assistant transcript line, or "". Lines that cannot be assistant lines, such
+// as large tool results, are rejected before they are decoded.
+func mainAssistantMessageID(line []byte) string {
+	if !bytes.Contains(line, []byte(`"assistant"`)) {
+		return ""
+	}
+	var entry struct {
+		Type        string `json:"type"`
+		IsSidechain bool   `json:"isSidechain"`
+		Message     struct {
+			ID string `json:"id"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(line, &entry) != nil || entry.Type != envelopeTypeAssistant || entry.IsSidechain {
+		return ""
+	}
+	return entry.Message.ID
 }
 
 // subagentTranscriptPaths maps every subagent the transcript launched to its

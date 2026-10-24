@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -507,6 +508,27 @@ func TestComputeOutOfBandTokenUsage_MissingBaselineMidSession(t *testing.T) {
 		StartedAt:  time.Now(),
 	}))
 	require.Equal(t, cumulative, computeOutOfBandTokenUsage(ctx, ag, freshID, "", nil))
+}
+
+// TestResolveTurnTokenUsage_TranscriptUsageRecountsFromTokenOffset: usage
+// counted from the transcript comes with a recount from the token offset a
+// condensation during the turn moved it to.
+func TestResolveTurnTokenUsage_TranscriptUsageRecountsFromTokenOffset(t *testing.T) {
+	t.Parallel()
+	transcript := []byte(`{"type":"user","message":{"content":"go"}}` + "\n" +
+		`{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":30,"output_tokens":30}}}` + "\n" +
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}` + "\n" +
+		`{"type":"assistant","message":{"id":"m2","usage":{"input_tokens":5,"output_tokens":5}}}` + "\n")
+	tokenStart := 0
+	preState := &PrePromptState{TranscriptOffset: 0, TokenStart: &tokenStart}
+
+	usage, recount := resolveTurnTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, &agent.Event{}, "s", preState, transcript, "", nil)
+	require.NotNil(t, usage)
+	require.Equal(t, 35, usage.OutputTokens, "the whole turn from its start")
+	require.NotNil(t, recount)
+	pending, rescoped := recount(2)
+	require.True(t, rescoped)
+	require.Equal(t, 5, pending.OutputTokens, "recount from the moved token offset")
 }
 
 // TestDispatchLifecycleEvent_SkipsForwardedHookFromNonOwningAgent verifies the

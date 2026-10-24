@@ -1037,7 +1037,10 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 // it inside the MutateSessionState that ends the turn, so the turn's phase
 // decides whether it is still unaccounted. ledgerVersion is the subagent
 // ledger version the usage was computed against (Codex), or nil; a stale one
-// drops the child aggregate, as it does for a step. A nil delta is a no-op.
-func ApplyTurnTokenUsage(state *SessionState, delta *agent.TokenUsage, ledgerVersion *uint64) {
-	applyTurnTokenUsage(state, withoutStaleSubagentSnapshot(delta, ledgerVersion, state))
+// drops the child aggregate, as it does for a step. recount scopes the
+// pending part as SaveStep does (see pendingTurnTokenUsage). A nil delta is a
+// no-op.
+func ApplyTurnTokenUsage(state *SessionState, delta *agent.TokenUsage, ledgerVersion *uint64, recount TurnTokenRecount) {
+	delta = withoutStaleSubagentSnapshot(delta, ledgerVersion, state)
+	applyTurnTokenUsage(state, delta, pendingTurnTokenUsage(state, delta, recount))
 }
