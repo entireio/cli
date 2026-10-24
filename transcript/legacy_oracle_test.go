@@ -114,8 +114,8 @@ func legacyEmitAssistant(result *[]byte, base transcriptLine, e parsedEntry) {
 	line.Type = TypeAssistant
 	line.TS = e.ts
 	line.ID = e.id
-	line.InputTokens = e.inputTokens
-	line.OutputTokens = e.outputTokens
+	line.InputTokens = int64(e.inputTokens)
+	line.OutputTokens = int64(e.outputTokens)
 	line.Content = e.content
 	appendLine(result, line)
 }

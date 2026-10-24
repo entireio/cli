@@ -133,8 +133,8 @@ func (f *Folder) line(m *message) ([]byte, bool) {
 	line.Type = m.role
 	line.TS = m.ts
 	line.ID = m.sourceID
-	line.InputTokens = m.inputTokens
-	line.OutputTokens = m.outputTokens
+	line.InputTokens = int64(m.inputTokens)
+	line.OutputTokens = int64(m.outputTokens)
 	line.Content = content
 	b, err := json.Marshal(line)
 	if err != nil {

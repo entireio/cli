@@ -149,8 +149,8 @@ func compactPi(content []byte, opts Options) ([]byte, error) {
 			line.ID = entry.ID
 			line.Content = contentJSON
 			if entry.Message.Usage != nil {
-				line.InputTokens = entry.Message.Usage.Input
-				line.OutputTokens = entry.Message.Usage.Output
+				line.InputTokens = int64(entry.Message.Usage.Input)
+				line.OutputTokens = int64(entry.Message.Usage.Output)
 			}
 			appendLine(&out, line)
 		}

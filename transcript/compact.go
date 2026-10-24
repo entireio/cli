@@ -22,15 +22,22 @@ type Options struct {
 // transcriptLine is the uniform output format for every line in transcript.jsonl.
 // Field order is guaranteed by encoding/json (struct declaration order).
 type transcriptLine struct {
-	V            int             `json:"v"`
-	Agent        string          `json:"agent"`
-	CLIVersion   string          `json:"cli_version"`
-	Type         string          `json:"type"`
-	TS           json.RawMessage `json:"ts,omitempty"`
-	ID           string          `json:"id,omitempty"`
-	InputTokens  int             `json:"input_tokens,omitempty"`
-	OutputTokens int             `json:"output_tokens,omitempty"`
-	Content      json.RawMessage `json:"content"`
+	V                int             `json:"v"`
+	Agent            string          `json:"agent"`
+	CLIVersion       string          `json:"cli_version"`
+	Type             string          `json:"type"`
+	TS               json.RawMessage `json:"ts,omitempty"`
+	ID               string          `json:"id,omitempty"`
+	Model            string          `json:"model,omitempty"`
+	InputTokens      int64           `json:"input_tokens,omitempty"`
+	OutputTokens     int64           `json:"output_tokens,omitempty"`
+	CacheReadTokens  int64           `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64           `json:"cache_write_tokens,omitempty"`
+	// Pointers preserve reported zero splits; nil means the split is unknown.
+	CacheWrite5mTokens *int64          `json:"cache_write_5m_tokens,omitempty"`
+	CacheWrite1hTokens *int64          `json:"cache_write_1h_tokens,omitempty"`
+	ReasoningTokens    int64           `json:"reasoning_tokens,omitempty"`
+	Content            json.RawMessage `json:"content"`
 }
 
 // newTranscriptLine returns a transcriptLine pre-filled with the shared

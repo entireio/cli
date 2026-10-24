@@ -160,8 +160,8 @@ func compactCodex(content []byte, opts Options) ([]byte, error) {
 			line := base
 			line.Type = TypeAssistant
 			line.TS = ts
-			line.InputTokens = inTok
-			line.OutputTokens = outTok
+			line.InputTokens = int64(inTok)
+			line.OutputTokens = int64(outTok)
 			line.Content = contentArr
 			appendLine(&result, line)
 
@@ -182,8 +182,8 @@ func compactCodex(content []byte, opts Options) ([]byte, error) {
 			line := base
 			line.Type = TypeAssistant
 			line.TS = ts
-			line.InputTokens = inTok
-			line.OutputTokens = outTok
+			line.InputTokens = int64(inTok)
+			line.OutputTokens = int64(outTok)
 			line.Content = contentArr
 			appendLine(&result, line)
 		}
