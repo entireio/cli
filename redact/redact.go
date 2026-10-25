@@ -654,6 +654,7 @@ func detectOracleCredentials(s string) []taggedRegion {
 
 func detectConnectionStrings(s string) []taggedRegion {
 	regions := detectOracleCredentials(s)
+	regions = append(regions, detectCommandLinePasswords(s)...)
 	if !strings.ContainsRune(s, '=') {
 		return regions
 	}
