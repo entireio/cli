@@ -42,7 +42,7 @@ const (
 )
 
 func trailContextBlurb() string {
-	return "A trail captures project intent across repositories and branches. Manage intent and discussions on the whole trail; use --repo and --branch to select context for checkout, sessions, findings, and approvals."
+	return "A trail captures project intent across repositories and branches. Manage intent and read discussions on the whole trail (people write them in the web app); use --repo and --branch to select context for checkout, sessions, findings, and approvals."
 }
 
 func legacyTrailContextBlurb() string {

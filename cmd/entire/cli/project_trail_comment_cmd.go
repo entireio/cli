@@ -5,91 +5,52 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
-	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
-const (
-	discussionShow      = "show"
-	discussionAdd       = "add"
-	discussionReply     = "reply"
-	discussionEdit      = "edit"
-	discussionDelete    = "delete"
-	discussionResolve   = "resolve"
-	discussionUnresolve = "unresolve"
-)
+const discussionShow = "show"
 
 type projectDiscussionResponse struct {
 	Discussion  api.TrailDiscussionSummary   `json:"discussion"`
-	Message     *api.TrailDiscussionMessage  `json:"message,omitempty"`
 	Messages    []api.TrailDiscussionMessage `json:"messages,omitempty"`
 	EventCursor string                       `json:"event_cursor,omitempty"`
 }
 
+// Project trail discussions are human conversation: the API accepts writes
+// only from the Entire web app, so the CLI offers reads alone. Repo-trail
+// comments (trail_comment_cmd.go) and findings are unaffected.
 func newProjectTrailCommentCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "comment", Short: "Discuss the whole trail across repositories", Args: cobra.NoArgs}
+	cmd := &cobra.Command{
+		Use:   "comment",
+		Short: "Read discussions on the whole trail",
+		Long: `Read discussions on the whole trail across repositories.
+
+Trail discussions are for people: start, reply to, edit, and resolve them in the
+Entire web app. Use 'entire trail finding' for agent review findings.`,
+		Args: cobra.NoArgs,
+	}
 	cmd.PersistentFlags().String("trail", "", "Project trail number, ID, or <repo>/<number> (defaults to the current branch's parent)")
 	cmd.PersistentFlags().String("branch", "", "Discover the trail through this repository branch")
-	for _, action := range []struct {
-		name, description string
-		count             int
-	}{
-		{cmdList, "List trail discussions", 0},
-		{discussionShow, "Show a discussion and its messages", 1},
-		{discussionAdd, "Start a discussion on the trail", 0},
-		{discussionReply, "Reply to a trail discussion", 1},
-		{discussionEdit, "Edit a discussion message", 2},
-		{discussionDelete, "Delete a discussion message", 2},
-		{discussionResolve, "Resolve a trail discussion", 1},
-		{discussionUnresolve, "Reopen a trail discussion", 1},
-	} {
-		child := newProjectDiscussionAction(action.name)
-		child.Use, child.Short, child.Args = action.name, action.description, cobra.ExactArgs(action.count)
-		if action.count > 0 {
-			child.Use += " <discussion-id>"
-		}
-		if action.count > 1 {
-			child.Use += " <message-id>"
-		}
-		cmd.AddCommand(child)
-	}
+	list := newProjectDiscussionAction(cmdList)
+	list.Use, list.Short, list.Args = cmdList, "List trail discussions", cobra.NoArgs
+	show := newProjectDiscussionAction(discussionShow)
+	show.Use, show.Short, show.Args = discussionShow+" <discussion-id>", "Show a discussion and its messages", cobra.ExactArgs(1)
+	cmd.AddCommand(list, show)
 	return cmd
 }
 
-func discussionNeedsBody(action string) bool {
-	return action == discussionAdd || action == discussionReply || action == discussionEdit
-}
-
 func newProjectDiscussionAction(action string) *cobra.Command {
-	var body, title string
-	var force bool
 	cmd := &cobra.Command{RunE: func(cmd *cobra.Command, args []string) error {
-		if discussionNeedsBody(action) && strings.TrimSpace(body) == "" {
-			return errors.New("--body is required")
-		}
-		if action == discussionDelete && !force {
-			return errors.New("deleting a message requires --force")
-		}
-		return runProjectDiscussion(cmd, action, args, body, title)
+		return runProjectDiscussion(cmd, action, args)
 	}}
-	if discussionNeedsBody(action) {
-		cmd.Flags().StringVarP(&body, "body", "m", "", "Message body (required)")
-	}
-	if action == discussionAdd {
-		cmd.Flags().StringVar(&title, "title", "", "Discussion title")
-	}
-	if action == discussionDelete {
-		cmd.Flags().BoolVarP(&force, "force", "f", false, "Confirm message deletion")
-	}
 	addJSONFlag(cmd)
 	return cmd
 }
 
-func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body, title string) error {
+func runProjectDiscussion(cmd *cobra.Command, action string, args []string) error {
 	target, err := resolveProjectTrail(cmd, trailSubcommandSelector(cmd))
 	if err != nil {
 		return err
@@ -102,111 +63,14 @@ func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body
 		}
 		return printTrailDiscussions(cmd.OutOrStdout(), items, target.label(), jsonRequested(cmd), true)
 	}
-	if len(args) > 0 {
-		path += "/" + url.PathEscape(args[0])
-	}
 	var current projectDiscussionResponse
-	var etag string
-	if action != discussionAdd && action != discussionReply {
-		etag, err = target.Client.ProjectTrailRequest(cmd.Context(), http.MethodGet, path, nil, nil, &current)
-		if err != nil {
-			return fmt.Errorf("read trail discussion: %w", err)
-		}
-		if current.Discussion.ID != args[0] {
-			return errors.New("discussion response identity does not match the request")
-		}
+	if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodGet, path+"/"+url.PathEscape(args[0]), nil, nil, &current); err != nil {
+		return fmt.Errorf("read trail discussion: %w", err)
+	}
+	if current.Discussion.ID != args[0] {
+		return errors.New("discussion response identity does not match the request")
 	}
 	// Render through the shared view types: raw API structs carry each
-	// resource's ETag, an internal conditional-write token, which the legacy
-	// JSON output deliberately omits.
-	if action == discussionShow {
-		return printTrailDiscussionDetail(cmd.OutOrStdout(), api.TrailDiscussionDetailResponse{Discussion: current.Discussion, Messages: current.Messages}, jsonRequested(cmd))
-	}
-	method := http.MethodPost
-	var request any
-	headers := http.Header{}
-	switch action {
-	case discussionAdd:
-		request = api.TrailDiscussionCreateRequest{Title: title, Body: body}
-	case discussionReply:
-		path += "/messages"
-		request = api.TrailDiscussionMessageRequest{Body: body}
-	case discussionEdit, discussionDelete:
-		etag = projectDiscussionMessageETag(current.Messages, args[1])
-		if etag == "" {
-			return errors.New("message not found or missing its ETag; refusing an unprotected write")
-		}
-		headers.Set("If-Match", etag)
-		path += "/messages/" + url.PathEscape(args[1])
-		method = http.MethodDelete
-		if action == discussionEdit {
-			method, request = http.MethodPatch, api.TrailDiscussionMessageRequest{Body: body}
-		}
-	case discussionResolve, discussionUnresolve:
-		if etag == "" {
-			return errors.New("discussion read returned no ETag; refusing an unprotected write")
-		}
-		headers.Set("If-Match", etag)
-		resolved := action == discussionResolve
-		method, request = http.MethodPatch, api.TrailDiscussionUpdateRequest{Resolved: &resolved}
-	default:
-		return errors.New("unknown discussion operation")
-	}
-	var out projectDiscussionResponse
-	var dest any = &out
-	if action == discussionDelete {
-		dest = nil
-	}
-	if _, err := target.Client.ProjectTrailRequest(cmd.Context(), method, path, request, headers, dest); err != nil {
-		return fmt.Errorf("%s trail discussion: %w", action, err)
-	}
-	if action == discussionDelete {
-		if jsonRequested(cmd) {
-			return printJSON(cmd.OutOrStdout(), map[string]bool{"deleted": true})
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), "Message deleted")
-		return nil
-	}
-	if jsonRequested(cmd) {
-		return printProjectDiscussionWriteJSON(cmd, out)
-	}
-	if out.Message != nil {
-		fmt.Fprintf(cmd.OutOrStdout(), "Message %s saved\n", tuiutil.SanitizeTerminalLabel(out.Message.ID))
-	}
-	if out.Discussion.ID != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Discussion %s saved\n", tuiutil.SanitizeTerminalLabel(out.Discussion.ID))
-	}
-	return nil
-}
-
-// Reply and edit return only a message. Keep absent resources absent rather
-// than serializing a zero-valued discussion, while still withholding ETags.
-func printProjectDiscussionWriteJSON(cmd *cobra.Command, out projectDiscussionResponse) error {
-	var payload struct {
-		Discussion *trailDiscussionSummaryJSON `json:"discussion,omitempty"`
-		Message    *trailDiscussionMessageJSON `json:"message,omitempty"`
-	}
-	if out.Discussion.ID != "" {
-		discussion := toTrailDiscussionSummaryJSON(out.Discussion)
-		payload.Discussion = &discussion
-	}
-	if out.Message != nil {
-		message := toTrailDiscussionMessageJSON(*out.Message)
-		payload.Message = &message
-	}
-	return printJSON(cmd.OutOrStdout(), payload)
-}
-
-func projectDiscussionMessageETag(messages []api.TrailDiscussionMessage, id string) string {
-	for _, message := range messages {
-		if message.ID == id {
-			return message.ETag
-		}
-		for _, reply := range message.Replies {
-			if reply.ID == id {
-				return reply.ETag
-			}
-		}
-	}
-	return ""
+	// resource's ETag, which the JSON output deliberately omits.
+	return printTrailDiscussionDetail(cmd.OutOrStdout(), api.TrailDiscussionDetailResponse{Discussion: current.Discussion, Messages: current.Messages}, jsonRequested(cmd))
 }

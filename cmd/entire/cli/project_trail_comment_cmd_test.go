@@ -19,8 +19,6 @@ func TestProjectTrailDiscussionsUseProjectRoutes(t *testing.T) {
 	}{
 		{[]string{"list", "--json"}, http.MethodGet, ""},
 		{[]string{"show", "discussion-one", "--json"}, http.MethodGet, "/discussion-one"},
-		{[]string{"add", "-m", "Plan", "--json"}, http.MethodPost, ""},
-		{[]string{"reply", "discussion-one", "-m", "Reply"}, http.MethodPost, "/discussion-one/messages"},
 	} {
 		t.Run(tt.args[0], func(t *testing.T) {
 			calls := 0
@@ -47,51 +45,17 @@ func TestProjectTrailDiscussionsUseProjectRoutes(t *testing.T) {
 	}
 }
 
-func TestProjectTrailDiscussionWritesUseResourceETags(t *testing.T) {
-	for _, tt := range []struct {
-		args                 []string
-		method, suffix, etag string
-	}{
-		{[]string{"resolve", "discussion-one"}, http.MethodPatch, "", `W/"discussion-version"`},
-		{[]string{"unresolve", "discussion-one"}, http.MethodPatch, "", `W/"discussion-version"`},
-		{[]string{"edit", "discussion-one", "message-one", "-m", "New body"}, http.MethodPatch, "/messages/message-one", `W/"message-version"`},
-		{[]string{"delete", "discussion-one", "message-one", "--force"}, http.MethodDelete, "/messages/message-one", `W/"message-version"`},
-	} {
-		t.Run(tt.args[0], func(t *testing.T) {
-			calls := 0
-			setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
-				calls++
-				if r.Method == http.MethodGet {
-					assert.Equal(t, projectTrailTestPath+"/discussions/discussion-one", r.URL.Path)
-					w.Header().Set("ETag", `W/"discussion-version"`)
-					assert.NoError(t, json.NewEncoder(w).Encode(projectDiscussionResponse{
-						Discussion: api.TrailDiscussionSummary{ID: "discussion-one"},
-						Messages:   []api.TrailDiscussionMessage{{ID: "message-one", ETag: `W/"message-version"`}},
-					}))
-					return
-				}
-				assert.Equal(t, tt.method, r.Method)
-				assert.Equal(t, projectTrailTestPath+"/discussions/discussion-one"+tt.suffix, r.URL.Path)
-				assert.Equal(t, tt.etag, r.Header.Get("If-Match"))
-				// A stale write fails once, never with an unconditional retry.
-				w.WriteHeader(http.StatusPreconditionFailed)
-				assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{"detail": "stale"}))
-			})
-			args := append([]string{"comment", "--project", "gh/acme", "--trail", projectTrailTestID}, tt.args...)
-			_, _, err := executeProjectTrailTest(t, args...)
-			require.ErrorContains(t, err, "changed since it was read")
-			require.Equal(t, 2, calls)
-		})
+// Project trail discussions are written only from the web app, so the CLI
+// offers no write verb an agent could reach for.
+func TestProjectTrailCommentIsReadOnly(t *testing.T) {
+	comment, _, err := newTrailCmdForMode(true).Find([]string{"comment"})
+	require.NoError(t, err)
+	var verbs []string
+	for _, child := range comment.Commands() {
+		verbs = append(verbs, child.Name())
 	}
-}
-
-func TestProjectTrailDiscussionMissingETagRefusesWrite(t *testing.T) {
-	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodGet, r.Method)
-		assert.NoError(t, json.NewEncoder(w).Encode(projectDiscussionResponse{Discussion: api.TrailDiscussionSummary{ID: "discussion-one"}}))
-	})
-	_, _, err := executeProjectTrailTest(t, "comment", "resolve", "discussion-one", "--project", "gh/acme", "--trail", projectTrailTestID)
-	require.ErrorContains(t, err, "no ETag")
+	assert.ElementsMatch(t, []string{"list", "show"}, verbs)
+	assert.Contains(t, comment.Long, "web app")
 }
 
 // An empty discussion list names the trail by the number the user knows it by
