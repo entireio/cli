@@ -1331,6 +1331,14 @@ func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Comm
 				return err
 			}
 		}
+		// --telemetry and --absolute-git-hook-path are settings too: without
+		// this, enable on a configured repo accepted them and saved nothing.
+		// --force alone writes no setting, so it does not trigger the write.
+		if cmd.Flags().Changed(flagTelemetry) || cmd.Flags().Changed(flagAbsoluteGitHookPath) {
+			if err := updateGlobalSettings(ctx, cmd, w, opts); err != nil {
+				return err
+			}
+		}
 	} else if err := runPreflight(); err != nil {
 		return err
 	}
