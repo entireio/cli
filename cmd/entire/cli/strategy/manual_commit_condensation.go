@@ -1199,6 +1199,11 @@ func sessionTokenUsage(state *SessionState) *agent.TokenUsage {
 // that also moves state.TokenUsage's cumulative subagent total, which the
 // caller must keep so the re-baseline covers what this checkpoint stored.
 func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, transcriptPath string) (*agent.TokenUsage, int) {
+	if state != nil && transcriptPath != "" {
+		// Read the transcript being attached; attach records it as the
+		// session's path when it saves.
+		state.TranscriptPath = transcriptPath
+	}
 	if ObserveTokenLedger(ctx, state) {
 		usage := session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
 		return usage, countTranscriptItems(ag.Type(), string(transcript))

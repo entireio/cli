@@ -2923,6 +2923,10 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 		// LastInteractionTime with now — exactly the value endedWhenLastSeen
 		// needs, so reading it afterwards always yields "now".
 		endedAt := sessionEndedAt(state, when)
+		// A last reading: an agent can write usage after its final Stop
+		// (Copilot's shutdown totals), and an ended session may never be read
+		// again.
+		strategy.ObserveTokenLedger(ctx, state)
 		if transErr := strategy.TransitionAndLog(ctx, state, session.EventSessionStop, session.TransitionContext{}, session.NoOpActionHandler{}); transErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "session stop transition failed",
 				slog.String("error", transErr.Error()))
