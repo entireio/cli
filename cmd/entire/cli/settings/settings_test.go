@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -1606,5 +1608,49 @@ func TestLoad_PIIIPDecodesAndMerges(t *testing.T) {
 	}
 	if settings.Redaction.PII.IP == nil || !*settings.Redaction.PII.IP {
 		t.Errorf("IP = %v, want true from the local override", settings.Redaction.PII.IP)
+	}
+}
+
+// SaveLocal writes "enabled" only when the settings state it: loaded from a
+// file that had the key, or set with SetEnabled. The load default (true) for
+// a file without the key must not be written as a local override.
+func TestSaveLocalWritesEnabledOnlyWhenStated(t *testing.T) {
+	for name, tc := range map[string]struct {
+		existing string // settings.local.json before; "" for none
+		set      *bool
+		want     string // "enabled" afterwards; "" for absent
+	}{
+		"missing file":              {},
+		"file without key":          {existing: `{"log_level":"debug"}`},
+		"file with false":           {existing: `{"enabled":false}`, want: "false"},
+		"missing file, set true":    {set: new(true), want: "true"},
+		"file with false, set true": {existing: `{"enabled":false}`, set: new(true), want: "true"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			testutil.InitRepo(t, root)
+			require.NoError(t, os.MkdirAll(filepath.Join(root, ".entire"), 0o755))
+			path := filepath.Join(root, EntireSettingsLocalFile)
+			if tc.existing != "" {
+				require.NoError(t, os.WriteFile(path, []byte(tc.existing), 0o644))
+			}
+			t.Chdir(root)
+			paths.ClearWorktreeRootCache()
+
+			s, err := LoadFromFile(path)
+			require.NoError(t, err)
+			if tc.set != nil {
+				s.SetEnabled(*tc.set)
+			}
+			s.LogLevel = "info"
+			require.NoError(t, SaveLocal(context.Background(), s))
+
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			var raw map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &raw))
+			require.Equal(t, tc.want, string(raw["enabled"]), "written: %s", data)
+			require.JSONEq(t, `"info"`, string(raw["log_level"]), "other fields still save")
+		})
 	}
 }
