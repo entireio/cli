@@ -214,6 +214,12 @@ type State struct {
 	//   - Cleared when session is reset (ResetSession deletes the state file entirely)
 	TurnCheckpointIDs []string `json:"turn_checkpoint_ids,omitempty"`
 
+	// ForeignTurnCheckpoints are this turn's checkpoints written in another
+	// repository by a commit the agent made there (strategy/foreign_session.go).
+	// Same lifecycle as TurnCheckpointIDs; HandleTurnEnd finalizes them by
+	// running `entire hooks git finalize-foreign` in that repository.
+	ForeignTurnCheckpoints []ForeignTurnCheckpoint `json:"foreign_turn_checkpoints,omitempty"`
+
 	// LastInteractionTime is updated on agent-interaction events (TurnStart,
 	// TurnEnd, SessionStop, Compaction) but NOT on git commit hooks.
 	// Used for stale session detection in "entire doctor".
@@ -1369,6 +1375,13 @@ func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateS
 		return nil, err
 	}
 	return newStateStoreAt(commonDir), nil
+}
+
+// ForeignTurnCheckpoint is a checkpoint in another repository's store, and the
+// worktree of that repository the commit was made in.
+type ForeignTurnCheckpoint struct {
+	CheckpointID string `json:"checkpoint_id"`
+	WorktreePath string `json:"worktree_path"`
 }
 
 // NewStateStoreForCommonDir returns the state store in an already-resolved git
