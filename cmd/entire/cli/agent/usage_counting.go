@@ -43,8 +43,13 @@ type keyedRecord struct {
 	Usage TokenUsage `json:"u"`
 }
 
-// Add records one copy of the call key.
+// Add records one copy of the call key. A record without a key cannot be
+// repeated, so it is counted at once.
 func (k *KeyedUsage) Add(child, key string, usage TokenUsage) {
+	if key == "" {
+		k.addClosed(child, usage)
+		return
+	}
 	for i := len(k.Open) - 1; i >= 0; i-- {
 		if r := &k.Open[i]; r.Child == child && r.Key == key {
 			if k.Policy == KeepLast || (k.Policy == KeepMostOutput && usage.OutputTokens > r.Usage.OutputTokens) {
@@ -74,11 +79,15 @@ func (k *KeyedUsage) Add(child, key string, usage TokenUsage) {
 	}
 }
 
-func (k *KeyedUsage) close(r keyedRecord) {
+func (k *KeyedUsage) addClosed(child string, usage TokenUsage) {
 	if k.Closed == nil {
 		k.Closed = make(map[string]*TokenUsage)
 	}
-	k.Closed[r.Child] = types.AddTokenUsage(k.Closed[r.Child], &r.Usage)
+	k.Closed[child] = types.AddTokenUsage(k.Closed[child], &usage)
+}
+
+func (k *KeyedUsage) close(r keyedRecord) {
+	k.addClosed(r.Child, r.Usage)
 	if !k.Remember {
 		return
 	}
@@ -153,10 +162,7 @@ func (k *KeyedUsage) CloseChild(child string) {
 	open := k.Open[:0]
 	for _, r := range k.Open {
 		if r.Child == child {
-			if k.Closed == nil {
-				k.Closed = make(map[string]*TokenUsage)
-			}
-			k.Closed[child] = types.AddTokenUsage(k.Closed[child], &r.Usage)
+			k.addClosed(child, r.Usage)
 		} else {
 			open = append(open, r)
 		}
@@ -206,7 +212,7 @@ func (r *RunningTotal) Add(snapshot *TokenUsage) {
 	if snapshot == nil {
 		return
 	}
-	if r.Last != nil && tokenTotal(snapshot) < tokenTotal(r.Last) {
+	if r.Last != nil && TokenTotal(snapshot) < TokenTotal(r.Last) {
 		r.Banked = types.AddTokenUsage(r.Banked, r.Last)
 	}
 	r.Last = snapshot
@@ -237,13 +243,17 @@ func MaxTokenUsage(a, b *TokenUsage) *TokenUsage {
 // write all-zero placeholders (Droid's settings.json before its first update,
 // an idle Copilot shutdown).
 func UsageOrNil(u *TokenUsage) *TokenUsage {
-	if u == nil || (tokenTotal(u) == 0 && u.APICallCount == 0 && u.SubagentTokens == nil) {
+	if u == nil || (TokenTotal(u) == 0 && u.APICallCount == 0 && u.SubagentTokens == nil) {
 		return nil
 	}
 	return u
 }
 
-func tokenTotal(u *TokenUsage) int {
+// TokenTotal returns u's token count over every field, 0 for nil.
+func TokenTotal(u *TokenUsage) int {
+	if u == nil {
+		return 0
+	}
 	return u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens + u.OutputTokens
 }
 

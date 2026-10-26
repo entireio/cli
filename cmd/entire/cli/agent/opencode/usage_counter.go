@@ -24,7 +24,7 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	return []agent.UsageFile{{Path: in.TranscriptPath, Whole: true}}
 }
 
-func (u *usageCounter) Add(_ string, data []byte, _ int) {
+func (u *usageCounter) Add(_ string, data []byte) {
 	session, err := ParseExportSession(data)
 	if err != nil || session == nil {
 		return

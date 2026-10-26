@@ -3,12 +3,15 @@
 package integration
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/stretchr/testify/require"
 )
 
@@ -269,5 +272,11 @@ func TestTokenLedger_Codex_RepeatedStopAndMidTurnCommit(t *testing.T) {
 	require.Equal(t, 140, usage1.InputTokens, "the mid-turn checkpoint holds everything before it")
 	require.Equal(t, 12, usage2.InputTokens, "the next checkpoint holds turn 2's tail and turn 3")
 	require.Equal(t, 152, sessionTokenTotal(t, env, sessionID).InputTokens)
+	content, found := env.ReadFileFromBranch(paths.MetadataBranchName, SessionMetadataPath(cp1))
+	require.True(t, found)
+	var meta checkpoint.Metadata
+	require.NoError(t, json.Unmarshal([]byte(content), &meta))
+	require.NotNil(t, meta.SessionTokenUsage)
+	require.Equal(t, 140, meta.SessionTokenUsage.InputTokens, "the session's running total at that checkpoint")
 	require.Equal(t, 16, sessionTokenTotal(t, env, sessionID).OutputTokens)
 }

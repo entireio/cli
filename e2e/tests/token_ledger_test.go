@@ -63,7 +63,7 @@ func TestTokenLedger_EveryCallCountedOnce(t *testing.T) {
 			// Child sessions (Droid Workers, OpenCode children) are credited
 			// beside the ledger and stored with it.
 			total := session.WithChildSessionTokens(ledger.Total(), state.ChildSessionTokens)
-			sum := addUsage(stored[state.SessionID], session.WithChildSessionTokens(ledger.Pending(), state.PendingChildSessionTokens()))
+			sum := types.AddTokenUsage(stored[state.SessionID], session.WithChildSessionTokens(ledger.Pending(), state.PendingChildSessionTokens()))
 			assertSameTokens(t, state.SessionID+": checkpoints + pending vs session total", total, sum)
 
 			fresh, _, err := agent.ReadCumulativeUsage(ctx, ag, agent.CumulativeTokenInput{
@@ -126,7 +126,7 @@ func storedTokensBySession(t *testing.T, dir string) map[string]*agent.TokenUsag
 	for _, cp := range testutil.CheckpointIDs(t, dir) {
 		for i := range testutil.ReadCheckpointMetadata(t, dir, cp).Sessions {
 			meta := testutil.ReadSessionMetadata(t, dir, cp, i)
-			stored[meta.SessionID] = addUsage(stored[meta.SessionID], toUsage(&meta.TokenUsage))
+			stored[meta.SessionID] = types.AddTokenUsage(stored[meta.SessionID], toUsage(&meta.TokenUsage))
 		}
 	}
 	return stored
@@ -141,8 +141,6 @@ func toUsage(u *testutil.TokenUsage) *agent.TokenUsage {
 		OutputTokens: u.OutputTokens, APICallCount: u.APICallCount, SubagentTokens: toUsage(u.SubagentTokens),
 	}
 }
-
-func addUsage(a, b *agent.TokenUsage) *agent.TokenUsage { return types.AddTokenUsage(a, b) }
 
 func assertSameTokens(t *testing.T, label string, want, got *agent.TokenUsage) {
 	t.Helper()

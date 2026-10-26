@@ -45,14 +45,11 @@ type CumulativeObservation struct {
 // UsageFile is one file a UsageCounter reads.
 type UsageFile struct {
 	Path string
-	// ID names what the file holds when its path can change (a Claude Code
-	// Workflow agent found later at its direct location); default Path. A new
-	// path for an ID is read from its start, after Reset.
-	ID string
 	// Whole marks a file read whole when its size or last bytes change: one
 	// rewritten rather than appended (OpenCode's export, Droid's
 	// settings.json), or one whose total is all the counter keeps (a Claude
-	// Code subagent). It never reports a restart.
+	// Code subagent). It never reports a restart. A file whose path can change
+	// must be Whole: Reset at its new path replaces what its old path counted.
 	Whole bool
 	// NoRestart keeps a rewrite of the main transcript from being reported,
 	// for a total that also rests on a file that does not shrink with it.
@@ -67,9 +64,8 @@ type UsageCounter interface {
 	// Files returns the files to read, the main transcript first. It is called
 	// again after they were read, so it can name files their lines revealed.
 	Files(in CumulativeTokenInput) []UsageFile
-	// Add folds complete lines appended to path in; firstLine is the first
-	// one's zero-based line number, for records identified by position.
-	Add(path string, data []byte, firstLine int)
+	// Add folds complete lines appended to path in.
+	Add(path string, data []byte)
 	// Reset forgets what was read from path: it is read again from its start.
 	Reset(path string)
 	// Totals returns the main agent's total and each child's (Codex reads its
@@ -88,7 +84,7 @@ type UsageCounterSource interface {
 
 // usageCursorVersion changes with the cursor's meaning; another version's
 // cursor is ignored.
-const usageCursorVersion = 3
+const usageCursorVersion = 4
 
 // usageCursorCheckBytes is how many bytes before a file's offset a cursor
 // fingerprints to detect a rewrite.
@@ -105,13 +101,10 @@ type usageCursor struct {
 	State   json.RawMessage          `json:"state,omitempty"`
 }
 
-// usageFileMark is how far a file was read: where, the end of the last
-// complete line consumed, how many lines, and a fingerprint of the bytes
-// before that end.
+// usageFileMark is how far a file was read: the end of the last complete line
+// consumed, and a fingerprint of the bytes before it.
 type usageFileMark struct {
-	Path   string `json:"p"`
 	Offset int    `json:"o"`
-	Lines  int    `json:"l,omitempty"`
 	Check  string `json:"c,omitempty"`
 }
 
@@ -150,24 +143,20 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 	for pass := range maxUsageFilePasses {
 		progressed := false
 		for i, f := range counter.Files(in) {
-			id := f.ID
-			if id == "" {
-				id = f.Path
-			}
-			if read[id] {
+			if read[f.Path] {
 				continue
 			}
-			read[id] = true
+			read[f.Path] = true
 			progressed = true
 			main := pass == 0 && i == 0
-			mark, restarted, readErr := readUsageFile(counter, f, cur.Files[id], main)
+			mark, restarted, readErr := readUsageFile(counter, f, cur.Files[f.Path], main)
 			if readErr != nil {
 				if main {
 					return CumulativeObservation{}, true, readErr
 				}
 				continue // not written yet, or already cleaned up
 			}
-			marks[id] = mark
+			marks[f.Path] = mark
 			obs.Restarted = obs.Restarted || (main && restarted && !f.NoRestart)
 		}
 		if !progressed {
@@ -192,13 +181,6 @@ func ReadCumulativeUsage(ctx context.Context, ag Agent, in CumulativeTokenInput,
 // file that no longer begins with what prev consumed; a cursor that consumed
 // nothing cannot tell a rewrite from growth, and a whole file never restarts.
 func readUsageFile(counter UsageCounter, f UsageFile, prev usageFileMark, main bool) (usageFileMark, bool, error) {
-	if prev.Path != f.Path {
-		// Read before, at another path or never: start over.
-		if prev.Path != "" {
-			counter.Reset(f.Path)
-		}
-		prev = usageFileMark{}
-	}
 	if f.Whole {
 		if prev.Offset > 0 {
 			// Unchanged when its size and last bytes are: skip the read.
@@ -215,8 +197,8 @@ func readUsageFile(counter UsageCounter, f UsageFile, prev usageFileMark, main b
 			return usageFileMark{}, false, err
 		}
 		counter.Reset(f.Path)
-		counter.Add(f.Path, data, 0)
-		return usageFileMark{Path: f.Path, Offset: len(data), Check: fingerprint(data[max(len(data)-usageCursorCheckBytes, 0):])}, false, nil
+		counter.Add(f.Path, data)
+		return usageFileMark{Offset: len(data), Check: fingerprint(data[max(len(data)-usageCursorCheckBytes, 0):])}, false, nil
 	}
 
 	start := max(prev.Offset-usageCursorCheckBytes, 0)
@@ -236,17 +218,11 @@ func readUsageFile(counter UsageCounter, f UsageFile, prev usageFileMark, main b
 	appended := data[prev.Offset-start:]
 	end := bytes.LastIndexByte(appended, '\n') + 1 // a line still being written waits
 	if end == 0 {
-		prev.Path = f.Path
 		return prev, restarted, nil
 	}
-	counter.Add(f.Path, appended[:end], prev.Lines)
+	counter.Add(f.Path, appended[:end])
 	offset := prev.Offset + end
-	return usageFileMark{
-		Path:   f.Path,
-		Offset: offset,
-		Lines:  prev.Lines + bytes.Count(appended[:end], []byte("\n")),
-		Check:  fingerprint(data[max(offset-usageCursorCheckBytes, start)-start : offset-start]),
-	}, restarted, nil
+	return usageFileMark{Offset: offset, Check: fingerprint(data[max(offset-usageCursorCheckBytes, start)-start : offset-start])}, restarted, nil
 }
 
 // readUsageBytes returns path's bytes from offset to its end, and its size.
@@ -295,12 +271,11 @@ func fingerprint(data []byte) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// ForEachLine calls fn for every non-blank line in data, with its zero-based
-// line number in the file given data's first line number.
-func ForEachLine(data []byte, firstLine int, fn func(lineNo int, line []byte)) {
-	for i, line := range bytes.Split(data, []byte("\n")) {
+// ForEachLine calls fn for every non-blank line in data.
+func ForEachLine(data []byte, fn func(line []byte)) {
+	for _, line := range bytes.Split(data, []byte("\n")) {
 		if line = bytes.TrimSpace(line); len(line) > 0 {
-			fn(firstLine+i, line)
+			fn(line)
 		}
 	}
 }

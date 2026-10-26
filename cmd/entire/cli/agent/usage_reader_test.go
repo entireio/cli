@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -19,40 +20,27 @@ type lineAgent struct {
 
 func (a *lineAgent) NewUsageCounter() UsageCounter { return &lineCounter{extra: a.extra} }
 
-// lineCounter counts lines per file ID, so a moved file's lines stay its own.
 type lineCounter struct {
 	extra []UsageFile
-	ids   map[string]string
 
 	Lines map[string]int `json:"lines"`
 }
 
 func (c *lineCounter) Files(in CumulativeTokenInput) []UsageFile {
-	c.ids = map[string]string{}
-	for _, f := range c.extra {
-		c.ids[f.Path] = f.ID
-	}
 	return append([]UsageFile{{Path: in.TranscriptPath}}, c.extra...)
 }
 
-func (c *lineCounter) key(path string) string {
-	if id := c.ids[path]; id != "" {
-		return id
-	}
-	return path
-}
-
-func (c *lineCounter) Add(path string, data []byte, _ int) {
+func (c *lineCounter) Add(path string, data []byte) {
 	if c.Lines == nil {
 		c.Lines = make(map[string]int)
 	}
-	c.Lines[c.key(path)] += bytes.Count(data, []byte("\n"))
+	c.Lines[path] += bytes.Count(data, []byte("\n"))
 	if !bytes.HasSuffix(data, []byte("\n")) {
-		c.Lines[c.key(path)]++ // a whole file's last line
+		c.Lines[path]++ // a whole file's last line
 	}
 }
 
-func (c *lineCounter) Reset(path string) { delete(c.Lines, c.key(path)) }
+func (c *lineCounter) Reset(path string) { delete(c.Lines, path) }
 
 func (c *lineCounter) Totals(context.Context, CumulativeTokenInput) (*TokenUsage, map[string]*TokenUsage) {
 	var calls int
@@ -119,18 +107,6 @@ func TestReadCumulativeUsage(t *testing.T) {
 		require.Equal(t, 3, calls(readLines(t, ag, path, obs.Cursor)), "not counted twice when it returns")
 	})
 
-	t.Run("a file at a new path is read from its start, counted once", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path, before, after := filepath.Join(dir, "t.jsonl"), filepath.Join(dir, "run.jsonl"), filepath.Join(dir, "direct.jsonl")
-		require.NoError(t, os.WriteFile(path, nil, 0o600))
-		require.NoError(t, os.WriteFile(before, []byte("1\n2\n"), 0o600))
-		require.NoError(t, os.WriteFile(after, []byte("1\n2\n3\n"), 0o600))
-		obs := readLines(t, &lineAgent{extra: []UsageFile{{Path: before, ID: "kid"}}}, path, nil)
-		require.Equal(t, 2, calls(obs))
-		require.Equal(t, 3, calls(readLines(t, &lineAgent{extra: []UsageFile{{Path: after, ID: "kid"}}}, path, obs.Cursor)))
-	})
-
 	t.Run("an unreadable transcript is an error; another agent's cursor is ignored", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "t.jsonl")
@@ -138,7 +114,7 @@ func TestReadCumulativeUsage(t *testing.T) {
 		require.True(t, ok)
 		require.Error(t, err)
 		require.NoError(t, os.WriteFile(path, []byte("a\nb\n"), 0o600))
-		foreign := []byte(`{"v":2,"agent":"someone-else","files":{"` + path + `":{"o":4}}}`)
+		foreign := []byte(`{"v":` + strconv.Itoa(usageCursorVersion) + `,"agent":"someone-else","files":{"` + path + `":{"o":4}}}`)
 		obs := readLines(t, &lineAgent{}, path, foreign)
 		require.Equal(t, 2, calls(obs))
 		require.False(t, obs.Restarted)

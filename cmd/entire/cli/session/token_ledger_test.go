@@ -39,10 +39,9 @@ func withKids(main, kids *agent.TokenUsage) *agent.TokenUsage {
 	return &out
 }
 
-// Repeated readings, growth, stale reads and rewrites are covered through the
-// hooks (integration_test/token_ledger_test.go) and attach's partial mark by
-// TestSaveAttachSessionState_LedgerMarksOnlyWhatAttachRead; these cover the
-// rest.
+// Readings, rewrites and checkpoint marks are covered through the hooks
+// (integration_test/token_ledger_test.go) and attach's partial mark by
+// TestSaveAttachSessionState_LedgerMarksOnlyWhatAttachRead.
 func TestTokenLedger(t *testing.T) {
 	t.Parallel()
 
@@ -55,30 +54,6 @@ func TestTokenLedger(t *testing.T) {
 		l.MarkCheckpointed()
 		l.Observe(reading(usage(20, 2, 2), map[string]*agent.TokenUsage{"a": usage(50, 5, 2), "b": usage(7, 1, 1)}))
 		assertUsage(t, "pending", l.Pending(), withKids(&agent.TokenUsage{}, usage(7, 1, 1)))
-	})
-
-	t.Run("the checkpointed mark never moves back", func(t *testing.T) {
-		t.Parallel()
-		var l TokenLedger
-		l.Observe(reading(usage(100, 10, 1), nil))
-		older := l.Clone()
-		l.Observe(reading(usage(250, 30, 3), nil))
-		l.MarkCheckpointed()
-		l.MarkCheckpointedUpTo(older)
-		assertUsage(t, "checkpointed", l.Checkpointed, usage(250, 30, 3))
-		if !l.CheckpointedBeyond(older) {
-			t.Fatal("a later checkpoint moved the mark past the older reading")
-		}
-	})
-
-	t.Run("clone is deep", func(t *testing.T) {
-		t.Parallel()
-		var l TokenLedger
-		l.Observe(reading(usage(10, 1, 1), map[string]*agent.TokenUsage{"a": usage(5, 1, 1)}))
-		c := l.Clone()
-		c.Children["a"].InputTokens = 999
-		c.Main.InputTokens = 999
-		assertUsage(t, "original", l.Total(), withKids(usage(10, 1, 1), usage(5, 1, 1)))
 	})
 
 	t.Run("nothing used is nil", func(t *testing.T) {

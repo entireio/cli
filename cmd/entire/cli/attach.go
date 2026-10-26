@@ -1500,8 +1500,6 @@ func applyAttachSessionState(ctx context.Context, state *session.State, now time
 			// Attach's reading activated the ledger; hooks have not yet.
 			state.TokenLedger = read.Clone()
 			state.CheckpointTokenUsage = nil
-		} else if state.TokenLedger.CheckpointedBeyond(read) {
-			logging.Warn(ctx, "attach: a checkpoint stored session tokens while attach was waiting; they may be in both checkpoints")
 		}
 		state.TokenLedger.MarkCheckpointedUpTo(read)
 		strategy.ConsumeAttachTokenWindow(state, tokenPos)

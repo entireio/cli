@@ -74,12 +74,12 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	u.agents = make(map[string]string, len(children))
 	for _, agentID := range slices.Sorted(maps.Keys(children)) {
 		u.agents[children[agentID]] = agentID
-		files = append(files, agent.UsageFile{Path: children[agentID], ID: "agent:" + agentID, Whole: true})
+		files = append(files, agent.UsageFile{Path: children[agentID], Whole: true})
 	}
 	return files
 }
 
-func (u *usageCounter) Add(path string, data []byte, _ int) {
+func (u *usageCounter) Add(path string, data []byte) {
 	lines, err := transcript.ParseFromBytes(data)
 	if err != nil {
 		return

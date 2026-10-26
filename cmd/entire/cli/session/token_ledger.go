@@ -20,7 +20,7 @@ type TokenLedger struct {
 	// Main is the main agent's total from the latest reading.
 	Main *agent.TokenUsage `json:"main,omitempty"`
 	// Base is what transcripts rewritten away had counted beyond what the
-	// rewritten transcript counts (see Observe). Its fields can be negative.
+	// rewritten transcript counts (see Observe).
 	Base *agent.TokenUsage `json:"base,omitempty"`
 	// Children is each subagent's highest total, so one whose file is
 	// deleted keeps its last total.
@@ -40,17 +40,17 @@ type TokenLedger struct {
 // the old one, never double counts.
 func (l *TokenLedger) Observe(obs agent.CumulativeObservation) {
 	switch {
-	case usageTotal(obs.Total) >= usageTotal(l.Main):
+	case agent.TokenTotal(obs.Total) >= agent.TokenTotal(l.Main):
 		l.Main = cloneUsage(obs.Total)
 	case obs.Restarted:
-		l.Base = types.AddTokenUsage(l.Base, signedDiff(l.Main, obs.Total))
+		l.Base = types.AddTokenUsage(l.Base, types.SubtractTokenUsage(cloneUsage(l.Main), cloneUsage(obs.Total)))
 		l.Main = cloneUsage(obs.Total)
 	}
 	for id, usage := range obs.Children {
 		if usage == nil {
 			continue
 		}
-		if prev, ok := l.Children[id]; ok && usageTotal(usage) < usageTotal(prev) {
+		if prev, ok := l.Children[id]; ok && agent.TokenTotal(usage) < agent.TokenTotal(prev) {
 			continue
 		}
 		if l.Children == nil {
@@ -108,13 +108,6 @@ func (l *TokenLedger) MarkCheckpointedUpTo(o *TokenLedger) {
 	l.CheckpointedChildren = agent.MaxTokenUsage(l.CheckpointedChildren, o.childrenTotal())
 }
 
-// CheckpointedBeyond reports whether a checkpoint marked tokens since o was
-// copied.
-func (l *TokenLedger) CheckpointedBeyond(o *TokenLedger) bool {
-	return usageTotal(l.Checkpointed) > usageTotal(o.Checkpointed) ||
-		usageTotal(l.CheckpointedChildren) > usageTotal(o.CheckpointedChildren)
-}
-
 // Clone returns a deep copy.
 func (l *TokenLedger) Clone() *TokenLedger {
 	if l == nil {
@@ -139,7 +132,7 @@ func (l *TokenLedger) Clone() *TokenLedger {
 
 // mainTotal is Main carried past rewrites by Base.
 func (l *TokenLedger) mainTotal() *agent.TokenUsage {
-	return clampUsage(types.AddTokenUsage(cloneUsage(l.Base), cloneUsage(l.Main)))
+	return types.AddTokenUsage(cloneUsage(l.Base), cloneUsage(l.Main))
 }
 
 func (l *TokenLedger) childrenTotal() *agent.TokenUsage {
@@ -161,24 +154,12 @@ func withSubagents(main, children *agent.TokenUsage) *agent.TokenUsage {
 	if main != nil {
 		*out = *main
 	}
-	out.SubagentTokens = nil
-	out.SubagentTokensComplete = nil
 	if children != nil {
-		c := *children
-		c.SubagentTokens = nil
-		c.SubagentTokensComplete = nil
-		out.SubagentTokens = &c
+		out.SubagentTokens = children
 		complete := true
 		out.SubagentTokensComplete = &complete
 	}
 	return out
-}
-
-func usageTotal(u *agent.TokenUsage) int {
-	if u == nil {
-		return 0
-	}
-	return u.InputTokens + u.CacheCreationTokens + u.CacheReadTokens + u.OutputTokens
 }
 
 func cloneUsage(u *agent.TokenUsage) *agent.TokenUsage {
@@ -189,35 +170,4 @@ func cloneUsage(u *agent.TokenUsage) *agent.TokenUsage {
 	c.SubagentTokens = nil
 	c.SubagentTokensComplete = nil
 	return &c
-}
-
-// signedDiff returns a − b per field, which can be negative.
-func signedDiff(a, b *agent.TokenUsage) *agent.TokenUsage {
-	if a == nil {
-		a = &agent.TokenUsage{}
-	}
-	if b == nil {
-		b = &agent.TokenUsage{}
-	}
-	return &agent.TokenUsage{
-		InputTokens:         a.InputTokens - b.InputTokens,
-		CacheCreationTokens: a.CacheCreationTokens - b.CacheCreationTokens,
-		CacheReadTokens:     a.CacheReadTokens - b.CacheReadTokens,
-		OutputTokens:        a.OutputTokens - b.OutputTokens,
-		APICallCount:        a.APICallCount - b.APICallCount,
-	}
-}
-
-// clampUsage floors each field at zero; nil for nil.
-func clampUsage(u *agent.TokenUsage) *agent.TokenUsage {
-	if u == nil {
-		return nil
-	}
-	return &agent.TokenUsage{
-		InputTokens:         max(u.InputTokens, 0),
-		CacheCreationTokens: max(u.CacheCreationTokens, 0),
-		CacheReadTokens:     max(u.CacheReadTokens, 0),
-		OutputTokens:        max(u.OutputTokens, 0),
-		APICallCount:        max(u.APICallCount, 0),
-	}
 }

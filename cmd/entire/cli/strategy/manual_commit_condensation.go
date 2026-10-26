@@ -638,7 +638,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		// Child sessions' usage is credited outside the ledger; add it here as
 		// resolveCondensedTokenUsage does, and resetCheckpointWindow rebaselines it.
 		sessionData.TokenUsage = session.WithChildSessionTokens(state.TokenLedger.Pending(), state.PendingChildSessionTokens())
-		sessionData.SessionTokenUsage = state.TotalTokenUsage()
 	} else {
 		resolveCondensedTokenUsage(ctx, ag, state, sessionData)
 	}
@@ -824,7 +823,7 @@ func buildCondensationWriteOptions(
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
-		SessionTokenUsage:           sessionData.SessionTokenUsage,
+		SessionTokenUsage:           sessionTokenUsage(state),
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
 		Summary:                     summary,
@@ -1178,6 +1177,15 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 	// Child sessions' usage is credited outside both sources above, so it
 	// is added exactly here; resetCheckpointWindow then rebaselines it.
 	sessionData.TokenUsage = session.WithChildSessionTokens(sessionData.TokenUsage, state.PendingChildSessionTokens())
+}
+
+// sessionTokenUsage is the session's running total a checkpoint records, for
+// token-ledger sessions; nil for the per-turn path, whose total is not one.
+func sessionTokenUsage(state *SessionState) *agent.TokenUsage {
+	if !state.TokenLedger.IsActive() {
+		return nil
+	}
+	return state.TotalTokenUsage()
 }
 
 // AttachTokenUsage returns the tokens `entire session attach` stores for a

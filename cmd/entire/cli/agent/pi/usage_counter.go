@@ -27,7 +27,7 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	return []agent.UsageFile{{Path: in.TranscriptPath}}
 }
 
-func (u *usageCounter) Add(_ string, data []byte, _ int) {
+func (u *usageCounter) Add(_ string, data []byte) {
 	scanner := pijsonl.NewScanner(data)
 	for scanner.Scan() {
 		if !bytes.Contains(scanner.Bytes(), []byte(`"usage"`)) {

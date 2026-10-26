@@ -35,8 +35,8 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	return []agent.UsageFile{{Path: in.TranscriptPath}}
 }
 
-func (u *usageCounter) Add(_ string, data []byte, firstLine int) {
-	agent.ForEachLine(data, firstLine, func(lineNo int, raw []byte) {
+func (u *usageCounter) Add(_ string, data []byte) {
+	agent.ForEachLine(data, func(raw []byte) {
 		if !bytes.Contains(raw, []byte(plannerResponse)) {
 			return
 		}
@@ -50,7 +50,7 @@ func (u *usageCounter) Add(_ string, data []byte, firstLine int) {
 		if json.Unmarshal(raw, &step) != nil || step.Type != plannerResponse || step.InputTokens+step.CacheReadTokens+step.OutputTokens == 0 {
 			return
 		}
-		key := "line:" + strconv.Itoa(lineNo)
+		key := ""
 		if step.StepIndex != nil {
 			key = strconv.Itoa(*step.StepIndex)
 		}

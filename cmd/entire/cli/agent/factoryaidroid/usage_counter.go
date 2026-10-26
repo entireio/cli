@@ -3,7 +3,6 @@ package factoryaidroid
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -51,7 +50,7 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	}
 }
 
-func (u *usageCounter) Add(path string, data []byte, firstLine int) {
+func (u *usageCounter) Add(path string, data []byte) {
 	if strings.HasSuffix(path, settingsSuffix) {
 		var settings droidSettings
 		if json.Unmarshal(data, &settings) != nil || settings.TokenUsage == nil {
@@ -67,15 +66,11 @@ func (u *usageCounter) Add(path string, data []byte, firstLine int) {
 	if err != nil {
 		return
 	}
-	for i, line := range lines {
+	for _, line := range lines {
 		if line.Type != roleAssistant {
 			continue
 		}
-		key := line.UUID
-		if key == "" {
-			key = "entry:" + strconv.Itoa(firstLine+i)
-		}
-		u.Messages.Add("", key, agent.TokenUsage{APICallCount: 1})
+		u.Messages.Add("", line.UUID, agent.TokenUsage{APICallCount: 1})
 		var msg messageWithUsage
 		if json.Unmarshal(line.Message, &msg) != nil || msg.ID == "" {
 			continue

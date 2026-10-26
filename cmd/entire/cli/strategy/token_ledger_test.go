@@ -105,25 +105,3 @@ func TestAttachTokenUsage_LedgerSessionStoresItsPending(t *testing.T) {
 	require.Equal(t, 20, usage.OutputTokens, "attach stores what no checkpoint holds")
 	require.Equal(t, 2, pos)
 }
-
-// A transcript rewritten to an older copy between turns (a resume restoring
-// it) reads lower at the next turn start. The tokens already counted stay
-// counted and nothing becomes pending; calls on the rewritten copy count once.
-func TestObserveTokenLedger_RewrittenTranscriptKeepsTheTotal(t *testing.T) {
-	t.Parallel()
-	state := ledgerState(t)
-	writeLedgerTranscript(t, state.TranscriptPath, 60, 40, 10)
-	state.TokenLedger = newTokenLedger(context.Background(), state.AgentType, state.SessionID, state.TranscriptPath)
-	require.True(t, state.TokenLedger.IsActive())
-
-	writeLedgerTranscript(t, state.TranscriptPath, 60)
-	require.True(t, ObserveTokenLedger(context.Background(), state))
-	require.Equal(t, 110, state.TokenUsage.OutputTokens, "a rewrite does not lower the total")
-	require.Nil(t, state.TokenLedger.Pending(), "a rewrite adds nothing to the next checkpoint")
-
-	writeLedgerTranscript(t, state.TranscriptPath, 60, 25)
-	require.True(t, ObserveTokenLedger(context.Background(), state))
-	require.Equal(t, 135, state.TokenUsage.OutputTokens)
-	require.NotNil(t, state.TokenLedger.Pending())
-	require.Equal(t, 25, state.TokenLedger.Pending().OutputTokens, "only the call made after the rewrite is pending")
-}

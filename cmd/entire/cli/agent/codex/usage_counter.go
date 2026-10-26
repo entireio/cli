@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"strconv"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
@@ -64,8 +63,8 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	return []agent.UsageFile{{Path: in.TranscriptPath}}
 }
 
-func (u *usageCounter) Add(_ string, data []byte, firstLine int) {
-	agent.ForEachLine(data, firstLine, func(lineNo int, raw []byte) {
+func (u *usageCounter) Add(_ string, data []byte) {
+	agent.ForEachLine(data, func(raw []byte) {
 		if !bytes.Contains(raw, []byte(rolloutLineTypeTokenUsageRecord)) && !bytes.Contains(raw, []byte(eventMsgTypeTokenCount)) {
 			return
 		}
@@ -82,11 +81,7 @@ func (u *usageCounter) Add(_ string, data []byte, firstLine int) {
 			if json.Unmarshal(line.Payload, &record) != nil || record.Usage == nil {
 				return
 			}
-			key := record.ResponseID
-			if key == "" {
-				key = "line:" + strconv.Itoa(lineNo)
-			}
-			u.Records.Add("", key, record.Usage.tokenUsage(1))
+			u.Records.Add("", record.ResponseID, record.Usage.tokenUsage(1))
 		case rolloutLineTypeEventMsg:
 			var event struct {
 				Type string `json:"type"`

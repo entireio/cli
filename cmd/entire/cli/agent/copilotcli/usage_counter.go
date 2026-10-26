@@ -3,7 +3,6 @@ package copilotcli
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -41,8 +40,8 @@ func (u *usageCounter) Files(in agent.CumulativeTokenInput) []agent.UsageFile {
 	return []agent.UsageFile{{Path: in.TranscriptPath}}
 }
 
-func (u *usageCounter) Add(_ string, data []byte, firstLine int) {
-	agent.ForEachLine(data, firstLine, func(lineNo int, raw []byte) {
+func (u *usageCounter) Add(_ string, data []byte) {
+	agent.ForEachLine(data, func(raw []byte) {
 		var event copilotEvent
 		if json.Unmarshal(raw, &event) != nil {
 			return
@@ -59,11 +58,7 @@ func (u *usageCounter) Add(_ string, data []byte, firstLine int) {
 			if json.Unmarshal(event.Data, &data) != nil || data.Usage == nil {
 				return
 			}
-			key := data.Usage.APICallID
-			if key == "" {
-				key = "event:" + strconv.Itoa(lineNo)
-			}
-			u.Calls.Add(event.AgentID, key, *data.Usage.tokenUsage(1))
+			u.Calls.Add(event.AgentID, data.Usage.APICallID, *data.Usage.tokenUsage(1))
 		case eventTypeSessionShutdown:
 			var data sessionShutdownData
 			if event.AgentID != "" || json.Unmarshal(event.Data, &data) != nil || len(data.ModelMetrics) == 0 {
