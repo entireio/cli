@@ -140,8 +140,9 @@ type WriteOptions struct {
 	// enable`'s optional history import: imported history has no
 	// Entire-Checkpoint trailer (we never rewrite existing commits), so import
 	// stamps the resolved anchor commit here. Per turn that is the commit the
-	// transcript recorded when one resolves and is reachable (see
-	// turnAnchorResolver), otherwise the resolved head fallback (see
+	// transcript recorded, or else one made while the turn's git command ran,
+	// when one resolves and is reachable (see turnAnchorResolver), otherwise
+	// the resolved head fallback (see
 	// resolveImportLinkCommitSHA for the order). An import that can resolve no
 	// anchor at all is refused before it writes, so an import written by a
 	// current CLI always carries one; imports predating that enforcement may
