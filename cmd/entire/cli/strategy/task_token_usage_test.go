@@ -165,12 +165,12 @@ func TestChildSessionTokens_EachChildCountsOnceAcrossWindows(t *testing.T) {
 	background := &agent.TokenUsage{InputTokens: 300, OutputTokens: 160, APICallCount: 2}
 	state := &SessionState{SessionID: "s", AgentType: agent.AgentTypeOpenCode}
 
-	applyTurnTokenUsage(state, turn)
+	applyTurnTokenUsage(state, turn, turn)
 	state.AddChildSessionTokens(foreground)
 	require.Equal(t, foreground, condensedTokenUsage(t, state).SubagentTokens)
 	resetCheckpointWindow(state) // checkpoint 1
 
-	applyTurnTokenUsage(state, turn)
+	applyTurnTokenUsage(state, turn, turn)
 	require.Nil(t, condensedTokenUsage(t, state).SubagentTokens, "turn 2 has no child of its own")
 	state.AddChildSessionTokens(background) // the turn ended, then the child went idle
 	require.Equal(t, background, condensedTokenUsage(t, state).SubagentTokens,
@@ -203,16 +203,16 @@ func TestChildSessionTokens_SurviveSubagentSnapshots(t *testing.T) {
 	}
 	state := &SessionState{SessionID: "s", AgentType: agent.AgentTypeFactoryAIDroid}
 
-	applyTurnTokenUsage(state, snapshot(40))
+	applyTurnTokenUsage(state, snapshot(40), snapshot(40))
 	state.AddChildSessionTokens(worker)
-	applyTurnTokenUsage(state, snapshot(70))
+	applyTurnTokenUsage(state, snapshot(70), snapshot(70))
 
 	wantSubagents := &agent.TokenUsage{InputTokens: 8682, OutputTokens: 109, CacheReadTokens: 8026, APICallCount: 2}
 	require.Equal(t, wantSubagents, state.TotalTokenUsage().SubagentTokens)
 	require.Equal(t, wantSubagents, condensedTokenUsage(t, state).SubagentTokens)
 	resetCheckpointWindow(state)
 
-	applyTurnTokenUsage(state, snapshot(90))
+	applyTurnTokenUsage(state, snapshot(90), snapshot(90))
 	require.Equal(t, &agent.TokenUsage{InputTokens: 20, APICallCount: 0}, condensedTokenUsage(t, state).SubagentTokens,
 		"the next checkpoint holds the snapshot's growth and not the Worker again")
 	require.Equal(t, 8702, state.TotalTokenUsage().SubagentTokens.InputTokens)

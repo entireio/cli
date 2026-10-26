@@ -531,6 +531,97 @@ func TestCalculateTotalTokenUsage_PerCheckpoint(t *testing.T) {
 	}
 }
 
+// TestCalculateTotalTokenUsage_MessageStraddlingStartLine: Claude Code writes
+// one line per content block of a message, all with the same message.id and
+// usage, and runs parallel tools between them, so a commit can land between
+// a message's lines. The message counts in the window holding its first line.
+func TestCalculateTotalTokenUsage_MessageStraddlingStartLine(t *testing.T) {
+	t.Parallel()
+
+	assistant := func(id string, out int) string {
+		return fmt.Sprintf(`{"type":"assistant","message":{"id":%q,"usage":{"input_tokens":%d,"output_tokens":%d}}}`, id, out, out)
+	}
+	sidechain := func(id string, out int) string {
+		return fmt.Sprintf(`{"type":"assistant","isSidechain":true,"message":{"id":%q,"usage":{"input_tokens":%d,"output_tokens":%d}}}`, id, out, out)
+	}
+	const (
+		prompt     = `{"type":"user","message":{"content":"prompt"}}`
+		toolResult = `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`
+	)
+
+	tests := []struct {
+		name      string
+		lines     []string
+		startLine int
+		wantOut   int
+		wantCalls int
+	}{
+		{
+			name:      "tail of a message begun before startLine",
+			lines:     []string{prompt, assistant("m1", 10), toolResult, assistant("m1", 10), toolResult, assistant("m1", 10)},
+			startLine: 3,
+		},
+		{
+			name:      "startLine on the tool_result between a message's lines",
+			lines:     []string{prompt, assistant("m1", 10), toolResult, assistant("m1", 10)},
+			startLine: 2,
+		},
+		{
+			name:      "message after the straddling one still counts",
+			lines:     []string{prompt, assistant("m1", 10), toolResult, assistant("m1", 10), toolResult, assistant("m2", 5)},
+			startLine: 3,
+			wantOut:   5,
+			wantCalls: 1,
+		},
+		{
+			name:      "boundary at a turn start",
+			lines:     []string{prompt, assistant("m1", 10), prompt, assistant("m2", 20)},
+			startLine: 2,
+			wantOut:   20,
+			wantCalls: 1,
+		},
+		{
+			name:      "a different earlier message stops the scan",
+			lines:     []string{prompt, assistant("m0", 7), toolResult, assistant("m1", 10), toolResult, assistant("m1", 10)},
+			startLine: 3,
+			wantOut:   10,
+			wantCalls: 1,
+		},
+		{
+			name:      "sidechain line before startLine does not stop the scan",
+			lines:     []string{prompt, assistant("m1", 10), sidechain("s1", 3), toolResult, assistant("m1", 10)},
+			startLine: 4,
+		},
+		{
+			name:      "sidechain line at startLine is not the straddling message",
+			lines:     []string{prompt, assistant("m1", 10), toolResult, sidechain("s1", 3), assistant("m1", 10)},
+			startLine: 3,
+			wantOut:   3,
+			wantCalls: 1,
+		},
+		{
+			name:      "malformed line before startLine",
+			lines:     []string{prompt, assistant("m1", 10), `{not json`, assistant("m1", 10)},
+			startLine: 3,
+		},
+		{
+			name:      "startLine past the end",
+			lines:     []string{prompt, assistant("m1", 10)},
+			startLine: 10,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(buildJSONL(tt.lines...), tt.startLine, "")
+			require.NoError(t, err)
+			require.NotNil(t, usage)
+			assert.Equal(t, tt.wantOut, usage.OutputTokens, "output tokens")
+			assert.Equal(t, tt.wantCalls, usage.APICallCount, "API calls")
+		})
+	}
+}
+
 // buildJSONL is a test helper that builds JSONL bytes from transcript lines.
 func buildJSONL(lines ...string) []byte {
 	var buf strings.Builder

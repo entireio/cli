@@ -146,6 +146,11 @@ type StepContext struct {
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage
 
+	// PendingTokenUsageFrom scopes the turn's pending checkpoint usage to what
+	// no condensation during the turn stored, or is nil (see
+	// pendingTurnTokenUsage).
+	PendingTokenUsageFrom TurnTokenRecount
+
 	// SubagentLedgerVersion is the authoritative inventory version observed
 	// while token evidence was extracted. nil means no inventory snapshot;
 	// a pointer to zero is a valid snapshot before the first child is observed.

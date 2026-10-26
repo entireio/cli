@@ -160,24 +160,34 @@ func (r *tokenTurnRun) record(step string) {
 	r.pendingOut, r.pendingSub = 0, 0
 }
 
+// verify checks every checkpoint holds exactly the tokens it newly covers, and
+// that the checkpoints and the session total each count every turn once. A
+// checkpoint that newly covers no tokens may store none.
 func (r *tokenTurnRun) verify() {
 	r.t.Helper()
 	require.Zero(r.t, r.pendingOut+r.pendingSub, "every turn must end up in a checkpoint")
 	var sumOut, sumSub int
 	for _, w := range r.want {
 		u := readCommittedTokenUsage(r.t, r.env, w.id)
-		require.NotNil(r.t, u, w.step)
-		gotSub := 0
-		if u.SubagentTokens != nil {
-			gotSub = u.SubagentTokens.OutputTokens
+		var gotOut, gotSub int
+		if u != nil {
+			gotOut = u.OutputTokens
+			if u.SubagentTokens != nil {
+				gotSub = u.SubagentTokens.OutputTokens
+			}
 		}
-		assert.Equal(r.t, w.out, u.OutputTokens, "%s: checkpoint must hold exactly the turns it newly covers", w.step)
+		r.t.Logf("%-28s expected %4d/%d  actual %4d/%d", w.step, w.out, w.sub, gotOut, gotSub)
+		assert.Equal(r.t, w.out, gotOut, "%s: checkpoint must hold exactly the turns it newly covers", w.step)
 		assert.Equal(r.t, w.sub, gotSub, "%s: subagent tokens", w.step)
-		sumOut += u.OutputTokens
+		sumOut += gotOut
 		sumSub += gotSub
 	}
 	assert.Equal(r.t, r.total, sumOut, "checkpoints must sum to the session's tokens")
 	assert.Equal(r.t, r.totalSub, sumSub, "checkpoints must sum to the session's subagent tokens")
+	state, err := r.env.GetSessionState(r.s.ID)
+	require.NoError(r.t, err)
+	require.NotNil(r.t, state.TokenUsage)
+	assert.Equal(r.t, r.total, state.TokenUsage.OutputTokens, "session total counts every turn once")
 }
 
 // TestTokenScope_EachTurnCountedOnce: every turn's tokens land in exactly one

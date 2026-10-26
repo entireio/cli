@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -77,6 +78,12 @@ type PrePromptState struct {
 	// checkpoint-scoped token delta. Empty for agents with transcript-embedded
 	// token data.
 	TokenBaseline json.RawMessage `json:"token_baseline,omitempty"`
+
+	// TokenStart is the session's token offset (SessionState.TokenStart) at
+	// turn start, so turn end can tell whether a condensation during the turn
+	// moved it. nil when no session state existed yet, or in state written by
+	// older versions.
+	TokenStart *int `json:"token_start,omitempty"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -248,8 +255,20 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 	// skipped-scan marker tells turn-end to disable new-file detection.
 	untrackedFiles, scanSkipped := untrackedFilesOrSkip(ctx)
 
-	// Get transcript position using TranscriptAnalyzer if available
+	// Read the token offset before measuring the transcript: a condensation
+	// that moves it in between then fails rebaseStaleTokenStart's
+	// compare-and-set instead of being rebased over.
+	var tokenStart *int
+	if session, loadErr := strategy.LoadSessionState(ctx, sessionID); loadErr == nil && session != nil {
+		start := session.TokenStart()
+		tokenStart = &start
+	}
+
+	// Get transcript position using TranscriptAnalyzer if available.
+	// positionKnown is false when the 0 offset only means "could not tell":
+	// agents report (0, nil) for a missing transcript too.
 	var transcriptOffset int
+	positionKnown := false
 	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok && sessionRef != "" {
 		pos, posErr := analyzer.GetTranscriptPosition(sessionRef)
 		if posErr != nil {
@@ -257,6 +276,8 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 				slog.String("error", posErr.Error()))
 		} else {
 			transcriptOffset = pos
+			_, statErr := os.Stat(sessionRef)
+			positionKnown = statErr == nil
 		}
 	}
 
@@ -269,6 +290,12 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		UntrackedFileStats:   statUntrackedFiles(ctx, untrackedFiles),
 		TranscriptOffset:     transcriptOffset,
 	}
+
+	if tokenStart != nil && positionKnown && transcriptOffset < *tokenStart && recountsTurnTokensFromTranscript(ag) {
+		rebased := rebaseStaleTokenStart(ctx, sessionID, *tokenStart, transcriptOffset)
+		tokenStart = &rebased
+	}
+	state.TokenStart = tokenStart
 
 	// Out-of-band token baseline: agents whose token usage lives outside the
 	// transcript (Antigravity, Factory AI Droid) snapshot their cumulative token position now so
@@ -295,6 +322,69 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		slog.Int("untracked_files", len(untrackedFiles)),
 		slog.Int("transcript_offset", transcriptOffset))
 	return nil
+}
+
+// recountsTurnTokensFromTranscript reports whether a stale token offset may be
+// rebased for the agent: its turn tokens are a per-line sum counted from the
+// offset, and a forced resume rewrites its transcript shorter. That holds for
+// Claude Code and Pi only. The rest are excluded: Codex counts a delta of a
+// cumulative total, so the pending usage carried past a rebase could count
+// twice; OpenCode's transcript is an export that can read short while stale,
+// which would rebase falsely; Cursor's usage comes from its Stop hook, and the
+// pending fallback already stores it; Copilot CLI backfills the session total
+// by recounting the whole transcript; out-of-band agents (Antigravity) never
+// read the offset, and late writers' transcripts read short mid-flush.
+func recountsTurnTokensFromTranscript(ag agent.Agent) bool {
+	switch ag.Type() {
+	case agent.AgentTypeClaudeCode, agent.AgentTypePi:
+		return true
+	default:
+		return false
+	}
+}
+
+// rebaseStaleTokenStart moves the session's token offset down to pos, the
+// transcript's length at turn start, and returns the offset the turn starts
+// from. A transcript rewritten shorter than the offset (a forced resume from
+// an older checkpoint) leaves the offset pointing past the transcript, so a
+// condensation during the turn would count from there, store none of the
+// turn's earlier tokens, and move the offset to the end; turn end would then
+// take those tokens as stored. Everything from pos on belongs to this turn.
+//
+// The pending usage moves to RewrittenTokenUsage in the same mutation: it was
+// counted from lines at or past tokenStart, which the rewrite removed, so the
+// next checkpoint must add it rather than expect a recount to find it.
+//
+// It only rebases while the offset is still tokenStart, the value the caller
+// read before measuring the transcript, so a condensation that moved it in
+// between wins. Any failure (the TurnStart lock wait expiring included) keeps
+// tokenStart: the turn then behaves as it did without the rebase.
+func rebaseStaleTokenStart(ctx context.Context, sessionID string, tokenStart, pos int) int {
+	rebased := false
+	err := strategy.MutateSessionState(ctx, sessionID, func(s *strategy.SessionState) error {
+		if s.TokenStart() != tokenStart || pos >= tokenStart {
+			return strategy.ErrMutationSkip
+		}
+		s.SetTokenStart(pos)
+		s.CarryRewrittenTokenUsage()
+		rebased = true
+		return nil
+	})
+	logCtx := logging.WithComponent(ctx, "state")
+	if err != nil {
+		logging.Warn(logCtx, "failed to rebase stale token offset",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		return tokenStart
+	}
+	if !rebased {
+		return tokenStart
+	}
+	logging.Info(logCtx, "rebased token offset past the transcript to turn start",
+		slog.String("session_id", sessionID),
+		slog.Int("token_start", tokenStart),
+		slog.Int("transcript_offset", pos))
+	return pos
 }
 
 // LoadPrePromptState loads previously captured state.

@@ -120,7 +120,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
-		applyTurnTokenUsage(state, step.TokenUsage)
+		applyTurnTokenUsage(state, step.TokenUsage, pendingTurnTokenUsage(state, step.TokenUsage, step.PendingTokenUsageFrom))
 
 		logCtx := logging.WithComponent(ctx, "checkpoint")
 		logging.Info(logCtx, "checkpoint saved",
@@ -155,19 +155,64 @@ func withoutStaleSubagentSnapshot(usage *agent.TokenUsage, ledgerVersion *uint64
 	return types.WithClearedSubagentTokens(usage, false)
 }
 
+// TurnTokenRecount recounts a turn's main-agent usage from the session's
+// current token offset when a condensation during the turn moved it, and
+// reports whether it did (see NewTurnTokenRecount).
+type TurnTokenRecount func(tokenStart int) (pending *agent.TokenUsage, rescoped bool)
+
+// NewTurnTokenRecount returns the recount for a turn counted from turnStart.
+// The token offset moved during the turn when it differs from
+// tokenStartAtTurnStart and lies past turnStart; a transcript rewritten
+// shorter than an earlier offset (undo, a forced resume) leaves the offset past
+// turnStart without any condensation, so the baseline is what decides. Without
+// one (no state at turn start, older pre-prompt state) the offset lying past
+// turnStart is the signal. count counts the main-agent usage from an offset.
+func NewTurnTokenRecount(turnStart int, tokenStartAtTurnStart *int, count func(from int) *agent.TokenUsage) TurnTokenRecount {
+	return func(tokenStart int) (*agent.TokenUsage, bool) {
+		if tokenStart <= turnStart || (tokenStartAtTurnStart != nil && tokenStart == *tokenStartAtTurnStart) {
+			return nil, false
+		}
+		return count(tokenStart), true
+	}
+}
+
+// pendingTurnTokenUsage returns the part of a turn's usage no checkpoint has
+// stored. A condensation during the turn (an agent commit, an attach) stored
+// the turn up to the token offset; counting the whole turn as pending would
+// store that part again when the next condensation's own recount finds nothing
+// and falls back to the pending usage. The recount keeps the turn's cumulative
+// subagent snapshot, which applyTurnTokenUsage rescopes. Hook-reported (Cursor)
+// and out-of-band (Antigravity) usage have no recount and stay whole: a
+// mid-turn condensation stores none of it. Call it under the session lock that
+// applies the result, so a concurrent condensation cannot move the offset in
+// between.
+func pendingTurnTokenUsage(state *SessionState, usage *agent.TokenUsage, recount TurnTokenRecount) *agent.TokenUsage {
+	if usage == nil || recount == nil {
+		return usage
+	}
+	recounted, rescoped := recount(state.TokenStart())
+	if !rescoped {
+		return usage
+	}
+	if recounted == nil {
+		recounted = &agent.TokenUsage{}
+	}
+	return replaceSubagentTokensFrom(recounted, usage)
+}
+
 // applyTurnTokenUsage records one turn's token usage on state: it adds the
-// per-turn counters to both the session total (TokenUsage) and the pending
-// checkpoint window (CheckpointTokenUsage), and rescopes the window's
-// cumulative SubagentTokens against the baseline. SaveStep and
-// ApplyTurnTokenUsage (turns that change no files) both go through
-// here, so a turn is accounted the same way whichever path records it. A nil
-// usage is a no-op.
-func applyTurnTokenUsage(state *SessionState, usage *agent.TokenUsage) {
+// per-turn counters to the session total (TokenUsage) and the pending ones (see
+// pendingTurnTokenUsage) to the pending checkpoint window
+// (CheckpointTokenUsage), and rescopes the window's cumulative SubagentTokens
+// against the baseline. SaveStep and ApplyTurnTokenUsage (turns that change no
+// files) both go through here, so a turn is accounted the same way whichever
+// path records it. A nil usage is a no-op.
+func applyTurnTokenUsage(state *SessionState, usage, pending *agent.TokenUsage) {
 	if usage == nil {
 		return
 	}
 	state.TokenUsage = accumulateTokenUsage(state.TokenUsage, usage)
-	state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, usage)
+	state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, pending)
 	// usage.SubagentTokens is a cumulative-since-session-start
 	// snapshot (agent IDs are discovered from the full transcript and each
 	// subagent's own transcript is re-read from its start on every call —
@@ -491,6 +536,7 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
+	state.RewrittenTokenUsage = nil
 	state.ClearCondensationAttempt()
 	state.RebaselineSubagentTokens()
 	removeCompletedTaskRecords(state)
