@@ -22,10 +22,36 @@ One JSON object per line, each line terminated by `\n`.
 | `type` | string | yes | `user` or `assistant`. |
 | `agent` | string | no | The CLI agent registry name (`claude-code`, `codex`, `copilot-cli`, `cursor`, `factoryai-droid`, `opencode`, `pi`, `antigravity`); otherwise the agent type string, e.g. for external agents. An open set. |
 | `cli_version` | string | no | Version of the producer that wrote the line. The name is historical. |
-| `ts` | string | no | RFC 3339 timestamp. May be omitted or empty (codex, gemini and copilot write `""`). The generic JSONL converter copies the source timestamp verbatim, so a non-string value can occur; readers ignore it. |
+| `ts` | string | no | Source timestamp where available, normally RFC 3339. May be omitted or empty when the native transcript has no timestamp. The generic JSONL converter copies source timestamps verbatim, so a non-string value can occur; readers ignore it. |
 | `id` | string | no | Assistant message ID. Streaming fragments with the same ID are merged into one line. |
-| `input_tokens`, `output_tokens` | int | no | Assistant lines only. |
+| `model` | string | no | Assistant lines only. The model the source reports for this call, verbatim; omitted when it reports none. Never inferred from a session-wide default, and never a placeholder: a value the agent writes in place of a model (Claude Code's `<synthetic>` on API-error entries) is omitted. |
+| `input_tokens` | int | no | Assistant lines only. Input not counted in the line's `cache_read_tokens` or `cache_write_tokens`; see below. |
+| `output_tokens` | int | no | Assistant lines only; includes reasoning tokens when the source reports them as part of output. |
+| `cache_read_tokens`, `cache_write_tokens` | int | no | Assistant lines only; per-call cached input read and total cached input written. Cache counts are separate from fresh `input_tokens`. |
+| `cache_write_5m_tokens`, `cache_write_1h_tokens` | int | no | Assistant lines only; an optional breakdown of `cache_write_tokens`, emitted only when the source reports the split (even when a reported value is zero). Absence means unknown, not zero or all 5m. Do not add the split to the total when summing usage. |
+| `reasoning_tokens` | int | no | Assistant lines only; subset of `output_tokens` when reported by the source, not additional output. |
 | `content` | array of blocks, string, or `null` | yes | Normally an array. A string can appear when an assistant message's source content was a string. `null` can appear because the writer does not omit empty content. |
+
+Usage and model fields are per call, never copied from a session aggregate. A zero omitted by JSON encoding does not assert that the source reported zero.
+
+On every line, `input_tokens` excludes the tokens in that line's `cache_read_tokens` and `cache_write_tokens`, so adding them never double counts. The sum is the call's total input only on lines from a converter that writes the cache fields. Lines written before that carry no cache fields, and their `input_tokens` is one of two things:
+
+- Fresh input only (Claude Code, and Pi except as below): the cached input is missing from the line, so the sum understates the call's input.
+- Fresh plus cached input (Codex, and Pi on Google models before pi-ai subtracted cached tokens in March 2026): the total is right, but its cache share is unknown, so pricing it at the fresh-input rate overstates the cost.
+
+Other agents' lines copy the native input count as the agent defines it. Only `agent` and the `cli_version` that wrote a line tell these cases apart; no field marks a line as old or new, and `model` in particular says nothing about how `input_tokens` was counted.
+
+Converters fill only what the native transcript reports per call. Claude Code, Codex and Pi record per-call usage and model, and their converters write them (below). Copilot CLI has only a shutdown aggregate, Cursor is hook-only, and external plugins and Antigravity report usage out of band, so their lines do not get these fields. Native timestamps are preserved where present; a missing one stays empty rather than fabricated.
+
+### Per-call usage
+
+An assistant line can carry usage with empty content (`"content":[]`, for example an aborted or thinking-only call): readers that render transcripts should skip it, and readers that count usage must keep it.
+
+Claude Code (`Options.Agent` `claude-code`, and `NewClaudeAdapter`; Cursor and Droid keep legacy counts): streaming fragments of one message ID become one line carrying the whole usage row with the strictly highest `output_tokens` (earlier wins ties) and the model of the first fragment that reports one, skipping Claude Code's `<synthetic>` placeholder; `ts` is the last fragment's. The 5m/1h cache-write split is emitted only when both durations are reported. A message with no usage object on any fragment has no model or usage fields. User entries holding only tool results between fragments of one ID do not split the call: the later fragments become separate lines without usage, and the best row stays on the call's first line (the first with visible content, since a thinking-only message has no line), so a call's usage is counted once. Read per-call usage from the full converted transcript: in a checkpoint slice (`ConvertWithBoundary`), a usage row that arrives after a tool result goes to the call's first line, which can sit before the slice boundary.
+
+Codex: one assistant line per model call, made of the reasoning, message and tool-call items up to the `token_count` that closes it (real order: call, output, `token_count`; outputs attach to their call by `call_id`). Usage is the difference between consecutive cumulative `info.total_token_usage` snapshots, and `ts` is the closing snapshot's when present, otherwise the last item's. Fresh input is `input - cached` clamped at zero; Codex lines carry no cache-write fields. Repeated snapshots and snapshots missing the input, cached-input or output counter are ignored, `reasoning_tokens` needs both adjacent snapshots to report it, and a decrease in any counter stops usage on later lines. A call with usage but no text or tool calls (for example reasoning-only) emits `content: []`, so consumers may see empty assistant lines; a call with neither usage nor content is omitted. Without usable `total_token_usage` snapshots (flat per-event totals are not read), no `token_count` closes a call, so consecutive assistant items merge into one line until the next user line or tool output; with usable snapshots, a tool output does not end its call. After a counter decrease, total snapshots still close calls but carry no usage, starting with the call the decrease closes. With `StartLine`, the last line before the boundary is part of the slice when its tool output or closing snapshot arrives after it (a one-line head overlap, which can repeat that call's usage); a later output for any earlier call lands only on that call's earlier line.
+
+Pi, one native message per call (no fragments to merge): `model` is `message.model`, and Pi's `input` is used as `input_tokens` unchanged, since the backends that report cached tokens already exclude them from it (a backend that folds cache reads into `input` cannot be told apart per call). `cache_write_1h_tokens` is Pi's `cacheWrite1h` and `cache_write_5m_tokens` the rest of `cacheWrite` (clamped at 0 if 1h exceeds it), only when Pi reports `cacheWrite1h`. `reasoning_tokens` is Pi's `reasoning` when reported. An assistant message with no visible content but non-zero usage (thinking-only, aborted) gets a line with `"content":[]`, so per-line usage sums to the session totals; one with zero usage gets none. Abandoned branches are excluded. Read per-call usage from the full converted transcript. Pi user `image` items pass through verbatim in Pi's native shape (`data`, `mimeType`) and in source order, so an image-only user message still has a line; `data` is the inline base64, or an `entire-asset:assets/…` placeholder when image externalization (`redaction.externalize_images`) moved the image to the checkpoint's assets.
 
 ### Blocks
 
@@ -52,7 +78,7 @@ One JSON object per line, each line terminated by `\n`.
 1. Readers ignore unknown fields, keep unknown block types (available through
    `Block.Raw`), and return lines with an unknown `type` as they are, so
    consumers can skip them.
-2. New fields, block types and line types are additive and optional. `v` stays `1`.
+2. New fields, block types and line types are additive and optional. `v` stays `1`. Old v1 lines without the new usage and model fields remain valid.
 3. `v` is bumped only for a breaking change.
 
 ## Reading
@@ -69,6 +95,11 @@ A line is skipped when it:
 - has a known field of the wrong JSON type, for example `"agent": 42`
   or `"input_tokens": "x"` (reason `invalid field: <name>`). A `ts` that is
   not a string is ignored rather than skipped.
+
+For optional scalar fields, JSON `null` is treated like absence, not a wrong
+type: strings (including `model`) become empty, token totals (including the
+historical `input_tokens` and `output_tokens`) become zero, and cache-write
+splits remain unknown (`nil`). These values do not cause a line to be skipped.
 
 `Decode` normalizes three v1 quirks:
 
@@ -157,14 +188,15 @@ One JSON object per record. An omitted field and a zero-length one mean the same
 | `content` | any JSON | `message`, `append` | Normally an array of blocks. `message` replaces the content; `append` adds the blocks of an array and ignores anything else. Appending to content that is not an array discards that content, since it has no blocks. |
 | `toolUseId` | string | `result` | The `tool_use` block to target, searching from the end. Empty targets the last `tool_use` block. |
 | `result` | object | `result` | The tool result object described under Blocks. Required on `result`. |
+| `usage` | object | `message`, `append`, `usage` | Optional per-call snapshot (`model`, `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `cacheWrite5mTokens`, `cacheWrite1hTokens`, `reasoningTokens`). When present it replaces the message's whole snapshot, and the line's usage fields come from it instead of `inputTokens`/`outputTokens`. |
 | `inputTokens`, `outputTokens` | int | `message`, `append`, `usage` | A non-zero value replaces the previous one; agents report cumulative usage. |
 
 What each op does to the message `id` names:
 
-- `message` creates it, or restates it: role, source ID, timestamp and content are replaced, token counts are updated, and a dropped message is restored. A message keeps the position where it was first created.
+- `message` creates it, or restates it: role, source ID, timestamp and content are replaced, token counts and any usage snapshot are updated, and a dropped message is restored. A message keeps the position where it was first created.
 - `append` concatenates content blocks and replaces the timestamp. Appending to non-array content (a string, `null`, or none) replaces it with the appended blocks, possibly none: the result is always an array.
 - `result` sets the result of one `tool_use` block. Nothing changes when the content is not an array, when one of its blocks is not an object, or when no block matches.
-- `usage` updates token counts.
+- `usage` updates token counts and, when it carries `usage`, the per-call snapshot.
 - `drop` hides the message.
 
 Every op except `message` must target a message created earlier, in this batch or a previous one.

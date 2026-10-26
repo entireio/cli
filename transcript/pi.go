@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/entireio/cli/transcript/pijsonl"
+	"github.com/entireio/cli/internal/transcript/pijsonl"
 )
 
 // --- pi format support ---
@@ -23,7 +23,7 @@ import (
 //
 // Parsing primitives (Entry/Message/ContentItem types, ResolveActiveBranch,
 // SkipLines, NewScanner) are shared with the pi agent package via
-// transcript/pijsonl so a fix applied here also lands there.
+// internal/transcript/pijsonl so a fix applied here also lands there.
 
 // piToolNameMap normalises Pi's lowercase tool names to the title-cased names
 // used elsewhere in Entire's compact format (matching Claude's "Read"/"Write"/"Edit").
@@ -136,8 +136,12 @@ func compactPi(content []byte, opts Options) ([]byte, error) {
 
 		case pijsonl.RoleAssistant:
 			blocks := piEmitAssistantContent(entry.Message.Content, results)
+			usage := piCallUsage(entry.Message)
 			if len(blocks) == 0 {
-				continue
+				if !piUsageHasCounts(usage) {
+					continue
+				}
+				blocks = []any{}
 			}
 			contentJSON, err := json.Marshal(blocks)
 			if err != nil {
@@ -148,9 +152,8 @@ func compactPi(content []byte, opts Options) ([]byte, error) {
 			line.TS = piTimestampJSON(entry.Timestamp)
 			line.ID = entry.ID
 			line.Content = contentJSON
-			if entry.Message.Usage != nil {
-				line.InputTokens = entry.Message.Usage.Input
-				line.OutputTokens = entry.Message.Usage.Output
+			if usage != nil {
+				applyCallUsage(&line, usage)
 			}
 			appendLine(&out, line)
 		}
@@ -161,20 +164,60 @@ func compactPi(content []byte, opts Options) ([]byte, error) {
 	return out, nil
 }
 
-// piEmitUserContent decodes a Pi user message's content (string or block array)
-// into compact user blocks.
-func piEmitUserContent(raw json.RawMessage) []piCompactUserBlock {
-	if text := pijsonl.DecodeStringContent(raw); text != "" {
-		return []piCompactUserBlock{{Text: text}}
+// piCallUsage returns the per-call usage of a Pi assistant message, or nil
+// when it reports none. Pi's input already excludes cached tokens on every
+// backend that reports them, so it is used as is; a backend that folds cache
+// reads into input cannot be told apart per call. The cache-write split is set
+// only when Pi reports the 1h part.
+func piCallUsage(m pijsonl.Message) *CallUsage {
+	pu := m.Usage
+	if pu == nil {
+		return nil
 	}
-	var items []pijsonl.ContentItem
+	u := &CallUsage{
+		Model:            m.Model,
+		InputTokens:      int64(pu.Input),
+		OutputTokens:     int64(pu.Output),
+		CacheReadTokens:  int64(pu.CacheRead),
+		CacheWriteTokens: int64(pu.CacheWrite),
+	}
+	if pu.Reasoning != nil {
+		u.ReasoningTokens = int64(*pu.Reasoning)
+	}
+	if pu.CacheWrite1h != nil {
+		oneHour := int64(*pu.CacheWrite1h)
+		fiveMin := max(0, u.CacheWriteTokens-oneHour)
+		u.CacheWrite1hTokens, u.CacheWrite5mTokens = &oneHour, &fiveMin
+	}
+	return u
+}
+
+func piUsageHasCounts(u *CallUsage) bool {
+	return u != nil && (u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0 ||
+		u.CacheWriteTokens != 0 || u.ReasoningTokens != 0)
+}
+
+// piEmitUserContent decodes a Pi user message's content (string or block array)
+// into compact user blocks. Image items pass through verbatim, in source order.
+func piEmitUserContent(raw json.RawMessage) []any {
+	if text := pijsonl.DecodeStringContent(raw); text != "" {
+		return []any{piCompactUserBlock{Text: text}}
+	}
+	var items []json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return nil
 	}
-	blocks := make([]piCompactUserBlock, 0, len(items))
-	for _, item := range items {
-		if item.Type == pijsonl.ContentTypeText && item.Text != "" {
+	blocks := make([]any, 0, len(items))
+	for _, rawItem := range items {
+		var item pijsonl.ContentItem
+		if err := json.Unmarshal(rawItem, &item); err != nil {
+			continue
+		}
+		switch {
+		case item.Type == pijsonl.ContentTypeText && item.Text != "":
 			blocks = append(blocks, piCompactUserBlock{Text: item.Text})
+		case item.Type == BlockImage:
+			blocks = append(blocks, rawItem)
 		}
 	}
 	return blocks

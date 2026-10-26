@@ -939,15 +939,14 @@ publish the repository yourself when you're ready.`,
 			// the picker itself waits until every flag has been accepted.
 			opts.checkpointRemoteChoice = &enableCheckpointRemoteChoice{}
 			defer func() { opts.checkpointRemoteChoice.report(cmd.Context(), cmd.OutOrStdout(), runErr) }()
-			// Best-effort: after a successful enable, tell the backend which repo
-			// was enabled so the web onboarding reflects it (and we can warn when
-			// the GitHub App can't reach it). A freshly bootstrapped repo has no
-			// origin yet, so this reports nothing until the user adds one.
+			// Best-effort: after a successful enable, probe and cache whether
+			// trails are enabled for the repo. A freshly bootstrapped repo has no
+			// origin yet, so this does nothing until the user adds one.
 			defer func() {
 				if runErr != nil {
 					return
 				}
-				reportRepoEnabled(ctx, insecureHTTPAuth)
+				cacheTrailsEnablementAfterEnable(ctx, insecureHTTPAuth)
 			}()
 
 			// Validate --checkpoint-backend up front so a bad value fails before we
@@ -1150,89 +1149,40 @@ func runEnableIdentityPreflight(ctx context.Context, cmd *cobra.Command, repoRoo
 	return ensureGitIdentity(ctx, cmd.OutOrStdout(), execRunner{}, repoRoot, resolve)
 }
 
-// reportRepoEnabled records the `entire enable` against the backend so the web
-// onboarding can reflect it, and — as a second, independent, best-effort step
-// — probes and caches whether trails are enabled for the repo. Both steps are
-// strictly best-effort and fully silent: enabling works offline, and every
-// outcome (no origin remote, not logged in, network error, App-can't-reach-
-// repo, trails probe failure) is swallowed — the web onboarding surfaces the
-// "install the GitHub App" nudge, so the CLI stays quiet.
-func reportRepoEnabled(ctx context.Context, insecureHTTPAuth bool) {
-	// This runs synchronously on the enable success path, so every network step
-	// below is bounded: a backend that accepts the connection but never responds
-	// must not hang the command after it has already printed success. The bounds
-	// live on the individual steps rather than on one shared parent here — see
-	// the call site at the bottom for why that distinction matters.
+// cacheTrailsEnablementAfterEnable probes and caches whether trails are
+// enabled for the repo that was just enabled. Strictly best-effort and fully
+// silent: enabling works offline, and every outcome (no origin remote, not
+// logged in, network error, probe failure) is swallowed.
+func cacheTrailsEnablementAfterEnable(ctx context.Context, insecureHTTPAuth bool) {
 	rawURL, err := gitremote.GetRemoteURL(ctx, "origin")
 	if err != nil || strings.TrimSpace(rawURL) == "" {
-		// Local-only repo with no origin yet — nothing to report.
+		// Local-only repo with no origin yet — nothing to probe.
 		return
 	}
 
 	info, err := gitremote.ParseURL(rawURL)
 	if err != nil {
-		logging.Debug(ctx, "skipping enable report: unparseable origin remote", "error", err)
+		logging.Debug(ctx, "skipping trails enablement probe: unparseable origin remote", "error", err)
 		return
 	}
 	if info.Forge == "" {
 		// Trails are only available for remotes that map to a supported forge.
 		// Persist the negative locally even if auth is unavailable so a stale true
-		// cache from a previous origin does not inject on the prompt path. No API
-		// report is useful for non-forge remotes.
+		// cache from a previous origin does not inject on the prompt path.
 		if err := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); err != nil {
 			logging.Debug(ctx, "failed to cache trails enablement", "error", err)
 		}
 		return
 	}
 
-	// Sequential, but each under its OWN deadline rather than sharing one: the
-	// trails probe costs ~4 sequential round trips (repos index, cluster
-	// catalog, login refresh, TrailsEnabled), so a slow enable report sharing
-	// a single budget could starve it to nothing. Separate budgets give the
-	// probe a floor it cannot lose, and their sum is a 5s ceiling.
-	//
-	// The probe gets the larger share because it is the longer step, and
-	// because its failure self-heals — SessionStart's detached refresh retries
-	// it — whereas the enable report has no retry.
-	reportEnableToBackend(ctx, insecureHTTPAuth, info)
 	probeAndCacheTrailsEnablement(ctx, insecureHTTPAuth, info)
 }
 
-const (
-	// enableReportBudget bounds the best-effort backend enable report, and
-	// enableTrailsProbeBudget the trails-enablement probe that follows it. See
-	// reportRepoEnabled's call site for why they are separate deadlines rather
-	// than one shared budget; their sum is the total this path may spend.
-	enableReportBudget      = 2 * time.Second
-	enableTrailsProbeBudget = 3 * time.Second
-)
-
-// reportEnableToBackend tells the backend which repo was just enabled, purely
-// for the web onboarding UI and the GitHub-App-reachability nudge. Best-effort
-// and independent of the trails probe: a failure here (not logged in, network
-// error, backend rejects the URL) must not block that probe.
-func reportEnableToBackend(ctx context.Context, insecureHTTPAuth bool, info *gitremote.Info) {
-	// Checked before the client is built, so a repo this report has nothing to
-	// say about costs no auth round trip.
-	reportURL, ok := cleanRemoteURLForReport(info)
-	if !ok {
-		logging.Debug(ctx, "skipping enable report: remote has no upstream forge URL", "forge", info.Forge)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, enableReportBudget)
-	defer cancel()
-
-	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTPAuth)
-	if err != nil {
-		// Not logged in / token unavailable — enable already succeeded locally.
-		logging.Debug(ctx, "skipping enable report", "error", err)
-		return
-	}
-	if _, err := client.ReportEnable(ctx, reportURL); err != nil {
-		logging.Debug(ctx, "enable report failed", "error", err)
-	}
-}
+// enableTrailsProbeBudget bounds the trails-enablement probe. It runs
+// synchronously on the enable success path, so a backend that accepts the
+// connection but never responds must not hang the command after it has already
+// printed success.
+const enableTrailsProbeBudget = 3 * time.Second
 
 // probeAndCacheTrailsEnablement checks whether trails are enabled for the repo
 // that was just enabled, and caches the decision. Routes through
@@ -1264,43 +1214,6 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 	if err := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, enabled); err != nil {
 		logging.Debug(ctx, "failed to cache trails enablement", "error", err)
 	}
-}
-
-// cleanRemoteURLForReport turns a parsed git remote into a clean,
-// credential-free HTTPS clone URL on the repo's UPSTREAM forge host, safe to
-// send to the backend. The raw remote can carry embedded credentials
-// (https://token@host/...) or query params, so we never forward it verbatim:
-// rebuild from host/owner/repo alone.
-//
-// ok is false when no upstream forge host is known, which is decided by
-// transport. A direct remote is reached over a git transport, so its Host IS a
-// git host and it is always reportable — a self-hosted GitHub Enterprise
-// included, which is why this does not simply require a mapped forge.
-//
-// An entire:// remote is the opposite: its Host is a cluster, so a forge clone
-// URL exists only when the forge maps back to an upstream host. Two kinds do
-// not. A native repo mirrors nothing. An unrecognized token does not either —
-// ParseURL preserves ANY non-empty forge it finds in the path, so a
-// `entire://<cluster>/jk/<owner>/<repo>` origin arrives looking just like a
-// mirror. Both would be reported as `https://<cluster>/<owner>/<repo>.git`: a
-// URL that addresses nothing, on a host that serves no such thing, wearing a
-// suffix Entire paths never carry. The report drives the web onboarding's
-// GitHub-App nudge, which has nothing to say about either, so the caller skips
-// it rather than reporting a synthesized URL.
-//
-// Because ok is false in those cases, the host returned here is always a real
-// git host, and the `.git` suffix is always that host's clone convention rather
-// than part of a name (see gitDirSuffix).
-func cleanRemoteURLForReport(info *gitremote.Info) (string, bool) {
-	if info.Protocol == gitremote.ProtocolEntire {
-		if _, known := info.UpstreamHost(); !known {
-			return "", false
-		}
-	}
-	// Use CanonicalHost, not Host: an entire://cluster/gh/owner/repo origin (an
-	// already-mirrored repo) carries the Entire cluster as Host, so reporting
-	// Host verbatim would point the backend at the cluster instead of github.com.
-	return fmt.Sprintf("https://%s/%s/%s%s", info.CanonicalHost(), info.Owner, info.Repo, gitDirSuffix), true
 }
 
 func newDisableCmd() *cobra.Command {

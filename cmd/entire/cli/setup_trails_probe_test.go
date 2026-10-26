@@ -44,7 +44,7 @@ func TestProbeAndCacheTrailsEnablement_RoutesThroughRepoCell(t *testing.T) {
 }
 
 // When the repo-routed client resolves and the probe succeeds, the decision is
-// cached exactly like the pre-split reportRepoEnabled did.
+// cached.
 // Not parallel: changes the process working directory and env.
 func TestProbeAndCacheTrailsEnablement_CachesEnabledDecision(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
@@ -114,10 +114,9 @@ func TestProbeAndCacheTrailsEnablement_NotOnboardedSavesDisabledCache(t *testing
 	}
 }
 
-// The probe must apply its OWN deadline rather than inheriting whatever the
-// enable report left behind: it now costs ~4 sequential round trips since it
-// moved onto the repo's cell, and sharing one budget let a slow enable report
-// starve it to nothing.
+// The probe must apply its OWN deadline rather than inheriting the caller's:
+// it runs synchronously after enable has printed success, so a hung control
+// plane must not stall the command.
 // Not parallel: changes the process working directory.
 func TestProbeAndCacheTrailsEnablement_AppliesItsOwnBudget(t *testing.T) {
 	t.Chdir(t.TempDir())
@@ -173,20 +172,5 @@ func TestProbeAndCacheTrailsEnablement_CachesEvenWhenTheParentIsDone(t *testing.
 	}
 	if prefs.TrailsEnabled == nil || *prefs.TrailsEnabled {
 		t.Fatalf("cached trails-enabled decision = %v, want false recorded despite the cancelled parent", prefs.TrailsEnabled)
-	}
-}
-
-// The two budgets are a split of one ceiling, not independent knobs: raising
-// either without the other in mind lengthens how long `entire enable` sits
-// silent after it has already printed success.
-func TestEnableBudgetsSumToTheSynchronousCeiling(t *testing.T) {
-	t.Parallel()
-
-	if total := enableReportBudget + enableTrailsProbeBudget; total > 5*time.Second {
-		t.Errorf("enableReportBudget + enableTrailsProbeBudget = %s, want at most the 5s this path used to spend", total)
-	}
-	if enableTrailsProbeBudget <= enableReportBudget {
-		t.Errorf("probe budget %s <= report budget %s; the probe is the step that grew to ~4 round trips and needs the larger share",
-			enableTrailsProbeBudget, enableReportBudget)
 	}
 }

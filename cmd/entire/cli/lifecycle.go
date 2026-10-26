@@ -483,15 +483,19 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 	return FilterAndNormalizePaths(resolved, repoRoot)
 }
 
-// entireTrailContextInjection is the one-time, model-facing pointer Entire
-// injects on the first turn of a session. It points at `entire agent-help` for
-// the full flag/subcommand surface — fetched on demand so that surface never goes
-// stale here as it grows — and adds only what an agent must know even if it never
+// entireContextInjection is the one-time, model-facing pointer Entire injects
+// on the first turn of a session. It points at `entire agent-help` for the full
+// flag/subcommand surface — fetched on demand so that surface never goes stale
+// here as it grows — and adds only what an agent must know even if it never
 // drills in: commits auto-capture checkpoints, and setup/destructive commands
-// belong to the user. It also names the auto-detected repo (from the
-// already-loaded session scope, no IO) and the standing rule that the agent is
-// inside the repo and must never ask the user for the repo name. Kept terse: it
-// costs context-window tokens on the first turn of every session.
+// need the user's go-ahead. It also names the auto-detected repo (from the
+// already-loaded session scope, no IO). Kept terse: it costs context-window
+// tokens on the first turn of every session.
+//
+// The base text goes out in every session; the trails paragraph only where
+// trails are enabled for the repo. Either part can be omitted: trails
+// enablement may be decided on a later turn than the base injection (see
+// emitContextInjection), and then only the trails paragraph is sent.
 //
 // Deliberately NOT here: per-task command recommendations. An earlier revision
 // urged `entire why <file>:<line>` and `entire checkpoint search` "before large
@@ -501,19 +505,33 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // sometimes-appropriate query as an always-do step. Which commands suit a given
 // task is agent-help's job, where it is pulled on demand and grouped by who
 // should initiate the command (see agentHelpAudience); this string carries only
-// invariants that hold on every turn of every session. The one model-dependent
-// invariant is what a trail is: under project trails a trail number names
-// project intent, not one branch, so say so once.
-func entireTrailContextInjection(scope trailEnablementScope, projectTrails bool) string {
+// invariants that hold on every turn of every session.
+func entireContextInjection(scope trailEnablementScope, base, trails bool) string {
+	var b strings.Builder
+	if base {
+		b.WriteString(contextInjectionEnabledLine(scope))
+		b.WriteString(" Run `entire agent-help` to see what entire does and which subcommand fits, then `entire agent-help <command>` for its exact, current flags. ")
+	}
+	if trails {
+		b.WriteString("A Trail is a project-level work item that can contain multiple changes from different repositories and branches. ")
+		b.WriteString("Inside a checkout, `entire trail` infers the repository. Outside one, pass `--project <forge>/<owner>`, plus `--repo` and `--branch` when needed. ")
+		b.WriteString("If it's unclear whether work belongs on an existing trail or a new one, ask the user. Keep a trail's description current with `entire trail update`. ")
+		b.WriteString("When referencing a trail or change, include its full URL. ")
+		b.WriteString("Post feedback on a trail as findings (`entire trail finding`), never as trail comments; comments are for people. ")
+	}
+	if base {
+		b.WriteString("Commits capture the AI session as a checkpoint automatically; only create checkpoints manually when the user asks. ")
+		b.WriteString("If a setup or destructive command (enable, disable, clean, auth) is needed, always ask the user before running it.")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// contextInjectionEnabledLine opens the base text and names the auto-detected
+// repo, or omits it when the scope is missing or unsafe to embed.
+func contextInjectionEnabledLine(scope trailEnablementScope) string {
 	repo := ""
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
 		repo = trailEnablementRepoKey(scope.Forge, scope.Owner, scope.Repo)
-	}
-	var b strings.Builder
-	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
-	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Leave setup and destructive commands (enable, disable, clean, auth) to the user. ")
-	if projectTrails {
-		b.WriteString("Trails here are project-scoped: one trail spans repositories and branches, and its number is project-wide; see `entire agent-help trail`. ")
 	}
 	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
 	// into the agent's model context (no escaping), so a repo key carrying control
@@ -521,19 +539,17 @@ func entireTrailContextInjection(scope trailEnablementScope, projectTrails bool)
 	// binary, or tampered) degrades to the generic message rather than reaching
 	// that sink.
 	if repo != "" && strings.IndexFunc(repo, unicode.IsControl) < 0 {
-		b.WriteString("This repo is auto-detected from the git origin remote as ")
-		b.WriteString(repo)
-		b.WriteString("; you are already inside it, so never ask the user for the repo name.")
-	} else {
-		b.WriteString("Entire auto-detects the repo from the git origin remote, so never ask the user for the repo name.")
+		return "Entire is enabled for this repo (`" + repo + "`, auto-detected from the git origin remote)."
 	}
-	return b.String()
+	return "Entire is enabled for this repo."
 }
 
 // emitContextInjection writes ag's native context-injection payload to stdout
-// when ag injects at event.Type, trails are enabled for the repo on the API,
-// and this session has not been injected yet. Best-effort: an injection failure
-// never fails the hook.
+// when ag injects at event.Type. The base text goes out on the first normal
+// turn of every session; the trails paragraph joins it once the clone-local
+// cache says trails are enabled for the repo, which may be a later turn (the
+// SessionStart refresh is detached). Best-effort: an injection failure never
+// fails the hook.
 func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) {
 	injector, ok := agent.AsContextInjector(ag)
 	if !ok || injector.InjectionEvent() != event.Type || event.SessionID == "" {
@@ -541,50 +557,50 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 
-	// Unknown cache leaves the session retryable.
+	// A missing hint (no usable origin) still gets the base text; it just never
+	// decides trails. Unknown cache leaves the trails decision retryable.
 	scope, scopeOK, scopeErr := loadTrailEnablementScopeHint(ctx, event.SessionID)
 	if scopeErr != nil {
 		logging.Warn(logCtx, "failed to load trails scope hint",
 			slog.String("error", scopeErr.Error()))
 		return
 	}
-	decision := trailEnablementCacheUnknown
-	mutated := false
+	var injectBase, injectTrails bool
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
-		if state.ContextInjectionDecided {
-			return strategy.ErrMutationSkip
-		}
-		// Review/investigate sessions are task-specific and don't need the branch
-		// trail pointer; skip without marking decided so normal sessions keep the
+		// Review/investigate sessions are task-specific and don't need the
+		// pointer; skip without marking anything so normal sessions keep the
 		// usual first-turn behavior.
 		if state.Kind != "" {
 			return strategy.ErrMutationSkip
 		}
-		if !scopeOK {
+		// A session that decided trails before the base text existed already
+		// got its one injection.
+		injectBase = !state.ContextInjectionBaseDone && !state.ContextInjectionDecided
+		trailsDecided := state.ContextInjectionDecided
+		if !trailsDecided && scopeOK {
+			if decision := cachedTrailsEnablementForScope(ctx, scope, time.Now()); decision != trailEnablementCacheUnknown {
+				trailsDecided = true
+				injectTrails = decision == trailEnablementCacheEnabled
+			}
+		}
+		if !injectBase && trailsDecided == state.ContextInjectionDecided {
 			return strategy.ErrMutationSkip
 		}
-		decision = cachedTrailsEnablementForScope(ctx, scope, time.Now())
-		if decision == trailEnablementCacheUnknown {
-			return strategy.ErrMutationSkip
-		}
-		state.ContextInjectionDecided = true
-		mutated = true
+		state.ContextInjectionBaseDone = true
+		state.ContextInjectionDecided = trailsDecided
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to record context injection decision",
 			slog.String("error", mutErr.Error()))
-		return
 	}
-	// Only proceed after the state mutation was persisted. If saving the updated
-	// state failed, mutErr was non-nil above and we returned without injecting,
-	// leaving a later turn free to retry safely.
-	won := mutErr == nil && mutated
-	if !won || decision != trailEnablementCacheEnabled {
+	// Only inject after the state mutation was persisted. A skipped mutation
+	// leaves both flags false; a failed save leaves a later turn free to retry.
+	if mutErr != nil || (!injectBase && !injectTrails) {
 		return
 	}
 
-	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection(scope, projectTrailsEnabled())})
+	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireContextInjection(scope, injectBase, injectTrails)})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection",
 			slog.String("error", err.Error()))

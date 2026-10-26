@@ -28,7 +28,7 @@ const (
 	// changes when the content is not an array, when one of its blocks is not
 	// an object, or when no tool_use block matches.
 	OpResult Op = "result"
-	// OpUsage sets a message's token counts.
+	// OpUsage sets a message's token counts or per-call usage snapshot.
 	OpUsage Op = "usage"
 	// OpDrop hides a message.
 	OpDrop Op = "drop"
@@ -70,4 +70,24 @@ type Record struct {
 	// Token counts. A non-zero value replaces the message's previous value.
 	InputTokens  int `json:"inputTokens,omitempty"`
 	OutputTokens int `json:"outputTokens,omitempty"`
+
+	// Usage, when non-nil, replaces the message's whole per-call usage
+	// snapshot, zeros included. An assistant message with a snapshot ignores
+	// the token counts above.
+	Usage *CallUsage `json:"usage,omitempty"`
+}
+
+// CallUsage is an authoritative per-call usage snapshot for an assistant
+// message. InputTokens excludes cache reads and writes, and ReasoningTokens is
+// a subset of OutputTokens. A nil cache-write split means unreported; a
+// pointer to zero means reported as zero.
+type CallUsage struct {
+	Model              string `json:"model,omitempty"`
+	InputTokens        int64  `json:"inputTokens,omitempty"`
+	OutputTokens       int64  `json:"outputTokens,omitempty"`
+	CacheReadTokens    int64  `json:"cacheReadTokens,omitempty"`
+	CacheWriteTokens   int64  `json:"cacheWriteTokens,omitempty"`
+	CacheWrite5mTokens *int64 `json:"cacheWrite5mTokens,omitempty"`
+	CacheWrite1hTokens *int64 `json:"cacheWrite1hTokens,omitempty"`
+	ReasoningTokens    int64  `json:"reasoningTokens,omitempty"`
 }

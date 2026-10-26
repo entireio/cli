@@ -7,7 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/transcript/pijsonl"
+	"github.com/entireio/cli/internal/transcript/pijsonl"
 )
 
 var _ agent.UsageCounterSource = (*PiAgent)(nil)
