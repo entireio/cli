@@ -120,6 +120,54 @@ func TestParseHookEvent_TurnStart_StripsIDEContextTags(t *testing.T) {
 	}
 }
 
+// Claude Code fires UserPromptSubmit for a background task's
+// <task-notification>, also while a turn is running. Only that notice is
+// conditional, so the dispatcher can drop it mid-turn; other injected text and
+// prompts that merely mention the tag stay unconditional turn starts.
+func TestParseHookEvent_TurnStart_TaskNotificationIsConditional(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		prompt string
+		want   bool
+	}{
+		{"notification", "<task-notification>\n<task-id>x</task-id>\n</task-notification>", true},
+		{"leading newline", "\n  <task-notification><task-id>x</task-id></task-notification>", true},
+		{"IDE tag then notification", "<ide_opened_file>The user opened /a.go in the IDE.</ide_opened_file>\n<task-notification><task-id>x</task-id></task-notification>", true},
+		{"typed prompt", "fix the build", false},
+		{"mentions the tag", "why did <task-notification> fire twice?", false},
+		{"interrupt marker", "[Request interrupted by user]", false},
+		{"bash input", "<bash-input>ls</bash-input>", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			input, err := json.Marshal(map[string]string{
+				"session_id": "s1", "transcript_path": "/tmp/t.jsonl", "prompt": tc.prompt, "prompt_id": "p1",
+			})
+			require.NoError(t, err)
+
+			event, err := (&ClaudeCodeAgent{}).ParseHookEvent(context.Background(), HookNameUserPromptSubmit, bytes.NewReader(input))
+			require.NoError(t, err)
+			require.NotNil(t, event)
+			require.Equal(t, agent.TurnStart, event.Type)
+			require.Equal(t, tc.want, event.SuppressIfSessionActive)
+		})
+	}
+}
+
+// prompt_id is only logged; a type Claude Code may change must never fail
+// the hook.
+func TestParseHookEvent_TurnStart_NonStringPromptID(t *testing.T) {
+	t.Parallel()
+
+	input := `{"session_id":"s1","transcript_path":"/tmp/t.jsonl","prompt":"hi","prompt_id":{"n":1}}`
+	event, err := (&ClaudeCodeAgent{}).ParseHookEvent(context.Background(), HookNameUserPromptSubmit, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, "hi", event.Prompt)
+}
+
 func TestParseHookEvent_TurnEnd(t *testing.T) {
 	t.Parallel()
 
