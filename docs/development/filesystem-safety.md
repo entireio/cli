@@ -636,6 +636,13 @@ comments at each site say which case applies:
   back to "Unknown" and signing was skipped. Scope is global + system only;
   `.git/config` is served by `r.Storer.Config()` and never reaches this. Its
   mutating methods fail closed.
+- **User-level Claude Code settings** — `claudecode.EnsureUserHooks` (global
+  enable) writes `$CLAUDE_CONFIG_DIR/settings.json`, else
+  `~/.claude/settings.json`, and follows a symlinked file there: that path is
+  the developer's own (a dotfiles checkout), not one a repository supplies. The
+  write goes to the resolved target, keeping its mode; a link that does not
+  resolve is refused. This covers that one file only, not worktree agent
+  configs, which keep the rules above.
 - **Agent `ReadTranscript(path)` / `ReadSession(input)`** — neither carries a
   repo path, so neither can build its own store, and the path they receive was
   already resolved through one (`ResolveTranscriptPath`, `resolveTranscriptPath`).

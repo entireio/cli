@@ -34,7 +34,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
 )
@@ -282,6 +284,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 			// settings file, which resume/compact/clear SessionStarts would
 			// throw away. Appended after any agent-help pointer, which only
 			// Factory AI Droid gets, so for Claude Code it ends the banner.
+			message += globalEnableBannerSuffix(ctx, ag.Name())
 			message += missingHooksBannerSuffix(ctx, ag)
 			if err := writer.WriteHookResponse(message); err != nil {
 				hookResponseSpan.RecordError(err)
@@ -332,6 +335,52 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	maybeSpawnSessionSweep(ctx)
 
 	return nil
+}
+
+// globalEnableBannerLines tell the developer, in the session that is about to
+// install Entire's git hooks, that global enable is the only reason.
+var globalEnableBannerLines = []string{
+	"Entire is on in this repository through global enable (you have not run `entire enable` here).",
+	"It installs its git hooks here and pushes session checkpoints with your git pushes.",
+	"Run `entire disable` here to stop.",
+}
+
+// globalEnableBannerSuffix is the SessionStart banner addition for a
+// repository on only through global enable whose git hooks are not installed
+// yet: the first prompt installs them. The user flag is checked first, since
+// it needs no git subprocess and settles every developer without global enable.
+func globalEnableBannerSuffix(ctx context.Context, agentName types.AgentName) string {
+	if !settings.UserTierEnablesEverywhere(ctx) || strategy.IsGitHookInstalled(ctx) {
+		return ""
+	}
+	s, err := LoadEntireSettings(ctx)
+	if err != nil || !s.EnabledOnlyByGlobal() {
+		return ""
+	}
+	if agentName == agent.AgentNameCodex {
+		return " " + strings.Join(globalEnableBannerLines, " ")
+	}
+	return "\n  " + strings.Join(globalEnableBannerLines, "\n  ")
+}
+
+// reportGlobalEnableGitHookInstall says so on stderr when the git hooks this
+// TurnStart just installed are there only because of global enable. Never
+// stdout: some agents read TurnStart stdout as context. Claude Code hides a
+// successful hook's stderr, so the SessionStart banner and this log line are
+// what reach its users.
+func reportGlobalEnableGitHookInstall(ctx context.Context) {
+	s, err := LoadEntireSettings(ctx)
+	if err != nil || !s.EnabledOnlyByGlobal() {
+		return
+	}
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[entire] Installed Entire's git hooks in %s because global enable is on; run 'entire disable' here to stop.\n",
+		tuiutil.SanitizeDisplayText(root))
+	logging.Info(ctx, "global enable: installed git hooks in a repository enabled only through it",
+		slog.String("worktree", root))
 }
 
 func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
@@ -660,9 +709,11 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// it before CapturePrePromptState: the snapshot should describe the tree the
 	// agent starts from, not one setup is about to change.
 	_, setupSpan := perf.Start(ctx, "ensure_setup")
-	if err := strategy.EnsureSetup(ctx); err != nil {
+	if installed, err := strategy.EnsureSetupReport(ctx); err != nil {
 		logging.Warn(logCtx, "failed to ensure strategy setup",
 			slog.String("error", err.Error()))
+	} else if installed {
+		reportGlobalEnableGitHookInstall(logCtx)
 	}
 	setupSpan.End()
 

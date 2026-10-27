@@ -1794,6 +1794,23 @@ func TestEnsureRedactionConfigured_NarrowedScanners(t *testing.T) {
 	}
 }
 
+// EnsureSetupReport reports a fresh install of the git hooks, and only that:
+// a later call with the hooks already in reports nothing, so a TurnStart that
+// merely confirms them says nothing.
+func TestEnsureSetupReport_ReportsOnlyAFreshInstall(t *testing.T) {
+	initHooksTestRepo(t)
+
+	for i, want := range []bool{true, false} {
+		installed, err := EnsureSetupReport(t.Context())
+		if err != nil {
+			t.Fatalf("call %d: %v", i+1, err)
+		}
+		if installed != want {
+			t.Errorf("call %d: installed = %v, want %v", i+1, installed, want)
+		}
+	}
+}
+
 func TestPIIConfigFromSettings_CategoryDefaults(t *testing.T) {
 	t.Parallel()
 	off := false
