@@ -216,8 +216,8 @@ func TestExpertsTUIViewEmptyBeforeWindowSize(t *testing.T) {
 }
 
 func TestExpertsSessionURL(t *testing.T) {
-	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.io")
-	if got, want := expertsSessionURL("entireio/cli", "abc123"), "https://entire.io/gh/entireio/cli/session/abc123"; got != want {
+	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.com")
+	if got, want := expertsSessionURL("entireio/cli", "abc123"), "https://entire.com/gh/entireio/cli/session/abc123"; got != want {
 		t.Fatalf("url = %q, want %q", got, want)
 	}
 	if got := expertsSessionURL("entireio/cli", ""); got != "" {
@@ -228,8 +228,8 @@ func TestExpertsSessionURL(t *testing.T) {
 	}
 
 	// A trailing slash on the base is normalized away.
-	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.io/")
-	if got, want := expertsSessionURL("o/r", "s"), "https://entire.io/gh/o/r/session/s"; got != want {
+	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.com/")
+	if got, want := expertsSessionURL("o/r", "s"), "https://entire.com/gh/o/r/session/s"; got != want {
 		t.Fatalf("trailing-slash url = %q, want %q", got, want)
 	}
 }
@@ -238,24 +238,24 @@ func TestExpertsWebBaseFallsBackToEntireForLocalAPI(t *testing.T) {
 	t.Setenv("ENTIRE_WEB_BASE_URL", "")
 
 	// A local data API must NOT leak into session links — they should point at
-	// the real entire.io web app.
+	// the real Entire web app.
 	t.Setenv("ENTIRE_API_BASE_URL", "http://127.0.0.1:8787")
-	if got, want := expertsSessionURL("entireio/cli", "abc"), "https://entire.io/gh/entireio/cli/session/abc"; got != want {
+	if got, want := expertsSessionURL("entireio/cli", "abc"), "https://entire.com/gh/entireio/cli/session/abc"; got != want {
 		t.Fatalf("local API url = %q, want %q", got, want)
 	}
 
-	// A real entire.io API origin is used as-is (frontend shares the host).
+	// An entire.io API origin maps to the entire.com web app.
 	t.Setenv("ENTIRE_API_BASE_URL", "https://entire.io")
-	if got, want := expertsSessionURL("entireio/cli", "abc"), "https://entire.io/gh/entireio/cli/session/abc"; got != want {
+	if got, want := expertsSessionURL("entireio/cli", "abc"), "https://entire.com/gh/entireio/cli/session/abc"; got != want {
 		t.Fatalf("prod API url = %q, want %q", got, want)
 	}
 }
 
 func TestExpertsTUIOpenKeyTargetsPrimarySession(t *testing.T) {
-	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.io")
+	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.com")
 	m := newSizedExpertsTUI(t, decodeExpertsFixture(t))
 
-	if got, want := m.primarySessionURL(), "https://entire.io/gh/acme/widget/session/sess-a"; got != want {
+	if got, want := m.primarySessionURL(), "https://entire.com/gh/acme/widget/session/sess-a"; got != want {
 		t.Fatalf("primary session url = %q, want %q", got, want)
 	}
 
@@ -271,7 +271,7 @@ func TestExpertsTUIOpenKeyTargetsPrimarySession(t *testing.T) {
 }
 
 func TestRenderExpertsLinksSessionsWhenStyled(t *testing.T) {
-	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.io")
+	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.com")
 	resp := decodeExpertsFixture(t)
 
 	var buf bytes.Buffer
@@ -281,7 +281,7 @@ func TestRenderExpertsLinksSessionsWhenStyled(t *testing.T) {
 	if !strings.Contains(out, "\x1b]8;;") {
 		t.Fatalf("styled output should contain an OSC 8 hyperlink:\n%q", out)
 	}
-	if !strings.Contains(out, "https://entire.io/gh/acme/widget/session/sess-a") {
+	if !strings.Contains(out, "https://entire.com/gh/acme/widget/session/sess-a") {
 		t.Fatalf("styled output should link to the session url:\n%q", out)
 	}
 
@@ -294,12 +294,12 @@ func TestRenderExpertsLinksSessionsWhenStyled(t *testing.T) {
 }
 
 func TestExpertsTUIExpandShowsSessionLink(t *testing.T) {
-	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.io")
+	t.Setenv("ENTIRE_WEB_BASE_URL", "https://entire.com")
 	m := newExpertsTUIModel(decodeExpertsFixture(t), false)
 	m = updateExpertsTUI(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
 	m = updateExpertsTUI(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	want := "https://entire.io/gh/acme/widget/session/sess-a"
+	want := "https://entire.com/gh/acme/widget/session/sess-a"
 	if got := expertsTUIView(t, m); !strings.Contains(got, want) {
 		t.Fatalf("expanded view should show session link %q:\n%s", want, got)
 	}

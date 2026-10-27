@@ -150,6 +150,21 @@ the only failure mode here that would not announce itself (a requirement
 mixing `oauth2` with `bearerAuth` survives whole and makes ogen abort at
 generate time on the now-dangling scheme).
 
+## 4. Hand-spliced ahead of a full refresh: ENT-3417 sync block and resync
+
+**Symptom:** the control plane has moved well past the vendored spec (new
+security schemes, dozens of new operations), and a full `curl` refresh no
+longer compiles without unrelated client work. `core.openapi.json` carries
+the ENT-3417 contract spliced in from the live spec: `MirrorSyncBlock`,
+`Mirror.syncBlock`, and `POST /mirrors/resync` with its two bodies.
+
+**Fix upstream:** nothing — the pieces are verbatim from the published spec.
+The next full refresh carries them on its own, and this entry goes.
+
+**Workaround:** none in `normalize.go` beyond the `ResyncMirrorOutputBody.status`
+enum loosening. entiredb#4961 is on main and in prod, so any refresh from a
+current core keeps the three schemas and the route.
+
 <!-- Resolved upstream and removed:
   - Nullable arrays (`"type": ["array","null"]`) — entiredb now emits
     non-nullable arrays (`"type": "array"`, absent ⇒ `[]`), so the

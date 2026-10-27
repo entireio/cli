@@ -3,7 +3,7 @@
 // path-bearing placeholder, and re-injects them byte-exactly on restore.
 //
 // The transform is per-agent because transcript formats differ: only agents that
-// inline base64 images (Claude Code and Codex today) register a codec; every
+// inline base64 images (Claude Code, Codex and Pi today) register a codec; every
 // other agent resolves to nil and its transcript flows through untouched (a
 // graceful no-op). All codecs share one extraction engine and reinjection routine
 // and differ only in how they *find* images (their collector).
@@ -106,6 +106,7 @@ var maxExternalizedImageBytes = agent.MaxChunkSize
 var codecs = map[types.AgentType]ImageCodec{
 	agent.AgentTypeClaudeCode: claudeCodec{},
 	agent.AgentTypeCodex:      codexCodec{},
+	agent.AgentTypePi:         piCodec{},
 }
 
 // CodecFor returns the image codec for an agent type, or nil if the agent's
@@ -279,6 +280,43 @@ func (codexCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
 
 func (codexCodec) ReinjectImages(transcript []byte, lookup func(name string) (Asset, bool)) ([]byte, error) {
 	return reinjectImages(transcript, lookup)
+}
+
+// piCodec handles Pi session JSONL transcripts, which embed images as
+// {"type":"image","data":<base64>,"mimeType":…} in user message and tool
+// result content.
+type piCodec struct{}
+
+func (piCodec) ExtractImages(transcript []byte) ([]byte, []Asset, error) {
+	return extractImagesWith(transcript, collectPiImages)
+}
+
+func (piCodec) ReinjectImages(transcript []byte, lookup func(name string) (Asset, bool)) ([]byte, error) {
+	return reinjectImages(transcript, lookup)
+}
+
+// collectPiImages walks any decoded JSON value and gathers every Pi image item,
+// at any nesting depth (user content, tool result content).
+func collectPiImages(v any, out *[]imgHit) {
+	switch t := v.(type) {
+	case map[string]any:
+		if t["type"] == "image" {
+			if data, ok := t["data"].(string); ok && data != "" {
+				var mediaType string
+				if mt, mok := t["mimeType"].(string); mok {
+					mediaType = mt
+				}
+				*out = append(*out, imgHit{data: data, mediaType: mediaType})
+			}
+		}
+		for _, vv := range t {
+			collectPiImages(vv, out)
+		}
+	case []any:
+		for _, vv := range t {
+			collectPiImages(vv, out)
+		}
+	}
 }
 
 // collectClaudeImages walks any decoded JSON value and gathers every inline

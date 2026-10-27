@@ -1408,6 +1408,7 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	// for state written before the token offset existed.
 	tokenStartOnDisk := state.TokenStart()
 	pendingOnDisk := state.CheckpointTokenUsage
+	pendingChildOnDisk := state.PendingChildSessionTokens()
 	lastCheckpointOnDisk := state.LastCheckpointID
 	// Read before LastInteractionTime is refreshed below: a running session
 	// whose agent exited will send no Stop for its turn. Inactivity stands in
@@ -1454,23 +1455,25 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	}
 	// A hook that ran while attach waited at its prompt recorded newer token
 	// state than attach read: a condensation moved the offset or stored the
-	// pending total (a new checkpoint ID), or a Stop added a turn to the
-	// pending total. Attach's figures are older than the hook's, so they are
+	// pending total (a new checkpoint ID), or a Stop added a turn or a
+	// child session's usage to the pending total. Attach's figures are older than the hook's, so they are
 	// left out: consuming from the stale position would move the offset back
 	// and have the next checkpoint recount, and clearing the pending total
 	// would drop a hook-only agent's turn. Turn start clears LastCheckpointID,
 	// which is not a checkpoint, so only a new non-empty ID counts.
 	countedFrom := 0
-	var pendingRead *agent.TokenUsage
+	var pendingRead, pendingChildRead *agent.TokenUsage
 	var lastCheckpointRead id.CheckpointID
 	if existingState != nil {
 		countedFrom = existingState.TokenStart()
 		pendingRead = existingState.CheckpointTokenUsage
+		pendingChildRead = existingState.PendingChildSessionTokens()
 		lastCheckpointRead = existingState.LastCheckpointID
 	}
 	switch {
 	case tokenStartOnDisk != countedFrom,
 		!reflect.DeepEqual(pendingOnDisk, pendingRead),
+		!reflect.DeepEqual(pendingChildOnDisk, pendingChildRead),
 		lastCheckpointOnDisk != "" && lastCheckpointOnDisk != lastCheckpointRead:
 		logging.Warn(ctx, "attach: session tokens changed while attach was waiting; leaving token state as the hooks set it",
 			slog.Int("counted_from", countedFrom), slog.Int("token_start", tokenStartOnDisk))

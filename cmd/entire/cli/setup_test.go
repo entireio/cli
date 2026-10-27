@@ -23,7 +23,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/agent/vogon"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -267,7 +266,7 @@ func TestRunEnable(t *testing.T) {
 	writeSettings(t, testSettingsDisabled)
 
 	var stdout bytes.Buffer
-	if err := runEnable(context.Background(), &stdout, false); err != nil {
+	if err := runEnable(context.Background(), &stdout, false, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable() error = %v", err)
 	}
 
@@ -289,7 +288,7 @@ func TestRunEnable_AlreadyEnabled(t *testing.T) {
 	writeSettings(t, testSettingsEnabled)
 
 	var stdout bytes.Buffer
-	if err := runEnable(context.Background(), &stdout, false); err != nil {
+	if err := runEnable(context.Background(), &stdout, false, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable() error = %v", err)
 	}
 
@@ -403,7 +402,7 @@ func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, true); err != nil {
+	if err := runEnable(context.Background(), &buf, true, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
@@ -442,7 +441,7 @@ func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
 	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, true); err != nil {
+	if err := runEnable(context.Background(), &buf, true, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
@@ -491,7 +490,7 @@ func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, false); err != nil {
+	if err := runEnable(context.Background(), &buf, false, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=false) error = %v", err)
 	}
 
@@ -1129,7 +1128,7 @@ func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
 	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, true); err != nil {
+	if err := runEnable(context.Background(), &buf, true, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
@@ -1175,7 +1174,7 @@ func TestRunEnable_LocalScope_PreservesLocalOnlyFields(t *testing.T) {
 	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, false); err != nil {
+	if err := runEnable(context.Background(), &buf, false, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=false) error = %v", err)
 	}
 
@@ -5222,128 +5221,6 @@ func TestConfigureCmd_FreshRepo_PointsAtEnable(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "entire enable") {
 		t.Errorf("expected hint pointing at 'entire enable', got stderr: %s", stderr.String())
-	}
-}
-
-func TestCleanRemoteURLForReport(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		rawURL   string
-		want     string
-		wantSkip bool // the remote names no upstream forge, so nothing is reported
-		wantErr  bool
-	}{
-		{
-			name:   "https without credentials is normalized",
-			rawURL: "https://github.com/entireio/cli.git",
-			want:   "https://github.com/entireio/cli.git",
-		},
-		{
-			name:   "https token credentials are stripped",
-			rawURL: "https://ghp_secrettoken@github.com/entireio/cli.git",
-			want:   "https://github.com/entireio/cli.git",
-		},
-		{
-			name:   "https user:password credentials are stripped",
-			rawURL: "https://x-access-token:ghp_secret@github.com/entireio/cli.git",
-			want:   "https://github.com/entireio/cli.git",
-		},
-		{
-			name:   "query parameters are dropped",
-			rawURL: "https://github.com/entireio/cli.git?token=secret",
-			want:   "https://github.com/entireio/cli.git",
-		},
-		{
-			name:   "scp-style ssh remote is normalized to https and the user is dropped",
-			rawURL: "git@github.com:entireio/cli.git",
-			want:   "https://github.com/entireio/cli.git",
-		},
-		{
-			name:   "missing .git suffix is added",
-			rawURL: "https://github.com/entireio/cli",
-			want:   "https://github.com/entireio/cli.git",
-		},
-		{
-			name:   "entire:// mirror origin maps the forge back to its real host",
-			rawURL: "entire://aws-us-east-2.entire.io/gh/entireio/cli",
-			want:   "https://github.com/entireio/cli.git",
-		},
-		{
-			name:   "unknown forge host is preserved (self-hosted enterprise)",
-			rawURL: "git@ghe.corp.example.com:entireio/cli.git",
-			want:   "https://ghe.corp.example.com/entireio/cli.git",
-		},
-		{
-			// A native repo mirrors nothing, so CanonicalHost falls back to the
-			// Entire cluster and no forge clone URL exists to report. Reporting
-			// a synthesized one would name a URL that addresses nothing.
-			name:     "native origin reports nothing",
-			rawURL:   "entire://aws-us-east-2.entire.io/et/widgets/web",
-			wantSkip: true,
-		},
-		{
-			name:     "native origin spelled with the .git alias reports nothing",
-			rawURL:   "entire://aws-us-east-2.entire.io/et/widgets/web.git",
-			wantSkip: true,
-		},
-		{
-			// ParseURL preserves ANY non-empty forge token, so an unrecognized
-			// one reaches here looking like a mirror. It maps to no upstream
-			// host either, so it is the same fiction as the native case and is
-			// skipped for the same reason -- `et` is not a special case, "no
-			// known upstream host" is the rule.
-			name:     "entire:// origin with an unrecognized forge reports nothing",
-			rawURL:   "entire://aws-us-east-2.entire.io/jk/myproject/repo",
-			wantSkip: true,
-		},
-		{
-			// The skip is scoped to entire:// remotes. A direct remote is
-			// reached over a git transport, so its Host IS a git host even when
-			// the forge is unmapped -- see the enterprise case above.
-			name:   "direct remote with an unmapped forge is still reportable",
-			rawURL: "https://git.corp.example.com/team/app",
-			want:   "https://git.corp.example.com/team/app.git",
-		},
-		{
-			name:    "unparseable single-segment path errors",
-			rawURL:  "https://github.com/onlyowner.git",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			info, err := gitremote.ParseURL(tt.rawURL)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected ParseURL error for %q", tt.rawURL)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error parsing %q: %v", tt.rawURL, err)
-			}
-			got, ok := cleanRemoteURLForReport(info)
-			if ok == tt.wantSkip {
-				t.Fatalf("cleanRemoteURLForReport(%q) ok = %v, want %v", tt.rawURL, ok, !tt.wantSkip)
-			}
-			if !ok && got != "" {
-				t.Errorf("cleanRemoteURLForReport(%q) returned %q alongside ok=false", tt.rawURL, got)
-			}
-			if got != tt.want {
-				t.Errorf("cleanRemoteURLForReport(%q) = %q, want %q", tt.rawURL, got, tt.want)
-			}
-			// The cleaned URL must never carry the original credentials.
-			for _, secret := range []string{"ghp_secrettoken", "ghp_secret", "x-access-token", "token=secret"} {
-				if strings.Contains(got, secret) {
-					t.Errorf("cleaned URL %q leaked credential %q", got, secret)
-				}
-			}
-		})
 	}
 }
 

@@ -487,6 +487,12 @@ type Metadata struct {
 	// Token usage for this checkpoint
 	TokenUsage *types.TokenUsage `json:"token_usage,omitempty"`
 
+	// Redaction is what redacting the stored full.jsonl replaced, never the
+	// values. full.jsonl holds the whole session so far, so the counts grow
+	// across a session's checkpoints. Nil when unknown: no transcript was
+	// stored, or an older CLI or a caller without counts wrote it.
+	Redaction *redact.Counts `json:"redaction,omitempty"`
+
 	// SkillEvents records explicit native skill signals observed in this session.
 	// Consumers use these anchors to collapse skill-related raw transcript events.
 	SkillEventsVersion int                `json:"skill_events_version,omitempty"`
@@ -603,6 +609,9 @@ type CheckpointSummary struct {
 	FilesTouched     []string           `json:"files_touched"`
 	Sessions         []SessionFilePaths `json:"sessions"`
 	TokenUsage       *types.TokenUsage  `json:"token_usage,omitempty"`
+	// Redaction sums the sessions' Metadata.Redaction; nil when any session
+	// stored a transcript without counts.
+	Redaction *redact.Counts `json:"redaction,omitempty"`
 	// LinkedCommits: attributing trailer-less links; see WriteOptions.LinkedCommits.
 	LinkedCommits []LinkedCommit `json:"linked_commits,omitempty"`
 

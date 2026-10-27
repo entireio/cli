@@ -35,6 +35,9 @@ func TestOpenCodeGenerateText(t *testing.T) {
 				if binary != openCodeBinary {
 					t.Fatalf("binary = %q", binary)
 				}
+				if slices.Equal(argv, []string{"--version"}) {
+					return exec.CommandContext(ctx, "echo", "1.18.33")
+				}
 				args = argv
 				command = exec.CommandContext(ctx, "cat")
 				return command
@@ -54,11 +57,13 @@ func TestOpenCodeGenerateText(t *testing.T) {
 			if model != "" && (modelIndex < 0 || args[modelIndex+1] != model) {
 				t.Fatalf("model missing from %v", args)
 			}
-			dirIndex := slices.Index(args, "--dir")
-			if dirIndex < 0 {
-				t.Fatal("missing isolated directory")
+			if slices.Contains(args, "--dir") {
+				t.Fatalf("OpenCode 2 rejects --dir: %v", args)
 			}
-			if _, err := os.Stat(args[dirIndex+1]); !os.IsNotExist(err) {
+			if command.Dir == "" {
+				t.Fatal("missing isolated working directory")
+			}
+			if _, err := os.Stat(command.Dir); !os.IsNotExist(err) {
 				t.Fatalf("temp directory not removed: %v", err)
 			}
 			for _, entry := range command.Env {
@@ -67,6 +72,112 @@ func TestOpenCodeGenerateText(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOpenCodeGenerateStandaloneByVersion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		version        []string
+		wantStandalone bool
+	}{
+		{"opencode 1", []string{"echo", "1.18.33"}, false},
+		{"opencode 2", []string{"echo", "opencode v2.1.1"}, true},
+		{"unparseable", []string{"echo", "opencode dev build"}, true},
+		{"probe fails", []string{"sh", "-c", "exit 3"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var probe, run *exec.Cmd
+			var args []string
+			a := &OpenCodeAgent{CommandRunner: func(ctx context.Context, _ string, argv ...string) *exec.Cmd {
+				if slices.Equal(argv, []string{"--version"}) {
+					probe = exec.CommandContext(ctx, tt.version[0], tt.version[1:]...)
+					return probe
+				}
+				args = argv
+				run = exec.CommandContext(ctx, "cat")
+				return run
+			}}
+			got, err := a.GenerateText(t.Context(), `{"type":"text","part":{"text":"hello"}}`, "")
+			if err != nil || got != "hello" {
+				t.Fatalf("GenerateText = %q, %v", got, err)
+			}
+			if probe == nil || probe.Dir == "" || probe.Dir != run.Dir {
+				t.Fatalf("version probe must run in the generation directory: probe=%v run=%q", probe, run.Dir)
+			}
+			for _, entry := range probe.Env {
+				if name, _, _ := strings.Cut(entry, "="); strings.HasPrefix(name, "GIT_") || name == "OPENCODE_CONFIG_CONTENT" {
+					t.Fatalf("version probe inherited %s", name)
+				}
+			}
+			if args[0] != "run" {
+				t.Fatalf("args = %v, want run first", args)
+			}
+			if got := slices.Index(args, "--standalone"); got != map[bool]int{true: 1, false: -1}[tt.wantStandalone] {
+				t.Fatalf("--standalone at %d in %v, want present=%v right after run", got, args, tt.wantStandalone)
+			}
+		})
+	}
+}
+
+func TestOpenCodeVersionProbeOmitsInlineConfig(t *testing.T) {
+	// Seeds process env; cannot run in parallel.
+	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"provider":{"openai":{"options":{"apiKey":"secret"}}}}`)
+	var probe, run *exec.Cmd
+	a := &OpenCodeAgent{CommandRunner: func(ctx context.Context, _ string, argv ...string) *exec.Cmd {
+		if slices.Equal(argv, []string{"--version"}) {
+			probe = exec.CommandContext(ctx, "echo", "opencode v2.1.1")
+			return probe
+		}
+		run = exec.CommandContext(ctx, "cat")
+		return run
+	}}
+	if _, err := a.GenerateText(t.Context(), `{"type":"text","part":{"text":"hello"}}`, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range probe.Env {
+		if strings.HasPrefix(entry, "OPENCODE_CONFIG_CONTENT=") {
+			t.Fatal("version probe inherited OPENCODE_CONFIG_CONTENT")
+		}
+	}
+	// Generation still merges the caller's inline config.
+	found := false
+	for _, entry := range run.Env {
+		if value, ok := strings.CutPrefix(entry, "OPENCODE_CONFIG_CONTENT="); ok && strings.Contains(value, `"provider"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("generation lost the inline OpenCode config")
+	}
+}
+
+func TestOpenCodeGenerateMissingBinary(t *testing.T) {
+	t.Parallel()
+	a := &OpenCodeAgent{CommandRunner: func(ctx context.Context, _ string, argv ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "entire-test-no-such-opencode", argv...)
+	}}
+	_, err := a.GenerateText(t.Context(), "prompt", "")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %v, want not found", err)
+	}
+}
+
+func TestOpenCodeVersion(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{
+		"1.18.33\n":       "v1.18.33",
+		"opencode v2.1.1": "v2.1.1",
+		"warning at position 25\nopencode v2.0.16": "v2.0.16",
+		"v25": "",
+		"":    "",
+	} {
+		if got := openCodeVersion(raw); got != want {
+			t.Errorf("openCodeVersion(%q) = %q, want %q", raw, got, want)
+		}
 	}
 }
 
@@ -81,6 +192,7 @@ func TestOpenCodeGenerateOutput(t *testing.T) {
 		{"api error after text", `{"type":"text","part":{"text":"partial"}}
 {"type":"error","error":{"name":"APIError","data":{"message":"API key is invalid."}}}`, "", "API key is invalid."},
 		{"named error", `{"type":"error","error":{"name":"UnknownError"}}`, "", "UnknownError"},
+		{"opencode 2 error", `{"type":"error","error":{"type":"unknown","message":"Agent not found: \"entire-x\""}}`, "", `Agent not found: "entire-x"`},
 		{"empty error", `{"type":"error"}`, "", "error"},
 		{"missing text", `{"type":"step_finish"}`, "", "no text"},
 		{"blank text", `{"type":"text","part":{"text":"  "}}`, "", "no text"},

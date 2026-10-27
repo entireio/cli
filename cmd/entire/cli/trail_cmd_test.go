@@ -605,6 +605,7 @@ func TestPrintCreatedTrail(t *testing.T) {
 
 func TestTrailDisplayURL(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
+	t.Setenv(api.WebBaseURLEnvVar, "")
 
 	// Server URL wins, even when a number is present.
 	got := trailDisplayURL(api.TrailResource{Number: 5, URL: "https://server/url"}, "gh", "acme", "repo")
@@ -613,9 +614,10 @@ func TestTrailDisplayURL(t *testing.T) {
 	}
 
 	// Falls back to a constructed URL for older servers that omit it.
+	// The web app lives on entire.com, not the entire.io API origin.
 	got = trailDisplayURL(api.TrailResource{Number: 5}, "gh", "acme", "repo")
-	if !strings.HasSuffix(got, "/gh/acme/repo/trails/5") {
-		t.Fatalf("expected constructed fallback URL, got %q", got)
+	if got != "https://entire.com/gh/acme/repo/trails/5" {
+		t.Fatalf("expected constructed fallback URL on the web origin, got %q", got)
 	}
 
 	// Nothing to show when neither is available.

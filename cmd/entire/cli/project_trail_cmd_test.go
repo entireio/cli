@@ -112,7 +112,14 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 	core, _ := setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, projectTrailTestPath, r.URL.Path)
 		assert.Equal(t, "Bearer project-token", r.Header.Get("Authorization"))
-		assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
+		item := projectTrailTestResource()
+		item.URL = "https://entire.io/gh/acme/-/trails/42/"
+		item.Changes[0].Repository = "widget"
+		item.Changes = append(item.Changes,
+			api.ChangeSummary{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAY", Repository: "api", Number: 3, Branch: "feature/a"},
+			api.ChangeSummary{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAZ", RepositoryID: "repo-hidden", Number: 9},
+			api.ChangeSummary{ID: "01ARZ3NDEKTSV4RRFFQ69G5FB0", Repository: "..", Number: 5, Branch: "feature/dots"})
+		assert.NoError(t, json.NewEncoder(w).Encode(item))
 	})
 	repoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/v1/trails/gh/acme/widget", r.URL.Path)
@@ -130,12 +137,96 @@ func TestProjectTrailShowFollowsParentAcrossCells(t *testing.T) {
 	t.Cleanup(func() { newTrailAPIClient = old })
 	out, _, err := executeProjectTrailTest(t, "show", "--repo", "gh/acme/widget", "--branch", "feature/a", "--json")
 	require.NoError(t, err)
-	var item api.ProjectTrail
+	var item projectTrailJSON
 	require.NoError(t, json.Unmarshal([]byte(out), &item))
 	require.Equal(t, 42, item.Number)
 	require.Equal(t, projectTrailTestID, item.ID)
 	require.True(t, item.IsPossiblyPartial)
+	require.Equal(t, "https://entire.io/gh/acme/-/trails/42/", item.URL, "the trail's own URL stays the server's")
+	require.Len(t, item.Changes, 4)
+	require.Equal(t, "https://entire.io/gh/acme/-/trails/42/changes/widget/7", item.Changes[0].URL)
+	require.True(t, item.Changes[0].Current, "the branch's own change is current")
+	require.Equal(t, "https://entire.io/gh/acme/-/trails/42/changes/api/3", item.Changes[1].URL)
+	require.False(t, item.Changes[1].Current, "a same-named branch in another repository is not current")
+	require.Empty(t, item.Changes[2].URL, "a change without a repository name has no URL")
+	require.False(t, item.Changes[2].Current)
+	require.Empty(t, item.Changes[3].URL, "a repository name that is not a valid selector, like .., has no URL")
 	require.Zero(t, core.resolveCalls, "repo-only parent reads must not resolve the project via project-view access")
+
+	text, _, err := executeProjectTrailTest(t, "show", "--repo", "gh/acme/widget", "--branch", "feature/a")
+	require.NoError(t, err)
+	require.Regexp(t, `(?s)^Trail #42: Project intent\n  ID:        `+projectTrailTestID+`\n.*`+
+		`  URL:       https://entire\.io/gh/acme/-/trails/42/\n  Assignees: alice\n  Changes:\n`+
+		`    CHANGE +BRANCH +STATUS +URL\n`+
+		`    widget/7 \(current\) +feature/a +https://entire\.io/gh/acme/-/trails/42/changes/widget/7\n`+
+		`    api/3 +feature/a +https://entire\.io/gh/acme/-/trails/42/changes/api/3\n`+
+		`    -\n`+
+		`    - +feature/dots\n`+
+		`\nDescription:\nDescription\n$`, text, "changes sit in the indented metadata block, before the description")
+	require.NotContains(t, text, "access filtering", "a possibly partial trail prints no access note")
+}
+
+// The trail's change summary leaves repository empty until the server has
+// synced the repository's display name; the current change still links by the
+// name the CLI resolved it in.
+func TestProjectTrailShowCurrentChangeWithoutRepositoryName(t *testing.T) {
+	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
+		item := projectTrailTestResource()
+		item.URL = "https://entire.io/gh/acme/-/trails/42"
+		assert.NoError(t, json.NewEncoder(w).Encode(item))
+	})
+	repoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
+			ID: projectTrailTestChange, Number: 7, Branch: "feature/a",
+			Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
+				Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"},
+		}}}))
+	}))
+	t.Cleanup(repoServer.Close)
+	old := newTrailAPIClient
+	newTrailAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+		return api.NewClientWithBaseURL("repo-token", repoServer.URL), "repo-id", nil
+	}
+	t.Cleanup(func() { newTrailAPIClient = old })
+
+	out, _, err := executeProjectTrailTest(t, "show", "--repo", "gh/acme/widget", "--branch", "feature/a", "--json")
+	require.NoError(t, err)
+	var item projectTrailJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &item))
+	require.Len(t, item.Changes, 1)
+	require.Empty(t, item.Changes[0].Repository, "the server's summary is passed through unchanged")
+	require.True(t, item.Changes[0].Current)
+	require.Equal(t, "https://entire.io/gh/acme/-/trails/42/changes/widget/7", item.Changes[0].URL)
+
+	text, _, err := executeProjectTrailTest(t, "show", "--repo", "gh/acme/widget", "--branch", "feature/a")
+	require.NoError(t, err)
+	require.Contains(t, text, "widget/7 (current)")
+	require.NotContains(t, text, "repo-a/7")
+}
+
+// A trail selector with --branch resolves the trail directly and finds the
+// branch's change through the working context; that change is still current.
+func TestProjectTrailShowSelectorWithBranchMarksCurrent(t *testing.T) {
+	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if !serveWorkingProjectRead(t, w, r) {
+			t.Errorf("unexpected project request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/trails/gh/acme/widget", r.URL.Path)
+		assert.NoError(t, json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
+			ID: projectTrailTestChange, Number: 7, Branch: "feature/work",
+			Parent: &api.TrailParentReference{ID: projectTrailTestID, Number: 42, ProjectID: projectTrailTestProject,
+				Host: "gh", Project: "acme", Path: projectTrailTestPath, Jurisdiction: "eu", PrimaryProcessingCell: "project-cell"},
+		}}}))
+	})
+	out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--repo", "gh/acme/widget", "--branch", "feature/work", "--json")
+	require.NoError(t, err)
+	var item projectTrailJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &item))
+	require.Len(t, item.Changes, 1)
+	require.True(t, item.Changes[0].Current)
 }
 
 func TestProjectTrailMissingParentDoesNotFallBack(t *testing.T) {
@@ -156,11 +247,26 @@ func TestProjectTrailShowPrintsServerURL(t *testing.T) {
 	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
 		item := projectTrailTestResource()
 		item.URL = "https://entire.io/gh/acme/-/trails/42"
+		item.Project = &api.TrailProject{ID: projectTrailTestProject}
+		item.Project.Reference.Forge, item.Project.Reference.Project = "gh", "acme"
+		item.Type, item.Priority = "task", "none"
+		item.Assignees = nil
 		assert.NoError(t, json.NewEncoder(w).Encode(item))
 	})
 	out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme")
 	require.NoError(t, err)
-	require.Contains(t, out, "Trail #42: Project intent\nURL: https://entire.io/gh/acme/-/trails/42\nID: ")
+	require.Contains(t, out, "Trail #42: Project intent\n  ID:      "+projectTrailTestID+"\n  Project: gh/acme\n  Status:  open\n  URL:     https://entire.io/gh/acme/-/trails/42\n  Type:    task\n  Changes:\n")
+	require.NotContains(t, out, "Priority:", "priority none is hidden")
+	require.NotContains(t, out, "Assignees:", "an empty assignee list is hidden")
+
+	// A trail selected directly was not reached through a change.
+	js, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
+	require.NoError(t, err)
+	var item projectTrailJSON
+	require.NoError(t, json.Unmarshal([]byte(js), &item))
+	require.Len(t, item.Changes, 1)
+	require.False(t, item.Changes[0].Current)
+	require.NotContains(t, out, "(current)")
 }
 
 func TestProjectTrailShowOmitsURLWithoutOne(t *testing.T) {
@@ -179,6 +285,7 @@ func TestProjectTrailShowOmitsURLWithoutOne(t *testing.T) {
 }
 
 func TestProjectTrailUpdateAtomicConditionalPatch(t *testing.T) {
+	setupProjectAssigneeCore(t, map[string]string{"alice": projectAssigneeAliceID, "bob": projectAssigneeBobID})
 	var methods []string
 	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
 		methods = append(methods, r.Method)
@@ -187,7 +294,7 @@ func TestProjectTrailUpdateAtomicConditionalPatch(t *testing.T) {
 			assert.Equal(t, `W/"precise-parent-version"`, r.Header.Get("If-Match"))
 			var body map[string]any
 			assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			assert.Equal(t, map[string]any{"title": "New intent", "body": "", "assignees": []any{"bob"}}, body)
+			assert.Equal(t, map[string]any{"title": "New intent", "body": "", "assignees": []any{"ulid:" + projectAssigneeBobID}}, body)
 		}
 		w.Header().Set("ETag", `W/"precise-parent-version"`)
 		assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))

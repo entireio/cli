@@ -449,7 +449,7 @@ func writeSessionCard(w io.Writer, s *strategy.SessionState, sty statusStyles) {
 	if s.LastInteractionTime != nil && s.LastInteractionTime.Sub(s.StartedAt) > time.Minute {
 		stats = append(stats, activeTimeDisplay(s.LastInteractionTime))
 	}
-	if t := totalTokens(s.TokenUsage); t > 0 {
+	if t := totalTokens(s.TotalTokenUsage()); t > 0 {
 		stats = append(stats, "tokens "+formatTokenCount(t))
 	}
 	statsLine := strings.Join(stats, sty.render(sty.dim, " · "))
@@ -647,13 +647,13 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		LastPrompt:     state.LastPrompt,
 		FilesTouched:   state.PendingFiles(),
 	}
-	if state.TokenUsage != nil {
+	if usage := state.TotalTokenUsage(); usage != nil {
 		info.Tokens = &tokenInfoJSON{
-			Total:      totalTokens(state.TokenUsage),
-			Input:      state.TokenUsage.InputTokens,
-			CacheRead:  state.TokenUsage.CacheReadTokens,
-			CacheWrite: state.TokenUsage.CacheCreationTokens,
-			Output:     state.TokenUsage.OutputTokens,
+			Total:      totalTokens(usage),
+			Input:      usage.InputTokens,
+			CacheRead:  usage.CacheReadTokens,
+			CacheWrite: usage.CacheCreationTokens,
+			Output:     usage.OutputTokens,
 		}
 	}
 	return info
@@ -718,21 +718,22 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)
 	}
 
-	if t := totalTokens(state.TokenUsage); t > 0 {
+	usage := state.TotalTokenUsage()
+	if t := totalTokens(usage); t > 0 {
 		fmt.Fprintf(w, "\nTokens:      %s\n", formatTokenCount(t))
 
 		var parts []string
-		if state.TokenUsage.InputTokens > 0 {
-			parts = append(parts, "Input: "+formatTokenCount(state.TokenUsage.InputTokens))
+		if usage.InputTokens > 0 {
+			parts = append(parts, "Input: "+formatTokenCount(usage.InputTokens))
 		}
-		if state.TokenUsage.CacheReadTokens > 0 {
-			parts = append(parts, "Cache read: "+formatTokenCount(state.TokenUsage.CacheReadTokens))
+		if usage.CacheReadTokens > 0 {
+			parts = append(parts, "Cache read: "+formatTokenCount(usage.CacheReadTokens))
 		}
-		if state.TokenUsage.CacheCreationTokens > 0 {
-			parts = append(parts, "Cache write: "+formatTokenCount(state.TokenUsage.CacheCreationTokens))
+		if usage.CacheCreationTokens > 0 {
+			parts = append(parts, "Cache write: "+formatTokenCount(usage.CacheCreationTokens))
 		}
-		if state.TokenUsage.OutputTokens > 0 {
-			parts = append(parts, "Output: "+formatTokenCount(state.TokenUsage.OutputTokens))
+		if usage.OutputTokens > 0 {
+			parts = append(parts, "Output: "+formatTokenCount(usage.OutputTokens))
 		}
 		if len(parts) > 0 {
 			fmt.Fprintf(w, "  %s\n", strings.Join(parts, " · "))

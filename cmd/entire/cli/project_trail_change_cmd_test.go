@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -36,7 +38,7 @@ func TestProjectTrailCreateWithChange(t *testing.T) {
 			var methods []string
 			handler := repositoryTrailCreationHandler(t, forge, func(change api.ChangeCreateRequest) {
 				assert.Equal(t, "feature/new", change.BranchName)
-				assert.Equal(t, "Intent", change.Title)
+				assert.Equal(t, "feature/new", change.Title)
 				assert.Equal(t, "link", change.BranchAction)
 			})
 			_, project := setupRepositoryTrailCreation(t, forge, func(w http.ResponseWriter, r *http.Request) {
@@ -85,18 +87,54 @@ func TestProjectTrailLinkRequiresParentAndRetryHeaders(t *testing.T) {
 		assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 		assert.Equal(t, "link", request.BranchAction)
 		assert.Equal(t, "feature/existing", request.BranchName)
+		assert.Equal(t, "feature/existing", request.Title)
 		assert.Equal(t, projectTrailTestChange, request.RepositoryID)
 		w.WriteHeader(http.StatusCreated)
 		assert.NoError(t, json.NewEncoder(w).Encode(api.ChangeCreateResponse{ID: projectTrailTestChange, TrailID: projectTrailTestID, RepositoryID: projectTrailTestChange}))
 	})
 	out, _, err := executeProjectTrailTest(t, "link", projectTrailTestID, "--project", "gh/acme", "--repo", "gh/acme/widget",
-		"--title", "Work", "--branch", "feature/existing", "--idempotency-key", "retry-link", "--json")
+		"--branch", "feature/existing", "--idempotency-key", "retry-link", "--json")
 	require.NoError(t, err)
 	require.Contains(t, out, projectTrailTestID)
 	require.Contains(t, out, "feature/existing")
 	require.NotContains(t, out, `"id":`)
 	require.Equal(t, []string{http.MethodGet, http.MethodPost}, methods)
 	require.Zero(t, project.resolveCalls)
+}
+
+// Descriptions belong to the project trail; the API ignores a Change-level body.
+func TestProjectTrailCreateSendsDescriptionOnlyOnParent(t *testing.T) {
+	handler := repositoryTrailCreationHandler(t, "gh", nil)
+	var parentBodies []string
+	_, _ = setupRepositoryTrailCreation(t, "gh", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			raw, err := io.ReadAll(r.Body)
+			assert.NoError(t, err)
+			var fields map[string]json.RawMessage
+			assert.NoError(t, json.Unmarshal(raw, &fields))
+			if strings.HasSuffix(r.URL.Path, "/changes") {
+				assert.NotContains(t, fields, "body", "Change creation must not carry a description")
+			} else {
+				parentBodies = append(parentBodies, string(fields["body"]))
+			}
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+		}
+		handler(w, r)
+	})
+	_, _, err := executeProjectTrailTest(t, "create", "--repo", "gh/acme/widget", "--title", "Intent", "--body", "Plan", "--branch", "feature/new")
+	require.NoError(t, err)
+	require.Equal(t, []string{`"Plan"`}, parentBodies)
+}
+
+func TestProjectTrailLinkRejectsTrailFields(t *testing.T) {
+	t.Parallel()
+	for _, flag := range []string{"title", "body", "type", "priority", "assignee"} {
+		t.Run(flag, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := executeProjectTrailTest(t, "link", projectTrailTestID, "--project", "gh/acme", "--repo", "gh/acme/widget", "--branch", "feature/work", "--"+flag, "x")
+			require.ErrorContains(t, err, "unknown flag: --"+flag)
+		})
+	}
 }
 
 func TestProjectTrailLinkSelectorGuidanceMatchesAcceptedForms(t *testing.T) {

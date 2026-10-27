@@ -25,6 +25,7 @@ type trailWorkingContext struct {
 	ETag              string
 	Client            *api.Client
 	BasePath          string
+	RepoID            string
 	Host, Owner, Repo string
 	Work              api.TrailResource
 }
@@ -92,7 +93,7 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 		if err != nil {
 			return nil, err
 		}
-		target, err = openTrailParentTarget(cmd, work, fmt.Sprintf("branch %q", branch))
+		target, err = openTrailParentTarget(cmd, work, repo, fmt.Sprintf("branch %q", branch))
 		if err != nil {
 			return nil, err
 		}
@@ -146,7 +147,7 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 // trailChangeWriteCommands act on the selected change itself, so a trail with
 // several changes must be disambiguated explicitly rather than by whichever
 // branch happens to be checked out.
-var trailChangeWriteCommands = map[string]bool{"approve": true, "request-changes": true, "unlink": true}
+var trailChangeWriteCommands = map[string]bool{"approve": true, "unlink": true, "merge": true}
 
 // finishForeignTrailWorkingContext opens the repository a sole change in
 // another repository belongs to. Repository is the server's basename in the
@@ -179,7 +180,7 @@ func resolveProjectTrailChangeContext(cmd *cobra.Command, sel projectTrailChange
 	if err != nil {
 		return nil, err
 	}
-	target, err := openTrailParentTarget(cmd, change.Work, "change "+sel.String())
+	target, err := openTrailParentTarget(cmd, change.Work, change.Repo, "change "+sel.String())
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +217,7 @@ func finishTrailWorkingContext(ctx context.Context, target *projectTrailTarget, 
 	out.Parent = &api.TrailParentReference{ID: parent.ID, Number: parent.Number, ProjectID: parent.ProjectID,
 		Host: target.Host, Project: target.Project, Path: target.path()}
 	client.SetTrailRoute(out.ID, trailNumberPathForBase(base, out.Number))
-	return &trailWorkingContext{Target: target, Parent: parent, ETag: etag, Client: client, BasePath: base,
+	return &trailWorkingContext{Target: target, Parent: parent, ETag: etag, Client: client, BasePath: base, RepoID: repoID,
 		Host: host, Owner: owner, Repo: repo, Work: out.TrailResource}, nil
 }
 
