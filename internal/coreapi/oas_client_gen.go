@@ -723,6 +723,12 @@ type Invoker interface {
 	//
 	// PUT /plugins/{plugin}/installations/{id}/repositories/{repository_id}
 	RestorePluginInstallationRepository(ctx context.Context, params RestorePluginInstallationRepositoryParams) error
+	// ResyncMirror invokes resyncMirror operation.
+	//
+	// Resync every placement of a mirrored upstream (live GitHub write-access gated).
+	//
+	// POST /mirrors/resync
+	ResyncMirror(ctx context.Context, request *ResyncMirrorInputBody) (*ResyncMirrorOutputBody, error)
 	// RevokeOrgInvitation invokes revokeOrgInvitation operation.
 	//
 	// Revoke an organization invitation.
@@ -13273,6 +13279,91 @@ func (c *Client) sendRestorePluginInstallationRepository(ctx context.Context, pa
 	defer body.Close()
 
 	result, err := decodeRestorePluginInstallationRepositoryResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ResyncMirror invokes resyncMirror operation.
+//
+// Resync every placement of a mirrored upstream (live GitHub write-access gated).
+//
+// POST /mirrors/resync
+func (c *Client) ResyncMirror(ctx context.Context, request *ResyncMirrorInputBody) (*ResyncMirrorOutputBody, error) {
+	res, err := c.sendResyncMirror(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendResyncMirror(ctx context.Context, request *ResyncMirrorInputBody) (res *ResyncMirrorOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/mirrors/resync"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeResyncMirrorRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ResyncMirrorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ResyncMirrorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeResyncMirrorResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

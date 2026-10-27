@@ -95,6 +95,10 @@ type Usage struct {
 	Output     int `json:"output"`
 	CacheRead  int `json:"cacheRead"`
 	CacheWrite int `json:"cacheWrite"`
+	// CacheWrite1h is the part of CacheWrite written with the 1h TTL, and
+	// Reasoning the part of Output spent reasoning. nil means not reported.
+	CacheWrite1h *int `json:"cacheWrite1h,omitempty"`
+	Reasoning    *int `json:"reasoning,omitempty"`
 }
 
 // ContentItem is one element of a Pi message's content array.

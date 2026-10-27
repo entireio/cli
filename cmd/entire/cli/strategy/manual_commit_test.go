@@ -298,8 +298,45 @@ func TestManualCommit_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
 		TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_keep", StartedAt: now, CompletedAt: now}},
 	}
 
-	fixtures := []*SessionState{legacyEmpty, idleUnknownOwner, idleDeadOwner, staleEnded, idleWithEndedAt, endedWithSteps, activeNoShadow, condensedIdle, recordEnded}
-	wantKept := []string{"active-no-shadow", "condensed-idle", "ended-with-steps", "record-ended", "idle-dead-owner", "idle-unknown-owner", "legacy-empty-phase"}
+	// Sessions 7a-7c: ENDED after a turn that changed no files (a headless agent
+	// ends its session after every prompt). KEPT: uncommitted tokens, or offsets
+	// from an earlier checkpoint, would be lost or recounted from line 0.
+	endedWithTokens := &SessionState{
+		SessionID: "ended-with-tokens", BaseCommit: "ggg7777", StartedAt: now.Add(-2 * time.Hour), Phase: "ended",
+		CheckpointTokenUsage: &agent.TokenUsage{InputTokens: 10, OutputTokens: 5, APICallCount: 1},
+	}
+	endedWithSubagentTokens := &SessionState{
+		SessionID: "ended-with-subagent-tokens", BaseCommit: "ggg7778", StartedAt: now.Add(-2 * time.Hour), Phase: "ended",
+		CheckpointTokenUsage: &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{OutputTokens: 3}},
+	}
+	endedWithOffsets := &SessionState{
+		SessionID: "ended-with-offsets", BaseCommit: "ggg7779", StartedAt: now.Add(-2 * time.Hour), Phase: "ended",
+		CheckpointTranscriptStart: 12,
+	}
+	// A condensation that could not read the transcript resets the transcript
+	// window to 0 (AdvanceCheckpointWindow(0)) and keeps the token offset.
+	endedWithTokenOffset := &SessionState{
+		SessionID: "ended-with-token-offset", BaseCommit: "ggg7782", StartedAt: now.Add(-2 * time.Hour), Phase: "ended",
+		CheckpointTranscriptStart: 0,
+	}
+	endedWithTokenOffset.SetTokenStart(12)
+	// The same condensation still re-baselines subagent tokens it stored.
+	endedWithSubagentBaseline := &SessionState{
+		SessionID: "ended-with-subagent-baseline", BaseCommit: "ggg7781", StartedAt: now.Add(-2 * time.Hour), Phase: "ended",
+		SubagentTokensBaseline: &agent.TokenUsage{OutputTokens: 4},
+	}
+
+	// Session 7d: ENDED with an all-zero token usage and no offsets: nothing to
+	// keep, so cleaned up.
+	endedWithZeroTokens := &SessionState{
+		SessionID: "ended-with-zero-tokens", BaseCommit: "ggg7780", StartedAt: now.Add(-2 * time.Hour), Phase: "ended",
+		CheckpointTokenUsage: &agent.TokenUsage{},
+	}
+
+	fixtures := []*SessionState{legacyEmpty, idleUnknownOwner, idleDeadOwner, staleEnded, idleWithEndedAt, endedWithSteps, activeNoShadow, condensedIdle, recordEnded,
+		endedWithTokens, endedWithSubagentTokens, endedWithOffsets, endedWithTokenOffset, endedWithSubagentBaseline, endedWithZeroTokens}
+	wantKept := []string{"active-no-shadow", "condensed-idle", "ended-with-steps", "record-ended", "idle-dead-owner", "idle-unknown-owner", "legacy-empty-phase",
+		"ended-with-tokens", "ended-with-subagent-tokens", "ended-with-offsets", "ended-with-token-offset", "ended-with-subagent-baseline"}
 	for _, state := range fixtures {
 		if err := s.saveSessionState(context.Background(), state); err != nil {
 			t.Fatalf("saveSessionState(%s) error = %v", state.SessionID, err)
@@ -346,7 +383,7 @@ func TestManualCommit_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
 	}
 
 	// Verify stale sessions were actually cleared from disk
-	for _, staleID := range []string{"stale-ended", "idle-with-ended-at"} {
+	for _, staleID := range []string{"stale-ended", "idle-with-ended-at", "ended-with-zero-tokens"} {
 		loaded, err := LoadSessionState(context.Background(), staleID)
 		if err != nil {
 			t.Errorf("LoadSessionState(%s) error = %v", staleID, err)

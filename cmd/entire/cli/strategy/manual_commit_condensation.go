@@ -67,6 +67,10 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 type condenseOpts struct {
 	repoDir string // Worktree root of the committing worktree (home-worktree check)
 
+	// recordedBranch overrides HEAD for ID-based salvage, including an empty
+	// branch recorded at detached HEAD. Commit-driven condensation keeps HEAD.
+	recordedBranch *string
+
 	// reconcileInterrupted allows this condensation to return a *different*
 	// checkpoint ID than the caller passed, when it recognises the transcript
 	// range in a checkpoint left behind by an interrupted write from a CLI that
@@ -222,6 +226,7 @@ func prepareTaskTranscriptForStorage(
 	state *SessionState,
 	path string,
 	raw []byte,
+	externalizeImages bool,
 ) (redacted redact.RedactedBytes, assets []cpkg.TranscriptAsset, tooLarge bool, err error) {
 	sanitized := agent.SanitizeTranscriptForStorage(ag, raw)
 	if len(sanitized) > agent.MaxChunkSize {
@@ -233,7 +238,10 @@ func prepareTaskTranscriptForStorage(
 			slog.Int("cap", agent.MaxChunkSize))
 		return redact.RedactedBytes{}, nil, true, nil
 	}
-	externalized, assets := externalizeSessionImages(ctx, logCtx, state, sanitized)
+	externalized := sanitized
+	if externalizeImages {
+		externalized, assets = externalizeSessionImages(ctx, logCtx, state, sanitized)
+	}
 	// nil repo declines prefix reuse: a subagent transcript is written once per
 	// task, not appended across checkpoints, so there is nothing to reuse.
 	redacted, _, err = redactSessionTranscript(logCtx, nil, "", externalized)
@@ -365,77 +373,230 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 	inventoryPaths := resolveInventoryTaskTranscripts(ctx, ag, state)
 	payloads := make([]cpkg.TaskPayload, 0, len(state.TaskRecords))
 	for _, record := range state.TaskRecords {
-		if record.ToolUseID == "" || validation.ValidateToolUseID(record.ToolUseID) != nil {
-			logging.Warn(logCtx, "skipping task record: unsafe or empty tool_use_id",
-				slog.String("session_id", state.SessionID),
-				slog.String("tool_use_id", record.ToolUseID),
-			)
+		payload, taskAssets, ok := taskPayload(ctx, logCtx, ag, state, record, inventoryPaths[record.AgentID], true)
+		if !ok {
 			continue
 		}
-		if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil {
-			logging.Warn(logCtx, "skipping task record: unsafe or missing agent_id",
-				slog.String("session_id", state.SessionID),
-				slog.String("tool_use_id", record.ToolUseID),
-			)
-			continue
-		}
-
-		payload := cpkg.TaskPayload{
-			ToolUseID:       record.ToolUseID,
-			AgentID:         record.AgentID,
-			SubagentType:    record.SubagentType,
-			TaskDescription: record.TaskDescription,
-			Files:           record.Files,
-			TokenUsage:      record.TokenUsage,
-			StartedAt:       record.StartedAt,
-			CompletedAt:     record.CompletedAt,
-		}
-		raw, transcriptPath, readErr := readTaskTranscript(ctx, logCtx, ag, state, record, inventoryPaths[record.AgentID])
-		if transcriptPath == "" && readErr == nil {
-			payload.TranscriptUnavailableReason = taskTranscriptReasonUnresolvable
-			payloads = append(payloads, payload)
-			continue
-		}
-		if readErr != nil {
-			logging.Warn(logCtx, "failed to read subagent transcript; storing task without it",
-				slog.String("session_id", state.SessionID),
-				slog.String("tool_use_id", record.ToolUseID),
-				slog.String("error", readErr.Error()),
-			)
-			payload.TranscriptUnavailableReason = taskTranscriptReasonUnreadable
-			payloads = append(payloads, payload)
-			continue
-		}
-		if len(raw) == 0 {
-			payload.TranscriptUnavailableReason = taskTranscriptReasonEmpty
-			payloads = append(payloads, payload)
-			continue
-		}
-		payload.TokenUsage = condensedTaskTokenUsage(ctx, ag, record, raw)
-
-		redacted, taskAssets, tooLarge, prepErr := prepareTaskTranscriptForStorage(ctx, logCtx, ag, state, transcriptPath, raw)
-		if tooLarge {
-			payload.TranscriptUnavailableReason = taskTranscriptReasonTooLarge
-			payloads = append(payloads, payload)
-			continue
-		}
-		if prepErr != nil {
-			logging.Warn(logCtx, "failed to redact subagent transcript; storing task without it",
-				slog.String("session_id", state.SessionID),
-				slog.String("tool_use_id", record.ToolUseID),
-				slog.String("error", prepErr.Error()),
-			)
-			payload.TranscriptUnavailableReason = taskTranscriptReasonRedactionFailed
-			payloads = append(payloads, payload)
-			continue
-		}
-
-		payload.Transcript = redacted
 		assets = append(assets, taskAssets...)
 		payloads = append(payloads, payload)
 	}
 
 	return payloads, assets
+}
+
+// taskPayload builds one task record's stored form; see materializeTaskRecords
+// for the rules. ok is false for a record with an unsafe or missing ToolUseID
+// or AgentID, which cannot be stored at all.
+func taskPayload(
+	ctx, logCtx context.Context,
+	ag agent.Agent,
+	state *SessionState,
+	record session.TaskRecord,
+	inventoryPath string,
+	externalizeImages bool,
+) (payload cpkg.TaskPayload, assets []cpkg.TranscriptAsset, ok bool) {
+	if record.ToolUseID == "" || validation.ValidateToolUseID(record.ToolUseID) != nil {
+		logging.Warn(logCtx, "skipping task record: unsafe or empty tool_use_id",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+		)
+		return cpkg.TaskPayload{}, nil, false
+	}
+	if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil {
+		logging.Warn(logCtx, "skipping task record: unsafe or missing agent_id",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+		)
+		return cpkg.TaskPayload{}, nil, false
+	}
+
+	payload = cpkg.TaskPayload{
+		ToolUseID:       record.ToolUseID,
+		AgentID:         record.AgentID,
+		SubagentType:    record.SubagentType,
+		TaskDescription: record.TaskDescription,
+		Files:           record.Files,
+		TokenUsage:      record.TokenUsage,
+		StartedAt:       record.StartedAt,
+		CompletedAt:     record.CompletedAt,
+	}
+	raw, transcriptPath, readErr := readTaskTranscript(ctx, logCtx, ag, state, record, inventoryPath)
+	if transcriptPath == "" && readErr == nil {
+		payload.TranscriptUnavailableReason = taskTranscriptReasonUnresolvable
+		return payload, nil, true
+	}
+	if readErr != nil {
+		logging.Warn(logCtx, "failed to read subagent transcript; storing task without it",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+			slog.String("error", readErr.Error()),
+		)
+		payload.TranscriptUnavailableReason = taskTranscriptReasonUnreadable
+		return payload, nil, true
+	}
+	if len(raw) == 0 {
+		payload.TranscriptUnavailableReason = taskTranscriptReasonEmpty
+		return payload, nil, true
+	}
+	payload.TokenUsage = condensedTaskTokenUsage(ctx, ag, record, raw)
+
+	redacted, taskAssets, tooLarge, prepErr := prepareTaskTranscriptForStorage(ctx, logCtx, ag, state, transcriptPath, raw, externalizeImages)
+	if tooLarge {
+		payload.TranscriptUnavailableReason = taskTranscriptReasonTooLarge
+		return payload, nil, true
+	}
+	if prepErr != nil {
+		logging.Warn(logCtx, "failed to redact subagent transcript; storing task without it",
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", record.ToolUseID),
+			slog.String("error", prepErr.Error()),
+		)
+		payload.TranscriptUnavailableReason = taskTranscriptReasonRedactionFailed
+		return payload, nil, true
+	}
+
+	payload.Transcript = redacted
+	return payload, taskAssets, true
+}
+
+// ErrTaskNotStorable reports a task record whose identity cannot be stored, so
+// writing it can never succeed.
+var ErrTaskNotStorable = errors.New("task record has no storable identity")
+
+// AttachTaskToCheckpoint stores a completed task record directly in an
+// existing checkpoint, for a foreground subagent whose own commit condensed the
+// session before its record existed. The record never enters state.TaskRecords:
+// the checkpoint holds it, so no later commit has anything to claim.
+//
+// Images stay inline in the stored transcript, as they do whenever image
+// externalization is off: a checkpoint's assets belong to its session, and
+// turn-end replaces them when it rewrites that session.
+func (s *ManualCommitStrategy) AttachTaskToCheckpoint(ctx context.Context, ag agent.Agent, state *SessionState, record session.TaskRecord, checkpointID id.CheckpointID) error {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	ctx = agent.WithSubagentFetchBudget(ctx, agent.SubagentFetchBudget)
+	scoped := *state
+	scoped.TaskRecords = []session.TaskRecord{record}
+	inventoryPath := resolveInventoryTaskTranscripts(ctx, ag, &scoped)[record.AgentID]
+	payload, _, ok := taskPayload(ctx, logCtx, ag, state, record, inventoryPath, false)
+	if !ok {
+		return ErrTaskNotStorable
+	}
+
+	stores, closeRepo, err := s.openHookStores(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeRepo()
+	if err := stores.Persistent.Write(ctx, cpkg.Tasks{
+		CheckpointID: checkpointID,
+		Tasks:        []cpkg.TaskPayload{payload},
+	}); err != nil {
+		return fmt.Errorf("add task to checkpoint %s: %w", checkpointID, err)
+	}
+	return nil
+}
+
+// TaskCheckpointForFiles picks which of candidates, newest first, holds a
+// commit carrying any of files: the first whose stored files touched include
+// one. When none matches and every candidate was readable, it returns the empty
+// ID. A candidate it cannot read could be the match, so then it returns the
+// newest candidate rather than drop the task.
+func (s *ManualCommitStrategy) TaskCheckpointForFiles(ctx context.Context, candidates []id.CheckpointID, files []string) id.CheckpointID {
+	if len(candidates) == 0 {
+		return id.EmptyCheckpointID
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	stores, closeRepo, err := s.openHookStores(ctx)
+	if err != nil {
+		logging.Warn(logCtx, "cannot check which checkpoint holds the task's commit; using the newest",
+			slog.Any("candidates", candidates),
+			slog.String("error", err.Error()))
+		return candidates[0]
+	}
+	defer closeRepo()
+	var unreadable []id.CheckpointID
+	var readErr error
+	for _, candidate := range candidates {
+		summary, err := cpkg.ReadCheckpoint(ctx, stores.Persistent, candidate)
+		if err != nil {
+			unreadable = append(unreadable, candidate)
+			readErr = err
+			continue
+		}
+		if slices.ContainsFunc(summary.FilesTouched, func(f string) bool { return slices.Contains(files, f) }) {
+			return candidate
+		}
+	}
+	if len(unreadable) > 0 {
+		logging.Warn(logCtx, "could not read every candidate checkpoint for the task's commit; using the newest",
+			slog.Any("candidates", candidates),
+			slog.Any("unreadable", unreadable),
+			slog.String("error", readErr.Error()))
+		return candidates[0]
+	}
+	return id.EmptyCheckpointID
+}
+
+// maxTaskAttachmentRetries bounds how many turn ends retry a pending task
+// attachment before it is dropped.
+const maxTaskAttachmentRetries = 3
+
+// retryPendingTaskAttachments writes each pending task attachment into its
+// checkpoint, keeping the ones that fail until maxTaskAttachmentRetries turn
+// ends have failed too.
+func (s *ManualCommitStrategy) retryPendingTaskAttachments(ctx context.Context, state *SessionState) {
+	if len(state.PendingTaskAttachments) == 0 {
+		return
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	ag, err := agent.GetByAgentType(state.AgentType)
+	if err != nil {
+		logging.Warn(logCtx, "cannot retry pending task attachments: unknown agent",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return
+	}
+	var kept []session.TaskAttachment
+	for _, attachment := range state.PendingTaskAttachments {
+		attrs := []any{
+			slog.String("session_id", state.SessionID),
+			slog.String("tool_use_id", attachment.Record.ToolUseID),
+			slog.String("checkpoint_id", attachment.CheckpointID),
+		}
+		checkpointID, err := id.NewCheckpointID(attachment.CheckpointID)
+		if err == nil {
+			err = s.AttachTaskToCheckpoint(ctx, ag, state, attachment.Record, checkpointID)
+		}
+		if err == nil {
+			logging.Info(logCtx, "added pending task record to its checkpoint", attrs...)
+			continue
+		}
+		attachment.FailedRetries++
+		if errors.Is(err, ErrTaskNotStorable) || attachment.FailedRetries >= maxTaskAttachmentRetries {
+			logging.Warn(logCtx, "dropping task record that could not be added to its checkpoint",
+				append(attrs, slog.Int("failed_retries", attachment.FailedRetries), slog.String("error", err.Error()))...)
+			continue
+		}
+		logging.Warn(logCtx, "task record still not added to its checkpoint; will retry at the next turn end",
+			append(attrs, slog.Int("failed_retries", attachment.FailedRetries), slog.String("error", err.Error()))...)
+		kept = append(kept, attachment)
+	}
+	state.PendingTaskAttachments = kept
+}
+
+// openHookStores opens the checkpoint store with the git-hook envelope. The
+// returned func closes the repository.
+func (s *ManualCommitStrategy) openHookStores(ctx context.Context) (*cpkg.Stores, func(), error) {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	stores, err := cpkg.Open(ctx, repo, s.hookCheckpointStoreOptions(ctx))
+	if err != nil {
+		_ = repo.Close()
+		return nil, nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	return stores, func() { _ = repo.Close() }, nil
 }
 
 // readTaskTranscript reads a task record's transcript: the agent-declared
@@ -518,7 +679,7 @@ func condensedTaskTokenUsage(ctx context.Context, ag agent.Agent, record session
 		return recorded
 	}
 	usage := agent.CalculateTokenUsage(ctx, ag, raw, 0, "")
-	if !hasTokenUsageData(usage) || (recorded != nil && usage.APICallCount < recorded.APICallCount) {
+	if !HasTokenUsageData(usage) || (recorded != nil && usage.APICallCount < recorded.APICallCount) {
 		return recorded
 	}
 	return usage
@@ -696,6 +857,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		ctx, repo, state, sessionData, redactedTranscript, extractedAssets,
 		taskPayloads, checkpointID,
 	)
+	if o.recordedBranch != nil {
+		writeOpts.Branch = *o.recordedBranch
+	}
 
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
@@ -1150,7 +1314,7 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 	// baseline does not regress to nil (finding 019f5ebf-a57e).
 	applyBackfilledSessionTokenUsage(ctx, ag, state, sessionData.Transcript, sessionData.TokenUsage)
 
-	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+	if !HasTokenUsageData(sessionData.TokenUsage) && HasTokenUsageData(state.CheckpointTokenUsage) {
 		// Whole-value fallback: accumulateTokenUsage already carries SubagentTokens.
 		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 	} else {
@@ -1158,6 +1322,9 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 		// applyBackfilledSessionTokenUsage, which needs the usage without it.
 		sessionData.TokenUsage = fillMissingSubagentTokensFrom(sessionData.TokenUsage, state.CheckpointTokenUsage)
 	}
+	// Child sessions' usage is credited outside both sources above, so it
+	// is added exactly here; resetCheckpointWindow then rebaselines it.
+	sessionData.TokenUsage = session.WithChildSessionTokens(sessionData.TokenUsage, state.PendingChildSessionTokens())
 }
 
 // AttachTokenUsage returns the tokens `entire session attach` stores for a
@@ -1178,13 +1345,16 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 		usage = calculateLiveTranscriptTokenUsage(ctx, ag, transcript, state, transcriptPath)
 	}
 	if state != nil {
-		if !hasTokenUsageData(usage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+		if !HasTokenUsageData(usage) && HasTokenUsageData(state.CheckpointTokenUsage) {
 			usage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
 		} else {
 			// The transcript recompute reads no subagent transcripts; take the
 			// pending window's subagent total, as condensation does.
 			usage = fillMissingSubagentTokensFrom(usage, state.CheckpointTokenUsage)
 		}
+		// As condensation does, store the credited child-session share; see
+		// CompleteChildSessionTaskRecord for where its task record lands.
+		usage = session.WithChildSessionTokens(usage, state.PendingChildSessionTokens())
 	}
 	return usage, countTranscriptItems(ag.Type(), string(transcript))
 }
@@ -1193,13 +1363,19 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 // counted: the token offset moves to pos and the pending window is reset, so
 // the session's next checkpoint does not count them again. The displayed
 // transcript window (CheckpointTranscriptStart) is left alone.
+//
+// Credited child-session usage (PendingChildSessionTokens) is consumed too,
+// because AttachTokenUsage stored it, while that child's completed task record
+// stays in state and its task.json lands in the session's next checkpoint.
+// That checkpoint lists the task without its tokens; nothing is counted twice.
 func ConsumeAttachTokenWindow(state *SessionState, pos int) {
 	state.CheckpointTokenUsage = nil
 	state.RebaselineSubagentTokens()
 	state.SetTokenStart(pos)
 }
 
-func hasTokenUsageData(usage *agent.TokenUsage) bool {
+// HasTokenUsageData reports whether usage, or its subagent usage, carries any counts.
+func HasTokenUsageData(usage *agent.TokenUsage) bool {
 	if usage == nil {
 		return false
 	}
@@ -1208,7 +1384,7 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 		return true
 	}
 
-	return hasTokenUsageData(usage.SubagentTokens)
+	return HasTokenUsageData(usage.SubagentTokens)
 }
 
 // fillMissingSubagentTokensFrom fills absent child coverage from this checkpoint
@@ -1270,13 +1446,13 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 
 	if len(transcript) > 0 {
 		fullSessionUsage := agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
-		if hasTokenUsageData(fullSessionUsage) {
+		if HasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
 		}
 		logging.Debug(ctx, "copilot-cli: full-session token read produced no data, falling back to checkpoint usage")
 	}
 
-	if hasTokenUsageData(checkpointUsage) {
+	if HasTokenUsageData(checkpointUsage) {
 		return checkpointUsage
 	}
 
@@ -1604,7 +1780,7 @@ func calculateLiveTranscriptTokenUsage(
 	state.TokenUsage = replaceSubagentTokensFrom(state.TokenUsage, usage)
 	scoped := *usage
 	scoped.SubagentTokens = types.SubtractTokenUsage(usage.SubagentTokens, state.SubagentTokensBaseline)
-	if !hasTokenUsageData(scoped.SubagentTokens) {
+	if !HasTokenUsageData(scoped.SubagentTokens) {
 		// A zero delta is absence, not a checkpoint subagent total. Keeping an
 		// all-zero pointer would both change the JSON shape and prevent the normal
 		// SaveStep-computed window delta from filling this value later.
@@ -2085,8 +2261,46 @@ func reserveDoctorCondensationAttempt(ctx context.Context, state *SessionState) 
 	return checkpointID, nil
 }
 
+// openSessionCondensationRepository uses the session's recorded worktree when
+// it is still available. The state path only selects a registered worktree of
+// this repository; a removed, replaced, or unusable worktree falls back to the
+// caller's repository. Registration alone does not establish the repository's
+// identity. The caller owns the returned repository.
+func openSessionCondensationRepository(ctx context.Context, state *SessionState) (*git.Repository, error) {
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve current worktree: %w", err)
+	}
+	if filepath.IsAbs(state.WorktreePath) && filepath.Clean(state.WorktreePath) != filepath.Clean(current) {
+		currentMetadata, err := gitrepo.ResolveWorktreeMetadata(current)
+		if err != nil {
+			return nil, fmt.Errorf("resolve current repository metadata: %w", err)
+		}
+		sessionMetadata, err := gitrepo.ResolveWorktreeMetadata(state.WorktreePath)
+		// The metadata resolver validates linked-worktree registration. Compare
+		// the validated common directories without spawning git under the lock.
+		if err == nil && sameDir(currentMetadata.CommonDir, sessionMetadata.CommonDir) {
+			var repo *git.Repository
+			repo, err = gitrepo.OpenPath(state.WorktreePath)
+			if err == nil {
+				return repo, nil
+			}
+		}
+		// A home that exists but cannot be used falls back like a removed one;
+		// failing here would leave the session's work pending on every retry.
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, gitrepo.ErrWorktreeMetadataNotFound) {
+			logging.Warn(logging.WithComponent(ctx, "checkpoint"), "session's recorded worktree is unusable; condensing from the current worktree's repository",
+				slog.String("session_id", state.SessionID),
+				slog.String("recorded_worktree", state.WorktreePath),
+				slog.String("error", err.Error()))
+		}
+	}
+	return gitrepo.OpenPath(current) //nolint:wrapcheck // OpenPath provides repository context
+}
+
 // CondenseSessionByID condenses a session by its ID and cleans up.
-// This is used by "entire doctor" to salvage stuck sessions.
+// Sweep and doctor salvage pending work using the session's recorded branch,
+// not the caller's HEAD (nor a later checkout in the session's worktree).
 func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionID string) error {
 	logCtx := logging.WithComponent(ctx, "condense-by-id")
 
@@ -2096,12 +2310,6 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			slog.String("parent_session_id", state.ParentSessionID))
 		return releaseSubagentSessionWork(ctx, sessionID)
 	}
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
 
 	// Records of worktrees removed since the session's last turn end are
 	// pruned first: no commit can carry those files, and salvaging them would
@@ -2163,6 +2371,12 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			return ErrMutationSkip
 		}
 
+		repo, err := openSessionCondensationRepository(ctx, state)
+		if err != nil {
+			return fmt.Errorf("failed to open repository: %w", err)
+		}
+		defer repo.Close()
+
 		// Resolve the stored copy's root once: the condensation reads it, and
 		// a successful one releases it from the same root.
 		storedRoot := storedSessionRootOrNil(ctx, state)
@@ -2171,7 +2385,11 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// not only the home's.
 		homeFiles := state.FilesTouched
 		state.FilesTouched = state.PendingFiles()
-		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{reconcileInterrupted: true, storedRoot: storedRoot})
+		result, err := s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{
+			reconcileInterrupted: true,
+			storedRoot:           storedRoot,
+			recordedBranch:       &state.Branch,
+		})
 		state.FilesTouched = homeFiles
 		if err != nil {
 			return fmt.Errorf("failed to condense session: %w", err)

@@ -17,14 +17,13 @@ import (
 // Branch membership is expressed in repository/branch terms. The backing Change
 // IDs stay inside the API adapter and are never accepted as user selectors.
 func newTrailLinkCmd() *cobra.Command {
-	var fields projectTrailFields
-	var branch, base, action, key string
+	var status, branch, base, action, key string
 	cmd := &cobra.Command{
 		Use: "link <trail>", Short: "Link a repository branch to a trail",
 		Long: "Link an existing remote branch to a project trail. --branch defaults to the current branch. Use --branch-action create to create remote branch work from --base. Existing work and reviews are preserved; a branch belonging to another trail is rejected.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := fields.validate(cmd, false); err != nil {
+			if err := validateProjectTrailStatusFlag(cmd, status); err != nil {
 				return err
 			}
 			if err := ensureTrailRepoHasTarget(cmd, strings.TrimSpace(branch) != "", "pass --branch"); err != nil {
@@ -53,10 +52,7 @@ func newTrailLinkCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if fields.Title == "" {
-				fields.Title = branch // Stable across retries even if the parent's title changes.
-			}
-			request := projectTrailChangeRequest(fields, repoID, branch, base, action)
+			request := projectTrailChangeRequest(status, repoID, branch, base, action)
 			key = projectTrailIdempotencyKey(cmd.ErrOrStderr(), key)
 			out, err := linkProjectTrailChange(cmd.Context(), target, request, etag, key)
 			if err != nil {
@@ -69,7 +65,8 @@ func newTrailLinkCmd() *cobra.Command {
 			return nil
 		},
 	}
-	fields.flags(cmd)
+	// Title, description, type, priority, and assignees belong to the trail.
+	cmd.Flags().StringVar(&status, cmdStatus, "", "Lifecycle status (open, closed)")
 	addProjectTrailCreationFlags(cmd, &branch, &base, &action, &key)
 	addJSONFlag(cmd)
 	return cmd

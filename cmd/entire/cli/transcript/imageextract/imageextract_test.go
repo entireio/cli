@@ -346,7 +346,7 @@ func TestClaudeCodec_LeavesNonBase64Inline(t *testing.T) {
 // SQLite store, captured via the SidecarImageProvider path, not a transcript codec.
 func TestCodecFor_NonImageAgentsAreNil(t *testing.T) {
 	t.Parallel()
-	for _, at := range []string{"Cursor", "Gemini CLI", "OpenCode", "Pi", "Factory AI Droid", "Copilot CLI"} {
+	for _, at := range []string{"Cursor", "Gemini CLI", "OpenCode", "Factory AI Droid", "Copilot CLI"} {
 		if CodecFor(types.AgentType(at)) != nil {
 			t.Errorf("agent %q should not have an image codec yet", at)
 		}

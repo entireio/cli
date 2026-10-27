@@ -162,7 +162,7 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 					if inp := state["input"]; inp != nil {
 						toolBlock["input"] = inp
 					}
-					toolBlock["result"] = openCodeToolResult(state)
+					toolBlock["result"] = openCodeToolResult(unquote(part["tool"]), state)
 				}
 			}
 			content = append(content, toolBlock)
@@ -180,21 +180,29 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 	line.ID = msg.Info.ID
 	line.Content = contentJSON
 	if msg.Info.Tokens != nil {
-		line.InputTokens = msg.Info.Tokens.Input
-		line.OutputTokens = msg.Info.Tokens.Output
+		line.InputTokens = int64(msg.Info.Tokens.Input)
+		line.OutputTokens = int64(msg.Info.Tokens.Output)
 	}
 	appendLine(result, line)
 }
 
 // openCodeToolResult builds the compact {"output":"...","status":"success"|"error"}
 // object from an OpenCode tool state map.
-func openCodeToolResult(state map[string]json.RawMessage) json.RawMessage {
+func openCodeToolResult(tool string, state map[string]json.RawMessage) json.RawMessage {
 	r := ToolResult{
 		Output: unquote(state["output"]),
 		Status: ToolStatusSuccess,
 	}
 	if s := unquote(state["status"]); s != "" && s != "completed" {
 		r.Status = ToolStatusError
+	}
+	// The task tool records the subagent's session once it starts. Other
+	// tools' metadata is not theirs to interpret.
+	var metadata struct {
+		SessionID string `json:"sessionId"`
+	}
+	if tool == "task" && json.Unmarshal(state["metadata"], &metadata) == nil && metadata.SessionID != "" {
+		r.Agent = &ToolResultAgent{ID: metadata.SessionID}
 	}
 	b, err := json.Marshal(r)
 	if err != nil {

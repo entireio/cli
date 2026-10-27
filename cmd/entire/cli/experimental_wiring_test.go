@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
 
@@ -15,14 +16,21 @@ var experimentalRootCommands = []string{
 	"blame", "why", "experts", "runner",
 }
 
-// withVisible sets the experimental visibility flag for the test and restores
-// it afterward. Because it mutates a package global, callers must not run in
+// Version stamps standing in for a developer build and a stable release.
+// Experimental visibility is derived from the resolved version.
+const (
+	devBuildVersion = "dev"
+	releaseVersion  = "0.12.0"
+)
+
+// withBuildVersion stamps versioninfo.Version for the test and restores it
+// afterward. Because it mutates a package global, callers must not run in
 // parallel.
-func withVisible(t *testing.T, v string) {
+func withBuildVersion(t *testing.T, v string) {
 	t.Helper()
-	prev := experimental.Visible
-	experimental.Visible = v
-	t.Cleanup(func() { experimental.Visible = prev })
+	prev := versioninfo.Version
+	versioninfo.Version = v
+	t.Cleanup(func() { versioninfo.Version = prev })
 }
 
 func findCommand(parent *cobra.Command, name string) *cobra.Command {
@@ -35,10 +43,10 @@ func findCommand(parent *cobra.Command, name string) *cobra.Command {
 }
 
 // TestExperimental_VisibleInDevBuild verifies that, in a developer build
-// (Visible defaults to "true"), the experimental commands are shown and filed
-// under the experimental group. Cannot use t.Parallel — mutates a global.
+// (version "dev"), the experimental commands are shown and filed under the
+// experimental group. Cannot use t.Parallel — mutates a global.
 func TestExperimental_VisibleInDevBuild(t *testing.T) {
-	withVisible(t, "true")
+	withBuildVersion(t, devBuildVersion)
 
 	root := NewRootCmd()
 
@@ -60,12 +68,12 @@ func TestExperimental_VisibleInDevBuild(t *testing.T) {
 	}
 }
 
-// TestExperimental_HiddenInReleaseBuild verifies that, when GoReleaser stamps
-// Visible=false, the experimental commands are hidden, carry no group, and the
-// empty experimental group is never registered (so release help is unchanged).
-// Cannot use t.Parallel — mutates a global.
+// TestExperimental_HiddenInReleaseBuild verifies that, when the build carries
+// a stable release version, the experimental commands are hidden, carry no
+// group, and the empty experimental group is never registered (so release help
+// is unchanged). Cannot use t.Parallel — mutates a global.
 func TestExperimental_HiddenInReleaseBuild(t *testing.T) {
-	withVisible(t, "false")
+	withBuildVersion(t, releaseVersion)
 
 	root := NewRootCmd()
 

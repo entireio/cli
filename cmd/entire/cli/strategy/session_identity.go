@@ -18,9 +18,13 @@ import (
 // content, so every session with pending content here belongs in it —
 // concurrent sessions interleave by design) and the identity-matched session
 // when the committing process's ancestry names one that worktree matching
-// missed. There is no precedence between the two — an identity hit must
-// never suppress worktree matches, or concurrent same-worktree sessions
-// would drop out of the commit. The identity union is what makes an
+// missed. An identity hit never suppresses sessions homed in this worktree,
+// or concurrent same-worktree sessions would drop out of the commit. It does
+// replace the fallback's matches when no session is homed here: those belong
+// to other worktrees, and a session there that edited this worktree through a
+// shell command mid-turn (no record of it until turn end) is dropped too.
+// Without an identified committer (Windows, no recorded owner) the fallback's
+// matches still link. The identity union is what makes an
 // agent-made commit immune to worktree bookkeeping drift: an agent
 // committing in a sibling worktree still links to its own session
 // (guest-linked), where path matching alone found nothing or declined as
@@ -43,8 +47,16 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 	// where a subagent sharing its parent's agent process ties with the parent
 	// and wins on recency.
 	allStates = slices.DeleteFunc(allStates, (*SessionState).IsSubagentSession)
-	sessions, ambiguous := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	sessions, ambiguous, fromFallback := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
 	guest := s.findSessionByCommitAncestry(ctx, allStates)
+	if guest != nil && fromFallback {
+		// No session is homed here and ancestry names the committer: the
+		// fallback's sessions belong to other worktrees, and one there that
+		// is mid-turn would otherwise be condensed into this commit by the
+		// shortcuts that skip content checks. A session that recorded edits
+		// here still joins below, held to them.
+		sessions = nil
+	}
 	if guest != nil && !linkingSetContains(sessions, guest.SessionID) {
 		sessions = append(sessions, guest)
 	}

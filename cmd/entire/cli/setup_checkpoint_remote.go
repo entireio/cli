@@ -295,14 +295,19 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		}
 		return
 	}
+	// Every successful run ends by naming where checkpoints go and what that
+	// exposes: enable is the last step before transcripts start travelling with
+	// the user's pushes. A destination that cannot be resolved or confirmed is
+	// reported in place of that notice, on every run, unless a dedicated
+	// checkpoint_remote still receives uploads.
+	fmt.Fprintln(w)
 	if c.changed {
 		fmt.Fprintf(w, "Checkpoint destination set to: %s\n", c.name)
 		fmt.Fprintln(w, "Saved to .entire/settings.local.json for this clone.")
 	}
-	// A healthy destination nobody asked about is not reported: the command
-	// ends at "Ready." and the multi-remote note covers the ambiguous repos. A
-	// broken destination is reported on every run, because the user cannot
-	// otherwise learn that checkpoint sync is off.
+	// How the destination was chosen, and the alternatives, are reported only
+	// when the user touched it, and ahead of the destination line so the
+	// notice stays last; the multi-remote note covers ambiguous repos.
 	touched := c.name != "" || c.offered || c.dedicatedRequested
 	s, err := settings.Load(ctx)
 	if err != nil {
@@ -322,7 +327,10 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		if touched {
 			c.reportUnchangedDestination(w)
 			fmt.Fprintln(w, "Checkpoint pushing remains disabled.")
+		} else {
+			fmt.Fprintln(w, "Checkpoint uploads are off (push_sessions: false). Checkpoints stay in this clone.")
 		}
+		fmt.Fprintln(w, checkpointRedactionNotice)
 		return
 	}
 	resolved, err := strategy.ResolveCheckpointSyncRemote(ctx)
@@ -339,8 +347,9 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 			}
 		}
 		if dedicated {
-			fmt.Fprintf(w, "Cannot resolve checkpoint remote selection: %v. Dedicated checkpoint uploads can still proceed.\n", err)
 			c.reportUnchangedDestination(w)
+			fmt.Fprintf(w, "Cannot resolve checkpoint remote selection: %v. Dedicated checkpoint uploads can still proceed.\n", err)
+			printCheckpointPrivacyNotice(w, false)
 			return
 		}
 		fmt.Fprintf(w, "Checkpoint sync remains disabled: %v\n", err)
@@ -349,10 +358,9 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		return
 	}
 	if resolved.Name == "" {
-		if touched {
-			fmt.Fprintln(w, "No Git remotes configured. Checkpoints stay local until a remote is configured.")
-			c.reportUnchangedDestination(w)
-		}
+		c.reportUnchangedDestination(w)
+		fmt.Fprintln(w, "No Git remotes configured. Once you add one, checkpoints will be uploaded when you push to it.")
+		printCheckpointPrivacyNotice(w, true)
 		return
 	}
 	// Resolve a possible local claim before computing the destination summary.
@@ -383,39 +391,39 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		}
 	}
 
-	if !touched {
-		return
-	}
-	if !c.changed && !c.dedicatedRequested {
+	if touched && !c.changed && !c.dedicatedRequested {
 		fmt.Fprintf(w, "Keeping checkpoint destination: %s (%s)\n", destination, checkpointRemoteSourceLabel(resolved.Source))
 	}
 	c.reportUnchangedDestination(w)
+	if touched {
+		topology := inspectRemoteTopology(ctx)
+		for _, d := range topology.destinations {
+			if !dedicated && d.pinned {
+				url, effective, err := remote.PushURL(ctx, d.name)
+				if err == nil && effective {
+					fmt.Fprintf(w, "Pushes to %s still upload checkpoints to the dedicated destination: %s\n", d.name, gitremote.RedactURLOrPath(url))
+				}
+			}
+			if d.name != resolved.Name || !d.fansOut() {
+				continue
+			}
+			remoteTopology{destinations: []remoteDestination{d}, primaryIsRefs: topology.primaryIsRefs}.describeFanout(w)
+		}
+		if !dedicated && c.name == "" && resolved.Source != strategy.SyncRemoteSourceConfig {
+			for _, d := range topology.destinations {
+				if d.name != resolved.Name && !d.pinned && validateCheckpointPushRemote(ctx, root, d.name) == nil {
+					fmt.Fprintf(w, "To choose another destination for this clone, run `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
+					break
+				}
+			}
+		}
+	}
 	if dedicated {
 		fmt.Fprintf(w, "Checkpoint uploads use the dedicated destination: %s.\n", destination)
 	} else {
 		fmt.Fprintf(w, "Checkpoints will be uploaded when you push to %s.\n", resolved.Name)
 	}
-	topology := inspectRemoteTopology(ctx)
-	for _, d := range topology.destinations {
-		if !dedicated && d.pinned {
-			url, effective, err := remote.PushURL(ctx, d.name)
-			if err == nil && effective {
-				fmt.Fprintf(w, "Pushes to %s still upload checkpoints to the dedicated destination: %s\n", d.name, gitremote.RedactURLOrPath(url))
-			}
-		}
-		if d.name != resolved.Name || !d.fansOut() {
-			continue
-		}
-		remoteTopology{destinations: []remoteDestination{d}, primaryIsRefs: topology.primaryIsRefs}.describeFanout(w)
-	}
-	if !dedicated && c.name == "" && resolved.Source != strategy.SyncRemoteSourceConfig {
-		for _, d := range topology.destinations {
-			if d.name != resolved.Name && !d.pinned && validateCheckpointPushRemote(ctx, root, d.name) == nil {
-				fmt.Fprintf(w, "To choose another destination for this clone, run `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
-				break
-			}
-		}
-	}
+	printCheckpointPrivacyNotice(w, !dedicated)
 }
 
 // reportUnchangedDestination announces the absence of a change only when one
@@ -423,6 +431,23 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 func (c *enableCheckpointRemoteChoice) reportUnchangedDestination(w io.Writer) {
 	if c.name != "" && !c.changed {
 		fmt.Fprintln(w, "No checkpoint destination settings changed.")
+	}
+}
+
+const checkpointRedactionNotice = "  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`."
+
+// printCheckpointPrivacyNotice must directly follow the line saying where
+// checkpoints go, which its first line refers back to.
+// offerPrivateRepo is false when checkpoints already go to a dedicated repo.
+func printCheckpointPrivacyNotice(w io.Writer, offerPrivateRepo bool) {
+	fmt.Fprintln(w, "  They contain your agent transcripts. If that repo is public, anyone can read them.")
+	fmt.Fprintln(w, checkpointRedactionNotice)
+	// Clone-local, because the project file can lose: a local push_sessions
+	// overrides it, and a checkpoint_remote there owned by someone other than
+	// origin's owner is ignored, leaving uploads on the public remote.
+	fmt.Fprintf(w, "  To stop uploads: `entire configure --local --%s`\n", flagSkipPushSessions)
+	if offerPrivateRepo {
+		fmt.Fprintf(w, "  To use a separate private repo: `entire configure --local --%s github:<owner>/<repo>`\n", flagCheckpointRemote)
 	}
 }
 

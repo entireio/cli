@@ -346,6 +346,35 @@ type SubagentTranscriptFetcher interface {
 	FetchSubagentTranscript(ctx context.Context, agentID, toolUseID string, startedAt, completedAt time.Time) (string, error)
 }
 
+// LiveSubagentFileReporter is implemented by agents that can report what a
+// still-running subagent call has modified so far (OpenCode: by exporting the
+// child session). The co-authorship check in post-commit uses it for a live
+// task record, which has no transcript on disk until its stop hook runs. It
+// must not write anything a task record declares or a later capture reads: a
+// report that lands after the call's stop must not replace its transcript.
+type LiveSubagentFileReporter interface {
+	Agent
+
+	// LiveSubagentModifiedFiles returns the files the task call toolUseID,
+	// run by subagent agentID since startedAt (zero when unknown), has
+	// modified so far.
+	LiveSubagentModifiedFiles(ctx context.Context, agentID, toolUseID string, startedAt time.Time) ([]string, error)
+}
+
+// ChildSessionSubagents is implemented by agents whose subagents run as
+// sessions of their own (OpenCode child sessions): a child's token usage is
+// recorded only in its own session, never in the parent's transcript or its
+// subagent snapshot. The completion that claims a child's task record, whether
+// a real stop or the SessionEnd sweep, credits that usage to the parent
+// session's total, once per call. Do not implement it when the parent's
+// transcript already counts its children, or each child would count twice.
+type ChildSessionSubagents interface {
+	Agent
+
+	// SubagentUsageOutsideParent marks the capability; it does nothing.
+	SubagentUsageOutsideParent()
+}
+
 // SidecarImageProvider is implemented by agents that keep images OUTSIDE the
 // transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
 // SQLite blob store, not the JSONL transcript. The strategy layer calls this
@@ -393,11 +422,13 @@ type TokenCalculator interface {
 }
 
 // OutOfBandTokenSource provides token usage from a source other than the
-// transcript. Antigravity needs this for older agy, which writes no token
-// data into its transcript or hook payloads: its title/statusline pipe is the
-// only surface, captured to disk by `entire hooks antigravity title-tee` (see
-// agent/antigravity/statusline.go). Current agy writes per-call usage into the
-// transcript, which its TokenCalculator reads first.
+// transcript, for agents that write no token data into their transcript or
+// hook payloads. Older Antigravity's only surface is its title/statusline
+// pipe, captured to disk by `entire hooks antigravity title-tee` (see
+// agent/antigravity/statusline.go); current agy writes per-call usage into
+// the transcript, which its TokenCalculator reads first. Factory AI Droid
+// keeps a running total in the .settings.json beside each transcript (see
+// agent/factoryaidroid/tokens.go).
 //
 // Flow: the lifecycle calls SnapshotTokenBaseline at TurnStart and stores the
 // opaque baseline in PrePromptState; at TurnEnd (when transcript-based
@@ -408,14 +439,16 @@ type OutOfBandTokenSource interface {
 	Agent
 
 	// SnapshotTokenBaseline returns an opaque, agent-defined marker of the
-	// current cumulative token position for the session. A nil baseline with
-	// nil error means "no usage observed yet" (delta will count from zero).
-	SnapshotTokenBaseline(ctx context.Context, sessionID string) (json.RawMessage, error)
+	// current cumulative token position for the session. sessionRef is the
+	// hook's transcript path and may be empty. A nil baseline with nil error
+	// means "no usage observed yet" (delta will count from zero), unless the
+	// agent defines a nil baseline as "position unknown".
+	SnapshotTokenBaseline(ctx context.Context, sessionID, sessionRef string) (json.RawMessage, error)
 
 	// CalculateTokenUsageSince computes usage between the baseline and now.
 	// A nil result with nil error means no data is available (degrade to no
 	// token counts, never to an error).
-	CalculateTokenUsageSince(ctx context.Context, sessionID string, baseline json.RawMessage) (*TokenUsage, error)
+	CalculateTokenUsageSince(ctx context.Context, sessionID, sessionRef string, baseline json.RawMessage) (*TokenUsage, error)
 }
 
 // SubagentReference is the authoritative record of one spawned agent supplied
