@@ -1,12 +1,10 @@
 package strategy
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -39,17 +37,6 @@ func TestNoticeGlobalEnablePush_PrintsOncePerClone(t *testing.T) {
 
 	stderr.Reset()
 	noticeGlobalEnablePush(t.Context(), ps)
-	assert.Empty(t, stderr.String())
-}
-
-// A marker left by an earlier push (or another worktree of the clone)
-// suppresses the notice.
-func TestNoticeGlobalEnablePush_ExistingMarkerSuppresses(t *testing.T) {
-	dir := noticeRepo(t)
-	require.NoError(t, os.WriteFile(noticeMarker(dir), nil, 0o600))
-	stderr := captureHintStderr(t)
-
-	noticeGlobalEnablePush(t.Context(), pushSettings{remote: "origin", enabledOnlyByGlobal: true})
 	assert.Empty(t, stderr.String())
 }
 

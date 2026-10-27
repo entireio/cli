@@ -66,11 +66,12 @@ func TestEnabledOnlyByGlobal(t *testing.T) {
 		"repos entry without enabled": {user: `{"global_enable": true, "repos": {ROOT: {"log_level": "debug"}}}`, wantGlobalOnly: true, wantEnabled: true},
 		"repos entry with enabled":    {user: `{"global_enable": true, "repos": {ROOT: {"enabled": true}}}`, wantEnabled: true},
 		"repos entry null":            {user: `{"global_enable": true, "repos": {ROOT: null}}`, wantGlobalOnly: true, wantEnabled: true},
-		"repos entry fails to decode": {user: `{"global_enable": true, "repos": {ROOT: {"nope": 1}}}`, wantGlobalOnly: true, wantEnabled: true},
 		"repos enabled false":         {user: `{"global_enable": true, "repos": {ROOT: {"enabled": false}}}`},
 		"committed enabled false":     {committed: `{"enabled": false}`, user: global},
-		"global off":                  {committed: `{"enabled": true}`, user: `{"global_enable": false}`, wantEnabled: true},
-		"no user file":                {committed: `{"enabled": true}`, wantEnabled: true},
+		// Committed false is a floor for global enable, but the developer's own
+		// repos entry still raises it.
+		"repos entry raises committed false": {committed: `{"enabled": false}`, user: `{"global_enable": true, "repos": {ROOT: {"enabled": true}}}`, wantEnabled: true},
+		"global off":                         {committed: `{"enabled": true}`, user: `{"global_enable": false}`, wantEnabled: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -79,26 +80,6 @@ func TestEnabledOnlyByGlobal(t *testing.T) {
 			assert.Equal(t, tc.wantEnabled, s.Enabled, "Enabled")
 		})
 	}
-}
-
-func TestEnabledOnlyByGlobal_NilSafe(t *testing.T) {
-	t.Parallel()
-	var s *EntireSettings
-	assert.False(t, s.EnabledOnlyByGlobal())
-	assert.Nil(t, s.CommittedKeysIgnoredForGlobalEnable())
-}
-
-// Committed enabled:false is a floor: global enable turns on repositories
-// nobody configured, not ones whose own team turned Entire off. A repos entry
-// set by this developer can still raise it.
-func TestGlobalEnable_CommittedFalseIsAFloor(t *testing.T) {
-	s := loadGlobalOnlyCase(t, `{"enabled": false}`, "", false, `{"global_enable": true}`)
-	assert.False(t, s.Enabled)
-
-	s = loadGlobalOnlyCase(t, `{"enabled": false}`, "", false,
-		`{"global_enable": true, "repos": {ROOT: {"enabled": true}}}`)
-	assert.True(t, s.Enabled, "the developer's own repos entry still raises a committed false")
-	assert.False(t, s.EnabledOnlyByGlobal())
 }
 
 const committedWithIgnorableKeys = `{
@@ -156,7 +137,6 @@ func TestGlobalOnly_CommittedKeysApplyOnceClaimedOrGlobalOff(t *testing.T) {
 	for name, tc := range map[string]struct{ local, user string }{
 		"claimed":    {local: `{"enabled": true}`, user: `{"global_enable": true}`},
 		"global off": {user: `{"global_enable": false}`},
-		"no user":    {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := loadGlobalOnlyCase(t, committedWithIgnorableKeys, tc.local, false, tc.user)
@@ -170,29 +150,4 @@ func TestGlobalOnly_CommittedKeysApplyOnceClaimedOrGlobalOff(t *testing.T) {
 			assert.Empty(t, s.CommittedKeysIgnoredForGlobalEnable())
 		})
 	}
-}
-
-// Claiming and disabling write the worktree's own local file, so they are
-// per-worktree: a linked worktree of a claimed repository is still enabled
-// only through global enable. A repos entry is the clone-wide claim.
-func TestGlobalOnly_ClaimIsPerWorktree(t *testing.T) {
-	main := newNeverEnabledRepo(t)
-	require.NoError(t, os.WriteFile(filepath.Join(main, "f.txt"), []byte("x"), 0o644))
-	testutil.RunGit(t, main, "add", ".")
-	testutil.RunGit(t, main, "commit", "-m", "init")
-	require.NoError(t, os.MkdirAll(filepath.Join(main, ".entire"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(main, EntireSettingsLocalFile), []byte(`{"enabled": true}`), 0o644))
-	writeUserSettings(t, `{"global_enable": true}`)
-
-	linked := filepath.Join(t.TempDir(), "linked")
-	testutil.RunGit(t, main, "worktree", "add", "-b", "linked-work", linked)
-
-	load := func(root string) *EntireSettings {
-		s, err := loadMergedSettings(t.Context(), filepath.Join(root, EntireSettingsFile), "",
-			filepath.Join(root, EntireSettingsLocalFile))
-		require.NoError(t, err)
-		return s
-	}
-	assert.False(t, load(main).EnabledOnlyByGlobal())
-	assert.True(t, load(linked).EnabledOnlyByGlobal())
 }

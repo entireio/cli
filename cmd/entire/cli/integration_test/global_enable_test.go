@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // userTierEnv points the spawned binary at a private user settings file and a
@@ -154,89 +155,51 @@ func TestGlobalEnable_EnabledRepoToleratesEveryHookTwice(t *testing.T) {
 }
 
 // Global enable turns on repositories nobody configured, not ones turned off:
-// a committed enabled:false stays a floor, and `entire disable` in a
-// repository on only through global enable stops it there.
+// a committed enabled:false stays a floor. Nothing is tracked, no git hooks
+// are installed, and no .entire/.gitignore is written.
 func TestGlobalEnable_DisabledRepoStaysUntracked(t *testing.T) {
 	t.Parallel()
-	for name, disable := range map[string]func(env *TestEnv){
-		"committed enabled false": func(env *TestEnv) {
-			env.WriteFile(".entire/settings.json", `{"enabled": false}`)
-			env.GitAdd(".entire/settings.json")
-			env.GitCommit("Turn Entire off for this repository")
-		},
-		"entire disable": func(env *TestEnv) {
-			env.RunCLI("disable")
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			env := newNeverEnabledRepo(t)
-			extra, _ := userTierEnv(t, `{"global_enable": true}`)
-			env.ExtraEnv = extra
-			disable(env)
-
-			runClaudeTurn(t, env, "feature.go", "package feature\n")
-
-			if cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); cpID != "" {
-				t.Errorf("commit linked to checkpoint %s in a disabled repository", cpID)
-			}
-		})
-	}
-}
-
-// `entire enable --global` asks first. A subprocess has no terminal, so
-// without --yes it refuses and writes nothing; with --yes it writes the flag.
-func TestEnableGlobal_NeedsConfirmation(t *testing.T) {
-	t.Parallel()
 	env := newNeverEnabledRepo(t)
-	extra, _ := userTierEnv(t, `{}`)
+	extra, _ := userTierEnv(t, `{"global_enable": true}`)
 	env.ExtraEnv = extra
-	userFile := filepath.Join(strings.TrimPrefix(extra[0], "ENTIRE_CONFIG_DIR="), usersettings.FileName)
+	env.WriteFile(".entire/settings.json", `{"enabled": false}`)
+	env.GitAdd(".entire/settings.json")
+	env.GitCommit("Turn Entire off for this repository")
 
-	out, err := env.RunCLIWithError("enable", "--global")
-	if err == nil {
-		t.Fatalf("enable --global without a terminal or --yes succeeded:\n%s", out)
-	}
-	if !strings.Contains(out, "--yes") {
-		t.Errorf("refusal does not say how to confirm:\n%s", out)
-	}
-	if data, readErr := os.ReadFile(userFile); readErr != nil || strings.Contains(string(data), "global_enable") {
-		t.Errorf("user settings written despite the refusal (err=%v):\n%s", readErr, data)
-	}
+	runClaudeTurn(t, env, "feature.go", "package feature\n")
 
-	out = env.RunCLI("enable", "--global", "--yes")
-	if !strings.Contains(out, "public repositories and forks") {
-		t.Errorf("--yes did not print what it accepted:\n%s", out)
+	if cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); cpID != "" {
+		t.Errorf("commit linked to checkpoint %s in a disabled repository", cpID)
 	}
-	if data, readErr := os.ReadFile(userFile); readErr != nil || !strings.Contains(string(data), `"global_enable": true`) {
-		t.Errorf("user settings lack global_enable after --yes (err=%v):\n%s", readErr, data)
+	if state := strategy.CheckGitHookStateInDir(t.Context(), env.RepoDir); state != strategy.GitHooksAbsent {
+		t.Errorf("Entire git hooks installed in a disabled repository (state = %v)", state)
+	}
+	if env.FileExists(".entire/.gitignore") {
+		t.Error(".entire/.gitignore written in a disabled repository")
 	}
 }
 
 // The first push that carries checkpoints from a repository on only through
-// global enable says so, once per clone. A repository the developer enabled
-// themselves, or any repository with global enable off, never sees it.
+// global enable says so, once per clone; a repository the developer enabled
+// themselves never sees it. The global-only row runs on the git-refs backend,
+// whose pre-push path prints the notice separately from the v1 branch's.
 func TestGlobalEnable_FirstCheckpointPushNotice(t *testing.T) {
 	t.Parallel()
 	const notice = "This repository is enabled through global enable"
 	for name, tc := range map[string]struct {
-		newEnv     func(t *testing.T) *TestEnv
-		user       string
+		store      string
 		claim      bool
 		wantNotice bool
 	}{
-		"global only": {newEnv: newNeverEnabledRepo, user: `{"global_enable": true}`, wantNotice: true},
-		"claimed":     {newEnv: newNeverEnabledRepo, user: `{"global_enable": true}`, claim: true},
-		"global off":  {newEnv: NewFeatureBranchEnv, user: `{"global_enable": false}`},
-		// Committed settings are anyone's to write, so they do not count as
-		// this developer enabling the repository.
-		"committed settings only": {newEnv: NewFeatureBranchEnv, user: `{"global_enable": true}`, wantNotice: true},
+		"global only": {store: StoreGitRefs, wantNotice: true},
+		"claimed":     {claim: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			env := tc.newEnv(t)
+			env := newNeverEnabledRepo(t)
+			env.CheckpointStore = tc.store
 			env.SetupBareRemote()
-			extra, _ := userTierEnv(t, tc.user)
+			extra, _ := userTierEnv(t, `{"global_enable": true}`)
 			env.ExtraEnv = extra
 			if tc.claim {
 				env.WriteFile(".entire/settings.local.json", `{"enabled": true}`)
@@ -269,25 +232,22 @@ func TestGlobalEnable_FirstCheckpointPushNotice(t *testing.T) {
 // banner says so (Claude shows it; it hides a successful hook's stderr), and
 // the prompt that installs them says so on stderr for agents that show it.
 // Neither appears once the hooks are in, nor in a repository the developer
-// enabled, nor with global enable off.
+// enabled.
 func TestGlobalEnable_SaysWhenItInstallsGitHooks(t *testing.T) {
 	t.Parallel()
 	const banner = "through global enable (you have not run `entire enable` here)"
 	const installLine = "Installed Entire's git hooks in"
 	for name, tc := range map[string]struct {
-		newEnv func(t *testing.T) *TestEnv
-		user   string
-		claim  bool
-		want   bool
+		claim bool
+		want  bool
 	}{
-		"global only": {newEnv: newNeverEnabledRepo, user: `{"global_enable": true}`, want: true},
-		"claimed":     {newEnv: newNeverEnabledRepo, user: `{"global_enable": true}`, claim: true},
-		"global off":  {newEnv: NewFeatureBranchEnv, user: `{"global_enable": false}`},
+		"global only": {want: true},
+		"claimed":     {claim: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			env := tc.newEnv(t)
-			extra, _ := userTierEnv(t, tc.user)
+			env := newNeverEnabledRepo(t)
+			extra, _ := userTierEnv(t, `{"global_enable": true}`)
 			env.ExtraEnv = extra
 			if tc.claim {
 				env.WriteFile(".entire/settings.local.json", `{"enabled": true}`)

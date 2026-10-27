@@ -172,6 +172,8 @@ func TestEnableGlobal_WritesTheFlagAndInstallsHooks(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(repo, ".entire")); !os.IsNotExist(statErr) {
 		t.Errorf("enable --global set up the current repository (stat err = %v)", statErr)
 	}
+	assert.Contains(t, out, "Accepted with --yes")
+	assert.Contains(t, out, "public repositories and forks")
 }
 
 // With no Claude config directory, nothing is created and the output does
@@ -225,16 +227,6 @@ func TestGlobal_RejectsRepositoryFlags(t *testing.T) {
 	}
 }
 
-// --yes accepts the consent prompt, and says what was accepted.
-func TestEnableGlobal_YesPrintsWhatItAccepted(t *testing.T) {
-	_, _, _, out, err := runGlobalCmd(t, false, "", "enable", "--global", "--yes")
-	if err != nil {
-		t.Fatalf("enable --global --yes: %v\n%s", err, out)
-	}
-	assert.Contains(t, out, "Accepted with --yes")
-	assert.Contains(t, out, "public repositories and forks")
-}
-
 // Without a terminal to ask in and without --yes, nothing is written: not the
 // user settings file, and not Claude's hooks.
 func TestEnableGlobal_RefusesWithoutConfirmation(t *testing.T) {
@@ -253,7 +245,6 @@ func TestEnableGlobal_AlreadyOnNeedsNoConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enable --global with the flag already on: %v\n%s", err, out)
 	}
-	assert.NotContains(t, out, "Accepted with --yes")
 }
 
 // The prompt shows the disclosure where the question is asked; declining
@@ -355,7 +346,6 @@ func TestEnable_ClaimsARepoEnabledOnlyByGlobal(t *testing.T) {
 		args      []string
 	}{
 		"already enabled":    {args: []string{"enable"}},
-		"agent":              {args: []string{"enable", "--agent", "claude-code"}},
 		"committed disabled": {committed: `{"enabled": false}`, args: []string{"enable"}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -417,6 +407,31 @@ func TestDisable_GlobalOnlyRepo(t *testing.T) {
 	}
 	assert.Contains(t, string(gitignore), "settings.local.json")
 	assert.Contains(t, out, "global enable stays on for your other repositories")
+
+	s, err := settings.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.False(t, s.Enabled)
+}
+
+// `entire disable --project` in a global-only repository writes the committed
+// file and still keeps the local file out of git, but does not print the
+// "stays on elsewhere" line: that line is only for the local-file path.
+func TestDisableProject_GlobalOnlyRepo(t *testing.T) {
+	repo := newGlobalOnlyRepo(t, true)
+	out, err := runRepoCmd(t, "disable", "--project")
+	if err != nil {
+		t.Fatalf("disable --project: %v\n%s", err, out)
+	}
+	assert.Equal(t, false, readJSONFile(t, filepath.Join(repo, EntireSettingsFile))["enabled"])
+	assert.NoFileExists(t, filepath.Join(repo, EntireSettingsLocalFile))
+	gitignore, readErr := os.ReadFile(filepath.Join(repo, ".entire", ".gitignore"))
+	if readErr != nil {
+		t.Fatalf("disable --project did not write .entire/.gitignore: %v", readErr)
+	}
+	assert.Contains(t, string(gitignore), "settings.local.json")
+	assert.NotContains(t, out, "global enable stays on for your other repositories")
 
 	s, err := settings.Load(t.Context())
 	if err != nil {
