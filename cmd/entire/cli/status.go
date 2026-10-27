@@ -200,7 +200,13 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		}
 		fmt.Fprintln(w, formatSettingsStatus(label, localSettings, sty))
 		if reason := effectiveSettings.LocalLayerRejection(); reason != "" {
-			fmt.Fprintf(w, "  %s\n  fix with: git rm --cached %s\n", reason, settings.EntireSettingsLocalFile)
+			git := "git"
+			if localInherited {
+				// The file is tracked in the main worktree's index; from here a
+				// bare `git rm` would touch this worktree's index instead.
+				git = "git -C " + strategy.ShellQuoteForDisplay(filepath.Dir(filepath.Dir(localSettingsPath)))
+			}
+			fmt.Fprintf(w, "  %s\n  fix with: %s rm --cached %s\n", reason, git, settings.EntireSettingsLocalFile)
 		}
 	}
 

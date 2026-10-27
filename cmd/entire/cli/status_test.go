@@ -3402,3 +3402,33 @@ func TestRunStatus_LinkedWorktreeUsesMainLocalSettings(t *testing.T) {
 		t.Errorf("detailed status should label the inherited local file, got: %s", detailed.String())
 	}
 }
+
+// An inherited local file tracked in the main worktree's index is rejected; the
+// fix must run against that index, not the linked worktree's.
+func TestRunStatus_LinkedWorktreeTrackedInheritedFileFixNamesMainWorktree(t *testing.T) {
+	mainRoot := t.TempDir()
+	testutil.InitRepo(t, mainRoot)
+	testutil.WriteFile(t, mainRoot, "f.txt", "x")
+	testutil.RunGit(t, mainRoot, "add", "f.txt")
+	testutil.RunGit(t, mainRoot, "commit", "-q", "-m", "init")
+	testutil.WriteFile(t, mainRoot, settings.EntireSettingsFile, testSettingsEnabled)
+	testutil.WriteFile(t, mainRoot, settings.EntireSettingsLocalFile, `{"log_level":"debug"}`)
+	testutil.RunGit(t, mainRoot, "add", "-f", settings.EntireSettingsLocalFile)
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, mainRoot, "worktree", "add", "-q", "-b", "feature", linked)
+	testutil.WriteFile(t, linked, settings.EntireSettingsFile, testSettingsEnabled)
+	t.Chdir(linked)
+
+	var detailed bytes.Buffer
+	if err := runStatus(context.Background(), &detailed, true, false); err != nil {
+		t.Fatalf("runStatus(detailed) error = %v", err)
+	}
+	resolvedMain, err := filepath.EvalSymlinks(mainRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "git -C " + resolvedMain + " rm --cached " + settings.EntireSettingsLocalFile
+	if !strings.Contains(detailed.String(), want) {
+		t.Errorf("want the fix %q, got:\n%s", want, detailed.String())
+	}
+}

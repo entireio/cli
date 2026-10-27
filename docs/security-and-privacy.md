@@ -375,11 +375,14 @@ Linked worktrees (`git worktree add`) are created without the gitignored
 `.entire/settings.local.json`. A linked worktree that has none of its own uses
 the main worktree's file, and the untracked check runs against the **main
 worktree's** index and `HEAD`, because that is where the file lives. Writes from
-such a worktree (`entire configure --local`, answering "always" at a prompt) go
-to that same file, so there is one local settings file per clone unless a
-worktree creates its own; a worktree with its own file uses only that file. Bare
-repositories and `--separate-git-dir` layouts have no main worktree, so their
-worktrees use only their own file.
+such a worktree (`entire configure --local`, `entire disable`, answering
+"always" at a prompt) go to that same file, so they change every worktree that
+has no file of its own, and the command output names the main worktree's file.
+There is one local settings file per clone unless a worktree creates its own; a
+worktree with its own file uses only that file. A bare repository has no main
+worktree to inherit from. With `--separate-git-dir` the main worktree exists but
+cannot be derived from the common directory, so inheritance is not attempted;
+in both cases a worktree uses only its own file.
 
 Rejection is a downgrade, never an error: discovery simply does not run.
 `entire status` names the setting and where it has to move, and the same reason

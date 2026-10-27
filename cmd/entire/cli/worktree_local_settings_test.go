@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -157,5 +159,25 @@ func TestMaybePromptVercelDeploymentDisable_LinkedWorktreeKeepsInheritedSettings
 	}
 	if !s.ExternalAgents || !s.Vercel {
 		t.Fatalf("want the inherited grant kept and vercel set, got %+v", s)
+	}
+}
+
+// A --local write from a linked worktree changes the main worktree's file, so
+// the output must name that file rather than the worktree-relative path.
+func TestSettingsTargetFile_LinkedWorktreeNamesInheritedFile(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir mutates process-global cwd.
+	mainRoot, _ := chdirLinkedWorktree(t, `{"enabled":true}`)
+
+	_, display := settingsTargetFile(context.Background(), true, false)
+	if !strings.Contains(display, "inherited from the main worktree") || !strings.Contains(display, mainRoot) {
+		t.Fatalf("display = %q, want it to name the main worktree's file", display)
+	}
+
+	var out bytes.Buffer
+	if err := runDisable(context.Background(), &out, false); err != nil {
+		t.Fatalf("runDisable() error = %v", err)
+	}
+	if !strings.Contains(out.String(), mainRoot) {
+		t.Fatalf("disable output = %q, want it to name the main worktree's file", out.String())
 	}
 }

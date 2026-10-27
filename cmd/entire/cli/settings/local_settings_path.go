@@ -66,8 +66,9 @@ func localSettingsPathIn(worktreeRoot string) (string, bool) {
 // mainWorktreeOf returns the main worktree of a linked worktree. The main
 // worktree is the parent of a common dir named .git (the derivation
 // trailWorktreeBaseRoot uses), confirmed by resolving its own metadata back to
-// the same common dir. Bare repositories and --separate-git-dir layouts have
-// no such parent and report false.
+// the same common dir. A bare repository has no main worktree; with
+// --separate-git-dir one exists, but the common dir is not named .git, so it
+// cannot be derived from it. Both report false.
 func mainWorktreeOf(worktreeRoot string) (string, bool) {
 	meta, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil || meta.WorktreeID == "" || filepath.Base(meta.CommonDir) != ".git" {
