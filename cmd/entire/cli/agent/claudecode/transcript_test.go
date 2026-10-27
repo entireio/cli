@@ -1363,3 +1363,22 @@ func TestCalculateSubagentTokenUsage_RecordsModel(t *testing.T) {
 		t.Errorf("CalculateTokenUsage must stay unlabelled, got %q", main.Model)
 	}
 }
+
+// A zero-usage message that names its model is still a model call, so the
+// subagent's call count matches the unsplit count; only a model-less
+// <synthetic> API-error entry is left out.
+func TestCalculateSubagentTokenUsage_CountsZeroUsageCallsWithAModel(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"type":"assistant","uuid":"s1","message":{"id":"m1","model":"claude-haiku-4-5","usage":{"input_tokens":3,"output_tokens":5}}}
+{"type":"assistant","uuid":"s2","message":{"id":"m2","model":"claude-haiku-4-5","usage":{"input_tokens":0,"output_tokens":0}}}
+{"type":"assistant","uuid":"s3","message":{"id":"m3","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
+`)
+	usage, err := (&ClaudeCodeAgent{}).CalculateSubagentTokenUsage(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Model != "claude-haiku-4-5" || usage.ByModel != nil || usage.APICallCount != 2 {
+		t.Errorf("subagent usage = %+v, want haiku only and 2 calls", usage)
+	}
+}

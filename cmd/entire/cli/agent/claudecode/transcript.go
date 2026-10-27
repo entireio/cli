@@ -154,15 +154,16 @@ func addModelsByMessageID(modelByMessageID map[string]string, transcript []Trans
 
 // sumUsageByModel totals usageByMessageID like sumUsage, split by the model
 // that produced each message so subagents on different models stay apart
-// (see TokenUsage.ByModel). A message with no recorded usage is not a model
-// call and is left out.
+// (see TokenUsage.ByModel). A message with no usage and no model (Claude
+// Code's <synthetic> API-error entry) is not a model call and is left out, as
+// the transcript library leaves it; one naming a model still counts as a call.
 func sumUsageByModel(usageByMessageID map[string]messageUsage, modelByMessageID map[string]string) *agent.TokenUsage {
 	byModel := make(map[string]map[string]messageUsage)
 	for msgID, u := range usageByMessageID {
-		if u == (messageUsage{}) {
+		model, named := modelByMessageID[msgID]
+		if u == (messageUsage{}) && !named {
 			continue
 		}
-		model := modelByMessageID[msgID]
 		if byModel[model] == nil {
 			byModel[model] = make(map[string]messageUsage)
 		}
