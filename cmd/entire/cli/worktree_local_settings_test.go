@@ -114,3 +114,48 @@ func TestUpdateSummaryTimeoutSetting_LinkedWorktreeKeepsInheritedSettings(t *tes
 		t.Fatalf("want the grant kept and the timeout added, got external_agents=%v timeout=%d", s.ExternalAgents, s.SummaryTimeoutSeconds)
 	}
 }
+
+// Setting the checkpoint backend with --local in a linked worktree must read
+// the file it saves (the inherited one), not the worktree's missing own file.
+func TestUpdateCheckpointBackend_LinkedWorktreeKeepsInheritedSettings(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir mutates process-global cwd.
+	mainRoot, linked := chdirLinkedWorktree(t, `{"enabled":true,"external_agents":true}`)
+
+	if err := updateCheckpointBackend(context.Background(), io.Discard, EnableOptions{UseLocalSettings: true, CheckpointBackend: "refs"}); err != nil {
+		t.Fatalf("updateCheckpointBackend() error = %v", err)
+	}
+
+	assertNoWorktreeLocalFile(t, linked)
+	s, err := settings.LoadFromFile(filepath.Join(mainRoot, settings.EntireSettingsLocalFile))
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	if !s.ExternalAgents {
+		t.Fatalf("the inherited external_agents grant was dropped: %+v", s)
+	}
+}
+
+// Recording an already-disabled Vercel deployment with --local in a linked
+// worktree must keep the inherited file's settings.
+func TestMaybePromptVercelDeploymentDisable_LinkedWorktreeKeepsInheritedSettings(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir mutates process-global cwd.
+	mainRoot, linked := chdirLinkedWorktree(t, `{"enabled":true,"external_agents":true}`)
+	testutil.WriteFile(t, linked, "vercel.json", `{"git":{"deploymentEnabled":{"entire/**":false}}}`)
+
+	changed, err := maybePromptVercelDeploymentDisable(context.Background(), io.Discard, settings.EntireSettingsLocalFile, func() (bool, error) {
+		t.Fatal("no prompt expected: vercel.json already disables entire/** deployments")
+		return false, nil
+	})
+	if err != nil || !changed {
+		t.Fatalf("maybePromptVercelDeploymentDisable() = %v, %v; want a settings change", changed, err)
+	}
+
+	assertNoWorktreeLocalFile(t, linked)
+	s, err := settings.LoadFromFile(filepath.Join(mainRoot, settings.EntireSettingsLocalFile))
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	if !s.ExternalAgents || !s.Vercel {
+		t.Fatalf("want the inherited grant kept and vercel set, got %+v", s)
+	}
+}

@@ -2693,7 +2693,10 @@ func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, target
 			configDisplay = configDisplayLocal
 		}
 
-		targetSettingsPath := filepath.Join(repoRoot, targetFile)
+		targetSettingsPath, err := settings.FilePath(ctx, targetFile)
+		if err != nil {
+			return false, fmt.Errorf("resolve settings path: %w", err)
+		}
 		targetSettings, err := settings.LoadFromFile(targetSettingsPath)
 		if err != nil {
 			return false, fmt.Errorf("load settings: %w", err)
