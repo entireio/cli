@@ -596,6 +596,12 @@ type TaskRecord struct {
 	SubagentType    string `json:"subagent_type,omitempty"`
 	TaskDescription string `json:"task_description,omitempty"`
 
+	// SubagentModel is the model the subagent ran on, when an agent names it
+	// only in a hook payload rather than in usage it reports (Cursor's
+	// subagentStart subagent_model, which carries no token counts to label).
+	// Empty when unknown.
+	SubagentModel string `json:"subagent_model,omitempty"`
+
 	// DeclaredTranscriptPath is the subagent transcript path an agent's stop
 	// hook declared (e.g. Claude Code's agent_transcript_path, or the
 	// equivalent Codex/Cursor field) — the path #2058 says must not be lost

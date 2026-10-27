@@ -518,6 +518,7 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 		AgentID:                     task.AgentID,
 		SubagentType:                task.SubagentType,
 		TaskDescription:             redact.String(task.TaskDescription),
+		SubagentModel:               task.SubagentModel,
 		Files:                       task.Files,
 		TokenUsage:                  task.TokenUsage,
 		StartedAt:                   task.StartedAt,

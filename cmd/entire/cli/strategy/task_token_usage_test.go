@@ -153,6 +153,17 @@ func TestMaterializeTaskRecords_RecountsTokensFromStoredTranscript(t *testing.T)
 	require.Contains(t, string(payloads[0].Transcript.Bytes()), "msg_2")
 }
 
+// A recount records the model that produced the subagent's tokens, read from
+// the transcript's own per-message model.
+func TestCondensedTaskTokenUsage_RecordsModel(t *testing.T) {
+	t.Parallel()
+
+	withModel := `{"type":"assistant","message":{"id":"msg_1","model":"claude-haiku-4-5","usage":{"input_tokens":3,"output_tokens":40}}}` + "\n"
+	got := condensedTaskTokenUsage(context.Background(), claudecode.NewClaudeCodeAgent(),
+		session.TaskRecord{TokenUsageFromTranscript: true, CompletedAt: time.Now()}, []byte(withModel))
+	require.Equal(t, &agent.TokenUsage{InputTokens: 3, OutputTokens: 40, APICallCount: 1, Model: "claude-haiku-4-5"}, got)
+}
+
 // TestChildSessionTokens_EachChildCountsOnceAcrossWindows walks two
 // checkpoint windows: a foreground child credited during turn 1, then a
 // background child credited after turn 2 ended. Each checkpoint stores only

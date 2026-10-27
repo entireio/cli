@@ -417,6 +417,33 @@ func TestParseHookEvent_SubagentStart(t *testing.T) {
 	}
 }
 
+// subagentStart's subagent_model is the only place Cursor names a
+// subagent's model; placeholders that name no model are dropped.
+func TestParseHookEvent_SubagentStartModel(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ raw, want string }{
+		{"claude-4.5-haiku", "claude-4.5-haiku"},
+		{" gpt-5.5 ", "gpt-5.5"},
+		{"auto", ""},
+		{"Default", ""},
+		{"", ""},
+	} {
+		raw, want := tc.raw, tc.want
+		input, err := json.Marshal(map[string]any{
+			"conversation_id": "main-session",
+			"subagent_id":     "sub_abc123",
+			"subagent_model":  raw,
+			"task":            "do something",
+		})
+		require.NoError(t, err)
+		event, err := (&CursorAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStart, strings.NewReader(string(input)))
+		require.NoError(t, err)
+		require.NotNil(t, event)
+		require.Equal(t, want, event.SubagentModel, "subagent_model %q", raw)
+	}
+}
+
 func TestParseHookEvent_SubagentEnd(t *testing.T) {
 	t.Parallel()
 

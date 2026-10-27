@@ -496,6 +496,7 @@ type checkpointTaskJSON struct {
 	AgentID         string            `json:"agent_id,omitempty"`
 	SubagentType    string            `json:"subagent_type,omitempty"`
 	TaskDescription string            `json:"task_description,omitempty"`
+	SubagentModel   string            `json:"subagent_model,omitempty"`
 	StartedAt       *time.Time        `json:"started_at,omitempty"`
 	CompletedAt     *time.Time        `json:"completed_at,omitempty"`
 	Files           []string          `json:"files,omitempty"`
@@ -702,6 +703,7 @@ func taskEntryToJSON(entry checkpoint.TaskEntry) checkpointTaskJSON {
 		AgentID:                     rec.AgentID,
 		SubagentType:                rec.SubagentType,
 		TaskDescription:             rec.TaskDescription,
+		SubagentModel:               rec.SubagentModel,
 		Files:                       rec.Files,
 		TokenUsage:                  boundedTokenUsage(rec.TokenUsage),
 		TranscriptStored:            &stored,
