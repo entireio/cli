@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // factoryImporter imports Factory AI Droid transcripts
@@ -26,13 +27,14 @@ func (factoryImporter) Name() string { return string(agent.AgentNameFactoryAIDro
 func (factoryImporter) AgentType() types.AgentType { return agent.AgentTypeFactoryAIDroid }
 
 // Discover returns Factory transcript files for the repo modified within the
-// lookback window.
+// lookback window whose session_start cwd is inside repoRoot (see
+// recordedCwdIn).
 func (factoryImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
 	dir, err := resolveDir(repoRoot, overridePath, "factory", (&factoryaidroid.FactoryAIDroidAgent{}).GetSessionDir)
 	if err != nil {
 		return nil, err
 	}
-	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(".jsonl", identitySessionID))
+	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(identitySessionID), recordedCwdIn(repoRoot))
 }
 
 // SplitTurns produces one Turn per user-prompt envelope, bounded by the next.
@@ -84,7 +86,7 @@ func factoryPromptText(raw []byte) (string, bool) {
 	var role struct {
 		Role string `json:"role"`
 	}
-	if err := json.Unmarshal(env.Message, &role); err != nil || role.Role != transcript.TypeUser {
+	if err := json.Unmarshal(env.Message, &role); err != nil || role.Role != transcriptlib.TypeUser {
 		return "", false
 	}
 	text := transcript.ExtractUserContent(env.Message)

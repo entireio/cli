@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -16,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -48,41 +49,8 @@ func newTestCmd(t *testing.T) (*cobra.Command, *bytes.Buffer) {
 // testBaseCommit is a fake commit hash used across classifySession tests.
 const testBaseCommit = "abcdef1234567890abcdef1234567890abcdef12"
 
-// createShadowBranchRef creates a shadow branch reference in the repo for
-// the given base commit and worktree ID. Uses an empty tree commit.
-func createShadowBranchRef(t *testing.T, repo *git.Repository, baseCommit, worktreeID string) {
-	t.Helper()
-
-	// Create empty tree
-	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
-	treeObj := repo.Storer.NewEncodedObject()
-	require.NoError(t, emptyTree.Encode(treeObj))
-	treeHash, err := repo.Storer.SetEncodedObject(treeObj)
-	require.NoError(t, err)
-
-	// Create commit
-	commitObj := &object.Commit{
-		Author:    object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
-		Committer: object.Signature{Name: "test", Email: "test@test.com", When: time.Now()},
-		Message:   "shadow checkpoint",
-		TreeHash:  treeHash,
-	}
-	enc := repo.Storer.NewEncodedObject()
-	require.NoError(t, commitObj.Encode(enc))
-	commitHash, err := repo.Storer.SetEncodedObject(enc)
-	require.NoError(t, err)
-
-	// Create branch reference
-	branchName := checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
-	refName := plumbing.NewBranchReferenceName(branchName)
-	ref := plumbing.NewHashReference(refName, commitHash)
-	require.NoError(t, repo.Storer.SetReference(ref))
-}
-
 func TestClassifySession_ActiveStale_NilInteractionTime(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:           "test-active-nil-time",
@@ -92,18 +60,15 @@ func TestClassifySession_ActiveStale_NilInteractionTime(t *testing.T) {
 		LastInteractionTime: nil,
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 
 	require.NotNil(t, result, "active session with nil LastInteractionTime should be stuck")
 	assert.Contains(t, result.Reason, "active, started")
 	assert.Equal(t, 3, result.CheckpointCount)
-	assert.False(t, result.HasShadowBranch)
 }
 
 func TestClassifySession_ActiveStale_OldInteractionTime(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	twoHoursAgo := time.Now().Add(-2 * time.Hour)
 	state := &strategy.SessionState{
@@ -116,7 +81,7 @@ func TestClassifySession_ActiveStale_OldInteractionTime(t *testing.T) {
 	}
 
 	now := time.Now()
-	result := classifySession(state, repo, now)
+	result := classifySession(state, now)
 
 	require.NotNil(t, result, "active session with old interaction time should be stuck")
 	assert.Contains(t, result.Reason, "active, last interaction")
@@ -125,9 +90,7 @@ func TestClassifySession_ActiveStale_OldInteractionTime(t *testing.T) {
 }
 
 func TestClassifySession_ActiveRecent_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	fiveMinutesAgo := time.Now().Add(-5 * time.Minute)
 	state := &strategy.SessionState{
@@ -138,106 +101,72 @@ func TestClassifySession_ActiveRecent_Healthy(t *testing.T) {
 		LastInteractionTime: &fiveMinutesAgo,
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 	assert.Nil(t, result, "active session with recent interaction should be healthy")
 }
 
 func TestClassifySession_EndedWithUncondensedData(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseCommit := testBaseCommit
-	createShadowBranchRef(t, repo, baseCommit, "")
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:    "test-ended-uncondensed",
-		BaseCommit:   baseCommit,
+		BaseCommit:   testBaseCommit,
 		Phase:        session.PhaseEnded,
 		StepCount:    3,
 		FilesTouched: []string{"main.go"},
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 
-	require.NotNil(t, result, "ended session with checkpoints and shadow branch should be stuck")
+	require.NotNil(t, result, "ended session with uncondensed steps should be stuck")
 	assert.Equal(t, "ended with uncondensed checkpoint data", result.Reason)
-	assert.True(t, result.HasShadowBranch)
 	assert.Equal(t, 3, result.CheckpointCount)
 	assert.Equal(t, 1, result.FilesTouchedCount)
 }
 
-func TestClassifySession_EndedNoShadowBranch_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	state := &strategy.SessionState{
-		SessionID:  "test-ended-no-shadow",
-		BaseCommit: testBaseCommit,
-		Phase:      session.PhaseEnded,
-		StepCount:  3,
-	}
-
-	result := classifySession(state, repo, time.Now())
-	assert.Nil(t, result, "ended session without shadow branch should be healthy")
-}
-
-// An ENDED record-bearing session has condensable task content that never
-// lives on the shadow branch, so branch absence must not classify it healthy.
-func TestClassifySession_EndedRecordsOnlyNoShadowBranch_Stuck(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+// An ENDED record-bearing session with no steps has condensable task content.
+func TestClassifySession_EndedRecordsOnly_Stuck(t *testing.T) {
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID: "test-ended-records-only", BaseCommit: testBaseCommit, Phase: session.PhaseEnded,
 		TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now(), CompletedAt: time.Now()}},
 	}
 
-	result := classifySession(state, repo, time.Now())
-	require.NotNil(t, result, "ended record-bearing session must be reported even without a shadow branch")
+	result := classifySession(state, time.Now())
+	require.NotNil(t, result, "ended record-bearing session must be reported")
 	assert.Equal(t, "ended with uncondensed checkpoint data", result.Reason)
 	assert.Equal(t, 1, result.CheckpointCount)
 }
 
 // FullyCondensed + leftover live record (pre-fix state or failed sweep capture) is healthy: everything worth keeping is materialized.
 func TestClassifySession_EndedFullyCondensedLeftoverRecord_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID: "test-ended-condensed-leftover", BaseCommit: testBaseCommit, Phase: session.PhaseEnded,
 		FullyCondensed: true, TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_left", StartedAt: time.Now()}},
 	}
-	assert.Nil(t, classifySession(state, repo, time.Now()),
+	assert.Nil(t, classifySession(state, time.Now()),
 		"a FullyCondensed ended session must not be re-flagged for a leftover live record")
 }
 
 func TestClassifySession_EndedZeroStepCount_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseCommit := "1234567890abcdef1234567890abcdef12345678"
-	createShadowBranchRef(t, repo, baseCommit, "")
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:  "test-ended-zero-steps",
-		BaseCommit: baseCommit,
+		BaseCommit: "1234567890abcdef1234567890abcdef12345678",
 		Phase:      session.PhaseEnded,
 		StepCount:  0,
 	}
 
-	result := classifySession(state, repo, time.Now())
-	assert.Nil(t, result, "ended session with zero steps should be healthy even with shadow branch")
+	result := classifySession(state, time.Now())
+	assert.Nil(t, result, "ended session with no pending work should be healthy")
 }
 
 func TestClassifySession_IdlePhase_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:  "test-idle",
@@ -246,14 +175,12 @@ func TestClassifySession_IdlePhase_Healthy(t *testing.T) {
 		StepCount:  1,
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 	assert.Nil(t, result, "IDLE session should be healthy")
 }
 
 func TestClassifySession_EmptyPhase_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	state := &strategy.SessionState{
 		SessionID:  "test-empty-phase",
@@ -262,14 +189,12 @@ func TestClassifySession_EmptyPhase_Healthy(t *testing.T) {
 		StepCount:  1,
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 	assert.Nil(t, result, "empty phase (backward compat) should be healthy")
 }
 
 func TestClassifySession_StalenessThresholdBoundary(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	now := time.Now()
 
@@ -283,7 +208,7 @@ func TestClassifySession_StalenessThresholdBoundary(t *testing.T) {
 		LastInteractionTime: &justOverThreshold,
 	}
 
-	result := classifySession(state, repo, now)
+	result := classifySession(state, now)
 	require.NotNil(t, result, "session just over staleness threshold should be stuck")
 
 	// Just under the threshold — should be healthy
@@ -296,57 +221,8 @@ func TestClassifySession_StalenessThresholdBoundary(t *testing.T) {
 		LastInteractionTime: &justUnderThreshold,
 	}
 
-	result2 := classifySession(state2, repo, now)
+	result2 := classifySession(state2, now)
 	assert.Nil(t, result2, "session just under staleness threshold should be healthy")
-}
-
-func TestClassifySession_ActiveWithShadowBranch(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseCommit := testBaseCommit
-	createShadowBranchRef(t, repo, baseCommit, "")
-
-	state := &strategy.SessionState{
-		SessionID:           "test-active-shadow",
-		BaseCommit:          baseCommit,
-		Phase:               session.PhaseActive,
-		StepCount:           2,
-		LastInteractionTime: nil,
-	}
-
-	result := classifySession(state, repo, time.Now())
-
-	require.NotNil(t, result)
-	assert.True(t, result.HasShadowBranch, "should detect existing shadow branch")
-	assert.NotEmpty(t, result.ShadowBranch)
-}
-
-func TestClassifySession_WorktreeIDInShadowBranch(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	baseCommit := testBaseCommit
-	worktreeID := "my-worktree"
-	createShadowBranchRef(t, repo, baseCommit, worktreeID)
-
-	state := &strategy.SessionState{
-		SessionID:    "test-worktree-shadow",
-		BaseCommit:   baseCommit,
-		WorktreeID:   worktreeID,
-		Phase:        session.PhaseEnded,
-		StepCount:    1,
-		FilesTouched: []string{"a.go"},
-	}
-
-	result := classifySession(state, repo, time.Now())
-
-	require.NotNil(t, result, "ended session with worktree shadow branch should be stuck")
-	assert.True(t, result.HasShadowBranch)
-	expectedBranch := checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
-	assert.Equal(t, expectedBranch, result.ShadowBranch)
 }
 
 // Distinct parentless commits have no common ancestor.
@@ -544,7 +420,7 @@ func TestRunSessionsFix_NonInteractive_HintsForceInsteadOfPrompting(t *testing.T
 	assert.Contains(t, output, "Found 2 stuck session(s):")
 	assert.Contains(t, output, "  Session: 2026-08-17-doctor-no-tty")
 	assert.Contains(t, output, "  Session: 2026-08-17-doctor-no-tty-2")
-	// No shadow branch exists, so --force would discard — the hint must say so.
+	// No pending work exists, so --force would discard — the hint must say so.
 	assert.Contains(t, output, "  Fix: discard (no condensable checkpoint data).")
 	assert.Contains(t, output, "entire doctor --force")
 	assert.NotContains(t, output, "Discarded session")
@@ -602,9 +478,6 @@ func TestRunSessionsFix_NonInteractive_TaskContentHintMatchesForceCondense(t *te
 func TestRunSessionsFix_HandlerLogsStayOffTheTerminal(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-	createShadowBranchRef(t, repo, testBaseCommit, "")
 
 	// Already ended, so never a candidate for the exited-owner sweep, but stuck
 	// with uncondensed data — which sends --force down the condensing path, and
@@ -1297,13 +1170,54 @@ func TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated(t *testing.T) {
 
 	out := stdout.String()
 	require.Contains(t, out, "Claude Code hooks: OUT OF DATE")
-	require.Contains(t, out, "entire enable --force")
+	require.Contains(t, out, "Run `entire agent add claude-code` to update it.")
+}
+
+// TestCheckHookTimeouts_RestoresWhatEnableWrites — a Claude Code config from
+// before hook timeouts existed is repaired to exactly what `entire enable`
+// writes today, and a repaired config is left alone on the next run.
+func TestCheckHookTimeouts_RestoresWhatEnableWrites(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	if _, err := (&claudecode.ClaudeCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	settingsPath := filepath.Join(dir, claudeDirName, claudecode.ClaudeSettingsFileName)
+	want, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+
+	untimed := regexp.MustCompile(`,\s*"timeout": \d+`).ReplaceAll(want, nil)
+	require.NotEqual(t, want, untimed, "fixture should have had timeouts to strip")
+	require.NoError(t, os.WriteFile(settingsPath, untimed, 0o600))
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+	require.Contains(t, stdout.String(), "Claude Code hooks: OUT OF DATE")
+
+	cmd, stdout = newTestCmd(t)
+	checkHookTimeouts(cmd)
+	out := stdout.String()
+	require.Contains(t, out, "Claude Code hooks: MISSING TIMEOUTS")
+	require.Contains(t, out, "✓ Fixed: timeouts added (your own hooks and timeouts are untouched).")
+
+	got, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	require.Equal(t, string(want), string(got))
+
+	cmd, stdout = newTestCmd(t)
+	checkHookTimeouts(cmd)
+	require.Empty(t, stdout.String())
+
+	cmd, stdout = newTestCmd(t)
+	checkHookDrift(cmd)
+	require.Contains(t, stdout.String(), "Claude Code hook config: OK")
 }
 
 // TestCheckCodexHookTrust_FlagsStaleHooksFile — user enabled Codex on
 // an older release that didn't ship PostToolUse. Their hooks.json has
 // only the three legacy events. Doctor must surface the gap and tell
-// them to re-run `entire enable`.
+// them to run `entire agent add codex`.
 func TestCheckCodexHookTrust_FlagsStaleHooksFile(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
@@ -1343,7 +1257,7 @@ trusted_hash = "sha256:ccc"
 	require.Contains(t, out, "Codex hooks: OUT OF DATE")
 	require.Contains(t, out, "- session_end")
 	require.Contains(t, out, "- post_tool_use")
-	require.Contains(t, out, "entire enable")
+	require.Contains(t, out, "Run `entire agent add codex` from this worktree")
 	// Trust stays quiet: every event the stale file actually declares is trusted,
 	// so only the out-of-date finding should fire.
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
@@ -2163,14 +2077,14 @@ func TestCheckAntigravityHooksLoaded_ProbeIsOptIn(t *testing.T) {
 }
 
 // The zero-cost check that replaces the probe by default: an installed entry
-// that is not what this host needs (here a bare command with no wrapper at all)
-// is reported with the reinstall remedy, and a freshly installed one is not.
+// carrying the other host family's wrapper is reported with the reinstall
+// remedy, and a freshly installed one is not.
 func TestCheckAntigravityHooksLoaded_ReportsAnEntryStaleForThisHost(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", t.TempDir())
 	stubAgyOnPath(t)
-	writeAntigravityHooksForDoctor(t, dir)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, !agent.HookHostIsWindows())
 
 	cmd, stdout := newTestCmd(t)
 	checkAntigravityHooksLoaded(cmd)
@@ -2183,6 +2097,37 @@ func TestCheckAntigravityHooksLoaded_ReportsAnEntryStaleForThisHost(t *testing.T
 	cmd, stdout = newTestCmd(t)
 	checkAntigravityHooksLoaded(cmd)
 	require.NotContains(t, stdout.String(), "STALE FOR THIS HOST")
+}
+
+// An entry written for this host by an older release (no session-start) still
+// tracks here, so it must not be reported as stale for this host.
+func TestCheckAntigravityHooksLoaded_OutdatedEntryIsNotStaleForThisHost(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", t.TempDir())
+	stubAgyOnPath(t)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, agent.HookHostIsWindows())
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.NotContains(t, stdout.String(), "STALE FOR THIS HOST")
+}
+
+// writeAntigravityPreInvocationEntryForDoctor writes an "entire" entry holding
+// only the pre-invocation hook, wrapped as InstallHooks wraps it for a Windows
+// or POSIX host.
+func writeAntigravityPreInvocationEntryForDoctor(t *testing.T, dir string, windowsHost bool) {
+	t.Helper()
+	command := agent.WrapProductionSilentHookCommand("entire hooks antigravity pre-invocation")
+	if windowsHost {
+		command = agent.WrapWindowsProductionSilentHookCommandDirect("entire hooks antigravity pre-invocation")
+	}
+	entry, err := json.Marshal(map[string]any{"entire": map[string]any{
+		"PreInvocation": []map[string]string{{"type": "command", "command": command}},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".agents"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".agents", "hooks.json"), entry, 0o600))
 }
 
 // A version string semver cannot parse is not "too old": the agy may be newer
@@ -2199,4 +2144,52 @@ func TestCheckAntigravityHooksLoaded_UnparseableVersionSkipsProbeWithoutUpgradeA
 	require.Contains(t, stdout.String(), "could not determine the agy version")
 	require.NotContains(t, stdout.String(), "agy update")
 	require.NotContains(t, stdout.String(), "LOADED by agy")
+}
+
+// An agy entry from before the SessionStart hook leaves sessions idle until
+// they are purged; doctor reports it and names the reinstall that fixes it.
+func TestCheckHookDrift_AntigravityWarnsWithoutSessionStart(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, agent.HookHostIsWindows())
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "hooks: OUT OF DATE")
+	require.Contains(t, out, "Run `entire agent add antigravity` to update it.")
+}
+
+// oldEntirePrePushHook is the pre-push hook Entire wrote before it passed git's
+// ref list, exactly as the release generated it.
+const oldEntirePrePushHook = "#!/bin/sh\n# Entire CLI hooks\n# Pre-push hook: push session logs alongside user's push\n" +
+	"# $1 is the remote name (e.g., \"origin\")\n" +
+	"if command -v entire >/dev/null 2>&1; then entire hooks git pre-push \"$1\"; else :; fi\n"
+
+// Entire's old pre-push hook is out of date for a reason of its own, so doctor
+// must not describe it as the working-tree launcher that used to be the only
+// cause. A hook the user edited is not out of date at all: --force leaves it,
+// and the lines the user added, alone.
+func TestCheckGitHooks_PrePushBeforeRefList(t *testing.T) {
+	dir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	_, err := strategy.InstallGitHook(context.Background(), true, false)
+	require.NoError(t, err)
+	prePush := filepath.Join(dir, ".git", "hooks", "pre-push")
+
+	require.NoError(t, os.WriteFile(prePush, []byte(oldEntirePrePushHook), 0o755))
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, false))
+	require.Contains(t, stdout.String(), "Git hooks: OUT OF DATE")
+	require.Contains(t, stdout.String(), "pre-push hook from before Entire read the refs `git push` sends")
+
+	edited := oldEntirePrePushHook + "git lfs pre-push \"$@\"\n"
+	require.NoError(t, os.WriteFile(prePush, []byte(edited), 0o755))
+	cmd, stdout = newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, true))
+	require.Contains(t, stdout.String(), "✓ Git hooks: OK")
+	data, err := os.ReadFile(prePush)
+	require.NoError(t, err)
+	require.Equal(t, edited, string(data), "doctor --force must keep the user's own lines")
 }

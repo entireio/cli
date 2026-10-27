@@ -85,7 +85,7 @@ jobs:
             done
           }
 
-          retry 'curl -fsSL --compressed https://entire.io/install.sh | bash -s -- --channel nightly'
+          retry 'curl -fsSL --compressed https://entire.com/install.sh | bash -s -- --channel nightly'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install nightly CLI (macOS)
@@ -147,7 +147,7 @@ jobs:
             }
           }
 
-          Invoke-WithRetry { iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly" }
+          Invoke-WithRetry { iex "& {$(irm https://entire.com/install.ps1)} -Channel nightly" }
           "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # Pin the checkout to the tag that produced the installed binary, so the
@@ -239,6 +239,8 @@ jobs:
       # shipped agents).
       - name: Install agent CLIs (Unix)
         if: matrix.os != 'windows-latest'
+        env:
+          CODEX_NON_INTERACTIVE: "1"
         run: |
           set -euo pipefail
           # Third-party install endpoints fail for reasons this repo can neither
@@ -269,7 +271,9 @@ jobs:
           # opencode by npm: its install script resolves its version through an
           # unauthenticated api.github.com call it gives no way to authenticate,
           # so it is rate-limited at random.
-          retry 'npm install -g @openai/codex @github/copilot opencode-ai'
+          retry 'npm install -g opencode-ai'
+          retry 'curl -fsSL --compressed https://chatgpt.com/codex/install.sh | sh'
+          retry 'curl -fsSL --compressed https://gh.io/copilot-install | bash'
           # agy's official installer: it resolves OS and architecture itself,
           # verifies a SHA-512 from the release manifest, and installs latest
           # into ~/.local/bin, which the line below puts on PATH.
@@ -537,7 +541,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: nightly-smoke-${{ matrix.os }}
           path: e2e/artifacts/

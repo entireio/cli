@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 )
@@ -15,9 +17,13 @@ import (
 // content, so every session with pending content here belongs in it —
 // concurrent sessions interleave by design) and the identity-matched session
 // when the committing process's ancestry names one that worktree matching
-// missed. There is no precedence between the two — an identity hit must
-// never suppress worktree matches, or concurrent same-worktree sessions
-// would drop out of the commit. The identity union is what makes an
+// missed. An identity hit never suppresses sessions homed in this worktree,
+// or concurrent same-worktree sessions would drop out of the commit. It does
+// replace the fallback's matches when no session is homed here: those belong
+// to other worktrees, and a session there that edited this worktree through a
+// shell command mid-turn (no record of it until turn end) is dropped too.
+// Without an identified committer (Windows, no recorded owner) the fallback's
+// matches still link. The identity union is what makes an
 // agent-made commit immune to worktree bookkeeping drift: an agent
 // committing in a sibling worktree still links to its own session
 // (guest-linked), where path matching alone found nothing or declined as
@@ -35,9 +41,42 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 		// rescue this; report it to the caller (hooks log and skip).
 		return nil, err
 	}
-	sessions, ambiguous := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
-	if guest := s.findSessionByCommitAncestry(ctx, allStates); guest != nil && !linkingSetContains(sessions, guest.SessionID) {
+	sessions, ambiguous, fromFallback := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	guest := s.findSessionByCommitAncestry(ctx, allStates)
+	if guest != nil && fromFallback {
+		// No session is homed here and ancestry names the committer: the
+		// fallback's sessions belong to other worktrees, and one there that
+		// is mid-turn would otherwise be condensed into this commit by the
+		// shortcuts that skip content checks. A session that recorded edits
+		// here still joins below, held to them.
+		sessions = nil
+	}
+	if guest != nil && !linkingSetContains(sessions, guest.SessionID) {
 		sessions = append(sessions, guest)
+	}
+	// A session homed elsewhere that recorded edits here, matched by the
+	// sibling fallback rather than identified as the committer, is held to
+	// those edits like one that joins below.
+	for _, state := range sessions {
+		if (guest == nil || state.SessionID != guest.SessionID) && hasWorktreeEntry(ctx, state, worktreePath) {
+			state.LinkedByWorktreeEntry = true
+		}
+	}
+	// A session that edited this worktree from elsewhere (an agent launched
+	// in another worktree writing here by path) recorded those edits for it;
+	// it may link this commit, but only one containing them.
+	for _, state := range allStates {
+		if state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" || linkingSetContains(sessions, state.SessionID) {
+			continue
+		}
+		if hasWorktreeEntry(ctx, state, worktreePath) {
+			state.LinkedByWorktreeEntry = true
+			sessions = append(sessions, state)
+		}
+	}
+	// Every session judges this commit by what it recorded for this worktree.
+	for _, state := range sessions {
+		enterWorktreeView(ctx, state, worktreePath)
 	}
 	if ambiguous && len(sessions) == 0 && !isGitSequenceOperation(ctx) {
 		fmt.Fprintln(stderrWriter,
@@ -82,7 +121,7 @@ func linkingSetContains(states []*SessionState, id string) bool {
 // file per session in the shared store, so a per-candidate walk would repeat
 // the hostname/boot/proc reads dozens of times per commit.
 func (s *ManualCommitStrategy) findSessionByCommitAncestry(ctx context.Context, states []*SessionState) *SessionState {
-	ancestry, ok := proclive.CurrentAncestry()
+	ancestry, ok := commitAncestry(ctx)
 	if !ok {
 		return nil
 	}
@@ -153,14 +192,32 @@ func isNearerOwner(depth, bestDepth int, state, best *SessionState) bool {
 
 // isSessionHomeWorktree reports whether worktreePath — the commit's worktree,
 // already resolved by the hook entry point — is the one the session is
-// recorded in. Worktree-coupled state (BaseCommit, shadow-branch content and
-// deletion) may only be mutated from the session's home worktree; a
+// recorded in. Worktree-coupled state (BaseCommit, pending files and their
+// recorded hashes) may only be mutated from the session's home worktree; a
 // guest-linked commit elsewhere condenses and links without moving it. A
 // pure comparison by design: an earlier version re-resolved the worktree
 // here and read resolution failure as "home", which would have mutated a
 // guest session's state in exactly the way the gate exists to prevent.
 func isSessionHomeWorktree(worktreePath string, state *SessionState) bool {
 	return worktreePath != "" && state.WorktreePath != "" && filepath.Clean(state.WorktreePath) == filepath.Clean(worktreePath)
+}
+
+// committedAtHome is isSessionHomeWorktree for a commit hook that has also
+// checked the session's home marker (homeAt): a worktree git re-added at the
+// recorded path after removing the home is not it (State.HomeNotHere).
+func committedAtHome(repoDir string, state *SessionState) bool {
+	return !state.HomeNotHere && isSessionHomeWorktree(repoDir, state)
+}
+
+// hookInSessionHome is isSessionHomeWorktree for an agent hook running in
+// worktreeRoot: a turn can end in another worktree of the repository (the
+// agent resumed there). Such a turn still records its own changes and tokens,
+// but nothing that reads the worktree to update what the session did at home:
+// that tree's absence of the home's untracked files is not a deletion, and its
+// HEAD and branch are not the session's. A state with no recorded worktree
+// (written before WorktreePath existed) counts as home, as before.
+func hookInSessionHome(worktreeRoot string, state *SessionState) bool {
+	return state.WorktreePath == "" || isSessionHomeWorktree(worktreeRoot, state)
 }
 
 func interactedAfter(a, b *SessionState) bool {
@@ -171,4 +228,115 @@ func interactedAfter(a, b *SessionState) bool {
 		return true
 	}
 	return a.LastInteractionTime.After(*b.LastInteractionTime)
+}
+
+// commitProvenance records which sessions' agents provably did not make the
+// commit a hook is running for. Built once per hook from the same listing the
+// hook links against.
+//
+// Commit linking trusts recency where content detection cannot help: with no
+// TTY, prepare-commit-msg stamps any ACTIVE session without checking what the
+// commit contains, and post-commit condenses ACTIVE sessions without an
+// overlap check. That trust is meant for the agent's own commit. A commit from
+// a process outside the agent (a hookless agent, a script or queue job, a GUI
+// client) would otherwise carry a mid-turn session that never touched it.
+// Linking treats a foreign session like a human commit treats any session: it
+// links only on file overlap.
+type commitProvenance struct {
+	foreign map[string]bool
+}
+
+// newCommitProvenance marks a session foreign only on positive evidence: its
+// recorded owner is alive and absent from a process ancestry walked all the
+// way to init, and no agent's caller-session variable names it. Everything
+// else (no owner, a dead or unverifiable owner, a truncated walk, a platform
+// that cannot introspect processes) keeps today's linking.
+func newCommitProvenance(ctx context.Context, states []*SessionState) commitProvenance {
+	ancestry, ok := commitAncestry(ctx)
+	if !ok || !ancestry.Complete() {
+		return commitProvenance{}
+	}
+	// An agent's shell tool exports its session ID, so a claim is positive
+	// evidence the commit runs under that agent even when its recorded owner
+	// is not in the walk (hooks spawned by a different long-lived process
+	// than the one running commands).
+	claimed := make(map[string]bool)
+	for _, c := range agent.CallerSessionCandidates() {
+		claimed[c.SessionID] = true
+	}
+	var foreign map[string]bool
+	for _, state := range states {
+		if state.Owner == nil || claimed[state.SessionID] || !ancestry.Excludes(*state.Owner) {
+			continue
+		}
+		if proclive.Check(*state.Owner) != proclive.LivenessAlive {
+			continue
+		}
+		if foreign == nil {
+			foreign = make(map[string]bool)
+		}
+		foreign[state.SessionID] = true
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
+			"commit is not from this session's agent; linking needs file overlap",
+			slog.String("session_id", state.SessionID),
+			slog.Int("owner_pid", state.Owner.PID),
+			slog.String("owner_name", state.Owner.Name),
+		)
+	}
+	return commitProvenance{foreign: foreign}
+}
+
+// isForeign reports whether the session's agent provably did not make the
+// commit.
+func (p commitProvenance) isForeign(sessionID string) bool {
+	return p.foreign[sessionID]
+}
+
+// withoutForeign returns sessions minus the foreign ones, preserving order.
+func (p commitProvenance) withoutForeign(sessions []*SessionState) []*SessionState {
+	if len(p.foreign) == 0 {
+		return sessions
+	}
+	kept := make([]*SessionState, 0, len(sessions))
+	for _, state := range sessions {
+		if !p.isForeign(state.SessionID) {
+			kept = append(kept, state)
+		}
+	}
+	return kept
+}
+
+// currentAncestry walks this process's ancestry; a variable so tests can
+// count the walks.
+var currentAncestry = proclive.CurrentAncestry
+
+// commitAncestryKey holds a commit hook's ancestry snapshot (withCommitAncestry).
+type commitAncestryKey struct{}
+
+type commitAncestrySnapshot struct {
+	once     sync.Once
+	ancestry proclive.Ancestry
+	ok       bool
+}
+
+// withCommitAncestry gives a commit hook one ancestry snapshot for every
+// identity decision it makes (findSessionByCommitAncestry, newCommitProvenance):
+// the walk reads the hostname, boot ID and up to maxAncestryDepth processes,
+// and each decision describes the same process tree.
+func withCommitAncestry(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(commitAncestryKey{}).(*commitAncestrySnapshot); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, commitAncestryKey{}, &commitAncestrySnapshot{})
+}
+
+// commitAncestry returns the hook's snapshot, walking on first use; without
+// one (a caller outside a commit hook) it walks every time.
+func commitAncestry(ctx context.Context) (proclive.Ancestry, bool) {
+	snap, ok := ctx.Value(commitAncestryKey{}).(*commitAncestrySnapshot)
+	if !ok {
+		return currentAncestry()
+	}
+	snap.once.Do(func() { snap.ancestry, snap.ok = currentAncestry() })
+	return snap.ancestry, snap.ok
 }

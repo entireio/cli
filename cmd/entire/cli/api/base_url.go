@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 )
 
 // ErrInsecureHTTP is returned when the base URL uses HTTP without an explicit opt-in.
@@ -30,13 +32,21 @@ const (
 	// BaseURLEnvVar overrides the Entire API origin for local development.
 	BaseURLEnvVar = "ENTIRE_API_BASE_URL"
 
+	// DefaultWebBaseURL is the production Entire web app origin. Browser
+	// links point here; API calls stay on DefaultBaseURL.
+	DefaultWebBaseURL = "https://entire.com"
+
+	// WebBaseURLEnvVar overrides the web app origin used for browser links,
+	// e.g. a local frontend on its own port during development.
+	WebBaseURLEnvVar = "ENTIRE_WEB_BASE_URL"
+
 	// AuthBaseURLEnvVar is the retired auth-origin override. Nothing reads
 	// its value — RejectRemovedAuthEnv fails every command when it is set,
 	// pointing at `entire login --server`.
 	AuthBaseURLEnvVar = "ENTIRE_AUTH_BASE_URL"
 
-	schemeHTTP  = "http"
-	schemeHTTPS = "https"
+	schemeHTTP  = httpclient.SchemeHTTP
+	schemeHTTPS = httpclient.SchemeHTTPS
 )
 
 // RejectRemovedAuthEnv returns an error when ENTIRE_AUTH_BASE_URL is set
@@ -66,6 +76,16 @@ func BaseURL() string {
 // for a caller that must tell the two apart.
 func BaseURLOverride() (string, bool) {
 	raw := strings.TrimSpace(os.Getenv(BaseURLEnvVar))
+	if raw == "" {
+		return "", false
+	}
+	return normalizeBaseURL(raw), true
+}
+
+// WebBaseURLOverride returns the normalized ENTIRE_WEB_BASE_URL and true when
+// set, or ("", false) when browser links should follow the data host's site.
+func WebBaseURLOverride() (string, bool) {
+	raw := strings.TrimSpace(os.Getenv(WebBaseURLEnvVar))
 	if raw == "" {
 		return "", false
 	}

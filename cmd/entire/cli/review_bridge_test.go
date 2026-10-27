@@ -1,10 +1,20 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 const testWholeChangeGranularity = "whole_change"
@@ -43,7 +53,7 @@ func TestReviewTrailFindingInputsSplitsTopLevelBullets(t *testing.T) {
   - nested detail stays with second
 - **[Low] Third issue:** remove the note from daytona-command-native-plan.md:1`
 
-	inputs := reviewTrailFindingInputs("general", verdict)
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: verdict})
 	if len(inputs) != 3 {
 		t.Fatalf("inputs = %d, want 3", len(inputs))
 	}
@@ -86,7 +96,7 @@ func TestReviewTrailFindingInputsSplitsTopLevelMarkedFindings(t *testing.T) {
 		"Additional detail for the first issue.\n\n" +
 		"**[MEDIUM] PATCH thread route missing requestBody** — `api/src/routes/trails.ts:2802`. Generated clients cannot send updates.\n"
 
-	inputs := reviewTrailFindingInputs("general", verdict)
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: verdict})
 	if len(inputs) != 2 {
 		t.Fatalf("inputs = %d, want 2", len(inputs))
 	}
@@ -108,11 +118,15 @@ func TestReviewTrailFindingInputsSplitsTopLevelMarkedFindings(t *testing.T) {
 	}
 }
 
-func TestReviewTrailFindingInputsAcceptsRunnerStyleJSONLastLine(t *testing.T) {
-	verdict := `Intermediate prose that should be ignored for posting.
-{"summary":"","comments":[{"severity":"high","confidence":0.92,"body":"` + "`" + `daytona.ts` + "`" + ` rejects public repos without a token; allow public clones or mint a token.","location":{"granularity":"line","file_path":"daytona.ts","start_line":901,"selected_text":"return err"}},{"severity":"P2","confidence":0.7,"body":"Delete failures are swallowed, orphaning provider snapshots.","location":{"granularity":"range","file_path":"daytona.ts","start_line":966,"end_line":970}}]}`
+func TestReviewTrailFindingInputsMapsStructuredComments(t *testing.T) {
+	t.Parallel()
+	confidence, lowConfidence := 0.92, 0.7
+	report := cliReview.TrailReport{Comments: []cliReview.TrailComment{
+		{Severity: "high", Confidence: &confidence, Body: "`daytona.ts` rejects public repos without a token; allow public clones or mint a token.", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "daytona.ts", StartLine: 901, SelectedText: "return err"}},
+		{Severity: "P2", Confidence: &lowConfidence, Body: "Delete failures are swallowed, orphaning provider snapshots.", Location: cliReview.TrailLocation{Granularity: "range", FilePath: "daytona.ts", StartLine: 966, EndLine: 970}},
+	}}
 
-	inputs := reviewTrailFindingInputs("general", verdict)
+	inputs := reviewTrailFindingInputs("general", report)
 	if len(inputs) != 2 {
 		t.Fatalf("inputs = %d, want 2", len(inputs))
 	}
@@ -139,8 +153,20 @@ func TestReviewTrailFindingInputsAcceptsRunnerStyleJSONLastLine(t *testing.T) {
 	}
 }
 
+func TestReviewTrailFindingInputsSplitsUnicodeBulletsAndBoldSeverity(t *testing.T) {
+	verdict := "request changes\n\n• [high] a.go:1 — A.\n**High** b.go:2 — B."
+
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: verdict})
+	if len(inputs) != 2 {
+		t.Fatalf("inputs = %d, want 2", len(inputs))
+	}
+	if !strings.Contains(*inputs[0].Body, "a.go:1") || !strings.Contains(*inputs[1].Body, "b.go:2") {
+		t.Fatalf("findings were not split cleanly: %q, %q", *inputs[0].Body, *inputs[1].Body)
+	}
+}
+
 func TestReviewTrailFindingInputsSingleVerdictUnchanged(t *testing.T) {
-	inputs := reviewTrailFindingInputs("general", "APPROVE - no actionable findings.")
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: "APPROVE - no actionable findings."})
 	if len(inputs) != 1 {
 		t.Fatalf("inputs = %d, want 1", len(inputs))
 	}
@@ -150,7 +176,7 @@ func TestReviewTrailFindingInputsSingleVerdictUnchanged(t *testing.T) {
 }
 
 func TestReviewTrailLocationFromJSON_SingleLineRangeBecomesLine(t *testing.T) {
-	loc := reviewTrailLocationFromJSON(reviewTrailJSONLocation{
+	loc := reviewTrailLocationFromJSON(cliReview.TrailLocation{
 		Granularity: reviewTrailGranularityRange,
 		FilePath:    "src/app.ts",
 		StartLine:   42,
@@ -165,7 +191,7 @@ func TestReviewTrailLocationFromJSON_SingleLineRangeBecomesLine(t *testing.T) {
 }
 
 func TestReviewTrailLocationFromJSON_InvalidRangeKeepsStartLineAnchor(t *testing.T) {
-	loc := reviewTrailLocationFromJSON(reviewTrailJSONLocation{
+	loc := reviewTrailLocationFromJSON(cliReview.TrailLocation{
 		Granularity: reviewTrailGranularityRange,
 		FilePath:    "src/app.ts",
 		StartLine:   42,
@@ -179,7 +205,113 @@ func TestReviewTrailLocationFromJSON_InvalidRangeKeepsStartLineAnchor(t *testing
 	}
 }
 
+func TestReviewTrailFindingInputsSkipsSeverityHeadings(t *testing.T) {
+	t.Parallel()
+	verdict := "request changes\n" +
+		"### High\n" +
+		"- retry.go:42 — loop ignores ctx\n" +
+		"**Low:**\n" +
+		"- docs typo in README.md:3\n"
+
+	inputs := reviewTrailFindingInputs("", cliReview.TrailReport{Prose: verdict})
+	want := []string{"loop ignores ctx", "docs typo"}
+	if len(inputs) != len(want) {
+		bodies := make([]string, len(inputs))
+		for i, in := range inputs {
+			bodies[i] = *in.Body
+		}
+		t.Fatalf("inputs = %#v, want %d findings and no heading findings", bodies, len(want))
+	}
+	for i, w := range want {
+		body := *inputs[i].Body
+		if !strings.Contains(body, w) || strings.Contains(body, "High") || strings.Contains(body, "Low") {
+			t.Errorf("body[%d] = %q, want it to hold %q without a heading", i, body, w)
+		}
+	}
+}
+
+func TestSplitReviewVerdictFindingsEndsFindingAtHeading(t *testing.T) {
+	t.Parallel()
+	verdict := "## claude-code\n\n" +
+		"request changes\n" +
+		"- [high] retry.go:42 — loop ignores ctx\n\n" +
+		"## codex\n\n" +
+		"I read the diff.\n" +
+		"- [low] README.md:3 — docs typo\n" +
+		"### [medium] cache.go:7 — stale entry\n"
+
+	items := splitReviewVerdictFindings(verdict)
+	if len(items) != 3 || !strings.Contains(items[2], "stale entry") {
+		t.Fatalf("items = %#v, want 3 findings, the last a heading-styled finding", items)
+	}
+	if strings.Contains(items[0], "codex") || strings.Contains(items[0], "I read the diff") {
+		t.Errorf("items[0] = %q, want it to end at the next reviewer's heading", items[0])
+	}
+}
+
+func TestSplitReviewVerdictFindingsKeepsTextAfterHeading(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		verdict string
+		want    []string
+	}{
+		{
+			name: "prose-only reviewer in combined output",
+			verdict: "## claude-code\n\nrequest changes\n- [high] retry.go:42 — loop ignores ctx\n\n" +
+				"## codex\n\nrequest changes. handler.go:9 drops the error.",
+			want: []string{"loop ignores ctx", "handler.go:9 drops the error"},
+		},
+		{
+			name:    "paragraph under a non-severity heading",
+			verdict: "request changes\n- [high] a.go:1 — A.\n## Notes\nb.go:3 also leaks the lock.",
+			want:    []string{"a.go:1", "b.go:3 also leaks the lock"},
+		},
+		{
+			name:    "paragraph under a severity heading",
+			verdict: "request changes\n### High\nretry.go:42 loops forever.",
+			want:    []string{"retry.go:42 loops forever"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			items := splitReviewVerdictFindings(tc.verdict)
+			if len(items) != len(tc.want) {
+				t.Fatalf("items = %#v, want %d findings", items, len(tc.want))
+			}
+			for i, w := range tc.want {
+				if !strings.Contains(items[i], w) || strings.Contains(items[i], "#") {
+					t.Errorf("items[%d] = %q, want it to hold %q without a heading", i, items[i], w)
+				}
+			}
+		})
+	}
+}
+
+func TestSplitReviewVerdictFindingsKeepsCodeBlocksWhole(t *testing.T) {
+	t.Parallel()
+	verdict := "request changes\n" +
+		"- [high] setup.sh:3 — deps installed twice:\n" +
+		"```sh\n# install deps\nnpm ci\nnpm ci\n```\n" +
+		"- [medium] a.go:1 — wrong default:\n" +
+		"```diff\n- timeout := 0\n+ timeout := 30\n```\n" +
+		"- [low] README.md:1 — typo"
+
+	items := splitReviewVerdictFindings(verdict)
+	if len(items) != 3 {
+		t.Fatalf("items = %#v, want 3 findings", items)
+	}
+	if !strings.Contains(items[0], "# install deps\nnpm ci\nnpm ci\n```") {
+		t.Errorf("items[0] = %q, want the whole sh block", items[0])
+	}
+	if !strings.Contains(items[1], "- timeout := 0\n+ timeout := 30\n```") {
+		t.Errorf("items[1] = %q, want the whole diff block", items[1])
+	}
+}
+
 func TestSplitReviewVerdictFindingsNumberedList(t *testing.T) {
+	t.Parallel()
 	items := splitReviewVerdictFindings("Verdict\n\n1. First\n2. Second")
 	if len(items) != 2 || items[0] != "First" || items[1] != "Second" {
 		t.Fatalf("items = %#v, want numbered findings", items)
@@ -188,6 +320,7 @@ func TestSplitReviewVerdictFindingsNumberedList(t *testing.T) {
 
 func TestTrailReviewWebURL(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
+	t.Setenv(api.WebBaseURLEnvVar, "")
 
 	cases := []struct {
 		name   string
@@ -202,7 +335,7 @@ func TestTrailReviewWebURL(t *testing.T) {
 				Repo:  "cli",
 				Trail: api.TrailResource{Number: 466, Branch: "review-profiles"},
 			},
-			want: "https://entire.io/gh/entireio/cli/trails/466/review-profiles",
+			want: "https://entire.com/gh/entireio/cli/trails/466/review-profiles",
 		},
 		{
 			name: "no trail number yields no link",
@@ -235,6 +368,7 @@ func TestTrailReviewWebURL(t *testing.T) {
 
 func TestTrailReviewWebURL_HonorsCustomBase(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, "https://entire.example.com/")
+	t.Setenv(api.WebBaseURLEnvVar, "")
 	target := trailReviewTarget{
 		Host:  "gh",
 		Owner: "acme",
@@ -244,5 +378,292 @@ func TestTrailReviewWebURL_HonorsCustomBase(t *testing.T) {
 	want := "https://entire.example.com/gh/acme/app/trails/7/feat/x"
 	if got := trailReviewWebURL(target); got != want {
 		t.Errorf("trailReviewWebURL() = %q, want %q", got, want)
+	}
+}
+
+func TestTrailReviewWebURL_HonorsWebBaseOverride(t *testing.T) {
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
+	t.Setenv(api.WebBaseURLEnvVar, "http://localhost:5173/")
+	target := trailReviewTarget{
+		Host:  "gh",
+		Owner: "acme",
+		Repo:  "app",
+		Trail: api.TrailResource{Number: 7, Branch: "feat/x"},
+	}
+	want := "http://localhost:5173/gh/acme/app/trails/7/feat/x"
+	if got := trailReviewWebURL(target); got != want {
+		t.Errorf("trailReviewWebURL() = %q, want %q", got, want)
+	}
+}
+
+// reviewPostTrailAPI is a fake trail API for the "feature" branch's trail that
+// records every finding batch postReviewToTrail sends.
+type reviewPostTrailAPI struct {
+	mu      sync.Mutex
+	batches []api.TrailReviewCommentBatchRequest
+}
+
+func (f *reviewPostTrailAPI) postedBatches() []api.TrailReviewCommentBatchRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.batches
+}
+
+// setupReviewPostTrail points postReviewToTrail at a repo on branch "feature"
+// whose trail is served by a fake API. Callers must not run in parallel: it
+// uses t.Chdir, t.Setenv, and the newTrailAPIClient seam.
+func setupReviewPostTrail(t *testing.T) *reviewPostTrailAPI {
+	t.Helper()
+	const (
+		base     = "/api/v1/trails/gh/acme/app"
+		trailID  = "trl_cap"
+		reviewID = "rvw_1"
+		// The server's current per-batch limit.
+		perBatch = 100
+	)
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "app.go", "package app\n")
+	testutil.GitAdd(t, repoDir, "app.go")
+	testutil.GitCommit(t, repoDir, "base")
+	testutil.RunGit(t, repoDir, "checkout", "-b", "feature")
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "https://github.com/acme/app.git")
+	t.Chdir(repoDir)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	fake := &reviewPostTrailAPI{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == base:
+			encodeTrailReviewTestJSON(t, w, api.TrailListResponse{Trails: []api.TrailResource{{ID: trailID, Number: 7, Branch: "feature"}}})
+		case r.Method == http.MethodPost && r.URL.Path == base+"/7/reviews":
+			encodeTrailReviewTestJSON(t, w, api.TrailReviewStartResponse{ReviewID: reviewID, TrailID: trailID, Limits: api.TrailReviewLimits{MaxCommentsPerBatch: perBatch}})
+		case r.Method == http.MethodPost && r.URL.Path == base+"/7/reviews/"+reviewID+"/comments":
+			var batch api.TrailReviewCommentBatchRequest
+			if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+				t.Errorf("decode batch: %v", err)
+				return
+			}
+			fake.mu.Lock()
+			fake.batches = append(fake.batches, batch)
+			fake.mu.Unlock()
+			results := make([]api.TrailReviewCommentBatchResult, 0, len(batch.Comments))
+			for _, c := range batch.Comments {
+				results = append(results, api.TrailReviewCommentBatchResult{ClientID: c.ClientID, Status: "created",
+					Comment: &api.TrailReviewComment{ID: "cm_" + c.ClientID, TrailID: trailID, ReviewID: reviewID, Status: trailReviewStatusOpen}})
+			}
+			encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentBatchResponse{Results: results})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(api.BaseURLEnvVar, srv.URL)
+
+	previous := newTrailAPIClient
+	newTrailAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+		return api.NewClientWithBaseURL("tok", srv.URL), "", nil
+	}
+	t.Cleanup(func() { newTrailAPIClient = previous })
+	return fake
+}
+
+const (
+	wantMaxPostedFindings  = 50
+	wantMaxPostedBodyRunes = 16384
+)
+
+// A misbehaving or prompt-injected reviewer must not flood the trail: posting
+// keeps the most severe findings up to the cap, shortens oversized bodies on a
+// character boundary so the server does not reject the batch, and says so.
+func TestPostReviewToTrailCapsFindingCountAndBodyLength(t *testing.T) {
+	fake := setupReviewPostTrail(t)
+
+	wholeChange := cliReview.TrailLocation{Granularity: testWholeChangeGranularity}
+	// An unrated finding comes first; it ranks below low, so order alone must
+	// not keep it.
+	comments := []cliReview.TrailComment{{Body: "unrated", Location: wholeChange}}
+	for range 400 {
+		comments = append(comments, cliReview.TrailComment{Severity: "low", Body: strings.Repeat("x", 64<<10), Location: wholeChange})
+	}
+	comments = append(comments, cliReview.TrailComment{Severity: "medium", Body: strings.Repeat("é", wantMaxPostedBodyRunes+100), Location: wholeChange})
+	for i := range 3 {
+		comments = append(comments, cliReview.TrailComment{Severity: "high", Body: fmt.Sprintf("high %d", i), Location: wholeChange})
+	}
+
+	var out bytes.Buffer
+	if err := postReviewToTrail(t.Context(), &out, "default", cliReview.TrailReport{Comments: comments}); err != nil {
+		t.Fatalf("postReviewToTrail: %v\noutput:\n%s", err, out.String())
+	}
+
+	batches := fake.postedBatches()
+	if len(batches) != 1 {
+		t.Fatalf("posted %d batches, want 1 (a capped review fits in one)", len(batches))
+	}
+	posted := batches[0].Comments
+	if len(posted) != wantMaxPostedFindings {
+		t.Fatalf("posted %d findings, want %d", len(posted), wantMaxPostedFindings)
+	}
+	// Kept findings stay in their original order: the first lows, then the
+	// medium, then the highs.
+	lows := wantMaxPostedFindings - 4
+	for i, c := range posted {
+		if c.Body == nil || c.Severity == nil {
+			t.Fatalf("finding %d has no body or severity: %+v", i, c)
+		}
+		body, severity := *c.Body, *c.Severity
+		if n := utf8.RuneCountInString(body); n > wantMaxPostedBodyRunes {
+			t.Errorf("finding %d body is %d characters, want at most %d", i, n, wantMaxPostedBodyRunes)
+		}
+		if strings.ContainsRune(body, utf8.RuneError) {
+			t.Errorf("finding %d body was cut inside a character", i)
+		}
+		switch {
+		case i < lows:
+			if severity != trailReviewSeverityLow || !strings.HasPrefix(body, "xxx") || !strings.Contains(strings.ToLower(body), "shortened") {
+				t.Errorf("finding %d = %s %q..., want a shortened low finding", i, severity, body[:min(len(body), 20)])
+			}
+		case i == lows:
+			if severity != trailReviewSeverityMedium || !strings.HasPrefix(body, "éé") || !strings.Contains(strings.ToLower(body), "shortened") {
+				t.Errorf("finding %d = %s, want the shortened medium finding", i, severity)
+			}
+		default:
+			if want := fmt.Sprintf("high %d", i-lows-1); severity != trailReviewSeverityHigh || body != want {
+				t.Errorf("finding %d = %s %q, want high %q unchanged", i, severity, body, want)
+			}
+		}
+	}
+
+	output := out.String()
+	for _, want := range []string{
+		fmt.Sprintf("as %d findings", wantMaxPostedFindings),
+		fmt.Sprintf("Left out %d of %d findings", len(comments)-wantMaxPostedFindings, len(comments)),
+		fmt.Sprintf("Shortened %d findings longer than %d characters", lows+1, wantMaxPostedBodyRunes),
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+// A review exactly at both caps posts unchanged and reports nothing extra.
+func TestPostReviewToTrailAtCapsPostsUnchanged(t *testing.T) {
+	fake := setupReviewPostTrail(t)
+
+	body := strings.Repeat("é", wantMaxPostedBodyRunes)
+	comments := make([]cliReview.TrailComment, wantMaxPostedFindings)
+	for i := range comments {
+		comments[i] = cliReview.TrailComment{Severity: "low", Body: body, Location: cliReview.TrailLocation{Granularity: testWholeChangeGranularity}}
+	}
+
+	var out bytes.Buffer
+	if err := postReviewToTrail(t.Context(), &out, "default", cliReview.TrailReport{Comments: comments}); err != nil {
+		t.Fatalf("postReviewToTrail: %v\noutput:\n%s", err, out.String())
+	}
+
+	var posted []api.TrailReviewCommentInput
+	for _, batch := range fake.postedBatches() {
+		posted = append(posted, batch.Comments...)
+	}
+	if len(posted) != wantMaxPostedFindings {
+		t.Fatalf("posted %d findings, want %d", len(posted), wantMaxPostedFindings)
+	}
+	for i, c := range posted {
+		if c.Body == nil || *c.Body != body {
+			t.Fatalf("finding %d body changed", i)
+		}
+	}
+	if output := out.String(); strings.Contains(output, "Left out") || strings.Contains(output, "Shortened") {
+		t.Errorf("output reports a cap that was not hit:\n%s", output)
+	}
+}
+
+// A cut inside an open code fence must close that fence before the shortened
+// note, or the note and everything after it on the trail renders as code.
+func TestShortenReviewTrailFindingBodyClosesOpenCodeFence(t *testing.T) {
+	t.Parallel()
+	plain, _ := shortenReviewTrailFindingBody(strings.Repeat("x", wantMaxPostedBodyRunes+10))
+	note := strings.TrimLeft(plain, "x")
+	budget := wantMaxPostedBodyRunes - utf8.RuneCountInString(note)
+
+	cases := []struct {
+		name   string
+		body   string
+		closer string // "" means no closing fence may be added
+	}{
+		{name: "backtick fence", body: "intro\n```go\n" + strings.Repeat("code line\n", 3000), closer: "```"},
+		{name: "longer backtick fence", body: "intro\n````md\n" + strings.Repeat("code line\n", 3000), closer: "````"},
+		{name: "tilde fence", body: "intro\n~~~\n" + strings.Repeat("code line\n", 3000), closer: "~~~"},
+		{name: "fences balanced before the cut", body: "```\nshort\n```\n" + strings.Repeat("prose line\n", 3000)},
+		{name: "fence opens where the closer would go", body: strings.Repeat("x", budget-4) + "\n```\n" + strings.Repeat("y", 20000)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := shortenReviewTrailFindingBody(c.body)
+			if !ok || !strings.HasSuffix(got, note) {
+				t.Fatalf("body was not shortened with the note: ok=%v", ok)
+			}
+			if n := utf8.RuneCountInString(got); n > wantMaxPostedBodyRunes {
+				t.Errorf("shortened body is %d characters, want at most %d", n, wantMaxPostedBodyRunes)
+			}
+			kept := strings.TrimSuffix(got, note)
+			fences := 0
+			for _, line := range strings.Split(kept, "\n") {
+				if isCodeFence(line) {
+					fences++
+				}
+			}
+			if fences%2 != 0 {
+				t.Errorf("shortened body leaves a code fence open (%d fence lines); tail=%q", fences, got[len(got)-120:])
+			}
+			lastLine := kept[strings.LastIndex(kept, "\n")+1:]
+			switch {
+			case c.closer != "" && lastLine != c.closer:
+				t.Errorf("last line before the note = %q, want the fence closed with %q", lastLine, c.closer)
+			case c.closer == "" && isCodeFence(lastLine):
+				t.Errorf("added a closing fence %q that nothing opened", lastLine)
+			}
+		})
+	}
+}
+
+// selected_text has no server limit, so an oversized one would leave a
+// finding's request unbounded. A reviewer-supplied one over the cap gives way
+// to the worktree span, and a span over the cap posts at file granularity.
+func TestPostReviewToTrailCapsSelectedText(t *testing.T) {
+	fake := setupReviewPostTrail(t)
+	long := strings.Repeat("x", wantMaxPostedBodyRunes+100)
+	// Changing the committed app.go keeps it part of the reviewed change.
+	testutil.WriteFile(t, ".", "app.go", long+"\nfunc main() {}\nvar three = 3\n")
+
+	comments := []cliReview.TrailComment{
+		{Severity: "low", Body: "range over a huge line", Location: cliReview.TrailLocation{Granularity: reviewTrailGranularityRange, FilePath: "app.go", StartLine: 1, EndLine: 2}},
+		{Severity: "low", Body: "oversized supplied text", Location: cliReview.TrailLocation{Granularity: reviewTrailGranularityLine, FilePath: "app.go", StartLine: 3, SelectedText: long}},
+	}
+	var out bytes.Buffer
+	if err := postReviewToTrail(t.Context(), &out, "default", cliReview.TrailReport{Comments: comments}); err != nil {
+		t.Fatalf("postReviewToTrail: %v\noutput:\n%s", err, out.String())
+	}
+
+	var posted []api.TrailReviewCommentInput
+	for _, batch := range fake.postedBatches() {
+		posted = append(posted, batch.Comments...)
+	}
+	if len(posted) != 2 {
+		t.Fatalf("posted %d findings, want 2", len(posted))
+	}
+	for i, c := range posted {
+		if c.Location.SelectedText != nil && utf8.RuneCountInString(*c.Location.SelectedText) > wantMaxPostedBodyRunes {
+			t.Errorf("finding %d selected_text is %d characters, want at most %d", i, utf8.RuneCountInString(*c.Location.SelectedText), wantMaxPostedBodyRunes)
+		}
+	}
+	if loc := posted[0].Location; loc.Granularity != reviewTrailGranularityFile || loc.FilePath == nil || *loc.FilePath != "app.go" || loc.SelectedText != nil || loc.StartLine != nil {
+		t.Errorf("range over a huge span = %+v, want file granularity on app.go with no selected_text", loc)
+	}
+	if loc := posted[1].Location; loc.Granularity != reviewTrailGranularityLine || loc.SelectedText == nil || *loc.SelectedText != "var three = 3" {
+		t.Errorf("oversized supplied selected_text = granularity %q, want line 3 with its worktree text", loc.Granularity)
 	}
 }

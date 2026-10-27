@@ -70,11 +70,11 @@ const (
 
 // getHookType returns the hook type based on the hook name.
 // Returns "subagent" for task-related hooks (pre-task, post-task, post-todo,
-// subagent-stop) and "agent" for all other agent hooks.
+// subagent-start, subagent-stop) and "agent" for all other agent hooks.
 func getHookType(hookName string) string {
 	switch hookName {
 	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo,
-		claudecode.HookNameSubagentStop:
+		claudecode.HookNameSubagentStart, claudecode.HookNameSubagentStop:
 		return hookTypeSubagent
 	default:
 		return hookTypeAgent
@@ -172,7 +172,8 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		// Lifecycle event — use the generic dispatcher
 		hookErr = DispatchLifecycleEvent(ctx, ag, event)
 	} else if agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostTodo {
-		// PostTodo is Claude-specific: creates incremental checkpoints during subagent execution
+		// PostTodo is Claude-specific and records nothing; it stays registered so
+		// hook configs written by older CLIs keep working until an install prunes them.
 		hookErr = handleClaudeCodePostTodo(ctx)
 	}
 	// Other pass-through hooks (nil event, no special handling) are no-ops

@@ -34,7 +34,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | | `SupportsHooks()` | Whether agent supports lifecycle hooks |
 | | `ParseHookInput()` | Parse hook callback input from stdin |
 | | `GetSessionID()` | Extract session ID from hook input |
-| | `GetSessionDir()` | Where agent stores session data |
+| | `GetSessionDir()` | Where agent stores session data. If the agent has a relocation variable, honor it here so resume writes where the agent reads (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `FACTORY_HOME_OVERRIDE`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`). Check what it replaces: Droid appends `.factory` under its, Claude does not, and Pi's `PI_CODING_AGENT_SESSION_DIR` is the session directory itself with no per-repo nesting (use `agent.LookupOverride` when the fallback is derived rather than a fixed path under the home). If the agent can also be relocated from its own settings files, only its CLI knows the answer: Claude Code asks `claude` through the SDK initialize reply, and only in commands that call `agent.EnableHomeProbes` (resume, trail resume, attach); hooks inherit the agent's settings env and need no probe. Cursor keeps `agent-transcripts` under `~/.cursor` even when `CURSOR_DATA_DIR` relocates its other data, so it has none to honor |
 | | `ResolveSessionFile()` | Path to session transcript file |
 | | `ReadSession()` | Read session data from agent's storage |
 | | `WriteSession()` | Write session data for resumption |
@@ -44,22 +44,28 @@ Every agent must implement all 19 methods on the `Agent` interface:
 
 | Interface | Methods | When to implement |
 |-----------|---------|-------------------|
-| `HookSupport` | `InstallHooks`, `UninstallHooks`, `AreHooksInstalled`, `GetSupportedHooks` | Agent uses a config file for hook registration (e.g., `settings.json`) |
+| `HookSupport` | `InstallHooks`, `UninstallHooks`, `AreHooksInstalled` | Agent uses a config file for hook registration (e.g., `settings.json`) |
+| `HookFreshness` | `CheckHookConfig` | Agent can tell whether its installed hook config still matches what this CLI writes (read-only). `entire status` points drift at `entire doctor`, which names the fix: `entire agent add <agent>`, then `--force` if that does not fix it. Claude Code also warns in its SessionStart banner, but only when a hook this CLI requires is missing (`claudecode.MissingRequiredHooks`); stale commands, missing timeouts and every other agent's check (Codex, OpenCode, Pi, Copilot) stay out of the banner because they also fire when a teammate's newer CLI wrote the config. |
 | `HookHandler` | `GetHookNames` | **Required for CLI hook registration** — `entire hooks <agent> <verb>` subcommands are only created for agents implementing this interface. Typically delegates to `HookNames()`. |
 | `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
+| `OutOfBandTokenSource` | `SnapshotTokenBaseline`, `CalculateTokenUsageSince` | Agent keeps token usage only outside its transcript, as a running total: the lifecycle snapshots it at turn start and records the difference at turn end, falling back to it when the transcript reports no usage (Antigravity's title tee, Factory AI Droid's per-session `.settings.json`). Built-in agents only |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
 | `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
-| `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
+| `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) skips review/investigate sessions. It emits the base text (agent-help pointer, checkpoint and setup/destructive rules, repo line) once per normal session on the first turn, recorded in `session.State.ContextInjectionBaseDone`, and adds the trails paragraph once fresh clone-local preferences say trails are enabled for the current repo/API/auth target, recorded in `session.State.ContextInjectionDecided`. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided, so when a later refresh says enabled the trails paragraph follows on its own on that turn. Claude Code / Codex inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
+| `HomeLayoutProvider` | `SessionHome`, `HomeLayout` | Built-in agent keeps transcripts in one or more stores beneath a relocatable home (e.g. Codex's `sessions` and `archived_sessions` beneath `CODEX_HOME`). Transcript discovery for `attach` then searches every store, session initialization and turn start record the home in `State.AgentHome` and the per-user registry, and a test checks that `GetSessionDir` lies in the first one |
+| `HomeScopedInventoryExtractor` | `ExtractWithSubagentInventoryUnderHome` | Agent keeps a child-session inventory (`InventoryAwareExtractor`) and can look up child transcripts beneath a session's recorded home rather than the active one (Codex) |
+| `SessionFileCandidatesProvider` | `ResolveSessionFileCandidates` | One session can live in more than one file (dated restores, nested and flat layouts). Discovery takes the first candidate that is a regular file; include the path `ResolveSessionFile` returns. That path must stay inside the session directory, which `SessionStore` enforces, so a file in a sibling store such as Codex's `archived_sessions` is listed only here |
 
 ### Declaring a subagent transcript
 
 Not an interface — a field. On `SubagentEnd`, set `Event.SubagentTranscriptPath` when
 the agent's hook payload names the subagent's own transcript (Codex and Cursor both
-send `agent_transcript_path`). Leave it empty and the framework probes the layout
+send `agent_transcript_path`; for OpenCode the framework's capture runs `opencode export` for the child and declares
+that file). Leave it empty and the framework probes the layout
 Claude Code and Factory AI Droid share, which finds nothing for any other agent and
 fails silently — the task checkpoint simply stores no subagent transcript. See the
 field's doc comment in `cmd/entire/cli/agent/event.go`.
@@ -436,7 +442,6 @@ func (a *YourAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 
 func (a *YourAgent) UninstallHooks() error         { /* reverse of install */ }
 func (a *YourAgent) AreHooksInstalled() bool        { /* check settings file */ }
-func (a *YourAgent) GetSupportedHooks() []agent.HookType { /* list supported types */ }
 ```
 
 #### Choosing the hook wrapper
@@ -483,15 +488,15 @@ Test `ParseHookEvent` for every hook name your agent supports. See [Testing Patt
 
 The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles each event type as follows:
 
-| Event Type | Framework Actions | Claude Code Hook | Cursor Hook | OpenCode Hook | Factory AI Droid Hook | Copilot CLI Hook |
-|------------|-------------------|------------------|-----------------|---------------|----------------------|-----------------|
-| `SessionStart` | Shows banner, checks concurrent sessions, fires state machine transition | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` |
-| `TurnStart` | Captures pre-prompt state (git status, transcript position), ensures strategy setup, initializes session | `user-prompt-submit` | `before-submit-prompt` | `turn-start` | `user-prompt-submit` | `user-prompt-submitted` |
-| `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop` | `stop` | `turn-end` | `stop` | `agent-stop` |
-| `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compact` | `compaction` | `pre-compact` | *(not used)* |
-| `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
-| `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | `subagent-start` (observed pass-through; no child identity) |
-| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Task], `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` (`agentId` joined to parent `subagent.started.toolCallId`) |
+| Event Type | Framework Actions | Claude Code Hook | Cursor Hook | OpenCode Hook | Factory AI Droid Hook | Copilot CLI Hook  | Antigravity Hook |
+|------------|-------------------|------------------|-----------------|---------------|----------------------|----------------- |------------------|
+| `SessionStart` | Shows banner, checks concurrent sessions, fires state machine transition | `session-start` | `session-start` | `session-start` | `session-start` | `session-start`  | `session-start` |
+| `TurnStart` | Captures pre-prompt state (git status, transcript position), ensures strategy setup, initializes session | `user-prompt-submit` | `before-submit-prompt` | `turn-start` | `user-prompt-submit` | `user-prompt-submitted`  | `pre-invocation` (`invocationNum == 0`; conditional for `> 0`) |
+| `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop`, `stop-failure` | `stop` | `turn-end` | `stop` | `agent-stop`  | `stop` (`fullyIdle: true`) |
+| `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compact` | `compaction` | `pre-compact` | *(not used)*  | *(not used)* |
+| `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end`  | *(not used)* |
+| `SubagentStart` | Captures pre-task state (git status snapshot) — or, for a `DeferredCompletion` start (OpenCode), records an in-flight task record and skips the snapshot | `pre-task` (PreToolUse[Task]) | `subagent-start` | `subagent-start` (plugin: parent task part `running` with `metadata.sessionId`; `DeferredCompletion`) | `pre-tool-use` (config-level `matcher: Task`) | `subagent-start` (observed pass-through; no child identity)  | *(not used)* |
+| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Agent] and PostToolUse[Skill] for a `context: fork` skill's agent, `Final: false`) + `subagent-start` (SubagentStart, matcher `workflow-subagent`: a Workflow agent's background launch, keyed by its agent ID, `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | `subagent-stop` | `subagent-stop` (plugin: `tool.execute.after` for `task`, or the child's own idle for a background task; `Final` + `CompletionWithoutLaunch`, child exported and declared) | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` (`agentId` joined to parent `subagent.started.toolCallId`)  | *(not used)* |
 
 ### Event Field Requirements
 
@@ -503,7 +508,9 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 | `Compaction` | `SessionID` | `SessionRef`, `Metadata` |
 | `SessionEnd` | `SessionID` | `SessionRef`, `Metadata` |
 | `SubagentStart` | `SessionID`, `SessionRef`, `ToolUseID` | `ToolInput`, `Metadata` |
-| `SubagentEnd` | `SessionID`, `SessionRef`, `ToolUseID` | `SubagentID`, `ToolInput`, `Metadata`, `SubagentTranscript` (authoritative subagent transcript path when the hook payload supplies one), `Final` (only for agents with a two-signal subagent model — a launch-time stub plus a separate true-completion signal, e.g. Claude Code's `SubagentStop`: the stub sets false, the completion signal sets true; single-signal agents leave it false) |
+| `SubagentEnd` | `SessionID`, `SessionRef`, and `ToolUseID` or `SubagentID` | `ToolInput`, `Metadata`, `SubagentTranscript` (authoritative subagent transcript path when the hook payload supplies one), `Final` (only for agents with a two-signal subagent model — a launch-time stub plus a separate true-completion signal, e.g. Claude Code's `SubagentStop`: the stub sets false, the completion signal sets true; single-signal agents leave it false), `SubagentLaunch` (launch-time events only: `Foreground`/`Background` when the agent's tool result says how the subagent ran, which wins over `run_in_background` in `ToolInput`), `SubagentLaunchIdempotent` (background launches keyed by the subagent itself rather than a fresh tool call: keep an existing record instead of replacing it) |
+
+A launch-time `SubagentEnd` needs `ToolUseID`, and should carry `SubagentID` whenever the agent reports one: a `Final` event that has only `SubagentID` (Claude Code's `SubagentStop` has no `tool_use_id`) is matched to the launch record by it. A subagent launched without a tool call of its own (a Claude Code Workflow agent: the Workflow's tool result names a run, not its agents) uses its agent ID as `ToolUseID`, so its task record lands under `tasks/<agent_id>/`.
 
 `Metadata` (`map[string]string`) holds agent-specific state that the framework stores and makes available on subsequent events. Use it for agent-internal tracking (e.g., cursor positions, background agent flags) that doesn't map to a dedicated Event field.
 
@@ -558,11 +565,12 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 ### `SubagentSessionResolver`
 
 **What it enables:** Attributing a detached subagent session's turn to the parent
-task invocation, as a task checkpoint under `.entire/metadata/<parent>/tasks/<tool-use-id>/`.
+task invocation, as a task record on the parent session that condensation
+materializes into the parent's checkpoint under `tasks/<tool-use-id>/`.
 
 **Without it:** Turn-end treats the subagent's session as an ordinary top-level
-session and mints a session checkpoint for it — the subagent's files land on the
-shadow branch under a session the user never drove, and no task checkpoint exists.
+session and records a turn end for it — the subagent's files are tracked under a
+session the user never drove, and no task record exists.
 
 **Implement when:** Your agent dispatches subagents as sessions of their own,
 firing a full SessionStart/UserPromptSubmit/Stop cycle for each. Factory AI
@@ -990,7 +998,7 @@ Captured from real agy stdin (1.0.x); all enforced by tests in `agent/antigravit
 - **Transcript is written AFTER the Stop hook** — `PrepareTranscript` briefly waits, then materialises an empty placeholder; condensation degrades to a files/prompt-only checkpoint and re-extracts prompts late (`resolvePromptsFromLateFlushedTranscript`). The hook payload's `transcriptPath` points at `transcript_full.jsonl` under `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/`.
 - **Tool args can be double-encoded** — `toolCall.args` values sometimes arrive as JSON strings containing JSON; see `decodeAgyString`/`decodeAgyBool`.
 - **Token usage has exactly one surface** — the statusline/title JSON payload (`context_window`). The integration tees it to disk via the global settings.json `title` slot (`entire hooks antigravity title-tee`) and implements `OutOfBandTokenSource`.
-- **No SessionStart hook surface** — there is no way to show a "tracked by entire" banner; agy tracks silently like Cursor/OpenCode/Copilot/Pi. Only PreToolUse, PreInvocation, and Stop are installed — agy's PostToolUse/PostInvocation have no lifecycle mapping and are deliberately not installed.
+- **SessionStart is installed but silent** — `session-start` (agy 1.1.1+) fires once per new conversation, not on `agy --conversation` resumes, and maps to `SessionStart` for the model hint and the zombie-session sweep. `AntigravityAgent` is not a `HookResponseWriter`, so no banner is written and agy tracks silently like Cursor/OpenCode/Copilot/Pi. Only SessionStart, PreToolUse, PreInvocation, and Stop are installed — agy's PostToolUse/PostInvocation have no lifecycle mapping and are deliberately not installed.
 
 #### Antigravity status: Preview
 
@@ -998,8 +1006,8 @@ The integration is preview status. That is a documentation statement, not a
 code flag: `agent.IsPreview` was removed from the Agent interface (#2554), so
 nothing in the CLI renders a label. Known limitations while in preview:
 
-- **No in-agy banner**: tracking is silent inside the agy UI (no SessionStart
-  hook surface). `entire status` is the visibility surface.
+- **No in-agy banner**: tracking is silent inside the agy UI (SessionStart is
+  installed but writes no banner). `entire status` is the visibility surface.
 - **Mid-turn commit token scoping is coarse**: a checkpoint created by a
   mid-turn agy commit records zero tokens; the turn's delta lands on the next
   condensation. Session totals stay correct.

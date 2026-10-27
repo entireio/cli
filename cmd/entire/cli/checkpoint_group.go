@@ -8,7 +8,7 @@ import (
 )
 
 // newCheckpointGroupCmd builds the `entire checkpoint` parent command and
-// registers list/explain/tokens/search/resume as children.
+// registers list/explain/tokens/search/resume/delete as children.
 func newCheckpointGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     cmdCheckpoint,
@@ -21,12 +21,14 @@ Commands:
   explain  Explain a checkpoint, commit, or session
   tokens   Show token usage and optimization recommendations
   search   Search checkpoints (semantic + keyword)
+  delete   Delete a checkpoint locally and from checkpoint remotes
 
 Examples:
   entire checkpoint list
   entire checkpoint explain <id|sha>
   entire checkpoint tokens <id>
-  entire checkpoint search "fix login"`,
+  entire checkpoint search "fix login"
+  entire checkpoint delete <id> --dry-run`,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
 				return errors.New("not a git repository")
@@ -36,10 +38,12 @@ Examples:
 	}
 
 	cmd.AddCommand(newCheckpointListCmd())
+	cmd.AddCommand(newCheckpointCreateCmd())
 	cmd.AddCommand(newCheckpointResumeCmd())
 	cmd.AddCommand(newExplainCmd())
 	cmd.AddCommand(newCheckpointTokensCmd())
 	cmd.AddCommand(newCheckpointSearchCmd())
+	cmd.AddCommand(newCheckpointDeleteCmd())
 
 	return cmd
 }
@@ -53,24 +57,32 @@ func newCheckpointSearchCmd() *cobra.Command {
 }
 
 // newCheckpointListCmd wraps the existing branch-default list view and adds
-// machine-readable (--json) and pending-checkpoint (--pending) modes.
+// machine-readable (--json), pending-checkpoint (--pending) and outgoing
+// (--outgoing) modes.
 //
 // Dataset/format matrix:
 //
 //	(default)            condensed checkpoints on the branch, human view (pager)
 //	--json               condensed checkpoints as JSON (branchCheckpointJSON shape)
-//	--pending            pending checkpoints (live + logs-only), human list
-//	--pending --json     pending checkpoints as JSON — the drop-in
-//	                     replacement for the deprecated `rewind --list` bridge
+//	--pending            next-checkpoint preview + task records + logs-only
+//	                     points, human list
+//	--pending --json     the same as a JSON array, in the shape the removed
+//	                     `rewind --list` produced
+//	--outgoing           checkpoints the next push sends to the checkpoint
+//	                     sync destination (git-refs backend only), read
+//	                     locally, human list
+//	--outgoing --json    the same as one JSON object (outgoingCheckpointsJSON)
 //
 // The condensed dataset (entire/checkpoints/v1 for the branch) and the pending
-// dataset (strategy.ListPendingCheckpoints; task checkpoints, logs-only points,
-// condensation IDs) are deliberately distinct — see issue #1767.
+// dataset (strategy.PreviewNextCheckpoint plus strategy.ListPendingCheckpoints;
+// task records, logs-only points, condensation IDs) are deliberately distinct —
+// see issue #1767.
 func newCheckpointListCmd() *cobra.Command {
 	var sessionFlag string
 	var noPagerFlag bool
 	var jsonFlag bool
 	var pendingFlag bool
+	var outgoingFlag bool
 
 	cmd := &cobra.Command{
 		Use:   cmdList,
@@ -78,18 +90,53 @@ func newCheckpointListCmd() *cobra.Command {
 		Long: `List checkpoints on the current branch.
 
 By default shows condensed checkpoints from the checkpoints branch for the
-current branch. Use --pending for the resume view instead: live checkpoints on
-the session's shadow branch (not yet condensed), plus logs-only resume points
-recovered from commits whose logs are already condensed.
+current branch. Use --pending for work that is not a checkpoint yet:
+
+  - A preview of the next checkpoint for each session in this worktree with
+    pending work. Agent turns are recorded in session state, not in git, so
+    this work has no checkpoint ID until you commit it. The preview shows the
+    turns since the last checkpoint, the files touched, subagent task records,
+    and the prompts since the last checkpoint.
+  - Subagent task records of other sessions on HEAD (not yet condensed).
+  - Logs-only resume points recovered from commits whose logs are already
+    condensed.
+
+Use --outgoing to see what your next 'git push' sends: the checkpoints
+queued for the checkpoint sync remote, read from local state with no network
+call. Each one shows its ID, age, agent, first prompt (or summary) and the
+files it touched. It needs the git-refs checkpoint backend, which pushes one
+ref per checkpoint; the git-branch backend pushes entire/checkpoints/v1 as one
+branch, so --outgoing reports an error there.
 
 Output modes:
-  --json             Machine-readable JSON instead of the human view.
-  --pending          Select the pending dataset: live shadow-branch
-                     checkpoints plus logs-only resume points.
-  --pending --json   Pending checkpoints as JSON (replaces the deprecated rewind --list).
+  --json              Machine-readable JSON instead of the human view.
+  --pending           Select the pending dataset described above.
+  --pending --json    The pending dataset as a JSON array.
+  --outgoing          Select the outgoing dataset described above.
+  --outgoing --json   The outgoing dataset as one JSON object.
+
+Each --pending --json element has id, message, metadata_dir, date (RFC3339),
+is_task_checkpoint, is_logs_only, and when set tool_use_id, condensation_id,
+session_id and session_prompt. A next-checkpoint preview element has an empty
+id, "is_next_checkpoint": true, and a "next_checkpoint" object:
+
+  {"agent": "...", "turns": 2,
+   "files_touched": ["..."],
+   "task_records": [{"tool_use_id": "...", "subagent_type": "...",
+                     "description": "...", "status": "running|completed"}],
+   "prompts": ["..."]}
+
+The arrays are always present, possibly empty.
+
+The --outgoing --json object has checkpoint_push_disabled,
+checkpoint_sync_remote, checkpoint_sync_remote_source and
+checkpoint_sync_error (as in 'entire status --json'), stale_queue_entries
+and a checkpoints array of {checkpoint_id, ref, created_at, agent,
+session_count, prompt, summary, files_touched, error}. The array is always
+present, possibly empty.
 
 Optionally filter condensed checkpoints by session ID with --session
-(not applicable with --pending).`,
+(not applicable with --pending or --outgoing).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if checkDisabledGuard(cmd.Context(), cmd.OutOrStdout()) {
 				return nil
@@ -103,8 +150,18 @@ Optionally filter condensed checkpoints by session ID with --session
 			if pendingFlag && sessionFlag != "" {
 				return errors.New("--session cannot be combined with --pending")
 			}
+			if outgoingFlag && pendingFlag {
+				return errors.New("--outgoing cannot be combined with --pending")
+			}
+			if outgoingFlag && sessionFlag != "" {
+				return errors.New("--session cannot be combined with --outgoing")
+			}
 
 			switch {
+			case outgoingFlag && jsonFlag:
+				return runCheckpointOutgoingListJSON(ctx, w, errW)
+			case outgoingFlag:
+				return runCheckpointOutgoingListHuman(ctx, w, errW, noPagerFlag)
 			case pendingFlag && jsonFlag:
 				return runCheckpointPendingListJSON(ctx, w)
 			case pendingFlag:
@@ -120,6 +177,7 @@ Optionally filter condensed checkpoints by session ID with --session
 	cmd.Flags().StringVar(&sessionFlag, "session", "", "Filter checkpoints by session ID (or prefix)")
 	cmd.Flags().BoolVar(&noPagerFlag, "no-pager", false, "Disable pager output")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON instead of the human view")
-	cmd.Flags().BoolVar(&pendingFlag, "pending", false, "List pending checkpoints — live shadow-branch state plus logs-only resume points")
+	cmd.Flags().BoolVar(&pendingFlag, "pending", false, "List pending work — a preview of the next checkpoint, uncondensed subagent task records, and logs-only resume points")
+	cmd.Flags().BoolVar(&outgoingFlag, "outgoing", false, "List the checkpoints your next git push sends, read locally with no network call (git-refs backend)")
 	return cmd
 }

@@ -276,6 +276,7 @@ func registerExternalAgent(ctx context.Context, binPath string, name types.Agent
 	agent.Register(name, func() agent.Agent {
 		return wrapped
 	})
+	recordCallerEnvVars(ea.info.CallerEnvVars, string(ea.Type()))
 
 	logging.Debug(ctx, "registered external agent",
 		slog.String("name", string(name)),

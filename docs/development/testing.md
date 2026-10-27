@@ -116,7 +116,7 @@ unsafe in parallel tests. Prefer the `t.*` helpers for enforcement and cleanup.
 
 **Tests that touch git state must use an isolated temp repo — never the real repo CWD.**
 
-Many handlers (lifecycle, strategy, hooks) resolve the git repo from CWD via `OpenRepository`, `GetGitCommonDir`, `DetectFileChanges`, etc. Without isolation, tests can create session state files, shadow branches, or other artifacts in the real `.git/` directory.
+Many handlers (lifecycle, strategy, hooks) resolve the git repo from CWD via `OpenRepository`, `GetGitCommonDir`, `DetectFileChanges`, etc. Without isolation, tests can create session state files, checkpoint refs, or other artifacts in the real `.git/` directory.
 
 Use the `testutil` helpers:
 
@@ -182,6 +182,12 @@ using `entire` for real while tests run.
   `ENTIRE_TEST_AUTH_STORE_FILE` process-wide so every spawned `entire` (and
   every agent-invoked hook) inherits isolation. Any new harness that spawns
   the real binary must do the same.
+- **Agent credential preparation**: mocking a subprocess runner does not
+  isolate code that discovers credentials before executing it. Antigravity
+  generation tests use `newTestTextGenerator` with explicit temporary
+  authentication sources; production-resolver tests replace HOME/USERPROFILE,
+  agy's config override, and the ADC credential variable before discovery.
+  Keychain/file-token carryover tests use fake files, never the real home.
 - **OS keyring**: packages whose tests can reach the zalando keyring need
   `keyring.MockInit()` in `TestMain` (see `cmd/entire/cli/global_test.go`) —
   the `testdirs` fallback does not isolate keyring access in-process.
@@ -195,7 +201,7 @@ Tests that spawn the real `entire` or `git` binary need the child to be non-inte
 1. `ENTIRE_TEST_TTY=1` → force interactive ON (any other non-empty value → force OFF).
 2. `testing.Testing()` → false. In-process `go test` runs are non-interactive by default; no per-test `t.Setenv("ENTIRE_TEST_TTY", "0")` is needed.
 3. Agent sentinels → false. `interactive.agentSubprocessEnvVars` is the single
-   source of truth for the presence-checked ones (`COPILOT_CLI`, `CURSOR_AGENT`,
+   source of truth for the presence-checked ones (`ANTIGRAVITY_AGENT`, `COPILOT_CLI`, `CURSOR_AGENT`,
    `GEMINI_CLI`, `OPENCODE`, `PI_CODING_AGENT`) — the function reads it and the
    tests both enumerate and clear it, so adding a vendor is a one-line change.
    `GIT_TERMINAL_PROMPT=0` stays separate because only that exact value counts.
@@ -203,7 +209,12 @@ Tests that spawn the real `entire` or `git` binary need the child to be non-inte
    it withdraws prompts from the largest agent population at once, which is a
    product decision rather than a detection fix.
 4. `CI=<non-empty-non-false>` → false.
-5. Controlling-terminal probe — `/dev/tty` on Unix, `CONIN$` + `CONOUT$` on
+5. Windows console with no window → false. A desktop app (such as Claude Code or
+   Codex desktop) may start its shell headless: `CONIN$` opens in line mode, so the
+   probe below passes, yet nobody can see or answer a prompt there. Only a missing
+   window counts; pseudoconsole hosts report an invisible window for consoles in
+   real use. See `interactive/console_windows.go`.
+6. Controlling-terminal probe — `/dev/tty` on Unix, `CONIN$` + `CONOUT$` on
    Windows. A terminal held in raw mode (canonical/line input off) belongs to a
    full-screen TUI that spawned us, not to a shell we can prompt: TUI git clients
    (lazygit, gitui, tig) run `git commit` as a child while owning the screen, so
@@ -235,8 +246,10 @@ invariants the compiler cannot. Examples include `TestRootBasesAreTrusted` (root
 `TestGitStatusCallSitesPassNoOptionalLocks`, and
 `TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent`.
 
-**They all go through `testutil.GitGrepGuard`, which owns three flags.** Each was
-missing from at least one guard, and the same one was missing from three:
+**Guards discover files through testutil's guard helpers: `GitGrepGuard` for
+grep-based guards and `GuardGoFiles` for guards that list files to parse.**
+They own the protections below. Each was missing from at least one hand-written
+guard call, and the same one was missing from three:
 
 - `--untracked`. `git grep` searches the INDEX. Every one of these guards has
   "someone just added a file" as its subject, so the file it most needs to see is
@@ -265,6 +278,9 @@ Two rules for writing one:
 - **Fail on zero matches.** A detection pattern that goes stale otherwise passes
   forever. `GitGrepGuard` does this itself; the `checked == 0` tallies are the
   second half of the same idea.
+
+Guards that parse files instead of grepping them list them with
+`testutil.GuardGoFiles`.
 
 ### Code Duplication Prevention
 

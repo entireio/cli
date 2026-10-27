@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 type CondensedEntry struct {
@@ -16,92 +16,46 @@ type CondensedEntry struct {
 	ToolDetail string
 }
 
-func parseLines(content []byte) ([]transcriptLine, error) {
-	trimmed := strings.TrimSpace(string(content))
-	if trimmed == "" {
-		return nil, nil
-	}
-
-	rawLines := strings.Split(trimmed, "\n")
-	parsed := make([]transcriptLine, 0, len(rawLines))
-
-	for _, rawLine := range rawLines {
-		lineText := strings.TrimSpace(rawLine)
-		if lineText == "" {
-			continue
-		}
-
-		var line transcriptLine
-		if err := json.Unmarshal([]byte(lineText), &line); err != nil {
-			return nil, fmt.Errorf("parsing compact transcript line: %w", err)
-		}
-		if line.V == 0 || line.CLIVersion == "" {
-			return nil, errors.New("not compact transcript format")
-		}
-
-		parsed = append(parsed, line)
-	}
-
-	return parsed, nil
-}
-
 func BuildCondensedEntries(content []byte) ([]CondensedEntry, error) {
-	lines, err := parseLines(content)
+	lines, err := transcriptlib.Decode(content)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parsing compact transcript: %w", err)
 	}
 
 	entries := make([]CondensedEntry, 0, len(lines))
 	for _, line := range lines {
-		var blocks []map[string]json.RawMessage
-		if len(line.Content) > 0 {
-			if err := json.Unmarshal(line.Content, &blocks); err != nil {
-				continue
-			}
-		}
-
 		switch line.Type {
-		case transcript.TypeUser:
+		case transcriptlib.TypeUser:
 			var parts []string
-			for _, block := range blocks {
-				var text string
-				if err := json.Unmarshal(block["text"], &text); err == nil && text != "" {
-					parts = append(parts, text)
+			for _, block := range line.Blocks {
+				if block.Text != "" {
+					parts = append(parts, block.Text)
 				}
 			}
 			if len(parts) > 0 {
-				entries = append(entries, CondensedEntry{Type: transcript.TypeUser, Content: strings.Join(parts, "\n")})
+				entries = append(entries, CondensedEntry{Type: transcriptlib.TypeUser, Content: strings.Join(parts, "\n")})
 			}
 
-		case transcript.TypeAssistant:
-			for _, block := range blocks {
-				var blockType string
-				if err := json.Unmarshal(block["type"], &blockType); err != nil {
-					continue
-				}
-
-				switch blockType {
-				case "text":
-					var text string
-					if err := json.Unmarshal(block["text"], &text); err == nil && text != "" {
-						entries = append(entries, CondensedEntry{Type: transcript.TypeAssistant, Content: text})
+		case transcriptlib.TypeAssistant:
+			for _, block := range line.Blocks {
+				switch block.Type {
+				case transcriptlib.BlockText:
+					if block.Text != "" {
+						entries = append(entries, CondensedEntry{Type: transcriptlib.TypeAssistant, Content: block.Text})
 					}
-				case "tool_use":
-					var toolName string
-					if err := json.Unmarshal(block["name"], &toolName); err != nil {
+				case transcriptlib.BlockToolUse:
+					if block.Name == "" {
 						continue
 					}
-
-					var input map[string]interface{}
-					if inputJSON, ok := block["input"]; ok && len(inputJSON) > 0 {
-						if err := json.Unmarshal(inputJSON, &input); err != nil {
+					var input map[string]any
+					if len(block.Input) > 0 {
+						if err := json.Unmarshal(block.Input, &input); err != nil {
 							input = nil
 						}
 					}
-
 					entries = append(entries, CondensedEntry{
 						Type:       "tool",
-						ToolName:   toolName,
+						ToolName:   block.Name,
 						ToolDetail: extractToolDetail(input),
 					})
 				}

@@ -47,9 +47,6 @@ type BenchRepo struct {
 	// Store is the committed (persistent) checkpoint store for this repo.
 	Store *checkpoint.GitStore
 
-	// Ephemeral is the shadow-branch (temporary) checkpoint store for this repo.
-	Ephemeral checkpoint.EphemeralStore
-
 	// HeadHash is the current HEAD commit hash string.
 	HeadHash string
 
@@ -183,10 +180,9 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 		// Benchmark fixture: construct the git store directly rather than via
 		// checkpoint.Open. Benchmarks pin the v1 topology and never exercise
 		// settings-driven backend selection, so they deliberately bypass Open.
-		Store:     checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()),
-		Ephemeral: checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs()),
-		HeadHash:  headHash.String(),
-		Strategy:  opts.Strategy,
+		Store:    checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()),
+		HeadHash: headHash.String(),
+		Strategy: opts.Strategy,
 	}
 
 	// Determine worktree ID
@@ -334,56 +330,25 @@ func (br *BenchRepo) WriteTranscriptFile(b *testing.B, sessionID string, data []
 	return absPath
 }
 
-// SeedShadowBranch creates N checkpoint commits on the shadow branch
-// for the current HEAD. This simulates a session that already has
-// prior checkpoints saved.
-//
-// Temporarily changes cwd to br.Dir because WriteTemporary uses
-// paths.WorktreeRoot() which depends on os.Getwd().
-func (br *BenchRepo) SeedShadowBranch(b *testing.B, sessionID string, checkpointCount int, filesPerCheckpoint int) {
+// SeedTurnEnd writes what a session's last turn end leaves on disk: the
+// agent-modified files src/file_000.go … and the stored transcript under
+// .entire/metadata/<session>/full.jsonl. Pair it with CreateSessionState
+// (StepCount, FilesTouched) to simulate a session with uncondensed work.
+func (br *BenchRepo) SeedTurnEnd(b *testing.B, sessionID string, filesPerTurn int) {
 	b.Helper()
 
-	// WriteTemporary internally calls paths.WorktreeRoot() which uses os.Getwd().
-	// Switch cwd so it resolves to the bench repo.
-	b.Chdir(br.Dir)
-	paths.ClearWorktreeRootCache()
+	for j := range filesPerTurn {
+		name := fmt.Sprintf("src/file_%03d.go", j)
+		writeFile(b, br.Dir, name, GenerateGoFile(j, 100))
+	}
 
-	for i := range checkpointCount {
-		var modified []string
-		for j := range filesPerCheckpoint {
-			name := fmt.Sprintf("src/file_%03d.go", j)
-			content := GenerateGoFile(i*1000+j, 100)
-			writeFile(b, br.Dir, name, content)
-			modified = append(modified, name)
-		}
-
-		metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
-		metadataDirAbs := filepath.Join(br.Dir, metadataDir)
-		if err := os.MkdirAll(metadataDirAbs, 0o750); err != nil {
-			b.Fatalf("mkdir metadata: %v", err)
-		}
-
-		// Write a minimal transcript to the metadata dir
-		transcriptPath := filepath.Join(metadataDirAbs, "full.jsonl")
-		transcript := GenerateTranscript(TranscriptOpts{MessageCount: 5, AvgMessageBytes: 200})
-		if err := os.WriteFile(transcriptPath, transcript, 0o600); err != nil {
-			b.Fatalf("write transcript: %v", err)
-		}
-
-		_, err := br.Ephemeral.Write(context.Background(), checkpoint.Step{
-			SessionID:         sessionID,
-			BaseCommit:        br.HeadHash,
-			WorktreeID:        br.WorktreeID,
-			ModifiedFiles:     modified,
-			MetadataDir:       metadataDir,
-			CommitMessage:     fmt.Sprintf("Checkpoint %d", i+1),
-			AuthorName:        benchAuthorName,
-			AuthorEmail:       benchAuthorEmail,
-			IsFirstCheckpoint: i == 0,
-		})
-		if err != nil {
-			b.Fatalf("write temporary checkpoint %d: %v", i+1, err)
-		}
+	metadataDirAbs := filepath.Join(br.Dir, paths.SessionMetadataDirFromSessionID(sessionID))
+	if err := os.MkdirAll(metadataDirAbs, 0o750); err != nil {
+		b.Fatalf("mkdir metadata: %v", err)
+	}
+	transcript := GenerateTranscript(TranscriptOpts{MessageCount: 5, AvgMessageBytes: 200})
+	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), transcript, 0o600); err != nil {
+		b.Fatalf("write transcript: %v", err)
 	}
 }
 

@@ -245,3 +245,122 @@ func TestConfigureCustomRules_SampleMismatchWarnDoesNotLogRawInput(t *testing.T)
 		t.Errorf("warn missing sample length: %s", logs)
 	}
 }
+
+// TestConfigureCustomRules_SkipsEmptyMatchingPatterns covers patterns that can
+// match zero characters. Applied, each zero-length match inserts a REDACTED
+// token, shredding every string including JSON "type" values; the
+// alternation case also never matches its real branch.
+func TestConfigureCustomRules_SkipsEmptyMatchingPatterns(t *testing.T) {
+	const jsonl = `{"type":"user","message":"hello world"}` + "\n"
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{"empty", ``},
+		{"star", `x*`},
+		{"trailing pipe", `ACME-[0-9]{8}|`},
+		{"optional group", `(EMP-\d{6})?`},
+		{"word boundary alternative", `\b|ACME-[0-9]{8}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetCustomRulesForTest(t)
+			var buf bytes.Buffer
+
+			ConfigureCustomRules(CustomRulesConfig{
+				Inline: map[string]string{"codename": tt.pattern},
+				Logger: slog.New(slog.NewJSONHandler(&buf, nil)),
+			})
+
+			if got := ActiveCustomRules(); got != 0 {
+				t.Errorf("ActiveCustomRules: want 0, have %d", got)
+			}
+			for range 3 {
+				if got := String("hello world"); got != "hello world" {
+					t.Fatalf("String changed plain text: %q", got)
+				}
+			}
+			got, err := JSONLContent(jsonl)
+			if err != nil {
+				t.Fatalf("JSONLContent: %v", err)
+			}
+			if got != jsonl {
+				t.Errorf("JSONLContent changed transcript: %q", got)
+			}
+
+			logs := buf.String()
+			if n := strings.Count(logs, "skipping invalid custom_redactions pattern"); n != 1 {
+				t.Errorf("want exactly one warning, have %d: %s", n, logs)
+			}
+			for _, want := range []string{`"label":"codename"`, `"error":"pattern can match the empty string"`} {
+				if !strings.Contains(logs, want) {
+					t.Errorf("warning missing %s: %s", want, logs)
+				}
+			}
+			if strings.Contains(logs, "ACME") || strings.Contains(logs, "EMP") {
+				t.Errorf("warning leaked the pattern text: %s", logs)
+			}
+		})
+	}
+}
+
+func TestConfigureCustomRules_EmptyMatchingRuleLeavesOthersActive(t *testing.T) {
+	resetCustomRulesForTest(t)
+
+	ConfigureCustomRules(CustomRulesConfig{
+		Inline: map[string]string{
+			"codename": "",
+			"acme":     `ACME-[0-9]{8}`,
+		},
+		Logger: slog.New(slog.DiscardHandler),
+	})
+
+	if got := ActiveCustomRules(); got != 1 {
+		t.Errorf("ActiveCustomRules: want 1, have %d", got)
+	}
+	if got, want := String("deploy ACME-12345678 to prod"), "deploy REDACTED to prod"; got != want {
+		t.Errorf("String: want %q, have %q", want, got)
+	}
+}
+
+// TestConfigureCustomRules_PackSkipsOnlyEmptyMatchingRule pins that one bad
+// rule costs only itself: the rest of its pack stays active.
+func TestConfigureCustomRules_PackSkipsOnlyEmptyMatchingRule(t *testing.T) {
+	resetCustomRulesForTest(t)
+	var buf bytes.Buffer
+
+	pack, err := ParsePack([]byte(`name: acme
+version: 1.0.0
+rules:
+  - id: loose
+    regex: 'ACME-[0-9]{8}|'
+  - id: session
+    regex: 'asess_[a-f0-9]{8}'
+`), "acme.yaml")
+	if err != nil {
+		t.Fatalf("ParsePack: %v", err)
+	}
+	ConfigureCustomRules(CustomRulesConfig{
+		Packs:  []*Pack{pack},
+		Logger: slog.New(slog.NewJSONHandler(&buf, nil)),
+	})
+
+	if got := ActiveCustomRules(); got != 1 {
+		t.Errorf("ActiveCustomRules: want 1, have %d", got)
+	}
+	in := "token ACME-12345678 session asess_deadbeef"
+	if got, want := String(in), "token ACME-12345678 session REDACTED"; got != want {
+		t.Errorf("String: want %q, have %q", want, got)
+	}
+	logs := buf.String()
+	for _, want := range []string{
+		"skipping invalid pack rule",
+		`"pack":"acme.yaml"`,
+		`"rule":"loose"`,
+		`"error":"pattern can match the empty string"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("warning missing %s: %s", want, logs)
+		}
+	}
+}

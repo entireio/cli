@@ -159,14 +159,13 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 			t.Fatalf("configure droid repo settings: %v", err)
 		}
 	}
-	// commit_linking=always ensures the prepare-commit-msg hook adds the
-	// Entire-Checkpoint trailer unconditionally. This is needed because
-	// interactive agents run inside tmux (CanPromptInteractively()=true) but
-	// can't respond to prompts, and content detection may fail on the first
-	// checkpoint when no shadow branch exists yet. Prompt-mode agents still
-	// exercise the !CanPromptInteractively() fast path since they have no TTY
-	// regardless of this setting.
-	PatchSettings(t, dir, map[string]any{"log_level": "debug", "commit_linking": "always"})
+	// commit_linking keeps its default ("prompt"), as for users: whether a
+	// commit links must come from the hook deciding nobody can answer, not from
+	// a setting that skips the decision. Every E2E commit is made by an agent or
+	// the harness, so a prompt shown is always a failure; see
+	// failIfCommitLinkingPrompted.
+	PatchSettings(t, dir, map[string]any{"log_level": "debug"})
+	t.Cleanup(func() { failIfCommitLinkingPrompted(t, dir) })
 
 	// Agents that need files planted before their first run in a repo get them
 	// here — after `entire enable` has written the agent's own config, so a

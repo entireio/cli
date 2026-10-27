@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -162,63 +163,27 @@ func TestState_NormalizeAfterLoad(t *testing.T) {
 		assert.Equal(t, 200, state.CheckpointTranscriptStart)
 		assert.Equal(t, 0, state.TranscriptLinesAtStart)
 	})
-
-	t.Run("heals_stale_divergence_flag_when_attribution_aligned", func(t *testing.T) {
-		t.Parallel()
-		// DivergenceNoticeShown is only meaningful while attribution is diverged.
-		// A state file carrying notice=true with base==attribution must self-heal on load —
-		// otherwise a legitimate future divergence would be suppressed by the stale flag.
-		state := &State{
-			BaseCommit:            "aaaaaaa",
-			AttributionBaseCommit: "aaaaaaa",
-			DivergenceNoticeShown: true,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.False(t, state.DivergenceNoticeShown,
-			"DivergenceNoticeShown must be cleared when AttributionBaseCommit == BaseCommit")
-	})
-
-	t.Run("heals_stale_divergence_flag_when_attribution_empty", func(t *testing.T) {
-		t.Parallel()
-		// Empty AttributionBaseCommit gets backfilled to BaseCommit below; once aligned,
-		// the flag is meaningless and must clear.
-		state := &State{
-			BaseCommit:            "bbbbbbb",
-			AttributionBaseCommit: "",
-			DivergenceNoticeShown: true,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.False(t, state.DivergenceNoticeShown,
-			"DivergenceNoticeShown must be cleared when AttributionBaseCommit is empty/backfilled")
-	})
-
-	t.Run("preserves_divergence_flag_when_actually_diverged", func(t *testing.T) {
-		t.Parallel()
-		state := &State{
-			BaseCommit:            "cccccc1",
-			AttributionBaseCommit: "cccccc0",
-			DivergenceNoticeShown: true,
-		}
-		state.NormalizeAfterLoad(context.Background())
-		assert.True(t, state.DivergenceNoticeShown,
-			"DivergenceNoticeShown must be preserved when attribution is genuinely diverged")
-	})
 }
 
-func TestState_RealignAttributionBase_ClearsDivergenceFlag(t *testing.T) {
+// TestState_LegacyAttributionKeysIgnored pins that state files written before
+// line attribution was removed still load, and that saving drops the keys.
+func TestState_LegacyAttributionKeysIgnored(t *testing.T) {
 	t.Parallel()
 
-	state := &State{
-		BaseCommit:            "ccccccc",
-		AttributionBaseCommit: "aaaaaaa",
-		DivergenceNoticeShown: true,
-	}
-	state.RealignAttributionBase("ccccccc")
+	legacy := `{"session_id":"s1","base_commit":"aaaaaaa","checkpoint_count":2,` +
+		`"attribution_base_commit":"bbbbbbb","divergence_notice_shown":true,` +
+		`"prompt_attributions":[{"checkpoint_number":1,"user_lines_added":3}],` +
+		`"pending_prompt_attribution":{"checkpoint_number":2},"last_checkpoint_commit_hash":"ccccccc"}`
+	var state State
+	require.NoError(t, json.Unmarshal([]byte(legacy), &state))
+	assert.Equal(t, "aaaaaaa", state.BaseCommit)
+	assert.Equal(t, 2, state.StepCount)
 
-	assert.Equal(t, "ccccccc", state.AttributionBaseCommit,
-		"AttributionBaseCommit must be updated to the new base")
-	assert.False(t, state.DivergenceNoticeShown,
-		"DivergenceNoticeShown must be cleared whenever attribution is realigned")
+	out, err := json.Marshal(&state)
+	require.NoError(t, err)
+	for _, key := range []string{"attribution_base_commit", "divergence_notice_shown", "prompt_attributions", "pending_prompt_attribution", "last_checkpoint_commit_hash"} {
+		assert.NotContains(t, string(out), key)
+	}
 }
 
 func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
@@ -227,28 +192,45 @@ func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 		json     string
 		wantCTS  int // CheckpointTranscriptStart
 		wantStep int // StepCount
+		wantTok  int // TokenStart; older state counted tokens from CheckpointTranscriptStart
 	}{
 		{
 			name:     "migrates old condensed_transcript_lines",
 			json:     `{"session_id":"s1","condensed_transcript_lines":42,"checkpoint_count":5}`,
 			wantCTS:  42,
 			wantStep: 5,
+			wantTok:  42,
 		},
 		{
 			name:    "migrates old transcript_lines_at_start",
 			json:    `{"session_id":"s1","transcript_lines_at_start":75}`,
 			wantCTS: 75,
+			wantTok: 75,
 		},
 		{
 			name:    "preserves new field over old",
 			json:    `{"session_id":"s1","condensed_transcript_lines":10,"checkpoint_transcript_start":50}`,
 			wantCTS: 50,
+			wantTok: 50,
 		},
 		{
 			name:     "handles clean new format",
 			json:     `{"session_id":"s1","checkpoint_transcript_start":25,"checkpoint_count":3}`,
 			wantCTS:  25,
 			wantStep: 3,
+			wantTok:  25,
+		},
+		{
+			name:    "keeps token offset ahead of a carry-forward window",
+			json:    `{"session_id":"s1","checkpoint_transcript_start":0,"token_transcript_start":40}`,
+			wantCTS: 0,
+			wantTok: 40,
+		},
+		{
+			name:    "keeps an explicit zero token offset",
+			json:    `{"session_id":"s1","checkpoint_transcript_start":30,"token_transcript_start":0}`,
+			wantCTS: 30,
+			wantTok: 0,
 		},
 	}
 
@@ -260,6 +242,8 @@ func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 
 			assert.Equal(t, tt.wantCTS, state.CheckpointTranscriptStart)
 			assert.Equal(t, tt.wantStep, state.StepCount)
+			assert.Equal(t, tt.wantTok, state.TokenStart())
+			require.NotNil(t, state.TokenTranscriptStart, "the token offset is persisted after load")
 			assert.Equal(t, 0, state.CondensedTranscriptLines, "deprecated field should be cleared")
 			assert.Equal(t, 0, state.TranscriptLinesAtStart, "deprecated field should be cleared")
 		})
@@ -1009,6 +993,45 @@ func TestState_TaskRecordAccessors(t *testing.T) {
 		assert.Nil(t, s.FindTaskRecord("does-not-exist"))
 	})
 
+	// Claude Code's SubagentStop payload carries agent_id but no tool_use_id,
+	// so the stop handler can only find the launch record by its AgentID.
+	t.Run("find by agent id", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{
+			{ToolUseID: "toolu_1", SubagentType: "reviewer"},
+			{ToolUseID: "toolu_2", AgentID: "a2", SubagentType: "dev"},
+		}}
+
+		got := s.FindTaskRecordByAgentID("a2")
+		require.NotNil(t, got)
+		assert.Equal(t, "toolu_2", got.ToolUseID)
+
+		assert.Nil(t, s.FindTaskRecordByAgentID("does-not-exist"))
+		// An empty AgentID must not match a record that never learned one.
+		assert.Nil(t, s.FindTaskRecordByAgentID(""))
+	})
+
+	// Should two records share an agent ID before condensation, the stop must
+	// find the live one, not the completed one.
+	t.Run("find by agent id prefers the live record", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{
+			{ToolUseID: "toolu_first", AgentID: "a1", CompletedAt: time.Now()},
+			{ToolUseID: "toolu_second", AgentID: "a1"},
+		}}
+
+		got := s.FindTaskRecordByAgentID("a1")
+		require.NotNil(t, got)
+		assert.Equal(t, "toolu_second", got.ToolUseID)
+
+		// With no live record left, a redelivered stop still finds the
+		// completed one, so the exactly-once guard can skip it.
+		s.TaskRecords[1].CompletedAt = time.Now()
+		got = s.FindTaskRecordByAgentID("a1")
+		require.NotNil(t, got)
+		assert.Equal(t, "toolu_first", got.ToolUseID)
+	})
+
 	t.Run("remove", func(t *testing.T) {
 		t.Parallel()
 		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}, {ToolUseID: "toolu_2"}}}
@@ -1277,6 +1300,44 @@ func TestState_RebaselineSubagentTokensPreservesTriState(t *testing.T) {
 	assert.Nil(t, unknown.SubagentTokensBaseline)
 }
 
+func TestState_AdvanceDisplayWindowKeepsTokenOffset(t *testing.T) {
+	t.Parallel()
+	unset := State{CheckpointTranscriptStart: 8}
+	unset.AdvanceDisplayWindow(12)
+	assert.Equal(t, 12, unset.CheckpointTranscriptStart)
+	assert.Equal(t, 8, unset.TokenStart(), "an unset token offset must not follow the display window")
+
+	set := State{CheckpointTranscriptStart: 0}
+	set.SetTokenStart(8)
+	set.AdvanceDisplayWindow(12)
+	assert.Equal(t, 8, set.TokenStart())
+}
+
+func TestState_AdvanceCheckpointWindowNeverMovesTokenOffsetBack(t *testing.T) {
+	t.Parallel()
+	advanced := State{}
+	advanced.AdvanceCheckpointWindow(12)
+	assert.Equal(t, 12, advanced.CheckpointTranscriptStart)
+	assert.Equal(t, 12, advanced.TokenStart())
+
+	// A condensation that could not read the transcript reports 0 lines.
+	unreadable := State{CheckpointTranscriptStart: 12}
+	unreadable.SetTokenStart(12)
+	unreadable.AdvanceCheckpointWindow(0)
+	assert.Equal(t, 0, unreadable.CheckpointTranscriptStart)
+	assert.Equal(t, 12, unreadable.TokenStart(), "tokens already counted must not be counted again")
+}
+
+func TestState_SetTokenStartDoesNotShareAcrossCopies(t *testing.T) {
+	t.Parallel()
+	source := State{}
+	source.SetTokenStart(10)
+	copied := source
+	copied.SetTokenStart(20)
+	assert.Equal(t, 10, source.TokenStart())
+	assert.Equal(t, 20, copied.TokenStart())
+}
+
 func TestState_RebaselineSubagentTokensPreservesLegacyNilUsage(t *testing.T) {
 	t.Parallel()
 	for _, agentType := range []types.AgentType{agent.AgentTypeClaudeCode, agent.AgentTypeFactoryAIDroid} {
@@ -1287,5 +1348,119 @@ func TestState_RebaselineSubagentTokensPreservesLegacyNilUsage(t *testing.T) {
 			require.Equal(t, &agent.TokenUsage{InputTokens: 7}, state.SubagentTokensBaseline)
 			require.Nil(t, state.SubagentTokensBaselineComplete)
 		})
+	}
+}
+
+func TestState_HasPendingWork(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state State
+		want  bool
+	}{
+		{name: "empty", state: State{}, want: false},
+		{name: "turn-end step", state: State{StepCount: 1}, want: true},
+		{name: "files awaiting a commit", state: State{FilesTouched: []string{"a.go"}}, want: true},
+		{name: "task record", state: State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}}}, want: true},
+		// FullyCondensed is the caller's concern (see HasPendingWork's doc).
+		{name: "fully condensed with nothing left", state: State{FullyCondensed: true}, want: false},
+		{name: "fully condensed with an in-flight record", state: State{FullyCondensed: true, TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}}}, want: true},
+		{name: "condensed checkpoint id alone", state: State{LastCheckpointID: id.MustCheckpointID("abc123def456")}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.state.HasPendingWork())
+		})
+	}
+}
+
+func TestClaimChildCallCredit(t *testing.T) {
+	t.Parallel()
+
+	credited := CreditedChildCall{ToolUseID: "call_1-ses_a", AgentID: "ses_a", StartedAtMs: 1000}
+	tests := []struct {
+		name string
+		call CreditedChildCall
+		want bool
+	}{
+		{"the same call", credited, false},
+		{"the bare call ID after its record was removed", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a", StartedAtMs: 1000}, false},
+		{"no start", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a"}, false},
+		{"a later start under the reused call ID", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a", StartedAtMs: 2000}, true},
+		{"another child", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_b", StartedAtMs: 1000}, true},
+		{"another call", CreditedChildCall{ToolUseID: "call_10", AgentID: "ses_a", StartedAtMs: 1000}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &State{CreditedChildCalls: []CreditedChildCall{credited}}
+			if got := state.ClaimChildCallCredit(tt.call); got != tt.want {
+				t.Fatalf("ClaimChildCallCredit() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A call first credited with no start (a completion without a launch, or the
+// SessionEnd sweep) cannot be told apart from a later stop for the same child
+// that carries one, so that stop is not credited again.
+func TestClaimChildCallCredit_UnknownCreditedStartMatches(t *testing.T) {
+	t.Parallel()
+
+	credited := CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a"}
+	tests := []struct {
+		name string
+		call CreditedChildCall
+		want bool
+	}{
+		{"the same call with a start", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_a", StartedAtMs: 1000}, false},
+		{"a minted key with a start", CreditedChildCall{ToolUseID: "call_1-ses_a", AgentID: "ses_a", StartedAtMs: 2000}, false},
+		{"another child", CreditedChildCall{ToolUseID: "call_1", AgentID: "ses_b", StartedAtMs: 1000}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &State{CreditedChildCalls: []CreditedChildCall{credited}}
+			if got := state.ClaimChildCallCredit(tt.call); got != tt.want {
+				t.Fatalf("ClaimChildCallCredit() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaimChildCallCredit_KeepsTheMostRecentCalls(t *testing.T) {
+	t.Parallel()
+
+	state := &State{}
+	for i := range MaxCreditedChildCalls + 10 {
+		if !state.ClaimChildCallCredit(CreditedChildCall{ToolUseID: "call_" + strconv.Itoa(i), AgentID: "ses_a"}) {
+			t.Fatalf("call %d was not credited", i)
+		}
+	}
+	if len(state.CreditedChildCalls) != MaxCreditedChildCalls {
+		t.Fatalf("ledger holds %d calls, want %d", len(state.CreditedChildCalls), MaxCreditedChildCalls)
+	}
+	if got := state.CreditedChildCalls[0].ToolUseID; got != "call_10" {
+		t.Fatalf("oldest kept call = %s, want call_10", got)
+	}
+}
+
+func TestTotalTokenUsage_AddsChildSessionsToSubagents(t *testing.T) {
+	t.Parallel()
+
+	state := &State{TokenUsage: &agent.TokenUsage{InputTokens: 10, SubagentTokens: &agent.TokenUsage{InputTokens: 5}}}
+	state.AddChildSessionTokens(&agent.TokenUsage{InputTokens: 7, APICallCount: 1})
+
+	got := state.TotalTokenUsage()
+	if got.InputTokens != 10 || got.SubagentTokens.InputTokens != 12 || got.SubagentTokens.APICallCount != 1 {
+		t.Fatalf("TotalTokenUsage() = %+v (subagents %+v)", got, got.SubagentTokens)
+	}
+	if state.TokenUsage.SubagentTokens.InputTokens != 5 {
+		t.Fatal("TotalTokenUsage must not change TokenUsage")
+	}
+	if (&State{}).TotalTokenUsage() != nil {
+		t.Fatal("a session with no usage has no total")
 	}
 }

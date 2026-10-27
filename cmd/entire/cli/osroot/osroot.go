@@ -485,25 +485,6 @@ func WalkDirNoSymlinks(root *os.Root, dir string, fn fs.WalkDirFunc) error {
 	})
 }
 
-// NoSymlinkedParent reports ErrSymlinkedPath when any directory component of
-// name is a symlink. The leaf is deliberately not examined. This is a
-// diagnostic predicate; an operation that follows it must still use
-// OpenParentNoSymlinks so the checked parent remains pinned through the use.
-//
-// A component that does not exist is not an error: the caller is about to fail
-// on the missing file, with a better message than this could give.
-func NoSymlinkedParent(root *os.Root, name string) error {
-	_, _, closeParent, err := OpenParentNoSymlinks(root, name)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	closeParent()
-	return nil
-}
-
 // SymlinkPaths walks dir within root and returns the names of every symlink it
 // finds, in the root's coordinates. It never follows one, so a symlinked
 // directory is reported and not descended into.

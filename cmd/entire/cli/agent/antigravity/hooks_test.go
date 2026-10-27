@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -25,8 +26,8 @@ func TestInstallHooks_FreshRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
-	if n != 3 {
-		t.Errorf("installed %d hooks, want 3", n)
+	if n != 4 {
+		t.Errorf("installed %d hooks, want 4", n)
 	}
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, ".agents", "hooks.json"))
@@ -41,8 +42,11 @@ func TestInstallHooks_FreshRepo(t *testing.T) {
 	if !ok {
 		t.Fatal("missing 'entire' hook entry")
 	}
-	if len(cfg.PreToolUse) != 1 || len(cfg.PreInvocation) != 1 || len(cfg.Stop) != 1 {
-		t.Errorf("event coverage incomplete: %+v", cfg)
+	if len(cfg.SessionStart) != 1 || len(cfg.PreToolUse) != 1 || len(cfg.PreInvocation) != 1 || len(cfg.Stop) != 1 {
+		t.Fatalf("event coverage incomplete: %+v", cfg)
+	}
+	if !strings.Contains(cfg.SessionStart[0].Command, "entire hooks antigravity session-start") {
+		t.Errorf("SessionStart command = %q, want the session-start verb", cfg.SessionStart[0].Command)
 	}
 	// PostToolUse/PostInvocation are deliberately not installed: they have no
 	// lifecycle mapping and would spawn a no-op subprocess per tool call.
@@ -73,8 +77,8 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first InstallHooks: %v", err)
 	}
-	if n != 3 {
-		t.Errorf("first install: installed %d hooks, want 3", n)
+	if n != 4 {
+		t.Errorf("first install: installed %d hooks, want 4", n)
 	}
 
 	// Second install — idempotent, should return 0
@@ -117,8 +121,8 @@ func TestInstallHooks_PreservesForeignHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
-	if n != 3 {
-		t.Errorf("installed %d hooks, want 3", n)
+	if n != 4 {
+		t.Errorf("installed %d hooks, want 4", n)
 	}
 
 	data, err := os.ReadFile(filepath.Join(agentsDir, "hooks.json"))
@@ -219,6 +223,14 @@ func TestAreHooksInstalled(t *testing.T) {
 
 	if installed, err := a.AreHooksInstalled(context.Background()); err != nil || !installed {
 		t.Errorf("AreHooksInstalled() = (%v, %v) after install, want (true, nil)", installed, err)
+	}
+
+	sessionStartOnly := `{"entire":{"SessionStart":[{"type":"command","command":"entire hooks antigravity session-start"}]}}`
+	if err := os.WriteFile(filepath.Join(tmpDir, ".agents", AgentsHooksFileName), []byte(sessionStartOnly), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if installed, err := a.AreHooksInstalled(context.Background()); err != nil || !installed {
+		t.Errorf("AreHooksInstalled() = (%v, %v) for a SessionStart-only entry, want (true, nil)", installed, err)
 	}
 }
 
@@ -474,6 +486,7 @@ func TestBuildEntireHookConfig_WindowsHostUsesDirectCmdWrapper(t *testing.T) {
 
 	cfg := buildEntireHookConfigForHost(true)
 	commands := []string{
+		cfg.SessionStart[0].Command,
 		cfg.PreToolUse[0].Hooks[0].Command,
 		cfg.PreInvocation[0].Command,
 		cfg.Stop[0].Command,
@@ -528,46 +541,118 @@ func TestUninstallHooks_LeavesAForeignOnlyFileUntouched(t *testing.T) {
 	}
 }
 
-// HooksEntryMatchesHost is doctor's zero-cost replacement for the probe: it
-// must call a fresh install current, a foreign-shaped entry stale, and a
-// user-disabled entry current (install leaves it alone too).
-func TestHooksEntryMatchesHost(t *testing.T) {
+// HooksEntryWrongHost is doctor's zero-cost replacement for the probe: only
+// an entry carrying the other host family's commands is wrong-host. A fresh
+// install, an entry from an older release for this host, and a user-disabled
+// entry (install leaves it alone too) are not.
+func TestHooksEntryWrongHost(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	t.Setenv(configDirEnv, t.TempDir())
 	a := &AntigravityAgent{}
 	ctx := context.Background()
-
-	installed, current, err := a.HooksEntryMatchesHost(ctx)
-	if err != nil || installed || current {
-		t.Fatalf("no file: installed=%v current=%v err=%v; want false,false,nil", installed, current, err)
+	hooksPath := filepath.Join(dir, ".agents", AgentsHooksFileName)
+	check := func(name string, want bool) {
+		t.Helper()
+		got, err := a.HooksEntryWrongHost(ctx)
+		if err != nil || got != want {
+			t.Fatalf("%s: wrongHost=%v err=%v; want %v,nil", name, got, err, want)
+		}
 	}
+	writeEntry := func(cfg HookConfig) {
+		t.Helper()
+		data, err := json.Marshal(HooksFile{"entire": cfg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hooksPath, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	check("no file", false)
 
 	if _, err := a.InstallHooks(ctx, false); err != nil {
 		t.Fatal(err)
 	}
-	installed, current, err = a.HooksEntryMatchesHost(ctx)
-	if err != nil || !installed || !current {
-		t.Fatalf("fresh install: installed=%v current=%v err=%v; want true,true,nil", installed, current, err)
-	}
+	check("fresh install", false)
 
-	hooksPath := filepath.Join(dir, ".agents", AgentsHooksFileName)
-	stale := `{"entire":{"PreInvocation":[{"type":"command","command":"sh -c 'exec entire hooks antigravity pre-invocation'"}]}}`
-	if err := os.WriteFile(hooksPath, []byte(stale), 0o600); err != nil {
+	otherHost := buildEntireHookConfigForHost(!agent.HookHostIsWindows())
+	writeEntry(otherHost)
+	check("other host", true)
+
+	outdated := buildEntireHookConfig()
+	outdated.SessionStart = nil
+	writeEntry(outdated)
+	check("outdated", false)
+
+	disabled := false
+	otherHost.Enabled = &disabled
+	writeEntry(otherHost)
+	check("user-disabled", false)
+}
+
+// Upgrading from a release that installed only pre-tool-use, pre-invocation
+// and stop: a plain install (no --force) must add session-start and leave
+// foreign entries intact.
+func TestInstallHooks_UpgradesEntryWithoutSessionStart(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv(configDirEnv, t.TempDir())
+
+	outdated := buildEntireHookConfig()
+	outdated.SessionStart = nil
+	foreign := json.RawMessage(`{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"safety-gate check"}]}]}`)
+	outdatedBytes, err := json.Marshal(outdated)
+	if err != nil {
 		t.Fatal(err)
 	}
-	installed, current, err = a.HooksEntryMatchesHost(ctx)
-	if err != nil || !installed || current {
-		t.Fatalf("foreign shape: installed=%v current=%v err=%v; want true,false,nil", installed, current, err)
-	}
-
-	disabled := `{"entire":{"enabled":false,"PreInvocation":[{"type":"command","command":"echo off"}]}}`
-	if err := os.WriteFile(hooksPath, []byte(disabled), 0o600); err != nil {
+	seed, err := json.Marshal(map[string]json.RawMessage{"entire": outdatedBytes, "safety-gate": foreign})
+	if err != nil {
 		t.Fatal(err)
 	}
-	installed, current, err = a.HooksEntryMatchesHost(ctx)
-	if err != nil || !installed || !current {
-		t.Fatalf("user-disabled: installed=%v current=%v err=%v; want true,true,nil", installed, current, err)
+	agentsDir := filepath.Join(dir, ".agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	hooksPath := filepath.Join(agentsDir, AgentsHooksFileName)
+	if err := os.WriteFile(hooksPath, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &AntigravityAgent{}
+	n, err := a.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	if n != 4 {
+		t.Errorf("installed %d hooks, want 4", n)
+	}
+
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var cfg HookConfig
+	if err := json.Unmarshal(raw["entire"], &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.SessionStart) != 1 {
+		t.Errorf("upgrade did not add SessionStart: %+v", cfg)
+	}
+	var gotForeign, wantForeign any
+	if err := json.Unmarshal(raw["safety-gate"], &gotForeign); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(foreign, &wantForeign); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotForeign, wantForeign) {
+		t.Errorf("foreign entry changed: got %s, want %s", raw["safety-gate"], foreign)
 	}
 }
 

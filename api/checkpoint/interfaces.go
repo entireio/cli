@@ -23,13 +23,33 @@ type SessionReader interface {
 	ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, string, error)
 }
 
+// TaskReader provides read access to the subagent task records a checkpoint
+// carries at tasks/<tool_use_id>/ (task.json plus an optional
+// agent-<agent_id>.jsonl transcript).
+type TaskReader interface {
+	// ListTasks returns every task record in the checkpoint, ordered by
+	// StartedAt then ToolUseID. A checkpoint without task records yields an
+	// empty list. A record that cannot be read is reported in its entry's Err
+	// rather than failing the list. Returns ErrCheckpointNotFound when the
+	// checkpoint does not exist.
+	ListTasks(ctx context.Context, checkpointID id.CheckpointID) ([]TaskEntry, error)
+
+	// ReadTaskTranscript returns the stored subagent transcript for
+	// toolUseID. Returns ErrTaskNotFound when the checkpoint has no such
+	// record, and an ErrNoTranscript-wrapped error naming the recorded reason
+	// when the record exists without a transcript.
+	ReadTaskTranscript(ctx context.Context, checkpointID id.CheckpointID, toolUseID string) ([]byte, error)
+}
+
 // PersistentStore provides the production persistent checkpoint storage surface:
-// checkpoint-level reads, session-level reads, and the unified Write. Writes go
-// through Writer.Write(ctx, WriteRequest); the concrete per-operation methods
-// live on the git implementation as the methods Write dispatches to.
+// checkpoint-level reads, session-level reads, subagent task reads, and the
+// unified Write. Writes go through Writer.Write(ctx, WriteRequest); the
+// concrete per-operation methods live on the git implementation as the methods
+// Write dispatches to.
 type PersistentStore interface {
 	CheckpointReader
 	SessionReader
+	TaskReader
 	Writer
 }
 
@@ -38,9 +58,8 @@ type PersistentStore interface {
 // unexported isWriteRequest marker. A store dispatches on the concrete type; a
 // mirror/fan-out store forwards the same value to each backend's Write.
 //
-// Four requests are session-level (Session, ReservedSession, SessionTranscript,
-// SessionSummary) and one is checkpoint-level (CheckpointAttribution). Adding
-// a write operation is a new request type plus one dispatch case in every
+// All four requests are session-level (Session, ReservedSession,
+// SessionTranscript, SessionSummary). Adding a write operation is a new request type plus one dispatch case in every
 // backend. The Store interface stays unchanged, so seam tests must exercise the
 // full union because Go does not exhaustively check type switches.
 type WriteRequest interface {
@@ -67,20 +86,10 @@ type SessionSummary struct {
 	Summary      *Summary
 }
 
-// CheckpointAttribution rewrites the checkpoint root's combined attribution
-// across all sessions. (checkpoint-level)
-//
-//nolint:revive // CheckpointAttribution stutter is accepted — the name makes the checkpoint (vs session) tier explicit.
-type CheckpointAttribution struct {
-	CheckpointID id.CheckpointID
-	Attribution  *Attribution
-}
-
-func (Session) isWriteRequest()               {}
-func (ReservedSession) isWriteRequest()       {}
-func (SessionTranscript) isWriteRequest()     {}
-func (SessionSummary) isWriteRequest()        {}
-func (CheckpointAttribution) isWriteRequest() {}
+func (Session) isWriteRequest()           {}
+func (ReservedSession) isWriteRequest()   {}
+func (SessionTranscript) isWriteRequest() {}
+func (SessionSummary) isWriteRequest()    {}
 
 // Writer is the persistent-store write surface: a single Write that accepts any
 // WriteRequest. It is the natural type for mirror fan-out.

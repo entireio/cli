@@ -5,17 +5,22 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // Hook marker used to identify Entire CLI hooks
@@ -34,12 +39,15 @@ const goosWindows = "windows"
 const chainComment = "# Chain: run pre-existing hook"
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 
-// postRewriteHook is named on its own because the rewrite hook is the one
-// Entire branches on by name (see below).
-const postRewriteHook = "post-rewrite"
+// postRewriteHook and prePushHook are named on their own because they are the
+// hooks Entire branches on by name (see below).
+const (
+	postRewriteHook = "post-rewrite"
+	prePushHook     = "pre-push"
+)
 
 // gitHookNames are the git hooks managed by Entire CLI
-var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", postRewriteHook, "pre-push"}
+var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", postRewriteHook, prePushHook}
 
 // ManagedGitHookNames returns the list of git hooks managed by Entire CLI.
 // This is useful for tests that need to manipulate hooks.
@@ -464,11 +472,19 @@ func AnyGitHookInstalled(ctx context.Context) bool {
 	return CheckGitHookState(ctx) != GitHooksAbsent
 }
 
-// ReinstallGitHooks rewrites the managed git hooks using this repo's hook
-// settings — the same pair EnsureSetup runs, exported so callers outside this
-// package cannot open-code it and silently drop absolute_git_hook_path.
+// ReinstallGitHooks rewrites the managed git hooks that are missing or out of
+// date, using this repo's hook settings — the same pair EnsureSetup runs,
+// exported so callers outside this package cannot open-code it and silently
+// drop absolute_git_hook_path.
+//
+// An Entire hook that is current stays as it is even when its text differs from
+// what this version writes: it carries entireHookMarker, so InstallGitHook would
+// replace it without a backup, and the difference may be lines the user added.
+// Skipping it also skips refreshing copies another tool moved aside, which is
+// safe: such a copy only runs from that tool's wrapper, and a wrapper in the
+// hook's place lacks the marker, so the hook reads Absent and is reinstalled.
 func ReinstallGitHooks(ctx context.Context) (int, error) {
-	return InstallGitHook(ctx, true, hookSettingsFromConfig(ctx))
+	return installGitHooks(ctx, true, hookSettingsFromConfig(ctx), true)
 }
 
 // legacyGitHookLaunchers are the markers of a git hook that runs Entire from the
@@ -509,22 +525,39 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	}
 	outdated := false
 	for _, hook := range gitHookNames {
-		// NoFollow: a hook that is a symlink is not one Entire wrote, whatever
-		// is at the far end. Reporting Absent is what sends EnsureSetup to
-		// InstallGitHook, which backs the link up and chains to it.
-		data, err := osroot.ReadFileNoFollow(root, hook)
-		if err != nil {
+		switch hookStateIn(root, hook) {
+		case GitHooksAbsent:
 			return GitHooksAbsent
-		}
-		content := string(data)
-		if !strings.Contains(content, entireHookMarker) {
-			return GitHooksAbsent
-		}
-		if entireHookLineRunsFromWorkingTree(content) {
+		case GitHooksOutdated:
 			outdated = true
+		case GitHooksCurrent:
 		}
 	}
 	if outdated {
+		return GitHooksOutdated
+	}
+	return GitHooksCurrent
+}
+
+// hookStateIn classifies one managed hook in root, as gitHookStateInHooksDir
+// does for the set.
+func hookStateIn(root *os.Root, hook string) GitHookState {
+	// NoFollow: a hook that is a symlink is not one Entire wrote, whatever is at
+	// the far end. Reporting Absent is what sends EnsureSetup to InstallGitHook,
+	// which backs the link up and chains to it.
+	data, err := osroot.ReadFileNoFollow(root, hook)
+	if err != nil {
+		return GitHooksAbsent
+	}
+	content := string(data)
+	if !strings.Contains(content, entireHookMarker) {
+		return GitHooksAbsent
+	}
+	if entireHookLineRunsFromWorkingTree(content) {
+		return GitHooksOutdated
+	}
+	if hook == prePushHook && isPrePushBeforeRefList(content) {
+		// Predates passing git's ref list to Entire.
 		return GitHooksOutdated
 	}
 	return GitHooksCurrent
@@ -554,6 +587,88 @@ func entireHookLineRunsFromWorkingTree(content string) bool {
 	return false
 }
 
+// These are the texts of the pre-push hooks Entire released before it passed
+// git's ref list: the header, then one Entire line, then (when a user's hook
+// was backed up) the chain to it. prePushSimpleChainBeforeRefList is the chain
+// v0.4.3 through v0.11.4 wrote; prePushChainBeforeRefList is the one from
+// v0.11.5 on. They are frozen copies, not rebuilt from today's generators, so
+// changing those cannot change which hooks count as Entire's own old one.
+const (
+	prePushHeaderBeforeRefList      = "#!/bin/sh\n# Entire CLI hooks\n# Pre-push hook: push session logs alongside user's push\n# $1 is the remote name (e.g., \"origin\")\n"
+	prePushSimpleChainBeforeRefList = `# Chain: run pre-existing hook
+_entire_hook_dir="$(dirname "$0")"
+if [ -x "$_entire_hook_dir/pre-push.pre-entire" ]; then
+    "$_entire_hook_dir/pre-push.pre-entire" "$@"
+fi
+`
+	prePushChainBeforeRefList = `_entire_status=$?
+if [ "$_entire_status" -ne 0 ]; then exit "$_entire_status"; fi
+# Chain: run pre-existing hook
+_entire_hook_dir="$(dirname "$0")"
+if [ -z "${ENTIRE_CHAINING_PRE_PUSH:-}" ]; then
+    ENTIRE_CHAINING_PRE_PUSH=1
+    export ENTIRE_CHAINING_PRE_PUSH
+    if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^# File generated by pre-commit: https://pre-commit.com' "$_entire_hook_dir/pre-push.pre-entire" 2>/dev/null; then
+        if [ -x "$_entire_hook_dir/pre-push.legacy.pre-entire" ]; then
+            "$_entire_hook_dir/pre-push.legacy.pre-entire" "$@"
+        fi
+    elif [ -x "$_entire_hook_dir/pre-push.pre-entire" ]; then
+        "$_entire_hook_dir/pre-push.pre-entire" "$@"
+    fi
+fi
+`
+)
+
+// isPrePushBeforeRefList reports whether a pre-push hook is exactly one Entire
+// wrote before it passed git's ref list, for any prefix it could have used.
+// Nothing looser counts: InstallGitHook replaces a hook carrying Entire's
+// marker without a backup, so a hook with the user's own changes must not read
+// Outdated.
+func isPrePushBeforeRefList(content string) bool {
+	body, ok := strings.CutPrefix(content, prePushHeaderBeforeRefList)
+	if !ok {
+		return false
+	}
+	line, rest, ok := strings.Cut(body, "\n")
+	if !ok || (rest != "" && rest != prePushSimpleChainBeforeRefList && rest != prePushChainBeforeRefList) {
+		return false
+	}
+	// v0.3.0 through v0.5.6 ran Entire with no availability test.
+	if prefix, ok := strings.CutSuffix(line, ` hooks git pre-push "$1" || true`); ok {
+		return isPrePushPrefixBeforeRefList(prefix)
+	}
+	line, ok = strings.CutPrefix(line, "if ")
+	if !ok {
+		return false
+	}
+	line, ok = strings.CutSuffix(line, "; else :; fi")
+	if !ok {
+		return false
+	}
+	// v0.6.x ignored Entire's exit status inside the test as well.
+	line = strings.TrimSuffix(line, " || true")
+	line, ok = strings.CutSuffix(line, ` hooks git pre-push "$1"`)
+	if !ok {
+		return false
+	}
+	test, prefix, ok := strings.Cut(line, "; then ")
+	if !ok || !isPrePushPrefixBeforeRefList(prefix) {
+		return false
+	}
+	if prefix == bareEntireHookCmd {
+		return test == "command -v entire >/dev/null 2>&1"
+	}
+	return test == "[ -x "+prefix+" ]" || test == "[ -f "+prefix+" ]"
+}
+
+// isPrePushPrefixBeforeRefList reports whether prefix is one an old pre-push
+// hook could have used: bare entire, or an absolute path, which was always
+// single-quoted (shellQuote).
+func isPrePushPrefixBeforeRefList(prefix string) bool {
+	return prefix == bareEntireHookCmd ||
+		(len(prefix) > 2 && strings.HasPrefix(prefix, "'") && strings.HasSuffix(prefix, "'"))
+}
+
 // buildHookSpecs returns the hook specifications for all managed hooks.
 func buildHookSpecs(cmdPrefix string) []hookSpec {
 	prepareCommitMsgCmd := gitHookCommand(cmdPrefix, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`, false)
@@ -578,7 +693,7 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 	// the user opted into by enabling OPF. Users hit by unrelated
 	// bugs can `ENTIRE_OPF=no git push` for a one-off bypass while
 	// the bug is fixed.
-	prePushCmd := gitHookCommand(cmdPrefix, `pre-push "$1"`, false)
+	prePushCmd := prePushHookLine(cmdPrefix)
 
 	return []hookSpec{
 		{
@@ -613,7 +728,7 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 `, entireHookMarker, postRewriteCmd),
 		},
 		{
-			name: "pre-push",
+			name: prePushHook,
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Pre-push hook: push session logs alongside user's push
@@ -683,6 +798,12 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 // binary form on the next install rather than leaving them pointed at repo
 // content.
 func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error) {
+	return installGitHooks(ctx, silent, absolutePath, false)
+}
+
+// installGitHooks is InstallGitHook, limited to the hooks that are missing or
+// out of date when onlyStale is set (see ReinstallGitHooks).
+func installGitHooks(ctx context.Context, silent, absolutePath, onlyStale bool) (int, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return 0, err
@@ -717,18 +838,84 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 	if err != nil {
 		return 0, err
 	}
-	specs := buildHookSpecs(cmdPrefix)
-	installedCount := 0
+	lockRoot, err := userdirs.CacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[entire] Warning: cannot open the git hooks lock directory (%v)\n", err)
+		lockRoot = nil // installHooks goes ahead without the lock
+	}
 
+	specs := buildHookSpecs(cmdPrefix)
+	if onlyStale {
+		specs = slices.DeleteFunc(specs, func(spec hookSpec) bool {
+			return hookStateIn(root, spec.name) == GitHooksCurrent
+		})
+	}
+	installedCount, err := installHooks(ctx, lockRoot, root, hooksDir, specs, time.Now())
+	if err != nil {
+		return installedCount, err
+	}
+
+	if !silent {
+		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push)")
+		fmt.Println("  Hooks delegate to the current strategy at runtime")
+	}
+
+	return installedCount, nil
+}
+
+// installHooks writes specs into root, holding the hooks lock in lockRoot so
+// concurrent installs and removals never interleave their moves.
+//
+// Install runs on enable and at every agent turn, and needed no per-user
+// directory before the lock existed, so a lock that cannot be used at all (nil
+// lockRoot, or a lock file that will not open) is warned about and skipped, as
+// in removeHooks. A lock another Entire process HOLDS still stops it.
+func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, specs []hookSpec, now time.Time) (int, error) {
+	release, err := acquireHooksLock(ctx, lockRoot, hooksDir)
+	switch {
+	case err == nil:
+		defer release()
+	case errors.Is(err, errHooksLockUnavailable):
+		fmt.Fprintf(stderrWriter, "[entire] Warning: %v; installing hooks without it\n", err)
+	default:
+		return 0, err
+	}
+
+	if err := removeLeftoverTemps(root); err != nil {
+		return 0, err
+	}
+	installedCount := 0
 	for _, spec := range specs {
 		backupName := spec.name + backupSuffix
-		backupExists := hookFileExists(root, backupName)
+
+		reclaimed, err := reclaimFromPreCommit(root, spec.name)
+		if err != nil {
+			return installedCount, fmt.Errorf("failed to take %s back from pre-commit: %w", spec.name, err)
+		}
+		if reclaimed {
+			fmt.Fprintf(stderrWriter, "[entire] pre-commit had moved Entire's %s hook to %s%s; Entire's hook is back and runs pre-commit's after it.\n", spec.name, spec.name, legacySuffix)
+			logging.Info(ctx, "git hook reclaimed from pre-commit", slog.String("hook", spec.name))
+		}
+		wrapped, err := reclaimFromWrappers(root, spec.name)
+		if err != nil {
+			return installedCount, fmt.Errorf("failed to take %s back from the hook manager that moved it: %w", spec.name, err)
+		}
+		if wrapped.changed() {
+			var older []string
+			if len(wrapped.placeholder) > 0 {
+				older = olderCopiesOf(root, spec.name)
+			}
+			fmt.Fprint(stderrWriter, wrapped.notice(spec.name, older))
+			logging.Info(ctx, "git hook reclaimed from a hook manager's wrapper", slog.String("hook", spec.name),
+				slog.String("user_hook_copies", strings.Join(wrapped.userHook, ",")),
+				slog.String("placeholder_copies", strings.Join(wrapped.placeholder, ",")))
+		}
 
 		// Back up existing non-Entire hooks. A symlinked hook is one of those:
 		// Entire never installs a link, so it belongs to the user or another
 		// tool. Refusing to read through it must not mean quietly replacing it,
-		// and the rename below preserves the link itself as the backup, which
-		// the generated chain call then invokes exactly as it would a script.
+		// and the backup keeps the link itself, which the generated chain call
+		// then invokes exactly as it would a script.
 		//
 		// A hook that cannot be classified at all stops the install for that
 		// hook rather than being treated as absent; see classifyExistingHook.
@@ -737,21 +924,41 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 			return installedCount, unclassifiableHookError(hooksDir, spec.name, classErr)
 		}
 		if class == hookForeign {
-			if !backupExists {
-				if err := root.Rename(spec.name, backupName); err != nil {
-					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
-				}
-				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
-			} else {
-				fmt.Fprintf(os.Stderr, "[entire] Warning: replacing %s (backup %s%s already exists from a previous install)\n", spec.name, spec.name, backupSuffix)
+			action, older, err := prepareHookBackup(root, spec.name, now)
+			if err != nil {
+				return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
 			}
-			backupExists = true
+			switch action {
+			case backupCreated:
+				fmt.Fprintf(stderrWriter, "[entire] Your %s hook still runs, after Entire's (moved to %s).\n",
+					spec.name, filepath.Join(hooksDir, backupName))
+				logging.Info(ctx, "git hook backed up", slog.String("hook", spec.name))
+			case backupRotated:
+				fmt.Fprintf(stderrWriter, "[entire] %s changed since Entire backed it up. The current version now runs after Entire's; the older copy was kept as %s and no longer runs.\n", spec.name, older)
+				logging.Warn(ctx, "git hook backup rotated; the older copy no longer runs", slog.String("hook", spec.name), slog.String("older_copy", older))
+			case backupReplacedSame:
+			}
 		}
 
-		// Chain to backup if one exists
+		moved, err := refreshMovedEntireHooks(root, spec.name, spec.content)
+		if err != nil {
+			return installedCount, fmt.Errorf("failed to update the copy of Entire's %s hook another tool moved aside: %w", spec.name, err)
+		}
+		if len(moved) > 0 {
+			logging.Info(ctx, "updated moved copies of Entire's git hook", slog.String("hook", spec.name), slog.String("copies", strings.Join(moved, ",")))
+		}
+
+		// Chain to the backup, unless it is Entire's own hook, which would call itself.
 		content := spec.content
-		if backupExists {
+		if hookFileExists(root, backupName) && !carriesEntireMarker(root, backupName) {
 			content = generateChainedContent(spec.content, spec.name)
+		}
+
+		afterHookBackup(spec.name)
+		if !hookUnchanged(root, spec.name, class) {
+			return installedCount, fmt.Errorf("%w: %s changed while Entire was installing its hook; "+
+				"it was left as it is, so re-run 'entire enable' to back it up and chain to it",
+				errHookChangedDuringInstall, filepath.Join(hooksDir, spec.name))
 		}
 
 		written, err := writeHookFile(root, spec.name, content)
@@ -762,12 +969,6 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 			installedCount++
 		}
 	}
-
-	if !silent {
-		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
-		fmt.Println("  Hooks delegate to the current strategy at runtime")
-	}
-
 	return installedCount, nil
 }
 
@@ -798,9 +999,27 @@ func writeHookFile(root *os.Root, name, content string) (bool, error) {
 // If a .pre-entire backup exists, it is restored.
 // Returns the number of hooks removed.
 func RemoveGitHook(ctx context.Context) (int, error) {
+	res, err := RemoveGitHookDetailed(ctx)
+	return res.Removed, err
+}
+
+// GitHookRemoval reports what RemoveGitHookDetailed did.
+type GitHookRemoval struct {
+	// Removed is the number of Entire hooks removed.
+	Removed int
+	// Restored names the hooks whose .pre-entire backup was put back.
+	Restored []string
+	// Older names the rotated copies (<hook>.pre-entire.<timestamp>) left in
+	// place: they no longer run, and uninstall does not delete user files.
+	Older []string
+}
+
+// RemoveGitHookDetailed is RemoveGitHook, also reporting which backups were
+// restored, for the caller to show the user.
+func RemoveGitHookDetailed(ctx context.Context) (GitHookRemoval, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
-		return 0, err
+		return GitHookRemoval{}, err
 	}
 
 	// ForRemoval: uninstall must be able to finish on a repo install refused.
@@ -809,12 +1028,38 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 	root, err := hooksRootForRemoval(hooksDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil // no hooks directory, so nothing of ours in it
+			return GitHookRemoval{}, nil // no hooks directory, so nothing of ours in it
 		}
-		return 0, fmt.Errorf("failed to open hooks directory %s: %w", hooksDir, err)
+		return GitHookRemoval{}, fmt.Errorf("failed to open hooks directory %s: %w", hooksDir, err)
 	}
 
-	removed := 0
+	lockRoot, err := userdirs.CacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "[entire] Warning: cannot open the git hooks lock directory (%v)\n", err)
+		lockRoot = nil // removeHooks goes ahead without the lock
+	}
+	return removeHooks(ctx, lockRoot, root, hooksDir, restoreMovedHooks)
+}
+
+// removeHooks is RemoveGitHookDetailed on an opened hooks root, under the hooks
+// lock. restore is restoreMovedHooks; tests pass a failing one.
+//
+// Uninstall is cleanup and must finish, so a lock that cannot be used at all
+// (nil lockRoot, or a lock file that will not open) is warned about and
+// skipped. A lock another Entire process HOLDS still stops it: going ahead
+// would interleave with the moves the lock serializes, and a retry succeeds.
+func removeHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, restore func(*os.Root, string) error) (GitHookRemoval, error) {
+	release, err := acquireHooksLock(ctx, lockRoot, hooksDir)
+	switch {
+	case err == nil:
+		defer release()
+	case errors.Is(err, errHooksLockUnavailable):
+		fmt.Fprintf(stderrWriter, "[entire] Warning: %v; removing hooks without it\n", err)
+	default:
+		return GitHookRemoval{}, err
+	}
+
+	var res GitHookRemoval
 	var removeErrors []string
 
 	for _, hook := range gitHookNames {
@@ -838,31 +1083,48 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 		hookIsOurs := class == hookOurs
 		hookExists := class != hookAbsent
 
+		if err := restore(root, hook); err != nil {
+			removeErrors = append(removeErrors, fmt.Sprintf("restore copies of %s: %v", hook, err))
+			continue // leave this hook's files as they are, so a retry can finish
+		}
+		// pre-commit reinstalled over Entire's hook: its wrapper is at the path
+		// and an identical copy in the backup is redundant.
+		if class == hookForeign && sameHookFile(root, hook, backupName) {
+			if err := root.Remove(backupName); err != nil {
+				removeErrors = append(removeErrors, fmt.Sprintf("%s: %v", backupName, err))
+			}
+		}
+
 		if hookIsOurs {
 			if err := osroot.RemoveNoSymlinks(root, hook); err != nil {
 				removeErrors = append(removeErrors, fmt.Sprintf("%s: %v", hook, err))
 				continue
 			}
-			removed++
+			res.Removed++
 		}
 
 		// Restore .pre-entire backup if it exists
 		if hookFileExists(root, backupName) {
 			if hookExists && !hookIsOurs {
 				// A non-Entire hook is present — don't overwrite it with the backup
-				fmt.Fprintf(os.Stderr, "[entire] Warning: %s was modified since install; backup %s%s left in place\n", hook, hook, backupSuffix)
+				fmt.Fprintf(stderrWriter, "[entire] Warning: %s was modified since install; backup %s%s left in place\n", hook, hook, backupSuffix)
 			} else {
 				if err := root.Rename(backupName, hook); err != nil {
 					removeErrors = append(removeErrors, fmt.Sprintf("restore %s%s: %v", hook, backupSuffix, err))
+				} else {
+					res.Restored = append(res.Restored, hook)
 				}
 			}
 		}
 	}
 
-	if len(removeErrors) > 0 {
-		return removed, fmt.Errorf("failed to remove hooks: %s", strings.Join(removeErrors, "; "))
+	if older, err := olderHookCopies(root); err == nil {
+		res.Older = older
 	}
-	return removed, nil
+	if len(removeErrors) > 0 {
+		return res, fmt.Errorf("failed to remove hooks: %s", strings.Join(removeErrors, "; "))
+	}
+	return res, nil
 }
 
 // generateChainedContent appends a chain call to the base hook content,
@@ -871,13 +1133,45 @@ func generateChainedContent(baseContent, hookName string) string {
 	if hookName == postRewriteHook {
 		return generatePostRewriteChainedContent(baseContent)
 	}
+	if hookName == prePushHook {
+		// pre-push is the one hook whose failure must stop git (an OPF decline;
+		// see buildHookSpecs). The script's exit status is its last command's,
+		// so without this a succeeding chained hook would let the push through.
+		baseContent += "_entire_status=$?\nif [ \"$_entire_status\" -ne 0 ]; then exit \"$_entire_status\"; fi\n"
+	}
 
-	return baseContent + fmt.Sprintf(`%s
+	return baseContent + chainCall(hookName, "")
+}
+
+// chainCall runs <hook>.pre-entire, with stdin as redirect gives it. When
+// pre-commit's wrapper ran this hook as <hook>.legacy and is itself the
+// backup, calling it again would trip pre-commit's migration-mode guard, so
+// the user's hook Entire kept for .legacy (see reclaimFromPreCommit) runs
+// instead.
+//
+// The chain also sets a per-hook guard before calling out and skips it when the
+// guard is already set. Any other hook manager that moves Entire's hook aside
+// and runs it from its own wrapper becomes the backup on the next install, so
+// without the guard Entire -> wrapper -> Entire -> ... never ends. The cost: a
+// git command run by the chained hook does not chain that same hook again.
+func chainCall(hookName, redirect string) string {
+	backup := hookName + backupSuffix
+	keep := hookName + keepSuffix
+	guard := "ENTIRE_CHAINING_" + strings.ToUpper(strings.ReplaceAll(hookName, "-", "_"))
+	return fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
-if [ -x "$_entire_hook_dir/%s%s" ]; then
-    "$_entire_hook_dir/%s%s" "$@"
+if [ -z "${%s:-}" ]; then
+    %s=1
+    export %s
+    if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; then
+        if [ -x "$_entire_hook_dir/%s" ]; then
+            "$_entire_hook_dir/%s" "$@"%s
+        fi
+    elif [ -x "$_entire_hook_dir/%s" ]; then
+        "$_entire_hook_dir/%s" "$@"%s
+    fi
 fi
-`, chainComment, hookName, backupSuffix, hookName, backupSuffix)
+`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect, backup, backup, redirect)
 }
 
 func generatePostRewriteChainedContent(baseContent string) string {
@@ -893,13 +1187,51 @@ trap 'rm -f "$_entire_stdin"' EXIT
 	body := strings.TrimPrefix(baseContent, "#!/bin/sh\n")
 	body = strings.Replace(body, original, replacement, 1)
 
-	return replayPrefix + body + fmt.Sprintf(`
-%s
-_entire_hook_dir="$(dirname "$0")"
-if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then
-    "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
-fi
-`, chainComment, backupSuffix, backupSuffix)
+	return replayPrefix + body + "\n" + chainCall(postRewriteHook, ` < "$_entire_stdin"`)
+}
+
+// PrePushStdinRefsEnv, set to 1, tells `entire hooks git pre-push` to read the
+// refs being pushed from stdin. It is an environment variable rather than a
+// flag so that an older entire binary run by a newer script (a downgrade, or a
+// second install earlier on PATH) ignores it instead of failing every push.
+// prePushHookLine sets it. Entire's own script from before it is outdated (see
+// isPrePushBeforeRefList); any other line without it, such as a hand-copied
+// hook-manager line or a hook the user edited, is left as it is.
+const PrePushStdinRefsEnv = "ENTIRE_PRE_PUSH_STDIN_REFS"
+
+// prePushRefsNotSavedMessage is what the pre-push line prints when it stops a
+// push whose ref list it read but could not save.
+const prePushRefsNotSavedMessage = "[entire] could not save git's pre-push ref list (is TMPDIR full?); stopping the push so the hooks after Entire don't run without it"
+
+// prePushHookLine is the pre-push invocation, as one line so a hook manager
+// such as Husky can paste it into a script with other commands. Entire reads
+// git's ref list from stdin (PrePushStdinRefsEnv), and so does whatever runs
+// after it, typically `git lfs pre-push`. The line therefore saves the list,
+// gives Entire the copy, and points the script's stdin back at the copy for
+// the commands after it. Entire's failure ends the script there: a later
+// command's exit status must not decide the push and lose an abort from Entire.
+//
+// When the temp file cannot be created, nothing has read git's stdin yet, so
+// Entire runs without the list, as an old hook would. When writing it fails,
+// cat has already consumed stdin, so the commands after Entire would get an
+// empty list (for `git lfs pre-push`, a push without its objects); the push
+// stops instead.
+//
+// There is no trap to remove the copy if the push is interrupted: a hook
+// manager pastes this line into its own script, where a trap would replace the
+// script's. A leftover copy holds only ref names and commit IDs.
+func prePushHookLine(cmdPrefix string) string {
+	withRefs := fmt.Sprintf(`%s=1 %s hooks git pre-push "$1" < "$_entire_refs"`, PrePushStdinRefsEnv, cmdPrefix)
+	withoutRefs := cmdPrefix + ` hooks git pre-push "$1" < /dev/null`
+	// Without Entire installed the line does nothing, stdin included.
+	return fmt.Sprintf(`if %s; then `, gitHookCommandAvailableTest(cmdPrefix)) +
+		`if _entire_refs="$(mktemp "${TMPDIR:-/tmp}/entire-pre-push.XXXXXX" 2>/dev/null)"; then ` +
+		`if cat > "$_entire_refs"; then ` +
+		withRefs + ` || { _entire_status=$?; rm -f "$_entire_refs"; exit "$_entire_status"; }; ` +
+		`exec < "$_entire_refs"; rm -f "$_entire_refs"; ` +
+		`else rm -f "$_entire_refs"; ` +
+		`printf '%s\n' ` + shellQuote(prePushRefsNotSavedMessage) + ` >&2; exit 1; fi; ` +
+		`else ` + withoutRefs + ` || exit $?; fi; fi`
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.

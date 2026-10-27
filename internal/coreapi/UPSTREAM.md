@@ -58,6 +58,16 @@ keeps its enum for outgoing requests. Locked in
 by `TestListProjectRepos_UnknownEnumValuesPassThrough`,
 `TestListOrgInvitations_UnknownEnumValuesPassThrough` and
 `TestListOrgMembers_UnknownEnumValuesPassThrough` in `client_test.go`.
+
+The detach result is the same shape: `entire repo mirror detach` displays each
+`DetachPrecondition.precondition` slug, and `DetachRepoResult.status` and
+`RepoDetachState.status`, and the server documents both the
+precondition list and the status set as growing. The CLI no longer reads
+`DetachAccessEntry`, but its `source` and `subjectType` stay loosened while
+core still sends `access`: a new value would otherwise fail the whole result.
+Locked in by
+`TestDetachRepo_UnknownEnumValuesPassThrough` and
+`TestGetRepoDetach_UnknownStatusPassesThrough`.
 Retire the allowlist entries as upstream loosens the corresponding fields.
 
 ## 2b. New read-model fields ship as `required`
@@ -94,6 +104,26 @@ and what `search`, `repo mirror` and the dispatch wizard page through, so a
 decode failure there takes out cell routing and search together rather than
 one command.
 
+`DetachRepoResult.access` is on the same list for the opposite reason: core
+drops the field, and the CLI no longer reads it. Locked in by
+`TestDetachRepo_UnsentAccessDecodes`.
+
+## 2c. Nullable objects are typed as the object alone
+
+**Symptom:** `ResourcePerson.directGrant` is a `$ref` to
+`ResourcePersonDirectGrant`, but the server sends `"directGrant": null` for
+everyone without a direct grant, which is every GitHub-synced collaborator.
+ogen's decoder then rejects the whole `GET /repos/{repoId}/people` (and
+`/projects/{projectId}/people`) response.
+
+**Fix upstream:** declare the field nullable (`anyOf: [$ref, {type: null}]`),
+or omit it instead of sending null.
+
+**Workaround:** `spec/normalize.go` (`allowReadModelNulls`, allowlist
+`readModelNullableFields`) rewrites the listed `$ref` fields into that
+`anyOf`, so ogen generates a `Nil…` wrapper. Locked in by
+`TestListRepoPeople_NullDirectGrantDecodes`.
+
 ## 3. Every operation advertises the interactive login schemes
 
 **Symptom:** the spec lists four security alternatives on every operation
@@ -119,6 +149,21 @@ shape; a device-code or authorize endpoint added upstream would, and it is
 the only failure mode here that would not announce itself (a requirement
 mixing `oauth2` with `bearerAuth` survives whole and makes ogen abort at
 generate time on the now-dangling scheme).
+
+## 4. Hand-spliced ahead of a full refresh: ENT-3417 sync block and resync
+
+**Symptom:** the control plane has moved well past the vendored spec (new
+security schemes, dozens of new operations), and a full `curl` refresh no
+longer compiles without unrelated client work. `core.openapi.json` carries
+the ENT-3417 contract spliced in from the live spec: `MirrorSyncBlock`,
+`Mirror.syncBlock`, and `POST /mirrors/resync` with its two bodies.
+
+**Fix upstream:** nothing — the pieces are verbatim from the published spec.
+The next full refresh carries them on its own, and this entry goes.
+
+**Workaround:** none in `normalize.go` beyond the `ResyncMirrorOutputBody.status`
+enum loosening. entiredb#4961 is on main and in prod, so any refresh from a
+current core keeps the three schemas and the route.
 
 <!-- Resolved upstream and removed:
   - Nullable arrays (`"type": ["array","null"]`) — entiredb now emits

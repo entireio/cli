@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/antigravity" // registers the late-transcript agent under test
@@ -110,7 +111,9 @@ func TestFinalizeAllTurnCheckpoints_LateTranscriptNotFlushedDefers(t *testing.T)
 		TurnCheckpointIDs: []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"},
 	}
 
-	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state)
+	// A live deadline is irrelevant here: the deferral returns before the
+	// network phase, the only part of finalize the deadline bounds once it starts.
+	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state, time.Now().Add(time.Minute))
 	require.Equal(t, 1, errCount, "a deferred finalize is still reported to the best-effort caller")
 	require.Equal(t, []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"}, state.TurnCheckpointIDs,
 		"TurnCheckpointIDs must survive an unflushed late transcript so a later turn end retries")
@@ -132,7 +135,7 @@ func TestFinalizeAllTurnCheckpoints_EmptyTranscriptClearsForOtherAgents(t *testi
 		TurnCheckpointIDs: []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"},
 	}
 
-	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state)
+	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state, time.Time{})
 	require.Equal(t, 1, errCount)
 	require.Empty(t, state.TurnCheckpointIDs)
 }

@@ -70,13 +70,17 @@ func (m *mockFullAgent) ExtractModifiedFilesFromOffset(context.Context, string, 
 	return nil, 0, nil
 }
 func (m *mockFullAgent) ExtractPrompts(string, int) ([]string, error) { return nil, nil }
-func (m *mockFullAgent) ExtractSummary(string) (string, error)        { return "", nil }
 
 // TranscriptPreparer
 func (m *mockFullAgent) PrepareTranscript(context.Context, string) error { return nil }
 
 // TokenCalculator
 func (m *mockFullAgent) CalculateTokenUsage([]byte, int) (*TokenUsage, error) { return nil, nil } //nolint:nilnil // test mock
+
+// SidecarImageProvider
+func (m *mockFullAgent) SidecarImages(context.Context, string) ([]CompactedTranscriptAsset, error) {
+	return nil, nil
+}
 
 // InventoryAwareExtractor is built-in only and deliberately has no DeclaredCaps bit.
 func (m *mockFullAgent) ExtractWithSubagentInventory(context.Context, []byte, int, []SubagentReference) (InventoryExtraction, error) {
@@ -92,13 +96,18 @@ func (m *mockFullAgent) GenerateText(context.Context, string, string) (string, e
 }
 
 // OutOfBandTokenSource (mockFullAgent is a CapabilityDeclarer, so AsOutOfBandTokenSource
-// must still exclude it — verifies the built-in-only gate).
-func (m *mockFullAgent) SnapshotTokenBaseline(context.Context, string) (json.RawMessage, error) {
+// must still exclude it — verifies the nonDeclarerCapability refusal).
+func (m *mockFullAgent) SnapshotTokenBaseline(context.Context, string, string) (json.RawMessage, error) {
 	return nil, nil
 }
-func (m *mockFullAgent) CalculateTokenUsageSince(context.Context, string, json.RawMessage) (*TokenUsage, error) {
+func (m *mockFullAgent) CalculateTokenUsageSince(context.Context, string, string, json.RawMessage) (*TokenUsage, error) {
 	return nil, nil //nolint:nilnil // test mock
 }
+
+// LateTranscriptWriter (mockFullAgent is a CapabilityDeclarer, so AsLateTranscriptWriter
+// must still exclude it — verifies the nonDeclarerCapability refusal).
+func (m *mockFullAgent) CountTranscriptPosition([]byte) int             { return 0 }
+func (m *mockFullAgent) SliceTranscriptFromPosition([]byte, int) []byte { return nil }
 
 // StreamingTextGenerator
 func (m *mockFullAgent) GenerateTextStreaming(context.Context, string, string, ProgressFn) (string, error) {
@@ -145,11 +154,22 @@ type mockBuiltinOOBAgent struct {
 	mockBaseAgent
 }
 
-func (m *mockBuiltinOOBAgent) SnapshotTokenBaseline(context.Context, string) (json.RawMessage, error) {
+func (m *mockBuiltinOOBAgent) SnapshotTokenBaseline(context.Context, string, string) (json.RawMessage, error) {
 	return nil, nil
 }
-func (m *mockBuiltinOOBAgent) CalculateTokenUsageSince(context.Context, string, json.RawMessage) (*TokenUsage, error) {
+func (m *mockBuiltinOOBAgent) CalculateTokenUsageSince(context.Context, string, string, json.RawMessage) (*TokenUsage, error) {
 	return nil, nil //nolint:nilnil // test mock
+}
+
+// mockBuiltinLateWriterAgent is a built-in agent that implements
+// LateTranscriptWriter but NOT CapabilityDeclarer.
+type mockBuiltinLateWriterAgent struct {
+	mockBaseAgent
+}
+
+func (m *mockBuiltinLateWriterAgent) CountTranscriptPosition([]byte) int { return 0 }
+func (m *mockBuiltinLateWriterAgent) SliceTranscriptFromPosition([]byte, int) []byte {
+	return nil
 }
 
 // --- Tests ---
@@ -250,6 +270,34 @@ func TestAsTranscriptPreparer(t *testing.T) {
 		_, ok := AsTranscriptPreparer(ag)
 		if ok {
 			t.Error("expected false")
+		}
+	})
+}
+
+func TestAsSidecarImageProvider(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil agent", func(t *testing.T) {
+		t.Parallel()
+		provider, ok := AsSidecarImageProvider(nil)
+		if ok || provider != nil {
+			t.Errorf("AsSidecarImageProvider(nil) = (%v, %v), want (nil, false)", provider, ok)
+		}
+	})
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		provider, ok := AsSidecarImageProvider(&mockBaseAgent{})
+		if ok || provider != nil {
+			t.Errorf("AsSidecarImageProvider(base agent) = (%v, %v), want (nil, false)", provider, ok)
+		}
+	})
+
+	t.Run("ignores capability declarations", func(t *testing.T) {
+		t.Parallel()
+		provider, ok := AsSidecarImageProvider(&mockFullAgent{})
+		if !ok || provider == nil {
+			t.Errorf("AsSidecarImageProvider(declarer) = (%v, %v), want non-nil/true", provider, ok)
 		}
 	})
 }
@@ -492,6 +540,42 @@ func TestAsOutOfBandTokenSource(t *testing.T) {
 	})
 }
 
+func TestAsLateTranscriptWriter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil agent", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsLateTranscriptWriter(nil)
+		if ok {
+			t.Error("expected false for nil agent")
+		}
+	})
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsLateTranscriptWriter(&mockBaseAgent{})
+		if ok {
+			t.Error("expected false for agent not implementing LateTranscriptWriter")
+		}
+	})
+
+	t.Run("builtin agent", func(t *testing.T) {
+		t.Parallel()
+		lw, ok := AsLateTranscriptWriter(&mockBuiltinLateWriterAgent{})
+		if !ok || lw == nil {
+			t.Error("expected true for built-in agent implementing LateTranscriptWriter")
+		}
+	})
+
+	t.Run("capability declarer excluded", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsLateTranscriptWriter(&mockFullAgent{})
+		if ok {
+			t.Error("expected false for CapabilityDeclarer agent")
+		}
+	})
+}
+
 func TestAsPromptExtractor(t *testing.T) {
 	t.Parallel()
 
@@ -577,4 +661,78 @@ func TestAsStreamingTextGenerator(t *testing.T) {
 			t.Error("expected false when capability declared false")
 		}
 	})
+}
+
+// mockLocatorAgent implements the capabilities that callers used to reach by
+// inline type assertion. None of them has a DeclaredCaps field.
+type mockLocatorAgent struct {
+	mockBaseAgent
+}
+
+func (m *mockLocatorAgent) DiscoverReviewSkills(context.Context) ([]DiscoveredSkill, error) {
+	return nil, nil
+}
+func (m *mockLocatorAgent) ResolveRestoredSessionFile(string, string, []byte) (string, error) {
+	return "", nil
+}
+func (m *mockLocatorAgent) ProtectedFiles() []string                             { return nil }
+func (m *mockLocatorAgent) HookConfigRelPath() string                            { return "" }
+func (m *mockLocatorAgent) ResolveSessionFileCandidates(string, string) []string { return nil }
+
+// mockDeclaringLocatorAgent is mockLocatorAgent as an external agent that
+// declares nothing. These capabilities have no declaration to make, so it must
+// still be accepted: the external adapter forwards ProtectedFiles this way.
+type mockDeclaringLocatorAgent struct {
+	mockLocatorAgent
+}
+
+func (m *mockDeclaringLocatorAgent) DeclaredCapabilities() DeclaredCaps { return DeclaredCaps{} }
+
+func TestUndeclaredCapabilityHelpers(t *testing.T) {
+	t.Parallel()
+
+	helpers := map[string]func(Agent) bool{
+		"AsSkillDiscoverer": func(ag Agent) bool {
+			_, ok := AsSkillDiscoverer(ag)
+			return ok
+		},
+		"AsRestoredSessionPathResolver": func(ag Agent) bool {
+			_, ok := AsRestoredSessionPathResolver(ag)
+			return ok
+		},
+		"AsProtectedFilesProvider": func(ag Agent) bool {
+			_, ok := AsProtectedFilesProvider(ag)
+			return ok
+		},
+		"AsHookConfigLocator": func(ag Agent) bool {
+			_, ok := AsHookConfigLocator(ag)
+			return ok
+		},
+		"AsSessionFileCandidatesProvider": func(ag Agent) bool {
+			_, ok := AsSessionFileCandidatesProvider(ag)
+			return ok
+		},
+	}
+
+	cases := []struct {
+		name string
+		ag   Agent
+		want bool
+	}{
+		{"nil agent", nil, false},
+		{"not implemented", &mockBaseAgent{}, false},
+		{"builtin agent", &mockLocatorAgent{}, true},
+		{"capability declarer", &mockDeclaringLocatorAgent{}, true},
+	}
+
+	for name, resolve := range helpers {
+		for _, tc := range cases {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				if got := resolve(tc.ag); got != tc.want {
+					t.Errorf("%s(%s) ok = %v, want %v", name, tc.name, got, tc.want)
+				}
+			})
+		}
+	}
 }

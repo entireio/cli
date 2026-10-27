@@ -39,6 +39,28 @@ e2e/
 - Use the `entire` package for CLI interactions, not raw `exec.Command`.
 - Skip tests pending CLI fixes with `t.Skip("ENT-XXX: reason")`.
 
+### Agents see only real agent signals
+
+Whether a git hook may prompt is decided from the agent's process alone, as on a user's machine, so the harness hands agents no shortcut:
+
+- Agent processes and tmux sessions start without `ENTIRE_TEST_TTY`, `CI`, `GITHUB_ACTIONS` or `GIT_TERMINAL_PROMPT` (`agents.harnessOnlyEnv`). Build a runner's env with `agentEnv`, never from bare `os.Environ()`; `NewTmuxSession` unsets them itself.
+- Headless agents start detached from the runner's terminal (`setupProcessGroup`), as an IDE or desktop app starts them: on Unix in a new session with no controlling terminal, on Windows in a console with no window (`CREATE_NO_WINDOW`), which the agent's git and hooks inherit.
+- Test repos keep the default `commit_linking` ("prompt"). Every E2E commit comes from an agent or the harness, so a test fails if any hook logged `strategy.CommitLinkingPromptLogMsg` (`failIfCommitLinkingPrompted`). The prompt gives up after a timeout, so without this a misjudged agent shell only shows as a slower commit.
+- Vogon behaves like a real agent: in interactive mode it turns off canonical input on its terminal as a TUI does, and it sets no "don't prompt" variable for its git commands.
+
+These rules exist because every one of those shortcuts hid a hang users hit: Windows `git commit` from Claude Code and Codex desktop blocked on an invisible prompt (#2725, #2726) while E2E stayed green.
+
+### OpenCode dependency cache
+
+OpenCode setup shares a version-keyed plugin dependency tree under the system
+temporary directory. A reusable tree must contain a `node_modules` directory
+and regular `package.json` and `package-lock.json` files. Incomplete trees are
+removed and rebuilt in staging; setup validates the staged tree before publishing
+it and validates any competing process's tree before reusing it. An interprocess
+lock beside the cache serializes validation, cleanup, installation, and publication;
+its lock file is retained so waiters keep using the same lock. Cache installs
+explicitly enable npm lockfile generation even when local npm settings disable it.
+
 ## Control-Plane Tests
 
 `controlplane/` runs the `entire` binary against the production control plane with no coding agent involved. Its `TestMain` logs in once per run with `entire login --device`, completing GitHub sign-in and the device approval in headless Chromium (playwright-go) as the GitHub test user named by `E2E_GH_USERNAME` / `E2E_GH_PASSWORD` / `E2E_GH_TOTP_SECRET`; every test then starts from that session. The account has authenticator-app 2FA enabled on purpose: GitHub skips its emailed new-device verification for 2FA accounts, and the test computes the one-time code from the secret. The CLI's config and token store live in a temp dir outside `e2e/artifacts/`, which CI uploads.
@@ -165,4 +187,11 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 - For debugging a single test, dispatch **`.github/workflows/e2e.yml`** with an agent and the optional `test` regex. An empty regex keeps the normal suite. The filter also reaches Windows when running Claude; selecting another agent skips the Windows Claude job.
 - **`.github/workflows/e2e-controlplane.yml`** runs the control-plane tests on pushes to main and on manual dispatch. Runs are serialized and never cancelled mid-flight, because the shared test account's resources are cleaned up by the test itself.
 
-The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary; `nightly-e2e.yml` checks the published nightly installation.
+Unix workflows install Codex and Copilot using their official shell installers;
+Codex prompts are disabled with `CODEX_NON_INTERACTIVE=1`. Installer downloads
+use `--compressed`, and E2E installs retain retries with `pipefail`. Nightly
+OpenCode installs deliberately keep npm to avoid the shell installer's
+unauthenticated GitHub API rate limits. Windows also keeps npm for Codex,
+Copilot, and OpenCode rather than using Unix shell installers.
+
+The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary on Linux, and runs the Vogon canary on Windows (`test-canary-windows`; roger-roger stays Linux-only); `nightly-e2e.yml` checks the published nightly installation.

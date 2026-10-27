@@ -39,6 +39,10 @@ func TestSkillEventFromPromptSlashCommand(t *testing.T) {
 func TestSkillEventFromPromptSlashCommand_Variants(t *testing.T) {
 	t.Parallel()
 
+	const (
+		githubPAT    = "ghp_a1b2c1d2e1f2g1h2a1b2c1d2e1f2g1h2a1b2"
+		anthropicKey = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
+	)
 	cases := []struct {
 		prompt   string
 		wantName string // "" means: expect no match
@@ -50,16 +54,19 @@ func TestSkillEventFromPromptSlashCommand_Variants(t *testing.T) {
 		{"/parent/child do x", "parent/child"},                      // opencode path namespace
 		{"/start-ticket https://x/y", "start-ticket"},               // url arg ignored
 		{"\t/skill:trigger-analysis inspect", "trigger-analysis"},   // pi form → bare name
-		{"/dev", "dev"},                       // bare command colliding with a root name — still a command
-		{"/dev implement the feature", "dev"}, // ditto, with args
-		{"/Users/alice/notes.md", ""},         // pasted absolute path
-		{"/dev/null 2>&1", ""},                // root followed by a path segment
-		{"/tmp/output.log read this", ""},     // pasted path with args
-		{"please run /review", ""},            // not leading
-		{"/ spaced", ""},                      // no command token
-		{"/", ""},                             // bare slash
-		{"/skill:", ""},                       // empty skill name
-		{"do the thing", ""},                  // no slash
+		{"/dev", "dev"},                        // bare command colliding with a root name — still a command
+		{"/dev implement the feature", "dev"},  // ditto, with args
+		{"/Users/alice/notes.md", ""},          // pasted absolute path
+		{"/dev/null 2>&1", ""},                 // root followed by a path segment
+		{"/tmp/output.log read this", ""},      // pasted path with args
+		{"/" + githubPAT + " is my token", ""}, // pasted secret
+		{"/" + anthropicKey, ""},               // pasted secret, no args
+		{"/skill:" + githubPAT, ""},            // pasted secret in the pi form
+		{"please run /review", ""},             // not leading
+		{"/ spaced", ""},                       // no command token
+		{"/", ""},                              // bare slash
+		{"/skill:", ""},                        // empty skill name
+		{"do the thing", ""},                   // no slash
 	}
 	for _, tc := range cases {
 		event, ok := SkillEventFromPromptSlashCommand("codex", tc.prompt, time.Time{})

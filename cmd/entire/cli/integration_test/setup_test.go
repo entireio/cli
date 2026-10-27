@@ -109,6 +109,28 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// Same reason for the agents' relocated homes: tests steer them through
+	// HOME and ENTIRE_TEST_*_PROJECT_DIR in the child env, and an inherited
+	// relocation variable would outrank HOME in the base-dir fallback. The list
+	// is static for the same reason as the one above.
+	for _, name := range agent.RelocationEnvVars() {
+		if err := os.Unsetenv(name); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to unset %s: %v\n", name, err)
+			os.RemoveAll(tmpDir)
+			os.Exit(1)
+		}
+	}
+
+	// Resume and attach ask claude for its config home (see
+	// agent.EnableHomeProbes). A spawned binary is not under `go test`, so
+	// without this it would start whatever claude the developer has on PATH;
+	// a test that exercises the probe points it at a fake one instead.
+	if err := os.Setenv("ENTIRE_TEST_CLAUDE_CONFIG_PROBE", "off"); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to disable the claude config probe: %v\n", err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
+	}
+
 	moduleRoot := findModuleRoot()
 	buildCmd := exec.CommandContext(context.Background(), "go", "build", "-o", testBinaryPath, ".")
 	buildCmd.Dir = filepath.Join(moduleRoot, "cmd", "entire")

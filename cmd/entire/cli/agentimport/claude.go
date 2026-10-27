@@ -22,7 +22,8 @@ func (claudeImporter) Name() string { return "claude-code" }
 func (claudeImporter) AgentType() types.AgentType { return agent.AgentTypeClaudeCode }
 
 // Discover returns Claude transcript files for the repo modified within the
-// lookback window. overridePath replaces the default ~/.claude/projects/<slug>
+// lookback window whose recorded cwd is inside repoRoot (see
+// recordedCwdIn). overridePath replaces the default ~/.claude/projects/<slug>
 // dir; sessionFilter, when non-empty, keeps only matching session IDs (the
 // file stem).
 func (claudeImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
@@ -30,7 +31,7 @@ func (claudeImporter) Discover(repoRoot, overridePath string, now time.Time, ses
 	if err != nil {
 		return nil, err
 	}
-	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(".jsonl", identitySessionID))
+	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(identitySessionID), recordedCwdIn(repoRoot))
 }
 
 // SplitTurns produces one Turn per user-prompt line. Main-agent token usage for
@@ -147,9 +148,8 @@ func isUserPromptLine(raw []byte) bool {
 	return transcript.ExtractUserContent(line.Message) != ""
 }
 
-// splitRawLines splits content into raw lines in the same index space as
-// transcript.SliceFromLine (newline-counted). Trailing empty segment from a
-// final newline is dropped.
+// splitRawLines splits content into raw lines using the same newline-counted
+// indices as transcript.SliceFromLine. A trailing empty segment is dropped.
 func splitRawLines(content []byte) [][]byte {
 	if len(content) == 0 {
 		return nil

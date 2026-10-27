@@ -219,6 +219,40 @@ func TestRunStatus_Enabled(t *testing.T) {
 	}
 }
 
+// A relative agent relocation variable is refused, and several callers fail
+// open on the refusal, so status is where it has to be visible — in the short
+// output, the detailed output and --json alike.
+func TestRunStatus_ReportsRefusedAgentHome(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	for _, envVar := range agent.RelocationEnvVars() {
+		t.Setenv(envVar, "")
+	}
+	t.Setenv("CODEX_HOME", filepath.Join("relative", "codex"))
+
+	for _, detailed := range []bool{false, true} {
+		var stdout bytes.Buffer
+		if err := runStatus(context.Background(), &stdout, detailed, false); err != nil {
+			t.Fatalf("runStatus(detailed=%v) error = %v", detailed, err)
+		}
+		if !strings.Contains(stdout.String(), "ignoring agent home: CODEX_HOME must be an absolute path") {
+			t.Errorf("runStatus(detailed=%v) did not report the refused CODEX_HOME:\n%s", detailed, stdout.String())
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus(json) error = %v", err)
+	}
+	var got statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("status --json is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(got.RefusedAgentHomes) != 1 || !strings.Contains(got.RefusedAgentHomes[0], "CODEX_HOME") {
+		t.Errorf("refused_agent_homes = %q, want the relative CODEX_HOME", got.RefusedAgentHomes)
+	}
+}
+
 // `entire status` surfaces the agent-help pointer for agents on transports
 // without context injection (Cursor / Copilot / Droid), but only once entire is
 // set up — not for not-set-up or not-a-git-repo states.
@@ -800,11 +834,10 @@ func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testin
 
 	now := time.Now()
 	state := &session.State{
-		SessionID:             "stale-base-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            baseCommit,
-		AttributionBaseCommit: baseCommit,
+		SessionID:    "stale-base-session",
+		WorktreePath: repoDir,
+		StartedAt:    now.Add(-10 * time.Minute),
+		BaseCommit:   baseCommit,
 	}
 	if err := store.Save(context.Background(), state); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -826,9 +859,6 @@ func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testin
 	}
 	if reloaded.BaseCommit != baseCommit {
 		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, baseCommit)
-	}
-	if reloaded.AttributionBaseCommit != baseCommit {
-		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, baseCommit)
 	}
 }
 
@@ -852,11 +882,10 @@ func TestWriteActiveSessions_NoWarningWhenReconciled(t *testing.T) {
 
 	now := time.Now()
 	state := &session.State{
-		SessionID:             "reconciled-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            headCommit,
-		AttributionBaseCommit: headCommit,
+		SessionID:    "reconciled-session",
+		WorktreePath: repoDir,
+		StartedAt:    now.Add(-10 * time.Minute),
+		BaseCommit:   headCommit,
 	}
 	if err := store.Save(context.Background(), state); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -867,64 +896,8 @@ func TestWriteActiveSessions_NoWarningWhenReconciled(t *testing.T) {
 	writeActiveSessions(context.Background(), &buf, sty)
 
 	output := buf.String()
-	if strings.Contains(output, "diverged") || strings.Contains(output, "attribution") {
-		t.Fatalf("expected no divergence or attribution warning when BaseCommit == HEAD and AttributionBaseCommit == BaseCommit, got: %s", output)
-	}
-}
-
-func TestWriteActiveSessions_ShowsSoftWarningWhenAttributionDiverged(t *testing.T) {
-	setupTestRepo(t)
-
-	repoDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd() error = %v", err)
-	}
-
-	testutil.WriteFile(t, repoDir, "tracked.txt", "content")
-	testutil.GitAdd(t, repoDir, "tracked.txt")
-	testutil.GitCommit(t, repoDir, "initial commit")
-	headCommit := testutil.GetHeadHash(t, repoDir)
-
-	// Simulate: hooks already reconciled BaseCommit to HEAD, but
-	// AttributionBaseCommit is still pointing at the old commit (stale).
-	oldBaseCommit := strings.Repeat("a", 40)
-
-	store, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatalf("NewStateStore() error = %v", err)
-	}
-
-	now := time.Now()
-	state := &session.State{
-		SessionID:             "attribution-diverged-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            headCommit,
-		AttributionBaseCommit: oldBaseCommit,
-	}
-	if err := store.Save(context.Background(), state); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	var buf bytes.Buffer
-	sty := newStatusStyles(&buf)
-	writeActiveSessions(context.Background(), &buf, sty)
-
-	output := buf.String()
-	if !strings.Contains(output, "attribution") {
-		t.Fatalf("expected attribution warning when AttributionBaseCommit != BaseCommit, got: %s", output)
-	}
-
-	// Verify session state was NOT mutated (read-only)
-	reloaded, err := store.Load(context.Background(), state.SessionID)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if reloaded.BaseCommit != headCommit {
-		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, headCommit)
-	}
-	if reloaded.AttributionBaseCommit != oldBaseCommit {
-		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, oldBaseCommit)
+	if strings.Contains(output, "diverged") {
+		t.Fatalf("expected no divergence warning when BaseCommit == HEAD, got: %s", output)
 	}
 }
 
@@ -942,10 +915,9 @@ func TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning(t 
 
 	active := []*session.State{
 		{
-			SessionID:             "partially-initialized",
-			WorktreePath:          repoRoot,
-			BaseCommit:            "",
-			AttributionBaseCommit: strings.Repeat("a", 40),
+			SessionID:    "partially-initialized",
+			WorktreePath: repoRoot,
+			BaseCommit:   "",
 		},
 	}
 
@@ -957,11 +929,6 @@ func TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning(t 
 	}
 	if !strings.Contains(msg, "linkage incomplete") {
 		t.Fatalf("expected warning to mention linkage incomplete, got %q", msg)
-	}
-	// Must NOT be the attribution-divergence message — that would be misleading
-	// since the session isn't diverged; it's un-initialized.
-	if strings.Contains(msg, "attribution base diverged") {
-		t.Fatalf("empty-BaseCommit session should not produce attribution-divergence wording, got %q", msg)
 	}
 }
 
@@ -1972,7 +1939,47 @@ func TestRunStatusJSON_SecretScanners(t *testing.T) {
 func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
+	writeOutdatedClaudeHooks(t)
 
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !slices.Contains(result.HooksOutdated, "claude-code") {
+		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
+	}
+}
+
+// TestRunStatus_HooksOutdatedPointsToDoctor: `entire enable --force` rebuilds
+// every Entire hook and drops the timeouts and fields the user set on them, while
+// doctor repairs what it can in place and names the fix for the rest.
+func TestRunStatus_HooksOutdatedPointsToDoctor(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeOutdatedClaudeHooks(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "hooks out of date · run 'entire doctor'") {
+		t.Errorf("status output does not point outdated hooks to doctor:\n%s", out)
+	}
+	if strings.Contains(out, "enable --force") {
+		t.Errorf("status output suggests enable --force:\n%s", out)
+	}
+}
+
+// writeOutdatedClaudeHooks writes Claude Code hooks under the retired
+// Task/TodoWrite matchers.
+func writeOutdatedClaudeHooks(t *testing.T) {
+	t.Helper()
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -1988,19 +1995,6 @@ func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 }`
 	if err := os.WriteFile(".claude/settings.json", []byte(stale), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	var result statusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if !slices.Contains(result.HooksOutdated, "claude-code") {
-		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
 	}
 }
 
@@ -2682,7 +2676,9 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 				queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
 				if backend == "git-refs" {
 					for _, ref := range []string{"refs/entire/checkpoints/aa/bb0000000001", "refs/entire/checkpoints/aa/bb0000000002"} {
-						if err := queue.Enqueue(plumbing.ReferenceName(ref)); err != nil {
+						// Only refs that exist locally count: the push drops the rest.
+						testutil.GitUpdateRef(t, ".", ref, head)
+						if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: plumbing.ReferenceName(ref)}); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -3082,6 +3078,9 @@ func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
 	if !strings.Contains(out, "2 checkpoints not yet on origin — they sync with your next 'git push origin'") {
 		t.Errorf("expected unpushed counter line, got:\n%s", out)
 	}
+	if strings.Contains(out, "checkpoint list --outgoing") {
+		t.Errorf("git-branch: --outgoing is git-refs only, so the counter must not point at it, got:\n%s", out)
+	}
 }
 
 func TestRunStatus_CheckpointSyncCounterOmitted_WhenSynced(t *testing.T) {
@@ -3139,18 +3138,20 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
 	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
-	checkpointSyncTestCommit(t, "a.txt", "one")
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	testutil.GitUpdateRef(t, ".", "refs/entire/checkpoints/aa/bb0000000001", head)
+	testutil.GitUpdateRef(t, ".", "refs/entire/checkpoints/aa/bb0000000002", head)
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
 	queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
-	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000001"); err != nil {
-		t.Fatalf("Enqueue: %v", err)
+	if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: "refs/entire/checkpoints/aa/bb0000000001"}); err != nil {
+		t.Fatalf("EnqueueEntry: %v", err)
 	}
-	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000002"); err != nil {
-		t.Fatalf("Enqueue: %v", err)
+	if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: "refs/entire/checkpoints/aa/bb0000000002"}); err != nil {
+		t.Fatalf("EnqueueEntry: %v", err)
 	}
 
 	var stdout bytes.Buffer
@@ -3163,8 +3164,8 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 		t.Errorf("expected dedicated destination line, got:\n%s", out)
 	}
 	// Dedicated mode has no remote name to phrase the counter around.
-	if !strings.Contains(out, "2 checkpoints not yet pushed") {
-		t.Errorf("expected queue-length counter without a remote name, got:\n%s", out)
+	if !strings.Contains(out, "2 checkpoints not yet pushed · see 'entire checkpoint list --outgoing'") {
+		t.Errorf("expected queue counter without a remote name, pointing at the listing, got:\n%s", out)
 	}
 	if strings.Contains(out, "not yet on") {
 		t.Errorf("dedicated counter must not name a git remote, got:\n%s", out)

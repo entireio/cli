@@ -264,9 +264,11 @@ func (s *semanticSearchV4Session) resolveScope(ctx context.Context, slugs []stri
 }
 
 // lookupFilter resolves one repo filter to index entries, cached per session.
-// Matching mirrors resolveRepoFilters: a gh/ prefix is stripped, owner/name
-// matches full_name (case-insensitive, server-side exact match), and a raw
-// ULID matches the index entry's ID.
+// A slash-bearing filter goes to the exact-match ListRepos filter unchanged
+// (case-insensitive server-side): the control plane reads gh/owner/repo as
+// GitHub-only, et/project/repo as native-only, and a bare owner/repo as either
+// forge, so stripping the forge here would let a GitHub-origin search also
+// match a same-named native repo. A raw ULID matches the index entry's ID.
 func (s *semanticSearchV4Session) lookupFilter(ctx context.Context, filter string) ([]coreapi.RepoIndexEntry, error) {
 	s.mu.Lock()
 	if cached, ok := s.slugRepos[filter]; ok {
@@ -275,12 +277,11 @@ func (s *semanticSearchV4Session) lookupFilter(ctx context.Context, filter strin
 	}
 	s.mu.Unlock()
 
-	slug := strings.TrimPrefix(filter, "gh/")
 	var matched []coreapi.RepoIndexEntry
-	if strings.Contains(slug, "/") {
+	if strings.Contains(filter, "/") {
 		lookupCtx, cancel := context.WithTimeout(ctx, semanticSearchControlPlaneTimeout)
 		defer cancel()
-		out, err := s.coreClient.ListRepos(lookupCtx, coreapi.ListReposParams{Filter: coreapi.NewOptString(slug)})
+		out, err := s.coreClient.ListRepos(lookupCtx, coreapi.ListReposParams{Filter: coreapi.NewOptString(filter)})
 		if err != nil {
 			return nil, fmt.Errorf("semantic search: resolving repository %q: %w", filter, err)
 		}

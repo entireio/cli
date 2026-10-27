@@ -35,16 +35,6 @@ var newExpertsAPIClient = func(ctx context.Context, insecureHTTP bool, target *a
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target)
 }
 
-func setExpertsClientFactoryForTest(
-	t interface{ Helper() },
-	fn func(context.Context, bool, *auth.CellTarget) (expertsAPIClient, error),
-) func() {
-	t.Helper()
-	prev := newExpertsAPIClient
-	newExpertsAPIClient = fn
-	return func() { newExpertsAPIClient = prev }
-}
-
 type expertsFlags struct {
 	repo         string
 	branch       string
@@ -414,7 +404,8 @@ func parseExpertsRepo(value string) (string, error) {
 	// Trimmed before the checks below, so a name the trim empties (".git") or
 	// turns dot-only ("..git" → ".") is refused here rather than forwarded to
 	// placement resolution. See dotOnlyRe.
-	owner, repo := parts[0], strings.TrimSuffix(parts[1], gitDirSuffix)
+	owner := parts[0]
+	repo, _ := gitremote.CutGitDirSuffix(parts[1])
 	if owner == "" || repo == "" || dotOnlyRe.MatchString(owner) || dotOnlyRe.MatchString(repo) {
 		return "", fmt.Errorf("invalid --repo %q (use owner/repo)", value)
 	}
@@ -431,21 +422,23 @@ func expertsAPIPath(repoID string) string {
 // the CLI happens to be talking to. So:
 //   - ENTIRE_WEB_BASE_URL wins when set (e.g. http://localhost:5173 for a local
 //     frontend during dev).
-//   - otherwise, if the data API is an Entire site (prod/staging), use it
-//     (frontend and API share that origin).
+//   - otherwise, if the data API is an Entire site (prod/staging), use that
+//     site's web origin.
 //   - otherwise (local dev API like 127.0.0.1) fall back to the canonical
-//     https://entire.io so links still resolve to the proper site.
+//     https://entire.com so links still resolve to the proper site.
 func expertsWebBaseURL() string {
-	if raw := strings.TrimSpace(os.Getenv("ENTIRE_WEB_BASE_URL")); raw != "" {
-		return strings.TrimRight(raw, "/")
+	if raw, ok := api.WebBaseURLOverride(); ok {
+		return raw
 	}
-	if base, err := auth.DataBaseURL(); err == nil && auth.EntireSite(base) != "" {
-		return strings.TrimRight(base, "/")
+	if base, err := auth.DataBaseURL(); err == nil {
+		if web := auth.WebOrigin(base); web != "" {
+			return web
+		}
 	}
-	return strings.TrimRight(api.DefaultBaseURL, "/")
+	return api.DefaultWebBaseURL
 }
 
-// expertsSessionURL builds the entire.io web URL for a session, matching the
+// expertsSessionURL builds the Entire web URL for a session, matching the
 // frontend route /gh/:org/:repo/session/:sessionId. Returns "" when the inputs
 // can't form a valid link.
 func expertsSessionURL(repoFullName, sessionID string) string {

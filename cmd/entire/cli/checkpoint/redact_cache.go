@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -21,14 +23,12 @@ import (
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // Transcripts are append-only JSONL, but every checkpoint used to re-redact them
-// from byte zero: a 70MB Codex rollout cost ~67s per Stop hook, and a session
-// with N checkpoints re-redacted O(N^2) bytes overall. Redaction is ~99.7% of
-// that write path (git object writing is milliseconds), and it is by far the
-// dominant cost of a Stop hook on a large session.
+// from byte zero: a 70MB Codex rollout cost ~67s per checkpoint write, and a
+// session with N checkpoints re-redacted O(N^2) bytes overall. Redaction is
+// ~99.7% of that write path (git object writing is milliseconds).
 //
 // So keep the redacted output for the prefix already processed and redact only
 // what was appended. Correctness rests on two properties:
@@ -43,23 +43,16 @@ import (
 //
 // The prefix is only reused when the source bytes it covered still hash the
 // same and the redaction rules have not changed. Anything else -- a rewritten
-// transcript, a compaction, changed custom rules, a CLI upgrade -- falls back to
-// redacting everything.
+// transcript, a compaction, changed custom rules or scanner selection, a CLI
+// upgrade -- falls back to redacting everything.
 //
-// Scope: all three whole-transcript paths reuse prefixes -- the shadow-branch
-// metadata write (via createRedactedBlobFromFile, which walks files), and
-// post-commit condensation and the Stop finalize rewrite (via
-// RedactTranscriptCached, which hold the transcript in memory).
-// Single-JSON-value transcripts (OpenCode export) get only the sharding in
-// redact.JSONLContent, since they have no line structure to split on.
-//
-// Those paths do NOT all redact the same bytes: the metadata walk stores a
-// sanitized transcript, while condensation and finalize store a sanitized *and*
-// image-externalized one. They stay separate because their cache keys are
-// different strings -- the walk uses its real tree path, the in-memory callers a
-// synthetic one (see transcriptCacheKey) -- and a key is hashed into its own
-// file. Sharing a key would be safe, since the prefix hash check rejects a
-// mismatch, but it would miss on every checkpoint.
+// Scope: both whole-transcript paths reuse prefixes -- post-commit
+// condensation and the Stop finalize rewrite, which hold the transcript in
+// memory and go through RedactTranscriptCached. The key is the synthetic
+// per-session transcriptCacheKey, not a file path, so condensations of the same
+// session across commits share it and stay incremental. Single-JSON-value
+// transcripts (OpenCode export) get only the sharding in redact.JSONLContent,
+// since they have no line structure to split on.
 
 const (
 	// RedactCacheDirName sits in the git common dir, NOT under .entire/, because
@@ -81,11 +74,15 @@ const (
 // timed out CI. Production never assigns to it.
 var redactCacheMinBytes = 1 << 20 // 1MiB
 
+// writeCacheFile writes one cache file. A var so tests can fail or interrupt a
+// store between its payload and its entry; production never assigns to it.
+var writeCacheFile = jsonutil.WriteFileAtomicIn
+
 // redactPrefixEntry is the persisted record of one file's already-redacted
 // prefix. Written atomically; a missing, unreadable, or stale entry simply means
 // a full redaction.
 type redactPrefixEntry struct {
-	// Fingerprint identifies the redaction rules that produced RedactedBlob.
+	// Fingerprint identifies the redaction rules that produced the prefix.
 	Fingerprint string `json:"fingerprint"`
 	// SourceBytes is the length of the source prefix covered, always ending
 	// immediately after a newline.
@@ -93,12 +90,11 @@ type redactPrefixEntry struct {
 	// SourceHash is the SHA-256 of source[:SourceBytes], proving the prefix has
 	// not been rewritten underneath us.
 	SourceHash string `json:"source_hash"`
-	// RedactedBlob is the git blob holding the redacted prefix. Set by the
-	// metadata walk, which had to write that blob for the checkpoint tree anyway.
-	RedactedBlob string `json:"redacted_blob,omitempty"`
 	// RedactedFile names a file beside this entry holding the redacted prefix.
-	// Used by callers that hold a transcript in memory, for whom a git blob is
-	// pure overhead: go-git deflates the whole payload before discovering the
+	// Every store writes a new one (see storePrefixBytes), so an entry only ever
+	// names a payload written in full for it.
+	//
+	// A file rather than a git blob, because a blob is pure overhead here: go-git deflates the whole payload before discovering the
 	// object already exists (dotgit dedups the rename, not the compression), so a
 	// 65MB transcript cost ~1-2s of zlib per checkpoint. Worse, the store chunks
 	// transcripts at agent.MaxChunkSize (50MB), so above that the whole-transcript
@@ -107,6 +103,14 @@ type redactPrefixEntry struct {
 	// full redaction. A plain file has none of that, and `entire clean` already
 	// reclaims this directory.
 	RedactedFile string `json:"redacted_file,omitempty"`
+	// RedactedBytes is RedactedFile's length when written. Cache writes do not
+	// fsync, so a power loss can leave the file empty or short; a payload of any
+	// other length is not reused.
+	RedactedBytes int `json:"redacted_bytes"`
+	// Counts is what redacting the prefix replaced; a reuse adds the suffix's
+	// counts to it. An entry without counts cannot give a total, so it is not
+	// reused.
+	Counts *redact.Counts `json:"counts,omitempty"`
 }
 
 // redactCache reads and writes redactPrefixEntry records under a directory in
@@ -161,10 +165,19 @@ func redactionFingerprint() string {
 	return versioninfo.Version + ":" + versioninfo.Commit + ":" + redact.ConfigFingerprint()
 }
 
+// prefixFileSuffix ends every payload file name.
+const prefixFileSuffix = ".prefix"
+
+// keyName is the digest of treePath that names its entry and starts the name of
+// every payload written for it.
+func keyName(treePath string) string {
+	sum := sha256.Sum256([]byte(treePath))
+	return hex.EncodeToString(sum[:])
+}
+
 // entryName renders a tree path's cache entry as a name relative to c.root.
 func (c *redactCache) entryName(treePath string) string {
-	sum := sha256.Sum256([]byte(treePath))
-	return c.name + "/" + hex.EncodeToString(sum[:]) + ".json"
+	return c.name + "/" + keyName(treePath) + ".json"
 }
 
 func (c *redactCache) load(treePath string) *redactPrefixEntry {
@@ -179,88 +192,89 @@ func (c *redactCache) load(treePath string) *redactPrefixEntry {
 	if entry.SourceBytes <= 0 || entry.SourceHash == "" {
 		return nil
 	}
-	if entry.RedactedBlob == "" && entry.RedactedFile == "" {
+	if entry.RedactedFile == "" || entry.RedactedBytes <= 0 || entry.Counts == nil {
 		return nil
 	}
 	return &entry
 }
 
-// storePrefix records the prefix just written so the next checkpoint can reuse
-// it. sourceHash must be the digest of the whole of the source content, and blob
-// the object holding its redacted form.
+// storePrefixBytes records the redacted prefix just produced so the next
+// checkpoint can reuse it, writing it as a file beside the entry (see
+// redactPrefixEntry). sourceHash must be the digest of the whole source content.
+//
+// The payload goes to a name no earlier store used and the entry is written
+// last, so renaming the entry into place is the one step that publishes a
+// store. Stopping before it, by a failed write or a killed process, leaves the
+// previous entry and the payload it names untouched; the new payload is at
+// worst an orphan, which the next store removes.
 //
 // Failures are silent: losing a cache entry only costs a full redaction next
 // time.
-func (c *redactCache) storePrefix(ctx context.Context, treePath, sourceHash string, sourceBytes int, blob plumbing.Hash) {
-	c.writeEntry(ctx, treePath, redactPrefixEntry{
-		Fingerprint:  redactionFingerprint(),
-		SourceBytes:  sourceBytes,
-		SourceHash:   sourceHash,
-		RedactedBlob: blob.String(),
-	})
-}
-
-// storePrefixBytes is storePrefix for callers with no blob to point at: it writes
-// the redacted prefix as a file beside the entry. See redactPrefixEntry.
-func (c *redactCache) storePrefixBytes(ctx context.Context, treePath, sourceHash string, sourceBytes int, redacted []byte) {
+func (c *redactCache) storePrefixBytes(ctx context.Context, treePath, sourceHash string, sourceBytes int, redacted []byte, counts *redact.Counts) {
 	if c == nil {
 		return
 	}
-	name := prefixFileName(treePath)
-	if err := jsonutil.WriteFileAtomicIn(c.root, c.name+"/"+name, redacted, 0o600); err != nil {
-		logging.Debug(logging.WithComponent(ctx, "redaction"),
-			"failed to store redaction prefix bytes", slog.String("error", err.Error()))
+	logCtx := logging.WithComponent(ctx, "redaction")
+	name := keyName(treePath) + "-" + rand.Text() + prefixFileSuffix
+	payload := c.name + "/" + name
+	if err := writeCacheFile(c.root, payload, redacted, 0o600); err != nil {
+		logging.Debug(logCtx, "failed to store redaction prefix bytes", slog.String("error", err.Error()))
 		return
 	}
-	c.writeEntry(ctx, treePath, redactPrefixEntry{
-		Fingerprint:  redactionFingerprint(),
-		SourceBytes:  sourceBytes,
-		SourceHash:   sourceHash,
-		RedactedFile: name,
+	entry, err := json.Marshal(redactPrefixEntry{
+		Fingerprint:   redactionFingerprint(),
+		SourceBytes:   sourceBytes,
+		SourceHash:    sourceHash,
+		RedactedFile:  name,
+		RedactedBytes: len(redacted),
+		Counts:        counts,
 	})
+	if err == nil {
+		err = writeCacheFile(c.root, c.entryName(treePath), entry, 0o600)
+	}
+	if err != nil {
+		logging.Debug(logCtx, "failed to store redaction prefix cache", slog.String("error", err.Error()))
+		_ = osroot.RemoveNoSymlinks(c.root, payload) //nolint:errcheck // best-effort: no entry names it, and the next store removes it
+		return
+	}
+	c.removeOtherPayloads(treePath, name)
 }
 
-// writeEntry persists the record itself. Written after any prefix payload, so a
-// crash between the two leaves an entry-less payload (ignored, reclaimed by
-// `entire clean`) rather than an entry pointing at nothing.
-func (c *redactCache) writeEntry(ctx context.Context, treePath string, entry redactPrefixEntry) {
-	if c == nil {
-		return
-	}
-	data, err := json.Marshal(entry)
+// removeOtherPayloads deletes every payload of treePath except keep: the one the
+// previous entry named, any left by a store that stopped before its entry, and
+// the fixed-name payload older CLIs wrote. Best-effort; `entire clean` reclaims
+// whatever survives.
+func (c *redactCache) removeOtherPayloads(treePath, keep string) {
+	files, err := osroot.ReadDirNoSymlinks(c.root, c.name)
 	if err != nil {
 		return
 	}
-	if err := jsonutil.WriteFileAtomicIn(c.root, c.entryName(treePath), data, 0o600); err != nil {
-		logging.Debug(logging.WithComponent(ctx, "redaction"),
-			"failed to store redaction prefix cache", slog.String("error", err.Error()))
+	key := keyName(treePath)
+	for _, f := range files {
+		name := f.Name()
+		if name == keep || !strings.HasPrefix(name, key) || !strings.HasSuffix(name, prefixFileSuffix) {
+			continue
+		}
+		_ = osroot.RemoveNoSymlinks(c.root, c.name+"/"+name) //nolint:errcheck // best-effort: the next store tries again
 	}
 }
 
-// prefixFileName is the payload file for treePath, alongside its .json entry.
-func prefixFileName(treePath string) string {
-	sum := sha256.Sum256([]byte(treePath))
-	return hex.EncodeToString(sum[:]) + ".prefix"
-}
-
-// readPrefix loads the redacted prefix an entry points at, from wherever it
-// lives. sizeHint pre-sizes the buffer so the join can append in place instead of
-// copying the whole prefix a second time.
-//
-// Each branch checks the field it is about to use rather than trusting load() to
-// have rejected a record with neither set. load() does reject that, so this is
-// not a reachable path today -- but the guarantee would otherwise live 80 lines
-// away from the code depending on it, and plumbing.NewHash("") does not fail
-// loudly: it yields the zero hash and surfaces as a puzzling missing-object
-// error instead of a bad cache entry.
-func (c *redactCache) readPrefix(repo *git.Repository, entry *redactPrefixEntry, sizeHint int) ([]byte, error) {
-	if entry.RedactedFile != "" {
-		return readFileBytes(c.root, c.name+"/"+entry.RedactedFile, sizeHint)
+// readPrefix loads the redacted prefix an entry points at. sizeHint pre-sizes
+// the buffer so the join can append in place instead of copying the whole
+// prefix a second time.
+func (c *redactCache) readPrefix(entry *redactPrefixEntry, sizeHint int) ([]byte, error) {
+	if entry.RedactedFile == "" {
+		return nil, errors.New("cache entry names no prefix file")
 	}
-	if entry.RedactedBlob == "" {
-		return nil, errors.New("cache entry names neither a prefix file nor a blob")
+	prefix, err := readFileBytes(c.root, c.name+"/"+entry.RedactedFile, sizeHint)
+	if err != nil {
+		return nil, err
 	}
-	return readBlobBytes(repo, plumbing.NewHash(entry.RedactedBlob), sizeHint)
+	if len(prefix) != entry.RedactedBytes {
+		return nil, fmt.Errorf("prefix %s holds %d bytes, its entry recorded %d",
+			entry.RedactedFile, len(prefix), entry.RedactedBytes)
+	}
+	return prefix, nil
 }
 
 // redactResult is the outcome of one incremental redaction attempt.
@@ -268,6 +282,8 @@ type redactResult struct {
 	// Redacted is the content to store. Nil means the caller must redact the
 	// whole content itself.
 	Redacted []byte
+	// Counts is what producing Redacted replaced, nil when unknown.
+	Counts *redact.Counts
 	// SourceHash is the digest of the whole source, computed as a side effect of
 	// prefix validation so the caller never hashes the content a second time.
 	SourceHash string
@@ -301,19 +317,18 @@ func incrementalRedactionCandidate(content []byte, treePath string) bool {
 // appended suffix and, on a cache miss, the whole content -- passing one redactor
 // for both is what makes it impossible to splice a prefix produced by one
 // pipeline onto a suffix produced by another.
-type transcriptRedactor func(ctx context.Context, content []byte) ([]byte, error)
+type transcriptRedactor func(ctx context.Context, content []byte) (redact.RedactedBytes, error)
 
 // redactIncrementally redacts content, reusing a previously redacted prefix when
 // one is available and still valid.
 func redactIncrementally(
 	ctx context.Context,
-	repo *git.Repository,
 	cache *redactCache,
 	content []byte,
 	treePath string,
 	redactor transcriptRedactor,
 ) (redactResult, error) {
-	res, err := reusePrefix(ctx, repo, cache, content, treePath, redactor)
+	res, err := reusePrefix(ctx, cache, content, treePath, redactor)
 	if err != nil || res.Redacted != nil {
 		return res, err
 	}
@@ -321,10 +336,11 @@ func redactIncrementally(
 	// would have handled the suffix. Doing this here rather than at each call
 	// site is what makes "one pipeline for prefix and suffix" structural instead
 	// of a convention two callers happen to follow.
-	res.Redacted, err = redactor(ctx, content)
+	out, err := redactor(ctx, content)
 	if err != nil {
 		return redactResult{}, err
 	}
+	res.Redacted, res.Counts = out.Bytes(), out.Counts()
 	return res, nil
 }
 
@@ -332,7 +348,6 @@ func redactIncrementally(
 // content is not eligible or no valid prefix is available.
 func reusePrefix(
 	ctx context.Context,
-	repo *git.Repository,
 	cache *redactCache,
 	content []byte,
 	treePath string,
@@ -379,7 +394,7 @@ func reusePrefix(
 	//
 	// A degraded scanner must not be spliced onto the reused prefix: fail the
 	// write instead of persisting an under-scanned suffix.
-	var redactedSuffix []byte
+	var redactedSuffix redact.RedactedBytes
 	if len(suffix) > 0 {
 		var err error
 		if redactedSuffix, err = redactor(ctx, suffix); err != nil {
@@ -387,7 +402,7 @@ func reusePrefix(
 		}
 	}
 
-	prefix, readErr := cache.readPrefix(repo, entry, len(redactedSuffix))
+	prefix, readErr := cache.readPrefix(entry, redactedSuffix.Len())
 	if readErr != nil {
 		logging.Debug(logCtx, "cached redacted prefix unreadable, redacting in full",
 			slog.String("path", treePath), slog.String("error", readErr.Error()))
@@ -404,7 +419,7 @@ func reusePrefix(
 	if len(suffix) == 0 {
 		// Nothing appended since the last checkpoint: the stored entry already
 		// describes exactly this content, so there is nothing to re-record.
-		return redactResult{Redacted: prefix}, nil
+		return redactResult{Redacted: prefix, Counts: entry.Counts}, nil
 	}
 
 	logging.Debug(logCtx, "redacted transcript incrementally",
@@ -412,7 +427,12 @@ func reusePrefix(
 		slog.Int("reused_bytes", entry.SourceBytes),
 		slog.Int("redacted_bytes", len(suffix)))
 
-	return redactResult{Redacted: append(prefix, redactedSuffix...), SourceHash: fullHash, StorePrefix: true}, nil
+	return redactResult{
+		Redacted:    append(prefix, redactedSuffix.Bytes()...),
+		Counts:      entry.Counts.Add(redactedSuffix.Counts()),
+		SourceHash:  fullHash,
+		StorePrefix: true,
+	}, nil
 }
 
 func hashBytes(b []byte) string {
@@ -420,30 +440,9 @@ func hashBytes(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// readBlobBytes loads a blob's full contents into a buffer with room for
-// sizeHint extra bytes, so the caller can append the redacted suffix without
-// copying the whole prefix again.
-func readBlobBytes(repo *git.Repository, hash plumbing.Hash, sizeHint int) ([]byte, error) {
-	blob, err := repo.BlobObject(hash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read blob %s: %w", hash, err)
-	}
-	reader, err := blob.Reader()
-	if err != nil {
-		return nil, fmt.Errorf("failed to open blob %s: %w", hash, err)
-	}
-	defer func() { _ = reader.Close() }()
-
-	// blob.Size is known, so read into an exact buffer: io.ReadAll grows by
-	// doubling and allocates roughly 2.3x the payload for a large transcript.
-	out := make([]byte, blob.Size, int64(sizeHint)+blob.Size)
-	if _, err := io.ReadFull(reader, out); err != nil {
-		return nil, fmt.Errorf("failed to read blob %s: %w", hash, err)
-	}
-	return out, nil
-}
-
-// readFileBytes is readBlobBytes for a file-backed prefix, named inside root.
+// readFileBytes loads a file-backed prefix, named inside root, into a buffer
+// with room for sizeHint extra bytes, so the caller can append the redacted
+// suffix without copying the whole prefix again.
 func readFileBytes(root *os.Root, path string, sizeHint int) ([]byte, error) {
 	f, err := root.Open(path)
 	if err != nil {
@@ -467,12 +466,9 @@ func readFileBytes(root *os.Root, path string, sizeHint int) ([]byte, error) {
 // on that basename, and carries the session ID so concurrent sessions in one
 // worktree never share an entry.
 //
-// It cannot collide with the metadata walk's entries even though both describe
-// "a session transcript": the walk keys on its real tree path
-// (.entire/metadata/<session>/full.jsonl), a different string and so a different
-// cache file. That difference matters because the two do not redact the same
-// bytes -- the walk stores a sanitized transcript, these callers a sanitized
-// *and* image-externalized one.
+// Older CLIs also cached a turn-end metadata walk under the real tree path
+// (.entire/metadata/<session>/full.jsonl); that is a different string and so a
+// different cache file, which nothing reads anymore and `entire clean` reclaims.
 func transcriptCacheKey(sessionID string) string {
 	return "committed/" + sessionID + "/" + paths.TranscriptFileName
 }
@@ -518,22 +514,15 @@ func RedactTranscriptCached(
 	}
 
 	cache := repoRedactCache(repo)
-	result, err := redactIncrementally(ctx, repo, cache, content, treePath,
-		func(ctx context.Context, b []byte) ([]byte, error) {
-			out, redErr := redactor(ctx, b)
-			if redErr != nil {
-				return nil, redErr
-			}
-			return out.Bytes(), nil
-		})
+	result, err := redactIncrementally(ctx, cache, content, treePath, redactor)
 	if err != nil {
 		return redact.RedactedBytes{}, err
 	}
 
 	if result.StorePrefix {
 		// Stored as bytes rather than a git blob: see redactPrefixEntry.
-		cache.storePrefixBytes(ctx, treePath, result.SourceHash, len(content), result.Redacted)
+		cache.storePrefixBytes(ctx, treePath, result.SourceHash, len(content), result.Redacted, result.Counts)
 	}
 
-	return redact.AlreadyRedacted(result.Redacted), nil
+	return redact.AlreadyRedacted(result.Redacted).WithCounts(result.Counts), nil
 }

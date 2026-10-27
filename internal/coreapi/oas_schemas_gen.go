@@ -939,6 +939,9 @@ func (s *BearerAuth) SetRoles(val []string) {
 	s.Roles = val
 }
 
+// BeginPluginInstallationDeletionNoContent is response for BeginPluginInstallationDeletion operation.
+type BeginPluginInstallationDeletionNoContent struct{}
+
 // Ref: #/components/schemas/Binding
 type Binding struct {
 	// A URL to the JSON Schema for this object.
@@ -3677,6 +3680,9 @@ type CreatePluginInstallationInputBody struct {
 	OrgID OptString `json:"org_id"`
 	// Entire project the installation belongs to.
 	ProjectID OptString `json:"project_id"`
+	// Project installations: a post-install URL registered for the plugin, which redirect_to returns the
+	// receipt to.
+	RedirectURI OptString `json:"redirect_uri"`
 	// Public repository ids (repo_<ULID>) when repository_selection is selected.
 	RepositoryIds []string `json:"repository_ids"`
 	// Project installations: all repositories in the project, or only repository_ids.
@@ -3704,6 +3710,11 @@ func (s *CreatePluginInstallationInputBody) GetOrgID() OptString {
 // GetProjectID returns the value of ProjectID.
 func (s *CreatePluginInstallationInputBody) GetProjectID() OptString {
 	return s.ProjectID
+}
+
+// GetRedirectURI returns the value of RedirectURI.
+func (s *CreatePluginInstallationInputBody) GetRedirectURI() OptString {
+	return s.RedirectURI
 }
 
 // GetRepositoryIds returns the value of RepositoryIds.
@@ -3744,6 +3755,11 @@ func (s *CreatePluginInstallationInputBody) SetOrgID(val OptString) {
 // SetProjectID sets the value of ProjectID.
 func (s *CreatePluginInstallationInputBody) SetProjectID(val OptString) {
 	s.ProjectID = val
+}
+
+// SetRedirectURI sets the value of RedirectURI.
+func (s *CreatePluginInstallationInputBody) SetRedirectURI(val OptString) {
+	s.RedirectURI = val
 }
 
 // SetRepositoryIds sets the value of RepositoryIds.
@@ -4423,7 +4439,10 @@ type CreateRepoInputBody struct {
 	// Public host of the cluster to pin the repo to (e.g. royalcanin.partial.to); must be in the
 	// project's processing cell. Empty takes that cell's cluster.
 	ClusterHost OptString `json:"clusterHost"`
-	Name        string    `json:"name"`
+	// Clusters to add native mirrors on once the repo is active. Core stores them with the create and
+	// retries each until its mirror exists.
+	MirrorClusterSlugs []string `json:"mirrorClusterSlugs"`
+	Name               string   `json:"name"`
 	// Hash format; defaults to sha1.
 	ObjectFormat    OptCreateRepoInputBodyObjectFormat `json:"objectFormat"`
 	ProjectId       string                             `json:"projectId"`
@@ -4438,6 +4457,11 @@ func (s *CreateRepoInputBody) GetSchema() OptURI {
 // GetClusterHost returns the value of ClusterHost.
 func (s *CreateRepoInputBody) GetClusterHost() OptString {
 	return s.ClusterHost
+}
+
+// GetMirrorClusterSlugs returns the value of MirrorClusterSlugs.
+func (s *CreateRepoInputBody) GetMirrorClusterSlugs() []string {
+	return s.MirrorClusterSlugs
 }
 
 // GetName returns the value of Name.
@@ -4468,6 +4492,11 @@ func (s *CreateRepoInputBody) SetSchema(val OptURI) {
 // SetClusterHost sets the value of ClusterHost.
 func (s *CreateRepoInputBody) SetClusterHost(val OptString) {
 	s.ClusterHost = val
+}
+
+// SetMirrorClusterSlugs sets the value of MirrorClusterSlugs.
+func (s *CreateRepoInputBody) SetMirrorClusterSlugs(val []string) {
+	s.MirrorClusterSlugs = val
 }
 
 // SetName sets the value of Name.
@@ -4768,7 +4797,7 @@ type CreatedProject struct {
 	// Stored processing cell ID, not a cluster slug. Empty when the project is unassigned.
 	PrimaryProcessingCell OptString `json:"primaryProcessingCell"`
 	Region                string    `json:"region"`
-	// Published logical repositories in paginated project listings. Omitted without project-wide view
+	// Published logical repositories in paginated project listings. Omitted without project inspect
 	// permission or when unavailable.
 	RepositoryCount OptInt64 `json:"repositoryCount"`
 	AdditionalProps CreatedProjectAdditional
@@ -5003,24 +5032,33 @@ type CreatedRepo struct {
 	// Deprecated: read the X-Entire-Commit-Token response header instead.
 	//
 	// Deprecated: schema marks this property as deprecated.
-	CommitToken       OptString        `json:"commitToken"`
-	Foreign           OptBool          `json:"foreign"`
-	FullName          OptString        `json:"fullName"`
-	ID                string           `json:"id"`
-	Jurisdiction      OptString        `json:"jurisdiction"`
-	MirrorSuspended   OptBool          `json:"mirrorSuspended"`
-	MirrorSuspendedAt OptString        `json:"mirrorSuspendedAt"`
-	Name              string           `json:"name"`
-	ObjectFormat      OptString        `json:"objectFormat"`
-	OwningProjectId   string           `json:"owningProjectId"`
-	Path              OptString        `json:"path"`
-	Placements        []RepoPlacement  `json:"placements"`
-	Primaries         OptRepoPrimaries `json:"primaries"`
-	Provider          OptString        `json:"provider"`
-	ProvisionAttempts OptInt64         `json:"provisionAttempts"`
-	ProvisionReason   OptString        `json:"provisionReason"`
-	RepoGroupId       OptString        `json:"repoGroupId"`
-	// Provisioning lifecycle. A mirror is active from creation, before its initial clone completes.
+	CommitToken  OptString   `json:"commitToken"`
+	DetachedAt   OptDateTime `json:"detachedAt"`
+	Foreign      OptBool     `json:"foreign"`
+	FullName     OptString   `json:"fullName"`
+	ID           string      `json:"id"`
+	Jurisdiction OptString   `json:"jurisdiction"`
+	LastPushedAt OptDateTime `json:"lastPushedAt"`
+	// Native-mirror clusters core stored with this create. Their status is on GET
+	// /repos/{repoId}/native-mirrors.
+	MirrorClusterSlugs []string  `json:"mirrorClusterSlugs"`
+	MirrorSuspended    OptBool   `json:"mirrorSuspended"`
+	MirrorSuspendedAt  OptString `json:"mirrorSuspendedAt"`
+	Name               string    `json:"name"`
+	// Native mirrors this create queued, each pending with its reserved placementId. Their status is on
+	// GET /repos/{repoId}/native-mirrors.
+	NativeMirrors     []NativeMirrorPlacement `json:"nativeMirrors"`
+	ObjectFormat      OptString               `json:"objectFormat"`
+	OwningProjectId   string                  `json:"owningProjectId"`
+	Path              OptString               `json:"path"`
+	Placements        []RepoPlacement         `json:"placements"`
+	Primaries         OptRepoPrimaries        `json:"primaries"`
+	Provider          OptString               `json:"provider"`
+	ProvisionAttempts OptInt64                `json:"provisionAttempts"`
+	ProvisionReason   OptString               `json:"provisionReason"`
+	RepoGroupId       OptString               `json:"repoGroupId"`
+	// Provisioning lifecycle. A mirror is active from creation, before its initial clone completes. A
+	// native primary reports deleting while a cascade delete removes its native mirrors; poll until 404.
 	State           OptString `json:"state"`
 	Visibility      OptString `json:"visibility"`
 	AdditionalProps CreatedRepoAdditional
@@ -5056,6 +5094,11 @@ func (s *CreatedRepo) GetCommitToken() OptString {
 	return s.CommitToken
 }
 
+// GetDetachedAt returns the value of DetachedAt.
+func (s *CreatedRepo) GetDetachedAt() OptDateTime {
+	return s.DetachedAt
+}
+
 // GetForeign returns the value of Foreign.
 func (s *CreatedRepo) GetForeign() OptBool {
 	return s.Foreign
@@ -5076,6 +5119,16 @@ func (s *CreatedRepo) GetJurisdiction() OptString {
 	return s.Jurisdiction
 }
 
+// GetLastPushedAt returns the value of LastPushedAt.
+func (s *CreatedRepo) GetLastPushedAt() OptDateTime {
+	return s.LastPushedAt
+}
+
+// GetMirrorClusterSlugs returns the value of MirrorClusterSlugs.
+func (s *CreatedRepo) GetMirrorClusterSlugs() []string {
+	return s.MirrorClusterSlugs
+}
+
 // GetMirrorSuspended returns the value of MirrorSuspended.
 func (s *CreatedRepo) GetMirrorSuspended() OptBool {
 	return s.MirrorSuspended
@@ -5089,6 +5142,11 @@ func (s *CreatedRepo) GetMirrorSuspendedAt() OptString {
 // GetName returns the value of Name.
 func (s *CreatedRepo) GetName() string {
 	return s.Name
+}
+
+// GetNativeMirrors returns the value of NativeMirrors.
+func (s *CreatedRepo) GetNativeMirrors() []NativeMirrorPlacement {
+	return s.NativeMirrors
 }
 
 // GetObjectFormat returns the value of ObjectFormat.
@@ -5181,6 +5239,11 @@ func (s *CreatedRepo) SetCommitToken(val OptString) {
 	s.CommitToken = val
 }
 
+// SetDetachedAt sets the value of DetachedAt.
+func (s *CreatedRepo) SetDetachedAt(val OptDateTime) {
+	s.DetachedAt = val
+}
+
 // SetForeign sets the value of Foreign.
 func (s *CreatedRepo) SetForeign(val OptBool) {
 	s.Foreign = val
@@ -5201,6 +5264,16 @@ func (s *CreatedRepo) SetJurisdiction(val OptString) {
 	s.Jurisdiction = val
 }
 
+// SetLastPushedAt sets the value of LastPushedAt.
+func (s *CreatedRepo) SetLastPushedAt(val OptDateTime) {
+	s.LastPushedAt = val
+}
+
+// SetMirrorClusterSlugs sets the value of MirrorClusterSlugs.
+func (s *CreatedRepo) SetMirrorClusterSlugs(val []string) {
+	s.MirrorClusterSlugs = val
+}
+
 // SetMirrorSuspended sets the value of MirrorSuspended.
 func (s *CreatedRepo) SetMirrorSuspended(val OptBool) {
 	s.MirrorSuspended = val
@@ -5214,6 +5287,11 @@ func (s *CreatedRepo) SetMirrorSuspendedAt(val OptString) {
 // SetName sets the value of Name.
 func (s *CreatedRepo) SetName(val string) {
 	s.Name = val
+}
+
+// SetNativeMirrors sets the value of NativeMirrors.
+func (s *CreatedRepo) SetNativeMirrors(val []NativeMirrorPlacement) {
+	s.NativeMirrors = val
 }
 
 // SetObjectFormat sets the value of ObjectFormat.
@@ -5324,6 +5402,58 @@ func (s *CreatedRepoHeaders) SetResponse(val CreatedRepo) {
 	s.Response = val
 }
 
+// Ref: #/components/schemas/DeclineInvitationInputBody
+type DeclineInvitationInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI `json:"$schema"`
+	Token           string `json:"token"`
+	AdditionalProps DeclineInvitationInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *DeclineInvitationInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetToken returns the value of Token.
+func (s *DeclineInvitationInputBody) GetToken() string {
+	return s.Token
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DeclineInvitationInputBody) GetAdditionalProps() DeclineInvitationInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *DeclineInvitationInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetToken sets the value of Token.
+func (s *DeclineInvitationInputBody) SetToken(val string) {
+	s.Token = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DeclineInvitationInputBody) SetAdditionalProps(val DeclineInvitationInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type DeclineInvitationInputBodyAdditional map[string]jx.Raw
+
+func (s *DeclineInvitationInputBodyAdditional) init() DeclineInvitationInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// DeclineInvitationNoContent is response for DeclineInvitation operation.
+type DeclineInvitationNoContent struct{}
+
 // DeleteBindingNoContent is response for DeleteBinding operation.
 type DeleteBindingNoContent struct{}
 
@@ -5406,6 +5536,11 @@ func (s *DeleteProjectNoContent) SetXEntireCommitToken(val OptString) {
 	s.XEntireCommitToken = val
 }
 
+// DeleteRepoAccepted is response for DeleteRepo operation.
+type DeleteRepoAccepted struct{}
+
+func (*DeleteRepoAccepted) deleteRepoRes() {}
+
 // DeleteRepoCIWebhookNoContent is response for DeleteRepoCIWebhook operation.
 type DeleteRepoCIWebhookNoContent struct{}
 
@@ -5423,6 +5558,8 @@ func (s *DeleteRepoNoContent) GetXEntireCommitToken() OptString {
 func (s *DeleteRepoNoContent) SetXEntireCommitToken(val OptString) {
 	s.XEntireCommitToken = val
 }
+
+func (*DeleteRepoNoContent) deleteRepoRes() {}
 
 // DeleteServiceAccountNoContent is response for DeleteServiceAccount operation.
 type DeleteServiceAccountNoContent struct{}
@@ -5790,6 +5927,90 @@ func (s *DeletionRepoAdditional) init() DeletionRepoAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/DetachAccessEntry
+type DetachAccessEntry struct {
+	// True when the target project grants at least this role.
+	CoveredByTargetProject bool   `json:"coveredByTargetProject"`
+	Role                   string `json:"role"`
+	// Github: synced from GitHub. legacy-tuple: a placement-level or legacy grant. automation: a CI or
+	// plugin automation. project: the mirrors project.
+	Source          string `json:"source"`
+	SubjectId       string `json:"subjectId"`
+	SubjectType     string `json:"subjectType"`
+	AdditionalProps DetachAccessEntryAdditional
+}
+
+// GetCoveredByTargetProject returns the value of CoveredByTargetProject.
+func (s *DetachAccessEntry) GetCoveredByTargetProject() bool {
+	return s.CoveredByTargetProject
+}
+
+// GetRole returns the value of Role.
+func (s *DetachAccessEntry) GetRole() string {
+	return s.Role
+}
+
+// GetSource returns the value of Source.
+func (s *DetachAccessEntry) GetSource() string {
+	return s.Source
+}
+
+// GetSubjectId returns the value of SubjectId.
+func (s *DetachAccessEntry) GetSubjectId() string {
+	return s.SubjectId
+}
+
+// GetSubjectType returns the value of SubjectType.
+func (s *DetachAccessEntry) GetSubjectType() string {
+	return s.SubjectType
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DetachAccessEntry) GetAdditionalProps() DetachAccessEntryAdditional {
+	return s.AdditionalProps
+}
+
+// SetCoveredByTargetProject sets the value of CoveredByTargetProject.
+func (s *DetachAccessEntry) SetCoveredByTargetProject(val bool) {
+	s.CoveredByTargetProject = val
+}
+
+// SetRole sets the value of Role.
+func (s *DetachAccessEntry) SetRole(val string) {
+	s.Role = val
+}
+
+// SetSource sets the value of Source.
+func (s *DetachAccessEntry) SetSource(val string) {
+	s.Source = val
+}
+
+// SetSubjectId sets the value of SubjectId.
+func (s *DetachAccessEntry) SetSubjectId(val string) {
+	s.SubjectId = val
+}
+
+// SetSubjectType sets the value of SubjectType.
+func (s *DetachAccessEntry) SetSubjectType(val string) {
+	s.SubjectType = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DetachAccessEntry) SetAdditionalProps(val DetachAccessEntryAdditional) {
+	s.AdditionalProps = val
+}
+
+type DetachAccessEntryAdditional map[string]jx.Raw
+
+func (s *DetachAccessEntryAdditional) init() DetachAccessEntryAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // DetachMyHandleNoContent is response for DetachMyHandle operation.
 type DetachMyHandleNoContent struct{}
 
@@ -5833,6 +6054,347 @@ func (s *DetachMyHandleProvider) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/DetachPrecondition
+type DetachPrecondition struct {
+	Detail          OptString `json:"detail"`
+	Passed          bool      `json:"passed"`
+	Precondition    string    `json:"precondition"`
+	AdditionalProps DetachPreconditionAdditional
+}
+
+// GetDetail returns the value of Detail.
+func (s *DetachPrecondition) GetDetail() OptString {
+	return s.Detail
+}
+
+// GetPassed returns the value of Passed.
+func (s *DetachPrecondition) GetPassed() bool {
+	return s.Passed
+}
+
+// GetPrecondition returns the value of Precondition.
+func (s *DetachPrecondition) GetPrecondition() string {
+	return s.Precondition
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DetachPrecondition) GetAdditionalProps() DetachPreconditionAdditional {
+	return s.AdditionalProps
+}
+
+// SetDetail sets the value of Detail.
+func (s *DetachPrecondition) SetDetail(val OptString) {
+	s.Detail = val
+}
+
+// SetPassed sets the value of Passed.
+func (s *DetachPrecondition) SetPassed(val bool) {
+	s.Passed = val
+}
+
+// SetPrecondition sets the value of Precondition.
+func (s *DetachPrecondition) SetPrecondition(val string) {
+	s.Precondition = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DetachPrecondition) SetAdditionalProps(val DetachPreconditionAdditional) {
+	s.AdditionalProps = val
+}
+
+type DetachPreconditionAdditional map[string]jx.Raw
+
+func (s *DetachPreconditionAdditional) init() DetachPreconditionAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/DetachRepoBody
+type DetachRepoBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Evaluate the preconditions and the access diff, and change nothing.
+	DryRun bool `json:"dryRun"`
+	// Native repository name. Defaults to the GitHub repository name.
+	Name OptString `json:"name"`
+	// Account the checks apply to. Defaults to the caller. Only a platform admin may set another account.
+	RequestedBy OptString `json:"requestedBy"`
+	// Project ID that owns the native repository after the detach.
+	TargetProject   string `json:"targetProject"`
+	AdditionalProps DetachRepoBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *DetachRepoBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetDryRun returns the value of DryRun.
+func (s *DetachRepoBody) GetDryRun() bool {
+	return s.DryRun
+}
+
+// GetName returns the value of Name.
+func (s *DetachRepoBody) GetName() OptString {
+	return s.Name
+}
+
+// GetRequestedBy returns the value of RequestedBy.
+func (s *DetachRepoBody) GetRequestedBy() OptString {
+	return s.RequestedBy
+}
+
+// GetTargetProject returns the value of TargetProject.
+func (s *DetachRepoBody) GetTargetProject() string {
+	return s.TargetProject
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DetachRepoBody) GetAdditionalProps() DetachRepoBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *DetachRepoBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetDryRun sets the value of DryRun.
+func (s *DetachRepoBody) SetDryRun(val bool) {
+	s.DryRun = val
+}
+
+// SetName sets the value of Name.
+func (s *DetachRepoBody) SetName(val OptString) {
+	s.Name = val
+}
+
+// SetRequestedBy sets the value of RequestedBy.
+func (s *DetachRepoBody) SetRequestedBy(val OptString) {
+	s.RequestedBy = val
+}
+
+// SetTargetProject sets the value of TargetProject.
+func (s *DetachRepoBody) SetTargetProject(val string) {
+	s.TargetProject = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DetachRepoBody) SetAdditionalProps(val DetachRepoBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type DetachRepoBodyAdditional map[string]jx.Raw
+
+func (s *DetachRepoBodyAdditional) init() DetachRepoBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/DetachRepoResult
+type DetachRepoResult struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Every account, team, automation, and project with access today.
+	Access []DetachAccessEntry `json:"access"`
+	DryRun bool                `json:"dryRun"`
+	// True when every precondition passes.
+	Eligible bool `json:"eligible"`
+	// Real detach only. The access sources the target project does not cover, which the detach removed.
+	// An empty list when nobody lost access. Absent on a resume, which does not know who lost access.
+	LostAccess []DetachAccessEntry `json:"lostAccess"`
+	// Native repository name the detach would use.
+	Name string `json:"name"`
+	// Real detach only. The repository's new address, et/<project>/<repo>.
+	NativeName OptString `json:"nativeName"`
+	// Real detach only. Notices for the requester: the GitHub repository stays live, and the gate
+	// guarantee.
+	Notices       []string             `json:"notices"`
+	Preconditions []DetachPrecondition `json:"preconditions"`
+	// Real detach only. The gh/<owner>/<repo> addresses that now answer moved.
+	ReleasedAddresses []string `json:"releasedAddresses"`
+	// Account the checks applied to.
+	RequestedBy string `json:"requestedBy"`
+	// Real detach only. complete: every step finished. in_progress: the repository is native and frozen
+	// while the rewire runs on. stalled: the rewire stopped; the repository stays frozen until the
+	// core's sweep resumes it, after the lease expires, or a call resumes it.
+	Status OptString `json:"status"`
+	// In_progress and stalled only. The path of GET /api/v1/repos/{repoId}/detach. Poll it to follow the
+	// rewire to its end.
+	StatusUrl       OptString `json:"statusUrl"`
+	TargetProject   string    `json:"targetProject"`
+	AdditionalProps DetachRepoResultAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *DetachRepoResult) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAccess returns the value of Access.
+func (s *DetachRepoResult) GetAccess() []DetachAccessEntry {
+	return s.Access
+}
+
+// GetDryRun returns the value of DryRun.
+func (s *DetachRepoResult) GetDryRun() bool {
+	return s.DryRun
+}
+
+// GetEligible returns the value of Eligible.
+func (s *DetachRepoResult) GetEligible() bool {
+	return s.Eligible
+}
+
+// GetLostAccess returns the value of LostAccess.
+func (s *DetachRepoResult) GetLostAccess() []DetachAccessEntry {
+	return s.LostAccess
+}
+
+// GetName returns the value of Name.
+func (s *DetachRepoResult) GetName() string {
+	return s.Name
+}
+
+// GetNativeName returns the value of NativeName.
+func (s *DetachRepoResult) GetNativeName() OptString {
+	return s.NativeName
+}
+
+// GetNotices returns the value of Notices.
+func (s *DetachRepoResult) GetNotices() []string {
+	return s.Notices
+}
+
+// GetPreconditions returns the value of Preconditions.
+func (s *DetachRepoResult) GetPreconditions() []DetachPrecondition {
+	return s.Preconditions
+}
+
+// GetReleasedAddresses returns the value of ReleasedAddresses.
+func (s *DetachRepoResult) GetReleasedAddresses() []string {
+	return s.ReleasedAddresses
+}
+
+// GetRequestedBy returns the value of RequestedBy.
+func (s *DetachRepoResult) GetRequestedBy() string {
+	return s.RequestedBy
+}
+
+// GetStatus returns the value of Status.
+func (s *DetachRepoResult) GetStatus() OptString {
+	return s.Status
+}
+
+// GetStatusUrl returns the value of StatusUrl.
+func (s *DetachRepoResult) GetStatusUrl() OptString {
+	return s.StatusUrl
+}
+
+// GetTargetProject returns the value of TargetProject.
+func (s *DetachRepoResult) GetTargetProject() string {
+	return s.TargetProject
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DetachRepoResult) GetAdditionalProps() DetachRepoResultAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *DetachRepoResult) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAccess sets the value of Access.
+func (s *DetachRepoResult) SetAccess(val []DetachAccessEntry) {
+	s.Access = val
+}
+
+// SetDryRun sets the value of DryRun.
+func (s *DetachRepoResult) SetDryRun(val bool) {
+	s.DryRun = val
+}
+
+// SetEligible sets the value of Eligible.
+func (s *DetachRepoResult) SetEligible(val bool) {
+	s.Eligible = val
+}
+
+// SetLostAccess sets the value of LostAccess.
+func (s *DetachRepoResult) SetLostAccess(val []DetachAccessEntry) {
+	s.LostAccess = val
+}
+
+// SetName sets the value of Name.
+func (s *DetachRepoResult) SetName(val string) {
+	s.Name = val
+}
+
+// SetNativeName sets the value of NativeName.
+func (s *DetachRepoResult) SetNativeName(val OptString) {
+	s.NativeName = val
+}
+
+// SetNotices sets the value of Notices.
+func (s *DetachRepoResult) SetNotices(val []string) {
+	s.Notices = val
+}
+
+// SetPreconditions sets the value of Preconditions.
+func (s *DetachRepoResult) SetPreconditions(val []DetachPrecondition) {
+	s.Preconditions = val
+}
+
+// SetReleasedAddresses sets the value of ReleasedAddresses.
+func (s *DetachRepoResult) SetReleasedAddresses(val []string) {
+	s.ReleasedAddresses = val
+}
+
+// SetRequestedBy sets the value of RequestedBy.
+func (s *DetachRepoResult) SetRequestedBy(val string) {
+	s.RequestedBy = val
+}
+
+// SetStatus sets the value of Status.
+func (s *DetachRepoResult) SetStatus(val OptString) {
+	s.Status = val
+}
+
+// SetStatusUrl sets the value of StatusUrl.
+func (s *DetachRepoResult) SetStatusUrl(val OptString) {
+	s.StatusUrl = val
+}
+
+// SetTargetProject sets the value of TargetProject.
+func (s *DetachRepoResult) SetTargetProject(val string) {
+	s.TargetProject = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DetachRepoResult) SetAdditionalProps(val DetachRepoResultAdditional) {
+	s.AdditionalProps = val
+}
+
+type DetachRepoResultAdditional map[string]jx.Raw
+
+func (s *DetachRepoResultAdditional) init() DetachRepoResultAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // DisconnectOrgCIDepotOrganizationNoContent is response for DisconnectOrgCIDepotOrganization operation.
@@ -6380,6 +6942,157 @@ func (s *GetOnboardingStatusOutputBody) SetAdditionalProps(val GetOnboardingStat
 type GetOnboardingStatusOutputBodyAdditional map[string]jx.Raw
 
 func (s *GetOnboardingStatusOutputBodyAdditional) init() GetOnboardingStatusOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/GetPluginInstallationOutputBody
+type GetPluginInstallationOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema         OptURI    `json:"$schema"`
+	Account        string    `json:"account"`
+	CreatedAt      time.Time `json:"created_at"`
+	InstallationID string    `json:"installation_id"`
+	// Present when more repositories remain.
+	NextCursor OptString `json:"next_cursor"`
+	OrgID      OptString `json:"org_id"`
+	// Plugin id (ULID).
+	PluginID            string                         `json:"plugin_id"`
+	ProjectID           OptString                      `json:"project_id"`
+	Repositories        []PluginInstallationRepository `json:"repositories"`
+	RepositorySelection OptString                      `json:"repository_selection"`
+	// Increases with each change; matches the installation lifecycle events.
+	Revision        int64 `json:"revision"`
+	AdditionalProps GetPluginInstallationOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *GetPluginInstallationOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAccount returns the value of Account.
+func (s *GetPluginInstallationOutputBody) GetAccount() string {
+	return s.Account
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *GetPluginInstallationOutputBody) GetCreatedAt() time.Time {
+	return s.CreatedAt
+}
+
+// GetInstallationID returns the value of InstallationID.
+func (s *GetPluginInstallationOutputBody) GetInstallationID() string {
+	return s.InstallationID
+}
+
+// GetNextCursor returns the value of NextCursor.
+func (s *GetPluginInstallationOutputBody) GetNextCursor() OptString {
+	return s.NextCursor
+}
+
+// GetOrgID returns the value of OrgID.
+func (s *GetPluginInstallationOutputBody) GetOrgID() OptString {
+	return s.OrgID
+}
+
+// GetPluginID returns the value of PluginID.
+func (s *GetPluginInstallationOutputBody) GetPluginID() string {
+	return s.PluginID
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *GetPluginInstallationOutputBody) GetProjectID() OptString {
+	return s.ProjectID
+}
+
+// GetRepositories returns the value of Repositories.
+func (s *GetPluginInstallationOutputBody) GetRepositories() []PluginInstallationRepository {
+	return s.Repositories
+}
+
+// GetRepositorySelection returns the value of RepositorySelection.
+func (s *GetPluginInstallationOutputBody) GetRepositorySelection() OptString {
+	return s.RepositorySelection
+}
+
+// GetRevision returns the value of Revision.
+func (s *GetPluginInstallationOutputBody) GetRevision() int64 {
+	return s.Revision
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *GetPluginInstallationOutputBody) GetAdditionalProps() GetPluginInstallationOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *GetPluginInstallationOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAccount sets the value of Account.
+func (s *GetPluginInstallationOutputBody) SetAccount(val string) {
+	s.Account = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *GetPluginInstallationOutputBody) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
+}
+
+// SetInstallationID sets the value of InstallationID.
+func (s *GetPluginInstallationOutputBody) SetInstallationID(val string) {
+	s.InstallationID = val
+}
+
+// SetNextCursor sets the value of NextCursor.
+func (s *GetPluginInstallationOutputBody) SetNextCursor(val OptString) {
+	s.NextCursor = val
+}
+
+// SetOrgID sets the value of OrgID.
+func (s *GetPluginInstallationOutputBody) SetOrgID(val OptString) {
+	s.OrgID = val
+}
+
+// SetPluginID sets the value of PluginID.
+func (s *GetPluginInstallationOutputBody) SetPluginID(val string) {
+	s.PluginID = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *GetPluginInstallationOutputBody) SetProjectID(val OptString) {
+	s.ProjectID = val
+}
+
+// SetRepositories sets the value of Repositories.
+func (s *GetPluginInstallationOutputBody) SetRepositories(val []PluginInstallationRepository) {
+	s.Repositories = val
+}
+
+// SetRepositorySelection sets the value of RepositorySelection.
+func (s *GetPluginInstallationOutputBody) SetRepositorySelection(val OptString) {
+	s.RepositorySelection = val
+}
+
+// SetRevision sets the value of Revision.
+func (s *GetPluginInstallationOutputBody) SetRevision(val int64) {
+	s.Revision = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *GetPluginInstallationOutputBody) SetAdditionalProps(val GetPluginInstallationOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type GetPluginInstallationOutputBodyAdditional map[string]jx.Raw
+
+func (s *GetPluginInstallationOutputBodyAdditional) init() GetPluginInstallationOutputBodyAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -11129,11 +11842,12 @@ func (s *MeIdentityHandleAdditional) init() MeIdentityHandleAdditional {
 
 // Ref: #/components/schemas/MeRegional
 type MeRegional struct {
-	Bio             OptString `json:"bio"`
-	Company         OptString `json:"company"`
-	DisplayName     OptString `json:"displayName"`
-	Email           OptString `json:"email"`
-	Location        OptString `json:"location"`
+	Bio             OptString                   `json:"bio"`
+	Company         OptString                   `json:"company"`
+	DisplayName     OptString                   `json:"displayName"`
+	Email           OptString                   `json:"email"`
+	Location        OptString                   `json:"location"`
+	ProviderEmails  OptMeRegionalProviderEmails `json:"providerEmails"`
 	AdditionalProps MeRegionalAdditional
 }
 
@@ -11160,6 +11874,11 @@ func (s *MeRegional) GetEmail() OptString {
 // GetLocation returns the value of Location.
 func (s *MeRegional) GetLocation() OptString {
 	return s.Location
+}
+
+// GetProviderEmails returns the value of ProviderEmails.
+func (s *MeRegional) GetProviderEmails() OptMeRegionalProviderEmails {
+	return s.ProviderEmails
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -11192,6 +11911,11 @@ func (s *MeRegional) SetLocation(val OptString) {
 	s.Location = val
 }
 
+// SetProviderEmails sets the value of ProviderEmails.
+func (s *MeRegional) SetProviderEmails(val OptMeRegionalProviderEmails) {
+	s.ProviderEmails = val
+}
+
 // SetAdditionalProps sets the value of AdditionalProps.
 func (s *MeRegional) SetAdditionalProps(val MeRegionalAdditional) {
 	s.AdditionalProps = val
@@ -11203,6 +11927,17 @@ func (s *MeRegionalAdditional) init() MeRegionalAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type MeRegionalProviderEmails map[string]string
+
+func (s *MeRegionalProviderEmails) init() MeRegionalProviderEmails {
+	m := *s
+	if m == nil {
+		m = map[string]string{}
 		*s = m
 	}
 	return m
@@ -11540,8 +12275,11 @@ type Mirror struct {
 	Repo                string    `json:"repo"`
 	// Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or
 	// suspended.
-	Status          OptMirrorStatus `json:"status"`
-	SuspendedAt     OptDateTime     `json:"suspendedAt"`
+	Status      OptMirrorStatus `json:"status"`
+	SuspendedAt OptDateTime     `json:"suspendedAt"`
+	// Present while GitHub blocks the upstream's GitHub App installation, so the mirror cannot sync. The
+	// block is per installation: every placement of the upstream carries the same value.
+	SyncBlock       OptMirrorSyncBlock `json:"syncBlock"`
 	AdditionalProps MirrorAdditional
 }
 
@@ -11613,6 +12351,11 @@ func (s *Mirror) GetStatus() OptMirrorStatus {
 // GetSuspendedAt returns the value of SuspendedAt.
 func (s *Mirror) GetSuspendedAt() OptDateTime {
 	return s.SuspendedAt
+}
+
+// GetSyncBlock returns the value of SyncBlock.
+func (s *Mirror) GetSyncBlock() OptMirrorSyncBlock {
+	return s.SyncBlock
 }
 
 // GetAdditionalProps returns the value of AdditionalProps.
@@ -11688,6 +12431,11 @@ func (s *Mirror) SetStatus(val OptMirrorStatus) {
 // SetSuspendedAt sets the value of SuspendedAt.
 func (s *Mirror) SetSuspendedAt(val OptDateTime) {
 	s.SuspendedAt = val
+}
+
+// SetSyncBlock sets the value of SyncBlock.
+func (s *Mirror) SetSyncBlock(val OptMirrorSyncBlock) {
+	s.SyncBlock = val
 }
 
 // SetAdditionalProps sets the value of AdditionalProps.
@@ -12107,6 +12855,56 @@ func (s *MirrorStatus) UnmarshalText(data []byte) error {
 	}
 }
 
+// Ref: #/components/schemas/MirrorSyncBlock
+type MirrorSyncBlock struct {
+	// When Core last observed the block. The periodic re-probe and a customer resync both refresh it.
+	ObservedAt time.Time `json:"observedAt"`
+	// Why GitHub refused the mint: org_ip_allowlist or installation_suspended. Other values may be added.
+	Reason          string `json:"reason"`
+	AdditionalProps MirrorSyncBlockAdditional
+}
+
+// GetObservedAt returns the value of ObservedAt.
+func (s *MirrorSyncBlock) GetObservedAt() time.Time {
+	return s.ObservedAt
+}
+
+// GetReason returns the value of Reason.
+func (s *MirrorSyncBlock) GetReason() string {
+	return s.Reason
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MirrorSyncBlock) GetAdditionalProps() MirrorSyncBlockAdditional {
+	return s.AdditionalProps
+}
+
+// SetObservedAt sets the value of ObservedAt.
+func (s *MirrorSyncBlock) SetObservedAt(val time.Time) {
+	s.ObservedAt = val
+}
+
+// SetReason sets the value of Reason.
+func (s *MirrorSyncBlock) SetReason(val string) {
+	s.Reason = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MirrorSyncBlock) SetAdditionalProps(val MirrorSyncBlockAdditional) {
+	s.AdditionalProps = val
+}
+
+type MirrorSyncBlockAdditional map[string]jx.Raw
+
+func (s *MirrorSyncBlockAdditional) init() MirrorSyncBlockAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/NativeMirrorPlacement
 type NativeMirrorPlacement struct {
 	// A URL to the JSON Schema for this object.
@@ -12116,12 +12914,16 @@ type NativeMirrorPlacement struct {
 	CreatedAt        time.Time                         `json:"createdAt"`
 	CreationFailedAt OptDateTime                       `json:"creationFailedAt"`
 	DesiredState     NativeMirrorPlacementDesiredState `json:"desiredState"`
-	LastError        OptString                         `json:"lastError"`
-	NextRetryAt      OptDateTime                       `json:"nextRetryAt"`
-	PlacementId      string                            `json:"placementId"`
-	Stage            NativeMirrorPlacementStage        `json:"stage"`
-	Status           NativeMirrorPlacementStatus       `json:"status"`
-	AdditionalProps  NativeMirrorPlacementAdditional
+	// Stable code for why the region failed, when it did.
+	FailureCode OptString `json:"failureCode"`
+	// Why the region failed, as a sentence that is safe to show a user.
+	FailureMessage  OptString                   `json:"failureMessage"`
+	LastError       OptString                   `json:"lastError"`
+	NextRetryAt     OptDateTime                 `json:"nextRetryAt"`
+	PlacementId     string                      `json:"placementId"`
+	Stage           NativeMirrorPlacementStage  `json:"stage"`
+	Status          NativeMirrorPlacementStatus `json:"status"`
+	AdditionalProps NativeMirrorPlacementAdditional
 }
 
 // GetSchema returns the value of Schema.
@@ -12152,6 +12954,16 @@ func (s *NativeMirrorPlacement) GetCreationFailedAt() OptDateTime {
 // GetDesiredState returns the value of DesiredState.
 func (s *NativeMirrorPlacement) GetDesiredState() NativeMirrorPlacementDesiredState {
 	return s.DesiredState
+}
+
+// GetFailureCode returns the value of FailureCode.
+func (s *NativeMirrorPlacement) GetFailureCode() OptString {
+	return s.FailureCode
+}
+
+// GetFailureMessage returns the value of FailureMessage.
+func (s *NativeMirrorPlacement) GetFailureMessage() OptString {
+	return s.FailureMessage
 }
 
 // GetLastError returns the value of LastError.
@@ -12212,6 +13024,16 @@ func (s *NativeMirrorPlacement) SetCreationFailedAt(val OptDateTime) {
 // SetDesiredState sets the value of DesiredState.
 func (s *NativeMirrorPlacement) SetDesiredState(val NativeMirrorPlacementDesiredState) {
 	s.DesiredState = val
+}
+
+// SetFailureCode sets the value of FailureCode.
+func (s *NativeMirrorPlacement) SetFailureCode(val OptString) {
+	s.FailureCode = val
+}
+
+// SetFailureMessage sets the value of FailureMessage.
+func (s *NativeMirrorPlacement) SetFailureMessage(val OptString) {
+	s.FailureMessage = val
 }
 
 // SetLastError sets the value of LastError.
@@ -12411,6 +13233,51 @@ func (s *NativeMirrorPlacementStatus) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// NewNilResourcePersonDirectGrant returns new NilResourcePersonDirectGrant with value set to v.
+func NewNilResourcePersonDirectGrant(v ResourcePersonDirectGrant) NilResourcePersonDirectGrant {
+	return NilResourcePersonDirectGrant{
+		Value: v,
+	}
+}
+
+// NilResourcePersonDirectGrant is nullable ResourcePersonDirectGrant.
+type NilResourcePersonDirectGrant struct {
+	Value ResourcePersonDirectGrant
+	Null  bool
+}
+
+// SetTo sets value to v.
+func (o *NilResourcePersonDirectGrant) SetTo(v ResourcePersonDirectGrant) {
+	o.Null = false
+	o.Value = v
+}
+
+// IsNull returns true if value is Null.
+func (o NilResourcePersonDirectGrant) IsNull() bool { return o.Null }
+
+// SetToNull sets value to null.
+func (o *NilResourcePersonDirectGrant) SetToNull() {
+	o.Null = true
+	var v ResourcePersonDirectGrant
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o NilResourcePersonDirectGrant) Get() (v ResourcePersonDirectGrant, ok bool) {
+	if o.Null {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o NilResourcePersonDirectGrant) Or(d ResourcePersonDirectGrant) ResourcePersonDirectGrant {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
 }
 
 // Ref: #/components/schemas/OIDCProvider
@@ -14507,6 +15374,52 @@ func (o OptMeRegional) Or(d MeRegional) MeRegional {
 	return d
 }
 
+// NewOptMeRegionalProviderEmails returns new OptMeRegionalProviderEmails with value set to v.
+func NewOptMeRegionalProviderEmails(v MeRegionalProviderEmails) OptMeRegionalProviderEmails {
+	return OptMeRegionalProviderEmails{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptMeRegionalProviderEmails is optional MeRegionalProviderEmails.
+type OptMeRegionalProviderEmails struct {
+	Value MeRegionalProviderEmails
+	Set   bool
+}
+
+// IsSet returns true if OptMeRegionalProviderEmails was set.
+func (o OptMeRegionalProviderEmails) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptMeRegionalProviderEmails) Reset() {
+	var v MeRegionalProviderEmails
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptMeRegionalProviderEmails) SetTo(v MeRegionalProviderEmails) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptMeRegionalProviderEmails) Get() (v MeRegionalProviderEmails, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptMeRegionalProviderEmails) Or(d MeRegionalProviderEmails) MeRegionalProviderEmails {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptMeRegionalUnavailable returns new OptMeRegionalUnavailable with value set to v.
 func NewOptMeRegionalUnavailable(v MeRegionalUnavailable) OptMeRegionalUnavailable {
 	return OptMeRegionalUnavailable{
@@ -14685,6 +15598,52 @@ func (o OptMirrorStatus) Get() (v MirrorStatus, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptMirrorStatus) Or(d MirrorStatus) MirrorStatus {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptMirrorSyncBlock returns new OptMirrorSyncBlock with value set to v.
+func NewOptMirrorSyncBlock(v MirrorSyncBlock) OptMirrorSyncBlock {
+	return OptMirrorSyncBlock{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptMirrorSyncBlock is optional MirrorSyncBlock.
+type OptMirrorSyncBlock struct {
+	Value MirrorSyncBlock
+	Set   bool
+}
+
+// IsSet returns true if OptMirrorSyncBlock was set.
+func (o OptMirrorSyncBlock) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptMirrorSyncBlock) Reset() {
+	var v MirrorSyncBlock
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptMirrorSyncBlock) SetTo(v MirrorSyncBlock) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptMirrorSyncBlock) Get() (v MirrorSyncBlock, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptMirrorSyncBlock) Or(d MirrorSyncBlock) MirrorSyncBlock {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -15053,6 +16012,52 @@ func (o OptRepoPrimaries) Get() (v RepoPrimaries, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptRepoPrimaries) Or(d RepoPrimaries) RepoPrimaries {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptRepoReference returns new OptRepoReference with value set to v.
+func NewOptRepoReference(v RepoReference) OptRepoReference {
+	return OptRepoReference{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptRepoReference is optional RepoReference.
+type OptRepoReference struct {
+	Value RepoReference
+	Set   bool
+}
+
+// IsSet returns true if OptRepoReference was set.
+func (o OptRepoReference) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptRepoReference) Reset() {
+	var v RepoReference
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptRepoReference) SetTo(v RepoReference) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptRepoReference) Get() (v RepoReference, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptRepoReference) Or(d RepoReference) RepoReference {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -16950,6 +17955,56 @@ func (s *PluginInstallationProfile) init() PluginInstallationProfile {
 	return m
 }
 
+// Ref: #/components/schemas/PluginInstallationRepository
+type PluginInstallationRepository struct {
+	// Repository name.
+	FullName string `json:"full_name"`
+	// Public repository id (repo_<ULID>).
+	ID              string `json:"id"`
+	AdditionalProps PluginInstallationRepositoryAdditional
+}
+
+// GetFullName returns the value of FullName.
+func (s *PluginInstallationRepository) GetFullName() string {
+	return s.FullName
+}
+
+// GetID returns the value of ID.
+func (s *PluginInstallationRepository) GetID() string {
+	return s.ID
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *PluginInstallationRepository) GetAdditionalProps() PluginInstallationRepositoryAdditional {
+	return s.AdditionalProps
+}
+
+// SetFullName sets the value of FullName.
+func (s *PluginInstallationRepository) SetFullName(val string) {
+	s.FullName = val
+}
+
+// SetID sets the value of ID.
+func (s *PluginInstallationRepository) SetID(val string) {
+	s.ID = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *PluginInstallationRepository) SetAdditionalProps(val PluginInstallationRepositoryAdditional) {
+	s.AdditionalProps = val
+}
+
+type PluginInstallationRepositoryAdditional map[string]jx.Raw
+
+func (s *PluginInstallationRepositoryAdditional) init() PluginInstallationRepositoryAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/PluginInstallationView
 type PluginInstallationView struct {
 	// A URL to the JSON Schema for this object.
@@ -17252,7 +18307,7 @@ type Project struct {
 	// Stored processing cell ID, not a cluster slug. Empty when the project is unassigned.
 	PrimaryProcessingCell OptString `json:"primaryProcessingCell"`
 	Region                string    `json:"region"`
-	// Published logical repositories in paginated project listings. Omitted without project-wide view
+	// Published logical repositories in paginated project listings. Omitted without project inspect
 	// permission or when unavailable.
 	RepositoryCount OptInt64 `json:"repositoryCount"`
 	AdditionalProps ProjectAdditional
@@ -17861,10 +18916,12 @@ type Repo struct {
 	Capabilities      OptRepoCapabilities `json:"capabilities"`
 	ClusterHost       OptString           `json:"clusterHost"`
 	ClusterSlug       OptString           `json:"clusterSlug"`
+	DetachedAt        OptDateTime         `json:"detachedAt"`
 	Foreign           OptBool             `json:"foreign"`
 	FullName          OptString           `json:"fullName"`
 	ID                string              `json:"id"`
 	Jurisdiction      OptString           `json:"jurisdiction"`
+	LastPushedAt      OptDateTime         `json:"lastPushedAt"`
 	MirrorSuspended   OptBool             `json:"mirrorSuspended"`
 	MirrorSuspendedAt OptString           `json:"mirrorSuspendedAt"`
 	Name              string              `json:"name"`
@@ -17877,7 +18934,8 @@ type Repo struct {
 	ProvisionAttempts OptInt64            `json:"provisionAttempts"`
 	ProvisionReason   OptString           `json:"provisionReason"`
 	RepoGroupId       OptString           `json:"repoGroupId"`
-	// Provisioning lifecycle. A mirror is active from creation, before its initial clone completes.
+	// Provisioning lifecycle. A mirror is active from creation, before its initial clone completes. A
+	// native primary reports deleting while a cascade delete removes its native mirrors; poll until 404.
 	State           OptString `json:"state"`
 	Visibility      OptString `json:"visibility"`
 	AdditionalProps RepoAdditional
@@ -17908,6 +18966,11 @@ func (s *Repo) GetClusterSlug() OptString {
 	return s.ClusterSlug
 }
 
+// GetDetachedAt returns the value of DetachedAt.
+func (s *Repo) GetDetachedAt() OptDateTime {
+	return s.DetachedAt
+}
+
 // GetForeign returns the value of Foreign.
 func (s *Repo) GetForeign() OptBool {
 	return s.Foreign
@@ -17926,6 +18989,11 @@ func (s *Repo) GetID() string {
 // GetJurisdiction returns the value of Jurisdiction.
 func (s *Repo) GetJurisdiction() OptString {
 	return s.Jurisdiction
+}
+
+// GetLastPushedAt returns the value of LastPushedAt.
+func (s *Repo) GetLastPushedAt() OptDateTime {
+	return s.LastPushedAt
 }
 
 // GetMirrorSuspended returns the value of MirrorSuspended.
@@ -18028,6 +19096,11 @@ func (s *Repo) SetClusterSlug(val OptString) {
 	s.ClusterSlug = val
 }
 
+// SetDetachedAt sets the value of DetachedAt.
+func (s *Repo) SetDetachedAt(val OptDateTime) {
+	s.DetachedAt = val
+}
+
 // SetForeign sets the value of Foreign.
 func (s *Repo) SetForeign(val OptBool) {
 	s.Foreign = val
@@ -18046,6 +19119,11 @@ func (s *Repo) SetID(val string) {
 // SetJurisdiction sets the value of Jurisdiction.
 func (s *Repo) SetJurisdiction(val OptString) {
 	s.Jurisdiction = val
+}
+
+// SetLastPushedAt sets the value of LastPushedAt.
+func (s *Repo) SetLastPushedAt(val OptDateTime) {
+	s.LastPushedAt = val
 }
 
 // SetMirrorSuspended sets the value of MirrorSuspended.
@@ -18398,6 +19476,144 @@ func (s *RepoCollaboratorRole) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/RepoDetachState
+type RepoDetachState struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// When the group rewrite made the repository native.
+	DetachedAt OptDateTime `json:"detachedAt"`
+	// True when a detach froze the repository's writes, so a push answers 423. With status none it is a
+	// hint: a detach before its group rewrite holds or held the lease, and it can have set the freeze.
+	Frozen bool `json:"frozen"`
+	// The repository's native address, et/<project>/<repo>.
+	NativeName OptString `json:"nativeName"`
+	// The gh/<owner>/<repo> addresses that answer moved.
+	ReleasedAddresses []string `json:"releasedAddresses"`
+	// True when the rewire stopped and the core's sweep resumes it after the step in step. False on a
+	// stalled detach that needs a call to the detach from an admin of the repo's project or a platform
+	// admin.
+	Resumable bool `json:"resumable"`
+	// None: no detach is recorded. in_progress: the repository is native and frozen while the rewire
+	// runs. stalled: the rewire stopped and the repository stays frozen. complete: every step finished.
+	Status string `json:"status"`
+	// The last rewire step that finished, 4 to 9. Absent before the group rewrite.
+	Step OptInt64 `json:"step"`
+	// The name of the step in step, as the rewire's logs and metrics name it.
+	StepName        OptString `json:"stepName"`
+	AdditionalProps RepoDetachStateAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *RepoDetachState) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetDetachedAt returns the value of DetachedAt.
+func (s *RepoDetachState) GetDetachedAt() OptDateTime {
+	return s.DetachedAt
+}
+
+// GetFrozen returns the value of Frozen.
+func (s *RepoDetachState) GetFrozen() bool {
+	return s.Frozen
+}
+
+// GetNativeName returns the value of NativeName.
+func (s *RepoDetachState) GetNativeName() OptString {
+	return s.NativeName
+}
+
+// GetReleasedAddresses returns the value of ReleasedAddresses.
+func (s *RepoDetachState) GetReleasedAddresses() []string {
+	return s.ReleasedAddresses
+}
+
+// GetResumable returns the value of Resumable.
+func (s *RepoDetachState) GetResumable() bool {
+	return s.Resumable
+}
+
+// GetStatus returns the value of Status.
+func (s *RepoDetachState) GetStatus() string {
+	return s.Status
+}
+
+// GetStep returns the value of Step.
+func (s *RepoDetachState) GetStep() OptInt64 {
+	return s.Step
+}
+
+// GetStepName returns the value of StepName.
+func (s *RepoDetachState) GetStepName() OptString {
+	return s.StepName
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *RepoDetachState) GetAdditionalProps() RepoDetachStateAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *RepoDetachState) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetDetachedAt sets the value of DetachedAt.
+func (s *RepoDetachState) SetDetachedAt(val OptDateTime) {
+	s.DetachedAt = val
+}
+
+// SetFrozen sets the value of Frozen.
+func (s *RepoDetachState) SetFrozen(val bool) {
+	s.Frozen = val
+}
+
+// SetNativeName sets the value of NativeName.
+func (s *RepoDetachState) SetNativeName(val OptString) {
+	s.NativeName = val
+}
+
+// SetReleasedAddresses sets the value of ReleasedAddresses.
+func (s *RepoDetachState) SetReleasedAddresses(val []string) {
+	s.ReleasedAddresses = val
+}
+
+// SetResumable sets the value of Resumable.
+func (s *RepoDetachState) SetResumable(val bool) {
+	s.Resumable = val
+}
+
+// SetStatus sets the value of Status.
+func (s *RepoDetachState) SetStatus(val string) {
+	s.Status = val
+}
+
+// SetStep sets the value of Step.
+func (s *RepoDetachState) SetStep(val OptInt64) {
+	s.Step = val
+}
+
+// SetStepName sets the value of StepName.
+func (s *RepoDetachState) SetStepName(val OptString) {
+	s.StepName = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *RepoDetachState) SetAdditionalProps(val RepoDetachStateAdditional) {
+	s.AdditionalProps = val
+}
+
+type RepoDetachStateAdditional map[string]jx.Raw
+
+func (s *RepoDetachStateAdditional) init() RepoDetachStateAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Ref: #/components/schemas/RepoFacetPage
@@ -19253,6 +20469,8 @@ func (s *RepoReferenceAdditional) init() RepoReferenceAdditional {
 type RepoResolution struct {
 	Candidate         OptRepoCandidate     `json:"candidate"`
 	FullName          OptString            `json:"fullName"`
+	GitCommand        OptString            `json:"gitCommand"`
+	MovedTo           OptRepoReference     `json:"movedTo"`
 	Placements        []RepoPlacement      `json:"placements"`
 	Primaries         OptRepoPrimaries     `json:"primaries"`
 	Provider          string               `json:"provider"`
@@ -19270,6 +20488,16 @@ func (s *RepoResolution) GetCandidate() OptRepoCandidate {
 // GetFullName returns the value of FullName.
 func (s *RepoResolution) GetFullName() OptString {
 	return s.FullName
+}
+
+// GetGitCommand returns the value of GitCommand.
+func (s *RepoResolution) GetGitCommand() OptString {
+	return s.GitCommand
+}
+
+// GetMovedTo returns the value of MovedTo.
+func (s *RepoResolution) GetMovedTo() OptRepoReference {
+	return s.MovedTo
 }
 
 // GetPlacements returns the value of Placements.
@@ -19315,6 +20543,16 @@ func (s *RepoResolution) SetCandidate(val OptRepoCandidate) {
 // SetFullName sets the value of FullName.
 func (s *RepoResolution) SetFullName(val OptString) {
 	s.FullName = val
+}
+
+// SetGitCommand sets the value of GitCommand.
+func (s *RepoResolution) SetGitCommand(val OptString) {
+	s.GitCommand = val
+}
+
+// SetMovedTo sets the value of MovedTo.
+func (s *RepoResolution) SetMovedTo(val OptRepoReference) {
+	s.MovedTo = val
 }
 
 // SetPlacements sets the value of Placements.
@@ -19369,6 +20607,7 @@ const (
 	RepoResolutionStatusReady       RepoResolutionStatus = "ready"
 	RepoResolutionStatusProcessing  RepoResolutionStatus = "processing"
 	RepoResolutionStatusNoMirror    RepoResolutionStatus = "no-mirror"
+	RepoResolutionStatusMoved       RepoResolutionStatus = "moved"
 	RepoResolutionStatusUnavailable RepoResolutionStatus = "unavailable"
 )
 
@@ -19378,6 +20617,7 @@ func (RepoResolutionStatus) AllValues() []RepoResolutionStatus {
 		RepoResolutionStatusReady,
 		RepoResolutionStatusProcessing,
 		RepoResolutionStatusNoMirror,
+		RepoResolutionStatusMoved,
 		RepoResolutionStatusUnavailable,
 	}
 }
@@ -19390,6 +20630,8 @@ func (s RepoResolutionStatus) MarshalText() ([]byte, error) {
 	case RepoResolutionStatusProcessing:
 		return []byte(s), nil
 	case RepoResolutionStatusNoMirror:
+		return []byte(s), nil
+	case RepoResolutionStatusMoved:
 		return []byte(s), nil
 	case RepoResolutionStatusUnavailable:
 		return []byte(s), nil
@@ -19409,6 +20651,9 @@ func (s *RepoResolutionStatus) UnmarshalText(data []byte) error {
 		return nil
 	case RepoResolutionStatusNoMirror:
 		*s = RepoResolutionStatusNoMirror
+		return nil
+	case RepoResolutionStatusMoved:
+		*s = RepoResolutionStatusMoved
 		return nil
 	case RepoResolutionStatusUnavailable:
 		*s = RepoResolutionStatusUnavailable
@@ -20050,11 +21295,11 @@ func (s *ResourcePeopleOutputBodyAdditional) init() ResourcePeopleOutputBodyAddi
 
 // Ref: #/components/schemas/ResourcePerson
 type ResourcePerson struct {
-	AccountId   string                    `json:"accountId"`
-	AvatarUrl   OptString                 `json:"avatarUrl"`
-	DirectGrant ResourcePersonDirectGrant `json:"directGrant"`
-	DisplayName OptString                 `json:"displayName"`
-	Handle      OptString                 `json:"handle"`
+	AccountId   string                       `json:"accountId"`
+	AvatarUrl   OptString                    `json:"avatarUrl"`
+	DirectGrant NilResourcePersonDirectGrant `json:"directGrant"`
+	DisplayName OptString                    `json:"displayName"`
+	Handle      OptString                    `json:"handle"`
 	// Earliest known effective-access time for the selected project. Organization-derived dates use
 	// membership activation, not invitation creation. Omitted for repositories and access without a
 	// known timestamp.
@@ -20076,7 +21321,7 @@ func (s *ResourcePerson) GetAvatarUrl() OptString {
 }
 
 // GetDirectGrant returns the value of DirectGrant.
-func (s *ResourcePerson) GetDirectGrant() ResourcePersonDirectGrant {
+func (s *ResourcePerson) GetDirectGrant() NilResourcePersonDirectGrant {
 	return s.DirectGrant
 }
 
@@ -20126,7 +21371,7 @@ func (s *ResourcePerson) SetAvatarUrl(val OptString) {
 }
 
 // SetDirectGrant sets the value of DirectGrant.
-func (s *ResourcePerson) SetDirectGrant(val ResourcePersonDirectGrant) {
+func (s *ResourcePerson) SetDirectGrant(val NilResourcePersonDirectGrant) {
 	s.DirectGrant = val
 }
 
@@ -20525,6 +21770,175 @@ func (s *ResourcePersonSourceSource) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// RestorePluginInstallationRepositoryNoContent is response for RestorePluginInstallationRepository operation.
+type RestorePluginInstallationRepositoryNoContent struct{}
+
+// Ref: #/components/schemas/ResyncMirrorInputBody
+type ResyncMirrorInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                        `json:"$schema"`
+	Owner           string                        `json:"owner"`
+	Provider        ResyncMirrorInputBodyProvider `json:"provider"`
+	Repo            string                        `json:"repo"`
+	AdditionalProps ResyncMirrorInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ResyncMirrorInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetOwner returns the value of Owner.
+func (s *ResyncMirrorInputBody) GetOwner() string {
+	return s.Owner
+}
+
+// GetProvider returns the value of Provider.
+func (s *ResyncMirrorInputBody) GetProvider() ResyncMirrorInputBodyProvider {
+	return s.Provider
+}
+
+// GetRepo returns the value of Repo.
+func (s *ResyncMirrorInputBody) GetRepo() string {
+	return s.Repo
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResyncMirrorInputBody) GetAdditionalProps() ResyncMirrorInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ResyncMirrorInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetOwner sets the value of Owner.
+func (s *ResyncMirrorInputBody) SetOwner(val string) {
+	s.Owner = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *ResyncMirrorInputBody) SetProvider(val ResyncMirrorInputBodyProvider) {
+	s.Provider = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *ResyncMirrorInputBody) SetRepo(val string) {
+	s.Repo = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResyncMirrorInputBody) SetAdditionalProps(val ResyncMirrorInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResyncMirrorInputBodyAdditional map[string]jx.Raw
+
+func (s *ResyncMirrorInputBodyAdditional) init() ResyncMirrorInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type ResyncMirrorInputBodyProvider string
+
+const (
+	ResyncMirrorInputBodyProviderGithub ResyncMirrorInputBodyProvider = "github"
+)
+
+// AllValues returns all ResyncMirrorInputBodyProvider values.
+func (ResyncMirrorInputBodyProvider) AllValues() []ResyncMirrorInputBodyProvider {
+	return []ResyncMirrorInputBodyProvider{
+		ResyncMirrorInputBodyProviderGithub,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ResyncMirrorInputBodyProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case ResyncMirrorInputBodyProviderGithub:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ResyncMirrorInputBodyProvider) UnmarshalText(data []byte) error {
+	switch ResyncMirrorInputBodyProvider(data) {
+	case ResyncMirrorInputBodyProviderGithub:
+		*s = ResyncMirrorInputBodyProviderGithub
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/ResyncMirrorOutputBody
+type ResyncMirrorOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// The placement the resync was published for.
+	MirrorId        string `json:"mirrorId"`
+	Status          string `json:"status"`
+	AdditionalProps ResyncMirrorOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ResyncMirrorOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetMirrorId returns the value of MirrorId.
+func (s *ResyncMirrorOutputBody) GetMirrorId() string {
+	return s.MirrorId
+}
+
+// GetStatus returns the value of Status.
+func (s *ResyncMirrorOutputBody) GetStatus() string {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ResyncMirrorOutputBody) GetAdditionalProps() ResyncMirrorOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ResyncMirrorOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetMirrorId sets the value of MirrorId.
+func (s *ResyncMirrorOutputBody) SetMirrorId(val string) {
+	s.MirrorId = val
+}
+
+// SetStatus sets the value of Status.
+func (s *ResyncMirrorOutputBody) SetStatus(val string) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ResyncMirrorOutputBody) SetAdditionalProps(val ResyncMirrorOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ResyncMirrorOutputBodyAdditional map[string]jx.Raw
+
+func (s *ResyncMirrorOutputBodyAdditional) init() ResyncMirrorOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // RevokeOrgInvitationNoContent is response for RevokeOrgInvitation operation.
@@ -21535,6 +22949,56 @@ func (s *UpdateOrgMemberRoleInputBodyRole) UnmarshalText(data []byte) error {
 	default:
 		return errors.Errorf("invalid value: %q", data)
 	}
+}
+
+// Ref: #/components/schemas/ValidatePluginInstallRedirectOutputBody
+type ValidatePluginInstallRedirectOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Redirect_uri carrying error=access_denied and the state.
+	CancelURL       string `json:"cancel_url"`
+	AdditionalProps ValidatePluginInstallRedirectOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ValidatePluginInstallRedirectOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetCancelURL returns the value of CancelURL.
+func (s *ValidatePluginInstallRedirectOutputBody) GetCancelURL() string {
+	return s.CancelURL
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ValidatePluginInstallRedirectOutputBody) GetAdditionalProps() ValidatePluginInstallRedirectOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ValidatePluginInstallRedirectOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetCancelURL sets the value of CancelURL.
+func (s *ValidatePluginInstallRedirectOutputBody) SetCancelURL(val string) {
+	s.CancelURL = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ValidatePluginInstallRedirectOutputBody) SetAdditionalProps(val ValidatePluginInstallRedirectOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ValidatePluginInstallRedirectOutputBodyAdditional map[string]jx.Raw
+
+func (s *ValidatePluginInstallRedirectOutputBodyAdditional) init() ValidatePluginInstallRedirectOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
 }
 
 // Ref: #/components/schemas/WillDeleteStruct

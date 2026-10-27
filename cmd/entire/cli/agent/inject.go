@@ -42,13 +42,10 @@ type ContextInjector interface {
 }
 
 // AsContextInjector returns ag as a ContextInjector when it implements the
-// interface. Mirrors AsHookResponseWriter so callers don't type-assert inline.
+// interface. DeclaredCaps has no field for context injection, so there is no
+// declaration gate.
 func AsContextInjector(ag Agent) (ContextInjector, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	ci, ok := ag.(ContextInjector)
-	return ci, ok
+	return builtinCapability[ContextInjector](ag)
 }
 
 // RenderAdditionalContextHookOutput renders the Claude-Code-style hook output

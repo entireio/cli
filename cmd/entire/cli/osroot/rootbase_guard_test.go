@@ -55,7 +55,6 @@ var allowedRootBases = map[string]string{
 	"cmd/entire/cli/plugin_index.go":                    "the per-index cache dir, opened at the clone it contains",
 	"cmd/entire/cli/plugin_install_remote.go":           "a staging dir this process just created",
 	"cmd/entire/cli/plugin_fetch.go":                    "the staging dir its caller created",
-	"cmd/entire/cli/utils.go":                           "one of worktree root / home / temp, chosen by containment",
 	"internal/entireclient/contexts/contexts.go":        "the caller's config dir, not the contexts file's parent",
 	"internal/entireclient/discovery/cache.go":          "the caller's cache dir, not the cache file's parent",
 

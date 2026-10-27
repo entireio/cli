@@ -77,7 +77,7 @@ func TestMaybeOfferSessionImport_AnchorlessRepoNeverPrompts(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
 	withImportSeams(t,
-		func(context.Context, []agent.Agent, string) []eligibleImport {
+		func(context.Context, io.Writer, []agent.Agent, string) []eligibleImport {
 			return []eligibleImport{{displayName: "Claude Code", sessionCount: 1}}
 		},
 		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {

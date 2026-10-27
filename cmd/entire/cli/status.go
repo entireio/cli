@@ -99,12 +99,23 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
+	writeRefusedAgentHomes(w)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
 	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// writeRefusedAgentHomes names every agent relocation variable Entire refuses.
+// Printed in the short output too, not only --detailed: the refusal breaks
+// resume and attach for that agent and silently drops it from transcript-owner
+// matching, and nothing else in a default run says so.
+func writeRefusedAgentHomes(w io.Writer) {
+	for _, err := range agent.RefusedRelocationEnvVars() {
+		fmt.Fprintf(w, "  ignoring agent home: %v\n", err)
+	}
 }
 
 // agentHelpCommand is the invocation a coding agent runs to get machine-readable
@@ -129,6 +140,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
+	writeRefusedAgentHomes(w)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -234,7 +246,10 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			b.WriteString(strings.Join(displayNames, ", "))
 		}
 
-		// Warn when installed hooks are out of date (read-only; fix is manual).
+		// Warn when installed hooks are out of date. Status stays read-only and
+		// points to doctor rather than `entire enable --force`: doctor repairs
+		// missing hook timeouts in place, while --force rebuilds every Entire hook
+		// and drops the timeouts and fields the user set on them.
 		for _, name := range OutdatedHookAgents(ctx) {
 			ag, err := agent.Get(name)
 			if err != nil {
@@ -242,11 +257,19 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 			}
 			b.WriteString("\n")
 			b.WriteString(sty.render(sty.yellow, "  ! "+string(ag.Type())+" hooks out of date"))
-			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
+			b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
 		}
 		if warning := codexStatusWarning(inspectCodexHookIssue(ctx)); warning != "" {
 			b.WriteString("\n")
 			b.WriteString(sty.render(sty.yellow, "  ! "+warning))
+		}
+		// Shadow branches older versions left behind hold raw working-tree
+		// snapshots and are no longer removed automatically; surface them so
+		// they are not pushed or kept by accident.
+		if n := legacyShadowBranchCount(ctx); n > 0 {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! "+pluralCount(n, "legacy shadow branch", "legacy shadow branches")))
+			b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
 		}
 	}
 
@@ -455,6 +478,13 @@ func resolveDedicatedReadSource(ctx context.Context, s *EntireSettings, lead str
 }
 
 func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
+	return computeCheckpointSyncInfoCounting(ctx, s, countUnpushedCheckpointsForStatus)
+}
+
+// computeCheckpointSyncInfoCounting is computeCheckpointSyncInfo with the
+// unpushed counter supplied, so a caller that already listed the outgoing
+// checkpoints does not list them again.
+func computeCheckpointSyncInfoCounting(ctx context.Context, s *EntireSettings, countUnpushed func(ctx context.Context, remoteName string) int) checkpointSyncInfo {
 	info := checkpointSyncInfo{PushDisabled: s.IsPushSessionsDisabled()}
 
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
@@ -527,7 +557,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 			// no remote-tracking ref, so it would permanently read "all
 			// unpushed".
 			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
-				info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
+				info.Unpushed = countUnpushed(ctx, "")
 			}
 			return info
 		}
@@ -535,7 +565,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 
 	info.Remote = elected.Name
 	info.Source = string(elected.Source)
-	info.Unpushed = countUnpushedCheckpointsForStatus(ctx, elected.Name)
+	info.Unpushed = countUnpushed(ctx, elected.Name)
 	// A configured checkpoint_remote that did not enable above is being
 	// ignored. When the ownership check is what rejected it, say so: this is
 	// the one trust-gate rejection a user otherwise experiences only as
@@ -661,8 +691,14 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		}
 	}
 	if info.Unpushed > 0 {
+		line := formatUnpushedCheckpointsLine(info)
+		// --outgoing lists the git-refs push queue; git-branch has no
+		// per-checkpoint answer to point at.
+		if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
+			line += " · see 'entire checkpoint list --outgoing'"
+		}
 		b.WriteString("\n  ")
-		b.WriteString(sty.render(sty.dim, formatUnpushedCheckpointsLine(info)))
+		b.WriteString(sty.render(sty.dim, line))
 	}
 }
 
@@ -884,7 +920,7 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				stats = append(stats, activeTimeDisplay(st.LastInteractionTime))
 			}
 
-			if t := totalTokens(st.TokenUsage); t > 0 {
+			if t := totalTokens(st.TotalTokenUsage()); t > 0 {
 				stats = append(stats, "tokens "+formatTokenCount(t))
 			}
 
@@ -907,7 +943,7 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
 			if st.CaptureDegradedAt != nil {
-				warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
+				warning := fmt.Sprintf("capture degraded %s: a status scan or checkpoint finalize ran out of time (see 'entire doctor logs')",
 					timeAgo(*st.CaptureDegradedAt))
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
@@ -1053,9 +1089,6 @@ func computeSessionDivergenceWarnings(
 		}
 
 		if st.BaseCommit == head.commitHash {
-			if st.AttributionBaseCommit != "" && st.AttributionBaseCommit != st.BaseCommit {
-				warnings[st.SessionID] = "attribution base diverged after history movement; figures may be off until next checkpoint"
-			}
 			continue
 		}
 
@@ -1090,9 +1123,17 @@ type statusJSON struct {
 	// `entire status --json` instead of the human footer. Set only on the
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
 	AgentHelp string `json:"agent_help,omitempty"`
-	// HooksOutdated lists agents whose installed hook config is out of date and
-	// should be refreshed with `entire enable --force`.
+	// HooksOutdated lists agents whose installed hook config is out of date;
+	// `entire doctor` repairs it or names the fix.
 	HooksOutdated []string `json:"hooks_outdated,omitempty"`
+	// LegacyShadowBranches counts the strict-shape entire/<commit>-<worktree>
+	// shadow branches older versions left behind; `entire doctor` reports and
+	// deletes them.
+	LegacyShadowBranches int `json:"legacy_shadow_branches,omitempty"`
+	// RefusedAgentHomes lists agent relocation variables (CLAUDE_CONFIG_DIR,
+	// CODEX_HOME, ...) set to a value Entire refuses, one message per variable.
+	// Resume and attach fail for that agent until it is fixed.
+	RefusedAgentHomes []string `json:"refused_agent_homes,omitempty"`
 	// CodexHooks reports effective discovery/trust warnings separately from
 	// current-checkout installation and freshness semantics.
 	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
@@ -1187,7 +1228,7 @@ type sessionBriefJSON struct {
 	Model        string `json:"model,omitempty"`
 	Status       string `json:"status"`
 	// CaptureDegraded reports that a session for this agent last turned with a
-	// status scan over budget, so new-file detection was skipped.
+	// capture operation over budget.
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
@@ -1220,6 +1261,9 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		ActiveSessions: []sessionBriefJSON{},
 		AgentHelp:      agentHelpCommand,
 	}
+	for _, refusal := range agent.RefusedRelocationEnvVars() {
+		result.RefusedAgentHomes = append(result.RefusedAgentHomes, refusal.Error())
+	}
 
 	if s.Enabled {
 		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
@@ -1231,6 +1275,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		for _, name := range OutdatedHookAgents(ctx) {
 			result.HooksOutdated = append(result.HooksOutdated, string(name))
 		}
+		result.LegacyShadowBranches = legacyShadowBranchCount(ctx)
 		result.CodexHooks = codexHooksStatusFromIssue(inspectCodexHookIssue(ctx))
 
 		// Same computation as the text path (writeCheckpointSyncLines);
@@ -1305,4 +1350,14 @@ func sessionStatusLabel(s *session.State) string {
 		return string(s.Phase)
 	}
 	return string(session.PhaseIdle)
+}
+
+// legacyShadowBranchCount returns how many strict-shape legacy shadow branches
+// exist (the ones `entire doctor` reports), or 0 when they cannot be listed.
+func legacyShadowBranchCount(ctx context.Context) int {
+	branches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
+	if err != nil {
+		return 0
+	}
+	return len(branches)
 }

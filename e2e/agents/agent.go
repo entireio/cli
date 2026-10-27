@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -225,9 +226,22 @@ func runCapture(cmd *exec.Cmd, promptCtx context.Context) (int, error) {
 	return exitCode, err
 }
 
+// harnessOnlyEnv are variables the test runner can carry that a real agent's
+// shell does not: Entire's test override and the CI markers. Each one tells
+// `entire` that nobody can answer a prompt, so an agent that inherits them
+// skips the detection users depend on: Windows commits from desktop agents
+// hung (#2725) while E2E stayed green through CI=true. Agent processes are
+// started without them, by agentEnv and NewTmuxSession.
+var harnessOnlyEnv = []string{"ENTIRE_TEST_TTY", "CI", "GITHUB_ACTIONS", "GIT_TERMINAL_PROMPT"}
+
+// agentEnv returns env as an agent process should see it: without
+// harnessOnlyEnv, and without the extra names a runner also replaces.
+func agentEnv(env []string, extra ...string) []string {
+	return filterEnv(env, append(slices.Clone(harnessOnlyEnv), extra...)...)
+}
+
 // filterEnv returns env with entries matching any of the given variable names
-// removed. Used to strip test-only overrides (e.g. ENTIRE_TEST_TTY) from agent
-// processes so they exercise real detection paths.
+// removed. Agent processes go through agentEnv, which also drops harnessOnlyEnv.
 func filterEnv(env []string, names ...string) []string {
 	out := make([]string, 0, len(env))
 	for _, e := range env {

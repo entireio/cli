@@ -209,7 +209,7 @@ func TestLocalWritesFromLinkedWorktreeLandInTheInheritedFile(t *testing.T) {
 	assert.True(t, s.ExternalAgents, "the grant survives the write")
 	assert.Equal(t, CommitLinkingAlways, s.CommitLinking)
 
-	data, err := LoadLocalBytes(t.Context())
+	data, err := os.ReadFile(mainLocal)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "external_agents")
 }

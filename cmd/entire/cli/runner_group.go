@@ -7,8 +7,7 @@ import (
 )
 
 // newRunnerCmd is the root of the `entire runner` group, which manages the
-// trail runner configs under .entire/runners/. Hidden during maturation, like
-// the related `trail` group.
+// trail runner configs under .entire/runners/. Hidden during maturation.
 func newRunnerCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 

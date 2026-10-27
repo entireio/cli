@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // Compile-time interface check.
@@ -123,43 +124,6 @@ func TestCursorAgent_ExtractPrompts_EmptyFile(t *testing.T) {
 	}
 	if len(prompts) != 0 {
 		t.Errorf("ExtractPrompts() returned %d prompts, want 0", len(prompts))
-	}
-}
-
-// --- ExtractSummary ---
-
-func TestCursorAgent_ExtractSummary(t *testing.T) {
-	t.Parallel()
-	ag := &CursorAgent{}
-
-	tmpDir := t.TempDir()
-	path := writeSampleTranscript(t, tmpDir)
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("ExtractSummary() error = %v", err)
-	}
-	if summary != "Created one.txt with one and committed." {
-		t.Errorf("ExtractSummary() = %q, want %q", summary, "Created one.txt with one and committed.")
-	}
-}
-
-func TestCursorAgent_ExtractSummary_EmptyFile(t *testing.T) {
-	t.Parallel()
-	ag := &CursorAgent{}
-
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "empty.jsonl")
-	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
-		t.Fatalf("failed to write empty file: %v", err)
-	}
-
-	summary, err := ag.ExtractSummary(path)
-	if err != nil {
-		t.Fatalf("ExtractSummary() error = %v", err)
-	}
-	if summary != "" {
-		t.Errorf("ExtractSummary() = %q, want empty string", summary)
 	}
 }
 
@@ -284,7 +248,7 @@ func TestCursorAgent_RealSessionContainsToolUseBlocks(t *testing.T) {
 	// Tool name -> the input keys observed for it in the real session.
 	got := map[string]map[string]bool{}
 	for i := range lines {
-		if lines[i].Type != transcript.TypeAssistant {
+		if lines[i].Type != transcriptlib.TypeAssistant {
 			continue
 		}
 		var msg transcript.AssistantMessage
@@ -292,7 +256,7 @@ func TestCursorAgent_RealSessionContainsToolUseBlocks(t *testing.T) {
 			t.Fatalf("unmarshal assistant message: %v", err)
 		}
 		for _, block := range msg.Content {
-			if block.Type != transcript.ContentTypeToolUse {
+			if block.Type != transcriptlib.ContentTypeToolUse {
 				continue
 			}
 			var input map[string]json.RawMessage

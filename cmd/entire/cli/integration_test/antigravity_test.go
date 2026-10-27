@@ -24,13 +24,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAntigravity_FullEventFlow drives the three installed Antigravity hooks
-// (pre-invocation, pre-tool-use, stop) against a real git repo via
-// `entire hooks antigravity <verb>` subprocesses and verifies the lifecycle
-// wiring: session state lazy-initializes on the first PreInvocation, file
-// changes from a write_to_file PreToolUse land in state.FilesTouched, and a
-// Stop with fullyIdle=true records SessionEnd. (PostToolUse/PostInvocation
-// are deliberately not installed — no lifecycle mapping.)
+// TestAntigravity_FullEventFlow drives the four installed Antigravity hooks
+// (session-start, pre-invocation, pre-tool-use, stop) against a real git repo
+// via `entire hooks antigravity <verb>` subprocesses and verifies the lifecycle
+// wiring: session-start writes nothing to stdout and creates no state, session
+// state lazy-initializes on the first PreInvocation with the model from
+// session-start, file changes from a write_to_file PreToolUse land in
+// state.FilesTouched, and a Stop with fullyIdle=true records TurnEnd.
+// (PostToolUse/PostInvocation are deliberately not installed — no lifecycle
+// mapping.)
 func TestAntigravity_FullEventFlow(t *testing.T) {
 	t.Parallel()
 	env := newAntigravityEnv(t)
@@ -49,6 +51,16 @@ func TestAntigravity_FullEventFlow(t *testing.T) {
 		"artifactDirectoryPath": filepath.Join(env.RepoDir, ".gemini", "antigravity-cli", "artifacts"),
 	}
 
+	statePath := filepath.Join(env.RepoDir, ".git", "entire-sessions", conversationID+".json")
+
+	// agy 1.3.4 SessionStart stdin: the common fields plus modelName.
+	stdout, err := runAntigravityHookStdout(t, env.RepoDir, "session-start", mergeMaps(common, map[string]any{
+		"modelName": "gemini-3.1-pro-low",
+	}))
+	require.NoError(t, err, "session-start hook should succeed")
+	assert.Empty(t, stdout, "session-start must write nothing to agy's stdout")
+	require.NoFileExists(t, statePath, "session-start must not create session state")
+
 	// agy wire format (captured on 1.0.14/1.0.15, re-verified unchanged on
 	// 1.1.1): invocationNum is 0-indexed. The first model
 	// invocation of a conversation carries invocationNum=0; only that one
@@ -62,8 +74,11 @@ func TestAntigravity_FullEventFlow(t *testing.T) {
 	require.NoError(t, runAntigravityHook(t, env.RepoDir, "pre-invocation", preInv),
 		"pre-invocation hook should succeed and lazy-init session state")
 
-	statePath := filepath.Join(env.RepoDir, ".git", "entire-sessions", conversationID+".json")
 	require.FileExists(t, statePath, "session state file should exist after pre-invocation")
+	initState, err := env.GetSessionState(conversationID)
+	require.NoError(t, err)
+	assert.Equal(t, "gemini-3.1-pro-low", initState.ModelName,
+		"the model hint stored at session-start should reach session state")
 
 	preTU := mergeMaps(common, map[string]any{
 		"toolCall": map[string]any{
@@ -94,7 +109,7 @@ func TestAntigravity_FullEventFlow(t *testing.T) {
 		"fullyIdle":         true,
 	})
 	require.NoError(t, runAntigravityHook(t, env.RepoDir, "stop", stopIdle),
-		"stop hook with fullyIdle=true should emit SessionEnd")
+		"stop hook with fullyIdle=true should emit TurnEnd")
 
 	stateBytes, err := os.ReadFile(statePath)
 	require.NoError(t, err, "session state file should still be readable after the full flow")
@@ -183,7 +198,7 @@ func TestAntigravity_MidTurnCommitWithUnwrittenTranscriptStillCondenses(t *testi
 // uncommitted-late-work fix: after a mid-turn commit condenses everything
 // tracked, agy can still create files via run_command (shell), which the
 // PreToolUse extractor cannot see. Stop must checkpoint those uncommitted
-// files (SaveStep → shadow branch) instead of skipping — the committed-state
+// files (SaveStep → session state) instead of skipping — the committed-state
 // filters drop only the already-condensed changes, not the late ones.
 func TestAntigravity_StopAfterMidTurnCommitCheckpointsLateShellFiles(t *testing.T) {
 	t.Parallel()
@@ -229,19 +244,18 @@ func TestAntigravity_StopAfterMidTurnCommitCheckpointsLateShellFiles(t *testing.
 		"fullyIdle":         true,
 	})))
 
-	// The uncommitted late file must have produced a shadow-branch checkpoint.
-	var shadowBranches []string
-	for _, branch := range env.ListBranchesWithPrefix("entire/") {
-		if branch == paths.MetadataBranchName || branch == paths.TrailsBranchName {
-			continue
-		}
-		shadowBranches = append(shadowBranches, branch)
-	}
-	require.NotEmpty(t, shadowBranches,
+	// The uncommitted late file must have produced a recorded turn-end step.
+	state, err := env.GetSessionState(conversationID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Positive(t, state.StepCount,
 		"Stop after a mid-turn commit must checkpoint uncommitted late files (docs/late.md), not skip SaveStep")
+	require.Contains(t, state.FilesTouched, "docs/late.md")
+	require.NotContains(t, state.FilesTouched, "docs/blue.md", "the already-condensed file must not be re-recorded")
+	env.AssertNoShadowBranches()
 }
 
-func TestAntigravity_StopAfterAgentCommitDoesNotCreateNewShadowBranch(t *testing.T) {
+func TestAntigravity_StopAfterAgentCommitRecordsNoNewStep(t *testing.T) {
 	t.Parallel()
 	env := newAntigravityEnv(t)
 
@@ -287,12 +301,15 @@ func TestAntigravity_StopAfterAgentCommitDoesNotCreateNewShadowBranch(t *testing
 		"fullyIdle":         true,
 	})))
 
-	for _, branch := range env.ListBranchesWithPrefix("entire/") {
-		if branch == paths.MetadataBranchName || branch == paths.TrailsBranchName {
-			continue
-		}
-		t.Fatalf("unexpected shadow branch after agent commit and stop: %s", branch)
+	// The commit condensed everything; Stop must not record the committed
+	// file again as a new pending step.
+	state, err := env.GetSessionState(conversationID)
+	require.NoError(t, err)
+	if state != nil {
+		require.Zero(t, state.StepCount, "no new turn-end step after the agent committed all its work")
+		require.Empty(t, state.FilesTouched)
 	}
+	env.AssertNoShadowBranches()
 }
 
 func gitCLICommitWithEntireHooks(t *testing.T, env *TestEnv, message string, files ...string) {
@@ -430,7 +447,7 @@ func TestAntigravity_TokenUsageInCheckpointMetadata(t *testing.T) {
 	// 6. Commit: prepare-commit-msg adds the Entire-Checkpoint trailer, then
 	//    post-commit condenses the session (with its token usage) onto
 	//    entire/checkpoints/v1.
-	env.GitCommitWithShadowHooks("Add tok.txt", "tok.txt")
+	env.GitCommitWithHooks("Add tok.txt", "tok.txt")
 
 	// 7. Read the committed checkpoint metadata and assert the token usage
 	//    reached both the per-session metadata.json and the summary aggregate.
@@ -466,7 +483,7 @@ func TestAntigravity_TokenUsageInCheckpointMetadata(t *testing.T) {
 // The test reproduces that exact timing:
 //  1. TurnStart (PreInvocation, invocationNum 0) — transcript file is EMPTY.
 //  2. PreToolUse write_to_file touches foo.txt; the file is written to the worktree.
-//  3. Stop (fullyIdle true) — SaveStep creates the shadow checkpoint while the
+//  3. Stop (fullyIdle true) — SaveStep records the turn end while the
 //     transcript is STILL EMPTY (proving the backfill cannot recover the prompt).
 //  4. The transcript is populated with a USER_INPUT/<USER_REQUEST> step BEFORE the
 //     git commit (simulating agy finishing its late write).
@@ -523,7 +540,7 @@ func TestAntigravity_PromptInCheckpointMetadata(t *testing.T) {
 	// checkpoint and later commit.
 	env.WriteFile("foo.txt", "bar\n")
 
-	// Stop (fullyIdle=true): TurnEnd → SaveStep creates the shadow checkpoint.
+	// Stop (fullyIdle=true): TurnEnd → SaveStep records the turn end.
 	// The transcript is STILL EMPTY here, so the TurnEnd prompt backfill recovers
 	// nothing and prompt.txt is empty. This is what makes the test exercise the
 	// condensation-time fallback rather than the backfill path.
@@ -552,7 +569,7 @@ func TestAntigravity_PromptInCheckpointMetadata(t *testing.T) {
 
 	// Commit → PostCommit condensation. The fallback re-extracts the prompt from
 	// the now-populated live transcript.
-	env.GitCommitWithShadowHooks("Add foo.txt", "foo.txt")
+	env.GitCommitWithHooks("Add foo.txt", "foo.txt")
 
 	// Resolve the checkpoint ID from the user commit's Entire-Checkpoint trailer.
 	headHash := env.GetHeadHash()
@@ -627,6 +644,25 @@ func runAntigravityHook(t *testing.T, repoDir, hookName string, input map[string
 // of the real entire binary.
 func runAntigravityHookWithEnv(t *testing.T, repoDir, hookName string, input map[string]any, extraEnv []string) error {
 	t.Helper()
+	output, runErr := antigravityHookCmd(t, repoDir, hookName, input, extraEnv).CombinedOutput()
+	t.Logf("antigravity hook %s output: %s", hookName, output)
+	return runErr
+}
+
+// runAntigravityHookStdout runs an Antigravity hook and returns only its
+// stdout, which is what agy reads as the hook's response.
+func runAntigravityHookStdout(t *testing.T, repoDir, hookName string, input map[string]any) (string, error) {
+	t.Helper()
+	cmd := antigravityHookCmd(t, repoDir, hookName, input, nil)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, runErr := cmd.Output()
+	t.Logf("antigravity hook %s stdout: %s\nstderr: %s", hookName, stdout, stderr.String())
+	return string(stdout), runErr
+}
+
+func antigravityHookCmd(t *testing.T, repoDir, hookName string, input map[string]any, extraEnv []string) *exec.Cmd {
+	t.Helper()
 	inputJSON, err := json.Marshal(input)
 	require.NoError(t, err)
 
@@ -635,9 +671,7 @@ func runAntigravityHookWithEnv(t *testing.T, repoDir, hookName string, input map
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(), antigravityBrainDirEnv(repoDir))
 	cmd.Env = append(cmd.Env, extraEnv...)
-	output, runErr := cmd.CombinedOutput()
-	t.Logf("antigravity hook %s output: %s", hookName, output)
-	return runErr
+	return cmd
 }
 
 func mergeMaps(base, overrides map[string]any) map[string]any {
@@ -719,11 +753,11 @@ func TestAntigravity_PromptInCheckpointMetadata_LaterTurnManualCommit(t *testing
 	}
 
 	runTurn("make a red note", "red.md", 1)
-	env.GitCommitWithShadowHooks("Add red note", "red.md")
+	env.GitCommitWithHooks("Add red note", "red.md")
 	require.Equal(t, "make a red note", promptOf("first manual commit"))
 
 	runTurn("add another", "blue.md", 3)
-	env.GitCommitWithShadowHooks("Add blue note", "blue.md")
+	env.GitCommitWithHooks("Add blue note", "blue.md")
 	require.Equal(t, "add another", promptOf("second manual commit"),
 		"a later turn's checkpoint must carry that turn's prompt, not the first turn's or none")
 }

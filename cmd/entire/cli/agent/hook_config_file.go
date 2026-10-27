@@ -90,6 +90,13 @@ type HookConfigLocator interface {
 	HookConfigRelPath() string
 }
 
+// AsHookConfigLocator returns the agent as HookConfigLocator if it implements
+// the interface. External agents declare hooks in their manifest instead, so
+// there is no DeclaredCaps gate.
+func AsHookConfigLocator(ag Agent) (HookConfigLocator, bool) {
+	return builtinCapability[HookConfigLocator](ag)
+}
+
 // OpenHookConfig returns the hook-config file at relPath inside worktreeRoot.
 //
 // relPath is slash-separated and relative to the worktree root

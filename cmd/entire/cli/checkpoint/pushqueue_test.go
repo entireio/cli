@@ -1,11 +1,15 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,8 +27,8 @@ func TestPushQueue_EnqueueDrainRemove(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, refs)
 
-	require.NoError(t, q.Enqueue(a))
-	require.NoError(t, q.Enqueue(b))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: b}))
 
 	refs, err = q.Drain()
 	require.NoError(t, err)
@@ -54,9 +58,9 @@ func TestPushQueue_DrainDedupes(t *testing.T) {
 	q := NewPushQueue(t.TempDir())
 	a := mustRefName(t, "a1b2c3d4e5f6")
 
-	require.NoError(t, q.Enqueue(a))
-	require.NoError(t, q.Enqueue(a))
-	require.NoError(t, q.Enqueue(a))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
 
 	refs, err := q.Drain()
 	require.NoError(t, err)
@@ -86,10 +90,10 @@ func TestPushQueue_DrainCompactsRedundantEntries(t *testing.T) {
 	a := mustRefName(t, "a1b2c3d4e5f6")
 	b := mustRefName(t, "b2c3d4e5f6a1")
 
-	require.NoError(t, q.Enqueue(a))
-	require.NoError(t, q.Enqueue(a))
-	require.NoError(t, q.Enqueue(b))
-	require.NoError(t, q.Enqueue(a))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: b}))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
 	require.Equal(t, 4, nonEmptyLineCount(t, q), "enqueue only appends")
 
 	refs, err := q.Drain()
@@ -108,7 +112,7 @@ func TestPushQueue_DrainCompactsMalformedLines(t *testing.T) {
 	t.Parallel()
 	q := NewPushQueue(t.TempDir())
 	a := mustRefName(t, "a1b2c3d4e5f6")
-	require.NoError(t, q.Enqueue(a))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
 
 	f, err := os.OpenFile(q.queuePath(), os.O_WRONLY|os.O_APPEND, 0o600)
 	require.NoError(t, err)
@@ -130,12 +134,12 @@ func TestPushQueue_RemovePreservesLaterEntries(t *testing.T) {
 
 	// Simulate: drain sees [a], then b is enqueued during the push, then we
 	// Remove(a). b must survive for the next pre-push.
-	require.NoError(t, q.Enqueue(a))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
 	drained, err := q.Drain()
 	require.NoError(t, err)
 	require.Equal(t, []plumbing.ReferenceName{a}, drained)
 
-	require.NoError(t, q.Enqueue(b))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: b}))
 	require.NoError(t, q.Remove(drained))
 
 	refs, err := q.Drain()
@@ -148,7 +152,7 @@ func TestPushQueue_SkipsMalformedLines(t *testing.T) {
 	dir := t.TempDir()
 	q := NewPushQueue(dir)
 	a := mustRefName(t, "a1b2c3d4e5f6")
-	require.NoError(t, q.Enqueue(a))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
 
 	// Append a garbage line + a blank line directly.
 	f, err := os.OpenFile(q.queuePath(), os.O_WRONLY|os.O_APPEND, 0o600)
@@ -179,9 +183,9 @@ func TestPushQueue_PeekIsReadOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, refs)
 
-	require.NoError(t, q.Enqueue(a))
-	require.NoError(t, q.Enqueue(a)) // duplicate on disk
-	require.NoError(t, q.Enqueue(b))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a}))
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: a})) // duplicate on disk
+	require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: b}))
 	require.Equal(t, 3, nonEmptyLineCount(t, q))
 
 	refs, err = q.Peek()
@@ -205,23 +209,25 @@ func TestPushQueue_RotateMovesRefsToBack(t *testing.T) {
 	b := mustRefName(t, "b2c3d4e5f6a1")
 	c := mustRefName(t, "c3d4e5f6a1b2")
 	for _, ref := range []plumbing.ReferenceName{a, b, c} {
-		require.NoError(t, q.Enqueue(ref))
+		require.NoError(t, q.EnqueueEntry(PushQueueEntry{Ref: ref}))
 	}
 
-	require.NoError(t, q.Rotate([]plumbing.ReferenceName{a, b}))
+	entry := func(ref plumbing.ReferenceName) PushQueueEntry { return PushQueueEntry{Ref: ref} }
+
+	require.NoError(t, q.Rotate([]PushQueueEntry{entry(a), entry(b)}))
 	refs, err := q.Drain()
 	require.NoError(t, err)
 	assert.Equal(t, []plumbing.ReferenceName{c, a, b}, refs,
 		"rotated refs go to the back, both groups keeping their relative order")
 
 	// A ref that is not queued is ignored rather than added.
-	require.NoError(t, q.Rotate([]plumbing.ReferenceName{mustRefName(t, "ffffffffffff")}))
+	require.NoError(t, q.Rotate([]PushQueueEntry{entry(mustRefName(t, "ffffffffffff"))}))
 	refs, err = q.Drain()
 	require.NoError(t, err)
 	assert.Equal(t, []plumbing.ReferenceName{c, a, b}, refs, "an absent ref must not join the queue")
 
 	// Rotating everything is a no-op on order, and never drops a ref.
-	require.NoError(t, q.Rotate([]plumbing.ReferenceName{c, a, b}))
+	require.NoError(t, q.Rotate([]PushQueueEntry{entry(c), entry(a), entry(b)}))
 	refs, err = q.Drain()
 	require.NoError(t, err)
 	assert.Equal(t, []plumbing.ReferenceName{c, a, b}, refs)
@@ -231,3 +237,154 @@ func TestPushQueue_RotateMovesRefsToBack(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, refs, 3, "rotation only reorders; it never removes")
 }
+
+func TestPushQueue_RemovePreservesNewerGenerationOfSameRef(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	old := PushQueueEntry{Ref: ref, Hash: plumbing.NewHash(strings.Repeat("a", 40))}
+	newer := PushQueueEntry{Ref: ref, Hash: plumbing.NewHash(strings.Repeat("b", 40))}
+
+	require.NoError(t, q.EnqueueEntry(old))
+	require.NoError(t, q.EnqueueEntry(newer))
+	require.NoError(t, q.RemoveEntries([]PushQueueEntry{old}))
+
+	entries, err := q.DrainEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{newer}, entries,
+		"cleanup for an older generation must not remove the newer generation")
+}
+
+func TestPushQueue_DrainKeepsLatestGenerationAtFirstSeenPosition(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	refA := mustRefName(t, "a1b2c3d4e5f6")
+	refB := mustRefName(t, "b2c3d4e5f6a1")
+	a1 := PushQueueEntry{Ref: refA, Hash: plumbing.NewHash(strings.Repeat("a", 40))}
+	b1 := PushQueueEntry{Ref: refB, Hash: plumbing.NewHash(strings.Repeat("b", 40))}
+	a2 := PushQueueEntry{Ref: refA, Hash: plumbing.NewHash(strings.Repeat("c", 40))}
+
+	require.NoError(t, q.EnqueueEntry(a1))
+	require.NoError(t, q.EnqueueEntry(b1))
+	require.NoError(t, q.EnqueueEntry(a2))
+
+	entries, err := q.DrainEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{a2, b1}, entries,
+		"latest generation must win without moving the ref behind later refs")
+}
+
+func TestPushQueue_LegacyEntryCannotRemoveKnownGeneration(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	legacy := PushQueueEntry{Ref: ref}
+	known := PushQueueEntry{Ref: ref, Hash: plumbing.NewHash(strings.Repeat("d", 40))}
+
+	root, release, err := q.lock()
+	require.NoError(t, err)
+	legacyLine, err := json.Marshal(pushQueueEntry{Ref: ref.String()})
+	require.NoError(t, err)
+	require.NoError(t, writeQueueAtomic(root, append(legacyLine, '\n')))
+	release()
+
+	require.NoError(t, q.EnqueueEntry(known))
+	require.NoError(t, q.RemoveEntries([]PushQueueEntry{legacy}))
+
+	entries, err := q.DrainEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{known}, entries,
+		"exact legacy cleanup must not remove a later hash-bearing generation")
+}
+
+// Rotation matches exact generations: a failed older generation must not drag
+// a newer generation of the same ref, enqueued meanwhile, to the back.
+func TestPushQueue_RotateLeavesNewerGenerationInPlace(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	refA := mustRefName(t, "a1b2c3d4e5f6")
+	refB := mustRefName(t, "b2c3d4e5f6a1")
+	a1 := PushQueueEntry{Ref: refA, Hash: plumbing.NewHash(strings.Repeat("a", 40))}
+	b1 := PushQueueEntry{Ref: refB, Hash: plumbing.NewHash(strings.Repeat("b", 40))}
+	a2 := PushQueueEntry{Ref: refA, Hash: plumbing.NewHash(strings.Repeat("c", 40))}
+	require.NoError(t, q.EnqueueEntry(a1))
+	require.NoError(t, q.EnqueueEntry(b1))
+	require.NoError(t, q.EnqueueEntry(a2))
+
+	require.NoError(t, q.Rotate([]PushQueueEntry{a1}))
+
+	entries, err := q.DrainEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{a2, b1}, entries,
+		"the newer generation keeps the ref's first-seen place")
+}
+
+// A ref that misses the queue is never pushed, so a ref EnqueueRef cannot
+// resolve is still queued, in the generation-less form delivery re-resolves.
+func TestPushQueue_EnqueueRefQueuesAnUnresolvableRef(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	q := NewPushQueue(t.TempDir())
+	missing := mustRefName(t, "a1b2c3d4e5f6")
+
+	require.NoError(t, q.EnqueueRef(repo, missing))
+
+	entries, err := q.PeekEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{{Ref: missing}}, entries)
+}
+
+// EnqueueRef must read the tip while it holds the queue lock. A tip read before
+// the lock can be appended after a newer generation's record and, as the ref's
+// latest line, hide it: cleanup for a push of the older tip would then drop the
+// ref with the newer generation still unpushed.
+func TestPushQueue_EnqueueRefRecordsTheTipSeenUnderTheLock(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	q := NewPushQueue(t.TempDir())
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	older := plumbing.NewHash(strings.Repeat("a", 40))
+	newer := plumbing.NewHash(strings.Repeat("b", 40))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, older)))
+
+	_, release, err := q.lock()
+	require.NoError(t, err)
+	enqueued := make(chan error, 1)
+	go func() { enqueued <- q.EnqueueRef(repo, ref) }()
+	// Give the enqueue time to reach the lock before the ref moves. If it starts
+	// late it sees the newer tip regardless, so the wait cannot fail a correct
+	// implementation.
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, newer)))
+	release()
+	require.NoError(t, <-enqueued)
+
+	entries, err := q.PeekEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{{Ref: ref, Hash: newer}}, entries)
+}
+
+// A line whose ref is well formed but whose generation is corrupt keeps the
+// ref: compaction would otherwise erase it, and nothing else rediscovers it.
+func TestPushQueue_CorruptHashKeepsTheRef(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	a := mustRefName(t, "a1b2c3d4e5f6")
+	require.NoError(t, os.WriteFile(filepath.Join(q.dir, pushQueueFileName),
+		[]byte(`{"ref":"`+a.String()+`","hash":"not-a-hash"}`+"\n"), 0o600))
+
+	entries, err := q.DrainEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{{Ref: a}}, entries)
+	entries, err = q.PeekEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{{Ref: a}}, entries, "compaction must not erase the ref")
+}
+
+func (q *PushQueue) queuePath() string { return filepath.Join(q.dir, pushQueueFileName) }

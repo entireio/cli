@@ -897,7 +897,7 @@ func TestInfoCmd_TextOutput(t *testing.T) {
 		"Status:      active",
 		"Worktree:    my-feature",
 		"Turns:       3",
-		"Checkpoints: 2",
+		"Pending turns: 2",
 		"Checkpoint:  a3b2c4d5e6f7",
 		"7.6k",
 		"Input: 100",

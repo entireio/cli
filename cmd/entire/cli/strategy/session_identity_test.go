@@ -2,19 +2,20 @@ package strategy
 
 import (
 	"context"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -286,6 +287,28 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 		assert.Equal(t, "sess-live", got[0].SessionID)
 	})
 
+	t.Run("an ended session kept only for its tokens does not veto a live one", func(t *testing.T) {
+		// Headless automation in one worktree ended a no-change turn: its state
+		// is kept for the tokens, but it has nothing a commit could carry.
+		dir := identityTestRepo(t)
+		wtEnded := addSiblingWorktree(t, dir, "ended")
+		wtLive := addSiblingWorktree(t, dir, "live")
+		saveIdentitySession(t, "sess-ended-headless", func(st *SessionState) {
+			st.WorktreePath = wtEnded
+			st.Phase = session.PhaseEnded
+			st.CheckpointTokenUsage = &agent.TokenUsage{InputTokens: 20, APICallCount: 1}
+		})
+		saveIdentitySession(t, "sess-live", func(st *SessionState) {
+			st.WorktreePath = wtLive
+		})
+
+		s := NewManualCommitStrategy()
+		got, err := s.findSessionsForWorktree(ctx, dir)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "sess-live", got[0].SessionID)
+	})
+
 	t.Run("all candidates stale still declines", func(t *testing.T) {
 		// The liveness filter must not turn "everything is days idle" into a
 		// guess: with no recently-interacting session, spanning worktrees
@@ -401,8 +424,8 @@ func TestIsSessionHomeWorktree_RejectsUnknownPaths(t *testing.T) {
 
 // Guest-linked sessions (identity-matched from a worktree other than their
 // home) must never have worktree-coupled state advanced by the foreign
-// commit: BaseCommit keys the shadow branch, and rewriting it from another
-// worktree orphans that branch and breaks the session's next home commit.
+// commit: BaseCommit tracks the home worktree's HEAD, and rewriting it from
+// another worktree breaks the session's next home commit.
 // The inverse matters just as much — a session committed in its OWN worktree
 // must keep advancing, or BaseCommit tracking silently freezes for everyone.
 //
@@ -434,11 +457,11 @@ func TestUpdateBaseCommitIfChanged_GuestWorktreeGating(t *testing.T) {
 }
 
 // A guest condensation may advance transcript bookkeeping, but it must not
-// consume or unpin the home worktree's pending shadow state. The home branch
-// still contains uncommitted files that must survive until a home commit.
+// consume the home worktree's pending state. The home worktree still holds
+// uncommitted files that must survive until a home commit.
 //
 // Not parallel: uses t.Chdir().
-func TestPostCommit_GuestCondensationPreservesHomeShadowState(t *testing.T) {
+func TestPostCommit_GuestCondensationPreservesHomePendingState(t *testing.T) {
 	ctx := context.Background()
 	homeDir := setupGitRepo(t)
 	t.Chdir(homeDir)
@@ -448,7 +471,7 @@ func TestPostCommit_GuestCondensationPreservesHomeShadowState(t *testing.T) {
 	t.Cleanup(func() { _ = homeRepo.Close() })
 
 	s := NewManualCommitStrategy()
-	sessionID := "sess-guest-shadow"
+	sessionID := "sess-guest-pending"
 	setupSessionWithCheckpoint(t, s, homeRepo, homeDir, sessionID)
 
 	state, err := s.loadSessionState(ctx, sessionID)
@@ -461,9 +484,8 @@ func TestPostCommit_GuestCondensationPreservesHomeShadowState(t *testing.T) {
 	baseCommitBefore := state.BaseCommit
 	stepCountBefore := state.StepCount
 	filesTouchedBefore := append([]string(nil), state.FilesTouched...)
-	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	shadowRefBefore, err := homeRepo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
-	require.NoError(t, err)
+	hashesBefore := maps.Clone(state.TouchedFileHashes)
+	require.NotEmpty(t, hashesBefore, "sanity: the home turn-end step recorded hashes")
 
 	guestDir := addSiblingWorktree(t, homeDir, "guest-condense")
 	t.Chdir(guestDir)
@@ -477,12 +499,9 @@ func TestPostCommit_GuestCondensationPreservesHomeShadowState(t *testing.T) {
 	state, err = guestStrategy.loadSessionState(ctx, sessionID)
 	require.NoError(t, err)
 	assert.Equal(t, baseCommitBefore, state.BaseCommit, "guest commit must not advance the home worktree base")
-	assert.Equal(t, stepCountBefore, state.StepCount, "guest condensation must keep the home shadow branch pinned")
+	assert.Equal(t, stepCountBefore, state.StepCount, "guest condensation must keep the home session pending")
 	assert.Equal(t, filesTouchedBefore, state.FilesTouched, "guest condensation must preserve home pending files")
-
-	shadowRefAfter, err := homeRepo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
-	require.NoError(t, err)
-	assert.Equal(t, shadowRefBefore.Hash(), shadowRefAfter.Hash(), "home shadow ref must remain byte-identical")
+	assert.Equal(t, hashesBefore, state.TouchedFileHashes, "guest condensation must preserve the home worktree's recorded hashes")
 }
 
 // Not parallel: uses t.Chdir()
@@ -533,5 +552,85 @@ func TestIsNearerOwner_Contract(t *testing.T) {
 					c.depth, c.bestDepth, c.state.SessionID, c.best.SessionID, got, c.want)
 			}
 		})
+	}
+}
+
+// ENT-2463 through the commit hooks: the committer, started in the main
+// checkout, commits from a sibling worktree where no session is homed, while
+// another main-checkout session is mid-turn with pending work. Only the
+// committer is stamped and condensed; the other session keeps its pending
+// work for its own commit.
+//
+// Not parallel: uses t.Chdir().
+func TestCommitHooks_IdentifiedCommitterLeavesMainCheckoutSessionsPending(t *testing.T) {
+	ctx := context.Background()
+	homeDir, err := filepath.EvalSymlinks(setupGitRepo(t))
+	require.NoError(t, err, "the recorded home must match git's worktree list")
+	t.Chdir(homeDir)
+	homeRepo, err := gitrepo.OpenPath(homeDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = homeRepo.Close() })
+
+	s := NewManualCommitStrategy()
+	setupSessionWithCheckpoint(t, s, homeRepo, homeDir, "sess-unrelated")
+	unrelated, err := s.loadSessionState(ctx, "sess-unrelated")
+	require.NoError(t, err)
+	unrelated.WorktreePath = homeDir
+	unrelated.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(ctx, unrelated))
+	stepsBefore := unrelated.StepCount
+	require.Positive(t, stepsBefore, "sanity: the unrelated session has pending work")
+
+	setupSessionWithCheckpointAndFile(t, s, homeDir, "sess-committer", "notes.txt")
+	committer, err := s.loadSessionState(ctx, "sess-committer")
+	require.NoError(t, err)
+	committer.Owner = selfAncestorOwner(t)
+	committer.WorktreePath = homeDir
+	committer.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(ctx, committer))
+
+	guestDir := addSiblingWorktree(t, homeDir, "committer-wt")
+	t.Chdir(guestDir)
+	testutil.WriteFile(t, guestDir, "guest.txt", "committer's shell edit")
+	testutil.GitAdd(t, guestDir, "guest.txt")
+	msg := prepareMessage(t, "committer's change\n")
+	cps := checkpointIDs(msg)
+	require.Len(t, cps, 1, "the committer's commit is stamped: %q", msg)
+	testutil.GitCommit(t, guestDir, msg)
+	require.NoError(t, NewManualCommitStrategy().PostCommit(ctx))
+
+	unrelated, err = s.loadSessionState(ctx, "sess-unrelated")
+	require.NoError(t, err)
+	assert.Equal(t, stepsBefore, unrelated.StepCount, "the main checkout's mid-turn session keeps its pending work")
+	assert.NotEqual(t, cps[0], unrelated.LastCheckpointID.String(), "the main checkout's session is not condensed into the commit")
+	committer, err = s.loadSessionState(ctx, "sess-committer")
+	require.NoError(t, err)
+	assert.Equal(t, cps[0], committer.LastCheckpointID.String(), "the stamped checkpoint is the committer's")
+}
+
+// A commit hook walks its process ancestry once, however many identity
+// decisions read it; outside a hook every read walks.
+func TestCommitAncestry_OneWalkPerHook(t *testing.T) { //nolint:paralleltest // swaps currentAncestry
+	walks := 0
+	old := currentAncestry
+	t.Cleanup(func() { currentAncestry = old })
+	currentAncestry = func() (proclive.Ancestry, bool) {
+		walks++
+		return proclive.Ancestry{}, true
+	}
+
+	ctx := withCommitAncestry(context.Background())
+	ctx = withCommitAncestry(ctx) // nested hook entry keeps the snapshot
+	commitAncestry(ctx)
+	commitAncestry(ctx)
+	newCommitProvenance(ctx, nil)
+	if walks != 1 {
+		t.Fatalf("walks in one hook = %d, want 1", walks)
+	}
+
+	commitAncestry(context.Background())
+	commitAncestry(context.Background())
+	if walks != 3 {
+		t.Fatalf("walks without a hook snapshot = %d, want 3", walks)
 	}
 }

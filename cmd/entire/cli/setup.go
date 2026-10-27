@@ -83,6 +83,9 @@ type EnableOptions struct {
 	CheckpointRemote       string
 	CheckpointPushRemote   string
 	checkpointRemoteChoice *enableCheckpointRemoteChoice
+	// errOut is the command's error stream, where prompts at the end of setup
+	// render; see promptErrOut.
+	errOut io.Writer
 	// CheckpointBackend selects the persistent checkpoint storage backend
 	// ("branch"/"refs" or the canonical "git-branch"/"git-refs"). Empty leaves
 	// the current/default (git-branch) backend in place.
@@ -102,6 +105,19 @@ type EnableOptions struct {
 	ImportHistory  bool
 	SearchSkill    bool
 	AgentHelpSkill bool
+	// NoCommitOffer lists the configuration still to commit without offering
+	// to commit it. Set by `entire agent add`, a targeted command that should
+	// not end in a prompt about files beyond the one agent it touched.
+	NoCommitOffer bool
+}
+
+// promptErrOut is the error stream prompts render on: the command's, when the
+// caller recorded it, otherwise the process's.
+func (opts *EnableOptions) promptErrOut() io.Writer {
+	if opts.errOut != nil {
+		return opts.errOut
+	}
+	return os.Stderr
 }
 
 // applyStrategyOptions sets strategy_options on settings from CLI flags.
@@ -926,6 +942,9 @@ func newEnableCmdWithIdentityResolverFactory(identityFactory identityResolverFac
 If Entire is not yet configured, this runs the full configuration flow.
 If Entire is already configured but disabled, this re-enables it.
 
+Existing git hooks are kept: each is moved to <hook>.pre-entire and runs after
+Entire's hook.
+
 If the current directory is not a git repository, Entire can initialize one
 for you and create an initial commit. It never creates or pushes to a remote —
 publish the repository yourself when you're ready.`,
@@ -936,15 +955,14 @@ publish the repository yourself when you're ready.`,
 			// the picker itself waits until every flag has been accepted.
 			opts.checkpointRemoteChoice = &enableCheckpointRemoteChoice{}
 			defer func() { opts.checkpointRemoteChoice.report(cmd.Context(), cmd.OutOrStdout(), runErr) }()
-			// Best-effort: after a successful enable, tell the backend which repo
-			// was enabled so the web onboarding reflects it (and we can warn when
-			// the GitHub App can't reach it). A freshly bootstrapped repo has no
-			// origin yet, so this reports nothing until the user adds one.
+			// Best-effort: after a successful enable, probe and cache whether
+			// trails are enabled for the repo. A freshly bootstrapped repo has no
+			// origin yet, so this does nothing until the user adds one.
 			defer func() {
 				if runErr != nil {
 					return
 				}
-				reportRepoEnabled(ctx, insecureHTTPAuth)
+				cacheTrailsEnablementAfterEnable(ctx, insecureHTTPAuth)
 			}()
 
 			// Validate --checkpoint-backend up front so a bad value fails before we
@@ -1070,7 +1088,7 @@ publish the repository yourself when you're ready.`,
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). In an existing repository it lists the configuration files to commit rather than committing them. Does not import existing agent history — see --"+flagImportHistory)
 	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
@@ -1105,12 +1123,19 @@ func continueEnableAfterAgentValidation(
 	needsIdentity bool,
 	resolveIdentity gitIdentityResolver,
 ) error {
+	opts.errOut = cmd.ErrOrStderr()
 	if selectedAgent != nil {
 		if err := runEnableIdentityPreflight(ctx, cmd, repoRoot, needsIdentity, resolveIdentity); err != nil {
 			return err
 		}
 		ensureLogger(cmd)
-		return setupAgentHooksNonInteractive(cmd.Context(), cmd.OutOrStdout(), selectedAgent, opts)
+		if err := setupAgentHooksNonInteractive(cmd.Context(), cmd.OutOrStdout(), selectedAgent, opts); err != nil {
+			return err
+		}
+		// Here rather than in setupAgentHooksNonInteractive, which `entire
+		// agent add` also runs without enable's destination report after it.
+		printSetupCheckpointDestinationNote(cmd.Context(), cmd.OutOrStdout())
+		return nil
 	}
 
 	if settings.IsSetUpAny(ctx) {
@@ -1141,89 +1166,40 @@ func runEnableIdentityPreflight(ctx context.Context, cmd *cobra.Command, repoRoo
 	return ensureGitIdentity(ctx, cmd.OutOrStdout(), execRunner{}, repoRoot, resolve)
 }
 
-// reportRepoEnabled records the `entire enable` against the backend so the web
-// onboarding can reflect it, and — as a second, independent, best-effort step
-// — probes and caches whether trails are enabled for the repo. Both steps are
-// strictly best-effort and fully silent: enabling works offline, and every
-// outcome (no origin remote, not logged in, network error, App-can't-reach-
-// repo, trails probe failure) is swallowed — the web onboarding surfaces the
-// "install the GitHub App" nudge, so the CLI stays quiet.
-func reportRepoEnabled(ctx context.Context, insecureHTTPAuth bool) {
-	// This runs synchronously on the enable success path, so every network step
-	// below is bounded: a backend that accepts the connection but never responds
-	// must not hang the command after it has already printed success. The bounds
-	// live on the individual steps rather than on one shared parent here — see
-	// the call site at the bottom for why that distinction matters.
+// cacheTrailsEnablementAfterEnable probes and caches whether trails are
+// enabled for the repo that was just enabled. Strictly best-effort and fully
+// silent: enabling works offline, and every outcome (no origin remote, not
+// logged in, network error, probe failure) is swallowed.
+func cacheTrailsEnablementAfterEnable(ctx context.Context, insecureHTTPAuth bool) {
 	rawURL, err := gitremote.GetRemoteURL(ctx, "origin")
 	if err != nil || strings.TrimSpace(rawURL) == "" {
-		// Local-only repo with no origin yet — nothing to report.
+		// Local-only repo with no origin yet — nothing to probe.
 		return
 	}
 
 	info, err := gitremote.ParseURL(rawURL)
 	if err != nil {
-		logging.Debug(ctx, "skipping enable report: unparseable origin remote", "error", err)
+		logging.Debug(ctx, "skipping trails enablement probe: unparseable origin remote", "error", err)
 		return
 	}
 	if info.Forge == "" {
 		// Trails are only available for remotes that map to a supported forge.
 		// Persist the negative locally even if auth is unavailable so a stale true
-		// cache from a previous origin does not inject on the prompt path. No API
-		// report is useful for non-forge remotes.
+		// cache from a previous origin does not inject on the prompt path.
 		if err := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); err != nil {
 			logging.Debug(ctx, "failed to cache trails enablement", "error", err)
 		}
 		return
 	}
 
-	// Sequential, but each under its OWN deadline rather than sharing one: the
-	// trails probe costs ~4 sequential round trips (repos index, cluster
-	// catalog, login refresh, TrailsEnabled), so a slow enable report sharing
-	// a single budget could starve it to nothing. Separate budgets give the
-	// probe a floor it cannot lose, and their sum is a 5s ceiling.
-	//
-	// The probe gets the larger share because it is the longer step, and
-	// because its failure self-heals — SessionStart's detached refresh retries
-	// it — whereas the enable report has no retry.
-	reportEnableToBackend(ctx, insecureHTTPAuth, info)
 	probeAndCacheTrailsEnablement(ctx, insecureHTTPAuth, info)
 }
 
-const (
-	// enableReportBudget bounds the best-effort backend enable report, and
-	// enableTrailsProbeBudget the trails-enablement probe that follows it. See
-	// reportRepoEnabled's call site for why they are separate deadlines rather
-	// than one shared budget; their sum is the total this path may spend.
-	enableReportBudget      = 2 * time.Second
-	enableTrailsProbeBudget = 3 * time.Second
-)
-
-// reportEnableToBackend tells the backend which repo was just enabled, purely
-// for the web onboarding UI and the GitHub-App-reachability nudge. Best-effort
-// and independent of the trails probe: a failure here (not logged in, network
-// error, backend rejects the URL) must not block that probe.
-func reportEnableToBackend(ctx context.Context, insecureHTTPAuth bool, info *gitremote.Info) {
-	// Checked before the client is built, so a repo this report has nothing to
-	// say about costs no auth round trip.
-	reportURL, ok := cleanRemoteURLForReport(info)
-	if !ok {
-		logging.Debug(ctx, "skipping enable report: remote has no upstream forge URL", "forge", info.Forge)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, enableReportBudget)
-	defer cancel()
-
-	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTPAuth)
-	if err != nil {
-		// Not logged in / token unavailable — enable already succeeded locally.
-		logging.Debug(ctx, "skipping enable report", "error", err)
-		return
-	}
-	if _, err := client.ReportEnable(ctx, reportURL); err != nil {
-		logging.Debug(ctx, "enable report failed", "error", err)
-	}
-}
+// enableTrailsProbeBudget bounds the trails-enablement probe. It runs
+// synchronously on the enable success path, so a backend that accepts the
+// connection but never responds must not hang the command after it has already
+// printed success.
+const enableTrailsProbeBudget = 3 * time.Second
 
 // probeAndCacheTrailsEnablement checks whether trails are enabled for the repo
 // that was just enabled, and caches the decision. Routes through
@@ -1257,43 +1233,6 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 	}
 }
 
-// cleanRemoteURLForReport turns a parsed git remote into a clean,
-// credential-free HTTPS clone URL on the repo's UPSTREAM forge host, safe to
-// send to the backend. The raw remote can carry embedded credentials
-// (https://token@host/...) or query params, so we never forward it verbatim:
-// rebuild from host/owner/repo alone.
-//
-// ok is false when no upstream forge host is known, which is decided by
-// transport. A direct remote is reached over a git transport, so its Host IS a
-// git host and it is always reportable — a self-hosted GitHub Enterprise
-// included, which is why this does not simply require a mapped forge.
-//
-// An entire:// remote is the opposite: its Host is a cluster, so a forge clone
-// URL exists only when the forge maps back to an upstream host. Two kinds do
-// not. A native repo mirrors nothing. An unrecognized token does not either —
-// ParseURL preserves ANY non-empty forge it finds in the path, so a
-// `entire://<cluster>/jk/<owner>/<repo>` origin arrives looking just like a
-// mirror. Both would be reported as `https://<cluster>/<owner>/<repo>.git`: a
-// URL that addresses nothing, on a host that serves no such thing, wearing a
-// suffix Entire paths never carry. The report drives the web onboarding's
-// GitHub-App nudge, which has nothing to say about either, so the caller skips
-// it rather than reporting a synthesized URL.
-//
-// Because ok is false in those cases, the host returned here is always a real
-// git host, and the `.git` suffix is always that host's clone convention rather
-// than part of a name (see gitDirSuffix).
-func cleanRemoteURLForReport(info *gitremote.Info) (string, bool) {
-	if info.Protocol == gitremote.ProtocolEntire {
-		if _, known := info.UpstreamHost(); !known {
-			return "", false
-		}
-	}
-	// Use CanonicalHost, not Host: an entire://cluster/gh/owner/repo origin (an
-	// already-mirrored repo) carries the Entire cluster as Host, so reporting
-	// Host verbatim would point the backend at the cluster instead of github.com.
-	return fmt.Sprintf("https://%s/%s/%s%s", info.CanonicalHost(), info.Owner, info.Repo, gitDirSuffix), true
-}
-
 func newDisableCmd() *cobra.Command {
 	var useLocalSettings bool
 	var useProjectSettings bool
@@ -1310,9 +1249,12 @@ show a disabled message.
 
 To completely remove Entire integrations from this repository, use --uninstall:
   - .entire/ directory (settings, logs, metadata)
-  - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
+  - Git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push),
+    restoring any hooks Entire backed up
   - Session state files (.git/entire-sessions/)
-  - Shadow branches (entire/<hash>)
+  - Shadow branches older versions left behind (entire/<commit>-<worktree>);
+    bare entire/<commit> branches are listed and kept, since a branch of
+    yours named after a short SHA looks the same (entire clean --all)
   - Agent hooks
 
 An external agent's hooks live inside its plugin, so removing them means asking the
@@ -1337,16 +1279,6 @@ was not fully uninstalled.`,
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt (use with --uninstall)")
 
 	return cmd
-}
-
-// runEnableInteractive runs the interactive enable flow.
-// agents must be provided by the caller (via detectOrSelectAgent).
-// runEnableOnConfiguredRepo handles `entire enable` when the repo is already set
-// up. Setup-mutating flags (strategy options, checkpoint backend, agent
-// management) behave like `configure`; a bare re-enable just flips the enabled
-// flag or reports current status.
-func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
-	return runEnableOnConfiguredRepoWithPreflight(ctx, cmd, opts, nil)
 }
 
 func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Command, opts EnableOptions, preflight func() error) error {
@@ -1441,10 +1373,9 @@ func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Comm
 		if !usedSetupFlow {
 			fmt.Fprintln(w, "Entire is already enabled.")
 		}
-		printEnabledStatus(ctx, w)
-		return nil
+		return printEnabledStatus(ctx, w, opts)
 	}
-	return runEnable(ctx, w, useProject)
+	return runEnable(ctx, w, useProject, opts)
 }
 
 // scopeExplicitlyDisabled reports whether the settings file for the given scope
@@ -1472,6 +1403,8 @@ func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
 	return !enabled
 }
 
+// runEnableInteractive runs the interactive enable flow.
+// agents must be provided by the caller (via detectOrSelectAgent).
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
 	// Agents have been chosen, but no setup settings or hooks have been changed.
 	if err := opts.checkpointRemoteChoice.selectAfterAgents(ctx, opts, nil); err != nil {
@@ -1489,8 +1422,12 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+		_, pruned, err := installAgentHooks(ctx, ag, opts.ForceHooks)
+		if err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
+		}
+		if pruned {
+			reportPrunedStaleHooks(w, ag)
 		}
 		warnCodexHooksAfterSetup(ctx, w, ag)
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
@@ -1631,28 +1568,27 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	fmt.Fprintln(w, "\nReady.")
 
-	// Note about empty repos at the end, after setup is complete
-	if repo, err := strategy.OpenRepository(ctx); err == nil {
-		defer repo.Close()
-		if strategy.IsEmptyRepository(repo) {
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, "Note: Session checkpoints require at least one commit. To get started,")
-			fmt.Fprintln(w, "commit the configuration files (e.g. .entire/, .claude/).")
-		}
+	if err := offerCommitConfig(ctx, w, opts); err != nil {
+		return err
 	}
-
 	printSetupCheckpointDestinationNote(ctx, w)
 
 	return nil
 }
 
-// printEnabledStatus prints agents and a hint about `entire agent`.
-func printEnabledStatus(ctx context.Context, w io.Writer) {
+// printEnabledStatus prints agents, a hint about `entire agent`, and the
+// configuration still to commit. It fails only when the commit offer is
+// interrupted.
+func printEnabledStatus(ctx context.Context, w io.Writer, opts EnableOptions) error {
 	if displayNames := InstalledAgentDisplayNames(ctx); len(displayNames) > 0 {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+	if err := offerCommitConfig(ctx, w, opts); err != nil {
+		return err
+	}
 	printSetupCheckpointDestinationNote(ctx, w)
+	return nil
 }
 
 // resolveFirstRunCheckpointBackend decides the checkpoint storage backend
@@ -1692,14 +1628,13 @@ func firstRunCheckpointBackendDefault() string {
 // (see setEnabledFlag). Callers resolve the scope: runEnableOnConfiguredRepo
 // uses settingsTargetFile so a bare `entire enable` targets the committed
 // settings.json when present and can recover a repo disabled there.
-func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
+func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool, opts EnableOptions) error {
 	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
 	}
 
 	fmt.Fprintln(w, "Entire is now enabled.")
-	printEnabledStatus(ctx, w)
-	return nil
+	return printEnabledStatus(ctx, w, opts)
 }
 
 // runDisable flips the enabled flag to false in the resolved settings scope.
@@ -1831,6 +1766,11 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 		return runRemoveRetiredGeminiHooks(ctx, w)
 	}
 
+	// Unlike discoverNamedExternalAgent, keep the error: a plugin that is on
+	// $PATH but cannot register would otherwise read as a misspelled name.
+	if err := external.DiscoverAndRegisterNamedAlways(ctx, types.AgentName(name)); err != nil {
+		return fmt.Errorf("agent %s: %w", name, err)
+	}
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
 		printWrongAgentError(w, name)
@@ -1981,13 +1921,40 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	return count, nil
 }
 
+// installAgentHooks installs ag's hooks (setupAgentHooks) and reports whether
+// the install also pruned or updated outdated Entire hooks (for Claude Code,
+// the retired post-todo hook or a hook missing its timeout). The stale check
+// runs before the install, because afterwards there is nothing left to detect.
+// Every enable path reports it, so a rewritten config is never called "already
+// installed" or left unmentioned.
+func installAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (installed int, prunedStale bool, err error) {
+	if reporter, ok := agent.AsStaleHookReporter(ag); ok {
+		prunedStale = reporter.HasStaleManagedHooks(ctx)
+	}
+	installed, err = setupAgentHooks(ctx, ag, forceHooks)
+	if err != nil {
+		return 0, false, err
+	}
+	return installed, prunedStale, nil
+}
+
+// reportPrunedStaleHooks tells the user an install removed or updated outdated
+// Entire hooks in ag's config.
+func reportPrunedStaleHooks(w io.Writer, ag agent.Agent) {
+	fmt.Fprintf(w, "  Updated outdated Entire hooks for %s\n", ag.Description())
+}
+
 func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
 	var successful []agent.Agent
 	var errs []error
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, forceHooks); err != nil {
+		_, pruned, err := installAgentHooks(ctx, ag, forceHooks)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 			continue
+		}
+		if pruned {
+			reportPrunedStaleHooks(w, ag)
 		}
 		warnCodexHooksAfterSetup(ctx, w, ag)
 		successful = append(successful, ag)
@@ -2233,8 +2200,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
-	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
+	// Install agent hooks (agent hooks don't depend on settings). The install
+	// reports whether it also pruned stale Entire hooks, so the message below
+	// does not call a changed config "already installed".
+	installedHooks, prunedStaleHooks, err := installAgentHooks(ctx, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
@@ -2340,9 +2309,14 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath)
 
-	if installedHooks == 0 {
+	switch {
+	case installedHooks == 0 && prunedStaleHooks:
+		reportPrunedStaleHooks(w, ag)
+	case installedHooks == 0:
 		fmt.Fprintf(w, "  Hooks for %s already installed\n", ag.Description())
-	} else {
+	case prunedStaleHooks:
+		fmt.Fprintf(w, "  Installed %d hooks for %s and updated outdated ones\n", installedHooks, ag.Description())
+	default:
 		fmt.Fprintf(w, "  Installed %d hooks for %s\n", installedHooks, ag.Description())
 	}
 	fmt.Fprintln(w, "  ✓ Configured project")
@@ -2371,16 +2345,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	fmt.Fprintln(w, "\nReady.")
 
-	if repo, err := strategy.OpenRepository(ctx); err == nil {
-		defer repo.Close()
-		if strategy.IsEmptyRepository(repo) {
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, "Note: Session checkpoints require at least one commit. To get started,")
-			fmt.Fprintln(w, "commit the configuration files (e.g. .entire/, .claude/).")
-		}
-	}
-
-	return nil
+	return offerCommitConfig(ctx, w, opts)
 }
 
 // validateSetupFlags checks that --local and --project flags are not both specified.
@@ -2901,16 +2866,22 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 // Failures render in the same shape as a failed agent-hook removal: a red ✗
 // headline naming the step, with the reason nested beneath it.
 func uninstallGitHooks(ctx context.Context, p *uninstallPrinter) bool {
-	removed, err := strategy.RemoveGitHook(ctx)
+	res, err := strategy.RemoveGitHookDetailed(ctx)
 	if err != nil {
 		p.stepFailed("Failed to remove git hooks")
 		p.warnUnder("failed to remove git hooks: %v", err)
 		return false
 	}
-	if removed > 0 {
-		p.step("Removed git hooks (%d)", removed)
+	if res.Removed > 0 {
+		p.step("Removed git hooks (%d)", res.Removed)
 	} else {
 		p.noop("No git hooks to remove")
+	}
+	for _, hook := range res.Restored {
+		p.step("Restored your original %s hook", hook)
+	}
+	if len(res.Older) > 0 {
+		p.warn("Older copies of your hooks were left in place and do not run: %s", strings.Join(res.Older, ", "))
 	}
 	return true
 }
@@ -2950,18 +2921,40 @@ func uninstallEntireDir(ctx context.Context, p *uninstallPrinter, dirExists bool
 	return true
 }
 
-// uninstallShadowBranches removes all shadow branches and reports what it did.
+// uninstallShadowBranches removes the legacy shadow branches older versions
+// left behind in the strict entire/<commit>-<worktree> form, exactly like
+// `entire doctor --force`. The deletion is `git branch -D`, which
+// force-deletes, so the bare entire/<hex> form is never deleted here: a user's
+// own branch named like a short SHA under entire/ matches it. Bare-form
+// branches are listed by name as kept, with a pointer to `entire clean --all`,
+// which removes them behind its own confirmation. A strict-form branch git
+// refuses to delete (checked out in a worktree) is reported and kept too.
+// Neither fails the uninstall, and the deleted count is still shown.
 func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
-	branchesRemoved, err := removeAllShadowBranches(ctx)
+	deleted, kept, bare, err := removeAllShadowBranches(ctx)
 	if err != nil {
-		p.stepFailed("Failed to remove shadow branches")
-		p.warnUnder("failed to remove shadow branches: %v", err)
+		p.stepFailed("Failed to remove legacy shadow branches")
+		p.warnUnder("failed to remove legacy shadow branches: %v", err)
 		return false
 	}
-	if branchesRemoved > 0 {
-		p.step("Removed %d shadow branches", branchesRemoved)
-	} else {
-		p.noop("No shadow branches to remove")
+	switch {
+	case deleted > 0:
+		p.step("Removed %s", pluralCount(deleted, "legacy shadow branch", "legacy shadow branches"))
+	case len(kept) == 0 && len(bare) == 0:
+		p.noop("No legacy shadow branches to remove")
+	}
+	if len(kept) > 0 {
+		p.warn("Kept %d legacy shadow branch(es) git refused to delete (checked out in a worktree?):", len(kept))
+		for _, branch := range kept {
+			p.warnDetail("%s", branch)
+		}
+	}
+	if len(bare) > 0 {
+		p.warn("Kept %s in the oldest entire/<commit> form; it may be yours (a branch named after a short SHA looks the same):", pluralCount(len(bare), "branch", "branches"))
+		for _, branch := range bare {
+			p.warnDetail("%s", branch)
+		}
+		p.warnDetail("Review with `entire clean --all --dry-run`; `entire clean --all` removes them after confirming.")
 	}
 	return true
 }
@@ -3004,13 +2997,13 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 		rows = append(rows, explainRow{Label: "retired hooks", Value: "Gemini CLI"})
 	}
 	if summary.gitHooksInstalled {
-		rows = append(rows, explainRow{Label: "git hooks", Value: "prepare-commit-msg, commit-msg, post-commit, pre-push"})
+		rows = append(rows, explainRow{Label: "git hooks", Value: "prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push"})
 	}
 	if summary.sessionStateCount > 0 {
 		rows = append(rows, explainRow{Label: "session states", Value: strconv.Itoa(summary.sessionStateCount)})
 	}
 	if summary.shadowBranchCount > 0 {
-		rows = append(rows, explainRow{Label: "shadow branches", Value: strconv.Itoa(summary.shadowBranchCount)})
+		rows = append(rows, explainRow{Label: "legacy shadow branches", Value: strconv.Itoa(summary.shadowBranchCount)})
 	}
 	if summary.entireDirExists {
 		rows = append(rows, explainRow{Label: ".entire/", Value: "settings, logs, metadata"})
@@ -3058,9 +3051,11 @@ func countSessionStates(ctx context.Context) int {
 	return len(states)
 }
 
-// countShadowBranches returns the number of shadow branches.
+// countShadowBranches returns the number of legacy shadow branches older CLI
+// versions left behind that uninstall deletes: the strict
+// entire/<commit>-<worktree> form only (see uninstallShadowBranches).
 func countShadowBranches(ctx context.Context) int {
-	branches, err := strategy.ListShadowBranches(ctx)
+	branches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
 	if err != nil {
 		return 0
 	}
@@ -3337,15 +3332,32 @@ func removeEntireDirectory(ctx context.Context) error {
 	return root.RemoveAll(paths.EntireDir) //nolint:wrapcheck // caller names the directory; os error carries operation
 }
 
-// removeAllShadowBranches removes all shadow branches.
-func removeAllShadowBranches(ctx context.Context) (int, error) {
-	branches, err := strategy.ListShadowBranches(ctx)
+// removeAllShadowBranches removes the strict entire/<commit>-<worktree>
+// legacy shadow branches older CLI versions left behind, returning how many
+// were deleted, which ones git refused to delete, and the bare entire/<hex>
+// branches it leaves alone (see uninstallShadowBranches). Only a failure to
+// list them is an error.
+func removeAllShadowBranches(ctx context.Context) (deleted int, refused, bare []string, err error) {
+	strict, err := strategy.ListRemovableLegacyShadowBranches(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to list shadow branches: %w", err)
+		return 0, nil, nil, fmt.Errorf("failed to list legacy shadow branches: %w", err)
 	}
-	if len(branches) == 0 {
-		return 0, nil
+	all, err := strategy.ListLegacyShadowBranches(ctx)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("failed to list legacy shadow branches: %w", err)
 	}
-	deleted, _, err := strategy.DeleteShadowBranches(ctx, branches)
-	return len(deleted), err
+	removable := make(map[string]struct{}, len(strict))
+	for _, branch := range strict {
+		removable[branch] = struct{}{}
+	}
+	for _, branch := range all {
+		if _, ok := removable[branch]; !ok {
+			bare = append(bare, branch)
+		}
+	}
+	if len(strict) == 0 {
+		return 0, nil, bare, nil
+	}
+	deletedBranches, failed := strategy.DeleteLegacyShadowBranches(ctx, strict)
+	return len(deletedBranches), failed, bare, nil
 }

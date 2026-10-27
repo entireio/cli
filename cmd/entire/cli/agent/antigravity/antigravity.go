@@ -24,6 +24,10 @@ func init() {
 //nolint:revive // AntigravityAgent is clearer than Agent in this context
 type AntigravityAgent struct {
 	CommandRunner agent.TextCommandRunner
+
+	// Nil resolves the user's authentication sources. Tests inject temporary
+	// sources separately from CommandRunner, which only replaces the process.
+	textGenerationAuth *textGenerationAuth
 }
 
 var _ agent.OutOfBandTokenSource = (*AntigravityAgent)(nil)

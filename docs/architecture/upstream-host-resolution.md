@@ -20,7 +20,10 @@ accept a core's JWTs.
 |---|---|---|---|
 | **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project`, `auth *`, `login` | none needed — the host *is* the core |
 | **Resource: git cluster** | `entire-server` / `entiredb` | `git-remote-entire` (clone/push) | `/.well-known/entire-cluster.json` → `core_urls` |
-| **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | none by default — the acting login's site is the host (`auth.ResolveDataAPI`); under `ENTIRE_API_BASE_URL`, `/.well-known/entire-api.json` → `trusted_issuers` (bearer = the context's login JWT) |
+| **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` | none by default — the acting login's site is the host (`auth.ResolveDataAPI`); under `ENTIRE_API_BASE_URL`, `/.well-known/entire-api.json` → `trusted_issuers` (bearer = the context's login JWT) |
+
+`entire dispatch` does not use the web/data API: it talks to an entire-api
+cell, see "Cloud dispatch" in [API routing](../development/api-routing.md).
 
 `contexts.json` (`$ENTIRE_CONFIG_DIR/contexts.json`, shared with entiredb's
 CLIs) stores each login as `{Name, CoreURL, Handle, KeychainService}` plus a
@@ -92,16 +95,21 @@ Key files: `cmd/entire/cli/auth/control_plane.go` (resolver),
 
 ### Web/data API (done)
 
-`activity` / `search` / `trail` / `dispatch` / `recap` / the `enable` report
+`activity` / `search` / `trail` / `recap` / the `enable` report
 **follow the acting login** (`auth.ResolveDataAPI`), with the control plane's
 precedence: `ENTIRE_TOKEN` when set (the token verbatim, its `aud`'s site as
 the host), else the selected login (its refreshed JWT as the bearer, its login
 server's site as the host) — `us.auth.partial.to` → `https://partial.to`,
 `*.entire.io` → `https://entire.io`. A login server outside those, a loopback
 dev core included (the web app runs on its own port, and a core is not a
-cell), is an error naming `ENTIRE_API_BASE_URL`. Printed web links (`trail`
-URLs, `experts` session links) use the same origin (`auth.DataBaseURL`). There
-is no ambient production default: a staging login never has its request sent
+cell), is an error naming `ENTIRE_API_BASE_URL`. Printed web links use the
+site's web origin instead (`auth.WebOrigin`): `entire.io` → `https://entire.com`,
+`partial.to` unchanged, and `ENTIRE_WEB_BASE_URL` overrides it (e.g. a local
+frontend on its own port). For any other data host the two link kinds differ:
+`trail` URLs and `review` trail links (`auth.WebBaseURL`) use that host as-is,
+because its trail numbers only resolve there, while `experts` session links
+(`expertsWebBaseURL`) fall back to `https://entire.com`. There is no ambient
+production default: a staging login never has its request sent
 to, or its identity swapped for, entire.io.
 
 `ENTIRE_API_BASE_URL` is the exception and names the host explicitly.
@@ -169,7 +177,6 @@ Key files: `cmd/entire/cli/auth/data_api.go` (`ResolveDataAPI`,
 the cluster path), `internal/entireclient/discovery/cluster_cores.go`
 (`LoadAPICores`/`ModifyAPICores`). Seams:
 `NewAuthenticatedAPIClient` (activity/trail/search-completion),
-`dispatch/mode_local.go` `lookupResourceToken` (dispatch),
 `search_cmd.go` `resolveSearchToken` (search).
 
 ## Account selection

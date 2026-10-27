@@ -73,6 +73,12 @@ func openAgyConfigRoot(create bool) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
+	return openAgyConfigRootAt(dir, create)
+}
+
+// openAgyConfigRootAt opens the config directory resolved by agyConfigDir,
+// or an explicitly injected temporary config directory in generation tests.
+func openAgyConfigRootAt(dir string, create bool) (*os.Root, error) {
 	if create {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, fmt.Errorf("failed to create agy config dir: %w", err)
@@ -352,8 +358,18 @@ func extractBase64WrappedCommand(command string) (string, bool) {
 // A missing directory or file returns an empty map (not an error); a
 // symlinked settings.json is refused rather than read through.
 func readAgySettings() (map[string]json.RawMessage, error) {
+	dir, err := agyConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve agy config dir: %w", err)
+	}
+	return readAgySettingsAt(dir)
+}
+
+// readAgySettingsAt preserves the no-follow policy for an explicitly resolved
+// config directory, including the fake config used by generation tests.
+func readAgySettingsAt(dir string) (map[string]json.RawMessage, error) {
 	rawFile := make(map[string]json.RawMessage)
-	root, err := openAgyConfigRoot(false)
+	root, err := openAgyConfigRootAt(dir, false)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return rawFile, nil

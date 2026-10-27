@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/betterleaks/betterleaks/detect"
 	"golang.org/x/sync/errgroup"
@@ -25,39 +26,127 @@ import (
 
 // secretPattern matches high-entropy strings that may be secrets.
 // Note: / is excluded to prevent matching entire file paths as single tokens.
-// Base64 and JWT tokens are still caught via high-entropy segments between slashes.
+// Base64 values containing / are scored whole by detectSlashedBase64 instead.
 var secretPattern = regexp.MustCompile(`[A-Za-z0-9+_=-]{10,}`)
+
+// pathSegmentPattern matches a path component that random base64 almost never
+// produces: a word ("refs", "Library"), a long lowercase hex name, as in
+// content-addressed caches, or a version tail with a build suffix, as in Go's
+// v1.2.10+incompatible module directories.
+var pathSegmentPattern = regexp.MustCompile(`^(?:[A-Z]?[a-z]{3,}|[0-9a-f]{16,}|[0-9]+\+[a-z]{3,})$`)
 
 // credentialedURIPattern matches URLs that embed userinfo with a password, such
 // as postgres://user:pass@host/db or redis://:pass@host/0. These often have
 // moderate entropy and are not reliably covered by vendor-specific scanners.
-var credentialedURIPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,31}://[^\s/?#@"'` + "`" + `<>:]*:[^\s/?#@"'` + "`" + `<>]+@[^\s"'` + "`" + `<>]+`)
+// Group 1 is the password.
+var credentialedURIPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]{1,31}://[^\s/?#@"'` + "`" + `<>:]*:([^\s/?#@"'` + "`" + `<>]+)@[^\s"'` + "`" + `<>]+`)
+
+// databaseURIPasswordPattern is credentialedURIPattern for database schemes,
+// with the password (group 1) also allowed to contain a slash or an
+// apostrophe. A slash is invalid unencoded in userinfo, but a hand-written DSN
+// still carries the secret. Other schemes keep the strict pattern because
+// host:port/path@… is common there (http://localhost:5173/@vite/client).
+var databaseURIPasswordPattern = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?)://[^\s/?#@"'` + "`" + `<>:]*:([^\s?#@"` + "`" + `<>]+)@[^\s"'` + "`" + `<>]+`)
+
+// uriPortPrefixPattern matches a databaseURIPasswordPattern "password" that is
+// really a port followed by the end of a quoted list item, as in
+// ['postgres://localhost:5432','admin@example.com'].
+var uriPortPrefixPattern = regexp.MustCompile(`^[0-9]+',`)
+
+// oracleJDBCPattern and sqlplusLoginPattern match Oracle's user/password@connect
+// syntax, which has no password= key. oracleJDBCPattern captures the password,
+// which Oracle lets a JDBC URL quote; sqlplusLoginPattern captures the
+// user/password@connect token, without the quotes scripts usually put around
+// it, and the password.
+var (
+	oracleJDBCPattern   = regexp.MustCompile(`(?i)\bjdbc:oracle:[a-z0-9]+:[^\s/@"'<>` + "`" + `]+/("[^"]*"|[^\s@"'<>` + "`" + `]+)@[^\s"'<>` + "`" + `]*`)
+	sqlplusLoginPattern = regexp.MustCompile(`(?i)\bsqlplus(?:\s+-[a-z]+)*\s+["']?([^\s/@"']+/([^\s@"']+)@[^\s"']+)`)
+)
+
+// sasSignaturePattern captures the value of a sig parameter, the HMAC that
+// authorizes an Azure SAS URL or token. It is URL-encoded base64, so the
+// entropy layer only ever sees fragments of it. Parameter order does not
+// matter to a SAS token, so sig may also start a bare token or follow the '='
+// of a connection-string setting. SAS parameter names are lowercase.
+var sasSignaturePattern = regexp.MustCompile(`(?:^|[?&=\s"'])sig=([A-Za-z0-9%+/=]{20,})`)
 
 // dbPasswordKeyShape matches a DB-prefixed credential key (vendor prefix +
 // optional `_word`/`-word` segments + `password`/`passwd`/`pwd`). Used to
 // compose both the env-var assignment regex and the JSON-key regex so the
 // vendor list stays in one place.
 const dbPasswordKeyShape = `(?:db|database|pg|postgres|postgresql|mysql|mariadb|redis|mongo|mongodb|sqlserver|mssql|jdbc)(?:[_-]+[a-z0-9]+)*[_-]*(?:password|passwd|pwd)` //nolint:gosec // regex literal, not a credential
+// secretValueKeyShape matches credential-style key names. Two alternation
+// branches:
+//  1. Explicit shapes (api_key, auth_token, client_secret, …) with an
+//     optional prefix.
+//  2. Bare `secret`/`token` ONLY when preceded by at least one prefix segment
+//     (e.g. csrf_token, auth_secret). Standalone `{"token":"…"}` /
+//     `{"secret":"…"}` JSON fields are intentionally NOT matched here —
+//     entropy + Betterleaks cover real high-entropy values, and bare
+//     `token`/`secret` keys appear in many non-credential contexts.
+//
+// codeIdentRef is a digit-free identifier or dotted member reference, the
+// only shape credentialCodeCallPattern accepts in callee and argument position.
+const codeIdentRef = `[A-Za-z_]+(?:\.[A-Za-z_]+)*`
+
+const secretValueKeyShape = `(?:(?:[a-z0-9]+[_-]+)*(?:api[_-]*key|auth[_-]*token|access[_-]*token|refresh[_-]*token|client[_-]*secret|consumer[_-]*secret|secret[_-]*key|secret[_-]*access[_-]*key|private[_-]*key|ssh[_-]*key)|(?:[a-z0-9]+[_-]+)+(?:secret|token))` //nolint:gosec // regex literal, not a credential
+
+// semicolonConnValue is one value of an ODBC or ADO.NET connection string.
+// Unquoted values run to the next ';' and may contain spaces, but never a
+// newline or a leading or trailing blank.
+const semicolonConnValue = `(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s](?:[^=;"'\r\n]*[^=;"'\s])?)`
 
 var (
 	jdbcPattern          = regexp.MustCompile(`(?i)\bjdbc:[^\s"'<>` + "`" + `]+`)
 	databaseURLPattern   = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s"'<>` + "`" + `]+`)
 	keywordDSNPattern    = regexp.MustCompile(`(?i)\b[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)(?:\s+[a-z_][a-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+)){2,}`)
-	semicolonConnPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)(?:;[a-z][a-z0-9 _-]*=(?:\{[^}]*\}|"[^"]*"|'[^']*'|[^=;"'\s]+)){2,}`)
+	semicolonConnPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9 _-]*=[ \t]*` + semicolonConnValue + `(?:;[ \t]*[a-z][a-z0-9 _-]*=[ \t]*` + semicolonConnValue + `){2,}`)
 	// credentialValuePattern requires the prefix to start at a non-alphanumeric
 	// boundary, so APP_DB_PASSWORD matches via the leading `_` but mydbpassword
-	// does not.
-	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)\s*=\s*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	// does not. Only spaces and tabs may surround `=`, so a blank value never
+	// takes the next line as its value.
+	credentialValuePattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(` + dbPasswordKeyShape + `)[ \t]*=[ \t]*("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	// credentialAssignmentPattern captures a bounded key candidate and lets the
+	// shared key classifier decide whether it is sensitive. Requiring `=` avoids
+	// prose, rejecting an initial `=` avoids equality expressions, and newline-
+	// free quote branches keep a match inside one command.
+	credentialAssignmentPattern = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|\(value hidden\)|[^\s,;&=` + "`" + `][^\s,;&]*)`)
+	// credentialCodeCallPattern accepts a call whose callee and arguments are
+	// digit-free identifiers or member references (fetch_secret(),
+	// self.refresh_token(), get(name, cfg.key)). Digits and literals are
+	// excluded on purpose: `decode(c2stbGl2ZS1hYmM)`, `f(hunter2)` and
+	// `Pa55w0rd(x)` put the secret itself in call position.
+	credentialCodeCallPattern  = regexp.MustCompile(`^` + codeIdentRef + `\((?:` + codeIdentRef + `(?:,[ \t]*` + codeIdentRef + `)*)?\)$`)
+	credentialCodeRefPattern   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$`)
+	goTemplateReferencePattern = regexp.MustCompile(`^\{\{[ \t]*\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+[ \t]*\}\}$`)
+	// shellStdinSecretPattern matches a printf literal piped into a
+	// secret-management command (`printf 'v' | mycli secrets put KEY`). Named
+	// captures keep the literal and key contracts stable; bounded, newline-free
+	// spans prevent the match from consuming neighboring transcript entries.
+	shellStdinSecretPattern = regexp.MustCompile(
+		`(?i)\bprintf\s+(?:(?:%[A-Za-z]|'%-?[0-9.]*[A-Za-z](?:\\n)?'|"%-?[0-9.]*[A-Za-z](?:\\n)?")\s+)?(?P<value>"[^"\r\n]{1,512}"|'[^'\r\n]{1,512}'|[^\s|&;]{1,512})\s*\|\s*[^&;\r\n]{0,300}\bsecrets?\s+(?:put|set|add|create)\s+(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\b`,
+	)
 
-	keywordHostPattern      = regexp.MustCompile(`(?i)(?:^|\s)host=`)
-	keywordUserPattern      = regexp.MustCompile(`(?i)(?:^|\s)user=`)
-	semicolonServerPattern  = regexp.MustCompile(`(?i)(?:^|;)\s*(?:server|data source|datasource|addr|address|network address)\s*=`)
-	semicolonUserPattern    = regexp.MustCompile(`(?i)(?:^|;)\s*(?:user id|userid|user|uid)\s*=`)
-	passwordAssignmentRegex = regexp.MustCompile(`(?i)(?:^|[?&;\s])(?:password|pwd)=("[^"]*"|'[^']*'|[^&;\s"']+)`)
+	// keywordTargetPattern requires a host or a database name; a Unix-socket
+	// DSN such as `user=app password=... dbname=app` has no host.
+	keywordTargetPattern     = regexp.MustCompile(`(?i)(?:^|\s)(?:host|hostaddr|dbname)=`)
+	keywordUserPattern       = regexp.MustCompile(`(?i)(?:^|\s)user=`)
+	semicolonServerPattern   = regexp.MustCompile(`(?i)(?:^|;)\s*(?:server|data source|datasource|addr|address|network address)\s*=`)
+	semicolonUserPattern     = regexp.MustCompile(`(?i)(?:^|;)\s*(?:user id|userid|user|uid)\s*=`)
+	semicolonPasswordPattern = regexp.MustCompile(`(?i)(?:^|;)[ \t]*(?:password|pwd)[ \t]*=[ \t]*(\{[^}]*\}|"[^"]*"|'[^']*'|[^;]*)`)
+	passwordAssignmentRegex  = regexp.MustCompile(`(?i)(?:^|[?&;\s])(password|pwd)=("[^"]*"|'[^']*'|[^&;\s"']+)`)
 	// credentialJSONKeyRegex operates on output of normalizeCredentialJSONKey
 	// (already lowercased, `-`/` `/`.` → `_`), so the `(?i)` flag is unnecessary.
 	credentialJSONKeyRegex  = regexp.MustCompile(`^` + dbPasswordKeyShape + `$`)
+	secretJSONKeyRegex      = regexp.MustCompile(`^` + secretValueKeyShape + `$`)
 	genericPasswordKeyRegex = regexp.MustCompile(`(?i)^(?:password|passwd|pwd)$`)
+	// credentialWordInKeyRE spots a secret-bearing word segment anywhere in a
+	// normalized key. Generic credential nouns (auth, cred, credential, cert)
+	// stay ordinary identifiers unless paired with one of these secret shapes.
+	// Used by isNonSecretIdentifierAssignment: an id/account-suffixed key that
+	// also names a secret (aws_access_key_id, api_token_id, secret_id) must
+	// never suppress entropy-layer redaction.
+	credentialWordInKeyRE = regexp.MustCompile(`(?:^|_)(?:key|token|secret|pass|passwd|password|pwd)(?:_|$)`)
 )
 
 // entropyThreshold is the minimum Shannon entropy for a string to be considered
@@ -66,14 +155,100 @@ var (
 // and tokens which tend to have entropy well above 5.0.
 const entropyThreshold = 4.5
 
+// claudeToolUseIDPattern is the exact shape of a Claude Code tool-use id:
+// "toolu_01" plus 22 base62 characters. Such ids score just above
+// entropyThreshold and appear in free text (e.g. <tool-use-id> in task
+// notifications), where the "*id" JSON-key skip cannot protect them.
+//
+// Anchored and fixed-length on purpose: secretPattern's class includes '_' and
+// '-', so a secret glued onto an id forms one longer match, and that longer
+// match must stay subject to the entropy check. A prefix rule would let it
+// through.
+var claudeToolUseIDPattern = regexp.MustCompile(`^toolu_01[A-Za-z0-9]{22}$`)
+
+// isClaudeToolUseID reports whether an entropy-layer match is, in its
+// entirety, a Claude Code tool-use id. It exempts the match from the entropy
+// layer only; every other layer still scans it.
+func isClaudeToolUseID(match string) bool {
+	return len(match) == 30 && claudeToolUseIDPattern.MatchString(match)
+}
+
+// contentDigestPattern matches a base64 content digest at its exact encoded
+// length: a go.sum h1: hash (SHA-256), or a Subresource Integrity, npm
+// lockfile, or CSP hash source (sha1-, sha256-, sha384-, sha512-). They hash
+// public content but score above entropyThreshold.
+var contentDigestPattern = regexp.MustCompile(`\b(?:h1:[A-Za-z0-9+/]{43}=|sha1-[A-Za-z0-9+/]{27}=|sha256-[A-Za-z0-9+/]{43}=|sha384-[A-Za-z0-9+/]{64}|sha512-[A-Za-z0-9+/]{86}==)`)
+
+// contentDigestSpans returns the byte ranges of content digests in s, in
+// order. An entropy-layer match lying entirely inside one is exempt from that
+// layer only; a secret glued onto a digest makes the match longer than the
+// digest, so it is still checked.
+func contentDigestSpans(s string) [][]int {
+	if !strings.Contains(s, "h1:") && !strings.Contains(s, "sha") {
+		return nil
+	}
+	spans := contentDigestPattern.FindAllStringIndex(s, -1)
+	digests := spans[:0]
+	for _, span := range spans {
+		// More base64 after the span means a longer value whose prefix only
+		// has a digest's length. A '/' inside it would split the entropy match,
+		// so its high-entropy head would otherwise look exempt.
+		if span[1] < len(s) && isBase64OrTokenByte(s[span[1]]) {
+			continue
+		}
+		digests = append(digests, span)
+	}
+	return digests
+}
+
+func isBase64OrTokenByte(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || strings.IndexByte("+/=_-", c) >= 0
+}
+
+// digestCursor answers whether entropy matches lie inside a content digest.
+// Matches arrive in increasing order, so it walks the spans forward and passes
+// over each one once.
+type digestCursor struct {
+	spans [][]int
+	next  int
+}
+
+func (c *digestCursor) contains(start, end int) bool {
+	for c.next < len(c.spans) && c.spans[c.next][1] <= start {
+		c.next++
+	}
+	return c.next < len(c.spans) && c.spans[c.next][0] <= start && end <= c.spans[c.next][1]
+}
+
 // RedactedPlaceholder is the replacement text used for redacted secrets.
 const RedactedPlaceholder = "REDACTED"
+
+// nonSecretTokenPrefixes lists key-name prefixes that, when followed by
+// `_token`, denote routinely-non-sensitive debug or pagination identifiers
+// (e.g. cancel_token, pagination_token). These are excluded from JSON-key
+// redaction so they remain readable in transcripts. Real high-entropy values
+// still get caught by the entropy detector / Betterleaks via the per-value
+// String() call in collectJSONLReplacements. See isKnownNonSecretTokenKey
+// for why `_secret` keys are deliberately not exempted.
+var nonSecretTokenPrefixes = map[string]struct{}{
+	"cancel":       {},
+	"continuation": {},
+	"cursor":       {},
+	"idempotency":  {},
+	"next":         {},
+	"page":         {},
+	"pagination":   {},
+	"prev":         {},
+	"previous":     {},
+	"sync":         {},
+}
 
 // placeholderSecretValues lists lowercase values that should be treated as
 // non-secrets when they appear as a credential value: prior redactions
 // (REDACTED / [REDACTED] / <REDACTED>), common documentation placeholders,
 // and obviously-non-real defaults. Values matched by shape (mask runs,
-// `<…>` brackets, `${…}` shell expansion) are handled separately.
+// `<…>` brackets, `${…}` shell expansion, template expressions like `%s`)
+// are handled separately.
 var placeholderSecretValues = func() map[string]struct{} {
 	lower := strings.ToLower(RedactedPlaceholder)
 	values := []string{
@@ -96,7 +271,8 @@ var placeholderSecretValues = func() map[string]struct{} {
 // Produced by JSONLBytes (primary constructor) or trusted wrappers for data
 // previously persisted by checkpoint writers.
 type RedactedBytes struct {
-	data []byte
+	data   []byte
+	counts *Counts
 }
 
 // Bytes returns the underlying byte slice.
@@ -107,6 +283,19 @@ func (r RedactedBytes) Bytes() []byte {
 // Len returns the number of bytes in the redacted payload.
 func (r RedactedBytes) Len() int {
 	return len(r.data)
+}
+
+// Counts reports what redaction replaced to produce these bytes, or nil when
+// that is unknown.
+func (r RedactedBytes) Counts() *Counts {
+	return r.counts
+}
+
+// WithCounts returns r carrying counts recorded when its bytes were redacted,
+// such as those stored with a reused cached prefix.
+func (r RedactedBytes) WithCounts(counts *Counts) RedactedBytes {
+	r.counts = counts
+	return r
 }
 
 // AlreadyRedacted wraps transcript bytes known to already be redacted by a
@@ -124,7 +313,7 @@ var (
 
 func getDetector() *detect.Detector {
 	betterleaksDetectorOnce.Do(func() {
-		d, err := detect.NewDetectorDefaultConfig()
+		d, err := newBetterleaksDetector()
 		if err != nil {
 			return
 		}
@@ -136,18 +325,26 @@ func getDetector() *detect.Detector {
 // region represents a byte range to redact.
 type region struct{ start, end int }
 
-// taggedRegion extends region with a label for typed replacement tokens.
+// taggedRegion extends region with a label for typed replacement tokens and
+// the layer that found it.
 // Empty label = secret (produces "REDACTED"). Non-empty = PII (produces "[REDACTED_<LABEL>]").
 type taggedRegion struct {
 	region
 
 	label string
+	layer layer
+	// builtinIP marks a match of the built-in IP rules. A custom PII pattern
+	// named ip shares the IP label but not the rules that depend on context.
+	builtinIP bool
 }
 
 type jsonReplacement struct {
 	key      string
 	original string
 	redacted string
+	// placeholders is how many placeholders redacting original wrote, when
+	// the walk counts.
+	placeholders int
 }
 
 type connectionStringRule struct {
@@ -170,10 +367,12 @@ var connectionStringRules = []connectionStringRule{
 //  3. Provider token prefixes: deterministic prefix rules for credential
 //     formats betterleaks misses in isolation (e.g. Supabase sb_secret_)
 //  4. Credentialed URIs: URLs containing userinfo passwords
-//  5. Database connection strings: JDBC, keyword DSNs, and semicolon strings
+//  5. Database connection strings: JDBC, keyword DSNs, semicolon strings, and
+//     Oracle user/password@ logins
 //  6. User-defined custom rules: configured via ConfigureCustomRules
-//  7. Bounded credential key/value pairs: DB_PASSWORD=...
-//  8. PII detection: email, phone, address patterns (only when configured via ConfigurePII)
+//  7. Shell stdin literals piped into secret-management commands
+//  8. Bounded credential key/value pairs: DB_PASSWORD=..., GITHUB_CLIENT_SECRET=..., Azure SAS sig=...
+//  9. PII detection: email, phone, address, IP patterns (only when configured via ConfigurePII)
 //
 // A string is redacted if ANY method flags it.
 func String(s string) string {
@@ -187,31 +386,34 @@ func String(s string) string {
 // StringWithPrivacyFilter for the augmented flow.
 func detectAllLayers(s string) []taggedRegion {
 	var regions []taggedRegion
+	next := 0
 
 	// 1. Entropy-based detection (secrets — always on).
+	digests := digestCursor{spans: contentDigestSpans(s)}
 	for _, loc := range secretPattern.FindAllStringIndex(s, -1) {
-		start, end := loc[0], loc[1]
+		start, end := skipJSONEscapeLetter(s, loc[0]), loc[1]
+		if end-start < 10 {
+			continue
+		}
 
-		// Don't consume characters that are part of JSON/string escape sequences.
-		// Example: in "controller.go\nmodel.go", the regex could match "nmodel"
-		// (consuming the 'n' from '\n'), and after replacement the '\' would be
-		// followed by 'R' from "REDACTED", creating invalid escape '\R'.
-		// Only skip for known JSON escape letters to avoid trimming real secrets
-		// that happen to follow a literal backslash in decoded content.
-		if start > 0 && s[start-1] == '\\' {
-			switch s[start] {
-			case 'n', 't', 'r', 'b', 'f', 'u', '"', '\\', '/':
-				start++
-				if end-start < 10 {
-					continue
-				}
-			}
+		if isClaudeToolUseID(s[start:end]) || digests.contains(start, end) {
+			continue
+		}
+		if isNonSecretIdentifierAssignment(s[start:end]) {
+			continue
 		}
 
 		if shannonEntropy(s[start:end]) > entropyThreshold {
 			regions = append(regions, taggedRegion{region: region{start, end}})
 		}
 	}
+	slashedDigests := digestCursor{spans: digests.spans}
+	for _, r := range detectSlashedBase64(s) {
+		if !slashedDigests.contains(r.start, r.end) {
+			regions = append(regions, r)
+		}
+	}
+	next = tagFrom(regions, next, layerEntropy)
 
 	// 2. Pattern-based detection via scanner engines (secrets — selected
 	// via ConfigureScanners; betterleaks-only when unconfigured).
@@ -219,63 +421,93 @@ func detectAllLayers(s string) []taggedRegion {
 		if d := getDetector(); d != nil {
 			seenSecrets := make(map[string]struct{})
 			for _, f := range d.DetectString(s) {
-				// Placeholder-valued findings (changeme, secret_here, mask runs)
-				// stay visible — but only on an exact match: splitting a greedy
-				// finding at a placeholder head can leak a real secret in the tail.
-				if isPlaceholderSecretValue(f.Secret) {
-					continue
-				}
-				// A finding reports one occurrence, but the search below already
-				// covers every copy of its secret. Repeated findings must not
-				// rescan the input and accumulate quadratically many regions.
-				if _, seen := seenSecrets[f.Secret]; seen {
-					continue
-				}
-				seenSecrets[f.Secret] = struct{}{}
-				searchFrom := 0
-				for {
-					idx := strings.Index(s[searchFrom:], f.Secret)
-					if idx < 0 {
-						break
+				for _, secret := range betterleaksFindingSecrets(f) {
+					// Placeholder-valued findings (changeme, secret_here, mask runs)
+					// stay visible — but only on an exact match: splitting a greedy
+					// finding at a placeholder head can leak a real secret in the tail.
+					if isPlaceholderSecretValue(secret) {
+						continue
 					}
-					absIdx := searchFrom + idx
-					regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
-					searchFrom = absIdx + len(f.Secret)
+					// A finding reports one occurrence, but the search below already
+					// covers every copy of its secret. Repeated findings must not
+					// rescan the input and accumulate quadratically many regions.
+					if _, seen := seenSecrets[secret]; seen {
+						continue
+					}
+					seenSecrets[secret] = struct{}{}
+					searchFrom := 0
+					for {
+						idx := strings.Index(s[searchFrom:], secret)
+						if idx < 0 {
+							break
+						}
+						absIdx := searchFrom + idx
+						regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(secret)}})
+						searchFrom = absIdx + len(secret)
+					}
 				}
 			}
 		}
 	}
+	next = tagFrom(regions, next, layerBetterleaks)
 	// goredact engine findings (only runs when enabled via ConfigureScanners).
 	regions = append(regions, detectGoredact(s)...)
+	next = tagFrom(regions, next, layerGoredact)
 
 	// 3. Provider-specific deterministic token prefixes (secrets — always on).
 	// Catches low-entropy credential formats (e.g. Supabase sb_secret_) that
 	// the entropy and betterleaks layers miss when captured in isolation.
 	regions = append(regions, detectProviderTokens(s)...)
+	next = tagFrom(regions, next, layerProviderToken)
 
-	// 4. Credentialed URIs (secrets — always on).
-	for _, loc := range credentialedURIPattern.FindAllStringIndex(s, -1) {
+	// 4. Credentialed URIs (secrets — always on). A URI whose password is a
+	// placeholder stays intact, like the connection strings in layer 5, unless
+	// its query carries a real password.
+	for _, loc := range credentialedURIPattern.FindAllStringSubmatchIndex(s, -1) {
+		if isPlaceholderSecretValue(s[loc[2]:loc[3]]) && !uriQueryHasPassword(s[loc[0]:loc[1]]) {
+			continue
+		}
 		regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
 	}
+	regions = append(regions, detectDatabaseURIPasswords(s)...)
+	next = tagFrom(regions, next, layerCredentialedURI)
 
 	// 5. Database and connection-string detection (secrets — always on).
 	regions = append(regions, detectConnectionStrings(s)...)
+	next = tagFrom(regions, next, layerConnectionString)
 
 	// 6. User-defined custom rules (secrets — only runs when configured).
 	regions = append(regions, detectCustomRules(getCustomRulesConfig(), s)...)
+	next = tagFrom(regions, next, layerCustom)
 
-	// 7. Bounded credential key/value detection (secrets — always on).
+	// 7. Shell stdin literals piped into secret-management commands
+	// (secrets — always on).
+	regions = append(regions, detectShellStdinSecrets(s)...)
+	next = tagFrom(regions, next, layerShellStdin)
+
+	// 8. Bounded credential key/value detection (secrets — always on).
 	regions = append(regions, detectCredentialValues(s)...)
+	next = tagFrom(regions, next, layerCredentialValue)
 
-	// 8. PII detection (opt-in — only runs when configured).
+	// 9. PII detection (opt-in — only runs when configured).
 	regions = append(regions, detectPII(getPIIConfig(), s)...)
+	tagFrom(regions, next, layerPII)
 
 	return regions
 }
 
 // applyRegions sorts, merges, and replaces the given regions in s, returning
 // the redacted string. Returns s unchanged when regions is empty.
+//
+// Zero-length regions are dropped: replacing nothing would insert a token
+// into text that no layer flagged.
 func applyRegions(s string, regions []taggedRegion) string {
+	return redactRegions(s, regions, nil)
+}
+
+// redactRegions is applyRegions that also adds what it replaced to t.
+func redactRegions(s string, regions []taggedRegion, t *tally) string {
+	regions = slices.DeleteFunc(regions, func(r taggedRegion) bool { return r.end <= r.start })
 	if len(regions) == 0 {
 		return s
 	}
@@ -301,6 +533,7 @@ func applyRegions(s string, regions []taggedRegion) string {
 			merged = append(merged, r)
 		}
 	}
+	t.addRegions(regions, len(merged))
 
 	var b strings.Builder
 	prev := 0
@@ -313,11 +546,117 @@ func applyRegions(s string, regions []taggedRegion) string {
 	return b.String()
 }
 
-func detectConnectionStrings(s string) []taggedRegion {
-	if !strings.ContainsRune(s, '=') {
+// skipJSONEscapeLetter returns start moved past the letter of a JSON escape
+// sequence the match begins with. Example: in "controller.go\nmodel.go" an
+// entropy pattern could match "nmodel", and after replacement the '\' would be
+// followed by 'R' from "REDACTED", creating the invalid escape '\R'. Only known
+// JSON escape letters are skipped, to avoid trimming real secrets that happen
+// to follow a literal backslash in decoded content.
+func skipJSONEscapeLetter(s string, start int) int {
+	if start > 0 && s[start-1] == '\\' {
+		switch s[start] {
+		case 'n', 't', 'r', 'b', 'f', 'u', '"', '\\', '/':
+			return start + 1
+		}
+	}
+	return start
+}
+
+// detectSlashedBase64 scores standard-alphabet base64 runs that contain '/' as
+// a whole. secretPattern splits such a secret at each '/', and the pieces often
+// fall short of entropyThreshold: an n-character string has at most log2(n)
+// bits of entropy, so a piece shorter than 23 characters never exceeds it. Runs
+// are found by expanding around each '/' because a regex pass over every string
+// cost more than secretPattern's own pass.
+func detectSlashedBase64(s string) []taggedRegion {
+	var regions []taggedRegion
+	for i := 0; i < len(s); {
+		slash := strings.IndexByte(s[i:], '/')
+		if slash < 0 {
+			break
+		}
+		start, end := i+slash, i+slash+1
+		for start > 0 && isBase64Byte(s[start-1]) {
+			start--
+		}
+		for end < len(s) && isBase64Byte(s[end]) {
+			end++
+		}
+		for pad := 0; pad < 2 && end < len(s) && s[end] == '='; pad++ {
+			end++
+		}
+		i = end
+		start = skipJSONEscapeLetter(s, start)
+		if end-start >= 20 && isSlashedBase64Secret(s[start:end]) {
+			regions = append(regions, taggedRegion{region: region{start, end}})
+		}
+	}
+	return regions
+}
+
+func isBase64Byte(c byte) bool {
+	return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '+' || c == '/'
+}
+
+// isSlashedBase64Secret reports whether run, a base64 run, is a
+// high-entropy value rather than a path. Only the run's own segments decide:
+// the text before it says nothing, since a secret often follows a flag, a key
+// prefix or a name (-p<secret>, token_<secret>, user@<secret>).
+func isSlashedBase64Secret(run string) bool {
+	if !strings.Contains(run, "/") {
+		return false
+	}
+	for segment := range strings.SplitSeq(run, "/") {
+		if pathSegmentPattern.MatchString(segment) {
+			return false
+		}
+	}
+	return shannonEntropy(run) > entropyThreshold
+}
+
+// detectDatabaseURIPasswords covers database URIs whose password contains a
+// character credentialedURIPattern stops at. Placeholder passwords stay
+// visible, as in every other credential layer.
+func detectDatabaseURIPasswords(s string) []taggedRegion {
+	if !strings.Contains(s, "@") || !strings.Contains(s, "://") {
 		return nil
 	}
 	var regions []taggedRegion
+	for _, loc := range databaseURIPasswordPattern.FindAllStringSubmatchIndex(s, -1) {
+		password := s[loc[2]:loc[3]]
+		if uriPortPrefixPattern.MatchString(password) || !hasNonPlaceholderPasswordValue(password) {
+			continue
+		}
+		regions = append(regions, taggedRegion{region: region{loc[0], loc[1]}})
+	}
+	return regions
+}
+
+// detectOracleCredentials redacts a JDBC Oracle URL as a unit, like the other
+// JDBC strings, and a sqlplus login as its user/password@connect token.
+func detectOracleCredentials(s string) []taggedRegion {
+	if !strings.Contains(s, "@") {
+		return nil
+	}
+	var regions []taggedRegion
+	for _, loc := range oracleJDBCPattern.FindAllStringSubmatchIndex(s, -1) {
+		if hasNonPlaceholderPasswordValue(s[loc[2]:loc[3]]) {
+			regions = append(regions, taggedRegion{region: region{loc[0], trimConnectionStringEnd(s, loc[0], loc[1])}})
+		}
+	}
+	for _, loc := range sqlplusLoginPattern.FindAllStringSubmatchIndex(s, -1) {
+		if hasNonPlaceholderPasswordValue(s[loc[4]:loc[5]]) {
+			regions = append(regions, taggedRegion{region: region{loc[2], trimConnectionStringEnd(s, loc[2], loc[3])}})
+		}
+	}
+	return regions
+}
+
+func detectConnectionStrings(s string) []taggedRegion {
+	regions := detectOracleCredentials(s)
+	if !strings.ContainsRune(s, '=') {
+		return regions
+	}
 	for _, rule := range connectionStringRules {
 		regions = append(regions, detectConnectionStringRule(s, rule)...)
 	}
@@ -331,11 +670,41 @@ func detectConnectionStringRule(s string, rule connectionStringRule) []taggedReg
 		if start >= end {
 			continue
 		}
-		if rule.hasSecret(s[start:end]) {
+		if start, ok := connectionStringStart(s, start, end, rule.hasSecret); ok {
 			regions = append(regions, taggedRegion{region: region{start, end}})
 		}
 	}
 	return regions
+}
+
+// maxConnectionKeyWords is the most words an ODBC or ADO.NET key has
+// ("Multiple Active Result Sets").
+const maxConnectionKeyWords = 4
+
+// connectionStringStart returns where the connection string in s[start:end]
+// begins. Semicolon-string keys may contain spaces ("Data Source"), so a match
+// can begin at the words before the string ("Use Server=..."), and those words
+// make the server check fail. A rejected match is retried from the start of
+// each of the last maxConnectionKeyWords words of its first key, earliest
+// first, so the words before the string stay visible. Bounding the retries
+// keeps a long rejected line linear.
+func connectionStringStart(s string, start, end int, hasSecret func(string) bool) (int, bool) {
+	if hasSecret(s[start:end]) {
+		return start, true
+	}
+	keyEnd := start + max(strings.IndexByte(s[start:end], '='), 0)
+	var wordStarts []int
+	for i := keyEnd - 1; i > start && len(wordStarts) < maxConnectionKeyWords; i-- {
+		if s[i] != ' ' && s[i-1] == ' ' {
+			wordStarts = append(wordStarts, i)
+		}
+	}
+	for j := len(wordStarts) - 1; j >= 0; j-- {
+		if hasSecret(s[wordStarts[j]:end]) {
+			return wordStarts[j], true
+		}
+	}
+	return 0, false
 }
 
 func trimConnectionStringEnd(s string, start, end int) int {
@@ -354,7 +723,7 @@ func hasJDBCPassword(candidate string) bool {
 	if !strings.HasPrefix(strings.ToLower(candidate), "jdbc:") {
 		return false
 	}
-	return hasNonPlaceholderPasswordAssignment(candidate)
+	return hasNonPlaceholderPasswordAssignment(candidate, nil)
 }
 
 func hasDatabaseURLSecret(candidate string) bool {
@@ -362,11 +731,30 @@ func hasDatabaseURLSecret(candidate string) bool {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return false
 	}
-	for key, values := range u.Query() {
+	return hasQueryPasswordSecret(u.Query())
+}
+
+// uriQueryHasPassword reports whether a URI's query assigns a real password.
+// It parses the query on its own, so a host url.Parse rejects (a templated
+// ${DB_HOST}) cannot hide it.
+func uriQueryHasPassword(uri string) bool {
+	_, query, ok := strings.Cut(uri, "?")
+	if !ok {
+		return false
+	}
+	query, _, _ = strings.Cut(query, "#")
+	// ParseQuery keeps every pair it can decode even when it reports an
+	// error for another.
+	values, _ := url.ParseQuery(query) //nolint:errcheck // partial values are what we want
+	return hasQueryPasswordSecret(values)
+}
+
+func hasQueryPasswordSecret(values url.Values) bool {
+	for key, vals := range values {
 		if !isPasswordQueryKey(key) {
 			continue
 		}
-		for _, value := range values {
+		for _, value := range vals {
 			if hasNonPlaceholderPasswordValue(value) {
 				return true
 			}
@@ -380,49 +768,221 @@ func isPasswordQueryKey(key string) bool {
 }
 
 func hasKeywordDSNPassword(candidate string) bool {
-	return keywordHostPattern.MatchString(candidate) &&
+	return keywordTargetPattern.MatchString(candidate) &&
 		keywordUserPattern.MatchString(candidate) &&
-		hasNonPlaceholderPasswordAssignment(candidate)
+		hasNonPlaceholderPasswordAssignment(candidate, isShellWorkingDirectory)
+}
+
+// isShellWorkingDirectory reports whether a keyword-DSN assignment is the
+// shell's PWD variable, which env output prints uppercase with an absolute
+// path. A lowercase pwd= is always a password.
+func isShellWorkingDirectory(key, value string) bool {
+	return key == "PWD" && (strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~/"))
 }
 
 func hasSemicolonConnectionPassword(candidate string) bool {
 	return semicolonServerPattern.MatchString(candidate) &&
 		semicolonUserPattern.MatchString(candidate) &&
-		hasNonPlaceholderPasswordAssignment(candidate)
+		hasNonPlaceholderSemicolonPassword(candidate)
+}
+
+// hasNonPlaceholderSemicolonPassword reads each Password/Pwd value up to the
+// next ';', since ODBC and ADO.NET values may contain spaces.
+func hasNonPlaceholderSemicolonPassword(candidate string) bool {
+	for _, m := range semicolonPasswordPattern.FindAllStringSubmatch(candidate, -1) {
+		if hasNonPlaceholderPasswordValue(strings.TrimRight(m[1], " \t")) {
+			return true
+		}
+	}
+	return false
+}
+
+func detectShellStdinSecrets(s string) []taggedRegion {
+	if !strings.ContainsRune(s, '|') || !containsFoldASCII(s, "printf") || !containsFoldASCII(s, "secret") {
+		return nil
+	}
+	return detectCredentialKeyCaptures(s, shellStdinSecretPattern, true, nil)
 }
 
 func detectCredentialValues(s string) []taggedRegion {
-	var regions []taggedRegion
+	// Authorization headers use ':', so they run before the '=' gate below.
+	regions := detectAuthorizationHeaders(s)
+	if !strings.ContainsRune(s, '=') {
+		return regions
+	}
 	for _, loc := range credentialValuePattern.FindAllStringSubmatchIndex(s, -1) {
 		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 {
 			continue
 		}
-		start, end := unquoteRange(s, loc[4], loc[5])
-		if hasNonPlaceholderPasswordValue(s[start:end]) {
+		start, end, singleQuoted := unquoteRangeQuoted(s, loc[4], loc[5])
+		if start == loc[4] {
+			end = extendPastValueSeparators(s, end)
+		}
+		// Main's shared placeholder rules, except that a single-quoted value
+		// is a shell literal and only the literal placeholder words apply.
+		isReal := hasNonPlaceholderPasswordValue(s[start:end])
+		if singleQuoted {
+			isReal = hasNonPlaceholderQuotedPasswordValue(s[start:end], true)
+		}
+		if isReal {
 			regions = append(regions, taggedRegion{region: region{start, end}})
+		}
+	}
+	if strings.Contains(s, "sig=") {
+		for _, loc := range sasSignaturePattern.FindAllStringSubmatchIndex(s, -1) {
+			regions = append(regions, taggedRegion{region: region{loc[2], loc[3]}})
+		}
+	}
+	regions = append(regions, detectCredentialKeyCaptures(s, credentialAssignmentPattern, false, shouldPreserveCredentialCodeAssignment)...)
+	return regions
+}
+
+func detectCredentialKeyCaptures(
+	s string,
+	pattern *regexp.Regexp,
+	genericPasswordContext bool,
+	shouldPreserve func(value, separator string) bool,
+) []taggedRegion {
+	valueGroup := pattern.SubexpIndex("value")
+	keyGroup := pattern.SubexpIndex("key")
+	var regions []taggedRegion
+	for _, match := range pattern.FindAllStringSubmatchIndex(s, -1) {
+		keyStart, keyEnd, ok := captureRange(match, keyGroup)
+		if !ok {
+			continue
+		}
+		key := s[keyStart:keyEnd]
+		credentialContext := genericPasswordContext || key == "PASSWORD" || key == "PASSWD"
+		if genericPasswordContext {
+			// A literal piped into a secrets-store write is a secret whatever
+			// the key is called (STRIPE_KEY, DATABASE_URL); only a pure
+			// identifier key such as CLIENT_ID names a non-secret.
+			if isPureIdentifierKey(key) {
+				continue
+			}
+		} else if !isCredentialJSONSecretKey(key, credentialContext) {
+			continue
+		}
+		if valueStart, valueEnd, valueOK := captureRange(match, valueGroup); valueOK &&
+			isNonPasswordCodeLiteral(key, strings.Trim(s[valueStart:valueEnd], `"'`)) {
+			continue
+		}
+		if shouldPreserve != nil {
+			valueStart, valueEnd, valueOK := captureRange(match, valueGroup)
+			if valueOK && keyEnd <= valueStart && shouldPreserve(s[valueStart:valueEnd], s[keyEnd:valueStart]) {
+				continue
+			}
+		}
+		if captured, ok := nonPlaceholderCapture(s, key, match, valueGroup); ok {
+			// Assignments get the same separator handling as the password
+			// pattern above: "ab;cd" is one value. Shell-stdin literals stop
+			// at the pipe syntax their pattern already bounds.
+			if shouldPreserve != nil {
+				if valueStart, _, _ := captureRange(match, valueGroup); captured.start == valueStart {
+					captured.end = extendPastValueSeparators(s, captured.end)
+				}
+			}
+			regions = append(regions, captured)
 		}
 	}
 	return regions
 }
 
-func unquoteRange(s string, start, end int) (int, int) {
+// extendPastValueSeparators continues an unquoted credential value across ',',
+// ';' and '&' while the text after the separator is not another key=value
+// pair, so "ab;cd" is redacted whole while "x;DB_USER=bob" and
+// "x&sslmode=require" still stop at the separator. A run of separators counts
+// as one. Like the value itself, it never crosses whitespace.
+func extendPastValueSeparators(s string, end int) int {
+	for end < len(s) && strings.IndexByte(",;&", s[end]) >= 0 {
+		next := end + 1
+		for next < len(s) && strings.IndexByte(",;&", s[next]) >= 0 {
+			next++
+		}
+		rest := s[next:]
+		n := strings.IndexAny(rest, " \t\n\f\r,;&")
+		if n < 0 {
+			n = len(rest)
+		}
+		if n == 0 || strings.Contains(rest[:n], "=") {
+			break
+		}
+		end = next + n
+	}
+	return end
+}
+
+// shouldPreserveCredentialCodeAssignment recognizes source expressions that
+// cannot be credential literals. Requiring whitespace on both sides of `=`
+// keeps compact shell/env assignments on the conservative redaction path.
+func shouldPreserveCredentialCodeAssignment(value, separator string) bool {
+	equal := strings.IndexByte(separator, '=')
+	if equal <= 0 || equal >= len(separator)-1 {
+		return false
+	}
+	return value == "await" || credentialCodeCallPattern.MatchString(value) || isCredentialCodeReference(value)
+}
+
+func isCredentialCodeReference(value string) bool {
+	if !credentialCodeRefPattern.MatchString(value) {
+		return false
+	}
+	memberStart := strings.LastIndexByte(value, '.') + 1
+	return isCredentialJSONSecretKey(value[memberStart:], false)
+}
+
+func nonPlaceholderCapture(s, key string, match []int, captureGroup int) (taggedRegion, bool) {
+	start, end, ok := captureRange(match, captureGroup)
+	if !ok {
+		return taggedRegion{}, false
+	}
+	start, end, singleQuoted := unquoteRangeQuoted(s, start, end)
+	if !hasNonPlaceholderKeyValue(key, s[start:end], singleQuoted) {
+		return taggedRegion{}, false
+	}
+	return taggedRegion{region: region{start, end}}, true
+}
+
+func captureRange(match []int, captureGroup int) (int, int, bool) {
+	index := captureGroup * 2
+	if captureGroup < 0 || len(match) <= index+1 || match[index] < 0 || match[index+1] < 0 {
+		return 0, 0, false
+	}
+	return match[index], match[index+1], true
+}
+
+// unquoteRangeQuoted narrows [start,end) past a matching pair of surrounding
+// quotes and reports whether those quotes were single quotes. Single-quoted
+// shell values are literals — `'$uperSecret123'` is a real password, never a
+// variable expansion — so callers must pass singleQuoted through to the
+// placeholder check to keep the shell-variable heuristic from unredacting
+// them.
+func unquoteRangeQuoted(s string, start, end int) (int, int, bool) {
 	if end-start < 2 {
-		return start, end
+		return start, end, false
 	}
 	first, last := s[start], s[end-1]
 	if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
-		return start + 1, end - 1
+		return start + 1, end - 1, first == '\''
 	}
-	return start, end
+	return start, end, false
 }
 
-func hasNonPlaceholderPasswordAssignment(candidate string) bool {
+// hasNonPlaceholderPasswordAssignment reports whether candidate assigns a
+// password that is not a placeholder. notPassword, when non-nil, excludes
+// assignments that only look like one.
+func hasNonPlaceholderPasswordAssignment(candidate string, notPassword func(key, value string) bool) bool {
 	for _, loc := range passwordAssignmentRegex.FindAllStringSubmatchIndex(candidate, -1) {
-		if len(loc) >= 4 && loc[2] >= 0 && loc[3] >= 0 {
-			start, end := unquoteRange(candidate, loc[2], loc[3])
-			if hasNonPlaceholderPasswordValue(candidate[start:end]) {
-				return true
-			}
+		if len(loc) < 6 || loc[4] < 0 || loc[5] < 0 {
+			continue
+		}
+		start, end, _ := unquoteRangeQuoted(candidate, loc[4], loc[5])
+		value := candidate[start:end]
+		if notPassword != nil && notPassword(candidate[loc[2]:loc[3]], value) {
+			continue
+		}
+		if hasNonPlaceholderPasswordValue(value) {
+			return true
 		}
 	}
 	return false
@@ -432,6 +992,19 @@ func hasNonPlaceholderPasswordValue(value string) bool {
 	return value != "" && !isPlaceholderSecretValue(value)
 }
 
+// hasNonPlaceholderQuotedPasswordValue is the quote-aware variant:
+// singleQuoted marks values whose surrounding single quotes were stripped by
+// unquoteRange, which makes any $-leading content a literal, not a shell
+// expansion.
+func hasNonPlaceholderQuotedPasswordValue(value string, singleQuoted bool) bool {
+	return value != "" && !isPlaceholderSecretValueQuoted(value, singleQuoted)
+}
+
+// isPlaceholderSecretValue checks a bare scanner finding. It stays an exact
+// match on known placeholder shapes: a finding is already a scanner's claim
+// that the span is a secret, and the key/value rules below (ellipses, shell
+// references, code literals) would drop real findings — the betterleaks
+// generic rule's capture can end in `...` when prose follows the secret.
 func isPlaceholderSecretValue(value string) bool {
 	trimmed := strings.Trim(strings.TrimSpace(value), `"'`)
 	if trimmed == "" {
@@ -440,21 +1013,218 @@ func isPlaceholderSecretValue(value string) bool {
 	if isBracketedPlaceholder(trimmed) {
 		return true
 	}
-	normalized := strings.ToLower(trimmed)
-	if strings.HasPrefix(normalized, "${") && strings.HasSuffix(normalized, "}") {
+	if strings.HasPrefix(trimmed, "${") && strings.HasSuffix(trimmed, "}") {
+		return isPlaceholderShellExpansion(trimmed)
+	}
+	if templatePlaceholderRE.MatchString(trimmed) {
 		return true
 	}
+	normalized := strings.ToLower(trimmed)
 	if _, ok := placeholderSecretValues[normalized]; ok {
 		return true
 	}
 	return isRepeatedCharPlaceholder(normalized)
 }
 
+// codeLiteralPlaceholderValues are values a non-password credential key meets
+// in code and tool output rather than in secrets: language null/boolean
+// literals (`access_token = None`) and the exact masks Entire's own review
+// trust inventory prints (`api_key=hidden`, `--api-key=(value hidden)`).
+// Never applied to password keys — `PASSWORD=hidden` or `=true` can be the
+// real password — nor to scanner findings.
+var codeLiteralPlaceholderValues = map[string]struct{}{
+	"none": {}, "null": {}, "nil": {}, "undefined": {},
+	"true": {}, "false": {},
+	"hidden": {}, "(value hidden)": {},
+}
+
+// isNonPasswordCodeLiteral reports whether value is a code literal or tool
+// mask under a credential key that does not name a password.
+func isNonPasswordCodeLiteral(key, value string) bool {
+	if _, ok := codeLiteralPlaceholderValues[strings.ToLower(strings.TrimSpace(value))]; !ok {
+		return false
+	}
+	return !isPasswordKey(key)
+}
+
+// isPasswordKey reports whether key names a password (DB_PASSWORD, passwd,
+// admin_pwd), where a human-chosen value can look like a placeholder.
+func isPasswordKey(key string) bool {
+	for _, form := range credentialJSONKeyForms(key) {
+		if credentialJSONKeyRegex.MatchString(form) || genericPasswordKeyRegex.MatchString(form) ||
+			passwordWordInKeyRE.MatchString(form) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasNonPlaceholderKeyValue reports whether value under key is a real
+// credential. Password keys get only the shared placeholder rules (plus the
+// single-quote literal rule): `your-secret` or `api-token-here` can be a
+// human-chosen password. Other credential keys also accept the key/value
+// placeholder shapes in isPlaceholderSecretValueQuoted.
+func hasNonPlaceholderKeyValue(key, value string, singleQuoted bool) bool {
+	if isPasswordKey(key) {
+		if singleQuoted {
+			return hasNonPlaceholderQuotedPasswordValue(value, true)
+		}
+		return hasNonPlaceholderPasswordValue(value)
+	}
+	return hasNonPlaceholderQuotedPasswordValue(value, singleQuoted)
+}
+
+// passwordWordInKeyRE spots a password segment anywhere in a normalized key.
+var passwordWordInKeyRE = regexp.MustCompile(`(?:^|_)(?:pass|passwd|password|pwd|passphrase)(?:_|$)`)
+
+func isPlaceholderSecretValueQuoted(value string, singleQuoted bool) bool {
+	trimmedSpace := strings.TrimSpace(value)
+	// Values that arrive still wearing their own single quotes are shell
+	// literals too (some callers match quoted forms without unquoting).
+	if len(trimmedSpace) >= 2 && trimmedSpace[0] == '\'' && trimmedSpace[len(trimmedSpace)-1] == '\'' {
+		singleQuoted = true
+	}
+	trimmed := strings.Trim(trimmedSpace, `"'`)
+	if trimmed == "" {
+		return true
+	}
+	normalized := strings.ToLower(trimmed)
+	// Inside single quotes the shell performs no expansion: `'$uperSecret123'`
+	// and `'${looks_like_var}'` are literal passwords, so only the literal
+	// placeholder shapes apply; the expansion and template rules do not.
+	if singleQuoted {
+		if isBracketedPlaceholder(trimmed) {
+			return true
+		}
+		if _, ok := placeholderSecretValues[normalized]; ok {
+			return true
+		}
+		return isRepeatedCharPlaceholder(normalized)
+	}
+	if isPlaceholderSecretValue(trimmed) || upperBracketedPlaceholderRE.MatchString(trimmed) {
+		return true
+	}
+	// Documentation fill-ins: `your_api_key_here`, `your-token`, `paste_key_here`.
+	if docFillInPlaceholderRE.MatchString(normalized) {
+		return true
+	}
+	// Command substitutions (`TOKEN="$(cat token)"`) are how docs and scripts
+	// reference a secret without containing it — the value is the recipe. Only
+	// a known secret-fetching command with no quotes or redirection counts:
+	// `$(echo x)`, `$(/bin/echo x)` and `$(cat <<< x)` carry the secret itself.
+	if inner, ok := strings.CutPrefix(trimmed, "$("); ok && strings.HasSuffix(inner, ")") {
+		if isSecretRecipeCommand(strings.TrimSuffix(inner, ")")) {
+			return true
+		}
+	}
+	// Documentation ellipsis placeholders: `ANTHROPIC_API_KEY=sk-ant-...`.
+	// Only a bare prefix (empty, or ending at a `-`/`_` separator) counts:
+	// `hunter2...` is a real value followed by prose, and a short one is
+	// below what entropy catches.
+	if stem, ok := strings.CutSuffix(normalized, "..."); ok && (stem == "" || ellipsisPrefixStemRE.MatchString(stem)) {
+		return true
+	}
+	return goTemplateReferencePattern.MatchString(trimmed)
+}
+
+// ellipsisPrefixStemRE matches the vendor prefix before a documentation
+// ellipsis (`sk-ant-`, `ghp_`, `sb_secret_`): short, letters only, ending in a
+// separator. Digits or length mean key material, as in `hunter2-...`.
+var ellipsisPrefixStemRE = regexp.MustCompile(`^[a-z]{1,10}(?:[-_][a-z]{1,10}){0,2}[-_]$`)
+
+// docFillInPlaceholderRE matches documentation fill-in values that name a
+// credential: "your_..._<noun>" optionally followed by "_here", or a
+// credential noun followed by "_here" (`your_api_key_here`, `your-token`,
+// `api-token-goes-here`). A lowercase phrase without a credential noun, such
+// as `your-dog-name`, can be a real passphrase.
+var docFillInPlaceholderRE = regexp.MustCompile(`^(?:your[_-](?:[a-z]+[_-])*(?:api[_-]?key|key|token|secret|password|passphrase|pat)(?:[_-](?:goes[_-])?here)?|[a-z_-]*(?:key|token|secret|password)[_-](?:goes[_-])?here)$`)
+
+// secretRecipeCommands are commands that fetch a secret from somewhere else,
+// so `$(cmd ...)` names where the value lives rather than containing it.
+var secretRecipeCommands = map[string]struct{}{
+	"cat": {}, "printenv": {}, "gh": {}, "op": {}, "vault": {}, "aws": {},
+	"gcloud": {}, "az": {}, "security": {}, "pass": {}, "doppler": {},
+	"bw": {}, "lpass": {}, "secret-tool": {}, "kubectl": {}, "infisical": {},
+}
+
+// isSecretRecipeCommand reports whether a $(...) body runs an allowlisted
+// secret-fetching command. Quotes and redirection (`<<<`, `<`) can carry a
+// literal, so any body containing them is treated as text.
+func isSecretRecipeCommand(cmd string) bool {
+	if strings.ContainsAny(cmd, "\"'<`$|;&") {
+		return false
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return false
+	}
+	_, ok := secretRecipeCommands[fields[0]]
+	return ok
+}
+
+// shellExpansionWordRE matches ${NAME<op>word}, whose word becomes the value
+// when NAME is unset (-, =) or set (+); with a colon, an empty NAME counts as
+// unset. ${NAME:?word} is left out: its word is an error message, never a
+// value.
+var shellExpansionWordRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+](.*)\}$`)
+
+// isPlaceholderShellExpansion reports whether a ${…} value is a placeholder:
+// one complete expression that is a plain reference, or one whose word is
+// itself empty or a placeholder, so ${DB_PASSWORD:-hunter2} and
+// ${A}hunter2${B} still count as secrets.
+func isPlaceholderShellExpansion(s string) bool {
+	if !isSingleBraceExpression(s) {
+		return false
+	}
+	if m := shellExpansionWordRE.FindStringSubmatch(s); m != nil {
+		return isPlaceholderSecretValue(m[1])
+	}
+	return !shellTextOperatorRE.MatchString(s)
+}
+
+// shellTextOperatorRE matches ${NAME<op>...} for shell operators whose text can
+// carry a literal value: pattern substitution and removal (/ # %), case
+// changes (^ ,), and substrings (:offset). Non-shell forms such as ${var.x},
+// ${env:X} and ${{secrets.X}} do not match.
+var shellTextOperatorRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*(?:[/#%^,]|:[-0-9 ])`)
+
+// isSingleBraceExpression reports whether the brace opened by the leading "${"
+// of s is closed by its final "}".
+func isSingleBraceExpression(s string) bool {
+	depth := 0
+	for i := 1; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i == len(s)-1
+			}
+		}
+	}
+	return false
+}
+
+// templatePlaceholderRE matches a value that is one interpolation expression:
+// a printf verb (%s, %v, %q), a Python %-format name (%(password)s), a format
+// field ({} or {password}), or an uppercase shell variable ($DB_PASSWORD).
+// Format-field names allow only lowercase letters, `_` and `.`, and shell
+// variables only uppercase, so values like {hunter2} or $hunter2 are still
+// redacted.
+var templatePlaceholderRE = regexp.MustCompile(`^(?:%[svq]|%\([A-Za-z_][A-Za-z0-9_]*\)s|\{\}|\{[a-z_][a-z_.]*\}|\$[A-Z_][A-Z0-9_]*)$`)
+
 // bracketedPlaceholderInteriorRE matches the inside of a "<…>" placeholder
-// shape: lowercase letters joined by `-` or `_`. Digits, mixed case, and
-// special chars are rejected so values like `<hunter2>` or `<RealPassword>`
-// still fall through to redaction.
+// shape: all-lowercase or all-uppercase letters joined by `-` or `_`
+// (`<your-token>`, `<ENTIRE_TOKEN>`). Digits, mixed case, and special chars
+// are rejected so values like `<hunter2>` or `<RealPassword>` still fall
+// through to redaction.
 var bracketedPlaceholderInteriorRE = regexp.MustCompile(`^[a-z][a-z_-]*$`)
+
+// upperBracketedPlaceholderRE matches an all-uppercase "<NAME>" placeholder
+// (`<ENTIRE_TOKEN>`). Key/value captures only: the shared rule stays
+// lowercase, so `<HUNTER>` from a scanner or connection string still redacts.
+var upperBracketedPlaceholderRE = regexp.MustCompile(`^<[A-Z][A-Z_-]{2,}>$`)
 
 // isBracketedPlaceholder reports whether s is a "<name>" doc placeholder
 // (e.g. "<password>", "<your-db-password>"). The minimum total length of 5
@@ -489,21 +1259,162 @@ func isRepeatedCharPlaceholder(s string) bool {
 }
 
 func isCredentialJSONSecretKey(key string, credentialContext bool) bool {
-	normalized := normalizeCredentialJSONKey(key)
-	if credentialJSONKeyRegex.MatchString(normalized) {
-		return true
+	for _, normalized := range credentialJSONKeyForms(key) {
+		if isKnownNonSecretTokenKey(normalized) {
+			continue
+		}
+		if isSensitiveNormalizedJSONValueKey(normalized) || isCredentialIdentifierKey(normalized) {
+			return true
+		}
+		if credentialContext && genericPasswordKeyRegex.MatchString(normalized) {
+			return true
+		}
 	}
-	return credentialContext && genericPasswordKeyRegex.MatchString(normalized)
+	return false
+}
+
+// credentialJSONKeyForms returns the camel-split normalization of key and,
+// when it differs, the flat one (lowercased, no camel split). Matching either
+// keeps vendor-cased keys detected: camel splitting turns MySQLPassword into
+// my_sql_password and hostName into host_name, which the key shapes and the
+// connection-object case list only know in their flat forms.
+func credentialJSONKeyForms(key string) []string {
+	camel := normalizeCredentialJSONKey(key)
+	flat := flattenCredentialJSONKey(key)
+	if flat == camel {
+		return []string{camel}
+	}
+	return []string{camel, flat}
+}
+
+// flattenCredentialJSONKey lowercases key and maps `-`, ` `, and `.` to `_`
+// without splitting camelCase. Flattened-config exporters (Spring, dotnet,
+// Vault) emit dotted keys like "db.password"; treat them like underscored.
+func flattenCredentialJSONKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	return strings.NewReplacer("-", "_", " ", "_", ".", "_").Replace(key)
+}
+
+// isKnownNonSecretTokenKey reports whether the normalized JSON key is
+// `<prefix>_token` where every `_`-separated segment of prefix is in
+// nonSecretTokenPrefixes — so compound pagination keys like
+// `next_page_token` qualify alongside `cancel_token` and
+// `pagination_token`, while any non-allowlisted segment
+// (`auth_page_token`, `csrf_token`) still redacts. Deliberately NOT
+// applied to `_secret` keys: `previous_secret`/`next_secret` are real
+// field names in webhook/HMAC secret-rotation payloads, and the entropy
+// fallback cannot catch them when hex-encoded (16 symbols cap Shannon
+// entropy at 4.0, below the 4.5 threshold).
+func isKnownNonSecretTokenKey(normalized string) bool {
+	prefix, ok := strings.CutSuffix(normalized, "_token")
+	if !ok || prefix == "" {
+		return false
+	}
+	for _, segment := range strings.Split(prefix, "_") {
+		if _, allowed := nonSecretTokenPrefixes[segment]; !allowed {
+			return false
+		}
+	}
+	return true
+}
+
+func isNonSecretIdentifierAssignment(candidate string) bool {
+	key, value, ok := strings.Cut(candidate, "=")
+	if !ok || key == "" || value == "" {
+		return false
+	}
+	for _, form := range credentialJSONKeyForms(key) {
+		if isSensitiveNormalizedJSONValueKey(form) || genericPasswordKeyRegex.MatchString(form) {
+			return false
+		}
+	}
+	normalized := normalizeCredentialJSONKey(key)
+	// A credential word anywhere in the key disqualifies suppression even
+	// under an id/account suffix: aws_access_key_id names a credential, not
+	// an identifier. This is the only reliable discriminator — Shannon
+	// entropy is not monotonic under concatenation, so a combined key=value
+	// can clear the 4.5 threshold while the value alone does not (e.g.
+	// aws_access_key_id=AKIA… scores 4.50 combined vs 3.68 for the value),
+	// and betterleaks' vendor rules filter the moderate-entropy forms too.
+	// Deliberately broader than isCredentialIdentifierKey: this only decides
+	// whether the entropy layer may stay silent, so failing closed costs
+	// readability, not a leak.
+	if credentialWordInKeyRE.MatchString(normalized) || bearerIdentifierKeyRE.MatchString(normalized) {
+		return false
+	}
+	if isHighEntropySecretCandidate(value) {
+		return false
+	}
+	return isIdentifierAssignmentKey(normalized)
+}
+
+// bearerIdentifierKeyRE spots identifier keys whose value can double as a
+// bearer credential (session, request, nonce, CSRF, cookie ids). They keep
+// the entropy layer's combined key=value scoring.
+var bearerIdentifierKeyRE = regexp.MustCompile(`(?:^|_)(?:session|sess|sid|request|req|nonce|csrf|xsrf|cookie|jti)(?:_|$)`)
+
+// isPureIdentifierKey reports whether key is an id/account key that names no
+// credential or bearer-style value (CLIENT_ID, tenant_id).
+func isPureIdentifierKey(key string) bool {
+	normalized := normalizeCredentialJSONKey(key)
+	return isIdentifierAssignmentKey(normalized) &&
+		!credentialWordInKeyRE.MatchString(normalized) &&
+		!bearerIdentifierKeyRE.MatchString(normalized)
+}
+
+func isIdentifierAssignmentKey(normalized string) bool {
+	return normalized == "id" ||
+		normalized == "account" ||
+		strings.HasSuffix(normalized, "_id") ||
+		strings.HasSuffix(normalized, "_account")
+}
+
+// isCredentialIdentifierKey reports whether an id/account-suffixed JSON key
+// names a credential rather than an identifier that merely mentions one. Only
+// the AWS access-key id (aws_access_key_id, AccessKeyId) qualifies: it is
+// paired with a secret and treated as sensitive, while api_key_id, tokenId,
+// SecretId and KeyId name a key, an AWS secret, or a KMS key — identifiers,
+// not key material.
+func isCredentialIdentifierKey(normalized string) bool {
+	stem, ok := strings.CutSuffix(normalized, "_id")
+	if !ok {
+		stem, ok = strings.CutSuffix(normalized, "_account")
+	}
+	if !ok || stem == "" {
+		return false
+	}
+	return accessKeyStemRE.MatchString(stem)
+}
+
+// accessKeyStemRE matches the AWS access-key id stem (access_key,
+// aws_access_key, secret_access_key), which secretValueKeyShape leaves out
+// because a bare access_key value is an identifier, not the secret.
+var accessKeyStemRE = regexp.MustCompile(`^(?:[a-z0-9]+_)*access_key$`)
+
+func isHighEntropySecretCandidate(value string) bool {
+	for _, loc := range secretPattern.FindAllStringIndex(value, -1) {
+		if shannonEntropy(value[loc[0]:loc[1]]) > entropyThreshold {
+			return true
+		}
+	}
+	return false
+}
+
+func isSensitiveNormalizedJSONValueKey(normalized string) bool {
+	return credentialJSONKeyRegex.MatchString(normalized) ||
+		secretJSONKeyRegex.MatchString(normalized)
 }
 
 func isCredentialJSONObject(obj map[string]any) bool {
 	var hasHost, hasUser bool
 	for key := range obj {
-		switch normalizeCredentialJSONKey(key) {
-		case "host", "hostname", "server", "addr", "address", "datasource", "data_source":
-			hasHost = true
-		case "user", "username", "userid", "user_id", "uid":
-			hasUser = true
+		for _, normalized := range credentialJSONKeyForms(key) {
+			switch normalized {
+			case "host", "hostname", "server", "addr", "address", "datasource", "data_source":
+				hasHost = true
+			case "user", "username", "userid", "user_id", "uid":
+				hasUser = true
+			}
 		}
 		if hasHost && hasUser {
 			return true
@@ -513,13 +1424,50 @@ func isCredentialJSONObject(obj map[string]any) bool {
 }
 
 func normalizeCredentialJSONKey(key string) string {
-	key = strings.ToLower(strings.TrimSpace(key))
-	key = strings.ReplaceAll(key, "-", "_")
-	key = strings.ReplaceAll(key, " ", "_")
-	// Flattened-config exporters (Spring, dotnet, Hashicorp Vault) emit dotted keys
-	// like "db.password" or "mysql.root.password"; treat them like underscored.
-	key = strings.ReplaceAll(key, ".", "_")
-	return key
+	key = strings.TrimSpace(key)
+	needsNormalization := false
+	hasNonASCII := false
+	for i := range len(key) {
+		current := key[i]
+		if current >= utf8.RuneSelf {
+			hasNonASCII = true
+		}
+		if hasNonASCII || current >= 'A' && current <= 'Z' || current == '-' || current == ' ' || current == '.' {
+			needsNormalization = true
+			break
+		}
+	}
+	if !needsNormalization {
+		return key
+	}
+
+	var normalized strings.Builder
+	normalized.Grow(len(key))
+	for i := range len(key) {
+		current := key[i]
+		switch current {
+		case '-', ' ', '.':
+			normalized.WriteByte('_')
+			continue
+		}
+		if current >= 'A' && current <= 'Z' && i > 0 {
+			previousIsLower := key[i-1] >= 'a' && key[i-1] <= 'z'
+			nextIsLower := i+1 < len(key) && key[i+1] >= 'a' && key[i+1] <= 'z'
+			previousIsUpper := key[i-1] >= 'A' && key[i-1] <= 'Z'
+			if previousIsLower || (previousIsUpper && nextIsLower) {
+				normalized.WriteByte('_')
+			}
+		}
+		if current >= 'A' && current <= 'Z' {
+			current += 'a' - 'A'
+		}
+		normalized.WriteByte(current)
+	}
+	result := normalized.String()
+	if hasNonASCII {
+		return strings.ToLower(result)
+	}
+	return result
 }
 
 // Bytes is a convenience wrapper around String for []byte content.
@@ -538,7 +1486,8 @@ func Bytes(b []byte) []byte {
 // betterleaks is disabled.
 func JSONLBytes(b []byte) (RedactedBytes, error) {
 	s := string(b)
-	redacted, err := JSONLContent(s)
+	var replaced tally
+	redacted, err := jsonlContentImpl(s, leafRedactor{detect: detectAllLayers, counts: &replaced}, concurrencySafeRedactor)
 	if err != nil {
 		// Degradation outranks a walk error: callers' errors.Is guards must
 		// see the sentinel so no error path can reach a Bytes fallback.
@@ -551,9 +1500,9 @@ func JSONLBytes(b []byte) (RedactedBytes, error) {
 		return RedactedBytes{}, ErrScannerDegraded
 	}
 	if redacted == s {
-		return RedactedBytes{data: b}, nil
+		return RedactedBytes{data: b, counts: replaced.counts()}, nil
 	}
-	return RedactedBytes{data: []byte(redacted)}, nil
+	return RedactedBytes{data: []byte(redacted), counts: replaced.counts()}, nil
 }
 
 // JSONLBytesWithPrivacyFilter augments JSONLBytes with the OpenAI Privacy
@@ -561,6 +1510,9 @@ func JSONLBytes(b []byte) (RedactedBytes, error) {
 // use JSONLBytes.
 // Returns ErrScannerDegraded when the goredact scanner degraded while
 // betterleaks is disabled.
+//
+// The result carries no counts (Counts returns nil): the OPF passes do not
+// tally, so this output must not feed checkpoint metadata's redaction counts.
 func JSONLBytesWithPrivacyFilter(ctx context.Context, b []byte) (RedactedBytes, error) {
 	s := string(b)
 	redacted, err := JSONLContentWithPrivacyFilter(ctx, s)
@@ -605,7 +1557,7 @@ func BytesWithPrivacyFilter(ctx context.Context, b []byte) []byte {
 // Large content is sharded across goroutines; output is byte-identical either
 // way. See jsonlContent.
 func JSONLContent(content string) (string, error) {
-	return jsonlContentImpl(content, String, concurrencySafeRedactor)
+	return jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 }
 
 // Whether a per-leaf redactor may be called from several goroutines at once.
@@ -619,15 +1571,61 @@ const (
 	concurrencyUnsafeRedactor = false
 )
 
+// leafRedactor redacts the string leaves of one JSONL walk, and each line that
+// is not JSON, with the regions detect finds. When counts is non-nil it also
+// adds what it replaced there.
+type leafRedactor struct {
+	detect func(string) []taggedRegion
+	counts *tally
+}
+
+// regexLayers is the uncounted regex-only redactor, String's walk equivalent.
+var regexLayers = leafRedactor{detect: detectAllLayers}
+
+func (r leafRedactor) redact(s string) string {
+	return redactRegions(s, r.detect(s), r.counts)
+}
+
+// mark returns the counts so far, for rollback when a line is redacted again.
+func (r leafRedactor) mark() tally {
+	if r.counts == nil {
+		return tally{}
+	}
+	return *r.counts
+}
+
+func (r leafRedactor) rollback(to tally) {
+	if r.counts != nil {
+		*r.counts = to
+	}
+}
+
+// replacements returns the placeholders counted so far, 0 when not counting.
+func (r leafRedactor) replacements() int {
+	if r.counts == nil {
+		return 0
+	}
+	return r.counts.replacements
+}
+
+// spliced replaces the placeholders counted since before with those the
+// splice wrote. The splice rewrites every copy of a collected value in the
+// line, including copies the walk never scanned, so it can write more than
+// the scanned values account for. Layer matches stay as scanned.
+func (r leafRedactor) spliced(before tally, written int) {
+	if r.counts != nil {
+		r.counts.replacements = before.replacements + written
+	}
+}
+
 // jsonlContentImpl is the body of JSONLContent parameterized by a per-leaf
-// redactor. JSONLContent passes String (regex layers only). The OPF-enabled
-// flow uses two passes: one with a collector that records leaves and returns
-// identity, one with a redactor that combines regex layers with cached OPF
-// spans for the recorded leaves.
+// redactor. JSONLContent passes the regex layers. The OPF-enabled flow uses
+// two passes: one with a collector that records leaves and finds nothing, one
+// that combines regex layers with cached OPF spans for the recorded leaves.
 //
-// concurrencySafe reports whether redactor tolerates concurrent calls; when it
-// does, large content is sharded across goroutines.
-func jsonlContentImpl(content string, redactor func(string) string, concurrencySafe bool) (string, error) {
+// concurrencySafe reports whether redactor.detect tolerates concurrent calls;
+// when it does, large content is sharded across goroutines.
+func jsonlContentImpl(content string, redactor leafRedactor, concurrencySafe bool) (string, error) {
 	if result, handled, err := redactSingleJSONValue(content, redactor); handled {
 		return result, err
 	}
@@ -646,7 +1644,7 @@ func jsonlContentImpl(content string, redactor func(string) string, concurrencyS
 // handled is false when the content is JSONL, so the caller processes it line by
 // line. Neither the shard split nor the incremental prefix cache in
 // checkpoint/redact_cache.go applies to the single-value shape.
-func redactSingleJSONValue(content string, redactor func(string) string) (result string, handled bool, err error) {
+func redactSingleJSONValue(content string, redactor leafRedactor) (result string, handled bool, err error) {
 	trimmed := strings.TrimSpace(content)
 	if len(trimmed) == 0 {
 		return "", false, nil
@@ -665,13 +1663,15 @@ func redactSingleJSONValue(content string, redactor func(string) string) (result
 		}
 		return result, true, nil
 	}
+	before := redactor.mark()
 	repls := collectJSONLReplacements(parsed, redactor)
-	result, err = applyJSONReplacements(content, repls)
+	result, written, err := applyJSONReplacements(content, repls)
 	if err != nil {
 		return "", true, err
 	}
+	redactor.spliced(before, written)
 	if len(repls) > 0 {
-		result, err = ensureReplacementsLanded(content, result, repls, redactor)
+		result, err = ensureReplacementsLanded(content, result, repls, redactor, before)
 		if err != nil {
 			return "", true, err
 		}
@@ -740,8 +1740,9 @@ const jsonlShardTargetBytes = 1 << 20 // 1MiB
 // to redactJSONLLines over the same lines, because each line is redacted in
 // isolation and shard boundaries fall between lines.
 //
-// redactor MUST be safe for concurrent use.
-func redactJSONLLinesSharded(lines []string, redactor func(string) string) (string, error) {
+// redactor.detect MUST be safe for concurrent use. Each shard counts into its
+// own tally, summed in order once every shard is done.
+func redactJSONLLinesSharded(lines []string, redactor leafRedactor) (string, error) {
 	// Balance shards by bytes, not by line count: agent transcripts mix
 	// thousands of short lines with occasional multi-MB tool results, so equal
 	// line counts would leave one oversized shard as the tail.
@@ -751,11 +1752,16 @@ func redactJSONLLinesSharded(lines []string, redactor func(string) string) (stri
 	}
 
 	results := make([]string, len(bounds))
+	shardCounts := make([]tally, len(bounds))
 	g := new(errgroup.Group)
 	g.SetLimit(runtime.GOMAXPROCS(0))
 	for i, b := range bounds {
 		g.Go(func() error {
-			out, err := redactJSONLLines(lines[b.lo:b.hi], redactor)
+			shard := leafRedactor{detect: redactor.detect}
+			if redactor.counts != nil {
+				shard.counts = &shardCounts[i]
+			}
+			out, err := redactJSONLLines(lines[b.lo:b.hi], shard)
 			if err != nil {
 				return err
 			}
@@ -765,6 +1771,9 @@ func redactJSONLLinesSharded(lines []string, redactor func(string) string) (stri
 	}
 	if err := g.Wait(); err != nil {
 		return "", fmt.Errorf("redacting JSONL shard: %w", err)
+	}
+	for _, c := range shardCounts {
+		redactor.counts.add(c)
 	}
 
 	// Shards are contiguous line ranges, so rejoining them with "\n" in order
@@ -800,7 +1809,7 @@ func shardLineBounds(lines []string, targetBytes int) []lineRange {
 // what makes sharding across goroutines (jsonlContentConcurrent) produce
 // byte-identical output to a sequential pass. Keep it that way — a redactor or
 // line rule that depended on earlier lines would silently break that guarantee.
-func redactJSONLLines(lines []string, redactor func(string) string) (string, error) {
+func redactJSONLLines(lines []string, redactor leafRedactor) (string, error) {
 	var b strings.Builder
 	// The input size is a capacity hint that avoids repeated doubling of a
 	// large buffer. It is only a hint: splicing shrinks or preserves a line,
@@ -824,7 +1833,7 @@ func redactJSONLLines(lines []string, redactor func(string) string) (string, err
 		}
 		var parsed any
 		if err := json.Unmarshal([]byte(lineTrimmed), &parsed); err != nil {
-			b.WriteString(redactor(line))
+			b.WriteString(redactor.redact(line))
 			continue
 		}
 		// Duplicate keys make the decoded tree an incomplete view of the raw
@@ -839,13 +1848,15 @@ func redactJSONLLines(lines []string, redactor func(string) string) (string, err
 			b.WriteString(result)
 			continue
 		}
+		before := redactor.mark()
 		repls := collectJSONLReplacements(parsed, redactor)
-		result, err := applyJSONReplacements(line, repls)
+		result, written, err := applyJSONReplacements(line, repls)
 		if err != nil {
 			return "", err
 		}
+		redactor.spliced(before, written)
 		if len(repls) > 0 {
-			result, err = ensureReplacementsLanded(line, result, repls, redactor)
+			result, err = ensureReplacementsLanded(line, result, repls, redactor, before)
 			if err != nil {
 				return "", err
 			}
@@ -867,7 +1878,7 @@ func StringWithPrivacyFilter(ctx context.Context, s string) string {
 // JSONLContentWithPrivacyFilter augments JSONLContent with the OpenAI
 // Privacy Filter via batched inference. Walks the content twice: pass 1
 // collects unique prose-shaped leaves into a single RedactBatch call;
-// pass 2 applies the eight regex layers per leaf plus the cached OPF spans
+// pass 2 applies the nine regex layers per leaf plus the cached OPF spans
 // for that leaf. One OPF shell-out covers the whole transcript instead of
 // one per leaf — without batching, a typical 500-leaf transcript would
 // take many minutes per commit.
@@ -877,26 +1888,26 @@ func StringWithPrivacyFilter(ctx context.Context, s string) string {
 func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string, error) {
 	cfg := getOPFConfig()
 	if cfg == nil || !cfg.Enabled || cfg.runtime == nil || opfBreakerTripped.Load() {
-		return jsonlContentImpl(content, String, concurrencySafeRedactor)
+		return jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 	}
 	cats := enabledCategories(cfg)
 	if len(cats) == 0 {
-		return jsonlContentImpl(content, String, concurrencySafeRedactor)
+		return jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 	}
 
 	// Pass 1: collect eligible (has-space, deduped) leaves. The collector
-	// closure returns identity so the JSONL walker doesn't mutate content.
+	// finds no regions, so the JSONL walker doesn't mutate content.
 	seen := make(map[string]struct{})
 	var inputs []string
-	if _, err := jsonlContentImpl(content, func(v string) string {
+	if _, err := jsonlContentImpl(content, leafRedactor{detect: func(v string) []taggedRegion {
 		if strings.ContainsRune(v, ' ') {
 			if _, ok := seen[v]; !ok {
 				seen[v] = struct{}{}
 				inputs = append(inputs, v)
 			}
 		}
-		return v
-	}, concurrencyUnsafeRedactor); err != nil {
+		return nil
+	}}, concurrencyUnsafeRedactor); err != nil {
 		return "", err
 	}
 
@@ -908,7 +1919,7 @@ func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string,
 		batched, err := cfg.runtime.RedactBatch(ctx, inputs, cats)
 		if err != nil {
 			handleOPFFailure(ctx, cfg, err)
-			return jsonlContentImpl(content, String, concurrencySafeRedactor)
+			return jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 		}
 		fmt.Fprintf(opfStderr, "✓ OpenAI Privacy Filter: done (%.1fs)\n", time.Since(start).Seconds())
 		// A short return means the runtime gave us fewer span slices than
@@ -925,7 +1936,7 @@ func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string,
 		if len(batched) != len(inputs) {
 			shortErr := fmt.Errorf("opf runtime returned %d span slices for %d inputs", len(batched), len(inputs))
 			handleOPFFailure(ctx, cfg, shortErr)
-			return jsonlContentImpl(content, String, concurrencySafeRedactor)
+			return jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 		}
 		for i, in := range inputs {
 			spansByInput[in] = batched[i]
@@ -933,50 +1944,67 @@ func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string,
 	}
 
 	// Pass 3: per-leaf regex layers + cached OPF spans.
-	return jsonlContentImpl(content, func(v string) string {
-		regions := detectAllLayers(v)
-		regions = append(regions, opfSpanRegions(v, spansByInput[v], cfg)...)
-		return applyRegions(v, regions)
-	}, concurrencySafeRedactor)
+	return jsonlContentImpl(content, leafRedactor{detect: func(v string) []taggedRegion {
+		return append(detectAllLayers(v), opfSpanRegions(v, spansByInput[v], cfg)...)
+	}}, concurrencySafeRedactor)
 }
 
 // applyJSONReplacements applies collected (original, redacted) string pairs
 // to the raw JSON text, replacing JSON-encoded originals with their redacted forms.
-// Returns s unchanged if repls is empty.
-func applyJSONReplacements(s string, repls []jsonReplacement) (string, error) {
+// Returns s unchanged if repls is empty. written is how many placeholders the
+// replacements put in: each copy replaced carries its pair's placeholders.
+func applyJSONReplacements(s string, repls []jsonReplacement) (result string, written int, err error) {
 	if len(repls) == 0 {
-		return s, nil
+		return s, 0, nil
 	}
+	// Keyed replacements go first. An unkeyed one replaces every copy of its
+	// text, so applied earlier it would also rewrite a keyed copy that needs
+	// a different result (a password under a credential key, an address under
+	// a network key), and the outcome would follow the walk's map order.
+	repls = slices.Clone(repls)
+	slices.SortStableFunc(repls, func(a, b jsonReplacement) int {
+		switch {
+		case a.key != "" && b.key == "":
+			return -1
+		case a.key == "" && b.key != "":
+			return 1
+		}
+		return 0
+	})
 	for _, r := range repls {
 		origJSON, err := jsonEncodeString(r.original)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		replJSON, err := jsonEncodeString(r.redacted)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		if r.key == "" {
+			written += strings.Count(s, origJSON) * r.placeholders
 			s = strings.ReplaceAll(s, origJSON, replJSON)
 			continue
 		}
 		keyJSON, err := jsonEncodeString(r.key)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
-		s = replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON)
+		var replaced int
+		s, replaced = replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON)
+		written += replaced * r.placeholders
 	}
-	return s, nil
+	return s, written, nil
 }
 
 // replaceKeyedJSONValue replaces every occurrence of origJSON that follows
-// keyJSON + optional whitespace + ':' + optional whitespace. Restricts
-// substitution to value positions so a key's own redacted text is not
-// rewritten when it collides with another field's value.
-func replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON string) string {
+// keyJSON + optional whitespace + ':' + optional whitespace, and reports how
+// many it replaced. Restricts substitution to value positions so a key's own
+// redacted text is not rewritten when it collides with another field's value.
+func replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON string) (string, int) {
 	if !strings.Contains(s, keyJSON) {
-		return s
+		return s, 0
 	}
+	replaced := 0
 	var b strings.Builder
 	b.Grow(len(s))
 	i := 0
@@ -1005,11 +2033,12 @@ func replaceKeyedJSONValue(s, keyJSON, origJSON, replJSON string) string {
 			b.WriteString(s[keyEnd:p])
 			b.WriteString(replJSON)
 			i = p + len(origJSON)
+			replaced++
 			continue
 		}
 		i = keyEnd
 	}
-	return b.String()
+	return b.String(), replaced
 }
 
 func isJSONWhitespace(c byte) bool {
@@ -1029,7 +2058,17 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 // walkRedactableStrings walks a parsed JSON value with the shared JSONL skip
 // rules (shouldSkipJSONLField, shouldSkipJSONLObject, credential context),
 // applying transform to each eligible string leaf. key is the leaf's object
-// key, empty inside arrays and at the root.
+// key, empty at the root. An array element takes the key of the array that
+// holds it, so {"Authorization":["Bearer <token>"]}, as json.Marshal writes an
+// http.Header, keeps the key context of {"Authorization":"Bearer <token>"}.
+// spliceKey is the key a raw-text splice can scope a replacement to: the
+// leaf's own key, but empty inside arrays and at the root, because
+// replaceKeyedJSONValue only finds a value written directly after its key.
+//
+// A skip key preserves its own string values, including the strings in its
+// arrays, but objects beneath it are walked with their own keys. The id rule
+// matches any key ending in "id", so {"android":{"apiKey":...}} is not an
+// identifier, and {"path":{"env":...}} is not a path.
 //
 // It returns a copy-on-write tree: containers are re-allocated only along
 // paths where transform changed a leaf, and changed reports whether any leaf
@@ -1037,9 +2076,9 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 // collection pass, the post-splice verification, and the structural re-encode
 // fallback must all agree on which leaves are redactable, and a second copy of
 // the rules is how they would drift apart.
-func walkRedactableStrings(v any, transform func(key string, credentialContext bool, val string) string) (any, bool) {
-	var walk func(key string, credentialContext bool, v any) (any, bool)
-	walk = func(key string, credentialContext bool, v any) (any, bool) {
+func walkRedactableStrings(v any, transform func(key, spliceKey string, credentialContext bool, val string) string) (any, bool) {
+	var walk func(key, spliceKey string, credentialContext, skipStrings bool, v any) (any, bool)
+	walk = func(key, spliceKey string, credentialContext, skipStrings bool, v any) (any, bool) {
 		switch val := v.(type) {
 		case map[string]any:
 			if shouldSkipJSONLObject(val) {
@@ -1048,10 +2087,7 @@ func walkRedactableStrings(v any, transform func(key string, credentialContext b
 			childCredentialContext := credentialContext || isCredentialJSONObject(val)
 			var out map[string]any
 			for k, child := range val {
-				if shouldSkipJSONLField(k) {
-					continue
-				}
-				newChild, childChanged := walk(k, childCredentialContext, child)
+				newChild, childChanged := walk(k, k, childCredentialContext, shouldSkipJSONLField(k), child)
 				if !childChanged {
 					continue
 				}
@@ -1067,7 +2103,7 @@ func walkRedactableStrings(v any, transform func(key string, credentialContext b
 		case []any:
 			var out []any
 			for i, child := range val {
-				newChild, childChanged := walk("", credentialContext, child)
+				newChild, childChanged := walk(key, "", credentialContext, skipStrings, child)
 				if !childChanged {
 					continue
 				}
@@ -1082,7 +2118,10 @@ func walkRedactableStrings(v any, transform func(key string, credentialContext b
 			}
 			return out, true
 		case string:
-			redacted := transform(key, credentialContext, val)
+			if skipStrings {
+				return v, false
+			}
+			redacted := transform(key, spliceKey, credentialContext, val)
 			if redacted == val {
 				return v, false
 			}
@@ -1091,18 +2130,103 @@ func walkRedactableStrings(v any, transform func(key string, credentialContext b
 			return v, false
 		}
 	}
-	return walk("", false, v)
+	return walk("", "", false, false, v)
 }
 
 // redactLeafValue is the per-leaf redaction rule shared by the splice
-// collection pass and the structural re-encode fallback: the redactor first,
-// then the credential-key placeholder for values the redactor left alone.
-func redactLeafValue(key string, credentialContext bool, val string, redactor func(string) string) string {
-	redacted := redactor(val)
-	if redacted == val && isCredentialJSONSecretKey(key, credentialContext) && hasNonPlaceholderPasswordValue(val) {
-		redacted = RedactedPlaceholder
+// collection pass and the structural re-encode fallback: the placeholder for
+// a value whose key reveals a secret the value alone does not, otherwise the
+// redactor, then the credential-key placeholder for values it left alone or
+// in which it found only PII, then IP addresses under a key that names one.
+//
+// The redactor always sees the unchanged value. Rewriting part of it first
+// would stop a rule that needs the whole value, such as an anchored custom
+// rule, from matching, and expose text it used to redact.
+func redactLeafValue(key string, credentialContext bool, val string, redactor leafRedactor) string {
+	if keyContextFindsMore(key, val) {
+		redactor.counts.addPlaceholder(layerKeyContext)
+		return RedactedPlaceholder
 	}
-	return redacted
+	version := isVersionValue(key, val)
+	regions := redactor.detect(val)
+	if version {
+		regions = slices.DeleteFunc(slices.Clone(regions), func(r taggedRegion) bool { return r.builtinIP })
+	}
+	// PII inside a credential value (an address or email next to the
+	// password) does not make the rest of it safe to keep.
+	if onlyPIIRegions(regions) && isCredentialJSONSecretKey(key, credentialContext) &&
+		hasNonPlaceholderKeyValue(key, val, false) && !isNonPasswordCodeLiteral(key, val) {
+		redactor.counts.addPlaceholder(layerCredentialKey)
+		return RedactedPlaceholder
+	}
+	redacted := redactRegions(val, regions, redactor.counts)
+	if version {
+		return redacted
+	}
+	return redactIPsUnderNetworkKey(key, redacted, redactor.counts)
+}
+
+// onlyPIIRegions reports whether every non-empty region is a PII match, true
+// when there are none.
+func onlyPIIRegions(regions []taggedRegion) bool {
+	for _, r := range regions {
+		if r.end > r.start && r.layer != layerPII {
+			return false
+		}
+	}
+	return true
+}
+
+// credentialKeyWords are stems of the keywords of betterleaks' generic-api-key
+// and generic-password rules. Those rules flag a bare value only when a key
+// containing one of them precedes it, as in api_key=<value>.
+var credentialKeyWords = []string{"access", "api", "auth", "cred", "key", "secret", "token", "passw", "psw", "pw"}
+
+// keyContextFindsMore reports whether scanning val as the "key":"val" text it
+// came from flags any part of val that scanning val alone leaves. A leaf
+// scanned on its own has lost its key, so without this {"api_key":"<hex>"}
+// would pass where api_key=<hex> in prose is redacted. Findings inside the key
+// itself do not count.
+//
+// Only keys containing a credentialKeyWords stem pay for the extra scans.
+func keyContextFindsMore(key, val string) bool {
+	if val == "" || !containsCredentialKeyWord(key) {
+		return false
+	}
+	prefix := `"` + key + `":"`
+	start, end := len(prefix), len(prefix)+len(val)
+	var coveredAlone []bool
+	for _, r := range detectAllLayers(prefix + val + `"`) {
+		// A network word in the key makes an IP look key-dependent, but
+		// redactIPsUnderNetworkKey owns that case and keeps the IP token
+		// instead of replacing the whole value.
+		if r.builtinIP && isNetworkKey(key) {
+			continue
+		}
+		s, e := max(r.start, start)-start, min(r.end, end)-start
+		if s >= e {
+			continue
+		}
+		if coveredAlone == nil {
+			coveredAlone = make([]bool, len(val))
+			for _, a := range detectAllLayers(val) {
+				for i := a.start; i < a.end; i++ {
+					coveredAlone[i] = true
+				}
+			}
+		}
+		if slices.Contains(coveredAlone[s:e], false) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCredentialKeyWord(key string) bool {
+	lower := strings.ToLower(key)
+	return slices.ContainsFunc(credentialKeyWords, func(word string) bool {
+		return strings.Contains(lower, word)
+	})
 }
 
 // replKey identifies one (key, original) replacement pair for deduplication.
@@ -1117,18 +2241,29 @@ type replKey struct {
 
 // collectJSONLReplacements walks a parsed JSON value and collects unique
 // string replacements via the supplied per-leaf redactor. JSONLContent
-// passes String; the OPF-enabled flow passes a closure that combines the
-// regex layers with cached batched OPF spans.
-func collectJSONLReplacements(v any, redactor func(string) string) []jsonReplacement {
-	seen := make(map[replKey]bool)
+// passes the regex layers; the OPF-enabled flow combines them with cached
+// batched OPF spans.
+func collectJSONLReplacements(v any, redactor leafRedactor) []jsonReplacement {
+	seen := make(map[replKey]int)
 	var repls []jsonReplacement
-	walkRedactableStrings(v, func(key string, credentialContext bool, val string) string {
+	walkRedactableStrings(v, func(key, spliceKey string, credentialContext bool, val string) string {
+		before := redactor.replacements()
 		redacted := redactLeafValue(key, credentialContext, val, redactor)
 		if redacted != val {
-			k := replKey{key: key, original: val}
-			if !seen[k] {
-				seen[k] = true
-				repls = append(repls, jsonReplacement{key: key, original: val, redacted: redacted})
+			k := replKey{key: spliceKey, original: val}
+			repl := jsonReplacement{
+				key: spliceKey, original: val, redacted: redacted,
+				placeholders: redactor.replacements() - before,
+			}
+			if i, ok := seen[k]; !ok {
+				seen[k] = len(repls)
+				repls = append(repls, repl)
+			} else if hidesMore(redacted, repls[i].redacted) {
+				// The same text can redact differently under another key: an
+				// address under a network key, a password under a credential
+				// key. The splice writes one result into every copy, so keep
+				// the one that hides more.
+				repls[i] = repl
 			}
 		}
 		// Collection only. The fast path splices the raw text, so the tree is
@@ -1136,6 +2271,16 @@ func collectJSONLReplacements(v any, redactor func(string) string) []jsonReplace
 		return val
 	})
 	return repls
+}
+
+// hidesMore reports whether redacted result a hides more than b: a
+// whole-value placeholder hides everything, otherwise more placeholders hide
+// more.
+func hidesMore(a, b string) bool {
+	if b == RedactedPlaceholder {
+		return false
+	}
+	return a == RedactedPlaceholder || strings.Count(a, RedactedPlaceholder) > strings.Count(b, RedactedPlaceholder)
 }
 
 // hasDuplicateJSONKeys reports whether any object in the JSON document spells
@@ -1242,10 +2387,14 @@ func tokenStreamHasDuplicateKeys(dec *json.Decoder) bool {
 // Formatting fidelity is deliberately sacrificed for exactly the lines the
 // splice could not rewrite. Content that cannot be re-encoded fails the
 // redaction, so JSONLBytes refuses to certify rather than shipping the line.
-func ensureReplacementsLanded(content, spliced string, repls []jsonReplacement, redactor func(string) string) (string, error) {
+//
+// The re-encode redacts every leaf again, so the counts roll back to before,
+// taken ahead of the collection pass, and each value is counted once.
+func ensureReplacementsLanded(content, spliced string, repls []jsonReplacement, redactor leafRedactor, before tally) (string, error) {
 	if !spliceMissed(spliced, repls) {
 		return spliced, nil
 	}
+	redactor.rollback(before)
 	return reencodeRedacted(content, redactor)
 }
 
@@ -1275,7 +2424,7 @@ func spliceMissed(spliced string, repls []jsonReplacement) bool {
 	}
 
 	missed := false
-	walkRedactableStrings(parsed, func(key string, _ bool, val string) string {
+	walkRedactableStrings(parsed, func(_, spliceKey string, _ bool, val string) string {
 		if missed {
 			return val
 		}
@@ -1283,7 +2432,7 @@ func spliceMissed(spliced string, repls []jsonReplacement) bool {
 			missed = true
 			return val
 		}
-		if _, ok := originalsByKey[key][val]; ok {
+		if _, ok := originalsByKey[spliceKey][val]; ok {
 			missed = true
 		}
 		return val
@@ -1311,7 +2460,7 @@ var ErrRedactionIncomplete = errors.New("redaction incomplete")
 // Both failure paths wrap ErrRedactionIncomplete: the content already parsed
 // once to get here, so an error is "redaction flagged this and could not
 // finish", never "this is not JSONL".
-func reencodeRedacted(content string, redactor func(string) string) (string, error) {
+func reencodeRedacted(content string, redactor leafRedactor) (string, error) {
 	trimmed := strings.TrimSpace(content)
 	dec := json.NewDecoder(strings.NewReader(trimmed))
 	dec.UseNumber()
@@ -1319,7 +2468,7 @@ func reencodeRedacted(content string, redactor func(string) string) (string, err
 	if err := dec.Decode(&parsed); err != nil {
 		return "", fmt.Errorf("%w: re-parse content for structural redaction: %w", ErrRedactionIncomplete, err)
 	}
-	redactedTree, _ := walkRedactableStrings(parsed, func(key string, credentialContext bool, val string) string {
+	redactedTree, _ := walkRedactableStrings(parsed, func(key, _ string, credentialContext bool, val string) string {
 		return redactLeafValue(key, credentialContext, val, redactor)
 	})
 	var buf bytes.Buffer
@@ -1334,9 +2483,10 @@ func reencodeRedacted(content string, redactor func(string) string) (string, err
 	return lead + encoded + trail, nil
 }
 
-// shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.
-// Skips signature fields (any key ending in "signature"), ID fields (ending in "id"/"ids"),
-// and common path/directory fields.
+// shouldSkipJSONLField returns true if a JSON key's string values should be
+// excluded from scanning/redaction. Skips signature fields (any key ending in
+// "signature"), ID fields (ending in "id"/"ids"), and common path/directory
+// fields. Objects under such a key are still scanned; see walkRedactableStrings.
 func shouldSkipJSONLField(key string) bool {
 	lower := strings.ToLower(key)
 
@@ -1349,10 +2499,25 @@ func shouldSkipJSONLField(key string) bool {
 		return true
 	}
 
+	// Credential-shaped identifier keys carry secrets despite their suffix.
+	// Keep them in the walker so structural key detection can redact even
+	// moderate-entropy values that the value-only scanners would miss.
+	if isCredentialIdentifierKey(normalizeCredentialJSONKey(key)) {
+		return false
+	}
+
 	// Skip ID fields
 	if strings.HasSuffix(lower, "id") || strings.HasSuffix(lower, "ids") {
 		return true
 	}
+
+	// Account fields (google_adsense_account, aws_account, ...) are
+	// deliberately NOT skipped here: shouldSkipJSONLField bypasses every
+	// content layer and prunes whole subtrees, and "service_account" is the
+	// canonical field name of the GCP credential container whose nested
+	// private_key must stay scanned. Low-entropy account identifiers survive
+	// value-level scanning on their own; the text-path false positive is
+	// handled by isNonSecretIdentifierAssignment instead.
 
 	// Skip common path and directory fields from agent transcripts.
 	// These appear frequently in tool calls and are structural, not secrets.

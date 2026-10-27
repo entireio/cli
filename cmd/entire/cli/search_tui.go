@@ -166,6 +166,13 @@ type searchModel struct {
 	// TUI search shares the invocation's discovery cache.
 	semanticSearch semanticSearcher
 
+	// fallbackRepos is the startup repo scope to reuse for re-searches that
+	// carry no inline repo: override when searchCfg names no current repo
+	// (origin unreadable, explicit --repo given). Without it a plain query
+	// after an override would clear Repos and leave semantic search with no
+	// scope at all, while code search keeps its startup scope.
+	fallbackRepos []string
+
 	// warning is the current search's completeness note (partial cell
 	// failure, truncated repo index), shown in the status row — the TUI
 	// counterpart of the one-shot path's stderr warnings.
@@ -322,6 +329,9 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		// Command layer overrides with its session searcher; instrumented
 		// anyway so a forgotten override never silently drops telemetry.
 		semanticSearch: instrumentSemanticSearcher("entire search", newSemanticSearcher(false)),
+	}
+	if cfg.Owner == "" || cfg.Repo == "" {
+		m.fallbackRepos = cfg.Repos
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
@@ -532,6 +542,9 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			cfg.Date = parsed.Date
 			cfg.Branch = parsed.Branch
 			cfg.Repos = parsed.Repos
+			if len(cfg.Repos) == 0 {
+				cfg.Repos = m.fallbackRepos
+			}
 			m.searchCfg = cfg
 			cmds = append(cmds, m.performSearch(cfg))
 		}

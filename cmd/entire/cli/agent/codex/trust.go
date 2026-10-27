@@ -3,35 +3,15 @@ package codex
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-)
 
-// HookTrustGaps returns the snake_case event labels declared in the hooks.json
-// Codex discovers that don't have a matching approval entry in the
-// user's Codex config.toml. Matching parses the full
-// `<hooks.json>:<event>:<group>:<handler>` key, accepts any valid indexes, and
-// compares canonicalized hook paths.
-//
-// This is the structural form of the trust check: we don't recompute
-// Codex's hook hash, we only look at key presence. That misses the
-// "command changed but key is still there" case (status = Modified),
-// but Codex's own startup warning catches those — our purpose here is
-// to surface fresh additions like "you trusted three hooks last month
-// but a new PostToolUse arrived" inside our SessionStart welcome.
-//
-// Returns nil when:
-//   - .codex/hooks.json doesn't exist (entire isn't installed in this repo)
-//   - The authoritative hook location can't be resolved
-//   - The checkout has no local .codex project layer
-//   - The user's config.toml can't be read
-//   - Every declared event already has a state entry
-func HookTrustGaps(ctx context.Context) []string {
-	return InspectHookTrust(ctx).Gaps
-}
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+)
 
 // HookTrustInspection is a structural view of Codex's local approval records.
 // It never computes or copies trusted hashes.
@@ -39,29 +19,6 @@ type HookTrustInspection struct {
 	Declared []string
 	Gaps     []string
 	Known    bool
-}
-
-// InspectHookTrust reports declared events and whether the user's Codex config
-// contains approval records for them. Known is false when config.toml cannot be
-// read, so callers do not mistake an unavailable trust check for active hooks.
-func InspectHookTrust(ctx context.Context) HookTrustInspection {
-	discovery := ResolveHookDiscovery(ctx)
-	if discovery.State != HookDiscoveryResolved || !discovery.ProjectLayerExists() {
-		return HookTrustInspection{}
-	}
-	inspection := inspectDiscoveredHookConfig(ctx, discovery.DiscoveredHooks)
-	if inspection.State != HookFileEntire {
-		return HookTrustInspection{}
-	}
-	return inspectHookTrustForDeclared(discovery.DiscoveredHooks.Path(), inspection.Declared)
-}
-
-func inspectHookTrust(hooksJSONPath string) HookTrustInspection {
-	declared, ok := declaredCodexEvents(hooksJSONPath)
-	if !ok || len(declared) == 0 {
-		return HookTrustInspection{}
-	}
-	return inspectHookTrustForDeclared(hooksJSONPath, declared)
 }
 
 func inspectHookTrustForDeclared(hooksJSONPath string, declared []string) HookTrustInspection {
@@ -88,28 +45,16 @@ func inspectHookTrustForDeclared(hooksJSONPath string, declared []string) HookTr
 	return inspection
 }
 
+// codexConfigPath returns the user-level config.toml, or "" when the Codex
+// home cannot be resolved, which the caller reads as "trust unknown".
 func codexConfigPath() string {
-	if h := os.Getenv("CODEX_HOME"); h != "" {
-		return filepath.Join(h, "config.toml")
-	}
-	home, err := os.UserHomeDir()
+	codexHome, err := resolveCodexHome()
 	if err != nil {
+		logging.Debug(context.Background(), "codex home unresolved; hook trust is unknown",
+			slog.String("error", err.Error()))
 		return ""
 	}
-	return filepath.Join(home, ".codex", "config.toml")
-}
-
-// declaredCodexEvents reads hooks.json and returns the snake_case labels
-// of every event that has at least one handler declared. The bool reports
-// whether the read+parse succeeded — false on missing/malformed file so
-// callers can stay silent rather than mid-flow noise.
-func declaredCodexEvents(hooksJSONPath string) ([]string, bool) {
-	document, err := readHooksDocument(hooksJSONPath)
-	if err != nil || !document.exists {
-		return nil, false
-	}
-	events, err := declaredCodexEventsFromDocument(document)
-	return events, err == nil
+	return filepath.Join(codexHome, "config.toml")
 }
 
 func declaredCodexEventsFromDocument(document *hooksDocument) ([]string, error) {
@@ -133,27 +78,6 @@ func declaredCodexEventsFromDocument(document *hooksDocument) ([]string, error) 
 		}
 	}
 	return events, nil
-}
-
-// MissingEntireHooks reports the managed Codex events that are not present in
-// a repository-local hooks file. It is kept as a compatibility helper for
-// callers that only need the drift list; diagnostics use HookConfigInspection.
-func MissingEntireHooks(repoRoot string) []string {
-	document, err := readHooksDocument(filepath.Join(repoRoot, ".codex", HooksFileName))
-	if err != nil || !document.exists {
-		return nil
-	}
-	var missing []string
-	for _, hook := range managedHooks {
-		var groups []MatcherGroup
-		if err := parseHookType(document.rawHooks, hook.event, &groups); err != nil {
-			return nil
-		}
-		if !hasEntireHook(groups) {
-			missing = append(missing, hook.label)
-		}
-	}
-	return missing
 }
 
 // codexTrustStateHeaderRegex matches `[hooks.state.<key>]` headers in the

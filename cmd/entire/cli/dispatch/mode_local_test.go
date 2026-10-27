@@ -1297,3 +1297,95 @@ func addOriginRemote(t *testing.T, repoDir string) {
 		t.Fatal(err)
 	}
 }
+
+// TestLocalMode_NativeOrigin pins that `entire dispatch --local` works in an
+// Entire-native checkout. The repo group is named by its forge-qualified slug
+// (there is no github.com page to link), where a GitHub checkout keeps its
+// bare name and link.
+func TestLocalMode_NativeOrigin(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "a.txt", "x")
+	testutil.GitAdd(t, dir, "a.txt")
+	testutil.GitCommit(t, dir, "initial")
+	addOriginRemoteURL(t, dir, "entire://aws-us-east-2.entire.io/et/entirehq/entire-api")
+
+	createdAt := time.Now().UTC()
+	seedCommittedCheckpoint(t, dir, seededCheckpoint{
+		id:           testCheckpointID,
+		branch:       "main",
+		createdAt:    createdAt,
+		filesTouched: []string{"a.txt"},
+		outcome:      testLocalFallbackText,
+	})
+
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return createdAt.Add(2 * time.Hour) }
+	t.Cleanup(func() { nowUTC = oldNow })
+
+	t.Chdir(dir)
+
+	got, err := Run(context.Background(), Options{
+		Mode:          ModeLocal,
+		Since:         "7d",
+		Branches:      []string{"main"},
+		TextGenerator: stubGeneratedLocalDispatch(),
+	})
+	if err != nil {
+		t.Fatalf("local dispatch in a native checkout should work, got %v", err)
+	}
+	if len(got.Repos) != 1 {
+		t.Fatalf("expected 1 repo group, got %d", len(got.Repos))
+	}
+	if got.Repos[0].FullName != "et/entirehq/entire-api" {
+		t.Fatalf("expected the native repo to be named by its et/ slug, got %+v", got.Repos[0])
+	}
+	if got.Repos[0].URL != "" {
+		t.Fatalf("a native repo has no github.com page, got URL %q", got.Repos[0].URL)
+	}
+	if len(got.CoveredRepos) != 1 || got.CoveredRepos[0] != "et/entirehq/entire-api" {
+		t.Fatalf("unexpected covered repos: %v", got.CoveredRepos)
+	}
+}
+
+func addOriginRemoteURL(t *testing.T, repoDir, remoteURL string) {
+	t.Helper()
+
+	repo, err := git.PlainOpenWithOptions(repoDir, &git.PlainOpenOptions{DetectDotGit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repo.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{remoteURL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLocalMode_UnknownOriginHostDoesNotSuggestRepos: local mode refuses
+// --repos, so an origin it cannot address must not point the user at it.
+func TestLocalMode_UnknownOriginHostDoesNotSuggestRepos(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "a.txt", "x")
+	testutil.GitAdd(t, dir, "a.txt")
+	testutil.GitCommit(t, dir, "initial")
+	addOriginRemoteURL(t, dir, "https://gitlab.com/acme/thing.git")
+
+	t.Chdir(dir)
+
+	_, err := Run(context.Background(), Options{
+		Mode:          ModeLocal,
+		Since:         "7d",
+		Branches:      []string{"main"},
+		TextGenerator: stubGeneratedLocalDispatch(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "gitlab.com") {
+		t.Fatalf("expected an error naming the host, got %v", err)
+	}
+	if strings.Contains(err.Error(), "--repos") {
+		t.Fatalf("local mode refuses --repos, so its error must not suggest it, got %v", err)
+	}
+}

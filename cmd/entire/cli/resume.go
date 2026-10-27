@@ -79,6 +79,9 @@ most recent commit with a checkpoint.  You'll be prompted to confirm resuming in
 }
 
 func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force bool) error {
+	// Restores and looks up agent transcripts from the user's shell, where a
+	// home an agent reads from its own settings is invisible to the environment.
+	agent.EnableHomeProbes()
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
@@ -1091,7 +1094,7 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 // sessionLogExists reports whether a session log is already on disk, checked
 // through the agent's own session store rather than by statting the path. Lstat,
 // not Stat: a present-but-dangling log still exists and must not be silently
-// overwritten, which is the same distinction the rewind path draws.
+// overwritten.
 func sessionLogExists(ag agent.Agent, repoRoot, sessionLogPath string) bool {
 	store, err := agent.OpenSessionStore(ag, repoRoot)
 	if err != nil {

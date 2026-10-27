@@ -67,17 +67,23 @@ type Deps struct {
 	// AppendReviewEnv), so review/cmd.go cannot import them back.
 	ReviewerFor func(agentName string) reviewtypes.AgentReviewer
 
-	// PostReviewToTrail posts the final review verdict to the current branch's
-	// trail as a finding (the "trail" output destination). Injected from the cli
+	// PostReviewToTrail posts the final review report to the current branch's
+	// trail as findings (the "trail" output destination). Injected from the cli
 	// package because the data API + auth live there. It prints its own success
 	// line to out. nil when trail delivery is unavailable (e.g. tests), in which
 	// case the run falls back to local output with a notice.
-	PostReviewToTrail func(ctx context.Context, out io.Writer, profileName, verdict string) error
+	PostReviewToTrail func(ctx context.Context, out io.Writer, profileName string, report TrailReport) error
 
-	// PrepareTarget resolves a branch, trail ID, or trail URL and checks its
-	// branch out in a worktree. It returns the worktree in which review should
-	// be re-run. Injected because trail API access lives in the parent package.
-	PrepareTarget func(ctx context.Context, out, errOut io.Writer, selector string) (TargetWorktree, error)
+	// ResolveTarget resolves a branch, trail ID, or trail URL to a local branch
+	// and pins its head without checking anything out.
+	ResolveTarget func(ctx context.Context, out, errOut io.Writer, selector string) (ResolvedTarget, error)
+
+	// CheckoutTarget checks a resolved target out (or reuses its worktree);
+	// untrusted hardens the checkout for someone else's code.
+	CheckoutTarget func(ctx context.Context, out, errOut io.Writer, target ResolvedTarget, untrusted bool) (TargetWorktree, error)
+
+	// InspectTrust lists what a checkout would run for the named agents.
+	InspectTrust func(ctx context.Context, source TrustSource, agents []TrustAgent) (TrustInventory, error)
 
 	// RemoveTarget removes a worktree created specifically for this review.
 	// Reused worktrees are never passed to it.
@@ -88,40 +94,8 @@ type Deps struct {
 	RunInWorktree func(ctx context.Context, worktreeRoot string, args, env []string, stdin io.Reader, stdout, stderr io.Writer) error
 }
 
-// NewCommand returns the `entire review` cobra command wired with the
-// provided deps. Callers in the cli package pass a fully-populated Deps;
-// tests pass a Deps with stub fields.
-func NewCommand(deps Deps) *cobra.Command {
-	var configure bool
-	var edit bool
-	var agentOverride string
-	var modelOverride string
-	var baseOverride string
-	var profileOverride string
-	var perRunPrompt string
-	var findings bool
-	var listModels bool
-	var listAgents bool
-	var listProfiles bool
-	var setAgents []string
-	var setJudge string
-	var setOutput string
-	var setLocal bool
-	var reviewTimeout time.Duration
-	var setTask string
-	var setModels []string
-	var setSlots []string
-	var target string
-	var cleanupWorktree bool
-
-	cmd := &cobra.Command{
-		Use: "review",
-		// Hidden from `entire help` while the feature is still maturing —
-		// users who know about it can still run `entire review` / `entire
-		// review --help` and the command works normally.
-		Hidden: true,
-		Short:  "Run a multi-agent review against a branch",
-		Long: `Run a multi-agent review against the current branch or a --target branch:
+// reviewLongHelp is the `entire review --help` text.
+const reviewLongHelp = `Run a multi-agent review against the current branch or a --target branch:
 several reviewer agents review the change in parallel, then a single judge consolidates their
 reports into the final verdict in a closing round. Reviews are saved as named
 profiles in Entire settings and clone-local preferences. On first run, guided
@@ -140,6 +114,10 @@ Flags:
   --set-model    with --configure: per-reviewer model as agent=model (repeatable)
   --set-slot     with --configure: a reviewer slot as agent[=model] (repeatable;
                  the same agent/model may repeat to run it multiple times)
+  --set-config   with --configure: a reviewer's own agent config as
+                 reviewer=<config.json|isolated|none> (repeatable). It replaces
+                 the reviewed checkout's hooks, MCP servers and extensions; the
+                 checkout's skills still load. Saved to clone-local preferences.
   --edit         re-open the advanced profile skill picker
   --findings     browse local findings; pass a handle to print one saved run
   --agent NAME   run only one reviewer from the selected profile
@@ -165,9 +143,55 @@ Flags:
   --cleanup-worktree
                  remove a newly-created target worktree after a successful
                  review. Interactive runs ask when this flag is omitted.
+  --show-config  list what the review would run (hooks, MCP servers, settings)
+                 and exit without checking anything out. Add --json for
+                 structured output.
+  --trust-target SHA
+                 approve reviewing code by someone else at this commit. Reviews
+                 of commits you did not author need approval because the
+                 reviewer loads the checkout's hooks, MCP servers, and settings.
 
 To tag an already-finished session as a review, use
-'entire session attach --review <id>'.`,
+'entire session attach --review <id>'.`
+
+// NewCommand returns the `entire review` cobra command wired with the
+// provided deps. Callers in the cli package pass a fully-populated Deps;
+// tests pass a Deps with stub fields.
+func NewCommand(deps Deps) *cobra.Command {
+	var configure bool
+	var edit bool
+	var agentOverride string
+	var modelOverride string
+	var baseOverride string
+	var profileOverride string
+	var perRunPrompt string
+	var findings bool
+	var listModels bool
+	var listAgents bool
+	var listProfiles bool
+	var setAgents []string
+	var setJudge string
+	var setOutput string
+	var setLocal bool
+	var reviewTimeout time.Duration
+	var setTask string
+	var setModels []string
+	var setSlots []string
+	var setConfigs []string
+	var target string
+	var cleanupWorktree bool
+	var trustTarget string
+	var showConfig bool
+	var showConfigJSON bool
+
+	cmd := &cobra.Command{
+		Use: "review",
+		// Hidden from `entire help` while the feature is still maturing —
+		// users who know about it can still run `entire review` / `entire
+		// review --help` and the command works normally.
+		Hidden: true,
+		Short:  "Run a multi-agent review against a branch",
+		Long:   reviewLongHelp,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return fmt.Errorf("accepts at most one argument, received %d", len(args))
@@ -179,18 +203,33 @@ To tag an already-finished session as a review, use
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			// Discover external agents so review configs that target them
+			// resolve correctly — without this, GetAgentsWithHooksInstalled
+			// and agent.Get can't see them. Before --target too: the gate also
+			// needs their declared caller variables.
+			external.DiscoverAndRegister(ctx)
+			gateOpts := reviewGateOptions{
+				TrustTarget:    trustTarget,
+				Command:        reviewInvocation(cmd, args),
+				AgentOverride:  agentOverride,
+				ShowConfig:     showConfig,
+				ShowConfigJSON: showConfigJSON,
+			}
 			if target != "" {
-				modeSelected := configure || edit || findings || listProfiles || listAgents || listModels
-				return runTargetReview(ctx, cmd, target, reviewTargetChildArgs(cmd, args), cleanupWorktree, modeSelected, deps)
+				return runTargetReview(ctx, cmd, targetReviewRequest{
+					Target:          target,
+					Positional:      args,
+					ProfileOverride: profileOverride,
+					CleanupWorktree: cleanupWorktree,
+					ShowConfig:      showConfig,
+					ShowConfigJSON:  showConfigJSON,
+					ModeSelected:    configure || edit || findings || listProfiles || listAgents || listModels,
+					Gate:            gateOpts,
+				}, deps)
 			}
 			if cleanupWorktree {
 				return errors.New("--cleanup-worktree requires --target")
 			}
-
-			// Discover external agents so review configs that target them
-			// resolve correctly — without this, GetAgentsWithHooksInstalled
-			// and agent.Get can't see them.
-			external.DiscoverAndRegister(ctx)
 
 			if listModels {
 				return runReviewListModels(ctx, cmd, agentOverride, deps)
@@ -228,13 +267,14 @@ To tag an already-finished session as a review, use
 			}
 			if configure {
 				return runReviewConfigure(ctx, cmd, profileName, reviewConfigureOptions{
-					Agents: setAgents,
-					Judge:  setJudge,
-					Output: setOutput,
-					Local:  setLocal,
-					Task:   setTask,
-					Models: setModels,
-					Slots:  setSlots,
+					Agents:  setAgents,
+					Judge:   setJudge,
+					Output:  setOutput,
+					Local:   setLocal,
+					Task:    setTask,
+					Models:  setModels,
+					Slots:   setSlots,
+					Configs: setConfigs,
 				}, deps)
 			}
 			if edit {
@@ -258,7 +298,10 @@ To tag an already-finished session as a review, use
 			// default 0, an explicit --timeout 0, and a negative all mean
 			// "reviewers run until done". The judge derives its own bound via
 			// judgeTimeoutArg and is never uncapped.
-			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, reviewTimeout, deps)
+			if targetPrompt := takeTargetChildPrompt(); targetPrompt != "" && !cmd.Flags().Changed("prompt") {
+				perRunPrompt = targetPrompt
+			}
+			return runReview(ctx, cmd, agentOverride, modelOverride, baseOverride, profileName, perRunPrompt, reviewTimeout, gateOpts, deps)
 		},
 	}
 	cmd.Flags().BoolVar(&configure, "configure", false, "set up a review profile; shows available agents and accepts --set-* flags for non-interactive config")
@@ -269,6 +312,7 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&setTask, "set-task", "", "with --configure: the profile's canonical task text")
 	cmd.Flags().StringArrayVar(&setModels, "set-model", nil, "with --configure: per-reviewer model as agent=model (repeatable)")
 	cmd.Flags().StringArrayVar(&setSlots, "set-slot", nil, "with --configure: a reviewer slot as agent[=model] (repeatable; same agent/model may repeat)")
+	cmd.Flags().StringArrayVar(&setConfigs, "set-config", nil, "with --configure: a reviewer's own agent config as reviewer=<config.json|isolated|none> (repeatable; saved to clone-local preferences)")
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the advanced review profile skill picker")
 	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings; pass a handle to print one saved run")
 	cmd.Flags().BoolVar(&listAgents, "agents", false, "list the reviewer agents you can pass to --agent for the selected profile")
@@ -281,11 +325,12 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
 	cmd.Flags().StringVar(&target, "target", "", "branch, trail ID, or Entire trail URL to check out in a worktree and review")
 	cmd.Flags().BoolVar(&cleanupWorktree, "cleanup-worktree", false, "remove a newly-created target worktree after a successful review (interactive runs ask when omitted)")
+	registerTrustFlags(cmd, &trustTarget, &showConfig, &showConfigJSON)
 	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 20m default")
 	// The listing modes and the action modes each select a distinct command
 	// behavior; combining them silently runs one and drops the rest, so reject
 	// the combination up front with a clear cobra error.
-	cmd.MarkFlagsMutuallyExclusive("configure", "edit", "findings", "list", "agents", "models")
+	cmd.MarkFlagsMutuallyExclusive("configure", "edit", "findings", "list", "agents", "models", "show-config")
 	return cmd
 }
 
@@ -298,6 +343,8 @@ type reviewConfigureOptions struct {
 	Task   string   // profile task text (--set-task)
 	Models []string // per-reviewer "agent=model" entries (--set-model)
 	Slots  []string // reviewer slots as "agent[=model]" entries (--set-slot)
+	// Configs are reviewer agent configs as "reviewer=<file|isolated|none>" (--set-config).
+	Configs []string
 }
 
 // reviewCommandIsInteractive requires the exact stdin consumed by huh and
@@ -339,7 +386,7 @@ func (o reviewConfigureOptions) scripted() bool {
 	// Local selects the destination only; by itself it must not force the
 	// non-interactive/scripted path. `entire review --configure --local` should
 	// still run the guided picker and preselect the local settings file.
-	return len(o.Agents) > 0 || o.Judge != "" || o.Output != "" || o.Task != "" || len(o.Models) > 0 || len(o.Slots) > 0
+	return len(o.Agents) > 0 || o.Judge != "" || o.Output != "" || o.Task != "" || len(o.Models) > 0 || len(o.Slots) > 0 || len(o.Configs) > 0
 }
 
 func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride string, opts reviewConfigureOptions, deps Deps) error {
@@ -371,21 +418,41 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 
 	// Scripted path: build + save the profile from --set-* flags, no TUI. The
 	// destination is the --local flag (default: project settings).
+	if len(opts.Configs) > 0 && !opts.withoutConfigs().scripted() {
+		return configureAgentConfigs(ctx, cmd, profileName, opts.Configs, silentErr)
+	}
 	if opts.scripted() {
+		fail := func(err error) error {
+			cmd.SilenceUsage = true
+			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+			return silentErr(err)
+		}
+		if profileHasUnverifiedFields(s, profileName, s.ReviewProfiles[profileName]) {
+			return fail(errUnverifiedLocalProfile(profileName, "--configure"))
+		}
 		profile, buildErr := buildConfiguredProfile(ctx, profileName, opts, s, deps)
 		if buildErr != nil {
-			cmd.SilenceUsage = true
-			fmt.Fprintln(cmd.ErrOrStderr(), buildErr.Error())
-			return silentErr(buildErr)
+			return fail(buildErr)
 		}
 		scope := reviewScopeProject
 		if opts.Local {
 			scope = reviewScopeLocal
+			// The loaded view carries configs from clone-local preferences, and
+			// --set-agents rebuilds reviewers without theirs: keep exactly the
+			// configs the local file already stores for the reviewers kept.
+			if err := keepStoredLocalConfigs(ctx, profileName, &profile); err != nil {
+				return fail(err)
+			}
 		}
 		if err := saveReviewProfile(ctx, profileName, profile, false, scope); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "Review profile %q saved to %s with %s.\n", profileName, scope.file(), strings.Join(sortedMapKeys(profile.Agents), ", "))
+		if len(opts.Configs) > 0 {
+			if err := configureAgentConfigs(ctx, cmd, profileName, opts.Configs, silentErr); err != nil {
+				return err
+			}
+		}
 		fmt.Fprintf(out, "Run `entire review %s` to start.\n", profileName)
 		return nil
 	}
@@ -510,7 +577,11 @@ func runReviewListProfiles(ctx context.Context, cmd *cobra.Command, deps Deps) e
 			if model == "" {
 				model = "default"
 			}
-			reviewers = append(reviewers, reviewAgentName(w, cfg)+" · "+model)
+			label := reviewAgentName(w, cfg) + " · " + model
+			if cfg.Config != nil {
+				label += " · own agent config"
+			}
+			reviewers = append(reviewers, label)
 		}
 		fmt.Fprintf(out, "    reviewers: %s\n", strings.Join(reviewers, ", "))
 
@@ -788,8 +859,16 @@ func judgeTimeoutArg(reviewerArg time.Duration) time.Duration {
 	return max(reviewerArg, 0)
 }
 
-// runReview executes the main review flow.
-func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOverride, baseOverride, profileOverride, perRunPrompt string, timeout time.Duration, deps Deps) error {
+// reviewProfileSelection is the resolved profile; done means setup ended the run.
+type reviewProfileSelection struct {
+	name      string
+	profile   settings.ReviewProfileConfig
+	installed []types.AgentName
+	done      bool
+}
+
+// resolveReviewProfile selects the profile, running setup or the chooser if needed.
+func resolveReviewProfile(ctx context.Context, cmd *cobra.Command, profileOverride, agentOverride string, deps Deps) (reviewProfileSelection, error) {
 	out := cmd.OutOrStdout()
 	silentErr := deps.NewSilentError
 
@@ -797,7 +876,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	if _, err := paths.WorktreeRoot(ctx); err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run `entire enable` first.")
-		return silentErr(errors.New("not a git repository"))
+		return reviewProfileSelection{}, silentErr(errors.New("not a git repository"))
 	}
 
 	// 2. Load config. A load error means the settings file exists but is
@@ -805,13 +884,13 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	// missing). Surface the error instead of silently opening the picker,
 	// which would cause the config writer to write over the user's other
 	// settings with an empty EntireSettings{}.
-	s, err := settings.Load(ctx)
+	s, err := settings.Load(reviewSettingsContext(ctx))
 	if err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to load settings: %v\n", err)
 		fmt.Fprintln(cmd.ErrOrStderr(),
 			"Fix your Entire settings or clone-local review preferences and re-run `entire review`.")
-		return silentErr(err)
+		return reviewProfileSelection{}, silentErr(err)
 	}
 	installed := deps.GetAgentsWithHooksInstalled(ctx)
 	if s == nil {
@@ -835,7 +914,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		} else {
 			fmt.Fprintln(eo, "No review profiles configured. Run `entire review --configure` in a terminal first.")
 		}
-		return silentErr(errors.New("no profile specified"))
+		return reviewProfileSelection{}, silentErr(errors.New("no profile specified"))
 	}
 
 	// Trigger first-run setup when no usable profile exists. Counting only
@@ -854,11 +933,11 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 			var setupErr error
 			profileForSetup, profile, setupErr = RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, profileForSetup, true, s)
 			if setupErr != nil {
-				return handlePickerError(cmd, silentErr, setupErr)
+				return reviewProfileSelection{}, handlePickerError(cmd, silentErr, setupErr)
 			}
 			scope, scopeErr := promptForSettingsScope(ctx, false)
 			if scopeErr != nil {
-				return handlePickerError(cmd, silentErr, scopeErr)
+				return reviewProfileSelection{}, handlePickerError(cmd, silentErr, scopeErr)
 			}
 			saveScope = scope
 		} else {
@@ -869,15 +948,15 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 			if defaultErr != nil {
 				cmd.SilenceUsage = true
 				fmt.Fprintln(cmd.ErrOrStderr(), defaultErr.Error())
-				return silentErr(defaultErr)
+				return reviewProfileSelection{}, silentErr(defaultErr)
 			}
 			profile = defaultProfile
 			fmt.Fprintf(out, "No review profiles found; using default %q profile with %s.\n", profileForSetup, strings.Join(sortedMapKeys(profile.Agents), ", "))
 			fmt.Fprintln(out, "Configure later with `entire review --configure`.")
 			fmt.Fprintln(out)
 		}
-		if saveErr := saveReviewProfile(ctx, profileForSetup, profile, false, saveScope); saveErr != nil {
-			return saveErr
+		if saveErr := saveReviewProfile(reviewSettingsContext(ctx), profileForSetup, profile, false, saveScope); saveErr != nil {
+			return reviewProfileSelection{}, saveErr
 		}
 		s.ReviewProfiles = map[string]settings.ReviewProfileConfig{profileForSetup: profile}
 		s.ReviewDefaultProfile = profileForSetup
@@ -887,10 +966,10 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		if guidedSetup {
 			runNow, confirmErr := ConfirmRunReviewNow(ctx, out)
 			if confirmErr != nil {
-				return handlePickerError(cmd, silentErr, confirmErr)
+				return reviewProfileSelection{}, handlePickerError(cmd, silentErr, confirmErr)
 			}
 			if !runNow {
-				return nil
+				return reviewProfileSelection{done: true}, nil
 			}
 			fmt.Fprintln(out)
 		}
@@ -901,7 +980,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	if profileOverride == "" {
 		picked, pickErr := promptForProfileToRun(ctx, s)
 		if pickErr != nil {
-			return handlePickerError(cmd, silentErr, pickErr)
+			return reviewProfileSelection{}, handlePickerError(cmd, silentErr, pickErr)
 		}
 		profileOverride = picked
 	}
@@ -910,11 +989,151 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	if err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-		return silentErr(err)
+		return reviewProfileSelection{}, silentErr(err)
 	}
 	notifyDroppedReviewPrompts(cmd.ErrOrStderr(), s, profileName)
+	// A reviewer config the user set locally but that can't be honored must
+	// stop the review: running it with the checkout's config instead would
+	// silently undo the isolation they asked for.
+	var unverified []string
+	for _, rej := range s.AgentPromptRejections() {
+		if settings.AgentConfigRejectionUnverified(rej) {
+			unverified = append(unverified, rej.Field)
+		}
+	}
+	if field, ok := unverifiedReviewerConfig(unverified, profileName, profile, agentOverride); ok {
+		cmd.SilenceUsage = true
+		err := fmt.Errorf("%s can't be applied: .entire/settings.local.json could not be verified as untracked; untrack it (git rm --cached .entire/settings.local.json) or remove the profile from it, then set the config again with entire review --configure %s --set-config", field, profileName)
+		fmt.Fprintln(cmd.ErrOrStderr(), "Not run: "+err.Error())
+		return reviewProfileSelection{}, silentErr(err)
+	}
 	profile.Task = profileTask(profileName, profile)
 	profile.Agents = nonZeroAgentConfigs(profile.Agents)
+	return reviewProfileSelection{name: profileName, profile: profile, installed: installed}, nil
+}
+
+// printBlockedTools reports tools a reviewer tried to call but its permission
+// settings denied, and where to allow them. The review itself completed.
+func printBlockedTools(w io.Writer, profileName string, summary reviewtypes.RunSummary) {
+	for _, run := range summary.AgentRuns {
+		var names []string
+		allow := ""
+		for _, ev := range run.Buffer {
+			if blocked, ok := ev.(reviewtypes.ToolsBlocked); ok {
+				for _, name := range blocked.Names {
+					if !slices.Contains(names, name) {
+						names = append(names, name)
+					}
+				}
+				allow = blocked.Allow
+			}
+		}
+		if len(names) == 0 {
+			continue
+		}
+		fmt.Fprintf(w, "%s: its permission settings blocked %s.\n", run.Name, strings.Join(names, ", "))
+		fmt.Fprintf(w, "  To allow them, %s; update the profile config with entire review --configure %s --set-config <reviewer>=<file>.\n", allow, profileName)
+	}
+}
+
+// errUnverifiedLocalProfile refuses to save profileName from a view that is
+// missing what Load dropped from an unverified local file.
+func errUnverifiedLocalProfile(profileName, flag string) error {
+	return fmt.Errorf("review profile %q is in .entire/settings.local.json, which could not be verified as untracked, so its prompts and reviewer configs aren't loaded and saving would erase them; untrack it (git rm --cached .entire/settings.local.json) and run %s again", profileName, flag)
+}
+
+// keepStoredLocalConfigs sets each reviewer's config in profile to the one the
+// local settings file stores for it, if any.
+func keepStoredLocalConfigs(ctx context.Context, profileName string, profile *settings.ReviewProfileConfig) error {
+	_, raw, err := loadReviewSettingsRaw(ctx, reviewScopeLocal)
+	if err != nil {
+		return err
+	}
+	stored, err := decodeRawReviewProfiles(raw)
+	if err != nil {
+		return err
+	}
+	agents := make(map[string]settings.ReviewConfig, len(profile.Agents))
+	for worker, cfg := range profile.Agents {
+		cfg.Config = stored[profileName].Agents[worker].Config
+		agents[worker] = cfg
+	}
+	profile.Agents = agents
+	return nil
+}
+
+// profileHasUnverifiedFields reports whether Load dropped any of profileName's
+// prompts or reviewer configs because the local file holding them could not be
+// verified.
+func profileHasUnverifiedFields(s *settings.EntireSettings, profileName string, profile settings.ReviewProfileConfig) bool {
+	prefix := "review_profiles." + profileName + "."
+	fields := []string{prefix + "task", prefix + "judge.prompt"}
+	for worker := range profile.Agents {
+		fields = append(fields, prefix+"agents."+worker+".prompt", prefix+"agents."+worker+".config")
+	}
+	for _, rej := range s.AgentPromptRejections() {
+		if settings.RejectionUnverified(rej) && slices.Contains(fields, rej.Field) {
+			return true
+		}
+	}
+	return false
+}
+
+// unverifiedReviewerConfig returns the first of the unverified (dropped)
+// config fields that belongs to a reviewer of profileName that will run.
+func unverifiedReviewerConfig(unverified []string, profileName string, profile settings.ReviewProfileConfig, agentOverride string) (string, bool) {
+	workers := sortedStringKeys(profile.Agents)
+	if agentOverride != "" {
+		if worker, _, err := selectProfileWorker(profile, agentOverride); err == nil {
+			workers = []string{worker}
+		}
+	}
+	for _, worker := range workers {
+		field := "review_profiles." + profileName + ".agents." + worker + ".config"
+		if slices.Contains(unverified, field) {
+			return field, true
+		}
+	}
+	return "", false
+}
+
+// runReview executes the main review flow.
+func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOverride, baseOverride, profileOverride, perRunPrompt string, timeout time.Duration, gateOpts reviewGateOptions, deps Deps) error {
+	out := cmd.OutOrStdout()
+	silentErr := deps.NewSilentError
+
+	if err := gateOpts.validate(); err != nil {
+		return err
+	}
+	if gateOpts.ShowConfig {
+		return runReviewShowConfig(ctx, cmd, profileOverride, gateOpts, deps)
+	}
+	selection, err := resolveReviewProfile(ctx, cmd, profileOverride, agentOverride, deps)
+	if err != nil || selection.done {
+		return err
+	}
+	profileName, profile, installed := selection.name, selection.profile, selection.installed
+
+	// Gate before the reviewers load the checkout's configuration.
+	if err := gatePlainReview(ctx, cmd, gateOpts, profileTrustAgents(profile, agentOverride), deps); err != nil {
+		if errors.Is(err, errTrustCancelled) {
+			return nil
+		}
+		return err
+	}
+	running := nonZeroAgentConfigs(profile.Agents)
+	if agentOverride != "" {
+		if worker, cfg, err := selectProfileWorker(profile, agentOverride); err == nil {
+			running = map[string]settings.ReviewConfig{worker: cfg}
+		}
+	}
+	for _, worker := range sortedMapKeys(running) {
+		if running[worker].Config != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s: using your profile's agent config; this checkout's hooks, MCP servers and extensions are not loaded.\n", worker)
+			warnAgentConfig(ctx, cmd.ErrOrStderr(), worker, running[worker].Config)
+		}
+	}
+
 	outputMode := profileOutput(profile)
 
 	if agentOverride != "" {
@@ -1124,6 +1343,8 @@ func runSingleAgentPath(
 		// No review runner adapter yet: write marker (with scope-aware prompt) and print guidance.
 		return RunMarkerFallback(ctx, agentName, runCfg, worktreeRoot, out)
 	}
+	// Set after the marker fallback, whose output is never posted to the trail.
+	runCfg.TrailFindingsJSON = outputMode == ReviewOutputTrail
 	reviewer = &perAgentConfiguredReviewer{name: displayName, inner: reviewer, cfg: runCfg}
 
 	runCtx, cancelRun := context.WithCancel(ctx)
@@ -1131,11 +1352,12 @@ func runSingleAgentPath(
 
 	runCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
 	sinks := composeSingleAgentSinks(singleAgentSinkInputs{
-		out:       out,
-		isTTY:     canPrompt,
-		canPrompt: canPrompt,
-		agentName: displayName,
-		cancelRun: cancelRun,
+		out:               out,
+		isTTY:             canPrompt,
+		canPrompt:         canPrompt,
+		agentName:         displayName,
+		cancelRun:         cancelRun,
+		trailFindingsJSON: runCfg.TrailFindingsJSON,
 	})
 	if tuiSink, ok := findTUISink(sinks); ok {
 		tuiSink.Start()
@@ -1143,7 +1365,8 @@ func runSingleAgentPath(
 	}
 
 	summary, waitErr := Run(runCtx, reviewer, runCfg, sinks)
-	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, "")
+	printBlockedTools(cmd.ErrOrStderr(), profileName, summary)
+	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, "", runCfg.TrailFindingsJSON)
 	maybePostReviewToTrail(ctx, out, deps, outputMode, profileName, summary, "")
 	if waitErr != nil && runCtx.Err() == nil && ctx.Err() == nil {
 		// Non-cancellation error: surface to caller.
@@ -1273,6 +1496,7 @@ func runMultiAgentPath(
 				PerRunPrompt:      perRunPrompt,
 				ScopeBaseRef:      scopeBaseRef,
 				CheckpointContext: checkpointContext,
+				TrailFindingsJSON: outputMode == ReviewOutputTrail,
 				StartingSHA:       headSHA,
 			}, agentCfg),
 		})
@@ -1311,6 +1535,7 @@ func runMultiAgentPath(
 		profileName:       profileName,
 		task:              profile.Task,
 		masterName:        masterLabel,
+		trailFindingsJSON: outputMode == ReviewOutputTrail,
 		judgeTimeout:      judgeTimeoutArg(timeout),
 		onSynthesisResult: func(result string) {
 			aggregateOutput = result
@@ -1328,12 +1553,13 @@ func runMultiAgentPath(
 	runMultiCfg.EnrichAgentRun = reviewAgentRunTokenEnricherForRuns(worktreeRoot, headSHA, plannedAgentRunsForReviewers(reviewers, runMultiCfg))
 	runMultiCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
 	summary, waitErr := RunMulti(runCtx, reviewers, runMultiCfg, sinks)
+	printBlockedTools(cmd.ErrOrStderr(), profileName, summary)
 	if shouldAbortMultiReview(summary, waitErr) && runCtx.Err() == nil && ctx.Err() == nil {
 		// Operational failure, not a usage error — don't dump the command help.
 		cmd.SilenceUsage = true
 		return multiReviewFailureError(waitErr)
 	}
-	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput)
+	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput, outputMode == ReviewOutputTrail)
 	maybePostReviewToTrail(ctx, out, deps, outputMode, profileName, summary, aggregateOutput)
 	// The judge produces the review's primary deliverable — the consolidated
 	// verdict. If it was attempted but failed (provider error or timeout), the
@@ -1391,6 +1617,7 @@ type multiAgentSinkInputs struct {
 	profileName       string
 	task              string
 	masterName        string
+	trailFindingsJSON bool
 	// judgeTimeout bounds the judge's consolidation call, following the same
 	// three-state convention as the reviewer timeout (positive: use it; zero:
 	// default; negative: disabled). Set from the resolved --timeout so one knob
@@ -1401,11 +1628,12 @@ type multiAgentSinkInputs struct {
 }
 
 type singleAgentSinkInputs struct {
-	out       io.Writer
-	isTTY     bool
-	canPrompt bool
-	agentName string
-	cancelRun context.CancelFunc
+	out               io.Writer
+	isTTY             bool
+	canPrompt         bool
+	agentName         string
+	cancelRun         context.CancelFunc
+	trailFindingsJSON bool
 }
 
 // composeMultiAgentSinks builds the sink slice for a multi-agent run. The
@@ -1421,23 +1649,24 @@ type singleAgentSinkInputs struct {
 func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 	sinks := []reviewtypes.Sink{}
 	if in.isTTY {
-		tui := NewTUISink(in.agentNames, in.cancelRun, in.out, os.Stdin)
+		tui := NewTUISink(in.agentNames, in.cancelRun, in.out, os.Stdin, in.trailFindingsJSON)
 		sinks = append(sinks, tui)
 		if in.synthesisProvider != nil {
 			postRunOut := &bytes.Buffer{}
-			sinks = append(sinks, DumpSink{W: postRunOut})
+			sinks = append(sinks, DumpSink{W: postRunOut, TrailFindingsJSON: in.trailFindingsJSON})
 			sinks = append(sinks, SynthesisSink{
-				Provider:        in.synthesisProvider,
-				Writer:          postRunOut,
-				RenderWriter:    in.out,
-				PerRunPrompt:    in.perRunPrompt,
-				ProfileName:     in.profileName,
-				Task:            in.task,
-				MasterName:      in.masterName,
-				RunContext:      in.runContext,
-				ProviderTimeout: in.judgeTimeout,
-				OnResult:        in.onSynthesisResult,
-				OnError:         in.onSynthesisError,
+				Provider:          in.synthesisProvider,
+				Writer:            postRunOut,
+				RenderWriter:      in.out,
+				PerRunPrompt:      in.perRunPrompt,
+				ProfileName:       in.profileName,
+				Task:              in.task,
+				MasterName:        in.masterName,
+				TrailFindingsJSON: in.trailFindingsJSON,
+				RunContext:        in.runContext,
+				ProviderTimeout:   in.judgeTimeout,
+				OnResult:          in.onSynthesisResult,
+				OnError:           in.onSynthesisError,
 				OnStart: func() {
 					tui.FinalPhaseStarted(finalJudgeDisplayName(in.masterName))
 				},
@@ -1449,23 +1678,24 @@ func composeMultiAgentSinks(in multiAgentSinkInputs) []reviewtypes.Sink {
 			return sinks
 		}
 		sinks = append(sinks, tuiPostRunCompleteSink{tui: tui})
-		sinks = append(sinks, DumpSink{W: in.out})
+		sinks = append(sinks, DumpSink{W: in.out, TrailFindingsJSON: in.trailFindingsJSON})
 		return sinks
 	}
 
-	sinks = append(sinks, DumpSink{W: in.out})
+	sinks = append(sinks, DumpSink{W: in.out, TrailFindingsJSON: in.trailFindingsJSON})
 	if in.synthesisProvider != nil {
 		sinks = append(sinks, SynthesisSink{
-			Provider:        in.synthesisProvider,
-			Writer:          in.out,
-			PerRunPrompt:    in.perRunPrompt,
-			ProfileName:     in.profileName,
-			Task:            in.task,
-			MasterName:      in.masterName,
-			RunContext:      in.runContext,
-			ProviderTimeout: in.judgeTimeout,
-			OnResult:        in.onSynthesisResult,
-			OnError:         in.onSynthesisError,
+			Provider:          in.synthesisProvider,
+			Writer:            in.out,
+			PerRunPrompt:      in.perRunPrompt,
+			ProfileName:       in.profileName,
+			Task:              in.task,
+			MasterName:        in.masterName,
+			TrailFindingsJSON: in.trailFindingsJSON,
+			RunContext:        in.runContext,
+			ProviderTimeout:   in.judgeTimeout,
+			OnResult:          in.onSynthesisResult,
+			OnError:           in.onSynthesisError,
 		})
 	}
 	return sinks
@@ -1527,12 +1757,13 @@ func maybePostReviewToTrail(
 	if outputMode != ReviewOutputTrail || summary.Cancelled {
 		return
 	}
-	verdict := strings.TrimSpace(aggregateOutput)
-	if verdict == "" {
-		verdict = combinedReviewNarratives(summary)
-	}
-	if verdict == "" {
+	report, post := trailReportFor(summary, aggregateOutput)
+	if !post {
 		fmt.Fprintln(out, "Nothing to report, so nothing was posted to the trail.")
+		return
+	}
+	if len(report.Comments) == 0 && strings.TrimSpace(report.Prose) == "" {
+		fmt.Fprintln(out, "The review produced no readable report, so nothing was posted to the trail.")
 		return
 	}
 	if deps.PostReviewToTrail == nil {
@@ -1540,7 +1771,7 @@ func maybePostReviewToTrail(
 		return
 	}
 	// On success the hook prints its own confirmation and trail link.
-	if err := deps.PostReviewToTrail(ctx, out, profileName, verdict); err != nil {
+	if err := deps.PostReviewToTrail(ctx, out, profileName, report); err != nil {
 		if !userMessageAlreadyPrinted(err) {
 			fmt.Fprintf(out, "Could not post the review to the trail: %v\n", err)
 		}
@@ -1556,13 +1787,19 @@ func userMessageAlreadyPrinted(err error) bool {
 	return errors.As(err, &printed) && printed.AlreadyPrinted()
 }
 
-// combinedReviewNarratives joins the reviewers' narratives into one document,
-// used as the trail-posting body for single-reviewer runs (which have no
-// synthesized verdict) and as a fallback when synthesis produced nothing.
-func combinedReviewNarratives(summary reviewtypes.RunSummary) string {
+// combinedReviewNarratives joins the given reviewers' narratives into one
+// document, the trail-posting body for reviewers whose JSON contract cannot
+// be posted. A reviewer that ended its report with a contract line
+// contributes only that report, so exploration narration is not posted as
+// findings; any other reviewer contributes its whole narrative.
+func combinedReviewNarratives(runs []reviewtypes.AgentRun) string {
 	var b strings.Builder
-	for _, run := range usableAgentRuns(summary) {
-		narrative := joinAssistantText(run.Buffer)
+	for _, run := range runs {
+		text := reportText(run.Buffer)
+		if text == "" {
+			text = joinAssistantText(run.Buffer)
+		}
+		narrative, _, _ := splitTrailJSON(text)
 		if narrative == "" {
 			continue
 		}
@@ -1581,6 +1818,7 @@ func writePostReviewManifest(
 	headSHA string,
 	summary reviewtypes.RunSummary,
 	aggregateOutput string,
+	trailFindingsJSON bool,
 ) {
 	if summary.Cancelled || len(summary.AgentRuns) == 0 {
 		return
@@ -1598,6 +1836,7 @@ func writePostReviewManifest(
 		return
 	}
 	manifest.WorktreePath = reviewManifestWorktreePath(worktreeRoot)
+	manifest.TrailFindingsJSON = trailFindingsJSON
 	if len(manifest.Sources) == 0 {
 		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
 		if sentinel {
@@ -1689,13 +1928,13 @@ func reviewAgentRunTokenEnricherForRuns(worktreeRoot, headSHA string, planned []
 func composeSingleAgentSinks(in singleAgentSinkInputs) []reviewtypes.Sink {
 	if !in.isTTY || !in.canPrompt {
 		fmt.Fprintf(in.out, "Running review with %s...\n", in.agentName)
-		return []reviewtypes.Sink{DumpSink{W: in.out}}
+		return []reviewtypes.Sink{DumpSink{W: in.out, TrailFindingsJSON: in.trailFindingsJSON}}
 	}
-	tui := NewTUISink([]string{in.agentName}, in.cancelRun, in.out, os.Stdin)
+	tui := NewTUISink([]string{in.agentName}, in.cancelRun, in.out, os.Stdin, in.trailFindingsJSON)
 	postRunOut := &bytes.Buffer{}
 	return []reviewtypes.Sink{
 		tui,
-		DumpSink{W: postRunOut},
+		DumpSink{W: postRunOut, TrailFindingsJSON: in.trailFindingsJSON},
 		tuiPostRunCompleteSink{tui: tui, buf: postRunOut, out: in.out},
 	}
 }
@@ -1709,6 +1948,7 @@ func applyReviewConfig(runCfg *reviewtypes.RunConfig, cfg settings.ReviewConfig)
 	runCfg.Model = strings.TrimSpace(cfg.Model)
 	runCfg.Skills = cfg.Skills
 	runCfg.AlwaysPrompt = cfg.Prompt
+	runCfg.AgentConfig = toAgentConfig(cfg.Config)
 }
 
 // findTUISink returns the first *TUISink in the slice (if any). Used by the

@@ -247,6 +247,11 @@ type ClonePreferences struct {
 	ReviewProfiles       map[string]ReviewProfileConfig `json:"review_profiles,omitempty"`
 	ReviewDefaultProfile string                         `json:"review_default_profile,omitempty"`
 
+	// ReviewAgentConfigs holds reviewer agent configs by profile, then
+	// reviewer. They overlay the effective profile at load, so the profile's
+	// other fields keep coming from whichever layer defines them.
+	ReviewAgentConfigs map[string]map[string]*ReviewAgentConfig `json:"review_agent_configs,omitempty"`
+
 	// Deprecated: legacy pre-profile review settings. Kept so old preference
 	// files parse. New review setup writes ReviewProfiles instead, while
 	// `entire review` may read Review as a fallback when profiles are absent.
@@ -348,12 +353,15 @@ type RedactionSettings struct {
 	// bundled detectors don't know about, project codenames, or any other
 	// string pattern you don't want stored. Each match is replaced with the
 	// bare "REDACTED" token used by the built-in secret layers, not the
-	// "[REDACTED_<LABEL>]" token used by PII. Failed regex compilations are
-	// logged via slog.Warn and the rule is skipped.
+	// "[REDACTED_<LABEL>]" token used by PII. A pattern that fails to compile
+	// or can match the empty string is logged via slog.Warn and skipped.
 	CustomRedactions map[string]string `json:"custom_redactions,omitempty"`
 
 	// OpenAIPrivacyFilter is the optional 8th redaction layer (opt-in).
-	// See docs/security-and-privacy.md.
+	//
+	// Deprecated: the OpenAI Privacy Filter will be removed in a future
+	// release. Existing configurations keep working until then; do not build
+	// new behavior on it.
 	OpenAIPrivacyFilter *OPFSettings `json:"openai_privacy_filter,omitempty"`
 
 	// ExternalizeImages opts into lifting inline base64 images out of transcripts
@@ -378,12 +386,14 @@ type ScannerSettings struct {
 }
 
 // PIISettings configures PII detection categories.
-// When Enabled is true, email and phone default to true; address defaults to false.
+// When Enabled is true, email, phone and ip default to true; address defaults
+// to false.
 type PIISettings struct {
 	Enabled        bool              `json:"enabled"`
 	Email          *bool             `json:"email,omitempty"`
 	Phone          *bool             `json:"phone,omitempty"`
 	Address        *bool             `json:"address,omitempty"`
+	IP             *bool             `json:"ip,omitempty"`
 	CustomPatterns map[string]string `json:"custom_patterns,omitempty"`
 }
 
@@ -542,11 +552,31 @@ type ReviewConfig struct {
 	// settings by any route other than Load() (LoadFromFile, LoadFromBytes)
 	// get the ungated value and must not hand it to an agent.
 	Prompt string `json:"prompt,omitempty"`
+
+	// Config, when set, replaces the reviewed checkout's agent config for this
+	// reviewer: the checkout's hooks, MCP servers and extensions are not
+	// loaded, and these are used instead. Presence (even {}) means isolated.
+	//
+	// It names commands Entire runs, so Load() honors it only from a
+	// developer-owned layer, like Prompt; see enforceAgentPromptTrust.
+	Config *ReviewAgentConfig `json:"config,omitempty"`
+}
+
+// ReviewAgentConfig is a reviewer's own agent config, in each agent's native
+// shape. Which fields an agent accepts is checked when the review runs.
+type ReviewAgentConfig struct {
+	// Settings is a Claude Code settings object (hooks, permissions, env, ...).
+	Settings json.RawMessage `json:"settings,omitempty"`
+	// MCPServers maps a server name to its definition ({command, args, env}
+	// or {url}), for Claude Code and Codex.
+	MCPServers map[string]json.RawMessage `json:"mcp_servers,omitempty"`
+	// Extensions are absolute paths of Pi extension files.
+	Extensions []string `json:"extensions,omitempty"`
 }
 
 // IsZero reports whether the config is effectively unset.
 func (c ReviewConfig) IsZero() bool {
-	return c.Agent == "" && c.Model == "" && len(c.Skills) == 0 && c.Prompt == ""
+	return c.Agent == "" && c.Model == "" && len(c.Skills) == 0 && c.Prompt == "" && c.Config == nil
 }
 
 // LocalLayerRejection reports why .entire/settings.local.json was ignored, or
@@ -763,6 +793,7 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// and the deprecated `investigate` key left in settings is not read.
 	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
 	enforceExternalAgentsTrust(ctx, settings, localSettingsFileAbs, localData)
+	applyClonePreferenceAgentConfigs(settings, preferences, localData)
 	enforceAgentPromptTrust(ctx, settings, localSettingsFileAbs, localData, preferences)
 	// allow_symlinked_agent_dirs decides where Entire writes an agent's hook
 	// config, so it gets the same gate, and then installs the surviving set as
@@ -825,26 +856,6 @@ func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMe
 // unrelated keys in the per-developer override file.
 func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
 	return loadRaw(ctx, EntireSettingsLocalFile, "local")
-}
-
-// LoadLocalBytes reads .entire/settings.local.json's raw bytes through the
-// shared .entire root, returning nil when the file does not exist. It exists so
-// callers that decode the local layer themselves (they need LoadFromBytes'
-// no-defaults semantics, not loadFromFile's Enabled: true) still read the file
-// through this package rather than reaching for os.ReadFile on a joined path.
-func LoadLocalBytes(ctx context.Context) ([]byte, error) {
-	filePath, _, err := LocalSettingsPath(ctx)
-	if err != nil {
-		return nil, err
-	}
-	data, err := readConfined(filePath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading local settings: %w", err)
-	}
-	return data, nil
 }
 
 // FilePath resolves a settings file (EntireSettingsFile or
@@ -1290,6 +1301,35 @@ func clonePreferencesRoot(filePath string) (*os.Root, string, error) {
 	return root, name, nil
 }
 
+// applyClonePreferenceAgentConfigs overlays clone-local reviewer configs on
+// the effective profiles. It runs after the local file is merged, since that
+// file replaces a profile it defines; a config the local file sets itself
+// wins.
+func applyClonePreferenceAgentConfigs(settings *EntireSettings, prefs *ClonePreferences, localData []byte) {
+	if prefs == nil {
+		return
+	}
+	var localRaw map[string]json.RawMessage
+	if len(localData) > 0 && json.Unmarshal(localData, &localRaw) != nil {
+		localRaw = nil
+	}
+	for name, workers := range prefs.ReviewAgentConfigs {
+		profile, ok := settings.ReviewProfiles[name]
+		if !ok {
+			continue
+		}
+		agents := make(map[string]ReviewConfig, len(profile.Agents))
+		for worker, cfg := range profile.Agents {
+			if agentCfg, ok := workers[worker]; ok && !rawHasKey(localRaw, "review_profiles", name, "agents", worker, "config") {
+				cfg.Config = agentCfg
+			}
+			agents[worker] = cfg
+		}
+		profile.Agents = agents
+		settings.ReviewProfiles[name] = profile
+	}
+}
+
 func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
 	if prefs == nil {
 		return
@@ -1729,6 +1769,13 @@ func mergePIISettings(dst *PIISettings, data json.RawMessage) error {
 		}
 		dst.Address = &b
 	}
+	if v, ok := raw["ip"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			return fmt.Errorf("parsing pii.ip: %w", err)
+		}
+		dst.IP = &b
+	}
 	if v, ok := raw["custom_patterns"]; ok {
 		if err := mergeStringMap(&dst.CustomPatterns, v, "pii.custom_patterns"); err != nil {
 			return err
@@ -1874,16 +1921,6 @@ func IsFilteredFetchesEnabled(ctx context.Context) bool {
 // themselves (telemetry.IsEnvOptedOut).
 func (s *EntireSettings) IsTelemetryEnabled() bool {
 	return s != nil && s.Telemetry != nil && *s.Telemetry
-}
-
-// IsTelemetryEnabled loads settings and reports the telemetry opt-in. Returns
-// false when settings cannot be loaded — telemetry never fails open.
-func IsTelemetryEnabled(ctx context.Context) bool {
-	s, err := Load(ctx)
-	if err != nil {
-		return false
-	}
-	return s.IsTelemetryEnabled()
 }
 
 // IsSummarizeEnabled checks if auto-summarize is enabled in settings.
@@ -2123,6 +2160,31 @@ func (s *EntireSettings) IsFilteredFetchesEnabled() bool {
 	}
 	val, ok := s.StrategyOptions["filtered_fetches"].(bool)
 	return ok && val
+}
+
+// maxCheckpointRefListTimeout caps
+// strategy_options.checkpoint_ref_list_timeout_seconds. The setting usually
+// comes from a committed settings.json, so a cloned repository must not be able
+// to make a names-only listing wait longer than one full checkpoint read fetch
+// (remote.ReadFetchTimeout).
+const maxCheckpointRefListTimeout = 2 * time.Minute
+
+// CheckpointRefListTimeoutValue returns how long remote checkpoint discovery
+// waits for each remote to list checkpoint refs, from
+// strategy_options.checkpoint_ref_list_timeout_seconds. Zero means unset (the
+// option is absent, not a number, or not positive) and the caller uses its
+// default. Values above maxCheckpointRefListTimeout are capped to it.
+func (s *EntireSettings) CheckpointRefListTimeoutValue() time.Duration {
+	if s.StrategyOptions == nil {
+		return 0
+	}
+	// JSON numbers decode into map[string]any as float64.
+	secs, ok := s.StrategyOptions["checkpoint_ref_list_timeout_seconds"].(float64)
+	if !ok || secs <= 0 {
+		return 0
+	}
+	// Cap in seconds before converting so a huge value cannot overflow Duration.
+	return time.Duration(min(secs, maxCheckpointRefListTimeout.Seconds()) * float64(time.Second))
 }
 
 // IsPushSessionsDisabled checks if push_sessions is disabled in settings.

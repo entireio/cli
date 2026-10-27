@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -114,41 +116,6 @@ func TestParseVisibility(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestRepoDetailRow(t *testing.T) {
-	t.Parallel()
-
-	t.Run("includes the entire:// remote", func(t *testing.T) {
-		t.Parallel()
-		row := repoDetailRow(coreapi.Repo{
-			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
-			Name:            "web",
-			OwningProjectId: "01KS6KFJR2XS6PZ188MVYE07AP",
-			ClusterHost:     coreapi.NewOptString("aws-us-east-2.entire.io"),
-			Path:            coreapi.NewOptString("acme/web"),
-			State:           coreapi.NewOptString("active"),
-		})
-		if len(row) != len(repoDetailColumns) {
-			t.Fatalf("row has %d cells, want %d (one per column)", len(row), len(repoDetailColumns))
-		}
-		if want := "entire://aws-us-east-2.entire.io/acme/web"; row[len(row)-1] != want {
-			t.Errorf("REMOTE cell = %q, want %q", row[len(row)-1], want)
-		}
-	})
-
-	t.Run("shows - when the remote is not yet resolvable", func(t *testing.T) {
-		t.Parallel()
-		row := repoDetailRow(coreapi.Repo{
-			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
-			Name:            "web",
-			OwningProjectId: "01KS6KFJR2XS6PZ188MVYE07AP",
-			ClusterHost:     coreapi.NewOptString("aws-us-east-2.entire.io"),
-		})
-		if row[len(row)-1] != "-" {
-			t.Errorf("REMOTE cell = %q, want %q", row[len(row)-1], "-")
-		}
-	})
 }
 
 func TestRepoCreateOutput_StampsRemote(t *testing.T) {
@@ -316,6 +283,11 @@ func serveRepoCreateWith(t *testing.T, created *coreapi.Repo) <-chan []byte {
 			bodyCh <- raw
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/projects/"):
+			// The one lookup made when nothing else names the new repo.
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":%q,"name":"acme","ownerType":"org","ownerId":"o","region":"us","createdAt":"2026-01-01T00:00:00Z","capabilities":{"canCreateRepository":true,"canDelete":false,"canManageAccess":false,"canManageTrails":false}}`, strings.TrimPrefix(r.URL.Path, "/api/v1/projects/"))
+			return
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/"+created.ID && r.URL.Query().Get("authoritative") == "true":
 			w.Header().Set("Content-Type", "application/json")
 		default:
@@ -399,12 +371,23 @@ func TestRepoCreate_WarnsOnInvalidServerHost(t *testing.T) {
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
 func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
-	for _, name := range []string{"web.git", "trails.el.git"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range gitSuffixCases {
+		t.Run(tc.in, func(t *testing.T) {
 			bodyCh := serveRepoCreate(t)
-			err := execRepoCreateNamed(t, name)
+			err := execRepoCreateNamed(t, tc.in)
 			require.ErrorContains(t, err, gitDirSuffix)
-			require.ErrorContains(t, err, strings.TrimSuffix(name, gitDirSuffix))
+			if _, stillCarriesSuffix := gitremote.CutGitDirSuffix(tc.rest); tc.rest == "" || stillCarriesSuffix {
+				// A doubled suffix leaves a remainder this same guard would
+				// refuse, and the suffix alone leaves nothing at all. Neither
+				// is advice, so neither is offered.
+				require.NotContains(t, err.Error(), "(use ")
+			} else {
+				// The refusal earns its round trip only by naming the
+				// spelling to use instead. Assert the whole parenthetical:
+				// a bare substring check passes on the quoted name itself,
+				// which is how a doubled suffix went unnoticed.
+				require.ErrorContains(t, err, `(use "`+tc.rest+`")`)
+			}
 			select {
 			case raw := <-bodyCh:
 				t.Fatalf("no create request expected, got body %s", raw)
@@ -413,13 +396,117 @@ func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
 		})
 	}
 
-	t.Run("a dotted name that does not end in the suffix is accepted", func(t *testing.T) {
-		bodyCh := serveRepoCreate(t)
-		require.NoError(t, execRepoCreateNamed(t, "trails.el"))
-		var body map[string]any
-		require.NoError(t, json.Unmarshal(<-bodyCh, &body))
-		require.Equal(t, "trails.el", body["name"])
-	})
+	// Surrounding whitespace is trimmed before the suffix is looked for, so a
+	// padded name is refused exactly as the bare one is. A shell that expands
+	// an empty variable into the argument is the ordinary way this happens,
+	// and the refusal must not depend on the padding being absent.
+	for _, name := range []string{" web.git", "web.git ", "  web.GIT  ", "\tweb.Git\n"} {
+		t.Run("padded "+strconv.Quote(name), func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			err := execRepoCreateNamed(t, name)
+			require.ErrorContains(t, err, gitDirSuffix)
+			require.ErrorContains(t, err, "web")
+			// The message quotes the trimmed name: echoing the padding back
+			// would show the user a spelling they cannot tell apart from
+			// the one they typed.
+			require.NotContains(t, err.Error(), strconv.Quote(name))
+			select {
+			case raw := <-bodyCh:
+				t.Fatalf("no create request expected, got body %s", raw)
+			default:
+			}
+		})
+	}
+
+	for _, name := range gitSuffixNonCases {
+		t.Run("accepted "+name, func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			require.NoError(t, execRepoCreateNamed(t, name))
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+			require.Equal(t, name, body["name"])
+		})
+	}
+}
+
+// TestRepoCreate_SendsTrimmedName pins that the name checked and the name sent
+// are the same string. `repo create` validates the trimmed argument, so
+// putting the raw one on the wire left a seam: the server trims too, which is
+// the only reason it never showed. A check that guards one value while a
+// different value travels is a latent disagreement, not a working design.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoCreate_SendsTrimmedName(t *testing.T) {
+	for _, name := range []string{"  web  ", "\tweb\n", "web "} {
+		t.Run(strconv.Quote(name), func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			require.NoError(t, execRepoCreateNamed(t, name))
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+			require.Equal(t, "web", body["name"])
+		})
+	}
+}
+
+// TestRepoCreate_SuggestsANameTheServerWouldAccept pins that the parenthetical
+// is advice the user can act on, not just the typed string minus four bytes.
+// It used to be the latter: "WEB.git" was answered with `(use "WEB")`, and the
+// server then refused "WEB" for carrying uppercase — a second refusal, for a
+// reason the first message had not mentioned.
+//
+// The hint is lowercased because `repo create` is the one path where the
+// server does NOT fold case (an uppercase name is refused outright), and it
+// is withheld entirely when the remainder fails the shape the server enforces.
+// Withholding is the safe direction: the check gates whether the CLI speaks,
+// never whether it refuses.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoCreate_SuggestsANameTheServerWouldAccept(t *testing.T) {
+	// A well-formed ULID. The server refuses a name of this shape outright,
+	// so proposing one would be proposing a second rejection.
+	const rawULID = "01KS6KFJR2XS6PZ188MVYE07AN"
+
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{name: "already lowercase", in: "web.git", want: "web"},
+		{name: "uppercase is folded", in: "WEB.git", want: "web"},
+		{name: "uppercase name and suffix", in: "WEB.GIT", want: "web"},
+		{name: "mixed case dotted name", in: "Trails.EL.GIT", want: "trails.el"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveRepoCreate(t)
+			err := execRepoCreateNamed(t, tc.in)
+			require.ErrorContains(t, err, `(use "`+tc.want+`")`)
+		})
+	}
+
+	for _, tc := range []struct{ name, in string }{
+		{name: "underscore survives the fold", in: "WEB_1.git"},
+		{name: "consecutive dots", in: "widgets..git"},
+		{name: "trailing dash once the suffix goes", in: "widgets-.git"},
+		{name: "a raw ULID is not a name", in: rawULID + ".git"},
+		{name: "a lowercased raw ULID is still one", in: strings.ToLower(rawULID) + ".GIT"},
+		{name: "too long by one", in: strings.Repeat("a", 65) + ".git"},
+		{name: "the suffix alone", in: ".git"},
+		// A doubled suffix is the case the shape checks alone cannot catch:
+		// nativeRepoRe allows interior dots, so "widgets.git" looks like a
+		// perfectly good name to every check except the one that matters —
+		// the guard immediately above, which refuses it on the next attempt.
+		{name: "doubled suffix", in: "widgets.git.git"},
+		{name: "doubled suffix, mixed case", in: "widgets.GIT.git"},
+		{name: "doubled suffix, uppercase last", in: "widgets.git.GIT"},
+		{name: "tripled suffix", in: "widgets.git.git.git"},
+	} {
+		t.Run("no hint: "+tc.name, func(t *testing.T) {
+			serveRepoCreate(t)
+			err := execRepoCreateNamed(t, tc.in)
+			// Still refused, and still for the suffix — only the advice is
+			// withheld.
+			require.ErrorContains(t, err, gitDirSuffix)
+			require.NotContains(t, err.Error(), "(use ")
+		})
+	}
 }
 
 // TestRepoCreate_HasNoClusterHostFlag pins that a repo's home cluster is not
@@ -513,6 +600,17 @@ func serveProjectRepos(t *testing.T, pages []coreapi.ListProjectReposOutputBody)
 	recCh := make(chan recordedRequest, len(pages))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// A ULID --project needs one GetProject to recover the NAME, which is
+		// what the /et/<project>/<repo> column is built from.
+		if r.URL.Path == "/api/v1/projects/"+testProjectULID {
+			if err := printJSON(w, &coreapi.Project{
+				ID: testProjectULID, Name: "widgets", OwnerId: "01OWNER",
+				OwnerType: coreapi.ProjectOwnerTypeOrg, Region: "us",
+			}); err != nil {
+				t.Errorf("encode project: %v", err)
+			}
+			return
+		}
 		if r.URL.Path != "/api/v1/projects/"+testProjectULID+"/repos" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -732,16 +830,27 @@ func TestRepoList_GroupedFlagHelp(t *testing.T) {
 // Not parallel: swaps the package-level activeCoreClient seam via runCoreCmd.
 func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 	const repoULID = "0123456789ABCDEFGHJKMNPQR5"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if err := printJSON(w, &coreapi.Repo{ID: repoULID, Name: "web", OwningProjectId: ulidProjectWidgets}); err != nil {
-			t.Errorf("encode repo: %v", err)
+		// `repo visibility get` is the vehicle: it still binds --project, and
+		// is a plain read. The cluster/native-mirror cases are kept so the fake
+		// also serves a view if one is added back here.
+		var body any = &coreapi.Repo{ID: repoULID, Name: "web", OwningProjectId: ulidProjectWidgets,
+			Visibility: coreapi.NewOptString("private")}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
+			body = &coreapi.ListNativeMirrorsOutputBody{}
+		case r.URL.Path == testClustersPath:
+			body = &coreapi.ListClustersOutputBody{}
+		}
+		if err := printJSON(w, body); err != nil {
+			t.Errorf("encode response: %v", err)
 		}
 	}))
 	t.Cleanup(srv.Close)
 
 	t.Run("a ULID ref warns that --project is ignored", func(t *testing.T) {
-		stdout, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID, "--project", "not-this-project")
+		stdout, stderr, err := runCoreCmd(t, newRepoVisibilityGetCmd, srv.URL, repoULID, "--project", "not-this-project")
 		require.NoError(t, err, "the command must still succeed")
 		require.Contains(t, stdout, repoULID, "the repo must still be shown")
 		require.Contains(t, stderr, "--project")
@@ -751,13 +860,13 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 	t.Run("an explicit empty --project still warns", func(t *testing.T) {
 		// Changed(), not a non-empty value: --project "" is still the user
 		// saying something about this repo's project, and it is still ignored.
-		_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID, "--project", "")
+		_, stderr, err := runCoreCmd(t, newRepoVisibilityGetCmd, srv.URL, repoULID, "--project", "")
 		require.NoError(t, err)
 		require.Contains(t, stderr, "ignored")
 	})
 
 	t.Run("a ULID ref without the flag says nothing", func(t *testing.T) {
-		_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID)
+		_, stderr, err := runCoreCmd(t, newRepoVisibilityGetCmd, srv.URL, repoULID)
 		require.NoError(t, err)
 		require.NotContains(t, stderr, "ignored")
 	})
@@ -767,10 +876,12 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 		// warning rides on bindRepoProjectFlag so it cannot be wired for some
 		// and missed for others. Asserting the PreRunE exists is what pins
 		// that, without standing up a server per command.
+		// `repo view` and `repo delete` are deliberately absent: they take the
+		// /et/<project>/<repo> path (delete also an unadvertised ULID), so
+		// there is no bare name for --project to scope and no flag to warn
+		// about.
 		for name, newCmd := range map[string]func() *cobra.Command{
-			"repo view":              newRepoViewCmd,
 			"repo edit":              newRepoEditCmd,
-			"repo delete":            newRepoDeleteCmd,
 			"repo visibility get":    newRepoVisibilityGetCmd,
 			"repo protection list":   newRepoProtectionListCmd,
 			"repo protection add":    newRepoProtectionAddCmd,
@@ -781,6 +892,26 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 			require.NotNilf(t, cmd.PreRunE, "%s must carry the redundancy check", name)
 		}
 	})
+}
+
+// TestRepoView_TakesForgeQualifiedRefsOnly pins the grammar `repo view` accepts:
+// a repository is named /<forge>/<a>/<b> and no other way. A ULID identifies a
+// row, not a repository, and a bare name is unique only inside a project — so
+// neither is a name this verb takes, and --project has nothing left to scope.
+func TestRepoView_TakesForgeQualifiedRefsOnly(t *testing.T) {
+	t.Parallel()
+	require.Nil(t, newRepoViewCmd().Flags().Lookup(projectFlagName),
+		"--project scoped a bare name, which this verb no longer takes")
+
+	for _, ref := range []string{"0123456789ABCDEFGHJKMNPQR5", "web", "acme/web"} {
+		cmd := newRepoCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"view", ref})
+		err := cmd.ExecuteContext(t.Context())
+		require.Errorf(t, err, "%q is not a forge-qualified repository reference", ref)
+	}
 }
 
 // TestRepoEdit_Visibility pins `repo edit --visibility`: the value is sent and
@@ -887,6 +1018,6 @@ func TestRepoDelete_GitSuffixResolvesToTheSuffixFreeRepo(t *testing.T) {
 	require.Equal(t, victimName, askedName, "the suffix must be dropped before the server is asked")
 	require.Equal(t, victimID, deletedID, "the ULID deleted must be the suffix-free repo's")
 	require.Contains(t, stdout, victimPath, "the confirmation names what the server resolved")
-	require.Contains(t, stdout, victimID)
+	require.NotContains(t, stdout, victimID, "the path names the repo; its ULID stays internal")
 	require.NotContains(t, stdout, strangerID)
 }

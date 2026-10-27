@@ -22,6 +22,10 @@ func TestConfigureOpenCodeSummaryAndRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	echoPath, err := exec.LookPath("echo")
+	if err != nil {
+		t.Fatal(err)
+	}
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	stubCLIAvailable(t)
@@ -74,6 +78,9 @@ func TestConfigureOpenCodeSummaryAndRunner(t *testing.T) {
 	}
 	agent.Register(agent.AgentNameOpenCode, func() agent.Agent {
 		return &opencode.OpenCodeAgent{CommandRunner: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+			if slices.Equal(args, []string{"--version"}) {
+				return exec.CommandContext(ctx, echoPath, "1.18.33")
+			}
 			i := slices.Index(args, "--model")
 			if i < 0 || args[i+1] != "openai/test" {
 				t.Fatalf("runner model not forwarded: %v", args)

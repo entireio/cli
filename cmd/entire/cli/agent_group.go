@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -37,7 +38,7 @@ Examples:
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgentMenu(cmd.Context(), cmd.OutOrStdout())
+			return runAgentMenu(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 
@@ -47,8 +48,8 @@ Examples:
 	return cmd
 }
 
-func runAgentMenu(ctx context.Context, w io.Writer) error {
-	opts := EnableOptions{Telemetry: true}
+func runAgentMenu(ctx context.Context, w, errOut io.Writer) error {
+	opts := EnableOptions{Telemetry: true, errOut: errOut}
 	if settings.IsSetUpAny(ctx) {
 		return runManageAgents(ctx, w, opts, nil)
 	}
@@ -66,6 +67,9 @@ func newAgentListCmd() *cobra.Command {
 }
 
 func runAgentList(ctx context.Context, w io.Writer) error {
+	// Gated: listing names no agent, so it may only run entire-agent-* binaries
+	// in a repo that opted into external_agents.
+	external.DiscoverAndRegister(ctx)
 	installed := GetAgentsWithHooksInstalled(ctx)
 	installedSet := make(map[types.AgentName]struct{}, len(installed))
 	for _, name := range installed {
@@ -104,6 +108,9 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			if err := external.DiscoverAndRegisterNamedAlways(cmd.Context(), types.AgentName(name)); err != nil {
+				return fmt.Errorf("agent %s: %w", name, err)
+			}
 			ag, err := agent.Get(types.AgentName(name))
 			if err != nil {
 				printWrongAgentError(cmd.OutOrStdout(), name)
@@ -114,6 +121,7 @@ Examples:
 				SearchSkill:    searchSkill,
 				AgentHelpSkill: agentHelpSkill,
 				Telemetry:      true,
+				NoCommitOffer:  true,
 			}
 			return setupAgentHooksNonInteractive(cmd.Context(), cmd.OutOrStdout(), ag, opts)
 		},

@@ -9,6 +9,7 @@ import "time"
 
 // TrailDiscussionReply is a reply on a discussion message. Replies do not nest further.
 type TrailDiscussionReply struct {
+	ETag      string    `json:"etag,omitempty"`
 	ID        string    `json:"id"`
 	Author    string    `json:"author"` // GitHub login
 	CreatedAt time.Time `json:"created_at"`
@@ -17,6 +18,7 @@ type TrailDiscussionReply struct {
 
 // TrailDiscussionMessage is a top-level message in a discussion.
 type TrailDiscussionMessage struct {
+	ETag      string                 `json:"etag,omitempty"`
 	ID        string                 `json:"id"`
 	Author    string                 `json:"author"` // GitHub login
 	CreatedAt time.Time              `json:"created_at"`

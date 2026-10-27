@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -132,6 +133,12 @@ func (f *CellClientFactory) ClientFor(ctx context.Context, target *CellTarget) (
 		return nil, err
 	}
 	return api.NewClientWithBaseURL(f.subject.loginJWT, cellBaseURL), nil
+}
+
+// HomeJurisdiction is the home_jurisdiction claim of the login this factory
+// dials with — the cell a nil target routes to. "" when the claim is absent.
+func (f *CellClientFactory) HomeJurisdiction() (string, error) {
+	return HomeJurisdictionFromLoginJWT(f.subject.loginJWT)
 }
 
 // cellBaseURLFor resolves the cell origin ClientFor dials for target, checked
@@ -335,13 +342,13 @@ func resolveEnvTokenCellSubject(raw string, insecureHTTP bool) (cellSubject, err
 func cellExchangeHTTPClient(origin string) *http.Client {
 	switch {
 	case cellExchangeTransportForTest != nil:
-		return &http.Client{Timeout: cellDataAPITimeout, Transport: versioninfo.WrapTransport(cellExchangeTransportForTest)}
+		return httpclient.New(httpclient.Options{Timeout: cellDataAPITimeout, Transport: versioninfo.WrapTransport(cellExchangeTransportForTest)})
 	case shouldUsePlainHTTPDiscovery(origin):
 		c := dataAPIDiscoveryClient(origin)
 		c.Timeout = cellDataAPITimeout
 		return c
 	default:
-		return &http.Client{Timeout: cellDataAPITimeout, Transport: versioninfo.WrapTransport(nil)}
+		return httpclient.New(httpclient.Options{Timeout: cellDataAPITimeout, Transport: versioninfo.WrapTransport(nil)})
 	}
 }
 
@@ -464,6 +471,12 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// The Entire sites EntireSite recognises.
+const (
+	siteEntire  = "entire.io"
+	sitePartial = "partial.to"
+)
+
 // EntireSite returns the Entire site ("entire.io" / "partial.to") a login
 // server or data host belongs to, or "" for loopback and custom hosts.
 func EntireSite(coreURL string) string {
@@ -473,10 +486,10 @@ func EntireSite(coreURL string) string {
 	}
 	host := strings.ToLower(u.Hostname())
 	switch {
-	case host == "partial.to" || strings.HasSuffix(host, ".partial.to"):
-		return "partial.to"
-	case host == "entire.io" || strings.HasSuffix(host, ".entire.io"):
-		return "entire.io"
+	case host == sitePartial || strings.HasSuffix(host, "."+sitePartial):
+		return sitePartial
+	case host == siteEntire || strings.HasSuffix(host, "."+siteEntire):
+		return siteEntire
 	default:
 		return ""
 	}
@@ -531,11 +544,10 @@ type clusterListingRow struct {
 
 // ErrNoCellForJurisdiction signals that the requested jurisdiction — the
 // caller's home, or an explicit --jurisdiction — has no entire-api cell in the
-// login core's cluster catalog (or its row carries no apiUrl). It is not fatal:
-// callers that also have a data-API path (e.g. activity/recap) treat it as
-// "entire-api isn't serving this region yet" and fall back rather than failing
-// the command. errors.Is unwraps it from the contextual message, which names
-// the core consulted and the jurisdictions it does serve.
+// login core's cluster catalog (or its row carries no apiUrl). Search treats it
+// as a skipped cell rather than a failed query; single-cell callers such as
+// activity and recap surface it. errors.Is unwraps it from the contextual
+// message, which names the core consulted and the jurisdictions it does serve.
 var ErrNoCellForJurisdiction = errors.New("no entire-api cell configured for jurisdiction")
 
 // resolveCellAPIBaseURL is the catalog cell resolver: it lists the clusters of
@@ -545,6 +557,8 @@ var ErrNoCellForJurisdiction = errors.New("no entire-api cell configured for jur
 // so auth cannot import coreapi without a cycle — the repo-scoped path avoids
 // this by resolving the cell in the cli layer (see resolveRepoCellTarget).
 func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction string, httpClient *http.Client) (string, error) {
+	// Guard the request boundary, including clients supplied by discovery or tests.
+	httpClient = httpclient.WithSecureRedirects(httpClient)
 	coreURL = strings.TrimRight(coreURL, "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coreURL+clustersAPIPath, nil)
 	if err != nil {

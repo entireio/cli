@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	transcriptlib "github.com/entireio/cli/transcript"
 )
 
 // Compile-time interface assertion.
@@ -66,7 +67,7 @@ func (c *CursorAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]strin
 
 	var prompts []string
 	for i := range lines {
-		if lines[i].Type != transcript.TypeUser {
+		if lines[i].Type != transcriptlib.TypeUser {
 			continue
 		}
 		// ExtractUserContent already strips IDE tags; stripping again is not a
@@ -77,36 +78,6 @@ func (c *CursorAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]strin
 		}
 	}
 	return prompts, nil
-}
-
-// ExtractSummary extracts the last assistant message as a session summary.
-func (c *CursorAgent) ExtractSummary(sessionRef string) (string, error) {
-	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
-	if err != nil {
-		return "", fmt.Errorf("failed to read transcript: %w", err)
-	}
-
-	lines, parseErr := transcript.ParseFromBytes(data)
-	if parseErr != nil {
-		return "", fmt.Errorf("failed to parse transcript: %w", parseErr)
-	}
-
-	// Walk backward to find last assistant text block
-	for i := len(lines) - 1; i >= 0; i-- {
-		if lines[i].Type != transcript.TypeAssistant {
-			continue
-		}
-		var msg transcript.AssistantMessage
-		if err := json.Unmarshal(lines[i].Message, &msg); err != nil {
-			continue
-		}
-		for _, block := range msg.Content {
-			if block.Type == transcript.ContentTypeText && block.Text != "" {
-				return block.Text, nil
-			}
-		}
-	}
-	return "", nil
 }
 
 // ExtractModifiedFiles extracts the files modified by Cursor tool calls in the
@@ -121,7 +92,7 @@ func ExtractModifiedFiles(lines []transcript.Line) []string {
 	var files []string
 
 	for i := range lines {
-		if lines[i].Type != transcript.TypeAssistant {
+		if lines[i].Type != transcriptlib.TypeAssistant {
 			continue
 		}
 		var msg transcript.AssistantMessage
@@ -129,7 +100,7 @@ func ExtractModifiedFiles(lines []transcript.Line) []string {
 			continue
 		}
 		for _, block := range msg.Content {
-			if block.Type != transcript.ContentTypeToolUse {
+			if block.Type != transcriptlib.ContentTypeToolUse {
 				continue
 			}
 			if !slices.Contains(FileModificationTools, block.Name) {
