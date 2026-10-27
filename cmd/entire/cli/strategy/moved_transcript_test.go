@@ -98,6 +98,22 @@ func TestResolveTranscriptPath_MovedLookupLeavesOtherPathsAlone(t *testing.T) {
 		require.ErrorIs(t, err, os.ErrNotExist)
 		assert.Equal(t, elsewhere, state.TranscriptPath)
 	})
+	t.Run("an agent whose session dirs nest (Cursor)", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("ENTIRE_TEST_CURSOR_PROJECT_DIR", "")
+		ag, err := agent.GetByAgentType(agent.AgentTypeCursor)
+		require.NoError(t, err)
+		home, err := ag.GetSessionDir(mainDir)
+		require.NoError(t, err)
+		moved, err := ag.GetSessionDir(linkedDir)
+		require.NoError(t, err)
+		writeTranscriptAt(t, filepath.Join(moved, "sess-cursor.jsonl"))
+		recorded := filepath.Join(home, "sess-cursor.jsonl")
+		state := &SessionState{SessionID: "sess-cursor", AgentType: agent.AgentTypeCursor, WorktreePath: mainDir, TranscriptPath: recorded}
+		_, err = resolveTranscriptPath(t.Context(), state)
+		require.ErrorIs(t, err, os.ErrNotExist, "nested layouts are not searched across worktrees")
+		assert.Equal(t, recorded, state.TranscriptPath)
+	})
 	t.Run("a recorded path the agent would not derive for the home", func(t *testing.T) {
 		writeTranscriptAt(t, sessionFile(linkedDir, "sess-attached"))
 		custom := filepath.Join(t.TempDir(), "sess-attached.jsonl")

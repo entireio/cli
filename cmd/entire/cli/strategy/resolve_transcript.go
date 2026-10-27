@@ -88,17 +88,15 @@ func resolveTranscriptPath(ctx context.Context, state *SessionState) (string, er
 
 	// Check if the re-resolved path exists.
 	if !store.Exists(name) {
-		if moved := movedTranscriptPath(ctx, ag, state, agentSessionID); moved != "" {
-			resolved = moved
-		} else {
+		moved := movedTranscriptPath(ctx, ag, state, agentSessionID)
+		if moved == "" {
 			return "", fmt.Errorf("transcript not found at %s (also tried %s): %w", state.TranscriptPath, resolved, os.ErrNotExist)
 		}
+		logMovedTranscript(ctx, state, moved)
+		resolved = moved
 	}
 
 	// Update state so subsequent reads use the correct path.
-	if filepath.Dir(resolved) != sessionDir {
-		logMovedTranscript(ctx, state, resolved)
-	}
 	state.TranscriptPath = resolved
 	return resolved, nil
 }
@@ -116,8 +114,9 @@ func resolveTranscriptPath(ctx context.Context, state *SessionState) (string, er
 // session's home or a directory inside it (a session launched from a
 // subdirectory), so a path from attach, import or an env override is never
 // second-guessed, and never to external agents, whose session-dir lookup
-// starts a process. The worktree this process runs in is tried first, then
-// the repository's other worktrees. The file name is the session's own ID.
+// starts a process. Only agents with Claude Code's flat session-dir layout
+// are searched (see below). The worktree this process runs in is tried first,
+// then the repository's other worktrees. The file name is the session's own ID.
 func movedTranscriptPath(ctx context.Context, ag agent.Agent, state *SessionState, agentSessionID string) string {
 	if state.WorktreePath == "" || external.IsExternal(ag) {
 		return ""
@@ -130,6 +129,13 @@ func movedTranscriptPath(ctx context.Context, ag agent.Agent, state *SessionStat
 	homeDir = filepath.Clean(homeDir)
 	projectsDir := filepath.Dir(homeDir)
 	if filepath.Dir(recordedDir) != projectsDir || !sessionDirWithin(filepath.Base(recordedDir), filepath.Base(homeDir)) {
+		return ""
+	}
+	// Only a flat layout, where a directory inside the home gets a sibling
+	// session dir (Claude Code's <projects>/<home>-sub), can be searched this
+	// way. A nested one (Cursor's <projects>/<home>/agent-transcripts) can't,
+	// so stop before listing worktrees.
+	if sub, err := ag.GetSessionDir(filepath.Join(state.WorktreePath, "sub")); err != nil || filepath.Dir(filepath.Clean(sub)) != projectsDir {
 		return ""
 	}
 	current, err := paths.WorktreeRoot(ctx)
