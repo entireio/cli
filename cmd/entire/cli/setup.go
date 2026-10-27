@@ -960,7 +960,7 @@ publish the repository yourself when you're ready.`,
 			// this repository themselves.
 			defer func() {
 				if runErr == nil {
-					runErr = claimRepoFromGlobalEnable(cmd.Context(), cmd.OutOrStdout())
+					claimRepoFromGlobalEnable(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 				}
 			}()
 

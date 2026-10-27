@@ -109,23 +109,28 @@ func confirmGlobalEnable(cmd *cobra.Command, yes bool) (bool, error) {
 // global enable: once global enable is not the only reason, the committed
 // settings it set aside apply and the global-enable notices stop. It writes
 // `enabled` to this worktree's settings.local.json, unless that file is
-// tracked and so not the developer's own.
-func claimRepoFromGlobalEnable(ctx context.Context, w io.Writer) error {
+// tracked and so not the developer's own. Best effort: enable already
+// succeeded, so a failure here is a warning.
+func claimRepoFromGlobalEnable(ctx context.Context, w, errW io.Writer) {
+	if !settings.UserTierEnablesEverywhere(ctx) {
+		return
+	}
 	s, err := LoadEntireSettings(ctx)
 	if err != nil || !s.EnabledOnlyByGlobal() {
-		return nil //nolint:nilerr // enable already succeeded; the claim is a refinement of it
+		return
 	}
 	if reason := s.LocalLayerRejection(); reason != "" {
 		fmt.Fprintf(w, "Entire stays enabled here only through global enable: %s is not written because %s.\n",
 			settings.EntireSettingsLocalFile, reason)
-		return nil
+		return
 	}
 	if err := setEnabledFlag(ctx, true, false); err != nil {
-		return err
+		fmt.Fprintf(errW, "Warning: Entire stays enabled here only through global enable: could not write %s: %v\n",
+			settings.EntireSettingsLocalFile, err)
+		return
 	}
 	fmt.Fprintf(w, "Entire is now enabled in this repository itself (%s), not only through global enable.\n",
 		settings.EntireSettingsLocalFile)
-	return nil
 }
 
 // rejectFlagsWithGlobal refuses any other flag of this command beside
@@ -148,11 +153,12 @@ func rejectFlagsWithGlobal(cmd *cobra.Command, allowed ...string) error {
 }
 
 // ensureGlobalEnableHooks makes `global_enable` effective in repositories that
-// were never enabled. Everything else already follows the flag once Entire is called (settings resolve as enabled, and the
-// first hook installs the git hooks lazily), but Claude only calls Entire if
-// its hooks are installed, and a never-enabled repository has no project
-// hooks. So whenever Entire runs with the flag on, it makes sure its hooks are
-// in the user-level Claude settings. Best effort: this never fails a command.
+// were never enabled. Everything else already follows the flag once Entire is
+// called (settings resolve as enabled, and the first hook installs the git
+// hooks lazily), but Claude only calls Entire if its hooks are installed, and a
+// never-enabled repository has no project hooks. So whenever Entire runs with
+// the flag on, it makes sure its hooks are in the user-level Claude settings.
+// Best effort: this never fails a command.
 func ensureGlobalEnableHooks(cmd *cobra.Command) {
 	ctx := cmd.Context()
 	if skipsGlobalEnableHooks(cmd) || !settings.UserTierEnablesEverywhere(ctx) {
@@ -172,20 +178,17 @@ func ensureGlobalEnableHooks(cmd *cobra.Command) {
 	}
 }
 
-// hooksCommandName is the `entire hooks` group that agents and git invoke.
-const hooksCommandName = "hooks"
-
 // skipsGlobalEnableHooks reports commands that must not (re)install the
-// user-level hooks: agent and git hook invocations, which run on every turn
-// and only fire once hooks are already installed, and `entire disable`, which
-// is removing Entire rather than using it.
+// user-level hooks: hidden commands, including the agent and git hook
+// invocations that run on every turn; `entire enable`, which installs hooks
+// itself; and `entire disable`, which is removing Entire rather than using it.
 func skipsGlobalEnableHooks(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
-		switch c.Name() {
-		case hooksCommandName, "disable":
-			if c.Parent() != nil && !c.Parent().HasParent() {
-				return true
-			}
+		if c.Hidden {
+			return true
+		}
+		if c.HasParent() && !c.Parent().HasParent() && (c.Name() == "enable" || c.Name() == "disable") {
+			return true
 		}
 	}
 	return false

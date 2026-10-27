@@ -33,6 +33,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -345,10 +346,10 @@ var globalEnableBannerLines = []string{
 
 // globalEnableBannerSuffix is the SessionStart banner addition for a
 // repository on only through global enable whose git hooks are not installed
-// yet: the first prompt installs them. Hook state is checked first, since it
-// is cheap and settles every session after the first.
+// yet: the first prompt installs them. The user flag is checked first, since
+// it needs no git subprocess and settles every developer without global enable.
 func globalEnableBannerSuffix(ctx context.Context, agentName types.AgentName) string {
-	if strategy.IsGitHookInstalled(ctx) {
+	if !settings.UserTierEnablesEverywhere(ctx) || strategy.IsGitHookInstalled(ctx) {
 		return ""
 	}
 	s, err := LoadEntireSettings(ctx)

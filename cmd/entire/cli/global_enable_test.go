@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/settings/usersettings"
@@ -81,14 +83,17 @@ func TestGlobalEnable_FlagOffLeavesClaudeSettingsAlone(t *testing.T) {
 	}
 }
 
-// Hook invocations run every turn and `entire disable` removes Entire; neither
-// (re)installs the user-level hooks.
-func TestGlobalEnable_HookAndDisableCommandsSkipInstall(t *testing.T) {
+// Hidden commands (hook invocations, background workers), `entire enable`
+// (which installs hooks itself) and `entire disable` do not (re)install the
+// user-level hooks.
+func TestGlobalEnable_HiddenEnableAndDisableCommandsSkipInstall(t *testing.T) {
 	t.Parallel()
 	root := NewRootCmd()
 	for _, args := range [][]string{
 		{"hooks", "claude-code", "stop"},
 		{"hooks", "git", "pre-push"},
+		{"__sweep_sessions"},
+		{"enable"},
 		{"disable"},
 	} {
 		cmd, _, err := root.Find(args)
@@ -99,7 +104,7 @@ func TestGlobalEnable_HookAndDisableCommandsSkipInstall(t *testing.T) {
 			t.Errorf("%v would install the user-level hooks", args)
 		}
 	}
-	for _, args := range [][]string{{"version"}, {"status"}, {"enable"}} {
+	for _, args := range [][]string{{"version"}, {"status"}} {
 		cmd, _, err := root.Find(args)
 		if err != nil {
 			t.Fatalf("find %v: %v", args, err)
@@ -392,6 +397,32 @@ func TestEnable_DoesNotClaimThroughATrackedLocalFile(t *testing.T) {
 	assert.Contains(t, out, "tracked in git")
 }
 
+// The claim is best effort: enable already succeeded, so a failed write is a
+// warning, not an error.
+func TestClaimRepoFromGlobalEnable_WarnsWhenTheWriteFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not block writes on Windows")
+	}
+	repo := newGlobalOnlyRepo(t, true)
+	entire := filepath.Join(repo, ".entire")
+	if err := os.MkdirAll(entire, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(entire, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(entire, 0o755); err != nil {
+			t.Error(err)
+		}
+	})
+
+	var out, errOut bytes.Buffer
+	claimRepoFromGlobalEnable(t.Context(), &out, &errOut)
+	assert.Empty(t, out.String())
+	assert.Contains(t, errOut.String(), "Warning: Entire stays enabled here only through global enable")
+}
+
 // `entire disable` in a global-only repository writes the local file, keeps
 // it out of git, and says global enable is still on elsewhere.
 func TestDisable_GlobalOnlyRepo(t *testing.T) {
@@ -451,4 +482,16 @@ func TestDisable_GlobalOffIsUnchanged(t *testing.T) {
 	}
 	assert.NoFileExists(t, filepath.Join(repo, ".entire", ".gitignore"))
 	assert.NotContains(t, out, "global enable")
+}
+
+// The SessionStart banner follows the user flag, which it checks before
+// spawning git to look for hooks.
+func TestGlobalEnableBannerSuffix_FollowsTheUserFlag(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		newGlobalOnlyRepo(t, on)
+		got := globalEnableBannerSuffix(t.Context(), agent.AgentNameClaudeCode)
+		if on != strings.Contains(got, "through global enable") {
+			t.Errorf("global_enable %v: banner suffix %q", on, got)
+		}
+	}
 }

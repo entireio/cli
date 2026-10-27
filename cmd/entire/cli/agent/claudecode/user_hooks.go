@@ -37,27 +37,47 @@ func EnsureUserHooks(ctx context.Context) (int, string, error) {
 	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
 		return 0, path, ErrClaudeNotInUse
 	}
+	cfg := userClaudeSettings{path: path}
+	// Every command runs this while the flag is on, so the usual case, hooks
+	// already in, is settled by a read alone: no lock, no write.
+	if _, err := installUserHooks(dryRunUserSettings{cfg}); !errors.Is(err, errWriteNeeded) {
+		return 0, path, err
+	}
 	// Entire processes run this concurrently, so the read-merge-write is
-	// serialised. The lock sits beside the file, as agy's does beside its
-	// settings.json.
+	// serialised, and repeated under the lock.
 	release, err := flock.AcquireContext(ctx, path+".lock")
 	if err != nil {
 		return 0, path, fmt.Errorf("lock %s: %w", path, err)
 	}
 	defer release()
-	// A file that exists but cannot be read must not be mistaken for an
-	// absent one: the install merge would then replace everything in it.
-	if _, err := os.ReadFile(path); err != nil && !errors.Is(err, fs.ErrNotExist) { //nolint:gosec // the user's own Claude config
-		return 0, path, fmt.Errorf("read %s: %w", path, err)
-	}
-	n, err := installHooksIn(userClaudeSettings{path: path}, false)
+	n, err := installUserHooks(cfg)
 	return n, path, err
 }
 
+// installUserHooks merges Entire's hooks into cfg. A file that exists but
+// cannot be read must not be mistaken for an absent one: the install merge
+// would then replace everything in it.
+func installUserHooks(cfg claudeSettingsFile) (int, error) {
+	if _, err := cfg.Read(); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return 0, fmt.Errorf("read %s: %w", cfg.Path(), err)
+	}
+	return installHooksIn(cfg, false)
+}
+
+// errWriteNeeded is dryRunUserSettings refusing the write the merge asked for.
+var errWriteNeeded = errors.New("user-level Claude settings need Entire's hooks")
+
+// dryRunUserSettings runs the install merge without writing: Write reports
+// that one is needed.
+type dryRunUserSettings struct{ userClaudeSettings }
+
+func (dryRunUserSettings) Write([]byte, os.FileMode) error { return errWriteNeeded }
+
 // userClaudeSettings is the user's own config file. Unlike a worktree file, a
 // symlink here is the user's arrangement (a dotfiles checkout), so the write
-// goes through it rather than replacing it. A link that does not resolve is
-// refused.
+// goes through it rather than replacing it; see "User-level Claude Code
+// settings" in docs/development/filesystem-safety.md. A link that does not
+// resolve is refused.
 type userClaudeSettings struct{ path string }
 
 func (u userClaudeSettings) Path() string { return u.path }
@@ -76,9 +96,6 @@ func (u userClaudeSettings) Write(data []byte, perm os.FileMode) error {
 			return fmt.Errorf("resolve symlink %s: %w", u.path, err)
 		}
 		target = resolved
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(target), err)
 	}
 	// The user chose this file's mode; keep it rather than imposing the
 	// project file's 0o600.

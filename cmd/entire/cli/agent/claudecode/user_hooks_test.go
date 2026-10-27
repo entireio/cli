@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 )
 
 func readUserClaudeSettings(t *testing.T, dir string) map[string]json.RawMessage {
@@ -203,6 +206,32 @@ func TestEnsureUserHooks_ConcurrentCallsInstallOnce(t *testing.T) {
 	}
 	if installs != 1 {
 		t.Errorf("%d callers installed hooks, want exactly 1", installs)
+	}
+}
+
+// Every command checks the user file while the flag is on, so hooks already in
+// are settled without the lock; only a needed write waits for it.
+func TestEnsureUserHooks_TakesTheLockOnlyToWrite(t *testing.T) {
+	userDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	t.Chdir(t.TempDir())
+	path := filepath.Join(userDir, ClaudeSettingsFileName)
+	release, err := flock.Acquire(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, _, err := EnsureUserHooks(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("install under a held lock: error = %v, want it to wait for the lock", err)
+	}
+	if _, err := installUserHooks(userClaudeSettings{path: path}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := EnsureUserHooks(context.Background()); err != nil || n != 0 {
+		t.Errorf("hooks already in under a held lock: n = %d, error = %v, want 0, nil", n, err)
 	}
 }
 
