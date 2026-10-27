@@ -15,6 +15,7 @@ import (
 const (
 	symlinkedAgentDirsRejectionNotLocal   = "it did not come from .entire/settings.local.json"
 	symlinkedAgentDirsRejectionUnverified = "the local settings file could not be verified as untracked"
+	symlinkedAgentDirsRejectionInherited  = "it is inherited from the main worktree's settings.local.json, which vouches only for that worktree's links; set it in this worktree's own settings.local.json"
 )
 
 // enforceSymlinkedAgentDirsTrust drops allow_symlinked_agent_dirs unless it came
@@ -37,7 +38,7 @@ const (
 // Rejection is a downgrade, never an error. The link is refused, which is
 // exactly what happens with no setting at all, and the recorded reason is what
 // tells the two apart.
-func enforceSymlinkedAgentDirsTrust(ctx context.Context, s *EntireSettings, localSettingsPath string, localData []byte) {
+func enforceSymlinkedAgentDirsTrust(ctx context.Context, s *EntireSettings, localSettingsPath string, localData []byte, inherited bool) {
 	// An empty list grants nothing, so there is nothing to gate and nothing to
 	// warn about.
 	if s == nil || len(s.AllowSymlinkedAgentDirs) == 0 {
@@ -48,6 +49,10 @@ func enforceSymlinkedAgentDirsTrust(ctx context.Context, s *EntireSettings, loca
 	switch {
 	case !localSetsSymlinkedAgentDirs(localData):
 		reason = symlinkedAgentDirsRejectionNotLocal
+	case inherited:
+		// A linked worktree's branch can ship its own link at `.claude`; the
+		// main worktree's vouch is for the link its developer looked at.
+		reason = symlinkedAgentDirsRejectionInherited
 	case classifyLocalSettingsDeep(ctx, localSettingsPath) != localOwn:
 		reason = symlinkedAgentDirsRejectionUnverified
 	default:

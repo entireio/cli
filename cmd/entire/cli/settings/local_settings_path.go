@@ -63,6 +63,30 @@ func localSettingsPathIn(worktreeRoot string) (string, bool) {
 	return inherited, true
 }
 
+// LocalInheritanceUnavailable reports whether the current worktree is a linked
+// worktree whose main worktree could not be determined (a bare repository, or
+// --separate-git-dir), so no settings.local.json is inherited. Status uses it
+// to explain a "not set up" that the main worktree's file would otherwise fix.
+func LocalInheritanceUnavailable(ctx context.Context) bool {
+	root, ok := worktreeRootFromContext(ctx)
+	if !ok {
+		var err error
+		if root, err = paths.WorktreeRoot(ctx); err != nil {
+			return false
+		}
+	}
+	return localInheritanceUnavailableIn(root)
+}
+
+func localInheritanceUnavailableIn(worktreeRoot string) bool {
+	meta, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
+	if err != nil || meta.WorktreeID == "" {
+		return false
+	}
+	_, ok := mainWorktreeOf(worktreeRoot)
+	return !ok
+}
+
 // mainWorktreeOf returns the main worktree of a linked worktree. The main
 // worktree is the parent of a common dir named .git (the derivation
 // trailWorktreeBaseRoot uses), confirmed by resolving its own metadata back to

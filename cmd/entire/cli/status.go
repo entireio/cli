@@ -83,6 +83,10 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 	if !projectExists && !localExists {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
+		if settings.LocalInheritanceUnavailable(ctx) {
+			// Otherwise the main worktree's settings.local.json would apply here.
+			fmt.Fprintln(w, "  This worktree can't use the main worktree's local settings: the main worktree can't be located (bare repository or --separate-git-dir).")
+		}
 		return nil
 	}
 

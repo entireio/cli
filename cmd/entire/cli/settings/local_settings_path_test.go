@@ -98,6 +98,28 @@ func TestLocalSettingsPathIn(t *testing.T) {
 		assert.False(t, inherited)
 	})
 
+	t.Run("--separate-git-dir: the main worktree cannot be derived, so nothing is inherited", func(t *testing.T) {
+		t.Parallel()
+		mainRoot := filepath.Join(t.TempDir(), "main")
+		gitDir := filepath.Join(t.TempDir(), "repo.git")
+		testutil.RunGit(t, t.TempDir(), "init", "-q", "--separate-git-dir", gitDir, mainRoot)
+		require.NoError(t, os.WriteFile(filepath.Join(mainRoot, "f.txt"), []byte("x"), 0o644))
+		testutil.RunGit(t, mainRoot, "add", ".")
+		testutil.RunGit(t, mainRoot, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+		require.NoError(t, os.MkdirAll(filepath.Join(mainRoot, ".entire"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(mainRoot, EntireSettingsLocalFile), []byte(`{"enabled":true}`), 0o644))
+		linked := filepath.Join(t.TempDir(), "wt")
+		testutil.RunGit(t, mainRoot, "worktree", "add", "-q", "-b", "other", linked)
+		linked, err := filepath.EvalSymlinks(linked)
+		require.NoError(t, err)
+
+		path, inherited := localSettingsPathIn(linked)
+		assert.Equal(t, filepath.Join(linked, EntireSettingsLocalFile), path)
+		assert.False(t, inherited)
+		assert.True(t, localInheritanceUnavailableIn(linked), "status can say why nothing was inherited")
+		assert.False(t, localInheritanceUnavailableIn(mainRoot), "a main worktree has nothing to inherit")
+	})
+
 	t.Run("not a repository: own path", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
@@ -257,4 +279,26 @@ func TestFilesPresent_InheritedLocalFileWithoutWorktreeEntireDir(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, project)
 	assert.True(t, local)
+}
+
+// Not parallel: t.Chdir. allow_symlinked_agent_dirs vouches for the links in
+// the worktree whose developer wrote it. Inherited into a linked worktree it
+// would vouch for whatever link that worktree's branch ships, so it is dropped
+// there and the reason recorded.
+func TestLoad_InheritedLocalFileDoesNotVouchForSymlinkedAgentDirs(t *testing.T) {
+	mainRoot, linked := worktreePair(t)
+	writeSettingsFile(t, filepath.Join(mainRoot, EntireSettingsLocalFile), `{"enabled":true,"allow_symlinked_agent_dirs":[".claude"]}`)
+
+	mainSettings, err := Load(WithWorktreeRoot(t.Context(), mainRoot))
+	require.NoError(t, err)
+	assert.Equal(t, []string{".claude"}, mainSettings.AllowSymlinkedAgentDirs, "the main worktree keeps its own vouch")
+
+	t.Chdir(linked)
+	s, err := Load(WithWorktreeRoot(t.Context(), linked))
+	require.NoError(t, err)
+	assert.True(t, s.Enabled, "the rest of the inherited file still applies")
+	assert.Empty(t, s.AllowSymlinkedAgentDirs)
+	reason, rejected := s.SymlinkedAgentDirsRejection()
+	assert.True(t, rejected)
+	assert.Contains(t, reason, "inherited from the main worktree")
 }

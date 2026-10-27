@@ -181,3 +181,18 @@ func TestSettingsTargetFile_LinkedWorktreeNamesInheritedFile(t *testing.T) {
 		t.Fatalf("disable output = %q, want it to name the main worktree's file", out.String())
 	}
 }
+
+// A bundle taken in a linked worktree must include the main worktree's local
+// file it runs on, named so the reader knows it was inherited.
+func TestWriteDoctorBundle_LinkedWorktreeIncludesInheritedLocalFile(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir mutates process-global cwd.
+	_, linked := chdirLinkedWorktree(t, `{"enabled":true,"external_agents":true}`)
+
+	out := filepath.Join(t.TempDir(), "bundle.zip")
+	if err := writeDoctorBundle(context.Background(), linked, out, false); err != nil {
+		t.Fatalf("writeDoctorBundle: %v", err)
+	}
+	if got := readZipEntry(t, out, "settings/inherited-settings.local.json"); !strings.Contains(got, "external_agents") {
+		t.Fatalf("inherited local file missing from the bundle, got %q", got)
+	}
+}

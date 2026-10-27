@@ -798,7 +798,9 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// allow_symlinked_agent_dirs decides where Entire writes an agent's hook
 	// config, so it gets the same gate, and then installs the surviving set as
 	// the process-wide policy.
-	enforceSymlinkedAgentDirsTrust(ctx, settings, localSettingsFileAbs, localData)
+	localInherited := localSettingsFileAbs != "" &&
+		!sameDirectory(worktreeRootOfSettingsFile(localSettingsFileAbs), worktreeRootOfSettingsFile(settingsFileAbs))
+	enforceSymlinkedAgentDirsTrust(ctx, settings, localSettingsFileAbs, localData, localInherited)
 	applyVouchedAgentDirs(settings, worktreeRootOfSettingsFile(settingsFileAbs))
 
 	// Re-validate after merge. Individual files are validated by loadFromFile,

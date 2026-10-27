@@ -3432,3 +3432,26 @@ func TestRunStatus_LinkedWorktreeTrackedInheritedFileFixNamesMainWorktree(t *tes
 		t.Errorf("want the fix %q, got:\n%s", want, detailed.String())
 	}
 }
+
+// A worktree of a --separate-git-dir repository cannot locate the main
+// worktree, so its local file is not inherited; "not set up" says why.
+func TestRunStatus_SeparateGitDirWorktreeExplainsNoInheritance(t *testing.T) {
+	mainRoot := filepath.Join(t.TempDir(), "main")
+	gitDir := filepath.Join(t.TempDir(), "repo.git")
+	testutil.RunGit(t, t.TempDir(), "init", "-q", "--separate-git-dir", gitDir, mainRoot)
+	testutil.WriteFile(t, mainRoot, "f.txt", "x")
+	testutil.RunGit(t, mainRoot, "add", "f.txt")
+	testutil.RunGit(t, mainRoot, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+	testutil.WriteFile(t, mainRoot, settings.EntireSettingsLocalFile, testSettingsEnabled)
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, mainRoot, "worktree", "add", "-q", "-b", "feature", linked)
+	t.Chdir(linked)
+
+	var out bytes.Buffer
+	if err := runStatus(context.Background(), &out, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "not set up") || !strings.Contains(out.String(), "main worktree") {
+		t.Errorf("want not set up plus why the main worktree's local settings don't apply, got:\n%s", out.String())
+	}
+}
