@@ -38,7 +38,7 @@ func contains(names []string, want string) bool {
 }
 
 // agent-help advertises visible commands plus hidden commands that explicitly
-// opt in via the agentHelpAnnotation (e.g. trail), but never plain-hidden
+// opt in via the agentHelpAnnotation (e.g. why), but never plain-hidden
 // commands, the help command, or agent-help itself (avoid a meta-loop).
 func TestAgentHelpCommands_IncludesAnnotatedHiddenOnly(t *testing.T) {
 	t.Parallel()
@@ -477,8 +477,8 @@ func TestRenderAgentHelpCommand_RendersExample(t *testing.T) {
 	}
 }
 
-// The top-level rendering lists the live command map (including the revealed
-// trail command), states the auto-detected repo, and carries the standing rule.
+// The top-level rendering lists the live command map (including trail),
+// states the auto-detected repo, and carries the standing rule.
 func TestRenderAgentHelpTop_ListsCommandsRepoAndRule(t *testing.T) {
 	t.Parallel()
 
@@ -486,7 +486,7 @@ func TestRenderAgentHelpTop_ListsCommandsRepoAndRule(t *testing.T) {
 	out := renderAgentHelpTop(root, agentHelpTestRepo, true)
 
 	for _, want := range []string{
-		"trail",             // hidden but revealed via annotation
+		"trail",             // visible
 		"checkpoint",        // visible
 		"status",            // visible
 		agentHelpTestRepo,   // auto-detected repo
@@ -948,12 +948,15 @@ func TestAgentHelpGuidance_NeverLeaksIntoCobraHelp(t *testing.T) {
 }
 
 // Project-trail URLs exist only in the project model, so their mapping ships on
-// the project tree's `trail show` and never on the legacy one built at the same
-// path, while trail's group guidance is still inherited.
+// the project tree's `trail` group — inherited by `trail show` (which the
+// first-turn injection names) and every other subcommand an agent looks up —
+// and never on the legacy tree built at the same path. trail's sandbox guidance
+// stays in both.
 func TestAgentHelpProjectTrailGuidance_OnlyInProjectTree(t *testing.T) {
 	t.Parallel()
 
 	const urlLine = "Users paste Entire trail URLs."
+	const showLine = "each changes[] entry is the change"
 	project := projectTrailsHelpTestRoot()
 	for path, guidance := range agentHelpProjectTrailGuidance {
 		cmd := project
@@ -969,13 +972,24 @@ func TestAgentHelpProjectTrailGuidance_OnlyInProjectTree(t *testing.T) {
 		}
 	}
 
-	show := agentHelpFindChild(agentHelpFindChild(project, "trail"), "show")
+	trail := agentHelpFindChild(project, "trail")
+	sandboxLine := strings.SplitN(agentHelpTrailSandboxGuidance, "\n", 2)[0]
+	groupText := renderAgentHelpCommand(trail, "", true)
+	for _, want := range []string{sandboxLine, urlLine, "<forge>/<project>/-/trails/<P>/changes/<repo>/<n>", "`entire trail show` prints"} {
+		if !strings.Contains(groupText, want) {
+			t.Errorf("project `agent-help trail` missing %q:\n%s", want, groupText)
+		}
+	}
+
+	show := agentHelpFindChild(trail, "show")
 	text := renderAgentHelpCommand(show, "", true)
-	trailFirstLine := strings.SplitN(agentHelpGuidance["trail"], "\n", 2)[0]
-	for _, want := range []string{urlLine, "<forge>/<project>/-/trails/<P>/changes/<repo>/<n>", "each changes[] entry is the change", "entry has current: true", trailFirstLine} {
+	for _, want := range []string{sandboxLine, urlLine, "<forge>/<project>/-/trails/<P>/changes/<repo>/<n>", showLine, "entry has current: true"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("project `agent-help trail show` missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Count(text, urlLine) != 1 {
+		t.Errorf("URL guidance should appear exactly once on `trail show`:\n%s", text)
 	}
 	js, err := renderAgentHelpJSON(project, show, "", true)
 	if err != nil {
@@ -988,8 +1002,43 @@ func TestAgentHelpProjectTrailGuidance_OnlyInProjectTree(t *testing.T) {
 	legacy := &cobra.Command{Use: "entire"}
 	legacy.AddCommand(newTrailCmdForMode(false))
 	legacyTrail := agentHelpFindChild(legacy, "trail")
-	if got := agentHelpGuidanceFor(agentHelpFindChild(legacyTrail, "show")); strings.Contains(got, urlLine) {
-		t.Errorf("legacy trail show must not carry project URL guidance:\n%s", got)
+	for _, cmd := range []*cobra.Command{legacyTrail, agentHelpFindChild(legacyTrail, "show")} {
+		got := agentHelpGuidanceFor(cmd)
+		if strings.Contains(got, urlLine) || strings.Contains(got, showLine) {
+			t.Errorf("legacy %q must not carry project trail guidance:\n%s", cmd.CommandPath(), got)
+		}
+		if !strings.Contains(got, sandboxLine) {
+			t.Errorf("legacy %q lost the sandbox guidance:\n%s", cmd.CommandPath(), got)
+		}
+	}
+}
+
+// Both trail models point agents from comments to findings, on the group and
+// on every comment subcommand, while keeping trail's sandbox guidance.
+func TestAgentHelpTrailCommentGuidance_PointsAtFindings(t *testing.T) {
+	t.Parallel()
+
+	const findingsLine = "Use `entire trail finding` for agent\nreview findings"
+	sandboxLine := strings.SplitN(agentHelpTrailSandboxGuidance, "\n", 2)[0]
+	legacy := &cobra.Command{Use: "entire"}
+	legacy.AddCommand(newTrailCmdForMode(false))
+	for name, root := range map[string]*cobra.Command{"project": projectTrailsHelpTestRoot(), "legacy": legacy} {
+		comment := agentHelpFindChild(agentHelpFindChild(root, "trail"), "comment")
+		if comment == nil {
+			t.Fatalf("%s trail comment not found", name)
+		}
+		if strings.Contains(comment.Long, findingsLine) {
+			t.Errorf("%s trail comment guidance is duplicated into its cobra help; keep it agent-only", name)
+		}
+		for _, cmd := range append([]*cobra.Command{comment}, comment.Commands()...) {
+			got := agentHelpGuidanceFor(cmd)
+			if !strings.Contains(got, findingsLine) || !strings.Contains(got, sandboxLine) {
+				t.Errorf("%s %q guidance should carry the findings rule and the sandbox guidance:\n%s", name, cmd.CommandPath(), got)
+			}
+			if strings.Contains(got, trailCommentHumanOverrideFlag) {
+				t.Errorf("%s %q guidance must not name the human override:\n%s", name, cmd.CommandPath(), got)
+			}
+		}
 	}
 }
 

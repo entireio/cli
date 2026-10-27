@@ -342,14 +342,18 @@ type State struct {
 	// normal agent execution.
 	AttachedManually bool `json:"attached_manually,omitempty"`
 
-	// ContextInjectionDecided records that the once-per-session model-context
-	// injection (e.g. the `entire trail` pointer) has been handled for this
-	// session, so the dispatcher does not re-inject on later turns. Set on the
-	// first normal turn regardless of whether anything was injected: the prompt
-	// path reads only clone-local cached trail enablement, and a missing/stale
-	// false cache fails closed (miss the hint) rather than retrying/spamming.
-	// Review/investigate sessions leave this false because they skip injection.
+	// ContextInjectionDecided records that the trails part of the
+	// once-per-session model-context injection has been decided for this
+	// session (injected when trails are enabled, skipped when they are not), so
+	// the dispatcher does not re-decide on later turns. An unknown trails cache
+	// leaves it false so a later turn can decide. Review/investigate sessions
+	// leave this false because they skip injection.
 	ContextInjectionDecided bool `json:"context_injection_decided,omitempty"`
+
+	// ContextInjectionBaseDone records that the base model-context injection
+	// (the `entire agent-help` pointer and standing rules) has been sent. It
+	// goes out on the first normal turn whether or not trails are decided yet.
+	ContextInjectionBaseDone bool `json:"context_injection_base_done,omitempty"`
 
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Codex", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`

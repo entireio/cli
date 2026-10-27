@@ -15,7 +15,7 @@ import (
 )
 
 // agentHelpAnnotation marks an otherwise-hidden command as worth advertising to
-// coding agents through `entire agent-help`. Hidden commands (e.g. trail) opt in
+// coding agents through `entire agent-help`. Hidden commands (e.g. why) opt in
 // by setting Annotations[agentHelpAnnotation] = "true".
 const agentHelpAnnotation = "entire_agent_help"
 
@@ -235,14 +235,15 @@ var agentHelpGuidance = map[string]string{
 		"did, read \"tasks\" in --json, then stream one subagent's transcript with\n" +
 		"--transcript --task <tool_use_id>.",
 
-	// Agent sandboxes commonly block both, and the failure reads like an auth
-	// wall to an agent that does not know what the command needs.
-	"trail": "Trail commands talk to entire.io and read the saved login from the OS\n" +
-		"keyring (the Keychain on macOS), so they need network and keyring access.\n" +
-		"If you run commands in a sandbox, request unsandboxed execution for\n" +
-		"`entire trail` up front. An error saying the Keychain is not accessible or\n" +
-		"the network is not allowed means the sandbox blocked it, not that the user\n" +
-		"is logged out: ask to re-run it unsandboxed, and do not run `entire login`.",
+	"trail": agentHelpTrailSandboxGuidance,
+
+	// Shared by both trail models: comments are human conversation, findings
+	// are the agent's channel. The write verbs refuse in agent sessions
+	// (guardTrailCommentWrites); this is the copy an agent reads first.
+	"trail comment": "Trail discussions are for people: read them for context, but do not start,\n" +
+		"reply to, edit, delete, or resolve one. Use `entire trail finding` for agent\n" +
+		"review findings, questions, and follow-ups, including when asked to\n" +
+		"\"comment\" on a trail. Comment writes refuse in agent sessions.",
 
 	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
@@ -252,22 +253,28 @@ var agentHelpGuidance = map[string]string{
 // project trail tree, whose selectors (and the web URLs users paste) differ
 // from the legacy repository-scoped tree built under the same path.
 var agentHelpProjectTrailGuidance = map[string]string{
-	// No command parses web URLs, and the project and change URLs put
-	// "-" where a repository name would be, so an agent passing one through
-	// gets a misleading repository-mismatch error.
-	"trail show": "Users paste Entire trail URLs. Do not pass a URL to any command; map\n" +
+	// On the group so every subcommand an agent looks up (show, checkout,
+	// finding, approve, …) inherits the selector model and URL mapping. No
+	// command parses web URLs, and the project and change URLs put "-" where a
+	// repository name would be, so an agent passing one through gets a
+	// misleading repository-mismatch error.
+	"trail": agentHelpTrailSandboxGuidance + "\n\n" +
+		"A project trail spans repositories; each change is its branch in one\n" +
+		"repository. Project trails and changes are numbered separately: never\n" +
+		"pass <P> where a change is expected, or <n> where a project trail is.\n" +
+		"Pass <repo>/<n> to checkout, resume, finding, watch, approvals or\n" +
+		"approve; given to show, it shows the parent project trail.\n" +
+		"Users paste Entire trail URLs. Do not pass a URL to any command; map\n" +
 		"the path after the host to a selector:\n" +
 		"  <forge>/<project>/-/trails/<P>/changes/<repo>/<n>  change <repo>/<n>\n" +
 		"  <forge>/<project>/<repo>/-/trails/<P>/changes/<n>  change <repo>/<n>\n" +
 		"  <forge>/<project>/<repo>/trails/<n>                change <repo>/<n>\n" +
 		"  <forge>/<project>/-/trails/<P>                     project trail <P>\n" +
 		"Add --project <forge>/<project> unless <project> is origin's owner.\n" +
-		"A project trail spans repositories; each change is its branch in one\n" +
-		"repository. Pass <repo>/<n> to checkout, resume, finding, watch,\n" +
-		"approvals or approve; given to show, it shows the parent\n" +
-		"project trail. Project trails and changes are numbered separately: never\n" +
-		"pass <P> where a change is expected, or <n> where a project trail is.\n" +
-		"To list a project trail's changes, run `entire trail show <P>\n" +
+		"To link a trail or change, use the url `entire trail show` prints.",
+	// Inherits the group's URL mapping above, so an agent that goes straight
+	// to `agent-help trail show` still gets it.
+	"trail show": "To list a project trail's changes, run `entire trail show <P>\n" +
 		"--project <forge>/<project> --json`; each changes[] entry is the change\n" +
 		"<repository>/<number> with its own url. When show reaches the trail\n" +
 		"through a change (the current branch, --branch, or <repo>/<n>), that\n" +
@@ -278,6 +285,16 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"tell the user which changes need another clone instead of skipping\n" +
 		"them silently.",
 }
+
+// agentHelpTrailSandboxGuidance is shared by both trail models. Agent sandboxes
+// commonly block network and keyring access, and the failure reads like an auth
+// wall to an agent that does not know what the command needs.
+const agentHelpTrailSandboxGuidance = "Trail commands talk to entire.io and read the saved login from the OS\n" +
+	"keyring (the Keychain on macOS), so they need network and keyring access.\n" +
+	"If you run commands in a sandbox, request unsandboxed execution for\n" +
+	"`entire trail` up front. An error saying the Keychain is not accessible or\n" +
+	"the network is not allowed means the sandbox blocked it, not that the user\n" +
+	"is logged out: ask to re-run it unsandboxed, and do not run `entire login`."
 
 // agentHelpFactsFor classifies one command path, defaulting the unclassified
 // case to user-owned and unlisted so an unclassified addition is under- rather
@@ -618,7 +635,7 @@ func maybeDelegateAgentHelpToPlugin(ctx context.Context, rootCmd *cobra.Command,
 }
 
 // agentHelpFindChild finds a direct child of parent by name or alias. It
-// includes hidden commands so an annotated one like trail resolves; the caller
+// includes hidden commands so an annotated one like why resolves; the caller
 // (runAgentHelp) then enforces isAgentHelpAdvertised, so the drillable surface
 // matches the advertised one.
 func agentHelpFindChild(parent *cobra.Command, name string) *cobra.Command {

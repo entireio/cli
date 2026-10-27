@@ -1672,7 +1672,7 @@ func liveTaskTranscriptFiles(ctx context.Context, analyzer agent.TranscriptAnaly
 
 // collectCommittedFileClaims counts sessions whose tracked files overlap with
 // committed files. When no persisted FilesTouched claims the
-// commit, it falls back to hasMidTurnClaimant; the read-only gate only asks
+// commit, it falls back to hasLiveTranscriptClaimant; the read-only gate only asks
 // whether any claimant exists, so that fallback reports at most one.
 func (s *ManualCommitStrategy) collectCommittedFileClaims(ctx context.Context, sessions []*SessionState, committedFileSet map[string]struct{}) int {
 	claimants := 0
@@ -1687,24 +1687,35 @@ func (s *ManualCommitStrategy) collectCommittedFileClaims(ctx context.Context, s
 			}
 		}
 	}
-	if claimants == 0 && s.hasMidTurnClaimant(ctx, sessions, committedFileSet) {
+	if claimants == 0 && s.hasLiveTranscriptClaimant(ctx, sessions, committedFileSet) {
 		claimants = 1
 	}
 	return claimants
 }
 
-// hasMidTurnClaimant reports whether any ACTIVE session's live transcript
-// modified a committed file. A session committing mid-turn has not run SaveStep yet, so its
-// claim on the commit exists only in its transcript; its persisted FilesTouched
-// is empty or left over from an earlier turn. Without this check, the read-only
+// hasLiveTranscriptClaimant reports whether any session whose claim on the
+// commit exists only in its live transcript modified a committed file. Two
+// kinds have such a claim: an ACTIVE session committing mid-turn, which has
+// not run SaveStep yet, so its persisted FilesTouched is empty or left over
+// from an earlier turn; and an IDLE session with no persisted files whose new
+// work no turn end recorded (liveTranscriptCheckApplies) and whose transcript
+// grew since, which PrepareCommitMsg linked on those edits when the commit is
+// at its home (transcriptEditsApplyHere). Without this check, the read-only
 // gate in shouldCondenseWithOverlapCheck sees no claimant and lets a file-less
 // session (a reviewer running a background subagent) condense into the commit.
 // Callers invoke it only when persisted FilesTouched found no claimant, so an
 // ordinary commit pays no transcript parse, and it stops at the first claimant
 // because each scan can reread a large transcript.
-func (s *ManualCommitStrategy) hasMidTurnClaimant(ctx context.Context, sessions []*SessionState, committedFileSet map[string]struct{}) bool {
+func (s *ManualCommitStrategy) hasLiveTranscriptClaimant(ctx context.Context, sessions []*SessionState, committedFileSet map[string]struct{}) bool {
 	for _, state := range sessions {
-		if !state.Phase.IsActive() {
+		// The IDLE session must also have new transcript work, as
+		// sessionHasNewContentFromLiveTranscript requires: a Claude Code
+		// subagent's edits are read from its whole transcript, so without it
+		// edits a checkpoint already holds would claim the commit.
+		idleTranscriptOnly := state.Phase == session.PhaseIdle && len(state.FilesTouched) == 0 &&
+			liveTranscriptCheckApplies(ctx, state) && transcriptEditsApplyHere(ctx, state) &&
+			s.hasNewTranscriptWork(ctx, state)
+		if !state.Phase.IsActive() && !idleTranscriptOnly {
 			continue
 		}
 		prepareTranscriptForState(ctx, state)
@@ -1715,6 +1726,65 @@ func (s *ManualCommitStrategy) hasMidTurnClaimant(ctx context.Context, sessions 
 		}
 	}
 	return false
+}
+
+// postCommitHasNewContent reports whether state has new content for the
+// commit (needed for TransitionContext and condensation). Fail-open: if the
+// content check errors, it assumes new content exists so we don't silently
+// skip data that should have been condensed.
+//
+// For ACTIVE sessions: the commit has a checkpoint trailer (verified by the
+// caller), meaning PrepareCommitMsg already determined this commit is
+// session-related. The trailer is only added when either:
+//   - No TTY (agent/subagent committing) — added unconditionally
+//   - TTY (human committing) — added after content detection confirmed agent work
+//
+// In both cases, PrepareCommitMsg already validated this commit. We trust
+// that decision here. Transcript-based re-validation is unreliable because
+// subagent transcripts may not be available yet (subagent still running).
+func (s *ManualCommitStrategy) postCommitHasNewContent(ctx context.Context, repo *git.Repository, state *SessionState, committedFileSet map[string]struct{}) bool {
+	if state.Phase.IsActive() {
+		return true
+	}
+	// Only an IDLE session can condense on its transcript's edits; an ENDED
+	// one without persisted files takes the discard action, and counting those
+	// edits as new content would keep it from ever being marked FullyCondensed.
+	var opts contentCheckOpts
+	if state.Phase == session.PhaseIdle {
+		opts.committedFiles = committedFileSet
+	}
+	hasNew, err := s.sessionHasNewContent(ctx, repo, state, opts)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "post-commit: error checking session content, assuming new content",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()),
+		)
+		return true
+	}
+	return hasNew
+}
+
+// postCommitFilesTouchedBefore saves FilesTouched BEFORE TransitionAndLog —
+// the handler's condensation clears it, but the original list is needed for
+// carry-forward computation. Only ACTIVE sessions fall back to transcript
+// extraction, and an IDLE one whose new work no turn end recorded:
+// sessionHasNewContent judged that one by its live transcript, as
+// PrepareCommitMsg did, so its overlap must come from the same edits. Other
+// IDLE/ENDED sessions have FilesTouched already populated by
+// SaveStep/mergeFilesTouched; an ENDED session without them takes the discard
+// action and condenses nothing.
+func (s *ManualCommitStrategy) postCommitFilesTouchedBefore(ctx context.Context, state *SessionState, foreign bool) []string {
+	switch {
+	case state.Phase.IsActive() && foreign:
+		return s.filesTouchedWithLiveTranscript(ctx, state)
+	case state.Phase.IsActive():
+		return s.resolveFilesTouched(ctx, state)
+	case len(state.FilesTouched) > 0:
+		return slices.Clone(state.FilesTouched)
+	case state.Phase == session.PhaseIdle && liveTranscriptCheckApplies(ctx, state) && transcriptEditsApplyHere(ctx, state):
+		return s.filesTouchedWithLiveTranscript(ctx, state)
+	}
+	return nil
 }
 
 // postCommitProcessSessionLocked handles a single session within the PostCommit loop.
@@ -1762,49 +1832,10 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		return newSkillEvents, condensedSignal, false
 	}
 
-	// Check for new content (needed for TransitionContext and condensation).
-	// Fail-open: if content check errors, assume new content exists so we
-	// don't silently skip data that should have been condensed.
-	//
-	// For ACTIVE sessions: the commit has a checkpoint trailer (verified above),
-	// meaning PrepareCommitMsg already determined this commit is session-related.
-	// The trailer is only added when either:
-	//   - No TTY (agent/subagent committing) — added unconditionally
-	//   - TTY (human committing) — added after content detection confirmed agent work
-	// In both cases, PrepareCommitMsg already validated this commit. We trust
-	// that decision here. Transcript-based re-validation is unreliable because
-	// subagent transcripts may not be available yet (subagent still running).
 	_, checkContentSpan := perf.Start(ctx, "check_session_content")
-	var hasNew bool
-	if state.Phase.IsActive() {
-		hasNew = true
-	} else {
-		var contentErr error
-		hasNew, contentErr = s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{})
-		if contentErr != nil {
-			hasNew = true
-			logging.Debug(logCtx, "post-commit: error checking session content, assuming new content",
-				slog.String("session_id", state.SessionID),
-				slog.String("error", contentErr.Error()),
-			)
-		}
-	}
+	hasNew := s.postCommitHasNewContent(ctx, repo, state, committedFileSet)
 	transitionCtx.HasFilesTouched = len(state.FilesTouched) > 0
-
-	// Save FilesTouched BEFORE TransitionAndLog — the handler's condensation
-	// clears it, but we need the original list for carry-forward computation.
-	// Only fall back to transcript extraction for ACTIVE sessions — IDLE/ENDED
-	// sessions have FilesTouched already populated by SaveStep/mergeFilesTouched.
-	var filesTouchedBefore []string
-	switch {
-	case state.Phase.IsActive() && foreign:
-		filesTouchedBefore = s.filesTouchedWithLiveTranscript(ctx, state)
-	case state.Phase.IsActive():
-		filesTouchedBefore = s.resolveFilesTouched(ctx, state)
-	case len(state.FilesTouched) > 0:
-		filesTouchedBefore = make([]string, len(state.FilesTouched))
-		copy(filesTouchedBefore, state.FilesTouched)
-	}
+	filesTouchedBefore := s.postCommitFilesTouchedBefore(ctx, state, foreign)
 	// Like FilesTouched, the recorded hashes are cleared by condensation but
 	// needed afterwards for the carry-forward decision.
 	touchedFileHashesBefore := maps.Clone(state.TouchedFileHashes)
@@ -2267,6 +2298,53 @@ type contentCheckOpts struct {
 	// to other heuristics (e.g., transcript growth).
 	// Non-nil empty means successfully resolved but no files are staged.
 	stagedFiles []string
+	// committedFiles is PostCommit's stand-in for stagedFiles in the
+	// live-transcript check: the files the commit changed. Without it that
+	// check finds no overlap after the commit, declining a session
+	// PrepareCommitMsg linked on the same transcript.
+	committedFiles map[string]struct{}
+}
+
+// commitFiles is the set the live-transcript check overlaps with: the commit's
+// files when PostCommit supplied them, otherwise the staged files.
+func (o contentCheckOpts) commitFiles() map[string]struct{} {
+	if o.committedFiles != nil {
+		return o.committedFiles
+	}
+	return fileSet(o.stagedFiles)
+}
+
+// liveTranscriptCheckApplies reports whether sessionHasNewContent judges a
+// session by its live transcript's edits: no turn end has recorded a step
+// since the last checkpoint, or one did but left neither files nor a stored
+// transcript. PrepareCommitMsg links such a session on those edits, so
+// PostCommit must take an IDLE one's condensation overlap, and its claim on the
+// commit, from the same edits.
+func liveTranscriptCheckApplies(ctx context.Context, state *SessionState) bool {
+	if state.StepCount == 0 {
+		return true
+	}
+	if len(state.FilesTouched) > 0 {
+		return false
+	}
+	_, hasTranscriptFile := storedTranscriptSize(ctx, state)
+	return !hasTranscriptFile
+}
+
+// transcriptEditsApplyHere reports whether the live transcript's edits can
+// describe a commit in the hook's worktree: they are made relative to the
+// session's home, so in any other worktree they match only files that happen
+// to share a name (ENT-3537's stacked worktrees). A state with no recorded
+// home is judged wherever it is asked about, as before homes were recorded.
+func transcriptEditsApplyHere(ctx context.Context, state *SessionState) bool {
+	if state.WorktreePath == "" {
+		return true
+	}
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return false
+	}
+	return committedAtHome(root, state)
 }
 
 // sessionHasNewContent checks if a session has new transcript content
@@ -2284,13 +2362,21 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 		return true, nil
 	}
 
-	// No turn-end step since the last condensation (and no carry-forward):
-	// any new work lives only in the live transcript.
-	if state.StepCount == 0 {
-		logging.Debug(logCtx, "sessionHasNewContent: no turn-end step, checking live transcript",
+	// No turn-end step since the last condensation, or no record a turn end
+	// left behind: any new work lives only in the live transcript.
+	if liveTranscriptCheckApplies(ctx, state) {
+		logging.Debug(logCtx, "sessionHasNewContent: no turn-end record, checking live transcript",
 			slog.String("session_id", state.SessionID),
+			slog.Int("step_count", state.StepCount),
 		)
-		return s.sessionHasNewContentFromLiveTranscript(ctx, state, opts.stagedFiles)
+		// An ACTIVE session's mid-turn edits keep their existing handling.
+		if !state.Phase.IsActive() && !transcriptEditsApplyHere(ctx, state) {
+			logging.Debug(logCtx, "sessionHasNewContent: live transcript edits are relative to another worktree",
+				slog.String("session_id", state.SessionID),
+			)
+			return false, nil
+		}
+		return s.sessionHasNewContentFromLiveTranscript(ctx, state, opts.commitFiles())
 	}
 
 	// Use the size of the stored turn-end transcript (sanitized, written by
@@ -2300,35 +2386,29 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 	transcriptBlobSize, hasTranscriptFile := storedTranscriptSize(ctx, state)
 
 	// No stored transcript (e.g. released after a condensation that left
-	// carry-forward files): check if the session has FilesTouched.
+	// carry-forward files): liveTranscriptCheckApplies has already taken the
+	// session without FilesTouched, so these are carry-forward files.
 	if !hasTranscriptFile {
-		if len(state.FilesTouched) > 0 {
-			// Carry-forward files - check if staged files overlap AND have
-			// matching content (content-aware check).
-			if len(opts.stagedFiles) > 0 {
-				// PrepareCommitMsg context: check staged files overlap with content
-				result := stagedFilesOverlapWithContent(ctx, repo, state.TouchedFileHashes, opts.stagedFiles, state.FilesTouched)
-				logging.Debug(logCtx, "sessionHasNewContent: no transcript, carry-forward with staged files",
-					slog.String("session_id", state.SessionID),
-					slog.Int("files_touched", len(state.FilesTouched)),
-					slog.Int("staged_files", len(opts.stagedFiles)),
-					slog.Bool("result", result),
-				)
-				return result, nil
-			}
-			// PostCommit context: no staged files, but we have carry-forward files.
-			// Return true and let the caller do the overlap check with committed files.
-			logging.Debug(logCtx, "sessionHasNewContent: no transcript, carry-forward without staged files (post-commit context)",
+		// Carry-forward files - check if staged files overlap AND have
+		// matching content (content-aware check).
+		if len(opts.stagedFiles) > 0 {
+			// PrepareCommitMsg context: check staged files overlap with content
+			result := stagedFilesOverlapWithContent(ctx, repo, state.TouchedFileHashes, opts.stagedFiles, state.FilesTouched)
+			logging.Debug(logCtx, "sessionHasNewContent: no transcript, carry-forward with staged files",
 				slog.String("session_id", state.SessionID),
 				slog.Int("files_touched", len(state.FilesTouched)),
+				slog.Int("staged_files", len(opts.stagedFiles)),
+				slog.Bool("result", result),
 			)
-			return true, nil
+			return result, nil
 		}
-		// No transcript and no FilesTouched - fall back to live transcript check
-		logging.Debug(logCtx, "sessionHasNewContent: no transcript and no files touched, checking live transcript",
+		// PostCommit context: no staged files, but we have carry-forward files.
+		// Return true and let the caller do the overlap check with committed files.
+		logging.Debug(logCtx, "sessionHasNewContent: no transcript, carry-forward without staged files (post-commit context)",
 			slog.String("session_id", state.SessionID),
+			slog.Int("files_touched", len(state.FilesTouched)),
 		)
-		return s.sessionHasNewContentFromLiveTranscript(ctx, state, opts.stagedFiles)
+		return true, nil
 	}
 
 	// Check if there's new content to condense. Two cases:
@@ -2421,15 +2501,17 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 // Returns true if:
 //  1. The transcript has grown since the last condensation, AND
 //  2. The new transcript portion contains file modifications, AND
-//  3. At least one modified file overlaps with the currently staged files
+//  3. At least one modified file is among the commit's files
 //
 // The overlap check ensures we don't add checkpoint trailers to commits that are
 // unrelated to the agent's recent changes.
 //
-// stagedFiles is the pre-computed list of staged files from the caller.
+// commitFiles is the commit's file set (contentCheckOpts.commitFiles): the
+// staged files in PrepareCommitMsg, the committed ones in PostCommit, so both
+// hooks reach the same answer.
 //
 // This handles the scenario where the agent commits mid-session before Stop.
-func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(ctx context.Context, state *SessionState, stagedFiles []string) (bool, error) {
+func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(ctx context.Context, state *SessionState, commitFiles map[string]struct{}) (bool, error) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
 	// Hook-captured files are evidence of new work on their own: FilesTouched
@@ -2468,14 +2550,14 @@ func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(ctx contex
 		slog.Int("modified_files", len(modifiedFiles)),
 	)
 
-	logging.Debug(logCtx, "live transcript check: comparing staged vs modified",
+	logging.Debug(logCtx, "live transcript check: comparing commit vs modified",
 		slog.String("session_id", state.SessionID),
-		slog.Int("staged_files", len(stagedFiles)),
+		slog.Int("commit_files", len(commitFiles)),
 		slog.Int("modified_files", len(modifiedFiles)),
 	)
 
-	if !hasOverlappingFiles(stagedFiles, modifiedFiles) {
-		logging.Debug(logCtx, "live transcript check: no overlap between staged and modified files",
+	if !overlapsFiles(modifiedFiles, commitFiles) {
+		logging.Debug(logCtx, "live transcript check: no overlap between commit and modified files",
 			slog.String("session_id", state.SessionID),
 		)
 		return false, nil // No overlap - staged files are unrelated to agent's work
@@ -2519,8 +2601,10 @@ func (s *ManualCommitStrategy) resolveFilesTouched(ctx context.Context, state *S
 // CheckpointTranscriptStart, and earlier edits are already in a checkpoint). FilesTouched holds
 // only what earlier turn ends recorded for an agent without file-edit hooks,
 // so for a mid-turn session it misses the current turn's edits. Used for a
-// foreign session, whose link rests on overlap alone; the other paths keep
-// resolveFilesTouched's FilesTouched-first answer.
+// foreign ACTIVE session, whose link rests on overlap alone, and for an IDLE
+// session whose new work no turn end recorded (liveTranscriptCheckApplies),
+// which PrepareCommitMsg linked on the transcript's edits; the other paths
+// keep resolveFilesTouched's FilesTouched-first answer.
 func (s *ManualCommitStrategy) filesTouchedWithLiveTranscript(ctx context.Context, state *SessionState) []string {
 	prepareTranscriptForState(ctx, state)
 	files := slices.Clone(state.FilesTouched)

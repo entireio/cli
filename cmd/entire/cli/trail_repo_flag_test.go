@@ -219,7 +219,7 @@ func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 		{name: "approve", args: []string{"approve", "--repo", "gh/acme/app"}},
 		{name: "approvals", args: []string{"approvals", "--repo", "gh/acme/app"}},
 		{name: "comment list", args: []string{"comment", "list", "--repo", "gh/acme/app"}},
-		{name: "comment add", args: []string{"comment", "add", "--repo", "gh/acme/app", "-m", "hi"}},
+		{name: "comment add", args: []string{"comment", "add", "--repo", "gh/acme/app", "-m", "hi", "--human-says-do-it"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
