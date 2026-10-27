@@ -150,9 +150,8 @@ func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent
 }
 
 // parseTurnStart parses UserPromptSubmit. Claude Code also fires it for the
-// <task-notification> it injects when a background task finishes, from its
-// message-queue enqueue pass — so it can fire while a turn is still running,
-// folding the notice into that turn. Such a TurnStart is conditional: the
+// <task-notification> it injects when a background task finishes, and that
+// can happen while a turn is still running, folding the notice into that turn. Such a TurnStart is conditional: the
 // dispatcher drops it while the session is ACTIVE, so the running turn keeps
 // its pre-prompt baseline (transcript offset, untracked files), TurnID, prompt
 // and turn checkpoints, and runs it as a new turn when the session is idle.
@@ -164,8 +163,8 @@ func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent
 //   - The dispatcher reads the phase without the session lock. A notification
 //     whose hook overlaps the previous turn's Stop can see ACTIVE, be dropped,
 //     and leave its follow-up turn untracked once Stop goes IDLE. Without the
-//     guard the same race loses that turn too: Stop deletes the newer
-//     pre-prompt file.
+//     guard that turn is lost as well (Stop deletes the newer pre-prompt
+//     file), along with the running turn's calls before the notification.
 func (c *ClaudeCodeAgent) parseTurnStart(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[userPromptSubmitRaw](stdin)
 	if err != nil {
@@ -177,8 +176,8 @@ func (c *ClaudeCodeAgent) parseTurnStart(ctx context.Context, stdin io.Reader) (
 	prompt := transcriptlib.StripIDEContextTags(raw.Prompt)
 	notification := isTaskNotification(prompt)
 	if len(raw.PromptID) > 0 || notification {
-		// prompt_id is logged to learn whether a mid-turn notification
-		// carries the running turn's id, which would be a structural signal.
+		// prompt_id is logged to learn whether Claude fires this hook when a
+		// notification is queued or when it is delivered.
 		logging.Debug(logging.WithComponent(ctx, "agent.claudecode"), "user-prompt-submit received",
 			slog.String("session_id", raw.SessionID),
 			slog.String("prompt_id", strings.Trim(string(raw.PromptID), `"`)),

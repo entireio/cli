@@ -63,8 +63,10 @@ func TestTurnStartOverlap_NotificationMidTurnKeepsBaseline(t *testing.T) {
 	assert.Equal(t, before.TurnID, after.TurnID, "the notification must not start a new turn")
 	assert.Equal(t, before.LastPrompt, after.LastPrompt, "the notification is not the turn's prompt")
 	promptFile, err := os.ReadFile(filepath.Join(r.env.RepoDir, ".entire", "metadata", r.s.ID, "prompt.txt"))
-	if err == nil {
-		assert.NotContains(t, string(promptFile), "<task-notification>")
+	if err != nil {
+		require.True(t, os.IsNotExist(err), "read prompt.txt: %v", err)
+	} else {
+		assert.NotContains(t, string(promptFile), "<task-notification>", "the notification must not be recorded as a prompt")
 	}
 
 	r.more(50)
@@ -154,12 +156,14 @@ func TestTurnStartOverlap_InterruptThenNotificationFoldsIntoTurn(t *testing.T) {
 	r.verify()
 }
 
-// TestTurnStartOverlap_NotificationRacingStopIsAKnownGap pins a known gap: a
+// TestTurnStartOverlap_NotificationRacingStopIsAKnownGap pins a known gap. A
 // notification whose hook reads ACTIVE just before the turn's Stop goes IDLE
 // is dropped, and the follow-up turn Claude Code then runs for it has no turn
-// start, so its Stop records nothing. Without the guard the same race loses
-// that turn too, because Stop deletes the notification's newer pre-prompt file. When Stop
-// stops doing that, this test should count the follow-up turn.
+// start. The hooks run one after the other here, so this pins the outcome
+// rather than the timing: a Stop with no turn start records nothing. Without
+// the guard the same sequence also loses the running turn's tokens (the
+// notification moves its baseline, and Stop deletes the newer pre-prompt
+// file). When Stop keeps that file, this test should count the follow-up turn.
 func TestTurnStartOverlap_NotificationRacingStopIsAKnownGap(t *testing.T) {
 	t.Parallel()
 	r := newTokenTurnRun(t)
