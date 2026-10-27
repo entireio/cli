@@ -15,7 +15,7 @@ import (
 const (
 	symlinkedAgentDirsRejectionNotLocal   = "it did not come from .entire/settings.local.json"
 	symlinkedAgentDirsRejectionUnverified = "the local settings file could not be verified as untracked"
-	symlinkedAgentDirsRejectionInherited  = "it is inherited from the main worktree's settings.local.json, which vouches only for that worktree's links; set it in this worktree's own settings.local.json"
+	symlinkedAgentDirsRejectionInherited  = "it is inherited from the main worktree's settings.local.json, which vouches only for that worktree's links; to vouch here, copy that file to this worktree's .entire/settings.local.json and set it there (a worktree with its own file stops inheriting the main one)"
 )
 
 // enforceSymlinkedAgentDirsTrust drops allow_symlinked_agent_dirs unless it came

@@ -301,4 +301,23 @@ func TestLoad_InheritedLocalFileDoesNotVouchForSymlinkedAgentDirs(t *testing.T) 
 	reason, rejected := s.SymlinkedAgentDirsRejection()
 	assert.True(t, rejected)
 	assert.Contains(t, reason, "inherited from the main worktree")
+	assert.Contains(t, reason, "copy that file", "a vouch-only file would drop every other inherited setting")
+}
+
+// The bundle reads the inherited file from the main worktree the resolver
+// found, not from a root derived from the file's path.
+func TestInheritedLocalSettingsRoot(t *testing.T) {
+	t.Parallel()
+	mainRoot, linked := worktreePair(t)
+
+	_, ok := InheritedLocalSettingsRoot(WithWorktreeRoot(t.Context(), linked))
+	assert.False(t, ok, "nothing to inherit before the main worktree has a local file")
+
+	writeSettingsFile(t, filepath.Join(mainRoot, EntireSettingsLocalFile), `{"enabled":true}`)
+	got, ok := InheritedLocalSettingsRoot(WithWorktreeRoot(t.Context(), linked))
+	require.True(t, ok)
+	assert.True(t, sameDirectory(mainRoot, got))
+
+	_, ok = InheritedLocalSettingsRoot(WithWorktreeRoot(t.Context(), mainRoot))
+	assert.False(t, ok, "the main worktree uses its own file")
 }

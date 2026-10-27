@@ -63,6 +63,24 @@ func localSettingsPathIn(worktreeRoot string) (string, bool) {
 	return inherited, true
 }
 
+// InheritedLocalSettingsRoot returns the main worktree whose
+// settings.local.json the current worktree uses, when it has none of its own.
+// Callers that read from that worktree's .entire open it from this root rather
+// than deriving one from the file's path.
+func InheritedLocalSettingsRoot(ctx context.Context) (string, bool) {
+	root, ok := worktreeRootFromContext(ctx)
+	if !ok {
+		var err error
+		if root, err = paths.WorktreeRoot(ctx); err != nil {
+			return "", false
+		}
+	}
+	if _, inherited := localSettingsPathIn(root); !inherited {
+		return "", false
+	}
+	return mainWorktreeOf(root)
+}
+
 // LocalInheritanceUnavailable reports whether the current worktree is a linked
 // worktree whose main worktree could not be determined (a bare repository, or
 // --separate-git-dir), so no settings.local.json is inherited. Status uses it

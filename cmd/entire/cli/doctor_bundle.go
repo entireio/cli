@@ -150,13 +150,20 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 	}
 	// A linked worktree with no local file of its own runs on the main
 	// worktree's, so the bundle carries that one, named as inherited.
-	if localPath, inherited, err := settings.LocalSettingsPath(settings.WithWorktreeRoot(ctx, repoRoot)); err == nil && inherited {
-		mainRoot, err := entiredir.OpenAtForRead(filepath.Dir(filepath.Dir(localPath)))
-		if err != nil {
-			return fmt.Errorf("open main worktree %s: %w", paths.EntireDir, err)
-		}
-		if err := addFileToZip(zw, mainRoot, settings.SettingsLocalName, path.Join("settings", "inherited-"+settings.SettingsLocalName), raw); err != nil {
-			return err
+	if mainWorktree, inherited := settings.InheritedLocalSettingsRoot(settings.WithWorktreeRoot(ctx, repoRoot)); inherited {
+		inheritedName := path.Join("settings", "inherited-"+settings.SettingsLocalName)
+		mainEntire, err := entiredir.OpenAtForRead(mainWorktree)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			// A gap in the bundle beats no bundle; say why the file is missing.
+			if err := addStringToZip(zw, inheritedName, fmt.Sprintf("[error: open main worktree %s: %v]\n", paths.EntireDir, err), raw); err != nil {
+				return err
+			}
+		default:
+			if err := addFileToZip(zw, mainEntire, settings.SettingsLocalName, inheritedName, raw); err != nil {
+				return err
+			}
 		}
 	}
 
