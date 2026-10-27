@@ -73,8 +73,8 @@ type UserPreferences struct {
 // userOverlay is everything the user tier contributes to one settings load.
 type userOverlay struct {
 	// globalEnable is the top-level `global_enable` key `entire enable
-	// --global` writes; nil when absent, null, or not a boolean.
-	globalEnable *bool
+	// --global` writes; false when absent, null, or not a boolean.
+	globalEnable bool
 	preferences  *UserPreferences
 	repos        map[string]json.RawMessage
 	rejections   []string
@@ -93,12 +93,12 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 			slog.String("error", err.Error()))
 		return overlay
 	}
-	if raw, ok := us.Block(usersettings.GlobalEnableKey); ok && !usersettings.IsJSONNull(raw) {
-		var enabled bool
+	if raw, ok := us.Block(usersettings.GlobalEnableKey); ok {
+		var enabled *bool // absorbs null
 		if err := json.Unmarshal(raw, &enabled); err != nil {
 			overlay.reject(ctx, usersettings.GlobalEnableKey+": must be true or false")
 		} else {
-			overlay.globalEnable = &enabled
+			overlay.globalEnable = enabled != nil && *enabled
 		}
 	}
 	if raw, ok := us.Block(userPreferencesBlock); ok {
@@ -376,7 +376,7 @@ func UserSettingsReadError(ctx context.Context) error {
 // IsSetUpAny guard exists to prevent, reached through a different door.
 func UserTierConfiguresRepo(ctx context.Context, worktreeRoot string) bool {
 	overlay := loadUserOverlay(ctx)
-	if overlay.enablesEverywhere() {
+	if overlay.globalEnable {
 		return true
 	}
 	return len(overlay.repoPreferences(ctx, worktreeRoot)) > 0
@@ -461,14 +461,9 @@ func (s *EntireSettings) UserLayerRejections() []string {
 // UserTierEnablesEverywhere reports whether the user settings file turns
 // Entire on machine-wide (`global_enable: true`, set by `entire enable
 // --global`). That is the one flag that sets up every repository the user
-// touches, short of one whose committed settings turn Entire off.
+// touches.
 func UserTierEnablesEverywhere(ctx context.Context) bool {
-	overlay := loadUserOverlay(ctx)
-	return overlay.enablesEverywhere()
-}
-
-func (o *userOverlay) enablesEverywhere() bool {
-	return o.globalEnable != nil && *o.globalEnable
+	return loadUserOverlay(ctx).globalEnable
 }
 
 // EnabledOnlyByGlobal reports whether this repository is on only because of

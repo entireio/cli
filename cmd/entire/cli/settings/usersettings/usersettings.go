@@ -194,17 +194,14 @@ func SetGlobalEnable(_ context.Context, enabled bool) (string, error) {
 	defer release()
 
 	settings := &UserSettings{}
-	data, err := osroot.ReadFileNoFollow(root, FileName)
+	data, err := readFileIn(root)
 	switch {
 	case err == nil:
 		if settings, err = decode(data); err != nil {
 			return path, fmt.Errorf("%s: %w", path, err)
 		}
-	case errors.Is(err, fs.ErrNotExist):
-	case errors.Is(err, osroot.ErrSymlinkedPath):
-		return path, fmt.Errorf("user settings %s is a symbolic link; it must be a regular file: %w", path, err)
-	default:
-		return path, fmt.Errorf("reading user settings %s: %w", path, err)
+	case !errors.Is(err, fs.ErrNotExist):
+		return path, err
 	}
 
 	blocks := settings.extra
@@ -238,6 +235,11 @@ func readFile() ([]byte, error) {
 		}
 		return nil, fmt.Errorf("opening user settings directory: %w", err)
 	}
+	return readFileIn(root)
+}
+
+// readFileIn reads the settings file from root, refusing a symlink.
+func readFileIn(root *os.Root) ([]byte, error) {
 	data, err := osroot.ReadFileNoFollow(root, FileName)
 	if err == nil {
 		return data, nil

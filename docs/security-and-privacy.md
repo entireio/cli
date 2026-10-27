@@ -456,12 +456,12 @@ install the git hooks.
   worktree of the clone, and one that sets `enabled` is the clone-wide way to
   turn one repository on or off.
 - In a repository enabled only through global enable (no `repos` entry that
-  sets `enabled`, and no
-  `enabled` key in an untracked `.entire/settings.local.json`), the committed
-  `strategy_options.summarize`, `summary_generation`, `summary_timeout_seconds`
-  and `"telemetry": true` are ignored: you never opted into them there, and
-  summarization sends transcripts to a model provider. `entire status` names
-  what was ignored. Redaction settings are always honored.
+  sets `enabled`, and no `enabled` key in an untracked
+  `.entire/settings.local.json`), the committed `strategy_options.summarize`,
+  `summary_generation`, `summary_timeout_seconds` and `"telemetry": true` are
+  ignored: you never opted into them there, and summarization sends
+  transcripts to a model provider. `entire status` names what was ignored.
+  Redaction settings are always honored.
 - Running `entire enable` in such a repository claims it: it writes
   `"enabled": true` to this worktree's `.entire/settings.local.json`, after which
   the committed settings apply in full and the global-enable notices stop.

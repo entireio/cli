@@ -785,7 +785,6 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// local (see localLayerTrackedReason). It is read here, ahead of the user
 	// tier, because whether global_enable alone turns this repository on
 	// depends on it.
-	applyLocal := false
 	localData, err := readConfined(localSettingsFileAbs)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -799,13 +798,11 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		// OPF command applies the stricter policy for itself.
 		settings.localLayerRejection = localLayerTrackedReason
 		localData = nil
-	default:
-		applyLocal = true
 	}
 
 	overlay := loadUserOverlay(ctx)
 	repoPrefs := overlay.repoPreferences(ctx, worktreeRootOfSettingsFile(settingsFileAbs))
-	if overlay.enablesEverywhere() && settings.Enabled && !reposSetEnabled(repoPrefs) && !localSetsEnabled(localData) {
+	if overlay.globalEnable && settings.Enabled && !reposSetEnabled(repoPrefs) && !localSetsEnabled(localData) {
 		settings.enabledOnlyByGlobal = true
 		settings.committedKeysIgnoredForGlobalEnable = ignoreCommittedForGlobalOnly(settings)
 		if ignored := settings.committedKeysIgnoredForGlobalEnable; len(ignored) > 0 {
@@ -823,7 +820,7 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// itself fails.
 	applyUserTier(settings, overlay, repoPrefs)
 
-	if applyLocal {
+	if localData != nil {
 		if err := mergeJSON(settings, localData); err != nil {
 			return nil, fmt.Errorf("merging local settings: %w", err)
 		}
