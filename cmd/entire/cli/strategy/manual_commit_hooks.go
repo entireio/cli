@@ -3546,6 +3546,8 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 		advanceCheckpointTranscriptStartToTurnEnd(ctx, state)
 	}
 
+	s.retryPendingTaskAttachments(ctx, state)
+
 	return nil
 }
 

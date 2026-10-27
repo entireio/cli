@@ -468,6 +468,14 @@ Windows — see `agent.HookHostIsWindows`'s doc comment for how its runner was
 read out of the shipped binaries, and for why codex and cursor are on the other
 gate for reasons of evidence rather than mechanism.
 
+Put a warning wrapper on one hook that fires every session (usually session
+start) so a broken install is visible. The sh-based warning wrappers warn both
+when `entire` is missing from PATH and when it is on PATH but `entire --version`
+fails, such as a version-manager shim with no version selected, and exit 0
+either way. Otherwise they `exec` the hook, so an agent's timeout signal reaches
+`entire` itself and the hook's exit code and output pass through unchanged. The
+silent and Windows wrappers still check only that `entire` is on PATH.
+
 Both gates are overridable in tests via `agent.SetWindowsHookProbeForTesting`;
 key install-test expectations to the host rather than hardcoding one wrapper, or
 they assert a command `InstallHooks` does not write on the other platform.

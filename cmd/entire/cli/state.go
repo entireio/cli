@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -727,6 +728,11 @@ type PreTaskState struct {
 	// SubagentModel is the model the start hook named for the subagent
 	// (agent.Event.SubagentModel), carried to its task record at completion.
 	SubagentModel string `json:"subagent_model,omitempty"`
+
+	// TurnCheckpointIDs are the checkpoints the session's current turn had
+	// already condensed when the task started, so subagent-end can tell which
+	// ones were condensed while the task ran. nil means they were not captured.
+	TurnCheckpointIDs []string `json:"turn_checkpoint_ids"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -741,11 +747,11 @@ func (s *PreTaskState) PreUntrackedFiles() []string {
 	return s.UntrackedFiles
 }
 
-// CapturePreTaskState captures current untracked files before a Task execution
-// and saves them, with the subagent's model when its start hook named one, to
-// a state file.
+// CapturePreTaskState captures current untracked files and the session's turn
+// checkpoints before a Task execution and saves them, with the subagent's
+// model when its start hook named one, to a state file.
 // Works correctly from any subdirectory within the repository.
-func CapturePreTaskState(ctx context.Context, toolUseID, subagentModel string) error {
+func CapturePreTaskState(ctx context.Context, sessionID, toolUseID, subagentModel string) error {
 	if toolUseID == "" {
 		return errors.New("tool_use_id is required")
 	}
@@ -771,6 +777,7 @@ func CapturePreTaskState(ctx context.Context, toolUseID, subagentModel string) e
 		UntrackedFiles:       untrackedFiles,
 		UntrackedScanSkipped: scanSkipped,
 		SubagentModel:        subagentModel,
+		TurnCheckpointIDs:    turnCheckpointIDsAtTaskStart(ctx, sessionID),
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
@@ -785,6 +792,23 @@ func CapturePreTaskState(ctx context.Context, toolUseID, subagentModel string) e
 	logging.Debug(logging.WithComponent(ctx, "state"), "captured state before task",
 		slog.Int("untracked_files", len(untrackedFiles)))
 	return nil
+}
+
+// turnCheckpointIDsAtTaskStart returns the checkpoints sessionID's current turn
+// has condensed: empty for a session with no state yet, nil when its state
+// cannot be read.
+func turnCheckpointIDsAtTaskStart(ctx context.Context, sessionID string) []string {
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "state"), "turn checkpoints unavailable for pre-task state",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	if state == nil {
+		return []string{}
+	}
+	return append([]string{}, state.TurnCheckpointIDs...)
 }
 
 // LoadPreTaskState loads previously captured task state.
