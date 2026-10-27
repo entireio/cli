@@ -108,29 +108,11 @@ jobs:
       matrix:
         shard: [1, 2, 3]
     steps:
-      - name: Set up Dev Drive
+      - name: Pin Go cache paths
         shell: pwsh
         run: |
-          $vhd = "$env:RUNNER_TEMP\dev-drive.vhdx"
-          fsutil devdrv enable /allowAv
-          New-VHD -Path $vhd -SizeBytes 20GB -Dynamic |
-            Mount-VHD -Passthru |
-            Initialize-Disk -PartitionStyle GPT -Passthru |
-            New-Partition -AssignDriveLetter -UseMaximumSize |
-            Format-Volume -DevDrive -Confirm:$false -Force | Out-Null
-          $letter = (Get-DiskImage -ImagePath $vhd | Get-Disk | Get-Partition | Get-Volume).DriveLetter
-          $drive = "${letter}:"
-          fsutil devdrv trust $drive
-          Dismount-VHD -Path $vhd
-          Mount-VHD -Path $vhd
-          $letter = (Get-DiskImage -ImagePath $vhd | Get-Disk | Get-Partition | Get-Volume).DriveLetter
-          $drive = "${letter}:"
-          fsutil devdrv query $drive
-          New-Item -ItemType Directory -Force -Path "$drive\tmp", "$drive\go-build", "$drive\go-mod" | Out-Null
-          "TMP=$drive\tmp" >> $env:GITHUB_ENV
-          "TEMP=$drive\tmp" >> $env:GITHUB_ENV
-          "GOCACHE=$drive\go-build" >> $env:GITHUB_ENV
-          "GOMODCACHE=$drive\go-mod" >> $env:GITHUB_ENV
+          "GOCACHE=$env:LOCALAPPDATA\go-build" >> $env:GITHUB_ENV
+          "GOMODCACHE=$env:USERPROFILE\go\pkg\mod" >> $env:GITHUB_ENV
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
