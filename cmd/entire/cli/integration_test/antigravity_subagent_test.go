@@ -122,6 +122,11 @@ func TestAntigravity_SubagentWorkBelongsToTheParent(t *testing.T) {
 	if child != nil && child.TokenUsage != nil {
 		require.Zero(t, child.TokenUsage.InputTokens, "the child's usage is on the parent's task, not its own session")
 	}
+	// The parent's displayed total adds the child once, as its subagent usage.
+	total := parent.TotalTokenUsage()
+	require.NotNil(t, total.SubagentTokens)
+	require.Equal(t, 5846+6224+6449, total.SubagentTokens.InputTokens)
+	require.Equal(t, 3, total.SubagentTokens.APICallCount)
 
 	_, _ = commitCheckpointTokens(t, env, first, "Add parent.txt", "parent.txt")
 	second := env.GetLatestCheckpointID()
