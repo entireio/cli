@@ -131,7 +131,9 @@ func sumUsage(usageByMessageID map[string]messageUsage) *agent.TokenUsage {
 }
 
 // addModelsByMessageID records the model of each assistant message in
-// transcript, keyed like addUsageByMessageID.
+// transcript, keyed like addUsageByMessageID. The first fragment naming a
+// model wins, as in the transcript library's per-call lines, so the model a
+// checkpoint's token usage names matches the model on that call's line.
 func addModelsByMessageID(modelByMessageID map[string]string, transcript []TranscriptLine) {
 	for _, line := range transcript {
 		if line.Type != envelopeTypeAssistant {
@@ -139,6 +141,9 @@ func addModelsByMessageID(modelByMessageID map[string]string, transcript []Trans
 		}
 		var msg messageWithUsage
 		if err := json.Unmarshal(line.Message, &msg); err != nil || msg.ID == "" {
+			continue
+		}
+		if _, seen := modelByMessageID[msg.ID]; seen {
 			continue
 		}
 		if msg.Model != "" && msg.Model != syntheticModel {
