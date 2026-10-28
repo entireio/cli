@@ -5735,6 +5735,10 @@
             "pattern": "^$|^[A-Za-z0-9_-]{60,512}$",
             "type": "string"
           },
+          "consistent": {
+            "description": "Read placements at the present time and re-check denials at full consistency, for a caller that must see its own recent write without a token. Placements ignore commitToken when set; a commitToken authorization revision still takes precedence.",
+            "type": "boolean"
+          },
           "recheckDeniedPermissions": {
             "description": "Retry stale permission denials for navigation. Defaults to false for list enrichment. Failed retries retain denials; a commitToken authorization revision takes precedence.",
             "type": "boolean"

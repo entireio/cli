@@ -20950,6 +20950,10 @@ type ResolveReposInputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema      OptURI    `json:"$schema"`
 	CommitToken OptString `json:"commitToken"`
+	// Read placements at the present time and re-check denials at full consistency, for a caller that
+	// must see its own recent write without a token. Placements ignore commitToken when set; a
+	// commitToken authorization revision still takes precedence.
+	Consistent OptBool `json:"consistent"`
 	// Retry stale permission denials for navigation. Defaults to false for list enrichment. Failed
 	// retries retain denials; a commitToken authorization revision takes precedence.
 	RecheckDeniedPermissions OptBool         `json:"recheckDeniedPermissions"`
@@ -20965,6 +20969,11 @@ func (s *ResolveReposInputBody) GetSchema() OptURI {
 // GetCommitToken returns the value of CommitToken.
 func (s *ResolveReposInputBody) GetCommitToken() OptString {
 	return s.CommitToken
+}
+
+// GetConsistent returns the value of Consistent.
+func (s *ResolveReposInputBody) GetConsistent() OptBool {
+	return s.Consistent
 }
 
 // GetRecheckDeniedPermissions returns the value of RecheckDeniedPermissions.
@@ -20990,6 +20999,11 @@ func (s *ResolveReposInputBody) SetSchema(val OptURI) {
 // SetCommitToken sets the value of CommitToken.
 func (s *ResolveReposInputBody) SetCommitToken(val OptString) {
 	s.CommitToken = val
+}
+
+// SetConsistent sets the value of Consistent.
+func (s *ResolveReposInputBody) SetConsistent(val OptBool) {
+	s.Consistent = val
 }
 
 // SetRecheckDeniedPermissions sets the value of RecheckDeniedPermissions.

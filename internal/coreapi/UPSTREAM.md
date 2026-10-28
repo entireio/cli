@@ -165,6 +165,10 @@ The next full refresh carries them on its own, and this entry goes.
 (`SetDefaultBranchInputBody`, `SetDefaultBranchOutputBody`) are spliced the
 same way, verbatim from the published spec (entiredb#5136).
 
+`ResolveReposInputBody.consistent` is spliced verbatim from core's own spec
+before core deploys it. An older core ignores the field, because the body
+allows additional properties.
+
 **Workaround:** none in `normalize.go` beyond the `ResyncMirrorOutputBody.status`
 enum loosening. entiredb#4961 is on main and in prod, so any refresh from a
 current core keeps the three schemas and the route.

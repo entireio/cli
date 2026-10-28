@@ -43784,6 +43784,12 @@ func (s *ResolveReposInputBody) encodeFields(e *jx.Encoder) {
 		}
 	}
 	{
+		if s.Consistent.Set {
+			e.FieldStart("consistent")
+			s.Consistent.Encode(e)
+		}
+	}
+	{
 		if s.RecheckDeniedPermissions.Set {
 			e.FieldStart("recheckDeniedPermissions")
 			s.RecheckDeniedPermissions.Encode(e)
@@ -43806,11 +43812,12 @@ func (s *ResolveReposInputBody) encodeFields(e *jx.Encoder) {
 	}
 }
 
-var jsonFieldsNameOfResolveReposInputBody = [4]string{
+var jsonFieldsNameOfResolveReposInputBody = [5]string{
 	0: "$schema",
 	1: "commitToken",
-	2: "recheckDeniedPermissions",
-	3: "repositories",
+	2: "consistent",
+	3: "recheckDeniedPermissions",
+	4: "repositories",
 }
 
 // Decode decodes ResolveReposInputBody from json.
@@ -43843,6 +43850,16 @@ func (s *ResolveReposInputBody) Decode(d *jx.Decoder) error {
 			}(); err != nil {
 				return errors.Wrap(err, "decode field \"commitToken\"")
 			}
+		case "consistent":
+			if err := func() error {
+				s.Consistent.Reset()
+				if err := s.Consistent.Decode(d); err != nil {
+					return err
+				}
+				return nil
+			}(); err != nil {
+				return errors.Wrap(err, "decode field \"consistent\"")
+			}
 		case "recheckDeniedPermissions":
 			if err := func() error {
 				s.RecheckDeniedPermissions.Reset()
@@ -43854,7 +43871,7 @@ func (s *ResolveReposInputBody) Decode(d *jx.Decoder) error {
 				return errors.Wrap(err, "decode field \"recheckDeniedPermissions\"")
 			}
 		case "repositories":
-			requiredBitSet[0] |= 1 << 3
+			requiredBitSet[0] |= 1 << 4
 			if err := func() error {
 				s.Repositories = make([]RepoReference, 0)
 				if err := d.Arr(func(d *jx.Decoder) error {
@@ -43892,7 +43909,7 @@ func (s *ResolveReposInputBody) Decode(d *jx.Decoder) error {
 	// Validate required fields.
 	var failures []validate.FieldError
 	for i, mask := range [1]uint8{
-		0b00001000,
+		0b00010000,
 	} {
 		if result := (requiredBitSet[i] & mask) ^ mask; result != 0 {
 			// Mask only required fields and check equality to mask using XOR.
