@@ -164,7 +164,13 @@ func pathsWithEncoding(target string, encode func(string) string, readLimit int)
 	// short names like RUNNER~1), or no listed entry can lead to it.
 	target = normalizePath(target)
 	want := encode(target)
-	queue := []string{filepath.VolumeName(target) + string(filepath.Separator)}
+	root := filepath.VolumeName(target) + string(filepath.Separator)
+	// Trimming lets the root encode like a directory named only of
+	// separators under it (/ and /---, C:\ and C:\_), so it is a candidate too.
+	if encode(root) == want {
+		matches = append(matches, root)
+	}
+	queue := []string{root}
 	for reads := 0; len(queue) > 0; reads++ {
 		if reads >= readLimit {
 			return matches, "an unscanned path (collision check exceeded its directory budget)"

@@ -211,6 +211,29 @@ func TestPathsWithEncoding_CollisionOnlyUnderCursorRule(t *testing.T) {
 	}
 }
 
+// TestPathsWithEncoding_IncludesVolumeRoot covers a root that encodes like the
+// target: under Cursor's trimming, / and /--- (or C:\ and C:\_) share a name,
+// so the walk's starting root must be checked, not only what it lists.
+func TestPathsWithEncoding_IncludesVolumeRoot(t *testing.T) {
+	t.Parallel()
+	target := normalizePath(t.TempDir())
+	root := filepath.VolumeName(target) + string(filepath.Separator)
+	encode := func(p string) string {
+		if p == root || p == target {
+			return "shared"
+		}
+		return "other-" + p
+	}
+
+	matches, unscanned := pathsWithEncoding(target, encode, 1)
+	if unscanned != "" {
+		t.Fatalf("unscanned = %q, want a complete walk", unscanned)
+	}
+	if !slices.Contains(matches, root) {
+		t.Fatalf("matches = %q, want the volume root %q", matches, root)
+	}
+}
+
 // TestPathsWithEncoding_MatchesBruteForce compares the pruned walk against an
 // exhaustive enumeration over a tree whose names exercise collapsing and
 // trimming: separator-only names, names with leading or trailing separators,
