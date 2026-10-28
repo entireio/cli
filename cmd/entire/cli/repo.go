@@ -38,7 +38,7 @@ func newRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoRemoteCmd())
 	cmd.AddCommand(newRepoVisibilityCmd())
 	cmd.AddCommand(newRepoProtectionCmd())
-	cmd.AddCommand(newDefaultBranchCmd())
+	cmd.AddCommand(newRepoDefaultBranchCmd())
 	cmd.AddCommand(newRepoGrantCmd())
 	return requireSubcommand(cmd)
 }
