@@ -170,9 +170,10 @@ func TestToolResultImages_PerConverter(t *testing.T) {
 	t.Parallel()
 
 	const (
-		claudeImage = `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"entire-asset:assets/img-ab.png"}}`
-		piImage     = `{"type":"image","data":"entire-asset:assets/img-cd.png","mimeType":"image/png"}`
-		codexImage  = `{"type":"input_image","image_url":"data:image/png;base64,entire-asset:assets/img-ef.png","detail":"original"}`
+		claudeImage  = `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"entire-asset:assets/img-ab.png"}}`
+		claudeImage2 = `{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"entire-asset:assets/img-gh.jpg"}}`
+		piImage      = `{"type":"image","data":"entire-asset:assets/img-cd.png","mimeType":"image/png"}`
+		codexImage   = `{"type":"input_image","image_url":"data:image/png;base64,entire-asset:assets/img-ef.png","detail":"original"}`
 	)
 	tests := []struct {
 		name, agent, input, toolUseID, wantOutput string
@@ -195,6 +196,24 @@ func TestToolResultImages_PerConverter(t *testing.T) {
 `,
 			toolUseID:  "toolu_2",
 			wantOutput: "ok",
+		},
+		{
+			name:  "cursor result keeps several images in order",
+			agent: "cursor",
+			input: `{"role":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]}}
+{"role":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":[` + claudeImage2 + `,{"type":"text","text":"between"},` + claudeImage + `]}]}}
+`,
+			toolUseID:  "tu1",
+			wantImages: []string{claudeImage2, claudeImage},
+		},
+		{
+			name:  "droid result keeps several images in order",
+			agent: "factoryai-droid",
+			input: `{"type":"message","id":"m1","timestamp":"t1","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]}}
+{"type":"message","id":"m2","timestamp":"t2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":[` + claudeImage + `,{"type":"text","text":"between"},` + claudeImage2 + `]}]}}
+`,
+			toolUseID:  "tu1",
+			wantImages: []string{claudeImage, claudeImage2},
 		},
 		{
 			name:  "pi image-only result",

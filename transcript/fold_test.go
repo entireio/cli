@@ -395,7 +395,7 @@ func TestFold_ResultIsCopied(t *testing.T) {
 	t.Parallel()
 
 	f := NewFolder(testMeta)
-	result := &ToolResult{Output: "first", Status: ToolStatusSuccess, File: &ToolResultFile{FilePath: "/a"}, Agent: &ToolResultAgent{ID: "a1"}}
+	result := &ToolResult{Output: "first", Status: ToolStatusSuccess, File: &ToolResultFile{FilePath: "/a"}, Agent: &ToolResultAgent{ID: "a1"}, Images: []json.RawMessage{rawMsg(`{"type":"image"}`)}}
 	if _, err := f.Apply([]Record{
 		assistantRecord("a", "a", `[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]`),
 		{Op: OpResult, ID: "a", ToolUseID: "tu1", Result: result},
@@ -405,12 +405,14 @@ func TestFold_ResultIsCopied(t *testing.T) {
 	result.Output = "changed"
 	result.File.FilePath = "/b"
 	result.Agent.ID = "a2"
+	copy(result.Images[0], `{"type":"IMAGE"}`)
+	result.Images[0] = rawMsg(`{`)
 	line, ok := f.Line("a")
 	if !ok {
 		t.Fatal("line not visible")
 	}
 	assertLines(t, []string{string(line)},
-		linePrefix+`"type":"assistant","ts":"t1","id":"a","content":[{"id":"tu1","input":{},"name":"Read","result":{"output":"first","status":"success","file":{"filePath":"/a"},"agent":{"id":"a1"}},"type":"tool_use"}]}`,
+		linePrefix+`"type":"assistant","ts":"t1","id":"a","content":[{"id":"tu1","input":{},"name":"Read","result":{"output":"first","status":"success","file":{"filePath":"/a"},"agent":{"id":"a1"},"images":[{"type":"image"}]},"type":"tool_use"}]}`,
 	)
 }
 
@@ -429,6 +431,11 @@ func TestFolder_ApplyRejectsInvalidBatchAtomically(t *testing.T) {
 		{"result without result", Record{Op: OpResult, ID: "u", ToolUseID: "t"}},
 		{"invalid content", Record{Op: OpMessage, ID: "x", Role: TypeUser, Content: rawMsg(`[`)}},
 		{"invalid ts", Record{Op: OpAppend, ID: "u", TS: rawMsg(`t1`)}},
+		{"invalid result image", Record{Op: OpResult, ID: "u", ToolUseID: "t", Result: &ToolResult{Status: ToolStatusSuccess, Images: []json.RawMessage{rawMsg(`{"type":"image"}`), rawMsg(`{`)}}}},
+		{"empty result image", Record{Op: OpResult, ID: "u", ToolUseID: "t", Result: &ToolResult{Status: ToolStatusSuccess, Images: []json.RawMessage{{}}}}},
+		{"nil result image", Record{Op: OpResult, ID: "u", ToolUseID: "t", Result: &ToolResult{Status: ToolStatusSuccess, Images: []json.RawMessage{nil}}}},
+		{"null result image", Record{Op: OpResult, ID: "u", ToolUseID: "t", Result: &ToolResult{Status: ToolStatusSuccess, Images: []json.RawMessage{rawMsg(`null`)}}}},
+		{"non-object result image", Record{Op: OpResult, ID: "u", ToolUseID: "t", Result: &ToolResult{Status: ToolStatusSuccess, Images: []json.RawMessage{rawMsg(`"img"`)}}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -457,6 +464,7 @@ func TestRecord_JSONRoundTrip(t *testing.T) {
 		{Op: OpUsage, ID: "m1", InputTokens: 4},
 		{Op: OpDrop, ID: "@L2"},
 		{Op: OpResult, ID: "m1", Result: &ToolResult{Status: ToolStatusSuccess, Agent: &ToolResultAgent{ID: "a1"}}},
+		{Op: OpResult, ID: "m1", Result: &ToolResult{Status: ToolStatusSuccess, Images: []json.RawMessage{rawMsg(`{"type":"image","source":{"type":"base64","data":"entire-asset:assets/img-ab.png"}}`)}}},
 	}
 
 	data, err := json.Marshal(records)
