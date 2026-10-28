@@ -262,6 +262,11 @@ func TestPrePushWithholdsCheckpointsWhenTheCheckpointRemoteHasNoURL(t *testing.T
 	assert.Contains(t, out.String(), "Checkpoints were not pushed and stay local")
 	assert.Contains(t, out.String(), `provider "entire"`)
 
+	// Attach confirms delivery against this target; there must be none, or a
+	// stale copy on the push remote would read as delivered.
+	_, _, err := CheckpointPushTarget(ctx, "origin")
+	require.ErrorIs(t, err, remote.ErrCheckpointRemoteUnroutable)
+
 	repo, err := gitrepo.OpenPath(dir)
 	require.NoError(t, err)
 	_, _, err = PushQueuedCheckpointRefs(ctx, repo, "origin")
