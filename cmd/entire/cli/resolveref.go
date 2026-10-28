@@ -368,11 +368,19 @@ func resolveRepoRefResolved(ctx context.Context, c repoRefClient, ref, projectRe
 //
 // The server answers unknown and unauthorized alike, so the miss is one error.
 // It wraps errNamedRefNotFound so routing callers classify it as definitive.
+//
+// Under --consistent (see consistentReads) the body asks core for a
+// present-time read, so a repo created seconds ago resolves. The field is
+// omitted otherwise; an older core ignores it either way.
 func resolveNativeRepoByPath(ctx context.Context, c repoRefClient, project, repoName string) (resolvedRef, error) {
 	fullName := project + "/" + repoName
-	out, err := c.ResolveRepos(ctx, &coreapi.ResolveReposInputBody{
+	body := &coreapi.ResolveReposInputBody{
 		Repositories: []coreapi.RepoReference{{Provider: repoProviderEntire, FullName: fullName}},
-	})
+	}
+	if consistentReads(ctx) {
+		body.Consistent = coreapi.NewOptBool(true)
+	}
+	out, err := c.ResolveRepos(ctx, body)
 	if err != nil {
 		return resolvedRef{}, fmt.Errorf("resolve repo: %w", err)
 	}
