@@ -16,11 +16,19 @@ export default function (pi: ExtensionAPI) {
   // extension), so it would otherwise forward its own lifecycle as the user's
   // session. Mark this process so any Pi it spawns knows it is nested.
   //
+  // The marker holds the PID of the top-level Pi that set it. Pi builds a new
+  // extension instance in the same process on /reload, /new and /resume, and that
+  // instance must still forward lifecycle, so a marker naming this process is not
+  // nesting. A nested Pi leaves the marker as it found it, so its own replacement
+  // instances and any Pi it spawns stay nested. Any other value, including the
+  // "1" older versions of this extension set, means a parent Pi spawned us.
+  //
   // WARNING: Entire's own hook subprocesses inherit this marker from the parent, so
   // the CLI side must never treat it as a skip signal — it would disable tracking
   // for everyone. See docs/architecture/agent-guide.md.
-  const nested = Boolean(process.env.ENTIRE_PI_NESTED);
-  process.env.ENTIRE_PI_NESTED = "1";
+  const marker = process.env.ENTIRE_PI_NESTED;
+  const nested = Boolean(marker) && marker !== String(process.pid);
+  if (!marker) process.env.ENTIRE_PI_NESTED = String(process.pid);
 
   const ENTIRE_CMD = '__ENTIRE_CMD__';
   let pendingSkillEvents: Array<{ skill_name: string; invocation: string; timestamp: string }> = [];
