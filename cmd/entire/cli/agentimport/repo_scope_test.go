@@ -188,6 +188,88 @@ func TestPathsWithEncoding_FindsCollidingDirectories(t *testing.T) {
 	}
 }
 
+// TestPathsWithEncoding_CollisionOnlyUnderCursorRule: x/.wt/r and x/wt/r
+// share a Cursor project directory only because Cursor collapses runs of
+// separators, so the walk must still find the pair.
+func TestPathsWithEncoding_CollisionOnlyUnderCursorRule(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	a := filepath.Join(base, "x", ".wt", "r")
+	b := filepath.Join(base, "x", "wt", "r")
+	for _, d := range []string{a, b} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if claudecode.SanitizePathForClaude(a) == claudecode.SanitizePathForClaude(b) {
+		t.Fatalf("fixture must collide only under Cursor's collapsing rule: %q vs %q", a, b)
+	}
+
+	other, shared := cursorProjectOtherPath(a, t.TempDir(), cursorCollisionReadLimit)
+	if !shared || !samePath(other, b) {
+		t.Fatalf("got (%q, %v), want (%q, true)", other, shared, b)
+	}
+}
+
+// TestPathsWithEncoding_MatchesBruteForce compares the pruned walk against an
+// exhaustive enumeration over a tree whose names exercise collapsing and
+// trimming: separator-only names, names with leading or trailing separators,
+// and dot directories.
+func TestPathsWithEncoding_MatchesBruteForce(t *testing.T) {
+	t.Parallel()
+	base := normalizePath(t.TempDir())
+	names := []string{"a", "a-b", "-", ".a", "b_"}
+	// base itself is a candidate: separator-only children encode like it.
+	all := []string{base}
+	var build func(dir string, depth int)
+	build = func(dir string, depth int) {
+		if depth == 0 {
+			return
+		}
+		for _, n := range names {
+			p := filepath.Join(dir, n)
+			if err := os.Mkdir(p, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			all = append(all, p)
+			build(p, depth-1)
+		}
+	}
+	build(base, 3)
+
+	enc := cursor.SanitizePathForCursor
+	// Every walk lists the shared system temp dir, which can be large, so the
+	// targets are a sample: everything down to depth 2, plus the depth-3
+	// directories ending in a separator-only name.
+	var targets []string
+	for _, p := range all {
+		rel, err := filepath.Rel(base, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(rel, string(filepath.Separator)) < 2 || filepath.Base(p) == "-" {
+			targets = append(targets, p)
+		}
+	}
+	for _, target := range targets {
+		var want []string
+		for _, p := range all {
+			if enc(p) == enc(target) {
+				want = append(want, p)
+			}
+		}
+		got, unscanned := pathsWithEncoding(target, enc, 1_000_000)
+		if unscanned != "" {
+			t.Fatalf("target %s: unscanned %q", target, unscanned)
+		}
+		slices.Sort(got)
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Fatalf("target %s: walk found %v, brute force %v", target, got, want)
+		}
+	}
+}
+
 func TestCursorProjectOtherPath(t *testing.T) {
 	t.Parallel()
 	a, b := collidingRepos(t)

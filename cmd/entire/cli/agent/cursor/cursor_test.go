@@ -222,6 +222,25 @@ func TestCursorAgent_GetSessionDir_DefaultPath(t *testing.T) {
 	}
 }
 
+// TestCursorAgent_GetSessionDir_WorktreeRepo: a repo under a dot directory
+// (the common .worktrees layout) must map to the directory Cursor writes to.
+// Not parallel: sets HOME.
+func TestCursorAgent_GetSessionDir_WorktreeRepo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("ENTIRE_TEST_CURSOR_PROJECT_DIR", "")
+
+	dir, err := (&CursorAgent{}).GetSessionDir("/x/.worktrees/r")
+	if err != nil {
+		t.Fatalf("GetSessionDir() error = %v", err)
+	}
+	want := filepath.Join(home, ".cursor", "projects", "x-worktrees-r", "agent-transcripts")
+	if dir != want {
+		t.Errorf("GetSessionDir() = %q, want %q", dir, want)
+	}
+}
+
 // --- ReadSession ---
 
 func TestReadSession_Success(t *testing.T) {
@@ -666,6 +685,19 @@ func TestSanitizePathForCursor(t *testing.T) {
 		{"simple", "simple"},
 		{"/path/with spaces/dir", "path-with-spaces-dir"},
 		{"/path.with.dots/dir", "path-with-dots-dir"},
+		// Runs of separators collapse to one "-".
+		{"/a/.worktrees/b", "a-worktrees-b"},
+		{"/a/b-/c", "a-b-c"},
+		{"/a/_x", "a-x"},
+		{"/a/b /c", "a-b-c"},
+		{"/private/tmp/claude-501/-Users-x--worktrees-y/z", "private-tmp-claude-501-Users-x-worktrees-y-z"},
+		// Leading and trailing separators are trimmed, not just a leading "/".
+		{"/a/b-", "a-b"},
+		{"/a/", "a"},
+		{"--a--b--", "a-b"},
+		{"C:\\Users\\me\\repo", "C-Users-me-repo"},
+		// Case is preserved.
+		{"/private/var/folders/dq/gjgq/T/entire-gen-cursor.Bn88", "private-var-folders-dq-gjgq-T-entire-gen-cursor-Bn88"},
 	}
 
 	for _, tt := range tests {
@@ -676,6 +708,34 @@ func TestSanitizePathForCursor(t *testing.T) {
 				t.Errorf("SanitizePathForCursor(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestSanitizePathForCursor_MatchesCursor pins parity with Cursor's own
+// function (cursor-agent utils/dist/workspace-paths.js). Every expected value
+// was produced by running it under node:
+//
+//	t.replace(/[^a-zA-Z0-9]/g,"-").replace(/-+/g,"-").replace(/^-+|-+$/g,"")
+func TestSanitizePathForCursor_MatchesCursor(t *testing.T) {
+	t.Parallel()
+
+	for input, want := range map[string]string{
+		"":                            "",
+		"/":                           "",
+		"-":                           "",
+		"/a/":                         "a",
+		"/\u00e9/x":                   "x",
+		"a\u00e9b":                    "a-b",
+		"\u00dcn\u00efc\u00f8d\u00e9": "n-c-d",
+		"/a/\U0001F600/b":             "a-b",
+		"x\x00y":                      "x-y",
+		"C:\\x":                       "C-x",
+		"C:/x":                        "C-x",
+		"/Users/x/Library/Application Support/Cursor/Workspaces/1765985805982/workspace.json": "Users-x-Library-Application-Support-Cursor-Workspaces-1765985805982-workspace-json",
+	} {
+		if got := SanitizePathForCursor(input); got != want {
+			t.Errorf("SanitizePathForCursor(%q) = %q, Cursor computes %q", input, got, want)
+		}
 	}
 }
 
