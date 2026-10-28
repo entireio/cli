@@ -131,6 +131,28 @@ func TestResolveStatusTarget_UnreachableKeyringErrors(t *testing.T) {
 	}
 }
 
+// A bad config.json is an error, not "Not logged in".
+func TestResolveStatusTarget_BadConfigErrors(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	stored := makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp))
+	if _, err := auth.RecordLoginContext(stored, "", true); err != nil {
+		t.Fatalf("record context: %v", err)
+	}
+	badConfig := func(context.Context, *contexts.Context) (string, error) {
+		return "", fmt.Errorf("read login: %w", tokenstore.ErrBadConfig)
+	}
+
+	_, err := resolveStatusTarget(t.Context(), auth.Contexts, badConfig)
+	if !errors.Is(err, tokenstore.ErrBadConfig) {
+		t.Fatalf("resolveStatusTarget error = %v, want ErrBadConfig", err)
+	}
+}
+
 // A genuine contexts.json read/parse error is surfaced by resolveStatusTarget,
 // symmetric with the control-plane commands. (A missing file reads as "no
 // contexts" and is not an error.)

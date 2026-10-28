@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -183,6 +184,11 @@ type FetchOptions struct {
 	Depth     int
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")
+	// AbortStalled kills a fetch that goes stallAbortIdle without git printing
+	// anything, for callers whose transfer can legitimately take longer than a
+	// fixed per-fetch deadline. It requests --progress so git reports the
+	// transfer while it runs.
+	AbortStalled bool
 }
 
 // Fetch runs git fetch with checkpoint token injection and optional
@@ -198,6 +204,9 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		args = append(args, "--no-tags")
 	}
 	args = append(args, opts.ExtraArgs...)
+	if opts.AbortStalled {
+		args = append(args, "--progress")
+	}
 	switch {
 	case opts.Shallow:
 		args = append(args, "--depth=1")
@@ -233,18 +242,29 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		existedBefore = gitRemoteSectionExists(ctx, opts.Dir, stampURL)
 	}
 
-	cmd := newCommand(ctx, args...)
+	cmdCtx, cancelCmd := context.WithCancelCause(ctx)
+	defer cancelCmd(nil)
+	cmd := newCommand(cmdCtx, args...)
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}
 	disableTerminalPrompt(cmd)
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	var err error
+	if opts.AbortStalled {
+		out, err = runAbortingStalls(cmd, cancelCmd)
+	} else {
+		out, err = cmd.CombinedOutput()
+	}
 
 	if stampCandidate && !existedBefore {
 		stampNewlyCreatedRemote(ctx, opts.Dir, stampURL)
 	}
 
 	if err != nil {
+		if cause := context.Cause(cmdCtx); errors.Is(cause, ErrFetchStalled) {
+			err = cause
+		}
 		return out, errWithGitOutput(fmt.Errorf("git fetch: %w", err), out, opts.Remote)
 	}
 	return out, nil
@@ -466,11 +486,30 @@ func formatGitPushError(ctx context.Context, err error, output []byte, remote st
 // Returns "" when git produced no output — which is what a process killed by a
 // cancelled context or an exhausted budget does.
 func gitOutputDetail(output []byte, remote string) string {
-	detail := strings.TrimSpace(string(output))
+	detail := strings.TrimSpace(finalProgressText(string(output)))
 	if detail == "" || remote == "" {
 		return detail
 	}
 	return strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
+}
+
+// finalProgressText keeps, for each line, only what a terminal would end up
+// showing: git's progress meters redraw a line in place with \r, so everything
+// before a line's last \r was overwritten. A trailing \r is a CRLF line ending,
+// not a redraw.
+func finalProgressText(output string) string {
+	if !strings.Contains(output, "\r") {
+		return output
+	}
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
+		if j := strings.LastIndexByte(line, '\r'); j >= 0 {
+			line = line[j+1:]
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
 }
 
 // errWithGitOutput annotates err with git's own output, or returns err unchanged
@@ -832,4 +871,73 @@ func disableTerminalPrompt(cmd *exec.Cmd) {
 		cmd.Env = os.Environ()
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
+}
+
+// stallAbortIdle is how long an AbortStalled fetch may print nothing before it
+// is killed. A pack that goes through index-pack redraws its receive progress
+// about once a second, but a fetch of fewer than fetch.unpackLimit objects (100
+// by default) is unpacked without progress and prints nothing until it is done.
+// The window must outlast such a fetch on a slow link; callers bound the total
+// time separately.
+var stallAbortIdle = 10 * time.Minute
+
+// ErrFetchStalled is the cause of a fetch AbortStalled killed.
+var ErrFetchStalled = errors.New("fetch stalled")
+
+// runAbortingStalls runs cmd like CombinedOutput, but calls cancel, which must
+// cancel cmd's context, once cmd has printed nothing for stallAbortIdle.
+func runAbortingStalls(cmd *exec.Cmd, cancel context.CancelCauseFunc) ([]byte, error) {
+	w := &activityWriter{last: time.Now()}
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Start(); err != nil {
+		return nil, err //nolint:wrapcheck // Fetch wraps the error
+	}
+	idle := stallAbortIdle
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(idle / 10)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if time.Since(w.lastWrite()) >= idle {
+					cancel(fmt.Errorf("%w: no progress for %s", ErrFetchStalled, idle))
+					return
+				}
+			}
+		}
+	}()
+	err := cmd.Wait()
+	close(done)
+	<-stopped
+	return w.output(), err
+}
+
+// activityWriter collects a command's output and when it last wrote.
+type activityWriter struct {
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	last time.Time
+}
+
+func (w *activityWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.last = time.Now()
+	return w.buf.Write(p) //nolint:wrapcheck // bytes.Buffer never fails
+}
+
+func (w *activityWriter) lastWrite() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.last
+}
+
+func (w *activityWriter) output() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Bytes()
 }

@@ -6143,6 +6143,61 @@
         ],
         "type": "object"
       },
+      "SetDefaultBranchInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetDefaultBranchInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "branch": {
+            "description": "An existing branch: a short name (main) or a full ref (refs/heads/main).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "branch"
+        ],
+        "type": "object"
+      },
+      "SetDefaultBranchOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetDefaultBranchOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "previous": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "branch",
+          "previous",
+          "changed"
+        ],
+        "type": "object"
+      },
       "SetPluginInstallationRepositoriesInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -12634,6 +12689,66 @@
           }
         ],
         "summary": "List repo collaborators",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/default-branch": {
+      "put": {
+        "operationId": "setDefaultBranch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDefaultBranchInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetDefaultBranchOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Set repository default branch",
         "tags": [
           "repos"
         ]

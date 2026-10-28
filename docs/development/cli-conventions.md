@@ -271,7 +271,7 @@ always runnable in every build.
   (an account with no handle, an org sharing its name) gets no command in the
   summary, which says why
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
-  `view`, `edit`, `delete`, `clone`, plus the `mirror`, `remote`,
+  `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
   `project grant`, addressing the repo by its `/et/<project>/<repo>` path;
   `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
@@ -325,7 +325,11 @@ always runnable in every build.
   server keeps an existing rule's level when it is absent, so re-adding a
   branch without the flag never lowers it and `--server-side-merge-only=false`
   is the explicit way down. A short branch name expands to `refs/heads/`,
-  `HEAD` and `refs/...` pass through. The `mirror` subtree is
+  `HEAD` and `refs/...` pass through.
+  `default-branch <repo> <branch>` is one PUT to core's
+  `/repos/{repoId}/default-branch`. It sends the branch as typed; the server
+  accepts a short name or a `refs/heads/` ref. A 409 on a GitHub mirror reads
+  as a plain message; any other 409 keeps the server's detail. The `mirror` subtree is
   server-side (`add`, `list`, `remove`; `add` and `remove` name clusters
   with `--cluster <host>`, repeatable or comma-separated, and place or tear down
   every named cluster in parallel through one engine — `mirrorTargets` →

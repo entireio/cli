@@ -36,6 +36,10 @@ const (
 	reviewTrailGranularityRange       = "range"
 )
 
+// maxReviewTrailAnchorLines caps the span a review finding may quote from the
+// worktree; a wider location is posted against its file instead.
+const maxReviewTrailAnchorLines = 50
+
 // buildReviewDeps builds the review.Deps struct used by review.NewCommand.
 func buildReviewDeps() cliReview.Deps {
 	return cliReview.Deps{
@@ -217,25 +221,59 @@ func openCodeFence(text string) string {
 // reviewTrailFindingInputs turns a trail report into trail findings.
 // Structured comments map directly; prose falls back to splitting top-level
 // markdown bullets, which keeps custom judge prompts that ignore the JSON
-// contract structurally correct.
+// contract structurally correct. Every line or range location is then
+// restricted to report.Scope by restrictReviewTrailLocation.
 func reviewTrailFindingInputs(profileName string, report cliReview.TrailReport) []api.TrailReviewCommentInput {
 	inputs := reviewTrailFindingInputsFromComments(report.Comments)
-	verdict := report.Prose
+	inputs = append(inputs, reviewTrailFindingInputsFromProse(profileName, report.Prose)...)
+	for i := range inputs {
+		inputs[i].Location = restrictReviewTrailLocation(inputs[i].Location, report.Scope)
+	}
+	return inputs
+}
+
+func reviewTrailFindingInputsFromProse(profileName, verdict string) []api.TrailReviewCommentInput {
 	if strings.TrimSpace(verdict) == "" {
-		return inputs
+		return nil
 	}
 	items := splitReviewVerdictFindings(verdict)
 	if len(items) == 0 {
 		// The verdict spans the whole change, so it uses "verdict" kind:
 		// the API requires a valid granularity and rejects an empty value.
-		return append(inputs, reviewTrailFindingInputWithKind(profileName, verdict, "verdict"))
+		return []api.TrailReviewCommentInput{reviewTrailFindingInputWithKind(profileName, verdict, "verdict")}
 	}
+	inputs := make([]api.TrailReviewCommentInput, 0, len(items))
 	for _, item := range items {
 		input := reviewTrailFindingInputWithKind(profileName, item, "finding")
 		enrichReviewTrailFindingInputFromMarkdown(&input, item)
 		inputs = append(inputs, input)
 	}
 	return inputs
+}
+
+// restrictReviewTrailLocation keeps a line or range location only when the
+// scope lets its file be quoted and the span is at most
+// maxReviewTrailAnchorLines. Otherwise a file the scope covers is posted
+// against that file, and any other file against the whole change. The location
+// comes from the model, and posting uploads the worktree text at a line
+// location as its quoted snippet.
+func restrictReviewTrailLocation(loc api.TrailReviewLocationCreateRequest, scope cliReview.TrailScope) api.TrailReviewLocationCreateRequest {
+	if loc.Granularity != reviewTrailGranularityLine && loc.Granularity != reviewTrailGranularityRange {
+		return loc
+	}
+	if loc.FilePath == nil || loc.StartLine == nil {
+		return loc
+	}
+	filePath := normalizeFindingPath(*loc.FilePath)
+	if !scope.Covers(filePath) {
+		return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityWholeChange}
+	}
+	tooWide := loc.EndLine != nil && *loc.EndLine-*loc.StartLine >= maxReviewTrailAnchorLines
+	if tooWide || !scope.CanQuote(filePath) {
+		return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityFile, FilePath: &filePath}
+	}
+	loc.FilePath = &filePath
+	return loc
 }
 
 func reviewTrailFindingInputsFromComments(comments []cliReview.TrailComment) []api.TrailReviewCommentInput {
@@ -271,25 +309,19 @@ func reviewTrailFindingInputWithKind(profileName, text, kind string) api.TrailRe
 
 func reviewTrailLocationFromJSON(loc cliReview.TrailLocation) api.TrailReviewLocationCreateRequest {
 	filePath := strings.TrimSpace(loc.FilePath)
-	withSelectedText := func(req api.TrailReviewLocationCreateRequest) api.TrailReviewLocationCreateRequest {
-		if strings.TrimSpace(loc.SelectedText) != "" {
-			req.SelectedText = stringPtr(loc.SelectedText)
-		}
-		return req
-	}
 	switch strings.ToLower(strings.TrimSpace(loc.Granularity)) {
 	case reviewTrailGranularityLine:
 		if filePath != "" && loc.StartLine > 0 {
-			return withSelectedText(api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine})
+			return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine}
 		}
 	case reviewTrailGranularityRange:
 		if filePath != "" && loc.StartLine > 0 && loc.EndLine > loc.StartLine {
-			return withSelectedText(api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityRange, FilePath: stringPtr(filePath), StartLine: &loc.StartLine, EndLine: &loc.EndLine})
+			return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityRange, FilePath: stringPtr(filePath), StartLine: &loc.StartLine, EndLine: &loc.EndLine}
 		}
 		if filePath != "" && loc.StartLine > 0 {
 			// Preserve the precise start-line anchor for malformed, missing, or
 			// single-line ranges instead of silently degrading to whole-change.
-			return withSelectedText(api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine})
+			return api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: stringPtr(filePath), StartLine: &loc.StartLine}
 		}
 	case reviewTrailGranularityFile:
 		if filePath != "" {
