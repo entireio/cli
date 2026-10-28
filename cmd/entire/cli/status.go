@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -536,12 +537,22 @@ func computeCheckpointSyncInfoCounting(ctx context.Context, s *EntireSettings, c
 				}
 				dedicated = true
 			}
-		} else if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil {
-			// The push side may fall soft to the elected remote because
-			// resolvePushSettings degrades the same way; the read side may
-			// not, which is why the helper above distinguishes error from
-			// false and this branch does not need to.
-			dedicated = enabled
+		} else {
+			_, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name)
+			if errors.Is(purlErr, checkpointremote.ErrCheckpointRemoteUnroutable) {
+				// Pre-push withholds checkpoints rather than falling soft to
+				// the elected remote, so naming that remote would misstate
+				// where they go.
+				info.Err = purlErr.Error()
+				return info
+			}
+			if purlErr == nil {
+				// The push side may fall soft to the elected remote because
+				// resolvePushSettings degrades the same way; the read side may
+				// not, which is why the helper above distinguishes error from
+				// false and this branch does not need to.
+				dedicated = enabled
+			}
 		}
 		if dedicated {
 			info.Remote = cr.Repo

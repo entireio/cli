@@ -337,10 +337,16 @@ func urlTargetsCheckpointRepo(url string, config *settings.CheckpointRemoteConfi
 // pushRemoteName — the checkpoint_remote URL when one is configured, otherwise
 // the remote itself — and whether push_sessions turns pushing off. Callers use
 // it to confirm delivery after a push, since PrePush is deliberately fail-soft.
-func CheckpointPushTarget(ctx context.Context, pushRemoteName string) (target string, disabled bool) {
+// It errors when PrePush withholds checkpoints because the configured
+// checkpoint_remote has no URL: there is no target to confirm against, and the
+// push remote may hold a stale copy from before the store was configured.
+func CheckpointPushTarget(ctx context.Context, pushRemoteName string) (target string, disabled bool, err error) {
 	ps := resolvePushSettings(ctx, pushRemoteName)
-	if ps.checkpointURL != "" {
-		return ps.checkpointURL, ps.pushDisabled
+	if ps.withheld != nil {
+		return "", ps.pushDisabled, ps.withheld
 	}
-	return ps.remote, ps.pushDisabled
+	if ps.checkpointURL != "" {
+		return ps.checkpointURL, ps.pushDisabled, nil
+	}
+	return ps.remote, ps.pushDisabled, nil
 }
