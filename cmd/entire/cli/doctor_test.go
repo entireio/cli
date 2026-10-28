@@ -1628,7 +1628,7 @@ func TestCheckAgentDirSymlinks_ReportsIntermediateHookConfigDirs(t *testing.T) {
 		link   string
 	}{
 		{parent: ".pi", link: ".pi/extensions"},
-		{parent: ".opencode", link: ".opencode/plugins"},
+		{parent: ".opencode", link: ".opencode/plugin"},
 	} {
 		t.Run(tc.link, func(t *testing.T) {
 			dir := setupGitRepoForPhaseTest(t)

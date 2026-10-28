@@ -516,6 +516,13 @@ type State struct {
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
 
+	// PendingTaskAttachments are completed task records whose write into an
+	// existing checkpoint failed at post-task (a foreground subagent that
+	// committed its own work). Each turn end retries them. They are not pending
+	// work: condensing one into another commit's checkpoint would misattribute
+	// it, so it is never materialized anywhere but its own checkpoint.
+	PendingTaskAttachments []TaskAttachment `json:"pending_task_attachments,omitempty"`
+
 	// SubagentInventory retains Codex child identities independently of task
 	// records so follow-up turns remain discoverable after materialization.
 	SubagentInventory []SubagentInventoryEntry `json:"subagent_inventory,omitempty"`
@@ -523,6 +530,14 @@ type State struct {
 	SubagentLedgerVersion uint64 `json:"subagent_ledger_version,omitempty"`
 	// SubagentInventoryComplete distinguishes exact empty from legacy unknown.
 	SubagentInventoryComplete *bool `json:"subagent_inventory_complete,omitempty"`
+}
+
+// TaskAttachment is a completed task record bound for an existing checkpoint.
+type TaskAttachment struct {
+	CheckpointID string     `json:"checkpoint_id"`
+	Record       TaskRecord `json:"record"`
+	// FailedRetries counts the turn ends whose write also failed.
+	FailedRetries int `json:"failed_retries,omitempty"`
 }
 
 type SubagentInventoryEntry struct {

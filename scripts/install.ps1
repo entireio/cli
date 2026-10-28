@@ -577,6 +577,13 @@ function Get-NormalizedPath {
     return $fullPath.TrimEnd($separators)
 }
 
+# cmd.exe accepts quoted entries; strip, then expand.
+function ConvertFrom-PathEntry {
+    param([string] $Entry)
+
+    return [Environment]::ExpandEnvironmentVariables($Entry.Trim().Trim('"'))
+}
+
 function Test-SamePath {
     param(
         [string] $Left,
@@ -590,8 +597,8 @@ function Test-SamePath {
     # The user PATH is read unexpanded, so an entry may be stored as
     # %USERPROFILE%\.local\bin. Expand before normalising: unexpanded, the
     # entry would be resolved relative to the current directory instead.
-    $Left = [Environment]::ExpandEnvironmentVariables($Left)
-    $Right = [Environment]::ExpandEnvironmentVariables($Right)
+    $Left = ConvertFrom-PathEntry -Entry $Left
+    $Right = ConvertFrom-PathEntry -Entry $Right
 
     try {
         return [string]::Equals(
@@ -699,6 +706,13 @@ function Get-UserEnvironmentValue {
     return $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
 }
 
+# Wrapped so tests can mock it.
+function Get-MachineEnvironmentValue {
+    param([string] $Name)
+
+    return [Environment]::GetEnvironmentVariable($Name, 'Machine')
+}
+
 function Write-UserEnvironmentValue {
     param(
         [string] $Name,
@@ -799,21 +813,29 @@ function Get-EntireCopy {
     }
 
     $stored = @(
-        (Get-UserEnvironmentValue -Name 'Path'),
-        [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        @{ Scope = 'user'; Value = (Get-UserEnvironmentValue -Name 'Path') },
+        @{ Scope = 'machine'; Value = (Get-MachineEnvironmentValue -Name 'Path') }
     )
 
-    foreach ($value in $stored) {
-        if ([string]::IsNullOrWhiteSpace($value)) {
+    foreach ($path in $stored) {
+        if ([string]::IsNullOrWhiteSpace($path.Value)) {
             continue
         }
-        foreach ($entry in ($value -split ';')) {
-            $directory = [Environment]::ExpandEnvironmentVariables($entry.Trim())
+        foreach ($entry in ($path.Value -split ';')) {
+            $directory = ConvertFrom-PathEntry -Entry $entry
             if ([string]::IsNullOrWhiteSpace($directory)) {
                 continue
             }
-            $candidate = Join-Path $directory 'entire.exe'
-            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            # Junk entries throw; warn and skip.
+            try {
+                $candidate = Join-Path $directory 'entire.exe' -ErrorAction Stop
+                $exists = Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction Stop
+            }
+            catch {
+                Write-InstallerWarning "Skipped unreadable $($path.Scope) PATH entry: '$entry'"
+                continue
+            }
+            if (-not $exists) {
                 continue
             }
             $known = $false
@@ -1030,7 +1052,7 @@ function Install-Entire {
             # whatever the current session resolves to -- say so, because
             # neither the verdict below nor reordering the user PATH can fix
             # it.
-            $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+            $machinePath = Get-MachineEnvironmentValue -Name 'Path'
             $machineConflict = $false
             foreach ($cmd in $conflicting) {
                 if (Test-PathContains -PathValue $machinePath -Directory (Split-Path -Parent $cmd.Source)) {

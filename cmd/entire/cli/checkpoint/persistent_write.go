@@ -19,6 +19,8 @@ func (s *GitStore) Write(ctx context.Context, req WriteRequest) error {
 		return s.backfillTranscript(ctx, UpdateOptions(r))
 	case SessionSummary:
 		return s.backfillSummary(ctx, r.CheckpointID, r.Summary)
+	case Tasks:
+		return s.backfillTasks(ctx, r)
 	default:
 		return fmt.Errorf("checkpoint: unsupported write request %T", req)
 	}

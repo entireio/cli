@@ -872,7 +872,7 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 	})
 
 	t.Run("the warning is wired on every command binding the flag", func(t *testing.T) {
-		// The flag is bound in two files across three command families; the
+		// The flag is bound across several files and command families; the
 		// warning rides on bindRepoProjectFlag so it cannot be wired for some
 		// and missed for others. Asserting the PreRunE exists is what pins
 		// that, without standing up a server per command.
@@ -886,6 +886,7 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 			"repo protection list":   newRepoProtectionListCmd,
 			"repo protection add":    newRepoProtectionAddCmd,
 			"repo protection remove": newRepoProtectionRemoveCmd,
+			"repo default-branch":    newDefaultBranchCmd,
 		} {
 			cmd := newCmd()
 			require.NotNilf(t, cmd.Flags().Lookup("project"), "%s must bind --project", name)

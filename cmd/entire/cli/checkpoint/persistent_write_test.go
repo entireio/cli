@@ -67,6 +67,56 @@ func TestWrite_DispatchesEachRequest(t *testing.T) {
 	if meta := readLatestSessionMetadata(t, repo, cpID); meta.Summary == nil || meta.Summary.Intent != "why" {
 		t.Errorf("SessionSummary not applied: %+v", meta.Summary)
 	}
+
+	// Tasks adds a task without touching the session.
+	if err := store.Write(ctx, Tasks{
+		CheckpointID: cpID,
+		Tasks: []TaskPayload{{
+			ToolUseID:  "toolu_01Added",
+			AgentID:    "a0123456789abcdef",
+			Transcript: redact.AlreadyRedacted([]byte("subagent line\n")),
+		}},
+	}); err != nil {
+		t.Fatalf("Write(Tasks) error = %v", err)
+	}
+	taskTranscript, err := store.ReadTaskTranscript(ctx, cpID, "toolu_01Added")
+	if err != nil {
+		t.Fatalf("ReadTaskTranscript() error = %v", err)
+	}
+	if string(taskTranscript) != "subagent line\n" {
+		t.Errorf("Tasks not applied: got %q", taskTranscript)
+	}
+	content, err = store.ReadSessionContent(ctx, cpID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() after Tasks error = %v", err)
+	}
+	if string(content.Transcript) != string(full) {
+		t.Errorf("Tasks changed the session transcript: got %q want %q", content.Transcript, full)
+	}
+	if meta := readLatestSessionMetadata(t, repo, cpID); meta.Summary == nil || meta.Summary.Intent != "why" {
+		t.Errorf("Tasks changed the session metadata: %+v", meta.Summary)
+	}
+}
+
+// TestWrite_BackfillTasksNotFound verifies a task write never creates a checkpoint.
+func TestWrite_BackfillTasksNotFound(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	if err := store.ensureSessionsBranch(context.Background()); err != nil {
+		t.Fatalf("ensureSessionsBranch() error = %v", err)
+	}
+	cpID := id.MustCheckpointID("000000000000")
+	err := store.Write(context.Background(), Tasks{
+		CheckpointID: cpID,
+		Tasks:        []TaskPayload{{ToolUseID: "toolu_01Orphan", AgentID: "a0123456789abcdef"}},
+	})
+	if !errors.Is(err, ErrCheckpointNotFound) {
+		t.Errorf("Write(Tasks) error = %v, want ErrCheckpointNotFound", err)
+	}
+	if summary, err := store.Read(context.Background(), cpID); err == nil && summary != nil {
+		t.Errorf("Write(Tasks) created checkpoint %s", cpID)
+	}
 }
 
 // TestWrite_BackfillSummaryNotFound verifies error propagation through dispatch.

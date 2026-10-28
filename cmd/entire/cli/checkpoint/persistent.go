@@ -216,7 +216,7 @@ func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, e
 		return plumbing.ZeroHash, err
 	}
 
-	if err := s.writeTaskRecordEntries(opts, basePath, entries); err != nil {
+	if err := s.writeTaskRecordEntries(opts.Tasks, basePath, entries); err != nil {
 		return plumbing.ZeroHash, err
 	}
 
@@ -224,6 +224,23 @@ func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, e
 		return plumbing.ZeroHash, err
 	}
 
+	return s.buildCheckpointSubtree(ctx, entries, basePath)
+}
+
+// applyTasksBackfill adds tasks to the checkpoint's current subtree, leaving
+// every session file as stored, and returns the new subtree hash. Returns
+// ErrCheckpointNotFound when the checkpoint has no root summary.
+func (s *treeWriter) applyTasksBackfill(ctx context.Context, existing *object.Tree, basePath string, tasks []TaskPayload) (plumbing.Hash, error) {
+	entries, err := s.flattenExisting(existing, basePath)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	if _, exists := entries[checkpointSubtreePath(basePath, paths.MetadataFileName)]; !exists {
+		return plumbing.ZeroHash, ErrCheckpointNotFound
+	}
+	if err := s.writeTaskRecordEntries(tasks, basePath, entries); err != nil {
+		return plumbing.ZeroHash, err
+	}
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
 }
 
@@ -447,7 +464,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
 }
 
-// writeTaskRecordEntries materializes each of opts.Tasks into
+// writeTaskRecordEntries materializes each of tasks into
 // tasks/<tool-use-id>/{agent-<agent-id>.jsonl, task.json} inside the
 // checkpoint tree at basePath. Iterates unconditionally — an empty Tasks
 // slice (every session before subagent-work durability landed, and every
@@ -459,8 +476,8 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 // session transcript gets), so this writer does not redact it again. The one
 // thing it does redact is task.json's free-text task_description, which the
 // record carries verbatim — see writeTaskRecordEntry.
-func (s *treeWriter) writeTaskRecordEntries(opts WriteOptions, basePath string, entries map[string]object.TreeEntry) error {
-	for _, task := range opts.Tasks {
+func (s *treeWriter) writeTaskRecordEntries(tasks []TaskPayload, basePath string, entries map[string]object.TreeEntry) error {
+	for _, task := range tasks {
 		if err := validation.ValidateToolUseID(task.ToolUseID); err != nil {
 			return fmt.Errorf("invalid task payload: %w", err)
 		}
@@ -1659,6 +1676,39 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 
 		authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
 		commitMsg := fmt.Sprintf("Update summary for checkpoint %s (session: %s)", checkpointID, sessionID)
+		return CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	})
+}
+
+// backfillTasks adds subagent task records to an existing checkpoint.
+// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
+func (s *GitStore) backfillTasks(ctx context.Context, req Tasks) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
+
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
+	}
+
+	return s.updatePrimaryRef(ctx, func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error) {
+		existing, err := s.subtreeObjAt(rootTreeHash, req.CheckpointID.Path())
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		checkpointSubtree, err := s.applyTasksBackfill(ctx, existing, req.CheckpointID.Path()+"/", req.Tasks)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+
+		newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, req.CheckpointID, checkpointSubtree)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+
+		authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+		commitMsg := fmt.Sprintf("Add tasks to checkpoint %s", req.CheckpointID)
 		return CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
 	})
 }

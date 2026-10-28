@@ -4,10 +4,69 @@
 //
 // Uses node:child_process so hooks work under both Bun (OpenCode CLI/TUI)
 // and Node (OpenCode Desktop's Electron sidecar). See #2014.
+//
+// One file serves both plugin APIs, through its only export. The two
+// loaders cannot share a shape: OpenCode 1 before v1.3 calls every export as
+// a function (an object export crashes OpenCode), and OpenCode 2 requires the
+// default export to be an {id, setup} object. So the default export is chosen
+// when the module loads: OpenCode 1 sets OPENCODE=1 in its own environment
+// and gets the plugin function; anything else gets {id, server, setup}
+// (OpenCode 1.3+ also accepts that object, through `server`).
 import { spawn, spawnSync } from "node:child_process"
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import type { Plugin } from "@opencode-ai/plugin"
 
-export const EntirePlugin: Plugin = async ({ directory }) => {
+/**
+ * Build the shell command for a hook invocation.
+ * Uses sh -c so the command is guarded by a `command -v` probe: when the
+ * entire binary is not on PATH the hook exits 0 rather than failing the
+ * surrounding OpenCode operation.
+ */
+function hookCmd(hookName: string): string[] {
+  return ["sh", "-c", `if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks opencode ${hookName}`]
+}
+
+// parseInjectedContext scans a hook's stdout for Entire's injection envelope
+// ({"inject_context":"..."}) and returns the text to inject, or null.
+function parseInjectedContext(stdout: string): string | null {
+  if (!stdout) return null
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith("{")) continue
+    try {
+      const parsed = JSON.parse(trimmed) as { inject_context?: unknown }
+      if (typeof parsed.inject_context === "string" && parsed.inject_context.length > 0) {
+        return parsed.inject_context
+      }
+    } catch {
+      // not our envelope — ignore
+    }
+  }
+  return null
+}
+
+// shadowedByLegacyCopy reports whether an Entire plugin an earlier CLI wrote
+// to .opencode/plugins sits beside this one in .opencode/plugin. OpenCode 1.0.224+
+// loads both directories, so on OpenCode 1 this copy stands down rather than
+// fire every hook twice (a teammate on an older CLI can re-create the old file).
+// OpenCode 2 cannot load the old copy, so its plugin never stands down.
+// The old copy is looked up beside this file, not under the session
+// directory: OpenCode finds .opencode by searching up from the directory it
+// was started in, so that directory can be a subdirectory of the one holding
+// both copies.
+function shadowedByLegacyCopy(): boolean {
+  try {
+    if (!fileURLToPath(import.meta.url).replace(/\\/g, "/").includes("/.opencode/plugin/")) return false
+    return readFileSync(new URL("../plugins/entire.ts", import.meta.url), "utf8").includes("entire enable --agent opencode")
+  } catch {
+    return false
+  }
+}
+
+// OpenCode 1 plugin.
+const EntirePlugin: Plugin = async ({ directory }) => {
+  if (shadowedByLegacyCopy()) return {}
   // Track seen user messages to fire turn-start only once per message
   const seenUserMessages = new Set<string>()
   // Track current session ID for message events (which don't include sessionID)
@@ -80,16 +139,6 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   const drainAtIdle = new Set<string>()
 
   /**
-   * Build the shell command for a hook invocation.
-   * Uses sh -c so the command is guarded by a `command -v` probe: when the
-   * entire binary is not on PATH the hook exits 0 rather than failing the
-   * surrounding OpenCode operation.
-   */
-  function hookCmd(hookName: string): string[] {
-    return ["sh", "-c", `if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks opencode ${hookName}`]
-  }
-
-  /**
    * Pipe JSON payload to an entire hooks command (async).
    * Errors are logged but never thrown — plugin failures must not crash OpenCode.
    */
@@ -129,25 +178,6 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     } catch {
       // Silently ignore — plugin failures must not crash OpenCode
     }
-  }
-
-  // parseInjectedContext scans a hook's stdout for Entire's injection envelope
-  // ({"inject_context":"..."}) and returns the text to inject, or null.
-  function parseInjectedContext(stdout: string): string | null {
-    if (!stdout) return null
-    for (const line of stdout.split("\n")) {
-      const trimmed = line.trim()
-      if (!trimmed.startsWith("{")) continue
-      try {
-        const parsed = JSON.parse(trimmed) as { inject_context?: unknown }
-        if (typeof parsed.inject_context === "string" && parsed.inject_context.length > 0) {
-          return parsed.inject_context
-        }
-      } catch {
-        // not our envelope — ignore
-      }
-    }
-    return null
   }
 
   // fireTurnStart fires turn-start synchronously (state must be ready before
@@ -583,3 +613,538 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     },
   }
 }
+
+// OpenCode 2 plugin.
+//
+// OpenCode 2 runs plugins inside a background service shared by every
+// repository, so this differs from the OpenCode 1 plugin in three ways:
+//   - Hooks (prompt, context, tool) are per location, but the event stream
+//     is process-wide and execution events carry no location. Only sessions
+//     this instance saw in its own prompt hook are acted on; nothing falls
+//     back to a "current" session.
+//   - Nothing blocks: a synchronous spawn would stall every session in the
+//     service. Hooks that must finish first (session-start, turn-start,
+//     subagent start/stop) are awaited asynchronous spawns with a timeout.
+//   - `opencode run --standalone` kills plugin cleanup about 3s after the
+//     turn ends, so turn-end, session-end and held subagent stops run detached
+//     and outlive it, each after the session's earlier detached hooks.
+// A turn is one execution: a prompt sent while one runs joins it, so turn-start
+// fires only when the session has no active turn (later prompts are read from
+// the transcript). OpenCode 1 also calls setup, with a reduced context; the
+// guard below leaves it to EntirePlugin.
+
+// Awaited hooks give up after this long rather than hang the shared service.
+const v2HookTimeoutMs = 60_000
+// Cleanup waits this long for the final turn-end and session-end, inside the
+// ~3s `opencode run --standalone` allows it, so a run's session-end lands
+// before the next run's turn-start. Hooks still running then finish detached.
+const v2CleanupWaitMs = 2_500
+// A detached hook waits at most this many 0.1s polls for the hooks before it.
+const v2DetachedWaitPolls = 1_200
+
+// The shared service may have been started from a shell with a repository
+// selected through the environment; hooks for this location must resolve
+// their own repository from their working directory.
+const v2RepoSelectorEnv = ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"]
+
+async function entireSetup(ctx: any) {
+  if (!(ctx?.session?.hook && ctx?.tool?.hook && ctx?.event?.subscribe && ctx?.location?.directory)) return
+  const directory: string = ctx.location.directory
+  const hookEnv: Record<string, string | undefined> = { ...process.env }
+  for (const key of v2RepoSelectorEnv) delete hookEnv[key]
+
+  // Top-level sessions seen in this instance's prompt hook.
+  const sessions = new Set<string>()
+  // Sessions session-start has been sent for.
+  const startedSessions = new Set<string>()
+  // Top-level sessions with a turn started and not yet ended.
+  const activeTurns = new Set<string>()
+  // Session -> model ID of its latest LLM call (from the context hook).
+  const models = new Map<string, string>()
+  // Session -> one-time context injection from turn-start, applied on the
+  // session's next LLM call.
+  const pendingInjection = new Map<string, string>()
+  // Session -> its detached hooks still running (turn-end, session-end,
+  // compaction, held subagent stops). Each new detached hook waits for these
+  // by PID (it may outlive this process) and the next turn-start awaits them,
+  // so a session's hooks land in the order OpenCode 1 sends them.
+  const inflight = new Map<string, Set<{ done: Promise<void>; pid?: number }>>()
+  // Session -> held subagent stops released but still waiting for their
+  // call's subagent-start, before they become detached hooks. Counted from
+  // the moment they are released, so neither session-end nor the next
+  // turn-start can overtake them.
+  const pendingStops = new Map<string, Set<Promise<void>>>()
+  // Child (subagent) sessions: child -> top-level session, child -> launcher.
+  const rootOf = new Map<string, string>()
+  const parentOf = new Map<string, string>()
+  // Per subagent call, keyed by callKey(calling session, callID). A callID is
+  // unique only within its session.
+  const taskCalls = new Map<string, { startedAt: number; input: any }>()
+  // Call key -> its subagent-start, which every stop of the call awaits; it
+  // also marks the call announced, so a late progress update cannot announce
+  // it again. Cleared when a new call reuses the key.
+  const taskStarts = new Map<string, Promise<void>>()
+  // Announced calls not yet stopped: call key -> subagent-stop payload.
+  const liveTasks = new Map<string, Record<string, unknown>>()
+  // Calls stopped before their running progress was seen; a late progress
+  // update must not announce a call that already stopped.
+  const stoppedBeforeStart = new Set<string>()
+  // Background children: child -> held calls, oldest first. Each of the
+  // child's executions ends the oldest held call (a resumed call that joins a
+  // running child queues behind it as its own execution).
+  const backgroundTasks = new Map<string, { key: string; payload: Record<string, unknown> }[]>()
+  // Children with an execution running; children whose held calls all end
+  // when that execution ends (their launcher was interrupted); and children
+  // whose execution ended with no call held yet (a launch result that arrives
+  // late), so the call that arrives next ends at once.
+  const busySessions = new Set<string>()
+  const drainAtEnd = new Set<string>()
+  const endedUnheld = new Set<string>()
+  // Top-level session -> its pending event handling (see enqueueEvent).
+  const eventQueues = new Map<string, Promise<void>>()
+
+  function callKey(sessionID: string, callID: string): string {
+    return sessionID + "\0" + callID
+  }
+
+  // within resolves when p settles or after ms, whichever is first. The timer
+  // also keeps the process alive while waiting on an unref'd detached hook.
+  function within(p: Promise<unknown>, ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms)
+      p.finally(() => { clearTimeout(timer); resolve() })
+    })
+  }
+
+  function isChild(sessionID: string): boolean {
+    return rootOf.has(sessionID)
+  }
+
+  function tracked(sessionID: string | undefined): sessionID is string {
+    return !!sessionID && (sessions.has(sessionID) || isChild(sessionID))
+  }
+
+  function topLevelSession(sessionID: string): string {
+    return rootOf.get(sessionID) ?? sessionID
+  }
+
+  function trackChild(childID: string, parentID: string) {
+    if (!rootOf.has(childID)) rootOf.set(childID, rootOf.get(parentID) ?? parentID)
+    if (!parentOf.has(childID)) parentOf.set(childID, parentID)
+  }
+
+  // runHook pipes the payload to a hook and resolves with its stdout. Errors
+  // and timeouts resolve with "" — plugin failures must not break OpenCode.
+  function runHook(hookName: string, payload: Record<string, unknown>): Promise<string> {
+    return new Promise<string>((resolve) => {
+      try {
+        const [cmd, ...args] = hookCmd(hookName)
+        const proc = spawn(cmd, args, { cwd: directory, env: hookEnv, stdio: ["pipe", "pipe", "ignore"] })
+        let out = ""
+        const timer = setTimeout(() => {
+          try { proc.kill() } catch {}
+          resolve(out)
+        }, v2HookTimeoutMs)
+        proc.stdout?.setEncoding("utf8")
+        proc.stdout?.on("data", (chunk: string) => { out += chunk })
+        proc.on("error", () => { clearTimeout(timer); resolve(out) })
+        proc.on("close", () => { clearTimeout(timer); resolve(out) })
+        proc.stdin?.on("error", () => {})
+        proc.stdin?.end(JSON.stringify(payload) + "\n")
+      } catch {
+        resolve("")
+      }
+    })
+  }
+
+  // runDetached starts a session's hook in its own process group so it
+  // survives OpenCode exiting, after the session's detached hooks still
+  // running (it polls their PIDs, bounded). done settles if this process
+  // lives to see the hook finish.
+  function runDetached(sessionID: string, hookName: string, payload: Record<string, unknown>): Promise<void> {
+    const running = inflight.get(sessionID) ?? new Set()
+    inflight.set(sessionID, running)
+    const pids = [...running].map((h) => h.pid).filter((pid): pid is number => typeof pid === "number")
+    const entry: { done: Promise<void>; pid?: number } = { done: Promise.resolve() }
+    entry.done = new Promise<void>((resolve) => {
+      try {
+        let [cmd, ...args] = hookCmd(hookName)
+        if (pids.length > 0) {
+          const wait = `for p in ${pids.join(" ")}; do i=0; while kill -0 $p 2>/dev/null && [ $i -lt ${v2DetachedWaitPolls} ]; do sleep 0.1; i=$((i+1)); done; done`
+          args = ["-c", `${wait}; ${args[1]}`]
+        }
+        const proc = spawn(cmd, args, { cwd: directory, env: hookEnv, stdio: ["pipe", "ignore", "ignore"], detached: true })
+        entry.pid = proc.pid
+        proc.on("error", () => resolve())
+        proc.on("close", () => resolve())
+        proc.stdin?.on("error", () => {})
+        proc.stdin?.end(JSON.stringify(payload) + "\n")
+        proc.unref()
+      } catch {
+        resolve()
+      }
+    }).then(() => { running.delete(entry) })
+    running.add(entry)
+    return entry.done
+  }
+
+  // settled resolves once the session's detached hooks, including held
+  // stops not yet started, have finished.
+  function settled(sessionID: string): Promise<void> {
+    const waits = [...(pendingStops.get(sessionID) ?? [])]
+    for (const h of inflight.get(sessionID) ?? []) waits.push(h.done)
+    if (waits.length === 0) return Promise.resolve()
+    return within(Promise.all(waits), v2HookTimeoutMs)
+  }
+
+  // classify records whether a session is top-level or a child, asking
+  // OpenCode for its parent the first time. A child's prompt reaches the hook
+  // before any event names its parent, so events cannot answer this in time.
+  async function classify(sessionID: string): Promise<"top" | "child" | "unknown"> {
+    if (sessions.has(sessionID)) return "top"
+    if (isChild(sessionID)) return "child"
+    try {
+      const session: any = await ctx.session.get({ sessionID })
+      if (session?.parentID) {
+        trackChild(sessionID, session.parentID)
+        return "child"
+      }
+      if (!session) return "unknown"
+    } catch {
+      return "unknown"
+    }
+    sessions.add(sessionID)
+    return "top"
+  }
+
+  async function startTurn(sessionID: string, prompt: string) {
+    activeTurns.add(sessionID)
+    await settled(sessionID)
+    if (!startedSessions.has(sessionID)) {
+      startedSessions.add(sessionID)
+      await runHook("session-start", { session_id: sessionID })
+    }
+    const out = await runHook("turn-start", { session_id: sessionID, prompt, model: models.get(sessionID) ?? "" })
+    const injected = parseInjectedContext(out)
+    if (injected) pendingInjection.set(sessionID, injected)
+  }
+
+  function endTurn(sessionID: string) {
+    if (!activeTurns.delete(sessionID)) return
+    runDetached(sessionID, "turn-end", { session_id: sessionID, model: models.get(sessionID) ?? "" })
+  }
+
+  function taskPayload(sessionID: string, callID: string, childID: string, call?: { startedAt: number; input: any }, input?: any) {
+    const args = call?.input ?? input ?? {}
+    return {
+      session_id: topLevelSession(sessionID),
+      tool_use_id: callID,
+      subagent_id: childID,
+      subagent_type: args.agent ?? args.subagent_type ?? "",
+      task_description: args.description ?? "",
+      started_at: call?.startedAt ?? 0,
+    }
+  }
+
+  // announceTask sends subagent-start once per call and records it, so every
+  // stop path can wait for it.
+  function announceTask(key: string, payload: Record<string, unknown>): Promise<void> {
+    const existing = taskStarts.get(key)
+    if (existing) return existing
+    const started = runHook("subagent-start", payload).then(() => {})
+    taskStarts.set(key, started)
+    return started
+  }
+
+  // A held stop runs detached (the child can end as OpenCode exits), after
+  // its call's start and the session's earlier detached hooks.
+  function stopHeldTask(held: { key: string; payload: Record<string, unknown> }) {
+    const sessionID = held.payload.session_id as string
+    const pending = pendingStops.get(sessionID) ?? new Set()
+    pendingStops.set(sessionID, pending)
+    const stop: Promise<void> = (async () => {
+      const started = taskStarts.get(held.key)
+      if (started) await within(started, v2HookTimeoutMs)
+      // Registered as a detached hook before leaving pendingStops, so there is
+      // no moment where neither set holds it.
+      const done = runDetached(sessionID, "subagent-stop", held.payload)
+      pending.delete(stop)
+      await done
+    })()
+    pending.add(stop)
+  }
+
+  function finishBackgroundTask(childID: string) {
+    const held = backgroundTasks.get(childID)
+    const next = held?.shift()
+    if (!next) {
+      endedUnheld.add(childID)
+      return
+    }
+    if (held!.length === 0) backgroundTasks.delete(childID)
+    stopHeldTask(next)
+  }
+
+  function drainBackgroundTasks(childID: string) {
+    const held = backgroundTasks.get(childID)
+    if (!held) {
+      endedUnheld.add(childID)
+      return
+    }
+    backgroundTasks.delete(childID)
+    for (const next of held) stopHeldTask(next)
+  }
+
+  // An interrupted session ends the held calls of the children it launched:
+  // at once for an idle child, when its execution ends for a busy one.
+  function launcherInterrupted(sessionID: string) {
+    for (const [childID, parentID] of parentOf) {
+      if (parentID !== sessionID || !backgroundTasks.has(childID)) continue
+      if (busySessions.has(childID)) drainAtEnd.add(childID)
+      else drainBackgroundTasks(childID)
+    }
+  }
+
+  // endSession ends the session after its held stops have become detached
+  // hooks, so session-end waits for them by PID. Calls still held for its
+  // children end with it (a child whose end arrived before it was tracked
+  // would otherwise hold its call forever), and the session's state is
+  // dropped: the plugin lives as long as the shared service.
+  async function endSession(sessionID: string): Promise<void> {
+    endTurn(sessionID)
+    const children = [...rootOf].filter(([, root]) => root === sessionID).map(([child]) => child)
+    for (const child of children) drainBackgroundTasks(child)
+    const pending = pendingStops.get(sessionID)
+    if (pending && pending.size > 0) await within(Promise.all(pending), v2CleanupWaitMs - 500)
+    const ended = runDetached(sessionID, "session-end", { session_id: sessionID })
+    forgetSession(sessionID, children)
+    await ended
+  }
+
+  function forgetSession(sessionID: string, children: string[]) {
+    const owners = new Set([sessionID, ...children])
+    const ownedKey = (key: string) => owners.has(key.slice(0, key.indexOf("\0")))
+    for (const id of owners) {
+      sessions.delete(id)
+      models.delete(id)
+      pendingInjection.delete(id)
+      rootOf.delete(id)
+      parentOf.delete(id)
+      busySessions.delete(id)
+      drainAtEnd.delete(id)
+      endedUnheld.delete(id)
+    }
+    for (const map of [taskCalls, taskStarts, liveTasks]) {
+      for (const key of map.keys()) if (ownedKey(key)) map.delete(key)
+    }
+    for (const key of stoppedBeforeStart) if (ownedKey(key)) stoppedBeforeStart.delete(key)
+  }
+
+  function endSessions(): Promise<void> {
+    const ended = [...startedSessions].map(endSession)
+    startedSessions.clear()
+    return Promise.all(ended).then(() => {})
+  }
+
+  // Sessions ended by location.shutdown, for cleanup to wait on.
+  let ending: Promise<void> = Promise.resolve()
+
+  await ctx.session.hook("prompt", async (e: any) => {
+    try {
+      const sessionID: string | undefined = e?.sessionID
+      if (!sessionID) return
+      if ((await classify(sessionID)) !== "top") return
+      // Events already received for the session (its last turn's end) are
+      // handled first, or a turn that has ended would still look active.
+      const queued = eventQueues.get(sessionID)
+      if (queued) await within(queued, v2CleanupWaitMs)
+      if (activeTurns.has(sessionID)) return
+      await startTurn(sessionID, typeof e?.prompt?.text === "string" ? e.prompt.text : "")
+    } catch {
+      // Silently ignore — plugin failures must not crash OpenCode
+    }
+  })
+
+  await ctx.session.hook("context", async (e: any) => {
+    try {
+      const sessionID: string | undefined = e?.sessionID
+      if (!sessionID || !sessions.has(sessionID)) return
+      if (typeof e?.model?.id === "string") models.set(sessionID, e.model.id)
+      const injection = pendingInjection.get(sessionID)
+      if (injection && Array.isArray(e.system)) {
+        e.system.push({ type: "text", text: injection })
+        pendingInjection.delete(sessionID)
+      }
+    } catch {
+      // Silently ignore — plugin failures must not crash OpenCode
+    }
+  })
+
+  // Subagent call start. No child exists yet, so this records the start and
+  // arguments; subagent-start fires from the call's progress event.
+  await ctx.tool.hook("execute.before", async (e: any) => {
+    try {
+      if (e?.tool !== "subagent" && e?.tool !== "task") return
+      if (!tracked(e.sessionID) || !e.id) return
+      const key = callKey(e.sessionID, e.id)
+      // A new call under this key (a reused callID): earlier markers must not
+      // swallow its start or stop.
+      stoppedBeforeStart.delete(key)
+      taskStarts.delete(key)
+      liveTasks.delete(key)
+      // Resuming a child starts a new run of it; an earlier run's end is not
+      // this call's.
+      const resumed = e.input?.sessionID ?? e.input?.task_id
+      if (typeof resumed === "string") endedUnheld.delete(resumed)
+      taskCalls.set(key, { startedAt: Date.now(), input: e.input ?? {} })
+    } catch {
+      // Silently ignore — plugin failures must not crash OpenCode
+    }
+  })
+
+  // Subagent call end: at completion for a foreground call, at launch for a
+  // background one (result status "running"), whose stop is held until the
+  // child's execution ends.
+  await ctx.tool.hook("execute.after", async (e: any) => {
+    try {
+      if (e?.tool !== "subagent" && e?.tool !== "task") return
+      if (!tracked(e.sessionID) || !e.id) return
+      const key = callKey(e.sessionID, e.id)
+      const call = taskCalls.get(key)
+      taskCalls.delete(key)
+      const announced = liveTasks.get(key)
+      liveTasks.delete(key)
+      const output = e?.result?.output
+      const childID: string | undefined = output?.sessionID ?? (announced?.subagent_id as string | undefined)
+      // A call that failed before its child was bound was never announced
+      // and fires nothing.
+      if (!childID || (e.status === "error" && !announced)) return
+      trackChild(childID, e.sessionID)
+      const payload = announced ?? taskPayload(e.sessionID, e.id, childID, call, e.input)
+      if (e.status !== "error" && output?.status === "running") {
+        // Background launch, often before its first progress update: hold the
+        // stop first, so the child's end cannot slip past it, then announce.
+        backgroundTasks.set(childID, [...(backgroundTasks.get(childID) ?? []), { key, payload }])
+        const started = announceTask(key, payload)
+        if (endedUnheld.delete(childID)) finishBackgroundTask(childID)
+        await started
+        return
+      }
+      if (!taskStarts.has(key)) stoppedBeforeStart.add(key)
+      const started = taskStarts.get(key)
+      if (started) await within(started, v2HookTimeoutMs)
+      await runHook("subagent-stop", payload)
+    } catch {
+      // Silently ignore — plugin failures must not crash OpenCode
+    }
+  })
+
+  // The event stream is the only source of turn ends; if it ends before
+  // shutdown, subscribe again rather than leave every turn open.
+  const abort = new AbortController()
+  ;(async () => {
+    while (!abort.signal.aborted) {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: abort.signal })) enqueueEvent(event)
+      } catch {
+        // Subscription failed; retried below unless shutting down
+      }
+      if (!abort.signal.aborted) await new Promise((resolve) => setTimeout(resolve, 1_000))
+    }
+  })()
+
+  // Events are handled in order per top-level session (a child's events with
+  // its parent's), but one session's slow hook never holds up another's
+  // events: a turn end stuck behind it would make the next prompt skip its
+  // turn-start. location.shutdown waits for every session's queue.
+  function enqueueEvent(event: any) {
+    const sessionID: string | undefined = event?.data?.sessionID
+    if (event?.type === "location.shutdown") {
+      const all = Promise.all([...eventQueues.values()])
+      eventQueues.set("", all.then(() => runEvent(event)))
+      return
+    }
+    const key = sessionID ? topLevelSession(sessionID) : ""
+    const next = (eventQueues.get(key) ?? Promise.resolve()).then(() => runEvent(event))
+    eventQueues.set(key, next)
+    next.then(() => {
+      if (eventQueues.get(key) === next) eventQueues.delete(key)
+    })
+  }
+
+  async function runEvent(event: any) {
+    try {
+      await handleEvent(event)
+    } catch {
+      // Silently ignore — plugin failures must not crash OpenCode
+    }
+  }
+
+  async function handleEvent(event: any) {
+    const type: string = event?.type ?? ""
+    const data = event?.data ?? {}
+    const sessionID: string | undefined = data.sessionID
+    switch (type) {
+      case "session.tool.progress": {
+        const childID = data.metadata?.sessionID
+        if (!tracked(sessionID) || !data.id || typeof childID !== "string" || data.metadata?.status !== "running") return
+        const key = callKey(sessionID, data.id)
+        trackChild(childID, sessionID)
+        if (taskStarts.has(key)) return
+        if (stoppedBeforeStart.delete(key)) return
+        const call = taskCalls.get(key)
+        if (!call) return // a call this instance never saw begin
+        const payload = taskPayload(sessionID, data.id, childID, call)
+        liveTasks.set(key, payload)
+        await announceTask(key, payload)
+        return
+      }
+      case "session.execution.started": {
+        if (!tracked(sessionID)) return
+        if (isChild(sessionID)) {
+          busySessions.add(sessionID)
+          endedUnheld.delete(sessionID)
+          return
+        }
+        // An execution with no prompt: OpenCode delivering a background
+        // subagent's result. The session takes a turn on it, with no prompt.
+        if (!activeTurns.has(sessionID)) await startTurn(sessionID, "")
+        return
+      }
+      case "session.execution.succeeded":
+      case "session.execution.failed":
+      case "session.execution.interrupted": {
+        if (!tracked(sessionID)) return
+        if (isChild(sessionID)) {
+          busySessions.delete(sessionID)
+          if (drainAtEnd.delete(sessionID) || type !== "session.execution.succeeded") drainBackgroundTasks(sessionID)
+          else finishBackgroundTask(sessionID)
+          return
+        }
+        if (type === "session.execution.interrupted") launcherInterrupted(sessionID)
+        endTurn(sessionID)
+        return
+      }
+      case "session.compaction.ended": {
+        if (sessions.has(sessionID ?? "")) runDetached(sessionID!, "compaction", { session_id: sessionID! })
+        return
+      }
+      case "session.deleted": {
+        if (!sessionID || !startedSessions.delete(sessionID)) return
+        endSession(sessionID)
+        return
+      }
+      case "location.shutdown": {
+        if (event?.location?.directory === directory) ending = endSessions()
+        return
+      }
+    }
+  }
+
+  return async () => {
+    await within(Promise.all([ending, endSessions()]), v2CleanupWaitMs)
+    abort.abort()
+  }
+}
+
+export default process.env.OPENCODE === "1" ? EntirePlugin : { id: "entire", server: EntirePlugin, setup: entireSetup }

@@ -78,8 +78,12 @@ const (
 	roleUser      = "user"
 )
 
-// partTypeText is the Part.Type of a text part.
-const partTypeText = "text"
+// Part.Type values.
+const (
+	partTypeText       = "text"
+	partTypeTool       = "tool"
+	partTypeCompaction = "compaction"
+)
 
 // Time holds message timestamps.
 type Time struct {

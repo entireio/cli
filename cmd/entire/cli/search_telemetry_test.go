@@ -31,6 +31,7 @@ func TestClassifySearchError(t *testing.T) {
 	}{
 		{"not logged in via login hint", fmt.Errorf("search failed: %w", loginHintErr(auth.ErrNotLoggedIn)), telemetry.SearchErrClassAuth},
 		{"unreadable keyring", fmt.Errorf("search failed: %w", fmt.Errorf("cannot read the saved login: %w", tokenstore.ErrKeyringUnavailable)), telemetry.SearchErrClassAuth},
+		{"bad config.json", fmt.Errorf("search failed: %w", fmt.Errorf("read access token: %w", tokenstore.ErrBadConfig)), telemetry.SearchErrClassAuth},
 		{"jurisdiction cell skip", regionSkip(auth.ErrNoCellForJurisdiction), telemetry.SearchErrClassCellSkip},
 		{"gateway without query-serve", regionSkip(search.ErrCellUnavailable), telemetry.SearchErrClassRegionUnavailable},
 		{"bare region sentinel", fmt.Errorf("semantic search: %w", errNoRegionAvailable), telemetry.SearchErrClassRegionUnavailable},

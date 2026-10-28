@@ -67,6 +67,7 @@ func ResolveHome(envVar, defaultRel string) (string, error) {
 	if ok {
 		return dir, nil
 	}
+	// Agent's $HOME, not Entire's; see userdirs.Home.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
@@ -144,6 +145,7 @@ func expandLeadingTilde(value string) (string, error) {
 	default:
 		return value, nil
 	}
+	// Agents expand ~ with $HOME too.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("expand ~: %w", err)
