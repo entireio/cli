@@ -56,6 +56,10 @@ const (
 
 var agySenderRe = regexp.MustCompile(`\[Message\] timestamp=\S+ sender=([A-Za-z0-9_-]+)\s`)
 
+// agySystemMessageTypeRe matches a raw step that declares itself a
+// SYSTEM_MESSAGE, for a step too long to decode.
+var agySystemMessageTypeRe = regexp.MustCompile(`"type"\s*:\s*"` + agyStepTypeSystemMessage + `"`)
+
 // ResolveSubagentSession implements agent.SubagentSessionResolver.
 //
 // The ToolUseID is the child's conversation ID: agy tool calls carry no IDs,
@@ -113,6 +117,13 @@ func subagentSender(data []byte) string {
 		seen++
 		var step agyStep
 		if json.Unmarshal(line, &step) != nil {
+			// A step longer than the head read (a long prompt) is cut off and
+			// does not decode; its sender is near the start of the message.
+			if agySystemMessageTypeRe.Match(line) {
+				if m := agySenderRe.FindSubmatch(line); m != nil {
+					return string(m[1])
+				}
+			}
 			continue
 		}
 		switch step.Type {
@@ -253,13 +264,18 @@ func lastNonBlankLine(data []byte) []byte {
 // TurnSubagents implements agent.SubagentReplyCounter: the subagents whose IDs
 // appear in the parent's steps after fromOffset — created by invoke_subagent,
 // messaged by send_message, or heard from in a SYSTEM_MESSAGE — each with how
-// many messages from it the whole transcript holds.
+// many messages from it the whole transcript holds. Only conversations this
+// parent created count (its "Created the following subagent" steps, the same
+// link ResolveSubagentSession requires), from any turn: a later turn can
+// message a child created earlier, while a conversation it never created is no
+// subagent of its, and must not hold its turn open.
 func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[string]int, error) {
 	data, err := a.readStoreTranscript(parentRef)
 	if err != nil {
 		return nil, err
 	}
 	turn := make(map[string]struct{})
+	created := make(map[string]struct{})
 	received := make(map[string]int)
 	line := 0
 	forEachNonBlankLine(data, 0, func(raw []byte) {
@@ -278,8 +294,11 @@ func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[
 				}
 			}
 		case agyStepTypeGeneric:
-			if id := createdSubagentID(step.Content); id != "" && inTurn {
-				turn[id] = struct{}{}
+			if id := createdSubagentID(step.Content); id != "" {
+				created[id] = struct{}{}
+				if inTurn {
+					turn[id] = struct{}{}
+				}
 			}
 		case agyStepTypePlannerResponse:
 			if !inTurn {
@@ -296,7 +315,7 @@ func (a *AntigravityAgent) TurnSubagents(parentRef string, fromOffset int) (map[
 	})
 	out := make(map[string]int, len(turn))
 	for id := range turn {
-		if validation.ValidateAgentSessionID(id) == nil {
+		if _, ok := created[id]; ok && validation.ValidateAgentSessionID(id) == nil {
 			out[id] = received[id]
 		}
 	}

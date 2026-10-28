@@ -82,6 +82,21 @@ not json
 	require.Equal(t, &agent.TokenUsage{InputTokens: 400, OutputTokens: 40, APICallCount: 2}, usage)
 }
 
+// A repeated step is recognized by its step_index; steps that carry none are
+// distinct calls, not repeats of step 0, while a real step 0 written twice
+// still counts once.
+func TestCalculateTokenUsage_StepsWithoutAnIndexAreNotRepeats(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"type":"PLANNER_RESPONSE","input_tokens":100,"output_tokens":10}
+{"type":"PLANNER_RESPONSE","input_tokens":200,"output_tokens":20}
+{"step_index":0,"type":"PLANNER_RESPONSE","input_tokens":5,"output_tokens":1}
+{"step_index":0,"type":"PLANNER_RESPONSE","input_tokens":5,"output_tokens":1}
+`)
+	usage, err := (&AntigravityAgent{}).CalculateTokenUsage(data, 0)
+	require.NoError(t, err)
+	require.Equal(t, &agent.TokenUsage{InputTokens: 305, OutputTokens: 31, APICallCount: 3}, usage)
+}
+
 // The lifecycle reaches the calculator through agent.CalculateTokenUsage; this
 // pins that agy is not routed past it (e.g. by a capability declaration).
 func TestCalculateTokenUsage_ReachedThroughTheFramework(t *testing.T) {

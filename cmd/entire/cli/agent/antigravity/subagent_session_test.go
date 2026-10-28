@@ -163,3 +163,58 @@ func TestParsePreInvocation_WakeUpFromSubagentIsConditional(t *testing.T) {
 
 	require.True(t, preInvocationEvent(t, prompt, 1).SuppressIfSessionActive, "follow-up calls stay conditional")
 }
+
+// A turn's subagents are the children this parent created, in any turn: a
+// later turn can message a child created earlier. A conversation the parent
+// never created is not its subagent, whether it messaged the parent or the
+// parent messaged it, so it cannot hold the parent's turn open.
+func TestTurnSubagents_OnlyChildrenThisParentCreated(t *testing.T) {
+	brain := brainDir(t)
+	const foreignID = "77777777-8888-4999-aaaa-bbbbbbbbbbbb"
+	message := func(step int, sender string) string {
+		return fmt.Sprintf(`{"step_index":%d,"type":"SYSTEM_MESSAGE","content":"[Message] timestamp=2026-10-20T01:50:00Z sender=%s content=hi"}`, step, sender)
+	}
+	sendTo := func(step int, recipient string) string {
+		return fmt.Sprintf(`{"step_index":%d,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"send_message","args":{"Recipient":"%s"}}]}`, step, recipient)
+	}
+	lines := append(parentInvokeLines(testChildID), message(3, testChildID))
+	firstTurnLines := len(lines)
+	lines = append(lines,
+		`{"step_index":4,"type":"USER_INPUT","content":"<USER_REQUEST>\nAsk again\n</USER_REQUEST>"}`,
+		sendTo(5, testChildID),
+		message(6, foreignID),
+		sendTo(7, foreignID),
+	)
+	parentPath := writeBrainTranscript(t, brain, testParentID, lines...)
+
+	got, err := (&AntigravityAgent{}).TurnSubagents(parentPath, firstTurnLines)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{testChildID: 1}, got)
+}
+
+// A prompt longer than the head read leaves step 0 cut off mid-line. Its
+// sender, near the start, still links the child.
+func TestResolveSubagentSession_LongPromptCutOffByTheHeadRead(t *testing.T) {
+	brain := brainDir(t)
+	writeBrainTranscript(t, brain, testParentID, parentInvokeLines(testChildID)...)
+	lines := childLines(testParentID)
+	lines[0] = strings.Replace(lines[0], "content=Read README.md", "content="+strings.Repeat("x", 300<<10), 1)
+	require.Greater(t, len(lines[0]), subagentHeadBytes)
+	childPath := writeBrainTranscript(t, brain, testChildID, lines...)
+
+	link, ok := (&AntigravityAgent{}).ResolveSubagentSession(childPath)
+	require.True(t, ok)
+	require.Equal(t, testParentID, link.ParentSessionID)
+}
+
+// The fallback for a cut-off step reads only a SYSTEM_MESSAGE: a cut-off user
+// prompt quoting a message line is not a subagent's first step.
+func TestResolveSubagentSession_CutOffUserPromptIsNotASubagent(t *testing.T) {
+	brain := brainDir(t)
+	writeBrainTranscript(t, brain, testParentID, parentInvokeLines(testChildID)...)
+	prompt := fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"[Message] timestamp=2026-10-20T00:12:09Z sender=%s content=%s`, testParentID, strings.Repeat("x", 300<<10))
+	childPath := writeBrainTranscript(t, brain, testChildID, prompt)
+
+	_, ok := (&AntigravityAgent{}).ResolveSubagentSession(childPath)
+	require.False(t, ok)
+}

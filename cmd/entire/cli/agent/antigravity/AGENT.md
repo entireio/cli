@@ -227,13 +227,18 @@ and `Role`. Captured on agy 1.4.2:
   lands before the subagent's turn ends, agy sends the parent no further Stop.
   The pause is recorded (`AwaitingSubagentsAt`), and the parent's turn is ended
   for it once every subagent the turn involved (launched, messaged, or heard
-  from, per the parent's transcript) has stopped and every reply it sent
+  from, per the parent's transcript, and created by this parent in any turn)
+  has stopped and every reply it sent
   (`send_message` with the parent as `Recipient`) is in the parent's transcript
   — an unread reply will wake the parent, so its turn is not over. A subagent
   whose agent died counts as stopped. The subagent's turn end and the parent's
   Stop can land milliseconds apart in either order, so both check; the first to
   find the turn done claims it (`SubagentTurnEndClaimed`, cleared at the next
-  turn start) and a pause reported afterwards cannot re-arm it.
+  turn start) and a pause reported afterwards cannot re-arm it. A Stop agy
+  still reports for that turn (a late `fullyIdle=true`) is dropped, so the
+  turn's step and tokens are saved once. A running subagent's hooks keep both
+  its own and its parent's interaction time fresh, so neither ages into a
+  stuck session while it works.
 - agy can wake the parent once more after that: when a subagent kept calling
   tools after its last reply, agy sends the parent a  notice
   ("Subagent <id> has gone idle. ... most recent response: ..."). Observed once
@@ -244,6 +249,13 @@ and `Role`. Captured on agy 1.4.2:
   agy does not send one.
 
 ## Gaps & Limitations (Preview)
+
+- **Known per-hook costs**: the subagent resolver runs on every tool call of
+  every unmarked session, top-level ones included, reading the head of the
+  session's transcript and, when it names a sender, the sender's whole
+  transcript. `lastStepIsUserInput` (the PreInvocation prompt-vs-wake check)
+  reads the whole transcript to find its last line. Both grow with transcript
+  size; neither is bounded yet.
 
 - **Silent tracking** in the agy UI by choice (SessionStart is installed but
   writes no banner); `entire status` is the visibility surface.

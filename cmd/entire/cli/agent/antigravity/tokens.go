@@ -24,7 +24,7 @@ const agyStepTypePlannerResponse = "PLANNER_RESPONSE"
 // includes cache_read_tokens is unconfirmed, because agy reported no cache
 // reads in any session observed so far.
 type agyTokenStep struct {
-	StepIndex       int    `json:"step_index"`
+	StepIndex       *int   `json:"step_index"`
 	Type            string `json:"type"`
 	InputTokens     *int   `json:"input_tokens"`
 	OutputTokens    *int   `json:"output_tokens"`
@@ -52,10 +52,14 @@ func (a *AntigravityAgent) CalculateTokenUsage(transcriptData []byte, fromOffset
 		if json.Unmarshal(raw, &step) != nil || step.Type != agyStepTypePlannerResponse || !step.hasTokens() {
 			return
 		}
-		if _, dup := seen[step.StepIndex]; dup {
-			return
+		// A step written twice repeats its step_index; a step without one is
+		// not a repeat of any other.
+		if step.StepIndex != nil {
+			if _, dup := seen[*step.StepIndex]; dup {
+				return
+			}
+			seen[*step.StepIndex] = struct{}{}
 		}
-		seen[step.StepIndex] = struct{}{}
 		usage.InputTokens += derefInt(step.InputTokens)
 		usage.OutputTokens += derefInt(step.OutputTokens)
 		usage.CacheReadTokens += derefInt(step.CacheReadTokens)
