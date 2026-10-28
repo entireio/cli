@@ -91,6 +91,32 @@ func TestDecode_Blocks(t *testing.T) {
 			},
 		},
 		{
+			name:  "tool_use result with images",
+			input: `{"v":1,"type":"assistant","content":[{"type":"tool_use","id":"tu-1","name":"Read","input":{},"result":{"output":"","status":"success","images":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"entire-asset:assets/img-ab.png"}}]}}]}`,
+			want: Line{
+				Version: 1, Type: TypeAssistant,
+				Blocks: []Block{{
+					Type: BlockToolUse, ID: "tu-1", Name: "Read", Input: json.RawMessage(`{}`),
+					Result: &ToolResult{Status: ToolStatusSuccess, Images: []json.RawMessage{
+						json.RawMessage(`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"entire-asset:assets/img-ab.png"}}`),
+					}},
+					Raw: json.RawMessage(`{"type":"tool_use","id":"tu-1","name":"Read","input":{},"result":{"output":"","status":"success","images":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"entire-asset:assets/img-ab.png"}}]}}`),
+				}},
+			},
+		},
+		{
+			name:  "tool_use result with malformed images keeps the block",
+			input: `{"v":1,"type":"assistant","content":[{"type":"tool_use","id":"tu-1","name":"Read","input":{},"result":{"output":"x","status":"success","images":"img"}}]}`,
+			want: Line{
+				Version: 1, Type: TypeAssistant,
+				Blocks: []Block{{
+					Type: BlockToolUse, ID: "tu-1", Name: "Read", Input: json.RawMessage(`{}`),
+					Result: &ToolResult{Output: "x", Status: ToolStatusSuccess},
+					Raw:    json.RawMessage(`{"type":"tool_use","id":"tu-1","name":"Read","input":{},"result":{"output":"x","status":"success","images":"img"}}`),
+				}},
+			},
+		},
+		{
 			name:  "tool_use with error result and no file",
 			input: `{"v":1,"type":"assistant","content":[{"type":"tool_use","name":"Bash","input":{},"result":{"output":"boom","status":"error"}}]}`,
 			want: Line{

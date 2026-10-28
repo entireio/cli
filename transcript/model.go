@@ -59,6 +59,9 @@ type ToolResult struct {
 	// Agent identifies the subagent this tool call launched, when the agent
 	// records one in the parent transcript.
 	Agent *ToolResultAgent `json:"agent,omitempty"`
+	// Images are the images the tool returned, each verbatim in the agent's
+	// native shape, in source order.
+	Images []json.RawMessage `json:"images,omitempty"`
 }
 
 // ToolResultAgent identifies a subagent launched by a tool call.
@@ -71,7 +74,7 @@ type ToolResultAgent struct {
 // UnmarshalJSON decodes a tool result. An "agent" that is not an object with
 // a non-empty string "id" decodes as absent rather than failing the result,
 // so a malformed one neither drops the block around it nor folds into an
-// empty agent.
+// empty agent. Likewise, "images" that is not an array decodes as absent.
 func (r *ToolResult) UnmarshalJSON(b []byte) error {
 	if string(bytes.TrimSpace(b)) == "null" {
 		return nil // as encoding/json leaves a struct on null
@@ -80,12 +83,17 @@ func (r *ToolResult) UnmarshalJSON(b []byte) error {
 	var w struct {
 		plain
 
-		Agent json.RawMessage `json:"agent"` // shadows plain.Agent
+		Agent  json.RawMessage `json:"agent"`  // shadows plain.Agent
+		Images json.RawMessage `json:"images"` // shadows plain.Images
 	}
 	if err := json.Unmarshal(b, &w); err != nil {
 		return fmt.Errorf("decoding tool result: %w", err)
 	}
 	*r = ToolResult(w.plain)
+	var images []json.RawMessage
+	if json.Unmarshal(w.Images, &images) == nil && len(images) > 0 {
+		r.Images = images
+	}
 	var agent struct {
 		ID json.RawMessage `json:"id"`
 	}

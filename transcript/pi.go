@@ -75,8 +75,9 @@ type piCompactToolUseBlock struct {
 }
 
 type piCompactToolResult struct {
-	Output string `json:"output"`
-	Status string `json:"status"`
+	Output string            `json:"output"`
+	Status string            `json:"status"`
+	Images []json.RawMessage `json:"images,omitempty"`
 }
 
 // compactPi converts a Pi JSONL transcript into the Entire compact format.
@@ -280,9 +281,11 @@ func piCollectToolResults(data []byte, active map[string]bool) (map[string]piCom
 		if entry.Message.ToolCallID == "" {
 			continue
 		}
+		output, images := piDecodeResultOutput(entry.Message.Content)
 		results[entry.Message.ToolCallID] = piCompactToolResult{
-			Output: piDecodeResultOutput(entry.Message.Content),
+			Output: output,
 			Status: piResultStatus(entry.Message.IsError),
+			Images: images,
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -309,30 +312,41 @@ func piDecodeArguments(raw json.RawMessage) any {
 	return decoded
 }
 
-func piDecodeResultOutput(raw json.RawMessage) string {
+// piDecodeResultOutput returns a tool result's text output and its image
+// items, verbatim and in order. A result with images but no text has empty
+// output rather than the serialized content array.
+func piDecodeResultOutput(raw json.RawMessage) (string, []json.RawMessage) {
 	if text := pijsonl.DecodeStringContent(raw); text != "" {
-		return text
+		return text, nil
 	}
-	var items []pijsonl.ContentItem
-	if err := json.Unmarshal(raw, &items); err == nil {
-		texts := make([]string, 0, len(items))
-		for _, item := range items {
-			if item.Type == pijsonl.ContentTypeText && item.Text != "" {
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(raw, &rawItems); err == nil {
+		texts := make([]string, 0, len(rawItems))
+		var images []json.RawMessage
+		for _, rawItem := range rawItems {
+			var item pijsonl.ContentItem
+			if json.Unmarshal(rawItem, &item) != nil {
+				continue
+			}
+			switch {
+			case item.Type == pijsonl.ContentTypeText && item.Text != "":
 				texts = append(texts, item.Text)
+			case item.Type == BlockImage:
+				images = append(images, rawItem)
 			}
 		}
-		if len(texts) > 0 {
-			return strings.Join(texts, "\n")
+		if len(texts) > 0 || len(images) > 0 {
+			return strings.Join(texts, "\n"), images
 		}
 	}
 	// Fall through: serialize unknown structure as JSON.
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err == nil {
 		if encoded, err := json.Marshal(decoded); err == nil {
-			return string(encoded)
+			return string(encoded), nil
 		}
 	}
-	return string(raw)
+	return string(raw), nil
 }
 
 func piResultStatus(isError bool) string {

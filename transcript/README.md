@@ -57,7 +57,7 @@ Pi, one native message per call (no fragments to merge): `model` is `message.mod
 
 - User text: `{"id"?: string, "text": string}`. There is no `type` field (a v1 quirk).
 - Assistant text: `{"type": "text", "text": string}`.
-- Tool use: `{"type": "tool_use", "id"?: string, "name": string, "input": any, "result"?: {"output": string, "status": "success"|"error", "file"?: {"filePath": string, "numLines"?: int}, "matchCount"?: int, "agent"?: {"id": string}}}`.
+- Tool use: `{"type": "tool_use", "id"?: string, "name": string, "input": any, "result"?: {"output": string, "status": "success"|"error", "file"?: {"filePath": string, "numLines"?: int}, "matchCount"?: int, "agent"?: {"id": string}, "images"?: [any]}}`.
   Tool results are inlined into the `tool_use` block that requested them,
   matched by tool call ID where the agent records one, including the results
   of parallel calls that the agent writes separately.
@@ -67,7 +67,19 @@ Pi, one native message per call (no fragments to merge): `model` is `message.mod
   forked Skill calls), Codex's `SubAgentActivity` thread for a `spawn_agent`
   call, OpenCode's `task` session (`state.metadata.sessionId`), and Copilot's
   `subagent.started` agent for a task call.
-- Image: passed through from the source verbatim. The image source is either
+  `images` holds the images a tool returned, each verbatim in the agent's
+  native shape and in source order: Claude Code and Cursor `image` blocks
+  from a `tool_result` content array, Pi `image` items from a tool result
+  (`data`, `mimeType`), and Codex `input_image` items (`image_url`, a data
+  URI) from a tool output array. As with user images, the base64 is either
+  inline or an `entire-asset:assets/…` placeholder. `output` keeps only the
+  text; a Pi result with images but no text has an empty `output`. Other
+  converters do not fill `images`. A Codex tool output that is a content-item
+  array has its `input_text` texts joined into `output`, with a newline
+  between two texts only where the first does not already end in one.
+- Image: passed through from the source verbatim, in the agent's native shape
+  (Codex user images are `input_image` items, without the `<image …>` and
+  `</image>` text items Codex wraps them in). The image source is either
   inline base64 or an `entire-asset:assets/…` placeholder left by image
   externalization.
 - Any other block type is passed through verbatim. Thinking blocks are dropped

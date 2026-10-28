@@ -227,6 +227,28 @@ func TestCompact_CodexInlineCases(t *testing.T) {
 			},
 		},
 		{
+			name: "content-item tool outputs join their texts",
+			input: cxJoin(cxCall("t1", "c1"),
+				`{"timestamp":"t2","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":[{"type":"input_text","text":"Script completed\nOutput:\n"},{"type":"input_text","text":"line one"},{"type":"input_text","text":"line two"},{"type":"input_image","image_url":"data:image/png;base64,x","detail":"original"}]}}`),
+			expected: []string{
+				cxPre + `"type":"assistant","ts":"t1","content":[{"type":"tool_use","id":"c1","name":"exec_command","input":{"cmd":"x"},"result":{"output":"Script completed\nOutput:\nline one\nline two","status":"success","images":[{"type":"input_image","image_url":"data:image/png;base64,x","detail":"original"}]}}]}`,
+			},
+		},
+		{
+			name:  "user images are kept and their tags dropped",
+			input: cxJoin(`{"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1] path=\"/tmp/a b.png\">"},{"type":"input_image","image_url":"data:image/png;base64,x"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"<image name=[Image #2]>"},{"type":"input_image","image_url":"data:image/png;base64,y"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"what is [Image #1]?"}]}}`),
+			expected: []string{
+				cxPre + `"type":"user","ts":"t1","content":[{"text":"what is [Image #1]?"},{"type":"input_image","image_url":"data:image/png;base64,x"},{"type":"input_image","image_url":"data:image/png;base64,y"}]}`,
+			},
+		},
+		{
+			name:  "an image-only user message still has a line",
+			input: cxJoin(`{"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,x"}]}}`),
+			expected: []string{
+				cxPre + `"type":"user","ts":"t1","content":[{"type":"input_image","image_url":"data:image/png;base64,x"}]}`,
+			},
+		},
+		{
 			name: "non-string snapshot timestamp keeps usage, the call boundary and the last item ts",
 			input: cxJoin(cxMessage("t1", "one"), strings.Replace(cxTokens("x", 10, 0, 4), `"x"`, `123`, 1),
 				cxMessage("t3", "two"), cxTokens("t4", 20, 0, 8)),

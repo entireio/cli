@@ -165,3 +165,97 @@ func TestToolResultAgent_PerConverter(t *testing.T) {
 		})
 	}
 }
+
+func TestToolResultImages_PerConverter(t *testing.T) {
+	t.Parallel()
+
+	const (
+		claudeImage = `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"entire-asset:assets/img-ab.png"}}`
+		piImage     = `{"type":"image","data":"entire-asset:assets/img-cd.png","mimeType":"image/png"}`
+		codexImage  = `{"type":"input_image","image_url":"data:image/png;base64,entire-asset:assets/img-ef.png","detail":"original"}`
+	)
+	tests := []struct {
+		name, agent, input, toolUseID, wantOutput string
+		wantImages                                []string
+	}{
+		{
+			name:  "claude Read of an image",
+			agent: "claude-code",
+			input: `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"shot.png"}}]}}
+{"type":"user","timestamp":"t2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[` + claudeImage + `]}]},"toolUseResult":{"type":"image","file":{"base64":"entire-asset:assets/img-ab.png","type":"image/png"}}}
+`,
+			toolUseID:  "toolu_1",
+			wantImages: []string{claudeImage},
+		},
+		{
+			name:  "claude string result has no images",
+			agent: "claude-code",
+			input: `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}}
+`,
+			toolUseID:  "toolu_2",
+			wantOutput: "ok",
+		},
+		{
+			name:  "pi image-only result",
+			agent: "pi",
+			input: `{"type":"session","version":3,"id":"s1","timestamp":"t0","cwd":"/tmp"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"t1","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc1","name":"read","arguments":{"path":"shot.png"}}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"t2","message":{"role":"toolResult","toolCallId":"tc1","toolName":"read","content":[` + piImage + `],"isError":false}}
+`,
+			toolUseID:  "tc1",
+			wantImages: []string{piImage},
+		},
+		{
+			name:  "pi text and image result",
+			agent: "pi",
+			input: `{"type":"session","version":3,"id":"s1","timestamp":"t0","cwd":"/tmp"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"t1","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc1","name":"read","arguments":{"path":"shot.png"}}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"t2","message":{"role":"toolResult","toolCallId":"tc1","toolName":"read","content":[{"type":"text","text":"Read image file [image/png]"},` + piImage + `],"isError":false}}
+`,
+			toolUseID:  "tc1",
+			wantOutput: "Read image file [image/png]",
+			wantImages: []string{piImage},
+		},
+		{
+			name:  "codex view_image",
+			agent: "codex",
+			input: `{"timestamp":"t0","type":"session_meta","payload":{"id":"s1"}}
+{"timestamp":"t1","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"path\":\"shot.png\"}","call_id":"call_1"}}
+{"timestamp":"t2","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":[` + codexImage + `]}}
+`,
+			toolUseID:  "call_1",
+			wantImages: []string{codexImage},
+		},
+		{
+			name:  "codex custom tool output with text and an image",
+			agent: "codex",
+			input: `{"timestamp":"t0","type":"session_meta","payload":{"id":"s1"}}
+{"timestamp":"t1","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"view()","call_id":"call_2"}}
+{"timestamp":"t2","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":[{"type":"input_text","text":"Script completed"},` + codexImage + `]}}
+`,
+			toolUseID:  "call_2",
+			wantOutput: "Script completed",
+			wantImages: []string{codexImage},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := convertResults(t, tc.input, tc.agent)[tc.toolUseID]
+			if r == nil {
+				t.Fatalf("tool_use %s has no result", tc.toolUseID)
+			}
+			if r.Output != tc.wantOutput {
+				t.Errorf("output = %q, want %q", r.Output, tc.wantOutput)
+			}
+			var got []string
+			for _, img := range r.Images {
+				got = append(got, string(img))
+			}
+			if strings.Join(got, "\n") != strings.Join(tc.wantImages, "\n") {
+				t.Errorf("images = %q, want %q", got, tc.wantImages)
+			}
+		})
+	}
+}

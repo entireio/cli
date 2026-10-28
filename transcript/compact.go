@@ -267,16 +267,16 @@ func foldJSONL(content []byte, opts Options, a *JSONLAdapter) ([]byte, error) {
 // userContentBlocks builds a user line's content: a text block carrying the
 // prompt ID (kept even when empty if there are no images), then the images
 // verbatim.
-func userContentBlocks(e parsedEntry) (json.RawMessage, error) {
+func userContentBlocks(id, text string, images []json.RawMessage) (json.RawMessage, error) {
 	var blocks []json.RawMessage
-	if e.userText != "" || len(e.userImages) == 0 {
-		b, err := json.Marshal(userTextBlock{ID: e.userID, Text: e.userText})
+	if text != "" || len(images) == 0 {
+		b, err := json.Marshal(userTextBlock{ID: id, Text: text})
 		if err != nil {
 			return nil, fmt.Errorf("marshaling user text block: %w", err)
 		}
 		blocks = append(blocks, b)
 	}
-	blocks = append(blocks, e.userImages...)
+	blocks = append(blocks, images...)
 
 	contentJSON, err := json.Marshal(blocks)
 	if err != nil {
@@ -393,6 +393,7 @@ func toolResult(tr toolResultEntry) *ToolResult {
 		Output:     tr.output,
 		Status:     ToolStatusSuccess,
 		MatchCount: tr.matchCount,
+		Images:     tr.images,
 	}
 	if tr.isError {
 		r.Status = ToolStatusError
@@ -473,6 +474,7 @@ type toolResultEntry struct {
 	toolUseID string
 	output    string
 	isError   bool
+	images    []json.RawMessage // image blocks the tool returned
 	// Rich metadata extracted from toolUseResult (optional).
 	file       *toolResultFile // Read/Edit: file path and line count
 	matchCount int             // Grep: number of matching files
@@ -609,6 +611,7 @@ func extractUserContent(contentRaw json.RawMessage) userContent {
 				toolUseID: unquote(block["tool_use_id"]),
 				output:    unquote(block["content"]),
 				isError:   isErr,
+				images:    itemsOfType(block["content"], BlockImage),
 			})
 
 		case "image":
@@ -624,6 +627,25 @@ func extractUserContent(contentRaw json.RawMessage) userContent {
 
 	uc.text = strings.TrimSpace(uc.text)
 	return uc
+}
+
+// itemsOfType returns the items of a JSON array whose "type" is typ, verbatim
+// and in order. Anything other than an array has none.
+func itemsOfType(arrayRaw json.RawMessage, typ string) []json.RawMessage {
+	var items []json.RawMessage
+	if json.Unmarshal(arrayRaw, &items) != nil {
+		return nil
+	}
+	var matched []json.RawMessage
+	for _, itemRaw := range items {
+		var item struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(itemRaw, &item) == nil && item.Type == typ {
+			matched = append(matched, itemRaw)
+		}
+	}
+	return matched
 }
 
 // stripAssistantContent drops thinking blocks and trims tool_use blocks to
