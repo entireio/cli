@@ -27,6 +27,10 @@ export default function (pi: ExtensionAPI) {
   // the CLI side must never treat it as a skip signal — it would disable tracking
   // for everyone. See docs/architecture/agent-guide.md.
   const marker = process.env.ENTIRE_PI_NESTED;
+  // A leftover "1" counts as nested on purpose: an older extension instance in
+  // this same process may have set it, and that is indistinguishable from "1"
+  // inherited from an older parent Pi, so such a session stays untracked until
+  // Pi restarts.
   const nested = Boolean(marker) && marker !== String(process.pid);
   if (!marker) process.env.ENTIRE_PI_NESTED = String(process.pid);
 
