@@ -45,6 +45,10 @@ export default function (pi: ExtensionAPI) {
           { timeout: 10000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
           (_err, stdout) => resolve(typeof stdout === "string" ? stdout : ""),
         );
+        // A hook that exits without reading its payload (or a missing `entire`)
+        // fails this write with EPIPE, emitted asynchronously as a stream error
+        // that the try/catch cannot see. Unhandled, it would crash Pi.
+        child.stdin?.on("error", () => {});
         child.stdin?.end(JSON.stringify(data));
       } catch {
         // best effort — never block the agent on a hook failure

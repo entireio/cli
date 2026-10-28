@@ -186,3 +186,17 @@ func TestExtension_MarkerFromOlderExtensionStillNests(t *testing.T) {
 		}
 	}
 }
+
+// TestExtension_HookStdinErrorDoesNotCrash pins that a hook which exits without
+// reading its payload (EPIPE on the stdin write) cannot take the host process
+// down: hooks are best effort.
+func TestExtension_HookStdinErrorDoesNotCrash(t *testing.T) {
+	t.Parallel()
+	res := runExtension(t, driverConfig{
+		Instances: 1,
+		Fire:      []fireEvent{{Event: "before_agent_start", PromptBytes: 4 << 20}},
+	}, "#!/bin/sh\nexit 0\n")
+	if len(res.Instances) != 1 {
+		t.Fatalf("instances = %v, want 1", res.Instances)
+	}
+}
