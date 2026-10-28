@@ -26,33 +26,54 @@ const codexItemsRollout = `{"timestamp":"2030-01-01T00:00:00.000Z","type":"sessi
 {"timestamp":"2030-01-01T00:00:08.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}
 `
 
-func TestHasCodexItems(t *testing.T) {
+// CodexItemRolloutDecided decides as soon as the first turn holds a user item
+// or a second turn starts without one, and stays undecided before that. A
+// prefix's "true" holds for the whole file, and hasCodexItems is the decided
+// "true" of the whole file.
+func TestCodexItemRolloutDecided(t *testing.T) {
 	t.Parallel()
 	full, err := os.ReadFile(filepath.Join("testdata", "codex_full.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	meta := `{"timestamp":"t","type":"session_meta","payload":{"id":"s1"}}` + "\n"
 	item := `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"hi"}]}}}` + "\n"
 	agent := `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"hi"}]}}}` + "\n"
 	started := `{"timestamp":"t","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}` + "\n"
 	subagent := `{"timestamp":"t","type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","id":"call_1","kind":"started","agent_thread_id":"th2","agent_path":"/root/a"}}}` + "\n"
 	old := `{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}` + "\n"
 	cases := []struct {
-		name    string
-		content []byte
-		want    bool
+		name          string
+		content       []byte
+		item, decided bool
 	}{
-		{"current rollout", []byte(codexItemsRollout), true},
-		{"older rollout", full, false},
-		{"items without task_started", []byte(old + item), false},
-		{"first turn without items", []byte(started + old + started + item), false},
-		{"first turn with items", []byte(started + old + item + started + old), true},
-		{"first turn with only a sub-agent item", []byte(started + old + subagent + started + old + item), false},
-		{"first turn with only an agent message item", []byte(started + old + agent + started + old + item), false},
+		{"current rollout", []byte(codexItemsRollout), true, true},
+		{"older rollout", full, false, false},
+		{"items without task_started", []byte(old + item), false, false},
+		{"first turn without items", []byte(started + old + started + item), false, true},
+		{"first turn with items", []byte(started + old + item + started + old), true, true},
+		{"first turn with only a sub-agent item", []byte(started + old + subagent + started + old + item), false, true},
+		{"first turn with only an agent message item", []byte(started + old + agent + started + old + item), false, true},
+		{"only session_meta", []byte(meta), false, false},
+		{"first turn running, no user item yet", []byte(meta + started + old + agent), false, false},
+		{"first turn's user item", []byte(meta + started + item), true, true},
+		{"user item in a partial last line", []byte(meta + started + strings.TrimSuffix(item, "\n")), true, true},
 	}
 	for _, c := range cases {
-		if got := hasCodexItems(c.content); got != c.want {
-			t.Errorf("%s: hasCodexItems = %v, want %v", c.name, got, c.want)
+		gotItem, gotDecided := CodexItemRolloutDecided(c.content)
+		if gotItem != c.item || gotDecided != c.decided {
+			t.Errorf("%s: CodexItemRolloutDecided = (%v, %v), want (%v, %v)", c.name, gotItem, gotDecided, c.item, c.decided)
+		}
+		if got, want := hasCodexItems(c.content), c.item && c.decided; got != want {
+			t.Errorf("%s: hasCodexItems = %v, want %v", c.name, got, want)
+		}
+		// A "true" decided on any prefix holds for the whole content.
+		lines := strings.SplitAfter(string(c.content), "\n")
+		for i := range lines {
+			prefix := strings.Join(lines[:i], "")
+			if it, dec := CodexItemRolloutDecided([]byte(prefix)); dec && it && (!gotItem || !gotDecided) {
+				t.Errorf("%s: prefix of %d lines decided true, the whole content isn't", c.name, i)
+			}
 		}
 	}
 }
