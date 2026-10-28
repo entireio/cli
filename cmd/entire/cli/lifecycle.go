@@ -140,6 +140,12 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 			endParentTurnIfSubagentsDone(ctx, ag, event.SessionID)
 			return nil
 		}
+		if subagentTurnEndClaimed(ctx, event.SessionID) {
+			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
+				"dropping TurnEnd for a turn already ended for its subagents",
+				slog.String("session_id", event.SessionID))
+			return nil
+		}
 		return handleLifecycleTurnEnd(ctx, ag, event)
 	case agent.Compaction:
 		return handleLifecycleCompaction(ctx, ag, event)
@@ -2808,7 +2814,11 @@ func markSubagentSession(ctx context.Context, ag agent.Agent, sessionID, transcr
 	if child.IsSubagentSession() {
 		if parent, err := strategy.LoadSessionState(ctx, child.ParentSessionID); err == nil && parent != nil {
 			if rec := findTaskRecordByAgent(parent, sessionID); rec != nil {
-				touchParentInteraction(ctx, logCtx, parent)
+				// Both sides age into IsStuckActive without hooks of their own:
+				// the waiting parent fires none, and a stuck-looking child would
+				// count as done to it while still running.
+				touchInteraction(ctx, logCtx, parent)
+				touchInteraction(ctx, logCtx, child)
 				return agent.SubagentSessionLink{
 					ParentSessionID: child.ParentSessionID,
 					ToolUseID:       rec.ToolUseID,
@@ -2871,23 +2881,24 @@ func findTaskRecordByAgent(parent *strategy.SessionState, agentID string) *sessi
 }
 
 // subagentInteractionRefresh bounds how often a subagent's hooks refresh its
-// parent's LastInteractionTime.
+// own and its parent's LastInteractionTime.
 const subagentInteractionRefresh = time.Minute
 
-// touchParentInteraction keeps a parent that waits on its subagent from aging
-// into IsStuckActive: the parent fires no hooks of its own meanwhile, and a
-// stuck parent's wake-up would restart its turn.
-func touchParentInteraction(ctx, logCtx context.Context, parent *strategy.SessionState) {
-	if parent.LastInteractionTime != nil && time.Since(*parent.LastInteractionTime) < subagentInteractionRefresh {
+// touchInteraction refreshes state's LastInteractionTime, at most once per
+// subagentInteractionRefresh. It keeps a subagent and the parent waiting on it
+// from aging into IsStuckActive while the subagent works: a stuck parent's
+// wake-up would restart its turn, and a stuck subagent counts as done.
+func touchInteraction(ctx, logCtx context.Context, state *strategy.SessionState) {
+	if state.LastInteractionTime != nil && time.Since(*state.LastInteractionTime) < subagentInteractionRefresh {
 		return
 	}
 	now := time.Now()
-	if err := strategy.MutateSessionState(ctx, parent.SessionID, func(state *strategy.SessionState) error {
-		state.LastInteractionTime = &now
+	if err := strategy.MutateSessionState(ctx, state.SessionID, func(s *strategy.SessionState) error {
+		s.LastInteractionTime = &now
 		return nil
 	}); err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
-		logging.Warn(logCtx, "failed to refresh parent interaction time",
-			slog.String("parent_session_id", parent.SessionID), slog.String("error", err.Error()))
+		logging.Warn(logCtx, "failed to refresh session interaction time",
+			slog.String("session_id", state.SessionID), slog.String("error", err.Error()))
 	}
 }
 
@@ -2987,6 +2998,20 @@ func claimSubagentTurnEnd(ctx context.Context, sessionID string) bool {
 		return nil
 	})
 	return err == nil && claimed
+}
+
+// subagentTurnEndClaimed reports whether the session's current turn was
+// claimed to be ended for its subagents. A Stop the agent reports afterwards
+// belongs to that same turn, whichever phase it finds: ACTIVE means the claimed
+// turn end is still running, IDLE that it finished and saved the turn. Either
+// way a second turn end would save the turn's step and tokens again. A failed
+// claimed end releases the claim, and the next TurnStart clears it.
+func subagentTurnEndClaimed(ctx context.Context, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	return err == nil && state != nil && state.SubagentTurnEndClaimed
 }
 
 // resetSubagentPause clears the pause and the claim at a new turn.

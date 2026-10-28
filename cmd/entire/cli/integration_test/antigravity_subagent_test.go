@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -325,4 +326,48 @@ func TestAntigravity_SubagentMarkedAtAShellCommand(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, child)
 	require.Equal(t, s.parentID, child.ParentSessionID)
+}
+
+// A Stop that arrives after the parent's turn was already ended for it (agy
+// can still report fullyIdle=true later) ends nothing more: the turn's step and
+// tokens were saved once, by that turn end.
+func TestAntigravity_LateStopAfterSubagentTurnEndCountsNothing(t *testing.T) {
+	t.Parallel()
+	s := newAgyParentChild(t)
+	s.start()
+	s.childReplies()
+	s.parentReadsReply()
+	s.env.WriteFile("parent.txt", "from the parent\n")
+	s.hook(s.parentID, "pre-tool-use", map[string]any{"toolCall": map[string]any{"name": "write_to_file", "args": map[string]any{"TargetFile": "parent.txt"}}})
+	s.stop(s.parentID, false)
+	s.stop(s.childID, true)
+	s.requireParentEnded()
+	before, err := s.env.GetSessionState(s.parentID)
+	require.NoError(t, err)
+	require.Positive(t, before.StepCount, "the turn changed a file, so its end saved a step")
+
+	s.stop(s.parentID, true)
+
+	after, err := s.env.GetSessionState(s.parentID)
+	require.NoError(t, err)
+	require.Equal(t, before.TokenUsage, after.TokenUsage, "the late Stop adds no tokens")
+	require.Equal(t, before.StepCount, after.StepCount, "the late Stop saves no step")
+}
+
+// A subagent busy for over an hour is still running: its own hooks keep it
+// from aging into a stuck session that its waiting parent would count done.
+func TestAntigravity_LongRunningSubagentKeepsItsParentWaiting(t *testing.T) {
+	t.Parallel()
+	s := newAgyParentChild(t)
+	s.start()
+	child, err := s.env.GetSessionState(s.childID)
+	require.NoError(t, err)
+	require.Equal(t, s.parentID, child.ParentSessionID)
+	longAgo := time.Now().Add(-2 * time.Hour)
+	child.LastInteractionTime = &longAgo
+	require.NoError(t, s.env.WriteSessionState(s.childID, child))
+
+	s.hook(s.childID, "pre-tool-use", map[string]any{"toolCall": map[string]any{"name": "view_file", "args": map[string]any{"AbsolutePath": "notes2.txt"}}})
+	s.stop(s.parentID, false)
+	s.requireParentActive("the subagent's tool call shows it is still running")
 }

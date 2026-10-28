@@ -2308,7 +2308,10 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		logging.Info(logCtx, "subagent session: handing its pending work to its parent",
 			slog.String("session_id", sessionID),
 			slog.String("parent_session_id", state.ParentSessionID))
-		return releaseSubagentSessionWork(ctx, sessionID)
+		if err := releaseSubagentSessionWork(ctx, sessionID); err != nil {
+			return err
+		}
+		return idleStuckSubagentSession(ctx, sessionID)
 	}
 
 	// Records of worktrees removed since the session's last turn end are
@@ -2608,6 +2611,28 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	if mutErr != nil {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
+	}
+	return nil
+}
+
+// idleStuckSubagentSession retires a subagent session that doctor condensed
+// while ACTIVE (its agent stopped reporting), as condensing a top-level session
+// by ID does; otherwise doctor would offer it again on every run. Other phases
+// are left alone: the sweeper also condenses ENDED sessions by ID, and those
+// must stay ENDED.
+//
+// This does not wake a parent that waits on the subagent: its turn still ends
+// only from its own hooks, a sibling subagent's, or doctor on the parent.
+func idleStuckSubagentSession(ctx context.Context, sessionID string) error {
+	err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if state.Phase != session.PhaseActive {
+			return ErrMutationSkip
+		}
+		state.Phase = session.PhaseIdle
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrStateNotFound) {
+		return fmt.Errorf("idle subagent session %s: %w", sessionID, err)
 	}
 	return nil
 }
