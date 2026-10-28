@@ -68,9 +68,10 @@ type driverResult struct {
 	HookLog   string     `json:"-"`
 }
 
-// runExtension renders the extension, puts entireScript on PATH as `entire`,
-// and runs the driver with env appended to the test's environment (minus any
-// inherited ENTIRE_PI_NESTED). It fails the test if Node exits non-zero.
+// runExtension renders the extension, puts entireScript on PATH as `entire`
+// (with ENTIRE_TEST_HOOK_LOG naming a log file it may append to), and runs the
+// driver with env appended to the test's environment (minus any inherited
+// ENTIRE_PI_NESTED). It fails the test if Node exits non-zero.
 func runExtension(t *testing.T, cfg driverConfig, entireScript string, env ...string) driverResult {
 	t.Helper()
 	if _, err := exec.LookPath("node"); err != nil {
@@ -86,7 +87,6 @@ func runExtension(t *testing.T, cfg driverConfig, entireScript string, env ...st
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(dir, "hooks.log")
-	entireScript = strings.ReplaceAll(entireScript, "$LOG", logPath)
 	for path, content := range map[string]string{
 		filepath.Join(dir, "index.ts"):   renderExtension(),
 		filepath.Join(dir, "driver.mjs"): extensionDriver,
@@ -107,7 +107,9 @@ func runExtension(t *testing.T, cfg driverConfig, entireScript string, env ...st
 			cmd.Env = append(cmd.Env, kv)
 		}
 	}
-	cmd.Env = append(cmd.Env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(cmd.Env,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"ENTIRE_TEST_HOOK_LOG="+logPath)
 	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.Output()
 	if err != nil {
@@ -129,7 +131,7 @@ func runExtension(t *testing.T, cfg driverConfig, entireScript string, env ...st
 }
 
 // recordingEntire logs each hook name with the ENTIRE_PI_NESTED value it saw.
-const recordingEntire = "#!/bin/sh\ncat >/dev/null\nprintf '%s nested=%s\\n' \"$3\" \"$ENTIRE_PI_NESTED\" >> $LOG\n"
+const recordingEntire = "#!/bin/sh\ncat >/dev/null\nprintf '%s nested=%s\\n' \"$3\" \"$ENTIRE_PI_NESTED\" >> \"$ENTIRE_TEST_HOOK_LOG\"\n"
 
 // TestExtension_ReplacementInstanceKeepsForwarding pins that a top-level Pi
 // keeps forwarding lifecycle after /reload, /new or /resume, which build a new
