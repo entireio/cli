@@ -79,6 +79,10 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if ps.pushDisabled {
 		return nil
 	}
+	if ps.withheld != nil {
+		warnWithheldCheckpointRemote(ps)
+		return nil
+	}
 
 	// Single-remote gate (ENT-1451): checkpoint data syncs only to the
 	// elected checkpoint sync remote. A dedicated checkpoint_remote URL is
@@ -462,6 +466,9 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	ps := resolvePushSettings(ctx, remote)
 	if ps.pushDisabled {
 		return 0, true, nil
+	}
+	if ps.withheld != nil {
+		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", ps.withheld)
 	}
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		// Names no cause, matching flushCheckpointRefsQueue's retry message

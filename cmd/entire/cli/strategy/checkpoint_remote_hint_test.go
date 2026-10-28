@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -229,4 +231,39 @@ func TestPrePushSaysNothingWhenThePushCarriesNoCheckpoints(t *testing.T) {
 
 	assert.NotContains(t, out.String(), "checkpoint_remote",
 		"nothing was pushed, so nothing was misdirected")
+}
+
+// TestPrePushWithholdsCheckpointsWhenTheCheckpointRemoteHasNoURL: a
+// checkpoint_remote the developer declared locally, for a provider no URL can
+// be built for, must keep checkpoints local and say so — not deliver them to
+// the code repository's push remote.
+//
+// Not parallel: t.Chdir, t.Setenv.
+func TestPrePushWithholdsCheckpointsWhenTheCheckpointRemoteHasNoURL(t *testing.T) {
+	dir := hintRepo(t, ownedOrigin)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.local.json"),
+		[]byte(`{"strategy_options": {"checkpoint_remote": {"provider": "entire", "repo": "acme/checkpoints"}}}`),
+		0o644,
+	))
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	// Should the withhold regress, the push would dial github.com; refuse every
+	// transport but file so the failure stays local.
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	out := captureHintStderr(t)
+
+	ctx := context.Background()
+	ps := resolvePushSettings(ctx, "origin")
+	require.ErrorIs(t, ps.withheld, remote.ErrCheckpointRemoteUnroutable)
+	require.False(t, ps.hasCheckpointURL())
+
+	require.NoError(t, NewManualCommitStrategy().PrePush(ctx, "origin"))
+	assert.Contains(t, out.String(), "Checkpoints were not pushed and stay local")
+	assert.Contains(t, out.String(), `provider "entire"`)
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	_, _, err = PushQueuedCheckpointRefs(ctx, repo, "origin")
+	require.ErrorIs(t, err, remote.ErrCheckpointRemoteUnroutable)
 }
