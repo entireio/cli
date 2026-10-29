@@ -299,3 +299,20 @@ func TestAuthServiceAccountCancelRaceAndEnrollingGuards(t *testing.T) {
 	require.Contains(t, errOut, "approved before it could be cancelled")
 	require.Equal(t, map[string]auth.ServiceAccountKeyStatus{keyID: auth.KeyActive}, listKeys(t), "an approved key must be kept and bound")
 }
+
+// With several inactive keys, `key activate` without --key-id must ask which
+// one, not fall back to finishing retirements.
+//
+// Not parallel: it sets ENTIRE_CONFIG_DIR and XDG_CACHE_HOME.
+func TestAuthServiceAccountActivateAmbiguousKeyNeedsKeyID(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	srv := newFakeServiceAccountServer(t)
+	for range 3 {
+		_, _, err := runServiceAccountCmd(t.Context(), "key", "create", "--service-account", testCmdServiceAccount, "--server", srv.srv.URL)
+		require.NoError(t, err)
+	}
+	_, _, err := runServiceAccountCmd(t.Context(), "key", "activate", "--service-account", testCmdServiceAccount)
+	require.ErrorContains(t, err, "pick one with --key-id")
+	require.Empty(t, srv.revoked)
+}

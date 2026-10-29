@@ -149,7 +149,7 @@ func newAuthServiceAccountKeyActivateCmd() *cobra.Command {
 			applyInsecureHTTPAuth(insecure)
 			ctx := cmd.Context()
 			key, err := selectServiceAccountKey(serviceAccount, keyID, auth.KeyInactive)
-			if err != nil && keyID == "" {
+			if errors.Is(err, errNoKeyWithStatus) && keyID == "" {
 				// Nothing to switch to: finish the revokes an earlier
 				// activation left behind, if any.
 				active, aerr := auth.LoadActiveServiceAccountKey(serviceAccount)
@@ -530,6 +530,10 @@ func revokeAndDelete(ctx context.Context, errW, w io.Writer, key *auth.ServiceAc
 	return nil
 }
 
+// errNoKeyWithStatus: the account has no key in the wanted status (as opposed
+// to several, which needs --key-id).
+var errNoKeyWithStatus = errors.New("no key in that status")
+
 // selectServiceAccountKey resolves --key-id, or the account's default key:
 // the active one for want=KeyActive, the only inactive one for KeyInactive.
 func selectServiceAccountKey(serviceAccount, keyID string, want auth.ServiceAccountKeyStatus) (*auth.ServiceAccountKey, error) {
@@ -564,7 +568,7 @@ func selectServiceAccountKey(serviceAccount, keyID string, want auth.ServiceAcco
 	}
 	switch len(ids) {
 	case 0:
-		return nil, fmt.Errorf("%s has no %s key on this machine", id, want)
+		return nil, fmt.Errorf("%s has no %s key on this machine: %w", id, want, errNoKeyWithStatus)
 	case 1:
 		return match, nil
 	default:
