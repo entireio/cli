@@ -33,6 +33,10 @@ func initHooksTestRepo(t *testing.T) (string, string) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	// Shared roots keep the hooks directory open for the process. On Windows
+	// that handle makes TempDir's RemoveAll fail. Close them before the
+	// directory is deleted. Registered after Chdir so this runs first.
+	t.Cleanup(osroot.ResetShared)
 
 	testutil.RunGit(t, tmpDir, "init")
 	clearGlobalHooksPath(t, tmpDir)
@@ -314,6 +318,7 @@ func TestInstallGitHook_HooksPathNonexistentIsCreated(t *testing.T) {
 	t.Chdir(tmpDir)
 	ClearHooksDirCache()
 	paths.ClearWorktreeRootCache()
+	t.Cleanup(osroot.ResetShared)
 
 	count, err := InstallGitHook(ctx, true, false)
 	if err != nil {
@@ -337,6 +342,7 @@ func TestInstallGitHook_WorktreeInstallsInCommonHooks(t *testing.T) {
 	mainRepo, worktreeDir := initHooksWorktreeRepo(t)
 	t.Chdir(worktreeDir)
 	paths.ClearWorktreeRootCache()
+	t.Cleanup(osroot.ResetShared)
 
 	count, err := InstallGitHook(context.Background(), true, false)
 	if err != nil {
@@ -2136,8 +2142,8 @@ func TestRemoveGitHook_DoesNotOverwriteReplacedHook(t *testing.T) {
 }
 
 func TestRemoveGitHook_PermissionDenied(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("Test cannot run as root (permission checks are bypassed)")
+	if runtime.GOOS == goosWindows || os.Getuid() == 0 {
+		t.Skip("directory mode bits do not deny write to the owner")
 	}
 
 	tmpDir, _ := initHooksTestRepo(t)
