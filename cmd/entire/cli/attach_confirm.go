@@ -156,13 +156,41 @@ func rewriteWarning(ctx context.Context, chain []*object.Commit, checkedRemotes 
 	if others := otherRefsContaining(ctx, target); len(others) > 0 {
 		lines = append(lines, "These keep the old commits: "+strings.Join(others, ", "))
 	}
+	yourEmail := yourGitEmail(ctx)
+	yoursSigned := false
+	var theirsSigned []string
 	for _, c := range chain {
-		if c.Signature != "" {
-			lines = append(lines, "Signed commits lose their signatures.")
-			break
+		switch {
+		case c.Signature == "":
+		case committedBy(c, yourEmail):
+			yoursSigned = true
+		default:
+			theirsSigned = append(theirsSigned, "  "+describeCommit(c))
 		}
 	}
+	if yoursSigned {
+		lines = append(lines, "Commits you signed are signed again with your signing key; one signed with another key loses its signature.")
+	}
+	if len(theirsSigned) > 0 {
+		lines = append(lines, "These signed commits were committed by someone else and lose their signatures:")
+		lines = append(lines, theirsSigned...)
+	}
 	return lines
+}
+
+// yourGitEmail is the user's git email, or "" when it can't be read.
+func yourGitEmail(ctx context.Context) string {
+	author, err := GetGitAuthor(ctx)
+	if err != nil {
+		return ""
+	}
+	return author.Email
+}
+
+// committedBy reports whether email, the user's, is c's committer. Empty never
+// matches.
+func committedBy(c *object.Commit, email string) bool {
+	return email != "" && strings.EqualFold(c.Committer.Email, email)
 }
 
 // otherRefsContaining lists the branches and tags, other than the checked-out
@@ -192,10 +220,7 @@ func otherRefsContaining(ctx context.Context, target *object.Commit) []string {
 // remapped as git's post-rewrite hook would.
 func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit, checkpointID id.CheckpointID) error {
 	oldHead := chain[len(chain)-1].Hash.String()
-	yourEmail := ""
-	if author, err := GetGitAuthor(ctx); err == nil {
-		yourEmail = author.Email
-	}
+	yourEmail := yourGitEmail(ctx)
 	var pairs strings.Builder
 	var unsigned []string
 	newSHA, targetSHA := "", ""
@@ -262,7 +287,7 @@ func replayCommit(ctx context.Context, c *object.Commit, message string, parents
 		sha, err = commitTree(ctx, c, message, parents, false)
 		return sha, "", err
 	}
-	if yourEmail == "" || !strings.EqualFold(c.Committer.Email, yourEmail) {
+	if !committedBy(c, yourEmail) {
 		lost = "it was committed by " + c.Committer.Email + ", not you"
 	} else if signed, err := commitTree(ctx, c, message, parents, true); err != nil {
 		lost = "signing failed: " + strings.Join(strings.Fields(err.Error()), " ")

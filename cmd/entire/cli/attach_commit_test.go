@@ -633,6 +633,28 @@ func TestAttachCommit_RewriteFallsBackWhenSigningFails(t *testing.T) {
 	}
 }
 
+// The confirmation says up front which signed commits keep a signature: the
+// user's own are signed again, someone else's are named as losing theirs.
+func TestRewriteWarning_SaysWhichSignedCommitsKeepTheirSignature(t *testing.T) {
+	setupAttachTestRepo(t)
+	yours, other := useSSHSigning(t)
+	mine := signedCommitAt(t, "work.txt", yours)
+	theirs := signedCommitAt(t, "theirs.txt", other, "-c", "user.name=Someone Else", "-c", "user.email=someone@example.com")
+
+	got := strings.Join(rewriteWarning(context.Background(), []*object.Commit{mine, theirs}, nil), "\n")
+	if !strings.Contains(got, "Commits you signed are signed again with your signing key") {
+		t.Errorf("expected the user's signed commits to be re-signed, got:\n%s", got)
+	}
+	want := "committed by someone else and lose their signatures:\n  " + describeCommit(theirs)
+	if !strings.Contains(got, want) || strings.Count(got, describeCommit(mine)) != 1 {
+		t.Errorf("expected only %s listed as losing its signature, got:\n%s", theirs.Hash.String()[:12], got)
+	}
+
+	if got := rewriteWarning(context.Background(), []*object.Commit{commitAt(t, "plain.txt")}, nil); strings.Contains(strings.Join(got, "\n"), "sign") {
+		t.Errorf("an unsigned commit needs no signature line, got:\n%s", strings.Join(got, "\n"))
+	}
+}
+
 // A merge after the target can't be replayed by a message-only rewrite, so it
 // is refused before anything is written.
 func TestAttachCommit_RefusesToRewriteAcrossAMerge(t *testing.T) {
