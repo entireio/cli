@@ -97,7 +97,24 @@ func runPromptForm(cmd *cobra.Command, form *huh.Form) (render io.Writer, err er
 // set, on the writer the form renders on: what the question asks about follows
 // the prompt rather than the command's output.
 func runPromptFormWithPreamble(cmd *cobra.Command, form *huh.Form, preamble func(io.Writer) error) (render io.Writer, err error) {
-	render = cmd.ErrOrStderr()
+	return runPromptFormOn(cmd.Context(), cmd.ErrOrStderr(), form, preamble)
+}
+
+// runPromptFormOn is runPromptFormWithPreamble for callers that hold the
+// command's context and error stream rather than the command itself.
+func runPromptFormOn(ctx context.Context, errOut io.Writer, form *huh.Form, preamble func(io.Writer) error) (render io.Writer, err error) {
+	return runPromptFormThen(ctx, errOut, form, preamble, nil)
+}
+
+// runPromptFormThen is runPromptFormOn that, once the form has run, hands its
+// error (nil when answered) to then on the render writer before releasing the
+// terminal. The writer returned by the others may be a fallback terminal that
+// is already closed, so whatever follows the form — an abort's "cancelled"
+// line, the action an answer sets off, the report of how it went — belongs in
+// then, or it is written to nothing. then's error is returned as is; then is
+// not called when the terminal cannot be opened, since no form ran.
+func runPromptFormThen(ctx context.Context, errOut io.Writer, form *huh.Form, preamble func(io.Writer) error, then func(io.Writer, error) error) (render io.Writer, err error) {
+	render = errOut
 	if !interactive.IsTerminalWriter(render) {
 		term, terr := openPromptTerminal()
 		if terr != nil {
@@ -123,7 +140,11 @@ func runPromptFormWithPreamble(cmd *cobra.Command, form *huh.Form, preamble func
 	// Returned unwrapped: every caller classifies it, matching huh's own
 	// sentinels through handleFormCancellation, and wraps whatever survives
 	// with the name of the thing being prompted for.
-	return render, form.WithOutput(render).RunWithContext(cmd.Context()) //nolint:wrapcheck // classified and wrapped by the caller
+	formErr := form.WithOutput(render).RunWithContext(ctx)
+	if then != nil {
+		return render, then(render, formErr)
+	}
+	return render, formErr //nolint:wrapcheck // classified and wrapped by the caller
 }
 
 // printSessionCommand writes a single session resume command line to w.

@@ -212,7 +212,7 @@ var vouchableDirs = []string{
 	".github",
 	".github/hooks",
 	".opencode",
-	".opencode/plugins",
+	".opencode/plugin",
 	".pi",
 	".pi/extensions",
 	// .pi/extensions/entire is deliberately absent, and neverVouchable refuses

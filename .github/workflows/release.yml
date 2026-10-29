@@ -14,12 +14,27 @@ on:
 permissions:
   contents: write
 
+# Deliberately NOT serialized with a concurrency group. GitHub keeps at most one
+# pending run per group and cancels the previously pending one, which
+# cancel-in-progress: false does not prevent — it only protects the run already
+# in progress. mirror-nightly pushes a nightly tag, so a single stable release
+# can enqueue a second run and cancel a queued hotfix by itself. Dropping a
+# release is worse than the race a group would close, and the pointer's
+# conditional write (--if-match in publish-channel-manifest.sh) already closes
+# that race, including for runs started by hand.
+
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Mint the OIDC token that configure-aws-credentials exchanges for
+      # short-lived credentials to the release-mirror bucket. Scoped to this
+      # job so the other jobs keep the workflow-level permissions.
+      id-token: write
     outputs:
       prerelease: ${{ steps.release-type.outputs.prerelease }}
     steps:
@@ -95,6 +110,17 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The release mirror is opt-in: with ENTIRE_RELEASE_BUCKET unset, this and
+      # the two steps below are skipped and the release publishes exactly as it
+      # did before. Setting the repository variables turns the mirror on with no
+      # code change. See docs/architecture/release-origins.md.
+      - name: Configure AWS credentials for the release mirror
+        if: vars.ENTIRE_RELEASE_BUCKET != ''
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.ENTIRE_RELEASE_UPLOAD_ROLE }}
+          aws-region: ${{ vars.ENTIRE_RELEASE_REGION || 'us-east-2' }}
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
         with:
@@ -113,6 +139,8 @@ jobs:
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           POSTHOG_ENDPOINT: ${{ vars.POSTHOG_ENDPOINT }}
+          ENTIRE_RELEASE_BUCKET: ${{ vars.ENTIRE_RELEASE_BUCKET }}
+          ENTIRE_RELEASE_REGION: ${{ vars.ENTIRE_RELEASE_REGION }}
           DISCORD_WEBHOOK_ID: ${{ secrets.DISCORD_WEBHOOK_ID }}
           DISCORD_WEBHOOK_TOKEN: ${{ secrets.DISCORD_WEBHOOK_TOKEN }}
 
@@ -143,6 +171,37 @@ jobs:
             fi
           done
           exit $fail
+
+      # Last, and deliberately so. The pointer is what makes a version visible
+      # to install.sh and to the CLI's update check, so it must not move until
+      # the artifacts are uploaded AND the macOS signing check above has passed.
+      # Advertising a release whose binaries Gatekeeper kills would be worse
+      # than not advertising it at all.
+      - name: Publish channel pointer
+        if: vars.ENTIRE_RELEASE_BUCKET != ''
+        run: |
+          scripts/publish-channel-manifest.sh \
+            --tag "$RELEASE_TAG" \
+            --bucket "${{ vars.ENTIRE_RELEASE_BUCKET }}" \
+            --region "${{ vars.ENTIRE_RELEASE_REGION || 'us-east-2' }}"
+
+      # After the pointer, and stable-only. These keys (the two installers and
+      # the Scoop manifest) are overwritten on every release rather than
+      # versioned, so a nightly publishing here would replace the installer
+      # stable users fetch; nightly users are served by the same stable
+      # installer, which takes --channel nightly.
+      #
+      # After the pointer rather than before it: these keys are shared across
+      # versions, so uploading first means a release the pointer then refuses
+      # (an older tag re-dispatched) leaves the installers rolled back with
+      # nothing advanced. The installer is version-independent, so a pointer
+      # that moved before it is harmless.
+      - name: Publish install scripts and Scoop manifest
+        if: vars.ENTIRE_RELEASE_BUCKET != '' && steps.release-type.outputs.prerelease == 'false'
+        run: |
+          scripts/publish-installers.sh \
+            --bucket "${{ vars.ENTIRE_RELEASE_BUCKET }}" \
+            --region "${{ vars.ENTIRE_RELEASE_REGION || 'us-east-2' }}"
 
   # A stable tag only refreshes the stable cask; the nightly channel would
   # otherwise not catch up until the next scheduled nightly run cuts a tag from

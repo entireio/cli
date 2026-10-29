@@ -195,6 +195,21 @@ func TestIsManagedHookCommand_WrappedPrefix(t *testing.T) {
 	}
 }
 
+// Warning wrappers written before the `entire --version` probe must still read
+// as Entire's, and differ from the current form, so an install replaces them.
+func TestIsManagedHookCommand_UnprobedWarningWrapper(t *testing.T) {
+	t.Parallel()
+
+	unprobed := `sh -c 'if ! command -v entire >/dev/null 2>&1; then printf "%s\n" "{\"systemMessage\":\"\\n\\nEntire CLI is enabled but not installed or not on PATH.\\nInstallation guide: https://docs.entire.io/cli/installation#installation-methods\"}"; exit 0; fi; exec entire hooks claude-code session-start'`
+	if !IsManagedHookCommand(unprobed) {
+		t.Fatal("expected unprobed warning wrapper to remain managed")
+	}
+	current := WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", WarningFormatMultiLine)
+	if current == unprobed {
+		t.Fatal("current wrapper should differ from the unprobed form so installs replace it")
+	}
+}
+
 func TestIsManagedHookCommand_DoesNotMatchSubstring(t *testing.T) {
 	t.Parallel()
 

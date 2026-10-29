@@ -527,17 +527,7 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 
 		// PII detection (opt-in).
 		if s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled {
-			pii := s.Redaction.PII
-			cfg := redact.PIIConfig{
-				Enabled:        true,
-				Categories:     make(map[redact.PIICategory]bool),
-				CustomPatterns: pii.CustomPatterns,
-				Logger:         logger,
-			}
-			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
-			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
-			cfg.Categories[redact.PIIAddress] = pii.Address != nil && *pii.Address
-			redact.ConfigurePII(cfg)
+			redact.ConfigurePII(piiConfigFromSettings(s.Redaction.PII, logger))
 		}
 
 		// Custom rules: inline + packs.
@@ -992,7 +982,12 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 	// resolves the recovery tier never fires again, so a blob-filtered bootstrap
 	// would leave `checkpoint list` permanently showing bare IDs with no prompt,
 	// date, or counts.
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, checkpointRemoteForegroundFetchTimeout); err != nil {
+	fetchCtx, release, err := startForegroundFetch(ctx, worktreeRoot)
+	if err == nil {
+		defer release()
+		err = fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch)
+	}
+	if err != nil {
 		// Warn, not Debug: `entire enable` is an explicit user action, and this
 		// failure means existing checkpoints stay unreachable until a read
 		// re-fetches them. At Debug the command looked like it had simply
@@ -1095,12 +1090,31 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 	}
 
 	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + primary.Short())
+	// Taken before the cleanup defer so the lock outlives the tmp ref.
+	fetchCtx, release, err := startForegroundFetch(ctx, worktreeRoot)
+	if err != nil {
+		logging.Warn(ctx, "checkpoint-remote: empty-orphan heal could not start its fetch; keeping local orphan",
+			slog.String("error", err.Error()),
+		)
+		return false, nil
+	}
+	defer release()
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
+
+	// The ref is force-set below, and the lock wait can be long enough for a
+	// checkpoint to land on the orphan meanwhile, so check for data again.
+	current, err := repo.Reference(primary, true)
+	if err != nil {
+		return false, nil
+	}
+	if hasData, err := metadataBranchHasData(repo, current); err != nil || hasData {
+		return false, nil
+	}
 
 	// Unfiltered, for the same reason as the bootstrap fetch above: this heal
 	// replaces a data-free orphan with the real branch, which readers then treat
 	// as the checkpoint store.
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, checkpointRemoteForegroundFetchTimeout); err != nil {
+	if err := fetchURLIntoTmpRef(fetchCtx, worktreeRoot, url, primary.String(), tmpRefName.String(), "metadata branch", true, foregroundFetch); err != nil {
 		// Warn for the same reason as the bootstrap fetch: this only runs from an
 		// explicit setup flow, and failing leaves the repo on a data-free orphan.
 		logging.Warn(ctx, "checkpoint-remote: empty-orphan heal fetch failed; keeping local orphan",
@@ -1728,5 +1742,21 @@ func prepareTranscriptIfNeeded(ctx context.Context, ag agent.Agent, transcriptPa
 		// Best-effort: callers handle missing files gracefully.
 		// Transcript may not be available yet (e.g., agent not installed).
 		_ = preparer.PrepareTranscript(ctx, transcriptPath) //nolint:errcheck // Best-effort in hook path
+	}
+}
+
+// piiConfigFromSettings maps enabled PII settings to the redaction config.
+// Email, phone and ip default on when unset; address defaults off.
+func piiConfigFromSettings(pii *settings.PIISettings, logger *slog.Logger) redact.PIIConfig {
+	return redact.PIIConfig{
+		Enabled: true,
+		Categories: map[redact.PIICategory]bool{
+			redact.PIIEmail:   pii.Email == nil || *pii.Email,
+			redact.PIIPhone:   pii.Phone == nil || *pii.Phone,
+			redact.PIIAddress: pii.Address != nil && *pii.Address,
+			redact.PIIIP:      pii.IP == nil || *pii.IP,
+		},
+		CustomPatterns: pii.CustomPatterns,
+		Logger:         logger,
 	}
 }

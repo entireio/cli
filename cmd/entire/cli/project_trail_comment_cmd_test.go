@@ -13,6 +13,7 @@ import (
 
 // Not parallel: these command tests replace the project routing constructors.
 func TestProjectTrailDiscussionsUseProjectRoutes(t *testing.T) {
+	clearAgentCallerEnv(t)
 	for _, tt := range []struct {
 		args           []string
 		method, suffix string
@@ -48,6 +49,7 @@ func TestProjectTrailDiscussionsUseProjectRoutes(t *testing.T) {
 }
 
 func TestProjectTrailDiscussionWritesUseResourceETags(t *testing.T) {
+	clearAgentCallerEnv(t)
 	for _, tt := range []struct {
 		args                 []string
 		method, suffix, etag string
@@ -86,6 +88,7 @@ func TestProjectTrailDiscussionWritesUseResourceETags(t *testing.T) {
 }
 
 func TestProjectTrailDiscussionMissingETagRefusesWrite(t *testing.T) {
+	clearAgentCallerEnv(t)
 	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
 		assert.NoError(t, json.NewEncoder(w).Encode(projectDiscussionResponse{Discussion: api.TrailDiscussionSummary{ID: "discussion-one"}}))

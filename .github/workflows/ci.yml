@@ -25,6 +25,19 @@ jobs:
           GO_TEST_PARALLEL: "16"
         run: mise run test:ci:core
 
+  # The installer reads our own release origin first and falls back to GitHub.
+  # A fallback that only runs during an incident is a fallback nobody knows
+  # works, so both tiers are exercised here against local fake origins.
+  test-release-origins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - name: Release origin tests
+        run: mise run test:release-origins
+
   test-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -85,17 +98,45 @@ jobs:
   # commits from a console with no window, as desktop agents do, which is the
   # case a Windows-only prompt regression hangs on (#2725). The roger-roger
   # lane stays on Linux; the canary script skips it here.
+  #
+  # Sharded; per-test overhead is ~10s here.
   test-canary-windows:
     runs-on: windows-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
+      - name: Pin Go cache paths
+        shell: pwsh
+        run: |
+          "GOCACHE=$env:LOCALAPPDATA\go-build" >> $env:GITHUB_ENV
+          "GOMODCACHE=$env:USERPROFILE\go\pkg\mod" >> $env:GITHUB_ENV
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore Go cache
+        id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}
+          key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum') }}
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
       - name: E2E Canary (Vogon)
         shell: bash
-        run: mise run test:e2e:canary
+        run: mise run test:ci:canary:shard -- ${{ matrix.shard }} 3
+      # PRs restore main's cache, never save.
+      - name: Save Go cache
+        if: github.event_name != 'pull_request' && matrix.shard == 1 && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
   test-windows:
     runs-on: windows-latest
@@ -117,6 +158,7 @@ jobs:
     permissions: {}
     needs:
       - test-core
+      - test-release-origins
       - test-integration
       - test-codex-hooks
       - test-canary
@@ -127,6 +169,7 @@ jobs:
       - name: Check dependencies
         run: |
           [ "${{ needs.test-core.result }}" = "success" ]
+          [ "${{ needs.test-release-origins.result }}" = "success" ]
           [ "${{ needs.test-integration.result }}" = "success" ]
           [ "${{ needs.test-codex-hooks.result }}" = "success" ]
           [ "${{ needs.test-canary.result }}" = "success" ]

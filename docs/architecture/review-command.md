@@ -23,7 +23,7 @@ entire review --timeout 15m
 entire review --agent claude-code --model opus
 entire review general --target feature/my-change
 entire review general --target feature/my-change --cleanup-worktree
-entire review general --target https://entire.io/gh/acme/app/trails/42/my-change
+entire review general --target https://entire.com/gh/acme/app/trails/42/my-change
 ```
 
 `--target` accepts a branch name, trail ID/number, or Entire trail URL. It
@@ -89,6 +89,9 @@ The profile-level `task` is the shared work item. Each `agents` map entry is a w
   - Comments post as native findings with their severity and location; entries without a body are dropped. When the prose has more severity-marked findings than the line has comments, the line is incomplete and the prose is posted instead, since it normally repeats every comment. When a judge runs, its line alone decides what is posted. Without a judge, each reviewer's report (the last text between tool calls that ends with a valid line) is read separately and the comments are merged; earlier narration cannot contradict it. A reviewer whose report contradicts its line posts that report; one without a valid line posts its whole narrative. Either is posted alongside the other reviewers' structured comments.
   - A missing or malformed line (no `comments` array) posts the prose, with a trailing `summary`/`comments` object removed, split into findings by top-level bullet. Other trailing JSON, such as a quoted config snippet, stays. A JSON-only reply posts its `summary`, or the reviewers' narratives when it has none; when neither has text, nothing is posted and the run says so.
   - The line is kept in the saved manifest and hidden when results are displayed.
+  - Posting keeps at most `maxPostedReviewFindings` findings, most severe first (high, medium, low, then unrated) and in their original order, and cuts a body over `maxPostedReviewFindingRunes` characters on a character boundary with a note, closing any code fence the cut leaves open (`review_bridge.go`). Both stay under the server's per-batch and per-body limits, so a capped review posts in one request and one long finding cannot fail the batch. The command says how many findings it left out or shortened. A line or range finding's `selected_text` is capped at the same length in `prepareTrailReviewLocationForCreate`, which `entire trail finding add` also goes through: a worktree span over the cap posts at file granularity. `entire trail finding add` does not cap the body.
+  - A line or range location, from a comment or inferred from prose such as `path/file.go:12`, keeps its lines only when the scope lets its file be quoted and the span is at most `maxReviewTrailAnchorLines` (`review_bridge.go`). Otherwise a file the scope covers is posted against that file, and any other file against the whole change. Posted paths are cleaned. The quoted snippet is always read from the worktree at those lines; a model-supplied `selected_text` is ignored.
+  - The scope (`TrailScope`, `review/scope.go`) is computed before any reviewer runs. Quotable files are those the branch adds or modifies since the scope base, plus staged, unstaged, and untracked files that are not ignored. Paths the uncommitted changes delete or rename away are left out, since an ignored local file can sit at one, and so are skip-worktree and assume-unchanged files, whose local text git hides. Each quotable file is hashed then; a file whose contents changed by posting time, such as one a reviewer rewrote, is posted against that file without a quote. Every tracked file is covered at file level. An untracked file that is not ignored, such as a new `.env`, is quotable. Without a scope base only uncommitted files are quotable, and the run says so; if git fails the scope is empty, the run says so, and every line location is posted against the whole change.
 - A bare non-interactive `entire review` does not auto-run a profile. Automation should pass a profile name.
 - Profile selection is positional/`--profile` → `review_default_profile` → `general` → the only configured profile.
 
@@ -152,6 +155,67 @@ approval first.
   prompt for agents without a runner). The judge runs from a temp directory
   and does not load the checkout's configuration.
 
+## Reviewer agent config in profiles
+
+A review profile can give each reviewer its own agent config, which replaces
+the reviewed checkout's hooks, MCP servers and extensions for that reviewer.
+Set it with `entire review --edit` (per reviewer: keep, use the checkout's,
+own config with nothing extra, or load a JSON file) or
+`entire review --configure <profile> --set-config <reviewer>=<file|isolated|none>`.
+
+```json
+{"settings": {"hooks": {...}, "permissions": {...}, "env": {...}},
+ "mcp_servers": {"docs": {"command": "/opt/mcp/docs", "args": ["--stdio"]}},
+ "extensions": ["/opt/pi/review.ts"]}
+```
+
+| Agent | Checkout config dropped | Profile config applied | Still loaded from the checkout |
+|---|---|---|---|
+| Claude Code | `--setting-sources user`, `--strict-mcp-config` | `settings` (with Entire's tracking hooks added) via `--settings`; `mcp_servers` via `--mcp-config` | CLAUDE.md; `.claude/skills` and `.claude/commands`, copied from the committed tree as the `project` plugin (`/review` becomes `/project:review`); symlinks and submodules there are skipped, not followed (the trust gate lists them as not inspected) |
+| Codex | checkout and main repo marked untrusted for the run (project config, hooks, rules) | `mcp_servers` via `-c` (`command`, `args`, `url` and `default_tools_approval_mode`; other fields and literal `env` values are refused, and so is a server name the user's `~/.codex/config.toml` already defines, since Codex would merge the two); Entire's tracking hooks via `-c` with `--dangerously-bypass-hook-trust`, which also runs the user's own untrusted hooks (Codex keeps hooks per config layer, so these are added beside the user's `config.toml` hooks, not in place of them) | AGENTS.md; skills |
+| Pi | `--no-extensions` | `extensions` via `--extension`, plus Entire's own | AGENTS.md/CLAUDE.md, skills, prompt templates, `.pi/settings.json` |
+
+Rules:
+
+- **Developer-owned only.** A reviewer config is honored only from clone-local
+  preferences or an untracked `.entire/settings.local.json`, never from the
+  committed settings file (dropped with a note), the judge, or the legacy
+  `review` map. A local file that can't be verified as untracked fails the
+  review instead of running it with the checkout's config. Saves go to the
+  local file when it defines the profile, else clone-local preferences
+  (`review_agent_configs`, by profile and reviewer), which overlay only the
+  config so the rest of the profile still comes from its own layer.
+- **Where config comes from is enforced; what commands do is not.** The
+  branch's hooks, MCP servers and extensions are not loaded. The profile's own
+  hooks, MCP servers and helpers are the user's code, like the hooks in their
+  agent settings: they run in the reviewed checkout as configured, and Entire
+  doesn't vet them (a command at an absolute path can still run the branch's
+  `package.json` scripts). A value naming a path inside the checkout or
+  `$CLAUDE_PROJECT_DIR` gets a warning at save time and before each run, since
+  it is usually a copy-paste mistake. Prompts never say nothing runs when the
+  profile configures hooks or MCP servers.
+- **Permissions come from the loaded settings.** Reviewers run headless, so a
+  tool call not allowed by the settings the reviewer loads is denied. With a
+  profile config those are the user's own settings plus the profile's
+  `settings`; the project's `.claude/settings.json` allows no longer apply.
+  Allow a profile MCP tool in the profile's `settings.permissions.allow`
+  (e.g. `mcp__docs__search`) for Claude, or with
+  `"default_tools_approval_mode": "approve"` on the server for Codex, whose
+  exec mode can't ask. Both report blocked calls, and the run prints them
+  after the reviewer finishes with where to allow them.
+- **Fail, don't fall back.** An agent that can't apply a field (Codex
+  `settings`, Pi `mcp_servers`, …) fails the review with an explanation.
+- **Gate.** Skills and commands can run their own commands, so reviewing
+  someone else's code still needs approval; for reviewers with their own
+  config the warning lists only what still loads from the branch, and
+  `--show-config` names them (`isolated_agents` in `--json`). Each run prints
+  which reviewers use their own config.
+- Files the run needs (settings, MCP config, the skills plugin) are written
+  0600 to a per-run directory under the user cache and removed when the
+  reviewer exits. An older `entire` binary rejects settings files containing
+  `config`.
+- Team-shared reviewer config and Codex hooks are follow-ups.
+
 ## Flow
 
 1. With `--target`, `entire review` selects the profile in the caller's checkout, resolves the branch directly or through its trail, pins its head, runs the trust gate, prepares a worktree, and re-runs the command there without `--target`. `--prompt` reaches the re-run through `ENTIRE_REVIEW_TARGET_PROMPT`, not its argv.
@@ -159,7 +223,7 @@ approval first.
 3. It composes worker prompts via `review.ComposeReviewPrompt` and computes scope (mainline base ref via `review.ComputeScopeStats`, overridable with `--base`).
 4. Adapter-backed review workers (claude-code, codex, pi) are spawned with `ENTIRE_REVIEW_{SESSION,AGENT,SKILLS,PROMPT,STARTING_SHA}` env vars. Their lifecycle hooks use those values to tag sessions as `Kind = "agent_review"`.
 5. Each spawned process has its own env, so multiple worktrees and multi-agent runs do not need a shared marker file.
-6. In multi-worker profiles, the configured judge receives all worker reports and produces one final verdict. The judge prompt asks it to reject unsupported claims, resolve contradictions, merge duplicates, and prioritize evidence-backed findings.
+6. In multi-worker profiles, the configured judge receives all worker reports and produces one final verdict. The judge prompt asks it to reject unsupported claims, resolve contradictions, merge duplicates, and prioritize evidence-backed findings. Each report sits between BEGIN and END lines that carry a random token made for that prompt, after the reviewers finished, so a report cannot write a marker that closes its own fence. The prompt tells the judge to treat report contents as untrusted data.
 7. On the next `git commit`, the PostCommit hook condenses worker review sessions into the checkpoint on `entire/checkpoints/v1`, with `Kind`, `ReviewSkills`, and `ReviewPrompt` recorded in `CommittedMetadata`.
 8. `CheckpointSummary.HasReview` is set for O(1) lookup. `entire status` and the re-run guard read this flag from checkpoint metadata.
 

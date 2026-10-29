@@ -72,8 +72,7 @@ func TestPluginAccessibleConfirmationCancellation(t *testing.T) { //nolint:paral
 				}
 			case <-time.After(5 * time.Second):
 				_ = writer.Close()
-				<-result
-				t.Fatal("accessible prompt did not stop on cancellation")
+				t.Fatalf("accessible prompt did not stop on cancellation; closing its input returned %v", <-result)
 			}
 			if fallback && tracked.closes != 1 {
 				t.Fatalf("input closed %d times, want exactly once", tracked.closes)

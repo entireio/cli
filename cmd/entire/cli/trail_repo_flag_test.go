@@ -217,10 +217,9 @@ func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 		{name: "unlink", args: []string{"unlink", "--repo", "gh/acme/app"}},
 		{name: "finding list", args: []string{"finding", "list", "--repo", "gh/acme/app"}},
 		{name: "approve", args: []string{"approve", "--repo", "gh/acme/app"}},
-		{name: "request-changes", args: []string{"request-changes", "--repo", "gh/acme/app", "-m", "why"}},
 		{name: "approvals", args: []string{"approvals", "--repo", "gh/acme/app"}},
 		{name: "comment list", args: []string{"comment", "list", "--repo", "gh/acme/app"}},
-		{name: "comment add", args: []string{"comment", "add", "--repo", "gh/acme/app", "-m", "hi"}},
+		{name: "comment add", args: []string{"comment", "add", "--repo", "gh/acme/app", "-m", "hi", "--human-says-do-it"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

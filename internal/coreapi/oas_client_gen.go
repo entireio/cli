@@ -723,6 +723,12 @@ type Invoker interface {
 	//
 	// PUT /plugins/{plugin}/installations/{id}/repositories/{repository_id}
 	RestorePluginInstallationRepository(ctx context.Context, params RestorePluginInstallationRepositoryParams) error
+	// ResyncMirror invokes resyncMirror operation.
+	//
+	// Resync every placement of a mirrored upstream (live GitHub write-access gated).
+	//
+	// POST /mirrors/resync
+	ResyncMirror(ctx context.Context, request *ResyncMirrorInputBody) (*ResyncMirrorOutputBody, error)
 	// RevokeOrgInvitation invokes revokeOrgInvitation operation.
 	//
 	// Revoke an organization invitation.
@@ -771,6 +777,12 @@ type Invoker interface {
 	//
 	// PUT /repos/{repoId}/branch-protection
 	SetBranchProtection(ctx context.Context, request *BranchProtection, params SetBranchProtectionParams) (*BranchProtection, error)
+	// SetDefaultBranch invokes setDefaultBranch operation.
+	//
+	// Set repository default branch.
+	//
+	// PUT /repos/{repoId}/default-branch
+	SetDefaultBranch(ctx context.Context, request *SetDefaultBranchInputBody, params SetDefaultBranchParams) (*SetDefaultBranchOutputBody, error)
 	// SetPluginInstallationRepositories invokes setPluginInstallationRepositories operation.
 	//
 	// Requires project#manage on the installation's project. Grants follow the new selection before the
@@ -13280,6 +13292,91 @@ func (c *Client) sendRestorePluginInstallationRepository(ctx context.Context, pa
 	return result, nil
 }
 
+// ResyncMirror invokes resyncMirror operation.
+//
+// Resync every placement of a mirrored upstream (live GitHub write-access gated).
+//
+// POST /mirrors/resync
+func (c *Client) ResyncMirror(ctx context.Context, request *ResyncMirrorInputBody) (*ResyncMirrorOutputBody, error) {
+	res, err := c.sendResyncMirror(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendResyncMirror(ctx context.Context, request *ResyncMirrorInputBody) (res *ResyncMirrorOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/mirrors/resync"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeResyncMirrorRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ResyncMirrorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ResyncMirrorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeResyncMirrorResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // RevokeOrgInvitation invokes revokeOrgInvitation operation.
 //
 // Revoke an organization invitation.
@@ -14306,6 +14403,110 @@ func (c *Client) sendSetBranchProtection(ctx context.Context, request *BranchPro
 	defer body.Close()
 
 	result, err := decodeSetBranchProtectionResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// SetDefaultBranch invokes setDefaultBranch operation.
+//
+// Set repository default branch.
+//
+// PUT /repos/{repoId}/default-branch
+func (c *Client) SetDefaultBranch(ctx context.Context, request *SetDefaultBranchInputBody, params SetDefaultBranchParams) (*SetDefaultBranchOutputBody, error) {
+	res, err := c.sendSetDefaultBranch(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendSetDefaultBranch(ctx context.Context, request *SetDefaultBranchInputBody, params SetDefaultBranchParams) (res *SetDefaultBranchOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/default-branch"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "PUT", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeSetDefaultBranchRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, SetDefaultBranchOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, SetDefaultBranchOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeSetDefaultBranchResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

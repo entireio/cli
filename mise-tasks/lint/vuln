@@ -1,0 +1,12 @@
+#!/bin/sh
+#MISE description="Report known vulnerabilities reachable from our code"
+
+# govulncheck fails only when the call graph reaches a vulnerable symbol.
+# Advisories on modules or packages we require but never call are listed as
+# informational and do not fail the run.
+#
+# Not part of `mise run lint`: it downloads the vulnerability database, and a
+# new advisory can turn it red without any change in this repository.
+# CI runs it on its own (.github/workflows/govulncheck.yml), including on a
+# schedule so new advisories surface against main.
+govulncheck ./...

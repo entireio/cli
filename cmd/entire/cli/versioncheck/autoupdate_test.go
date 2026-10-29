@@ -132,7 +132,7 @@ func autoInstallers() []installerCase {
 	return []installerCase{
 		{name: "brew", execPath: brewCaskPath, wantCmd: brewUpgradeCmd},
 		{name: "mise", execPath: miseExecutablePath, wantCmd: miseUpgradeCmd},
-		{name: "unknown_curl_bash", execPath: plainBinPath, wantCmd: "curl -fsSL https://entire.io/install.sh | bash"},
+		{name: "unknown_curl_bash", execPath: plainBinPath, wantCmd: "curl -fsSL https://entire.com/install.sh | bash"},
 	}
 }
 

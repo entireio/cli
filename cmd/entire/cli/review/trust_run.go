@@ -62,42 +62,50 @@ func reviewSettingsContext(ctx context.Context) context.Context {
 // knownReviewAgents are the agents a review can launch.
 var knownReviewAgents = []string{"claude-code", "codex", "pi"}
 
-// profileAgentNames lists the reviewer agents a profile launches (or just
-// --agent). The judge runs from a temp directory, so it is not included.
-func profileAgentNames(profile settings.ReviewProfileConfig, agentOverride string) []string {
+// profileTrustAgents lists the reviewer agents a profile launches (or just
+// --agent). The judge runs from a temp directory, so it is not included. An
+// agent counts as isolated only if every worker on it has a profile config.
+func profileTrustAgents(profile settings.ReviewProfileConfig, agentOverride string) []TrustAgent {
+	workers := nonZeroAgentConfigs(profile.Agents)
 	if agentOverride != "" {
 		if worker, cfg, err := selectProfileWorker(profile, agentOverride); err == nil {
-			return []string{reviewAgentName(worker, cfg)}
+			workers = map[string]settings.ReviewConfig{worker: cfg}
 		}
 	}
-	var names []string
-	for worker, cfg := range nonZeroAgentConfigs(profile.Agents) {
+	isolated := map[string]bool{}
+	for worker, cfg := range workers {
 		name := reviewAgentName(worker, cfg)
-		if !slices.Contains(names, name) {
-			names = append(names, name)
-		}
+		prev, seen := isolated[name]
+		isolated[name] = cfg.Config != nil && (!seen || prev)
 	}
-	slices.Sort(names)
-	return names
+	agents := make([]TrustAgent, 0, len(isolated))
+	for _, name := range sortedStringKeys(isolated) {
+		agents = append(agents, TrustAgent{Name: name, Isolated: isolated[name]})
+	}
+	return agents
 }
 
 // showConfigAgents uses the named profile's agents, or all launchable ones.
-func showConfigAgents(ctx context.Context, profileName, agentOverride string) []string {
+func showConfigAgents(ctx context.Context, profileName, agentOverride string) []TrustAgent {
 	if s, err := settings.Load(reviewSettingsContext(ctx)); err == nil && s != nil {
 		applyLegacyReviewProfileFallback(s)
 		if strings.TrimSpace(profileName) != "" {
 			if _, profile, selErr := selectReviewProfile(s, profileName); selErr == nil {
-				if names := profileAgentNames(profile, agentOverride); len(names) > 0 {
-					return names
+				if agents := profileTrustAgents(profile, agentOverride); len(agents) > 0 {
+					return agents
 				}
 			}
 		}
 	}
-	return slices.Clone(knownReviewAgents)
+	agents := make([]TrustAgent, 0, len(knownReviewAgents))
+	for _, name := range knownReviewAgents {
+		agents = append(agents, TrustAgent{Name: name})
+	}
+	return agents
 }
 
 // gatePlainReview applies the trust gate to a review of the current checkout.
-func gatePlainReview(ctx context.Context, cmd *cobra.Command, opts reviewGateOptions, agents []string, deps Deps) error {
+func gatePlainReview(ctx context.Context, cmd *cobra.Command, opts reviewGateOptions, agents []TrustAgent, deps Deps) error {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve worktree root: %w", err)
@@ -123,7 +131,7 @@ func gatePlainReview(ctx context.Context, cmd *cobra.Command, opts reviewGateOpt
 }
 
 // inspectReview gathers authorship and, when needed, what source would run.
-func inspectReview(ctx context.Context, repoRoot, head string, source TrustSource, agents []string, alwaysInventory bool, deps Deps) (TrustSubject, TrustInventory, error) {
+func inspectReview(ctx context.Context, repoRoot, head string, source TrustSource, agents []TrustAgent, alwaysInventory bool, deps Deps) (TrustSubject, TrustInventory, error) {
 	subject, err := commitAuthorship(ctx, repoRoot, head)
 	if err != nil {
 		return TrustSubject{}, TrustInventory{}, err

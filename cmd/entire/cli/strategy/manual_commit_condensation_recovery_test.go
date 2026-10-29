@@ -143,7 +143,7 @@ func TestPostCommitProcessSessionLocked_PreservesDifferentReservedAttempt(t *tes
 
 	_, _, condensed := (&ManualCommitStrategy{}).postCommitProcessSessionLocked(
 		context.Background(), nil, state, nil, commitID, nil, nil, "", "",
-		nil, nil, nil, 0, nil,
+		nil, nil, nil, 0, nil, false,
 	)
 
 	require.False(t, condensed)

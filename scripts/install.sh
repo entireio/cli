@@ -6,6 +6,20 @@ GITHUB_REPO="entireio/cli"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 DEFAULT_CHANNEL="stable"
 
+# Release origins, in the order they are tried.
+#
+# Ours comes first. Reading it first is what makes an install work while GitHub
+# is down, and — because every install uses it, not just installs during an
+# incident — it also means the path cannot rot into a fallback nobody has
+# exercised. GitHub stays as the automatic second choice, so a problem with our
+# own origin degrades to the previous behaviour instead of breaking installs.
+#
+# Both origins lay artifacts out the same way, <base>/v<version>/<file>, so one
+# URL builder covers both.
+DEFAULT_RELEASE_ORIGIN="https://install.entire.com"
+GITHUB_RELEASE_ORIGIN="https://github.com/${GITHUB_REPO}/releases/download"
+GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}"
+
 # Colors (disabled in non-interactive mode)
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
@@ -42,11 +56,17 @@ error() {
 
 usage() {
     cat <<EOF
-Usage: install.sh [--channel stable|nightly]
+Usage: install.sh [--channel stable|nightly] [--version X.Y.Z]
 
 Options:
   --channel   Release channel to install (default: stable)
+  --version   Install this exact version instead of the channel's latest
   -h, --help  Show this help message
+
+Environment:
+  ENTIRE_INSTALL_BASE_URL  Use only this release origin, skipping the GitHub
+                           fallback. Set it to pin an install to one mirror.
+  GITHUB_TOKEN             Sent to the GitHub API if the fallback is reached.
 EOF
 }
 
@@ -63,7 +83,7 @@ detect_os() {
         mingw*|msys*|cygwin*)
             error "install.sh does not support Windows. Run this from PowerShell 5.1 or later:
 
-    irm https://entire.io/install.ps1 -UseBasicParsing | iex
+    irm https://entire.com/install.ps1 -UseBasicParsing | iex
 
   Or install the Entire CLI using Scoop:
 
@@ -94,9 +114,22 @@ detect_arch() {
     esac
 }
 
+# Timeouts exist so a reachable-but-broken origin fails over instead of hanging.
+# Metadata requests are small and get a hard ceiling; archives only get a connect
+# timeout, because capping total time would kill a working download on a slow
+# link — the failure we are guarding against is a dead origin, not a slow one.
+CURL_METADATA_OPTS=(--connect-timeout 5 --max-time 15)
+# --connect-timeout only bounds connection setup. An origin that accepts the
+# connection and then sends nothing would otherwise stall the install forever
+# and never reach the fallback. --speed-limit/--speed-time bounds that without
+# capping a slow-but-progressing download the way --max-time would: abort only
+# if throughput stays under 1KB/s for 30s. Verified to fire before any headers
+# arrive, which is the case that matters here.
+CURL_DOWNLOAD_OPTS=(--connect-timeout 10 --speed-limit 1024 --speed-time 30)
+
 fetch_github_json() {
     local url="$1"
-    local curl_opts=(-fsSL)
+    local curl_opts=(-fsSL "${CURL_METADATA_OPTS[@]}")
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         curl_opts+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
     fi
@@ -104,34 +137,168 @@ fetch_github_json() {
     curl "${curl_opts[@]}" "$url" 2>/dev/null
 }
 
-get_latest_stable_version() {
-    local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
-    local version
-    version=$(fetch_github_json "$url" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
-
-    if [[ -z "$version" ]]; then
-        error "Failed to fetch latest version from GitHub. Please check your internet connection."
+# release_origins prints the origins to try, in order. An explicit
+# ENTIRE_INSTALL_BASE_URL is authoritative: someone pinning a mirror wants that
+# mirror, not a silent fall back to GitHub that hides whether the mirror worked.
+release_origins() {
+    if [[ -n "${ENTIRE_INSTALL_BASE_URL:-}" ]]; then
+        echo "entire"
+        return
     fi
-
-    echo "$version"
+    echo "entire"
+    echo "github"
 }
 
-get_latest_nightly_version() {
-    local url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20"
-    local version
-    version=$(fetch_github_json "$url" | grep '"tag_name"' | grep 'nightly' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
+# origin_artifact_base prints the base URL under which <base>/v<version>/<file>
+# resolves for the given origin.
+origin_artifact_base() {
+    case "$1" in
+        entire) printf '%s' "${ENTIRE_INSTALL_BASE_URL:-$DEFAULT_RELEASE_ORIGIN}" ;;
+        github) printf '%s' "$GITHUB_RELEASE_ORIGIN" ;;
+        *)      return 1 ;;
+    esac
+}
 
-    if [[ -z "$version" ]]; then
-        error "Failed to fetch latest nightly version from GitHub. Please check your internet connection."
+# origin_label prints a short human name, used in progress and error output so
+# a failed install says which origin was being read.
+origin_label() {
+    case "$1" in
+        entire) printf '%s' "${ENTIRE_INSTALL_BASE_URL:-$DEFAULT_RELEASE_ORIGIN}" ;;
+        github) printf '%s' "github.com/${GITHUB_REPO}" ;;
+        *)      return 1 ;;
+    esac
+}
+
+# version_valid_for_channel rejects a manifest value that is not a version, or
+# that belongs to the other channel. Without this a value like "not-a-version"
+# ends discovery here, and both origins are then asked for a release that does
+# not exist — failing the install even when GitHub has a valid one. Invalid
+# metadata has to advance to the fallback, not stop the walk.
+# version_is_release_version checks the shape alone. Split out because every
+# version that reaches a URL has to pass it, including one pinned with
+# --version, where there is no channel to check against. It is interpolated
+# into ${base}/v${version}/..., and curl normalises ".." segments, so an
+# unchecked value can address something outside the v<version>/ prefix
+# entirely and fail later as a generic download error.
+version_is_release_version() {
+    printf '%s' "$1" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+}
+
+version_valid_for_channel() {
+    local version="$1" channel="$2"
+
+    if ! version_is_release_version "$version"; then
+        return 1
+    fi
+    if [[ "$channel" == "nightly" ]]; then
+        if ! printf '%s' "$version" | grep -qE -- '-nightly\.'; then
+            return 1
+        fi
+        return 0
+    fi
+    # Stable carries no prerelease segment; a nightly here would downgrade or
+    # cross-grade every stable install.
+    if printf '%s' "$version" | grep -qE -- '-'; then
+        return 1
+    fi
+    return 0
+}
+
+# manifest_field prints one string field from a channel manifest, or nothing.
+manifest_field() {
+    printf '%s' "$1" \
+        | grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+        | sed -E 's/.*: *"([^"]*)".*/\1/' \
+        | head -n 1 || true
+}
+
+# resolve_version_from_entire reads the channel pointer we publish at release
+# time. One request, one answer — no list-and-filter, and no GitHub API rate
+# limit (60/hour per IP unauthenticated, which a shared office or CI egress IP
+# can exhaust on its own).
+resolve_version_from_entire() {
+    local channel="$1"
+    local base body declared version
+    base="$(origin_artifact_base entire)"
+    body="$(curl -fsSL "${CURL_METADATA_OPTS[@]}" "${base}/channels/${channel}.json" 2>/dev/null || true)"
+    [[ -n "$body" ]] || return 1
+
+    # A manifest published to the wrong key, or left stale across a rename,
+    # would otherwise cross the streams. The CLI's update check makes the same
+    # check; both readers have to agree or the two disagree about what is
+    # installable.
+    declared="$(manifest_field "$body" channel)"
+    if [[ -n "$declared" && "$declared" != "$channel" ]]; then
+        return 1
     fi
 
-    echo "$version"
+    # tag first, then version, matching the CLI. They normally agree; when they
+    # do not, the tag is the thing the artifacts were published under.
+    version="$(manifest_field "$body" tag)"
+    [[ -n "$version" ]] || version="$(manifest_field "$body" version)"
+    version="${version#v}"
+
+    if [[ -n "$version" ]] && version_valid_for_channel "$version" "$channel"; then
+        printf '%s' "$version"
+        return 0
+    fi
+    return 1
+}
+
+resolve_version_from_github() {
+    local channel="$1" version
+    if [[ "$channel" == "nightly" ]]; then
+        # The literal -nightly. segment, not a bare "nightly" substring: a
+        # looser match here selects tags every other reader rejects, so the two
+        # origins in this script would disagree about what is installable.
+        version="$(fetch_github_json "${GITHUB_API}/releases?per_page=20" \
+            | grep '"tag_name"' \
+            | grep -- '-nightly\.' \
+            | head -n 1 \
+            | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)"
+    else
+        version="$(fetch_github_json "${GITHUB_API}/releases/latest" \
+            | grep '"tag_name"' \
+            | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)"
+    fi
+
+    # Validated exactly like the release origin's answer. An origin we do not
+    # own is not more trustworthy than one we do.
+    if [[ -n "$version" ]] && version_valid_for_channel "$version" "$channel"; then
+        printf '%s' "$version"
+        return 0
+    fi
+    return 1
+}
+
+resolve_version_from_origin() {
+    case "$1" in
+        entire) resolve_version_from_entire "$2" ;;
+        github) resolve_version_from_github "$2" ;;
+        *)      return 1 ;;
+    esac
+}
+
+# resolve_version walks the origins and prints the first version any of them
+# names. Failing to reach one origin is not fatal; failing to reach all of them
+# is.
+resolve_version() {
+    local channel="$1"
+    local origin version
+    for origin in $(release_origins); do
+        version="$(resolve_version_from_origin "$origin" "$channel" || true)"
+        if [[ -n "$version" ]]; then
+            printf '%s' "$version"
+            return 0
+        fi
+    done
+    return 1
 }
 
 download_file() {
     local url="$1"
     local output="$2"
-    local curl_opts=(-fsSL)
+    local curl_opts=(-fsSL "${CURL_DOWNLOAD_OPTS[@]}")
 
     curl "${curl_opts[@]}" "$url" -o "$output"
 }
@@ -155,8 +322,55 @@ verify_checksum() {
     fi
 }
 
+# fetch_release_from_origin downloads the archive and checksums.txt for one
+# version from a single origin and verifies one against the other.
+#
+# Archive and checksums always come from the SAME origin. Mixing them would let
+# a healthy origin's checksums vouch for another origin's bytes, which is a
+# weaker guarantee than either origin offers on its own.
+#
+# Return codes drive the caller's chain, and the split follows the same rule as
+# the checkpoint read chain: a definite bad answer aborts, an unreachable one
+# advances.
+#   0  archive downloaded and verified
+#   1  this origin could not serve the release — try the next one
+# A checksum MISMATCH does not return: it calls error and exits. Bytes that
+# disagree with their own origin's checksums mean that origin is corrupt or
+# hostile, and quietly retrying elsewhere would hide it.
+fetch_release_from_origin() {
+    local origin="$1" version="$2" archive_name="$3" tmp_dir="$4"
+    local base label archive_path checksums_path expected_checksum
+    base="$(origin_artifact_base "$origin")"
+    label="$(origin_label "$origin")"
+    archive_path="${tmp_dir}/${archive_name}"
+    checksums_path="${tmp_dir}/checksums.txt"
+
+    info "Downloading ${archive_name} from ${label}..."
+    if ! download_file "${base}/v${version}/${archive_name}" "$archive_path"; then
+        warn "Could not download ${archive_name} from ${label}"
+        return 1
+    fi
+
+    if ! download_file "${base}/v${version}/checksums.txt" "$checksums_path"; then
+        warn "Could not download checksums.txt from ${label}"
+        return 1
+    fi
+
+    expected_checksum=$(grep -iE "${archive_name}\$" "$checksums_path" | awk '{print $1}' || true)
+    if [[ -z "$expected_checksum" ]]; then
+        warn "checksums.txt from ${label} does not list ${archive_name}"
+        return 1
+    fi
+
+    info "Verifying checksum..."
+    verify_checksum "$archive_path" "$expected_checksum"
+    success "Checksum verified (${label})"
+    return 0
+}
+
 main() {
     local channel="${DEFAULT_CHANNEL}"
+    local channel_given=0
     local version=""
 
     while [[ $# -gt 0 ]]; do
@@ -165,6 +379,12 @@ main() {
                 shift
                 [[ $# -gt 0 ]] || error "--channel requires a value"
                 channel="$1"
+                channel_given=1
+                ;;
+            --version)
+                shift
+                [[ $# -gt 0 ]] || error "--version requires a value"
+                version="${1#v}"
                 ;;
             -h|--help)
                 usage
@@ -188,6 +408,19 @@ main() {
             ;;
     esac
 
+    # --version pins a specific build and skips discovery, so it cannot also
+    # honour --channel. Silently installing a stable build under
+    # `--channel nightly --version X` is the worst outcome; refusing is better
+    # than guessing which half of a contradictory request was meant.
+    if [[ -n "$version" ]]; then
+        if ! version_is_release_version "$version"; then
+            error "--version ${version} is not a version. Expected X.Y.Z, optionally with a prerelease suffix."
+        fi
+        if [[ "$channel_given" -eq 1 ]] && ! version_valid_for_channel "$version" "$channel"; then
+            error "--version ${version} is not a ${channel} version. Drop --channel to install it, or pick a ${channel} version."
+        fi
+    fi
+
     info "Installing Entire CLI..."
 
     # Detect platform
@@ -196,46 +429,39 @@ main() {
     arch=$(detect_arch)
     info "Detected platform: ${os}/${arch}"
 
-    info "Fetching latest ${channel} version..."
-    if [[ "$channel" == "nightly" ]]; then
-        version=$(get_latest_nightly_version)
-    else
-        version=$(get_latest_stable_version)
+    if [[ -z "$version" ]]; then
+        info "Fetching latest ${channel} version..."
+        version="$(resolve_version "$channel" || true)"
+        if [[ -z "$version" ]]; then
+            error "Could not determine the latest ${channel} version from any release origin.
+  Tried: $(for o in $(release_origins); do printf '%s ' "$(origin_label "$o")"; done)
+  Check your internet connection, or install a known version directly:
+    curl -fsSL https://entire.com/install.sh | bash -s -- --version X.Y.Z"
+        fi
     fi
     # Strip leading 'v' if present
     version="${version#v}"
     info "Installing version: ${version}"
 
-    # Construct download URL
     local archive_name="entire_${os}_${arch}.tar.gz"
-    local download_url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/${archive_name}"
-    local checksums_url="https://github.com/${GITHUB_REPO}/releases/download/v${version}/checksums.txt"
 
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
 
-    # Download archive
+    local origin fetched=0
+    for origin in $(release_origins); do
+        if fetch_release_from_origin "$origin" "$version" "$archive_name" "$tmp_dir"; then
+            fetched=1
+            break
+        fi
+    done
+    if [[ "$fetched" -ne 1 ]]; then
+        error "Could not download Entire CLI v${version} from any release origin.
+  Tried: $(for o in $(release_origins); do printf '%s ' "$(origin_label "$o")"; done)
+  Check that the version exists and try again."
+    fi
+
     local archive_path="${tmp_dir}/${archive_name}"
-    info "Downloading ${archive_name}..."
-    if ! download_file "$download_url" "$archive_path"; then
-        error "Failed to download from ${download_url}. Please check that the version exists and try again."
-    fi
-
-    # Download and verify checksums
-    info "Downloading checksums..."
-    local checksums_path="${tmp_dir}/checksums.txt"
-    if ! download_file "$checksums_url" "$checksums_path"; then
-        error "Failed to download checksums from ${checksums_url}"
-    fi
-
-    info "Verifying checksum..."
-    local expected_checksum
-    expected_checksum=$(grep -iE "${archive_name}\$" "$checksums_path" | awk '{print $1}' || true)
-    if [[ -z "$expected_checksum" ]]; then
-        error "Checksum for ${archive_name} not found in checksums.txt"
-    fi
-    verify_checksum "$archive_path" "$expected_checksum"
-    success "Checksum verified"
 
     info "Extracting..."
     tar -xzf "$archive_path" -C "$tmp_dir"

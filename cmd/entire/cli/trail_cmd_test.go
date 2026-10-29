@@ -605,6 +605,7 @@ func TestPrintCreatedTrail(t *testing.T) {
 
 func TestTrailDisplayURL(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
+	t.Setenv(api.WebBaseURLEnvVar, "")
 
 	// Server URL wins, even when a number is present.
 	got := trailDisplayURL(api.TrailResource{Number: 5, URL: "https://server/url"}, "gh", "acme", "repo")
@@ -613,9 +614,10 @@ func TestTrailDisplayURL(t *testing.T) {
 	}
 
 	// Falls back to a constructed URL for older servers that omit it.
+	// The web app lives on entire.com, not the entire.io API origin.
 	got = trailDisplayURL(api.TrailResource{Number: 5}, "gh", "acme", "repo")
-	if !strings.HasSuffix(got, "/gh/acme/repo/trails/5") {
-		t.Fatalf("expected constructed fallback URL, got %q", got)
+	if got != "https://entire.com/gh/acme/repo/trails/5" {
+		t.Fatalf("expected constructed fallback URL on the web origin, got %q", got)
 	}
 
 	// Nothing to show when neither is available.
@@ -819,8 +821,8 @@ func TestResolveCreateBranch(t *testing.T) {
 	}
 }
 
-// Trail deletion was removed; the command must fail and point at closing,
-// whichever legacy flags a script still passes.
+// Trail deletion was removed; the command must say so whichever legacy flags
+// a script still passes.
 func TestTrailDeleteRemoved(t *testing.T) {
 	t.Parallel()
 
@@ -833,8 +835,8 @@ func TestTrailDeleteRemoved(t *testing.T) {
 		if err == nil {
 			t.Fatalf("trail delete %v: expected error, got nil", args)
 		}
-		if !strings.Contains(err.Error(), "entire trail update --status closed") {
-			t.Fatalf("trail delete %v: error should point at closing, got: %v", args, err)
+		if !errors.Is(err, errTrailDeleteRemoved) {
+			t.Fatalf("trail delete %v: want the removal error, got: %v", args, err)
 		}
 	}
 }

@@ -29,7 +29,7 @@ func TestCompact_Pi_LinearTranscript(t *testing.T) {
 
 	expected := []string{
 		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"user","ts":"2026-03-27T21:00:01.000Z","content":[{"text":"Create hello.txt"}]}`,
-		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"assistant","ts":"2026-03-27T21:00:02.000Z","id":"m2","input_tokens":100,"output_tokens":50,"content":[{"type":"tool_use","id":"tc1","name":"Write","input":{"content":"hello world\n","path":"hello.txt"},"result":{"output":"Written 12 bytes","status":"success"}}]}`,
+		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"assistant","ts":"2026-03-27T21:00:02.000Z","id":"m2","input_tokens":100,"output_tokens":50,"cache_read_tokens":10,"cache_write_tokens":5,"content":[{"type":"tool_use","id":"tc1","name":"Write","input":{"content":"hello world\n","path":"hello.txt"},"result":{"output":"Written 12 bytes","status":"success"}}]}`,
 		`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"assistant","ts":"2026-03-27T21:00:04.000Z","id":"m4","input_tokens":200,"output_tokens":30,"content":[{"type":"text","text":"Created hello.txt with the content hello world."}]}`,
 	}
 
@@ -157,4 +157,73 @@ func TestIsPiFormat(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCompact_Pi_UserImages(t *testing.T) {
+	t.Parallel()
+
+	const (
+		img1 = `{"type":"image","data":"QUJD","mimeType":"image/png"}`
+		img2 = `{"type":"image","data":"REVG","mimeType":"image/jpeg"}`
+		head = `{"type":"session","version":3,"id":"s"}` + "\n"
+	)
+	user := func(content string) string {
+		return head + `{"type":"message","id":"m1","timestamp":"t1","message":{"role":"user","content":` + content + `}}` + "\n"
+	}
+	const prefix = `{"v":1,"agent":"pi","cli_version":"0.5.1","type":"user","ts":"t1","content":`
+
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"image only", user(`[` + img1 + `]`), []string{prefix + `[` + img1 + `]}`}},
+		{"text then image", user(`[{"type":"text","text":"look"},` + img1 + `]`), []string{prefix + `[{"text":"look"},` + img1 + `]}`}},
+		{"image then text", user(`[` + img1 + `,{"type":"text","text":"look"}]`), []string{prefix + `[` + img1 + `,{"text":"look"}]}`}},
+		{"two images around text", user(`[` + img1 + `,{"type":"text","text":"x"},` + img2 + `]`), []string{prefix + `[` + img1 + `,{"text":"x"},` + img2 + `]}`}},
+		{"other item types only emit nothing", user(`[{"type":"thinking","thinking":"x"}]`), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out, err := Convert([]byte(tt.input), agentOpts("pi"))
+			if err != nil {
+				t.Fatalf("Convert: %v", err)
+			}
+			assertJSONLines(t, out, tt.want)
+		})
+	}
+}
+
+func TestCompact_Pi_UserImageDecodesAsImageBlock(t *testing.T) {
+	t.Parallel()
+	const img = `{"type":"image","data":"QUJD","mimeType":"image/png"}`
+	in := `{"type":"session","version":3,"id":"s"}
+{"type":"message","id":"m1","timestamp":"t1","message":{"role":"user","content":[` + img + `]}}
+`
+	out, err := Convert([]byte(in), agentOpts("pi"))
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	lines, err := Decode(out)
+	if err != nil || len(lines) != 1 || len(lines[0].Blocks) != 1 {
+		t.Fatalf("Decode: lines=%v err=%v", lines, err)
+	}
+	b := lines[0].Blocks[0]
+	if b.Type != BlockImage || string(b.Raw) != img {
+		t.Errorf("block = %q %s, want image %s", b.Type, b.Raw, img)
+	}
+}
+
+func TestCompact_Pi_UserImageWithStartLine(t *testing.T) {
+	t.Parallel()
+	in := `{"type":"session","version":3,"id":"s"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"t1","message":{"role":"user","content":"first"}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"t2","message":{"role":"user","content":[{"type":"image","data":"QUJD","mimeType":"image/png"}]}}
+`
+	out, err := Convert([]byte(in), Options{Agent: "pi", CLIVersion: "0.5.1", StartLine: 2})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	assertJSONLines(t, out, []string{`{"v":1,"agent":"pi","cli_version":"0.5.1","type":"user","ts":"t2","content":[{"type":"image","data":"QUJD","mimeType":"image/png"}]}`})
 }

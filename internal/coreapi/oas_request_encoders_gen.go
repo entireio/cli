@@ -360,8 +360,36 @@ func encodeResolveReposRequest(
 	return nil
 }
 
+func encodeResyncMirrorRequest(
+	req *ResyncMirrorInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeSetBranchProtectionRequest(
 	req *BranchProtection,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeSetDefaultBranchRequest(
+	req *SetDefaultBranchInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"

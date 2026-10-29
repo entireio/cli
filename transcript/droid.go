@@ -43,7 +43,7 @@ func isDroidFormat(content []byte) bool {
 // format. Droid uses the same Anthropic Messages API structure as Claude Code
 // and Cursor, but wraps each message in an envelope that must be unwrapped first.
 func compactDroid(content []byte, opts Options) ([]byte, error) {
-	return compactJSONLWith(content, opts, unwrapDroidEnvelope)
+	return foldJSONL(content, opts, NewDroidAdapter())
 }
 
 // unwrapDroidEnvelope flattens a Droid envelope line in place:

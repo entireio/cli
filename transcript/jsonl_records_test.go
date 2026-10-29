@@ -10,8 +10,8 @@ import (
 	"testing"
 )
 
-// jsonlFixtures are the golden inputs handled by compactJSONLWith, with the
-// preprocessor Compact selects for them.
+// jsonlFixtures are the golden inputs handled by the JSONL adapters, with the
+// preprocessor Convert selects for them.
 var jsonlFixtures = []struct {
 	path       string
 	preprocess linePreprocessor
@@ -37,10 +37,26 @@ not json
 {"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]}}
 {"type":"assistant","timestamp":"t3","message":{"id":"m1","content":[{"type":"text","text":"done"}]}}
 `,
-	"result only from the immediately following user entry": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}
+	"parallel results in separate user entries": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}
+{"type":"assistant","timestamp":"t1","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu2","name":"Read","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu2","content":"second"}]},"toolUseResult":{"file":{"filePath":"/a","numLines":2}}}
+{"type":"user","timestamp":"t3","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"first"}]},"toolUseResult":{"stdout":"first"}}
+{"type":"assistant","timestamp":"t4","message":{"id":"m2","content":[{"type":"text","text":"done"}]}}
+`,
+	"result after the next assistant message began": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"mcp__slack__read","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu0","content":"earlier"}]}}
+{"type":"assistant","timestamp":"t3","message":{"id":"m2","content":[{"type":"tool_use","id":"tu2","name":"mcp__slack__read","input":{}}]}}
+{"type":"user","timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"late"},{"type":"tool_result","content":"no id: last message"}]}}
+`,
+	"results by ID attach after injected text": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Skill","input":{}},{"type":"tool_use","id":"tu2","name":"Bash","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"loaded"}]}}
+{"type":"user","isMeta":true,"timestamp":"t3","message":{"content":[{"type":"text","text":"Base directory for this skill"}]}}
+{"type":"user","timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"tu2","content":"late"}]}}
+`,
+	"results by ID attach after a prompt": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}
 {"type":"user","timestamp":"t2","message":{"content":"interrupt"}}
 {"type":"user","timestamp":"t3","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"late"}]}}
-{"type":"user","timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"late"},{"type":"text","text":"kept"}]}}
+{"type":"user","timestamp":"t4","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"later"},{"type":"text","text":"kept"}]}}
 `,
 	"unmatched and empty tool_use_id results": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"A","input":{}},{"type":"tool_use","id":"tu2","name":"B","input":{}}]}}
 {"type":"user","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"nope","content":"x"},{"type":"tool_result","content":"last","is_error":true}]},"toolUseResult":{"stdout":"ignored for two results"}}
@@ -82,6 +98,10 @@ not json
 	"orphan tool-result user entries": `{"type":"user","timestamp":"t1","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"x"}]}}
 {"type":"human","timestamp":"t2","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"x"},{"type":"text","text":"hello"}]}}
 {"type":"user","timestamp":"t3","message":{"content":""}}
+`,
+	"results without an ID only until the next prompt": `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"content":"interrupt"}}
+{"type":"user","timestamp":"t3","message":{"content":[{"type":"tool_result","content":"anon"}]}}
 `,
 	"no trailing newline": `{"type":"user","timestamp":"t1","message":{"content":"hi"}}
 {"type":"assistant","timestamp":"t2","message":{"id":"m1","content":[{"type":"text","text":"yo"}]}}`,
@@ -197,6 +217,62 @@ func TestJSONLAdapter_FeedHoldsPartialLineUntilComplete(t *testing.T) {
 	}
 }
 
+// The exported constructors are what live streams use, so folding their
+// line-by-line records must match Convert on the same bytes.
+func TestJSONLAdapter_ExportedConstructorsMatchConvert(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		path    string
+		agent   string
+		adapter func() *JSONLAdapter
+	}{
+		{"testdata/claude_full.jsonl", agentClaudeCode, NewClaudeAdapter},
+		{"testdata/claude_full2.jsonl", agentClaudeCode, NewClaudeAdapter},
+		{"testdata/claude_full.jsonl", "cursor", NewCursorAdapter},
+		{"testdata/droid_full.jsonl", "factoryai-droid", NewDroidAdapter},
+	} {
+		input, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opts := defaultOpts
+		opts.Agent = tc.agent
+		want, err := Convert(input, opts)
+		if err != nil {
+			t.Fatalf("%s: Convert: %v", tc.path, err)
+		}
+		a := tc.adapter()
+		var recs []Record
+		for _, line := range bytes.SplitAfter(input, []byte("\n")) {
+			recs = append(recs, a.Feed(line)...)
+		}
+		recs = append(recs, a.Flush()...)
+		got, err := Fold(recs, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s: fold differs from Convert\ngot:\n%s\nwant:\n%s", tc.path, got, want)
+		}
+	}
+}
+
+func TestJSONLAdapter_LinesCountsConsumedLines(t *testing.T) {
+	t.Parallel()
+
+	a := NewClaudeAdapter()
+	line := `{"type":"user","timestamp":"t1","message":{"content":"hi"}}`
+	a.Feed([]byte(line + "\n\n" + `{"type":"progress"}` + "\n" + line[:20]))
+	if got := a.Lines(); got != 3 {
+		t.Fatalf("Lines after three complete lines and a partial one = %d, want 3", got)
+	}
+	a.Flush()
+	if got := a.Lines(); got != 4 {
+		t.Fatalf("Lines after Flush = %d, want 4", got)
+	}
+}
+
 func TestJSONLAdapter_ReusedMessageIDGetsDistinctKey(t *testing.T) {
 	t.Parallel()
 
@@ -277,7 +353,10 @@ func TestJSONLAdapter_AlternatingFragmentRecordsGrowLinearly(t *testing.T) {
 	}
 	for _, n := range []int{1000, 4000} {
 		input := alternating(n)
-		assertMatchesLegacy(t, input, nil)
+		// The legacy oracle is quadratic here.
+		if n == 1000 {
+			assertMatchesLegacy(t, input, nil)
+		}
 		if size := len(encodeRecords(t, adapterRecords(input, nil, nil))); size > 2*len(input) {
 			t.Errorf("%d fragments: %d bytes of records for %d bytes of input", n, size, len(input))
 		}
@@ -287,17 +366,66 @@ func TestJSONLAdapter_AlternatingFragmentRecordsGrowLinearly(t *testing.T) {
 func assertMatchesLegacy(t *testing.T, input []byte, preprocess linePreprocessor) {
 	t.Helper()
 
-	want, err := legacyCompactJSONLWith(input, defaultOpts, preprocess)
+	opts := defaultOpts
+	opts.Agent = "cursor" // claude-code lines carry per-call usage the oracle predates
+	want, err := legacyCompactJSONLWith(input, opts, preprocess)
 	if err != nil {
 		t.Fatalf("legacy: %v", err)
 	}
-	got, err := compactJSONLWith(input, defaultOpts, preprocess)
+	got, err := convertJSONL(input, opts, preprocess)
 	if err != nil {
-		t.Fatalf("compactJSONLWith: %v", err)
+		t.Fatalf("convertJSONL: %v", err)
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("output differs from legacy compactor\ninput:\n%s\ngot:\n%s\nwant:\n%s", input, got, want)
 	}
+
+	opts.Agent = agentClaudeCode
+	want, err = legacyCompactJSONLWith(input, opts, preprocess)
+	if err != nil {
+		t.Fatalf("legacy: %v", err)
+	}
+	got, err = convertJSONL(input, opts, preprocess)
+	if err != nil {
+		t.Fatalf("convertJSONL: %v", err)
+	}
+	if got, want := withoutUsageFields(t, got), withoutUsageFields(t, want); !bytes.Equal(got, want) {
+		t.Fatalf("claude-code output differs from legacy compactor outside usage fields\ninput:\n%s\ngot:\n%s\nwant:\n%s", input, got, want)
+	}
+}
+
+// convertJSONL converts input as Convert does for a JSONL transcript that
+// needs preprocess (nil for Claude Code and Cursor, the envelope unwrapper for
+// Droid).
+func convertJSONL(input []byte, opts Options, preprocess linePreprocessor) ([]byte, error) {
+	if preprocess != nil {
+		return compactDroid(input, opts)
+	}
+	return compactJSONL(input, opts)
+}
+
+func withoutUsageFields(t *testing.T, out []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	for _, line := range bytes.SplitAfter(out, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []string{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens", "reasoning_tokens"} {
+			delete(m, k)
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes()
 }
 
 // adapterRecords feeds chunks (or the whole input when chunks is nil) to a
@@ -307,6 +435,7 @@ func adapterRecords(input []byte, preprocess linePreprocessor, chunks [][]byte) 
 		chunks = [][]byte{input}
 	}
 	a := newJSONLAdapter(preprocess)
+	a.perCallUsage = true
 	var recs []Record
 	for _, c := range chunks {
 		recs = append(recs, a.Feed(c)...)

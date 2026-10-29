@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -28,6 +30,7 @@ var runOpenCodeExportToFileFn = runOpenCodeExportToFile
 var (
 	_ agent.ContextInjector           = (*OpenCodeAgent)(nil)
 	_ agent.SubagentTranscriptFetcher = (*OpenCodeAgent)(nil)
+	_ agent.LiveSubagentFileReporter  = (*OpenCodeAgent)(nil)
 )
 
 // InjectionEvent reports that OpenCode injects model context at TurnStart. The
@@ -317,6 +320,18 @@ func sessionTranscriptPath(ctx context.Context, sessionID string) (string, error
 // entireTmpName is .entire/tmp relative to the .entire root.
 var entireTmpName = entiredir.MustName(paths.EntireTmpDir)
 
+// mockExportName reports whether integration tests replace every
+// `opencode export` with a pre-written file (ENTIRE_TEST_OPENCODE_MOCK_EXPORT),
+// and names that file for sessionID: .entire/tmp/<sessionID>.json, relative to
+// the .entire root. Every export path asks here, so the test hook and its file
+// name live in one place.
+func mockExportName(sessionID string) (string, bool) {
+	if os.Getenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT") == "" {
+		return "", false
+	}
+	return entireTmpName + "/" + sessionID + ".json", true
+}
+
 // fetchAndCacheExport calls `opencode export <sessionID>` and writes the result
 // to a temporary file. Returns the path to the temp file.
 //
@@ -348,11 +363,21 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 	tmpFile := filepath.Join(entireDirAbs, filepath.FromSlash(tmpName))
 
 	// Integration test mode: use pre-written mock file without calling opencode export
-	if os.Getenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT") != "" {
-		if _, err := root.Stat(tmpName); err == nil {
-			return tmpFile, nil
+	if mockName, ok := mockExportName(sessionID); ok {
+		data, err := entiredir.ReadFile(root, mockName)
+		if err != nil {
+			return "", fmt.Errorf("mock export file not found: %s (ENTIRE_TEST_OPENCODE_MOCK_EXPORT is set)", tmpFile)
 		}
-		return "", fmt.Errorf("mock export file not found: %s (ENTIRE_TEST_OPENCODE_MOCK_EXPORT is set)", tmpFile)
+		normalized, err := normalizeOpenCodeExport(data)
+		if err != nil {
+			return "", err
+		}
+		if !bytes.Equal(normalized, data) {
+			if err := jsonutil.WriteFileAtomicIn(root, mockName, normalized, 0o600); err != nil {
+				return "", fmt.Errorf("write normalized mock export: %w", err)
+			}
+		}
+		return tmpFile, nil
 	}
 
 	// Write export directly to temp file under .entire. Avoid stdout capture,
@@ -401,6 +426,20 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 		)
 		return "", &openCodeExportError{
 			message: fmt.Sprintf("OpenCode returned invalid transcript data for session %q. Try updating OpenCode and running the command again.", sessionID),
+		}
+	}
+
+	// OpenCode 2 exports are stored in the 1.x shape every reader expects.
+	normalized, err := normalizeOpenCodeExport(data)
+	if err != nil {
+		return "", err
+	}
+	if !bytes.Equal(normalized, data) {
+		if err := jsonutil.WriteFileAtomicIn(root, staged, normalized, 0o600); err != nil {
+			// The staged export is intact and valid; keep it, as the rename
+			// failure below does.
+			keepStaged = true
+			return "", fmt.Errorf("failed to write normalized export (export saved at %s): %w", stagedAbs, err)
 		}
 	}
 

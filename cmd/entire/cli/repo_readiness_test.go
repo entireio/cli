@@ -637,6 +637,10 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 					case http.MethodPost:
 						posts.Add(1)
 						w.Header().Set("Content-Type", "application/json")
+						// The header is the token; the body field is the
+						// deprecated copy, deliberately different so a poll
+						// that read the body instead is caught.
+						w.Header().Set("X-Entire-Commit-Token", "tok-hdr")
 						w.WriteHeader(http.StatusCreated)
 						fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":%q,"commitToken":"tok-abc","clusterHost":"cell.example","path":"/et/project/web","capabilities":{"canManage":true,"canPush":true,"canPull":true}}`, testDeleteULID, testProjectULID, state)
 						return
@@ -644,6 +648,9 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 						n := gets.Add(1)
 						if r.URL.Query().Get("authoritative") != "true" {
 							t.Error("missing authoritative query")
+						}
+						if got := r.URL.Query().Get("commitToken"); got != "tok-hdr" {
+							t.Errorf("poll commitToken = %q, want the create's header", got)
 						}
 						if tc.pollStatus == http.StatusTooManyRequests {
 							http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
@@ -766,7 +773,7 @@ func TestAwaitRepoActive(t *testing.T) {
 			err := awaitRepoActive(t.Context(), repoReadFunc(func(context.Context, coreapi.GetRepoParams) (*coreapi.Repo, error) {
 				calls++
 				return nil, errors.New("unexpected")
-			}), result, nil)
+			}), result, "", nil)
 			require.Error(t, err)
 			require.Zero(t, calls)
 			require.Equal(t, testDeleteULID, result.ID)
@@ -790,12 +797,41 @@ func TestAwaitRepoActive(t *testing.T) {
 					state = "active"
 				}
 				return &coreapi.Repo{ID: testDeleteULID, State: coreapi.NewOptString(state)}, nil
-			}), result, nil)
+			}), result, "", nil)
 			require.NoError(t, err)
 			require.Equal(t, 6, calls)
 			require.Equal(t, "active", result.State.Or(""))
 		})
 	})
+	// The token rides every read, not only the first: any poll can land on a
+	// follower that has not seen the creator's grant yet.
+	for _, token := range []string{"", "tok-abc"} {
+		t.Run(fmt.Sprintf("commit token %q on every poll", token), func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				result := &coreapi.Repo{ID: testDeleteULID, State: coreapi.NewOptString("provisioning")}
+				calls := 0
+				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+				defer cancel()
+				err := awaitRepoActive(ctx, repoReadFunc(func(_ context.Context, p coreapi.GetRepoParams) (*coreapi.Repo, error) {
+					calls++
+					require.True(t, p.Authoritative.Or(false))
+					if token == "" {
+						require.False(t, p.CommitToken.IsSet(), "no token means no parameter")
+					} else {
+						require.Equal(t, token, p.CommitToken.Or(""))
+					}
+					state := "provisioning"
+					if calls == 3 {
+						state = "active"
+					}
+					return &coreapi.Repo{ID: testDeleteULID, State: coreapi.NewOptString(state)}, nil
+				}), result, token, nil)
+				require.NoError(t, err)
+				require.Equal(t, 3, calls)
+			})
+		})
+	}
 	for _, inFlight := range []bool{false, true} {
 		t.Run(fmt.Sprintf("deadline in flight %v", inFlight), func(t *testing.T) {
 			t.Parallel()
@@ -811,7 +847,7 @@ func TestAwaitRepoActive(t *testing.T) {
 						return nil, ctx.Err()
 					}
 					return result, nil
-				}), result, nil)
+				}), result, "", nil)
 				require.ErrorIs(t, err, context.DeadlineExceeded)
 				require.Equal(t, "provisioning", result.State.Or(""))
 				if inFlight {
@@ -832,7 +868,7 @@ func TestAwaitRepoActive(t *testing.T) {
 		err := awaitRepoActive(ctx, repoReadFunc(func(context.Context, coreapi.GetRepoParams) (*coreapi.Repo, error) {
 			t.Error("read after cancellation")
 			return nil, errors.New("unexpected read")
-		}), result, nil)
+		}), result, "", nil)
 		require.ErrorIs(t, err, context.Canceled)
 	})
 }
@@ -1010,7 +1046,7 @@ func TestAwaitRepoActiveBackoff(t *testing.T) {
 				state = "active"
 			}
 			return &coreapi.Repo{ID: testDeleteULID, State: coreapi.NewOptString(state)}, nil
-		}), result, nil)
+		}), result, "", nil)
 		require.NoError(t, err)
 		require.Zero(t, probes[0], "the first probe must be immediate")
 		// Explicit values pin the production backoff and both jitter extremes,
@@ -1040,7 +1076,7 @@ func TestAwaitRepoActiveErrorBudget(t *testing.T) {
 				err := awaitRepoActive(ctx, repoReadFunc(func(context.Context, coreapi.GetRepoParams) (*coreapi.Repo, error) {
 					calls++
 					return nil, problem
-				}), result, nil)
+				}), result, "", nil)
 				require.ErrorIs(t, err, problem)
 				if status == 403 || status == 404 {
 					require.Equal(t, 2, calls)
@@ -1193,7 +1229,7 @@ func TestAwaitRepoActivePollingCallback(t *testing.T) {
 						state = "active"
 					}
 					return &coreapi.Repo{ID: testDeleteULID, State: coreapi.NewOptString(state)}, nil
-				}), result, func() { started++ })
+				}), result, "", func() { started++ })
 				if initial == "provisioning" || initial == "active" {
 					require.NoError(t, err)
 					require.Equal(t, 1, started)
@@ -1229,7 +1265,7 @@ func TestAwaitRepoActiveErrorWindowBoundsInflight(t *testing.T) {
 					}
 					<-ctx.Done()
 					return nil, ctx.Err()
-				}), result, nil)
+				}), result, "", nil)
 				require.ErrorIs(t, err, problem, "keep the observed API failure when its retry window expires")
 				require.Equal(t, 2, calls)
 				want := time.Minute
@@ -1252,7 +1288,7 @@ func TestAwaitRepoActiveRetainsOnlyCreationCoordinates(t *testing.T) {
 	snapshot := &coreapi.Repo{ID: testDeleteULID, State: coreapi.NewOptString("active")}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	err := awaitRepoActive(ctx, repoReadFunc(func(context.Context, coreapi.GetRepoParams) (*coreapi.Repo, error) { return snapshot, nil }), result, nil)
+	err := awaitRepoActive(ctx, repoReadFunc(func(context.Context, coreapi.GetRepoParams) (*coreapi.Repo, error) { return snapshot, nil }), result, "", nil)
 	require.NoError(t, err)
 	require.Equal(t, "web", result.Name)
 	require.Equal(t, testProjectULID, result.OwningProjectId)

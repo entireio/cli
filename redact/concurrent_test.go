@@ -62,13 +62,13 @@ func buildJSONLFixture(t *testing.T, targetBytes int) string {
 func TestJSONLContentSharded_MatchesSequential(t *testing.T) {
 	t.Parallel()
 
-	// Comfortably above jsonlConcurrentMinBytes so sharding actually engages.
-	content := buildJSONLFixture(t, 4<<20)
+	// Four shards, so sharding engages.
+	content := buildJSONLFixture(t, 4*jsonlShardTargetBytes)
 
-	sequential, err := jsonlContentImpl(content, String, concurrencyUnsafeRedactor)
+	sequential, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 	require.NoError(t, err)
 
-	concurrent, err := jsonlContentImpl(content, String, concurrencySafeRedactor)
+	concurrent, err := jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 	require.NoError(t, err)
 
 	require.Equal(t, sequential, concurrent,
@@ -81,8 +81,8 @@ func TestJSONLContentSharded_MatchesSequential(t *testing.T) {
 func TestJSONLContentSharded_ShardBoundariesPreserveLines(t *testing.T) {
 	t.Parallel()
 
-	content := buildJSONLFixture(t, 3<<20)
-	out, err := jsonlContentImpl(content, String, concurrencySafeRedactor)
+	content := buildJSONLFixture(t, 3*jsonlShardTargetBytes)
+	out, err := jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 	require.NoError(t, err)
 
 	require.Equal(t, strings.Count(content, "\n"), strings.Count(out, "\n"),
@@ -97,9 +97,9 @@ func TestJSONLContentSharded_SmallContentStaysSequential(t *testing.T) {
 	t.Parallel()
 
 	content := "{\"a\":\"hello\"}\n{\"b\":\"world\"}\n"
-	got, err := jsonlContentImpl(content, String, concurrencySafeRedactor)
+	got, err := jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 	require.NoError(t, err)
-	want, err := jsonlContentImpl(content, String, concurrencyUnsafeRedactor)
+	want, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 }
@@ -121,9 +121,9 @@ func TestJSONLContentSharded_EdgeShapes(t *testing.T) {
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			want, err := jsonlContentImpl(content, String, concurrencyUnsafeRedactor)
+			want, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 			require.NoError(t, err)
-			got, err := jsonlContentImpl(content, String, concurrencySafeRedactor)
+			got, err := jsonlContentImpl(content, regexLayers, concurrencySafeRedactor)
 			require.NoError(t, err)
 			require.Equal(t, want, got)
 		})
@@ -135,8 +135,8 @@ func TestJSONLContentSharded_EdgeShapes(t *testing.T) {
 func TestJSONLContent_ConcurrentCallsAreRaceFree(t *testing.T) {
 	t.Parallel()
 
-	content := buildJSONLFixture(t, 2<<20)
-	want, err := jsonlContentImpl(content, String, concurrencyUnsafeRedactor)
+	content := buildJSONLFixture(t, 2*jsonlShardTargetBytes)
+	want, err := jsonlContentImpl(content, regexLayers, concurrencyUnsafeRedactor)
 	require.NoError(t, err)
 
 	const callers = 8
@@ -168,9 +168,14 @@ func TestJSONLContent_ConcurrentCallsAreRaceFree(t *testing.T) {
 func TestJSONLContent_SplitConcatenationEquivalence(t *testing.T) {
 	t.Parallel()
 
-	prefix := buildJSONLFixture(t, 2<<20)
+	prefix := buildJSONLFixture(t, 2*jsonlShardTargetBytes)
 	require.True(t, strings.HasSuffix(prefix, "\n"), "prefix must end on a line boundary")
-	suffix := buildJSONLFixture(t, 64<<10)
+	suffix := buildJSONLFixture(t, 3*jsonlShardTargetBytes/4)
+	// One shard, line path, all four line types.
+	require.True(t, IsLineDelimited([]byte(suffix)), "suffix must take the line path")
+	require.Len(t, shardLineBounds(strings.Split(suffix, "\n"), jsonlShardTargetBytes), 1,
+		"suffix must stay in one shard")
+	require.Contains(t, suffix, "not json at all", "suffix must include every line type")
 
 	whole, err := JSONLContent(prefix + suffix)
 	require.NoError(t, err)
@@ -260,7 +265,7 @@ func TestIsLineDelimited_AgreesWithRouting(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, handled, err := redactSingleJSONValue(content, String)
+			_, handled, err := redactSingleJSONValue(content, regexLayers)
 			require.NoError(t, err)
 			require.Equal(t, !handled, IsLineDelimited([]byte(content)),
 				"IsLineDelimited must mirror the redactor's own routing decision")

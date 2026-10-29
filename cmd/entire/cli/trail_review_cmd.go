@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -18,7 +19,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -197,7 +197,7 @@ func newTrailFindingAddCmd(targetOpts *trailReviewTargetOptions) *cobra.Command 
 	cmd.Flags().IntVar(&opts.Line, "line", 0, "Line number for the finding location")
 	cmd.Flags().IntVar(&opts.StartLine, "start-line", 0, "Start line for the finding location")
 	cmd.Flags().IntVar(&opts.EndLine, "end-line", 0, "End line for the finding location")
-	cmd.Flags().StringVar(&opts.ClientID, "client-id", "", "Client-provided idempotency key for this finding")
+	cmd.Flags().StringVar(&opts.ClientID, "client-id", "", "Retry key for this finding and its review (24-hour server retention; reuse with the same fields)")
 	cmd.Flags().StringVar(&opts.Patch, "patch", "", "Unified-diff suggested change to attach; must modify a single existing file in this worktree")
 	cmd.Flags().StringVar(&opts.PatchFile, "patch-file", "", "Read unified-diff suggested change from file; use '-' for stdin")
 	cmd.Flags().StringVar(&opts.Instruction, "instruction", "", "Manual suggested-change instruction to attach")
@@ -357,7 +357,11 @@ func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string
 }
 
 func runTrailReviewCommentAdd(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewCommentAddOptions) error {
-	client, target, err := mode.reviewTarget(cmd, selector, false)
+	// A patch or file location is read from this worktree, so without an
+	// explicit --repo the finding must land on this clone's change, never a
+	// sole change in another repository that happens to share the path.
+	localAnchor := opts.Patch != "" || opts.PatchFile != "" || opts.FilePath != ""
+	client, target, err := mode.reviewTarget(cmd, selector, localAnchor && trailRepoFlag(cmd) == "")
 	if err != nil {
 		return err
 	}
@@ -930,9 +934,6 @@ func normalizeFindingPath(p string) string {
 	return path.Clean(filepath.ToSlash(strings.TrimSpace(p)))
 }
 
-// createTrailReviewFinding posts a single finding through the current API flow:
-// start a review session, then submit a one-item comment batch under it. It
-// returns the created (or already-existing) finding.
 func prepareTrailReviewCommentInputsForCreate(worktreeRoot string, inputs []api.TrailReviewCommentInput) []api.TrailReviewCommentInput {
 	out := make([]api.TrailReviewCommentInput, len(inputs))
 	copy(out, inputs)
@@ -945,9 +946,8 @@ func prepareTrailReviewCommentInputsForCreate(worktreeRoot string, inputs []api.
 func prepareTrailReviewLocationForCreate(worktreeRoot string, loc api.TrailReviewLocationCreateRequest) api.TrailReviewLocationCreateRequest {
 	switch loc.Granularity {
 	case reviewTrailGranularityLine, reviewTrailGranularityRange:
-		if loc.SelectedText != nil && strings.TrimSpace(*loc.SelectedText) != "" {
-			return loc
-		}
+		// selected_text is always the worktree's text: a supplied value is an
+		// unverified quote the trail would show as code from this file.
 		filePath := ""
 		if loc.FilePath != nil {
 			filePath = strings.TrimSpace(*loc.FilePath)
@@ -961,7 +961,7 @@ func prepareTrailReviewLocationForCreate(worktreeRoot string, loc api.TrailRevie
 			endLine = *loc.EndLine
 		}
 		selected, fileOK, selectedOK := trailReviewSelectedTextFromWorktree(worktreeRoot, filePath, startLine, endLine)
-		if selectedOK {
+		if selectedOK && withinPostedFindingCap(selected) {
 			loc.SelectedText = stringPtr(selected)
 			return loc
 		}
@@ -1015,21 +1015,16 @@ func readWorktreeFileSafely(worktreeRoot, filePath string) ([]byte, bool) {
 	if filepath.IsAbs(filePath) {
 		return nil, false
 	}
-	name, err := worktreedir.Name(worktreeRoot, filePath)
-	if err != nil {
-		return nil, false
-	}
-	root, err := worktreedir.OpenAt(worktreeRoot)
-	if err != nil {
-		return nil, false
-	}
-	data, err := osroot.ReadFileNoFollow(root, name)
+	data, err := worktreedir.ReadFileNoFollow(worktreeRoot, filePath)
 	if err != nil {
 		return nil, false
 	}
 	return data, true
 }
 
+// createTrailReviewFinding posts a single finding through the current API flow:
+// start a review session, then submit a one-item comment batch under it. It
+// returns the created (or already-existing) finding.
 func createTrailReviewFinding(ctx context.Context, client *api.Client, trailID string, input api.TrailReviewCommentInput) (api.TrailReviewComment, error) {
 	findings, err := createTrailReviewFindings(ctx, client, trailID, []api.TrailReviewCommentInput{input})
 	if err != nil {
@@ -1052,7 +1047,11 @@ func createTrailReviewFindings(ctx context.Context, client *api.Client, trailID 
 		worktreeRoot = ""
 	}
 	inputs = prepareTrailReviewCommentInputsForCreate(worktreeRoot, inputs)
-	review, err := startTrailReview(ctx, client, trailID)
+	key, err := trailReviewStartKey(inputs)
+	if err != nil {
+		return nil, err
+	}
+	review, err := startTrailReview(ctx, client, trailID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -1112,8 +1111,9 @@ func postTrailReviewFindingBatch(ctx context.Context, client *api.Client, trailI
 // The API rejects a lone head_sha — base_sha and head_sha must be supplied
 // together or not at all — and computing a correct base SHA client-side is out
 // of scope for a single-finding add, so neither is sent.
-func startTrailReview(ctx context.Context, client *api.Client, trailID string) (api.TrailReviewStartResponse, error) {
-	resp, err := client.Post(ctx, trailReviewStartPath(trailID), api.TrailReviewStartRequest{})
+func startTrailReview(ctx context.Context, client *api.Client, trailID, key string) (api.TrailReviewStartResponse, error) {
+	resp, err := client.Request(ctx, http.MethodPost, trailReviewStartPath(trailID),
+		http.Header{"Idempotency-Key": {key}}, strings.NewReader("{}"))
 	if err != nil {
 		return api.TrailReviewStartResponse{}, fmt.Errorf("start review: %w", err)
 	}
