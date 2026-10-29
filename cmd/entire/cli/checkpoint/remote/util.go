@@ -458,13 +458,11 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 
 	pushInfo, err := ParseURL(pushRemoteURL)
 	if err != nil {
-		if originURL != "" {
-			logFallback(ctx, "push", originURL, "parse push remote URL", err,
-				slog.String("push_remote", pushRemoteName),
-			)
-			return originURL, false, nil
-		}
-		return "", true, fmt.Errorf("no push URL found: %w", err)
+		// A push remote that is no URL at all (a bare filesystem path) only
+		// passes the ownership vote from settings.local.json, so the store is
+		// this developer's explicit choice: route it like an unmappable
+		// protocol below instead of handing checkpoints to origin.
+		return routeToProvider(ctx, config, err)
 	}
 	withToken := strings.TrimSpace(os.Getenv(CheckpointTokenEnvVar)) != ""
 	if withToken && isDirectGitTransport(pushInfo.Protocol) {
@@ -501,21 +499,25 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	if err != nil {
 		// The push remote's protocol can't be mapped to a checkpoint URL
 		// (e.g. file://, or an entire:// mirror of a different forge than the
-		// configured provider). Honor the configured checkpoint_remote by
-		// targeting the provider's canonical host over HTTPS rather than
-		// misrouting checkpoints to the origin remote.
-		if providerURL, ok := resolveProviderCheckpointURL(ctx, config, ""); ok {
-			return providerURL, true, nil
-		}
-		// No URL exists for this provider (no known host to build one on).
-		// The store passed the ownership vote, so it is this developer's
-		// explicit destination: sending checkpoints to the push remote instead
-		// would publish them somewhere they chose not to, possibly a public
-		// code repository. Withhold rather than fall back.
-		return "", true, fmt.Errorf("%w: provider %q: %w", ErrCheckpointRemoteUnroutable, config.Provider, err)
+		// configured provider).
+		return routeToProvider(ctx, config, err)
 	}
 
 	return pushURL, true, nil
+}
+
+// routeToProvider resolves an owned checkpoint_remote whose URL cannot be
+// derived from the push remote. It targets the provider's canonical host
+// rather than misrouting checkpoints to the origin remote. When no URL exists
+// for the provider (no known host to build one on) it withholds: the store
+// passed the ownership vote, so it is this developer's explicit destination,
+// and sending checkpoints to the push remote instead would publish them
+// somewhere they chose not to, possibly a public code repository.
+func routeToProvider(ctx context.Context, config *settings.CheckpointRemoteConfig, cause error) (string, bool, error) {
+	if providerURL, ok := resolveProviderCheckpointURL(ctx, config, ""); ok {
+		return providerURL, true, nil
+	}
+	return "", true, fmt.Errorf("%w: provider %q: %w", ErrCheckpointRemoteUnroutable, config.Provider, cause)
 }
 
 // Configured reports whether a structured checkpoint_remote is configured.
