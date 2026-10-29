@@ -517,6 +517,14 @@ func EnvCredentialConfigured() bool {
 	return EnvCredential() != CredentialFromContext
 }
 
+// EnvCredentialNonEmpty reports whether ENTIRE_TOKEN or ENTIRE_SERVICE_ACCOUNT
+// holds a value. Hints and notices use it, keeping their long-standing rule
+// that an exported-but-empty variable means "not configured"; resolution
+// (LookupEnvToken) still fails closed on a set-but-blank one.
+func EnvCredentialNonEmpty() bool {
+	return os.Getenv(EnvTokenVar) != "" || os.Getenv(ServiceAccountEnvVar) != ""
+}
+
 // EnvCredentialSource names where the non-interactive bearer comes from, for
 // status output. Only meaningful when EnvCredentialConfigured is true.
 func EnvCredentialSource() string {

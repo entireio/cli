@@ -32,7 +32,7 @@ var (
 //
 // Package var so tests can force the whole outcome (see #1773 review thread).
 var importLoggedIn = func() bool {
-	if auth.EnvCredentialConfigured() {
+	if auth.EnvCredentialNonEmpty() {
 		return true
 	}
 	ctxs, current, err := importListContexts()

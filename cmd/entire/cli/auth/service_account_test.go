@@ -697,3 +697,20 @@ func TestMintServiceAccountSession_RefusesRedirect(t *testing.T) {
 		t.Fatal("the assertion was forwarded to the redirect target")
 	}
 }
+
+// Notices treat an exported-but-empty variable as unset, as they always have.
+func TestEnvCredentialNonEmpty(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	t.Setenv(EnvTokenVar, "")
+	t.Setenv(ServiceAccountEnvVar, "")
+	if EnvCredentialNonEmpty() {
+		t.Fatal("empty variables reported as a configured credential")
+	}
+	if !EnvCredentialConfigured() {
+		t.Fatal("set-but-empty variables must still commit resolution to the env path")
+	}
+	t.Setenv(ServiceAccountEnvVar, testServiceAccount)
+	if !EnvCredentialNonEmpty() {
+		t.Fatal("a service account was not reported")
+	}
+}
