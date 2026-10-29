@@ -36,6 +36,7 @@ const (
 	colHeaderName     = "NAME"
 	colHeaderProject  = "PROJECT"
 	colHeaderRegion   = "REGION"
+	colHeaderModel    = "MODEL"
 	colHeaderRepo     = "REPO"
 	colHeaderRole     = "ROLE"
 	colHeaderSource   = "SOURCE"
