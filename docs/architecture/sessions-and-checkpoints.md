@@ -903,7 +903,8 @@ reachable from the resolved link anchor (the default-branch head when
 resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`).
 Claude Code writes that record only when git prints the new commit's SHA, so a
 quiet `git commit -q` leaves none. A turn whose recorded commits anchor nothing
-anchors to the newest reachable commit whose committer time falls between one
+anchors to the newest reachable commit, committed by the importer's git email,
+whose committer time falls between one
 of its Bash calls running `git commit`, `cherry-pick`, `revert`, `merge`,
 `rebase` or `am` and that call's result. Otherwise (older transcripts, a commit
 squashed or rebased away, one made by a background command, whose result

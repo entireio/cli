@@ -53,6 +53,9 @@ func buildAnchorTestRepo(t *testing.T) (repo *git.Repository, c1, c2, s1 string)
 	return repo, c1, c2, s1
 }
 
+// testCommitterEmail is the committer of every commit these tests make.
+const testCommitterEmail = "test@test.com"
+
 func writeAndCommit(t *testing.T, wt *git.Worktree, repoDir, content, msg string) {
 	t.Helper()
 	// When must be a real timestamp: the anchor resolver's bounded walk
@@ -65,11 +68,17 @@ func writeAndCommit(t *testing.T, wt *git.Worktree, repoDir, content, msg string
 // the commit's full SHA.
 func writeAndCommitAt(t *testing.T, wt *git.Worktree, repoDir, content, msg string, when time.Time) string {
 	t.Helper()
+	return writeAndCommitAsAt(t, wt, repoDir, content, msg, testCommitterEmail, when)
+}
+
+// writeAndCommitAsAt is writeAndCommitAt by committer email.
+func writeAndCommitAsAt(t *testing.T, wt *git.Worktree, repoDir, content, msg, email string, when time.Time) string {
+	t.Helper()
 	testutil.WriteFile(t, repoDir, "f.txt", content)
 	if _, err := wt.Add("f.txt"); err != nil {
 		t.Fatal(err)
 	}
-	sig := &object.Signature{Name: "Test", Email: "test@test.com", When: when}
+	sig := &object.Signature{Name: "Test", Email: email, When: when}
 	hash, err := wt.Commit(msg, &git.CommitOptions{Author: sig, Committer: sig})
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +99,7 @@ func committedAt(t *testing.T, repo *git.Repository, sha string) time.Time {
 func TestResolveTurnAnchor_PicksLastReachableCandidate(t *testing.T) {
 	t.Parallel()
 	repo, c1, c2, _ := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, testCommitterEmail, time.Now())
 
 	got, fromCandidate := r.resolve(context.Background(), []string{c1[:7], c2[:7]}, nil)
 	if got != c2 {
@@ -114,7 +123,7 @@ func TestResolveTurnAnchor_CommitWindows(t *testing.T) {
 	around := func(at time.Time) TimeWindow {
 		return TimeWindow{Start: at.Add(-time.Second), End: at.Add(time.Second)}
 	}
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, testCommitterEmail, time.Now())
 
 	tests := []struct {
 		name              string
@@ -153,7 +162,7 @@ func TestResolveTurnAnchor_WindowPrefersChildInSameSecond(t *testing.T) {
 	writeAndCommitAt(t, wt, repoDir, "parent", "parent", at)
 	child := writeAndCommitAt(t, wt, repoDir, "child", "child", at)
 	tip := writeAndCommitAt(t, wt, repoDir, "tip", "tip", at.Add(10*time.Second))
-	r := newTurnAnchorResolver(repo, tip, time.Now())
+	r := newTurnAnchorResolver(repo, tip, testCommitterEmail, time.Now())
 
 	got, _ := r.resolve(context.Background(), nil, []TimeWindow{{Start: at, End: at}})
 	if got != child {
@@ -167,7 +176,7 @@ func TestResolveTurnAnchor_WindowPrefersChildInSameSecond(t *testing.T) {
 func TestResolveTurnAnchor_ReportsFallback(t *testing.T) {
 	t.Parallel()
 	repo, _, c2, s1 := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, testCommitterEmail, time.Now())
 
 	got, fromCandidate := r.resolve(context.Background(), []string{s1[:7]}, nil)
 	if got != c2 || fromCandidate {
@@ -206,7 +215,7 @@ func TestResolveTurnAnchor_DateCutoffBoundsWalk(t *testing.T) {
 	}
 	tip := head.Hash().String()
 
-	r := newTurnAnchorResolver(repo, tip, time.Now())
+	r := newTurnAnchorResolver(repo, tip, testCommitterEmail, time.Now())
 	got, fromCandidate := r.resolve(context.Background(), []string{oldHash.String()[:7]}, nil)
 	if got != tip || fromCandidate {
 		t.Fatalf("resolve = (%q, %v), want fallback %q: pre-cutoff commit must miss the bounded walk", got, fromCandidate, tip)
@@ -219,7 +228,7 @@ func TestResolveTurnAnchor_DateCutoffBoundsWalk(t *testing.T) {
 func TestResolveTurnAnchor_MaxWalkCapBoundsWalk(t *testing.T) {
 	t.Parallel()
 	repo, c1, c2, _ := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, testCommitterEmail, time.Now())
 	r.maxWalk = 1
 
 	got, fromCandidate := r.resolve(context.Background(), []string{c1[:7]}, nil)
@@ -235,7 +244,7 @@ func TestResolveTurnAnchor_MaxWalkCapBoundsWalk(t *testing.T) {
 func TestResolveTurnAnchor_SkipsUnreachableAndUnresolvable(t *testing.T) {
 	t.Parallel()
 	repo, _, c2, s1 := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, testCommitterEmail, time.Now())
 	ctx := context.Background()
 
 	// s1 resolves but is not an ancestor of the fallback c2.
@@ -261,7 +270,7 @@ func TestResolveTurnAnchor_SkipsUnreachableAndUnresolvable(t *testing.T) {
 func TestResolveTurnAnchor_RejectsRevisionSyntax(t *testing.T) {
 	t.Parallel()
 	repo, _, c2, _ := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, c2, time.Now())
+	r := newTurnAnchorResolver(repo, c2, testCommitterEmail, time.Now())
 	ctx := context.Background()
 
 	if got, _ := r.resolve(ctx, []string{"HEAD"}, nil); got != c2 {
@@ -275,7 +284,7 @@ func TestResolveTurnAnchor_RejectsRevisionSyntax(t *testing.T) {
 func TestResolveTurnAnchor_EmptyFallback(t *testing.T) {
 	t.Parallel()
 	repo, c1, _, _ := buildAnchorTestRepo(t)
-	r := newTurnAnchorResolver(repo, "", time.Now())
+	r := newTurnAnchorResolver(repo, "", testCommitterEmail, time.Now())
 
 	if got, _ := r.resolve(context.Background(), []string{c1[:7]}, nil); got != "" {
 		t.Fatalf("empty fallback: resolve = %q, want empty", got)
@@ -291,10 +300,38 @@ func TestResolveTurnAnchor_FallbackDoesNotResolve(t *testing.T) {
 	t.Parallel()
 	repo, c1, _, _ := buildAnchorTestRepo(t)
 	fallback := strings.Repeat("ca", 20) // valid hex, 40 chars, not a real object
-	r := newTurnAnchorResolver(repo, fallback, time.Now())
+	r := newTurnAnchorResolver(repo, fallback, testCommitterEmail, time.Now())
 
 	got, _ := r.resolve(context.Background(), []string{c1[:7]}, nil)
 	if got != fallback {
 		t.Fatalf("resolve = %q, want unresolvable fallback %q", got, fallback)
+	}
+}
+
+// The default branch holds other people's pushed commits too: one inside the
+// turn's git call, newer than the turn's own, must not win. A window with only
+// someone else's commit, or an importer with no git email, falls back.
+func TestResolveTurnAnchor_WindowOnlyAdoptsImportersCommits(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	own := writeAndCommitAt(t, wt, repoDir, "own", "agent: quiet commit", base.Add(10*time.Second))
+	teammate := writeAndCommitAsAt(t, wt, repoDir, "mate", "teammate: pushed", "mate@example.com", base.Add(20*time.Second))
+	tip := repoHeadSHA(t, repo)
+	window := []TimeWindow{{Start: base, End: base.Add(30 * time.Second)}}
+
+	if got, ok := newTurnAnchorResolver(repo, tip, testCommitterEmail, time.Now()).resolve(context.Background(), nil, window); got != own || !ok {
+		t.Errorf("own and teammate commits in window: = %s ok=%v, want own %s", got, ok, own)
+	}
+	onlyMate := []TimeWindow{{Start: base.Add(15 * time.Second), End: base.Add(30 * time.Second)}}
+	if got, ok := newTurnAnchorResolver(repo, tip, testCommitterEmail, time.Now()).resolve(context.Background(), nil, onlyMate); got != tip || ok {
+		t.Errorf("only teammate %s in window: = %s ok=%v, want the tip %s", teammate, got, ok, tip)
+	}
+	if got, ok := newTurnAnchorResolver(repo, tip, "", time.Now()).resolve(context.Background(), nil, window); got != tip || ok {
+		t.Errorf("no importer email: = %s ok=%v, want the tip %s", got, ok, tip)
 	}
 }
