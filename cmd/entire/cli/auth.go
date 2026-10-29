@@ -250,13 +250,16 @@ func newAuthStatusCmd() *cobra.Command {
 				}
 				return authStatusJSONFailure(cmd.OutOrStdout(), coreURL, err)
 			}
+			// Before resolving: an ENTIRE_SERVICE_ACCOUNT target exchanges its
+			// key while resolving, which must already see the plain-HTTP opt-in.
+			insecure := applyInsecureHTTPAuth(insecureHTTPAuth)
 			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
 			if err != nil {
 				// No target resolved, so no server to name.
 				return fail("", err)
 			}
 			// We send the session token to target.coreURL; enforce TLS on it.
-			if !applyInsecureHTTPAuth(insecureHTTPAuth) && target.coreURL != "" {
+			if !insecure && target.coreURL != "" {
 				if err := api.RequireSecureURL(target.coreURL); err != nil {
 					return fail(target.coreURL, fmt.Errorf("context login server URL check: %w", err))
 				}
@@ -333,6 +336,10 @@ type statusTarget struct {
 	// separates one login from another.
 	distinctServers int
 	envToken        bool
+	// credential says which non-interactive credential supplied an envToken
+	// target: ENTIRE_TOKEN itself or a key-minted ENTIRE_SERVICE_ACCOUNT
+	// session. Stored-context targets leave it CredentialFromContext.
+	credential auth.CredentialSource
 }
 
 // resolveAuthStatusTarget picks the target for `entire auth status`, honouring
@@ -345,7 +352,9 @@ func resolveAuthStatusTarget(ctx context.Context, listContexts contextsProvider,
 		if err != nil {
 			return statusTarget{}, err //nolint:wrapcheck // already prefixed with the env var that selected it
 		}
-		return resolveEnvTokenStatusTarget(raw)
+		target, err := resolveEnvTokenStatusTarget(raw)
+		target.credential = auth.EnvCredential()
+		return target, err
 	}
 	return resolveStatusTarget(ctx, listContexts, resolveLogin)
 }
@@ -360,7 +369,7 @@ func resolveEnvTokenStatusTarget(raw string) (statusTarget, error) {
 	if err != nil {
 		return statusTarget{}, err //nolint:wrapcheck // auth.ParseEnvToken already prefixes with EnvTokenVar
 	}
-	return statusTarget{coreURL: coreURL, token: token, envToken: true}, nil
+	return statusTarget{coreURL: coreURL, token: token, envToken: true, credential: auth.CredentialFromEnvToken}, nil
 }
 
 // resolveStatusTarget picks the core + token for `entire auth status` from
@@ -789,10 +798,13 @@ type authStatusJSON struct {
 	DisplayName   string `json:"display_name,omitempty"`
 	Jurisdiction  string `json:"jurisdiction,omitempty"`
 	ForeignRegion bool   `json:"foreign_region,omitempty"`
-	// TokenSource is the same description the text view prints; EnvToken is the
-	// field to branch on, since an env bearer has no revocable session.
-	TokenSource string `json:"token_source,omitempty"`
-	EnvToken    bool   `json:"env_token,omitempty"`
+	// TokenSource is the same description the text view prints. EnvToken keeps
+	// its original meaning, "ENTIRE_TOKEN supplied the bearer";
+	// CredentialSource is the field to branch on: context, env_token or
+	// service_account (the last two have no revocable login session).
+	TokenSource      string `json:"token_source,omitempty"`
+	EnvToken         bool   `json:"env_token,omitempty"`
+	CredentialSource string `json:"credential_source,omitempty"`
 	// CurrentSessionID and ExpiresAt are present only when the caller's own
 	// session was identified; absent means unidentified, never "no expiry".
 	CurrentSessionID string `json:"current_session_id,omitempty"`
@@ -853,9 +865,11 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 	// name, and naming the keychain would assert a token is filed there.
 	if t.token != "" {
 		if t.envToken {
-			out.EnvToken = true
+			out.EnvToken = t.credential == auth.CredentialFromEnvToken
+			out.CredentialSource = string(t.credential)
 			out.TokenSource = auth.EnvCredentialSource()
 		} else {
+			out.CredentialSource = string(auth.CredentialFromContext)
 			out.TokenSource = tokenstore.BackendDescription()
 		}
 	}

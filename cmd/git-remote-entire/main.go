@@ -206,8 +206,8 @@ func statusMessage(status *transport.HTTPStatusError, cluster, repo string, uses
 	switch code := status.StatusCode; {
 	case code == http.StatusUnauthorized && usesEnvToken:
 		source := auth.EnvTokenVar
-		if _, ok := os.LookupEnv(auth.EnvTokenVar); !ok && os.Getenv(auth.ServiceAccountEnvVar) != "" {
-			source = "service account " + strings.TrimSpace(os.Getenv(auth.ServiceAccountEnvVar))
+		if auth.EnvCredential() == auth.CredentialFromServiceAccount {
+			source = auth.EnvCredentialSource()
 		}
 		return fmt.Sprintf("%s rejected %s%s", cluster, source, reason)
 	case code == http.StatusUnauthorized:

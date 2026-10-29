@@ -14,14 +14,18 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/entireio/auth-go/sts"
+	"github.com/entireio/auth-go/tokens"
 	"github.com/oklog/ulid/v2"
 
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -32,9 +36,8 @@ import (
 // exchanges it (RFC 8693, same endpoint as workload identity federation) for a
 // regular sa-session JWT, which then flows through every ENTIRE_TOKEN path.
 //
-// PROTOTYPE: the server side (key registration on the service account and the
-// assertion branch of the STS) does not exist yet. The wire format here is the
-// proposal; see ServiceAccountAssertionAudience and MintServiceAccountToken.
+// PROTOTYPE: the server side does not exist yet. The proposed contract is
+// docs/architecture/service-account-keys.md.
 
 // ServiceAccountEnvVar selects the service account whose locally stored key
 // authenticates this process. It is the opt-in: a key on disk is never used
@@ -44,7 +47,6 @@ const ServiceAccountEnvVar = "ENTIRE_SERVICE_ACCOUNT"
 
 const (
 	serviceAccountIDPrefix = "svc_"
-	serviceAccountKeyType  = "entire_service_account_key"
 
 	// saSessionTokenType is the requested_token_type the STS issues an
 	// sa-session JWT for (entiredb docs/entire-core/workload-identity-federation.md).
@@ -57,21 +59,17 @@ const (
 	// saSessionRefreshSkew re-exchanges this long before the session expires so
 	// a request started on a cached token does not die mid-flight.
 	saSessionRefreshSkew = 2 * time.Minute
+
+	// maxSASessionLifetime caps what the CLI will cache, whatever the server
+	// claims: a session that outlives this is treated as malformed.
+	maxSASessionLifetime = 24 * time.Hour
 )
 
-// ServiceAccountKey is the on-disk key file, stored 0600 in the per-user
-// config directory as service-account-<id>.json.
-type ServiceAccountKey struct {
-	Type           string `json:"type"`
-	ServiceAccount string `json:"service_account"`
-	// Server is the regional login server that owns the service account
-	// (service accounts are regional), e.g. https://us.auth.entire.io.
-	Server     string    `json:"server"`
-	KeyID      string    `json:"key_id"`
-	PrivateKey string    `json:"private_key"`
-	CreatedAt  time.Time `json:"created_at"`
-
-	signer ed25519.PrivateKey
+// CredentialEnvVars lists every variable that selects a non-interactive
+// credential. Test harnesses unset all of them so a developer's own
+// credential never reaches a test or a spawned binary.
+func CredentialEnvVars() []string {
+	return []string{EnvTokenVar, ServiceAccountEnvVar}
 }
 
 // ParseServiceAccountID validates id as svc_<ULID> and returns its canonical
@@ -89,23 +87,23 @@ func ParseServiceAccountID(id string) (string, error) {
 }
 
 // GenerateServiceAccountKey creates a fresh Ed25519 key for serviceAccount on
-// server. It does not persist it; see SaveServiceAccountKey.
-func GenerateServiceAccountKey(serviceAccount, server string, now time.Time) (*ServiceAccountKey, error) {
+// server. It does not persist it; see CreateServiceAccountKey.
+func GenerateServiceAccountKey(serviceAccount, server, name string, now time.Time) (*ServiceAccountKey, error) {
 	id, err := ParseServiceAccountID(serviceAccount)
 	if err != nil {
 		return nil, err
 	}
-	k, err := generateUnboundKey(server, now)
+	k, err := generateUnboundKey(server, name, now)
 	if err != nil {
 		return nil, err
 	}
-	k.ServiceAccount = id
+	k.serviceAccount = id
 	return k, nil
 }
 
 // generateUnboundKey creates a key not yet tied to a service account: the
 // enrollment flow learns the account only when an admin approves.
-func generateUnboundKey(server string, now time.Time) (*ServiceAccountKey, error) {
+func generateUnboundKey(server, name string, now time.Time) (*ServiceAccountKey, error) {
 	origin, err := normalizeServiceAccountServer(server)
 	if err != nil {
 		return nil, err
@@ -114,23 +112,21 @@ func generateUnboundKey(server string, now time.Time) (*ServiceAccountKey, error
 	if err != nil {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
-	der, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		return nil, fmt.Errorf("encode private key: %w", err)
-	}
 	return &ServiceAccountKey{
-		Type:       serviceAccountKeyType,
-		Server:     origin,
-		KeyID:      ed25519Thumbprint(pub),
-		PrivateKey: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
-		CreatedAt:  now.UTC(),
-		signer:     priv,
+		keyID:     ed25519Thumbprint(pub),
+		server:    origin,
+		name:      name,
+		createdAt: now.UTC(),
+		signer:    priv,
 	}, nil
 }
 
 // PublicKeyPEM is the PKIX PEM of the key's public half: what gets registered
 // on the service account (the same encoding plugin keys use).
 func (k *ServiceAccountKey) PublicKeyPEM() (string, error) {
+	if err := k.usable(); err != nil {
+		return "", err
+	}
 	der, err := x509.MarshalPKIXPublicKey(k.signer.Public())
 	if err != nil {
 		return "", fmt.Errorf("encode public key: %w", err)
@@ -138,112 +134,42 @@ func (k *ServiceAccountKey) PublicKeyPEM() (string, error) {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
 }
 
-func serviceAccountKeyFileName(id string) string {
-	return "service-account-" + id + ".json"
-}
-
-func serviceAccountTokenCacheName(id string) string {
-	return "service-account-" + id + ".session.json"
-}
-
-// ErrServiceAccountKeyExists is returned by SaveServiceAccountKey when a key
-// for that service account is already stored and overwrite was not requested.
-var ErrServiceAccountKeyExists = errors.New("a key for this service account already exists")
-
-// SaveServiceAccountKey writes k to the per-user config directory, 0600.
-// Replacing an existing key needs overwrite: the old key may still be the one
-// registered on the server.
-func SaveServiceAccountKey(k *ServiceAccountKey, overwrite bool) (string, error) {
-	root, err := userdirs.ConfigRoot()
-	if err != nil {
-		return "", fmt.Errorf("open config directory: %w", err)
-	}
-	name := serviceAccountKeyFileName(k.ServiceAccount)
-	if !overwrite {
-		if _, err := root.Lstat(name); err == nil {
-			return "", fmt.Errorf("%w (%s); pass --force to replace it", ErrServiceAccountKeyExists, name)
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("check existing key: %w", err)
-		}
-	}
-	data, err := jsonutil.MarshalIndentWithNewline(k, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode key file: %w", err)
-	}
-	if err := jsonutil.WriteFileAtomicIn(root, name, data, 0o600); err != nil {
-		return "", fmt.Errorf("write key file: %w", err)
-	}
-	return name, nil
-}
-
-// LoadServiceAccountKey reads the stored key for serviceAccount. A missing key
-// is reported with the command that creates one.
-func LoadServiceAccountKey(serviceAccount string) (*ServiceAccountKey, error) {
-	id, err := ParseServiceAccountID(serviceAccount)
-	if err != nil {
-		return nil, err
-	}
-	root, err := userdirs.ConfigRootForRead()
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("open config directory: %w", err)
-	}
-	var data []byte
-	if err == nil {
-		data, err = osroot.ReadFileNoFollow(root, serviceAccountKeyFileName(id))
-	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("no key stored for service account %s; create one with `entire auth service-account key create --service-account %s --server <login-server>`", id, id)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read key for service account %s: %w", id, err)
-	}
-	var k ServiceAccountKey
-	if err := json.Unmarshal(data, &k); err != nil {
-		return nil, fmt.Errorf("parse key for service account %s: %w", id, err)
-	}
-	if k.Type != serviceAccountKeyType || k.ServiceAccount != id {
-		return nil, fmt.Errorf("key file for service account %s is not a key for that service account", id)
-	}
-	if k.Server, err = normalizeServiceAccountServer(k.Server); err != nil {
-		return nil, fmt.Errorf("key for service account %s: %w", id, err)
-	}
-	block, _ := pem.Decode([]byte(k.PrivateKey))
-	if block == nil || block.Type != "PRIVATE KEY" {
-		return nil, fmt.Errorf("key for service account %s has no PEM private key", id)
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse private key for service account %s: %w", id, err)
-	}
-	signer, ok := parsed.(ed25519.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("key for service account %s is not an Ed25519 key", id)
-	}
-	pub, ok := signer.Public().(ed25519.PublicKey)
-	if !ok || ed25519Thumbprint(pub) != k.KeyID {
-		return nil, fmt.Errorf("key for service account %s does not match its key_id", id)
-	}
-	k.signer = signer
-	return &k, nil
-}
-
 // normalizeServiceAccountServer accepts a bare https origin (or loopback http,
-// or any http under --insecure-http-auth) and returns scheme://host.
+// or any http under --insecure-http-auth) and returns scheme://host. It runs
+// when a key is created; network calls re-check the scheme on every use.
 func normalizeServiceAccountServer(raw string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("login server %q must be an absolute URL such as https://us.auth.entire.io", raw)
+	origin, err := parseStoredServer(raw)
+	if err != nil {
+		return "", err
 	}
-	switch {
-	case u.Scheme == schemeHTTPS:
-	case u.Scheme == schemeHTTP && (isLoopbackHTTP(u.String()) || insecureHTTPEnabled()):
-	default:
-		return "", fmt.Errorf("login server %q must use https", u.Redacted())
+	if strings.HasPrefix(origin, schemeHTTP+"://") && !isLoopbackHTTP(origin) && !insecureHTTPEnabled() {
+		return "", fmt.Errorf("login server %q must use https (pass --insecure-http-auth for local development)", origin)
+	}
+	return origin, nil
+}
+
+// parseStoredServer checks only the shape of a stored key's server: a bare
+// http(s) origin. Whether plain HTTP may be used is decided per request, so a
+// key created under --insecure-http-auth can still be listed, shown and
+// deleted without the flag.
+func parseStoredServer(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || (u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP) {
+		return "", fmt.Errorf("login server %q must be an absolute https URL such as https://us.auth.entire.io", raw)
 	}
 	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("login server %q must be a bare origin", u.Redacted())
 	}
 	return u.Scheme + "://" + u.Host, nil
+}
+
+// requireKeyTransport refuses a key-signed request over plain HTTP unless it
+// targets loopback or the user opted in for this invocation.
+func requireKeyTransport(endpoint string) error {
+	if strings.HasPrefix(endpoint, schemeHTTPS+"://") || isLoopbackHTTP(endpoint) || insecureHTTPEnabled() {
+		return nil
+	}
+	return fmt.Errorf("refusing to send a key-signed request over plain HTTP to %s (pass --insecure-http-auth for local development)", endpoint)
 }
 
 // ServiceAccountAssertionAudience is the aud a key-signed assertion carries:
@@ -259,7 +185,10 @@ func ServiceAccountAssertionAudience(server string) string {
 // a short exp and a random jti for replay protection, and the key id in the
 // header so the server need not try every registered key.
 func (k *ServiceAccountKey) SignAssertion(now time.Time) (string, error) {
-	return k.signAssertion(now, k.ServiceAccount, ServiceAccountAssertionAudience(k.Server))
+	if k.serviceAccount == "" {
+		return "", fmt.Errorf("key %s is not bound to a service account yet", k.keyID)
+	}
+	return k.signAssertion(now, k.serviceAccount, ServiceAccountAssertionAudience(k.server))
 }
 
 // signAssertion signs a proof-of-possession JWT for one call. aud names that
@@ -267,11 +196,14 @@ func (k *ServiceAccountKey) SignAssertion(now time.Time) (string, error) {
 // one cannot be replayed against another. iss/sub is the service account, or
 // the key id while the key is not yet bound to one.
 func (k *ServiceAccountKey) signAssertion(now time.Time, subject, aud string) (string, error) {
+	if err := k.usable(); err != nil {
+		return "", err
+	}
 	jti := make([]byte, 16)
 	if _, err := rand.Read(jti); err != nil {
 		return "", fmt.Errorf("generate assertion id: %w", err)
 	}
-	header, err := json.Marshal(map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": k.KeyID})
+	header, err := json.Marshal(map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": k.keyID})
 	if err != nil {
 		return "", fmt.Errorf("encode assertion header: %w", err)
 	}
@@ -301,11 +233,18 @@ func ed25519Thumbprint(pub ed25519.PublicKey) string {
 
 // serviceAccountSession is the cached sa-session JWT, kept in the per-user
 // cache so every short-lived entire / git-remote-entire process does not pay
-// an exchange round trip.
+// an exchange round trip. It is keyed by key id and records the server and
+// account it was minted for; a mismatch on any of them is a cache miss.
 type serviceAccountSession struct {
-	KeyID       string    `json:"key_id"`
-	AccessToken string    `json:"access_token"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	Server         string    `json:"server"`
+	ServiceAccount string    `json:"service_account"`
+	KeyID          string    `json:"key_id"`
+	AccessToken    string    `json:"access_token"`
+	ExpiresAt      time.Time `json:"expires_at"`
+}
+
+func serviceAccountSessionName(keyID string) string {
+	return "service-account-session-" + keyID + ".json"
 }
 
 // serviceAccountExchange is the STS call; a var so tests can count calls
@@ -314,101 +253,198 @@ var serviceAccountExchange = mintServiceAccountSession
 
 // ServiceAccountToken returns a valid sa-session JWT for k, from the cache when
 // it is still fresh, otherwise by signing an assertion and exchanging it.
+// Concurrent processes on the same key share one exchange: the first takes a
+// per-key lock and the rest find its result in the cache.
 func ServiceAccountToken(ctx context.Context, k *ServiceAccountKey) (string, error) {
-	now := nowFunc()
-	if cached, ok := readServiceAccountSession(k); ok && cached.ExpiresAt.After(now.Add(saSessionRefreshSkew)) {
-		return cached.AccessToken, nil
+	if s, ok := readServiceAccountSession(k, nowFunc()); ok {
+		return s.AccessToken, nil
 	}
+	root, err := userdirs.CacheRoot()
+	if err != nil {
+		// No cache directory: still authenticate, just without sharing.
+		return exchangeServiceAccountSession(ctx, k, nil)
+	}
+	release, err := flock.AcquireContextIn(ctx, root, serviceAccountSessionName(k.keyID)+".lock")
+	if err != nil {
+		return "", fmt.Errorf("lock session cache: %w", err)
+	}
+	defer release()
+	if s, ok := readServiceAccountSession(k, nowFunc()); ok {
+		return s.AccessToken, nil
+	}
+	return exchangeServiceAccountSession(ctx, k, root)
+}
+
+// VerifyServiceAccountKey performs a fresh exchange with k, bypassing the
+// cache, to prove the server accepts it before it is made the active key.
+func VerifyServiceAccountKey(ctx context.Context, k *ServiceAccountKey) error {
+	root, err := userdirs.CacheRoot()
+	if err != nil {
+		root = nil
+	}
+	_, err = exchangeServiceAccountSession(ctx, k, root)
+	return err
+}
+
+func exchangeServiceAccountSession(ctx context.Context, k *ServiceAccountKey, cache *os.Root) (string, error) {
+	now := nowFunc()
 	session, err := serviceAccountExchange(ctx, k, now)
 	if err != nil {
 		return "", err
 	}
-	// The cache is an optimisation; failing to write it must not fail auth.
-	writeServiceAccountSession(k, session)
+	if err := validateServiceAccountSession(k, &session, now); err != nil {
+		return "", fmt.Errorf("service account %s: %s returned an unusable session token: %w", k.serviceAccount, k.server, err)
+	}
+	if cache != nil {
+		// The cache is an optimisation; failing to write it must not fail auth.
+		writeServiceAccountSession(cache, session)
+	}
 	return session.AccessToken, nil
 }
 
+// validateServiceAccountSession checks the minted token's unverified claims
+// before it is cached and sent anywhere: it must be for this account, aimed at
+// this server, and expire within maxSASessionLifetime. The server verifies the
+// signature; this only stops a confused or malicious response from being
+// cached as this account's identity or sent to another origin. The token's own
+// exp wins over the response's expires_in when it is earlier.
+func validateServiceAccountSession(k *ServiceAccountKey, s *serviceAccountSession, now time.Time) error {
+	claims, err := tokens.ParseClaims(s.AccessToken)
+	if err != nil {
+		return fmt.Errorf("parse claims: %w", err)
+	}
+	if claims.Subject != k.serviceAccount {
+		return fmt.Errorf("sub is %q, want %s", claims.Subject, k.serviceAccount)
+	}
+	if !slices.Contains(claims.Audience, k.server) {
+		return fmt.Errorf("aud %v does not include %s", claims.Audience, k.server)
+	}
+	if claims.ExpiresAt.IsZero() || !claims.ExpiresAt.After(now) || claims.ExpiresAt.After(now.Add(maxSASessionLifetime)) {
+		return fmt.Errorf("exp %s is not within %s of now", claims.ExpiresAt.Format(time.RFC3339), maxSASessionLifetime)
+	}
+	if s.ExpiresAt.IsZero() || claims.ExpiresAt.Before(s.ExpiresAt) {
+		s.ExpiresAt = claims.ExpiresAt
+	}
+	return nil
+}
+
 func mintServiceAccountSession(ctx context.Context, k *ServiceAccountKey, now time.Time) (serviceAccountSession, error) {
+	if err := requireKeyTransport(k.server); err != nil {
+		return serviceAccountSession{}, err
+	}
 	assertion, err := k.SignAssertion(now)
 	if err != nil {
 		return serviceAccountSession{}, err
 	}
+	// sts.Client refuses cross-host redirects itself, so the assertion (a
+	// bearer for its five minutes) never reaches another origin.
 	client, err := sts.New(&sts.Client{
-		BaseURL:           k.Server,
+		BaseURL:           k.server,
 		Path:              oauthTokenPath,
-		AllowInsecureHTTP: isLoopbackHTTP(k.Server) || insecureHTTPEnabled(),
+		AllowInsecureHTTP: isLoopbackHTTP(k.server) || insecureHTTPEnabled(),
 		UserAgent:         oauthClientID,
 	})
 	if err != nil {
-		return serviceAccountSession{}, fmt.Errorf("service account %s: %w", k.ServiceAccount, err)
+		return serviceAccountSession{}, fmt.Errorf("service account %s: %w", k.serviceAccount, err)
 	}
 	set, err := client.Exchange(ctx, sts.ExchangeRequest{
 		SubjectToken:       assertion,
 		SubjectTokenType:   sts.SubjectTokenTypeJWT,
 		RequestedTokenType: saSessionTokenType,
-		Audience:           k.Server,
-		Resource:           k.ServiceAccount,
+		Audience:           k.server,
+		Resource:           k.serviceAccount,
 		ClientID:           oauthClientID,
 	})
 	if err != nil {
-		return serviceAccountSession{}, fmt.Errorf("service account %s: exchange key assertion at %s: %w", k.ServiceAccount, k.Server, err)
+		return serviceAccountSession{}, fmt.Errorf("service account %s: exchange key assertion at %s: %w", k.serviceAccount, k.server, err)
 	}
 	if set.AccessToken == "" {
-		return serviceAccountSession{}, fmt.Errorf("service account %s: %s returned no access token", k.ServiceAccount, k.Server)
+		return serviceAccountSession{}, fmt.Errorf("service account %s: %s returned no access token", k.serviceAccount, k.server)
 	}
-	return serviceAccountSession{KeyID: k.KeyID, AccessToken: set.AccessToken, ExpiresAt: set.ExpiresAt}, nil
+	return serviceAccountSession{
+		Server:         k.server,
+		ServiceAccount: k.serviceAccount,
+		KeyID:          k.keyID,
+		AccessToken:    set.AccessToken,
+		ExpiresAt:      set.ExpiresAt,
+	}, nil
 }
 
-func readServiceAccountSession(k *ServiceAccountKey) (serviceAccountSession, bool) {
+func readServiceAccountSession(k *ServiceAccountKey, now time.Time) (serviceAccountSession, bool) {
 	root, err := userdirs.CacheRoot()
 	if err != nil {
 		return serviceAccountSession{}, false
 	}
-	data, err := osroot.ReadFileNoFollow(root, serviceAccountTokenCacheName(k.ServiceAccount))
+	data, err := osroot.ReadFileNoFollow(root, serviceAccountSessionName(k.keyID))
 	if err != nil {
 		return serviceAccountSession{}, false
 	}
 	var s serviceAccountSession
-	if json.Unmarshal(data, &s) != nil || s.KeyID != k.KeyID || s.AccessToken == "" {
+	if json.Unmarshal(data, &s) != nil ||
+		s.KeyID != k.keyID || s.Server != k.server || s.ServiceAccount != k.serviceAccount ||
+		s.AccessToken == "" || !s.ExpiresAt.After(now.Add(saSessionRefreshSkew)) {
 		return serviceAccountSession{}, false
 	}
 	return s, true
 }
 
-func writeServiceAccountSession(k *ServiceAccountKey, s serviceAccountSession) {
-	if s.ExpiresAt.IsZero() {
-		return
-	}
-	root, err := userdirs.CacheRoot()
-	if err != nil {
-		return
-	}
+func writeServiceAccountSession(root *os.Root, s serviceAccountSession) {
 	data, err := json.Marshal(s) //nolint:gosec // G117: this 0600 cache exists to hold the short-lived session token
 	if err != nil {
 		return
 	}
-	_ = jsonutil.WriteFileAtomicIn(root, serviceAccountTokenCacheName(k.ServiceAccount), data, 0o600) //nolint:errcheck // best-effort cache
+	_ = jsonutil.WriteFileAtomicIn(root, serviceAccountSessionName(s.KeyID), data, 0o600) //nolint:errcheck // best-effort cache
 }
 
-// EnvCredentialConfigured reports, without touching the network, whether this
-// process authenticates non-interactively: ENTIRE_TOKEN or ENTIRE_SERVICE_ACCOUNT
-// is set. Callers use it for wording ("context provided by …"), never as
-// permission to skip LookupEnvToken's errors.
-func EnvCredentialConfigured() bool {
-	if _, ok := os.LookupEnv(EnvTokenVar); ok {
-		return true
+// removeServiceAccountSession deletes the cached session of keyID. Unlike the
+// cache write, a failure is returned: a revoked key's session left on disk
+// would keep authenticating until it expires.
+func removeServiceAccountSession(keyID string) error {
+	root, err := userdirs.CacheRoot()
+	if err != nil {
+		return fmt.Errorf("open cache directory: %w", err)
 	}
-	_, ok := os.LookupEnv(ServiceAccountEnvVar)
-	return ok
+	if err := root.Remove(serviceAccountSessionName(keyID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove cached session: %w", err)
+	}
+	return nil
+}
+
+// CredentialSource names which credential a process authenticates with, for
+// status output and scripts.
+type CredentialSource string
+
+const (
+	CredentialFromContext        CredentialSource = "context"
+	CredentialFromEnvToken       CredentialSource = "env_token"
+	CredentialFromServiceAccount CredentialSource = "service_account"
+)
+
+// EnvCredential reports, without touching the network, which non-interactive
+// credential is configured: ENTIRE_TOKEN first, then ENTIRE_SERVICE_ACCOUNT,
+// otherwise CredentialFromContext. Callers use it for wording and provenance,
+// never as permission to skip LookupEnvToken's errors.
+func EnvCredential() CredentialSource {
+	if _, ok := os.LookupEnv(EnvTokenVar); ok {
+		return CredentialFromEnvToken
+	}
+	if _, ok := os.LookupEnv(ServiceAccountEnvVar); ok {
+		return CredentialFromServiceAccount
+	}
+	return CredentialFromContext
+}
+
+// EnvCredentialConfigured reports whether ENTIRE_TOKEN or
+// ENTIRE_SERVICE_ACCOUNT is set.
+func EnvCredentialConfigured() bool {
+	return EnvCredential() != CredentialFromContext
 }
 
 // EnvCredentialSource names where the non-interactive bearer comes from, for
 // status output. Only meaningful when EnvCredentialConfigured is true.
 func EnvCredentialSource() string {
-	if _, ok := os.LookupEnv(EnvTokenVar); !ok {
-		if id := strings.TrimSpace(os.Getenv(ServiceAccountEnvVar)); id != "" {
-			return "service account " + id + " (local key, " + ServiceAccountEnvVar + ")"
-		}
+	if EnvCredential() == CredentialFromServiceAccount {
+		return "service account " + tuiutil.SanitizeDisplayText(strings.TrimSpace(os.Getenv(ServiceAccountEnvVar))) + " (local key, " + ServiceAccountEnvVar + ")"
 	}
 	return EnvTokenVar + " environment variable"
 }
@@ -434,27 +470,24 @@ func LookupEnvToken(ctx context.Context) (string, bool, error) {
 }
 
 // ServiceAccountTarget is the control-plane target for ENTIRE_SERVICE_ACCOUNT:
-// the key's login server, and a bearer minted lazily on first use (so commands
-// that never authenticate never exchange). ok=false when the variable is unset
-// or ENTIRE_TOKEN, which takes precedence, is set. Loading the key does not
-// touch the network.
+// the active key's login server, and a bearer minted lazily on first use (so
+// commands that never authenticate never exchange). ok=false when the variable
+// is unset or ENTIRE_TOKEN, which takes precedence, is set. Loading the key
+// does not touch the network.
 func ServiceAccountTarget() (ControlPlaneTarget, bool, error) {
-	if _, ok := os.LookupEnv(EnvTokenVar); ok {
+	if EnvCredential() != CredentialFromServiceAccount {
 		return ControlPlaneTarget{}, false, nil
 	}
-	id, ok := os.LookupEnv(ServiceAccountEnvVar)
-	if !ok {
-		return ControlPlaneTarget{}, false, nil
-	}
+	id := os.Getenv(ServiceAccountEnvVar)
 	if strings.TrimSpace(id) == "" {
 		return ControlPlaneTarget{}, true, fmt.Errorf("%s is set but blank", ServiceAccountEnvVar)
 	}
-	k, err := LoadServiceAccountKey(id)
+	k, err := LoadActiveServiceAccountKey(id)
 	if err != nil {
 		return ControlPlaneTarget{}, true, fmt.Errorf("%s: %w", ServiceAccountEnvVar, err)
 	}
 	return ControlPlaneTarget{
-		CoreURL: k.Server,
+		CoreURL: k.server,
 		TokenSource: func(ctx context.Context) (string, error) {
 			token, err := ServiceAccountToken(ctx, k)
 			if err != nil {

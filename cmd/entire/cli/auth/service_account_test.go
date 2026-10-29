@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/x509"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,11 +32,20 @@ func isolateServiceAccountDirs(t *testing.T) string {
 	configDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv(EnvTokenVar, "")
-	os.Unsetenv(EnvTokenVar)
-	t.Setenv(ServiceAccountEnvVar, "")
-	os.Unsetenv(ServiceAccountEnvVar)
+	for _, name := range CredentialEnvVars() {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
 	return configDir
+}
+
+func newTestKey(t *testing.T, server string) *ServiceAccountKey {
+	t.Helper()
+	key, err := GenerateServiceAccountKey(testServiceAccount, server, "box-1", nowFunc())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }
 
 func TestParseServiceAccountID(t *testing.T) {
@@ -50,22 +61,19 @@ func TestParseServiceAccountID(t *testing.T) {
 	}
 }
 
-func TestServiceAccountKey_SaveLoadRoundTrip(t *testing.T) {
+func TestCreateServiceAccountKey_FirstActivatesLaterStayInactive(t *testing.T) {
 	configDir := isolateServiceAccountDirs(t)
+	ctx := context.Background()
 
-	key, err := GenerateServiceAccountKey(testServiceAccount, "https://us.auth.example.com/", time.Now())
-	if err != nil {
-		t.Fatal(err)
+	first := newTestKey(t, "https://us.auth.example.com/")
+	if first.Server() != "https://us.auth.example.com" {
+		t.Fatalf("server = %q, want bare origin", first.Server())
 	}
-	if key.Server != "https://us.auth.example.com" {
-		t.Fatalf("server = %q, want bare origin", key.Server)
-	}
-	name, err := SaveServiceAccountKey(key, false)
-	if err != nil {
-		t.Fatal(err)
+	if activated, err := CreateServiceAccountKey(ctx, first); err != nil || !activated {
+		t.Fatalf("first key: activated %v err %v; want it active", activated, err)
 	}
 	if runtime.GOOS != "windows" {
-		info, err := os.Stat(filepath.Join(configDir, name))
+		info, err := os.Stat(filepath.Join(configDir, ServiceAccountKeyFileName(first.KeyID())))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,36 +82,216 @@ func TestServiceAccountKey_SaveLoadRoundTrip(t *testing.T) {
 		}
 	}
 
-	if _, err := SaveServiceAccountKey(key, false); !errors.Is(err, ErrServiceAccountKeyExists) {
-		t.Fatalf("second save without overwrite: err = %v, want ErrServiceAccountKeyExists", err)
+	second := newTestKey(t, "https://us.auth.example.com")
+	if activated, err := CreateServiceAccountKey(ctx, second); err != nil || activated {
+		t.Fatalf("second key: activated %v err %v; an existing active key must not be displaced", activated, err)
 	}
-
-	loaded, err := LoadServiceAccountKey(testServiceAccount)
-	if err != nil {
-		t.Fatal(err)
+	active, err := LoadActiveServiceAccountKey(testServiceAccount)
+	if err != nil || active.KeyID() != first.KeyID() {
+		t.Fatalf("active key = %v, %v; want the first key", active, err)
 	}
-	if loaded.KeyID != key.KeyID || loaded.Server != key.Server {
-		t.Fatalf("loaded key = %+v, want key id %q server %q", loaded, key.KeyID, key.Server)
-	}
-	wantPub, _ := key.PublicKeyPEM()   //nolint:errcheck // compared below
-	gotPub, _ := loaded.PublicKeyPEM() //nolint:errcheck // compared below
+	wantPub, _ := first.PublicKeyPEM() //nolint:errcheck // compared below
+	gotPub, _ := active.PublicKeyPEM() //nolint:errcheck // compared below
 	if gotPub != wantPub {
 		t.Fatal("loaded key has a different public key")
 	}
+	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{first.KeyID(): KeyActive, second.KeyID(): KeyInactive})
 }
 
-func TestLoadServiceAccountKey_MissingNamesCreateCommand(t *testing.T) {
+func assertKeyStatuses(t *testing.T, want map[string]ServiceAccountKeyStatus) {
+	t.Helper()
+	keys, err := ListServiceAccountKeys("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]ServiceAccountKeyStatus{}
+	for _, k := range keys {
+		got[k.Key.KeyID()] = k.Status
+	}
+	if len(got) != len(want) {
+		t.Fatalf("stored keys = %v, want %v", got, want)
+	}
+	for id, status := range want {
+		if got[id] != status {
+			t.Fatalf("key %s status = %q, want %q (all: %v)", id, got[id], status, got)
+		}
+	}
+}
+
+// The exclusive create must never replace a stored key, even the same one.
+func TestCreateServiceAccountKey_NeverOverwrites(t *testing.T) {
+	configDir := isolateServiceAccountDirs(t)
+	key := newTestKey(t, "https://us.auth.example.com")
+	if _, err := CreateServiceAccountKey(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, ServiceAccountKeyFileName(key.KeyID()))
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateServiceAccountKey(context.Background(), key); !errors.Is(err, ErrServiceAccountKeyExists) {
+		t.Fatalf("second create: err = %v, want ErrServiceAccountKeyExists", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("key file changed by a refused create (err %v)", err)
+	}
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Fatalf("temp file %s left behind", e.Name())
+		}
+	}
+}
+
+// Concurrent creates for one account: every key is stored and exactly one is
+// active. Before the lock, check-then-rename let one write replace another.
+func TestCreateServiceAccountKey_ConcurrentCreatesKeepEveryKey(t *testing.T) {
 	isolateServiceAccountDirs(t)
-	_, err := LoadServiceAccountKey(testServiceAccount)
-	if err == nil || !strings.Contains(err.Error(), "entire auth service-account key create") {
-		t.Fatalf("err = %v, want the create hint", err)
+	const n = 8
+	keys := make([]*ServiceAccountKey, n)
+	for i := range keys {
+		keys[i] = newTestKey(t, "https://us.auth.example.com")
+	}
+	var wg sync.WaitGroup
+	var activated atomic.Int32
+	errs := make(chan error, n)
+	for _, k := range keys {
+		wg.Go(func() {
+			ok, err := CreateServiceAccountKey(context.Background(), k)
+			if err != nil {
+				errs <- err
+			}
+			if ok {
+				activated.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if got := activated.Load(); got != 1 {
+		t.Fatalf("%d keys activated, want exactly 1", got)
+	}
+	stored, err := ListServiceAccountKeys(testServiceAccount)
+	if err != nil || len(stored) != n {
+		t.Fatalf("stored %d keys (err %v), want %d", len(stored), err, n)
+	}
+}
+
+func TestActivateServiceAccountKey_SwitchesAndRetiresPrevious(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	ctx := context.Background()
+	oldKey := newTestKey(t, "https://us.auth.example.com")
+	newKey := newTestKey(t, "https://us.auth.example.com")
+	for _, k := range []*ServiceAccountKey{oldKey, newKey} {
+		if _, err := CreateServiceAccountKey(ctx, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	previous, err := ActivateServiceAccountKey(ctx, newKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous == nil || previous.KeyID() != oldKey.KeyID() {
+		t.Fatalf("previous = %v, want the old key returned for revocation", previous)
+	}
+	active, err := LoadActiveServiceAccountKey(testServiceAccount)
+	if err != nil || active.KeyID() != newKey.KeyID() {
+		t.Fatalf("active = %v, %v; want the new key", active, err)
+	}
+	// The retired key is still on disk and can still sign its own revoke.
+	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{oldKey.KeyID(): KeyRetired, newKey.KeyID(): KeyActive})
+	if _, err := previous.signAssertion(time.Now(), testServiceAccount, "https://x/revoke"); err != nil {
+		t.Fatalf("retired key cannot sign its revoke: %v", err)
+	}
+	if _, err := ActivateServiceAccountKey(ctx, previous); err == nil {
+		t.Fatal("a retired key was re-activated")
+	}
+
+	if err := DeleteServiceAccountKey(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadActiveServiceAccountKey(testServiceAccount); err == nil || !strings.Contains(err.Error(), "entire auth service-account enroll") {
+		t.Fatalf("after deleting the active key: err = %v, want the enroll hint", err)
+	}
+	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{oldKey.KeyID(): KeyRetired})
+}
+
+func TestReadKeyFile_WarnsOnLoosePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no unix permission bits")
+	}
+	configDir := isolateServiceAccountDirs(t)
+	var warn bytes.Buffer
+	prev := keyPermsWarnW
+	keyPermsWarnW = &warn
+	t.Cleanup(func() { keyPermsWarnW = prev })
+
+	key := newTestKey(t, "https://us.auth.example.com")
+	if _, err := CreateServiceAccountKey(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(configDir, ServiceAccountKeyFileName(key.KeyID())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadActiveServiceAccountKey(testServiceAccount); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(warn.String(), "accessible by group/others") {
+		t.Fatalf("warning = %q, want a loose-permission warning", warn.String())
+	}
+}
+
+func TestServiceAccountKey_ZeroValueErrorsInsteadOfPanicking(t *testing.T) {
+	t.Parallel()
+	var k ServiceAccountKey
+	if _, err := k.PublicKeyPEM(); err == nil {
+		t.Error("PublicKeyPEM on a zero key succeeded")
+	}
+	if _, err := k.SignAssertion(time.Now()); err == nil {
+		t.Error("SignAssertion on a zero key succeeded")
+	}
+	if _, err := k.signAssertion(time.Now(), "x", "y"); err == nil {
+		t.Error("signAssertion on a zero key succeeded")
+	}
+}
+
+// A key created for a plain-HTTP dev server under --insecure-http-auth must
+// stay listable and deletable without the flag; only network use needs it.
+func TestServiceAccountKey_InsecureServerUsableOnlyWithOptIn(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	insecureHTTPOverride.Store(true)
+	t.Cleanup(func() { insecureHTTPOverride.Store(false) })
+	key := newTestKey(t, "http://dev-core.internal:8080")
+	if _, err := CreateServiceAccountKey(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	insecureHTTPOverride.Store(false)
+
+	loaded, err := LoadActiveServiceAccountKey(testServiceAccount)
+	if err != nil {
+		t.Fatalf("loading a dev-server key without the flag: %v", err)
+	}
+	if _, err := mintServiceAccountSession(context.Background(), loaded, time.Now()); err == nil || !strings.Contains(err.Error(), "plain HTTP") {
+		t.Fatalf("exchange without the flag: err = %v, want a plain-HTTP refusal", err)
+	}
+	if err := RevokeServiceAccountKey(context.Background(), loaded); err == nil || !strings.Contains(err.Error(), "plain HTTP") {
+		t.Fatalf("revoke without the flag: err = %v, want a plain-HTTP refusal", err)
 	}
 }
 
 func TestGenerateServiceAccountKey_RejectsInsecureOrNonOriginServer(t *testing.T) {
 	t.Parallel()
-	for _, server := range []string{"http://auth.example.com", "https://auth.example.com/path", "https://user@auth.example.com", "auth.example.com"} {
-		if _, err := GenerateServiceAccountKey(testServiceAccount, server, time.Now()); err == nil {
+	for _, server := range []string{"http://auth.example.com", "https://auth.example.com/path", "https://user@auth.example.com", "auth.example.com", "ftp://auth.example.com"} {
+		if _, err := GenerateServiceAccountKey(testServiceAccount, server, "", time.Now()); err == nil {
 			t.Errorf("server %q accepted, want error", server)
 		}
 	}
@@ -111,7 +299,7 @@ func TestGenerateServiceAccountKey_RejectsInsecureOrNonOriginServer(t *testing.T
 
 func TestSignAssertion_VerifiesAndCarriesClaims(t *testing.T) {
 	t.Parallel()
-	key, err := GenerateServiceAccountKey(testServiceAccount, "https://us.auth.example.com", time.Now())
+	key, err := GenerateServiceAccountKey(testServiceAccount, "https://us.auth.example.com", "", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +309,7 @@ func TestSignAssertion_VerifiesAndCarriesClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	header, claims := verifyTestAssertion(t, key, assertion)
-	if header["alg"] != "EdDSA" || header["kid"] != key.KeyID {
+	if header["alg"] != "EdDSA" || header["kid"] != key.KeyID() {
 		t.Fatalf("header = %v", header)
 	}
 	if claims["iss"] != testServiceAccount || claims["sub"] != testServiceAccount {
@@ -156,6 +344,9 @@ func verifyTestAssertion(t *testing.T, key *ServiceAccountKey, assertion string)
 func verifyTestAssertionPEM(t *testing.T, pubPEM, assertion string) (header, claims map[string]any) {
 	t.Helper()
 	block, _ := pem.Decode([]byte(pubPEM))
+	if block == nil {
+		t.Fatal("no PEM public key")
+	}
 	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
 		t.Fatal(err)
@@ -191,108 +382,205 @@ func decodeTestSegment(t *testing.T, seg string) map[string]any {
 	return m
 }
 
-// testSessionJWT is a JWT shaped like an sa-session token. The CLI only reads
-// its aud (ParseEnvToken, which refuses alg:none), so the signature is junk.
-func testSessionJWT(aud string) string {
+// testSessionJWT is a JWT shaped like an sa-session token. The CLI reads only
+// its claims, so the signature is junk.
+func testSessionJWT(sub, aud string, exp time.Time) string {
 	enc := base64.RawURLEncoding.EncodeToString
-	return enc([]byte(`{"alg":"EdDSA","typ":"JWT"}`)) + "." + enc([]byte(`{"sub":"`+testServiceAccount+`","aud":"`+aud+`"}`)) + "." + enc([]byte("sig"))
+	claims := fmt.Sprintf(`{"sub":%q,"aud":%q,"exp":%d}`, sub, aud, exp.Unix())
+	return enc([]byte(`{"alg":"EdDSA","typ":"JWT"}`)) + "." + enc([]byte(claims)) + "." + enc([]byte("sig"))
 }
 
-// newFakeSTS serves /oauth/token, verifying the request the way the proposed
-// server branch would, and counts exchanges.
-func newFakeSTS(t *testing.T, key **ServiceAccountKey, calls *atomic.Int32, reject bool) *httptest.Server {
+// fakeSTS serves /oauth/token, verifying the request the way the proposed
+// server branch would, and counts exchanges. session overrides the minted
+// token (for the claim-validation tests).
+type fakeSTS struct {
+	t       *testing.T
+	srv     *httptest.Server
+	key     *ServiceAccountKey
+	calls   atomic.Int32
+	reject  bool
+	session func(server string) string
+}
+
+func newFakeSTS(t *testing.T) *fakeSTS {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/oauth/token" {
-			http.NotFound(w, r)
-			return
-		}
-		calls.Add(1)
-		if err := r.ParseForm(); err != nil {
-			t.Errorf("parse form: %v", err)
-		}
-		if reject {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"error":"invalid_grant"}`)
-			return
-		}
-		if id, _, ok := r.BasicAuth(); !ok || id != OAuthClientID {
-			t.Errorf("client basic auth = %q, %v; want %s", id, ok, OAuthClientID)
-		}
-		want := map[string]string{
-			"grant_type":           "urn:ietf:params:oauth:grant-type:token-exchange",
-			"subject_token_type":   "urn:ietf:params:oauth:token-type:jwt",
-			"requested_token_type": saSessionTokenType,
-			"resource":             testServiceAccount,
-			"audience":             (*key).Server,
-		}
-		for field, v := range want {
-			if got := r.PostForm.Get(field); got != v {
-				t.Errorf("%s = %q, want %q", field, got, v)
-			}
-		}
-		_, claims := verifyTestAssertion(t, *key, r.PostForm.Get("subject_token"))
-		if claims["aud"] != ServiceAccountAssertionAudience((*key).Server) {
-			t.Errorf("assertion aud = %v", claims["aud"])
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"access_token":%q,"token_type":"Bearer","expires_in":3600}`, testSessionJWT("https://us.auth.example.com"))
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	f := &fakeSTS{t: t}
+	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(f.srv.Close)
+	return f
 }
 
-func setupServiceAccountWithSTS(t *testing.T, reject bool) (*atomic.Int32, *ServiceAccountKey) {
+func (f *fakeSTS) serve(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/oauth/token" {
+		http.NotFound(w, r)
+		return
+	}
+	f.calls.Add(1)
+	if err := r.ParseForm(); err != nil {
+		f.t.Errorf("parse form: %v", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if f.reject {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"invalid_grant"}`)
+		return
+	}
+	if id, _, ok := r.BasicAuth(); !ok || id != OAuthClientID {
+		f.t.Errorf("client basic auth = %q, %v; want %s", id, ok, OAuthClientID)
+	}
+	want := map[string]string{
+		"grant_type":           "urn:ietf:params:oauth:grant-type:token-exchange",
+		"subject_token_type":   "urn:ietf:params:oauth:token-type:jwt",
+		"requested_token_type": saSessionTokenType,
+		"resource":             testServiceAccount,
+		"audience":             f.key.Server(),
+	}
+	for field, v := range want {
+		if got := r.PostForm.Get(field); got != v {
+			f.t.Errorf("%s = %q, want %q", field, got, v)
+		}
+	}
+	_, claims := verifyTestAssertion(f.t, f.key, r.PostForm.Get("subject_token"))
+	if claims["aud"] != ServiceAccountAssertionAudience(f.key.Server()) {
+		f.t.Errorf("assertion aud = %v", claims["aud"])
+	}
+	token := testSessionJWT(testServiceAccount, f.key.Server(), nowFunc().Add(time.Hour))
+	if f.session != nil {
+		token = f.session(f.key.Server())
+	}
+	fmt.Fprintf(w, `{"access_token":%q,"token_type":"Bearer","expires_in":3600}`, token)
+}
+
+func setupServiceAccountWithSTS(t *testing.T) (*fakeSTS, *ServiceAccountKey) {
 	t.Helper()
 	isolateServiceAccountDirs(t)
-	var calls atomic.Int32
-	var key *ServiceAccountKey
-	srv := newFakeSTS(t, &key, &calls, reject)
-	var err error
-	key, err = GenerateServiceAccountKey(testServiceAccount, srv.URL, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := SaveServiceAccountKey(key, false); err != nil {
+	f := newFakeSTS(t)
+	f.key = newTestKey(t, f.srv.URL)
+	if _, err := CreateServiceAccountKey(context.Background(), f.key); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(ServiceAccountEnvVar, testServiceAccount)
-	return &calls, key
+	return f, f.key
 }
 
-func TestLookupEnvToken_ServiceAccountExchangesThenCaches(t *testing.T) {
-	calls, _ := setupServiceAccountWithSTS(t, false)
+func pinClock(t *testing.T) *time.Time {
+	t.Helper()
 	now := time.Now()
 	nowFunc = func() time.Time { return now }
 	t.Cleanup(func() { nowFunc = time.Now })
+	return &now
+}
+
+func TestLookupEnvToken_ServiceAccountExchangesThenCaches(t *testing.T) {
+	now := pinClock(t)
+	sts, key := setupServiceAccountWithSTS(t)
 
 	raw, ok, err := LookupEnvToken(context.Background())
 	if err != nil || !ok {
 		t.Fatalf("LookupEnvToken = ok %v, err %v", ok, err)
 	}
-	if core, _, err := ParseEnvToken(raw); err != nil || core != "https://us.auth.example.com" {
-		t.Fatalf("minted token does not pass ParseEnvToken: core %q, err %v", core, err)
+	if claims := decodeTestSegment(t, strings.Split(raw, ".")[1]); claims["aud"] != key.Server() {
+		t.Fatalf("minted token aud = %v, want %s", claims["aud"], key.Server())
 	}
 	if _, _, err := LookupEnvToken(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := calls.Load(); got != 1 {
+	if got := sts.calls.Load(); got != 1 {
 		t.Fatalf("exchanges = %d, want 1 (second lookup must use the cache)", got)
 	}
 
 	// Inside the refresh skew the cached session is no longer handed out.
-	now = now.Add(time.Hour - saSessionRefreshSkew + time.Second)
+	*now = now.Add(time.Hour - saSessionRefreshSkew + time.Second)
 	if _, _, err := LookupEnvToken(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := calls.Load(); got != 2 {
+	if got := sts.calls.Load(); got != 2 {
 		t.Fatalf("exchanges = %d, want 2 after the cached session neared expiry", got)
 	}
 }
 
+// Concurrent processes on one key share one exchange through the cache lock.
+func TestServiceAccountToken_ConcurrentCallersShareOneExchange(t *testing.T) {
+	sts, key := setupServiceAccountWithSTS(t)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if _, err := ServiceAccountToken(context.Background(), key); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if got := sts.calls.Load(); got != 1 {
+		t.Fatalf("exchanges = %d, want 1", got)
+	}
+}
+
+func TestServiceAccountToken_RejectsUnusableSessions(t *testing.T) {
+	for name, session := range map[string]func(server string) string{
+		"another subject": func(server string) string {
+			return testSessionJWT("svc_01HKZ3J4N5P6Q7R8S9T0V1W2X4", server, time.Now().Add(time.Hour))
+		},
+		"another audience": func(string) string {
+			return testSessionJWT(testServiceAccount, "https://evil.example.com", time.Now().Add(time.Hour))
+		},
+		"already expired": func(server string) string {
+			return testSessionJWT(testServiceAccount, server, time.Now().Add(-time.Minute))
+		},
+		"far future": func(server string) string {
+			return testSessionJWT(testServiceAccount, server, time.Now().Add(30*24*time.Hour))
+		},
+		"not a JWT": func(string) string { return "opaque" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			sts, key := setupServiceAccountWithSTS(t)
+			sts.session = session
+			if _, err := ServiceAccountToken(context.Background(), key); err == nil || !strings.Contains(err.Error(), "unusable session token") {
+				t.Fatalf("err = %v, want the session to be refused", err)
+			}
+			if _, ok := readServiceAccountSession(key, time.Now()); ok {
+				t.Fatal("a refused session was cached")
+			}
+		})
+	}
+}
+
+// A cache entry is bound to server, account and key id: a file edited to
+// claim another server is a miss, not a token sent there.
+func TestServiceAccountToken_CacheBoundToServerAndAccount(t *testing.T) {
+	sts, key := setupServiceAccountWithSTS(t)
+	if _, err := ServiceAccountToken(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "entire")
+	path := filepath.Join(cacheDir, serviceAccountSessionName(key.KeyID()))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read cache (looked in %s): %v", cacheDir, err)
+	}
+	var s serviceAccountSession
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatal(err)
+	}
+	s.Server = "https://other.example.com"
+	tampered, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ServiceAccountToken(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if got := sts.calls.Load(); got != 2 {
+		t.Fatalf("exchanges = %d, want 2: a cache entry for another server must not be used", got)
+	}
+}
+
 func TestLookupEnvToken_ServiceAccountRejectedFailsClosed(t *testing.T) {
-	setupServiceAccountWithSTS(t, true)
+	sts, _ := setupServiceAccountWithSTS(t)
+	sts.reject = true
 	_, ok, err := LookupEnvToken(context.Background())
 	if !ok {
 		t.Fatal("ok = false; a configured service account must commit the caller to the env path")
@@ -303,7 +591,7 @@ func TestLookupEnvToken_ServiceAccountRejectedFailsClosed(t *testing.T) {
 }
 
 func TestLookupEnvToken_Precedence(t *testing.T) {
-	calls, _ := setupServiceAccountWithSTS(t, false)
+	sts, _ := setupServiceAccountWithSTS(t)
 
 	t.Setenv(EnvTokenVar, "explicit-token")
 	raw, ok, err := LookupEnvToken(context.Background())
@@ -313,11 +601,17 @@ func TestLookupEnvToken_Precedence(t *testing.T) {
 	if _, ok, _ := ServiceAccountTarget(); ok { //nolint:errcheck // only ok matters
 		t.Fatal("ServiceAccountTarget ok while ENTIRE_TOKEN is set")
 	}
-	if calls.Load() != 0 {
+	if EnvCredential() != CredentialFromEnvToken {
+		t.Fatalf("EnvCredential = %q, want env_token", EnvCredential())
+	}
+	if sts.calls.Load() != 0 {
 		t.Fatal("service account exchanged although ENTIRE_TOKEN wins")
 	}
 
 	os.Unsetenv(EnvTokenVar)
+	if EnvCredential() != CredentialFromServiceAccount {
+		t.Fatalf("EnvCredential = %q, want service_account", EnvCredential())
+	}
 	t.Setenv(ServiceAccountEnvVar, " ")
 	if _, ok, err := LookupEnvToken(context.Background()); !ok || err == nil {
 		t.Fatalf("blank %s: ok %v err %v; want a fail-closed error", ServiceAccountEnvVar, ok, err)
@@ -329,20 +623,49 @@ func TestLookupEnvToken_Precedence(t *testing.T) {
 	}
 }
 
+// A configured account with no key on disk fails closed: no exchange, no
+// fall-back to a stored login.
+func TestLookupEnvToken_ServiceAccountWithoutKeyFailsClosed(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	t.Setenv(ServiceAccountEnvVar, testServiceAccount)
+	_, ok, err := LookupEnvToken(context.Background())
+	if !ok || err == nil || !strings.Contains(err.Error(), "no active key") {
+		t.Fatalf("ok %v err %v; want a fail-closed missing-key error", ok, err)
+	}
+}
+
 func TestServiceAccountToken_CacheIgnoredAfterKeyRotation(t *testing.T) {
-	calls, key := setupServiceAccountWithSTS(t, false)
+	sts, key := setupServiceAccountWithSTS(t)
 	if _, err := ServiceAccountToken(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := GenerateServiceAccountKey(testServiceAccount, key.Server, time.Now())
-	if err != nil {
+	rotated := newTestKey(t, key.Server())
+	sts.key = rotated
+	if _, err := ServiceAccountToken(context.Background(), rotated); err != nil {
 		t.Fatal(err)
 	}
-	*key = *rotated // the fake STS verifies against the current key
-	if _, err := ServiceAccountToken(context.Background(), key); err != nil {
-		t.Fatal(err)
-	}
-	if got := calls.Load(); got != 2 {
+	if got := sts.calls.Load(); got != 2 {
 		t.Fatalf("exchanges = %d, want 2: a session minted by the old key must not be reused", got)
+	}
+}
+
+// The STS exchange carries a bearer assertion: a redirect must not forward it
+// to another origin. auth-go's sts.Client enforces this; the test pins it.
+func TestMintServiceAccountSession_RefusesRedirect(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	var leaked atomic.Int32
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { leaked.Add(1) }))
+	t.Cleanup(elsewhere.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	key := newTestKey(t, redirector.URL)
+	if _, err := mintServiceAccountSession(context.Background(), key, time.Now()); err == nil {
+		t.Fatal("a redirected exchange succeeded")
+	}
+	if leaked.Load() != 0 {
+		t.Fatal("the assertion was forwarded to the redirect target")
 	}
 }

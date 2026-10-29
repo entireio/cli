@@ -267,7 +267,7 @@ func TestRunAuthStatusJSON_ContextCountDistinguishesZeroFromUncounted(t *testing
 		t.Errorf("available_contexts = %d, want 0", *got.AvailableContexts)
 	}
 
-	env := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true}
+	env := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true, credential: auth.CredentialFromEnvToken}
 	envGot := decodeAuthStatusJSON(t, okProfile, unusedSessions(t), env, authStatusOptions{})
 	if envGot.AvailableContexts != nil {
 		t.Errorf("available_contexts = %d, want absent — env-token mode never counted them", *envGot.AvailableContexts)
@@ -291,7 +291,7 @@ func TestRunAuthStatusJSON_NotLoggedIn(t *testing.T) {
 func TestRunAuthStatusJSON_EnvTokenHasNoSessions(t *testing.T) {
 	t.Parallel()
 
-	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true}
+	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true, credential: auth.CredentialFromEnvToken}
 	list := func(context.Context, string, string) ([]api.AuthSession, error) {
 		t.Helper()
 		t.Fatal("listSessions must not be called in ENTIRE_TOKEN mode")
@@ -304,6 +304,33 @@ func TestRunAuthStatusJSON_EnvTokenHasNoSessions(t *testing.T) {
 	}
 	if got.ActiveSessions != nil || got.CurrentSessionID != "" || got.ExpiresAt != "" {
 		t.Errorf("got %+v, want no session fields for an env bearer", got)
+	}
+}
+
+// A key-minted service-account bearer is not ENTIRE_TOKEN: env_token keeps its
+// meaning and credential_source names the real provenance.
+func TestRunAuthStatusJSON_ServiceAccountIsNotEnvToken(t *testing.T) {
+	t.Parallel()
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true, credential: auth.CredentialFromServiceAccount}
+	list := func(context.Context, string, string) ([]api.AuthSession, error) {
+		t.Helper()
+		t.Fatal("listSessions must not be called for a service-account bearer")
+		return nil, nil
+	}
+
+	got := decodeAuthStatusJSON(t, okProfile, list, target, authStatusOptions{})
+	if got.EnvToken {
+		t.Error("env_token = true, want false: ENTIRE_TOKEN did not supply this bearer")
+	}
+	if got.CredentialSource != "service_account" {
+		t.Errorf("credential_source = %q, want service_account", got.CredentialSource)
+	}
+
+	none := func(context.Context, string, string) ([]api.AuthSession, error) { return nil, nil }
+	stored := decodeAuthStatusJSON(t, okProfile, none, statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "work", totalContexts: 1}, authStatusOptions{})
+	if stored.EnvToken || stored.CredentialSource != "context" {
+		t.Errorf("stored login: env_token=%v credential_source=%q, want false/context", stored.EnvToken, stored.CredentialSource)
 	}
 }
 
@@ -525,7 +552,7 @@ func TestRunAuthStatus_NoJurisdictionAnywhere(t *testing.T) {
 func TestRunAuthStatus_EnvTokenMode(t *testing.T) {
 	t.Parallel()
 
-	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true}
+	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true, credential: auth.CredentialFromEnvToken}
 	listSessions := func(context.Context, string, string) ([]api.AuthSession, error) {
 		t.Helper()
 		t.Fatal("listSessions must not be called in ENTIRE_TOKEN mode")
@@ -1415,7 +1442,7 @@ func TestBuildAuthStatusJSON_UserIsTheWireHandle(t *testing.T) {
 func TestBuildAuthStatusJSON_EnvTokenSurvivesAnInvalidBearer(t *testing.T) {
 	t.Parallel()
 
-	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true}
+	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true, credential: auth.CredentialFromEnvToken}
 	got := buildAuthStatusJSON(authStatusData{target: target, invalid: true, current: -1}, authStatusOptions{})
 	if !got.EnvToken {
 		t.Error("env_token = false, want it reported for a rejected env bearer")

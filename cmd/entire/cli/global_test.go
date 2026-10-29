@@ -86,8 +86,13 @@ func TestMain(m *testing.M) {
 	// which ParseEnvToken maps to errEntireEnvTokenRejected, whose guidance also
 	// carries the git-config line the tests look for — so they would pass
 	// without exercising the path they exist to pin.
-	if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
-		panic(fmt.Errorf("failed to unset %s: %w", auth.EnvTokenVar, err))
+	//
+	// ENTIRE_SERVICE_ACCOUNT has the same precedence over stored logins, so
+	// every credential selector goes, from the one shared list.
+	for _, name := range auth.CredentialEnvVars() {
+		if err := os.Unsetenv(name); err != nil {
+			panic(fmt.Errorf("failed to unset %s: %w", name, err))
+		}
 	}
 
 	// Tests steer the agents' homes through HOME and ENTIRE_TEST_*_PROJECT_DIR;
