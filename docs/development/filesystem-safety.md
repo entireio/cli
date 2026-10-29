@@ -310,6 +310,10 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 | per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |
 | managed plugin tree | `pluginRoot` (`plugin_store.go`) | `pluginParentDir()` — `$ENTIRE_PLUGIN_DIR`, `%LOCALAPPDATA%`, or `$XDG_DATA_HOME` |
 
+The per-user cache's `session-homes/` directory belongs to
+`session/home_index.go`. Its records are pointers only: readers resolve the
+named worktree's repository through git and load the session from there.
+
 **An `os.Root`'s base directory must always be a trusted path — one a resolver
 produced — never `filepath.Dir` of the file being opened, and never a path that
 arrived as data.** This is the rule the table above encodes, and it is the one

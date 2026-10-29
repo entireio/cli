@@ -1386,6 +1386,21 @@ func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateS
 	return newStateStoreAt(commonDir), nil
 }
 
+// NewStateStoreForCommonDir returns the state store in an already-resolved git
+// common dir, for a caller that verified commonDir independently of the process
+// CWD (a commit hook reading the state of a session homed in another
+// repository). commonDir must be absolute and clean: it is the trusted root
+// the store opens on, never a path derived from the state directory itself.
+func NewStateStoreForCommonDir(commonDir string) (*StateStore, error) {
+	if !filepath.IsAbs(commonDir) || filepath.Clean(commonDir) != commonDir {
+		return nil, fmt.Errorf("git common dir %q must be an absolute, clean path", commonDir)
+	}
+	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
+		return nil, err
+	}
+	return newStateStoreAt(commonDir), nil
+}
+
 // ensureTestIsolatedStateDir fails loud when `go test` code reaches a
 // session state directory outside the temp root: the test is missing repo
 // isolation (testutil.InitRepo + t.Chdir, or NewStateStoreForWorktree /
@@ -1448,6 +1463,13 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 // Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
 	return s.load(ctx, sessionID, true)
+}
+
+// LoadReadOnly is Load without the stale-record cleanup: a caller observing
+// another repository's store (a foreign-repo commit link) must not change it
+// by reading. Returns (nil, nil) when the file does not exist.
+func (s *StateStore) LoadReadOnly(ctx context.Context, sessionID string) (*State, error) {
+	return s.load(ctx, sessionID, false)
 }
 
 // load reads one session. When deleteStale is false the record is returned

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	_ "unsafe"
@@ -28,17 +29,37 @@ func TestMain(m *testing.M) {
 	// hooks, and so t.Parallel tests are not excluded. Mirrors the e2e TestMains.
 	gitenv.IsolateMain()
 
+	// Turn start writes the per-user session-home index (session/home_index.go)
+	// under userdirs' cache dir. Point the cache at a throwaway dir, and block
+	// the index there: every in-process session's owner is an ancestor of every
+	// test, so a shared index would let one test's session claim another's
+	// commit. Tests that exercise the index set their own per-test cache.
+	cacheDir, err := os.MkdirTemp("", "entire-strategy-test-cache-*")
+	if err != nil {
+		panic(fmt.Errorf("failed to create test cache dir: %w", err))
+	}
+	os.Setenv("XDG_CACHE_HOME", cacheDir)
+	blocked := filepath.Join(cacheDir, "entire", "session-homes")
+	if err := os.MkdirAll(filepath.Dir(blocked), 0o700); err != nil {
+		panic(fmt.Errorf("failed to create test cache dir: %w", err))
+	}
+	if err := os.WriteFile(blocked, nil, 0o400); err != nil {
+		panic(fmt.Errorf("failed to block the shared session-home index: %w", err))
+	}
+
 	// Register a default ConfigSource so tests that call ConfigScoped
 	// (directly or indirectly via Commit/CreateTag) don't fail with
 	// "no config loader registered".
-	err := plugin.Register(plugin.ConfigLoader(), func() plugin.ConfigSource {
+	err = plugin.Register(plugin.ConfigLoader(), func() plugin.ConfigSource {
 		return config.NewEmpty()
 	})
 	if err != nil {
 		panic(fmt.Errorf("failed to register config storers: %w", err))
 	}
 
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(cacheDir)
+	os.Exit(code)
 }
 
 //go:linkname resetPluginEntry github.com/go-git/go-git/v6/x/plugin.resetEntry
