@@ -772,3 +772,47 @@ func TestRevokeServiceAccountKey(t *testing.T) {
 		t.Fatalf("deleting an absent key: %v", err)
 	}
 }
+
+// Resuming after the local expiry still asks the server before concluding
+// anything: an approval that landed while the box was away binds the key
+// instead of deleting it.
+func TestWaitForServiceAccountEnrollment_ResumeAfterExpiryStillPolls(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	now := pinClock(t)
+	stubEnrollmentSleep(t)
+	api := newFakeKeyAPI(t)
+	api.pollReplies = []string{"approved"}
+	key, _ := startEnrollment(t, api, "")
+
+	*now = now.Add(2 * time.Hour) // far past expiry and skew
+	approved, err := WaitForServiceAccountEnrollment(context.Background(), reload(t, key))
+	if err != nil || approved != testServiceAccount {
+		t.Fatalf("approved %q err %v; want the late approval found by a poll", approved, err)
+	}
+	if api.polls != 1 {
+		t.Fatalf("polls = %d, want 1", api.polls)
+	}
+}
+
+// One unreadable key file is skipped with a warning; it does not block
+// listing (and so enroll, resume and activate).
+func TestListServiceAccountKeys_SkipsUnreadableFile(t *testing.T) {
+	configDir := isolateServiceAccountDirs(t)
+	var warn strings.Builder
+	prev := keyPermsWarnW
+	keyPermsWarnW = &warn
+	t.Cleanup(func() { keyPermsWarnW = prev })
+
+	good := newTestKey(t, "https://us.auth.example.com")
+	if _, err := CreateServiceAccountKey(context.Background(), good); err != nil {
+		t.Fatal(err)
+	}
+	bad := strings.Repeat("A", 43)
+	if err := os.WriteFile(filepath.Join(configDir, ServiceAccountKeyFileName(bad)), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{good.KeyID(): KeyActive})
+	if !strings.Contains(warn.String(), bad) {
+		t.Fatalf("warning = %q, want it to name the unreadable key", warn.String())
+	}
+}

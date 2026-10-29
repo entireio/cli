@@ -602,7 +602,8 @@ func LoadServiceAccountKey(keyID string) (*ServiceAccountKey, error) {
 
 // ListServiceAccountKeys returns the stored keys of serviceAccount (every key,
 // including enrollments without an account, when it is ""), oldest first. A
-// file that cannot be read is reported rather than skipped.
+// key file that cannot be read is skipped with a warning on stderr, so one bad
+// file does not block every command that lists keys.
 func ListServiceAccountKeys(serviceAccount string) ([]StoredServiceAccountKey, error) {
 	if serviceAccount != "" {
 		id, err := ParseServiceAccountID(serviceAccount)
@@ -639,7 +640,12 @@ func listKeys(root *os.Root, serviceAccount string) ([]StoredServiceAccountKey, 
 			continue // deleted since the directory was read
 		}
 		if err != nil {
-			return nil, err
+			// One corrupt or foreign file must not block every command that
+			// lists keys; it is reported and left on disk for the user.
+			if _, warned := keyListWarn.LoadOrStore(keyID, true); !warned {
+				fmt.Fprintf(keyPermsWarnW, "Warning: ignoring unreadable service-account key %s: %v\n", keyID, err)
+			}
+			continue
 		}
 		if serviceAccount != "" && k.serviceAccount != serviceAccount {
 			continue
@@ -769,6 +775,7 @@ func writeState(root *os.Root, k *ServiceAccountKey) error {
 var (
 	keyPermsWarnW io.Writer = os.Stderr
 	keyPermsWarn  sync.Map
+	keyListWarn   sync.Map
 )
 
 func readKey(root *os.Root, keyID string) (*ServiceAccountKey, error) {
