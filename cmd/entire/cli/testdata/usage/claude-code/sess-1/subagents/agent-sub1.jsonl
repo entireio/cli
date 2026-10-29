@@ -1,4 +1,4 @@
 {"type":"assistant","uuid":"s1","message":{"id":"sm1","usage":{"input_tokens":7,"output_tokens":3}}}
 {"type":"assistant","uuid":"s2","message":{"id":"sm1","usage":{"input_tokens":7,"output_tokens":3}}}
-{"type":"assistant","uuid":"s3","message":{"content":[{"type":"tool_use","id":"toolu_2","name":"Task","input":{"prompt":"do something"}}]}}
+{"type":"assistant","uuid":"s3","message":{"content":[{"type":"tool_use","id":"toolu_2","name":"Agent","input":{"prompt":"do something"}}]}}
 {"type":"user","uuid":"s4","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"agentId: sub2"}]}}

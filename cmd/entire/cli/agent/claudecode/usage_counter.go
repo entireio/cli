@@ -110,13 +110,17 @@ func (u *usageCounter) Add(path string, data []byte) {
 	if u.dir == "" {
 		return
 	}
-	for _, runID := range workflowRunIDsFromToolUseResults(data) {
+	// A subagent's transcript is read for launches with the stricter rule
+	// (launchedBySubagent): its ordinary results can quote other agents' IDs.
+	launch := launchedBy
+	if child != "" {
+		launch = launchedBySubagent
+	}
+	agentIDs, runIDs := launch(data, lines)
+	for _, runID := range runIDs {
 		u.RunIDs = appendWorkflowRunID(u.RunIDs, runID)
 	}
-	for _, runID := range ExtractWorkflowRunIDs(lines) {
-		u.RunIDs = appendWorkflowRunID(u.RunIDs, runID)
-	}
-	for agentID := range spawnedAgentIDs(data, lines) {
+	for agentID := range agentIDs {
 		if !slices.Contains(u.Launched, agentID) {
 			u.Launched = append(u.Launched, agentID)
 		}
