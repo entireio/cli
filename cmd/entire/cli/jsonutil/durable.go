@@ -64,15 +64,41 @@ func writeDurable(root *os.Root, name string, data []byte, perm fs.FileMode, exc
 		return fmt.Errorf("chmod temp for %s: %w", name, err)
 	}
 	if exclusive {
-		// The link leaves the temp name behind; the deferred remove drops it.
 		if err := parent.Link(tmpName, leaf); err != nil {
 			return fmt.Errorf("create %s: %w", name, err)
+		}
+		// Drop the temp alias before the directory sync, so a power loss
+		// cannot leave a second name for the content behind.
+		removeTmp = false
+		if err := parent.Remove(tmpName); err != nil {
+			return fmt.Errorf("remove temp for %s: %w", name, err)
 		}
 	} else {
 		if err := parent.Rename(tmpName, leaf); err != nil {
 			return fmt.Errorf("rename temp to %s: %w", name, err)
 		}
 		removeTmp = false
+	}
+	return syncParent(parent, name)
+}
+
+// RemoveDurableIn removes name and fsyncs its directory, so the removal
+// survives a power loss (a deleted credential must not come back). A missing
+// file is not an error.
+func RemoveDurableIn(root *os.Root, name string) error {
+	parent, leaf, closeParent, err := osroot.OpenParentNoSymlinks(root, name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open parent for %s: %w", name, err)
+	}
+	defer closeParent()
+	if err := parent.Remove(leaf); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("remove %s: %w", name, err)
 	}
 	return syncParent(parent, name)
 }

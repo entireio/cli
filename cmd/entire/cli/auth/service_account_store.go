@@ -214,6 +214,18 @@ func legacyServiceAccountKeyName(id string) string {
 // multi-step transition and can fail it, simulating a crash at that point.
 var storeFault func(step string) error
 
+// InjectStoreFaultForTest makes the named store step fail, as a crash there
+// would, until the returned restore runs.
+func InjectStoreFaultForTest(step string) (restore func()) {
+	storeFault = func(s string) error {
+		if s == step {
+			return fmt.Errorf("injected crash at %s", step)
+		}
+		return nil
+	}
+	return func() { storeFault = nil }
+}
+
 func faultAt(step string) error {
 	if storeFault == nil {
 		return nil
@@ -272,12 +284,12 @@ func SavePendingEnrollmentKey(ctx context.Context, k *ServiceAccountKey) error {
 		return err
 	}
 	return withServiceAccountLock(ctx, func(root *os.Root) error {
-		keys, err := listKeys(root, "")
+		keys, _, err := scanKeys(root, "", true)
 		if err != nil {
 			return err
 		}
 		for _, s := range keys {
-			if s.Status == KeyEnrolling {
+			if HasEnrollmentInProgress(s.Key) {
 				return fmt.Errorf("%w (key %s)", ErrEnrollmentInProgress, s.Key.keyID)
 			}
 		}
@@ -328,7 +340,17 @@ func BindEnrolledKey(ctx context.Context, k *ServiceAccountKey, serviceAccount s
 			return err
 		}
 		if cur.enrollment.phase == "" {
-			return fmt.Errorf("key %s has no enrollment to bind", k.keyID)
+			// Already fully bound (a concurrent resume finished first).
+			if cur.serviceAccount != id {
+				return fmt.Errorf("key %s is bound to %s, not %s", k.keyID, cur.serviceAccount, id)
+			}
+			ptr, err := readPointer(root, id)
+			if err != nil {
+				return err
+			}
+			activated = ptr.KeyID == k.keyID
+			*k = *cur
+			return nil
 		}
 		if cur.enrollment.phase == EnrollmentApproved && cur.serviceAccount != id {
 			return fmt.Errorf("key %s was already bound to %s", k.keyID, cur.serviceAccount)
@@ -411,17 +433,26 @@ func ActivateServiceAccountKey(ctx context.Context, k *ServiceAccountKey) (retir
 			}
 		case KeyActive:
 		}
+		var gone []string
 		for _, id := range ptr.Retiring {
 			old, err := readKey(root, id)
 			if errors.Is(err, fs.ErrNotExist) {
-				continue // deleted after its revoke; the next delete tidies the list
+				// Its files are only ever deleted after its revoke (or an
+				// explicit --local-only); a crash before the list update
+				// leaves this entry, which is dropped here.
+				gone = append(gone, id)
+				continue
 			}
 			if err != nil {
 				return err
 			}
 			retiring = append(retiring, old)
 		}
-		return nil
+		if len(gone) == 0 {
+			return nil
+		}
+		ptr.Retiring = slices.DeleteFunc(ptr.Retiring, func(id string) bool { return slices.Contains(gone, id) })
+		return writePointer(root, ptr)
 	})
 	return retiring, err
 }
@@ -447,7 +478,7 @@ func DeleteServiceAccountKey(ctx context.Context, k *ServiceAccountKey) error {
 		if err != nil {
 			return err
 		}
-		if cur.signer != nil && keyStatus(cur, ptr) == KeyEnrolling {
+		if cur.signer != nil && isUndecidedEnrollment(cur) {
 			return fmt.Errorf("key %s: %w", k.keyID, ErrKeyEnrolling)
 		}
 		if err := deleteKeyFiles(root, cur.keyID); err != nil {
@@ -487,23 +518,36 @@ func ForgetEnrollment(ctx context.Context, k *ServiceAccountKey, outcome error) 
 		if err != nil {
 			return err
 		}
-		if keyStatus(cur, ptr) != KeyEnrolling || cur.enrollment.phase == EnrollmentApproved {
+		if !isUndecidedEnrollment(cur) || keyStatus(cur, ptr) != KeyEnrolling {
 			return fmt.Errorf("key %s is no longer an undecided enrollment", k.keyID)
 		}
 		return deleteKeyFiles(root, cur.keyID)
 	})
 }
 
+// isUndecidedEnrollment: the key was submitted (or is about to be) and no
+// decision has been recorded, so the server may still come to trust it.
+func isUndecidedEnrollment(k *ServiceAccountKey) bool {
+	return k.enrollment.phase == EnrollmentSubmitting || k.enrollment.phase == EnrollmentPending
+}
+
+// HasEnrollmentInProgress reports whether k still has enrollment work to do:
+// undecided, or approved with the bind not yet finished. `enroll --resume`
+// and `--cancel` select keys by this, whatever their status.
+func HasEnrollmentInProgress(k *ServiceAccountKey) bool {
+	return k.enrollment.phase != ""
+}
+
 // deleteKeyFiles removes the key file, then its state, then its cached
-// session, in that order (see the layout comment).
+// session, in that order (see the layout comment), each durably.
 func deleteKeyFiles(root *os.Root, keyID string) error {
 	if err := faultAt("delete:key"); err != nil {
 		return err
 	}
-	if err := root.Remove(ServiceAccountKeyFileName(keyID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := jsonutil.RemoveDurableIn(root, ServiceAccountKeyFileName(keyID)); err != nil {
 		return fmt.Errorf("remove key file: %w", err)
 	}
-	if err := root.Remove(serviceAccountStateName(keyID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := jsonutil.RemoveDurableIn(root, serviceAccountStateName(keyID)); err != nil {
 		return fmt.Errorf("remove key state: %w", err)
 	}
 	return removeServiceAccountSession(keyID)
@@ -600,35 +644,56 @@ func LoadServiceAccountKey(keyID string) (*ServiceAccountKey, error) {
 	return k, err
 }
 
+// KeyProblem is a key-shaped entry that could not be read.
+type KeyProblem struct {
+	KeyID string
+	Err   error
+}
+
 // ListServiceAccountKeys returns the stored keys of serviceAccount (every key,
-// including enrollments without an account, when it is ""), oldest first. A
-// key file that cannot be read is skipped with a warning on stderr, so one bad
-// file does not block every command that lists keys.
+// including enrollments without an account, when it is ""), oldest first.
+// It fails closed: an unreadable or non-regular key entry is an error, since
+// every caller that decides something from the listing (resume, cancel,
+// activate, the one-enrollment rule) must not act on a partial view.
 func ListServiceAccountKeys(serviceAccount string) ([]StoredServiceAccountKey, error) {
+	keys, _, err := listServiceAccountKeys(serviceAccount, true)
+	return keys, err
+}
+
+// ListServiceAccountKeysForDisplay is the best-effort listing for `key list`:
+// readable keys, plus a diagnostic for every entry that could not be read.
+func ListServiceAccountKeysForDisplay(serviceAccount string) ([]StoredServiceAccountKey, []KeyProblem, error) {
+	return listServiceAccountKeys(serviceAccount, false)
+}
+
+func listServiceAccountKeys(serviceAccount string, strict bool) ([]StoredServiceAccountKey, []KeyProblem, error) {
 	if serviceAccount != "" {
 		id, err := ParseServiceAccountID(serviceAccount)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		serviceAccount = id
 	}
 	root, err := configRootForRead()
 	if err != nil || root == nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return listKeys(root, serviceAccount)
+	return scanKeys(root, serviceAccount, strict)
 }
 
-func listKeys(root *os.Root, serviceAccount string) ([]StoredServiceAccountKey, error) {
+// scanKeys reads every key entry. strict turns the first unreadable or
+// non-regular key entry into an error; otherwise it is collected as a problem.
+func scanKeys(root *os.Root, serviceAccount string, strict bool) ([]StoredServiceAccountKey, []KeyProblem, error) {
 	entries, err := osroot.ReadDir(root, ".")
 	if err != nil {
-		return nil, fmt.Errorf("list config directory: %w", err)
+		return nil, nil, fmt.Errorf("list config directory: %w", err)
 	}
 	pointers := map[string]serviceAccountPointerFile{}
 	var out []StoredServiceAccountKey
+	var problems []KeyProblem
 	for _, e := range entries {
 		keyID, ok := strings.CutPrefix(e.Name(), serviceAccountKeyPrefix)
-		if !ok || !e.Type().IsRegular() {
+		if !ok {
 			continue
 		}
 		keyID, ok = strings.CutSuffix(keyID, ".json")
@@ -636,15 +701,17 @@ func listKeys(root *os.Root, serviceAccount string) ([]StoredServiceAccountKey, 
 			continue // state files and temp files
 		}
 		k, err := readKey(root, keyID)
+		if err == nil && !e.Type().IsRegular() {
+			err = errors.New("not a regular file")
+		}
 		if errors.Is(err, fs.ErrNotExist) {
 			continue // deleted since the directory was read
 		}
 		if err != nil {
-			// One corrupt or foreign file must not block every command that
-			// lists keys; it is reported and left on disk for the user.
-			if _, warned := keyListWarn.LoadOrStore(keyID, true); !warned {
-				fmt.Fprintf(keyPermsWarnW, "Warning: ignoring unreadable service-account key %s: %v\n", keyID, err)
+			if strict {
+				return nil, nil, fmt.Errorf("service-account key %s is unreadable (%w); fix or remove %s before changing keys", keyID, err, ServiceAccountKeyFileName(keyID))
 			}
+			problems = append(problems, KeyProblem{KeyID: keyID, Err: err})
 			continue
 		}
 		if serviceAccount != "" && k.serviceAccount != serviceAccount {
@@ -653,14 +720,14 @@ func listKeys(root *os.Root, serviceAccount string) ([]StoredServiceAccountKey, 
 		ptr, seen := pointers[k.serviceAccount]
 		if !seen {
 			if ptr, err = readPointer(root, k.serviceAccount); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			pointers[k.serviceAccount] = ptr
 		}
 		out = append(out, StoredServiceAccountKey{Key: k, Status: keyStatus(k, ptr)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key.createdAt.Before(out[j].Key.createdAt) })
-	return out, nil
+	return out, problems, nil
 }
 
 // configRootForRead returns the config root, or nil when the directory does
@@ -709,7 +776,7 @@ func readPointer(root *os.Root, id string) (serviceAccountPointerFile, error) {
 func writePointer(root *os.Root, p serviceAccountPointerFile) error {
 	name := serviceAccountPointerName(p.ServiceAccount)
 	if p.KeyID == "" && len(p.Retiring) == 0 {
-		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := jsonutil.RemoveDurableIn(root, name); err != nil {
 			return fmt.Errorf("remove active key of %s: %w", p.ServiceAccount, err)
 		}
 		return nil
@@ -775,7 +842,6 @@ func writeState(root *os.Root, k *ServiceAccountKey) error {
 var (
 	keyPermsWarnW io.Writer = os.Stderr
 	keyPermsWarn  sync.Map
-	keyListWarn   sync.Map
 )
 
 func readKey(root *os.Root, keyID string) (*ServiceAccountKey, error) {

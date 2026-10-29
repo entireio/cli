@@ -11,10 +11,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -115,7 +113,7 @@ func generateUnboundKey(server, name string, now time.Time) (*ServiceAccountKey,
 	return &ServiceAccountKey{
 		keyID:     ed25519Thumbprint(pub),
 		server:    origin,
-		name:      name,
+		name:      sanitizeKeyLabel(name),
 		createdAt: now.UTC(),
 		signer:    priv,
 	}, nil
@@ -290,12 +288,11 @@ func ServiceAccountToken(ctx context.Context, k *ServiceAccountKey) (string, err
 
 // VerifyServiceAccountKey performs a fresh exchange with k, bypassing the
 // cache, to prove the server accepts it before it is made the active key.
+//
+// The session it mints is not cached: verification must not leave a bearer
+// behind (for example one a concurrent delete just removed).
 func VerifyServiceAccountKey(ctx context.Context, k *ServiceAccountKey) error {
-	root, err := userdirs.CacheRoot()
-	if err != nil {
-		root = nil
-	}
-	_, err = exchangeServiceAccountSession(ctx, k, root)
+	_, err := exchangeServiceAccountSession(ctx, k, nil)
 	return err
 }
 
@@ -329,8 +326,24 @@ func validateServiceAccountSession(k *ServiceAccountKey, s *serviceAccountSessio
 	if claims.Subject != k.serviceAccount {
 		return fmt.Errorf("sub is %q, want %s", claims.Subject, k.serviceAccount)
 	}
-	if !slices.Contains(claims.Audience, k.server) {
-		return fmt.Errorf("aud %v does not include %s", claims.Audience, k.server)
+	// Exactly one URL-shaped audience, and it is the key's server: routing
+	// downstream (CoreURLFromEnvToken) takes the first URL audience, so a
+	// token naming another origin as well could carry this bearer there.
+	var urlAuds []string
+	for _, aud := range claims.Audience {
+		if u, err := url.Parse(aud); err == nil && u.Scheme != "" {
+			urlAuds = append(urlAuds, aud)
+		}
+	}
+	if len(urlAuds) != 1 || urlAuds[0] != k.server {
+		return fmt.Errorf("aud %v must name exactly one origin, %s", claims.Audience, k.server)
+	}
+	lineage, err := sessionKeyLineage(s.AccessToken)
+	if err != nil {
+		return err
+	}
+	if lineage != k.keyID {
+		return fmt.Errorf("%s is %q, want this key %s", saKeyIDClaim, lineage, k.keyID)
 	}
 	if claims.ExpiresAt.IsZero() || !claims.ExpiresAt.After(now) || claims.ExpiresAt.After(now.Add(maxSASessionLifetime)) {
 		return fmt.Errorf("exp %s is not within %s of now", claims.ExpiresAt.Format(time.RFC3339), maxSASessionLifetime)
@@ -339,6 +352,34 @@ func validateServiceAccountSession(k *ServiceAccountKey, s *serviceAccountSessio
 		s.ExpiresAt = claims.ExpiresAt
 	}
 	return nil
+}
+
+// saKeyIDClaim names the key that minted an sa-session (the key's RFC 7638
+// thumbprint). The server stamps it on every session and on every token
+// derived from one, and rejects them all once that key is revoked.
+const saKeyIDClaim = "sa_key_id"
+
+// sessionKeyLineage reads the sa_key_id claim from a JWT's unverified payload
+// (tokens.ParseClaims does not expose custom claims).
+func sessionKeyLineage(jwt string) (string, error) {
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		return "", errors.New("not a JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("decode payload: %w", err)
+	}
+	var claims struct {
+		KeyID *string `json:"sa_key_id"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("parse payload: %w", err)
+	}
+	if claims.KeyID == nil {
+		return "", fmt.Errorf("no %s claim: the session is not bound to its key, so revoking the key would not end it", saKeyIDClaim)
+	}
+	return *claims.KeyID, nil
 }
 
 func mintServiceAccountSession(ctx context.Context, k *ServiceAccountKey, now time.Time) (serviceAccountSession, error) {
@@ -440,7 +481,7 @@ func removeServiceAccountSession(keyID string) error {
 		return err
 	}
 	defer release()
-	if err := root.Remove(serviceAccountSessionName(keyID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := jsonutil.RemoveDurableIn(root, serviceAccountSessionName(keyID)); err != nil {
 		return fmt.Errorf("remove cached session: %w", err)
 	}
 	return nil

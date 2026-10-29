@@ -392,11 +392,14 @@ func decodeTestSegment(t *testing.T, seg string) map[string]any {
 	return m
 }
 
-// testSessionJWT is a JWT shaped like an sa-session token. The CLI reads only
-// its claims, so the signature is junk.
-func testSessionJWT(sub, aud string, exp time.Time) string {
+// testSessionJWT is a JWT shaped like an sa-session token minted by keyID.
+// The CLI reads only its claims, so the signature is junk.
+func testSessionJWT(sub, aud, keyID string, exp time.Time) string {
+	return testSessionJWTClaims(fmt.Sprintf(`{"sub":%q,"aud":%q,"sa_key_id":%q,"exp":%d}`, sub, aud, keyID, exp.Unix()))
+}
+
+func testSessionJWTClaims(claims string) string {
 	enc := base64.RawURLEncoding.EncodeToString
-	claims := fmt.Sprintf(`{"sub":%q,"aud":%q,"exp":%d}`, sub, aud, exp.Unix())
 	return enc([]byte(`{"alg":"EdDSA","typ":"JWT"}`)) + "." + enc([]byte(claims)) + "." + enc([]byte("sig"))
 }
 
@@ -409,7 +412,7 @@ type fakeSTS struct {
 	key     *ServiceAccountKey
 	calls   atomic.Int32
 	reject  bool
-	session func(server string) string
+	session func(key *ServiceAccountKey) string
 }
 
 func newFakeSTS(t *testing.T) *fakeSTS {
@@ -454,9 +457,9 @@ func (f *fakeSTS) serve(w http.ResponseWriter, r *http.Request) {
 	if claims["aud"] != ServiceAccountAssertionAudience(f.key.Server()) {
 		f.t.Errorf("assertion aud = %v", claims["aud"])
 	}
-	token := testSessionJWT(testServiceAccount, f.key.Server(), nowFunc().Add(time.Hour))
+	token := testSessionJWT(testServiceAccount, f.key.Server(), f.key.KeyID(), nowFunc().Add(time.Hour))
 	if f.session != nil {
-		token = f.session(f.key.Server())
+		token = f.session(f.key)
 	}
 	fmt.Fprintf(w, `{"access_token":%q,"token_type":"Bearer","expires_in":3600}`, token)
 }
@@ -527,20 +530,35 @@ func TestServiceAccountToken_ConcurrentCallersShareOneExchange(t *testing.T) {
 }
 
 func TestServiceAccountToken_RejectsUnusableSessions(t *testing.T) {
-	for name, session := range map[string]func(server string) string{
-		"another subject": func(server string) string {
-			return testSessionJWT("svc_01HKZ3J4N5P6Q7R8S9T0V1W2X4", server, time.Now().Add(time.Hour))
+	exp := func() int64 { return time.Now().Add(time.Hour).Unix() }
+	for name, session := range map[string]func(k *ServiceAccountKey) string{
+		"another subject": func(k *ServiceAccountKey) string {
+			return testSessionJWT("svc_01HKZ3J4N5P6Q7R8S9T0V1W2X4", k.Server(), k.KeyID(), time.Now().Add(time.Hour))
 		},
-		"another audience": func(string) string {
-			return testSessionJWT(testServiceAccount, "https://evil.example.com", time.Now().Add(time.Hour))
+		"another audience": func(k *ServiceAccountKey) string {
+			return testSessionJWT(testServiceAccount, "https://evil.example.com", k.KeyID(), time.Now().Add(time.Hour))
 		},
-		"already expired": func(server string) string {
-			return testSessionJWT(testServiceAccount, server, time.Now().Add(-time.Minute))
+		// Routing takes the first URL audience, so a second origin next to
+		// the trusted one would carry the bearer there.
+		"a second origin before the server": func(k *ServiceAccountKey) string {
+			return testSessionJWTClaims(fmt.Sprintf(`{"sub":%q,"aud":["https://evil.example.com",%q],"sa_key_id":%q,"exp":%d}`, testServiceAccount, k.Server(), k.KeyID(), exp()))
 		},
-		"far future": func(server string) string {
-			return testSessionJWT(testServiceAccount, server, time.Now().Add(30*24*time.Hour))
+		"a second origin after the server": func(k *ServiceAccountKey) string {
+			return testSessionJWTClaims(fmt.Sprintf(`{"sub":%q,"aud":[%q,"https://evil.example.com"],"sa_key_id":%q,"exp":%d}`, testServiceAccount, k.Server(), k.KeyID(), exp()))
 		},
-		"not a JWT": func(string) string { return "opaque" },
+		"no key lineage": func(k *ServiceAccountKey) string {
+			return testSessionJWTClaims(fmt.Sprintf(`{"sub":%q,"aud":%q,"exp":%d}`, testServiceAccount, k.Server(), exp()))
+		},
+		"another key's lineage": func(k *ServiceAccountKey) string {
+			return testSessionJWT(testServiceAccount, k.Server(), strings.Repeat("B", 43), time.Now().Add(time.Hour))
+		},
+		"already expired": func(k *ServiceAccountKey) string {
+			return testSessionJWT(testServiceAccount, k.Server(), k.KeyID(), time.Now().Add(-time.Minute))
+		},
+		"far future": func(k *ServiceAccountKey) string {
+			return testSessionJWT(testServiceAccount, k.Server(), k.KeyID(), time.Now().Add(30*24*time.Hour))
+		},
+		"not a JWT": func(*ServiceAccountKey) string { return "opaque" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			sts, key := setupServiceAccountWithSTS(t)

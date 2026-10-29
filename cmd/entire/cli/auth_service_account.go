@@ -66,6 +66,18 @@ type serviceAccountKeyOutput struct {
 	KeyFile        string `json:"key_file"`
 }
 
+// serviceAccountKeyListOutput is `key list --json`: the readable keys, and a
+// diagnostic for each key entry that could not be read.
+type serviceAccountKeyListOutput struct {
+	Keys     []serviceAccountKeyOutput  `json:"keys"`
+	Problems []serviceAccountKeyProblem `json:"problems"`
+}
+
+type serviceAccountKeyProblem struct {
+	KeyID string `json:"key_id"`
+	Error string `json:"error"`
+}
+
 func newAuthServiceAccountKeyCreateCmd() *cobra.Command {
 	var (
 		serviceAccount string
@@ -208,21 +220,29 @@ func newAuthServiceAccountKeyListCmd() *cobra.Command {
 		Short: "List the service-account keys stored on this machine",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			keys, err := auth.ListServiceAccountKeys(serviceAccount)
+			// Best effort: a damaged entry is reported, not fatal, so the rest
+			// can still be inspected.
+			keys, problems, err := auth.ListServiceAccountKeysForDisplay(serviceAccount)
 			if err != nil {
 				return err //nolint:wrapcheck // already user-facing
 			}
 			w := cmd.OutOrStdout()
 			if jsonOut {
-				out := make([]serviceAccountKeyOutput, 0, len(keys))
+				out := serviceAccountKeyListOutput{Keys: make([]serviceAccountKeyOutput, 0, len(keys)), Problems: []serviceAccountKeyProblem{}}
 				for _, k := range keys {
 					o, err := serviceAccountKeyJSON(k)
 					if err != nil {
 						return err
 					}
-					out = append(out, o)
+					out.Keys = append(out.Keys, o)
+				}
+				for _, p := range problems {
+					out.Problems = append(out.Problems, serviceAccountKeyProblem{KeyID: p.KeyID, Error: p.Err.Error()})
 				}
 				return printJSON(w, out)
+			}
+			for _, p := range problems {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: key %s is unreadable: %v\n", p.KeyID, p.Err)
 			}
 			if len(keys) == 0 {
 				fmt.Fprintln(w, "No service-account keys are stored on this machine.")
@@ -233,7 +253,11 @@ func newAuthServiceAccountKeyListCmd() *cobra.Command {
 				if account == "" {
 					account = "(approver chooses)"
 				}
-				fmt.Fprintf(w, "%-9s  %s  %s  %s  %s\n", k.Status, k.Key.KeyID(), account, k.Key.Server(), k.Key.CreatedAt().Format(time.RFC3339))
+				status := string(k.Status)
+				if auth.HasEnrollmentInProgress(k.Key) && k.Status != auth.KeyEnrolling {
+					status += " (finish with `enroll --resume`)"
+				}
+				fmt.Fprintf(w, "%-9s  %s  %s  %s  %s\n", status, k.Key.KeyID(), account, k.Key.Server(), k.Key.CreatedAt().Format(time.RFC3339))
 			}
 			return nil
 		},
@@ -302,6 +326,9 @@ func defaultKeyName(name string) string {
 	return name
 }
 
+// enrollNameFlag labels a new enrollment's key.
+const enrollNameFlag = "name"
+
 func newAuthServiceAccountEnrollCmd() *cobra.Command {
 	var (
 		serviceAccount string
@@ -310,6 +337,7 @@ func newAuthServiceAccountEnrollCmd() *cobra.Command {
 		keyID          string
 		resume         bool
 		cancel         bool
+		localOnly      bool
 		insecure       bool
 	)
 	cmd := &cobra.Command{
@@ -320,8 +348,10 @@ func newAuthServiceAccountEnrollCmd() *cobra.Command {
 			"logged in, checks that the code matches, and confirms which service account the\n" +
 			"key belongs to (--service-account proposes one; without it the approver picks).\n\n" +
 			"The key is written to disk before the request is sent, so an interrupted wait\n" +
-			"loses nothing: `enroll --resume` keeps waiting, `enroll --cancel` withdraws the\n" +
-			"request and deletes the key. An approved key becomes the account's active key\n" +
+			"loses nothing: `enroll --resume` looks the key up and keeps waiting, `enroll\n" +
+			"--cancel` withdraws the request and deletes the key once the server confirms.\n" +
+			"A key is deleted only on the server's answer, never because time passed;\n" +
+			"`--cancel --local-only` deletes it regardless, at your own risk. An approved key becomes the account's active key\n" +
 			"unless the account already has one here; then it is stored inactive for\n" +
 			"`key activate`.",
 		Example: "  entire auth service-account enroll --server https://us.auth.entire.io\n" +
@@ -334,13 +364,23 @@ func newAuthServiceAccountEnrollCmd() *cobra.Command {
 			if resume && cancel {
 				return errors.New("--resume and --cancel cannot be combined")
 			}
+			if localOnly && !cancel {
+				return errors.New("--local-only applies only to --cancel")
+			}
 			if resume || cancel {
+				// These continue a stored enrollment; flags describing a new
+				// one would be silently ignored, so they are refused.
+				for _, name := range []string{"server", "service-account", enrollNameFlag} {
+					if cmd.Flags().Changed(name) {
+						return fmt.Errorf("--%s describes a new enrollment and cannot be used with --resume or --cancel", name)
+					}
+				}
 				key, err := selectEnrollingKey(keyID)
 				if err != nil {
 					return err
 				}
 				if cancel {
-					return cancelEnrollment(ctx, cmd, key)
+					return cancelEnrollment(ctx, cmd, key, localOnly)
 				}
 				return runEnrollment(ctx, cmd, key)
 			}
@@ -369,10 +409,11 @@ func newAuthServiceAccountEnrollCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&serviceAccount, "service-account", "", "Service account to propose (svc_...); the approver picks one if omitted")
 	cmd.Flags().StringVar(&server, "server", "", "Login server that owns the service account (default: the active login's server)")
-	cmd.Flags().StringVar(&name, "name", "", "Label shown to the approver (default: this machine's hostname)")
+	cmd.Flags().StringVar(&name, enrollNameFlag, "", "Label shown to the approver (default: this machine's hostname)")
 	cmd.Flags().BoolVar(&resume, "resume", false, "Keep waiting for an enrollment that was interrupted")
 	cmd.Flags().BoolVar(&cancel, "cancel", false, "Withdraw a pending enrollment and delete its key")
 	cmd.Flags().StringVar(&keyID, "key-id", "", "Pending enrollment to resume or cancel (default: the only one)")
+	cmd.Flags().BoolVar(&localOnly, "local-only", false, "With --cancel: delete the key even though the server could not confirm the cancellation (if it was approved, it stays trusted until an admin revokes it)")
 	addInsecureHTTPAuthFlag(cmd, &insecure)
 	return cmd
 }
@@ -387,13 +428,18 @@ func runEnrollment(ctx context.Context, cmd *cobra.Command, key *auth.ServiceAcc
 		return err
 	}
 	switch key.EnrollmentPhase() {
-	case auth.EnrollmentSubmitting:
+	case auth.EnrollmentSubmitting, auth.EnrollmentPending:
+		// (Re)submit: for a new key this creates the enrollment; on --resume it
+		// is the lookup by key id, which finds the live enrollment, the
+		// decision already made, or (if the record was purged) a fresh one.
 		enrollment, err := auth.SubmitServiceAccountEnrollment(ctx, key)
-		if err != nil {
-			if errors.Is(err, auth.ErrEnrollmentRejected) {
-				return forgetEnrollment(ctx, key, err)
-			}
+		switch {
+		case errors.Is(err, auth.ErrEnrollmentRejected) || errors.Is(err, auth.ErrEnrollmentDenied) || errors.Is(err, auth.ErrEnrollmentExpired):
+			return forgetEnrollment(ctx, key, err)
+		case err != nil:
 			return keep(err)
+		case enrollment.Status == auth.EnrollmentStatusApproved:
+			return bindEnrollment(ctx, cmd, key, enrollment.ServiceAccount)
 		}
 		link := enrollment.VerificationURIComplete
 		if link == "" {
@@ -401,8 +447,6 @@ func runEnrollment(ctx context.Context, cmd *cobra.Command, key *auth.ServiceAcc
 		}
 		fmt.Fprintf(errW, "To approve this machine, open:\n\n  %s\n\nand check that it shows the code %s (key %s).\n", link, enrollment.UserCode, key.KeyID())
 		fmt.Fprintf(errW, "Waiting for approval (expires in %s)...\n", time.Duration(enrollment.ExpiresIn)*time.Second)
-	case auth.EnrollmentPending:
-		fmt.Fprintf(errW, "Resuming the enrollment of key %s (expires %s).\n", key.KeyID(), key.EnrollmentExpiresAt().Local().Format(time.Kitchen))
 	case auth.EnrollmentApproved:
 		return bindEnrollment(ctx, cmd, key, key.ServiceAccount())
 	default:
@@ -442,8 +486,12 @@ func bindEnrollment(ctx context.Context, cmd *cobra.Command, key *auth.ServiceAc
 // cancelEnrollment withdraws key's enrollment and deletes the key only when
 // the server confirms it can no longer be approved. If the approval won the
 // race, the key is kept and bound.
-func cancelEnrollment(ctx context.Context, cmd *cobra.Command, key *auth.ServiceAccountKey) error {
+func cancelEnrollment(ctx context.Context, cmd *cobra.Command, key *auth.ServiceAccountKey, localOnly bool) error {
 	approved, err := auth.CancelServiceAccountEnrollment(ctx, key)
+	if localOnly && err != nil && !errors.Is(err, auth.ErrEnrollmentAlreadyApproved) && !auth.IsDefinitiveEnrollmentOutcome(err) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: the server did not confirm (%v). Deleting key %s anyway; if its enrollment was approved, it stays trusted until an admin revokes it.\n", err, key.KeyID())
+		err = auth.ErrEnrollmentAbandoned
+	}
 	switch {
 	case errors.Is(err, auth.ErrEnrollmentAlreadyApproved):
 		fmt.Fprintf(cmd.ErrOrStderr(), "The enrollment of key %s was approved before it could be cancelled; keeping the key. Remove it with `entire auth service-account key revoke --service-account %s --key-id %s`.\n", key.KeyID(), approved, key.KeyID())
@@ -584,7 +632,7 @@ func selectEnrollingKey(keyID string) (*auth.ServiceAccountKey, error) {
 	}
 	var found []*auth.ServiceAccountKey
 	for _, k := range keys {
-		if k.Status == auth.KeyEnrolling && (keyID == "" || k.Key.KeyID() == keyID) {
+		if auth.HasEnrollmentInProgress(k.Key) && (keyID == "" || k.Key.KeyID() == keyID) {
 			found = append(found, k.Key)
 		}
 	}

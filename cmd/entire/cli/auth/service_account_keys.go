@@ -36,9 +36,12 @@ import (
 //	POST /api/v1/service-account-enrollments/{enrollment_id}/cancel
 //	POST /api/v1/service-accounts/{svc}/keys/{key_id}/revoke
 //
-// Everything that can delete a key from disk is decided here, and only on a
-// definitive answer: a lost response, a 5xx or an unknown enrollment that may
-// still be live never deletes a key the server might trust.
+// Everything that can delete a key from disk is decided here, and only on an
+// explicit answer from the server: "denied", "expired", a cancel confirmed
+// with 204, or a submission refused with a 4xx. Elapsed time, a lost
+// response, a 5xx or a 404 never count: an enrollment may have been approved
+// before its record went away. Resubmitting by key id is the authoritative
+// lookup the client falls back to.
 
 const (
 	enrollmentsPath     = "/api/v1/service-account-enrollments"
@@ -55,13 +58,25 @@ const (
 	defaultEnrollmentLifetime = 15 * time.Minute
 	maxEnrollmentLifetime     = time.Hour
 
-	// enrollmentExpirySkew is how long past its expiry an enrollment must be
-	// before the client treats "unknown" or "still pending" as expired.
-	enrollmentExpirySkew = 5 * time.Minute
+	// maxKeyLabelLen bounds the label (default: the hostname) sent with an
+	// enrollment and shown to the approver.
+	maxKeyLabelLen = 64
 )
 
-// ServiceAccountEnrollment is what the box shows while it waits for approval.
+// Enrollment statuses the server reports (submit, poll, cancel conflict).
+const (
+	EnrollmentStatusPending  = "pending"
+	EnrollmentStatusApproved = "approved"
+	EnrollmentStatusDenied   = "denied"
+	EnrollmentStatusExpired  = "expired"
+)
+
+// ServiceAccountEnrollment is the server's record for a key's enrollment.
+// Status is "pending" (the default when absent) for a live enrollment, or the
+// decision the server already holds for this key id.
 type ServiceAccountEnrollment struct {
+	Status                  string `json:"status"`
+	ServiceAccount          string `json:"service_account"`
 	ID                      string `json:"enrollment_id"`
 	UserCode                string `json:"user_code"`
 	VerificationURI         string `json:"verification_uri"`
@@ -75,14 +90,21 @@ var (
 	userCodePattern     = regexp.MustCompile(`^[A-Z0-9-]{4,16}$`)
 )
 
-// Definitive enrollment outcomes: the enrollment can never be approved, so
-// its key may be deleted (ForgetEnrollment accepts only these).
+// Definitive enrollment outcomes, each an explicit server answer: the key can
+// never become trusted, so it may be deleted (ForgetEnrollment accepts only
+// these and ErrEnrollmentAbandoned).
 var (
 	ErrEnrollmentDenied    = errors.New("the enrollment request was denied")
 	ErrEnrollmentExpired   = errors.New("the enrollment request expired before it was approved")
 	ErrEnrollmentRejected  = errors.New("the server refused the enrollment request")
 	ErrEnrollmentCancelled = errors.New("the enrollment request was cancelled")
 )
+
+// ErrEnrollmentAbandoned is not a server answer but the user's explicit
+// decision (`enroll --cancel --local-only`) to delete a key whose enrollment
+// could not be settled. If the server did approve it, it stays trusted until
+// an admin revokes it.
+var ErrEnrollmentAbandoned = errors.New("the enrollment was abandoned locally without the server's confirmation")
 
 // ErrEnrollmentAlreadyApproved: a cancel lost the race with an approval. The
 // key is trusted on the server and must be kept (and bound).
@@ -96,7 +118,8 @@ func IsDefinitiveEnrollmentOutcome(err error) bool {
 
 func isDefinitiveEnrollmentOutcome(err error) bool {
 	return errors.Is(err, ErrEnrollmentDenied) || errors.Is(err, ErrEnrollmentExpired) ||
-		errors.Is(err, ErrEnrollmentRejected) || errors.Is(err, ErrEnrollmentCancelled)
+		errors.Is(err, ErrEnrollmentRejected) || errors.Is(err, ErrEnrollmentCancelled) ||
+		errors.Is(err, ErrEnrollmentAbandoned)
 }
 
 // enrollmentSleep waits between polls; a var so tests do not sleep.
@@ -147,12 +170,31 @@ func NewEnrollmentKey(server, serviceAccount, name string) (*ServiceAccountKey, 
 	return k, nil
 }
 
-// SubmitServiceAccountEnrollment submits (or, for a key already submitting,
-// resubmits) k's public key for approval and records the server's answer on
-// the key. The server deduplicates by key id, so resubmitting after a lost
-// response returns the same enrollment. Errors: ErrEnrollmentRejected when
-// the server definitively refused (nothing was created), otherwise the
-// outcome is unknown and the key stays submitting for --resume or --cancel.
+// sanitizeKeyLabel restricts a key label to printable ASCII without '"' and
+// '\\', at most maxKeyLabelLen bytes. Every string in a key-management body
+// is then printable ASCII (the PEM adds only newlines), for which the body
+// hash's serialisation is exactly RFC 8785 JCS.
+func sanitizeKeyLabel(name string) string {
+	out := []byte(strings.TrimSpace(name))
+	for i, c := range out {
+		if c < 0x20 || c > 0x7e || c == '"' || c == '\\' {
+			out[i] = '-'
+		}
+	}
+	if len(out) > maxKeyLabelLen {
+		out = out[:maxKeyLabelLen]
+	}
+	return string(out)
+}
+
+// SubmitServiceAccountEnrollment submits k's public key for approval, or
+// resubmits it: the server answers by key id with the record it holds, so a
+// resubmission after a lost response, an interruption or a purged enrollment
+// is the authoritative lookup. The answer's Status is the server's decision:
+// "pending" (recorded on the key; wait for it), "approved" (bind the key),
+// or ErrEnrollmentDenied/ErrEnrollmentExpired. ErrEnrollmentRejected means a
+// 4xx refusal (the key is not and will not be trusted). Any other error is an
+// unknown outcome; the key is kept.
 func SubmitServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) (*ServiceAccountEnrollment, error) {
 	if k.enrollment.phase != EnrollmentSubmitting && k.enrollment.phase != EnrollmentPending {
 		return nil, fmt.Errorf("key %s has no enrollment to submit", k.keyID)
@@ -185,6 +227,18 @@ func SubmitServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) (
 	if err := validateEnrollment(&out); err != nil {
 		return nil, fmt.Errorf("submit enrollment to %s (outcome unknown, the key was kept): %w", k.server, err)
 	}
+	switch out.Status {
+	case EnrollmentStatusPending:
+	case EnrollmentStatusApproved:
+		if _, err := ParseServiceAccountID(out.ServiceAccount); err != nil {
+			return nil, fmt.Errorf("submit enrollment: approved with an invalid service account: %w", err)
+		}
+		return &out, nil
+	case EnrollmentStatusDenied:
+		return nil, ErrEnrollmentDenied
+	case EnrollmentStatusExpired:
+		return nil, ErrEnrollmentExpired
+	}
 	if err := RecordEnrollment(ctx, k, &out); err != nil {
 		return nil, fmt.Errorf("record enrollment %s (the key was kept; --resume resubmits): %w", out.ID, err)
 	}
@@ -207,6 +261,16 @@ func isDefinitiveRefusal(status int) bool {
 // Links must be printable ASCII (an IDN host arrives as punycode), which
 // rules out control, C1, bidi and other format characters in one test.
 func validateEnrollment(e *ServiceAccountEnrollment) error {
+	if e.Status == "" {
+		e.Status = EnrollmentStatusPending
+	}
+	switch e.Status {
+	case EnrollmentStatusApproved, EnrollmentStatusDenied, EnrollmentStatusExpired:
+		return nil // a decision; there is nothing to show or poll
+	case EnrollmentStatusPending:
+	default:
+		return fmt.Errorf("server returned an unknown enrollment status %q", tuiutil.SanitizeDisplayText(e.Status))
+	}
 	if !enrollmentIDPattern.MatchString(e.ID) {
 		return errors.New("server returned a malformed enrollment id")
 	}
@@ -244,17 +308,6 @@ func clampSeconds(v int, def, upper time.Duration) time.Duration {
 
 func notPrintableASCII(r rune) bool { return r < 0x21 || r > 0x7e }
 
-// enrollmentLapsed reports whether k's enrollment is certainly over on the
-// server: past its recorded expiry plus skew, or, while still submitting (no
-// expiry known), past the contract's maximum lifetime since the key was made.
-func enrollmentLapsed(k *ServiceAccountKey, now time.Time) bool {
-	deadline := k.enrollment.expiresAt
-	if deadline.IsZero() {
-		deadline = k.createdAt.Add(maxEnrollmentLifetime)
-	}
-	return now.After(deadline.Add(enrollmentExpirySkew))
-}
-
 type pollResult struct {
 	Status         string `json:"status"`
 	ServiceAccount string `json:"service_account"`
@@ -268,10 +321,9 @@ func pollEnrollment(ctx context.Context, k *ServiceAccountKey) (pollResult, erro
 		return pollResult{}, fmt.Errorf("poll enrollment: %w", err)
 	}
 	if status == http.StatusNotFound {
-		if enrollmentLapsed(k, nowFunc()) {
-			return pollResult{}, ErrEnrollmentExpired
-		}
-		return pollResult{}, errors.New("poll enrollment: the server does not know this enrollment; the key was kept, retry with --resume")
+		// Not proof of anything: the record may have been purged after an
+		// approval. --resume resubmits, which asks by key id.
+		return pollResult{}, errors.New("poll enrollment: the server no longer knows this enrollment id; the key was kept, run `entire auth service-account enroll --resume` to look it up by key")
 	}
 	if status != http.StatusOK {
 		return pollResult{}, fmt.Errorf("poll enrollment: %s", describeStatus(status, body))
@@ -287,17 +339,17 @@ func pollEnrollment(ctx context.Context, k *ServiceAccountKey) (pollResult, erro
 // outcome, or (done=false) "keep waiting".
 func decidePoll(r pollResult) (approved string, done bool, err error) {
 	switch r.Status {
-	case "pending":
+	case EnrollmentStatusPending:
 		return "", false, nil
-	case "approved":
+	case EnrollmentStatusApproved:
 		id, err := ParseServiceAccountID(r.ServiceAccount)
 		if err != nil {
 			return "", true, fmt.Errorf("enrollment approved with an invalid service account: %w", err)
 		}
 		return id, true, nil
-	case "denied":
+	case EnrollmentStatusDenied:
 		return "", true, ErrEnrollmentDenied
-	case "expired":
+	case EnrollmentStatusExpired:
 		return "", true, ErrEnrollmentExpired
 	default:
 		return "", true, fmt.Errorf("poll enrollment: unknown status %q", tuiutil.SanitizeDisplayText(r.Status))
@@ -306,9 +358,10 @@ func decidePoll(r pollResult) (approved string, done bool, err error) {
 
 // WaitForServiceAccountEnrollment polls k's recorded enrollment at its stored
 // interval until it is decided and returns the approved service account.
-// Neither a sleep nor a request runs past the enrollment's expiry; at expiry
-// one last poll settles the outcome, and anything short of a definitive
-// answer is returned as a non-definitive error so the key is kept.
+// Neither a sleep nor a poll runs past the enrollment's expiry. At expiry one
+// last poll (bounded by the 30-second request timeout) catches a last-moment
+// decision; only the server saying "expired" or "denied" is definitive, and
+// anything else is returned as an error that keeps the key.
 func WaitForServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) (string, error) {
 	if k.enrollment.phase != EnrollmentPending || k.enrollment.id == "" || k.enrollment.expiresAt.IsZero() {
 		return "", fmt.Errorf("key %s has no recorded enrollment to wait for", k.keyID)
@@ -358,64 +411,84 @@ func WaitForServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) 
 	if done {
 		return approved, err
 	}
-	if enrollmentLapsed(k, nowFunc()) {
-		return "", ErrEnrollmentExpired
-	}
-	return "", errors.New("the enrollment is still pending at its expiry; the key was kept, retry with --resume in a few minutes")
+	return "", errors.New("the server still reports the enrollment pending at its expiry; the key was kept, run `entire auth service-account enroll --resume` later")
 }
 
 // CancelServiceAccountEnrollment withdraws k's enrollment. It returns
-// ErrEnrollmentCancelled, ErrEnrollmentDenied, ErrEnrollmentExpired or
-// ErrEnrollmentRejected when the enrollment can never be approved (the key may
-// then be forgotten), ErrEnrollmentAlreadyApproved with the account when the
-// approval won the race (the key must be kept and bound), and any other error
-// when the outcome is unknown (the key must be kept).
+// ErrEnrollmentCancelled (only on 204), or ErrEnrollmentDenied,
+// ErrEnrollmentExpired or ErrEnrollmentRejected, when the server says the key
+// can never be trusted (it may then be forgotten);
+// ErrEnrollmentAlreadyApproved with the account when the approval won (the
+// key must be kept and bound); any other error when the outcome is unknown
+// (the key must be kept). A 404 for the enrollment id is followed by one
+// lookup by key id (a resubmission), and a fresh pending enrollment found
+// that way is cancelled in turn.
 func CancelServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) (approved string, err error) {
 	switch k.enrollment.phase {
 	case EnrollmentApproved:
 		return k.serviceAccount, ErrEnrollmentAlreadyApproved
 	case EnrollmentSubmitting:
-		// Learn the enrollment id first; resubmitting is idempotent.
-		if _, err := SubmitServiceAccountEnrollment(ctx, k); err != nil {
-			if !errors.Is(err, ErrEnrollmentRejected) && enrollmentLapsed(k, nowFunc()) {
-				return "", ErrEnrollmentExpired
-			}
-			return "", err
+		if approved, err := lookupEnrollment(ctx, k); approved != "" || err != nil {
+			return approved, err
 		}
 	case EnrollmentPending:
 	default:
 		return "", fmt.Errorf("key %s has no enrollment to cancel", k.keyID)
 	}
-	endpoint := k.server + enrollmentsPath + "/" + url.PathEscape(k.enrollment.id) + "/cancel"
-	status, body, err := postKeyAPI(ctx, k, k.keyID, endpoint, map[string]string{})
-	if err != nil {
-		return "", fmt.Errorf("cancel enrollment (outcome unknown, the key was kept): %w", err)
-	}
-	switch status {
-	case http.StatusOK, http.StatusNoContent:
-		return "", ErrEnrollmentCancelled
-	case http.StatusConflict:
-		var decided pollResult
-		if err := json.Unmarshal(body, &decided); err != nil {
-			return "", fmt.Errorf("cancel enrollment: decode conflict: %w", err)
+	for attempt := 0; ; attempt++ {
+		endpoint := k.server + enrollmentsPath + "/" + url.PathEscape(k.enrollment.id) + "/cancel"
+		status, body, err := postKeyAPI(ctx, k, k.keyID, endpoint, map[string]string{})
+		if err != nil {
+			return "", fmt.Errorf("cancel enrollment (outcome unknown, the key was kept): %w", err)
 		}
-		approved, done, err := decidePoll(decided)
-		switch {
-		case !done:
-			return "", errors.New("cancel enrollment: the server reported a conflict but the enrollment is still pending; the key was kept")
-		case err == nil:
-			return approved, ErrEnrollmentAlreadyApproved
+		switch status {
+		case http.StatusNoContent:
+			return "", ErrEnrollmentCancelled
+		case http.StatusConflict:
+			var decided pollResult
+			if err := json.Unmarshal(body, &decided); err != nil {
+				return "", fmt.Errorf("cancel enrollment: decode conflict: %w", err)
+			}
+			approved, done, err := decidePoll(decided)
+			switch {
+			case !done:
+				return "", errors.New("cancel enrollment: the server reported a conflict but the enrollment is still pending; the key was kept")
+			case err == nil:
+				return approved, ErrEnrollmentAlreadyApproved
+			default:
+				return "", err
+			}
+		case http.StatusNotFound:
+			if attempt > 0 {
+				return "", errors.New("cancel enrollment: the server does not know the enrollment it just returned for this key; the key was kept")
+			}
+			if approved, err := lookupEnrollment(ctx, k); approved != "" || err != nil {
+				return approved, err
+			}
 		default:
+			// Including 200: only 204 is a cancellation in the contract.
+			return "", fmt.Errorf("cancel enrollment (outcome unknown, the key was kept): unexpected %s", describeStatus(status, body))
+		}
+	}
+}
+
+// lookupEnrollment resubmits k by key id to learn what the server holds. It
+// returns the approved account (with ErrEnrollmentAlreadyApproved), a
+// definitive outcome, an unknown-outcome error, or ("", nil) after recording
+// a live pending enrollment on k.
+func lookupEnrollment(ctx context.Context, k *ServiceAccountKey) (string, error) {
+	e, err := SubmitServiceAccountEnrollment(ctx, k)
+	if err != nil {
+		return "", err
+	}
+	if e.Status == EnrollmentStatusApproved {
+		id, err := ParseServiceAccountID(e.ServiceAccount)
+		if err != nil {
 			return "", err
 		}
-	case http.StatusNotFound:
-		if enrollmentLapsed(k, nowFunc()) {
-			return "", ErrEnrollmentExpired
-		}
-		return "", errors.New("cancel enrollment: the server does not know this enrollment; the key was kept until the enrollment has certainly expired")
-	default:
-		return "", fmt.Errorf("cancel enrollment (outcome unknown, the key was kept): %s", describeStatus(status, body))
+		return id, ErrEnrollmentAlreadyApproved
 	}
+	return "", nil
 }
 
 // ErrServiceAccountKeyUnknown means the server no longer knows the key:

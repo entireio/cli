@@ -15,7 +15,7 @@ A configured service account **fails closed**: a blank variable, a missing key, 
 
 ### Storage
 
-All files live in the per-user config directory (`userdirs.ConfigRoot`), mode 0600, and every write is **durable**: the data is fsynced before it is renamed or linked into place, and the directory after (`jsonutil.WriteFileDurableIn` / `CreateFileDurableIn`). None of these files can be rebuilt, so the repo's usual rename-without-fsync is not enough here.
+All files live in the per-user config directory (`userdirs.ConfigRoot`), mode 0600, and every change is **durable**: data is fsynced before it is renamed or linked into place, the temporary alias of an exclusive create is removed before the directory is fsynced, and removals of key, state, pointer and session files fsync their directory too (`jsonutil.WriteFileDurableIn`, `CreateFileDurableIn`, `RemoveDurableIn`). None of these files can be rebuilt, and a deleted credential must not come back after a power loss, so the repo's usual rename-without-fsync is not enough here.
 
 | File | Content | Written |
 | --- | --- | --- |
@@ -28,27 +28,26 @@ The key id is the RFC 7638 JWK thumbprint of the public key, so it names the fil
 
 The single-file format of the first prototype (`service-account-<svc>.json`) is not migrated: it never shipped outside the prototype branch. If such a file is found where an active key is expected, the error says so and asks for a new enrollment.
 
-The session cache is `service-account-session-<key id>.json` in the per-user cache directory, recording server, account and key id; a mismatch on any of them is a miss. A per-key lock in the cache directory serialises exchanges and cache removal across processes. A minted token is cached only if its unverified claims have `sub` equal to the service account, `aud` containing the key's server, and `exp` in the future and within 24 hours (the token's `exp` wins over a later `expires_in`); a cached token is re-checked the same way on every read. Deleting a key deletes its cached session under the same lock, and a failure is reported.
+The session cache is `service-account-session-<key id>.json` in the per-user cache directory, recording server, account and key id; a mismatch on any of them is a miss. A per-key lock in the cache directory serialises exchanges and cache removal across processes; the verification exchange of `key activate` is never cached. A minted token is used only if its unverified claims have `sub` equal to the service account, **exactly one URL-shaped audience, equal to the key's server** (routing elsewhere takes the first URL audience, so a second origin could otherwise receive the bearer), `sa_key_id` equal to this key's id, and `exp` in the future and within 24 hours; a cached token is re-checked the same way on every read.
 
 ### Key life cycle
 
 | Status | Meaning |
 | --- | --- |
-| `enrolling` | Enrollment in flight: `submitting` (the create request may or may not have reached the server), `pending` (awaiting a decision), or `approved` (bound, activation not yet settled) |
+| `enrolling` | Enrollment undecided: `submitting` (the create request may or may not have reached the server) or `pending` (awaiting a decision). A key in phase `approved` (bound, bind not yet finished) shows its real status, marked for `enroll --resume`. |
 | `active` | Selected by the account's pointer; the key that signs |
 | `inactive` | Bound to an account but not selected: a staged successor |
 | `retired` | In the pointer's retiring list: replaced, and still has to revoke itself |
 
 Transitions are enforced in the store, not in the commands:
 
-- **Only a definitive outcome removes an enrolling key** (`ForgetEnrollment`): denied, expired, refused at submission, or cancelled as confirmed by the server. Lost responses, 5xx, timeouts and "unknown enrollment" while it could still be live keep the key. An enrolling key cannot be revoked or deleted by any other path, including `key revoke --key-id` and `--local-only`.
-- **Submission is idempotent.** The key is stored in phase `submitting` before the request. If the response is lost, `enroll --resume` resubmits; the server returns the same enrollment for the same key id. A submission refused with a 4xx (other than 408, 425, 429) created nothing and deletes the key.
-- **An enrollment is certainly over** once its recorded expiry plus 5 minutes has passed, or, while still `submitting`, once one hour (the contract's maximum lifetime) plus 5 minutes has passed since the key was made. Only then do "unknown" (404) or "still pending" count as expired. This gives every stuck enrollment a way out without guessing.
-- **Polling** uses the server's interval (persisted, so `--resume` keeps it), clamped to 1–60 s; neither a sleep nor a request runs past the expiry, and one last poll at expiry settles a last-moment approval.
-- **Cancel** deletes the key only on 204, or on 409 with `denied`/`expired`. On 409 `approved` the approval won the race: the key is kept and bound, and the user is told how to revoke it. On 404 before the enrollment is certainly over, the key is kept.
-- **Binding** is three recoverable writes: mark the key `approved` with its account, set the pointer if the account has no active key, clear the enrollment. `enroll --resume` finishes an interrupted bind. An approved key never displaces an account's existing active key; it stays inactive for `key activate`.
-- **Activation** first runs a real exchange with the new key and changes nothing if the server refuses it. One atomic pointer write then selects the new key **and** moves the old one into the retiring list, so the obligation to revoke it cannot be lost. Each retiring key revokes itself and is deleted, and only then leaves the list. A failed revoke keeps it there; `key activate` with nothing left to switch to retries every pending revoke.
-- **Only one enrollment** may be in flight per machine; the check and the new key's write happen under the store lock.
+- **Only an explicit server answer removes an enrolling key** (`ForgetEnrollment`): `denied`, `expired`, a submission refused with a 4xx, or a cancel confirmed with 204. Elapsed time, lost responses, 5xx, timeouts and 404s **never** count: an enrollment may have been approved before its record went away. The only other way out is the user's explicit `enroll --cancel --local-only`, which warns that an approved key would stay trusted until an admin revokes it. An undecided key cannot be revoked or deleted by any other path, including `key revoke --key-id` and `--local-only`.
+- **Submission is the lookup.** The key is stored in phase `submitting` before the request. The server answers by key id with what it holds, so `enroll --resume` always resubmits: it finds the live enrollment, the decision already made (`approved` binds the key; `denied`/`expired` delete it), or, if the record is gone and the key was never approved, a fresh enrollment to approve.
+- **Polling** uses the server's interval (persisted for `--resume`), clamped to 1–60 s; neither a sleep nor a poll runs past the expiry. At expiry one last poll, bounded by the 30-second request timeout, catches a last-moment decision; "still pending" or a 404 then keeps the key and points at `--resume`.
+- **Cancel** deletes the key only on 204, or on 409 with `denied`/`expired`. Any other success status (including 200) fails closed. On 409 `approved` the approval won the race: the key is kept and bound, and the user is told how to revoke it. On 404 the client looks the key up by resubmitting and follows the answer (cancelling a fresh pending enrollment found that way once); anything unresolved keeps the key.
+- **Binding** is three recoverable writes: mark the key `approved` with its account, set the pointer if the account has no active key, clear the enrollment. `enroll --resume` selects keys by enrollment phase, not status, so it also finds a key that became active before the last write, and finishes it; binding an already-bound key is a no-op, so concurrent resumes agree.
+- **Activation** first runs a real exchange with the new key (not cached) and changes nothing if the server refuses it. One atomic pointer write then selects the new key **and** moves the old one into the retiring list, so the obligation to revoke it cannot be lost. Each retiring key revokes itself and is deleted, and only then leaves the list; an entry whose files are already gone is dropped on the next activation. `key activate` with nothing left to switch to retries every pending revoke.
+- **Lifecycle decisions fail closed on a damaged store.** The one-enrollment-per-machine rule, resume and cancel selection, and activation scan every key entry and stop on any unreadable or non-regular one; only `key list` reads best-effort, reporting such entries (`problems` in `--json`).
 
 ### Transport rules
 
@@ -63,7 +62,7 @@ Every key-proved call carries a compact JWS signed by the key:
 - header `alg` = `EdDSA`, `typ` = `JWT`, `kid` = the key id (RFC 7638 thumbprint, recomputable from the registered public key);
 - `iss` = `sub` = the service account for exchange and revoke, the key id for enrollment calls (the key has no account yet);
 - `aud` = `<server>/api/authz/sts` for the exchange, otherwise **the exact endpoint URL**;
-- for key-management calls, `htm` = `POST` and `bh` = base64url SHA-256 of the request body **without** its `proof` member, serialised per RFC 8785 (JCS; for these string-only objects, sorted keys and no insignificant whitespace);
+- for key-management calls, `htm` = `POST` and `bh` = base64url SHA-256 of the request body **without** its `proof` member, serialised per RFC 8785 (JCS). The client keeps every body string within printable ASCII plus the PEM's newlines (labels are sanitised to printable ASCII without `"` and `\`, at most 64 bytes), for which sorted-key JSON without HTML escaping is exactly JCS;
 - `iat`, `exp` = `iat` + 5 minutes, and a random `jti`.
 
 The server must verify the signature against the registered (or, for enrollment, submitted) public key, check `aud`, `htm` and `bh` against the request it received, reject `exp` in the past or more than 5 minutes ahead (allowing small clock skew), and **refuse a reused `jti`** for as long as the proof could be valid. A replay cache keyed by (key id, `jti`) with a TTL of the remaining lifetime suffices. With `aud`, `htm` and `bh` bound, a captured proof cannot be replayed against another endpoint or with another body.
@@ -73,14 +72,14 @@ The server must verify the signature against the registered (or, for enrollment,
 | Call | Request | Response |
 | --- | --- | --- |
 | Token exchange `POST /oauth/token` | RFC 8693 form: `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token=<proof>`, `subject_token_type=urn:ietf:params:oauth:token-type:jwt`, `requested_token_type=urn:entire:token-type:sa-session`, `resource=svc_…`, `audience=<server>`; client `entire-cli` | `{access_token, token_type, expires_in}` |
-| Submit enrollment `POST /api/v1/service-account-enrollments` | `{public_key (PKIX PEM), key_id, service_account?, name, proof}` | 200/201 `{enrollment_id, user_code, verification_uri, verification_uri_complete?, expires_in, interval}`. **Idempotent by `key_id`**: resubmitting the same key returns the same enrollment, whatever its state, for as long as the record is kept. A 4xx (other than 408/425/429) means nothing was created. |
-| Poll `POST /api/v1/service-account-enrollments/{id}/poll` | `{proof}` | 200 `{status: pending\|approved\|denied\|expired, service_account}`; 404 only for an id the server never issued or has purged |
-| Cancel `POST /api/v1/service-account-enrollments/{id}/cancel` | `{proof}` | 204 cancelled (it can no longer be approved); **409 `{status: approved\|denied\|expired, service_account}`** when already decided; 404 only for an unknown or purged id |
+| Submit enrollment `POST /api/v1/service-account-enrollments` | `{public_key (PKIX PEM), key_id, service_account?, name, proof}` | 200/201 `{status, service_account?, enrollment_id, user_code, verification_uri, verification_uri_complete?, expires_in, interval}`. **The authoritative lookup by `key_id`**: for a key ever approved and not revoked, `status: approved` with its account, for as long as the key exists; for an undecided enrollment, that enrollment (`status: pending`); for a recorded denial or expiry, that status; only for a key the server has no record of, a new enrollment. A 4xx (other than 408/425/429) means the key is not and will not become trusted, e.g. a revoked key. |
+| Poll `POST /api/v1/service-account-enrollments/{id}/poll` | `{proof}` | 200 `{status: pending\|approved\|denied\|expired, service_account}`; 404 for an id the server never issued or has purged (the client then looks up by key id) |
+| Cancel `POST /api/v1/service-account-enrollments/{id}/cancel` | `{proof}` | **204** cancelled (it can no longer be approved) — the only success status; **409 `{status: approved\|denied\|expired, service_account}`** when already decided; 404 for an unknown or purged id |
 | Self-revoke `POST /api/v1/service-accounts/{svc}/keys/{key id}/revoke` | `{proof}` | 204; 404 when unknown or already revoked |
 
-`expires_in` is at most one hour. Decided and expired enrollment records are kept for at least 24 hours so polls, resubmissions and cancels can be answered with their real state instead of 404.
+`expires_in` is at most one hour. Decided and expired enrollment records should be kept for at least 24 hours, but the client never relies on that: an approved key's registration is itself the lasting record that the key-id lookup answers from.
 
-The exchange is a new branch of the existing STS: a subject token whose `iss` is a `svc_` id is verified against that account's registered, non-revoked keys. The minted sa-session JWT **must** carry `sub` = the service account and `aud` = the server origin (the client refuses anything else), and **must** carry the id of the key that minted it.
+The exchange is a new branch of the existing STS: a subject token whose `iss` is a `svc_` id is verified against that account's registered, non-revoked keys. The minted sa-session JWT **must** carry `sub` = the service account, `aud` = exactly the server origin (no other URL audience; the client refuses anything else), and **`sa_key_id`** (string) = the RFC 7638 thumbprint of the key that minted it; the client refuses a session whose `sa_key_id` is missing or not its own key.
 
 ### Registration and activation
 
@@ -93,7 +92,7 @@ The exchange is a new branch of the existing STS: a subject token whose `iss` is
 ### Revocation
 
 - A key may revoke only itself; revoking other keys is an admin action. Both must be audit-logged.
-- **Revocation must end live sessions immediately.** Every sa-session minted from a key carries the key id, and the session check rejects a session whose key is revoked, the way `checkPluginFamily` ends plugin tokens. Without this, a revoked key keeps working for as long as its sessions live (the client caps that at 24 hours), so this is a requirement, not an optimisation.
+- **Revocation must end live sessions immediately.** `sa_key_id` is the lineage claim: every token derived from an sa-session (repo-scoped push/pull tokens, on-behalf-of exchanges) **must** copy it unchanged, and every verifier of such tokens (core, cells, git) **must** reject a token whose `sa_key_id` names a revoked key, the way `checkPluginFamily` ends plugin tokens. Without this, a revoked key keeps working for as long as its sessions and their derived tokens live (the client caps sessions at 24 hours), so this is a requirement, not an optimisation.
 - Retired keys are revoked by the client right after `key activate`; an admin-set maximum key lifetime (open question) would cover machines nobody decommissions.
 
 ### Rollout compatibility
@@ -106,3 +105,4 @@ Everything is additive. Servers without the endpoints answer 404 to enrollment (
 - Should a key carry an optional permission ceiling below the account's grants, or is "one service account per purpose" the scoping tool?
 - Should a key be able to register its own successor (self-rotation without an admin), and if so how is a stolen key prevented from persisting itself?
 - An admin-set maximum key lifetime.
+- **Atomic rotation (recommended).** `key activate` verifies the new key, switches, then revokes the old one: three steps with a window in which both keys are valid. A server operation `POST /api/v1/service-accounts/{svc}/keys/{new key id}/activate`, proved by the new key and naming the key it replaces, which revokes the old key in the same transaction, would close that window; the client would keep its local pointer-and-retiring-list recovery around it.

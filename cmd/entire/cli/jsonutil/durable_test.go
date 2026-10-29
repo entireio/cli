@@ -60,3 +60,24 @@ func TestWriteFileDurableIn_Replaces(t *testing.T) {
 		t.Fatalf("content = %q (err %v), want two", got, err)
 	}
 }
+
+func TestRemoveDurableIn(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := CreateFileDurableIn(root, "key.json", []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // the second call removes nothing and is not an error
+		if err := RemoveDurableIn(root, "key.json"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "key.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stat after remove: %v", err)
+	}
+}

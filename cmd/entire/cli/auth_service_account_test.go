@@ -63,8 +63,16 @@ func (f *fakeServiceAccountServer) serve(w http.ResponseWriter, r *http.Request)
 			_, _ = io.WriteString(w, `{"error":"invalid_grant"}`) //nolint:errcheck // test server
 			return
 		}
+		// sa_key_id is the minting key: the kid of the submitted assertion.
+		_ = r.ParseForm() //nolint:errcheck // a malformed form fails the kid decode below
+		var header struct {
+			Kid string `json:"kid"`
+		}
+		if raw, err := base64.RawURLEncoding.DecodeString(strings.Split(r.PostForm.Get("subject_token"), ".")[0]); err == nil {
+			_ = json.Unmarshal(raw, &header) //nolint:errcheck // an empty kid is refused by the client
+		}
 		enc := base64.RawURLEncoding.EncodeToString
-		claims := fmt.Sprintf(`{"sub":%q,"aud":%q,"exp":%d}`, testCmdServiceAccount, f.srv.URL, time.Now().Add(time.Hour).Unix())
+		claims := fmt.Sprintf(`{"sub":%q,"aud":%q,"sa_key_id":%q,"exp":%d}`, testCmdServiceAccount, f.srv.URL, header.Kid, time.Now().Add(time.Hour).Unix())
 		token := enc([]byte(`{"alg":"EdDSA"}`)) + "." + enc([]byte(claims)) + ".c2ln"
 		fmt.Fprintf(w, `{"access_token":%q,"token_type":"Bearer","expires_in":3600}`, token)
 	case r.URL.Path == "/api/v1/service-account-enrollments":
@@ -315,4 +323,74 @@ func TestAuthServiceAccountActivateAmbiguousKeyNeedsKeyID(t *testing.T) {
 	_, _, err := runServiceAccountCmd(t.Context(), "key", "activate", "--service-account", testCmdServiceAccount)
 	require.ErrorContains(t, err, "pick one with --key-id")
 	require.Empty(t, srv.revoked)
+}
+
+// A crash after the pointer write but before the enrollment is cleared leaves
+// an active key still in the approved phase; `enroll --resume` must find it
+// through the real CLI selection and finish the bind.
+//
+// Not parallel: it sets ENTIRE_CONFIG_DIR, XDG_CACHE_HOME and package seams.
+func TestAuthServiceAccountResumeFinishesInterruptedBind(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Cleanup(auth.SkipEnrollmentWaitForTest(t))
+	srv := newFakeServiceAccountServer(t)
+
+	restore := auth.InjectStoreFaultForTest("bind:finish")
+	_, _, err := runServiceAccountCmd(t.Context(), "enroll", "--server", srv.srv.URL)
+	restore()
+	require.ErrorContains(t, err, "--resume")
+	keys, err := auth.ListServiceAccountKeys("")
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	require.Equal(t, auth.KeyActive, keys[0].Status)
+	require.True(t, auth.HasEnrollmentInProgress(keys[0].Key), "the bind was not finished")
+
+	out, _, err := runServiceAccountCmd(t.Context(), "enroll", "--resume")
+	require.NoError(t, err)
+	require.Contains(t, out, "export ENTIRE_SERVICE_ACCOUNT="+testCmdServiceAccount)
+	keys, err = auth.ListServiceAccountKeys("")
+	require.NoError(t, err)
+	require.False(t, auth.HasEnrollmentInProgress(keys[0].Key), "resume must clear the finished enrollment")
+
+	// The next enrollment is allowed again.
+	srv.pollStatus = "pending"
+	t.Cleanup(auth.SetEnrollmentSleepForTest(t, func(context.Context, time.Duration) error { return context.Canceled }))
+	_, _, err = runServiceAccountCmd(t.Context(), "enroll", "--server", srv.srv.URL, "--service-account", testCmdServiceAccount)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// --resume and --cancel continue a stored enrollment; flags for a new one are
+// refused rather than silently ignored. --local-only needs --cancel and
+// abandons a key whose cancellation the server cannot confirm.
+//
+// Not parallel: it sets ENTIRE_CONFIG_DIR, XDG_CACHE_HOME and package seams.
+func TestAuthServiceAccountEnrollFlagsAndLocalAbandon(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	srv := newFakeServiceAccountServer(t)
+	srv.pollStatus = "pending"
+	t.Cleanup(auth.SetEnrollmentSleepForTest(t, func(context.Context, time.Duration) error { return context.Canceled }))
+	_, _, err := runServiceAccountCmd(t.Context(), "enroll", "--server", srv.srv.URL)
+	require.ErrorIs(t, err, context.Canceled)
+
+	for _, args := range [][]string{
+		{"enroll", "--resume", "--server", srv.srv.URL},
+		{"enroll", "--cancel", "--service-account", testCmdServiceAccount},
+		{"enroll", "--resume", "--name", "x"},
+		{"enroll", "--local-only"},
+	} {
+		_, _, err := runServiceAccountCmd(t.Context(), args...)
+		require.Error(t, err, args)
+	}
+
+	srv.srv.Close() // the server is gone: cancellation cannot be confirmed
+	_, _, err = runServiceAccountCmd(t.Context(), "enroll", "--cancel")
+	require.ErrorContains(t, err, "was kept")
+	require.Len(t, listKeys(t), 1)
+
+	_, errOut, err := runServiceAccountCmd(t.Context(), "enroll", "--cancel", "--local-only")
+	require.NoError(t, err)
+	require.Contains(t, errOut, "stays trusted until an admin revokes it")
+	require.Empty(t, listKeys(t))
 }
