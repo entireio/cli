@@ -192,38 +192,24 @@ func otherRefsContaining(ctx context.Context, target *object.Commit) []string {
 func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit, checkpointID id.CheckpointID) error {
 	oldHead := chain[len(chain)-1].Hash.String()
 	var pairs strings.Builder
-	parents := chain[0].ParentHashes
 	newSHA, targetSHA := "", ""
 	for i, c := range chain {
 		message := c.Message
 		if i == 0 {
 			message = trailers.AppendCheckpointTrailer(message, checkpointID.String())
 		}
-		args := []string{"commit-tree", c.TreeHash.String()}
+		parents := []string{newSHA}
 		if i == 0 {
-			for _, p := range parents {
-				args = append(args, "-p", p.String())
+			parents = make([]string, 0, len(c.ParentHashes))
+			for _, p := range c.ParentHashes {
+				parents = append(parents, p.String())
 			}
-		} else {
-			args = append(args, "-p", newSHA)
 		}
-		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Stdin = strings.NewReader(message)
-		cmd.Env = append(withoutIdentityEnv(os.Environ()),
-			"GIT_AUTHOR_NAME="+c.Author.Name,
-			"GIT_AUTHOR_EMAIL="+c.Author.Email,
-			fmt.Sprintf("GIT_AUTHOR_DATE=@%d %s", c.Author.When.Unix(), c.Author.When.Format("-0700")),
-			"GIT_COMMITTER_NAME="+c.Committer.Name,
-			"GIT_COMMITTER_EMAIL="+c.Committer.Email,
-			fmt.Sprintf("GIT_COMMITTER_DATE=@%d %s", c.Committer.When.Unix(), c.Committer.When.Format("-0700")),
-		)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		sha, err := commitTree(ctx, c, message, parents)
 		if err != nil {
-			return fmt.Errorf("rewrite commit %s: %w: %s", c.Hash.String()[:12], err, strings.TrimSpace(stderr.String()))
+			return fmt.Errorf("rewrite commit %s: %w", c.Hash.String()[:12], err)
 		}
-		newSHA = strings.TrimSpace(string(out))
+		newSHA = sha
 		if i == 0 {
 			targetSHA = newSHA
 		}
@@ -253,8 +239,34 @@ func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit
 	return nil
 }
 
+// commitTree runs git commit-tree for c's tree on parents with message and c's
+// author and committer, and returns the new commit's hash.
+func commitTree(ctx context.Context, c *object.Commit, message string, parents []string) (string, error) {
+	args := []string{"commit-tree", c.TreeHash.String()}
+	for _, p := range parents {
+		args = append(args, "-p", p)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Stdin = strings.NewReader(message)
+	cmd.Env = append(withoutIdentityEnv(os.Environ()),
+		"GIT_AUTHOR_NAME="+c.Author.Name,
+		"GIT_AUTHOR_EMAIL="+c.Author.Email,
+		fmt.Sprintf("GIT_AUTHOR_DATE=@%d %s", c.Author.When.Unix(), c.Author.When.Format("-0700")),
+		"GIT_COMMITTER_NAME="+c.Committer.Name,
+		"GIT_COMMITTER_EMAIL="+c.Committer.Email,
+		fmt.Sprintf("GIT_COMMITTER_DATE=@%d %s", c.Committer.When.Unix(), c.Committer.When.Format("-0700")),
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // withoutIdentityEnv drops GIT_AUTHOR_* and GIT_COMMITTER_* from env, so the
-// identity rewriteWithTrailer sets is the only one: with a duplicate, which
+// identity commitTree sets is the only one: with a duplicate, which
 // one git sees depends on the platform's getenv.
 func withoutIdentityEnv(env []string) []string {
 	return slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
