@@ -30,10 +30,14 @@ type fakeProjectTrailCore struct {
 	apiURL         string
 	resolutionJSON string
 	clusters       []coreapi.Cluster
+	wantProject    string // when set, ResolveProject asserts the requested project
 }
 
 func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, params coreapi.ResolveProjectParams) (*coreapi.ResolveProjectOutputBody, error) {
 	f.resolveCalls++
+	if f.wantProject != "" && params.Project != f.wantProject {
+		return nil, fmt.Errorf("resolve project %q, want %q", params.Project, f.wantProject)
+	}
 	resolved := struct {
 		Project *struct {
 			ID                    string `json:"id"`

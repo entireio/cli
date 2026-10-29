@@ -254,23 +254,23 @@ var agentHelpGuidance = map[string]string{
 // from the legacy repository-scoped tree built under the same path.
 var agentHelpProjectTrailGuidance = map[string]string{
 	// On the group so every subcommand an agent looks up (show, checkout,
-	// finding, approve, …) inherits the selector model and URL mapping. No
-	// command parses web URLs, and the project and change URLs put "-" where a
-	// repository name would be, so an agent passing one through gets a
-	// misleading repository-mismatch error.
+	// finding, approve, …) inherits the selector model and URL mapping. Trail
+	// commands take a pasted URL and resolve it in the URL's project; the
+	// mapping stays for `entire review`, which takes only repository trail URLs.
 	"trail": agentHelpTrailSandboxGuidance + "\n\n" +
 		"A project trail spans repositories; each change is its branch in one\n" +
 		"repository. Project trails and changes are numbered separately: never\n" +
 		"pass <P> where a change is expected, or <n> where a project trail is.\n" +
 		"Pass <repo>/<n> to checkout, resume, finding, watch, approvals or\n" +
 		"approve; given to show, it shows the parent project trail.\n" +
-		"Users paste Entire trail URLs. Do not pass a URL to any command; map\n" +
-		"the path after the host to a selector:\n" +
+		"Users paste Entire trail URLs. Trail commands accept the URL as the\n" +
+		"selector and use its project. Elsewhere, map the path after the host:\n" +
 		"  <forge>/<project>/-/trails/<P>/changes/<repo>/<n>  change <repo>/<n>\n" +
 		"  <forge>/<project>/<repo>/-/trails/<P>/changes/<n>  change <repo>/<n>\n" +
 		"  <forge>/<project>/<repo>/trails/<n>                change <repo>/<n>\n" +
 		"  <forge>/<project>/-/trails/<P>                     project trail <P>\n" +
-		"Add --project <forge>/<project> unless <project> is origin's owner.\n" +
+		"With a mapped selector, add --project <forge>/<project> unless\n" +
+		"<project> is origin's owner.\n" +
 		"To link a trail or change, use the url `entire trail show` prints.",
 	// Inherits the group's URL mapping above, so an agent that goes straight
 	// to `agent-help trail show` still gets it.

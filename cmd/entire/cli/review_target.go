@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,19 +178,14 @@ func normalizeReviewTargetSelector(raw, forge, owner, repo string) (string, bool
 	if !strings.Contains(raw, "://") {
 		return raw, false, nil
 	}
-	u, parseErr := url.Parse(raw)
-	if parseErr != nil || u.Scheme == "" || u.Host == "" {
-		return "", true, fmt.Errorf("invalid review target URL %q", raw)
+	host, parts, urlErr := entireTrailURLPath(raw)
+	if urlErr != nil {
+		return "", true, fmt.Errorf("invalid review target: %w", urlErr)
 	}
-	if u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP {
-		return "", true, fmt.Errorf("unsupported review target URL scheme %q", u.Scheme)
-	}
-	host := strings.ToLower(u.Hostname())
 	if !isEntireWebHost(host) {
 		return "", true, errors.New("review target URL must be an Entire trail URL")
 	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) < 5 || parts[3] != "trails" || strings.TrimSpace(parts[4]) == "" {
+	if len(parts) < 5 || parts[3] != groupTrails || strings.TrimSpace(parts[4]) == "" {
 		return "", true, fmt.Errorf("invalid Entire trail URL %q", raw)
 	}
 	if parts[0] != forge || parts[1] != owner || parts[2] != repo {
