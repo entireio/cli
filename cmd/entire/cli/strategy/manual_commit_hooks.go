@@ -3735,9 +3735,11 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	if err != nil || len(fullTranscript) == 0 {
 		// A late-transcript agent (agy) writes its transcript AFTER the Stop
 		// hook, so an empty file here is the placeholder PrepareTranscript
-		// materialised when the flush lost the race: a transient state, not a
-		// lost transcript. A later HandleTurnEnd in this turn finalizes with
-		// the flushed content.
+		// materialised when the flush lost the race, not a read failure.
+		// Keeping TurnCheckpointIDs lets another Stop in this turn finalize
+		// them, but agy usually sends only one, so the checkpoints normally
+		// keep their provisional transcripts and the turn reports degraded
+		// capture.
 		if _, late := agent.AsLateTranscriptWriter(ag); late && err == nil {
 			logging.Info(logCtx, "finalize: late-transcript agent has not flushed yet, deferring",
 				slog.String("session_id", state.SessionID),
