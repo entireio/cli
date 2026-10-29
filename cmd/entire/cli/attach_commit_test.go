@@ -5,7 +5,9 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -495,6 +498,138 @@ func TestAttachCommit_UnpushedOlderCommitGetsTheTrailer(t *testing.T) {
 	}
 	if summary := readSummary(t, cpID.String()); len(summary.LinkedCommits) != 0 {
 		t.Errorf("LinkedCommits = %v: a trailer-linked checkpoint needs no anchor", summary.LinkedCommits)
+	}
+}
+
+// useSSHSigning gives the test repository an SSH signing key and returns its
+// private key, with another key the user can't sign with. Skips without
+// ssh-keygen, which git runs to sign and verify.
+func useSSHSigning(t *testing.T) (yours, other string) {
+	t.Helper()
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen not on PATH")
+	}
+	keys := t.TempDir()
+	yours, other = filepath.Join(keys, "yours"), filepath.Join(keys, "other")
+	for _, key := range []string{yours, other} {
+		if out, err := execx.NonInteractive(t.Context(), "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", filepath.Base(key), "-f", key).CombinedOutput(); err != nil {
+			t.Fatalf("ssh-keygen: %v: %s", err, out)
+		}
+	}
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "config", "gpg.format", "ssh")
+	testutil.RunGit(t, dir, "config", "user.signingkey", yours)
+	return yours, other
+}
+
+// signedCommitAt commits name on top of HEAD, signed with key, with extra git
+// options (such as another committer), and returns the commit.
+func signedCommitAt(t *testing.T, name, key string, opts ...string) *object.Commit {
+	t.Helper()
+	dir := mustGetwd(t)
+	testutil.WriteFile(t, dir, name, name)
+	testutil.GitAdd(t, dir, name)
+	args := append(slices.Clone(opts), "-c", "user.signingkey="+key, "commit", "-q", "-S", "-m", "add "+name)
+	testutil.RunGit(t, dir, args...)
+	c := headCommitOf(t)
+	if c.Signature == "" {
+		t.Fatalf("commit %s was not signed", name)
+	}
+	return c
+}
+
+// A commit the user signed is still signed by the same key after attach
+// rewrites it, the target and a commit replayed after it alike (#2974).
+func TestAttachCommit_RewriteKeepsYourSignature(t *testing.T) {
+	setupAttachTestRepo(t)
+	yours, _ := useSSHSigning(t)
+	target := signedCommitAt(t, "work.txt", yours)
+	later := signedCommitAt(t, "later.txt", yours)
+	key := signingKey(context.Background(), target.Hash.String())
+	if key == "" {
+		t.Fatal("no signing key reported for the original commit")
+	}
+
+	out, err := attachHeadless(t, "attach-signed", attachOptions{Commit: target.Hash.String()})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	head := headCommitOf(t)
+	parent, err := head.Parent(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.Hash == later.Hash || parent.Hash == target.Hash {
+		t.Fatalf("commits were not rewritten:\n%s", out)
+	}
+	for _, c := range []*object.Commit{parent, head} {
+		if got := signingKey(context.Background(), c.Hash.String()); got != key {
+			t.Errorf("rewritten commit %s signed by %q, want %q", c.Hash, got, key)
+		}
+	}
+	if strings.Contains(out, "no longer signed") {
+		t.Errorf("no commit should lose its signature:\n%s", out)
+	}
+}
+
+// A commit someone else committed and signed is replayed unsigned, not signed
+// with the user's key, and the signer is never asked.
+func TestAttachCommit_RewriteDoesNotSignSomeoneElsesCommit(t *testing.T) {
+	setupAttachTestRepo(t)
+	_, other := useSSHSigning(t)
+	target := commitAt(t, "work.txt")
+	signedCommitAt(t, "theirs.txt", other, "-c", "user.name=Someone Else", "-c", "user.email=someone@example.com")
+	// Signing with this would fail, so a "signing failed" reason means attach tried.
+	testutil.RunGit(t, mustGetwd(t), "config", "user.signingkey", filepath.Join(t.TempDir(), "missing"))
+
+	out, err := attachHeadless(t, "attach-signed-theirs", attachOptions{Commit: target.Hash.String()})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if head := headCommitOf(t); head.Signature != "" {
+		t.Errorf("someone else's commit was signed on replay")
+	}
+	if !strings.Contains(out, "is no longer signed: it was committed by someone@example.com, not you") {
+		t.Errorf("expected a warning that their commit is no longer signed, got:\n%s", out)
+	}
+}
+
+// A commit the user committed but signed with a key they can't sign with now
+// is replayed unsigned: the new signature would be by a different key.
+func TestAttachCommit_RewriteDropsASignatureByAnotherKey(t *testing.T) {
+	setupAttachTestRepo(t)
+	_, other := useSSHSigning(t)
+	target := signedCommitAt(t, "work.txt", other)
+
+	out, err := attachHeadless(t, "attach-signed-other-key", attachOptions{Commit: target.Hash.String()})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if head := headCommitOf(t); head.Signature != "" || head.Hash == target.Hash {
+		t.Errorf("the rewrite should be unsigned: %s signed=%v", head.Hash, head.Signature != "")
+	}
+	if !strings.Contains(out, "is no longer signed: it was signed with a key other than your signing key") {
+		t.Errorf("expected a warning naming the other key, got:\n%s", out)
+	}
+}
+
+// When signing fails, the commit is still rewritten, unsigned, with the reason.
+func TestAttachCommit_RewriteFallsBackWhenSigningFails(t *testing.T) {
+	setupAttachTestRepo(t)
+	yours, _ := useSSHSigning(t)
+	target := signedCommitAt(t, "work.txt", yours)
+	testutil.RunGit(t, mustGetwd(t), "config", "user.signingkey", filepath.Join(t.TempDir(), "missing"))
+
+	out, err := attachHeadless(t, "attach-signing-fails", attachOptions{Commit: target.Hash.String()})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	head := headCommitOf(t)
+	if _, ok := trailers.ParseCheckpoint(head.Message); !ok || head.Signature != "" {
+		t.Errorf("want an unsigned rewrite with the trailer: signed=%v %q", head.Signature != "", head.Message)
+	}
+	if !strings.Contains(out, "is no longer signed: signing failed:") {
+		t.Errorf("expected the signing failure, got:\n%s", out)
 	}
 }
 
