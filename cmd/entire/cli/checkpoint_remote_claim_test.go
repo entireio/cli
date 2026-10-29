@@ -245,7 +245,7 @@ func TestCheckpointClaimReport(t *testing.T) {
 		invalidTransport bool
 	}{
 		{name: "confirmed", wantClaim: true},
-		{name: "confirmed but transport cannot resolve", wantClaim: true, invalidTransport: true},
+		{name: "confirmed with unparseable push URL", wantClaim: true, invalidTransport: true},
 		{name: "yes skips claim", args: []string{"--yes"}, yes: true},
 		{name: "agent skips claim", args: []string{"--agent", "claude-code"}},
 		{name: "tracked local", localState: "tracked"},
@@ -278,8 +278,11 @@ func TestCheckpointClaimReport(t *testing.T) {
 			assert.Equal(t, tc.wantClaim, settings.CheckpointRemoteIsLocalOnly(t.Context()), out.String())
 			switch {
 			case tc.wantClaim && tc.invalidTransport:
-				assert.Contains(t, out.String(), "uploaded when you push to origin")
-				assert.NotContains(t, out.String(), "Checkpoints will use acme/checkpoints")
+				// The push URL yields no transport to derive from, so the
+				// confirmed store is reached on the provider's host rather
+				// than falling back to the code remote.
+				assert.Contains(t, out.String(), "Checkpoint uploads use the dedicated destination: git@github.com:acme/checkpoints.git")
+				assert.NotContains(t, out.String(), "uploaded when you push to origin")
 			case tc.wantClaim:
 				assert.NotContains(t, out.String(), "No checkpoint destination settings changed")
 				assert.Contains(t, out.String(), "Checkpoint uploads use the dedicated destination:")
