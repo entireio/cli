@@ -484,18 +484,31 @@ func pinClock(t *testing.T) *time.Time {
 	return &now
 }
 
+// envServiceAccountToken mints through ServiceAccountTarget, the path
+// LookupEnvToken takes, minus its https-only check (the fakes are loopback
+// HTTP servers).
+func envServiceAccountToken(t *testing.T) (string, bool, error) {
+	t.Helper()
+	target, ok, err := ServiceAccountTarget()
+	if !ok || err != nil {
+		return "", ok, err
+	}
+	token, err := target.TokenSource(context.Background())
+	return token, true, err
+}
+
 func TestLookupEnvToken_ServiceAccountExchangesThenCaches(t *testing.T) {
 	now := pinClock(t)
 	sts, key := setupServiceAccountWithSTS(t)
 
-	raw, ok, err := LookupEnvToken(context.Background())
+	raw, ok, err := envServiceAccountToken(t)
 	if err != nil || !ok {
 		t.Fatalf("LookupEnvToken = ok %v, err %v", ok, err)
 	}
 	if claims := decodeTestSegment(t, strings.Split(raw, ".")[1]); claims["aud"] != key.Server() {
 		t.Fatalf("minted token aud = %v, want %s", claims["aud"], key.Server())
 	}
-	if _, _, err := LookupEnvToken(context.Background()); err != nil {
+	if _, _, err := envServiceAccountToken(t); err != nil {
 		t.Fatal(err)
 	}
 	if got := sts.calls.Load(); got != 1 {
@@ -504,7 +517,7 @@ func TestLookupEnvToken_ServiceAccountExchangesThenCaches(t *testing.T) {
 
 	// Inside the refresh skew the cached session is no longer handed out.
 	*now = now.Add(time.Hour - saSessionRefreshSkew + time.Second)
-	if _, _, err := LookupEnvToken(context.Background()); err != nil {
+	if _, _, err := envServiceAccountToken(t); err != nil {
 		t.Fatal(err)
 	}
 	if got := sts.calls.Load(); got != 2 {
@@ -609,7 +622,7 @@ func TestServiceAccountToken_CacheBoundToServerAndAccount(t *testing.T) {
 func TestLookupEnvToken_ServiceAccountRejectedFailsClosed(t *testing.T) {
 	sts, _ := setupServiceAccountWithSTS(t)
 	sts.reject = true
-	_, ok, err := LookupEnvToken(context.Background())
+	_, ok, err := envServiceAccountToken(t)
 	if !ok {
 		t.Fatal("ok = false; a configured service account must commit the caller to the env path")
 	}
@@ -712,5 +725,19 @@ func TestEnvCredentialNonEmpty(t *testing.T) {
 	t.Setenv(ServiceAccountEnvVar, testServiceAccount)
 	if !EnvCredentialNonEmpty() {
 		t.Fatal("a service account was not reported")
+	}
+}
+
+// A key whose server is not https cannot feed the ENTIRE_TOKEN-compatible
+// paths (their aud check refuses plain HTTP); LookupEnvToken says so before
+// any exchange instead of failing later on the aud.
+func TestLookupEnvToken_RefusesPlainHTTPKeyServer(t *testing.T) {
+	sts, _ := setupServiceAccountWithSTS(t) // a loopback http server
+	_, ok, err := LookupEnvToken(context.Background())
+	if !ok || err == nil || !strings.Contains(err.Error(), "not https") {
+		t.Fatalf("ok %v err %v; want a fail-closed https error", ok, err)
+	}
+	if sts.calls.Load() != 0 {
+		t.Fatal("exchanged although the session could not be used")
 	}
 }

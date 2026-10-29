@@ -51,7 +51,7 @@ Transitions are enforced in the store, not in the commands:
 
 ### Transport rules
 
-Every key-signed request requires HTTPS, except loopback or an explicit `--insecure-http-auth` for that invocation. A key created for a plain-HTTP development server stays listable, showable and deletable without the flag; only network use needs it. Key-management requests never follow redirects (a 307/308 would resend the proof elsewhere), and the STS client refuses cross-host redirects. Approval links must be HTTPS, carry no userinfo and consist of printable ASCII; user codes and enrollment ids must match fixed patterns; server error text is passed through the terminal sanitizer and capped before it is printed.
+Every key-signed request requires HTTPS, except loopback or an explicit `--insecure-http-auth` for that invocation. A key created for a plain-HTTP development server stays listable, showable and deletable without the flag; only network use needs it. Such a key can manage itself and back `coreapi` clients, but `ENTIRE_SERVICE_ACCOUNT` refuses it on the ENTIRE_TOKEN-compatible paths (`auth status`/`token`, data API, cells, git), whose audience check accepts only https, just as it does for `ENTIRE_TOKEN`. Key-management requests never follow redirects (a 307/308 would resend the proof elsewhere), and the STS client refuses cross-host redirects. Approval links must be HTTPS, carry no userinfo and consist of printable ASCII; user codes and enrollment ids must match fixed patterns; server error text is passed through the terminal sanitizer and capped before it is printed.
 
 ## Server contract (proposed)
 

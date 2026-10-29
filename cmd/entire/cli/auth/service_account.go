@@ -550,6 +550,13 @@ func LookupEnvToken(ctx context.Context) (string, bool, error) {
 	if !ok || err != nil {
 		return "", ok, err
 	}
+	// Callers treat the value like ENTIRE_TOKEN and route by its aud, which
+	// must be https (CoreURLFromEnvToken refuses plain HTTP even with the
+	// insecure opt-in). Say so up front rather than mint a session whose aud
+	// fails later with a less helpful message.
+	if !strings.HasPrefix(target.CoreURL, schemeHTTPS+"://") {
+		return "", true, fmt.Errorf("%s: the key's login server %s is not https; plain-HTTP servers work only for key management and coreapi clients, not for the ENTIRE_TOKEN-compatible paths (auth status/token, data API, cells, git)", ServiceAccountEnvVar, target.CoreURL)
+	}
 	token, err := target.TokenSource(ctx)
 	return token, true, err
 }
