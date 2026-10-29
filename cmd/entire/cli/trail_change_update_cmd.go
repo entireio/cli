@@ -32,12 +32,21 @@ not every repository on the trail. The branch work must be open.`),
 			if err != nil {
 				return err
 			}
-			if ready && updated.ReadyForReview != nil && !*updated.ReadyForReview {
+			switch {
+			case updated.ReadyForReview == nil:
+				// Nothing in the response confirms the state; do not claim it.
+				requested := "draft"
+				if ready {
+					requested = "ready for review"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Requested %s for %s, but the server did not report its readiness; check it with 'entire trail show'\n",
+					requested, selected.description())
+				return nil
+			case ready && !*updated.ReadyForReview:
 				return errTrailNotMarkedReady
-			}
-			if ready {
+			case ready:
 				fmt.Fprintf(cmd.OutOrStdout(), "Marked %s ready for review\n", selected.description())
-			} else {
+			default:
 				fmt.Fprintf(cmd.OutOrStdout(), "Returned %s to draft\n", selected.description())
 			}
 			return nil

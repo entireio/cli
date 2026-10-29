@@ -91,14 +91,18 @@ func TestTrailReady_FailsWhenTheServerDoesNotRecordReadiness(t *testing.T) {
 	assert.Empty(t, out, "must not claim success")
 }
 
-func TestTrailReady_TrustsTheRequestWhenTheServerOmitsReadiness(t *testing.T) {
+func TestTrailReady_DoesNotClaimSuccessWhenTheServerOmitsReadiness(t *testing.T) {
 	// Serial: replaces global clients.
 	omitted := func(map[string]any) api.TrailResource {
 		return api.TrailResource{Number: 7, Branch: "feature/work"}
 	}
-	_, out, err := runTrailChangeUpdate(t, true, []string{"ready"}, omitted)
-	require.NoError(t, err)
-	assert.Contains(t, out, "ready for review")
+	for _, args := range [][]string{{"ready"}, {"ready", "--undo"}} {
+		_, out, err := runTrailChangeUpdate(t, true, args, omitted)
+		require.NoError(t, err, "args %v", args)
+		assert.Contains(t, out, "did not report its readiness")
+		assert.NotContains(t, out, "Marked")
+		assert.NotContains(t, out, "Returned")
+	}
 }
 
 func TestTrailRetarget_SendsOnlyTheBase(t *testing.T) {
