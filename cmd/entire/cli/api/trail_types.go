@@ -51,6 +51,8 @@ type TrailResource struct {
 	// review-target resolution, ...) does not depend on the snapshot's shape;
 	// only `trail show` reads it, through DecodeMergeability.
 	Mergeability json.RawMessage `json:"mergeability,omitempty"`
+	// Runners is detail-only too, and raw for the same reason; see DecodeRunners.
+	Runners json.RawMessage `json:"runners,omitempty"`
 	// FromDetail reports that the resource was decoded from the detail route
 	// rather than a list page. It is the reliable marker: body_document can be
 	// absent from a valid detail response.
@@ -72,7 +74,7 @@ type TrailBodyDocument struct {
 // DecodeMergeability decodes the detail resource's mergeability snapshot. It
 // returns nil, nil when the snapshot is absent or null.
 func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
-	if len(r.Mergeability) == 0 || string(r.Mergeability) == "null" {
+	if rawJSONAbsent(r.Mergeability) {
 		return nil, nil //nolint:nilnil // nil, nil means "no snapshot served"
 	}
 	var m TrailMergeability
@@ -80,6 +82,12 @@ func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
 		return nil, fmt.Errorf("decode trail mergeability: %w", err)
 	}
 	return &m, nil
+}
+
+// rawJSONAbsent reports a detail-only field the read did not carry: missing
+// or null.
+func rawJSONAbsent(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(raw) == "null"
 }
 
 // ToMetadata converts a TrailResource to display metadata.
@@ -196,7 +204,7 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 	if wire.Body != nil {
 		a.Body = *wire.Body
 	}
-	if len(wire.Author) == 0 || string(wire.Author) == "null" {
+	if rawJSONAbsent(wire.Author) {
 		return nil
 	}
 	if err := json.Unmarshal(wire.Author, &a.Author); err == nil {

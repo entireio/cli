@@ -114,6 +114,9 @@ entire trail finding resolve <id> -m "fixed in abc123"
 
 entire trail comment add -m "Should this cover the admin API too?"
 entire trail approve
+entire trail runner list                # configured runners and their latest outcome
+entire trail runner rerun-review        # re-run the configured review on the current head
+entire trail update-branch              # merge the base into the branch on the server (Entire-native repos)
 entire trail merge                      # merge this branch's change into its base
 entire trail resume 42                  # continue Trail #42: restore its branch's sessions in your agent
 ```

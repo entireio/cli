@@ -63,7 +63,7 @@ func resolveLegacyTrailContext(cmd *cobra.Command, selector, branch string, loca
 		}
 		found.Parent = nil
 		client.SetTrailRoute(found.ID, trailNumberPathForBase(base, found.Number))
-		selected = &trailWorkingContext{Client: client, BasePath: base, Host: forge, Owner: owner, Repo: repo, Work: *found}
+		selected = &trailWorkingContext{Client: client, BasePath: base, RepoID: repoID, Host: forge, Owner: owner, Repo: repo, Work: *found}
 		return nil
 	})
 	return selected, err
