@@ -30,10 +30,14 @@ type fakeProjectTrailCore struct {
 	apiURL         string
 	resolutionJSON string
 	clusters       []coreapi.Cluster
+	resolveErr     error
 }
 
 func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, params coreapi.ResolveProjectParams) (*coreapi.ResolveProjectOutputBody, error) {
 	f.resolveCalls++
+	if f.resolveErr != nil {
+		return nil, f.resolveErr
+	}
 	resolved := struct {
 		Project *struct {
 			ID                    string `json:"id"`
@@ -426,4 +430,62 @@ func TestProjectTrailValidationBeforeIO(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// Core answers 404 for a missing project and for a GitHub namespace the login
+// cannot see, and 403 for a native project it may not inspect. Both must read
+// as one line naming the project, never the generated client's error dump.
+func TestProjectTrailProjectResolveErrorsAreReadable(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		args   []string
+		want   []string
+	}{
+		{
+			name: "missing GitHub namespace on list", status: http.StatusNotFound,
+			args: []string{"list", "--project", "gh/acme"},
+			want: []string{"gh/acme does not exist or is not visible to your login", "entire auth status", "GitHub owner is connected to Entire"},
+		},
+		{
+			name: "missing native project on show", status: http.StatusNotFound,
+			args: []string{"show", "42", "--project", "et/widgets"},
+			want: []string{"et/widgets does not exist or is not visible to your login", "entire auth status"},
+		},
+		{
+			name: "forbidden native project", status: http.StatusForbidden,
+			args: []string{"show", "42", "--project", "et/widgets"},
+			want: []string{"your login does not have access to et/widgets"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, _ := setupProjectTrailTest(t, func(http.ResponseWriter, *http.Request) {
+				t.Error("no data-plane request expected after a refused project resolution")
+			})
+			core.resolveErr = &coreapi.ErrorModelStatusCode{StatusCode: tc.status, Response: coreapi.ErrorModel{
+				Detail: coreapi.NewOptString("project not found"),
+				Title:  coreapi.NewOptString(http.StatusText(tc.status)),
+			}}
+			_, _, err := executeProjectTrailTest(t, tc.args...)
+			require.ErrorIs(t, err, errProjectTrailProjectNotFound)
+			for _, want := range tc.want {
+				assert.Contains(t, err.Error(), want)
+			}
+			assert.NotContains(t, err.Error(), "Schema:", "the generated client's error dump must not reach the user")
+			if tc.args[len(tc.args)-1] == "et/widgets" {
+				assert.NotContains(t, err.Error(), "GitHub owner", "native projects get no GitHub hint")
+			}
+		})
+	}
+}
+
+// Server errors other than 404/403 keep the underlying error for diagnosis.
+func TestProjectTrailProjectResolveOtherErrorsKeepCause(t *testing.T) {
+	core, _ := setupProjectTrailTest(t, func(http.ResponseWriter, *http.Request) {})
+	cause := &coreapi.ErrorModelStatusCode{StatusCode: http.StatusInternalServerError}
+	core.resolveErr = cause
+	_, _, err := executeProjectTrailTest(t, "list", "--project", "gh/acme")
+	require.ErrorIs(t, err, cause)
+	require.NotErrorIs(t, err, errProjectTrailProjectNotFound)
+	assert.Contains(t, err.Error(), "resolve project gh/acme")
 }

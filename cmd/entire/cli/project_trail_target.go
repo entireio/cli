@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -159,10 +161,39 @@ func resolveProjectTrailCollectionFor(ctx context.Context, host, project string,
 	return target, nil
 }
 
+// errProjectTrailProjectNotFound marks a project Core would not resolve for
+// this login: Core answers 404 both for a missing project and for a GitHub
+// namespace the caller cannot see, so the message covers both.
+var errProjectTrailProjectNotFound = errors.New("project not found")
+
+// describeProjectResolveError turns Core's 404/403 for a project reference
+// into one actionable line instead of the generated client's raw error dump.
+// Other failures (401, timeouts, server errors) keep their existing handling.
+func describeProjectResolveError(ctx context.Context, host, project string, err error) error {
+	ref := host + "/" + project
+	status := coreapi.APIErrorStatus(err)
+	if status == http.StatusNotFound || status == http.StatusForbidden {
+		logging.Debug(logging.WithComponent(ctx, "trail"), "core refused project resolution",
+			slog.String("project", ref), slog.Int("status", status), slog.String("detail", coreapi.APIError(err)))
+	}
+	switch status {
+	case http.StatusNotFound:
+		hint := "check that 'entire auth status' shows the account that can open this project's trails on the web"
+		if host == mirrorCloneForge {
+			hint += ", and that the GitHub owner is connected to Entire"
+		}
+		return fmt.Errorf("%w: %s does not exist or is not visible to your login; %s", errProjectTrailProjectNotFound, ref, hint)
+	case http.StatusForbidden:
+		return fmt.Errorf("%w: your login does not have access to %s", errProjectTrailProjectNotFound, ref)
+	default:
+		return fmt.Errorf("resolve project %s: %w", ref, err)
+	}
+}
+
 func resolveProjectTrailRoute(ctx context.Context, core projectTrailCoreClient, host, project string) (*projectTrailTarget, *auth.CellTarget, error) {
 	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{Host: coreapi.ResolveProjectHost(host), Project: project})
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve project: %w", err)
+		return nil, nil, describeProjectResolveError(ctx, host, project, err)
 	}
 	if string(resolved.Reference.Host) != host || !strings.EqualFold(resolved.Reference.Project, project) {
 		return nil, nil, errors.New("core returned a different project reference")
