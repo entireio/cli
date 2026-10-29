@@ -245,21 +245,6 @@ func TestFinalizeAllTurnCheckpoints_Deadline(t *testing.T) {
 	}
 }
 
-// An ordinary per-checkpoint failure is an error, not a timeout: it must not
-// raise the capture-degraded warning.
-func TestFinalizeAllTurnCheckpoints_WriteErrorIsNotDegradation(t *testing.T) {
-	f := newFinalizeFixture(t)
-	f.state.TurnCheckpointIDs = append([]string{"not-a-checkpoint-id"}, f.state.TurnCheckpointIDs...)
-
-	s := NewManualCommitStrategy()
-	s.checkpointRefFetcher = func(_ context.Context, refName plumbing.ReferenceName) error { return f.restore(refName) }
-
-	errCount := s.finalizeAllTurnCheckpoints(context.Background(), f.state, time.Now().Add(time.Minute))
-	require.Equal(t, 1, errCount)
-	require.Nil(t, f.state.CaptureDegradedAt)
-	f.requireTranscripts(t, len(f.checkpointIDs))
-}
-
 // Once the deadline has passed, nothing finalize prepares can be written, so
 // it must not start the local preparation at all: that time is the headroom
 // the hook needs to save state before its host kills it. The transcript path

@@ -1428,11 +1428,10 @@ func TestHandleTurnEnd_PartialFailure(t *testing.T) {
 	require.NoError(t, err,
 		"HandleTurnEnd should return nil even with partial failures (best-effort)")
 
-	// TurnCheckpointIDs should be cleared regardless of partial failure
-	assert.Empty(t, state.TurnCheckpointIDs,
-		"TurnCheckpointIDs should be cleared after HandleTurnEnd, even with errors")
-	assert.Nil(t, state.CaptureDegradedAt,
-		"a write that fails while the context is alive is an error, not capture degradation")
+	assert.Equal(t, []string{"ffffffffffff"}, state.TurnCheckpointIDs,
+		"only the checkpoint that failed to write is kept for a repeated Stop")
+	assert.NotNil(t, state.CaptureDegradedAt,
+		"a checkpoint that failed to write keeps its provisional transcript, so capture degraded")
 
 	// Verify the 2 valid checkpoints were finalized with the full transcript
 	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())

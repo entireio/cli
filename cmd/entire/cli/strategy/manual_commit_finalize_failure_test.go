@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,6 +99,110 @@ func TestFinalizeAllTurnCheckpoints_EarlyFailureIsDegradation(t *testing.T) {
 			require.Empty(t, f.state.TurnCheckpointIDs)
 			f.requireTranscripts(t, len(f.checkpointIDs))
 		})
+	}
+}
+
+// A checkpoint whose own write fails keeps its provisional transcript while
+// the rest of the turn finalizes. That is degraded capture too, and only the
+// failed checkpoints are kept for a repeated Stop. An ID that is not a
+// checkpoint ID can never be written, so it is reported but not kept.
+func TestFinalizeAllTurnCheckpoints_WriteFailureIsDegradation(t *testing.T) {
+	errRemote := errors.New("remote rejected the fetch")
+	for _, tc := range []struct {
+		name string
+		// prefix is prepended to the fixture's turn IDs.
+		prefix []string
+		// fetch serves the call-th ref fetch (1-based); cancel ends the hook's context.
+		fetch     func(f *finalizeFixture, cancel context.CancelFunc, call int, refName plumbing.ReferenceName) error
+		errCount  int
+		kept      []int
+		finalized []bool
+	}{
+		{
+			// The store skips every later fetch in the operation once one
+			// fails, so the third checkpoint fails with the second.
+			name: "fetch_fails_mid_turn",
+			fetch: func(f *finalizeFixture, _ context.CancelFunc, call int, refName plumbing.ReferenceName) error {
+				if call == 2 {
+					return errRemote
+				}
+				return f.restore(refName)
+			},
+			errCount:  2,
+			kept:      []int{1, 2},
+			finalized: []bool{true, false, false},
+		},
+		{
+			name:   "invalid_checkpoint_id",
+			prefix: []string{"not-a-checkpoint-id"},
+			fetch: func(f *finalizeFixture, _ context.CancelFunc, _ int, refName plumbing.ReferenceName) error {
+				return f.restore(refName)
+			},
+			errCount:  1,
+			finalized: []bool{true, true, true},
+		},
+		{
+			name:   "failure_then_interrupted",
+			prefix: []string{"not-a-checkpoint-id"},
+			fetch: func(_ *finalizeFixture, cancel context.CancelFunc, _ int, _ plumbing.ReferenceName) error {
+				cancel()
+				return context.Canceled
+			},
+			errCount:  1,
+			kept:      []int{0, 1, 2},
+			finalized: []bool{false, false, false},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFinalizeFixture(t)
+			fixtureIDs := append([]string(nil), f.state.TurnCheckpointIDs...)
+			f.state.TurnCheckpointIDs = append(append([]string(nil), tc.prefix...), fixtureIDs...)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			s := NewManualCommitStrategy()
+			calls := 0
+			s.checkpointRefFetcher = func(_ context.Context, refName plumbing.ReferenceName) error {
+				calls++
+				return tc.fetch(f, cancel, calls, refName)
+			}
+
+			errCount := s.finalizeAllTurnCheckpoints(ctx, f.state, time.Now().Add(time.Minute))
+			require.Equal(t, tc.errCount, errCount, "failed checkpoints are still counted as errors")
+			require.NotNil(t, f.state.CaptureDegradedAt, "a checkpoint left provisional must show in `entire status`")
+			var kept []string
+			for _, i := range tc.kept {
+				kept = append(kept, fixtureIDs[i])
+			}
+			require.Equal(t, kept, f.state.TurnCheckpointIDs, "only checkpoints a retry can still write are kept")
+			f.requireFinalized(t, tc.finalized)
+			if len(kept) == 0 {
+				return
+			}
+
+			// A repeated Stop retries the kept IDs and finishes the turn.
+			retry := NewManualCommitStrategy()
+			retry.checkpointRefFetcher = func(_ context.Context, refName plumbing.ReferenceName) error { return f.restore(refName) }
+			require.Zero(t, retry.finalizeAllTurnCheckpoints(context.Background(), f.state, time.Now().Add(time.Minute)))
+			require.Empty(t, f.state.TurnCheckpointIDs)
+			f.requireTranscripts(t, len(f.checkpointIDs))
+		})
+	}
+}
+
+// requireFinalized checks each fixture checkpoint's transcript: finalized[i]
+// says whether checkpoint i holds the full transcript or the provisional one.
+func (f *finalizeFixture) requireFinalized(t *testing.T, finalized []bool) {
+	t.Helper()
+	f.restoreUnfetched(t)
+	for i, checkpointID := range f.checkpointIDs {
+		content, err := f.store.ReadSessionContent(context.Background(), checkpointID, 0)
+		require.NoError(t, err)
+		want := provisionalTranscript
+		if finalized[i] {
+			want = testTranscriptPromptResponse
+		}
+		require.Equal(t, want, string(content.Transcript), "checkpoint %d", i)
 	}
 }
 

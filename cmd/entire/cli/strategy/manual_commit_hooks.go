@@ -3681,8 +3681,9 @@ var errTurnEndDeadline = errors.New("turn-end finalize deadline exceeded")
 // interruption is logged and recorded as capture degradation instead.
 //
 // Any exit before the writes leaves every checkpoint with its provisional
-// transcript, so it records capture degradation and keeps TurnCheckpointIDs:
-// a repeated Stop in the same turn retries them, and turn start clears them.
+// transcript, and a failed write leaves its own checkpoint so. Both record
+// capture degradation and keep the affected TurnCheckpointIDs: a repeated
+// Stop in the same turn retries them, and turn start clears them.
 func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, state *SessionState, deadline time.Time) int {
 	if len(state.TurnCheckpointIDs) == 0 {
 		return 0 // No mid-turn commits to finalize
@@ -3893,10 +3894,15 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		SkillEvents:             skillEvents,
 		PrecomputedBlobs:        precomputed,
 	}
-	errCount, unfinalized := finalizeTurnCheckpointWrites(budgetCtx, logCtx, store, state, updateOpts)
+	errCount, failed, unfinalized := finalizeTurnCheckpointWrites(budgetCtx, logCtx, store, state, updateOpts)
 	if unfinalized > 0 {
-		state.TurnCheckpointIDs = state.TurnCheckpointIDs[len(state.TurnCheckpointIDs)-unfinalized:]
+		state.TurnCheckpointIDs = append(failed, state.TurnCheckpointIDs[len(state.TurnCheckpointIDs)-unfinalized:]...)
 		recordFinalizeInterruption(budgetCtx, logCtx, state)
+		return errCount
+	}
+	if errCount > 0 {
+		state.TurnCheckpointIDs = failed
+		markFinalizeIncomplete(state)
 		return errCount
 	}
 
@@ -3913,19 +3919,21 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 // finalizeTurnCheckpointWrites writes the finalized transcript to each
 // checkpoint in state.TurnCheckpointIDs, in order. errCount counts checkpoints
 // that failed for reasons other than ctx ending; processing continues past
-// them. If ctx ends, the loop stops and unfinalized is the length of the
-// unprocessed suffix of state.TurnCheckpointIDs, which the caller keeps for a
-// retry; it is zero whenever ctx did not end.
+// them. failed lists those whose write failed, which a retry may still write;
+// an invalid ID is counted but not listed. If ctx ends, the loop stops and
+// unfinalized is the length of the unprocessed suffix of
+// state.TurnCheckpointIDs; it is zero whenever ctx did not end. The caller
+// keeps failed and that suffix for a retry.
 func finalizeTurnCheckpointWrites(
 	ctx context.Context,
 	logCtx context.Context,
 	store checkpoint.PersistentStore,
 	state *SessionState,
 	updateOpts checkpoint.UpdateOptions,
-) (errCount, unfinalized int) {
+) (errCount int, failed []string, unfinalized int) {
 	for checkpointIndex, cpIDStr := range state.TurnCheckpointIDs {
 		if ctx.Err() != nil {
-			return errCount, len(state.TurnCheckpointIDs) - checkpointIndex
+			return errCount, failed, len(state.TurnCheckpointIDs) - checkpointIndex
 		}
 
 		cpID, err := id.NewCheckpointID(cpIDStr)
@@ -3947,13 +3955,14 @@ func finalizeTurnCheckpointWrites(
 					slog.String("checkpoint_id", cpIDStr),
 					slog.String("error", err.Error()),
 				)
-				return errCount, len(state.TurnCheckpointIDs) - checkpointIndex
+				return errCount, failed, len(state.TurnCheckpointIDs) - checkpointIndex
 			}
 			logging.Warn(logCtx, "finalize: failed to update checkpoint",
 				slog.String("checkpoint_id", cpIDStr),
 				slog.String("error", err.Error()),
 			)
 			errCount++
+			failed = append(failed, cpIDStr)
 			continue
 		}
 
@@ -3962,7 +3971,7 @@ func finalizeTurnCheckpointWrites(
 			slog.String("session_id", state.SessionID),
 		)
 	}
-	return errCount, 0
+	return errCount, failed, 0
 }
 
 // abandonIfInterrupted reports whether ctx has ended, from the turn-end
