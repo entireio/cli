@@ -66,6 +66,8 @@ func newLogoutCmd() *cobra.Command {
 			// so it still authenticates after the sweep.
 			if os.Getenv(auth.EnvTokenVar) != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Context provided by %s.\n", auth.EnvTokenVar)
+			} else if os.Getenv(auth.ServiceAccountEnvVar) != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Service account provided by %s.\n", auth.ServiceAccountEnvVar)
 			}
 			return err
 		},

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -137,6 +137,7 @@ func newAuthCmd() *cobra.Command {
 	cmd.AddCommand(newAuthTokenCmd())
 	cmd.AddCommand(newAuthContextsCmd())
 	cmd.AddCommand(newAuthSwitchCmd())
+	experimental.Register(cmd, newAuthServiceAccountCmd())
 	return cmd
 }
 
@@ -340,7 +341,10 @@ type statusTarget struct {
 // that the request never touches. `logout` does not use this: it sweeps
 // every stored login, and an ephemeral env token is not one of them.
 func resolveAuthStatusTarget(ctx context.Context, listContexts contextsProvider, resolveLogin loginTokenResolver) (statusTarget, error) {
-	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
+	if raw, ok, err := auth.LookupEnvToken(ctx); ok {
+		if err != nil {
+			return statusTarget{}, err //nolint:wrapcheck // already prefixed with the env var that selected it
+		}
 		return resolveEnvTokenStatusTarget(raw)
 	}
 	return resolveStatusTarget(ctx, listContexts, resolveLogin)
@@ -674,7 +678,7 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 		// env-token mode names no server anywhere.
 		rows = append(rows,
 			explainRow{Label: "server", Value: authServerHost(t.coreURL)},
-			explainRow{Label: authTokenRowLabel, Value: auth.EnvTokenVar + " environment variable"},
+			explainRow{Label: authTokenRowLabel, Value: auth.EnvCredentialSource()},
 		)
 		fmt.Fprint(w, sty.metadataRows(rows))
 		return
@@ -850,7 +854,7 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 	if t.token != "" {
 		if t.envToken {
 			out.EnvToken = true
-			out.TokenSource = auth.EnvTokenVar + " environment variable"
+			out.TokenSource = auth.EnvCredentialSource()
 		} else {
 			out.TokenSource = tokenstore.BackendDescription()
 		}

@@ -151,7 +151,7 @@ func run(args []string) int {
 	helperStart := time.Now()
 	if err := githelper.Run(ctx, proxy, protocolVersion, os.Stdin, os.Stdout); err != nil {
 		debuglog.Printf("helper session failed: %v", err)
-		_, usesEnvToken := os.LookupEnv(auth.EnvTokenVar)
+		usesEnvToken := auth.EnvCredentialConfigured()
 		fmt.Fprintf(os.Stderr, "fatal: %s\n", userMessage(err, parsedURL, usesEnvToken))
 		return 128
 	}
@@ -205,7 +205,11 @@ func statusMessage(status *transport.HTTPStatusError, cluster, repo string, uses
 	}
 	switch code := status.StatusCode; {
 	case code == http.StatusUnauthorized && usesEnvToken:
-		return fmt.Sprintf("%s rejected %s%s", cluster, auth.EnvTokenVar, reason)
+		source := auth.EnvTokenVar
+		if _, ok := os.LookupEnv(auth.EnvTokenVar); !ok && os.Getenv(auth.ServiceAccountEnvVar) != "" {
+			source = "service account " + strings.TrimSpace(os.Getenv(auth.ServiceAccountEnvVar))
+		}
+		return fmt.Sprintf("%s rejected %s%s", cluster, source, reason)
 	case code == http.StatusUnauthorized:
 		return fmt.Sprintf("%s rejected your login%s. Run `entire login`, then try again", cluster, reason)
 	case code == http.StatusForbidden:
@@ -476,7 +480,14 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	// consumer (aud derivation and the exchanged subject_token) sees the
 	// cleaned value; a trailing newline from $(cat token) is common. An empty
 	// or whitespace-only value fails closed.
-	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
+	//
+	// ENTIRE_SERVICE_ACCOUNT takes the same path with an sa-session JWT minted
+	// from the box's local key (cached across helper processes), so a dev box
+	// clones as its service account without exporting a token.
+	if raw, ok, err := auth.LookupEnvToken(ctx); ok {
+		if err != nil {
+			return nil, nil, err //nolint:wrapcheck // already prefixed with the env var that selected it
+		}
 		envToken := strings.TrimSpace(raw)
 		if envToken == "" {
 			return nil, nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
