@@ -976,9 +976,13 @@ func TestPushURL_WithholdsWhenProviderHasNoURL(t *testing.T) {
 	tests := []struct {
 		name      string
 		originURL string
-		token     string
+		// pushPath, when set, is a bare filesystem path added as the push
+		// remote "local": a URL that does not parse at all.
+		pushPath string
+		token    string
 	}{
 		{name: "github https origin", originURL: "https://github.com/acme/app.git"},
+		{name: "bare path push remote", originURL: "https://github.com/acme/app.git", pushPath: "/srv/repos/app.git"},
 		{name: "github ssh origin", originURL: "git@github.com:acme/app.git"},
 		{name: "github origin with checkpoint token", originURL: "git@github.com:acme/app.git", token: "ci-token"},
 		{name: "entire mirror origin", originURL: "entire://aws-us-east-2.entire.io/gh/acme/app"},
@@ -990,12 +994,17 @@ func TestPushURL_WithholdsWhenProviderHasNoURL(t *testing.T) {
 			runGit(t, repoDir, "remote", "add", "origin", tt.originURL)
 			writeSettings(t, repoDir, `{"enabled":true}`)
 			writeLocalSettings(t, repoDir, localEntire)
+			pushRemote := "origin"
+			if tt.pushPath != "" {
+				pushRemote = "local"
+				runGit(t, repoDir, "remote", "add", pushRemote, tt.pushPath)
+			}
 			t.Chdir(repoDir)
 			if tt.token != "" {
 				t.Setenv(CheckpointTokenEnvVar, tt.token)
 			}
 
-			gotURL, gotEnabled, err := PushURL(context.Background(), "origin")
+			gotURL, gotEnabled, err := PushURL(context.Background(), pushRemote)
 			if !errors.Is(err, ErrCheckpointRemoteUnroutable) {
 				t.Fatalf("PushURL() error = %v, want ErrCheckpointRemoteUnroutable", err)
 			}
@@ -1026,6 +1035,26 @@ func TestPushURL_UnknownProviderOnSelfHostedOriginStillDerives(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, gotEnabled)
 	require.Equal(t, "https://git.corp.example/acme/checkpoints.git", gotURL)
+}
+
+// TestPushURL_BarePathPushRemoteRoutesToProvider: a push remote that is a bare
+// filesystem path has no URL to derive from, so an owned store with a known
+// provider is reached on the provider's host instead of falling back to origin.
+//
+// Not parallel: t.Chdir.
+func TestPushURL_BarePathPushRemoteRoutesToProvider(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/acme/app.git")
+	runGit(t, repoDir, "remote", "add", "local", "/srv/repos/app.git")
+	writeSettings(t, repoDir, `{"enabled":true}`)
+	writeLocalSettings(t, repoDir, `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	t.Chdir(repoDir)
+
+	gotURL, gotEnabled, err := PushURL(context.Background(), "local")
+	require.NoError(t, err)
+	require.True(t, gotEnabled)
+	require.Equal(t, "https://github.com/acme/checkpoints.git", gotURL)
 }
 
 func TestPushURL_ErrorsWhenNoCheckpointRemoteAndOriginMissing(t *testing.T) {
