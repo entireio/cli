@@ -20,9 +20,14 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      # The attach signing tests run once per git signing format and skip a
+      # format whose tool is missing; here they must all run.
+      - name: Install commit signing tools
+        run: command -v ssh-keygen gpg gpgsm gpgconf >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends openssh-client gnupg gpgsm; }
       - name: Core Tests
         env:
           GO_TEST_PARALLEL: "16"
+          ENTIRE_TEST_REQUIRE_COMMIT_SIGNERS: "1"
         run: mise run test:ci:core
 
   # The installer reads our own release origin first and falls back to GitHub.
