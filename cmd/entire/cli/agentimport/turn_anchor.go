@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v6"
@@ -39,8 +40,8 @@ const (
 // turnAnchorResolver picks the commit_sha anchor for each imported turn in one
 // Run: the LAST candidate (transcript order — the turn's end state) that both
 // resolves in the repo and is an ancestor of fallback; failing that, the
-// newest ancestor whose committer time falls inside one of the turn's commit
-// windows (Turn.CommitWindows); else fallback itself.
+// newest ancestor committed by the importer whose committer time falls inside
+// one of the turn's commit windows (Turn.CommitWindows); else fallback itself.
 // fallback is the caller-resolved default-branch tip (Options.LinkCommitSHA);
 // ancestry against it doubles as the reachability check, so this needs no
 // branch-name logic. Candidates are abbreviated commit SHAs recorded by the
@@ -54,7 +55,7 @@ const (
 // Commit windows exist because transcripts record a SHA only when git prints
 // one, so a quiet commit leaves no candidate. They rank below candidates: a
 // window only shows that some ancestor was committed while the turn's git
-// command ran, and another process may have committed in the same seconds.
+// command ran, and the same user may have committed in the same seconds.
 //
 // The fallback's ancestor set is walked and memoized once, lazily, on the
 // first turn that actually carries a candidate or window. The walk is bounded
@@ -72,12 +73,17 @@ type turnAnchorResolver struct {
 	maxWalk   int                        // hard cap on commits visited (overridable in tests)
 	ancestors map[plumbing.Hash]struct{} // nil until the first call with a candidate or window
 	byTime    []ancestorCommit           // the same commits, newest committer time first
+	// committerEmail is the importer's git email. A window only adopts a commit
+	// with this committer: the default branch also holds other people's pushed
+	// commits, and one can land inside a slow git call (hooks running tests).
+	committerEmail string
 }
 
 // ancestorCommit is a walked ancestor and its committer time.
 type ancestorCommit struct {
-	hash plumbing.Hash
-	when time.Time
+	hash  plumbing.Hash
+	when  time.Time
+	email string // committer email
 }
 
 // newTurnAnchorResolver builds a resolver for one Run. It does no repo work
@@ -86,15 +92,16 @@ type ancestorCommit struct {
 // short fallback would silently degrade to the empty ancestor-set path. now
 // anchors the walk's date cutoff (Options.Now; zero falls back to the wall
 // clock).
-func newTurnAnchorResolver(repo *git.Repository, fallback string, now time.Time) *turnAnchorResolver {
+func newTurnAnchorResolver(repo *git.Repository, fallback, committerEmail string, now time.Time) *turnAnchorResolver {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	return &turnAnchorResolver{
-		repo:     repo,
-		fallback: fallback,
-		cutoff:   now.Add(-(time.Duration(LookbackDays)*24*time.Hour + ancestorWalkSlack)),
-		maxWalk:  ancestorWalkMaxCommits,
+		repo:           repo,
+		fallback:       fallback,
+		committerEmail: committerEmail,
+		cutoff:         now.Add(-(time.Duration(LookbackDays)*24*time.Hour + ancestorWalkSlack)),
+		maxWalk:        ancestorWalkMaxCommits,
 	}
 }
 
@@ -130,16 +137,22 @@ func (r *turnAnchorResolver) resolve(ctx context.Context, candidates []string, w
 	return r.fallback, false
 }
 
-// newestCommittedIn returns the newest ancestor whose committer time falls
-// inside any of windows. byTime is sorted newest-first, so a binary search
-// finds each window's newest commit, and the lowest index across windows is
-// the newest overall.
+// newestCommittedIn returns the newest ancestor committed by committerEmail
+// whose committer time falls inside any of windows. byTime is sorted
+// newest-first, so a binary search finds each window's newest commit, and the
+// lowest index across windows is the newest overall.
 func (r *turnAnchorResolver) newestCommittedIn(windows []TimeWindow) (plumbing.Hash, bool) {
 	best := len(r.byTime)
+	if r.committerEmail == "" {
+		return plumbing.ZeroHash, false
+	}
 	for _, w := range windows {
 		i := sort.Search(len(r.byTime), func(i int) bool { return !r.byTime[i].when.After(w.End) })
-		if i < best && !r.byTime[i].when.Before(w.Start) {
-			best = i
+		for ; i < best && !r.byTime[i].when.Before(w.Start); i++ {
+			if strings.EqualFold(r.byTime[i].email, r.committerEmail) {
+				best = i
+				break
+			}
 		}
 	}
 	if best == len(r.byTime) {
@@ -179,7 +192,7 @@ func (r *turnAnchorResolver) buildAncestors(ctx context.Context) {
 			return storer.ErrStop
 		}
 		r.ancestors[c.Hash] = struct{}{}
-		r.byTime = append(r.byTime, ancestorCommit{hash: c.Hash, when: c.Committer.When})
+		r.byTime = append(r.byTime, ancestorCommit{hash: c.Hash, when: c.Committer.When, email: c.Committer.Email})
 		return nil
 	})
 	// The walk is newest-first except where clock skew dates a parent after

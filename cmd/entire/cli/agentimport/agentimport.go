@@ -292,13 +292,12 @@ func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) 
 	// ancestor set the first time a turn actually carries a candidate or
 	// commit window, so a whole import run pays for at most one history walk,
 	// not one per turn.
-	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA, opts.Now)
-
 	// Resolve the importer's git identity once per run (not per turn):
 	// checkpoint commits otherwise carry an empty author, which the
 	// GitHub->mirror ingestion path falls back to when it has no pusher
 	// identity for imported sessions, leaving them unattributed.
 	authorName, authorEmail := cp.GetGitAuthorFromRepo(repo)
+	anchorResolver := newTurnAnchorResolver(repo, opts.LinkCommitSHA, authorEmail, opts.Now)
 
 	for sessionIndex, sf := range files {
 		// Stop before reading and splitting the next transcript.

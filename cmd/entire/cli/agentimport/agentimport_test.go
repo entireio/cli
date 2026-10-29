@@ -351,7 +351,17 @@ func TestRun_AnchorsQuietCommitByCommitWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg, err := repo.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.User.Name, cfg.User.Email = "Test", testCommitterEmail
+	if err := repo.SetConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 	quietSHA := writeAndCommitAt(t, wt, repoDir, "y", "agent: quiet commit", fixtureU1At.Add(30*time.Second))
+	// A teammate's commit pushed during the same git call must not be adopted.
+	writeAndCommitAsAt(t, wt, repoDir, "m", "teammate: pushed", "mate@example.com", fixtureU1At.Add(30*time.Second+200*time.Millisecond))
 	writeAndCommit(t, wt, repoDir, "z", "human: later work")
 	tipSHA := repoHeadSHA(t, repo)
 
