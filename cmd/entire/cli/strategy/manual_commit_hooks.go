@@ -3679,6 +3679,10 @@ var errTurnEndDeadline = errors.New("turn-end finalize deadline exceeded")
 // Returns the number of errors encountered (best-effort: continues processing on error).
 // Checkpoints the deadline or a cancellation cut off are not counted: the
 // interruption is logged and recorded as capture degradation instead.
+//
+// Any exit before the writes leaves every checkpoint with its provisional
+// transcript, so it records capture degradation and keeps TurnCheckpointIDs:
+// a repeated Stop in the same turn retries them, and turn start clears them.
 func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, state *SessionState, deadline time.Time) int {
 	if len(state.TurnCheckpointIDs) == 0 {
 		return 0 // No mid-turn commits to finalize
@@ -3711,8 +3715,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		logging.Warn(logCtx, "finalize: no transcript path, skipping",
 			slog.String("session_id", state.SessionID),
 		)
-		state.TurnCheckpointIDs = nil
-		return 1 // Count as error - all checkpoints will be skipped
+		markFinalizeIncomplete(state)
+		return 1
 	}
 
 	transcriptPath, resolveErr := resolveTranscriptPath(state)
@@ -3721,8 +3725,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			slog.String("session_id", state.SessionID),
 			slog.Any("error", resolveErr),
 		)
-		state.TurnCheckpointIDs = nil
-		return 1 // Count as error - all checkpoints will be skipped
+		markFinalizeIncomplete(state)
+		return 1
 	}
 
 	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
@@ -3731,19 +3735,17 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 	if err != nil || len(fullTranscript) == 0 {
 		// A late-transcript agent (agy) writes its transcript AFTER the Stop
 		// hook, so an empty file here is the placeholder PrepareTranscript
-		// materialised when the flush lost the race — a normal, transient
-		// state, not a lost transcript. Keep TurnCheckpointIDs so a later
-		// HandleTurnEnd in this turn finalizes with the flushed content, the
-		// same deferral the degraded-scanner path below uses; nilling them
-		// would abandon the backfill for every mid-turn checkpoint of the turn
-		// on the first Stop that beat the flush.
+		// materialised when the flush lost the race: a transient state, not a
+		// lost transcript. A later HandleTurnEnd in this turn finalizes with
+		// the flushed content.
 		if _, late := agent.AsLateTranscriptWriter(ag); late && err == nil {
 			logging.Info(logCtx, "finalize: late-transcript agent has not flushed yet, deferring",
 				slog.String("session_id", state.SessionID),
 				slog.String("transcript_path", state.TranscriptPath),
 				slog.Int("checkpoint_count", len(state.TurnCheckpointIDs)),
 			)
-			return 1 // Reported, not abandoned: TurnCheckpointIDs survive for the retry
+			markFinalizeIncomplete(state)
+			return 1
 		}
 		msg := "finalize: empty transcript, skipping"
 		if err != nil {
@@ -3754,8 +3756,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 			slog.String("transcript_path", state.TranscriptPath),
 			slog.Any("error", err),
 		)
-		state.TurnCheckpointIDs = nil
-		return 1 // Count as error - all checkpoints will be skipped
+		markFinalizeIncomplete(state)
+		return 1
 	}
 
 	// Open repository (needed for the checkpoint store)
@@ -3767,8 +3769,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		logging.Warn(logCtx, "finalize: failed to open repository",
 			slog.String("error", err.Error()),
 		)
-		state.TurnCheckpointIDs = nil
-		return 1 // Count as error - all checkpoints will be skipped
+		markFinalizeIncomplete(state)
+		return 1
 	}
 	defer repo.Close()
 
@@ -3838,6 +3840,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 
 	redactedTranscript, redactOK := redactFinalizedTranscript(logCtx, repo, state.SessionID, fullTranscript)
 	if !redactOK {
+		markFinalizeIncomplete(state)
 		return 1
 	}
 
@@ -3866,7 +3869,8 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		logging.Warn(logCtx, "finalize: failed to open checkpoint store",
 			slog.String("error", err.Error()),
 		)
-		return 1 // Count as error - all checkpoints will be skipped
+		markFinalizeIncomplete(state)
+		return 1
 	}
 	// The deadline can pass while Open runs; precompute would then hash the
 	// whole transcript for writes that never start.
@@ -3975,13 +3979,20 @@ func abandonIfInterrupted(ctx, logCtx context.Context, state *SessionState) bool
 // Stop in the same turn can retry them; turn start clears them otherwise,
 // leaving their provisional transcripts for good.
 func recordFinalizeInterruption(ctx, logCtx context.Context, state *SessionState) {
-	now := time.Now().UTC()
-	state.CaptureDegradedAt = &now
+	markFinalizeIncomplete(state)
 	logging.Warn(logCtx, "finalize: interrupted; checkpoints left with provisional transcripts",
 		slog.String("session_id", state.SessionID),
 		slog.Int("unfinalized_count", len(state.TurnCheckpointIDs)),
 		slog.Any("cause", context.Cause(ctx)),
 	)
+}
+
+// markFinalizeIncomplete records that this turn's checkpoints kept their
+// provisional transcripts, so `entire status` reports degraded capture until
+// a later Stop finalizes them.
+func markFinalizeIncomplete(state *SessionState) {
+	now := time.Now().UTC()
+	state.CaptureDegradedAt = &now
 }
 
 // filesChangedInCommit returns the set of files changed in a commit using git diff-tree.

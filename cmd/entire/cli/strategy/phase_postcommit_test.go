@@ -1493,6 +1493,7 @@ func TestFinalizeAllTurnCheckpoints_ScannerDegraded(t *testing.T) {
 	require.Equal(t, 1, errCount)
 	require.Equal(t, []string{testTrailerCheckpointID.String()}, state.TurnCheckpointIDs,
 		"TurnCheckpointIDs must survive a degraded finalize so a repeated Stop process can retry")
+	require.NotNil(t, state.CaptureDegradedAt, "a skipped finalize leaves the checkpoint provisional")
 
 	content, err := store.ReadSessionContent(context.Background(), testTrailerCheckpointID, 0)
 	require.NoError(t, err)
