@@ -223,6 +223,7 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	retired.OtherWorktrees = nil
 	retired.TurnID = ""
 	retired.TurnCheckpointIDs = nil
+	retired.PendingTaskAttachments = nil
 	retired.AdoptedIntoWorktreePath = target.WorktreePath
 	retired.AdoptedIntoWorktreeID = target.WorktreeID
 	return retired
@@ -741,6 +742,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, home a
 	adopted.ClearLegacyTranscriptOffsets()
 	adopted.TurnID = ""
 	adopted.TurnCheckpointIDs = nil
+	adopted.PendingTaskAttachments = nil
 	adopted.LastCheckpointID = id.EmptyCheckpointID
 	adopted.ClearCondensationAttempt()
 	// Token accounting continues from the source's last checkpoint, unlike the

@@ -773,6 +773,11 @@ type SetBranchProtectionParams struct {
 	RepoId string
 }
 
+// SetDefaultBranchParams is parameters of setDefaultBranch operation.
+type SetDefaultBranchParams struct {
+	RepoId string
+}
+
 // SetPluginInstallationRepositoriesParams is parameters of setPluginInstallationRepositories operation.
 type SetPluginInstallationRepositoriesParams struct {
 	// Plugin installation profile.

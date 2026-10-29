@@ -38,7 +38,7 @@ Examples:
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgentMenu(cmd.Context(), cmd.OutOrStdout())
+			return runAgentMenu(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 
@@ -48,8 +48,8 @@ Examples:
 	return cmd
 }
 
-func runAgentMenu(ctx context.Context, w io.Writer) error {
-	opts := EnableOptions{Telemetry: true}
+func runAgentMenu(ctx context.Context, w, errOut io.Writer) error {
+	opts := EnableOptions{Telemetry: true, errOut: errOut}
 	if settings.IsSetUpAny(ctx) {
 		return runManageAgents(ctx, w, opts, nil)
 	}
@@ -121,6 +121,7 @@ Examples:
 				SearchSkill:    searchSkill,
 				AgentHelpSkill: agentHelpSkill,
 				Telemetry:      true,
+				NoCommitOffer:  true,
 			}
 			return setupAgentHooksNonInteractive(cmd.Context(), cmd.OutOrStdout(), ag, opts)
 		},

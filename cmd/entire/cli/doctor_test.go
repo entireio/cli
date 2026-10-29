@@ -1628,7 +1628,7 @@ func TestCheckAgentDirSymlinks_ReportsIntermediateHookConfigDirs(t *testing.T) {
 		link   string
 	}{
 		{parent: ".pi", link: ".pi/extensions"},
-		{parent: ".opencode", link: ".opencode/plugins"},
+		{parent: ".opencode", link: ".opencode/plugin"},
 	} {
 		t.Run(tc.link, func(t *testing.T) {
 			dir := setupGitRepoForPhaseTest(t)
@@ -2159,4 +2159,37 @@ func TestCheckHookDrift_AntigravityWarnsWithoutSessionStart(t *testing.T) {
 	out := stdout.String()
 	require.Contains(t, out, "hooks: OUT OF DATE")
 	require.Contains(t, out, "Run `entire agent add antigravity` to update it.")
+}
+
+// oldEntirePrePushHook is the pre-push hook Entire wrote before it passed git's
+// ref list, exactly as the release generated it.
+const oldEntirePrePushHook = "#!/bin/sh\n# Entire CLI hooks\n# Pre-push hook: push session logs alongside user's push\n" +
+	"# $1 is the remote name (e.g., \"origin\")\n" +
+	"if command -v entire >/dev/null 2>&1; then entire hooks git pre-push \"$1\"; else :; fi\n"
+
+// Entire's old pre-push hook is out of date for a reason of its own, so doctor
+// must not describe it as the working-tree launcher that used to be the only
+// cause. A hook the user edited is not out of date at all: --force leaves it,
+// and the lines the user added, alone.
+func TestCheckGitHooks_PrePushBeforeRefList(t *testing.T) {
+	dir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	_, err := strategy.InstallGitHook(context.Background(), true, false)
+	require.NoError(t, err)
+	prePush := filepath.Join(dir, ".git", "hooks", "pre-push")
+
+	require.NoError(t, os.WriteFile(prePush, []byte(oldEntirePrePushHook), 0o755))
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, false))
+	require.Contains(t, stdout.String(), "Git hooks: OUT OF DATE")
+	require.Contains(t, stdout.String(), "pre-push hook from before Entire read the refs `git push` sends")
+
+	edited := oldEntirePrePushHook + "git lfs pre-push \"$@\"\n"
+	require.NoError(t, os.WriteFile(prePush, []byte(edited), 0o755))
+	cmd, stdout = newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, true))
+	require.Contains(t, stdout.String(), "✓ Git hooks: OK")
+	data, err := os.ReadFile(prePush)
+	require.NoError(t, err)
+	require.Equal(t, edited, string(data), "doctor --force must keep the user's own lines")
 }

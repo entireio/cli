@@ -22302,6 +22302,138 @@ func (s *SessionAuth) SetRoles(val []string) {
 	s.Roles = val
 }
 
+// Ref: #/components/schemas/SetDefaultBranchInputBody
+type SetDefaultBranchInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// An existing branch: a short name (main) or a full ref (refs/heads/main).
+	Branch          string `json:"branch"`
+	AdditionalProps SetDefaultBranchInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *SetDefaultBranchInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetBranch returns the value of Branch.
+func (s *SetDefaultBranchInputBody) GetBranch() string {
+	return s.Branch
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *SetDefaultBranchInputBody) GetAdditionalProps() SetDefaultBranchInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *SetDefaultBranchInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetBranch sets the value of Branch.
+func (s *SetDefaultBranchInputBody) SetBranch(val string) {
+	s.Branch = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *SetDefaultBranchInputBody) SetAdditionalProps(val SetDefaultBranchInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type SetDefaultBranchInputBodyAdditional map[string]jx.Raw
+
+func (s *SetDefaultBranchInputBodyAdditional) init() SetDefaultBranchInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/SetDefaultBranchOutputBody
+type SetDefaultBranchOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI `json:"$schema"`
+	Branch          string `json:"branch"`
+	Changed         bool   `json:"changed"`
+	Previous        string `json:"previous"`
+	RepoID          string `json:"repo_id"`
+	AdditionalProps SetDefaultBranchOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *SetDefaultBranchOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetBranch returns the value of Branch.
+func (s *SetDefaultBranchOutputBody) GetBranch() string {
+	return s.Branch
+}
+
+// GetChanged returns the value of Changed.
+func (s *SetDefaultBranchOutputBody) GetChanged() bool {
+	return s.Changed
+}
+
+// GetPrevious returns the value of Previous.
+func (s *SetDefaultBranchOutputBody) GetPrevious() string {
+	return s.Previous
+}
+
+// GetRepoID returns the value of RepoID.
+func (s *SetDefaultBranchOutputBody) GetRepoID() string {
+	return s.RepoID
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *SetDefaultBranchOutputBody) GetAdditionalProps() SetDefaultBranchOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *SetDefaultBranchOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetBranch sets the value of Branch.
+func (s *SetDefaultBranchOutputBody) SetBranch(val string) {
+	s.Branch = val
+}
+
+// SetChanged sets the value of Changed.
+func (s *SetDefaultBranchOutputBody) SetChanged(val bool) {
+	s.Changed = val
+}
+
+// SetPrevious sets the value of Previous.
+func (s *SetDefaultBranchOutputBody) SetPrevious(val string) {
+	s.Previous = val
+}
+
+// SetRepoID sets the value of RepoID.
+func (s *SetDefaultBranchOutputBody) SetRepoID(val string) {
+	s.RepoID = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *SetDefaultBranchOutputBody) SetAdditionalProps(val SetDefaultBranchOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type SetDefaultBranchOutputBodyAdditional map[string]jx.Raw
+
+func (s *SetDefaultBranchOutputBodyAdditional) init() SetDefaultBranchOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/SetPluginInstallationRepositoriesInputBody
 type SetPluginInstallationRepositoriesInputBody struct {
 	// A URL to the JSON Schema for this object.

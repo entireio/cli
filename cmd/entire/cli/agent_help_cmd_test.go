@@ -38,7 +38,7 @@ func contains(names []string, want string) bool {
 }
 
 // agent-help advertises visible commands plus hidden commands that explicitly
-// opt in via the agentHelpAnnotation (e.g. trail), but never plain-hidden
+// opt in via the agentHelpAnnotation (e.g. why), but never plain-hidden
 // commands, the help command, or agent-help itself (avoid a meta-loop).
 func TestAgentHelpCommands_IncludesAnnotatedHiddenOnly(t *testing.T) {
 	t.Parallel()
@@ -477,8 +477,8 @@ func TestRenderAgentHelpCommand_RendersExample(t *testing.T) {
 	}
 }
 
-// The top-level rendering lists the live command map (including the revealed
-// trail command), states the auto-detected repo, and carries the standing rule.
+// The top-level rendering lists the live command map (including trail),
+// states the auto-detected repo, and carries the standing rule.
 func TestRenderAgentHelpTop_ListsCommandsRepoAndRule(t *testing.T) {
 	t.Parallel()
 
@@ -486,7 +486,7 @@ func TestRenderAgentHelpTop_ListsCommandsRepoAndRule(t *testing.T) {
 	out := renderAgentHelpTop(root, agentHelpTestRepo, true)
 
 	for _, want := range []string{
-		"trail",             // hidden but revealed via annotation
+		"trail",             // visible
 		"checkpoint",        // visible
 		"status",            // visible
 		agentHelpTestRepo,   // auto-detected repo

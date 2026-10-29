@@ -194,4 +194,4 @@ OpenCode installs deliberately keep npm to avoid the shell installer's
 unauthenticated GitHub API rate limits. Windows also keeps npm for Codex,
 Copilot, and OpenCode rather than using Unix shell installers.
 
-The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary on Linux, and runs the Vogon canary on Windows (`test-canary-windows`; roger-roger stays Linux-only); `nightly-e2e.yml` checks the published nightly installation.
+The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary on Linux, and runs the Vogon canary on Windows in three shards (`test-canary-windows` via `mise run test:ci:canary:shard -- <n> 3`; roger-roger stays Linux-only); `nightly-e2e.yml` checks the published nightly installation.

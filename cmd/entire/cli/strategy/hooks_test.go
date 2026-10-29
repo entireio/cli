@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -701,11 +702,19 @@ func TestCheckGitHookState_LegacyEntireLineIsStillDrift(t *testing.T) {
 func writeCurrentManagedHooks(t *testing.T, dir string) {
 	t.Helper()
 	for _, hook := range gitHookNames {
-		content := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git " + hook + "\n"
+		content := "#!/bin/sh\n# " + entireHookMarker + "\n" + currentHookCommand(hook) + "\n"
 		if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+}
+
+// currentHookCommand is the hook's Entire invocation in the current script shape.
+func currentHookCommand(hook string) string {
+	if hook == prePushHook {
+		return PrePushStdinRefsEnv + `=1 entire hooks git pre-push "$1"`
+	}
+	return "entire hooks git " + hook
 }
 
 func TestIsGitHookInstalled_LegacyLocalDevCountsAsNotInstalled(t *testing.T) {
@@ -1690,8 +1699,8 @@ func TestRemoveGitHook_RestoresBackupWhenHookAlreadyGone(t *testing.T) {
 func TestGenerateChainedContent(t *testing.T) {
 	t.Parallel()
 
-	base := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git pre-push \"$1\" || true\n"
-	result := generateChainedContent(base, "pre-push")
+	base := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git post-commit || true\n"
+	result := generateChainedContent(base, "post-commit")
 
 	// Should start with the base content
 	if !strings.HasPrefix(result, base) {
@@ -1709,15 +1718,287 @@ func TestGenerateChainedContent(t *testing.T) {
 	}
 
 	// Should check executable permission on backup
-	expectedCheck := `[ -x "$_entire_hook_dir/pre-push` + backupSuffix + `" ]`
+	expectedCheck := `[ -x "$_entire_hook_dir/post-commit` + backupSuffix + `" ]`
 	if !strings.Contains(result, expectedCheck) {
 		t.Errorf("chained content should check -x on backup, got:\n%s", result)
 	}
 
 	// Should forward all arguments with "$@"
-	expectedExec := `"$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
+	expectedExec := `"$_entire_hook_dir/post-commit` + backupSuffix + `" "$@"`
 	if !strings.Contains(result, expectedExec) {
 		t.Errorf("chained content should execute backup with $@, got:\n%s", result)
+	}
+}
+
+// Whatever runs after Entire's pre-push line (a hook Entire chains to, or the
+// next line of a Husky script, typically `git lfs pre-push`) must still receive
+// git's ref list on stdin after Entire has read it, and Entire's failure must
+// end the script there: otherwise a later command's status decides the push
+// and an abort from Entire is lost.
+// When the temp file cannot be created, nothing has read git's stdin yet, so
+// Entire runs without the list (as an old hook would) and the commands after it
+// still get git's stdin. When it was created but writing it fails, cat has
+// already consumed stdin and the commands after Entire would get an empty list
+// (for `git lfs pre-push`, a push without its objects), so the push stops.
+func TestPrePushHookLine_UnwritableTMPDIRFallsBack(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs the generated POSIX sh script")
+	}
+	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n"
+	for _, tc := range []struct {
+		name       string
+		entireExit int
+	}{
+		{name: "mktemp fails, entire succeeds", entireExit: 0},
+		{name: "mktemp fails, entire fails", entireExit: 3},
+	} {
+		entireExit := tc.entireExit
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			binDir := filepath.Join(dir, "bin")
+			require.NoError(t, os.MkdirAll(binDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(binDir, "entire"),
+				[]byte(fmt.Sprintf("#!/bin/sh\nenv > %q\nexit %d\n", filepath.Join(dir, "entire.env"), entireExit)), 0o755))
+			tmpDir := filepath.Join(dir, "missing")
+			script := "#!/bin/sh\n" + prePushHookLine(bareEntireHookCmd) + "\n/bin/cat > " + filepath.Join(dir, "after.stdin") + "\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook), []byte(script), 0o755))
+
+			cmd := exec.CommandContext(t.Context(), "sh", filepath.Join(dir, prePushHook), "origin", "url")
+			cmd.Stdin = strings.NewReader(refs)
+			cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"TMPDIR="+tmpDir)
+			err := cmd.Run()
+			exit := 0
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				exit = exitErr.ExitCode()
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, entireExit, exit, "the script's status must be Entire's")
+			env, readErr := os.ReadFile(filepath.Join(dir, "entire.env"))
+			require.NoError(t, readErr, "Entire must still run")
+			require.NotContains(t, string(env), PrePushStdinRefsEnv+"=1", "without a saved list Entire runs as an old hook")
+			after, afterErr := os.ReadFile(filepath.Join(dir, "after.stdin"))
+			if entireExit == 0 {
+				require.NoError(t, afterErr)
+				require.Equal(t, refs, string(after), "the command after Entire must still get git's stdin")
+			} else {
+				require.ErrorIs(t, afterErr, os.ErrNotExist, "nothing may run after Entire fails")
+			}
+			leftovers, globErr := filepath.Glob(filepath.Join(dir, "entire-pre-push.*"))
+			require.NoError(t, globErr)
+			require.Empty(t, leftovers, "a failed copy must be removed")
+		})
+	}
+}
+
+func TestPrePushHookLine_PartlySavedListStopsPush(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs the generated POSIX sh script")
+	}
+	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n"
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "entire"),
+		[]byte(fmt.Sprintf("#!/bin/sh\nenv > %q\n", filepath.Join(dir, "entire.env"))), 0o755))
+	// A cat that reads git's stdin and then fails to write, as a nearly full
+	// TMPDIR would.
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "cat"), []byte("#!/bin/sh\n/bin/cat > /dev/null\nexit 1\n"), 0o755))
+	script := "#!/bin/sh\n" + prePushHookLine(bareEntireHookCmd) + "\n/bin/cat > " + filepath.Join(dir, "after.stdin") + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook), []byte(script), 0o755))
+
+	cmd := exec.CommandContext(t.Context(), "sh", filepath.Join(dir, prePushHook), "origin", "url")
+	cmd.Stdin = strings.NewReader(refs)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "TMPDIR="+dir)
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr, "a push whose ref list was consumed but not saved must stop")
+	require.Equal(t, 1, exitErr.ExitCode())
+	require.Contains(t, stderr.String(), "could not save git's pre-push ref list")
+	_, entireErr := os.Stat(filepath.Join(dir, "entire.env"))
+	require.ErrorIs(t, entireErr, os.ErrNotExist, "Entire must not run")
+	_, afterErr := os.Stat(filepath.Join(dir, "after.stdin"))
+	require.ErrorIs(t, afterErr, os.ErrNotExist, "nothing may run after a lost ref list")
+	leftovers, globErr := filepath.Glob(filepath.Join(dir, "entire-pre-push.*"))
+	require.NoError(t, globErr)
+	require.Empty(t, leftovers, "a failed copy must be removed")
+}
+
+func TestPrePushHookLine_ReplaysStdinAndPropagatesFailure(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs the generated POSIX sh script")
+	}
+
+	const refs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n"
+	var installed string
+	for _, spec := range buildHookSpecs(bareEntireHookCmd) {
+		if spec.name == prePushHook {
+			installed = spec.content
+		}
+	}
+	require.NotEmpty(t, installed)
+
+	for _, shape := range []struct {
+		name   string
+		script func(dir string) string
+		after  func(dir string) string // where the command after Entire records its stdin
+	}{
+		{
+			name:   "installed script chaining to a backed-up hook",
+			script: func(string) string { return generateChainedContent(installed, prePushHook) },
+			after:  func(dir string) string { return filepath.Join(dir, "chained.stdin") },
+		},
+		{
+			name: "Husky script with the printed line followed by another command",
+			script: func(dir string) string {
+				return "#!/bin/sh\n" + extractCommandLine(installed) + "\ncat > " + filepath.Join(dir, "chained.stdin") + "\n"
+			},
+			after: func(dir string) string { return filepath.Join(dir, "chained.stdin") },
+		},
+	} {
+		for _, tc := range []struct {
+			name       string
+			entireExit int
+			wantAfter  bool
+		}{
+			{name: "entire succeeds", entireExit: 0, wantAfter: true},
+			{name: "entire fails", entireExit: 3, wantAfter: false},
+		} {
+			t.Run(shape.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				binDir := filepath.Join(dir, "bin")
+				require.NoError(t, os.MkdirAll(binDir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(binDir, "entire"),
+					[]byte(fmt.Sprintf("#!/bin/sh\ncat > %q\nexit %d\n", filepath.Join(dir, "entire.stdin"), tc.entireExit)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook), []byte(shape.script(dir)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook+backupSuffix),
+					[]byte(fmt.Sprintf("#!/bin/sh\ncat > %q\n", filepath.Join(dir, "chained.stdin"))), 0o755))
+
+				cmd := exec.CommandContext(t.Context(), "sh", filepath.Join(dir, prePushHook), "origin", "url")
+				cmd.Stdin = strings.NewReader(refs)
+				cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "TMPDIR="+dir)
+				err := cmd.Run()
+				exit := 0
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
+					exit = exitErr.ExitCode()
+				} else {
+					require.NoError(t, err)
+				}
+				require.Equal(t, tc.entireExit, exit, "the script's status must be Entire's")
+
+				got, readErr := os.ReadFile(filepath.Join(dir, "entire.stdin"))
+				require.NoError(t, readErr)
+				require.Equal(t, refs, string(got), "entire must read git's ref list")
+				after, afterErr := os.ReadFile(shape.after(dir))
+				if tc.wantAfter {
+					require.NoError(t, afterErr)
+					require.Equal(t, refs, string(after), "the command after Entire must get the same ref list")
+				} else {
+					require.ErrorIs(t, afterErr, os.ErrNotExist, "nothing may run after Entire fails")
+				}
+				leftovers, globErr := filepath.Glob(filepath.Join(dir, "entire-pre-push.*"))
+				require.NoError(t, globErr)
+				require.Empty(t, leftovers, "the saved ref list must be removed")
+			})
+		}
+	}
+}
+
+// oldPrePushHeader and oldPrePushChain are the text of the last pre-push hook
+// Entire wrote before passing git's ref list, as the release generated it.
+const (
+	oldPrePushHeader = "#!/bin/sh\n# Entire CLI hooks\n# Pre-push hook: push session logs alongside user's push\n# $1 is the remote name (e.g., \"origin\")\n"
+	oldPrePushChain  = `_entire_status=$?
+if [ "$_entire_status" -ne 0 ]; then exit "$_entire_status"; fi
+# Chain: run pre-existing hook
+_entire_hook_dir="$(dirname "$0")"
+if [ -z "${ENTIRE_CHAINING_PRE_PUSH:-}" ]; then
+    ENTIRE_CHAINING_PRE_PUSH=1
+    export ENTIRE_CHAINING_PRE_PUSH
+    if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^# File generated by pre-commit: https://pre-commit.com' "$_entire_hook_dir/pre-push.pre-entire" 2>/dev/null; then
+        if [ -x "$_entire_hook_dir/pre-push.legacy.pre-entire" ]; then
+            "$_entire_hook_dir/pre-push.legacy.pre-entire" "$@"
+        fi
+    elif [ -x "$_entire_hook_dir/pre-push.pre-entire" ]; then
+        "$_entire_hook_dir/pre-push.pre-entire" "$@"
+    fi
+fi
+`
+	oldPrePushBareLine = `if command -v entire >/dev/null 2>&1; then entire hooks git pre-push "$1"; else :; fi` + "\n"
+
+	// The chain v0.4.3 through v0.11.4 wrote.
+	oldPrePushSimpleChain = `# Chain: run pre-existing hook
+_entire_hook_dir="$(dirname "$0")"
+if [ -x "$_entire_hook_dir/pre-push.pre-entire" ]; then
+    "$_entire_hook_dir/pre-push.pre-entire" "$@"
+fi
+`
+	// The unguarded line v0.3.0 through v0.5.6 wrote, and the guarded one v0.6.x
+	// wrote; both ignored Entire's exit status.
+	oldPrePushUnguardedLine = `entire hooks git pre-push "$1" || true` + "\n"
+	oldPrePushGuardedOrTrue = `if command -v entire >/dev/null 2>&1; then entire hooks git pre-push "$1" || true; else :; fi` + "\n"
+)
+
+// Entire's own pre-push hook from before it passed git's ref list is replaced,
+// so it starts passing the list. Only the exact text Entire wrote counts:
+// EnsureSetup rewrites an Outdated hook without a backup, so a hook with any
+// change of the user's must stay Current.
+func TestCheckGitHookState_PrePushBeforeRefList(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    GitHookState
+	}{
+		{name: "bare prefix", content: oldPrePushHeader + oldPrePushBareLine, want: GitHooksOutdated},
+		{name: "absolute prefix", content: oldPrePushHeader +
+			`if [ -x '/usr/local/bin/entire' ]; then '/usr/local/bin/entire' hooks git pre-push "$1"; else :; fi` + "\n", want: GitHooksOutdated},
+		{name: "windows absolute prefix", content: oldPrePushHeader +
+			`if [ -f 'C:\Tools\entire.exe' ]; then 'C:\Tools\entire.exe' hooks git pre-push "$1"; else :; fi` + "\n", want: GitHooksOutdated},
+		{name: "chained to the user's hook", content: oldPrePushHeader + oldPrePushBareLine + oldPrePushChain, want: GitHooksOutdated},
+		{name: "v0.11.4 chained to the user's hook", content: oldPrePushHeader + oldPrePushBareLine + oldPrePushSimpleChain, want: GitHooksOutdated},
+		{name: "v0.11.4 absolute prefix chained", content: oldPrePushHeader +
+			`if [ -x '/usr/local/bin/entire' ]; then '/usr/local/bin/entire' hooks git pre-push "$1"; else :; fi` + "\n" + oldPrePushSimpleChain, want: GitHooksOutdated},
+		{name: "v0.6 line ignoring Entire's status", content: oldPrePushHeader + oldPrePushGuardedOrTrue, want: GitHooksOutdated},
+		{name: "v0.6 line chained", content: oldPrePushHeader + oldPrePushGuardedOrTrue + oldPrePushSimpleChain, want: GitHooksOutdated},
+		{name: "v0.6 windows absolute prefix", content: oldPrePushHeader +
+			`if [ -f 'C:\Tools\entire.exe' ]; then 'C:\Tools\entire.exe' hooks git pre-push "$1" || true; else :; fi` + "\n", want: GitHooksOutdated},
+		{name: "v0.5 unguarded line", content: oldPrePushHeader + oldPrePushUnguardedLine, want: GitHooksOutdated},
+		{name: "v0.5 unguarded line chained", content: oldPrePushHeader + oldPrePushUnguardedLine + oldPrePushSimpleChain, want: GitHooksOutdated},
+		{name: "v0.5 unguarded absolute prefix", content: oldPrePushHeader +
+			`'/usr/local/bin/entire' hooks git pre-push "$1" || true` + "\n", want: GitHooksOutdated},
+		{name: "a line the user added after the v0.11.4 chain", content: oldPrePushHeader + oldPrePushBareLine + oldPrePushSimpleChain + "echo done\n", want: GitHooksCurrent},
+		{name: "an unguarded line without || true", content: oldPrePushHeader + `entire hooks git pre-push "$1"` + "\n", want: GitHooksCurrent},
+		{name: "an unguarded unquoted absolute prefix", content: oldPrePushHeader +
+			`/usr/local/bin/entire hooks git pre-push "$1" || true` + "\n", want: GitHooksCurrent},
+		{name: "an unguarded line the user changed", content: oldPrePushHeader + `entire hooks git pre-push "$1" || echo failed` + "\n", want: GitHooksCurrent},
+		{name: "a line the user added", content: oldPrePushHeader + oldPrePushBareLine + "git lfs pre-push \"$@\"\n", want: GitHooksCurrent},
+		{name: "a line the user added after the chain", content: oldPrePushHeader + oldPrePushBareLine + oldPrePushChain + "echo done\n", want: GitHooksCurrent},
+		{name: "an edited Entire line", content: oldPrePushHeader +
+			`if command -v entire >/dev/null 2>&1; then timeout 30 entire hooks git pre-push "$1"; else :; fi` + "\n", want: GitHooksCurrent},
+		{name: "a test for another binary", content: oldPrePushHeader +
+			`if [ -x '/opt/other' ]; then '/usr/local/bin/entire' hooks git pre-push "$1"; else :; fi` + "\n", want: GitHooksCurrent},
+		{name: "an unquoted absolute prefix", content: oldPrePushHeader +
+			`if [ -x /usr/local/bin/entire ]; then /usr/local/bin/entire hooks git pre-push "$1"; else :; fi` + "\n", want: GitHooksCurrent},
+		{name: "the current hook", content: findHookSpec(t, buildHookSpecs(bareEntireHookCmd), prePushHook).content, want: GitHooksCurrent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeCurrentManagedHooks(t, dir)
+			require.NoError(t, os.WriteFile(filepath.Join(dir, prePushHook), []byte(tc.content), 0o755))
+			require.Equal(t, tc.want, gitHookStateInHooksDir(dir))
+		})
 	}
 }
 
@@ -2237,4 +2518,33 @@ func TestSymlinkedHooksDirError_UsesTheQuotedCommand(t *testing.T) {
 	assert.Contains(t, msg, HooksPathCommand(realHooks))
 	assert.NotContains(t, msg, "core.hooksPath "+realHooks,
 		"the bare unquoted path would be split by the shell the user pastes into")
+}
+
+// The reinstall an agent turn (EnsureSetup) or doctor --force runs replaces only
+// the hooks that need it. Every other Entire hook carries the marker, so it
+// would be overwritten without a backup, and its difference from the generated
+// text may be the user's own lines. `entire enable` still rewrites them all.
+func TestReinstallGitHooks_OnlyReplacesHooksThatNeedIt(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+	_, err := InstallGitHook(context.Background(), true, false)
+	require.NoError(t, err)
+	specs := buildHookSpecs(bareEntireHookCmd)
+	read := func(name string) string {
+		t.Helper()
+		data, readErr := os.ReadFile(filepath.Join(hooksDir, name))
+		require.NoError(t, readErr)
+		return string(data)
+	}
+
+	editedPostCommit := findHookSpec(t, specs, "post-commit").content + "echo my own step\n"
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "post-commit"), []byte(editedPostCommit), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, prePushHook), []byte(oldPrePushHeader+oldPrePushBareLine), 0o755))
+	require.NoError(t, os.Remove(filepath.Join(hooksDir, "commit-msg")))
+
+	_, err = ReinstallGitHooks(context.Background())
+	require.NoError(t, err)
+
+	require.Equal(t, findHookSpec(t, specs, prePushHook).content, read(prePushHook), "the old pre-push hook is upgraded")
+	require.Equal(t, findHookSpec(t, specs, "commit-msg").content, read("commit-msg"), "a missing hook is installed")
+	require.Equal(t, editedPostCommit, read("post-commit"), "an edited Entire hook keeps the user's lines")
 }

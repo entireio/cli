@@ -15,7 +15,7 @@ import (
 )
 
 // agentHelpAnnotation marks an otherwise-hidden command as worth advertising to
-// coding agents through `entire agent-help`. Hidden commands (e.g. trail) opt in
+// coding agents through `entire agent-help`. Hidden commands (e.g. why) opt in
 // by setting Annotations[agentHelpAnnotation] = "true".
 const agentHelpAnnotation = "entire_agent_help"
 
@@ -635,7 +635,7 @@ func maybeDelegateAgentHelpToPlugin(ctx context.Context, rootCmd *cobra.Command,
 }
 
 // agentHelpFindChild finds a direct child of parent by name or alias. It
-// includes hidden commands so an annotated one like trail resolves; the caller
+// includes hidden commands so an annotated one like why resolves; the caller
 // (runAgentHelp) then enforces isAgentHelpAdvertised, so the drillable surface
 // matches the advertised one.
 func agentHelpFindChild(parent *cobra.Command, name string) *cobra.Command {

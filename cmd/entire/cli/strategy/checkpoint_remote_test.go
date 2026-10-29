@@ -3,12 +3,17 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -1525,4 +1530,533 @@ func TestEnsurePrimaryRef_SkipsEmptyOrphanHealUnderGitRefsPrimary(t *testing.T) 
 	// heal fetch was skipped rather than attempted and failed.
 	assert.Equal(t, orphanTip, checkpointRemoteRevParse(t, localDir, paths.MetadataBranchName),
 		"enable must not heal the v1 orphan from the checkpoint remote under git-refs primary")
+}
+
+// The fetch lock only saves bandwidth for concurrent fetches; failing to take it
+// must not cost the user the fetch itself.
+//
+// Not parallel: uses t.Chdir()
+func TestFetchMetadataBranch_ProceedsWhenFetchLockUnavailable(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	testutil.RunGit(t, remoteDir, "branch", "entire/checkpoints/v1")
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	// A directory where the lock file belongs makes every lock attempt fail.
+	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".git", checkpointRemoteFetchLockName), 0o750))
+
+	t.Chdir(localDir)
+
+	require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+	assert.True(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"))
+}
+
+func TestBoundFetch(t *testing.T) {
+	t.Parallel()
+
+	// A fixed per-fetch deadline here is the bug this mode exists to prevent:
+	// the archive outgrows it, the partial transfer is discarded, and every
+	// later command restarts the same fetch from zero. The only bound is the
+	// caller's overall budget from startForegroundFetch.
+	t.Run("foreground adds no deadline and aborts stalls instead", func(t *testing.T) {
+		t.Parallel()
+		var opts remote.FetchOptions
+		ctx, cancel := boundFetch(context.Background(), foregroundFetch, &opts)
+		defer cancel()
+		_, hasDeadline := ctx.Deadline()
+		assert.False(t, hasDeadline)
+		assert.True(t, opts.AbortStalled)
+	})
+
+	t.Run("hot path keeps its deadline", func(t *testing.T) {
+		t.Parallel()
+		var opts remote.FetchOptions
+		ctx, cancel := boundFetch(context.Background(), hotPathFetch, &opts)
+		defer cancel()
+		deadline, hasDeadline := ctx.Deadline()
+		require.True(t, hasDeadline)
+		assert.WithinDuration(t, time.Now().Add(checkpointRemoteFetchTimeout), deadline, 5*time.Second)
+		assert.False(t, opts.AbortStalled)
+	})
+}
+
+// Concurrent commands must not each transfer the archive: a foreground fetch
+// waits for one already running in the same repository, and lands nothing
+// until it has the lock.
+//
+// Not parallel: uses t.Chdir()
+func TestFetchMetadataBranch_WaitsForConcurrentFetch(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	testutil.RunGit(t, remoteDir, "branch", "entire/checkpoints/v1")
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	t.Chdir(localDir)
+
+	root, err := gitdir.Open(ctx)
+	require.NoError(t, err)
+	release, err := flock.AcquireIn(root, checkpointRemoteFetchLockName)
+	require.NoError(t, err)
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- FetchMetadataBranch(ctx, remoteDir) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("fetch finished while another fetch held the lock (err: %v)", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	assert.False(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"), "nothing may land while another fetch holds the lock")
+
+	release()
+	released = true
+	require.NoError(t, <-done)
+	assert.True(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"))
+}
+
+// The push hot path does not take the fetch lock, so it must not use the tmp
+// ref a lock-holding foreground fetch is writing: its promote would remove that
+// ref and fail the other fetch's ref update.
+//
+// Not parallel: uses t.Chdir()
+func TestFetchBranchIfMissing_LeavesForegroundTmpRefAlone(t *testing.T) {
+	ctx := context.Background()
+
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "remote")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "remote")
+	testutil.RunGit(t, remoteDir, "branch", "entire/checkpoints/v1")
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "local")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "local")
+	t.Chdir(localDir)
+
+	root, err := gitdir.Open(ctx)
+	require.NoError(t, err)
+	release, err := flock.AcquireIn(root, checkpointRemoteFetchLockName)
+	require.NoError(t, err)
+	defer release()
+
+	foregroundTmpRef := FetchTmpRefPrefix + "entire/checkpoints/v1"
+	inFlight := strings.TrimSpace(testutil.RunGit(t, localDir, "rev-parse", "HEAD"))
+	testutil.RunGit(t, localDir, "update-ref", foregroundTmpRef, inFlight)
+
+	require.NoError(t, fetchMetadataBranchIfMissing(ctx, remoteDir))
+
+	assert.True(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"))
+	assert.Equal(t, inFlight, strings.TrimSpace(testutil.RunGit(t, localDir, "rev-parse", foregroundTmpRef)),
+		"the hot path must not overwrite or remove the foreground fetch's tmp ref")
+}
+
+// A command waiting behind another fetch must stop on Ctrl-C rather than wait
+// out the other fetch, and must not then fetch on the cancelled context.
+//
+// Not parallel: uses t.Chdir()
+func TestFetchMetadataBranch_CancelWhileWaitingForFetchLock(t *testing.T) {
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	testutil.RunGit(t, remoteDir, "branch", "entire/checkpoints/v1")
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	t.Chdir(localDir)
+
+	root, err := gitdir.Open(context.Background())
+	require.NoError(t, err)
+	release, err := flock.AcquireIn(root, checkpointRemoteFetchLockName)
+	require.NoError(t, err)
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- FetchMetadataBranch(ctx, remoteDir) }()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetch kept waiting for the lock after its context was cancelled")
+	}
+	assert.False(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"), "a cancelled waiter must not fetch")
+}
+
+func TestParseForegroundFetchBudget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "unset uses the default", value: "", want: defaultForegroundFetchBudget},
+		{name: "duration", value: "45m", want: 45 * time.Minute},
+		{name: "surrounding space", value: " 2h ", want: 2 * time.Hour},
+		{name: "not a duration", value: "30", want: defaultForegroundFetchBudget, wantErr: true},
+		{name: "zero", value: "0s", want: defaultForegroundFetchBudget, wantErr: true},
+		{name: "negative", value: "-5m", want: defaultForegroundFetchBudget, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseForegroundFetchBudget(tt.value)
+			assert.Equal(t, tt.want, got)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// A waiter whose budget runs out must give up, not fetch unserialized: parallel
+// callers that each fall back to their own transfer move the archive N times.
+//
+// Not parallel: uses t.Chdir() and t.Setenv()
+func TestFetchMetadataBranch_BudgetExpiresWhileWaitingForFetchLock(t *testing.T) {
+	t.Setenv(foregroundFetchBudgetEnvVar, "300ms")
+	remoteDir, localDir := setupCheckpointFetchRepos(t)
+	t.Chdir(localDir)
+
+	root, err := gitdir.Open(context.Background())
+	require.NoError(t, err)
+	release, err := flock.AcquireIn(root, checkpointRemoteFetchLockName)
+	require.NoError(t, err)
+	defer release()
+
+	done := make(chan error, 1)
+	go func() { done <- FetchMetadataBranch(context.Background(), remoteDir) }()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, errForegroundFetchBudget)
+		assert.Contains(t, err.Error(), foregroundFetchBudgetEnvVar, "the error must name the setting that raises the budget")
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetch kept waiting for the lock after its budget ran out")
+	}
+	assert.False(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"), "a waiter out of budget must not fetch")
+}
+
+// The budget covers the transfer too: a server that accepts the connection and
+// never answers prints nothing, so only the budget ends the fetch before the
+// stall window does.
+//
+// Not parallel: uses t.Chdir() and t.Setenv()
+func TestFetchMetadataBranch_BudgetBoundsTheFetch(t *testing.T) {
+	t.Setenv(foregroundFetchBudgetEnvVar, "1s")
+	t.Setenv(remote.CheckpointTokenEnvVar, "")
+	_, localDir := setupCheckpointFetchRepos(t)
+	t.Chdir(localDir)
+	url, _ := silentHTTPRemote(t)
+
+	done := make(chan error, 1)
+	go func() { done <- FetchMetadataBranch(context.Background(), url) }()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, errForegroundFetchBudget)
+		assert.Contains(t, err.Error(), foregroundFetchBudgetEnvVar)
+	case <-time.After(30 * time.Second):
+		t.Fatal("fetch outlived its budget")
+	}
+}
+
+// A remote that stalls costs each command that tries it a full stall window.
+// Right after one slow failure, the next foreground fetch from the same remote
+// fails fast without contacting it.
+//
+// Not parallel: uses t.Chdir() and t.Setenv()
+func TestFetchMetadataBranch_FailsFastAfterSlowFailure(t *testing.T) {
+	t.Setenv(foregroundFetchBudgetEnvVar, "1s")
+	t.Setenv(remote.CheckpointTokenEnvVar, "")
+	_, localDir := setupCheckpointFetchRepos(t)
+	t.Chdir(localDir)
+	url, conns := silentHTTPRemote(t)
+
+	require.ErrorIs(t, FetchMetadataBranch(context.Background(), url), errForegroundFetchBudget)
+	dialed := conns.Load()
+	require.Positive(t, dialed)
+
+	start := time.Now()
+	err := FetchMetadataBranch(context.Background(), url)
+	require.ErrorIs(t, err, errRecentSlowFetchFailure)
+	assert.Less(t, time.Since(start), 500*time.Millisecond)
+	assert.Equal(t, dialed, conns.Load(), "a fail-fast fetch must not contact the remote")
+}
+
+// Commands queued on the fetch lock behind a fetch that stalls must fail
+// together when it does, not each pay the stall window in turn.
+//
+// Not parallel: uses t.Chdir() and t.Setenv()
+func TestFetchMetadataBranch_WaiterFailsFastWhenHolderStalls(t *testing.T) {
+	t.Setenv(remote.CheckpointTokenEnvVar, "")
+	_, localDir := setupCheckpointFetchRepos(t)
+	t.Chdir(localDir)
+	url, conns := silentHTTPRemote(t)
+	ctx := context.Background()
+
+	root, err := gitdir.Open(ctx)
+	require.NoError(t, err)
+	release, err := flock.AcquireIn(root, checkpointRemoteFetchLockName)
+	require.NoError(t, err)
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- FetchMetadataBranch(ctx, url) }()
+	time.Sleep(200 * time.Millisecond)
+
+	recordForegroundFetchOutcome(ctx, "", url, "refs/heads/"+paths.MetadataBranchName,
+		fmt.Errorf("git fetch: %w: no progress for 10m0s", remote.ErrFetchStalled))
+	release()
+	released = true
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, errRecentSlowFetchFailure)
+		assert.Contains(t, err.Error(), remote.ErrFetchStalled.Error(), "the error must say why the earlier fetch failed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter fetched again after the lock holder stalled")
+	}
+	assert.Zero(t, conns.Load(), "the waiter must not contact the remote")
+}
+
+// The fail-fast is scoped to the remote that failed, expires, and only follows
+// slow failures: a fast failure such as a missing repository costs little to
+// retry, and blocking the retry would hide the fix.
+//
+// Not parallel: uses t.Chdir()
+func TestFetchMetadataBranch_SlowFailureScope(t *testing.T) {
+	srcRef := "refs/heads/" + paths.MetadataBranchName
+	stalled := fmt.Errorf("git fetch: %w", remote.ErrFetchStalled)
+
+	t.Run("another remote still fetches", func(t *testing.T) {
+		remoteDir, localDir := setupCheckpointFetchRepos(t)
+		t.Chdir(localDir)
+		ctx := context.Background()
+		recordForegroundFetchOutcome(ctx, "", "https://example.invalid/other.git", srcRef, stalled)
+
+		require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+		assert.True(t, testutil.BranchExists(t, localDir, paths.MetadataBranchName))
+	})
+
+	t.Run("an expired failure is retried and a success clears it", func(t *testing.T) {
+		remoteDir, localDir := setupCheckpointFetchRepos(t)
+		t.Chdir(localDir)
+		ctx := context.Background()
+		root, err := gitdir.Open(ctx)
+		require.NoError(t, err)
+		require.NoError(t, writeSlowFetchFailure(root, slowFetchFailure{
+			Remote: remote.RedactURL(remoteDir),
+			Ref:    srcRef,
+			Reason: remote.ErrFetchStalled.Error(),
+			At:     time.Now().Add(-recentSlowFetchFailureWindow - time.Second),
+		}))
+
+		require.NoError(t, FetchMetadataBranch(ctx, remoteDir))
+		_, err = root.Stat(checkpointRemoteFetchFailureName)
+		assert.ErrorIs(t, err, os.ErrNotExist, "a successful fetch must clear the recorded failure")
+	})
+
+	t.Run("a fast failure is not recorded", func(t *testing.T) {
+		_, localDir := setupCheckpointFetchRepos(t)
+		t.Chdir(localDir)
+		missing := filepath.Join(t.TempDir(), "missing.git")
+
+		require.Error(t, FetchMetadataBranch(context.Background(), missing))
+		err := FetchMetadataBranch(context.Background(), missing)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, errRecentSlowFetchFailure)
+	})
+}
+
+// silentHTTPRemote returns the URL of a server that accepts connections and
+// never answers, and a count of the connections it accepted.
+func silentHTTPRemote(t *testing.T) (string, *atomic.Int32) {
+	t.Helper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	conns := &atomic.Int32{}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conns.Add(1)
+			t.Cleanup(func() { _ = conn.Close() })
+		}
+	}()
+	return "http://" + ln.Addr().String() + "/repo.git", conns
+}
+
+// setupCheckpointFetchRepos returns a remote with a checkpoint branch and a
+// local repository without one.
+func setupCheckpointFetchRepos(t *testing.T) (remoteDir, localDir string) {
+	t.Helper()
+	remoteDir = t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	testutil.RunGit(t, remoteDir, "branch", "entire/checkpoints/v1")
+
+	localDir = t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	return remoteDir, localDir
+}
+
+// An empty-orphan heal is best-effort: running out of budget while another
+// fetch holds the lock must leave `entire enable` working on the local orphan.
+//
+// Not parallel: uses t.Chdir() and t.Setenv()
+func TestEnsurePrimaryRef_HealLockWaitFailureKeepsOrphan(t *testing.T) {
+	t.Setenv(foregroundFetchBudgetEnvVar, "300ms")
+	localDir, _ := setupEmptyOrphanHeal(t)
+	orphanTip := checkpointRemoteRevParse(t, localDir, paths.MetadataBranchName)
+
+	root, err := gitdir.Open(context.Background())
+	require.NoError(t, err)
+	release, err := flock.AcquireIn(root, checkpointRemoteFetchLockName)
+	require.NoError(t, err)
+	defer release()
+
+	repo, err := OpenRepository(context.Background())
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.NoError(t, EnsurePrimaryRef(WithCheckpointRemoteBootstrap(context.Background()), repo))
+	assert.Equal(t, orphanTip, checkpointRemoteRevParse(t, localDir, paths.MetadataBranchName))
+}
+
+// A checkpoint written to the local orphan while the heal waits for the fetch
+// lock must survive: the heal force-sets the ref, so it has to re-check for
+// data once it holds the lock.
+//
+// Not parallel: uses t.Chdir()
+func TestEnsurePrimaryRef_HealKeepsCheckpointWrittenWhileWaitingForLock(t *testing.T) {
+	localDir, remoteTip := setupEmptyOrphanHeal(t)
+
+	root, err := gitdir.Open(context.Background())
+	require.NoError(t, err)
+	release, err := flock.AcquireIn(root, checkpointRemoteFetchLockName)
+	require.NoError(t, err)
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+
+	repo, err := OpenRepository(context.Background())
+	require.NoError(t, err)
+	defer repo.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- EnsurePrimaryRef(WithCheckpointRemoteBootstrap(context.Background()), repo) }()
+
+	// Write the checkpoint through a second worktree so the main worktree, which
+	// the waiting heal resolved, stays untouched.
+	metadataWorktree := filepath.Join(t.TempDir(), "metadata")
+	testutil.RunGit(t, localDir, "worktree", "add", metadataWorktree, paths.MetadataBranchName)
+	commitCheckpointRemoteMetadata(t, metadataWorktree, "bbbbbbbbbbbb", "device-b")
+	localCheckpoint := checkpointRemoteRevParse(t, localDir, paths.MetadataBranchName)
+
+	release()
+	released = true
+	require.NoError(t, <-done)
+
+	localTip := checkpointRemoteRevParse(t, localDir, paths.MetadataBranchName)
+	assert.NotEqual(t, remoteTip, localTip, "the heal must not replace a branch that gained data")
+	assert.Equal(t, localCheckpoint, localTip)
+}
+
+// setupEmptyOrphanHeal returns a local repository, now the working directory,
+// whose metadata branch is an empty orphan and whose checkpoint_remote holds a
+// real checkpoint at remoteTip.
+func setupEmptyOrphanHeal(t *testing.T) (localDir, remoteTip string) {
+	t.Helper()
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	testutil.WriteFile(t, remoteDir, "f.txt", "init")
+	testutil.GitAdd(t, remoteDir, "f.txt")
+	testutil.GitCommit(t, remoteDir, "init")
+	remoteDefaultBranch := checkpointRemoteCurrentBranch(t, remoteDir)
+	runCheckpointRemoteGit(t, remoteDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(t, remoteDir, "rm", "-rf", ".")
+	commitCheckpointRemoteMetadata(t, remoteDir, "aaaaaaaaaaaa", "device-a")
+	runCheckpointRemoteGit(t, remoteDir, "checkout", remoteDefaultBranch)
+	remoteTip = checkpointRemoteRevParse(t, remoteDir, paths.MetadataBranchName)
+
+	localDir = t.TempDir()
+	testutil.InitRepo(t, localDir)
+	testutil.WriteFile(t, localDir, "f.txt", "init")
+	testutil.GitAdd(t, localDir, "f.txt")
+	testutil.GitCommit(t, localDir, "init")
+	runCheckpointRemoteGit(t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
+	runCheckpointRemoteGit(t, localDir, "checkout", "--orphan", paths.MetadataBranchName)
+	runCheckpointRemoteGit(t, localDir, "rm", "-rf", ".")
+	runCheckpointRemoteGit(t, localDir, "commit", "--allow-empty", "-m", "Initialize metadata ref")
+	runCheckpointRemoteGit(t, localDir, "checkout", remoteDefaultBranch)
+
+	entireDir := filepath.Join(localDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`),
+		0o644,
+	))
+	redirectGitURL(t, localDir, "git@github.com:org/checkpoints.git", "file://"+remoteDir)
+
+	t.Chdir(localDir)
+	paths.ClearWorktreeRootCache()
+	return localDir, remoteTip
 }
