@@ -113,6 +113,8 @@ entire trail finding apply <id>         # apply a finding's suggested fix
 entire trail finding resolve <id> -m "fixed in abc123"
 
 entire trail comment add -m "Should this cover the admin API too?"
+entire trail ready                      # mark this branch's change ready for review (--undo: back to draft)
+entire trail retarget --base release/2  # change the base branch it merges into
 entire trail approve
 entire trail merge                      # merge this branch's change into its base
 entire trail resume 42                  # continue Trail #42: restore its branch's sessions in your agent

@@ -20,15 +20,17 @@ type TrailListResponse struct {
 // snake_case and nullable branch fields. Branch is empty when the trail is
 // currently unlinked; OriginalBranch separately preserves its last link.
 type TrailResource struct {
-	ID                 string                `json:"id,omitempty"`
-	Number             int                   `json:"number,omitempty"`
-	URL                string                `json:"url,omitempty"`
-	Branch             string                `json:"branch"`
-	OriginalBranch     string                `json:"original_branch,omitempty"`
-	Base               string                `json:"base"`
-	Title              string                `json:"title"`
-	Body               string                `json:"body,omitempty"`
-	Status             string                `json:"status"`
+	ID             string `json:"id,omitempty"`
+	Number         int    `json:"number,omitempty"`
+	URL            string `json:"url,omitempty"`
+	Branch         string `json:"branch"`
+	OriginalBranch string `json:"original_branch,omitempty"`
+	Base           string `json:"base"`
+	Title          string `json:"title"`
+	Body           string `json:"body,omitempty"`
+	Status         string `json:"status"`
+	// ReadyForReview is nil when the server omits it.
+	ReadyForReview     *bool                 `json:"ready_for_review,omitempty"`
 	Phase              string                `json:"phase,omitempty"`
 	Author             *trail.Author         `json:"author"`
 	Assignees          []string              `json:"assignees"`
@@ -140,6 +142,12 @@ type TrailUpdateRequest struct {
 	RequestedReviewers *[]string `json:"requested_reviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`
 	Priority           *string   `json:"priority,omitempty"`
+	// ReadyForReview marks the change ready (true) or back to draft (false).
+	// The server keeps it false on a repository without an approval gate, but
+	// still applies the matching draft state to a backing pull request.
+	ReadyForReview *bool `json:"ready_for_review,omitempty"`
+	// Base retargets the change onto another base branch.
+	Base *string `json:"base,omitempty"`
 }
 
 type TrailUpdateResponse struct {
