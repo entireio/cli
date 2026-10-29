@@ -3,6 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
@@ -20,25 +23,22 @@ import (
 
 // Key-management calls a machine makes with its own key: enrolling it (an
 // admin approves in the web UI, no public key is copied around) and revoking
-// it. Each request carries a proof — an assertion signed by the key whose aud
-// is that exact endpoint URL — so a captured proof is useless anywhere else.
+// it. Each request carries a proof signed by the key, bound to the exact
+// endpoint URL, the HTTP method and the request body, so a captured proof is
+// useless for any other call.
 //
 // PROTOTYPE: these endpoints are proposed, not implemented in entire-core.
+// The contract, including the idempotency and status rules the client relies
+// on below, is docs/architecture/service-account-keys.md.
 //
-//	POST /api/v1/service-account-enrollments
-//	     {public_key, key_id, service_account?, name, proof}
-//	  -> {enrollment_id, user_code, verification_uri, verification_uri_complete, expires_in, interval}
-//	POST /api/v1/service-account-enrollments/{enrollment_id}/poll   {proof}
-//	  -> {status: pending|approved|denied|expired, service_account}
-//	POST /api/v1/service-account-enrollments/{enrollment_id}/cancel {proof}
-//	  -> 204; 404 when the enrollment is unknown or already decided
-//	POST /api/v1/service-accounts/{svc}/keys/{key_id}/revoke         {proof}
-//	  -> 204; 404 when the key is unknown or already revoked
+//	POST /api/v1/service-account-enrollments                         (idempotent by key_id)
+//	POST /api/v1/service-account-enrollments/{enrollment_id}/poll
+//	POST /api/v1/service-account-enrollments/{enrollment_id}/cancel
+//	POST /api/v1/service-accounts/{svc}/keys/{key_id}/revoke
 //
-// Enrollment proofs use the key id as iss/sub (no account yet); revoke proofs
-// use the service account. A key may revoke only itself; revoking other keys
-// is an admin action. The full contract, including what the server must
-// enforce, is docs/architecture/service-account-keys.md.
+// Everything that can delete a key from disk is decided here, and only on a
+// definitive answer: a lost response, a 5xx or an unknown enrollment that may
+// still be live never deletes a key the server might trust.
 
 const (
 	enrollmentsPath     = "/api/v1/service-account-enrollments"
@@ -48,11 +48,16 @@ const (
 
 	// Bounds on the server's enrollment timing. Values outside them are
 	// clamped, so a hostile or broken response cannot make the box wait for
-	// hours or overflow a time.Duration.
+	// hours or overflow a time.Duration. maxEnrollmentLifetime is also the
+	// contract's upper bound on how long the server keeps an enrollment open.
 	defaultEnrollmentInterval = 5 * time.Second
 	maxEnrollmentInterval     = time.Minute
 	defaultEnrollmentLifetime = 15 * time.Minute
 	maxEnrollmentLifetime     = time.Hour
+
+	// enrollmentExpirySkew is how long past its expiry an enrollment must be
+	// before the client treats "unknown" or "still pending" as expired.
+	enrollmentExpirySkew = 5 * time.Minute
 )
 
 // ServiceAccountEnrollment is what the box shows while it waits for approval.
@@ -70,11 +75,29 @@ var (
 	userCodePattern     = regexp.MustCompile(`^[A-Z0-9-]{4,16}$`)
 )
 
-// ErrEnrollmentDenied and ErrEnrollmentExpired end the wait without a key.
+// Definitive enrollment outcomes: the enrollment can never be approved, so
+// its key may be deleted (ForgetEnrollment accepts only these).
 var (
-	ErrEnrollmentDenied  = errors.New("the enrollment request was denied")
-	ErrEnrollmentExpired = errors.New("the enrollment request expired before it was approved")
+	ErrEnrollmentDenied    = errors.New("the enrollment request was denied")
+	ErrEnrollmentExpired   = errors.New("the enrollment request expired before it was approved")
+	ErrEnrollmentRejected  = errors.New("the server refused the enrollment request")
+	ErrEnrollmentCancelled = errors.New("the enrollment request was cancelled")
 )
+
+// ErrEnrollmentAlreadyApproved: a cancel lost the race with an approval. The
+// key is trusted on the server and must be kept (and bound).
+var ErrEnrollmentAlreadyApproved = errors.New("the enrollment was approved before it could be cancelled")
+
+// IsDefinitiveEnrollmentOutcome reports whether err means the enrollment can
+// never be approved, so its key may be forgotten.
+func IsDefinitiveEnrollmentOutcome(err error) bool {
+	return isDefinitiveEnrollmentOutcome(err)
+}
+
+func isDefinitiveEnrollmentOutcome(err error) bool {
+	return errors.Is(err, ErrEnrollmentDenied) || errors.Is(err, ErrEnrollmentExpired) ||
+		errors.Is(err, ErrEnrollmentRejected) || errors.Is(err, ErrEnrollmentCancelled)
+}
 
 // enrollmentSleep waits between polls; a var so tests do not sleep.
 var enrollmentSleep = func(ctx context.Context, d time.Duration) error {
@@ -106,7 +129,7 @@ func SetEnrollmentSleepForTest(t interface{ Helper() }, sleep func(context.Conte
 
 // NewEnrollmentKey generates a key to enroll on server, proposing
 // serviceAccount ("" lets the approver choose). The caller stores it with
-// SavePendingEnrollmentKey before StartServiceAccountEnrollment, so the
+// SavePendingEnrollmentKey before SubmitServiceAccountEnrollment, so the
 // server never learns a public key whose private half is not on disk.
 func NewEnrollmentKey(server, serviceAccount, name string) (*ServiceAccountKey, error) {
 	if serviceAccount != "" {
@@ -124,37 +147,59 @@ func NewEnrollmentKey(server, serviceAccount, name string) (*ServiceAccountKey, 
 	return k, nil
 }
 
-// StartServiceAccountEnrollment submits k's public key for approval, proposing
-// k's service account when it has one. The returned timing is already
-// clamped to sane bounds.
-func StartServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) (*ServiceAccountEnrollment, error) {
+// SubmitServiceAccountEnrollment submits (or, for a key already submitting,
+// resubmits) k's public key for approval and records the server's answer on
+// the key. The server deduplicates by key id, so resubmitting after a lost
+// response returns the same enrollment. Errors: ErrEnrollmentRejected when
+// the server definitively refused (nothing was created), otherwise the
+// outcome is unknown and the key stays submitting for --resume or --cancel.
+func SubmitServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) (*ServiceAccountEnrollment, error) {
+	if k.enrollment.phase != EnrollmentSubmitting && k.enrollment.phase != EnrollmentPending {
+		return nil, fmt.Errorf("key %s has no enrollment to submit", k.keyID)
+	}
 	pub, err := k.PublicKeyPEM()
 	if err != nil {
 		return nil, err
 	}
 	endpoint := k.server + enrollmentsPath
-	proof, err := k.signAssertion(nowFunc(), k.keyID, endpoint)
-	if err != nil {
-		return nil, err
-	}
-	var out ServiceAccountEnrollment
-	status, err := postKeyAPI(ctx, endpoint, map[string]string{
+	status, body, err := postKeyAPI(ctx, k, k.keyID, endpoint, map[string]string{
 		"public_key":      pub,
 		"key_id":          k.keyID,
 		"service_account": k.serviceAccount,
 		"name":            k.name,
-		"proof":           proof,
-	}, &out)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("start enrollment at %s: %w", k.server, err)
+		return nil, fmt.Errorf("submit enrollment to %s (outcome unknown, the key was kept): %w", k.server, err)
 	}
-	if status != http.StatusOK && status != http.StatusCreated {
-		return nil, fmt.Errorf("start enrollment at %s: unexpected status %d", k.server, status)
+	switch {
+	case status == http.StatusOK || status == http.StatusCreated:
+	case isDefinitiveRefusal(status):
+		return nil, fmt.Errorf("%w: %s", ErrEnrollmentRejected, describeStatus(status, body))
+	default:
+		return nil, fmt.Errorf("submit enrollment to %s (outcome unknown, the key was kept): %s", k.server, describeStatus(status, body))
+	}
+	var out ServiceAccountEnrollment
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("submit enrollment to %s (outcome unknown, the key was kept): decode response: %w", k.server, err)
 	}
 	if err := validateEnrollment(&out); err != nil {
-		return nil, fmt.Errorf("start enrollment at %s: %w", k.server, err)
+		return nil, fmt.Errorf("submit enrollment to %s (outcome unknown, the key was kept): %w", k.server, err)
+	}
+	if err := RecordEnrollment(ctx, k, &out); err != nil {
+		return nil, fmt.Errorf("record enrollment %s (the key was kept; --resume resubmits): %w", out.ID, err)
 	}
 	return &out, nil
+}
+
+// isDefinitiveRefusal: a 4xx means the request was refused and nothing was
+// created, except the statuses that mean "try again" (timeout, too early,
+// rate-limited), where the server may not have looked at it at all.
+func isDefinitiveRefusal(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	}
+	return status >= 400 && status < 500
 }
 
 // validateEnrollment refuses a response the box would print or put in a URL
@@ -199,74 +244,178 @@ func clampSeconds(v int, def, upper time.Duration) time.Duration {
 
 func notPrintableASCII(r rune) bool { return r < 0x21 || r > 0x7e }
 
-// WaitForServiceAccountEnrollment polls k's recorded enrollment until it is
-// decided and returns the approved service account. It never waits past the
-// enrollment's expiry: each sleep is cut to the time remaining.
-func WaitForServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey, interval time.Duration) (string, error) {
-	if k.enrollmentID == "" || k.enrollmentExpiresAt.IsZero() {
-		return "", fmt.Errorf("key %s has no recorded enrollment", k.keyID)
+// enrollmentLapsed reports whether k's enrollment is certainly over on the
+// server: past its recorded expiry plus skew, or, while still submitting (no
+// expiry known), past the contract's maximum lifetime since the key was made.
+func enrollmentLapsed(k *ServiceAccountKey, now time.Time) bool {
+	deadline := k.enrollment.expiresAt
+	if deadline.IsZero() {
+		deadline = k.createdAt.Add(maxEnrollmentLifetime)
 	}
-	interval = min(max(interval, time.Second), maxEnrollmentInterval)
-	endpoint := k.server + enrollmentsPath + "/" + url.PathEscape(k.enrollmentID) + "/poll"
-	deadline := k.enrollmentExpiresAt
+	return now.After(deadline.Add(enrollmentExpirySkew))
+}
+
+type pollResult struct {
+	Status         string `json:"status"`
+	ServiceAccount string `json:"service_account"`
+}
+
+// pollEnrollment asks for k's enrollment once.
+func pollEnrollment(ctx context.Context, k *ServiceAccountKey) (pollResult, error) {
+	endpoint := k.server + enrollmentsPath + "/" + url.PathEscape(k.enrollment.id) + "/poll"
+	status, body, err := postKeyAPI(ctx, k, k.keyID, endpoint, map[string]string{})
+	if err != nil {
+		return pollResult{}, fmt.Errorf("poll enrollment: %w", err)
+	}
+	if status == http.StatusNotFound {
+		if enrollmentLapsed(k, nowFunc()) {
+			return pollResult{}, ErrEnrollmentExpired
+		}
+		return pollResult{}, errors.New("poll enrollment: the server does not know this enrollment; the key was kept, retry with --resume")
+	}
+	if status != http.StatusOK {
+		return pollResult{}, fmt.Errorf("poll enrollment: %s", describeStatus(status, body))
+	}
+	var out pollResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		return pollResult{}, fmt.Errorf("poll enrollment: decode response: %w", err)
+	}
+	return out, nil
+}
+
+// decidePoll maps a poll answer to the approved account, a definitive
+// outcome, or (done=false) "keep waiting".
+func decidePoll(r pollResult) (approved string, done bool, err error) {
+	switch r.Status {
+	case "pending":
+		return "", false, nil
+	case "approved":
+		id, err := ParseServiceAccountID(r.ServiceAccount)
+		if err != nil {
+			return "", true, fmt.Errorf("enrollment approved with an invalid service account: %w", err)
+		}
+		return id, true, nil
+	case "denied":
+		return "", true, ErrEnrollmentDenied
+	case "expired":
+		return "", true, ErrEnrollmentExpired
+	default:
+		return "", true, fmt.Errorf("poll enrollment: unknown status %q", tuiutil.SanitizeDisplayText(r.Status))
+	}
+}
+
+// WaitForServiceAccountEnrollment polls k's recorded enrollment at its stored
+// interval until it is decided and returns the approved service account.
+// Neither a sleep nor a request runs past the enrollment's expiry; at expiry
+// one last poll settles the outcome, and anything short of a definitive
+// answer is returned as a non-definitive error so the key is kept.
+func WaitForServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) (string, error) {
+	if k.enrollment.phase != EnrollmentPending || k.enrollment.id == "" || k.enrollment.expiresAt.IsZero() {
+		return "", fmt.Errorf("key %s has no recorded enrollment to wait for", k.keyID)
+	}
+	interval := k.enrollment.interval
+	if interval <= 0 {
+		interval = defaultEnrollmentInterval
+	}
+	interval = min(interval, maxEnrollmentInterval)
+	deadline := k.enrollment.expiresAt
 	for {
 		remaining := deadline.Sub(nowFunc())
 		if remaining <= 0 {
-			return "", ErrEnrollmentExpired
+			break
 		}
 		if err := enrollmentSleep(ctx, min(interval, remaining)); err != nil {
 			return "", err
 		}
-		proof, err := k.signAssertion(nowFunc(), k.keyID, endpoint)
+		if !nowFunc().Before(deadline) {
+			break
+		}
+		pollCtx, cancel := context.WithDeadline(ctx, deadline)
+		r, err := pollEnrollment(pollCtx, k)
+		expired := errors.Is(pollCtx.Err(), context.DeadlineExceeded)
+		cancel()
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("wait for enrollment: %w", ctx.Err())
+		}
 		if err != nil {
+			if expired {
+				break // the request ran into the expiry; settle it below
+			}
 			return "", err
 		}
-		var out struct {
-			Status         string `json:"status"`
-			ServiceAccount string `json:"service_account"`
-		}
-		status, err := postKeyAPI(ctx, endpoint, map[string]string{"proof": proof}, &out)
-		if err != nil {
-			return "", fmt.Errorf("poll enrollment: %w", err)
-		}
-		switch {
-		case status == http.StatusNotFound || out.Status == "expired":
-			return "", ErrEnrollmentExpired
-		case status != http.StatusOK:
-			return "", fmt.Errorf("poll enrollment: unexpected status %d", status)
-		case out.Status == "denied":
-			return "", ErrEnrollmentDenied
-		case out.Status == "approved":
-			id, err := ParseServiceAccountID(out.ServiceAccount)
-			if err != nil {
-				return "", fmt.Errorf("enrollment approved with an invalid service account: %w", err)
-			}
-			return id, nil
-		case out.Status != "pending":
-			return "", fmt.Errorf("poll enrollment: unknown status %q", tuiutil.SanitizeDisplayText(out.Status))
+		if approved, done, err := decidePoll(r); done {
+			return approved, err
 		}
 	}
+	// At expiry: one final, separately bounded poll. An approval that landed
+	// at the last moment still binds; "pending" or no answer is not proof of
+	// expiry until the skew has passed.
+	r, err := pollEnrollment(ctx, k)
+	if err != nil {
+		return "", err
+	}
+	approved, done, err := decidePoll(r)
+	if done {
+		return approved, err
+	}
+	if enrollmentLapsed(k, nowFunc()) {
+		return "", ErrEnrollmentExpired
+	}
+	return "", errors.New("the enrollment is still pending at its expiry; the key was kept, retry with --resume in a few minutes")
 }
 
-// CancelServiceAccountEnrollment withdraws k's pending enrollment on the
-// server. A 404 (already decided or expired) is not an error.
-func CancelServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) error {
-	if k.enrollmentID == "" {
-		return nil
+// CancelServiceAccountEnrollment withdraws k's enrollment. It returns
+// ErrEnrollmentCancelled, ErrEnrollmentDenied, ErrEnrollmentExpired or
+// ErrEnrollmentRejected when the enrollment can never be approved (the key may
+// then be forgotten), ErrEnrollmentAlreadyApproved with the account when the
+// approval won the race (the key must be kept and bound), and any other error
+// when the outcome is unknown (the key must be kept).
+func CancelServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) (approved string, err error) {
+	switch k.enrollment.phase {
+	case EnrollmentApproved:
+		return k.serviceAccount, ErrEnrollmentAlreadyApproved
+	case EnrollmentSubmitting:
+		// Learn the enrollment id first; resubmitting is idempotent.
+		if _, err := SubmitServiceAccountEnrollment(ctx, k); err != nil {
+			if !errors.Is(err, ErrEnrollmentRejected) && enrollmentLapsed(k, nowFunc()) {
+				return "", ErrEnrollmentExpired
+			}
+			return "", err
+		}
+	case EnrollmentPending:
+	default:
+		return "", fmt.Errorf("key %s has no enrollment to cancel", k.keyID)
 	}
-	endpoint := k.server + enrollmentsPath + "/" + url.PathEscape(k.enrollmentID) + "/cancel"
-	proof, err := k.signAssertion(nowFunc(), k.keyID, endpoint)
+	endpoint := k.server + enrollmentsPath + "/" + url.PathEscape(k.enrollment.id) + "/cancel"
+	status, body, err := postKeyAPI(ctx, k, k.keyID, endpoint, map[string]string{})
 	if err != nil {
-		return err
+		return "", fmt.Errorf("cancel enrollment (outcome unknown, the key was kept): %w", err)
 	}
-	status, err := postKeyAPI(ctx, endpoint, map[string]string{"proof": proof}, nil)
-	if err != nil {
-		return fmt.Errorf("cancel enrollment at %s: %w", k.server, err)
+	switch status {
+	case http.StatusOK, http.StatusNoContent:
+		return "", ErrEnrollmentCancelled
+	case http.StatusConflict:
+		var decided pollResult
+		if err := json.Unmarshal(body, &decided); err != nil {
+			return "", fmt.Errorf("cancel enrollment: decode conflict: %w", err)
+		}
+		approved, done, err := decidePoll(decided)
+		switch {
+		case !done:
+			return "", errors.New("cancel enrollment: the server reported a conflict but the enrollment is still pending; the key was kept")
+		case err == nil:
+			return approved, ErrEnrollmentAlreadyApproved
+		default:
+			return "", err
+		}
+	case http.StatusNotFound:
+		if enrollmentLapsed(k, nowFunc()) {
+			return "", ErrEnrollmentExpired
+		}
+		return "", errors.New("cancel enrollment: the server does not know this enrollment; the key was kept until the enrollment has certainly expired")
+	default:
+		return "", fmt.Errorf("cancel enrollment (outcome unknown, the key was kept): %s", describeStatus(status, body))
 	}
-	if status >= 300 && status != http.StatusNotFound {
-		return fmt.Errorf("cancel enrollment at %s: unexpected status %d", k.server, status)
-	}
-	return nil
 }
 
 // ErrServiceAccountKeyUnknown means the server no longer knows the key:
@@ -274,48 +423,75 @@ func CancelServiceAccountEnrollment(ctx context.Context, k *ServiceAccountKey) e
 var ErrServiceAccountKeyUnknown = errors.New("the server does not know this key (already revoked, or never registered)")
 
 // RevokeServiceAccountKey revokes k on the server using k itself as the
-// credential. It deletes nothing locally; see DeleteServiceAccountKey.
+// credential. It deletes nothing locally; see DeleteServiceAccountKey. A key
+// whose enrollment is undecided is refused: it is cancelled, not revoked.
 func RevokeServiceAccountKey(ctx context.Context, k *ServiceAccountKey) error {
-	if k.serviceAccount == "" {
-		return fmt.Errorf("key %s is not bound to a service account; cancel its enrollment instead", k.keyID)
-	}
-	endpoint := k.server + "/api/v1/service-accounts/" + url.PathEscape(k.serviceAccount) + "/keys/" + url.PathEscape(k.keyID) + "/revoke"
-	proof, err := k.signAssertion(nowFunc(), k.serviceAccount, endpoint)
+	status, err := ServiceAccountKeyStatusOf(k)
 	if err != nil {
 		return err
 	}
-	status, err := postKeyAPI(ctx, endpoint, map[string]string{"proof": proof}, nil)
+	if status == KeyEnrolling {
+		return fmt.Errorf("key %s: %w", k.keyID, ErrKeyEnrolling)
+	}
+	endpoint := k.server + "/api/v1/service-accounts/" + url.PathEscape(k.serviceAccount) + "/keys/" + url.PathEscape(k.keyID) + "/revoke"
+	code, body, err := postKeyAPI(ctx, k, k.serviceAccount, endpoint, map[string]string{})
 	if err != nil {
 		return fmt.Errorf("revoke key %s at %s: %w", k.keyID, k.server, err)
 	}
-	switch status {
+	switch code {
 	case http.StatusOK, http.StatusNoContent:
 		return nil
 	case http.StatusNotFound:
 		return ErrServiceAccountKeyUnknown
 	default:
-		return fmt.Errorf("revoke key %s at %s: unexpected status %d", k.keyID, k.server, status)
+		return fmt.Errorf("revoke key %s at %s: %s", k.keyID, k.server, describeStatus(code, body))
 	}
 }
 
-// postKeyAPI POSTs body as JSON and decodes a 2xx JSON response into out (when
-// non-nil). Non-2xx statuses are returned for the caller to classify, with
-// the server's error text in err only when it is not a status the caller
-// handles (404). Redirects are never followed: a 307/308 would resend the
-// signed proof to wherever the response points.
-func postKeyAPI(ctx context.Context, endpoint string, body any, out any) (int, error) {
-	if err := requireKeyTransport(endpoint); err != nil {
-		return 0, err
+// keyProofBodyHash is the "bh" claim: base64url SHA-256 of the request body
+// without its proof, serialised as sorted-key JSON without HTML escaping
+// (RFC 8785 JCS for these string-only objects).
+func keyProofBodyHash(fields map[string]string) (string, error) {
+	canonical, err := jsonutil.MarshalWithNoHTMLEscape(fields)
+	if err != nil {
+		return "", fmt.Errorf("encode request body: %w", err)
 	}
+	sum := sha256.Sum256(canonical)
+	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
+}
+
+// postKeyAPI signs a proof for exactly this call (aud = endpoint, htm = POST,
+// bh = hash of fields), POSTs fields plus the proof as JSON, and returns the
+// status and body for the caller to classify. err is only for failures where
+// no status was received (network, timeout, a refused redirect), i.e. the
+// outcome is unknown. Redirects are never followed: a 307/308 would resend
+// the signed proof to wherever the response points.
+func postKeyAPI(ctx context.Context, k *ServiceAccountKey, subject, endpoint string, fields map[string]string) (int, []byte, error) {
+	if err := requireKeyTransport(endpoint); err != nil {
+		return 0, nil, err
+	}
+	bh, err := keyProofBodyHash(fields)
+	if err != nil {
+		return 0, nil, err
+	}
+	proof, err := k.signAssertion(nowFunc(), subject, endpoint, map[string]any{"htm": http.MethodPost, "bh": bh})
+	if err != nil {
+		return 0, nil, err
+	}
+	body := make(map[string]string, len(fields)+1)
+	for name, v := range fields {
+		body[name] = v
+	}
+	body["proof"] = proof
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return 0, fmt.Errorf("encode request: %w", err)
+		return 0, nil, fmt.Errorf("encode request: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, keyAPIRequestTimout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return 0, fmt.Errorf("build request: %w", err)
+		return 0, nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -327,37 +503,31 @@ func postKeyAPI(ctx context.Context, endpoint string, body any, out any) (int, e
 		},
 	}).Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("request: %w", err)
+		return 0, nil, fmt.Errorf("request: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return 0, nil, fmt.Errorf("refusing to follow a %d redirect for a key-signed request", resp.StatusCode)
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxKeyAPIBody))
 	if err != nil {
-		return resp.StatusCode, fmt.Errorf("read response: %w", err)
+		return 0, nil, fmt.Errorf("read response: %w", err)
 	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return resp.StatusCode, fmt.Errorf("refusing to follow a %d redirect for a key-signed request", resp.StatusCode)
+	return resp.StatusCode, data, nil
+}
+
+// describeStatus renders an unexpected status with the server's error text,
+// sanitised.
+func describeStatus(status int, body []byte) string {
+	var apiErr struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
 	}
-	if resp.StatusCode >= 400 {
-		if resp.StatusCode == http.StatusNotFound {
-			return resp.StatusCode, nil
-		}
-		var apiErr struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-		}
-		_ = json.Unmarshal(data, &apiErr) //nolint:errcheck // best-effort detail
-		detail := sanitizeServerText(apiErr.Error + " " + apiErr.Message)
-		if detail != "" {
-			return resp.StatusCode, fmt.Errorf("status %d: %s", resp.StatusCode, detail)
-		}
-		return resp.StatusCode, nil
+	_ = json.Unmarshal(body, &apiErr) //nolint:errcheck // best-effort detail
+	if detail := sanitizeServerText(apiErr.Error + " " + apiErr.Message); detail != "" {
+		return fmt.Sprintf("status %d: %s", status, detail)
 	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return resp.StatusCode, fmt.Errorf("decode response: %w", err)
-		}
-	}
-	return resp.StatusCode, nil
+	return fmt.Sprintf("status %d", status)
 }
 
 // sanitizeServerText makes server-supplied error text safe to print on one

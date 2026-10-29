@@ -41,6 +41,7 @@ type fakeServiceAccountServer struct {
 	revoked      []string
 	pollStatus   string
 	stsStatus    int
+	cancelBody   string // non-empty: answer cancel with 409 and this body
 }
 
 func newFakeServiceAccountServer(t *testing.T) *fakeServiceAccountServer {
@@ -71,6 +72,11 @@ func (f *fakeServiceAccountServer) serve(w http.ResponseWriter, r *http.Request)
 	case r.URL.Path == "/api/v1/service-account-enrollments/enr_1/poll":
 		fmt.Fprintf(w, `{"status":%q,"service_account":%q}`, f.pollStatus, testCmdServiceAccount)
 	case r.URL.Path == "/api/v1/service-account-enrollments/enr_1/cancel":
+		if f.cancelBody != "" {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, f.cancelBody) //nolint:errcheck // test server
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case strings.HasSuffix(r.URL.Path, "/revoke"):
 		f.revoked = append(f.revoked, r.URL.Path)
@@ -202,7 +208,7 @@ func TestAuthServiceAccountEnrollInterruptResumeAndCancel(t *testing.T) {
 	}
 
 	_, _, err = runServiceAccountCmd(t.Context(), "enroll", "--server", srv.srv.URL)
-	require.ErrorContains(t, err, "already waiting for approval")
+	require.ErrorIs(t, err, auth.ErrEnrollmentInProgress)
 
 	t.Cleanup(auth.SkipEnrollmentWaitForTest(t))
 	srv.pollStatus = "approved"
@@ -225,7 +231,7 @@ func TestAuthServiceAccountEnrollInterruptResumeAndCancel(t *testing.T) {
 	before := len(listKeys(t))
 	out, _, err = runServiceAccountCmd(t.Context(), "enroll", "--cancel")
 	require.NoError(t, err)
-	require.Contains(t, out, "Cancelled")
+	require.Contains(t, out, "Withdrew")
 	require.Len(t, listKeys(t), before-1)
 }
 
@@ -255,4 +261,41 @@ func TestAuthServiceAccountRevoke(t *testing.T) {
 	require.Error(t, err, "revoke must delete the local key")
 	require.Empty(t, srv.revoked, "--local-only must not call the server")
 	require.Empty(t, listKeys(t))
+}
+
+// TestAuthServiceAccountCancelRaceAndEnrollingGuards: an approval that beats
+// the cancel keeps (and binds) the key, and an enrolling key cannot be
+// revoked or deleted by `key revoke`, even with --key-id or --local-only.
+//
+// Not parallel: it sets ENTIRE_CONFIG_DIR, XDG_CACHE_HOME and the enrollment
+// sleep seam.
+func TestAuthServiceAccountCancelRaceAndEnrollingGuards(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	srv := newFakeServiceAccountServer(t)
+	srv.pollStatus = "pending"
+	t.Cleanup(auth.SetEnrollmentSleepForTest(t, func(context.Context, time.Duration) error { return context.Canceled }))
+
+	_, _, err := runServiceAccountCmd(t.Context(), "enroll", "--server", srv.srv.URL, "--service-account", testCmdServiceAccount)
+	require.ErrorIs(t, err, context.Canceled)
+	var keyID string
+	for id := range listKeys(t) {
+		keyID = id
+	}
+
+	for _, args := range [][]string{
+		{"key", "revoke", "--service-account", testCmdServiceAccount, "--key-id", keyID},
+		{"key", "revoke", "--service-account", testCmdServiceAccount, "--key-id", keyID, "--local-only"},
+	} {
+		_, _, err = runServiceAccountCmd(t.Context(), args...)
+		require.ErrorIs(t, err, auth.ErrKeyEnrolling, args)
+	}
+	require.Empty(t, srv.revoked)
+	require.Equal(t, map[string]auth.ServiceAccountKeyStatus{keyID: auth.KeyEnrolling}, listKeys(t))
+
+	srv.cancelBody = fmt.Sprintf(`{"status":"approved","service_account":%q}`, testCmdServiceAccount)
+	_, errOut, err := runServiceAccountCmd(t.Context(), "enroll", "--cancel")
+	require.NoError(t, err)
+	require.Contains(t, errOut, "approved before it could be cancelled")
+	require.Equal(t, map[string]auth.ServiceAccountKeyStatus{keyID: auth.KeyActive}, listKeys(t), "an approved key must be kept and bound")
 }

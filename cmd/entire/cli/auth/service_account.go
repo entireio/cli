@@ -188,14 +188,17 @@ func (k *ServiceAccountKey) SignAssertion(now time.Time) (string, error) {
 	if k.serviceAccount == "" {
 		return "", fmt.Errorf("key %s is not bound to a service account yet", k.keyID)
 	}
-	return k.signAssertion(now, k.serviceAccount, ServiceAccountAssertionAudience(k.server))
+	return k.signAssertion(now, k.serviceAccount, ServiceAccountAssertionAudience(k.server), nil)
 }
 
 // signAssertion signs a proof-of-possession JWT for one call. aud names that
 // call (the STS, or a key-management endpoint URL) so an assertion captured for
 // one cannot be replayed against another. iss/sub is the service account, or
 // the key id while the key is not yet bound to one.
-func (k *ServiceAccountKey) signAssertion(now time.Time, subject, aud string) (string, error) {
+//
+// extra adds claims; key-management proofs use it to bind the HTTP method and
+// the request body (see signKeyProof).
+func (k *ServiceAccountKey) signAssertion(now time.Time, subject, aud string, extra map[string]any) (string, error) {
 	if err := k.usable(); err != nil {
 		return "", err
 	}
@@ -207,14 +210,18 @@ func (k *ServiceAccountKey) signAssertion(now time.Time, subject, aud string) (s
 	if err != nil {
 		return "", fmt.Errorf("encode assertion header: %w", err)
 	}
-	claims, err := json.Marshal(map[string]any{
+	fields := map[string]any{
 		"iss": subject,
 		"sub": subject,
 		"aud": aud,
 		"iat": now.Unix(),
 		"exp": now.Add(assertionTTL).Unix(),
 		"jti": base64.RawURLEncoding.EncodeToString(jti),
-	})
+	}
+	for name, v := range extra {
+		fields[name] = v
+	}
+	claims, err := json.Marshal(fields)
 	if err != nil {
 		return "", fmt.Errorf("encode assertion claims: %w", err)
 	}
@@ -256,6 +263,12 @@ var serviceAccountExchange = mintServiceAccountSession
 // Concurrent processes on the same key share one exchange: the first takes a
 // per-key lock and the rest find its result in the cache.
 func ServiceAccountToken(ctx context.Context, k *ServiceAccountKey) (string, error) {
+	if err := k.usable(); err != nil {
+		return "", err
+	}
+	if k.serviceAccount == "" {
+		return "", fmt.Errorf("key %s is not bound to a service account yet", k.keyID)
+	}
 	if s, ok := readServiceAccountSession(k, nowFunc()); ok {
 		return s.AccessToken, nil
 	}
@@ -264,9 +277,9 @@ func ServiceAccountToken(ctx context.Context, k *ServiceAccountKey) (string, err
 		// No cache directory: still authenticate, just without sharing.
 		return exchangeServiceAccountSession(ctx, k, nil)
 	}
-	release, err := flock.AcquireContextIn(ctx, root, serviceAccountSessionName(k.keyID)+".lock")
+	release, err := lockServiceAccountSession(ctx, root, k.keyID)
 	if err != nil {
-		return "", fmt.Errorf("lock session cache: %w", err)
+		return "", err
 	}
 	defer release()
 	if s, ok := readServiceAccountSession(k, nowFunc()); ok {
@@ -370,6 +383,19 @@ func mintServiceAccountSession(ctx context.Context, k *ServiceAccountKey, now ti
 	}, nil
 }
 
+// lockServiceAccountSession takes the per-key lock that serialises exchanges
+// and cache removal for one key across processes.
+func lockServiceAccountSession(ctx context.Context, cache *os.Root, keyID string) (func(), error) {
+	release, err := flock.AcquireContextIn(ctx, cache, serviceAccountSessionName(keyID)+".lock")
+	if err != nil {
+		return nil, fmt.Errorf("lock session cache: %w", err)
+	}
+	return release, nil
+}
+
+// readServiceAccountSession returns the cached session for k if it was minted
+// for k's server, account and key, its token still passes the same claim
+// checks as a fresh one, and it is not within the refresh skew of expiry.
 func readServiceAccountSession(k *ServiceAccountKey, now time.Time) (serviceAccountSession, bool) {
 	root, err := userdirs.CacheRoot()
 	if err != nil {
@@ -382,7 +408,10 @@ func readServiceAccountSession(k *ServiceAccountKey, now time.Time) (serviceAcco
 	var s serviceAccountSession
 	if json.Unmarshal(data, &s) != nil ||
 		s.KeyID != k.keyID || s.Server != k.server || s.ServiceAccount != k.serviceAccount ||
-		s.AccessToken == "" || !s.ExpiresAt.After(now.Add(saSessionRefreshSkew)) {
+		s.AccessToken == "" {
+		return serviceAccountSession{}, false
+	}
+	if err := validateServiceAccountSession(k, &s, now); err != nil || !s.ExpiresAt.After(now.Add(saSessionRefreshSkew)) {
 		return serviceAccountSession{}, false
 	}
 	return s, true
@@ -404,6 +433,13 @@ func removeServiceAccountSession(keyID string) error {
 	if err != nil {
 		return fmt.Errorf("open cache directory: %w", err)
 	}
+	// Under the exchange lock, so an exchange already in flight cannot write
+	// the session back after it was removed.
+	release, err := lockServiceAccountSession(context.Background(), root, keyID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := root.Remove(serviceAccountSessionName(keyID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove cached session: %w", err)
 	}

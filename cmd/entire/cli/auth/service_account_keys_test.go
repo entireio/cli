@@ -16,10 +16,12 @@ import (
 	"time"
 )
 
-// fakeKeyAPI is the proposed key-management API, verifying every proof the
-// way the server would: signature against the enrolled/registered public key,
-// aud equal to the exact endpoint URL, iss the key id (enrollment) or the
-// service account (revoke).
+// fakeKeyAPI is the proposed key-management API. It verifies every proof the
+// way the server must (signature against the submitted/registered public key,
+// aud = the exact endpoint, htm = POST, bh = hash of the body without its
+// proof, iss the key id or the service account) and implements the contract's
+// idempotency and conflict rules, with switches to inject the failures the
+// client must survive.
 type fakeKeyAPI struct {
 	t   *testing.T
 	srv *httptest.Server
@@ -27,21 +29,26 @@ type fakeKeyAPI struct {
 	mu          sync.Mutex
 	publicKey   string
 	keyID       string
-	pollReplies []string // statuses handed out in order; last one repeats
+	submissions int    // submit requests received
+	enrollments int    // enrollments actually created (idempotent by key id)
+	submitCode  int    // non-zero: refuse submissions with this status
+	loseSubmit  string // "500" or "drop": create the enrollment, then lose the response
+	pollReplies []string
 	polls       int
+	poll404     bool
 	interval    int
 	expiresIn   int
+	cancelReply string // "cancelled" (204), "approved"/"denied"/"expired" (409), "404"
+	cancels     int
 	revokeCode  int
 	revoked     []string
-	cancelled   int
 	badLink     string
-	// onStart runs when the enrollment request arrives, before the reply.
-	onStart func()
+	onSubmit    func()
 }
 
 func newFakeKeyAPI(t *testing.T) *fakeKeyAPI {
 	t.Helper()
-	f := &fakeKeyAPI{t: t, revokeCode: http.StatusNoContent, interval: 1, expiresIn: 600}
+	f := &fakeKeyAPI{t: t, revokeCode: http.StatusNoContent, interval: 1, expiresIn: 600, cancelReply: "cancelled"}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -58,10 +65,35 @@ func (f *fakeKeyAPI) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
 	case enrollmentsPath:
+		f.submissions++
+		if f.publicKey != "" && body["key_id"] != f.keyID {
+			f.t.Errorf("a second key %s was submitted; one enrollment per machine", body["key_id"])
+		}
 		f.publicKey, f.keyID = body["public_key"], body["key_id"]
-		f.checkProof(body["proof"], f.keyID, endpoint)
-		if f.onStart != nil {
-			f.onStart()
+		f.checkProof(body, f.keyID, endpoint)
+		if f.onSubmit != nil {
+			f.onSubmit()
+		}
+		if f.submitCode != 0 {
+			w.WriteHeader(f.submitCode)
+			return
+		}
+		if f.enrollments == 0 {
+			f.enrollments++ // idempotent by key id: later submissions return the same one
+		}
+		switch f.loseSubmit {
+		case "500":
+			f.loseSubmit = ""
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		case "drop":
+			f.loseSubmit = ""
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				f.t.Fatalf("hijack: %v", err)
+			}
+			_ = conn.Close() // simulating a lost response
+			return
 		}
 		link := "https://entire.example/approve"
 		if f.badLink != "" {
@@ -72,16 +104,28 @@ func (f *fakeKeyAPI) serve(w http.ResponseWriter, r *http.Request) {
 			"verification_uri": link, "expires_in": f.expiresIn, "interval": f.interval,
 		})
 	case enrollmentsPath + "/enr_1/poll":
-		f.checkProof(body["proof"], f.keyID, endpoint)
+		f.checkProof(body, f.keyID, endpoint)
+		if f.poll404 {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		status := f.pollReplies[min(f.polls, len(f.pollReplies)-1)]
 		f.polls++
 		f.reply(w, map[string]string{"status": status, "service_account": testServiceAccount})
 	case enrollmentsPath + "/enr_1/cancel":
-		f.checkProof(body["proof"], f.keyID, endpoint)
-		f.cancelled++
-		w.WriteHeader(http.StatusNoContent)
+		f.checkProof(body, f.keyID, endpoint)
+		f.cancels++
+		switch f.cancelReply {
+		case "cancelled":
+			w.WriteHeader(http.StatusNoContent)
+		case "404":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusConflict)
+			f.reply(w, map[string]string{"status": f.cancelReply, "service_account": testServiceAccount})
+		}
 	case "/api/v1/service-accounts/" + testServiceAccount + "/keys/" + f.keyID + "/revoke":
-		f.checkProof(body["proof"], testServiceAccount, endpoint)
+		f.checkProof(body, testServiceAccount, endpoint)
 		f.revoked = append(f.revoked, f.keyID)
 		w.WriteHeader(f.revokeCode)
 	default:
@@ -95,14 +139,27 @@ func (f *fakeKeyAPI) reply(w http.ResponseWriter, v any) {
 	}
 }
 
-func (f *fakeKeyAPI) checkProof(proof, wantSubject, wantAud string) {
+func (f *fakeKeyAPI) checkProof(body map[string]string, wantSubject, wantAud string) {
 	f.t.Helper()
-	_, claims := verifyTestAssertionPEM(f.t, f.publicKey, proof)
+	_, claims := verifyTestAssertionPEM(f.t, f.publicKey, body["proof"])
 	if claims["iss"] != wantSubject || claims["sub"] != wantSubject {
 		f.t.Errorf("proof iss/sub = %v/%v, want %s", claims["iss"], claims["sub"], wantSubject)
 	}
 	if claims["aud"] != wantAud {
 		f.t.Errorf("proof aud = %v, want the endpoint %s", claims["aud"], wantAud)
+	}
+	if claims["htm"] != http.MethodPost {
+		f.t.Errorf("proof htm = %v, want POST", claims["htm"])
+	}
+	fields := map[string]string{}
+	for k, v := range body {
+		if k != "proof" {
+			fields[k] = v
+		}
+	}
+	want, err := keyProofBodyHash(fields)
+	if err != nil || claims["bh"] != want {
+		f.t.Errorf("proof bh = %v, want %s (the body was not bound)", claims["bh"], want)
 	}
 }
 
@@ -111,9 +168,21 @@ func stubEnrollmentSleep(t *testing.T) {
 	t.Cleanup(SkipEnrollmentWaitForTest(t))
 }
 
-// startEnrollment runs the command's sequence up to the wait: persist, submit,
-// record.
-func startEnrollment(t *testing.T, api *fakeKeyAPI, proposed string) (*ServiceAccountKey, *ServiceAccountEnrollment) {
+func injectStoreFault(t *testing.T, step string) {
+	t.Helper()
+	storeFault = func(s string) error {
+		if s == step {
+			return errors.New("injected crash at " + step)
+		}
+		return nil
+	}
+	t.Cleanup(func() { storeFault = nil })
+}
+
+func clearStoreFault() { storeFault = nil }
+
+// newEnrollment stores a new enrolling key, as `enroll` does before submitting.
+func newEnrollment(t *testing.T, api *fakeKeyAPI, proposed string) *ServiceAccountKey {
 	t.Helper()
 	key, err := NewEnrollmentKey(api.srv.URL, proposed, "box-1")
 	if err != nil {
@@ -122,14 +191,29 @@ func startEnrollment(t *testing.T, api *fakeKeyAPI, proposed string) (*ServiceAc
 	if err := SavePendingEnrollmentKey(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
-	enrollment, err := StartServiceAccountEnrollment(context.Background(), key)
+	return key
+}
+
+// startEnrollment stores, submits and records an enrollment.
+func startEnrollment(t *testing.T, api *fakeKeyAPI, proposed string) (*ServiceAccountKey, *ServiceAccountEnrollment) {
+	t.Helper()
+	key := newEnrollment(t, api, proposed)
+	enrollment, err := SubmitServiceAccountEnrollment(context.Background(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RecordEnrollment(context.Background(), key, enrollment); err != nil {
+	return key, enrollment
+}
+
+// reload drops the in-memory key, as a crashed process would, and reads it
+// back from disk.
+func reload(t *testing.T, k *ServiceAccountKey) *ServiceAccountKey {
+	t.Helper()
+	got, err := LoadServiceAccountKey(k.KeyID())
+	if err != nil {
 		t.Fatal(err)
 	}
-	return key, enrollment
+	return got
 }
 
 func TestServiceAccountEnrollment_ApprovedStoresBoundKey(t *testing.T) {
@@ -137,8 +221,9 @@ func TestServiceAccountEnrollment_ApprovedStoresBoundKey(t *testing.T) {
 	stubEnrollmentSleep(t)
 	api := newFakeKeyAPI(t)
 	api.pollReplies = []string{"pending", "pending", "approved"}
+	api.interval = 7
 	// The private half must be on disk before the server learns the public half.
-	api.onStart = func() {
+	api.onSubmit = func() {
 		if _, err := os.Stat(filepath.Join(configDir, ServiceAccountKeyFileName(api.keyID))); err != nil {
 			t.Errorf("key not on disk when the enrollment was submitted: %v", err)
 		}
@@ -148,8 +233,11 @@ func TestServiceAccountEnrollment_ApprovedStoresBoundKey(t *testing.T) {
 	if enrollment.UserCode != "WXYZ-1234" {
 		t.Fatalf("user code = %q", enrollment.UserCode)
 	}
+	if got := reload(t, key).EnrollmentInterval(); got != 7*time.Second {
+		t.Fatalf("persisted interval = %s, want the server's 7s", got)
+	}
 	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{key.KeyID(): KeyEnrolling})
-	got, err := WaitForServiceAccountEnrollment(context.Background(), key, time.Second)
+	got, err := WaitForServiceAccountEnrollment(context.Background(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,39 +251,311 @@ func TestServiceAccountEnrollment_ApprovedStoresBoundKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.KeyID() != key.KeyID() || loaded.EnrollmentID() != "" {
-		t.Fatalf("active key = %s (enrollment %q), want the enrolled key with no pending enrollment", loaded.KeyID(), loaded.EnrollmentID())
+	if loaded.KeyID() != key.KeyID() || loaded.EnrollmentPhase() != "" {
+		t.Fatalf("active key = %s (phase %q), want the enrolled key with no enrollment left", loaded.KeyID(), loaded.EnrollmentPhase())
 	}
 }
 
-// The process dies after the server recorded the enrollment (approval may land
-// at any point after). Nothing in memory survives; the key file alone is
-// enough to resume, and the approved key is bound to its private half.
-func TestServiceAccountEnrollment_ResumesAfterCrash(t *testing.T) {
+// The server creates the enrollment but the response is lost (a 500, or the
+// connection dropping). The key must stay, and resubmitting must find the same
+// enrollment rather than create a second one.
+func TestServiceAccountEnrollment_LostSubmitResponseIsResumable(t *testing.T) {
+	for _, lose := range []string{"500", "drop"} {
+		t.Run(lose, func(t *testing.T) {
+			isolateServiceAccountDirs(t)
+			stubEnrollmentSleep(t)
+			api := newFakeKeyAPI(t)
+			api.pollReplies = []string{"approved"}
+			api.loseSubmit = lose
+
+			key := newEnrollment(t, api, "")
+			_, err := SubmitServiceAccountEnrollment(context.Background(), key)
+			if err == nil || IsDefinitiveEnrollmentOutcome(err) {
+				t.Fatalf("err = %v, want a non-definitive error", err)
+			}
+			if ferr := ForgetEnrollment(context.Background(), key, err); ferr == nil {
+				t.Fatal("ForgetEnrollment accepted a lost response as a definitive outcome")
+			}
+			resumed := reload(t, key)
+			if resumed.EnrollmentPhase() != EnrollmentSubmitting {
+				t.Fatalf("phase = %q, want submitting", resumed.EnrollmentPhase())
+			}
+
+			if _, err := SubmitServiceAccountEnrollment(context.Background(), resumed); err != nil {
+				t.Fatal(err)
+			}
+			if api.submissions != 2 || api.enrollments != 1 {
+				t.Fatalf("submissions %d, enrollments %d; want 2 submissions for 1 enrollment", api.submissions, api.enrollments)
+			}
+			approved, err := WaitForServiceAccountEnrollment(context.Background(), resumed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := BindEnrolledKey(context.Background(), resumed, approved); err != nil {
+				t.Fatal(err)
+			}
+			assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{key.KeyID(): KeyActive})
+		})
+	}
+}
+
+func TestServiceAccountEnrollment_RefusedSubmitIsDefinitive(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	api := newFakeKeyAPI(t)
+	api.submitCode = http.StatusBadRequest
+	key := newEnrollment(t, api, "")
+	_, err := SubmitServiceAccountEnrollment(context.Background(), key)
+	if !errors.Is(err, ErrEnrollmentRejected) {
+		t.Fatalf("err = %v, want ErrEnrollmentRejected", err)
+	}
+	if err := ForgetEnrollment(context.Background(), key, err); err != nil {
+		t.Fatal(err)
+	}
+	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{})
+
+	// 429 is "try again", not a refusal: the key stays.
+	api.submitCode = http.StatusTooManyRequests
+	api.publicKey = "" // the first key is gone; a new one may enroll
+	key = newEnrollment(t, api, "")
+	if _, err := SubmitServiceAccountEnrollment(context.Background(), key); err == nil || IsDefinitiveEnrollmentOutcome(err) {
+		t.Fatalf("429: err = %v, want a non-definitive error", err)
+	}
+}
+
+// The approval wins a race with the cancel: the server's 409 says so, and the
+// key, now trusted on the server, must not be deleted.
+func TestCancelServiceAccountEnrollment_ApprovalWinsRace(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	api := newFakeKeyAPI(t)
+	api.cancelReply = "approved"
+	key, _ := startEnrollment(t, api, "")
+
+	approved, err := CancelServiceAccountEnrollment(context.Background(), key)
+	if !errors.Is(err, ErrEnrollmentAlreadyApproved) || approved != testServiceAccount {
+		t.Fatalf("approved %q err %v; want ErrEnrollmentAlreadyApproved for %s", approved, err, testServiceAccount)
+	}
+	if ferr := ForgetEnrollment(context.Background(), key, err); ferr == nil {
+		t.Fatal("ForgetEnrollment deleted a key whose enrollment was approved")
+	}
+	if _, err := BindEnrolledKey(context.Background(), key, approved); err != nil {
+		t.Fatal(err)
+	}
+	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{key.KeyID(): KeyActive})
+}
+
+func TestCancelServiceAccountEnrollment_Outcomes(t *testing.T) {
+	for reply, definitive := range map[string]bool{"cancelled": true, "denied": true, "expired": true, "404": false} {
+		t.Run(reply, func(t *testing.T) {
+			isolateServiceAccountDirs(t)
+			api := newFakeKeyAPI(t)
+			api.cancelReply = reply
+			key, _ := startEnrollment(t, api, "")
+			_, err := CancelServiceAccountEnrollment(context.Background(), key)
+			if got := IsDefinitiveEnrollmentOutcome(err); got != definitive {
+				t.Fatalf("err = %v: definitive %v, want %v", err, got, definitive)
+			}
+			if definitive {
+				if err := ForgetEnrollment(context.Background(), key, err); err != nil {
+					t.Fatal(err)
+				}
+				assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{})
+			}
+		})
+	}
+}
+
+// "Unknown enrollment" only counts as expired once the enrollment has
+// certainly lapsed (expiry plus skew); before that the key is kept.
+func TestCancelServiceAccountEnrollment_UnknownBecomesExpiredOnlyAfterLapse(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	now := pinClock(t)
+	api := newFakeKeyAPI(t)
+	api.cancelReply = "404"
+	key, _ := startEnrollment(t, api, "")
+	if _, err := CancelServiceAccountEnrollment(context.Background(), key); IsDefinitiveEnrollmentOutcome(err) {
+		t.Fatalf("before expiry: err = %v, want non-definitive", err)
+	}
+	*now = now.Add(10*time.Minute + enrollmentExpirySkew + time.Second)
+	if _, err := CancelServiceAccountEnrollment(context.Background(), key); !errors.Is(err, ErrEnrollmentExpired) {
+		t.Fatalf("after expiry and skew: err = %v, want ErrEnrollmentExpired", err)
+	}
+}
+
+func TestWaitForServiceAccountEnrollment_Poll404KeepsKeyUntilLapse(t *testing.T) {
 	isolateServiceAccountDirs(t)
 	stubEnrollmentSleep(t)
 	api := newFakeKeyAPI(t)
-	api.pollReplies = []string{"approved"}
+	api.poll404 = true
+	key, _ := startEnrollment(t, api, "")
+	if _, err := WaitForServiceAccountEnrollment(context.Background(), key); err == nil || IsDefinitiveEnrollmentOutcome(err) {
+		t.Fatalf("err = %v, want a non-definitive error for an unknown enrollment", err)
+	}
+}
 
-	crashed, _ := startEnrollment(t, api, "")
-	crashedID := crashed.KeyID()
+// An enrolling key — even one proposing an account — cannot be revoked or
+// deleted by any path but a confirmed enrollment outcome.
+func TestEnrollingKey_CannotBeRevokedOrDeleted(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	api := newFakeKeyAPI(t)
+	key, _ := startEnrollment(t, api, testServiceAccount)
+	if err := RevokeServiceAccountKey(context.Background(), key); !errors.Is(err, ErrKeyEnrolling) {
+		t.Fatalf("revoke: err = %v, want ErrKeyEnrolling", err)
+	}
+	if len(api.revoked) != 0 {
+		t.Fatal("a revoke request was sent for an enrolling key")
+	}
+	if err := DeleteServiceAccountKey(context.Background(), key); !errors.Is(err, ErrKeyEnrolling) {
+		t.Fatalf("delete: err = %v, want ErrKeyEnrolling", err)
+	}
+	if _, err := ActivateServiceAccountKey(context.Background(), key); !errors.Is(err, ErrKeyEnrolling) {
+		t.Fatalf("activate: err = %v, want ErrKeyEnrolling", err)
+	}
+	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{key.KeyID(): KeyEnrolling})
+}
 
-	keys, err := ListServiceAccountKeys("")
-	if err != nil || len(keys) != 1 || keys[0].Status != KeyEnrolling {
-		t.Fatalf("after the crash: keys %v err %v; want one enrolling key", keys, err)
+// One enrollment per machine, enforced under the lock: concurrent attempts
+// leave exactly one.
+func TestSavePendingEnrollmentKey_OneAtATime(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	api := newFakeKeyAPI(t)
+	var ok, refused atomic.Int32
+	var wg sync.WaitGroup
+	for range 6 {
+		key, err := NewEnrollmentKey(api.srv.URL, "", "box")
+		if err != nil {
+			t.Fatal(err)
+		}
+		wg.Go(func() {
+			switch err := SavePendingEnrollmentKey(context.Background(), key); {
+			case err == nil:
+				ok.Add(1)
+			case errors.Is(err, ErrEnrollmentInProgress):
+				refused.Add(1)
+			default:
+				t.Error(err)
+			}
+		})
 	}
-	resumed := keys[0].Key
-	if resumed.KeyID() != crashedID || resumed.EnrollmentID() != "enr_1" {
-		t.Fatalf("resumed key %s enrollment %q", resumed.KeyID(), resumed.EnrollmentID())
+	wg.Wait()
+	if ok.Load() != 1 || refused.Load() != 5 {
+		t.Fatalf("%d stored, %d refused; want exactly one stored", ok.Load(), refused.Load())
 	}
-	approved, err := WaitForServiceAccountEnrollment(context.Background(), resumed, 0)
-	if err != nil {
-		t.Fatal(err)
+}
+
+// A crash at every write of the bind leaves a state --resume finishes: the
+// key is never lost, and it ends up active.
+func TestBindEnrolledKey_RecoversFromCrashAtEveryStep(t *testing.T) {
+	for _, step := range []string{"bind:approve", "bind:pointer", "bind:finish"} {
+		t.Run(step, func(t *testing.T) {
+			isolateServiceAccountDirs(t)
+			stubEnrollmentSleep(t)
+			api := newFakeKeyAPI(t)
+			api.pollReplies = []string{"approved"}
+			key, _ := startEnrollment(t, api, "")
+			approved, err := WaitForServiceAccountEnrollment(context.Background(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			injectStoreFault(t, step)
+			if _, err := BindEnrolledKey(context.Background(), key, approved); err == nil {
+				t.Fatal("injected fault did not fail the bind")
+			}
+			clearStoreFault()
+
+			// What --resume does from whatever phase is on disk.
+			resumed := reload(t, key)
+			switch resumed.EnrollmentPhase() {
+			case EnrollmentPending:
+				if approved, err = WaitForServiceAccountEnrollment(context.Background(), resumed); err != nil {
+					t.Fatal(err)
+				}
+				fallthrough
+			case EnrollmentApproved:
+				if _, err := BindEnrolledKey(context.Background(), resumed, approved); err != nil {
+					t.Fatal(err)
+				}
+			case "", EnrollmentSubmitting:
+				t.Fatalf("unexpected phase %q after a bind crash", resumed.EnrollmentPhase())
+			}
+			assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{key.KeyID(): KeyActive})
+		})
 	}
-	if _, err := BindEnrolledKey(context.Background(), resumed, approved); err != nil {
-		t.Fatal(err)
+}
+
+// A crash while switching keys never loses the old key's pending revoke, and
+// a crash while deleting a revoked key never leaves the list wrong for long.
+func TestActivation_RecoversFromCrashAtEveryStep(t *testing.T) {
+	setup := func(t *testing.T) (oldKey, newKey *ServiceAccountKey) {
+		t.Helper()
+		isolateServiceAccountDirs(t)
+		oldKey = newTestKey(t, "https://us.auth.example.com")
+		newKey = newTestKey(t, "https://us.auth.example.com")
+		for _, k := range []*ServiceAccountKey{oldKey, newKey} {
+			if _, err := CreateServiceAccountKey(context.Background(), k); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return oldKey, newKey
 	}
-	if _, err := LoadActiveServiceAccountKey(testServiceAccount); err != nil {
+
+	t.Run("activate:pointer", func(t *testing.T) {
+		oldKey, newKey := setup(t)
+		injectStoreFault(t, "activate:pointer")
+		if _, err := ActivateServiceAccountKey(context.Background(), newKey); err == nil {
+			t.Fatal("injected fault did not fail the activation")
+		}
+		clearStoreFault()
+		assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{oldKey.KeyID(): KeyActive, newKey.KeyID(): KeyInactive})
+	})
+
+	for _, step := range []string{"delete:key", "delete:pointer"} {
+		t.Run(step, func(t *testing.T) {
+			oldKey, newKey := setup(t)
+			retiring, err := ActivateServiceAccountKey(context.Background(), newKey)
+			if err != nil || len(retiring) != 1 {
+				t.Fatalf("retiring %v err %v", retiring, err)
+			}
+			injectStoreFault(t, step)
+			if err := DeleteServiceAccountKey(context.Background(), retiring[0]); err == nil {
+				t.Fatal("injected fault did not fail the delete")
+			}
+			clearStoreFault()
+
+			// Re-running activation picks up whatever retirement is still owed.
+			again, err := ActivateServiceAccountKey(context.Background(), newKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range again {
+				if err := DeleteServiceAccountKey(context.Background(), k); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{newKey.KeyID(): KeyActive})
+			if _, err := LoadServiceAccountKey(oldKey.KeyID()); err == nil {
+				t.Fatal("the retired key is still on disk")
+			}
+			// A delete that removed the files but not the list entry is tidied
+			// by the next delete or skipped by readers.
+			if _, err := LoadActiveServiceAccountKey(testServiceAccount); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestServiceAccountEnrollment_Denied(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	stubEnrollmentSleep(t)
+	api := newFakeKeyAPI(t)
+	api.pollReplies = []string{"pending", "denied"}
+
+	key, _ := startEnrollment(t, api, "")
+	_, err := WaitForServiceAccountEnrollment(context.Background(), key)
+	if !errors.Is(err, ErrEnrollmentDenied) {
+		t.Fatalf("err = %v, want ErrEnrollmentDenied", err)
+	}
+	if err := ForgetEnrollment(context.Background(), key, err); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -213,7 +573,7 @@ func TestServiceAccountEnrollment_ApprovalNeverReplacesActiveKey(t *testing.T) {
 	api.pollReplies = []string{"approved"}
 
 	key, _ := startEnrollment(t, api, "svc_01HKZ3J4N5P6Q7R8S9T0V1W2X4")
-	approved, err := WaitForServiceAccountEnrollment(context.Background(), key, 0)
+	approved, err := WaitForServiceAccountEnrollment(context.Background(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,32 +583,9 @@ func TestServiceAccountEnrollment_ApprovalNeverReplacesActiveKey(t *testing.T) {
 	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{existing.KeyID(): KeyActive, key.KeyID(): KeyInactive})
 }
 
-func TestServiceAccountEnrollment_Denied(t *testing.T) {
-	isolateServiceAccountDirs(t)
-	stubEnrollmentSleep(t)
-	api := newFakeKeyAPI(t)
-	api.pollReplies = []string{"pending", "denied"}
-
-	key, _ := startEnrollment(t, api, "")
-	if _, err := WaitForServiceAccountEnrollment(context.Background(), key, time.Second); !errors.Is(err, ErrEnrollmentDenied) {
-		t.Fatalf("err = %v, want ErrEnrollmentDenied", err)
-	}
-}
-
-func TestCancelServiceAccountEnrollment(t *testing.T) {
-	isolateServiceAccountDirs(t)
-	api := newFakeKeyAPI(t)
-	key, _ := startEnrollment(t, api, "")
-	if err := CancelServiceAccountEnrollment(context.Background(), key); err != nil {
-		t.Fatal(err)
-	}
-	if api.cancelled != 1 {
-		t.Fatalf("cancel calls = %d, want 1", api.cancelled)
-	}
-}
-
 // A hostile interval longer than the enrollment's lifetime must not stall the
-// box past expiry: every sleep is cut to the time remaining.
+// box past expiry: every sleep is cut to the time remaining, and the final
+// poll at expiry settles it.
 func TestWaitForServiceAccountEnrollment_NeverSleepsPastExpiry(t *testing.T) {
 	isolateServiceAccountDirs(t)
 	now := pinClock(t)
@@ -262,7 +599,9 @@ func TestWaitForServiceAccountEnrollment_NeverSleepsPastExpiry(t *testing.T) {
 	t.Cleanup(func() { enrollmentSleep = prev })
 
 	api := newFakeKeyAPI(t)
-	api.pollReplies = []string{"pending"}
+	// One poll at 60s, then the 90s expiry cuts the next sleep to 30s and the
+	// final poll settles it.
+	api.pollReplies = []string{"pending", "expired"}
 	api.interval = math.MaxInt
 	api.expiresIn = 90
 
@@ -270,7 +609,7 @@ func TestWaitForServiceAccountEnrollment_NeverSleepsPastExpiry(t *testing.T) {
 	if enrollment.Interval != int(maxEnrollmentInterval/time.Second) || enrollment.ExpiresIn != 90 {
 		t.Fatalf("interval %d expires_in %d; want the interval clamped to %s", enrollment.Interval, enrollment.ExpiresIn, maxEnrollmentInterval)
 	}
-	_, err := WaitForServiceAccountEnrollment(context.Background(), key, time.Duration(enrollment.Interval)*time.Second)
+	_, err := WaitForServiceAccountEnrollment(context.Background(), key)
 	if !errors.Is(err, ErrEnrollmentExpired) {
 		t.Fatalf("err = %v, want ErrEnrollmentExpired", err)
 	}
@@ -283,6 +622,39 @@ func TestWaitForServiceAccountEnrollment_NeverSleepsPastExpiry(t *testing.T) {
 	}
 	if total != 90*time.Second {
 		t.Fatalf("slept %s in total (%v), want exactly the 90s lifetime", total, slept)
+	}
+}
+
+// Each poll request is bounded by the enrollment's expiry, not just the sleep
+// before it: a server that hangs cannot hold the box past expiry.
+func TestWaitForServiceAccountEnrollment_PollRequestBoundedByExpiry(t *testing.T) {
+	isolateServiceAccountDirs(t)
+	stubEnrollmentSleep(t)
+	release := make(chan struct{})
+	var polls atomic.Int32
+	api := newFakeKeyAPI(t)
+	api.expiresIn = 1
+	key, _ := startEnrollment(t, api, "")
+	api.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if polls.Add(1) == 1 {
+			select { // the first poll hangs past the expiry
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"expired"}`)) //nolint:errcheck // test server
+	})
+	t.Cleanup(func() { close(release) })
+
+	start := time.Now()
+	_, err := WaitForServiceAccountEnrollment(context.Background(), key)
+	if !errors.Is(err, ErrEnrollmentExpired) {
+		t.Fatalf("err = %v, want ErrEnrollmentExpired from the final poll", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("waited %s; the hanging poll was not cut at the 1s expiry", elapsed)
 	}
 }
 
@@ -318,22 +690,23 @@ func TestValidateEnrollment_ClampsTimingAndRejectsUnsafeLinks(t *testing.T) {
 	}
 }
 
-func TestServiceAccountEnrollment_RejectsInsecureApprovalLink(t *testing.T) {
+// An unusable approval link is an unknown outcome (the server may have
+// created the enrollment), so the key is kept.
+func TestServiceAccountEnrollment_InsecureApprovalLinkKeepsKey(t *testing.T) {
 	isolateServiceAccountDirs(t)
 	api := newFakeKeyAPI(t)
 	api.badLink = "http://entire.example/approve"
-	key, err := NewEnrollmentKey(api.srv.URL, "", "box-1")
-	if err != nil {
-		t.Fatal(err)
+	key := newEnrollment(t, api, "")
+	_, err := SubmitServiceAccountEnrollment(context.Background(), key)
+	if err == nil || IsDefinitiveEnrollmentOutcome(err) {
+		t.Fatalf("err = %v; an http:// approval link must fail without deleting the key", err)
 	}
-	if _, err := StartServiceAccountEnrollment(context.Background(), key); err == nil {
-		t.Fatal("an http:// approval link was accepted; the box must only print https links")
-	}
+	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{key.KeyID(): KeyEnrolling})
 }
 
 // A signed proof must never follow a redirect to another origin.
 func TestPostKeyAPI_RefusesRedirect(t *testing.T) {
-	t.Parallel()
+	isolateServiceAccountDirs(t)
 	var leaked atomic.Int32
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { leaked.Add(1) }))
 	t.Cleanup(elsewhere.Close)
@@ -342,7 +715,8 @@ func TestPostKeyAPI_RefusesRedirect(t *testing.T) {
 			http.Redirect(w, r, elsewhere.URL+r.URL.Path, code)
 		}))
 		t.Cleanup(redirector.Close)
-		if _, err := postKeyAPI(context.Background(), redirector.URL+enrollmentsPath, map[string]string{"proof": "p"}, nil); err == nil || !strings.Contains(err.Error(), "redirect") {
+		key := newTestKey(t, redirector.URL)
+		if _, _, err := postKeyAPI(context.Background(), key, key.KeyID(), redirector.URL+enrollmentsPath, map[string]string{}); err == nil || !strings.Contains(err.Error(), "redirect") {
 			t.Errorf("%d: err = %v, want a refused redirect", code, err)
 		}
 	}
@@ -351,18 +725,10 @@ func TestPostKeyAPI_RefusesRedirect(t *testing.T) {
 	}
 }
 
-func TestPostKeyAPI_SanitizesServerError(t *testing.T) {
+func TestDescribeStatus_SanitizesServerError(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"error":"denied\u001b[31m\u202e\u0085x","message":"` + strings.Repeat("a", 1000) + `"}`)) //nolint:errcheck // test server
-	}))
-	t.Cleanup(srv.Close)
-	_, err := postKeyAPI(context.Background(), srv.URL+"/x", map[string]string{}, nil)
-	if err == nil {
-		t.Fatal("want an error")
-	}
-	msg := err.Error()
+	body := []byte(`{"error":"denied\u001b[31m\u202e\u0085x","message":"` + strings.Repeat("a", 1000) + `"}`)
+	msg := describeStatus(http.StatusForbidden, body)
 	if strings.ContainsAny(msg, "\x1b\u202e\u0085") || len([]rune(msg)) > maxServerErrorRunes+40 {
 		t.Fatalf("unsanitized or unbounded server error: %q", msg)
 	}
@@ -397,11 +763,10 @@ func TestRevokeServiceAccountKey(t *testing.T) {
 	if err := DeleteServiceAccountKey(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(configDir, ServiceAccountKeyFileName(key.KeyID()))); !os.IsNotExist(err) {
-		t.Fatalf("key file still present after delete: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(configDir, serviceAccountPointerName(testServiceAccount))); !os.IsNotExist(err) {
-		t.Fatalf("active pointer still present after deleting the active key: %v", err)
+	for _, name := range []string{ServiceAccountKeyFileName(key.KeyID()), serviceAccountStateName(key.KeyID()), serviceAccountPointerName(testServiceAccount)} {
+		if _, err := os.Stat(filepath.Join(configDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s still present after delete: %v", name, err)
+		}
 	}
 	if err := DeleteServiceAccountKey(context.Background(), key); err != nil {
 		t.Fatalf("deleting an absent key: %v", err)

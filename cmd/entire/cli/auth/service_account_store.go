@@ -13,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -24,21 +25,31 @@ import (
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
-// On-disk layout, all in the per-user config directory and all 0600:
+// On-disk layout, all in the per-user config directory, 0600, written durably
+// (fsync of file and directory) because none of it can be rebuilt:
 //
-//	service-account-key-<key id>.json   one file per key, never overwritten in place
-//	                                    except to record its own state
-//	service-account-<svc>.active.json   which key the account currently uses
-//	service-accounts.lock               held by every change to the above
+//	service-account-key-<key id>.json        the key itself; created once, never rewritten
+//	service-account-key-<key id>.state.json  what the key is for: its account and any
+//	                                         enrollment in flight
+//	service-account-<svc>.active.json        the account's active key, plus the keys
+//	                                         that still have to revoke themselves
+//	service-accounts.lock                    held by every change to the above
 //
-// A key file is created exclusively (it can never replace another key) and is
-// written before the server learns its public half, so the server never trusts
-// a key whose private half does not exist on disk. Switching keys is a single
-// atomic rewrite of the pointer: there is no moment without a usable key, and
-// the previous key stays on disk, able to revoke itself, until it has.
+// Every transition is a single atomic file replacement, ordered so a crash at
+// any point leaves a state the next command recognises and finishes:
+//
+//   - A state file is written before its key file, and a key file is deleted
+//     before its state file, so a key file never exists without its state.
+//   - A key is written to disk before any server learns its public half.
+//   - Switching keys moves the old key into the pointer's retiring list in the
+//     same write that selects the new one, so the obligation to revoke it is
+//     never lost; it leaves the list only after it is revoked and deleted.
+//   - An enrolling key can leave disk only once its enrollment is definitively
+//     denied, expired, rejected or cancelled (ForgetEnrollment).
 
 const (
 	serviceAccountKeyType     = "entire_service_account_key"
+	serviceAccountStateType   = "entire_service_account_key_state"
 	serviceAccountPointerType = "entire_service_account_active_key"
 	serviceAccountLockName    = "service-accounts.lock"
 	serviceAccountKeyPrefix   = "service-account-key-"
@@ -54,7 +65,8 @@ type ServiceAccountKeyStatus string
 const (
 	// KeyActive is the key the account's pointer selects: the one that signs.
 	KeyActive ServiceAccountKeyStatus = "active"
-	// KeyEnrolling is waiting for an admin to approve its enrollment.
+	// KeyEnrolling has an enrollment in flight (being submitted, awaiting
+	// approval, or approved but not yet bound).
 	KeyEnrolling ServiceAccountKeyStatus = "enrolling"
 	// KeyInactive is bound to an account but not selected: a staged successor
 	// awaiting `key activate`.
@@ -63,42 +75,85 @@ const (
 	KeyRetired ServiceAccountKeyStatus = "retired"
 )
 
-// serviceAccountKeyFile is the on-disk form. It is the only type that carries
-// the encoded private key; ServiceAccountKey keeps it unexported.
+// EnrollmentPhase is how far a key's enrollment got.
+type EnrollmentPhase string
+
+const (
+	// EnrollmentSubmitting: the key is on disk and the create request may or
+	// may not have reached the server. Resubmitting is safe: the server
+	// deduplicates by key id.
+	EnrollmentSubmitting EnrollmentPhase = "submitting"
+	// EnrollmentPending: the server returned an enrollment id; awaiting a
+	// decision.
+	EnrollmentPending EnrollmentPhase = "pending"
+	// EnrollmentApproved: approved and bound to its account, but becoming the
+	// active key (when the account has none) has not been settled yet.
+	EnrollmentApproved EnrollmentPhase = "approved"
+)
+
+var (
+	// ErrServiceAccountKeyExists: a key file with that id already exists.
+	// Generating the same Ed25519 key twice is not possible, so this means the
+	// same key was saved twice.
+	ErrServiceAccountKeyExists = errors.New("a key with this id is already stored")
+	// ErrEnrollmentInProgress: only one enrollment may be in flight per machine.
+	ErrEnrollmentInProgress = errors.New("an enrollment is already in progress on this machine")
+	// ErrKeyEnrolling: the key's enrollment is undecided, so the server may
+	// still come to trust it; it cannot be revoked or deleted, only resumed or
+	// cancelled.
+	ErrKeyEnrolling = errors.New("this key's enrollment is still in progress; resume it with `entire auth service-account enroll --resume` or withdraw it with `--cancel`")
+)
+
 type serviceAccountKeyFile struct {
-	Type   string `json:"type"`
-	KeyID  string `json:"key_id"`
-	Server string `json:"server"`
-	// ServiceAccount is empty while an enrollment that lets the approver pick
-	// the account is pending.
-	ServiceAccount      string     `json:"service_account,omitempty"`
-	Name                string     `json:"name,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	EnrollmentID        string     `json:"enrollment_id,omitempty"`
-	EnrollmentExpiresAt *time.Time `json:"enrollment_expires_at,omitempty"`
-	RetiredAt           *time.Time `json:"retired_at,omitempty"`
-	PrivateKey          string     `json:"private_key"`
+	Type       string    `json:"type"`
+	KeyID      string    `json:"key_id"`
+	Server     string    `json:"server"`
+	Name       string    `json:"name,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	PrivateKey string    `json:"private_key"`
+}
+
+type serviceAccountStateFile struct {
+	Type  string `json:"type"`
+	KeyID string `json:"key_id"`
+	// ServiceAccount is the bound account, the proposed one while enrolling,
+	// or empty while an enrollment lets the approver choose.
+	ServiceAccount string               `json:"service_account,omitempty"`
+	Enrollment     *enrollmentStateFile `json:"enrollment,omitempty"`
+}
+
+type enrollmentStateFile struct {
+	Phase           EnrollmentPhase `json:"phase"`
+	ID              string          `json:"id,omitempty"`
+	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+	IntervalSeconds int             `json:"interval_seconds,omitempty"`
 }
 
 type serviceAccountPointerFile struct {
-	Type           string `json:"type"`
-	ServiceAccount string `json:"service_account"`
-	KeyID          string `json:"key_id"`
+	Type           string   `json:"type"`
+	ServiceAccount string   `json:"service_account"`
+	KeyID          string   `json:"key_id,omitempty"`
+	Retiring       []string `json:"retiring,omitempty"`
 }
 
 // ServiceAccountKey is one locally held key. Its private half is never
 // exported; the zero value is not a usable key and its methods return errors
 // instead of panicking.
 type ServiceAccountKey struct {
-	keyID               string
-	server              string
-	serviceAccount      string
-	name                string
-	createdAt           time.Time
-	enrollmentID        string
-	enrollmentExpiresAt time.Time
-	retiredAt           time.Time
-	signer              ed25519.PrivateKey
+	keyID          string
+	server         string
+	name           string
+	createdAt      time.Time
+	signer         ed25519.PrivateKey
+	serviceAccount string
+	enrollment     enrollmentState
+}
+
+type enrollmentState struct {
+	phase     EnrollmentPhase
+	id        string
+	expiresAt time.Time
+	interval  time.Duration
 }
 
 func (k *ServiceAccountKey) KeyID() string          { return k.keyID }
@@ -107,11 +162,17 @@ func (k *ServiceAccountKey) ServiceAccount() string { return k.serviceAccount }
 func (k *ServiceAccountKey) Name() string           { return k.name }
 func (k *ServiceAccountKey) CreatedAt() time.Time   { return k.createdAt }
 
-// EnrollmentID is the pending enrollment this key waits on, or "".
-func (k *ServiceAccountKey) EnrollmentID() string { return k.enrollmentID }
+// EnrollmentPhase is the key's enrollment progress, "" when none is in flight.
+func (k *ServiceAccountKey) EnrollmentPhase() EnrollmentPhase { return k.enrollment.phase }
 
-// EnrollmentExpiresAt is when the pending enrollment lapses on the server.
-func (k *ServiceAccountKey) EnrollmentExpiresAt() time.Time { return k.enrollmentExpiresAt }
+// EnrollmentID is the server's enrollment id, once known.
+func (k *ServiceAccountKey) EnrollmentID() string { return k.enrollment.id }
+
+// EnrollmentExpiresAt is when the enrollment lapses on the server.
+func (k *ServiceAccountKey) EnrollmentExpiresAt() time.Time { return k.enrollment.expiresAt }
+
+// EnrollmentInterval is the server's polling interval, kept for --resume.
+func (k *ServiceAccountKey) EnrollmentInterval() time.Duration { return k.enrollment.interval }
 
 var errUnusableKey = errors.New("service-account key is not initialised")
 
@@ -134,17 +195,34 @@ func ServiceAccountKeyFileName(keyID string) string {
 	return serviceAccountKeyPrefix + keyID + ".json"
 }
 
+func serviceAccountStateName(keyID string) string {
+	return serviceAccountKeyPrefix + keyID + ".state.json"
+}
+
 func serviceAccountPointerName(id string) string {
 	return "service-account-" + id + ".active.json"
 }
 
-// ErrServiceAccountKeyExists is returned when a key file with that id is
-// already stored: generating the same Ed25519 key twice is not possible, so
-// this means the same key was saved twice.
-var ErrServiceAccountKeyExists = errors.New("a key with this id is already stored")
+// legacyServiceAccountKeyName is the single-file format of the first
+// prototype, which kept one key per account. It is not migrated (it never
+// shipped outside the prototype branch); its presence only adds a hint.
+func legacyServiceAccountKeyName(id string) string {
+	return "service-account-" + id + ".json"
+}
 
-// withServiceAccountLock serialises every change to key files and pointers
-// across processes.
+// storeFault, when set by a test, runs before each named write of a
+// multi-step transition and can fail it, simulating a crash at that point.
+var storeFault func(step string) error
+
+func faultAt(step string) error {
+	if storeFault == nil {
+		return nil
+	}
+	return storeFault(step)
+}
+
+// withServiceAccountLock serialises every change to key, state and pointer
+// files across processes.
 func withServiceAccountLock(ctx context.Context, fn func(root *os.Root) error) error {
 	root, err := userdirs.ConfigRoot()
 	if err != nil {
@@ -158,162 +236,314 @@ func withServiceAccountLock(ctx context.Context, fn func(root *os.Root) error) e
 	return fn(root)
 }
 
-// CreateServiceAccountKey stores a new key bound to an account. If the
-// account has no active key it becomes the active one; otherwise it is stored
-// inactive and an explicit ActivateServiceAccountKey switches to it, so an
-// existing working key is never displaced by one the server does not know yet.
+// CreateServiceAccountKey stores a new key bound to an account (registered by
+// hand). If the account has no active key it becomes the active one;
+// otherwise it is stored inactive and ActivateServiceAccountKey switches to
+// it, so a working key is never displaced by one the server does not know yet.
 func CreateServiceAccountKey(ctx context.Context, k *ServiceAccountKey) (activated bool, err error) {
 	if err := k.usable(); err != nil {
 		return false, err
 	}
-	if k.serviceAccount == "" {
-		return false, errors.New("a created key must name its service account")
+	if k.serviceAccount == "" || k.enrollment.phase != "" {
+		return false, errors.New("a created key must name its service account and have no enrollment")
 	}
 	err = withServiceAccountLock(ctx, func(root *os.Root) error {
-		if err := createKeyFile(root, k); err != nil {
+		if err := writeNewKey(root, k); err != nil {
 			return err
 		}
-		if _, ok, err := readPointer(root, k.serviceAccount); err != nil || ok {
+		ptr, err := readPointer(root, k.serviceAccount)
+		if err != nil || ptr.KeyID != "" {
 			return err
 		}
+		ptr.KeyID = k.keyID
 		activated = true
-		return writePointer(root, k.serviceAccount, k.keyID)
+		return writePointer(root, ptr)
 	})
 	return activated, err
 }
 
-// SavePendingEnrollmentKey stores a key before its enrollment is submitted, so
-// that a crash at any later point leaves the private half on disk for the
-// public half the server may come to trust. serviceAccount is the proposed
-// account, or "" to let the approver choose.
+// SavePendingEnrollmentKey stores a key before its enrollment is submitted,
+// so the server never learns a public key whose private half is not on disk.
+// serviceAccount on k is the proposed account, or "" to let the approver
+// choose. Refuses while another enrollment is in flight; the check and the
+// write happen under one lock.
 func SavePendingEnrollmentKey(ctx context.Context, k *ServiceAccountKey) error {
 	if err := k.usable(); err != nil {
 		return err
 	}
 	return withServiceAccountLock(ctx, func(root *os.Root) error {
-		return createKeyFile(root, k)
+		keys, err := listKeys(root, "")
+		if err != nil {
+			return err
+		}
+		for _, s := range keys {
+			if s.Status == KeyEnrolling {
+				return fmt.Errorf("%w (key %s)", ErrEnrollmentInProgress, s.Key.keyID)
+			}
+		}
+		k.enrollment = enrollmentState{phase: EnrollmentSubmitting}
+		return writeNewKey(root, k)
 	})
 }
 
-// RecordEnrollment notes the server's enrollment id and expiry on the pending
-// key so a later `enroll --resume` can keep polling it.
+// RecordEnrollment notes the server's enrollment id, expiry and polling
+// interval on the key so `enroll --resume` can continue exactly where the
+// wait stopped.
 func RecordEnrollment(ctx context.Context, k *ServiceAccountKey, e *ServiceAccountEnrollment) error {
-	return updateKeyFile(ctx, k, func(f *serviceAccountKeyFile) {
-		exp := nowFunc().Add(time.Duration(e.ExpiresIn) * time.Second).UTC()
-		f.EnrollmentID = e.ID
-		f.EnrollmentExpiresAt = &exp
+	return withServiceAccountLock(ctx, func(root *os.Root) error {
+		cur, err := readKey(root, k.keyID)
+		if err != nil {
+			return err
+		}
+		if cur.enrollment.phase != EnrollmentSubmitting && cur.enrollment.phase != EnrollmentPending {
+			return fmt.Errorf("key %s is not waiting for an enrollment id", k.keyID)
+		}
+		cur.enrollment = enrollmentState{
+			phase:     EnrollmentPending,
+			id:        e.ID,
+			expiresAt: nowFunc().Add(time.Duration(e.ExpiresIn) * time.Second).UTC(),
+			interval:  time.Duration(e.Interval) * time.Second,
+		}
+		if err := writeState(root, cur); err != nil {
+			return err
+		}
+		*k = *cur
+		return nil
 	})
 }
 
-// BindEnrolledKey records the approved account on the key. It becomes the
-// active key only when the account has none on this machine; replacing a
-// working key stays an explicit `key activate`.
+// BindEnrolledKey records the approved account on the key and, when the
+// account has no active key here, makes it the active one. Three writes, each
+// recoverable: the key is first marked approved (an interrupted bind resumes
+// with `enroll --resume`), then the pointer is set, then the enrollment is
+// cleared. Replacing a working key stays an explicit ActivateServiceAccountKey.
 func BindEnrolledKey(ctx context.Context, k *ServiceAccountKey, serviceAccount string) (activated bool, err error) {
 	id, err := ParseServiceAccountID(serviceAccount)
 	if err != nil {
 		return false, err
 	}
 	err = withServiceAccountLock(ctx, func(root *os.Root) error {
-		if err := rewriteKeyFile(root, k, func(f *serviceAccountKeyFile) {
-			f.ServiceAccount = id
-			f.EnrollmentID = ""
-			f.EnrollmentExpiresAt = nil
-		}); err != nil {
+		cur, err := readKey(root, k.keyID)
+		if err != nil {
 			return err
 		}
-		if _, ok, err := readPointer(root, id); err != nil || ok {
+		if cur.enrollment.phase == "" {
+			return fmt.Errorf("key %s has no enrollment to bind", k.keyID)
+		}
+		if cur.enrollment.phase == EnrollmentApproved && cur.serviceAccount != id {
+			return fmt.Errorf("key %s was already bound to %s", k.keyID, cur.serviceAccount)
+		}
+		if err := faultAt("bind:approve"); err != nil {
 			return err
 		}
-		activated = true
-		return writePointer(root, id, k.keyID)
+		cur.serviceAccount = id
+		cur.enrollment.phase = EnrollmentApproved
+		if err := writeState(root, cur); err != nil {
+			return err
+		}
+		ptr, err := readPointer(root, id)
+		if err != nil {
+			return err
+		}
+		switch ptr.KeyID {
+		case "":
+			if err := faultAt("bind:pointer"); err != nil {
+				return err
+			}
+			ptr.KeyID = k.keyID
+			if err := writePointer(root, ptr); err != nil {
+				return err
+			}
+			activated = true
+		case k.keyID:
+			activated = true
+		}
+		if err := faultAt("bind:finish"); err != nil {
+			return err
+		}
+		cur.enrollment = enrollmentState{}
+		if err := writeState(root, cur); err != nil {
+			return err
+		}
+		*k = *cur
+		return nil
 	})
 	return activated, err
 }
 
-// ActivateServiceAccountKey makes k the account's active key and marks the
-// previous one retired, returning it so the caller can have it revoke itself.
-// The retired key stays on disk until DeleteServiceAccountKey.
-func ActivateServiceAccountKey(ctx context.Context, k *ServiceAccountKey) (previous *ServiceAccountKey, err error) {
+// ActivateServiceAccountKey makes k the account's active key. In the same
+// atomic write the previous active key joins the retiring list, so the
+// obligation to revoke it survives any crash. It returns every key still
+// retiring (including ones left over from an earlier, interrupted
+// activation) for the caller to revoke and then delete. Activating the
+// already-active key changes nothing and just returns that list.
+func ActivateServiceAccountKey(ctx context.Context, k *ServiceAccountKey) (retiring []*ServiceAccountKey, err error) {
 	if err := k.usable(); err != nil {
 		return nil, err
 	}
-	if k.serviceAccount == "" || k.enrollmentID != "" {
-		return nil, fmt.Errorf("key %s is still waiting for enrollment approval", k.keyID)
-	}
 	err = withServiceAccountLock(ctx, func(root *os.Root) error {
-		// Re-read under the lock: the caller's copy may be stale.
-		current, err := readKeyFile(root, k.keyID)
+		cur, err := readKey(root, k.keyID)
 		if err != nil {
 			return err
 		}
-		if current.serviceAccount != k.serviceAccount {
-			return fmt.Errorf("key %s now belongs to %s, not %s", k.keyID, current.serviceAccount, k.serviceAccount)
+		if cur.serviceAccount == "" || cur.serviceAccount != k.serviceAccount {
+			return fmt.Errorf("key %s does not belong to %s", k.keyID, k.serviceAccount)
 		}
-		if !current.retiredAt.IsZero() {
+		ptr, err := readPointer(root, cur.serviceAccount)
+		if err != nil {
+			return err
+		}
+		switch keyStatus(cur, ptr) {
+		case KeyEnrolling:
+			return fmt.Errorf("key %s: %w", k.keyID, ErrKeyEnrolling)
+		case KeyRetired:
 			return fmt.Errorf("key %s was retired; create or enroll a new key instead", k.keyID)
+		case KeyInactive:
+			if err := faultAt("activate:pointer"); err != nil {
+				return err
+			}
+			if ptr.KeyID != "" {
+				ptr.Retiring = append(ptr.Retiring, ptr.KeyID)
+			}
+			ptr.KeyID = k.keyID
+			if err := writePointer(root, ptr); err != nil {
+				return err
+			}
+		case KeyActive:
 		}
-		prevID, ok, err := readPointer(root, k.serviceAccount)
+		for _, id := range ptr.Retiring {
+			old, err := readKey(root, id)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // deleted after its revoke; the next delete tidies the list
+			}
+			if err != nil {
+				return err
+			}
+			retiring = append(retiring, old)
+		}
+		return nil
+	})
+	return retiring, err
+}
+
+// DeleteServiceAccountKey removes a key that is active, inactive or retired:
+// after a successful revoke, or on an explicit --local-only. It refuses an
+// enrolling key (ErrKeyEnrolling): only ForgetEnrollment may delete one. The
+// files go first, then the account's pointer stops naming the key; a crash in
+// between leaves a pointer entry with no key, which every reader skips.
+// Missing files are not an error; any other failure is.
+func DeleteServiceAccountKey(ctx context.Context, k *ServiceAccountKey) error {
+	if !keyIDPattern.MatchString(k.keyID) {
+		return errUnusableKey
+	}
+	return withServiceAccountLock(ctx, func(root *os.Root) error {
+		cur, err := readKey(root, k.keyID)
+		if errors.Is(err, fs.ErrNotExist) {
+			cur = &ServiceAccountKey{keyID: k.keyID, serviceAccount: k.serviceAccount}
+		} else if err != nil {
+			return err
+		}
+		ptr, err := readPointer(root, cur.serviceAccount)
 		if err != nil {
 			return err
 		}
-		if ok && prevID == k.keyID {
-			return nil
+		if cur.signer != nil && keyStatus(cur, ptr) == KeyEnrolling {
+			return fmt.Errorf("key %s: %w", k.keyID, ErrKeyEnrolling)
 		}
-		if err := writePointer(root, k.serviceAccount, k.keyID); err != nil {
+		if err := deleteKeyFiles(root, cur.keyID); err != nil {
 			return err
 		}
-		if !ok {
+		if cur.serviceAccount == "" || (ptr.KeyID != cur.keyID && !slices.Contains(ptr.Retiring, cur.keyID)) {
 			return nil
 		}
-		prev, err := readKeyFile(root, prevID)
+		if err := faultAt("delete:pointer"); err != nil {
+			return err
+		}
+		if ptr.KeyID == cur.keyID {
+			ptr.KeyID = ""
+		}
+		ptr.Retiring = slices.DeleteFunc(ptr.Retiring, func(id string) bool { return id == cur.keyID })
+		return writePointer(root, ptr)
+	})
+}
+
+// ForgetEnrollment deletes an enrolling key once its enrollment can no longer
+// be approved. outcome must be one of the definitive enrollment errors
+// (denied, expired, rejected at submission, cancelled); anything else, such
+// as a lost response, keeps the key so the enrollment can be resumed.
+func ForgetEnrollment(ctx context.Context, k *ServiceAccountKey, outcome error) error {
+	if !isDefinitiveEnrollmentOutcome(outcome) {
+		return fmt.Errorf("refusing to delete key %s: the enrollment outcome is not definitive (%w)", k.keyID, outcome)
+	}
+	return withServiceAccountLock(ctx, func(root *os.Root) error {
+		cur, err := readKey(root, k.keyID)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if err := rewriteKeyFile(root, prev, func(f *serviceAccountKeyFile) {
-			now := nowFunc().UTC()
-			f.RetiredAt = &now
-		}); err != nil {
+		ptr, err := readPointer(root, cur.serviceAccount)
+		if err != nil {
 			return err
 		}
-		previous = prev
-		return nil
+		if keyStatus(cur, ptr) != KeyEnrolling || cur.enrollment.phase == EnrollmentApproved {
+			return fmt.Errorf("key %s is no longer an undecided enrollment", k.keyID)
+		}
+		return deleteKeyFiles(root, cur.keyID)
 	})
-	return previous, err
 }
 
-// DeleteServiceAccountKey removes k's file, its cached session, and the
-// account's pointer when it selects k. Missing files are not an error; any
-// other failure is returned so a revoked key is never reported as gone while
-// it is still on disk.
-func DeleteServiceAccountKey(ctx context.Context, k *ServiceAccountKey) error {
-	if !keyIDPattern.MatchString(k.keyID) {
-		return errUnusableKey
-	}
-	if err := removeServiceAccountSession(k.keyID); err != nil {
+// deleteKeyFiles removes the key file, then its state, then its cached
+// session, in that order (see the layout comment).
+func deleteKeyFiles(root *os.Root, keyID string) error {
+	if err := faultAt("delete:key"); err != nil {
 		return err
 	}
-	return withServiceAccountLock(ctx, func(root *os.Root) error {
-		if k.serviceAccount != "" {
-			if id, ok, err := readPointer(root, k.serviceAccount); err != nil {
-				return err
-			} else if ok && id == k.keyID {
-				if err := root.Remove(serviceAccountPointerName(k.serviceAccount)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					return fmt.Errorf("remove active-key pointer: %w", err)
-				}
-			}
-		}
-		if err := root.Remove(ServiceAccountKeyFileName(k.keyID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("remove key file: %w", err)
-		}
-		return nil
-	})
+	if err := root.Remove(ServiceAccountKeyFileName(keyID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove key file: %w", err)
+	}
+	if err := root.Remove(serviceAccountStateName(keyID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove key state: %w", err)
+	}
+	return removeServiceAccountSession(keyID)
+}
+
+// ServiceAccountKeyStatusOf reads k's current status from disk.
+func ServiceAccountKeyStatusOf(k *ServiceAccountKey) (ServiceAccountKeyStatus, error) {
+	root, err := configRootForRead()
+	if err != nil {
+		return "", err
+	}
+	if root == nil {
+		return "", fmt.Errorf("no key %s is stored on this machine", k.keyID)
+	}
+	cur, err := readKey(root, k.keyID)
+	if err != nil {
+		return "", err
+	}
+	ptr, err := readPointer(root, cur.serviceAccount)
+	if err != nil {
+		return "", err
+	}
+	return keyStatus(cur, ptr), nil
+}
+
+func keyStatus(k *ServiceAccountKey, ptr serviceAccountPointerFile) ServiceAccountKeyStatus {
+	switch {
+	case k.serviceAccount != "" && ptr.KeyID == k.keyID:
+		return KeyActive
+	case k.serviceAccount != "" && slices.Contains(ptr.Retiring, k.keyID):
+		return KeyRetired
+	case k.enrollment.phase != "" || k.serviceAccount == "":
+		return KeyEnrolling
+	default:
+		return KeyInactive
+	}
 }
 
 // LoadActiveServiceAccountKey reads the key that signs for serviceAccount. It
-// takes no lock: the pointer and key files are only ever replaced atomically.
+// takes no lock: every file is only ever replaced atomically.
 func LoadActiveServiceAccountKey(serviceAccount string) (*ServiceAccountKey, error) {
 	id, err := ParseServiceAccountID(serviceAccount)
 	if err != nil {
@@ -323,26 +553,30 @@ func LoadActiveServiceAccountKey(serviceAccount string) (*ServiceAccountKey, err
 	if err != nil {
 		return nil, err
 	}
-	var keyID string
-	ok := false
+	var ptr serviceAccountPointerFile
 	if root != nil {
-		keyID, ok, err = readPointer(root, id)
-		if err != nil {
+		if ptr, err = readPointer(root, id); err != nil {
 			return nil, err
 		}
 	}
-	if !ok {
-		return nil, fmt.Errorf("no active key stored for service account %s; run `entire auth service-account enroll --service-account %s`, or `entire auth service-account key create`", id, id)
+	if ptr.KeyID == "" {
+		msg := fmt.Sprintf("no active key stored for service account %s; run `entire auth service-account enroll --service-account %s` or `entire auth service-account key create`, or `key activate` if `key list` shows an inactive key", id, id)
+		if root != nil {
+			if _, err := root.Lstat(legacyServiceAccountKeyName(id)); err == nil {
+				msg += fmt.Sprintf(" (%s is a key in the earlier prototype format, which is not read any more; enroll a new key, then delete that file)", legacyServiceAccountKeyName(id))
+			}
+		}
+		return nil, errors.New(msg)
 	}
-	k, err := readKeyFile(root, keyID)
+	k, err := readKey(root, ptr.KeyID)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("the active key %s for service account %s is missing from disk", keyID, id)
+		return nil, fmt.Errorf("the active key %s for service account %s is missing from disk", ptr.KeyID, id)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if k.serviceAccount != id {
-		return nil, fmt.Errorf("the active key %s for service account %s belongs to %q", keyID, id, k.serviceAccount)
+		return nil, fmt.Errorf("the active key %s for service account %s belongs to %q", ptr.KeyID, id, k.serviceAccount)
 	}
 	return k, nil
 }
@@ -359,7 +593,7 @@ func LoadServiceAccountKey(keyID string) (*ServiceAccountKey, error) {
 	if root == nil {
 		return nil, fmt.Errorf("no key %s is stored on this machine", keyID)
 	}
-	k, err := readKeyFile(root, keyID)
+	k, err := readKey(root, keyID)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("no key %s is stored on this machine", keyID)
 	}
@@ -367,8 +601,8 @@ func LoadServiceAccountKey(keyID string) (*ServiceAccountKey, error) {
 }
 
 // ListServiceAccountKeys returns the stored keys of serviceAccount (every key,
-// including unbound enrollments, when it is ""), oldest first. A file that
-// cannot be read is reported rather than skipped.
+// including enrollments without an account, when it is ""), oldest first. A
+// file that cannot be read is reported rather than skipped.
 func ListServiceAccountKeys(serviceAccount string) ([]StoredServiceAccountKey, error) {
 	if serviceAccount != "" {
 		id, err := ParseServiceAccountID(serviceAccount)
@@ -381,11 +615,15 @@ func ListServiceAccountKeys(serviceAccount string) ([]StoredServiceAccountKey, e
 	if err != nil || root == nil {
 		return nil, err
 	}
+	return listKeys(root, serviceAccount)
+}
+
+func listKeys(root *os.Root, serviceAccount string) ([]StoredServiceAccountKey, error) {
 	entries, err := osroot.ReadDir(root, ".")
 	if err != nil {
 		return nil, fmt.Errorf("list config directory: %w", err)
 	}
-	active := map[string]string{}
+	pointers := map[string]serviceAccountPointerFile{}
 	var out []StoredServiceAccountKey
 	for _, e := range entries {
 		keyID, ok := strings.CutPrefix(e.Name(), serviceAccountKeyPrefix)
@@ -394,35 +632,26 @@ func ListServiceAccountKeys(serviceAccount string) ([]StoredServiceAccountKey, e
 		}
 		keyID, ok = strings.CutSuffix(keyID, ".json")
 		if !ok || !keyIDPattern.MatchString(keyID) {
-			continue
+			continue // state files and temp files
 		}
-		k, err := readKeyFile(root, keyID)
+		k, err := readKey(root, keyID)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // deleted since the directory was read
+		}
 		if err != nil {
 			return nil, err
 		}
 		if serviceAccount != "" && k.serviceAccount != serviceAccount {
 			continue
 		}
-		status := KeyInactive
-		switch {
-		case k.enrollmentID != "" || k.serviceAccount == "":
-			status = KeyEnrolling
-		case !k.retiredAt.IsZero():
-			status = KeyRetired
-		default:
-			activeID, seen := active[k.serviceAccount]
-			if !seen {
-				activeID, _, err = readPointer(root, k.serviceAccount)
-				if err != nil {
-					return nil, err
-				}
-				active[k.serviceAccount] = activeID
+		ptr, seen := pointers[k.serviceAccount]
+		if !seen {
+			if ptr, err = readPointer(root, k.serviceAccount); err != nil {
+				return nil, err
 			}
-			if activeID == k.keyID {
-				status = KeyActive
-			}
+			pointers[k.serviceAccount] = ptr
 		}
-		out = append(out, StoredServiceAccountKey{Key: k, Status: status})
+		out = append(out, StoredServiceAccountKey{Key: k, Status: keyStatus(k, ptr)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key.createdAt.Before(out[j].Key.createdAt) })
 	return out, nil
@@ -441,95 +670,75 @@ func configRootForRead() (*os.Root, error) {
 	return root, nil
 }
 
-func readPointer(root *os.Root, id string) (string, bool, error) {
+// readPointer returns the account's pointer, or an empty one (no active key,
+// nothing retiring) when there is none.
+func readPointer(root *os.Root, id string) (serviceAccountPointerFile, error) {
+	empty := serviceAccountPointerFile{Type: serviceAccountPointerType, ServiceAccount: id}
+	if id == "" {
+		return empty, nil
+	}
 	data, err := osroot.ReadFileNoFollow(root, serviceAccountPointerName(id))
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", false, nil
+		return empty, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("read active key of %s: %w", id, err)
+		return empty, fmt.Errorf("read active key of %s: %w", id, err)
 	}
 	var p serviceAccountPointerFile
 	if err := json.Unmarshal(data, &p); err != nil {
-		return "", false, fmt.Errorf("parse active key of %s: %w", id, err)
+		return empty, fmt.Errorf("parse active key of %s: %w", id, err)
 	}
-	if p.Type != serviceAccountPointerType || p.ServiceAccount != id || !keyIDPattern.MatchString(p.KeyID) {
-		return "", false, fmt.Errorf("active-key file of %s is malformed", id)
+	valid := p.Type == serviceAccountPointerType && p.ServiceAccount == id && (p.KeyID == "" || keyIDPattern.MatchString(p.KeyID))
+	for _, r := range p.Retiring {
+		valid = valid && keyIDPattern.MatchString(r)
 	}
-	return p.KeyID, true, nil
+	if !valid {
+		return empty, fmt.Errorf("active-key file of %s is malformed", id)
+	}
+	return p, nil
 }
 
-func writePointer(root *os.Root, id, keyID string) error {
-	data, err := jsonutil.MarshalIndentWithNewline(serviceAccountPointerFile{
-		Type: serviceAccountPointerType, ServiceAccount: id, KeyID: keyID,
-	}, "", "  ")
+// writePointer replaces the account's pointer, or removes it once it names
+// nothing at all.
+func writePointer(root *os.Root, p serviceAccountPointerFile) error {
+	name := serviceAccountPointerName(p.ServiceAccount)
+	if p.KeyID == "" && len(p.Retiring) == 0 {
+		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove active key of %s: %w", p.ServiceAccount, err)
+		}
+		return nil
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(p, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode active key: %w", err)
 	}
-	if err := jsonutil.WriteFileAtomicIn(root, serviceAccountPointerName(id), data, 0o600); err != nil {
-		return fmt.Errorf("write active key of %s: %w", id, err)
+	if err := jsonutil.WriteFileDurableIn(root, name, data, 0o600); err != nil {
+		return fmt.Errorf("write active key of %s: %w", p.ServiceAccount, err)
 	}
 	return nil
 }
 
-func encodeKeyFile(k *ServiceAccountKey) ([]byte, error) {
-	der, err := x509.MarshalPKCS8PrivateKey(k.signer)
-	if err != nil {
-		return nil, fmt.Errorf("encode private key: %w", err)
-	}
-	f := serviceAccountKeyFile{
-		Type:           serviceAccountKeyType,
-		KeyID:          k.keyID,
-		Server:         k.server,
-		ServiceAccount: k.serviceAccount,
-		Name:           k.name,
-		CreatedAt:      k.createdAt,
-		EnrollmentID:   k.enrollmentID,
-		PrivateKey:     string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
-	}
-	if !k.enrollmentExpiresAt.IsZero() {
-		f.EnrollmentExpiresAt = &k.enrollmentExpiresAt
-	}
-	if !k.retiredAt.IsZero() {
-		f.RetiredAt = &k.retiredAt
-	}
-	data, err := jsonutil.MarshalIndentWithNewline(f, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("encode key file: %w", err)
-	}
-	return data, nil
-}
-
-// createKeyFile writes k's file only if no file of that name exists: the
-// content goes to a private temp file that is then hard-linked into place,
-// which fails rather than replaces.
-func createKeyFile(root *os.Root, k *ServiceAccountKey) (retErr error) {
-	data, err := encodeKeyFile(k)
-	if err != nil {
+// writeNewKey writes k's state, then creates its key file exclusively.
+func writeNewKey(root *os.Root, k *ServiceAccountKey) error {
+	if err := writeState(root, k); err != nil {
 		return err
 	}
-	name := ServiceAccountKeyFileName(k.keyID)
-	f, tmp, err := jsonutil.CreateTempIn(root, name)
+	der, err := x509.MarshalPKCS8PrivateKey(k.signer)
 	if err != nil {
-		return fmt.Errorf("create key file: %w", err)
+		return fmt.Errorf("encode private key: %w", err)
 	}
-	defer func() {
-		if rerr := root.Remove(tmp); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) && retErr == nil {
-			retErr = fmt.Errorf("remove temp key file: %w", rerr)
-		}
-	}()
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write key file: %w", err)
+	data, err := jsonutil.MarshalIndentWithNewline(serviceAccountKeyFile{
+		Type:       serviceAccountKeyType,
+		KeyID:      k.keyID,
+		Server:     k.server,
+		Name:       k.name,
+		CreatedAt:  k.createdAt,
+		PrivateKey: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+	}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode key file: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("sync key file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close key file: %w", err)
-	}
-	if err := root.Link(tmp, name); err != nil {
+	if err := jsonutil.CreateFileDurableIn(root, ServiceAccountKeyFileName(k.keyID), data, 0o600); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: %s", ErrServiceAccountKeyExists, k.keyID)
 		}
@@ -538,41 +747,21 @@ func createKeyFile(root *os.Root, k *ServiceAccountKey) (retErr error) {
 	return nil
 }
 
-// updateKeyFile applies change to k's file under the lock and refreshes k.
-func updateKeyFile(ctx context.Context, k *ServiceAccountKey, change func(*serviceAccountKeyFile)) error {
-	return withServiceAccountLock(ctx, func(root *os.Root) error {
-		return rewriteKeyFile(root, k, change)
-	})
-}
-
-// rewriteKeyFile re-reads k's file, applies change, writes it back atomically
-// and copies the result into k. The private key and id are never changed.
-func rewriteKeyFile(root *os.Root, k *ServiceAccountKey, change func(*serviceAccountKeyFile)) error {
-	current, err := readKeyFile(root, k.keyID)
+func writeState(root *os.Root, k *ServiceAccountKey) error {
+	s := serviceAccountStateFile{Type: serviceAccountStateType, KeyID: k.keyID, ServiceAccount: k.serviceAccount}
+	if e := k.enrollment; e.phase != "" {
+		s.Enrollment = &enrollmentStateFile{Phase: e.phase, ID: e.id, IntervalSeconds: int(e.interval / time.Second)}
+		if !e.expiresAt.IsZero() {
+			s.Enrollment.ExpiresAt = &e.expiresAt
+		}
+	}
+	data, err := jsonutil.MarshalIndentWithNewline(s, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("encode key state: %w", err)
 	}
-	data, err := encodeKeyFile(current)
-	if err != nil {
-		return err
+	if err := jsonutil.WriteFileDurableIn(root, serviceAccountStateName(k.keyID), data, 0o600); err != nil {
+		return fmt.Errorf("write key state: %w", err)
 	}
-	var f serviceAccountKeyFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		return fmt.Errorf("decode key file: %w", err)
-	}
-	change(&f)
-	updated, err := decodeKeyFile(f)
-	if err != nil {
-		return err
-	}
-	data, err = encodeKeyFile(updated)
-	if err != nil {
-		return err
-	}
-	if err := jsonutil.WriteFileAtomicIn(root, ServiceAccountKeyFileName(k.keyID), data, 0o600); err != nil {
-		return fmt.Errorf("write key file: %w", err)
-	}
-	*k = *updated
 	return nil
 }
 
@@ -582,7 +771,7 @@ var (
 	keyPermsWarn  sync.Map
 )
 
-func readKeyFile(root *os.Root, keyID string) (*ServiceAccountKey, error) {
+func readKey(root *os.Root, keyID string) (*ServiceAccountKey, error) {
 	name := ServiceAccountKeyFileName(keyID)
 	// Like the file token store: warn, do not refuse, when the key is readable
 	// by group/others. A provisioned file may carry a mode the user cannot
@@ -591,7 +780,7 @@ func readKeyFile(root *os.Root, keyID string) (*ServiceAccountKey, error) {
 	if runtime.GOOS != "windows" {
 		if info, err := root.Lstat(name); err == nil && info.Mode().Perm()&0o077 != 0 {
 			if _, warned := keyPermsWarn.LoadOrStore(keyID, true); !warned {
-				fmt.Fprintf(keyPermsWarnW, "Warning: service-account key file %s is accessible by group/others (mode %04o) and holds a private key; run: chmod 0600 on it\n", name, info.Mode().Perm())
+				fmt.Fprintf(keyPermsWarnW, "Warning: service-account key file %s is accessible by group/others (mode %04o) and holds a private key; run chmod 0600 on it\n", name, info.Mode().Perm())
 			}
 		}
 	}
@@ -606,21 +795,45 @@ func readKeyFile(root *os.Root, keyID string) (*ServiceAccountKey, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse key %s: %w", keyID, err)
 	}
-	if f.KeyID != keyID {
-		return nil, fmt.Errorf("key file %s holds key %q", name, f.KeyID)
+	if f.Type != serviceAccountKeyType || f.KeyID != keyID {
+		return nil, fmt.Errorf("key file %s is not service-account key %s", name, keyID)
 	}
-	return decodeKeyFile(f)
-}
-
-func decodeKeyFile(f serviceAccountKeyFile) (*ServiceAccountKey, error) {
-	if f.Type != serviceAccountKeyType {
-		return nil, fmt.Errorf("key %s: not a service-account key file", f.KeyID)
+	k, err := decodeKey(f)
+	if err != nil {
+		return nil, err
 	}
-	if f.ServiceAccount != "" {
-		if _, err := ParseServiceAccountID(f.ServiceAccount); err != nil {
-			return nil, fmt.Errorf("key %s: %w", f.KeyID, err)
+	stateData, err := osroot.ReadFileNoFollow(root, serviceAccountStateName(keyID))
+	if err != nil {
+		return nil, fmt.Errorf("read state of key %s: %w", keyID, err)
+	}
+	var s serviceAccountStateFile
+	if err := json.Unmarshal(stateData, &s); err != nil {
+		return nil, fmt.Errorf("parse state of key %s: %w", keyID, err)
+	}
+	if s.Type != serviceAccountStateType || s.KeyID != keyID {
+		return nil, fmt.Errorf("state file of key %s is malformed", keyID)
+	}
+	if s.ServiceAccount != "" {
+		if _, err := ParseServiceAccountID(s.ServiceAccount); err != nil {
+			return nil, fmt.Errorf("key %s: %w", keyID, err)
 		}
 	}
+	k.serviceAccount = s.ServiceAccount
+	if e := s.Enrollment; e != nil {
+		switch e.Phase {
+		case EnrollmentSubmitting, EnrollmentPending, EnrollmentApproved:
+		default:
+			return nil, fmt.Errorf("key %s: unknown enrollment phase %q", keyID, e.Phase)
+		}
+		k.enrollment = enrollmentState{phase: e.Phase, id: e.ID, interval: time.Duration(e.IntervalSeconds) * time.Second}
+		if e.ExpiresAt != nil {
+			k.enrollment.expiresAt = *e.ExpiresAt
+		}
+	}
+	return k, nil
+}
+
+func decodeKey(f serviceAccountKeyFile) (*ServiceAccountKey, error) {
 	server, err := parseStoredServer(f.Server)
 	if err != nil {
 		return nil, fmt.Errorf("key %s: %w", f.KeyID, err)
@@ -641,20 +854,5 @@ func decodeKeyFile(f serviceAccountKeyFile) (*ServiceAccountKey, error) {
 	if !ok || ed25519Thumbprint(pub) != f.KeyID {
 		return nil, fmt.Errorf("key %s does not match its key_id", f.KeyID)
 	}
-	k := &ServiceAccountKey{
-		keyID:          f.KeyID,
-		server:         server,
-		serviceAccount: f.ServiceAccount,
-		name:           f.Name,
-		createdAt:      f.CreatedAt,
-		enrollmentID:   f.EnrollmentID,
-		signer:         signer,
-	}
-	if f.EnrollmentExpiresAt != nil {
-		k.enrollmentExpiresAt = *f.EnrollmentExpiresAt
-	}
-	if f.RetiredAt != nil {
-		k.retiredAt = *f.RetiredAt
-	}
-	return k, nil
+	return &ServiceAccountKey{keyID: f.KeyID, server: server, name: f.Name, createdAt: f.CreatedAt, signer: signer}, nil
 }

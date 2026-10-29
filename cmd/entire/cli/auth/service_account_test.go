@@ -196,24 +196,30 @@ func TestActivateServiceAccountKey_SwitchesAndRetiresPrevious(t *testing.T) {
 		}
 	}
 
-	previous, err := ActivateServiceAccountKey(ctx, newKey)
+	retiring, err := ActivateServiceAccountKey(ctx, newKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if previous == nil || previous.KeyID() != oldKey.KeyID() {
-		t.Fatalf("previous = %v, want the old key returned for revocation", previous)
+	if len(retiring) != 1 || retiring[0].KeyID() != oldKey.KeyID() {
+		t.Fatalf("retiring = %v, want the old key returned for revocation", retiring)
 	}
+	previous := retiring[0]
 	active, err := LoadActiveServiceAccountKey(testServiceAccount)
 	if err != nil || active.KeyID() != newKey.KeyID() {
 		t.Fatalf("active = %v, %v; want the new key", active, err)
 	}
 	// The retired key is still on disk and can still sign its own revoke.
 	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{oldKey.KeyID(): KeyRetired, newKey.KeyID(): KeyActive})
-	if _, err := previous.signAssertion(time.Now(), testServiceAccount, "https://x/revoke"); err != nil {
+	if _, err := previous.signAssertion(time.Now(), testServiceAccount, "https://x/revoke", nil); err != nil {
 		t.Fatalf("retired key cannot sign its revoke: %v", err)
 	}
 	if _, err := ActivateServiceAccountKey(ctx, previous); err == nil {
 		t.Fatal("a retired key was re-activated")
+	}
+	// Re-activating the active key resumes the pending retirement.
+	again, err := ActivateServiceAccountKey(ctx, active)
+	if err != nil || len(again) != 1 || again[0].KeyID() != oldKey.KeyID() {
+		t.Fatalf("re-activate: retiring %v err %v; want the old key still owed a revoke", again, err)
 	}
 
 	if err := DeleteServiceAccountKey(ctx, active); err != nil {
@@ -223,6 +229,10 @@ func TestActivateServiceAccountKey_SwitchesAndRetiresPrevious(t *testing.T) {
 		t.Fatalf("after deleting the active key: err = %v, want the enroll hint", err)
 	}
 	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{oldKey.KeyID(): KeyRetired})
+	if err := DeleteServiceAccountKey(ctx, previous); err != nil {
+		t.Fatal(err)
+	}
+	assertKeyStatuses(t, map[string]ServiceAccountKeyStatus{})
 }
 
 func TestReadKeyFile_WarnsOnLoosePermissions(t *testing.T) {
@@ -259,7 +269,7 @@ func TestServiceAccountKey_ZeroValueErrorsInsteadOfPanicking(t *testing.T) {
 	if _, err := k.SignAssertion(time.Now()); err == nil {
 		t.Error("SignAssertion on a zero key succeeded")
 	}
-	if _, err := k.signAssertion(time.Now(), "x", "y"); err == nil {
+	if _, err := k.signAssertion(time.Now(), "x", "y", nil); err == nil {
 		t.Error("signAssertion on a zero key succeeded")
 	}
 }
