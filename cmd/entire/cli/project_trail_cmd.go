@@ -209,9 +209,11 @@ func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []proj
 func newProjectTrailListCmd() *cobra.Command {
 	var status, cursor string
 	var pageSize int
+	var mine bool
 	cmd := &cobra.Command{
 		Use: "list", Short: "List trails in a project",
-		Long: "List trails in one explicitly selected --project, newest update first, without requiring a checkout. --project is required even inside a clone; --repo only filters within that project. Requests go directly to the project's assigned cell. --status filters on the server before pagination. Use --page-token with the same project and filters to continue. Omitting --status includes all lifecycle states.",
+		Long: "List trails in one explicitly selected --project, newest update first, without requiring a checkout. --project is required even inside a clone; --repo only filters within that project. Requests go directly to the project's assigned cell. --status filters on the server before pagination. Use --page-token with the same project and filters to continue. Omitting --status includes all lifecycle states.\n\n" +
+			"--mine instead lists the trails you authored or are assigned, across every project and region, latest activity first. It returns one page of up to --limit trails and takes no --project, --repo, or --page-token; a region that cannot be reached is reported as a warning.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if status != "" && !validProjectTrailStatus(status) {
@@ -219,6 +221,19 @@ func newProjectTrailListCmd() *cobra.Command {
 			}
 			if pageSize < 1 || pageSize > trailListServerMaxLimit {
 				return errors.New("--limit must be between 1 and 100")
+			}
+			if mine {
+				if projectTrailProjectFlag(cmd) != "" || trailRepoFlag(cmd) != "" || cursor != "" {
+					return errors.New("--mine lists across every project; it cannot be combined with --project, --repo, or --page-token")
+				}
+				out, err := listMyProjectTrails(cmd, status, pageSize)
+				if err != nil {
+					return err
+				}
+				if jsonRequested(cmd) {
+					return printJSON(cmd.OutOrStdout(), out)
+				}
+				return printMyProjectTrails(cmd.OutOrStdout(), cmd.ErrOrStderr(), out)
 			}
 			page, err := listProjectTrails(cmd, status, pageSize, cursor)
 			if err != nil {
@@ -246,6 +261,7 @@ func newProjectTrailListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status before pagination (open, closed)")
 	cmd.Flags().IntVar(&pageSize, "limit", 50, "Page size (1-100)")
 	cmd.Flags().StringVar(&cursor, "page-token", "", "Continue from nextPageToken")
+	cmd.Flags().BoolVar(&mine, "mine", false, "List trails you authored or are assigned, across every project and region")
 	addJSONFlag(cmd)
 	return cmd
 }

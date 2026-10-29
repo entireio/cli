@@ -35,6 +35,7 @@ Shared command bodies do not check the mode. Retiring legacy means deleting
 ```sh
 entire trail list --project gh/entireio --json
 entire trail list --project gh/entireio --limit 50 --page-token '<nextPageToken>'
+entire trail list --mine --status open   # yours, across every project and region
 entire trail show 42 --project gh/entireio
 entire trail create --title 'Cross-repository work'
 entire trail create --title 'Repository-scoped plan' --no-branch
