@@ -183,6 +183,15 @@ func validateRecord(r Record) error {
 		if r.Result == nil {
 			return errors.New("result record without result")
 		}
+		// An image must be a JSON object. That also rejects nil and null alike,
+		// so a record folds the same before and after a JSON round trip, which
+		// turns a nil image into null.
+		for i, img := range r.Result.Images {
+			var obj map[string]json.RawMessage
+			if json.Unmarshal(img, &obj) != nil || obj == nil {
+				return fmt.Errorf("result image %d is not a JSON object", i)
+			}
+		}
 	case OpAppend, OpUsage, OpDrop:
 	default:
 		return fmt.Errorf("unknown op %q", r.Op)
@@ -408,6 +417,12 @@ func cloneToolResult(r *ToolResult) *ToolResult {
 	if r.Agent != nil {
 		agent := *r.Agent
 		c.Agent = &agent
+	}
+	if r.Images != nil {
+		c.Images = make([]json.RawMessage, len(r.Images))
+		for i, img := range r.Images {
+			c.Images[i] = cloneRaw(img)
+		}
 	}
 	return &c
 }

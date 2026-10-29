@@ -259,7 +259,7 @@ func (a *JSONLAdapter) user(e parsedEntry, out []Record) []Record {
 	}
 	a.results = ""
 
-	content, err := userContentBlocks(e)
+	content, err := userContentBlocks(e.userID, e.userText, e.userImages)
 	if err != nil {
 		return out
 	}

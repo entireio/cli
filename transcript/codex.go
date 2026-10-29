@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -17,6 +18,8 @@ const (
 	codexTypeFunctionCallOutput   = "function_call_output"
 	codexTypeCustomToolCall       = "custom_tool_call"
 	codexTypeCustomToolCallOutput = "custom_tool_call_output"
+	codexTypeInputText            = "input_text"
+	codexTypeInputImage           = "input_image"
 	codexTypeReasoning            = "reasoning"
 	codexTypeTurnContext          = "turn_context"
 )
@@ -237,8 +240,11 @@ func (c *codexConverter) responseItem(cl codexLine) {
 	switch typ {
 	case codexTypeFunctionCallOutput, codexTypeCustomToolCallOutput:
 		if slot, ok := c.tools[callID]; ok && slot.outputType == typ {
-			output := codexToolOutputText(cl.Payload, typ)
-			slot.block["result"] = buildToolResult(toolResultEntry{output: output, agentID: c.subagents[callID]})
+			slot.block["result"] = buildToolResult(toolResultEntry{
+				output:  codexToolOutputText(cl.Payload),
+				images:  codexToolOutputImages(cl.Payload),
+				agentID: c.subagents[callID],
+			})
 			if !c.snapshots && c.open == slot.call {
 				c.open = nil
 			}
@@ -255,7 +261,8 @@ func (c *codexConverter) responseItem(cl codexLine) {
 	}
 	switch {
 	case p.Type == transcriptTypeMessage && p.Role == TypeUser:
-		c.user(cl.ts(), codexUserText(p.Content))
+		text, images := codexUserContent(p.Content)
+		c.user(cl.ts(), text, images)
 	case p.Type == transcriptTypeMessage && p.Role == TypeAssistant:
 		text := codexAssistantText(p.Content)
 		if text == "" {
@@ -288,11 +295,11 @@ func (c *codexConverter) toolCall(ts string, p codexPayload, block map[string]js
 	}
 }
 
-func (c *codexConverter) user(ts, text string) {
-	if text == "" {
+func (c *codexConverter) user(ts, text string, images []json.RawMessage) {
+	if text == "" && len(images) == 0 {
 		return
 	}
-	contentJSON, err := json.Marshal([]userTextBlock{{Text: text}})
+	contentJSON, err := userContentBlocks("", text, images)
 	if err != nil {
 		return
 	}
@@ -408,25 +415,40 @@ func isCodexTokenCountLine(cl codexLine) bool {
 	return json.Unmarshal(cl.Payload, &p) == nil && p.Type == "token_count"
 }
 
-// codexUserText extracts the actual user prompt text from a Codex user message,
-// dropping system-injected content (AGENTS.md, environment_context, permissions,
-// turn_aborted, etc.).
-func codexUserText(raw json.RawMessage) string {
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &blocks) != nil {
-		return ""
+// codexImageTagRe matches the text items Codex wraps around a pasted image:
+// `<image name=[Image #1]>`, optionally with a path attribute, and `</image>`.
+var codexImageTagRe = regexp.MustCompile(`^(?:<image name=\[Image #\d+\](?: path="[^"\n]*")?>|</image>)$`)
+
+// codexUserContent extracts the actual user prompt text from a Codex user
+// message, dropping system-injected content (AGENTS.md, environment_context,
+// permissions, turn_aborted, etc.) and the tags around pasted images. It also
+// returns the message's input_image items, verbatim and in order.
+func codexUserContent(raw json.RawMessage) (string, []json.RawMessage) {
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return "", nil
 	}
 
 	var texts []string
-	for _, b := range blocks {
-		if b.Type != "input_text" {
+	var images []json.RawMessage
+	for _, rawItem := range items {
+		var b struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(rawItem, &b) != nil {
 			continue
 		}
-		// Skip system-injected content.
-		if isCodexSystemContent(b.Text) {
+		switch b.Type {
+		case codexTypeInputImage:
+			images = append(images, rawItem)
+			continue
+		case codexTypeInputText:
+		default:
+			continue
+		}
+		// Skip system-injected content and image tags.
+		if isCodexSystemContent(b.Text) || codexImageTagRe.MatchString(b.Text) {
 			continue
 		}
 		stripped := StripIDEContextTags(b.Text)
@@ -435,7 +457,7 @@ func codexUserText(raw json.RawMessage) string {
 		}
 	}
 
-	return strings.Join(texts, "\n\n")
+	return strings.Join(texts, "\n\n"), images
 }
 
 // isCodexSystemContent returns true for content blocks that are system-injected
@@ -483,17 +505,58 @@ func codexToolUseBlock(p codexPayload) map[string]json.RawMessage {
 }
 
 // codexToolOutputText extracts the output text from a tool call output payload.
-// For function_call_output, the output field is a plain string.
-// For custom_tool_call_output, it is an object {"type":"text","text":"..."}.
-func codexToolOutputText(payload json.RawMessage, outputType string) string {
-	if outputType == codexTypeCustomToolCallOutput {
-		return codexCustomOutputText(payload)
+// Either output type holds a plain string, an object {"type":"text","text":"..."},
+// or an array of content items whose input_text texts are joined, a newline
+// separating two texts only where the first does not already end in one.
+func codexToolOutputText(payload json.RawMessage) string {
+	var p struct {
+		Output json.RawMessage `json:"output"`
 	}
-	var p codexPayload
-	if json.Unmarshal(payload, &p) == nil {
-		return p.Output
+	if json.Unmarshal(payload, &p) != nil || p.Output == nil {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(p.Output, &s) == nil {
+		return s
+	}
+	var items []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(p.Output, &items) == nil {
+		var b strings.Builder
+		for _, item := range items {
+			if item.Type != codexTypeInputText || item.Text == "" {
+				continue
+			}
+			if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+				b.WriteByte('\n')
+			}
+			b.WriteString(item.Text)
+		}
+		return b.String()
+	}
+	var obj struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(p.Output, &obj) == nil {
+		return obj.Text
 	}
 	return ""
+}
+
+// codexToolOutputImages returns the input_image items of a tool call output
+// whose "output" is a content-item array, verbatim and in order. Codex writes
+// an image a tool returned (for example view_image) as
+// {"type":"input_image","image_url":"data:image/…;base64,…"}.
+func codexToolOutputImages(payload json.RawMessage) []json.RawMessage {
+	var p struct {
+		Output json.RawMessage `json:"output"`
+	}
+	if json.Unmarshal(payload, &p) != nil {
+		return nil
+	}
+	return itemsOfType(p.Output, codexTypeInputImage)
 }
 
 // codexCallIDAndType extracts just the type and call_id from a payload without
@@ -527,30 +590,6 @@ func codexCustomToolUseBlock(p codexPayload) map[string]json.RawMessage {
 		}
 	}
 	return block
-}
-
-// codexCustomOutputText extracts the output text from a custom_tool_call_output payload.
-// The output field is an object {"type":"text","text":"..."} rather than a plain string.
-func codexCustomOutputText(payload json.RawMessage) string {
-	var p struct {
-		Output json.RawMessage `json:"output"`
-	}
-	if json.Unmarshal(payload, &p) != nil || p.Output == nil {
-		return ""
-	}
-	// Try as plain string first (for forward compatibility).
-	var s string
-	if json.Unmarshal(p.Output, &s) == nil {
-		return s
-	}
-	// Try as object with "text" field.
-	var obj struct {
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(p.Output, &obj) == nil {
-		return obj.Text
-	}
-	return ""
 }
 
 // mustJSON marshals v to JSON, panicking on error (only used for simple types).
