@@ -2724,7 +2724,7 @@ func (s *ManualCommitStrategy) hasNewTranscriptWork(ctx context.Context, state *
 	}
 
 	// Re-resolve transcript path — handles agents that relocate transcripts mid-session.
-	if _, resolveErr := resolveTranscriptPath(state); resolveErr != nil {
+	if _, resolveErr := resolveTranscriptPath(ctx, state); resolveErr != nil {
 		logging.Debug(logCtx, "hasNewTranscriptWork: transcript path resolution failed",
 			slog.String("session_id", state.SessionID),
 			slog.Any("error", resolveErr),
@@ -2793,7 +2793,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 	}
 
 	// Re-resolve transcript path — handles agents that relocate transcripts mid-session.
-	if _, resolveErr := resolveTranscriptPath(state); resolveErr != nil {
+	if _, resolveErr := resolveTranscriptPath(ctx, state); resolveErr != nil {
 		logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: transcript path resolution failed",
 			slog.String("session_id", state.SessionID),
 			slog.Any("error", resolveErr),
@@ -3684,7 +3684,7 @@ func advanceCheckpointTranscriptStartToTurnEnd(ctx context.Context, state *Sessi
 	_, isLate := agent.AsLateTranscriptWriter(ag)
 
 	advanced := false
-	if pos, ok := currentTranscriptPosition(state); ok && pos > state.CheckpointTranscriptStart {
+	if pos, ok := currentTranscriptPosition(ctx, state); ok && pos > state.CheckpointTranscriptStart {
 		logging.Debug(logCtx,
 			"advancing CheckpointTranscriptStart to turn end after mid-turn commit",
 			slog.String("session_id", state.SessionID),
@@ -3827,7 +3827,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		return 1 // Count as error - all checkpoints will be skipped
 	}
 
-	transcriptPath, resolveErr := resolveTranscriptPath(state)
+	transcriptPath, resolveErr := resolveTranscriptPath(ctx, state)
 	if resolveErr != nil {
 		logging.Warn(logCtx, "finalize: transcript path resolution failed, skipping",
 			slog.String("session_id", state.SessionID),

@@ -768,7 +768,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// Re-resolve transcript path before any reads — handles agents that relocate
 	// transcripts mid-session (e.g., Cursor CLI flat → nested layout change).
 	// Errors are ignored; downstream readers handle missing transcripts gracefully.
-	resolveTranscriptPath(state) //nolint:errcheck,gosec // best-effort; downstream readers handle missing files
+	resolveTranscriptPath(ctx, state) //nolint:errcheck,gosec // best-effort; downstream readers handle missing files
 
 	// Complete a turn-end offset advance that lost the transcript flush race
 	// (late-transcript agents) before any offset-scoped extraction below.
@@ -1522,7 +1522,7 @@ func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionS
 		if state.Phase.IsActive() {
 			prepareTranscriptIfNeeded(ctx, ag, state.TranscriptPath)
 		}
-		if transcriptPath, err := resolveTranscriptPath(state); err == nil {
+		if transcriptPath, err := resolveTranscriptPath(ctx, state); err == nil {
 			if live, readErr := agent.ReadTranscriptFile(transcriptPath); readErr == nil && len(live) > 0 {
 				return live, transcriptPath
 			}
@@ -1681,7 +1681,7 @@ func resolvePendingTranscriptOffset(ctx context.Context, ag agent.Agent, state *
 	// flushed yet, which is the state the deferral was recorded for, so the
 	// next condensation must get the same chance rather than inherit a stale
 	// offset pointing inside the previous, already-condensed turn.
-	transcriptPath, err := resolveTranscriptPath(state)
+	transcriptPath, err := resolveTranscriptPath(ctx, state)
 	if err != nil {
 		return
 	}
