@@ -1469,6 +1469,10 @@ func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api
 }
 
 func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts) {
+	if s := newStatusStyles(w); s.colorEnabled {
+		renderTrailReviewDashboardStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), target, comments, nextCursor, opts, counts)
+		return
+	}
 	trail := trailForDisplay(target.Trail)
 	clean := tuiutil.SanitizeDisplayText
 	if trail.Number > 0 {
@@ -1504,6 +1508,10 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 }
 
 func printTrailReviewComments(w io.Writer, comments []api.TrailReviewComment, nextCursor string) {
+	if s := newStatusStyles(w); s.colorEnabled {
+		renderTrailReviewCommentsStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), comments, nextCursor)
+		return
+	}
 	if len(comments) == 0 {
 		fmt.Fprintln(w, "No findings found.")
 	} else {
@@ -1539,6 +1547,10 @@ func printIndentedBlock(w io.Writer, block, indent string) {
 }
 
 func printTrailReviewCommentCreated(w io.Writer, target trailReviewTarget, comment api.TrailReviewComment) {
+	if s := newStatusStyles(w); s.colorEnabled {
+		renderTrailReviewCommentCreatedStyled(w, newTrailReviewStyles(s), target, comment)
+		return
+	}
 	clean := tuiutil.SanitizeDisplayText
 	fmt.Fprintf(w, "Created finding %s on %s\n", clean(comment.ID), clean(trailReviewTargetDisplay(target)))
 	fmt.Fprintf(w, "Status:   %s\n", clean(comment.Status))
@@ -1547,6 +1559,10 @@ func printTrailReviewCommentCreated(w io.Writer, target trailReviewTarget, comme
 }
 
 func printTrailReviewCommentDetail(w io.Writer, comment api.TrailReviewComment) {
+	if s := newStatusStyles(w); s.colorEnabled {
+		renderTrailReviewCommentDetailStyled(w, newTrailReviewStyles(s), trailReviewWidth(w), comment)
+		return
+	}
 	clean := tuiutil.SanitizeDisplayText
 	fmt.Fprintf(w, "Finding:   %s\n", clean(comment.ID))
 	if title := strings.TrimSpace(clean(stringPtrValue(comment.Title))); title != "" {

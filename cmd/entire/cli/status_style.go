@@ -35,9 +35,11 @@ type statusStyles struct {
 
 // newStatusStyles creates styles appropriate for the output writer.
 func newStatusStyles(w io.Writer) statusStyles {
-	useColor := shouldUseColor(w)
-	width := getTerminalWidth(w)
+	return statusStylesFor(shouldUseColor(w), getTerminalWidth(w))
+}
 
+// statusStylesFor builds the styles for a known color mode and width.
+func statusStylesFor(useColor bool, width int) statusStyles {
 	s := statusStyles{
 		colorEnabled: useColor,
 		width:        width,
