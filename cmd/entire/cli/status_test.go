@@ -3359,7 +3359,7 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	var out bytes.Buffer
 	sty := statusStyles{colorEnabled: false, width: 80}
 	if err := runStatusDetailed(t.Context(), &out, sty, projectPath,
-		filepath.Join(entireDir, "settings.local.json"), true, false); err != nil {
+		filepath.Join(entireDir, "settings.local.json"), false, true, false); err != nil {
 		t.Fatalf("runStatusDetailed: %v", err)
 	}
 
@@ -3369,5 +3369,89 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	}
 	if !strings.Contains(got, settings.EntireSettingsLocalFile) {
 		t.Errorf("status does not name where the setting must live:\n%s", got)
+	}
+}
+
+// `entire enable --local` in the main tree leaves only a gitignored local file,
+// which a linked worktree does not get. The worktree reported "not set up" and
+// captured nothing; it now uses the main worktree's file and says so.
+func TestRunStatus_LinkedWorktreeUsesMainLocalSettings(t *testing.T) {
+	mainRoot := t.TempDir()
+	testutil.InitRepo(t, mainRoot)
+	testutil.WriteFile(t, mainRoot, "f.txt", "x")
+	testutil.RunGit(t, mainRoot, "add", "f.txt")
+	testutil.RunGit(t, mainRoot, "commit", "-q", "-m", "init")
+	testutil.WriteFile(t, mainRoot, settings.EntireSettingsLocalFile, testSettingsEnabled)
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, mainRoot, "worktree", "add", "-q", "-b", "feature", linked)
+	t.Chdir(linked)
+
+	var short bytes.Buffer
+	if err := runStatus(context.Background(), &short, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	if strings.Contains(short.String(), "not set up") || !strings.Contains(short.String(), "Enabled") {
+		t.Errorf("linked worktree should be enabled by the main worktree's local file, got: %s", short.String())
+	}
+
+	var detailed bytes.Buffer
+	if err := runStatus(context.Background(), &detailed, true, false); err != nil {
+		t.Fatalf("runStatus(detailed) error = %v", err)
+	}
+	if !strings.Contains(detailed.String(), "Local (inherited from the main worktree)") {
+		t.Errorf("detailed status should label the inherited local file, got: %s", detailed.String())
+	}
+}
+
+// An inherited local file tracked in the main worktree's index is rejected; the
+// fix must run against that index, not the linked worktree's.
+func TestRunStatus_LinkedWorktreeTrackedInheritedFileFixNamesMainWorktree(t *testing.T) {
+	mainRoot := t.TempDir()
+	testutil.InitRepo(t, mainRoot)
+	testutil.WriteFile(t, mainRoot, "f.txt", "x")
+	testutil.RunGit(t, mainRoot, "add", "f.txt")
+	testutil.RunGit(t, mainRoot, "commit", "-q", "-m", "init")
+	testutil.WriteFile(t, mainRoot, settings.EntireSettingsFile, testSettingsEnabled)
+	testutil.WriteFile(t, mainRoot, settings.EntireSettingsLocalFile, `{"log_level":"debug"}`)
+	testutil.RunGit(t, mainRoot, "add", "-f", settings.EntireSettingsLocalFile)
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, mainRoot, "worktree", "add", "-q", "-b", "feature", linked)
+	testutil.WriteFile(t, linked, settings.EntireSettingsFile, testSettingsEnabled)
+	t.Chdir(linked)
+
+	var detailed bytes.Buffer
+	if err := runStatus(context.Background(), &detailed, true, false); err != nil {
+		t.Fatalf("runStatus(detailed) error = %v", err)
+	}
+	resolvedMain, err := filepath.EvalSymlinks(mainRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "git -C " + resolvedMain + " rm --cached " + settings.EntireSettingsLocalFile
+	if !strings.Contains(detailed.String(), want) {
+		t.Errorf("want the fix %q, got:\n%s", want, detailed.String())
+	}
+}
+
+// A worktree of a --separate-git-dir repository cannot locate the main
+// worktree, so its local file is not inherited; "not set up" says why.
+func TestRunStatus_SeparateGitDirWorktreeExplainsNoInheritance(t *testing.T) {
+	mainRoot := filepath.Join(t.TempDir(), "main")
+	gitDir := filepath.Join(t.TempDir(), "repo.git")
+	testutil.RunGit(t, t.TempDir(), "init", "-q", "--separate-git-dir", gitDir, mainRoot)
+	testutil.WriteFile(t, mainRoot, "f.txt", "x")
+	testutil.RunGit(t, mainRoot, "add", "f.txt")
+	testutil.RunGit(t, mainRoot, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+	testutil.WriteFile(t, mainRoot, settings.EntireSettingsLocalFile, testSettingsEnabled)
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, mainRoot, "worktree", "add", "-q", "-b", "feature", linked)
+	t.Chdir(linked)
+
+	var out bytes.Buffer
+	if err := runStatus(context.Background(), &out, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "not set up") || !strings.Contains(out.String(), "main worktree") {
+		t.Errorf("want not set up plus why the main worktree's local settings don't apply, got:\n%s", out.String())
 	}
 }

@@ -70,7 +70,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	if err != nil {
 		settingsPath = EntireSettingsFile
 	}
-	localSettingsPath, err := paths.AbsPath(ctx, EntireSettingsLocalFile)
+	localSettingsPath, localInherited, err := settings.LocalSettingsPath(ctx)
 	if err != nil {
 		localSettingsPath = EntireSettingsLocalFile
 	}
@@ -83,13 +83,17 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 	if !projectExists && !localExists {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
+		if settings.LocalInheritanceUnavailable(ctx) {
+			// Otherwise the main worktree's settings.local.json would apply here.
+			fmt.Fprintln(w, "  This worktree can't use the main worktree's local settings: the main worktree can't be located (bare repository or --separate-git-dir).")
+		}
 		return nil
 	}
 
 	sty := newStatusStyles(w)
 
 	if detailed {
-		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, projectExists, localExists)
+		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, localInherited, projectExists, localExists)
 	}
 
 	// Short output: just show the effective/merged state
@@ -133,7 +137,7 @@ func writeAgentHelpHint(w io.Writer, sty statusStyles) {
 }
 
 // runStatusDetailed shows the effective status plus detailed status for each settings file.
-func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, settingsPath, localSettingsPath string, projectExists, localExists bool) error {
+func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, settingsPath, localSettingsPath string, localInherited, projectExists, localExists bool) error {
 	// First show the effective/merged status
 	effectiveSettings, err := LoadEntireSettings(ctx)
 	if err != nil {
@@ -190,12 +194,23 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 			return fmt.Errorf("failed to load local settings: %w", err)
 		}
 		label := "Local"
+		if localInherited {
+			// A linked worktree with no local file of its own uses the main
+			// worktree's; say whose file this is.
+			label = "Local (inherited from the main worktree)"
+		}
 		if effectiveSettings.LocalLayerRejection() != "" {
-			label = "Local (ignored)"
+			label += " (ignored)"
 		}
 		fmt.Fprintln(w, formatSettingsStatus(label, localSettings, sty))
 		if reason := effectiveSettings.LocalLayerRejection(); reason != "" {
-			fmt.Fprintf(w, "  %s\n  fix with: git rm --cached %s\n", reason, settings.EntireSettingsLocalFile)
+			git := "git"
+			if localInherited {
+				// The file is tracked in the main worktree's index; from here a
+				// bare `git rm` would touch this worktree's index instead.
+				git = "git -C " + strategy.ShellQuoteForDisplay(filepath.Dir(filepath.Dir(localSettingsPath)))
+			}
+			fmt.Fprintf(w, "  %s\n  fix with: %s rm --cached %s\n", reason, git, settings.EntireSettingsLocalFile)
 		}
 	}
 
