@@ -156,13 +156,47 @@ func rewriteWarning(ctx context.Context, chain []*object.Commit, checkedRemotes 
 	if others := otherRefsContaining(ctx, target); len(others) > 0 {
 		lines = append(lines, "These keep the old commits: "+strings.Join(others, ", "))
 	}
+	yourEmail := yourGitEmail(ctx)
+	yoursSigned := false
+	var theirsSigned []string
 	for _, c := range chain {
-		if c.Signature != "" {
-			lines = append(lines, "Signed commits lose their signatures.")
-			break
+		switch {
+		case c.Signature == "":
+		case committedBy(c, yourEmail):
+			yoursSigned = true
+		default:
+			theirsSigned = append(theirsSigned, "  "+describeCommit(c))
 		}
 	}
+	if yoursSigned {
+		lines = append(lines, "Commits you signed are signed again with your signing key; one signed with another key loses its signature.")
+	}
+	if len(theirsSigned) > 0 {
+		lines = append(lines, "These signed commits were committed by someone else and lose their signatures:")
+		lines = append(lines, theirsSigned...)
+	}
 	return lines
+}
+
+// yourGitEmail is the email git commits as for the user, from user.email,
+// committer.email or GIT_COMMITTER_EMAIL, or "" when it can't be read.
+func yourGitEmail(ctx context.Context) string {
+	out, err := exec.CommandContext(ctx, "git", "var", "GIT_COMMITTER_IDENT").Output()
+	if err != nil {
+		return ""
+	}
+	_, rest, _ := strings.Cut(string(out), "<")
+	email, _, ok := strings.Cut(rest, ">")
+	if !ok {
+		return ""
+	}
+	return email
+}
+
+// committedBy reports whether email, the user's, is c's committer. Empty never
+// matches.
+func committedBy(c *object.Commit, email string) bool {
+	return email != "" && strings.EqualFold(c.Committer.Email, email)
 }
 
 // otherRefsContaining lists the branches and tags, other than the checked-out
@@ -187,43 +221,36 @@ func otherRefsContaining(ctx context.Context, target *object.Commit) []string {
 // git filter-branch does), then moves the
 // checked-out branch (or a detached HEAD) to the new tip if it is still at the
 // old one. Trees are reused, so the worktree and index are untouched, and no
-// commit hooks run. Session state that names the old commits is remapped as
-// git's post-rewrite hook would.
+// commit hooks run. A signed commit is signed again only as replayCommit
+// allows; the others are reported. Session state that names the old commits is
+// remapped as git's post-rewrite hook would.
 func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit, checkpointID id.CheckpointID) error {
 	oldHead := chain[len(chain)-1].Hash.String()
+	yourEmail := yourGitEmail(ctx)
+	keys := signingProbe{}
 	var pairs strings.Builder
-	parents := chain[0].ParentHashes
+	var unsigned []string
 	newSHA, targetSHA := "", ""
 	for i, c := range chain {
 		message := c.Message
 		if i == 0 {
 			message = trailers.AppendCheckpointTrailer(message, checkpointID.String())
 		}
-		args := []string{"commit-tree", c.TreeHash.String()}
+		parents := []string{newSHA}
 		if i == 0 {
-			for _, p := range parents {
-				args = append(args, "-p", p.String())
+			parents = make([]string, 0, len(c.ParentHashes))
+			for _, p := range c.ParentHashes {
+				parents = append(parents, p.String())
 			}
-		} else {
-			args = append(args, "-p", newSHA)
 		}
-		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Stdin = strings.NewReader(message)
-		cmd.Env = append(withoutIdentityEnv(os.Environ()),
-			"GIT_AUTHOR_NAME="+c.Author.Name,
-			"GIT_AUTHOR_EMAIL="+c.Author.Email,
-			fmt.Sprintf("GIT_AUTHOR_DATE=@%d %s", c.Author.When.Unix(), c.Author.When.Format("-0700")),
-			"GIT_COMMITTER_NAME="+c.Committer.Name,
-			"GIT_COMMITTER_EMAIL="+c.Committer.Email,
-			fmt.Sprintf("GIT_COMMITTER_DATE=@%d %s", c.Committer.When.Unix(), c.Committer.When.Format("-0700")),
-		)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		sha, lost, err := replayCommit(ctx, c, message, parents, yourEmail, keys)
 		if err != nil {
-			return fmt.Errorf("rewrite commit %s: %w: %s", c.Hash.String()[:12], err, strings.TrimSpace(stderr.String()))
+			return fmt.Errorf("rewrite commit %s: %w", c.Hash.String()[:12], err)
 		}
-		newSHA = strings.TrimSpace(string(out))
+		if lost != "" {
+			unsigned = append(unsigned, fmt.Sprintf("commit %s (was %s) is no longer signed: %s", sha[:12], c.Hash.String()[:12], lost))
+		}
+		newSHA = sha
 		if i == 0 {
 			targetSHA = newSHA
 		}
@@ -250,11 +277,126 @@ func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit
 		fmt.Fprintf(w, "; HEAD was %s", oldHead[:12])
 	}
 	fmt.Fprintln(w, ")")
+	for _, line := range unsigned {
+		fmt.Fprintf(w, "  warning: %s\n", line)
+	}
 	return nil
 }
 
+// replayCommit writes c again with message on parents, keeping its tree,
+// author and committer. A signed c is signed again, by the user's own git
+// signing setup, only when the user committed it, its signature is good, and
+// it was made by the key the user signs with now. Anything else is replayed
+// unsigned, rather than with the user's signature on someone else's commit or
+// on content their key never signed, and lost says why.
+func replayCommit(ctx context.Context, c *object.Commit, message string, parents []string, yourEmail string, keys signingProbe) (sha, lost string, err error) {
+	if c.Signature == "" {
+		sha, err = commitTree(ctx, c, message, parents, false)
+		return sha, "", err
+	}
+	if !committedBy(c, yourEmail) {
+		lost = "it was committed by " + c.Committer.Email + ", not you"
+	} else if key, good := signingKey(ctx, c.Hash.String()); !good {
+		lost = "its signature can't be verified"
+	} else if yours, err := keys.key(ctx, c.Committer); err != nil {
+		lost = "signing failed: " + strings.Join(strings.Fields(err.Error()), " ")
+	} else if key != yours {
+		lost = "it was signed with a key other than your signing key"
+	} else if signed, err := commitTree(ctx, c, message, parents, true); err != nil {
+		lost = "signing failed: " + strings.Join(strings.Fields(err.Error()), " ")
+	} else {
+		return signed, "", nil
+	}
+	sha, err = commitTree(ctx, c, message, parents, false)
+	return sha, lost, err
+}
+
+// commitTree runs git commit-tree for c's tree on parents with message and c's
+// author and committer, signed when sign is set (commit-tree ignores
+// commit.gpgsign), and returns the new commit's hash.
+func commitTree(ctx context.Context, c *object.Commit, message string, parents []string, sign bool) (string, error) {
+	args := []string{"commit-tree", c.TreeHash.String()}
+	for _, p := range parents {
+		args = append(args, "-p", p)
+	}
+	if sign {
+		args = append(args, "-S")
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Stdin = strings.NewReader(message)
+	cmd.Env = append(withoutIdentityEnv(os.Environ()),
+		"GIT_AUTHOR_NAME="+c.Author.Name,
+		"GIT_AUTHOR_EMAIL="+c.Author.Email,
+		fmt.Sprintf("GIT_AUTHOR_DATE=@%d %s", c.Author.When.Unix(), c.Author.When.Format("-0700")),
+		"GIT_COMMITTER_NAME="+c.Committer.Name,
+		"GIT_COMMITTER_EMAIL="+c.Committer.Email,
+		fmt.Sprintf("GIT_COMMITTER_DATE=@%d %s", c.Committer.When.Unix(), c.Committer.When.Format("-0700")),
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// signingProbe finds the key the user's git signing setup signs with, by
+// signing a commit of the empty tree, so that a commit is signed only once its
+// own key is known to match. Without user.signingkey, OpenPGP picks the key by
+// the committer, so the key is found once per committer.
+type signingProbe map[string]probedKey
+
+type probedKey struct {
+	key string
+	err error
+}
+
+func (p signingProbe) key(ctx context.Context, committer object.Signature) (string, error) {
+	who := committer.Name + " <" + committer.Email + ">"
+	if k, ok := p[who]; ok {
+		return k.key, k.err
+	}
+	key, err := probeSigningKey(ctx, committer)
+	p[who] = probedKey{key, err}
+	return key, err
+}
+
+func probeSigningKey(ctx context.Context, committer object.Signature) (string, error) {
+	tree, err := exec.CommandContext(ctx, "git", "mktree").Output()
+	if err != nil {
+		return "", fmt.Errorf("write the empty tree: %w", err)
+	}
+	probe := &object.Commit{TreeHash: plumbing.NewHash(strings.TrimSpace(string(tree))), Author: committer, Committer: committer}
+	sha, err := commitTree(ctx, probe, "Entire signing key probe\n", nil, true)
+	if err != nil {
+		return "", err
+	}
+	key, _ := signingKey(ctx, sha)
+	return key, nil
+}
+
+// signingKey is the key git reports for commit sha's signature (%GK): a key ID
+// for OpenPGP and X.509, a fingerprint for SSH. Empty when the commit is
+// unsigned or the signature can't be read. good is false unless the signature
+// checks out: git reports the key of a bad signature too. git reports an SSH
+// signature's key only with an allowed-signers file configured, so it is given
+// an empty one and reports the key as untrusted (U), which is all comparing
+// two signatures needs. The literal /dev/null, not os.DevNull: ssh-keygen
+// opens it, and both Git for Windows' and Windows OpenSSH's ssh-keygen map
+// that path. --no-show-signature keeps log.showSignature's verification text
+// out of the output.
+func signingKey(ctx context.Context, sha string) (key string, good bool) {
+	out, err := exec.CommandContext(ctx, "git", "-c", "gpg.ssh.allowedSignersFile=/dev/null", "show", "-s", "--no-show-signature", "--format=%G?%n%GK", sha).Output()
+	if err != nil {
+		return "", false
+	}
+	status, key, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	return key, key != "" && (status == "G" || status == "U")
+}
+
 // withoutIdentityEnv drops GIT_AUTHOR_* and GIT_COMMITTER_* from env, so the
-// identity rewriteWithTrailer sets is the only one: with a duplicate, which
+// identity commitTree sets is the only one: with a duplicate, which
 // one git sees depends on the platform's getenv.
 func withoutIdentityEnv(env []string) []string {
 	return slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
