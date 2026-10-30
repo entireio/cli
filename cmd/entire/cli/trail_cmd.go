@@ -1023,9 +1023,9 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 	}
 	defer repo.Close()
 
-	base = resolveTrailCreateBase(repo, base)
+	base, namingBase := resolveTrailCreateBase(ctx, repo, base)
 	_, currentBranch, _ := isOnDefaultBranchRepo(repo) //nolint:errcheck // best-effort; reuse the open repo for the current branch name
-	title, body, base, branch, statusStr, err = resolveTrailCreateFields(cmd, w, title, body, base, branch, statusStr, currentBranch, noBranch)
+	title, body, _, branch, statusStr, err = resolveTrailCreateFields(cmd, w, title, body, namingBase, branch, statusStr, currentBranch, noBranch)
 	if err != nil {
 		return err
 	}
@@ -1095,16 +1095,6 @@ func validateTrailCreateFlagCombos(cmd *cobra.Command, checkout, noBranch bool) 
 		return errors.New("cannot combine --no-branch with --checkout")
 	}
 	return nil
-}
-
-func resolveTrailCreateBase(repo *git.Repository, base string) string {
-	if base != "" {
-		return base
-	}
-	if detected := strategy.GetDefaultBranchName(repo); detected != "" {
-		return detected
-	}
-	return defaultBaseBranch
 }
 
 func resolveTrailCreateFields(cmd *cobra.Command, w io.Writer, title, body, base, branch, statusStr, currentBranch string, noBranch bool) (string, string, string, string, string, error) {
