@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.2] - 2026-10-26
+
+### Added
+
+- `entire enable` ends by listing the Entire configuration that still needs committing (`.entire/settings.json`, `.entire/.gitignore`, and each agent's hook config and skill files), since other worktrees and clones only get the setup once it is committed. In an interactive terminal it offers to commit exactly those files and leaves anything else you had staged alone. The default answer is Yes when setup created a file and No when every listed file was already tracked. With `--yes`, without a TTY, or during a merge or rebase it only prints the list, and `entire agent add` only lists. Nothing is pushed ([#2893](https://github.com/entireio/cli/pull/2893))
+- `transcript.jsonl` assistant lines carry per-call usage for Claude Code, Codex and Pi: the call's `model`, fresh `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` (with the 5m/1h split when the agent reports it) and `reasoning_tokens`. Codex writes one assistant line per model call. Older lines stay readable and the format version is still 1 ([#2834](https://github.com/entireio/cli/pull/2834), [#2889](https://github.com/entireio/cli/pull/2889), [#2858](https://github.com/entireio/cli/pull/2858), [#2859](https://github.com/entireio/cli/pull/2859), [#2862](https://github.com/entireio/cli/pull/2862))
+- With `redaction.externalize_images` on, Pi images move to `assets/` like Claude Code and Codex images. Pi user turns that hold only an image are no longer dropped from `transcript.jsonl` ([#2891](https://github.com/entireio/cli/pull/2891))
+
+### Changed
+
+- The first-turn context Entire injects into agent sessions now goes out in every session, not only where trails are enabled. It points agents at `entire agent-help`; the trail guidance is added only when trails are enabled, on a later turn if that is learned after the session starts. Agents may create checkpoints manually when the user asks, and are told to ask before running setup or destructive commands ([#2887](https://github.com/entireio/cli/pull/2887))
+- `entire trail comment` write commands (`add`, `reply`, `edit`, `delete`, `resolve`, `unresolve`) refuse when run from an agent session and point at `entire trail finding` instead, since trail comments are for people. `list` and `show` still work for agents. agent-help and the injected context say the same ([#2890](https://github.com/entireio/cli/pull/2890))
+- `entire trail` is listed in `entire help` under a new "Trails:" group ([#2896](https://github.com/entireio/cli/pull/2896))
+
+### Fixed
+
+- A commit no longer gets an `Entire-Checkpoint` trailer for an idle session whose new work is only in its live transcript without that checkpoint being written. Such sessions are now condensed at commit, and in stacked worktrees that touch the same files only the session's own worktree picks up its work ([#2892](https://github.com/entireio/cli/pull/2892))
+
+### Housekeeping
+
+- The `transcript` library's Pi JSONL parser moved to an internal package, and the unused Claude Code and Codex native-reader API was removed ([#2832](https://github.com/entireio/cli/pull/2832))
+
 ## [0.12.1] - 2026-10-24
 
 ### Added

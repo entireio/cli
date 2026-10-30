@@ -9,12 +9,13 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// failIfCommitLinkingPrompted fails t when any hook in the repo showed the
-// commit-linking prompt. No E2E commit has a person behind it, so a prompt
-// means the hook misjudged an agent's shell as interactive, which is the bug
-// users hit as a hung commit (#2725). Since the prompt gives up after a
-// timeout, the commit still succeeds and the test would otherwise pass slowly.
-func failIfCommitLinkingPrompted(t *testing.T, repoDir string) {
+// failIfPrompted fails t when any hook in the repo showed the commit-linking
+// prompt or the first-push checkpoint push policy question. No E2E commit or
+// push has a person behind it, so a prompt means the hook misjudged an agent's
+// shell as interactive, which is the bug users hit as a hung commit (#2725).
+// Since the prompts give up after a timeout, the git command still succeeds
+// and the test would otherwise pass slowly.
+func failIfPrompted(t *testing.T, repoDir string) {
 	t.Helper()
 	logDir := filepath.Join(repoDir, ".entire", "logs")
 	entries, err := os.ReadDir(logDir)
@@ -27,8 +28,8 @@ func failIfCommitLinkingPrompted(t *testing.T, repoDir string) {
 			continue
 		}
 		for line := range strings.Lines(string(data)) {
-			if strings.Contains(line, strategy.CommitLinkingPromptLogMsg) {
-				t.Errorf("a git hook showed the commit-linking prompt to an agent commit (%s): %s", e.Name(), strings.TrimSpace(line))
+			if strings.Contains(line, strategy.CommitLinkingPromptLogMsg) || strings.Contains(line, strategy.CheckpointPushQuestionLogMsg) {
+				t.Errorf("a git hook prompted an agent (%s): %s", e.Name(), strings.TrimSpace(line))
 				return
 			}
 		}

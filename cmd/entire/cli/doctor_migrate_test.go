@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
@@ -140,6 +141,24 @@ func TestPushMigratedRefs_ConfiguresRedactionBeforeGating(t *testing.T) {
 
 	assert.True(t, redact.OPFEnabled(),
 		"the push must configure redaction, or its OPF gate is a no-op and ships unscanned content")
+}
+
+// Under manual, migration's push-now must say the refs are held by the policy,
+// not that the queue was empty.
+func TestPushMigratedRefs_ManualPolicyReportsHeldRefs(t *testing.T) {
+	repo, bareDir := setupMigratePushRepo(t, `{"enabled": true}`)
+	workDir, err := os.Getwd()
+	require.NoError(t, err)
+	policyFile := filepath.Join(workDir, ".git", filepath.FromSlash(settings.CheckpointPushPolicyFile))
+	require.NoError(t, os.MkdirAll(filepath.Dir(policyFile), 0o755))
+	require.NoError(t, os.WriteFile(policyFile, []byte("manual\n"), 0o600))
+
+	var out bytes.Buffer
+	require.NoError(t, pushMigratedRefs(context.Background(), &out, repo, bareDir))
+
+	assert.Contains(t, out.String(), "manual")
+	assert.Contains(t, out.String(), "entire checkpoint push")
+	assert.NotContains(t, out.String(), "No queued refs")
 }
 
 // Read-only outcomes must not consult redaction settings at all: a repo whose

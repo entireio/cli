@@ -38,6 +38,7 @@ func TestProjectTrailStatusExcludesDraft(t *testing.T) {
 
 // Not parallel: replaces project-client constructors through the fixture.
 func TestProjectTrailMessageOnlyWriteJSON(t *testing.T) {
+	clearAgentCallerEnv(t)
 	for _, verb := range []string{"reply", "edit"} {
 		t.Run(verb, func(t *testing.T) {
 			setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {

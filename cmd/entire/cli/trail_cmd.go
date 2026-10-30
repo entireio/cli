@@ -62,16 +62,11 @@ func newTrailCmdForMode(project bool) *cobra.Command {
 	var repoOverride string
 
 	cmd := &cobra.Command{
-		Use:    cmdTrail,
-		Short:  mode.help("Manage trails for your branches", "Manage trails across repositories and branches"),
-		Hidden: true,
-		// Hidden from root help while the surface matures, but advertised to
-		// coding agents through `entire agent-help`.
-		Annotations: map[string]string{
-			agentHelpAnnotation: agentHelpAnnotationEnabled,
-		},
-		Args: cobra.NoArgs,
-		Long: mode.help(legacyTrailContextBlurb(), trailContextBlurb()),
+		Use:         cmdTrail,
+		Short:       mode.help("Manage trails for your branches", "Manage trails across repositories and branches"),
+		Annotations: map[string]string{},
+		Args:        cobra.NoArgs,
+		Long:        mode.help(legacyTrailContextBlurb(), trailContextBlurb()),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},

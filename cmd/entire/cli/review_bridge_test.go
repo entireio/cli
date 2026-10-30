@@ -3,10 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -53,7 +56,10 @@ func TestReviewTrailFindingInputsSplitsTopLevelBullets(t *testing.T) {
   - nested detail stays with second
 - **[Low] Third issue:** remove the note from daytona-command-native-plan.md:1`
 
-	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: verdict})
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{
+		Prose: verdict,
+		Scope: trailScopeWith(t, []string{"sandbox-runs-queue.ts", "daytona.ts", "daytona-command-native-plan.md"}),
+	})
 	if len(inputs) != 3 {
 		t.Fatalf("inputs = %d, want 3", len(inputs))
 	}
@@ -96,7 +102,10 @@ func TestReviewTrailFindingInputsSplitsTopLevelMarkedFindings(t *testing.T) {
 		"Additional detail for the first issue.\n\n" +
 		"**[MEDIUM] PATCH thread route missing requestBody** — `api/src/routes/trails.ts:2802`. Generated clients cannot send updates.\n"
 
-	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{Prose: verdict})
+	inputs := reviewTrailFindingInputs("general", cliReview.TrailReport{
+		Prose: verdict,
+		Scope: trailScopeWith(t, []string{"api/src/lib/planetscale/trails.ts", "api/src/routes/trails.ts"}),
+	})
 	if len(inputs) != 2 {
 		t.Fatalf("inputs = %d, want 2", len(inputs))
 	}
@@ -122,9 +131,9 @@ func TestReviewTrailFindingInputsMapsStructuredComments(t *testing.T) {
 	t.Parallel()
 	confidence, lowConfidence := 0.92, 0.7
 	report := cliReview.TrailReport{Comments: []cliReview.TrailComment{
-		{Severity: "high", Confidence: &confidence, Body: "`daytona.ts` rejects public repos without a token; allow public clones or mint a token.", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "daytona.ts", StartLine: 901, SelectedText: "return err"}},
+		{Severity: "high", Confidence: &confidence, Body: "`daytona.ts` rejects public repos without a token; allow public clones or mint a token.", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "daytona.ts", StartLine: 901}},
 		{Severity: "P2", Confidence: &lowConfidence, Body: "Delete failures are swallowed, orphaning provider snapshots.", Location: cliReview.TrailLocation{Granularity: "range", FilePath: "daytona.ts", StartLine: 966, EndLine: 970}},
-	}}
+	}, Scope: trailScopeWith(t, []string{"daytona.ts"})}
 
 	inputs := reviewTrailFindingInputs("general", report)
 	if len(inputs) != 2 {
@@ -141,9 +150,6 @@ func TestReviewTrailFindingInputsMapsStructuredComments(t *testing.T) {
 	}
 	if inputs[0].Location.Granularity != reviewTrailGranularityLine || inputs[0].Location.FilePath == nil || *inputs[0].Location.FilePath != "daytona.ts" || inputs[0].Location.StartLine == nil || *inputs[0].Location.StartLine != 901 {
 		t.Fatalf("location[0] = %+v, want daytona.ts:901", inputs[0].Location)
-	}
-	if inputs[0].Location.SelectedText == nil || *inputs[0].Location.SelectedText != "return err" {
-		t.Fatalf("selected_text[0] = %v, want preserved JSON selected_text", inputs[0].Location.SelectedText)
 	}
 	if inputs[1].Severity == nil || *inputs[1].Severity != "medium" {
 		t.Fatalf("severity[1] = %v, want normalized medium", inputs[1].Severity)
@@ -631,8 +637,8 @@ func TestShortenReviewTrailFindingBodyClosesOpenCodeFence(t *testing.T) {
 }
 
 // selected_text has no server limit, so an oversized one would leave a
-// finding's request unbounded. A reviewer-supplied one over the cap gives way
-// to the worktree span, and a span over the cap posts at file granularity.
+// finding's request unbounded. A worktree span over the cap posts at file
+// granularity, while a short span keeps its line and worktree text.
 func TestPostReviewToTrailCapsSelectedText(t *testing.T) {
 	fake := setupReviewPostTrail(t)
 	long := strings.Repeat("x", wantMaxPostedBodyRunes+100)
@@ -641,10 +647,10 @@ func TestPostReviewToTrailCapsSelectedText(t *testing.T) {
 
 	comments := []cliReview.TrailComment{
 		{Severity: "low", Body: "range over a huge line", Location: cliReview.TrailLocation{Granularity: reviewTrailGranularityRange, FilePath: "app.go", StartLine: 1, EndLine: 2}},
-		{Severity: "low", Body: "oversized supplied text", Location: cliReview.TrailLocation{Granularity: reviewTrailGranularityLine, FilePath: "app.go", StartLine: 3, SelectedText: long}},
+		{Severity: "low", Body: "short line", Location: cliReview.TrailLocation{Granularity: reviewTrailGranularityLine, FilePath: "app.go", StartLine: 3}},
 	}
 	var out bytes.Buffer
-	if err := postReviewToTrail(t.Context(), &out, "default", cliReview.TrailReport{Comments: comments}); err != nil {
+	if err := postReviewToTrail(t.Context(), &out, "default", cliReview.TrailReport{Comments: comments, Scope: trailScopeOver(t, ".", []string{"app.go"})}); err != nil {
 		t.Fatalf("postReviewToTrail: %v\noutput:\n%s", err, out.String())
 	}
 
@@ -664,6 +670,161 @@ func TestPostReviewToTrailCapsSelectedText(t *testing.T) {
 		t.Errorf("range over a huge span = %+v, want file granularity on app.go with no selected_text", loc)
 	}
 	if loc := posted[1].Location; loc.Granularity != reviewTrailGranularityLine || loc.SelectedText == nil || *loc.SelectedText != "var three = 3" {
-		t.Errorf("oversized supplied selected_text = granularity %q, want line 3 with its worktree text", loc.Granularity)
+		t.Errorf("short line = granularity %q, want line 3 with its worktree text", loc.Granularity)
+	}
+}
+
+// trailScopeOver returns a scope over root in which quotable files may be
+// quoted with their current contents and tracked files are only in the index.
+func trailScopeOver(t *testing.T, root string, quotable []string, tracked ...string) cliReview.TrailScope {
+	t.Helper()
+	scope := cliReview.TrailScope{Root: root, Quotable: make(map[string][sha256.Size]byte), Tracked: make(map[string]struct{})}
+	for _, p := range quotable {
+		data, err := os.ReadFile(filepath.Join(root, p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		scope.Quotable[p] = sha256.Sum256(data)
+	}
+	for _, p := range tracked {
+		scope.Tracked[p] = struct{}{}
+	}
+	return scope
+}
+
+// trailScopeWith writes each quotable file into a fresh worktree, then
+// returns trailScopeOver it.
+func trailScopeWith(t *testing.T, quotable []string, tracked ...string) cliReview.TrailScope {
+	t.Helper()
+	root := t.TempDir()
+	for _, p := range quotable {
+		testutil.WriteFile(t, root, p, "package app\n")
+	}
+	return trailScopeOver(t, root, quotable, tracked...)
+}
+
+// A reviewer's location decides which worktree lines are uploaded as the
+// finding's snippet, so only files the reviewed change touches may keep a
+// line anchor, and only for a bounded span.
+func TestReviewTrailFindingInputsRestrictsLineAnchorsToChangedFiles(t *testing.T) {
+	t.Parallel()
+	scope := trailScopeWith(t, []string{"src/app.go"}, "src/app.go", "src/other.go")
+	tests := []struct {
+		name            string
+		report          cliReview.TrailReport
+		wantGranularity string
+		wantFile        string
+	}{
+		{
+			name:            "line in a file outside the change",
+			report:          cliReview.TrailReport{Comments: []cliReview.TrailComment{{Body: "leak", Location: cliReview.TrailLocation{Granularity: "range", FilePath: ".env", StartLine: 1, EndLine: 2}}}},
+			wantGranularity: reviewTrailGranularityWholeChange,
+		},
+		{
+			name:            "line in git metadata",
+			report:          cliReview.TrailReport{Comments: []cliReview.TrailComment{{Body: "leak", Location: cliReview.TrailLocation{Granularity: "line", FilePath: ".git/config", StartLine: 1}}}},
+			wantGranularity: reviewTrailGranularityWholeChange,
+		},
+		{
+			name:            "prose location outside the change",
+			report:          cliReview.TrailReport{Prose: "request changes\n\n- [high] secrets in deploy/prod.env:1 — rotate them"},
+			wantGranularity: reviewTrailGranularityWholeChange,
+		},
+		{
+			name:            "absolute path outside the repository",
+			report:          cliReview.TrailReport{Comments: []cliReview.TrailComment{{Body: "leak", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "/etc/passwd", StartLine: 1}}}},
+			wantGranularity: reviewTrailGranularityWholeChange,
+		},
+		{
+			name:            "range over the line cap",
+			report:          cliReview.TrailReport{Comments: []cliReview.TrailComment{{Body: "too wide", Location: cliReview.TrailLocation{Granularity: "range", FilePath: "src/app.go", StartLine: 1, EndLine: maxReviewTrailAnchorLines + 1}}}},
+			wantGranularity: reviewTrailGranularityFile,
+			wantFile:        "src/app.go",
+		},
+		{
+			name:            "range at the line cap",
+			report:          cliReview.TrailReport{Comments: []cliReview.TrailComment{{Body: "ok", Location: cliReview.TrailLocation{Granularity: "range", FilePath: "src/app.go", StartLine: 1, EndLine: maxReviewTrailAnchorLines}}}},
+			wantGranularity: reviewTrailGranularityRange,
+			wantFile:        "src/app.go",
+		},
+		{
+			name:            "uncleaned path to a changed file posts the cleaned file",
+			report:          cliReview.TrailReport{Comments: []cliReview.TrailComment{{Body: "ok", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "./src/app.go", StartLine: 3}}}},
+			wantGranularity: reviewTrailGranularityLine,
+			wantFile:        "src/app.go",
+		},
+		{
+			name:            "line in a tracked file outside the change",
+			report:          cliReview.TrailReport{Comments: []cliReview.TrailComment{{Body: "caller breaks", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "./src/other.go", StartLine: 120}}}},
+			wantGranularity: reviewTrailGranularityFile,
+			wantFile:        "src/other.go",
+		},
+		{
+			name:            "uncleaned path over the line cap posts the cleaned file",
+			report:          cliReview.TrailReport{Comments: []cliReview.TrailComment{{Body: "too wide", Location: cliReview.TrailLocation{Granularity: "range", FilePath: "./src/app.go", StartLine: 1, EndLine: maxReviewTrailAnchorLines + 1}}}},
+			wantGranularity: reviewTrailGranularityFile,
+			wantFile:        "src/app.go",
+		},
+		{
+			name:            "parent traversal out of a changed directory",
+			report:          cliReview.TrailReport{Comments: []cliReview.TrailComment{{Body: "leak", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "src/../.env", StartLine: 1}}}},
+			wantGranularity: reviewTrailGranularityWholeChange,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			report := tt.report
+			report.Scope = scope
+			inputs := reviewTrailFindingInputs("", report)
+			if len(inputs) != 1 {
+				t.Fatalf("inputs = %d, want 1", len(inputs))
+			}
+			loc := inputs[0].Location
+			gotFile := ""
+			if loc.FilePath != nil {
+				gotFile = *loc.FilePath
+			}
+			if loc.Granularity != tt.wantGranularity || gotFile != tt.wantFile {
+				t.Fatalf("location = %+v, want %s on %q", loc, tt.wantGranularity, tt.wantFile)
+			}
+			if loc.Granularity != reviewTrailGranularityLine && loc.Granularity != reviewTrailGranularityRange && (loc.StartLine != nil || loc.EndLine != nil) {
+				t.Fatalf("%s location kept a line span: %+v", loc.Granularity, loc)
+			}
+			if loc.SelectedText != nil {
+				t.Fatalf("selected_text = %q, want none before the worktree read", *loc.SelectedText)
+			}
+		})
+	}
+}
+
+func TestReviewTrailFindingInputsWithoutAScopeDropsLineAnchors(t *testing.T) {
+	t.Parallel()
+	inputs := reviewTrailFindingInputs("", cliReview.TrailReport{Comments: []cliReview.TrailComment{
+		{Body: "b", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "src/app.go", StartLine: 3}},
+	}})
+	if len(inputs) != 1 {
+		t.Fatalf("inputs = %d, want 1", len(inputs))
+	}
+	if loc := inputs[0].Location; loc.Granularity != reviewTrailGranularityWholeChange || loc.FilePath != nil {
+		t.Fatalf("location = %+v, want whole_change when the scope is unknown", loc)
+	}
+}
+
+// A file rewritten after the scope was fixed, such as by a reviewer appending
+// another file's text to it, posts against the file without a quote.
+func TestReviewTrailFindingInputsDropsQuotesFromRewrittenFiles(t *testing.T) {
+	t.Parallel()
+	scope := trailScopeWith(t, []string{"src/app.go"})
+	testutil.WriteFile(t, scope.Root, "src/app.go", "API_KEY=copied\n")
+
+	inputs := reviewTrailFindingInputs("", cliReview.TrailReport{Scope: scope, Comments: []cliReview.TrailComment{
+		{Body: "b", Location: cliReview.TrailLocation{Granularity: "line", FilePath: "src/app.go", StartLine: 1}},
+	}})
+	if len(inputs) != 1 {
+		t.Fatalf("inputs = %d, want 1", len(inputs))
+	}
+	if loc := inputs[0].Location; loc.Granularity != reviewTrailGranularityFile || loc.FilePath == nil || *loc.FilePath != "src/app.go" || loc.StartLine != nil {
+		t.Fatalf("location = %+v, want file granularity on src/app.go", loc)
 	}
 }

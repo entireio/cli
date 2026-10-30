@@ -48,6 +48,7 @@ const (
 	agentFlagName            = "agent"
 	flagCheckpointRemote     = "checkpoint-remote"
 	flagCheckpointBackend    = "checkpoint-backend"
+	flagCheckpointPushPolicy = "checkpoint-push-policy"
 	flagSkipPushSessions     = "skip-push-sessions"
 	flagSummarizeModel       = "summarize-model"
 	flagSummarizeAgent       = "summarize-provider"
@@ -83,6 +84,9 @@ type EnableOptions struct {
 	CheckpointRemote       string
 	CheckpointPushRemote   string
 	checkpointRemoteChoice *enableCheckpointRemoteChoice
+	// errOut is the command's error stream, where prompts at the end of setup
+	// render; see promptErrOut.
+	errOut io.Writer
 	// CheckpointBackend selects the persistent checkpoint storage backend
 	// ("branch"/"refs" or the canonical "git-branch"/"git-refs"). Empty leaves
 	// the current/default (git-branch) backend in place.
@@ -102,6 +106,19 @@ type EnableOptions struct {
 	ImportHistory  bool
 	SearchSkill    bool
 	AgentHelpSkill bool
+	// NoCommitOffer lists the configuration still to commit without offering
+	// to commit it. Set by `entire agent add`, a targeted command that should
+	// not end in a prompt about files beyond the one agent it touched.
+	NoCommitOffer bool
+}
+
+// promptErrOut is the error stream prompts render on: the command's, when the
+// caller recorded it, otherwise the process's.
+func (opts *EnableOptions) promptErrOut() io.Writer {
+	if opts.errOut != nil {
+		return opts.errOut
+	}
+	return os.Stderr
 }
 
 // applyStrategyOptions sets strategy_options on settings from CLI flags.
@@ -155,7 +172,7 @@ func hasGlobalSettingsFlags(cmd *cobra.Command) bool {
 // hasConfigureSettingsFlags reports whether configure was invoked with any
 // flag that mutates settings or hooks. Bare invocation prints help instead.
 func hasConfigureSettingsFlags(cmd *cobra.Command) bool {
-	return hasStrategyFlags(cmd) || hasCheckpointBackendFlag(cmd) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd)
+	return hasStrategyFlags(cmd) || hasCheckpointBackendFlag(cmd) || cmd.Flags().Changed(flagCheckpointPushPolicy) || hasSummaryProviderFlags(cmd) || hasSummaryTimeoutFlag(cmd) || hasGlobalSettingsFlags(cmd)
 }
 
 // enableUsesSetupFlow reports whether `entire enable` should delegate to the
@@ -822,6 +839,7 @@ func newSetupCmd() *cobra.Command {
 	var summarizeProvider string
 	var summarizeModel string
 	var summarizeTimeoutSeconds int
+	var checkpointPushPolicy string
 
 	cmd := &cobra.Command{
 		Use:   "configure",
@@ -838,6 +856,7 @@ Examples:
   entire configure --force                        # Reinstall git hook
   entire configure --checkpoint-remote github:org/checkpoints   # or gitlab:org/checkpoints
   entire configure --checkpoint-backend refs      # Move a legacy repo to per-checkpoint git refs
+  entire configure --checkpoint-push-policy manual   # Keep checkpoints local until 'entire checkpoint push'
   entire configure --summarize-provider claude-code
   entire configure --summarize-timeout-seconds 300   # 5m deadline for explain --generate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -863,6 +882,21 @@ Examples:
 				return NewSilentError(errors.New("entire not configured"))
 			}
 
+			// Checked first, so an invalid value is refused before any other
+			// flag has changed anything, and saved last, so a failed step
+			// cannot leave manual on a backend it does not support.
+			var pushPolicy settings.CheckpointPushPolicy
+			if cmd.Flags().Changed(flagCheckpointPushPolicy) {
+				var backend string
+				if hasCheckpointBackendFlag(cmd) {
+					backend = opts.CheckpointBackend
+				}
+				policy, err := checkCheckpointPushPolicy(ctx, checkpointPushPolicy, backend)
+				if err != nil {
+					return err
+				}
+				pushPolicy = policy
+			}
 			if hasStrategyFlags(cmd) {
 				if err := updateStrategyOptions(ctx, cmd.OutOrStdout(), opts); err != nil {
 					return err
@@ -888,6 +922,11 @@ Examples:
 					return err
 				}
 			}
+			if pushPolicy != "" {
+				if err := saveCheckpointPushPolicy(ctx, cmd.OutOrStdout(), pushPolicy); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 	}
@@ -898,6 +937,7 @@ Examples:
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", checkpointRemoteFlagUsage)
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
+	cmd.Flags().StringVar(&checkpointPushPolicy, flagCheckpointPushPolicy, "", "When checkpoints upload for this clone: automatic (on git push) or manual (only with 'entire checkpoint push'). Applies to the whole clone; --local and --project don't change where it is saved")
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, antigravity, pi, opencode, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears the setting, leaving summary generation unbounded.")
@@ -1072,7 +1112,7 @@ publish the repository yourself when you're ready.`,
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). In an existing repository it lists the configuration files to commit rather than committing them. Does not import existing agent history — see --"+flagImportHistory)
 	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
@@ -1107,6 +1147,7 @@ func continueEnableAfterAgentValidation(
 	needsIdentity bool,
 	resolveIdentity gitIdentityResolver,
 ) error {
+	opts.errOut = cmd.ErrOrStderr()
 	if selectedAgent != nil {
 		if err := runEnableIdentityPreflight(ctx, cmd, repoRoot, needsIdentity, resolveIdentity); err != nil {
 			return err
@@ -1356,10 +1397,9 @@ func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Comm
 		if !usedSetupFlow {
 			fmt.Fprintln(w, "Entire is already enabled.")
 		}
-		printEnabledStatus(ctx, w)
-		return nil
+		return printEnabledStatus(ctx, w, opts)
 	}
-	return runEnable(ctx, w, useProject)
+	return runEnable(ctx, w, useProject, opts)
 }
 
 // scopeExplicitlyDisabled reports whether the settings file for the given scope
@@ -1552,28 +1592,27 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	fmt.Fprintln(w, "\nReady.")
 
-	// Note about empty repos at the end, after setup is complete
-	if repo, err := strategy.OpenRepository(ctx); err == nil {
-		defer repo.Close()
-		if strategy.IsEmptyRepository(repo) {
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, "Note: Session checkpoints require at least one commit. To get started,")
-			fmt.Fprintln(w, "commit the configuration files (e.g. .entire/, .claude/).")
-		}
+	if err := offerCommitConfig(ctx, w, opts); err != nil {
+		return err
 	}
-
 	printSetupCheckpointDestinationNote(ctx, w)
 
 	return nil
 }
 
-// printEnabledStatus prints agents and a hint about `entire agent`.
-func printEnabledStatus(ctx context.Context, w io.Writer) {
+// printEnabledStatus prints agents, a hint about `entire agent`, and the
+// configuration still to commit. It fails only when the commit offer is
+// interrupted.
+func printEnabledStatus(ctx context.Context, w io.Writer, opts EnableOptions) error {
 	if displayNames := InstalledAgentDisplayNames(ctx); len(displayNames) > 0 {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+	if err := offerCommitConfig(ctx, w, opts); err != nil {
+		return err
+	}
 	printSetupCheckpointDestinationNote(ctx, w)
+	return nil
 }
 
 // resolveFirstRunCheckpointBackend decides the checkpoint storage backend
@@ -1613,14 +1652,13 @@ func firstRunCheckpointBackendDefault() string {
 // (see setEnabledFlag). Callers resolve the scope: runEnableOnConfiguredRepo
 // uses settingsTargetFile so a bare `entire enable` targets the committed
 // settings.json when present and can recover a repo disabled there.
-func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
+func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool, opts EnableOptions) error {
 	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
 	}
 
 	fmt.Fprintln(w, "Entire is now enabled.")
-	printEnabledStatus(ctx, w)
-	return nil
+	return printEnabledStatus(ctx, w, opts)
 }
 
 // runDisable flips the enabled flag to false in the resolved settings scope.
@@ -2331,16 +2369,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	fmt.Fprintln(w, "\nReady.")
 
-	if repo, err := strategy.OpenRepository(ctx); err == nil {
-		defer repo.Close()
-		if strategy.IsEmptyRepository(repo) {
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, "Note: Session checkpoints require at least one commit. To get started,")
-			fmt.Fprintln(w, "commit the configuration files (e.g. .entire/, .claude/).")
-		}
-	}
-
-	return nil
+	return offerCommitConfig(ctx, w, opts)
 }
 
 // validateSetupFlags checks that --local and --project flags are not both specified.
@@ -3355,4 +3384,44 @@ func removeAllShadowBranches(ctx context.Context) (deleted int, refused, bare []
 	}
 	deletedBranches, failed := strategy.DeleteLegacyShadowBranches(ctx, strict)
 	return len(deletedBranches), failed, bare, nil
+}
+
+// checkCheckpointPushPolicy parses a --checkpoint-push-policy value. backend
+// is this run's --checkpoint-backend, empty when not given.
+//
+// manual needs git-refs: git-branch delivery does not read the policy, and
+// 'entire checkpoint push' cannot send its checkpoints.
+func checkCheckpointPushPolicy(ctx context.Context, value, backend string) (settings.CheckpointPushPolicy, error) {
+	policy, err := settings.ParseCheckpointPushPolicy(value)
+	if err != nil {
+		return "", err //nolint:wrapcheck // names the value and the accepted ones
+	}
+	if policy == settings.CheckpointPushPolicyManual {
+		refs, err := primaryBackendIsRefsAfter(ctx, backend)
+		if err != nil {
+			return "", err
+		}
+		if !refs {
+			return "", errors.New("checkpoint push policy manual needs the git-refs checkpoint backend; " +
+				"switch with 'entire configure --checkpoint-backend git-refs --checkpoint-push-policy manual' " +
+				"and convert existing checkpoints with 'entire doctor migrate-checkpoints'")
+		}
+	}
+	return policy, nil
+}
+
+// saveCheckpointPushPolicy saves the clone's checkpoint push policy. It is a
+// clone preference, so --local and --project do not apply: every worktree
+// shares one push queue.
+func saveCheckpointPushPolicy(ctx context.Context, w io.Writer, policy settings.CheckpointPushPolicy) error {
+	if err := settings.SaveCheckpointPushPolicy(ctx, policy); err != nil {
+		return err //nolint:wrapcheck // already names what failed
+	}
+	switch policy {
+	case settings.CheckpointPushPolicyManual:
+		fmt.Fprintln(w, "✓ Checkpoint push policy: manual. git push no longer uploads checkpoints from this clone; upload them with 'entire checkpoint push --all'.")
+	case settings.CheckpointPushPolicyAutomatic:
+		fmt.Fprintln(w, "✓ Checkpoint push policy: automatic. Checkpoints upload when you git push.")
+	}
+	return nil
 }

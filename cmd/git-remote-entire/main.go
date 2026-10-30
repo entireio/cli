@@ -468,6 +468,10 @@ func parseProtocolVersion(raw string) int {
 //   - otherwise: resolve the login context for this cluster from contexts.json
 //     and use its refreshed login JWT.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
+	// Fail before any network call.
+	if err := auth.CheckTokenStoreConfig(); err != nil {
+		return nil, nil, err //nolint:wrapcheck // already names the file
+	}
 	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,
 	// not Getenv, so we can tell set-empty from unset), we commit to the
 	// env-token path and any failure to use it is fatal — never a silent

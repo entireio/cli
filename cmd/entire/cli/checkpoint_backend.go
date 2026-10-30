@@ -52,6 +52,24 @@ func resolveCheckpointBackendType(name string) (string, error) {
 	return typ, nil
 }
 
+// primaryBackendIsRefsAfter reports whether the primary checkpoint backend is
+// git-refs once this configure run applies flagValue, its --checkpoint-backend
+// (empty when not given).
+func primaryBackendIsRefsAfter(ctx context.Context, flagValue string) (bool, error) {
+	if flagValue != "" {
+		typ, err := resolveCheckpointBackendType(flagValue)
+		if err != nil {
+			return false, err
+		}
+		return typ == checkpoint.BackendTypeGitRefs, nil
+	}
+	cfg, err := settings.LoadCheckpointsConfig(ctx)
+	if err != nil {
+		return false, fmt.Errorf("read checkpoint backend: %w", err)
+	}
+	return checkpoint.PrimaryIsRefs(cfg), nil
+}
+
 // applyCheckpointBackend sets the primary checkpoint backend on settings,
 // preserving any existing mirrors except one whose type would collide with the
 // new primary (the one-of-each-type topology rule enforced in checkpoint.Open).

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -16,6 +18,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/entireio/cli/internal/remotehelper/transport"
 )
 
@@ -526,6 +530,25 @@ func TestResolveEnvTokenCreds_DoesNotRequireJurisdictionAudience(t *testing.T) {
 	}
 	if got != envToken {
 		t.Errorf("creds = %q, want ENTIRE_TOKEN verbatim", got)
+	}
+}
+
+// A bad config.json fails before discovery.
+func TestResolveCreds_BadConfigFailsEarly(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(userdirs.EnvConfigDir, dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"tokenstore": "file"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(auth.EnvTokenVar, "")
+	if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
+		t.Fatal(err)
+	}
+	// A nil client panics if discovery runs.
+	dummyURL := &url.URL{Scheme: "entire", Host: "cluster.example.com"}
+	_, _, err := resolveCreds(t.Context(), dummyURL, false, nil)
+	if !errors.Is(err, tokenstore.ErrBadConfig) {
+		t.Fatalf("err = %v, want ErrBadConfig", err)
 	}
 }
 

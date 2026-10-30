@@ -52,6 +52,12 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(isolationDir, "auth-tokens.json"))
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(isolationDir, "config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(isolationDir, "cache"))
+	// The post-plugin-run update check loads the invoked plugin's install
+	// manifest, so any test that drives MaybeRunPlugin to a successful exit
+	// would otherwise read the developer's real managed plugin tree — and a
+	// name that matches a real install would run a real `git ls-remote`.
+	// Tests that need a populated plugin dir override this with withPluginDir.
+	os.Setenv("ENTIRE_PLUGIN_DIR", filepath.Join(isolationDir, "plugins"))
 	// Cursor import discovery reads ~/.cursor/chats; keep it off the
 	// developer's real sessions.
 	os.Setenv("ENTIRE_TEST_CURSOR_CHATS_DIR", filepath.Join(isolationDir, "cursor-chats"))

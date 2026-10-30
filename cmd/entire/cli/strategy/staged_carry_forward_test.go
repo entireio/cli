@@ -20,6 +20,7 @@ import (
 func commitPathsWithTrailer(t *testing.T, dir, checkpointID string, paths ...string) {
 	t.Helper()
 	msg := "partial commit\n\n" + trailers.CheckpointTrailerKey + ": " + id.MustCheckpointID(checkpointID).String() + "\n"
+	recordStampedTrailer(context.Background(), id.MustCheckpointID(checkpointID))
 	testutil.RunGit(t, dir, append([]string{"commit", "-q", "-m", msg, "--"}, paths...)...)
 }
 

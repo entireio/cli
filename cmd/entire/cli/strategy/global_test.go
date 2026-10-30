@@ -28,6 +28,13 @@ func TestMain(m *testing.M) {
 	// hooks, and so t.Parallel tests are not excluded. Mirrors the e2e TestMains.
 	gitenv.IsolateMain()
 
+	// The commit hooks read GIT_EDITOR=: as git opening no editor, and these
+	// tests run them in-process: a value the developer's shell exports (a git
+	// hook running the suite gets ":") would change where they place trailers.
+	if err := os.Unsetenv("GIT_EDITOR"); err != nil {
+		panic(fmt.Errorf("unset GIT_EDITOR: %w", err))
+	}
+
 	// Register a default ConfigSource so tests that call ConfigScoped
 	// (directly or indirectly via Commit/CreateTag) don't fail with
 	// "no config loader registered".

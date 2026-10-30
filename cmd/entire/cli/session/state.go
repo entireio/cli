@@ -342,14 +342,18 @@ type State struct {
 	// normal agent execution.
 	AttachedManually bool `json:"attached_manually,omitempty"`
 
-	// ContextInjectionDecided records that the once-per-session model-context
-	// injection (e.g. the `entire trail` pointer) has been handled for this
-	// session, so the dispatcher does not re-inject on later turns. Set on the
-	// first normal turn regardless of whether anything was injected: the prompt
-	// path reads only clone-local cached trail enablement, and a missing/stale
-	// false cache fails closed (miss the hint) rather than retrying/spamming.
-	// Review/investigate sessions leave this false because they skip injection.
+	// ContextInjectionDecided records that the trails part of the
+	// once-per-session model-context injection has been decided for this
+	// session (injected when trails are enabled, skipped when they are not), so
+	// the dispatcher does not re-decide on later turns. An unknown trails cache
+	// leaves it false so a later turn can decide. Review/investigate sessions
+	// leave this false because they skip injection.
 	ContextInjectionDecided bool `json:"context_injection_decided,omitempty"`
+
+	// ContextInjectionBaseDone records that the base model-context injection
+	// (the `entire agent-help` pointer and standing rules) has been sent. It
+	// goes out on the first normal turn whether or not trails are decided yet.
+	ContextInjectionBaseDone bool `json:"context_injection_base_done,omitempty"`
 
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Codex", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
@@ -512,6 +516,13 @@ type State struct {
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
 
+	// PendingTaskAttachments are completed task records whose write into an
+	// existing checkpoint failed at post-task (a foreground subagent that
+	// committed its own work). Each turn end retries them. They are not pending
+	// work: condensing one into another commit's checkpoint would misattribute
+	// it, so it is never materialized anywhere but its own checkpoint.
+	PendingTaskAttachments []TaskAttachment `json:"pending_task_attachments,omitempty"`
+
 	// SubagentInventory retains Codex child identities independently of task
 	// records so follow-up turns remain discoverable after materialization.
 	SubagentInventory []SubagentInventoryEntry `json:"subagent_inventory,omitempty"`
@@ -519,6 +530,14 @@ type State struct {
 	SubagentLedgerVersion uint64 `json:"subagent_ledger_version,omitempty"`
 	// SubagentInventoryComplete distinguishes exact empty from legacy unknown.
 	SubagentInventoryComplete *bool `json:"subagent_inventory_complete,omitempty"`
+}
+
+// TaskAttachment is a completed task record bound for an existing checkpoint.
+type TaskAttachment struct {
+	CheckpointID string     `json:"checkpoint_id"`
+	Record       TaskRecord `json:"record"`
+	// FailedRetries counts the turn ends whose write also failed.
+	FailedRetries int `json:"failed_retries,omitempty"`
 }
 
 type SubagentInventoryEntry struct {

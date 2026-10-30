@@ -266,7 +266,7 @@ func TestRunEnable(t *testing.T) {
 	writeSettings(t, testSettingsDisabled)
 
 	var stdout bytes.Buffer
-	if err := runEnable(context.Background(), &stdout, false); err != nil {
+	if err := runEnable(context.Background(), &stdout, false, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable() error = %v", err)
 	}
 
@@ -288,7 +288,7 @@ func TestRunEnable_AlreadyEnabled(t *testing.T) {
 	writeSettings(t, testSettingsEnabled)
 
 	var stdout bytes.Buffer
-	if err := runEnable(context.Background(), &stdout, false); err != nil {
+	if err := runEnable(context.Background(), &stdout, false, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable() error = %v", err)
 	}
 
@@ -402,7 +402,7 @@ func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, true); err != nil {
+	if err := runEnable(context.Background(), &buf, true, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
@@ -441,7 +441,7 @@ func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
 	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, true); err != nil {
+	if err := runEnable(context.Background(), &buf, true, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
@@ -490,7 +490,7 @@ func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, false); err != nil {
+	if err := runEnable(context.Background(), &buf, false, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=false) error = %v", err)
 	}
 
@@ -1128,7 +1128,7 @@ func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
 	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, true); err != nil {
+	if err := runEnable(context.Background(), &buf, true, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=true) error = %v", err)
 	}
 
@@ -1174,7 +1174,7 @@ func TestRunEnable_LocalScope_PreservesLocalOnlyFields(t *testing.T) {
 	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
 	var buf bytes.Buffer
-	if err := runEnable(context.Background(), &buf, false); err != nil {
+	if err := runEnable(context.Background(), &buf, false, EnableOptions{}); err != nil {
 		t.Fatalf("runEnable(project=false) error = %v", err)
 	}
 

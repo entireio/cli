@@ -268,62 +268,77 @@ func TestRunPlugin_ExitCodePropagation(t *testing.T) {
 	}
 }
 
-// interceptVersionCheck swaps the post-plugin version-check seam for a
-// counter and restores it on cleanup.
-func interceptVersionCheck(t *testing.T) *int {
+// interceptPluginNotices swaps both post-plugin notice seams — the CLI
+// version check and the plugin update check — for counters and restores
+// them on cleanup.
+func interceptPluginNotices(t *testing.T) (versionCalls, updateCalls *int) {
 	t.Helper()
-	calls := 0
-	orig := postPluginVersionCheck
-	postPluginVersionCheck = func(context.Context, io.Writer, string) { calls++ }
-	t.Cleanup(func() { postPluginVersionCheck = orig })
-	return &calls
+	v, u := 0, 0
+	origVersion, origUpdate := postPluginVersionCheck, postPluginUpdateCheck
+	postPluginVersionCheck = func(context.Context, io.Writer, string) { v++ }
+	postPluginUpdateCheck = func(context.Context, io.Writer, string) { u++ }
+	t.Cleanup(func() {
+		postPluginVersionCheck, postPluginUpdateCheck = origVersion, origUpdate
+	})
+	return &v, &u
 }
 
-func TestMaybeRunPlugin_VersionCheckAfterSuccess(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+func TestMaybeRunPlugin_NoticesAfterSuccess(t *testing.T) { //nolint:paralleltest // mutates PATH and the notice seams
 	dir := t.TempDir()
 	writePluginBinary(t, dir, "entire-pgr", filepath.Join(dir, "args.txt"), 0)
 	withPathDir(t, dir)
-	calls := interceptVersionCheck(t)
+	versionCalls, updateCalls := interceptPluginNotices(t)
 
 	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
 	if !handled || code != 0 {
 		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
 	}
-	if *calls != 1 {
-		t.Errorf("version check calls: got %d, want 1", *calls)
+	if *versionCalls != 1 {
+		t.Errorf("version check calls: got %d, want 1", *versionCalls)
+	}
+	if *updateCalls != 1 {
+		t.Errorf("update check calls: got %d, want 1", *updateCalls)
 	}
 }
 
 // After `entire upgrade` replaces the binary on disk, this process still
 // carries the pre-upgrade compiled-in version — a post-run version check
 // would see itself as outdated and prompt to redo the finished upgrade.
-func TestMaybeRunPlugin_NoVersionCheckAfterSelfUpdate(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+// The plugin update check is exempt from that guard: it reads the upgrade
+// plugin's manifest fresh from disk, which the self-update cannot stale.
+func TestMaybeRunPlugin_NoVersionCheckAfterSelfUpdate(t *testing.T) { //nolint:paralleltest // mutates PATH and the notice seams
 	dir := t.TempDir()
 	writePluginBinary(t, dir, "entire-upgrade", filepath.Join(dir, "args.txt"), 0)
 	withPathDir(t, dir)
-	calls := interceptVersionCheck(t)
+	versionCalls, updateCalls := interceptPluginNotices(t)
 
 	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"upgrade", "--nightly"})
 	if !handled || code != 0 {
 		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
 	}
-	if *calls != 0 {
-		t.Errorf("version check calls: got %d, want 0", *calls)
+	if *versionCalls != 0 {
+		t.Errorf("version check calls: got %d, want 0", *versionCalls)
+	}
+	if *updateCalls != 1 {
+		t.Errorf("update check calls: got %d, want 1", *updateCalls)
 	}
 }
 
-func TestMaybeRunPlugin_NoVersionCheckAfterFailure(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+func TestMaybeRunPlugin_NoNoticesAfterFailure(t *testing.T) { //nolint:paralleltest // mutates PATH and the notice seams
 	dir := t.TempDir()
 	writePluginBinary(t, dir, "entire-pgr", filepath.Join(dir, "args.txt"), 3)
 	withPathDir(t, dir)
-	calls := interceptVersionCheck(t)
+	versionCalls, updateCalls := interceptPluginNotices(t)
 
 	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
 	if !handled || code != 3 {
 		t.Fatalf("handled=%v code=%d, want handled=true code=3", handled, code)
 	}
-	if *calls != 0 {
-		t.Errorf("version check calls: got %d, want 0", *calls)
+	if *versionCalls != 0 {
+		t.Errorf("version check calls: got %d, want 0", *versionCalls)
+	}
+	if *updateCalls != 0 {
+		t.Errorf("update check calls: got %d, want 0", *updateCalls)
 	}
 }
 
@@ -404,7 +419,7 @@ func TestMaybeRunPlugin_PropagatesTheChildsSignal(t *testing.T) { //nolint:paral
 	binPath := filepath.Join(dir, "entire-signaller")
 	writeExecutableScript(t, binPath, "#!/bin/sh\ntrap - TERM\nkill -TERM $$\n")
 	t.Setenv("PATH", dir)
-	interceptVersionCheck(t)
+	interceptPluginNotices(t)
 
 	handled, code, killedBy := MaybeRunPlugin(t.Context(), newTestRoot(), []string{"signaller"})
 	if !handled || code != ExitPluginSignalled {

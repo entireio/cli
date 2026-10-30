@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,10 +31,14 @@ type fakeProjectTrailCore struct {
 	apiURL         string
 	resolutionJSON string
 	clusters       []coreapi.Cluster
+	resolveErr     error
 }
 
 func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, params coreapi.ResolveProjectParams) (*coreapi.ResolveProjectOutputBody, error) {
 	f.resolveCalls++
+	if f.resolveErr != nil {
+		return nil, f.resolveErr
+	}
 	resolved := struct {
 		Project *struct {
 			ID                    string `json:"id"`
@@ -85,7 +90,24 @@ func setupProjectTrailTest(t *testing.T, handler http.HandlerFunc) (*fakeProject
 		require.Equal(t, server.URL, target.BaseURL)
 		return api.NewClientWithBaseURL("project-token", target.BaseURL), nil
 	}
-	t.Cleanup(func() { newProjectTrailCoreClient, newProjectTrailCellClient = oldCore, oldCell })
+	// Repository reads (show's merge gates) fail unless a test stubs them, so
+	// no test reaches the real control plane.
+	oldTrail := newTrailAPIClient
+	newTrailAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+		return nil, "", errors.New("repository client not stubbed")
+	}
+	// The shared-login opener routes through newTrailAPIClient, so a test
+	// stubs one seam for both.
+	oldOpener := newTrailRepoClientOpener
+	newTrailRepoClientOpener = func(insecure bool) trailRepoClientOpener {
+		return func(ctx context.Context, forge, owner, repo string) (*api.Client, string, error) {
+			return newTrailAPIClient(ctx, insecure, forge, owner, repo)
+		}
+	}
+	t.Cleanup(func() {
+		newProjectTrailCoreClient, newProjectTrailCellClient, newTrailAPIClient = oldCore, oldCell, oldTrail
+		newTrailRepoClientOpener = oldOpener
+	})
 	return core, server
 }
 
@@ -426,4 +448,72 @@ func TestProjectTrailValidationBeforeIO(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// Core answers 404 for a missing project and for a GitHub namespace the login
+// cannot see, and 403 for a native project it may not inspect. Both must read
+// as one line naming the project, never the generated client's error dump.
+func TestProjectTrailProjectResolveErrorsAreReadable(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       int
+		args         []string
+		sentinel     error
+		want         []string
+		noGitHubHint bool
+	}{
+		{
+			name: "missing GitHub namespace on list", status: http.StatusNotFound,
+			args: []string{"list", "--project", "gh/acme"}, sentinel: errProjectTrailProjectNotFound,
+			want: []string{"project gh/acme does not exist or is not visible to your login", "entire auth status", "GitHub owner is connected to Entire"},
+		},
+		{
+			name: "missing native project on show", status: http.StatusNotFound,
+			args: []string{"show", "42", "--project", "et/widgets"}, sentinel: errProjectTrailProjectNotFound,
+			want:         []string{"project et/widgets does not exist or is not visible to your login", "entire auth status"},
+			noGitHubHint: true,
+		},
+		{
+			name: "forbidden native project", status: http.StatusForbidden,
+			args: []string{"show", "42", "--project", "et/widgets"}, sentinel: errProjectTrailProjectForbidden,
+			want:         []string{"your login does not have access to project et/widgets"},
+			noGitHubHint: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, _ := setupProjectTrailTest(t, func(http.ResponseWriter, *http.Request) {
+				t.Error("no data-plane request expected after a refused project resolution")
+			})
+			cause := &coreapi.ErrorModelStatusCode{StatusCode: tc.status, Response: coreapi.ErrorModel{
+				Detail: coreapi.NewOptString("project not found"),
+				Title:  coreapi.NewOptString(http.StatusText(tc.status)),
+			}}
+			core.resolveErr = cause
+			_, _, err := executeProjectTrailTest(t, tc.args...)
+			require.ErrorIs(t, err, tc.sentinel)
+			require.ErrorIs(t, err, cause, "callers can still inspect the client error")
+			for _, want := range tc.want {
+				assert.Contains(t, err.Error(), want)
+			}
+			assert.NotContains(t, err.Error(), "Schema:", "the generated client's error dump must not reach the user")
+			assert.NotContains(t, err.Error(), "project not found:", "the sentinel text must not prefix the message")
+			if tc.noGitHubHint {
+				assert.NotContains(t, err.Error(), "GitHub owner", "native projects get no GitHub hint")
+			}
+		})
+	}
+}
+
+// Other Core API errors name the project, the server's detail and the status,
+// still without the dump, and keep the underlying error for diagnosis.
+func TestProjectTrailProjectResolveOtherErrorsKeepCause(t *testing.T) {
+	core, _ := setupProjectTrailTest(t, func(http.ResponseWriter, *http.Request) {})
+	cause := &coreapi.ErrorModelStatusCode{StatusCode: http.StatusInternalServerError, Response: coreapi.ErrorModel{
+		Detail: coreapi.NewOptString("boom detail"),
+	}}
+	core.resolveErr = cause
+	_, _, err := executeProjectTrailTest(t, "list", "--project", "gh/acme")
+	require.ErrorIs(t, err, cause)
+	require.NotErrorIs(t, err, errProjectTrailProjectNotFound)
+	assert.Equal(t, "resolve project gh/acme: boom detail (HTTP 500)", err.Error())
 }

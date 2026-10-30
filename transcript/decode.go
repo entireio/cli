@@ -27,15 +27,21 @@ func (e *SkippedLinesError) Error() string {
 }
 
 type wireLine struct {
-	V            *int            `json:"v"`
-	Type         *string         `json:"type"`
-	Agent        string          `json:"agent"`
-	CLIVersion   string          `json:"cli_version"`
-	TS           json.RawMessage `json:"ts"`
-	ID           string          `json:"id"`
-	InputTokens  int             `json:"input_tokens"`
-	OutputTokens int             `json:"output_tokens"`
-	Content      json.RawMessage `json:"content"`
+	V                  *int            `json:"v"`
+	Type               *string         `json:"type"`
+	Agent              string          `json:"agent"`
+	CLIVersion         string          `json:"cli_version"`
+	TS                 json.RawMessage `json:"ts"`
+	ID                 string          `json:"id"`
+	Model              string          `json:"model"`
+	InputTokens        int64           `json:"input_tokens"`
+	OutputTokens       int64           `json:"output_tokens"`
+	CacheReadTokens    int64           `json:"cache_read_tokens"`
+	CacheWriteTokens   int64           `json:"cache_write_tokens"`
+	CacheWrite5mTokens *int64          `json:"cache_write_5m_tokens"`
+	CacheWrite1hTokens *int64          `json:"cache_write_1h_tokens"`
+	ReasoningTokens    int64           `json:"reasoning_tokens"`
+	Content            json.RawMessage `json:"content"`
 }
 
 type wireBlock struct {
@@ -109,15 +115,21 @@ func decodeLine(raw []byte) (Line, string) {
 		ts = ""
 	}
 	return Line{
-		Version:      *w.V,
-		Type:         *w.Type,
-		Agent:        w.Agent,
-		CLIVersion:   w.CLIVersion,
-		Timestamp:    ts,
-		ID:           w.ID,
-		InputTokens:  w.InputTokens,
-		OutputTokens: w.OutputTokens,
-		Blocks:       decodeContent(w.Content),
+		Version:            *w.V,
+		Type:               *w.Type,
+		Agent:              w.Agent,
+		CLIVersion:         w.CLIVersion,
+		Timestamp:          ts,
+		ID:                 w.ID,
+		Model:              w.Model,
+		InputTokens:        w.InputTokens,
+		OutputTokens:       w.OutputTokens,
+		CacheReadTokens:    w.CacheReadTokens,
+		CacheWriteTokens:   w.CacheWriteTokens,
+		CacheWrite5mTokens: w.CacheWrite5mTokens,
+		CacheWrite1hTokens: w.CacheWrite1hTokens,
+		ReasoningTokens:    w.ReasoningTokens,
+		Blocks:             decodeContent(w.Content),
 	}, ""
 }
 

@@ -10,8 +10,8 @@ import (
 	"testing"
 )
 
-// jsonlFixtures are the golden inputs handled by compactJSONLWith, with the
-// preprocessor Compact selects for them.
+// jsonlFixtures are the golden inputs handled by the JSONL adapters, with the
+// preprocessor Convert selects for them.
 var jsonlFixtures = []struct {
 	path       string
 	preprocess linePreprocessor
@@ -224,18 +224,21 @@ func TestJSONLAdapter_ExportedConstructorsMatchConvert(t *testing.T) {
 
 	for _, tc := range []struct {
 		path    string
+		agent   string
 		adapter func() *JSONLAdapter
 	}{
-		{"testdata/claude_full.jsonl", NewClaudeAdapter},
-		{"testdata/claude_full2.jsonl", NewClaudeAdapter},
-		{"testdata/claude_full.jsonl", NewCursorAdapter},
-		{"testdata/droid_full.jsonl", NewDroidAdapter},
+		{"testdata/claude_full.jsonl", agentClaudeCode, NewClaudeAdapter},
+		{"testdata/claude_full2.jsonl", agentClaudeCode, NewClaudeAdapter},
+		{"testdata/claude_full.jsonl", "cursor", NewCursorAdapter},
+		{"testdata/droid_full.jsonl", "factoryai-droid", NewDroidAdapter},
 	} {
 		input, err := os.ReadFile(tc.path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want, err := Convert(input, defaultOpts)
+		opts := defaultOpts
+		opts.Agent = tc.agent
+		want, err := Convert(input, opts)
 		if err != nil {
 			t.Fatalf("%s: Convert: %v", tc.path, err)
 		}
@@ -245,7 +248,11 @@ func TestJSONLAdapter_ExportedConstructorsMatchConvert(t *testing.T) {
 			recs = append(recs, a.Feed(line)...)
 		}
 		recs = append(recs, a.Flush()...)
-		if got := foldRecords(t, recs); !bytes.Equal(got, want) {
+		got, err := Fold(recs, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
 			t.Fatalf("%s: fold differs from Convert\ngot:\n%s\nwant:\n%s", tc.path, got, want)
 		}
 	}
@@ -346,7 +353,10 @@ func TestJSONLAdapter_AlternatingFragmentRecordsGrowLinearly(t *testing.T) {
 	}
 	for _, n := range []int{1000, 4000} {
 		input := alternating(n)
-		assertMatchesLegacy(t, input, nil)
+		// The legacy oracle is quadratic here.
+		if n == 1000 {
+			assertMatchesLegacy(t, input, nil)
+		}
 		if size := len(encodeRecords(t, adapterRecords(input, nil, nil))); size > 2*len(input) {
 			t.Errorf("%d fragments: %d bytes of records for %d bytes of input", n, size, len(input))
 		}
@@ -356,17 +366,66 @@ func TestJSONLAdapter_AlternatingFragmentRecordsGrowLinearly(t *testing.T) {
 func assertMatchesLegacy(t *testing.T, input []byte, preprocess linePreprocessor) {
 	t.Helper()
 
-	want, err := legacyCompactJSONLWith(input, defaultOpts, preprocess)
+	opts := defaultOpts
+	opts.Agent = "cursor" // claude-code lines carry per-call usage the oracle predates
+	want, err := legacyCompactJSONLWith(input, opts, preprocess)
 	if err != nil {
 		t.Fatalf("legacy: %v", err)
 	}
-	got, err := compactJSONLWith(input, defaultOpts, preprocess)
+	got, err := convertJSONL(input, opts, preprocess)
 	if err != nil {
-		t.Fatalf("compactJSONLWith: %v", err)
+		t.Fatalf("convertJSONL: %v", err)
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("output differs from legacy compactor\ninput:\n%s\ngot:\n%s\nwant:\n%s", input, got, want)
 	}
+
+	opts.Agent = agentClaudeCode
+	want, err = legacyCompactJSONLWith(input, opts, preprocess)
+	if err != nil {
+		t.Fatalf("legacy: %v", err)
+	}
+	got, err = convertJSONL(input, opts, preprocess)
+	if err != nil {
+		t.Fatalf("convertJSONL: %v", err)
+	}
+	if got, want := withoutUsageFields(t, got), withoutUsageFields(t, want); !bytes.Equal(got, want) {
+		t.Fatalf("claude-code output differs from legacy compactor outside usage fields\ninput:\n%s\ngot:\n%s\nwant:\n%s", input, got, want)
+	}
+}
+
+// convertJSONL converts input as Convert does for a JSONL transcript that
+// needs preprocess (nil for Claude Code and Cursor, the envelope unwrapper for
+// Droid).
+func convertJSONL(input []byte, opts Options, preprocess linePreprocessor) ([]byte, error) {
+	if preprocess != nil {
+		return compactDroid(input, opts)
+	}
+	return compactJSONL(input, opts)
+}
+
+func withoutUsageFields(t *testing.T, out []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	for _, line := range bytes.SplitAfter(out, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []string{"model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens", "reasoning_tokens"} {
+			delete(m, k)
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes()
 }
 
 // adapterRecords feeds chunks (or the whole input when chunks is nil) to a
@@ -376,6 +435,7 @@ func adapterRecords(input []byte, preprocess linePreprocessor, chunks [][]byte) 
 		chunks = [][]byte{input}
 	}
 	a := newJSONLAdapter(preprocess)
+	a.perCallUsage = true
 	var recs []Record
 	for _, c := range chunks {
 		recs = append(recs, a.Feed(c)...)

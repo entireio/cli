@@ -102,7 +102,7 @@ func TestMissingHooksBannerSuffix_OpenCodeOutdatedStaysSilent(t *testing.T) {
 	_, err := hs.InstallHooks(ctx, false)
 	require.NoError(t, err)
 
-	plugin := filepath.Join(dir, ".opencode", "plugins", "entire.ts")
+	plugin := filepath.Join(dir, ".opencode", "plugin", "entire.ts")
 	data, err := os.ReadFile(plugin)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(plugin, append(data, "// edited by another CLI version\n"...), 0o600))

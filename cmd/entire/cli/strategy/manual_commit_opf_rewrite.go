@@ -446,7 +446,7 @@ func resolveRemoteV1Tip(ctx context.Context, repo *git.Repository, target string
 	if wt, wtErr := repo.Worktree(); wtErr == nil {
 		worktreeRoot = wt.Filesystem().Root()
 	}
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, target, srcRef, opfRewriteFetchTmpRef, "v1 for OPF rewrite", true, checkpointRemoteFetchTimeout); err != nil {
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, target, srcRef, opfRewriteFetchTmpRef, "v1 for OPF rewrite", true, hotPathFetch); err != nil {
 		if !remote.IsURL(target) {
 			logging.Warn(ctx, "OPF rewrite: failed to fetch remote v1; using local remote-tracking ref",
 				slog.String("remote", target),

@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
@@ -18,6 +20,10 @@ import (
 )
 
 const trailBranchActionLink = "link"
+
+// trailChangeGatesTimeout bounds the merge gate reads behind `trail show`.
+// The trail renders without them, so a slow cell only drops a change's gates.
+const trailChangeGatesTimeout = 5 * time.Second
 
 func projectTrailSelector(args []string) string {
 	if len(args) == 1 {
@@ -33,7 +39,7 @@ func addProjectTrailSelectorFlags(cmd *cobra.Command) {
 func newProjectTrailShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "show [<trail>]", Short: "Show trail intent and its repositories and branches",
-		Long: "Show a project trail by its project-local number or ULID, or the trail of <repo>/<number> branch work. Without a selector, follow the current branch's parent. Use --branch to follow another branch's parent.",
+		Long: "Show a project trail by its project-local number or ULID, or the trail of <repo>/<number> branch work. Without a selector, follow the current branch's parent. Use --branch to follow another branch's parent. Open changes, and the change the trail was reached through, show their merge gates (the first 20 changes).",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target, err := resolveProjectTrail(cmd, projectTrailSelector(args))
@@ -44,12 +50,70 @@ func newProjectTrailShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printProjectTrail(cmd, out, target.Change)
+			return printProjectTrail(cmd, out, target.Change, lookupProjectTrailGates(cmd, target, out))
 		},
 	}
 	addProjectTrailSelectorFlags(cmd)
 	addJSONFlag(cmd)
 	return cmd
+}
+
+// lookupProjectTrailGates reads the mergeability snapshot of each open change,
+// and of the change the trail was reached through whatever its status, from
+// its repository trail, keyed by change ID. A change missing from the result
+// was not looked up or could not be read; the result is never nil, so every
+// change carries the key in --json. Failures are summed into one
+// warning so a partial-access reader sees the trail rather than an error.
+func lookupProjectTrailGates(cmd *cobra.Command, target *projectTrailTarget, item api.ProjectTrail) map[string]*api.TrailMergeability {
+	var changes []api.ChangeSummary
+	for _, c := range item.Changes {
+		if c.Number <= 0 {
+			continue // Not yet a repository trail; there is nothing to read.
+		}
+		if target.Change != nil && c.ID == target.Change.ID {
+			if c.Repository == "" {
+				c.Repository = target.Change.Repo
+			}
+			// First, so the lookup cap never drops the change the user asked about.
+			changes = append([]api.ChangeSummary{c}, changes...)
+			continue
+		}
+		if s := trail.Status(c.Status); s == trail.StatusMerged || s == trail.StatusClosed {
+			continue
+		}
+		changes = append(changes, c)
+	}
+	if len(changes) == 0 {
+		return map[string]*api.TrailMergeability{}
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), trailChangeGatesTimeout)
+	defer cancel()
+	// The current change's repository is already open from resolving the
+	// trail; reuse it as reviews do (trail_working_context.go).
+	var local trailRepoAccess
+	if target.Change != nil {
+		local = target.Change.Access
+	}
+	gates, failed := lookupTrailChangeData(ctx, newTrailRepoClientOpener(trailInsecureHTTP(cmd)), target, local, changes, readTrailChangeMergeability)
+	if failed > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load merge gates for %d change(s)\n", failed)
+	}
+	if skipped := len(changes) - trailChangeReviewLimit; skipped > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Merge gates are shown for the first %d changes; %d more were not read.\n", trailChangeReviewLimit, skipped)
+	}
+	return gates
+}
+
+func readTrailChangeMergeability(ctx context.Context, access *trailRepoAccess, number int) (*api.TrailMergeability, error) {
+	detail, err := fetchTrailDetailAtPath(ctx, access.Client, access.BasePath, number)
+	if err != nil {
+		return nil, err
+	}
+	mg, err := detail.DecodeMergeability()
+	if err != nil {
+		return nil, fmt.Errorf("trail %d: %w", number, err)
+	}
+	return mg, nil
 }
 
 // projectTrailJSON is a project trail as `--json` prints it: each change
@@ -66,6 +130,20 @@ type projectTrailChangeJSON struct {
 
 	URL     string `json:"url,omitempty"`
 	Current bool   `json:"current,omitempty"`
+	// Mergeability is the change's merge gates snapshot, set only by `trail
+	// show`. There it is always present and null when there is no snapshot: a
+	// merged or closed change that was not read, a failed read (which also
+	// warns on stderr), or a read whose server has no snapshot yet (no
+	// warning; the repository trail's own --json prints null for it too). A
+	// missing verdict so never reads as "mergeable": false; commands that do
+	// not read gates omit the key, which is why it points to a possibly nil
+	// snapshot.
+	Mergeability **trailMergeabilityJSON `json:"mergeability,omitempty"`
+
+	// gates is the snapshot for the human view; gatesLoaded tells a change
+	// whose read returned no snapshot from one that was not read.
+	gates       *api.TrailMergeability
+	gatesLoaded bool
 
 	// selector is the change as <repo>/<number>, from the summary's repository
 	// or, for the current change, the one the CLI resolved when the summary
@@ -85,8 +163,10 @@ func projectTrailChangeURL(trailURL, selector string) string {
 }
 
 // printProjectTrail renders a project trail. current is the change the trail
-// was reached through, or nil when it was selected directly.
-func printProjectTrail(cmd *cobra.Command, item api.ProjectTrail, current *projectTrailCurrentChange) error {
+// was reached through, or nil when it was selected directly. gates holds the
+// changes' mergeability snapshots by change ID; nil when the command does
+// not read gates.
+func printProjectTrail(cmd *cobra.Command, item api.ProjectTrail, current *projectTrailCurrentChange, gates map[string]*api.TrailMergeability) error {
 	out := projectTrailJSON{ProjectTrail: item, Changes: mapSlice(item.Changes, func(c api.ChangeSummary) projectTrailChangeJSON {
 		entry := projectTrailChangeJSON{ChangeSummary: c}
 		named := c
@@ -98,6 +178,11 @@ func printProjectTrail(cmd *cobra.Command, item api.ProjectTrail, current *proje
 		}
 		entry.selector, _ = trailChangeSelectorFor(named)
 		entry.URL = projectTrailChangeURL(item.URL, entry.selector)
+		if gates != nil {
+			entry.gates, entry.gatesLoaded = gates[c.ID]
+			snapshot := toTrailMergeabilityJSON(entry.gates)
+			entry.Mergeability = &snapshot
+		}
 		return entry
 	})}
 	if jsonRequested(cmd) {
@@ -199,6 +284,22 @@ func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []proj
 				}
 				return cell
 			})
+		}
+	}
+	for _, c := range changes {
+		if !c.gatesLoaded {
+			continue
+		}
+		name := c.selector
+		if name == "" {
+			name = tuiutil.SanitizeTerminalLabel(c.Branch)
+		}
+		fmt.Fprintf(w, "  %s\n", label("Gates for "+name+":"))
+		// Indent the single-trail block one level under its change.
+		var block strings.Builder
+		printTrailMergeability(&block, styles, label, c.gates)
+		for line := range strings.Lines(block.String()) {
+			fmt.Fprint(w, "  "+line)
 		}
 	}
 	if item.Body != "" {
@@ -346,7 +447,7 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 			if err := target.validateResponse(out); err != nil {
 				return err
 			}
-			return printProjectTrail(cmd, out, target.Change)
+			return printProjectTrail(cmd, out, target.Change, nil)
 		},
 	}
 	fields.flags(cmd)
@@ -406,7 +507,7 @@ func newProjectTrailCreateCmd() *cobra.Command {
 			if err := target.validateResponse(out); err != nil {
 				return err
 			}
-			return printProjectTrail(cmd, out, nil)
+			return printProjectTrail(cmd, out, nil, nil)
 		},
 	}
 	fields.flags(cmd)

@@ -123,6 +123,7 @@ func TestCommitHookPerformance(t *testing.T) {
 				commitMsg = fmt.Sprintf("%s\n%s: %s\n",
 					strings.TrimRight(commitMsg, "\n"),
 					trailers.CheckpointTrailerKey, cpID)
+				recordStampedTrailer(context.Background(), cpID)
 				t.Logf("  Injected trailer (PrepareCommitMsg skipped content-aware check)")
 			}
 

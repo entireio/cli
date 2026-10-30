@@ -458,7 +458,7 @@ func SendEvents(payloadJSON string) {
 	// Resolve the installed git version best-effort, once for the whole batch.
 	// A missing or failing git must never block the rest of the telemetry — the
 	// property is simply omitted when it can't be determined.
-	gitVer := gitVersion(context.Background())
+	gitVer := GitVersion(context.Background())
 
 	for _, payload := range payloads {
 		props := posthog.NewProperties()
@@ -498,10 +498,10 @@ func decodeEventPayloads(payloadJSON string) []EventPayload {
 	return []EventPayload{single}
 }
 
-// gitVersion returns the installed git version (e.g. "2.43.0"), best-effort.
+// GitVersion returns the installed git version (e.g. "2.43.0"), best-effort.
 // It returns "" when git is absent, the command fails or times out, or the
 // output cannot be parsed — callers must treat "" as "unknown" and move on.
-func gitVersion(ctx context.Context) string {
+func GitVersion(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 

@@ -13,7 +13,7 @@ import (
 
 // committedHookConfigAgents are the agents whose Entire hook config this repo
 // commits: .claude/settings.json, .codex/hooks.json,
-// .opencode/plugins/entire.ts, and .pi/extensions/entire/index.ts. Each must be
+// .opencode/plugin/entire.ts, and .pi/extensions/entire/index.ts. Each must be
 // found and current. The path travels with the agent name so the test can copy
 // that exact committed config into its isolated repository.
 //
@@ -26,7 +26,7 @@ var committedHookConfigAgents = []struct {
 }{
 	{name: "claude-code", path: ".claude/settings.json"},
 	{name: "codex", path: ".codex/hooks.json"},
-	{name: "opencode", path: ".opencode/plugins/entire.ts"},
+	{name: "opencode", path: ".opencode/plugin/entire.ts"},
 	{name: "pi", path: ".pi/extensions/entire/index.ts"},
 }
 

@@ -1,0 +1,64 @@
+#!/bin/sh
+#MISE description="Run one shard of the E2E canary"
+#USAGE arg "<shard>" help="Shard number, from 1"
+#USAGE arg "<total>" help="Number of shards"
+
+set -eu
+
+shard="${usage_shard:-}"
+total="${usage_total:-}"
+
+case "$total" in
+  '' | *[!0-9]* | 0)
+    echo "error: total must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+case "$shard" in
+  '' | *[!0-9]*)
+    echo "error: shard must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$shard" -lt 1 ] || [ "$shard" -gt "$total" ]; then
+  echo "error: shard must be between 1 and $total" >&2
+  exit 1
+fi
+
+# TestMain needs built binaries; read names from source.
+tests="$(
+  grep -h '^func Test[A-Za-z0-9_]*(t \*testing.T)' e2e/tests/*_test.go |
+    sed 's/^func \(Test[A-Za-z0-9_]*\).*/\1/'
+)"
+
+if [ -z "$tests" ]; then
+  echo "error: failed to enumerate canary tests" >&2
+  exit 1
+fi
+
+# Fail if any test escapes the enumeration.
+enumerated="$(printf '%s\n' "$tests" | wc -l | tr -d ' ')"
+declared="$(
+  find e2e/tests -name '*_test.go' -exec grep -h '^func Test' {} + |
+    grep -cv '^func TestMain('
+)"
+if [ "$enumerated" -ne "$declared" ]; then
+  echo "error: enumerated $enumerated canary tests, but e2e/tests declares $declared" >&2
+  echo "Use (t *testing.T) and keep tests in e2e/tests itself." >&2
+  exit 1
+fi
+
+# Round-robin, so every test lands in one shard.
+selected="$(printf '%s\n' "$tests" | awk -v s="$shard" -v n="$total" '(NR - 1) % n == s - 1')"
+
+if [ -z "$selected" ]; then
+  echo "error: shard $shard/$total matched no tests" >&2
+  exit 1
+fi
+
+count="$(printf '%s\n' "$selected" | wc -l | tr -d ' ')"
+echo "canary shard $shard/$total: $count tests"
+
+run_regex="$(printf '%s\n' "$selected" | paste -sd'|' -)"
+
+mise run test:e2e:canary -- "^(${run_regex})$"

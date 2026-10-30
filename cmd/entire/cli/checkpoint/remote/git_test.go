@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -1173,6 +1175,13 @@ func TestWithBatchModeSSH(t *testing.T) {
 			want: "/usr/local/bin/custom-ssh -o BatchMode=yes",
 		},
 		{
+			name: "GIT_SSH path is quoted for the shell git runs GIT_SSH_COMMAND through",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH=C:\Program Files\it's\ssh.exe`)
+			},
+			want: `'C:\Program Files\it'\''s\ssh.exe' -o BatchMode=yes`,
+		},
+		{
 			name: "unrelated substring containing BatchMode-like text does not count as explicit",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, `GIT_SSH_COMMAND=ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither"`)
@@ -1488,4 +1497,158 @@ func TestErrWithGitOutput_KeepsCauseWhenGitIsSilent(t *testing.T) {
 	detailed := errWithGitOutput(sentinel, []byte("fatal: couldn't find remote ref\n"), "origin")
 	require.ErrorIs(t, detailed, sentinel, "detail must annotate the cause, not replace it")
 	assert.Contains(t, detailed.Error(), "couldn't find remote ref")
+}
+
+// --progress output overwrites each progress line in place with \r. Folding all
+// of it into an error buries git's verdict under hundreds of stale percentages,
+// so only what a terminal would finally show for each line may remain.
+func TestErrWithGitOutput_DropsOverwrittenProgress(t *testing.T) {
+	t.Parallel()
+	output := "remote: Counting objects:  50% (1/2)\rremote: Counting objects: 100% (2/2), done.\n" +
+		"Receiving objects:  10% (1/10)\rReceiving objects:  20% (2/10)\r" +
+		"error: RPC failed; curl 28 Operation too slow\n" +
+		"fatal: early EOF\n"
+
+	err := errWithGitOutput(errors.New("exit status 128"), []byte(output), "origin")
+
+	assert.Contains(t, err.Error(), "Counting objects: 100% (2/2), done.")
+	assert.Contains(t, err.Error(), "curl 28 Operation too slow")
+	assert.Contains(t, err.Error(), "fatal: early EOF")
+	assert.NotContains(t, err.Error(), "50% (1/2)")
+	assert.NotContains(t, err.Error(), "Receiving objects")
+}
+
+// fakeSSH installs script as the ssh git runs for an ssh:// remote and returns
+// that remote. GIT_SSH is unset, not empty, so git takes GIT_SSH_COMMAND.
+func fakeSSH(t *testing.T, script string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ssh is a shell script")
+	}
+	testutil.IsolateGitConfigEnv(t)
+	t.Setenv(CheckpointTokenEnvVar, "")
+	t.Setenv("GIT_SSH", "")
+	require.NoError(t, os.Unsetenv("GIT_SSH"))
+	path := filepath.Join(t.TempDir(), "ssh")
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755))
+	t.Setenv("GIT_SSH_COMMAND", path)
+	return "ssh://git@example.invalid/acme/repo.git"
+}
+
+func abortStalledFetch(t *testing.T, remote string) (time.Duration, error) {
+	t.Helper()
+	local := t.TempDir()
+	testutil.InitRepo(t, local)
+	start := time.Now()
+	_, err := Fetch(context.Background(), FetchOptions{
+		Remote:       remote,
+		RefSpecs:     []string{"+refs/heads/main:refs/x"},
+		NoTags:       true,
+		NoFilter:     true,
+		Dir:          local,
+		AbortStalled: true,
+	})
+	return time.Since(start), err
+}
+
+// Every transport reports progress through git's stderr, so silence is the one
+// stall signal that covers them all, including ones with no timeout of their own.
+//
+// Not parallel: sets stallAbortIdle and env vars.
+func TestFetch_AbortStalledKillsSilentFetch(t *testing.T) {
+	remote := fakeSSH(t, "echo connected >&2\nexec sleep 600\n")
+	orig := stallAbortIdle
+	stallAbortIdle = 500 * time.Millisecond
+	t.Cleanup(func() { stallAbortIdle = orig })
+
+	elapsed, err := abortStalledFetch(t, remote)
+	require.ErrorIs(t, err, ErrFetchStalled)
+	assert.Less(t, elapsed, 30*time.Second)
+}
+
+// A slow transfer that keeps reporting progress must run as long as it needs.
+//
+// Not parallel: sets stallAbortIdle and env vars.
+func TestFetch_AbortStalledLetsProgressingFetchRun(t *testing.T) {
+	remote := fakeSSH(t, "for i in 1 2 3 4 5 6 7 8; do echo progress $i >&2; sleep 0.2; done\nexit 1\n")
+	orig := stallAbortIdle
+	stallAbortIdle = 1 * time.Second
+	t.Cleanup(func() { stallAbortIdle = orig })
+
+	elapsed, err := abortStalledFetch(t, remote)
+	require.Error(t, err, "the fake ssh always fails")
+	require.NotErrorIs(t, err, ErrFetchStalled)
+	assert.Greater(t, elapsed, stallAbortIdle, "the fetch must outlive the idle window")
+	assert.Contains(t, err.Error(), "progress 8")
+}
+
+// GIT_SSH names a program git runs without a shell; once it is carried into
+// GIT_SSH_COMMAND, as batch mode does, it goes through sh, so a path sh would
+// mangle must still run.
+func TestFetch_BatchModeRunsGITSSHPathWithBackslash(t *testing.T) {
+	// Not parallel: changes the GIT_SSH env vars and the checkpoint token env var.
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ssh is a shell script")
+	}
+	testutil.IsolateGitConfigEnv(t)
+	t.Setenv(CheckpointTokenEnvVar, "")
+	t.Setenv("GIT_SSH_COMMAND", "")
+	require.NoError(t, os.Unsetenv("GIT_SSH_COMMAND"))
+
+	binDir := filepath.Join(t.TempDir(), `a\b c`)
+	require.NoError(t, os.MkdirAll(binDir, 0o750))
+	logPath := filepath.Join(t.TempDir(), "argv.log")
+	script := "#!/bin/sh\necho \"$*\" >> '" + logPath + "'\nexit 1\n"
+	sshPath := filepath.Join(binDir, "ssh")
+	require.NoError(t, os.WriteFile(sshPath, []byte(script), 0o755))
+	t.Setenv("GIT_SSH", sshPath)
+
+	local := t.TempDir()
+	testutil.InitRepo(t, local)
+
+	_, err := Fetch(WithNonInteractiveSSH(context.Background()), FetchOptions{
+		Remote:   "ssh://git@example.invalid/acme/repo.git",
+		RefSpecs: []string{"+refs/heads/main:refs/x"},
+		NoTags:   true,
+		NoFilter: true,
+		Dir:      local,
+	})
+	require.Error(t, err, "the fake ssh always fails")
+	argv, readErr := os.ReadFile(logPath)
+	require.NoError(t, readErr, "git must have run the GIT_SSH program")
+	assert.Contains(t, string(argv), "BatchMode=yes")
+}
+
+// The stall watchdog reads silence as a stall, and git prints nothing to a pipe
+// unless asked, so AbortStalled must request --progress.
+func TestFetch_AbortStalledRequestsProgress(t *testing.T) {
+	// Not parallel: changes the checkpoint token env var.
+	testutil.IsolateGitConfigEnv(t)
+	t.Setenv(CheckpointTokenEnvVar, "")
+
+	src := t.TempDir()
+	testutil.InitRepo(t, src)
+	testutil.WriteFile(t, src, "f.txt", "data")
+	testutil.GitAdd(t, src, "f.txt")
+	testutil.GitCommit(t, src, "init")
+	head := strings.TrimSpace(testutil.RunGit(t, src, "rev-parse", "HEAD"))
+
+	for _, abortStalled := range []bool{true, false} {
+		local := t.TempDir()
+		testutil.InitRepo(t, local)
+		out, err := Fetch(context.Background(), FetchOptions{
+			Remote:       "file://" + filepath.ToSlash(src),
+			RefSpecs:     []string{"+" + head + ":refs/x"},
+			NoTags:       true,
+			NoFilter:     true,
+			Dir:          local,
+			AbortStalled: abortStalled,
+		})
+		require.NoError(t, err)
+		if abortStalled {
+			assert.Contains(t, string(out), "objects", "git must report progress")
+		} else {
+			assert.NotContains(t, string(out), "objects")
+		}
+	}
 }

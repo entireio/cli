@@ -240,7 +240,14 @@ always runnable in every build.
   plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
   grantee, roles owner/admin/member (default member)
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
-  plus `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
+  plus `agent` (`list`/`add`): the project's review agents, configured in
+  entire-api rather than repository files (they replaced the trail runners).
+  `add` creates a preset agent for the current repository, or extends the
+  project's existing agent of that preset to it (one agent per preset per
+  project), refusing `--disabled`/`--environment` an existing agent cannot
+  honor. Creates send a fresh `Idempotency-Key` and replaces the agent's
+  `If-Match` etag, as entire-api requires. Also
+  `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
   optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
   creates without prompting even in a terminal, leaving an omitted `--region`
@@ -271,7 +278,7 @@ always runnable in every build.
   (an account with no handle, an org sharing its name) gets no command in the
   summary, which says why
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
-  `view`, `edit`, `delete`, `clone`, plus the `mirror`, `remote`,
+  `view`, `edit`, `delete`, `clone`, `default-branch`, plus the `mirror`, `remote`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
   `project grant`, addressing the repo by its `/et/<project>/<repo>` path;
   `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
@@ -325,7 +332,11 @@ always runnable in every build.
   server keeps an existing rule's level when it is absent, so re-adding a
   branch without the flag never lowers it and `--server-side-merge-only=false`
   is the explicit way down. A short branch name expands to `refs/heads/`,
-  `HEAD` and `refs/...` pass through. The `mirror` subtree is
+  `HEAD` and `refs/...` pass through.
+  `default-branch <repo> <branch>` is one PUT to core's
+  `/repos/{repoId}/default-branch`. It sends the branch as typed; the server
+  accepts a short name or a `refs/heads/` ref. A 409 on a GitHub mirror reads
+  as a plain message; any other 409 keeps the server's detail. The `mirror` subtree is
   server-side (`add`, `list`, `remove`; `add` and `remove` name clusters
   with `--cluster <host>`, repeatable or comma-separated, and place or tear down
   every named cluster in parallel through one engine — `mirrorTargets` →
@@ -812,7 +823,7 @@ and inferred from the origin remote — and the inferred one is the common path.
 Experimental commands (gated by the build version as described above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`blame`, `why`, `experts`, and `runner`.
+`blame`, `why`, and `experts`.
 `tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
@@ -898,7 +909,7 @@ classified; a read-only group contains no writing subcommand; guidance text
 never appears in a command's `Short`/`Long`.
 
 Hidden commands opt into being advertised here by setting
-`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
+`Annotations[agentHelpAnnotation] = "true"` (e.g. `why`). Because `agent-help`
 renders live and lists non-hidden commands, the experimental commands appear in
 `agent-help` in developer/nightly builds and are absent in stable releases — the
 advertised surface is build-dependent, matching what `entire help` shows.
@@ -916,7 +927,7 @@ unsupported and points the agent at this passive path instead.
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
 `checkpoint`.
 
-Hidden infrastructure commands: `hooks`, `trail`,
+Hidden infrastructure commands: `hooks`,
 `curl-bash-post-install`, `__send_analytics`, `__sweep_sessions`, `mcp` (MCP
 stdio server for MCP-host agents).
 

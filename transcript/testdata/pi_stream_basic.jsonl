@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"0199a000-0000-7000-8000-000000000001","timestamp":"2026-10-16T10:00:00.000Z","cwd":"/repo"}
+{"type":"model_change","id":"m0","parentId":null,"timestamp":"2026-10-16T10:00:00.010Z","provider":"anthropic","modelId":"claude-sonnet-5-5"}
+{"type":"message","id":"u1","parentId":"m0","timestamp":"2026-10-16T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"list files"}],"timestamp":1760608801000}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-10-16T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"use ls"},{"type":"toolCall","id":"call1","name":"bash","arguments":{"command":"ls"}}],"stopReason":"toolUse","timestamp":1760608802000}}
+{"type":"message","id":"r1","parentId":"a1","timestamp":"2026-10-16T10:00:03.500Z","message":{"role":"toolResult","toolCallId":"call1","toolName":"bash","content":[{"type":"text","text":"a.go\nb.go"}],"isError":false,"timestamp":1760608803400}}
+{"type":"message","id":"a2","parentId":"r1","timestamp":"2026-10-16T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Two files."}],"stopReason":"stop","timestamp":1760608804000}}

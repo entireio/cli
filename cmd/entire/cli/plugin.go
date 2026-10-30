@@ -102,6 +102,10 @@ func (e *PluginExitError) AlreadyPrinted() bool { return true }
 // fires after a successful plugin run.
 var postPluginVersionCheck = versioncheck.CheckAndNotify
 
+// postPluginUpdateCheck is a test seam for the plugin's own update notice,
+// same pattern as postPluginVersionCheck above.
+var postPluginUpdateCheck = checkPluginUpdateAndNotify
+
 // MaybeRunPlugin returns (true, exitCode) when an external command was
 // resolved and run. On launch failure (e.g. missing executable bit)
 // returns (true, 1) after printing to stderr. On no-match returns
@@ -175,6 +179,7 @@ func MaybeRunPlugin(ctx context.Context, rootCmd *cobra.Command, args []string) 
 		if pluginName != selfUpdatePluginName {
 			postPluginVersionCheck(ctx, os.Stderr, versioninfo.Version)
 		}
+		postPluginUpdateCheck(ctx, os.Stderr, pluginName)
 	}
 	return true, exitCode, killedBy
 }

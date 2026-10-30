@@ -47,6 +47,10 @@ Progress travels on the context (`withPluginProgress`), so a caller that has not
 
 Confirmations read from the **controlling terminal**, never stdin, so a plugin's piped input survives being prompted about. They render to the writer the caller supplies, except when that writer is not itself a terminal (`entire graph 2>log`): then the prompt renders on the terminal the answer is read from, because a prompt nobody can see still blocks on a keypress — and with Yes as the default, an unwitting Enter would authorize the install. An input that reaches EOF never becomes a Yes, but the two modes get there differently: accessibility mode declines outright — huh's scanner would otherwise read EOF as the field's default, which is Yes here — while the default full-screen prompt keeps waiting until the context is cancelled. Both fail closed; only one of them answers. Cancellation stops the prompt either way, and still terminates by signal.
 
+### Update notice
+
+After a successful dispatched run, the CLI checks whether the plugin that ran has a newer stable tag and prints a notice on stderr (`Plugin update available! <name> x -> y`, followed by the `entire plugin upgrade <name>` command). It mirrors the CLI's own post-run version check: one remote lookup per plugin per 24 hours, with the cache (`plugin_version_check.json`, beside `version_check.json` in the global config dir) and silence on every error. One deliberate difference: the cache is stamped **before** the lookup, so a failed lookup is not retried for 24 hours, an unwritable config dir (sandboxed agents, read-only `$HOME`) costs no network at all, and concurrent plugin runs don't each start their own lookup. The latest version comes from the same stable-tag resolution `plugin upgrade` uses, but bounded to the version check's 2-second budget rather than the 2-minute git deadline, because it runs synchronously after every plugin exit. Pinned installs and manifest-less installs (local-dev symlinks, binaries dropped on `$PATH`) are never checked — the same installs `upgrade` skips.
+
 ### Remote install
 
 `entire plugin install` accepts three source forms:

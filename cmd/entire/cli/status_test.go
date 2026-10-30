@@ -2678,7 +2678,7 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 					for _, ref := range []string{"refs/entire/checkpoints/aa/bb0000000001", "refs/entire/checkpoints/aa/bb0000000002"} {
 						// Only refs that exist locally count: the push drops the rest.
 						testutil.GitUpdateRef(t, ".", ref, head)
-						if err := queue.Enqueue(plumbing.ReferenceName(ref)); err != nil {
+						if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: plumbing.ReferenceName(ref)}); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -3147,11 +3147,11 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 		t.Fatalf("Getwd: %v", err)
 	}
 	queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
-	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000001"); err != nil {
-		t.Fatalf("Enqueue: %v", err)
+	if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: "refs/entire/checkpoints/aa/bb0000000001"}); err != nil {
+		t.Fatalf("EnqueueEntry: %v", err)
 	}
-	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000002"); err != nil {
-		t.Fatalf("Enqueue: %v", err)
+	if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: "refs/entire/checkpoints/aa/bb0000000002"}); err != nil {
+		t.Fatalf("EnqueueEntry: %v", err)
 	}
 
 	var stdout bytes.Buffer

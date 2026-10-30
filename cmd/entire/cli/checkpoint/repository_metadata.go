@@ -32,3 +32,10 @@ func repositoryDirs(repo *git.Repository) (worktreeRoot, commonDir string, err e
 	}
 	return worktreeRoot, metadata.CommonDir, nil
 }
+
+// RepositoryCommonDir returns repo's git common dir, shared by every worktree
+// of the clone.
+func RepositoryCommonDir(repo *git.Repository) (string, error) {
+	_, commonDir, err := repositoryDirs(repo)
+	return commonDir, err
+}
