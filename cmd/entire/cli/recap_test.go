@@ -182,7 +182,7 @@ func TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery(t *testing.T) {
 			return nil, errors.New("unreachable")
 		}))
 
-	_, _, _, err := newRecapClient(t.Context(), false)
+	_, _, err := newRecapSource(t.Context(), false)
 	if !errors.Is(err, api.ErrInsecureHTTP) {
 		t.Fatalf("error = %v, want ErrInsecureHTTP", err)
 	}

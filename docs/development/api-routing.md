@@ -87,9 +87,15 @@ uses the following routing shapes, mirroring the entire.io BFF:
   forge-qualified `resolveForgeRepoCellPlacement`), by cross-repo checkpoint
   reads (`explain --repo`, `explain_repo.go`; the same placement id keys both
   `/checkpoints/{id}` and the commit→checkpoint resolution at
-  `/commits/{sha}/checkpoints`) and by `experts --repo owner/repo`, which sends
+  `/commits/{sha}/checkpoints`), by `experts --repo owner/repo`, which sends
   that placement id to entire-api
-  instead of re-deriving it from a data-plane repo listing.
+  instead of re-deriving it from a data-plane repo listing, and by `entire api`'s
+  `{repo_id}` placeholder. A `--to cell` request whose path (not query) names
+  `{repo_id}` dials that placement's cell; `/me/*` paths stay on the home cell,
+  and an explicit `--jurisdiction`, or an `ENTIRE_API_BASE_URL` naming a direct
+  cell or loopback host (`auth.BaseURLOverridePinsCell`), wins; an override naming
+  a BFF/apex still routes by catalog. Another cell answers a placement id it
+  does not host with an error or, for the processing id, an empty result.
 - **Project-scoped trails → assigned project cell**:
   Core resolves the required `--project`; list uses
   `GET /api/v1/trails?projectId=<ID>` at its assigned API URL, and a numeric
@@ -100,8 +106,16 @@ uses the following routing shapes, mirroring the entire.io BFF:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim. Activity and recap use it with no data-API
   fallback (`runAuthenticatedActivityAPI` in `entireapi_client.go`,
-  `newRecapClient` in `recap.go`): the BFF serves `/me/*` by proxying to the
+  `newRecapSource` in `recap.go`): the BFF serves `/me/*` by proxying to the
   same home cell, so it cannot answer a caller the cell path cannot.
+  The one exception is recap's team side: a repo's team rollups live only on
+  its processing cell and the caller's own activity only on their home cell,
+  and entire-api does not merge across cells. When the current repo's
+  processing placement is on another cell, recap also asks that cell for the
+  same window and takes only the team fields from it (`recapSource` in
+  `recap_source.go`, `recap.MergeTeam`). The personal side always comes from
+  the home cell, both calls share one `CellClientFactory`, and an
+  `ENTIRE_API_BASE_URL` that pins a cell keeps recap on that one host.
 - **Cloud dispatch → one jurisdiction's cell**: `entire dispatch` builds one
   `CellClientFactory` (`newDispatchCellClient` in `dispatch/mode_cloud.go`)
   and dials the `--jurisdiction` cell, else the home cell. It posts to

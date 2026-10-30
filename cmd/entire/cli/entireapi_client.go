@@ -3,13 +3,11 @@ package cli
 import (
 	"context"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
-	"github.com/entireio/cli/internal/coreapi"
 )
 
 // currentRepoRefTimeout bounds currentRepoRef's control-plane lookup. The
@@ -31,64 +29,26 @@ func runAuthenticatedActivityAPI(ctx context.Context, errW io.Writer, insecureHT
 	return fn(ctx, client)
 }
 
-// forgeToMirrorProvider maps a gitremote forge identifier (e.g. "gh") to the
-// upstream provider the control plane records mirrors under (e.g. "github").
-// entire-api routing only supports GitHub mirrors today.
-func forgeToMirrorProvider(forge string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(forge)) {
-	case "gh", mirrorCloneProviderGitHub:
-		return mirrorCloneProviderGitHub, true
-	default:
-		return "", false
-	}
-}
-
 // currentRepoRef best-effort resolves the current repo (its "origin" remote)
 // to the ULID entire-api uses for repo-scoped params — recap's /me/recap?repo=
 // — plus the human owner/repo slug for display, from a single remote
 // resolution (the caller needs both; resolving twice would double the git and
-// control-plane work). entire.io/api documents the mirror id as exactly that
-// repo_id (repo_id = mirror_repos.id), and the CLI already lists mirrors via
-// the control plane, so no extra resolution is needed. Any failure returns
-// "", "" — recap then shows the personal side only rather than erroring.
-func currentRepoRef(ctx context.Context) (repoID, repoSlug string) {
+// control-plane work). The ULID is the repo's processing placement id: a repo
+// mirrored in several regions has a different id per placement, and only the
+// processing one holds its data. cell is that placement's cell, where the
+// repo's team data lives. Any failure returns zero values — recap then shows
+// the personal side only rather than erroring.
+func currentRepoRef(ctx context.Context) (repoID, repoSlug string, cell *auth.CellTarget) {
 	ctx, cancel := context.WithTimeout(ctx, currentRepoRefTimeout)
 	defer cancel()
 
 	forge, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
 	if err != nil || owner == "" || repo == "" {
-		return "", ""
+		return "", "", nil
 	}
-	provider, ok := forgeToMirrorProvider(forge)
-	if !ok {
-		return "", ""
+	placement, err := resolveForgeRepoCellPlacement(ctx, forge, owner, repo)
+	if err != nil || placement.RepoID == "" {
+		return "", "", nil
 	}
-	c, err := coreapi.New()
-	if err != nil {
-		return "", ""
-	}
-	mirrors, err := listMirrorsForRepo(ctx, c, provider, strings.ToLower(owner), repo)
-	if err != nil {
-		return "", ""
-	}
-	repoID = firstActiveRepoID(mirrors)
-	if repoID == "" {
-		return "", ""
-	}
-	return repoID, owner + "/" + repo
-}
-
-// firstActiveRepoID returns the id of the repo's first active mirror (the repo
-// id is stable across a repo's placements, so any active one serves). Archived
-// and failed/suspended placements are skipped — they can't answer for the repo.
-func firstActiveRepoID(mirrors []coreapi.Mirror) string {
-	for i := range mirrors {
-		if !isActiveMirror(mirrors[i]) {
-			continue
-		}
-		if id := strings.TrimSpace(mirrors[i].MirrorId); id != "" {
-			return id
-		}
-	}
-	return ""
+	return placement.RepoID, owner + "/" + repo, placement.Target
 }
