@@ -84,13 +84,13 @@ func TestRepoDefaultBranch_Sets(t *testing.T) {
 	fake := &fakeDefaultBranchServer{previous: "refs/heads/main"}
 	srvURL := newDefaultBranchServer(t, fake)
 
-	out, _, err := runCoreCmd(t, newDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, "master")
+	out, _, err := runCoreCmd(t, newRepoDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, "master")
 	require.NoError(t, err)
 	assert.Equal(t, "✓ Default branch: refs/heads/master (was refs/heads/main)\n", out)
 	require.Len(t, fake.bodies, 1)
 	assert.Equal(t, map[string]any{"branch": "master"}, fake.bodies[0])
 
-	out, _, err = runCoreCmd(t, newDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, "master", "--json")
+	out, _, err = runCoreCmd(t, newRepoDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, "master", "--json")
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(out), &got))
@@ -107,7 +107,7 @@ func TestRepoDefaultBranch_Unchanged(t *testing.T) {
 	fake := &fakeDefaultBranchServer{previous: "refs/heads/master"}
 	srvURL := newDefaultBranchServer(t, fake)
 
-	out, _, err := runCoreCmd(t, newDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, "master")
+	out, _, err := runCoreCmd(t, newRepoDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, "master")
 	require.NoError(t, err)
 	assert.Equal(t, "Default branch already refs/heads/master\n", out)
 }
@@ -129,7 +129,7 @@ func TestRepoDefaultBranch_Errors(t *testing.T) {
 			fake := &fakeDefaultBranchServer{status: tc.status, detail: tc.detail}
 			srvURL := newDefaultBranchServer(t, fake)
 
-			_, _, err := runCoreCmd(t, newDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, "master")
+			_, _, err := runCoreCmd(t, newRepoDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, "master")
 			require.Error(t, err)
 			assert.Equal(t, tc.want, err.Error())
 		})
@@ -141,7 +141,7 @@ func TestRepoDefaultBranch_EmptyBranch(t *testing.T) {
 	fake := &fakeDefaultBranchServer{}
 	srvURL := newDefaultBranchServer(t, fake)
 
-	_, _, err := runCoreCmd(t, newDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, " ")
+	_, _, err := runCoreCmd(t, newRepoDefaultBranchCmd, srvURL, testDefaultBranchRepoULID, " ")
 	require.Error(t, err)
 	assert.Empty(t, fake.bodies, "no request for an empty branch")
 }
