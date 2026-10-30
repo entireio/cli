@@ -40,7 +40,7 @@ require (
 	github.com/ogen-go/ogen v1.24.0
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/pelletier/go-toml/v2 v2.4.3
-	github.com/posthog/posthog-go v1.35.1
+	github.com/posthog/posthog-go v1.38.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.12.1
