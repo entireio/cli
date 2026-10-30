@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -595,7 +594,7 @@ func runProjectCreateWizard(cmd *cobra.Command, name string) error {
 func wizardLoginNote() string {
 	// ENTIRE_TOKEN wins over every saved login (coreapi.New never resolves a
 	// context then), so naming one would name the wrong identity.
-	if contexts.Requested() || os.Getenv(auth.EnvTokenVar) != "" {
+	if contexts.Requested() || auth.EnvCredentialNonEmpty() {
 		return ""
 	}
 	all, _, err := auth.StoredContexts()

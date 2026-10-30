@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -229,7 +228,10 @@ func resolveActiveContextCellSubject(ctx context.Context, insecureHTTP bool) (ce
 // machine instead of sending it to the token's home cell.
 func resolveCellClientSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
 	dataURL, overridden := api.BaseURLOverride()
-	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
+	if raw, ok, err := LookupEnvToken(ctx); ok {
+		if err != nil {
+			return cellSubject{}, err
+		}
 		subject, err := resolveEnvTokenCellSubject(raw, insecureHTTP)
 		if err != nil {
 			return cellSubject{}, err

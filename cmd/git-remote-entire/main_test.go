@@ -573,6 +573,23 @@ func TestResolveCreds_BlankEnvTokenFailsClosed(t *testing.T) {
 	}
 }
 
+// ENTIRE_SERVICE_ACCOUNT commits the helper to the env path like ENTIRE_TOKEN:
+// a missing key aborts the clone rather than falling back to a stored login.
+// Sets process-global env vars, so not parallel.
+func TestResolveCreds_ServiceAccountWithoutKeyFailsClosed(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv(auth.ServiceAccountEnvVar, "svc_01HKZ3J4N5P6Q7R8S9T0V1W2X3")
+	dummyURL := &url.URL{Scheme: "entire", Host: "cluster.example.com"}
+	creds, _, err := resolveCreds(t.Context(), dummyURL, false, nil)
+	if err == nil || creds != nil {
+		t.Fatalf("creds %v err %v; want a fail-closed error", creds, err)
+	}
+	if !strings.Contains(err.Error(), auth.ServiceAccountEnvVar) {
+		t.Fatalf("err = %v, want it to name %s", err, auth.ServiceAccountEnvVar)
+	}
+}
+
 func TestSetAuthWithProvider_ResolvesCredentialPerRequest(t *testing.T) {
 	t.Parallel()
 	calls := 0

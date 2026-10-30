@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ogen-go/ogen/ogenerrors"
 
@@ -58,6 +59,38 @@ func TestNew_CoreOrigin_HonoursEnvToken(t *testing.T) {
 	}
 	if got := c.CoreOrigin(); got != core {
 		t.Fatalf("CoreOrigin() = %q, want the env token's aud %q", got, core)
+	}
+}
+
+// ENTIRE_SERVICE_ACCOUNT is the same bypass with a key-minted bearer: the
+// client dials the key's server (no network needed to build it), and a missing
+// key fails closed instead of falling back to a stored login.
+//
+// Not parallel: sets ENTIRE_SERVICE_ACCOUNT, ENTIRE_CONFIG_DIR, XDG_CACHE_HOME.
+func TestNew_ServiceAccountTargetsKeyServerAndFailsClosed(t *testing.T) {
+	const core = "https://core.us.entire.io"
+	const svc = "svc_01HKZ3J4N5P6Q7R8S9T0V1W2X3"
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv(auth.ServiceAccountEnvVar, svc)
+
+	if _, err := New(); err == nil || !strings.Contains(err.Error(), auth.ServiceAccountEnvVar) {
+		t.Fatalf("New with no key: err = %v, want a fail-closed %s error", err, auth.ServiceAccountEnvVar)
+	}
+
+	key, err := auth.GenerateServiceAccountKey(svc, core, "box", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.CreateServiceAccountKey(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := c.CoreOrigin(); got != core {
+		t.Fatalf("CoreOrigin() = %q, want the key's server %q", got, core)
 	}
 }
 

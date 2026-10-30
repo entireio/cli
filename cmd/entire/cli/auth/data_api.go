@@ -68,7 +68,10 @@ type DataAPI struct {
 // global opt-in.
 func ResolveDataAPI(ctx context.Context) (DataAPI, error) {
 	dataURL, overridden := api.BaseURLOverride()
-	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
+	if raw, ok, err := LookupEnvToken(ctx); ok {
+		if err != nil {
+			return DataAPI{}, err
+		}
 		return envTokenDataAPI(raw, dataURL, overridden)
 	}
 	if overridden {
@@ -132,6 +135,12 @@ func DataBaseURL() (string, error) {
 			return "", err
 		}
 		return dataBaseURLForCore(core)
+	}
+	if target, ok, err := ServiceAccountTarget(); ok {
+		if err != nil {
+			return "", err
+		}
+		return dataBaseURLForCore(target.CoreURL)
 	}
 	c, ok, err := ActiveContext()
 	if err != nil {

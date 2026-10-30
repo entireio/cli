@@ -18,6 +18,10 @@ import (
 var (
 	errEntireLoginRequired    = errors.New("entire login required")
 	errEntireEnvTokenRejected = errors.New("entire token rejected")
+	// errEntireServiceAccountIdentity: a service account is not a person, so
+	// it never supplies a git author, and the human login it overrides must
+	// not be used in its place.
+	errEntireServiceAccountIdentity = errors.New("service account has no git identity")
 )
 
 type identityGuidanceError string
@@ -43,6 +47,10 @@ const unattendedIdentityGuidance = "Git identity is missing, and Entire authenti
 const envTokenIdentityGuidance = "ENTIRE_TOKEN could not authenticate an Entire user profile.\n" +
 	"ENTIRE_TOKEN overrides stored logins, so automatic sign-in cannot repair this session.\n" +
 	"Fix or unset ENTIRE_TOKEN, then rerun `entire enable`.\n" +
+	gitConfigIdentityGuidance
+
+const serviceAccountIdentityGuidance = "Git identity is missing, and ENTIRE_SERVICE_ACCOUNT is set.\n" +
+	"A service account cannot supply a git author, and it overrides stored logins.\n" +
 	gitConfigIdentityGuidance
 
 type gitIdentityResolver func(context.Context) (*authProfile, error)
@@ -204,6 +212,11 @@ func resolveEntireIdentityProfile(ctx context.Context, deps identityProfileDepen
 		}
 		return identityProfileResult{profile: profile, loginServer: target.coreURL}, nil
 	}
+	// Fail closed like every other ENTIRE_SERVICE_ACCOUNT consumer: never fall
+	// through to (or prompt for) a human login on the same machine.
+	if _, ok := deps.lookupEnv(cliauth.ServiceAccountEnvVar); ok {
+		return identityProfileResult{}, errEntireServiceAccountIdentity
+	}
 
 	active, ok, err := deps.activeContext()
 	if err != nil {
@@ -252,6 +265,9 @@ func recoverGitIdentity(
 	}
 	if errors.Is(err, errEntireEnvTokenRejected) {
 		return nil, identityGuidanceError(envTokenIdentityGuidance)
+	}
+	if errors.Is(err, errEntireServiceAccountIdentity) {
+		return nil, identityGuidanceError(serviceAccountIdentityGuidance)
 	}
 	if !errors.Is(err, errEntireLoginRequired) {
 		return nil, err

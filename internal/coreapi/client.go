@@ -99,7 +99,18 @@ func NewForCluster(ctx context.Context, clusterHost string) (*Client, error) {
 // (NewForCluster doesn't tighten this even though it has a cluster host to
 // anchor against: the same no-escalation argument holds — the env token is the
 // credential, sent verbatim, not exchanged.)
+//
+// ENTIRE_SERVICE_ACCOUNT is the same bypass with a key-minted sa-session
+// bearer: the key file names the core, and the bearer is minted lazily per
+// request like a context's.
 func clientFromEnvToken() (*Client, bool, error) {
+	if target, ok, err := auth.ServiceAccountTarget(); ok {
+		if err != nil {
+			return nil, true, err //nolint:wrapcheck // already prefixed with ServiceAccountEnvVar
+		}
+		client, err := clientForTarget(target)
+		return client, true, err
+	}
 	raw, ok := os.LookupEnv(auth.EnvTokenVar)
 	if !ok {
 		return nil, false, nil
