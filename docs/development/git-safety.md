@@ -338,6 +338,11 @@ Two rules about *where* the check goes, both learned by getting them wrong:
 
 #### Invoking Commands on Windows - Never Put a Dynamic Value on a cmd.exe Line
 
+Background workers started by `execx.SpawnDetached` use `CREATE_NO_WINDOW` on
+Windows so their ordinary subprocesses inherit a headless console instead of
+opening visible windows. `execx.NonInteractive` still uses `DETACHED_PROCESS`:
+its callers need console input probes to fail. Unix workers start a new session.
+
 **When Entire performs the exec itself, do not go through `cmd.exe`.** Pass the
 program and its arguments as separate argv elements (`exec.Command(prog, arg)`),
 or call the Win32 API directly.

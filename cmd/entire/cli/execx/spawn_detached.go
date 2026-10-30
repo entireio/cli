@@ -9,7 +9,8 @@ import (
 
 // SpawnDetached re-execs the current executable as a detached, fire-and-forget
 // child running args, surviving the parent's exit (new session on Unix,
-// CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS on Windows, via detachFromTTY).
+// CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW on Windows). Windows workers
+// have a headless console that their subprocesses can inherit.
 // The child runs in dir (os.TempDir() when empty, so the child never holds the
 // parent's working directory), inherits the parent's environment, and has its
 // stdout/stderr discarded. Best-effort: every error is swallowed — callers
@@ -48,7 +49,7 @@ func newDetachedCmd(executable, dir string, args ...string) *exec.Cmd {
 	// context.Background(): the child must outlive the parent, so it is never
 	// tied to a cancellable context.
 	cmd := exec.CommandContext(context.Background(), executable, args...)
-	detachFromTTY(cmd)
+	detachBackgroundWorker(cmd)
 	cmd.Dir = dir
 	if cmd.Dir == "" {
 		cmd.Dir = os.TempDir()

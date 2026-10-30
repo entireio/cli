@@ -19,6 +19,15 @@ func detachFromTTY(cmd *exec.Cmd) {
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS
 }
 
+// A headless console prevents ordinary subprocesses from creating a visible
+// console, while leaving NonInteractive's no-console behavior unchanged.
+func detachBackgroundWorker(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW
+}
+
 // killProcessGroupOnCancel is a no-op on Windows: reliable tree-kill needs a Job
 // Object. The WaitDelay backstop still bounds the wait on a hung subprocess.
 func killProcessGroupOnCancel(_ *exec.Cmd) {}

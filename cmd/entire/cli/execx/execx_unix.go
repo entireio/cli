@@ -17,6 +17,10 @@ func detachFromTTY(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setsid = true
 }
 
+func detachBackgroundWorker(cmd *exec.Cmd) {
+	detachFromTTY(cmd)
+}
+
 // killProcessGroupOnCancel SIGKILLs the whole process group on ctx-cancel.
 // exec.Cmd's default Cancel only kills the direct child, leaving any descendant
 // (a sandbox or transport helper) alive and holding the output pipe open.
