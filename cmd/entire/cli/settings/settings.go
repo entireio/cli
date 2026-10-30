@@ -80,6 +80,14 @@ const (
 
 // EntireSettings represents the .entire/settings.json configuration
 type EntireSettings struct {
+	// enabledStated is whether this struct carries a deliberate "enabled":
+	// the file it was loaded from had the key, or SetEnabled was called.
+	// Without it Enabled is only the load default (true), and SaveLocal
+	// leaves the key out: a local file that never said "enabled" must not
+	// start overriding the project file's choice. Unexported so it never
+	// serializes.
+	enabledStated bool
+
 	// localLayerRejection records why .entire/settings.local.json was ignored.
 	// Unexported so it never serializes. Surfaced via LocalLayerRejection.
 	localLayerRejection string
@@ -102,6 +110,8 @@ type EntireSettings struct {
 
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
+	// Change it with SetEnabled: SaveLocal does not write a plain assignment
+	// to a struct whose file had no "enabled" key.
 	Enabled bool `json:"enabled"`
 
 	// Deprecated: no longer used, and deliberately not read anywhere — not even
@@ -966,6 +976,9 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 	if err := dec.Decode(s); err != nil {
 		return nil, fmt.Errorf("parsing settings: %w", err)
 	}
+	if err := noteEnabledStated(s, data); err != nil {
+		return nil, err
+	}
 	if s.Redaction != nil {
 		if err := validateOPFSettings(s.Redaction.OpenAIPrivacyFilter); err != nil {
 			return nil, err
@@ -1143,6 +1156,26 @@ func writeClonePreferencesAtomic(filePath string, data []byte, perm fs.FileMode)
 
 // loadFromFile loads settings from a specific file path.
 // Returns default settings if the file doesn't exist.
+// noteEnabledStated records whether the decoded settings data had an
+// "enabled" key, which the struct's plain bool cannot tell from the default.
+func noteEnabledStated(s *EntireSettings, data []byte) error {
+	var probe struct {
+		Enabled json.RawMessage `json:"enabled"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return fmt.Errorf("parsing settings file: %w", err)
+	}
+	s.enabledStated = probe.Enabled != nil
+	return nil
+}
+
+// SetEnabled turns Entire on or off in these settings, so that saving them
+// writes "enabled" even to a file that did not have the key.
+func (s *EntireSettings) SetEnabled(enabled bool) {
+	s.Enabled = enabled
+	s.enabledStated = true
+}
+
 func loadFromFile(filePath string) (*EntireSettings, error) {
 	settings := &EntireSettings{Enabled: true}
 
@@ -1158,6 +1191,9 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(settings); err != nil {
 		return nil, fmt.Errorf("parsing settings file: %w", err)
+	}
+	if err := noteEnabledStated(settings, data); err != nil {
+		return nil, err
 	}
 
 	// Validate commit_linking if set
@@ -1494,6 +1530,9 @@ func mergeInvestigate(settings *EntireSettings, raw map[string]json.RawMessage) 
 func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage) error {
 	if err := mergeRawBool(raw, "enabled", &settings.Enabled); err != nil {
 		return err
+	}
+	if _, ok := raw["enabled"]; ok {
+		settings.enabledStated = true
 	}
 	// "local_dev" is deliberately absent — a deprecated no-op, see
 	// EntireSettings.LocalDev.
@@ -2287,13 +2326,27 @@ func Save(ctx context.Context, settings *EntireSettings) error {
 	return saveToFile(ctx, settings, EntireSettingsFile)
 }
 
-// SaveLocal saves the settings to .entire/settings.local.json.
+// SaveLocal saves the settings to .entire/settings.local.json. It writes
+// "enabled" only when the settings state it (see EntireSettings.enabledStated),
+// so changing another local setting never re-enables a repository the project
+// file disables.
 func SaveLocal(ctx context.Context, settings *EntireSettings) error {
-	return saveToFile(ctx, settings, EntireSettingsLocalFile)
+	if settings.enabledStated {
+		return saveToFile(ctx, settings, EntireSettingsLocalFile)
+	}
+	// The outer Enabled shadows the embedded one and is omitted while nil;
+	// every other field marshals as usual, in the same order.
+	type withoutEnabled EntireSettings
+	return saveToFile(ctx, struct {
+		*withoutEnabled
+
+		Enabled *bool `json:"enabled,omitempty"`
+	}{withoutEnabled: (*withoutEnabled)(settings)}, EntireSettingsLocalFile)
 }
 
-// saveToFile saves settings to the specified file path.
-func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) error {
+// saveToFile saves settings (an *EntireSettings, or a view of one) to the
+// specified file path.
+func saveToFile(ctx context.Context, settings any, filePath string) error {
 	// Get absolute path for the file
 	filePathAbs, err := entiredir.PathTo(ctx, filePath)
 	if err != nil {

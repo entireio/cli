@@ -1473,7 +1473,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		settings = &EntireSettings{}
 	}
 	// Update the specific fields
-	settings.Enabled = true
+	settings.SetEnabled(true)
 	if opts.AbsoluteGitHookPath {
 		settings.AbsoluteGitHookPath = true
 	}
@@ -2270,7 +2270,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err != nil {
 		return fmt.Errorf("refusing to enable: %s could not be parsed (invalid JSON, or written by a newer entire version); fix or remove it, or upgrade the CLI, then retry: %w", configDisplay, err)
 	}
-	targetSettings.Enabled = true
+	targetSettings.SetEnabled(true)
 	if opts.AbsoluteGitHookPath {
 		targetSettings.AbsoluteGitHookPath = true
 	}
