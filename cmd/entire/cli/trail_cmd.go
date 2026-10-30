@@ -1097,14 +1097,14 @@ func validateTrailCreateFlagCombos(cmd *cobra.Command, checkout, noBranch bool) 
 	return nil
 }
 
+// resolveTrailCreateBase returns "" when the local repository names no default
+// branch: the server then picks the repository's own default, or refuses a
+// main that doesn't exist, instead of storing a guess.
 func resolveTrailCreateBase(repo *git.Repository, base string) string {
 	if base != "" {
 		return base
 	}
-	if detected := strategy.GetDefaultBranchName(repo); detected != "" {
-		return detected
-	}
-	return defaultBaseBranch
+	return strategy.GetDefaultBranchName(repo)
 }
 
 func resolveTrailCreateFields(cmd *cobra.Command, w io.Writer, title, body, base, branch, statusStr, currentBranch string, noBranch bool) (string, string, string, string, string, error) {
