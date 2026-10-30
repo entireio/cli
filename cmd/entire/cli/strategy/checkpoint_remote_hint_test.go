@@ -243,7 +243,9 @@ func TestPrePushWithholdsCheckpointsWhenTheCheckpointRemoteHasNoURL(t *testing.T
 	dir := hintRepo(t, ownedOrigin)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, ".entire", "settings.local.json"),
-		[]byte(`{"strategy_options": {"checkpoint_remote": {"provider": "entire", "repo": "acme/checkpoints"}}}`),
+		// git-refs, which PushCheckpoints requires; the withhold precedes the
+		// backend split everywhere else.
+		[]byte(`{"strategy_options": {"checkpoint_remote": {"provider": "entire", "repo": "acme/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`),
 		0o644,
 	))
 	t.Chdir(dir)
@@ -270,5 +272,12 @@ func TestPrePushWithholdsCheckpointsWhenTheCheckpointRemoteHasNoURL(t *testing.T
 	repo, err := gitrepo.OpenPath(dir)
 	require.NoError(t, err)
 	_, _, err = PushQueuedCheckpointRefs(ctx, repo, "origin")
+	require.ErrorIs(t, err, remote.ErrCheckpointRemoteUnroutable)
+
+	// Naming checkpoints bypasses the push policy, not the withhold.
+	_, err = PushCheckpoints(ctx, nil)
+	require.ErrorIs(t, err, remote.ErrCheckpointRemoteUnroutable)
+
+	_, err = flushCheckpointRefs(ctx, repo, ps, checkpointRefSelection{})
 	require.ErrorIs(t, err, remote.ErrCheckpointRemoteUnroutable)
 }

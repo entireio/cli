@@ -648,6 +648,11 @@ type checkpointFlushResult struct {
 // the outcome of every selected ref. It does not read the policy: an explicit
 // selection is the user naming what to send.
 func flushCheckpointRefs(ctx context.Context, repo *git.Repository, ps pushSettings, selection checkpointRefSelection) (checkpointFlushResult, error) {
+	// Callers check first; repeated so a new caller cannot hand a withheld
+	// store's checkpoints to the push remote.
+	if ps.withheld != nil {
+		return checkpointFlushResult{}, ps.withheld
+	}
 	result := checkpointFlushResult{failed: make(map[plumbing.ReferenceName]error)}
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
