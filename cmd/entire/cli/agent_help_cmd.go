@@ -138,6 +138,9 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail resume":    {agentHelpAudienceTaskDriven, false},
 	"trail link":      {agentHelpAudienceUserOwned, false},
 	"trail unlink":    {agentHelpAudienceUserOwned, false},
+	"trail timeline":  {agentHelpAudienceReadOnly, false},
+	"trail sessions":  {agentHelpAudienceReadOnly, false},
+	"trail stack":     {agentHelpAudienceReadOnly, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
