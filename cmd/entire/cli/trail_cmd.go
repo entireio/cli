@@ -2268,10 +2268,11 @@ func parseTrailRepoShape(raw string) (forge, owner, repo string, err error) {
 }
 
 // checkTrailResponse checks the API response and returns user-friendly errors.
-// For auth failures, it appends a hint to re-authenticate while preserving the server's error message.
+// For a 401, it appends a hint to re-authenticate while preserving the server's
+// error message. A 403 is a valid login that lacks access, so it gets no hint.
 func checkTrailResponse(resp *http.Response) error {
 	if err := api.CheckResponse(resp); err != nil {
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		if resp.StatusCode == http.StatusUnauthorized {
 			return fmt.Errorf("%w — run 'entire login' to re-authenticate", err)
 		}
 		return fmt.Errorf("trail API: %w", err)
