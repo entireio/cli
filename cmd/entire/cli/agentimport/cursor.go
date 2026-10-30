@@ -143,10 +143,14 @@ func cursorTrustedWorkspace(projectDir string) (workspace string, ok bool) {
 }
 
 // pathsWithEncoding returns every existing directory whose encode(path) equals
-// encode(target), target included. encode must map each path character to one
-// output character with separators becoming "-" (as the agents' project-dir
-// encodings do), so a directory can only lead to a match when its own encoding
-// is a prefix of the target's followed by "-"; every other branch is pruned.
+// encode(target), target included. encode must turn separators into "-" and
+// may collapse runs of "-" and trim them from both ends (Cursor's
+// project-dir encoding does both). A descendant then encodes to its ancestor's
+// encoding, followed by "-" and the encoding of the rest when the rest has an
+// alphanumeric character. So a directory can only lead to a match when its
+// encoding is empty, equals the target's (a child named only of separators
+// still matches), or is a prefix of the target's followed by "-"; every other
+// branch is pruned.
 //
 // unscanned is empty when the walk was complete. Otherwise it describes what
 // could not be checked: a directory that could not be listed or a candidate
@@ -160,7 +164,13 @@ func pathsWithEncoding(target string, encode func(string) string, readLimit int)
 	// short names like RUNNER~1), or no listed entry can lead to it.
 	target = normalizePath(target)
 	want := encode(target)
-	queue := []string{filepath.VolumeName(target) + string(filepath.Separator)}
+	root := filepath.VolumeName(target) + string(filepath.Separator)
+	// Trimming lets the root encode like a directory named only of
+	// separators under it (/ and /---, C:\ and C:\_), so it is a candidate too.
+	if encode(root) == want {
+		matches = append(matches, root)
+	}
+	queue := []string{root}
 	for reads := 0; len(queue) > 0; reads++ {
 		if reads >= readLimit {
 			return matches, "an unscanned path (collision check exceeded its directory budget)"
@@ -176,7 +186,7 @@ func pathsWithEncoding(target string, encode func(string) string, readLimit int)
 		for _, e := range entries {
 			p := filepath.Join(dir, e.Name())
 			enc := encode(p)
-			if enc != want && !strings.HasPrefix(want, enc+"-") {
+			if enc != "" && enc != want && !strings.HasPrefix(want, enc+"-") {
 				continue
 			}
 			info, statErr := os.Stat(p)
@@ -191,9 +201,8 @@ func pathsWithEncoding(target string, encode func(string) string, readLimit int)
 			}
 			if enc == want {
 				matches = append(matches, p)
-			} else {
-				queue = append(queue, p)
 			}
+			queue = append(queue, p)
 		}
 	}
 	return matches, unscanned
