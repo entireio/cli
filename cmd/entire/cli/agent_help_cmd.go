@@ -804,7 +804,7 @@ func renderAgentHelpCommand(cmd *cobra.Command, repoLine string, trailsEnabled b
 	}
 	b.WriteString("\n")
 	if agentHelpPath(cmd) == "trail list" && usesProjectTrails(cmd) {
-		b.WriteString("Scope: one project; --project is required, even inside a clone. --repo only filters within that project.\n")
+		b.WriteString("Scope: one project; --project is required, even inside a clone. --repo only filters within that project. --mine instead lists your trails across every project.\n")
 	} else {
 		b.WriteString(agentHelpRepoBlock(repoLine))
 	}
@@ -852,7 +852,7 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 	var b strings.Builder
 	b.WriteString(agentHelpOverview)
 	if trailCmd, _, err := rootCmd.Find([]string{"trail"}); err == nil && usesProjectTrails(trailCmd) {
-		b.WriteString("\nTrails are project-scoped. Trail listing requires an explicit --project; --repo only filters within it.")
+		b.WriteString("\nTrails are project-scoped. Trail listing requires an explicit --project (--repo only filters within it), or --mine for your trails across projects.")
 	}
 	b.WriteString("\n\n")
 	b.WriteString(agentHelpRepoBlock(repoLine))
