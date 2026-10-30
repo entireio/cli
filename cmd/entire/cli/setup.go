@@ -374,10 +374,20 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 	}
 
 	if cmd.Flags().Changed(flagForce) || cmd.Flags().Changed(flagAbsoluteGitHookPath) {
-		if _, err := strategy.InstallGitHook(ctx, true, s.AbsoluteGitHookPath); err != nil {
+		// The hook follows the merged view, now including the save above, as in
+		// setupAgentHooksNonInteractive: absolute_git_hook_path may be set only
+		// in the other settings file, and reinstalling from this file alone
+		// would replace a working absolute-path hook with a PATH-dependent one.
+		absolute := s.AbsoluteGitHookPath
+		if merged, err := LoadEntireSettings(ctx); err == nil {
+			absolute = merged.AbsoluteGitHookPath
+		} else {
+			logging.Warn(ctx, "could not load merged settings for hook reinstall; using the target file's absolute_git_hook_path", "error", err)
+		}
+		if _, err := strategy.InstallGitHook(ctx, true, absolute); err != nil {
 			return fmt.Errorf("failed to reinstall git hook: %w", err)
 		}
-		strategy.CheckAndWarnHookManagers(ctx, w, s.AbsoluteGitHookPath)
+		strategy.CheckAndWarnHookManagers(ctx, w, absolute)
 		fmt.Fprintln(w, "  ✓ Reinstalled git hook")
 	}
 
@@ -1352,6 +1362,14 @@ func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Comm
 		}
 		if hasCheckpointBackendFlag(cmd) {
 			if err := updateCheckpointBackend(ctx, w, opts); err != nil {
+				return err
+			}
+		}
+		// --telemetry and --absolute-git-hook-path are settings too: without
+		// this, enable on a configured repo accepted them and saved nothing.
+		// --force alone writes no setting, so it does not trigger the write.
+		if cmd.Flags().Changed(flagTelemetry) || cmd.Flags().Changed(flagAbsoluteGitHookPath) {
+			if err := updateGlobalSettings(ctx, cmd, w, opts); err != nil {
 				return err
 			}
 		}
