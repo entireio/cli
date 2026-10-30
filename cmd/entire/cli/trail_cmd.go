@@ -91,6 +91,9 @@ func newTrailCmdForMode(project bool) *cobra.Command {
 		// Project intent can exist without any repository or repo-trails
 		// toggle, so the project tree stays discoverable regardless.
 		cmd.Annotations[projectTrailsAnnotation] = agentHelpAnnotationEnabled
+		// Pasted trail URLs become selectors (and --project) before any
+		// subcommand resolves them; see normalizeProjectTrailURLArgs.
+		cmd.PersistentPreRunE = normalizeProjectTrailURLArgs
 		cmd.PersistentFlags().String("project", "", "Project as gh/<owner> or et/<project>; required for list, otherwise defaults to the repository's namespace")
 		cmd.AddCommand(newProjectTrailShowCmd(), newProjectTrailListCmd(), newProjectTrailCreateCmd(), newProjectTrailUpdateCmd())
 		cmd.AddCommand(newTrailLinkCmd(), newTrailUnlinkCmd(), newProjectTrailCommentCmd())
