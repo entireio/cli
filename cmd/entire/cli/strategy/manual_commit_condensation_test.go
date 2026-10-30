@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
