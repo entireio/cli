@@ -3032,3 +3032,24 @@ func TestPrepareTrailCreateBranchPushesToDeclaredRemote(t *testing.T) {
 	cleanupCreatedTrailBranch(ctx, repo, remote, branch, state.LocalCreated, state.RemotePushed, &errOut)
 	require.False(t, gitBranchExistsTrailTest(t, forkDir, branch), "cleanup left the branch on the declared remote; stderr: %s", errOut.String())
 }
+
+// A repository whose only branch is a feature branch names no default, so
+// trail create sends no base rather than a guessed main.
+func TestResolveTrailCreateBase(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.RunGit(t, dir, "checkout", "-q", "-b", "feature/first")
+	testutil.WriteFile(t, dir, "a.txt", "a")
+	testutil.GitAdd(t, dir, "a.txt")
+	testutil.GitCommit(t, dir, "first")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	require.Empty(t, resolveTrailCreateBase(repo, ""))
+	require.Equal(t, "release", resolveTrailCreateBase(repo, "release"))
+
+	testutil.RunGit(t, dir, "branch", "main")
+	require.Equal(t, "main", resolveTrailCreateBase(repo, ""))
+}
