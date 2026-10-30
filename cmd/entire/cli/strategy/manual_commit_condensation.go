@@ -1297,12 +1297,12 @@ func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
 //     checkpoint metadata stays scoped to the token offset (TokenStart).
 //  2. Accumulated per-checkpoint usage (state.CheckpointTokenUsage, reset at
 //     every condensation). This is what carries out-of-band token counts
-//     (e.g. Antigravity, whose transcript has no token data — SaveStep
+//     (e.g. older Antigravity, whose transcript has no token data — SaveStep
 //     accumulates the title-tee delta here). Deliberately NOT
 //     state.TokenUsage: that is the session-cumulative total, which is never
 //     reset at condensation and would double-count earlier turns on every
 //     checkpoint after the first.
-//     Known limitation (mid-turn commits): the out-of-band baseline only
+//     Known limitation (mid-turn commits, out-of-band only): the baseline only
 //     re-snapshots at TurnStart, so a mid-turn commit condenses with zero
 //     tokens and the whole turn's delta lands on the next condensation.
 //     Totals across the turn remain correct; only per-checkpoint scoping is
@@ -2307,6 +2307,16 @@ func openSessionCondensationRepository(ctx context.Context, state *SessionState)
 func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionID string) error {
 	logCtx := logging.WithComponent(ctx, "condense-by-id")
 
+	if state, loadErr := s.loadSessionState(ctx, sessionID); loadErr == nil && state.IsSubagentSession() {
+		logging.Info(logCtx, "subagent session: handing its pending work to its parent",
+			slog.String("session_id", sessionID),
+			slog.String("parent_session_id", state.ParentSessionID))
+		if err := releaseSubagentSessionWork(ctx, sessionID); err != nil {
+			return err
+		}
+		return idleStuckSubagentSession(ctx, sessionID)
+	}
+
 	// Records of worktrees removed since the session's last turn end are
 	// pruned first: no commit can carry those files, and salvaging them would
 	// fold them into this checkpoint.
@@ -2510,6 +2520,14 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	if reservedState == nil {
 		return nil
 	}
+	if reservedState.IsSubagentSession() {
+		// Its work condenses with the parent's task record.
+		if err := releaseSubagentSessionWork(ctx, sessionID); err != nil {
+			logging.Warn(logCtx, "eager condense: failed to release subagent session",
+				slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		}
+		return nil
+	}
 	// Files waiting for a commit belong to PostCommit; a fully condensed
 	// session proceeds only for work that arrived after its condensation.
 	if reservedState.HasPendingFiles() || (reservedState.FullyCondensed && !reservedState.HasPendingWork()) {
@@ -2596,6 +2614,63 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	if mutErr != nil {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
+	}
+	return nil
+}
+
+// idleStuckSubagentSession retires a subagent session that doctor condensed
+// while ACTIVE (its agent stopped reporting), as condensing a top-level session
+// by ID does; otherwise doctor would offer it again on every run. Other phases
+// are left alone: the sweeper also condenses ENDED sessions by ID, and those
+// must stay ENDED.
+//
+// This does not wake a parent that waits on the subagent: its turn still ends
+// only from its own hooks, a sibling subagent's, or doctor on the parent.
+func idleStuckSubagentSession(ctx context.Context, sessionID string) error {
+	err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if state.Phase != session.PhaseActive {
+			return ErrMutationSkip
+		}
+		state.Phase = session.PhaseIdle
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrStateNotFound) {
+		return fmt.Errorf("idle subagent session %s: %w", sessionID, err)
+	}
+	return nil
+}
+
+// releaseSubagentSessionWork is what condensing a subagent's own session means:
+// it never checkpoints on its own, so any files it still holds (recorded before
+// it was known to be a subagent) move to its parent, and it is then marked
+// fully condensed so doctor and the sweeper stop offering it. The parent gets
+// the files first; only the files it received leave the subagent, so a failed
+// handoff stays retryable and an edit recorded meanwhile is kept.
+func releaseSubagentSessionWork(ctx context.Context, sessionID string) error {
+	child, err := LoadSessionState(ctx, sessionID)
+	if err != nil || child == nil || child.ParentSessionID == "" {
+		return err
+	}
+	handed := slices.Clone(child.FilesTouched)
+	if len(handed) > 0 {
+		err := MutateSessionState(ctx, child.ParentSessionID, func(state *SessionState) error {
+			MergeUnhashedFilesTouched(state, handed)
+			return nil
+		})
+		if err != nil {
+			// The parent is gone or unwritable: keep the files on the subagent.
+			return fmt.Errorf("hand subagent files to parent %s: %w", child.ParentSessionID, err)
+		}
+	}
+	err = MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		state.FilesTouched = slices.DeleteFunc(state.FilesTouched, func(f string) bool {
+			return slices.Contains(handed, f)
+		})
+		state.FullyCondensed = len(state.FilesTouched) == 0
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("release subagent session %s: %w", sessionID, err)
 	}
 	return nil
 }

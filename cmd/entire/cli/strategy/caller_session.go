@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"log/slog"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -146,6 +147,9 @@ func ResolveCallerSession(ctx context.Context) ResolvedSession {
 			slog.String("error", err.Error()))
 		states = nil
 	}
+	// A subagent's own session is never the answer: it can share its parent's
+	// agent process, so ancestry ties the two, and its work is the parent's.
+	states = slices.DeleteFunc(states, (*SessionState).IsSubagentSession)
 
 	if resolved, ok := resolveCallerIdentity(ctx, states); ok {
 		return resolved

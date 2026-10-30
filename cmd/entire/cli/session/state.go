@@ -512,6 +512,25 @@ type State struct {
 	// timeout. Only meaningful on Owner.Host.
 	Owner *proclive.Identity `json:"owner,omitempty"`
 
+	// ParentSessionID is set on a subagent's own session (an agent whose
+	// subagents run as sessions of their own, resolved through
+	// agent.SubagentSessionResolver) once its parent is known. Its work belongs
+	// to the parent's task record, so such a session never links a commit,
+	// condenses on its own, or answers "which session is calling".
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+
+	// AwaitingSubagentsAt is set while an ACTIVE session's agent has stopped
+	// with subagents still running (agent.Event.AwaitingSubagents) and cleared
+	// when the session runs again. When the last of its running subagents
+	// finishes while it is set, the lifecycle ends the session's turn.
+	AwaitingSubagentsAt *time.Time `json:"awaiting_subagents_at,omitempty"`
+
+	// SubagentTurnEndClaimed is set when the lifecycle has taken it on itself
+	// to end the current turn because its subagents finished, and cleared at the
+	// next turn start. A pause reported after the claim does not re-arm it, so
+	// the turn is ended once.
+	SubagentTurnEndClaimed bool `json:"subagent_turn_end_claimed,omitempty"`
+
 	// TaskRecords tracks subagents dispatched by this session — the durable
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
@@ -673,6 +692,12 @@ func (s *State) EnsureTaskRecord(task TaskRecord) bool {
 	}
 	s.AddTaskRecord(task)
 	return true
+}
+
+// IsSubagentSession reports whether this is a subagent's own session, whose
+// work is recorded on its parent's task record (see ParentSessionID).
+func (s *State) IsSubagentSession() bool {
+	return s != nil && s.ParentSessionID != ""
 }
 
 // FindSubagentInventory returns an entry that aliases state. Callers must use
