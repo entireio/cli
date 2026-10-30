@@ -31,10 +31,13 @@ var trailRemoteDefaultBranch = remoteDefaultBranch
 // branch to compare against when deciding whether to derive a new branch name.
 //
 // send is an explicit --base, else origin's default branch when it is known
-// (origin/HEAD, else asked of origin), else "": the server then applies the
-// repo's default branch. It never guesses: a guessed "main" in a repo whose
-// default is develop gave the trail the wrong base, so the user's PR into the
-// real default never settled it and Entire kept a draft open on merged work.
+// (asked of origin, else the local origin/HEAD), else "": the server then
+// applies the repo's default branch. It never guesses: a guessed "main" in a
+// repo whose default is develop gave the trail the wrong base, so the user's PR
+// into the real default never settled it and Entire kept a draft open on
+// merged work. Origin is asked first because fetch does not move an existing
+// origin/HEAD when the upstream default changes while the old branch survives;
+// the local ref only answers when origin cannot.
 //
 // naming falls back to the local main/master guess when send is unknown, which
 // keeps branch naming as it was; it is never sent.
@@ -42,10 +45,10 @@ func resolveTrailCreateBase(ctx context.Context, repo *git.Repository, base stri
 	if base = strings.TrimSpace(base); base != "" {
 		return base, base
 	}
-	if name := localOriginHEADBranch(repo); name != "" && ValidateBranchName(ctx, name) == nil {
+	if name, ok := trailRemoteDefaultBranch(ctx, "origin"); ok && ValidateBranchName(ctx, name) == nil {
 		return name, name
 	}
-	if name, ok := trailRemoteDefaultBranch(ctx, "origin"); ok && ValidateBranchName(ctx, name) == nil {
+	if name := localOriginHEADBranch(repo); name != "" && ValidateBranchName(ctx, name) == nil {
 		return name, name
 	}
 	if guess := strategy.GetDefaultBranchName(repo); guess != "" {

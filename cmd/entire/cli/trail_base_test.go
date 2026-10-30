@@ -117,7 +117,18 @@ func TestResolveTrailCreateBase(t *testing.T) {
 			t.Fatalf("send = %q, want a hand-set origin/HEAD outside refs/remotes/origin ignored", send)
 		}
 	})
-	t.Run("local origin/HEAD is used without asking", func(t *testing.T) {
+	t.Run("origin's answer beats a stale origin/HEAD", func(t *testing.T) {
+		// fetch leaves an existing origin/HEAD alone when the upstream default
+		// moves and the old branch survives, so the local ref can be stale.
+		stubRemote(t, "release", true)
+		testutil.RunGit(t, dir, "remote", "set-head", "origin", "main")
+		t.Cleanup(func() { testutil.RunGit(t, dir, "remote", "set-head", "origin", "-d") })
+		send, naming := resolveTrailCreateBase(t.Context(), repo, "")
+		if send != "release" || naming != "release" {
+			t.Fatalf("got (%q, %q), want release from origin over a stale origin/HEAD", send, naming)
+		}
+	})
+	t.Run("local origin/HEAD answers when origin cannot", func(t *testing.T) {
 		stubRemote(t, "", false)
 		testutil.RunGit(t, dir, "remote", "set-head", "origin", "release")
 		t.Cleanup(func() { testutil.RunGit(t, dir, "remote", "set-head", "origin", "-d") })
