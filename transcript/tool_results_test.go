@@ -165,3 +165,52 @@ func TestToolResultAgent_PerConverter(t *testing.T) {
 		})
 	}
 }
+
+// TestClaudeToolResultContent covers a tool_result whose content is an array
+// of blocks, as MCP tools write it: the text blocks' text is the output,
+// joined line by line, and image bytes never reach it. Checkpoints (Convert)
+// and live records (NewClaudeAdapter) must agree.
+func TestClaudeToolResultContent(t *testing.T) {
+	t.Parallel()
+
+	const imageBlock = `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUg"}}`
+	tests := []struct {
+		name, content, want string
+	}{
+		{name: "string content", content: `"line one\nline two"`, want: "line one\nline two"},
+		{name: "text blocks", content: `[{"type":"text","text":"first"},{"type":"text","text":"second"}]`, want: "first\nsecond"},
+		{name: "text and image", content: `[{"type":"text","text":"took a screenshot"},` + imageBlock + `,{"type":"text","text":"done"}]`, want: "took a screenshot\ndone"},
+		{name: "image only", content: `[` + imageBlock + `]`, want: ""},
+		{name: "empty array", content: `[]`, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			input := `{"type":"assistant","timestamp":"t1","message":{"id":"m1","content":[{"type":"tool_use","id":"toolu_1","name":"mcp__browser__screenshot","input":{}}]}}
+{"type":"user","timestamp":"t2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":` + tc.content + `}]}}
+`
+			stored := convertResults(t, input, "claude-code")["toolu_1"]
+			if stored == nil {
+				t.Fatal("stored: tool_use toolu_1 has no result")
+			}
+			if stored.Output != tc.want {
+				t.Errorf("stored output = %q, want %q", stored.Output, tc.want)
+			}
+
+			a := NewClaudeAdapter()
+			records := append(a.Feed([]byte(input)), a.Flush()...)
+			var live *ToolResult
+			for _, r := range records {
+				if r.Op == OpResult && r.ToolUseID == "toolu_1" {
+					live = r.Result
+				}
+			}
+			if live == nil {
+				t.Fatal("live: no result record for toolu_1")
+			}
+			if live.Output != tc.want {
+				t.Errorf("live output = %q, want %q", live.Output, tc.want)
+			}
+		})
+	}
+}
