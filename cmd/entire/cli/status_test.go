@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -3369,5 +3370,63 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	}
 	if !strings.Contains(got, settings.EntireSettingsLocalFile) {
 		t.Errorf("status does not name where the setting must live:\n%s", got)
+	}
+}
+
+// TestRunStatus_ShowsEnabledExternalAgent pins that an external agent with
+// hooks installed appears in `entire status`, text and JSON. The Agents line
+// reads the registry, which holds only built-ins until discovery runs.
+func TestRunStatus_ShowsEnabledExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-status-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus: %v", err)
+	}
+	if !strings.Contains(stdout.String(), agentName+" Agent") {
+		t.Errorf("status must list the installed external agent, got:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus --json: %v", err)
+	}
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal status JSON: %v\n%s", err, stdout.String())
+	}
+	if !slices.Contains(result.Agents, agentName+" Agent") {
+		t.Errorf("status --json agents = %v, want it to include %q", result.Agents, agentName+" Agent")
+	}
+}
+
+// TestRunStatus_DoesNotRunPluginsWithoutOptIn pins that status never executes
+// entire-agent-* binaries in a repo that has not enabled external_agents.
+func TestRunStatus_DoesNotRunPluginsWithoutOptIn(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-status-optout-test"
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	externalDir := t.TempDir()
+	writeExternalAgentBinaryEx(t, externalDir, agentName, true)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	execLog := externalAgentExecLog(t)
+
+	for _, jsonOutput := range []bool{false, true} {
+		var stdout bytes.Buffer
+		if err := runStatus(context.Background(), &stdout, false, jsonOutput); err != nil {
+			t.Fatalf("runStatus(json=%v): %v", jsonOutput, err)
+		}
+		if strings.Contains(stdout.String(), agentName) {
+			t.Errorf("status (json=%v) showed an external agent without external_agents enabled:\n%s", jsonOutput, stdout.String())
+		}
+	}
+	if log := execLog(); log != "" {
+		t.Errorf("status executed a plugin without external_agents enabled, exec log:\n%s", log)
 	}
 }
