@@ -97,6 +97,20 @@ type Tokens struct {
 	Output    int   `json:"output"`
 	Reasoning int   `json:"reasoning"`
 	Cache     Cache `json:"cache"`
+	Total     int   `json:"total"`
+}
+
+// OutputWithReasoning returns output tokens with reasoning counted once.
+// OpenCode 1.3.16 and later store reasoning apart from output; earlier versions
+// stored the provider's output, which for some providers already includes it.
+// A total (recorded since 1.1.57) of input + output + cache marks reasoning as
+// inside output. Any other total, or no total (zero-usage messages, or messages
+// written before 1.1.57), is assumed to store reasoning apart, so it is added.
+func (t Tokens) OutputWithReasoning() int {
+	if t.Total > 0 && t.Total == t.Input+t.Output+t.Cache.Read+t.Cache.Write {
+		return t.Output
+	}
+	return t.Output + t.Reasoning
 }
 
 // Cache holds cache-related token counts.
