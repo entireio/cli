@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- `entire enable` edits a git-tracked `core.hooksPath` shell hook in place instead of moving it to an untracked `*.pre-entire` file. Committing the old wrapper dropped the project's hook in every other clone, because the backup was never in the tree. The project's script stays in the tracked file and runs after Entire. A tracked hook that is not a shell script, or is a symbolic link, is left unchanged. Hooks in `.git/hooks` and in gitignored directories are still backed up and chained as before.
+
 ## [0.12.2] - 2026-10-26
 
 ### Added

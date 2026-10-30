@@ -92,6 +92,11 @@ func hookUnchanged(root *os.Root, name string, class hookClassification) bool {
 		return carriesEntireMarker(root, name)
 	case hookAbsent:
 		return !hookFileExists(root, name)
+	case hookSpliced:
+		// The file still holds the project's script. writeHookFile would
+		// replace that script with the stock wrapper, so a splice is never
+		// "unchanged ours". The indexed install returns before this check.
+		return false
 	}
 	return false
 }
