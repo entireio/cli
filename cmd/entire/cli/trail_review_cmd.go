@@ -20,6 +20,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/google/uuid"
@@ -1469,13 +1470,14 @@ func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api
 
 func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts) {
 	trail := trailForDisplay(target.Trail)
+	clean := tuiutil.SanitizeDisplayText
 	if trail.Number > 0 {
-		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, trail.Title)
+		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, clean(trail.Title))
 	} else {
-		fmt.Fprintf(w, "  Trail %s  %s\n", trail.ID, trail.Title)
+		fmt.Fprintf(w, "  Trail %s  %s\n", clean(trail.ID), clean(trail.Title))
 	}
-	fmt.Fprintf(w, "  Status: %s · Branch: %s · Base: %s\n", trail.Status, trail.Branch, trail.Base)
-	fmt.Fprintf(w, "  ID: %s\n\n", trail.ID)
+	fmt.Fprintf(w, "  Status: %s · Branch: %s · Base: %s\n", clean(trail.Status), clean(trail.Branch), clean(trail.Base))
+	fmt.Fprintf(w, "  ID: %s\n\n", clean(trail.ID))
 
 	fmt.Fprintf(w, "  Open findings: %d  high %d  medium %d  low %d\n", counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow)
 	fmt.Fprintf(w, "  Resolved: %d        Dismissed: %d     Stale: %d\n", counts.Resolved, counts.Dismissed, counts.Stale)
@@ -1518,10 +1520,10 @@ func printTrailReviewCommentsTable(w io.Writer, comments []api.TrailReviewCommen
 	fmt.Fprintln(tw, "ID\tSEV\tSTATUS\tFRESHNESS\tLOCATION\tSUMMARY")
 	for _, comment := range comments {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			abbreviate12(comment.ID),
-			severityTableDisplay(comment.Severity),
-			comment.Status,
-			trailReviewFreshnessDisplay(comment),
+			abbreviate12(tuiutil.SanitizeDisplayText(comment.ID)),
+			tuiutil.SanitizeDisplayText(severityTableDisplay(comment.Severity)),
+			tuiutil.SanitizeDisplayText(comment.Status),
+			tuiutil.SanitizeDisplayText(trailReviewFreshnessDisplay(comment)),
 			trailReviewLocationDisplay(comment.Location),
 			trailReviewCommentSummary(comment),
 		)
@@ -1537,35 +1539,40 @@ func printIndentedBlock(w io.Writer, block, indent string) {
 }
 
 func printTrailReviewCommentCreated(w io.Writer, target trailReviewTarget, comment api.TrailReviewComment) {
-	fmt.Fprintf(w, "Created finding %s on %s\n", comment.ID, trailReviewTargetDisplay(target))
-	fmt.Fprintf(w, "Status:   %s\n", comment.Status)
-	fmt.Fprintf(w, "Severity: %s\n", severityDisplay(comment.Severity))
+	clean := tuiutil.SanitizeDisplayText
+	fmt.Fprintf(w, "Created finding %s on %s\n", clean(comment.ID), clean(trailReviewTargetDisplay(target)))
+	fmt.Fprintf(w, "Status:   %s\n", clean(comment.Status))
+	fmt.Fprintf(w, "Severity: %s\n", clean(severityDisplay(comment.Severity)))
 	fmt.Fprintf(w, "Location: %s\n", trailReviewLocationDisplay(comment.Location))
 }
 
 func printTrailReviewCommentDetail(w io.Writer, comment api.TrailReviewComment) {
-	fmt.Fprintf(w, "Finding:   %s\n", comment.ID)
-	fmt.Fprintf(w, "Status:    %s\n", comment.Status)
-	fmt.Fprintf(w, "Freshness: %s\n", trailReviewFreshnessDisplay(comment))
-	fmt.Fprintf(w, "Severity:  %s\n", severityDisplay(comment.Severity))
+	clean := tuiutil.SanitizeDisplayText
+	fmt.Fprintf(w, "Finding:   %s\n", clean(comment.ID))
+	if title := strings.TrimSpace(clean(stringPtrValue(comment.Title))); title != "" {
+		fmt.Fprintf(w, "Title:     %s\n", title)
+	}
+	fmt.Fprintf(w, "Status:    %s\n", clean(comment.Status))
+	fmt.Fprintf(w, "Freshness: %s\n", clean(trailReviewFreshnessDisplay(comment)))
+	fmt.Fprintf(w, "Severity:  %s\n", clean(severityDisplay(comment.Severity)))
 	if comment.Confidence != nil {
 		fmt.Fprintf(w, "Confidence: %.2f\n", *comment.Confidence)
 	}
 	fmt.Fprintf(w, "Location: %s\n", trailReviewLocationDisplay(comment.Location))
-	if body := stringPtrValue(comment.Body); body != "" {
-		fmt.Fprintf(w, "\n%s\n", strings.TrimSpace(body))
+	if body := strings.TrimSpace(tuiutil.SanitizeTerminalText(stringPtrValue(comment.Body))); body != "" {
+		fmt.Fprintf(w, "\n%s\n", body)
 	}
 	if len(comment.SuggestedChanges) > 0 {
 		fmt.Fprintln(w, "\nSuggested changes:")
 		for _, change := range comment.SuggestedChanges {
-			fmt.Fprintf(w, "- %s (%s)\n", change.ID, change.ChangeType)
-			if change.ExpectedFilePath != nil && *change.ExpectedFilePath != "" {
-				fmt.Fprintf(w, "  file: %s\n", *change.ExpectedFilePath)
+			fmt.Fprintf(w, "- %s (%s)\n", clean(change.ID), clean(change.ChangeType))
+			if path := clean(stringPtrValue(change.ExpectedFilePath)); path != "" {
+				fmt.Fprintf(w, "  file: %s\n", path)
 			}
-			if patch := stringPtrValue(change.Patch); patch != "" {
-				fmt.Fprintf(w, "  patch:\n%s\n", strings.TrimSpace(patch))
+			if patch := trailReviewPatchText(change.Patch); patch != "" {
+				fmt.Fprintf(w, "  patch:\n%s\n", patch)
 			}
-			if instruction := stringPtrValue(change.Instruction); instruction != "" {
+			if instruction := tuiutil.SanitizeTerminalText(stringPtrValue(change.Instruction)); instruction != "" {
 				fmt.Fprintf(w, "  instruction: %s\n", instruction)
 			}
 		}
@@ -1621,10 +1628,17 @@ func countTrailReviewComments(comments []api.TrailReviewComment) trailReviewComm
 	return counts
 }
 
+// trailReviewPatchText returns a suggested change's patch for display:
+// terminal escapes stripped and only surrounding blank lines trimmed, since a
+// leading space is a context line's prefix and part of the patch.
+func trailReviewPatchText(patch *string) string {
+	return strings.Trim(tuiutil.SanitizeTerminalText(stringPtrValue(patch)), "\r\n")
+}
+
 func trailReviewLocationDisplay(loc api.TrailReviewLocation) string {
-	file := stringPtrValue(loc.FilePath)
+	file := tuiutil.SanitizeDisplayText(stringPtrValue(loc.FilePath))
 	if file == "" {
-		return loc.Granularity
+		return tuiutil.SanitizeDisplayText(loc.Granularity)
 	}
 	if loc.StartLine == nil {
 		return file
@@ -1636,7 +1650,7 @@ func trailReviewLocationDisplay(loc api.TrailReviewLocation) string {
 }
 
 func trailReviewCommentSummary(comment api.TrailReviewComment) string {
-	body := strings.TrimSpace(stringPtrValue(comment.Body))
+	body := strings.TrimSpace(tuiutil.SanitizeDisplayText(stringPtrValue(comment.Body)))
 	if body == "" {
 		return "(empty finding)"
 	}

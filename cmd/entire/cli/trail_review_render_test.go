@@ -118,6 +118,36 @@ func TestPrintTrailReviewCommentCreated_PlainGolden(t *testing.T) {
 	assertTrailReviewGolden(t, out.String(), trailReviewCreatedPlainGolden)
 }
 
+// Server text can carry terminal control sequences; the plain views print it
+// for NO_COLOR terminals too, so it must never reach the terminal raw.
+func TestPrintTrailReview_PlainStripsTerminalEscapes(t *testing.T) {
+	t.Parallel()
+	target, comments := trailReviewRenderFixture()
+	target.Trail.Title = "Title\x1b]0;pwned\x07"
+	comments[0].Body = trailReviewStrPtr("Body \x1b[2Jcleared")
+	path := "src/\x1b[31mred.ts"
+	comments[0].Location = api.TrailReviewLocation{Granularity: "line", FilePath: &path}
+	detail := trailReviewDetailFixture()
+	detail.Title = trailReviewStrPtr("Title \x1b[1mbold")
+	detail.Body = comments[0].Body
+	detail.SuggestedChanges[0].Patch = trailReviewStrPtr("+\x1b]8;;https://evil\x07link")
+	detail.SuggestedChanges[0].Instruction = trailReviewStrPtr("do \x1b[5mthis")
+
+	var out strings.Builder
+	printTrailReviewDashboard(&out, target, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments))
+	printTrailReviewComments(&out, comments, "")
+	printTrailReviewCommentDetail(&out, detail)
+	printTrailReviewCommentCreated(&out, target, comments[0])
+	if strings.ContainsAny(out.String(), "\x1b\x07") {
+		t.Fatalf("plain output passed through a terminal control sequence:\n%q", out.String())
+	}
+	for _, want := range []string{"Body cleared", "src/red.ts", "Title bold", "do this"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("sanitized text %q missing:\n%s", want, out.String())
+		}
+	}
+}
+
 func assertTrailReviewGolden(t *testing.T, got, want string) {
 	t.Helper()
 	if got != want {
@@ -158,6 +188,7 @@ More findings available; next page: --cursor "next-1"
 `
 
 const trailReviewDetailPlainGolden = `Finding:   01M63Q23WNMWAAAAAAAAAAAAAA
+Title:     Expiry skew ignored
 Status:    open
 Freshness: current
 Severity:  medium
@@ -172,7 +203,7 @@ Suggested changes:
 - sc_1 (patch)
   file: src/auth/session.ts
   patch:
-const now = Date.now();
+ const now = Date.now();
 -if (exp < now) {
 +if (exp - skew < now) {
   instruction: Subtract the configured skew
