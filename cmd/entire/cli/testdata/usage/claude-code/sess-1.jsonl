@@ -1,0 +1,8 @@
+{"type":"user","uuid":"u1","message":{"content":"go"}}
+{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"thinking"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":500,"cache_read_input_tokens":9000,"output_tokens":120}}}
+{"type":"assistant","uuid":"a2","message":{"id":"m1","content":[{"type":"tool_use"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":500,"cache_read_input_tokens":9000,"output_tokens":120}}}
+{"type":"assistant","uuid":"a3","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Task","input":{"prompt":"do something"}}]}}
+{"type":"user","uuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"agentId: sub1"}]}}
+{"type":"assistant","uuid":"a4","message":{"id":"m2","usage":{"input_tokens":2,"cache_read_input_tokens":9500,"output_tokens":10}}}
+{"type":"assistant","uuid":"a5","message":{"id":"m2","usage":{"input_tokens":2,"cache_read_input_tokens":9500,"output_tokens":40}}}
+{"type":"assistant","uuid":"e1","isApiErrorMessage":true,"message":{"id":"err1","content":[{"type":"text","text":"API Error"}]}}

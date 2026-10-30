@@ -777,6 +777,7 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	adopted.UntrackedFilesAtStart = slices.Clone(source.UntrackedFilesAtStart)
 	adopted.FilesTouched = slices.Clone(source.FilesTouched)
 	adopted.TouchedFileHashes = maps.Clone(source.TouchedFileHashes)
+	adopted.TokenLedger = source.TokenLedger.Clone()
 	adopted.TaskRecords = cloneTaskRecords(source.TaskRecords)
 	adopted.SubagentInventory = cloneSubagentInventory(source.SubagentInventory)
 	adopted.TokenUsage = cloneTokenUsage(source.TokenUsage)

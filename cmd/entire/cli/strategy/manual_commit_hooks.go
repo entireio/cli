@@ -3379,6 +3379,10 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
 			state.TranscriptPath = transcriptPath
 		}
+		// Read before the turn's calls: a transcript rewritten since the last
+		// reading (a resume restoring an older copy) still reads lower than
+		// the session's total, which is how the ledger tells it apart.
+		ObserveTokenLedger(ctx, state)
 		remember = updateSessionAgentHome(ctx, state)
 		homeAgentType = state.AgentType
 		captureSessionOwner(state)

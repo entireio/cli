@@ -380,6 +380,12 @@ type State struct {
 	// a shrunk snapshot yields 0, never a negative or stale delta.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
+	// TokenLedger, when set, is the source of this session's token usage:
+	// TokenUsage is its Total and a checkpoint stores its Pending. Only
+	// sessions this CLI started at a turn start have one; the others keep the
+	// per-turn accounting below until they end.
+	TokenLedger *TokenLedger `json:"token_ledger,omitempty"`
+
 	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
 	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`

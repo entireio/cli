@@ -1458,18 +1458,37 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	}
 
 	now := time.Now()
-	state := existingState
-	// A trailer rewrite remaps stored state to the new commits; start from
-	// that rather than the copy loaded before it.
-	if fresh, loadErr := stateStore.Load(ctx, sessionID); loadErr == nil && fresh != nil {
-		state = fresh
+
+	// A trailer rewrite remaps stored state to the new commits, and hooks may
+	// have moved it on while attach waited: update the state on disk under the
+	// session lock, so a concurrent hook's write is neither lost nor lost to.
+	mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+		applyAttachSessionState(ctx, state, now, repo, existingState, agentType, transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, transcriptEnd, opts, reviewSkills, seedBase)
+		return nil
+	})
+	if mutErr == nil {
+		return nil
 	}
+	if !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		return fmt.Errorf("failed to save session state: %w", mutErr)
+	}
+	state := existingState
 	if state == nil {
 		state = &session.State{
 			SessionID: sessionID,
 			StartedAt: now,
 		}
 	}
+	applyAttachSessionState(ctx, state, now, repo, existingState, agentType, transcriptPath, agentHome, checkpointID, meta, sessionUsage, tokenPos, transcriptEnd, opts, reviewSkills, seedBase)
+	if err := stateStore.Save(ctx, state); err != nil {
+		return fmt.Errorf("failed to save session state: %w", err)
+	}
+	return nil
+}
+
+// applyAttachSessionState updates state, the session's state as stored now,
+// with what attach read and checkpointed.
+func applyAttachSessionState(ctx context.Context, state *session.State, now time.Time, repo *git.Repository, existingState *session.State, agentType types.AgentType, transcriptPath, agentHome string, checkpointID id.CheckpointID, meta transcriptMetadata, sessionUsage *agent.TokenUsage, tokenPos, transcriptEnd int, opts attachOptions, reviewSkills []string, seedBase bool) {
 	// Read before the display offset below moves: TokenStart falls back to it
 	// for state written before the token offset existed.
 	tokenStartOnDisk := state.TokenStart()
@@ -1537,6 +1556,20 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		lastCheckpointRead = existingState.LastCheckpointID
 	}
 	switch {
+	case existingState != nil && existingState.TokenLedger.IsActive():
+		// The checkpoint stored what attach's reading of the ledger had grown
+		// by. Mark exactly that as checkpointed: the ledger on disk may have
+		// read further since (a Stop while attach waited), and those tokens
+		// are in no checkpoint yet.
+		read := existingState.TokenLedger
+		if !state.TokenLedger.IsActive() {
+			// Attach's reading activated the ledger; hooks have not yet.
+			state.TokenLedger = read.Clone()
+			state.CheckpointTokenUsage = nil
+		}
+		state.TokenLedger.MarkCheckpointedUpTo(read)
+		strategy.ConsumeAttachTokenWindow(state, tokenPos)
+		state.TokenUsage = state.TokenLedger.Total()
 	case tokenStartOnDisk != countedFrom,
 		!reflect.DeepEqual(pendingOnDisk, pendingRead),
 		!reflect.DeepEqual(pendingChildOnDisk, pendingChildRead),
@@ -1576,11 +1609,6 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 		state.ReviewSkills = reviewSkills
 		state.ReviewPrompt = reviewPromptForAttach(meta, opts)
 	}
-
-	if err := stateStore.Save(ctx, state); err != nil {
-		return fmt.Errorf("failed to save session state: %w", err)
-	}
-	return nil
 }
 
 func reviewPromptForAttach(meta transcriptMetadata, opts attachOptions) string {

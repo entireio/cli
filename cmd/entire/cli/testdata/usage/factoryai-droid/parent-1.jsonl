@@ -1,0 +1,4 @@
+{"type":"session_start","id":"parent-1"}
+{"type":"message","id":"e1","message":{"role":"user","content":[{"type":"text","text":"go"}]}}
+{"type":"message","id":"e2","message":{"role":"assistant","id":"msg_1","content":[{"type":"text","text":"working"}]}}
+{"type":"message","id":"e3","message":{"role":"assistant","id":"msg_2","content":[{"type":"text","text":"done"}]}}
