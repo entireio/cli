@@ -437,55 +437,65 @@ func TestProjectTrailValidationBeforeIO(t *testing.T) {
 // as one line naming the project, never the generated client's error dump.
 func TestProjectTrailProjectResolveErrorsAreReadable(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		status int
-		args   []string
-		want   []string
+		name         string
+		status       int
+		args         []string
+		sentinel     error
+		want         []string
+		noGitHubHint bool
 	}{
 		{
 			name: "missing GitHub namespace on list", status: http.StatusNotFound,
-			args: []string{"list", "--project", "gh/acme"},
-			want: []string{"gh/acme does not exist or is not visible to your login", "entire auth status", "GitHub owner is connected to Entire"},
+			args: []string{"list", "--project", "gh/acme"}, sentinel: errProjectTrailProjectNotFound,
+			want: []string{"project gh/acme does not exist or is not visible to your login", "entire auth status", "GitHub owner is connected to Entire"},
 		},
 		{
 			name: "missing native project on show", status: http.StatusNotFound,
-			args: []string{"show", "42", "--project", "et/widgets"},
-			want: []string{"et/widgets does not exist or is not visible to your login", "entire auth status"},
+			args: []string{"show", "42", "--project", "et/widgets"}, sentinel: errProjectTrailProjectNotFound,
+			want:         []string{"project et/widgets does not exist or is not visible to your login", "entire auth status"},
+			noGitHubHint: true,
 		},
 		{
 			name: "forbidden native project", status: http.StatusForbidden,
-			args: []string{"show", "42", "--project", "et/widgets"},
-			want: []string{"your login does not have access to et/widgets"},
+			args: []string{"show", "42", "--project", "et/widgets"}, sentinel: errProjectTrailProjectForbidden,
+			want:         []string{"your login does not have access to project et/widgets"},
+			noGitHubHint: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, _ := setupProjectTrailTest(t, func(http.ResponseWriter, *http.Request) {
 				t.Error("no data-plane request expected after a refused project resolution")
 			})
-			core.resolveErr = &coreapi.ErrorModelStatusCode{StatusCode: tc.status, Response: coreapi.ErrorModel{
+			cause := &coreapi.ErrorModelStatusCode{StatusCode: tc.status, Response: coreapi.ErrorModel{
 				Detail: coreapi.NewOptString("project not found"),
 				Title:  coreapi.NewOptString(http.StatusText(tc.status)),
 			}}
+			core.resolveErr = cause
 			_, _, err := executeProjectTrailTest(t, tc.args...)
-			require.ErrorIs(t, err, errProjectTrailProjectNotFound)
+			require.ErrorIs(t, err, tc.sentinel)
+			require.ErrorIs(t, err, cause, "callers can still inspect the client error")
 			for _, want := range tc.want {
 				assert.Contains(t, err.Error(), want)
 			}
 			assert.NotContains(t, err.Error(), "Schema:", "the generated client's error dump must not reach the user")
-			if tc.args[len(tc.args)-1] == "et/widgets" {
+			assert.NotContains(t, err.Error(), "project not found:", "the sentinel text must not prefix the message")
+			if tc.noGitHubHint {
 				assert.NotContains(t, err.Error(), "GitHub owner", "native projects get no GitHub hint")
 			}
 		})
 	}
 }
 
-// Server errors other than 404/403 keep the underlying error for diagnosis.
+// Other Core API errors name the project, the server's detail and the status,
+// still without the dump, and keep the underlying error for diagnosis.
 func TestProjectTrailProjectResolveOtherErrorsKeepCause(t *testing.T) {
 	core, _ := setupProjectTrailTest(t, func(http.ResponseWriter, *http.Request) {})
-	cause := &coreapi.ErrorModelStatusCode{StatusCode: http.StatusInternalServerError}
+	cause := &coreapi.ErrorModelStatusCode{StatusCode: http.StatusInternalServerError, Response: coreapi.ErrorModel{
+		Detail: coreapi.NewOptString("boom detail"),
+	}}
 	core.resolveErr = cause
 	_, _, err := executeProjectTrailTest(t, "list", "--project", "gh/acme")
 	require.ErrorIs(t, err, cause)
 	require.NotErrorIs(t, err, errProjectTrailProjectNotFound)
-	assert.Contains(t, err.Error(), "resolve project gh/acme")
+	assert.Equal(t, "resolve project gh/acme: boom detail (HTTP 500)", err.Error())
 }

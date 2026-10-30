@@ -161,32 +161,61 @@ func resolveProjectTrailCollectionFor(ctx context.Context, host, project string,
 	return target, nil
 }
 
-// errProjectTrailProjectNotFound marks a project Core would not resolve for
-// this login: Core answers 404 both for a missing project and for a GitHub
-// namespace the caller cannot see, so the message covers both.
-var errProjectTrailProjectNotFound = errors.New("project not found")
+// Core answers 404 both for a missing project and for a GitHub namespace the
+// caller cannot see, so errProjectTrailProjectNotFound covers both; 403 is a
+// project the login may not inspect.
+var (
+	errProjectTrailProjectNotFound  = errors.New("project not found")
+	errProjectTrailProjectForbidden = errors.New("project access denied")
+)
 
-// describeProjectResolveError turns Core's 404/403 for a project reference
-// into one actionable line instead of the generated client's raw error dump.
-// Other failures (401, timeouts, server errors) keep their existing handling.
+// projectResolveError is Core refusing a project reference, rendered as one
+// line rather than the generated client's error dump. It matches its sentinel
+// (if any) and unwraps to the client error for callers that inspect it.
+type projectResolveError struct {
+	msg      string
+	sentinel error
+	cause    error
+}
+
+func (e *projectResolveError) Error() string { return e.msg }
+
+func (e *projectResolveError) Unwrap() []error {
+	if e.sentinel == nil {
+		return []error{e.cause}
+	}
+	return []error{e.sentinel, e.cause}
+}
+
+// describeProjectResolveError turns a Core API error for a project reference
+// into one actionable line. 401 and non-API failures (network, timeouts) keep
+// their existing handling.
 func describeProjectResolveError(ctx context.Context, host, project string, err error) error {
 	ref := host + "/" + project
 	status := coreapi.APIErrorStatus(err)
-	if status == http.StatusNotFound || status == http.StatusForbidden {
-		logging.Debug(logging.WithComponent(ctx, "trail"), "core refused project resolution",
-			slog.String("project", ref), slog.Int("status", status), slog.String("detail", coreapi.APIError(err)))
+	if status == 0 || status == http.StatusUnauthorized {
+		return fmt.Errorf("resolve project %s: %w", ref, err)
 	}
+	detail := coreapi.APIError(err)
+	logging.Debug(logging.WithComponent(ctx, "trail"), "core refused project resolution",
+		slog.String("project", ref), slog.Int("status", status), slog.String("detail", detail))
 	switch status {
 	case http.StatusNotFound:
 		hint := "check that 'entire auth status' shows the account that can open this project's trails on the web"
 		if host == mirrorCloneForge {
 			hint += ", and that the GitHub owner is connected to Entire"
 		}
-		return fmt.Errorf("%w: %s does not exist or is not visible to your login; %s", errProjectTrailProjectNotFound, ref, hint)
+		return &projectResolveError{
+			msg:      fmt.Sprintf("project %s does not exist or is not visible to your login; %s", ref, hint),
+			sentinel: errProjectTrailProjectNotFound, cause: err,
+		}
 	case http.StatusForbidden:
-		return fmt.Errorf("%w: your login does not have access to %s", errProjectTrailProjectNotFound, ref)
+		return &projectResolveError{
+			msg:      "your login does not have access to project " + ref,
+			sentinel: errProjectTrailProjectForbidden, cause: err,
+		}
 	default:
-		return fmt.Errorf("resolve project %s: %w", ref, err)
+		return &projectResolveError{msg: fmt.Sprintf("resolve project %s: %s (HTTP %d)", ref, detail, status), cause: err}
 	}
 }
 
