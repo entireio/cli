@@ -71,18 +71,18 @@ func TestPiUsage_Convert(t *testing.T) {
 	}
 }
 
-func TestPiUsage_ContentlessLineHasEmptyContentArray(t *testing.T) {
+func TestPiUsage_ContentlessLineHasNullContent(t *testing.T) {
 	t.Parallel()
 	in := `{"type":"session","version":3,"id":"s"}
 {"type":"message","id":"m1","timestamp":"t1","message":{"role":"assistant","model":"c","content":[{"type":"thinking","thinking":"x"}],"usage":{"input":2,"output":3,"cacheRead":0,"cacheWrite":0}}}
 `
 	out, err := Convert([]byte(in), agentOpts("pi"))
 	require.NoError(t, err)
+	assert.Contains(t, string(out), `"content":null`)
 	lines, err := Decode(out)
 	require.NoError(t, err)
 	require.Len(t, lines, 1)
 	assert.Equal(t, TypeAssistant, lines[0].Type)
-	assert.NotNil(t, lines[0].Blocks)
 	assert.Empty(t, lines[0].Blocks)
 	assert.Equal(t, int64(3), lines[0].OutputTokens)
 }

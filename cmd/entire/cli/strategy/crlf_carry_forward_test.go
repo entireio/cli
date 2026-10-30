@@ -71,6 +71,7 @@ func agentEditsCRLF(t *testing.T, s *ManualCommitStrategy, dir, sid, content str
 func commitIndexWithTrailer(t *testing.T, dir, checkpointID string) {
 	t.Helper()
 	msg := "user commit\n\n" + trailers.CheckpointTrailerKey + ": " + id.MustCheckpointID(checkpointID).String() + "\n"
+	recordStampedTrailer(context.Background(), id.MustCheckpointID(checkpointID))
 	testutil.RunGit(t, dir, "commit", "-q", "-m", msg)
 }
 

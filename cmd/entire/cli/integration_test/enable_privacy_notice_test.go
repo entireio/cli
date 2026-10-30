@@ -18,9 +18,16 @@ import (
 func TestEnable_PrivacyNotice(t *testing.T) {
 	t.Parallel()
 	const (
+		// The policy line is git-refs only (the default): the git-branch
+		// backend does not read the policy, and under manual there is nothing to offer.
+		privacyNoPolicy = "  They contain your agent transcripts. If that repo is public, anyone can read them.\n" +
+			"  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`.\n" +
+			"  To stop uploads: `entire configure --local --skip-push-sessions`\n" +
+			"  To use a separate private repo: `entire configure --local --checkpoint-remote github:<owner>/<repo>`\n"
 		privacy = "  They contain your agent transcripts. If that repo is public, anyone can read them.\n" +
 			"  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`.\n" +
 			"  To stop uploads: `entire configure --local --skip-push-sessions`\n" +
+			"  To upload only the checkpoints you choose: `entire configure --checkpoint-push-policy manual`\n" +
 			"  To use a separate private repo: `entire configure --local --checkpoint-remote github:<owner>/<repo>`\n"
 		redaction = "  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`.\n"
 	)
@@ -29,8 +36,11 @@ func TestEnable_PrivacyNotice(t *testing.T) {
 		name     string
 		noRemote bool
 		fork     bool
-		before   []string
-		args     []string
+		branch   bool
+		// policy seeds the stored checkpoint push policy.
+		policy string
+		before []string
+		args   []string
 		// after is setup output the notice must follow.
 		after, notice string
 	}{
@@ -42,10 +52,19 @@ func TestEnable_PrivacyNotice(t *testing.T) {
 		{name: "rerun", before: enableAgent, args: []string{"enable"}, after: "Entire is already enabled.", notice: "Checkpoints will be uploaded when you push to origin.\n" + privacy},
 		{name: "push disabled", args: append(enableAgent, "--skip-push-sessions"), after: "Ready.", notice: "Checkpoint uploads are off (push_sessions: false). Checkpoints stay in this clone.\n" + redaction},
 		{name: "no remote", noRemote: true, args: enableAgent, after: "Ready.", notice: "No Git remotes configured. Once you add one, checkpoints will be uploaded when you push to it.\n" + privacy},
+		{name: "git-branch", branch: true, args: enableAgent, after: "Ready.", notice: "Checkpoints will be uploaded when you push to origin.\n" + privacyNoPolicy},
+		{name: "manual", policy: "manual", args: enableAgent, after: "Ready.", notice: "Checkpoints will be uploaded to origin when you run `entire checkpoint push`.\n" + privacyNoPolicy},
+		{name: "manual no remote", noRemote: true, policy: "manual", args: enableAgent, after: "Ready.", notice: "No Git remotes configured. Once you add one, `entire checkpoint push` will upload checkpoints to it.\n" + privacyNoPolicy},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			env := freshRepoEnv(t)
+			if tc.branch {
+				env.CheckpointStore = StoreGitBranch
+			}
+			if tc.policy != "" {
+				setCheckpointPushPolicy(t, env, tc.policy)
+			}
 			if !tc.noRemote {
 				env.SetupBareRemote()
 			}
@@ -74,6 +93,10 @@ func TestEnable_PrivacyNoticeWhileDedicatedUploadsContinue(t *testing.T) {
 		"  Secret redaction is best effort, not bulletproof. Review with `entire checkpoint explain`.\n" +
 		"  To stop uploads: `entire configure --local --skip-push-sessions`\n"
 	ForEachBackend(t, func(t *testing.T, backend string) {
+		want := notice
+		if backend == StoreGitRefs {
+			want += "  To upload only the checkpoints you choose: `entire configure --checkpoint-push-policy manual`\n"
+		}
 		env := NewFeatureBranchEnv(t)
 		env.CheckpointStore = backend
 		origin := env.SetupBareRemote()
@@ -95,7 +118,7 @@ func TestEnable_PrivacyNoticeWhileDedicatedUploadsContinue(t *testing.T) {
 
 		out := env.RunCLI("enable")
 		require.Contains(t, out, "Cannot resolve checkpoint remote selection")
-		require.True(t, strings.HasSuffix(out, notice), "notice should end the output; got:\n%s", out)
+		require.True(t, strings.HasSuffix(out, want), "notice should end the output; got:\n%s", out)
 
 		createCheckpointedCommit(t, env, "Add module", "mod.go", "package mod", "Add module")
 		env.RunPrePush("origin")

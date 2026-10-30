@@ -384,7 +384,7 @@ type cellClientBuilder interface {
 
 // newCellClientBuilder builds the per-operation cell client factory: the
 // login subject is resolved and refreshed once, however many cells the
-// fan-out touches. Swapped in tests.
+// fan-out (or a trail read across repositories) touches. Swapped in tests.
 var newCellClientBuilder = func(ctx context.Context, insecureHTTP bool) (cellClientBuilder, error) {
 	return auth.NewEntireAPICellClientFactory(ctx, insecureHTTP)
 }

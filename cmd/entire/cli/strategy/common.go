@@ -683,11 +683,18 @@ func resolveAgentType(ctxAgentType types.AgentType, state *SessionState) types.A
 // git-refs. Resolution is fail-soft: any config-load error is treated as the
 // default git-branch backend (returns false), preserving legacy behavior.
 func primaryIsGitRefs(ctx context.Context) bool {
+	isRefs, err := primaryBackendIsGitRefs(ctx)
+	return err == nil && isRefs
+}
+
+// primaryBackendIsGitRefs is primaryIsGitRefs for callers that must not treat
+// an unreadable checkpoints config as the git-branch backend.
+func primaryBackendIsGitRefs(ctx context.Context) (bool, error) {
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("read checkpoint backend: %w", err)
 	}
-	return checkpoint.PrimaryIsRefs(cfg)
+	return checkpoint.PrimaryIsRefs(cfg), nil
 }
 
 func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {

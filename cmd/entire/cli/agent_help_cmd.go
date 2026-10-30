@@ -106,6 +106,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"checkpoint delete":  {agentHelpAudienceUserOwned, false},  // destructive, irreversible on remotes
 	"checkpoint explain": {agentHelpAudienceTaskDriven, false}, // --generate writes a summary
 	"checkpoint list":    {agentHelpAudienceReadOnly, false},
+	"checkpoint push":    {agentHelpAudienceUserOwned, false}, // uploads checkpoints the user may be holding back
 	"checkpoint search":  {agentHelpAudienceReadOnly, false},
 	"checkpoint tokens":  {agentHelpAudienceReadOnly, false},
 
@@ -161,7 +162,6 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"dispatch": {agentHelpAudienceTaskDriven, false},
 	"doctor":   {agentHelpAudienceTaskDriven, false},
 	"import":   {agentHelpAudienceTaskDriven, false},
-	"runner":   {agentHelpAudienceTaskDriven, false},
 
 	// The user's to start. review is not destructive but spawns a paid
 	// multi-agent run, so an uninvited one spends the user's money.
@@ -247,6 +247,13 @@ var agentHelpGuidance = map[string]string{
 
 	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
+
+	"checkpoint push": "Uploads checkpoints the user may be keeping on this machine on purpose.\n" +
+		"Never run this unless the user explicitly asks to upload those checkpoints.\n" +
+		"Without a terminal it accepts only <checkpoint-id>@<commit>; get the commit\n" +
+		"from `checkpoints[].commit` in `entire checkpoint list --outgoing --json`.\n" +
+		"A result with status `changed` means the checkpoint moved since that read:\n" +
+		"read the listing again and ask the user before uploading the new version.",
 }
 
 // agentHelpProjectTrailGuidance replaces agentHelpGuidance for commands in the
@@ -283,7 +290,13 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"(e.g. review) a whole project trail, cover every change. Checkout and\n" +
 		"review need a clone of that repository: do the ones in this clone and\n" +
 		"tell the user which changes need another clone instead of skipping\n" +
-		"them silently.",
+		"them silently. A change's merge state is changes[].mergeability: its\n" +
+		"gates (approvals, checks, findings, up_to_date) are under .gates and\n" +
+		"its CI runs, with details_url links, under .checks.runs. mergeability\n" +
+		"is null for merged or closed changes other than the current one, when\n" +
+		"the server has no snapshot yet, and when it could not be read; only a\n" +
+		"failed read prints a warning on stderr. Null is unknown, never\n" +
+		"mergeable.",
 }
 
 // agentHelpTrailSandboxGuidance is shared by both trail models. Agent sandboxes

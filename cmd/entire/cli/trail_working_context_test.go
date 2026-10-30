@@ -231,11 +231,29 @@ func TestWorkingTrailWriteListsChangesInsteadOfGuessing(t *testing.T) {
 		return api.NewClientWithBaseURL("repo-token", server.URL), map[string]string{"widget": "repo-id", "api": "api-id"}[repo], nil
 	}
 	t.Cleanup(func() { newTrailAPIClient = old })
+	// Other repositories' reviews are read through one shared-login opener
+	// (docs/development/api-routing.md), not a login per repository.
+	var (
+		openers int
+		shared  []string
+	)
+	setupOpener := newTrailRepoClientOpener
+	newTrailRepoClientOpener = func(insecure bool) trailRepoClientOpener {
+		openers++
+		open := setupOpener(insecure)
+		return func(ctx context.Context, forge, owner, repo string) (*api.Client, string, error) {
+			shared = append(shared, repo)
+			return open(ctx, forge, owner, repo)
+		}
+	}
+	t.Cleanup(func() { newTrailRepoClientOpener = setupOpener })
 
 	_, _, err := executeProjectTrailTest(t, "approve", "42")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "trail #42 has 2 open changes; choose one:\n  widget/7 - Widget work (approved by alice)\n  api/9 - API work (no reviews yet)")
 	require.Contains(t, err.Error(), "Run, for example: trail approve api/9")
+	assert.Equal(t, 1, openers)
+	assert.Equal(t, []string{"api"}, shared, "this clone's repository reuses its client; only api is opened")
 }
 
 // A trail whose only open change lives in another repository acts on that

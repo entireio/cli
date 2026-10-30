@@ -120,7 +120,7 @@ entire trail resume 42                  # continue Trail #42: restore its branch
 
 Trail commands use the current repository's project (`gh/<owner>` or `et/<project>`); pass `--project` or `--repo` to work on another one without a checkout. `entire trail list` always takes `--project`. Other subcommands are `checkout`, `link`, `unlink`, `update`, and `approvals`.
 
-**Runners** are those evals: per-repository checks such as risk, confidence, drift, security, and review, which score each push to a Trail and raise its findings. They live in `.entire/runners/`; `entire runner setup` (experimental) creates the default set and can tailor its prompts to your repository using its docs, history, and past findings.
+**Project agents** are those evals: review agents such as risk, confidence, drift, security, and review, configured per project in Entire, which score each push to a Trail and raise its findings. `entire project agent` lists them and adds Entire's presets to your repository with `add`. Preset agents run on free credit; a custom agent runs once the project's billing is set up.
 
 ## Agent Sessions
 

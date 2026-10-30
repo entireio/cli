@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -80,11 +81,43 @@ func requireSecureDataOverride() error {
 // repository and returns its repo_id for repo-addressed trail reads. It is a
 // package seam so tests can substitute a client pointed at a stub server.
 var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, string, error) {
+	return openTrailRepoClient(ctx, forge, owner, repo, func() (cellClientBuilder, error) {
+		return newCellClientBuilder(ctx, insecureHTTP)
+	})
+}
+
+// trailRepoClientOpener is newTrailAPIClient for one operation that reads
+// several repositories.
+type trailRepoClientOpener func(ctx context.Context, forge, owner, repo string) (*api.Client, string, error)
+
+// newTrailRepoClientOpener returns an opener that resolves the login once and
+// shares one CellClientFactory across every repository it opens, as multi-cell
+// operations must (docs/development/api-routing.md). It is safe for concurrent
+// use. A package seam so tests can substitute stub servers.
+var newTrailRepoClientOpener = func(insecureHTTP bool) trailRepoClientOpener {
+	var (
+		once    sync.Once
+		factory cellClientBuilder
+		err     error
+	)
+	return func(ctx context.Context, forge, owner, repo string) (*api.Client, string, error) {
+		return openTrailRepoClient(ctx, forge, owner, repo, func() (cellClientBuilder, error) {
+			once.Do(func() { factory, err = newCellClientBuilder(ctx, insecureHTTP) })
+			return factory, err
+		})
+	}
+}
+
+func openTrailRepoClient(ctx context.Context, forge, owner, repo string, newFactory func() (cellClientBuilder, error)) (*api.Client, string, error) {
 	placement, err := resolveForgeRepoCellPlacement(ctx, forge, owner, repo)
 	if err != nil {
 		return nil, "", err
 	}
-	client, err := auth.NewEntireAPICellClient(ctx, insecureHTTP, placement.Target)
+	factory, err := newFactory()
+	var client *api.Client
+	if err == nil {
+		client, err = factory.ClientFor(ctx, placement.Target)
+	}
 	if errors.Is(err, clusterdiscovery.ErrNoAuthContext) {
 		// Preserve cluster discovery's detailed host/context hint while restoring
 		// the sentinel trail commands use for the standard login UX.

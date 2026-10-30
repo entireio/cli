@@ -44,6 +44,7 @@ Examples:
 	cmd.AddCommand(newCheckpointTokensCmd())
 	cmd.AddCommand(newCheckpointSearchCmd())
 	cmd.AddCommand(newCheckpointDeleteCmd())
+	cmd.AddCommand(newCheckpointPushCmd())
 
 	return cmd
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -491,6 +492,7 @@ func TestPostCommit_GuestCondensationPreservesHomePendingState(t *testing.T) {
 	t.Chdir(guestDir)
 	testutil.WriteFile(t, guestDir, "guest.txt", "guest worktree content")
 	testutil.GitAdd(t, guestDir, "guest.txt")
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("a1b2c3d4e5f6"))
 	testutil.GitCommit(t, guestDir, "guest commit\n\n"+trailers.CheckpointTrailerKey+": a1b2c3d4e5f6\n")
 
 	guestStrategy := NewManualCommitStrategy()

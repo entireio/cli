@@ -236,9 +236,6 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(exemptFromConfigCheck(newRefreshTrailEnablementCmd()))
 	cmd.AddCommand(exemptFromConfigCheck(newSweepSessionsCmd()))
 
-	// Experimental command (developer-only visibility; setup/tune runners).
-	experimental.Register(cmd, newRunnerCmd()) // 'runner' (experimental)
-
 	cmd.SetVersionTemplate(versionString())
 
 	// Replace default help command with custom one that supports -t flag

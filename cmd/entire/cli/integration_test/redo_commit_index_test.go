@@ -95,26 +95,50 @@ func TestRedo_ComparesTheCommitIndex(t *testing.T) {
 // hook passes the arguments the installed hook passes (strategy/hooks.go).
 func gitWithEntireCommitHooks(t *testing.T, env *TestEnv) func(...string) string {
 	t.Helper()
-	hooksDir := t.TempDir()
-	binary := "'" + strings.ReplaceAll(filepath.ToSlash(getTestBinary()), "'", "'\"'\"'") + "'"
-	func() {
-		// A parallel fork inherits an open write descriptor until it execs, and
-		// Linux refuses to execute the script meanwhile (ETXTBSY).
-		syscall.ForkLock.RLock()
-		defer syscall.ForkLock.RUnlock()
-		for hook, args := range map[string]string{"prepare-commit-msg": `"$1" "$2"`, "post-commit": ""} {
-			script := fmt.Sprintf("#!/bin/sh\nexec %s hooks git %s %s\n", binary, hook, args)
-			require.NoError(t, os.WriteFile(filepath.Join(hooksDir, hook), []byte(script), 0o755))
-		}
-	}()
+	git := gitWithEntireCommitHooksEnv(t, env)
 	return func(args ...string) string {
+		t.Helper()
+		out, err := git(nil, args...)
+		require.NoError(t, err, "git %v: %s", args, out)
+		return out
+	}
+}
+
+// gitWithEntireCommitHooksEnv is gitWithEntireCommitHooks for a git command
+// that may fail, run with extra environment such as a scripted GIT_EDITOR.
+func gitWithEntireCommitHooksEnv(t *testing.T, env *TestEnv) func(extraEnv []string, args ...string) (string, error) {
+	t.Helper()
+	hooksDir := t.TempDir()
+	binary := shellQuote(filepath.ToSlash(getTestBinary()))
+	scripts := make(map[string]string)
+	for hook, args := range map[string]string{"prepare-commit-msg": `"$1" "$2"`, "commit-msg": `"$1"`, "post-commit": "", "post-rewrite": `"$1"`} {
+		scripts[hook] = fmt.Sprintf("#!/bin/sh\nexec %s hooks git %s %s\n", binary, hook, args)
+	}
+	writeScripts(t, hooksDir, scripts)
+	return func(extraEnv []string, args ...string) (string, error) {
 		t.Helper()
 		args = append([]string{"-c", "core.hooksPath=" + hooksDir}, args...)
 		cmd := execx.NonInteractive(t.Context(), "git", args...)
 		cmd.Dir = env.RepoDir
-		cmd.Env = env.cliEnv()
+		cmd.Env = append(env.cliEnv(), extraEnv...)
 		out, err := cmd.CombinedOutput()
-		require.NoError(t, err, "git %v: %s", args, out)
-		return string(out)
+		return string(out), err
 	}
+}
+
+// writeScripts writes executable shell scripts into dir, by file name.
+func writeScripts(t *testing.T, dir string, scripts map[string]string) {
+	t.Helper()
+	// A parallel fork inherits an open write descriptor until it execs, and
+	// Linux refuses to execute the script meanwhile (ETXTBSY).
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	for name, script := range scripts {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755))
+	}
+}
+
+// shellQuote quotes s as one POSIX shell word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }

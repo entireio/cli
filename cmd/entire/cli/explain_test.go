@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -441,6 +442,179 @@ func TestRunExplainAuto_CommitRefWithCheckpointTrailer(t *testing.T) {
 	err = runExplainAuto(ctx, &out, &errOut, commitHash.String(), true, false, false, false, false, false, false, 0)
 	require.NoError(t, err)
 	require.Contains(t, out.String(), cpID.String(), "expected checkpoint header resolved via trailer")
+}
+
+// --generate writes a summary into the checkpoint it resolves, so a checkpoint
+// ID mentioned only in the commit body must not reach it. git log still shows
+// that line, so the error names it.
+func TestExplainGenerate_BodyCheckpointLineIsNotATrailer(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	commitHash := commitExplainBodyMention(t, repo)
+
+	tests := []struct {
+		name string
+		run  func(out, errOut io.Writer) error
+	}{
+		{
+			name: "commit flag",
+			run: func(out, errOut io.Writer) error {
+				return runExplainCommit(context.Background(), out, errOut, commitHash.String(), true, false, false, false, true, true, false, 0)
+			},
+		},
+		{
+			name: "positional commit",
+			run: func(out, errOut io.Writer) error {
+				return runExplainAuto(context.Background(), out, errOut, commitHash.String(), true, false, false, false, true, true, false, 0)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			err := tt.run(&out, &errOut)
+			require.ErrorContains(t, err, "names checkpoint deadbeefcafe only outside its final trailer block")
+		})
+	}
+}
+
+// A final block can name several checkpoints: a squash's inherited trailers
+// come first and the one prepare stamped last. --generate writes into the
+// last, the checkpoint attach would join.
+func TestExplainGenerate_UsesTheLastFinalBlockTrailer(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	commitHash := commitExplainMessage(t, repo, "Squash feature\n\nEntire-Checkpoint: aaaaaaaaaaaa\nEntire-Checkpoint: bbbbbbbbbbbb\n")
+
+	tests := []struct {
+		name string
+		run  func(out, errOut io.Writer) error
+	}{
+		{
+			name: "commit flag",
+			run: func(out, errOut io.Writer) error {
+				return runExplainCommit(context.Background(), out, errOut, commitHash.String(), true, false, false, false, true, true, false, 0)
+			},
+		},
+		{
+			name: "positional commit",
+			run: func(out, errOut io.Writer) error {
+				return runExplainAuto(context.Background(), out, errOut, commitHash.String(), true, false, false, false, true, true, false, 0)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			err := tt.run(&out, &errOut)
+			require.ErrorContains(t, err, "bbbbbbbbbbbb")
+			require.NotContains(t, err.Error(), "aaaaaaaaaaaa")
+		})
+	}
+}
+
+// Read-only explain keeps finding checkpoints mentioned anywhere in the
+// message: squash commits carry their squashed commits' trailers in the body.
+func TestExplainReadOnly_FindsBodyCheckpointLine(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("deadbeefcafe")
+	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
+		CheckpointID: cpID,
+		SessionID:    "session-squashed",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+	commitHash := commitExplainBodyMention(t, repo)
+
+	var out, errOut bytes.Buffer
+	require.NoError(t, runExplainAuto(ctx, &out, &errOut, commitHash.String(), true, false, false, false, false, false, false, 0))
+	require.Contains(t, out.String(), cpID.String())
+}
+
+// Read-only explain shows the checkpoint --generate writes and attach joins:
+// the last of the final block, not the squash's first inherited trailer.
+func TestExplainReadOnly_ShowsTheLastFinalBlockTrailer(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	inherited, stamped := id.MustCheckpointID("aaaaaaaaaaaa"), id.MustCheckpointID("bbbbbbbbbbbb")
+	for _, cpID := range []id.CheckpointID{inherited, stamped} {
+		writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
+			SessionID:  "session-" + cpID.String(),
+			Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
+		})
+	}
+	commitHash := commitExplainMessage(t, repo, "Squash feature\n\nEntire-Checkpoint: "+inherited.String()+"\nEntire-Checkpoint: "+stamped.String()+"\n")
+
+	tests := []struct {
+		name string
+		run  func(out, errOut io.Writer) error
+	}{
+		{
+			name: "commit flag",
+			run: func(out, errOut io.Writer) error {
+				return runExplainCommit(context.Background(), out, errOut, commitHash.String(), true, false, false, false, false, false, false, 0)
+			},
+		},
+		{
+			name: "positional commit",
+			run: func(out, errOut io.Writer) error {
+				return runExplainAuto(context.Background(), out, errOut, commitHash.String(), true, false, false, false, false, false, false, 0)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			require.NoError(t, tt.run(&out, &errOut))
+			require.Contains(t, out.String(), stamped.String())
+			require.NotContains(t, out.String(), inherited.String())
+		})
+	}
+}
+
+// The branch listing and the --checkpoint commit search must agree with
+// explain <commit>: a squash commit lists the checkpoint it stamped, and a
+// search for either checkpoint it names finds it.
+func TestExplainReadOnly_ListingAndSearchAgreeWithTheCommitView(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	inherited, stamped := id.MustCheckpointID("aaaaaaaaaaaa"), id.MustCheckpointID("bbbbbbbbbbbb")
+	for _, cpID := range []id.CheckpointID{inherited, stamped} {
+		writeCheckpointForExport(t, repo, cpID, checkpoint.WriteOptions{
+			SessionID:  "session-" + cpID.String(),
+			Transcript: redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n")),
+		})
+	}
+	commitHash := commitExplainMessage(t, repo, "Squash feature\n\nEntire-Checkpoint: "+inherited.String()+"\nEntire-Checkpoint: "+stamped.String()+"\n")
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 20)
+	require.NoError(t, err)
+	listed := slices.IndexFunc(points, func(p strategy.PendingCheckpoint) bool { return p.ID == commitHash.String() })
+	require.GreaterOrEqual(t, listed, 0, "the listing shows the squash commit: %+v", points)
+	require.Equal(t, stamped, points[listed].CheckpointID, "the listing shows the checkpoint explain <commit> shows")
+
+	for _, cpID := range []id.CheckpointID{inherited, stamped} {
+		commits, err := getAssociatedCommits(context.Background(), repo, cpID, false)
+		require.NoError(t, err)
+		require.True(t, slices.ContainsFunc(commits, func(c associatedCommit) bool { return c.SHA == commitHash.String() }),
+			"explain --checkpoint %s finds the commit that names it: %+v", cpID, commits)
+	}
+}
+
+func commitExplainBodyMention(t *testing.T, repo *git.Repository) plumbing.Hash {
+	t.Helper()
+	return commitExplainMessage(t, repo, "Implement feature\n\nEntire-Checkpoint: deadbeefcafe\n\nSigned-off-by: Test User <test@example.com>\n")
+}
+
+func commitExplainMessage(t *testing.T, repo *git.Repository, message string) plumbing.Hash {
+	t.Helper()
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(wt.Filesystem().Root(), "feature.txt"), []byte("feature"), 0o644))
+	_, err = wt.Add("feature.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit(message, &git.CommitOptions{Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}})
+	require.NoError(t, err)
+	return commitHash
 }
 
 // TestRunExplainAuto_CommitWithoutTrailer covers the trailer-less commit
@@ -4267,6 +4441,39 @@ func TestGetAssociatedCommits(t *testing.T) {
 	if len(commit.SHA) != 40 {
 		t.Errorf("expected 40-char full SHA, got %d chars", len(commit.SHA))
 	}
+}
+
+// A commit whose body mentions a checkpoint while its final trailer block
+// names another is listed only under the one it links, as explain <commit>
+// shows it. A commit without a final-block trailer is listed under the first
+// checkpoint it names, as explain <commit> falls back to it.
+func TestGetAssociatedCommits_BodyMentionIsNotALink(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	mentioned, linked, unlinked := id.MustCheckpointID("abc123def456"), id.MustCheckpointID("def456abc123"), id.MustCheckpointID("fed654cba321")
+	testutil.WriteFile(t, tmpDir, "a.txt", "a")
+	testutil.GitAdd(t, tmpDir, "a.txt")
+	testutil.GitCommit(t, tmpDir, "Follow-up\n\nFollow-up to Entire-Checkpoint: "+mentioned.String()+"\n\nEntire-Checkpoint: "+linked.String())
+	testutil.WriteFile(t, tmpDir, "b.txt", "b")
+	testutil.GitAdd(t, tmpDir, "b.txt")
+	testutil.GitCommit(t, tmpDir, "Notes\n\nSee Entire-Checkpoint: "+unlinked.String()+" for context.")
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	commits, err := getAssociatedCommits(context.Background(), repo, mentioned, false)
+	require.NoError(t, err)
+	require.Empty(t, commits, "a body mention is not the commit's link")
+
+	commits, err = getAssociatedCommits(context.Background(), repo, linked, false)
+	require.NoError(t, err)
+	require.Len(t, commits, 1)
+	require.Contains(t, commits[0].Message, "Follow-up")
+
+	commits, err = getAssociatedCommits(context.Background(), repo, unlinked, false)
+	require.NoError(t, err)
+	require.Len(t, commits, 1, "with no final-block trailer, the first ID is what explain <commit> shows")
+	require.Contains(t, commits[0].Message, "Notes")
 }
 
 func TestGetAssociatedCommits_NoMatches(t *testing.T) {

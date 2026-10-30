@@ -86,9 +86,10 @@ func Convert(content []byte, opts Options) ([]byte, error) {
 	// Formats that need detection on raw content before line truncation:
 	// - Single-object formats (OpenCode, Gemini): SliceFromLine would cut
 	//   a JSON object mid-value. They handle StartLine as a message-index offset.
-	// - Codex: session_meta header is only on the first line. Codex slices
-	//   by physical line itself, after seeding its usage baseline from the
-	//   skipped lines.
+	// - Codex: session_meta header is only on the first line, and the choice
+	//   between its item and response_item paths is made on the whole
+	//   rollout. Codex slices by physical line itself, after seeding its usage
+	//   baseline from the skipped lines.
 	if isOpenCodeFormat(content) {
 		return compactOpenCode(content, opts)
 	}

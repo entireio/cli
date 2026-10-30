@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
@@ -400,6 +401,22 @@ func TestFlushCheckpointRefsQueue_SupersededRecoveriesDoNotStopTheRetry(t *testi
 	assert.Empty(t, queued)
 }
 
+// A selected ref superseded during recovery is reported as changed with the
+// commit now waiting, so a caller has the version to pin next.
+func TestFlushCheckpointRefs_SupersededSelectedRefReportsItsNewTip(t *testing.T) {
+	repo, bareDir, refs, base, _ := divergeCheckpointRefs(t, 1)
+	stubRecoveryCAS(t, loseRecoveryCAS(t, base))
+	selection := checkpointRefSelection{refs: map[plumbing.ReferenceName]plumbing.Hash{refs[0]: plumbing.ZeroHash}}
+
+	restore := captureStderr(t)
+	result, err := flushCheckpointRefs(context.Background(), repo, pushSettings{remote: bareDir}, selection)
+	restore()
+	require.NoError(t, err)
+	require.Len(t, result.changed, 1)
+	assert.Equal(t, refs[0], result.changed[0].name)
+	assert.Equal(t, base, result.changed[0].hash, "the commit the concurrent write left waiting")
+}
+
 // Superseded refs were attempted but did not fail, so the flush error counts
 // only the real failures among the attempts.
 func TestFlushCheckpointRefsQueue_ReportsOnlyRealFailures(t *testing.T) {
@@ -557,6 +574,55 @@ func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
 	assert.ElementsMatch(t, refs, remaining, "disabled push leaves refs queued")
 }
 
+// Under manual, the queue is held, not empty: the caller must be able to tell
+// the two apart to report why nothing was pushed.
+func TestPushQueuedCheckpointRefs_ManualPolicyHoldsRefs(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	policyFile := filepath.Join(workDir, ".git", filepath.FromSlash(settings.CheckpointPushPolicyFile))
+	require.NoError(t, os.MkdirAll(filepath.Dir(policyFile), 0o755))
+	require.NoError(t, os.WriteFile(policyFile, []byte("manual\n"), 0o600))
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.ErrorIs(t, err, ErrCheckpointPushHeldByPolicy)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, 0, pushed)
+
+	assert.Empty(t, strings.TrimSpace(testutil.RunGit(t, bareDir, "for-each-ref", "refs/entire/")), "manual must not push")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "held refs stay queued")
+}
+
+// flushCheckpointRefsQueue checks the policy itself, so a new caller that
+// forgets to cannot upload under manual.
+func TestFlushCheckpointRefsQueue_ManualPolicySendsNothing(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	policyFile := filepath.Join(workDir, ".git", filepath.FromSlash(settings.CheckpointPushPolicyFile))
+	require.NoError(t, os.MkdirAll(filepath.Dir(policyFile), 0o755))
+	require.NoError(t, os.WriteFile(policyFile, []byte("manual\n"), 0o600))
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	pushed, err := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir})
+	require.NoError(t, err)
+	assert.Equal(t, 0, pushed)
+
+	assert.Empty(t, strings.TrimSpace(testutil.RunGit(t, bareDir, "for-each-ref", "refs/entire/")), "manual must not push")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "held refs stay queued")
+}
+
 func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	workDir, _, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
@@ -649,6 +715,28 @@ func TestPushQueuedCheckpointRefs_OPFFailureWithholdsPush(t *testing.T) {
 	assert.Equal(t, before, refHashes(t, repo, refs), "a withheld push must leave every ref unmoved")
 	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "withheld refs stay queued")
 	assertRefsAbsentFromRemote(t, bareDir, refs, "withheld push must not reach the remote")
+}
+
+// A push of named refs must not read, warn about or fail on refs it was not
+// asked to send.
+func TestPartitionCheckpointRefPushes_UnnamedUnreadableRefWaits(t *testing.T) {
+	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	loop := plumbing.ReferenceName("refs/entire/loop")
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewSymbolicReference(refs[0], loop)))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewSymbolicReference(loop, refs[0])))
+	entries := []checkpoint.PushQueueEntry{{Ref: refs[0]}, {Ref: refs[1]}}
+
+	part := partitionCheckpointRefPushes(repo, entries,
+		checkpointRefSelection{refs: map[plumbing.ReferenceName]plumbing.Hash{refs[1]: plumbing.ZeroHash}})
+
+	assert.Empty(t, part.unreadable, "a ref nobody named is not read")
+	require.Len(t, part.waiting, 1)
+	assert.Equal(t, refs[0], part.waiting[0].Ref)
+	require.Len(t, part.ready, 1)
+	assert.Equal(t, refs[1], part.ready[0].name)
 }
 
 // A queued ref that cannot be read (here a symbolic-ref loop, which fails with
