@@ -197,9 +197,9 @@ func signedCommitAt(t *testing.T, name, key string, opts ...string) *object.Comm
 // the originals.
 func assertRewrittenKeepsKey(t *testing.T, sessionID string, target, later *object.Commit) {
 	t.Helper()
-	key := signingKey(context.Background(), target.Hash.String())
-	if key == "" {
-		t.Fatal("no signing key reported for the original commit")
+	key, good := signingKey(context.Background(), target.Hash.String())
+	if !good {
+		t.Fatal("the original commit has no good signature")
 	}
 	out, err := attachHeadless(t, sessionID, attachOptions{Commit: target.Hash.String()})
 	if err != nil {
@@ -214,8 +214,8 @@ func assertRewrittenKeepsKey(t *testing.T, sessionID string, target, later *obje
 		t.Fatalf("commits were not rewritten:\n%s", out)
 	}
 	for _, c := range []*object.Commit{parent, head} {
-		if got := signingKey(context.Background(), c.Hash.String()); got != key {
-			t.Errorf("rewritten commit %s signed by %q, want %q", c.Hash, got, key)
+		if got, good := signingKey(context.Background(), c.Hash.String()); !good || got != key {
+			t.Errorf("rewritten commit %s signed by %q (good=%v), want %q", c.Hash, got, good, key)
 		}
 	}
 	if strings.Contains(out, "no longer signed") {
@@ -225,12 +225,26 @@ func assertRewrittenKeepsKey(t *testing.T, sessionID string, target, later *obje
 
 // A commit the user signed is still signed by the same key after attach
 // rewrites it, the target and a commit replayed after it alike (#2974).
+// log.showSignature must not leak verification text into the key lookup.
 func TestAttachCommit_RewriteKeepsYourSignature(t *testing.T) {
 	forEachSigner(t, func(t *testing.T, yours, _ string) {
 		target := signedCommitAt(t, "work.txt", yours)
 		later := signedCommitAt(t, "later.txt", yours)
+		testutil.RunGit(t, mustGetwd(t), "config", "log.showSignature", "true")
 		assertRewrittenKeepsKey(t, "attach-signed", target, later)
 	})
+}
+
+// The user is whoever git commits as: committer.email wins over user.email.
+func TestAttachCommit_RewriteKeepsYourSignatureUnderCommitterEmail(t *testing.T) {
+	setupAttachTestRepo(t)
+	yours, _ := useSSHSigning(t)
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "config", "committer.email", "committer@example.com")
+	testutil.RunGit(t, dir, "config", "user.email", "author@example.com")
+	target := signedCommitAt(t, "work.txt", yours)
+	later := signedCommitAt(t, "later.txt", yours)
+	assertRewrittenKeepsKey(t, "attach-signed-committer-email", target, later)
 }
 
 // Without user.signingkey, OpenPGP signing picks the key by the committer
@@ -268,7 +282,8 @@ func TestAttachCommit_RewriteDoesNotSignSomeoneElsesCommit(t *testing.T) {
 }
 
 // A commit the user committed but signed with a key they can't sign with now
-// is replayed unsigned: the new signature would be by a different key.
+// is replayed unsigned: the new signature would be by a different key. The
+// user's key never signs its content, not even in an object attach discards.
 func TestAttachCommit_RewriteDropsASignatureByAnotherKey(t *testing.T) {
 	forEachSigner(t, func(t *testing.T, _, other string) {
 		target := signedCommitAt(t, "work.txt", other)
@@ -282,6 +297,63 @@ func TestAttachCommit_RewriteDropsASignatureByAnotherKey(t *testing.T) {
 		}
 		if !strings.Contains(out, "is no longer signed: it was signed with a key other than your signing key") {
 			t.Errorf("expected a warning naming the other key, got:\n%s", out)
+		}
+		if signed := signedCommitsOfTree(t, target.TreeHash.String()); !slices.Equal(signed, []string{target.Hash.String()}) {
+			t.Errorf("signed commits of the target's tree = %v, want only the original %s", signed, target.Hash)
+		}
+	})
+}
+
+// signedCommitsOfTree lists every signed commit object in the repository,
+// reachable or not, whose tree is tree.
+func signedCommitsOfTree(t *testing.T, tree string) []string {
+	t.Helper()
+	dir := mustGetwd(t)
+	var signed []string
+	for _, line := range strings.Split(strings.TrimSpace(testutil.RunGit(t, dir, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)")), "\n") {
+		sha, typ, _ := strings.Cut(line, " ")
+		if typ != "commit" {
+			continue
+		}
+		raw := testutil.RunGit(t, dir, "cat-file", "commit", sha)
+		if strings.HasPrefix(raw, "tree "+tree+"\n") && strings.Contains(raw, "\ngpgsig") {
+			signed = append(signed, sha)
+		}
+	}
+	return signed
+}
+
+// A commit whose signature doesn't verify (its content changed after signing)
+// is replayed unsigned: git still reports the key that signed the original
+// content, but re-signing would put the user's signature on content they never
+// signed.
+func TestAttachCommit_RewriteDropsASignatureThatDoesNotVerify(t *testing.T) {
+	forEachSigner(t, func(t *testing.T, yours, _ string) {
+		dir := mustGetwd(t)
+		signed := signedCommitAt(t, "work.txt", yours)
+		raw := testutil.RunGit(t, dir, "cat-file", "commit", signed.Hash.String())
+		cmd := execx.NonInteractive(t.Context(), "git", "hash-object", "-t", "commit", "-w", "--stdin")
+		cmd.Dir = dir
+		cmd.Stdin = strings.NewReader(strings.Replace(raw, "add work.txt", "add work.txt, altered", 1))
+		forged, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("write the altered commit: %v", err)
+		}
+		testutil.RunGit(t, dir, "update-ref", "HEAD", strings.TrimSpace(string(forged)))
+		target := headCommitOf(t)
+		if _, good := signingKey(context.Background(), target.Hash.String()); good {
+			t.Fatal("the altered commit's signature should not verify")
+		}
+
+		out, err := attachHeadless(t, "attach-signed-altered", attachOptions{Commit: target.Hash.String()})
+		if err != nil {
+			t.Fatalf("runAttach: %v\n%s", err, out)
+		}
+		if head := headCommitOf(t); head.Signature != "" || head.Hash == target.Hash {
+			t.Errorf("the rewrite should be unsigned: %s signed=%v", head.Hash, head.Signature != "")
+		}
+		if !strings.Contains(out, "is no longer signed: its signature can't be verified") {
+			t.Errorf("expected a warning that the signature doesn't verify, got:\n%s", out)
 		}
 	})
 }
