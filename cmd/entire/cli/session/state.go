@@ -220,8 +220,9 @@ type State struct {
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
 	// CaptureDegradedAt records when the session's most recent turn degraded
-	// capture because a bounded capture operation exceeded its budget. Set at
-	// turn end, cleared by the next healthy turn, and surfaced by `entire status`.
+	// capture: a bounded capture operation exceeded its budget, or turn-end
+	// finalize left checkpoints with their provisional transcripts. Set at turn
+	// end, cleared by the next healthy turn, and surfaced by `entire status`.
 	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
 
 	// StepCount is the number of checkpoints/steps created in this session.

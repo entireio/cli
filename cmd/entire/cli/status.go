@@ -964,7 +964,7 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
 			if st.CaptureDegradedAt != nil {
-				warning := fmt.Sprintf("capture degraded %s: a status scan or checkpoint finalize ran out of time (see 'entire doctor logs')",
+				warning := fmt.Sprintf("capture degraded %s: a status scan ran out of time or a checkpoint finalize did not complete (see 'entire doctor logs')",
 					timeAgo(*st.CaptureDegradedAt))
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
@@ -1252,8 +1252,8 @@ type sessionBriefJSON struct {
 	Branch       string `json:"branch,omitempty"`
 	Model        string `json:"model,omitempty"`
 	Status       string `json:"status"`
-	// CaptureDegraded reports that a session for this agent last turned with a
-	// capture operation over budget.
+	// CaptureDegraded reports that a session for this agent last turned with
+	// degraded capture (see SessionState.CaptureDegradedAt).
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 

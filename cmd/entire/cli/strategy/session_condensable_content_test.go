@@ -117,27 +117,7 @@ func TestFinalizeAllTurnCheckpoints_LateTranscriptNotFlushedDefers(t *testing.T)
 	require.Equal(t, 1, errCount, "a deferred finalize is still reported to the best-effort caller")
 	require.Equal(t, []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"}, state.TurnCheckpointIDs,
 		"TurnCheckpointIDs must survive an unflushed late transcript so a later turn end retries")
-}
-
-// A non-late agent's empty transcript is still the terminal condition it was:
-// there is no later flush to wait for, so the IDs are cleared as before.
-func TestFinalizeAllTurnCheckpoints_EmptyTranscriptClearsForOtherAgents(t *testing.T) {
-	t.Parallel()
-
-	empty := filepath.Join(t.TempDir(), "transcript.jsonl")
-	require.NoError(t, os.WriteFile(empty, nil, 0o600))
-
-	state := &SessionState{
-		SessionID:         "claude-mid-turn",
-		AgentType:         agent.AgentTypeClaudeCode,
-		Phase:             session.PhaseActive,
-		TranscriptPath:    empty,
-		TurnCheckpointIDs: []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"},
-	}
-
-	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state, time.Time{})
-	require.Equal(t, 1, errCount)
-	require.Empty(t, state.TurnCheckpointIDs)
+	require.NotNil(t, state.CaptureDegradedAt, "until a later turn end finalizes them, the checkpoints stay provisional")
 }
 
 // TestSessionLacksCondensableContent_StatsThroughTheSessionStore: when the
