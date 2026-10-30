@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
@@ -203,20 +204,22 @@ func ReadPostServiceAdvertisement(r io.Reader) ([]byte, error) {
 // optionally followed by a raw PACK stream when at least one command
 // is not a delete (i.e. the new OID isn't all zeros).
 //
-// The returned bytes are exactly what was on the wire — caller
-// streams them to the remote without further framing. EOF before the
-// flush is reported (treating it as a clean close would let a
-// truncated request look like a clean delete-only push).
-func ReadReceivePackRequest(r io.Reader) ([]byte, error) {
-	var buf bytes.Buffer
+// The returned body is exactly what was on the wire — caller streams
+// it to the remote without further framing. Each command pkt-line is
+// its own chunk, so the first chunk is the line carrying the
+// capabilities (see AppendAgentToReceivePackBody). EOF before the flush
+// is reported (treating it as a clean close would let a truncated
+// request look like a clean delete-only push).
+func ReadReceivePackRequest(r io.Reader) (*RequestBody, error) {
+	body := &RequestBody{}
 	lenBuf := make([]byte, pktline.LenSize)
 	needPackData := false
 
 	for {
 		n, err := io.ReadFull(r, lenBuf)
 		if err != nil {
-			if errors.Is(err, io.EOF) && n == 0 && buf.Len() == 0 {
-				return buf.Bytes(), nil
+			if errors.Is(err, io.EOF) && n == 0 && body.Len() == 0 {
+				return body, nil
 			}
 			if errors.Is(err, io.ErrUnexpectedEOF) || (errors.Is(err, io.EOF) && n > 0) {
 				return nil, fmt.Errorf("reading pkt-line length: %w", io.ErrUnexpectedEOF)
@@ -228,27 +231,29 @@ func ReadReceivePackRequest(r io.Reader) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("receive-pack request: %w", err)
 		}
-		buf.Write(lenBuf)
 
 		if pktLen == pktline.Flush {
+			body.appendChunk(slices.Clone(lenBuf))
 			if needPackData {
-				if _, err := io.Copy(&buf, r); err != nil {
+				if _, err := body.ReadFrom(r); err != nil {
 					return nil, fmt.Errorf("reading pack data: %w", err)
 				}
 			}
-			return buf.Bytes(), nil
+			return body, nil
 		}
 		if pktLen < pktline.LenSize {
+			body.appendChunk(slices.Clone(lenBuf))
 			continue
 		}
 
-		content := make([]byte, pktLen-pktline.LenSize)
-		if _, err := io.ReadFull(r, content); err != nil {
+		line := make([]byte, pktLen)
+		copy(line, lenBuf)
+		if _, err := io.ReadFull(r, line[pktline.LenSize:]); err != nil {
 			return nil, fmt.Errorf("reading pkt-line content: %w", err)
 		}
-		buf.Write(content)
+		body.appendChunk(line)
 
-		if !needPackData && receivePackCommandNeedsPack(content) {
+		if !needPackData && receivePackCommandNeedsPack(line[pktline.LenSize:]) {
 			needPackData = true
 		}
 	}
@@ -282,23 +287,23 @@ func receivePackCommandNeedsPack(content []byte) bool {
 }
 
 // ReadSendPackRequest reads one request emitted by
-// `git send-pack --stateless-rpc` and writes the unwrapped payload to
+// `git send-pack --stateless-rpc` and appends the unwrapped payload to
 // dst. Send-pack wraps the receive-pack request in an outer pkt-line
 // stream so it can mark request boundaries without closing stdout;
 // the HTTP body is the concatenated payload of those outer packets.
+// Each payload is kept as its own chunk of dst rather than copied into
+// one buffer, so the pack is held once.
 //
 // Returns when the outer flush is seen. Special lengths 1/2 are
 // tolerated and skipped (current send-pack doesn't emit them, but
 // the shape is permissive). EOF before the flush is wrapped as
 // io.ErrUnexpectedEOF — a truncated send-pack stdout is never a
 // clean end.
-func ReadSendPackRequest(r *bufio.Reader, dst *bytes.Buffer) error {
+func ReadSendPackRequest(r *bufio.Reader, dst *RequestBody) error {
+	lenBuf := make([]byte, pktline.LenSize)
 	for {
-		lenBuf := make([]byte, pktline.LenSize)
-		n, err := io.ReadFull(r, lenBuf)
-		if err != nil {
+		if _, err := io.ReadFull(r, lenBuf); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				_ = n
 				return fmt.Errorf("reading send-pack packet length: %w", io.ErrUnexpectedEOF)
 			}
 			return fmt.Errorf("reading send-pack packet length: %w", err)
@@ -318,8 +323,6 @@ func ReadSendPackRequest(r *bufio.Reader, dst *bytes.Buffer) error {
 		if _, err := io.ReadFull(r, payload); err != nil {
 			return fmt.Errorf("reading send-pack packet payload: %w", err)
 		}
-		if _, err := dst.Write(payload); err != nil {
-			return fmt.Errorf("buffering send-pack packet payload: %w", err)
-		}
+		dst.appendChunk(payload)
 	}
 }

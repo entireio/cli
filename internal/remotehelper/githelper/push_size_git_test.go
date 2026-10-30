@@ -113,7 +113,9 @@ func TestHandlePush_RealSendPack_DeclaresSizeAndLands(t *testing.T) {
 	if want := strconv.FormatInt(srv.bodyRead, 10); srv.declared != want {
 		t.Errorf("X-Entire-Push-Size = %s, body read = %s", srv.declared, want)
 	}
-	if srv.contentLen >= 0 && strconv.FormatInt(srv.contentLen, 10) != srv.declared {
+	// The body is not a bytes.Reader, so net/http only knows its length
+	// because the helper declares it; -1 would mean a chunked upload.
+	if strconv.FormatInt(srv.contentLen, 10) != srv.declared {
 		t.Errorf("Content-Length %d disagrees with X-Entire-Push-Size %s", srv.contentLen, srv.declared)
 	}
 	if !strings.Contains(stdout.String(), "ok "+testRefMain) {
