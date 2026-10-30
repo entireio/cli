@@ -995,12 +995,19 @@ enable`. When the transcript itself
 records the commit(s) a turn made (Claude Code `gitOperation` records), the
 turn's checkpoint instead anchors to the last such commit that resolves and is
 reachable from the resolved link anchor (the default-branch head when
-resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`);
-otherwise (older transcripts, or a recorded commit that's been
-squashed/rebased away) it falls back to the default-branch head as described
-above. It is an anchor for UI display only, not an attribution signal — an
-imported session's local `session.State.BaseCommit` stays empty — and
-pre-existing imported checkpoints are not backfilled with it.
+resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`).
+Claude Code writes that record only when git prints the new commit's SHA, so a
+quiet `git commit -q` leaves none. A turn whose recorded commits anchor nothing
+anchors to the newest reachable commit, committed by the importer's git email,
+whose committer time falls between one
+of its Bash calls running `git commit`, `cherry-pick`, `revert`, `merge`,
+`rebase` or `am` and that call's result. Otherwise (older transcripts, a commit
+squashed or rebased away, one made by a background command, whose result
+returns before it commits, or one made by a subagent, whose calls live in its
+own transcript) it falls back to the default-branch head as described above.
+It is an anchor for UI display only, not an attribution signal — an imported
+session's local `session.State.BaseCommit` stays empty — and pre-existing
+imported checkpoints are not backfilled with it.
 
 ### Checkpoint ID Linking
 
