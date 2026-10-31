@@ -181,40 +181,163 @@ func TestRequestBody_ReadFromEOFWithFinalBytes(t *testing.T) {
 	}
 }
 
-// The agent amend must copy only the first chunk: the rest of the body is
-// the pack, and copying it is what made a push hold the pack several times.
-func TestAppendAgentToReceivePackBody_AmendsFirstChunkOnly(t *testing.T) {
+// holdsChunk reports whether b still holds c itself rather than a copy.
+func holdsChunk(b *RequestBody, c []byte) bool {
+	for _, held := range b.chunks {
+		if &held[0] == &c[0] {
+			return true
+		}
+	}
+	return false
+}
+
+// The agent amend must copy only the capability line: the rest of the body
+// is the pack, and copying it is what made a push hold the pack several times.
+func TestAppendAgentToReceivePackBody_CopiesOnlyCapabilityLine(t *testing.T) {
 	t.Parallel()
 
-	oldSHA := strings.Repeat("a", 40)
-	newSHA := strings.Repeat("b", 40)
-	cmd := oldSHA + " " + newSHA + " " + testRefMain + "\x00 report-status agent=git/2.54.0\n"
-	b := newTestBody(pktLine(cmd)+"0000", "PACK", "more pack")
-	pack := b.chunks[1]
+	cmd, wantCmd := testCommand()
+	b := newTestBody(cmd+"0000", "PACK", "more pack")
+	pack, morePack := b.chunks[1], b.chunks[2]
 
-	if err := AppendAgentToReceivePackBody(b, "git-remote-entire/dev"); err != nil {
+	if err := AppendAgentToReceivePackBody(b, testHelperAgent); err != nil {
 		t.Fatalf("AppendAgentToReceivePackBody: %v", err)
 	}
-	wantCmd := oldSHA + " " + newSHA + " " + testRefMain + "\x00 report-status agent=git/2.54.0+git-remote-entire/dev\n"
-	want := pktLine(wantCmd) + "0000PACKmore pack"
+	want := wantCmd + "0000PACKmore pack"
 	if got := bodyString(t, b); got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 	if b.Len() != int64(len(want)) {
 		t.Errorf("Len = %d, want %d", b.Len(), len(want))
 	}
-	if &b.chunks[1][0] != &pack[0] {
-		t.Error("pack chunk was copied")
+	if !holdsChunk(b, pack) || !holdsChunk(b, morePack) {
+		t.Error("pack chunks were copied")
 	}
 }
 
-func TestAppendAgentToReceivePackBody_FirstLineSplitFails(t *testing.T) {
+const testHelperAgent = "git-remote-entire/dev"
+
+// testCommand returns a receive-pack command line carrying capabilities,
+// before and after the helper agent is appended.
+func testCommand() (string, string) {
+	head := strings.Repeat("a", 40) + " " + strings.Repeat("b", 40) + " " + testRefMain + "\x00 report-status agent=git/2.54.0"
+	return pktLine(head + "\n"), pktLine(head + "+" + testHelperAgent + "\n")
+}
+
+// testShallowLines returns n shallow pkt-lines, which a shallow client
+// sends ahead of its first command.
+func testShallowLines(n int) string {
+	var sb strings.Builder
+	for i := range n {
+		sb.WriteString(pktLine(fmt.Sprintf("shallow %040x\n", i)))
+	}
+	return sb.String()
+}
+
+// send-pack frames the request in payloads of at most 65515 bytes, so a
+// command line behind enough shallow lines spans two chunks.
+func TestAppendAgentToReceivePackBody_CommandSpansChunks(t *testing.T) {
 	t.Parallel()
 
-	cmd := pktLine(strings.Repeat("a", 40) + " " + strings.Repeat("b", 40) + " " + testRefMain + "\x00 agent=git/2.54.0\n")
-	b := newTestBody(cmd[:20], cmd[20:]+"0000")
-	if err := AppendAgentToReceivePackBody(b, "git-remote-entire/dev"); err == nil {
-		t.Fatal("expected an error when the first command line spans chunks")
+	cmd, wantCmd := testCommand()
+	for _, split := range []int{1, 4, 20, len(cmd) - 1} {
+		b := newTestBody(cmd[:split], cmd[split:]+"0000", "PACK")
+		pack := b.chunks[2]
+		if err := AppendAgentToReceivePackBody(b, testHelperAgent); err != nil {
+			t.Fatalf("split at %d: %v", split, err)
+		}
+		if got, want := bodyString(t, b), wantCmd+"0000PACK"; got != want {
+			t.Errorf("split at %d: body = %q, want %q", split, got, want)
+		}
+		if !holdsChunk(b, pack) {
+			t.Errorf("split at %d: pack chunk was copied", split)
+		}
+	}
+}
+
+// A shallow client's shallow lines come first; the capabilities are on the
+// first command after them, on both push paths.
+func TestAppendAgentToReceivePackBody_AfterShallowLines(t *testing.T) {
+	t.Parallel()
+
+	cmd, wantCmd := testCommand()
+
+	t.Run("connect", func(t *testing.T) {
+		t.Parallel()
+		shallow := testShallowLines(2)
+		b, err := ReadReceivePackRequest(strings.NewReader(shallow + cmd + "0000" + testFakePackData))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := AppendAgentToReceivePackBody(b, testHelperAgent); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := bodyString(t, b), shallow+wantCmd+"0000"+testFakePackData; got != want {
+			t.Errorf("body = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("send-pack framing", func(t *testing.T) {
+		t.Parallel()
+		// Enough shallow lines that the command straddles send-pack's
+		// first 65515-byte payload.
+		shallow := testShallowLines(65515/53 - 1)
+		request := shallow + cmd + "0000"
+		var framed strings.Builder
+		for rest := request; rest != ""; {
+			n := min(len(rest), 65515)
+			framed.WriteString(pktLine(rest[:n]))
+			rest = rest[n:]
+		}
+		framed.WriteString(pktLine(testFakePackData) + "0000")
+
+		var b RequestBody
+		if err := ReadSendPackRequest(bufio.NewReader(strings.NewReader(framed.String())), &b); err != nil {
+			t.Fatal(err)
+		}
+		if len(b.chunks) < 3 || len(b.chunks[0]) != 65515 {
+			t.Fatalf("fixture: want the command split across the first two chunks, got %d chunks", len(b.chunks))
+		}
+		if err := AppendAgentToReceivePackBody(&b, testHelperAgent); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := bodyString(t, &b), shallow+wantCmd+"0000"+testFakePackData; got != want {
+			t.Errorf("amended body differs (len %d, want %d)", len(got), len(want))
+		}
+	})
+}
+
+func TestAppendAgentToReceivePackBody_Unchanged(t *testing.T) {
+	t.Parallel()
+
+	noCaps := testShallowLines(1) + pktLine(strings.Repeat("a", 40)+" "+strings.Repeat("b", 40)+" "+testRefMain+"\n") + "0000PACK"
+	for name, in := range map[string]string{
+		"no capability line before flush": noCaps,
+		"empty":                           "",
+	} {
+		b := newTestBody(in)
+		if err := AppendAgentToReceivePackBody(b, testHelperAgent); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		if got := bodyString(t, b); got != in {
+			t.Errorf("%s: body = %q, want unchanged", name, got)
+		}
+	}
+}
+
+func TestAppendAgentToReceivePackBody_TruncatedFails(t *testing.T) {
+	t.Parallel()
+
+	cmd, _ := testCommand()
+	for name, in := range map[string]string{
+		"line longer than body": cmd[:len(cmd)-5],
+		"partial length prefix": testShallowLines(1) + "00",
+		"invalid length":        "0003",
+		"non-hex length":        "zzzz",
+	} {
+		if err := AppendAgentToReceivePackBody(newTestBody(in), testHelperAgent); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
 	}
 }
 
@@ -239,24 +362,5 @@ func TestReadSendPackRequest_ChunkPerPacket(t *testing.T) {
 		if string(b.chunks[i]) != p {
 			t.Errorf("chunk %d = %q, want %q", i, b.chunks[i], p)
 		}
-	}
-}
-
-// AppendAgentToReceivePackBody relies on the capability line being the
-// whole first chunk on the v0/v1 connect path.
-func TestReadReceivePackRequest_FirstChunkIsFirstLine(t *testing.T) {
-	t.Parallel()
-
-	first := pktLine(strings.Repeat("0", 40) + " " + strings.Repeat("b", 40) + " " + testRefMain + "\x00 report-status\n")
-	second := pktLine(strings.Repeat("0", 40) + " " + strings.Repeat("c", 40) + " refs/heads/other\n")
-	b, err := ReadReceivePackRequest(strings.NewReader(first + second + "0000" + testFakePackData))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b.chunks[0]) != first {
-		t.Errorf("first chunk = %q, want %q", b.chunks[0], first)
-	}
-	if got, want := bodyString(t, b), first+second+"0000"+testFakePackData; got != want {
-		t.Errorf("body = %q, want %q", got, want)
 	}
 }

@@ -1,10 +1,13 @@
 package gitproto
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
+
+	"github.com/go-git/go-git/v6/plumbing/format/pktline"
 )
 
 // bodyChunkSize is the block size RequestBody.ReadFrom reads raw pack
@@ -43,14 +46,22 @@ func (b *RequestBody) appendChunk(p []byte) {
 	b.ends = append(b.ends, b.Len()+int64(len(p)))
 }
 
-// replaceFirstChunk swaps the first chunk for p and recomputes offsets.
-func (b *RequestBody) replaceFirstChunk(p []byte) {
-	b.chunks[0] = p
-	var end int64
-	for i, c := range b.chunks {
-		end += int64(len(c))
-		b.ends[i] = end
+// replaceRange replaces bytes [start, end) with p. The chunks on either
+// side are re-sliced rather than copied, so the pack stays where it is.
+func (b *RequestBody) replaceRange(start, end int64, p []byte) {
+	chunks, ends, total := b.chunks, b.ends, b.Len()
+	b.chunks, b.ends = nil, nil
+	keep := func(from, to int64) {
+		for i, c := range chunks {
+			cStart := ends[i] - int64(len(c))
+			if lo, hi := max(cStart, from), min(ends[i], to); lo < hi {
+				b.appendChunk(c[lo-cStart : hi-cStart])
+			}
+		}
 	}
+	keep(0, start)
+	b.appendChunk(p)
+	keep(end, total)
 }
 
 // ReadFrom appends everything r yields until io.EOF, in bodyChunkSize
@@ -115,20 +126,45 @@ func (b *RequestBody) ApplyTo(req *http.Request) {
 }
 
 // AppendAgentToReceivePackBody appends helperAgent to the agent
-// capability on the request's first command line, which both push paths
-// keep in the first chunk: send-pack writes the command section as its
-// own stateless-rpc packets ahead of the pack, and ReadReceivePackRequest
-// stores the first pkt-line as a chunk of its own. Only that chunk is
-// copied. Git always puts the capabilities on the first line, so a first
-// line that doesn't fit in the first chunk is reported as an error.
+// capability on the request's first command line: the first pkt-line
+// carrying a NUL before the flush. Shallow lines can precede it, and
+// send-pack's stateless-rpc framing can split it across chunks, so the
+// lines are read through the body. Only that line is copied. It leaves
+// requests without agent= unchanged.
 func AppendAgentToReceivePackBody(body *RequestBody, helperAgent string) error {
-	if body.Len() == 0 {
+	if helperAgent == "" {
 		return nil
 	}
-	first, err := AppendAgentToReceivePackRequest(body.chunks[0], helperAgent)
-	if err != nil {
-		return fmt.Errorf("first request chunk: %w", err)
+	lenBuf := make([]byte, pktline.LenSize)
+	for off := int64(0); off < body.Len(); {
+		if _, err := body.ReadAt(lenBuf, off); err != nil {
+			return fmt.Errorf("pkt-line length at offset %d: %w", off, io.ErrUnexpectedEOF)
+		}
+		pktLen, err := pktline.ParseLength(lenBuf)
+		if err != nil {
+			return fmt.Errorf("parsing pkt-line length at offset %d: %w", off, err)
+		}
+		switch pktLen {
+		case pktline.Flush, pktline.Delim, pktline.ResponseEnd:
+			return nil
+		}
+		if pktLen < pktline.LenSize {
+			return fmt.Errorf("invalid pkt-line length %d at offset %d", pktLen, off)
+		}
+		line := make([]byte, pktLen)
+		if _, err := body.ReadAt(line, off); err != nil {
+			return fmt.Errorf("pkt-line length %d at offset %d exceeds request length", pktLen, off)
+		}
+		if bytes.IndexByte(line[pktline.LenSize:], 0) < 0 {
+			off += int64(pktLen)
+			continue
+		}
+		amended, err := AppendAgentToReceivePackRequest(line, helperAgent)
+		if err != nil {
+			return err
+		}
+		body.replaceRange(off, off+int64(pktLen), amended)
+		return nil
 	}
-	body.replaceFirstChunk(first)
 	return nil
 }

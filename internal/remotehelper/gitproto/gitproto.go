@@ -205,9 +205,7 @@ func ReadPostServiceAdvertisement(r io.Reader) ([]byte, error) {
 // is not a delete (i.e. the new OID isn't all zeros).
 //
 // The returned body is exactly what was on the wire — caller streams
-// it to the remote without further framing. Each command pkt-line is
-// its own chunk, so the first chunk is the line carrying the
-// capabilities (see AppendAgentToReceivePackBody). EOF before the flush
+// it to the remote without further framing. EOF before the flush
 // is reported (treating it as a clean close would let a truncated
 // request look like a clean delete-only push).
 func ReadReceivePackRequest(r io.Reader) (*RequestBody, error) {
