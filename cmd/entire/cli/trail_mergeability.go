@@ -25,7 +25,8 @@ var trailFailedCheckConclusions = map[string]bool{
 
 // printTrailMergeability renders the mergeability snapshot for the human
 // `trail show` view: the server's verdict, head, and conflict status, one row
-// per gate, and a checks summary listing only the failed runs. `--json`
+// per gate with eval gates grouped under "Evals:", the non-blocking gates that
+// need attention, and a checks summary listing only the failed runs. `--json`
 // carries every run and full gate rows. Server-supplied strings are sanitized
 // because they are printed straight to the terminal.
 func printTrailMergeability(w io.Writer, styles statusStyles, label func(string) string, mg *api.TrailMergeability) {
@@ -45,6 +46,7 @@ func printTrailMergeability(w io.Writer, styles statusStyles, label func(string)
 	fmt.Fprintf(w, "  %s%s\n", label("Conflicts: "), trailConflictDisplay(styles, mg.ConflictStatus))
 
 	printTrailGates(w, styles, label, mg.Gates)
+	printTrailGatesNeedingAttention(w, label, mg.Gates)
 	printTrailChecks(w, styles, label, mg.Checks)
 }
 
@@ -67,27 +69,71 @@ func printTrailGates(w io.Writer, styles statusStyles, label func(string) string
 		return
 	}
 	fmt.Fprintf(w, "  %s\n", label("Gates:"))
-	keys := make([]string, len(gates))
-	statuses := make([]string, len(gates))
+	var others, evals []api.TrailGate
+	for _, g := range gates {
+		if g.GateType == api.TrailGateTypeEval {
+			evals = append(evals, g)
+		} else {
+			others = append(others, g)
+		}
+	}
+	keys := make([]string, len(others))
+	statuses := make([]string, len(others))
 	keyWidth, statusWidth := 0, 0
-	for i, g := range gates {
+	for i, g := range others {
 		keys[i] = tuiutil.SanitizeDisplayText(g.GateKey)
 		statuses[i] = tuiutil.SanitizeDisplayText(g.Status)
 		keyWidth = max(keyWidth, lipgloss.Width(keys[i]))
 		statusWidth = max(statusWidth, lipgloss.Width(statuses[i]))
 	}
-	for i, g := range gates {
+	for i, g := range others {
 		icon, style := trailGateIcon(styles, g.Status)
-		detail := ""
-		if g.Rationale != nil {
-			detail = tuiutil.SanitizeDisplayText(*g.Rationale)
-		}
-		if !g.Blocking {
-			detail = strings.TrimSpace(detail + " (non-blocking)")
-		}
 		line := fmt.Sprintf("    %s %s  %s  %s", styles.render(style, icon),
-			tuiutil.PadDisplayWidth(keys[i], keyWidth), tuiutil.PadDisplayWidth(statuses[i], statusWidth), detail)
+			tuiutil.PadDisplayWidth(keys[i], keyWidth), tuiutil.PadDisplayWidth(statuses[i], statusWidth), trailGateDetail(g))
 		fmt.Fprintln(w, strings.TrimRight(line, " "))
+	}
+	if len(evals) > 0 {
+		fmt.Fprintf(w, "    %s\n", label("Evals:"))
+		printTrailEvalGates(w, styles, evals)
+	}
+}
+
+// trailGateDetail is a gate row's rationale, marked when the gate does not
+// block the merge.
+func trailGateDetail(g api.TrailGate) string {
+	detail := ""
+	if g.Rationale != nil {
+		detail = tuiutil.SanitizeDisplayText(*g.Rationale)
+	}
+	if !g.Blocking {
+		detail = strings.TrimSpace(detail + " (non-blocking)")
+	}
+	return detail
+}
+
+// trailGatesNeedingAttention returns the non-blocking gates that failed or
+// errored: they do not hold the merge, but someone should look at them.
+func trailGatesNeedingAttention(gates []api.TrailGate) []api.TrailGate {
+	var out []api.TrailGate
+	for _, g := range gates {
+		if g.Blocking || g.State == trailGateStateDisabled {
+			continue
+		}
+		if g.Status == trailGateFailed || g.Status == trailGateError {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+func printTrailGatesNeedingAttention(w io.Writer, label func(string) string, gates []api.TrailGate) {
+	attention := trailGatesNeedingAttention(gates)
+	if len(attention) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "  %s\n", label("Needs attention:"))
+	for _, g := range attention {
+		fmt.Fprintf(w, "    - %s\n", describeGateFailure(g))
 	}
 }
 
@@ -95,7 +141,7 @@ func trailGateIcon(styles statusStyles, status string) (string, lipgloss.Style) 
 	switch status {
 	case "passed":
 		return "✓", styles.green
-	case "failed":
+	case "failed", "error":
 		return "✗", styles.red
 	case "pending":
 		return "…", styles.yellow
