@@ -291,12 +291,15 @@ var agentHelpProjectTrailGuidance = map[string]string{
 		"review need a clone of that repository: do the ones in this clone and\n" +
 		"tell the user which changes need another clone instead of skipping\n" +
 		"them silently. A change's merge state is changes[].mergeability: its\n" +
-		"gates (approvals, checks, findings, up_to_date) are under .gates and\n" +
-		"its CI runs, with details_url links, under .checks.runs. mergeability\n" +
-		"is null for merged or closed changes other than the current one, when\n" +
-		"the server has no snapshot yet, and when it could not be read; only a\n" +
-		"failed read prints a warning on stderr. Null is unknown, never\n" +
-		"mergeable.",
+		"gates (approvals, checks, findings, up_to_date, eval) are under .gates\n" +
+		"and its CI runs, with details_url links, under .checks.runs. An eval\n" +
+		"gate's gate_key is an agent id; its .value has agent_name, value,\n" +
+		"threshold, and a configuration_issue when the gate is not enforced.\n" +
+		"A gate that failed or errored with blocking: false needs attention but\n" +
+		"does not block the merge. mergeability is null for merged or closed\n" +
+		"changes other than the current one, when the server has no snapshot\n" +
+		"yet, and when it could not be read; only a failed read prints a\n" +
+		"warning on stderr. Null is unknown, never mergeable.",
 }
 
 // agentHelpTrailSandboxGuidance is shared by both trail models. Agent sandboxes

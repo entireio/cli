@@ -30,9 +30,12 @@ const (
 	trailMergeOverrideDenied = "merge_gates_bypass_forbidden"
 
 	trailGateStateDisabled = "disabled"
+	trailGateStateStale    = "stale"
+	trailGatePassed        = "passed"
 	trailGateFailed        = "failed"
 	trailGatePending       = "pending"
 	trailGateError         = "error"
+	trailGateSkipped       = "skipped"
 
 	// Why the server kept a merged native trail's branch (branchKeptReason).
 	trailBranchKeptNotRequested  = "not_requested"
@@ -77,9 +80,12 @@ can pass one as <repo>/<number> or select it with --branch and --repo. Each
 change merges on its own; merging one never merges the trail's other changes.`) + `
 
 The trail's gates (approvals, CI checks, the base branch's CI, being up to date,
-and any other configured gates) are checked first. When a blocking gate fails
-or is still pending, the blocking gates are listed and nothing is merged. A
-trail that conflicts with its base is never merged; resolve the conflicts first.
+agents' evals, and any other configured gates) are checked first. When a
+blocking gate fails or is still pending, the blocking gates are listed and
+nothing is merged. Non-blocking gates that failed, and eval gates that are not
+enforced, do not stop the merge; they are printed as warnings on stderr before
+merging. A trail that conflicts with its base is never merged; resolve the
+conflicts first.
 
 Pass --force to merge anyway. This bypasses the blocking gates and is recorded
 on the trail; the repo's bypass policy decides who may do it. You are asked to
@@ -227,7 +233,7 @@ func runTrailMerge(ctx context.Context, out, errW io.Writer, insecureHTTP bool, 
 			return err
 		}
 		ref := legacyTrailMergeRef(found.Number)
-		return mergeResolvedTrail(ctx, out, w, client, repoID, found, ref, opts)
+		return mergeResolvedTrail(ctx, out, w, errW, client, repoID, found, ref, opts)
 	})
 }
 
@@ -250,7 +256,7 @@ func runProjectTrailMerge(cmd *cobra.Command, mode *trailMode, opts trailMergeOp
 		return errors.New("the selected change has no number yet")
 	}
 	ref := projectTrailMergeRef(selected.Repo, selected.Work.Number, selected.Parent.Number, selected.Target.Host+"/"+selected.Target.Project)
-	return mergeResolvedTrail(ctx, cmd.OutOrStdout(), w, selected.Client, selected.RepoID, &selected.Work, ref, opts)
+	return mergeResolvedTrail(ctx, cmd.OutOrStdout(), w, cmd.ErrOrStderr(), selected.Client, selected.RepoID, &selected.Work, ref, opts)
 }
 
 var errTrailMergeDeleteBranchGitHub = errors.New("--delete-branch and --no-delete-branch apply to native trails only; GitHub's own auto-delete setting decides for a GitHub-backed trail")
@@ -297,8 +303,9 @@ func (r trailMergeRef) Title() string {
 }
 
 // mergeResolvedTrail reads mergeability and merges, once the trail (or the
-// project trail change) and its repository are known.
-func mergeResolvedTrail(ctx context.Context, out, w io.Writer, client *api.Client, repoID string, found *api.TrailResource, ref trailMergeRef, opts trailMergeOptions) error {
+// project trail change) and its repository are known. Warnings go to errW,
+// so they survive --json.
+func mergeResolvedTrail(ctx context.Context, out, w, errW io.Writer, client *api.Client, repoID string, found *api.TrailResource, ref trailMergeRef, opts trailMergeOptions) error {
 	// repo_id-addressed for every forge: the name-addressed routes were retired.
 	mergePath, err := trailRepoIDNumberPath(repoID, found.Number)
 	if err != nil {
@@ -312,7 +319,7 @@ func mergeResolvedTrail(ctx context.Context, out, w io.Writer, client *api.Clien
 
 	gates := trailMergeBlockingGates(m)
 	result := newTrailMergeResultJSON(found, ref, m, gates, opts.DryRun)
-	err = trailMergeAfterRead(ctx, w, client, mergePath, found, ref, m, trailBypassVerdictFor(m, actions), gates, opts, result)
+	err = trailMergeAfterRead(ctx, w, errW, client, mergePath, found, ref, m, trailBypassVerdictFor(m, actions), gates, opts, result)
 	return finishTrailMerge(out, opts.JSON, result, err)
 }
 
@@ -330,7 +337,7 @@ func finishTrailMerge(out io.Writer, jsonOut bool, result *trailMergeResultJSON,
 
 // trailMergeAfterRead decides and performs the merge once mergeability is in
 // hand, recording the outcome on result for --json.
-func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, mergePath string, found *api.TrailResource, ref trailMergeRef,
+func trailMergeAfterRead(ctx context.Context, w, errW io.Writer, client *api.Client, mergePath string, found *api.TrailResource, ref trailMergeRef,
 	m *api.TrailMergeabilityResponse, v trailBypassVerdict, gates []api.TrailGate, opts trailMergeOptions, result *trailMergeResultJSON,
 ) error {
 	bypassable := len(gates)
@@ -398,6 +405,7 @@ func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, m
 	// failing in between is refused rather than bypassed unseen. A bypass is
 	// pinned to the head only: the server takes no gate set, so a gate that
 	// changes on the same head after the recheck is bypassed too.
+	printTrailMergeWarnings(errW, m.Gates)
 	req := api.TrailMergeRequest{Bypass: bypass, ExpectedHeadSha: trailMergeHead(m), DeleteBranch: opts.DeleteBranch}
 	res, err := postTrailMerge(ctx, client, mergePath, ref, req, v, m.BypassPolicy)
 	if err != nil {
@@ -833,18 +841,22 @@ func describeTrailMergeBlockers(ref trailMergeRef, m *api.TrailMergeabilityRespo
 }
 
 func describeGateFailure(g api.TrailGate) string {
-	name := strings.TrimSpace(g.GateKey)
-	if name == "" {
-		name = strings.TrimSpace(g.GateType)
-	}
 	reason := ""
 	if g.Rationale != nil {
 		reason = strings.TrimSpace(*g.Rationale)
 	}
+	// An eval gate's rationale is a sentence that already names its agent,
+	// unless it is about an earlier commit.
+	if g.GateType == api.TrailGateTypeEval && g.State == trailGateStateStale {
+		return tuiutil.SanitizeDisplayText(trailGateName(g) + ": " + trailEvalOutdated)
+	}
+	if g.GateType == api.TrailGateTypeEval && reason != "" {
+		return tuiutil.SanitizeDisplayText(reason)
+	}
 	if reason == "" {
 		reason = strings.TrimSpace(g.Status)
 	}
-	line := name + ": " + reason
+	line := trailGateName(g) + ": " + reason
 	if u := trailGateWebURL(g); u != "" {
 		line += " (" + u + ")"
 	}

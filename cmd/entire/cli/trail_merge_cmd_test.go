@@ -151,6 +151,13 @@ func runTrailMergeTest(t *testing.T, stub *trailMergeStub, repo string, args ...
 
 func runTrailMergeTestArgs(t *testing.T, stub *trailMergeStub, args ...string) (string, error) {
 	t.Helper()
+	out, _, err := runTrailMergeTestStreams(t, stub, args...)
+	return out, err
+}
+
+// runTrailMergeTestStreams is runTrailMergeTestArgs that also returns stderr.
+func runTrailMergeTestStreams(t *testing.T, stub *trailMergeStub, args ...string) (string, string, error) {
+	t.Helper()
 	srv := httptest.NewServer(stub)
 	t.Cleanup(srv.Close)
 	previous := newTrailAPIClient
@@ -179,7 +186,7 @@ func runTrailMergeTestArgs(t *testing.T, stub *trailMergeStub, args ...string) (
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 	err := cmd.Execute()
-	return out.String(), err
+	return out.String(), errOut.String(), err
 }
 
 func TestTrailMerge_BlockedWithoutForce(t *testing.T) {
@@ -548,6 +555,76 @@ func TestTrailMerge_PendingGatesSayPending(t *testing.T) {
 	require.Contains(t, err.Error(), "trail #7 is not mergeable yet: 1 blocking gate pending")
 	require.NotContains(t, err.Error(), "failing")
 	require.Contains(t, err.Error(), "wait for")
+}
+
+func evalGate(agent string, blocking bool, status, rationale string, value map[string]any) func(map[string]any) {
+	value["agent_id"], value["agent_name"] = "01K8"+strings.ToUpper(strings.ReplaceAll(agent, " ", "")), agent
+	return withGate(map[string]any{"gate_type": "eval", "gate_key": value["agent_id"], "blocking": blocking, "status": status,
+		"state": "evaluated", "rationale": rationale, "value": value})
+}
+
+var (
+	evalRiskBlocks = evalGate("Risk review", true, "failed", "Risk review is 72%; the gate needs 40% or lower.",
+		map[string]any{"value_type": "percent", "polarity": "lower_is_better", "threshold": 40, "value": 72})
+	evalRiskAttention = evalGate("Risk review", false, "failed", "Risk review is 72%; the gate needs 40% or lower.",
+		map[string]any{"value_type": "percent", "polarity": "lower_is_better", "threshold": 40, "value": 72})
+	evalStylePaused = evalGate("Style review", true, "skipped", "Not enforced: Style review is paused.",
+		map[string]any{"value_type": "percent", "polarity": "lower_is_better", "threshold": 30, "value": nil,
+			"configuration_issue": map[string]any{"code": "agent_paused", "message": "Not enforced: Style review is paused."}})
+)
+
+// Gates that do not block still warn before the merge goes ahead, on stderr
+// so --json keeps them too; what blocks the merge does not change.
+func TestTrailMerge_WarnsAboutGatesItMergesPast(t *testing.T) {
+	const wantWarnings = "Warning: needs attention: findings: advisory findings open\n" +
+		"Warning: needs attention: Risk review is 72%; the gate needs 40% or lower.\n" +
+		"Warning: not enforced: Style review is paused.\n"
+	for _, args := range [][]string{nil, {"--json"}} {
+		t.Run(strings.Join(append([]string{"args"}, args...), " "), func(t *testing.T) {
+			stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase,
+				mergeability: trailMergeability(t, findingsAdvisry, evalRiskAttention, evalStylePaused), mergeBody: `{"ok":true,"mergeCommitSha":"merge-example"}`}
+			out, errOut, err := runTrailMergeTestStreams(t, stub, append([]string{"merge", "7", "--repo", "et/acme/widget"}, args...)...)
+
+			require.NoError(t, err)
+			require.Len(t, stub.mergePosts(), 1)
+			require.Equal(t, wantWarnings, errOut)
+			if args == nil {
+				require.Contains(t, out, "      ✗ Risk review   72%  must be ≤ 40%  needs attention\n")
+				require.Contains(t, out, "      - Style review  not enforced: Style review is paused.\n")
+				require.Contains(t, out, "Merged trail #7 into trunk (merge-example)")
+				require.NotContains(t, out, "Blocked by:")
+			} else {
+				var got trailMergeResultJSON
+				require.NoError(t, json.Unmarshal([]byte(out), &got), "stdout stays JSON: %s", out)
+				require.True(t, got.Merged)
+				require.Empty(t, got.Blockers)
+			}
+		})
+	}
+}
+
+func TestTrailMerge_DryRunDoesNotWarn(t *testing.T) {
+	stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, evalRiskAttention, evalStylePaused)}
+	out, errOut, err := runTrailMergeTestStreams(t, stub, "merge", "7", "--repo", "et/acme/widget", "--dry-run")
+
+	require.NoError(t, err)
+	require.Empty(t, errOut, "nothing is merged, so there is nothing to warn about")
+	require.Contains(t, out, "  Needs attention:\n    - Risk review is 72%; the gate needs 40% or lower.\n")
+	require.Empty(t, stub.mergePosts())
+}
+
+func TestTrailMerge_BlockingEvalGateBlocks(t *testing.T) {
+	stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, blocked, evalRiskBlocks, evalStylePaused)}
+	out, errOut, err := runTrailMergeTestStreams(t, stub, "merge", "7", "--repo", "et/acme/widget")
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "trail #7 is not mergeable: 1 blocking gate failing")
+	_, blockedBy, ok := strings.Cut(out, "Blocked by:")
+	require.True(t, ok, out)
+	require.Equal(t, "\n  - Risk review is 72%; the gate needs 40% or lower.\n", blockedBy,
+		"the eval gate is named by its rationale, not its agent id; a gate not enforced does not block")
+	require.Empty(t, errOut)
+	require.Empty(t, stub.mergePosts())
 }
 
 func TestTrailMerge_PolicyNobodySuppressesForce(t *testing.T) {
