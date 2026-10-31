@@ -151,9 +151,16 @@ func trailEvalReading(valueType string, raw json.RawMessage) string {
 }
 
 // trailEvalRequirement is what the reading must be to pass: "≤ 40%",
-// "≥ medium", or for a yes/no eval the better answer. It is "" when the
-// direction or the threshold is unknown.
+// "≥ medium", or for a yes/no eval the answer the gate names. It is "" when
+// the direction or the threshold is unknown.
 func trailEvalRequirement(v api.TrailEvalGateValue) string {
+	if v.ValueType == trailEvalBoolean {
+		var answer string
+		if json.Unmarshal(v.Threshold, &answer) == nil && (answer == trailEvalYes || answer == trailEvalNo) {
+			return answer
+		}
+		return ""
+	}
 	var op string
 	switch v.Polarity {
 	case trailEvalLowerIsBetter:
@@ -162,9 +169,6 @@ func trailEvalRequirement(v api.TrailEvalGateValue) string {
 		op = "≥"
 	default:
 		return ""
-	}
-	if v.ValueType == trailEvalBoolean {
-		return trailEvalYesNo(v.Polarity == trailEvalHigherIsBetter)
 	}
 	threshold := trailEvalReading(v.ValueType, v.Threshold)
 	if threshold == "" {
