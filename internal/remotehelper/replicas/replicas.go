@@ -86,12 +86,25 @@ func LoadFresh(host, repoPath string) []string {
 	return nodes
 }
 
+// minRemainingTTL is how long an unchanged cached replica set must have
+// left before it expires for Persist to skip rewriting it.
+const minRemainingTTL = discovery.DefaultTTL / 2
+
 // Persist stores the given replica set in the on-disk cache. Best
 // effort: cache write failures are logged but never fatal. The
 // load-mutate-save runs under ModifyCache's single lock so concurrent
 // clone/fetch/push processes don't clobber each other's entries.
+//
+// Every info/refs response carries the replica set, so most calls find
+// it already cached. Those skip the write, and with it the exclusive
+// lock every other git operation on this machine needs, unless the
+// entry is in the second half of its TTL.
 func Persist(host, repoPath string, nodes []string) {
 	if host == "" || repoPath == "" || len(nodes) == 0 {
+		return
+	}
+	if cache, err := discovery.LoadCache(userdirs.Cache()); err == nil &&
+		cache.HasRepoNodes(host, repoPath, nodes, minRemainingTTL) {
 		return
 	}
 	if err := discovery.ModifyCache(userdirs.Cache(), func(cache discovery.ClusterCache) error {

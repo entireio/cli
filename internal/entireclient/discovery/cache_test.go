@@ -209,3 +209,62 @@ func TestModifyCache_AcceptsTheResolversOwnFallback(t *testing.T) {
 		t.Fatalf("ModifyCache(%q) = %v, want the resolver's own fallback honored", dir, err)
 	}
 }
+
+// Without pruning, nodes.json keeps every repository the helper has ever
+// seen, and every write rewrites all of it under the shared lock.
+func TestModifyCache_PrunesExpiredEntries(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	if err := ModifyCache(dir, func(c ClusterCache) error {
+		c.SetRepoNodes("old.example", "a/b", []string{"https://n1.old.example"}, -time.Second)
+		c.SetRepoNodes("x.example", "stale/repo", []string{"https://n1.x.example"}, -time.Second)
+		c.SetRepoNodes("x.example", "live/repo", []string{"https://n1.x.example"}, time.Hour)
+		return nil
+	}); err != nil {
+		t.Fatalf("ModifyCache: %v", err)
+	}
+
+	cache, err := LoadCache(dir)
+	if err != nil {
+		t.Fatalf("LoadCache: %v", err)
+	}
+	if _, ok := cache["old.example"]; ok {
+		t.Error("cluster with only expired repos was kept")
+	}
+	if _, ok := cache["x.example"].Repos["stale/repo"]; ok {
+		t.Error("expired repo entry was kept")
+	}
+	if _, fresh := cache.GetRepoNodes("x.example", "live/repo"); !fresh {
+		t.Error("live repo entry was dropped")
+	}
+}
+
+func TestHasRepoNodes(t *testing.T) {
+	t.Parallel()
+	cache := make(ClusterCache)
+	cache.SetRepoNodes("x.example", "a/b", []string{"https://n1", "https://n2"}, 24*time.Hour)
+
+	tests := []struct {
+		name         string
+		repo         string
+		nodes        []string
+		minRemaining time.Duration
+		want         bool
+	}{
+		{"same set", "a/b", []string{"https://n1", "https://n2"}, 12 * time.Hour, true},
+		{"same set, other order", "a/b", []string{"https://n2", "https://n1"}, 12 * time.Hour, true},
+		{"different set", "a/b", []string{"https://n1", "https://n3"}, 12 * time.Hour, false},
+		{"subset", "a/b", []string{"https://n1"}, 12 * time.Hour, false},
+		{"too close to expiry", "a/b", []string{"https://n1", "https://n2"}, 25 * time.Hour, false},
+		{"unknown repo", "c/d", []string{"https://n1", "https://n2"}, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := cache.HasRepoNodes("x.example", tt.repo, tt.nodes, tt.minRemaining); got != tt.want {
+				t.Errorf("HasRepoNodes = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

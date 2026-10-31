@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -60,7 +62,12 @@ func readCacheNoLock(f cacheFile) (ClusterCache, error) {
 	return cache, err
 }
 
+// writeCacheNoLock drops expired entries before writing. Nothing reads an
+// expired entry, and without pruning the file keeps every repository the
+// helper has ever seen, so each write — and the lock it holds — would cost
+// time proportional to that history.
 func writeCacheNoLock(f cacheFile, cache ClusterCache) error {
+	cache.pruneExpired(time.Now())
 	return writeCacheFile(f, cache)
 }
 
@@ -253,6 +260,39 @@ func (c ClusterCache) SetRepoNodes(cluster, repoPath string, nodes []string, ttl
 	entry.Repos[repoPath] = &RepoEntry{
 		Nodes:     nodes,
 		ExpiresAt: time.Now().Add(ttl),
+	}
+}
+
+// HasRepoNodes reports whether the cache already holds nodes for the repo,
+// in any order, with at least minRemaining left before the entry expires.
+// Callers use it to skip rewriting an entry that is already current.
+func (c ClusterCache) HasRepoNodes(cluster, repoPath string, nodes []string, minRemaining time.Duration) bool {
+	entry := c[cluster]
+	if entry == nil {
+		return false
+	}
+	repo := entry.Repos[repoPath]
+	if repo == nil || time.Until(repo.ExpiresAt) < minRemaining {
+		return false
+	}
+	cached, want := slices.Clone(repo.Nodes), slices.Clone(nodes)
+	slices.Sort(cached)
+	slices.Sort(want)
+	return slices.Equal(cached, want)
+}
+
+// pruneExpired removes repo entries that expired before now, and clusters
+// left with no repos.
+func (c ClusterCache) pruneExpired(now time.Time) {
+	for cluster, entry := range c {
+		if entry != nil {
+			maps.DeleteFunc(entry.Repos, func(_ string, repo *RepoEntry) bool {
+				return repo == nil || !now.Before(repo.ExpiresAt)
+			})
+		}
+		if entry == nil || len(entry.Repos) == 0 {
+			delete(c, cluster)
+		}
 	}
 }
 

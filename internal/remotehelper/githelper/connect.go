@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
@@ -49,19 +47,16 @@ func handleConnect(ctx context.Context, t Transport, service string, stdin io.Re
 	if err != nil {
 		return fmt.Errorf("reading git request: %w", err)
 	}
-	reqBody, err = gitproto.AppendAgentToReceivePackRequest(reqBody, Agent)
-	if err != nil {
+	if err := gitproto.AppendAgentToReceivePackBody(reqBody, Agent); err != nil {
 		return fmt.Errorf("amending receive-pack agent: %w", err)
 	}
-	debuglog.Printf("git request: %d bytes", len(reqBody))
+	debuglog.Printf("git request: %d bytes", reqBody.Len())
 
-	if len(reqBody) == 0 {
+	if reqBody.Len() == 0 {
 		return nil
 	}
 
-	resp, err := t.ServiceRPC(ctx, service, bytes.NewReader(reqBody), func(req *http.Request) {
-		req.Header.Set("X-Entire-Push-Size", strconv.Itoa(len(reqBody)))
-	})
+	resp, err := t.ServiceRPC(ctx, service, reqBody.Reader(), receivePackHeaders(reqBody))
 	if err != nil {
 		return fmt.Errorf("connect %s POST: %w", service, err)
 	}
