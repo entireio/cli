@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -40,6 +41,7 @@ func newRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoProtectionCmd())
 	cmd.AddCommand(newDefaultBranchCmd())
 	cmd.AddCommand(newRepoGrantCmd())
+	experimental.Register(cmd, newRepoGatesCmd())
 	return requireSubcommand(cmd)
 }
 

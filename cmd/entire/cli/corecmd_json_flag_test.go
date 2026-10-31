@@ -58,7 +58,12 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo protection list":   true,
 		"repo protection add":    true,
 		"repo protection remove": true,
-		"repo default-branch":    true,
+		// every gates verb renders the gates it read or saved.
+		"repo gates list":     true,
+		"repo gates add":      true,
+		"repo gates set":      true,
+		"repo gates remove":   true,
+		"repo default-branch": true,
 		// grant subtrees: add/list render a payload, remove only reports
 		"org grant add":    true,
 		"org grant list":   true,

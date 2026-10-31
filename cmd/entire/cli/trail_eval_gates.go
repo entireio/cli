@@ -188,16 +188,25 @@ func trailEvalYesNo(b bool) string {
 // issue, without the "Not enforced:" lead-in, or "" when it is enforced.
 func trailEvalNotEnforced(g api.TrailGate) string {
 	v, ok := trailEvalGateValue(g)
-	if !ok || g.Status != trailGateSkipped || g.State == trailGateStateDisabled || v.ConfigurationIssue == nil {
+	if !ok || g.Status != trailGateSkipped || g.State == trailGateStateDisabled {
 		return ""
 	}
-	msg := strings.TrimSpace(v.ConfigurationIssue.Message)
+	return evalIssueText(v.ConfigurationIssue)
+}
+
+// evalIssueText is a configuration issue's message without its "Not
+// enforced:" lead-in, or its code when it has no message; "" for no issue.
+func evalIssueText(issue *api.TrailEvalGateConfigIssue) string {
+	if issue == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(issue.Message)
 	const lead = "not enforced:"
 	if len(msg) >= len(lead) && strings.EqualFold(msg[:len(lead)], lead) {
 		msg = strings.TrimSpace(msg[len(lead):])
 	}
 	if msg == "" {
-		msg = strings.TrimSpace(v.ConfigurationIssue.Code)
+		msg = strings.TrimSpace(issue.Code)
 	}
 	if msg == "" {
 		msg = "configuration issue"

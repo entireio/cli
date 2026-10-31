@@ -245,6 +245,15 @@ var agentHelpGuidance = map[string]string{
 		"review findings, questions, and follow-ups, including when asked to\n" +
 		"\"comment\" on a trail. Comment writes refuse in agent sessions.",
 
+	"repo gates": "Gates decide what can merge in the repository, so add, set and remove are\n" +
+		"the user's to run: change a gate only when the user asks for that change.\n" +
+		"`entire repo gates list --json` only reads. Its `gates` are each gate as the\n" +
+		"API sends it (gateKey, gateType, enabled, blocking); `eval_gates` are the\n" +
+		"eval gates (agent_id, agent_name, threshold, enabled, blocking, and\n" +
+		"configuration_issue when one is not enforced). A gate whose enabled is false\n" +
+		"is off; otherwise blocking true stops the merge and false only marks the\n" +
+		"trail as needing attention.",
+
 	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
 

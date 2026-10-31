@@ -333,6 +333,22 @@ always runnable in every build.
   branch without the flag never lowers it and `--server-side-merge-only=false`
   is the explicit way down. A short branch name expands to `refs/heads/`,
   `HEAD` and `refs/...` pass through.
+  `gates` (experimental: `list`, `add eval`, `set`, `remove eval`) reads and
+  sets the repository's merge gates on its entire-api cell, for the current
+  repo or `--repo`. A mode is `off` (disabled), `attention` (enabled, not
+  blocking) or `block`. `set <gate-key> --mode` PATCHes only `enabled` and
+  `blocking` on `/repos/{repo_id}/trails/gates/{gateId}`; the list route
+  returns no per-gate ETag, and the PATCH writes back nothing it read. Eval
+  gates are saved as a whole set (`PUT .../trails/gates/evals` with the read's
+  `If-Match`): each verb reads the set, changes one agent's entry, and sends
+  the rest unchanged and without a signal, so they keep the eval they were set
+  against. A 412 or 409 reads the set again and retries once, saying so on
+  stderr. `add` finds the agent through `/repos/{repo_id}/agents` and refuses a
+  threshold that does not fit its eval, or a neutral percent or size eval,
+  before any write; it and `set --threshold` send the agent's signal so the
+  server refuses the write if the eval changed meanwhile. `set` and `remove`
+  find the gate by its own agent id or name, so a gate whose agent was
+  archived can still be removed.
   `default-branch <repo> <branch>` is one PUT to core's
   `/repos/{repoId}/default-branch`. It sends the branch as typed; the server
   accepts a short name or a `refs/heads/` ref. A 409 on a GitHub mirror reads
