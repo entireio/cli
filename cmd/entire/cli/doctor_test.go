@@ -2193,3 +2193,27 @@ func TestCheckGitHooks_PrePushBeforeRefList(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, edited, string(data), "doctor --force must keep the user's own lines")
 }
+
+// Brain moves Entire's pre-push hook to pre-push.pre-entire-brain and puts a
+// wrapper in front that runs it. Entire's hook still runs, so doctor reports the
+// hooks as installed, and --force leaves Brain's wrapper where it is.
+func TestCheckGitHooks_BrainPrePushWrapper(t *testing.T) {
+	dir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	_, err := strategy.InstallGitHook(context.Background(), true, false)
+	require.NoError(t, err)
+	prePush := filepath.Join(dir, ".git", "hooks", "pre-push")
+	require.NoError(t, os.Rename(prePush, prePush+".pre-entire-brain"))
+	wrapper := "#!/bin/sh\n# entire-brain push hook\n" +
+		"backup=\"$0.pre-entire-brain\"\nif [ -x \"$backup\" ]; then exec \"$backup\" \"$@\"; fi\n"
+	require.NoError(t, os.WriteFile(prePush, []byte(wrapper), 0o755))
+
+	for _, force := range []bool{false, true} {
+		cmd, stdout := newTestCmd(t)
+		require.NoError(t, checkGitHooks(cmd, force))
+		require.Contains(t, stdout.String(), "✓ Git hooks: OK", "force=%v", force)
+		data, err := os.ReadFile(prePush)
+		require.NoError(t, err)
+		require.Equal(t, wrapper, string(data), "Brain's wrapper stays in place (force=%v)", force)
+	}
+}

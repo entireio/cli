@@ -626,8 +626,8 @@ func olderCopiesOf(root *os.Root, hook string) []string {
 // manager's wrapper that runs such a copy becomes Entire's backup on the next
 // install, and a copy written before the chain guard existed chains straight
 // back to that backup, so commits would recurse forever. It reports the names
-// it rewrote.
-func refreshMovedEntireHooks(root *os.Root, hook, content string) ([]string, error) {
+// it rewrote. skip, if not empty, names a copy the caller writes itself.
+func refreshMovedEntireHooks(root *os.Root, hook, content, skip string) ([]string, error) {
 	names, err := hookDirNames(root)
 	if err != nil {
 		return nil, err
@@ -635,7 +635,7 @@ func refreshMovedEntireHooks(root *os.Root, hook, content string) ([]string, err
 	backup := hook + backupSuffix
 	var rewritten []string
 	for _, n := range names {
-		if !strings.HasPrefix(n, hook+".") || n == backup || strings.HasPrefix(n, backup+".") {
+		if !strings.HasPrefix(n, hook+".") || n == backup || strings.HasPrefix(n, backup+".") || n == skip {
 			continue
 		}
 		if !carriesEntireMarker(root, n) {

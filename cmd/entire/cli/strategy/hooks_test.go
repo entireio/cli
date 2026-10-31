@@ -2002,6 +2002,271 @@ func TestCheckGitHookState_PrePushBeforeRefList(t *testing.T) {
 	}
 }
 
+// brainPrePushWrapper is the pre-push hook entire-brain installs in front of the
+// hook it finds, after moving that hook to pre-push.pre-entire-brain.
+const brainPrePushWrapper = `#!/bin/sh
+# entire-brain push hook
+# Tells the local entire-brain plugin that a push is transferring this
+# repo's commits, so it uploads its fact store (detached, best-effort).
+if [ -x '/home/me/.local/share/entire/plugins/bin/entire-brain' ]; then
+  '/home/me/.local/share/entire/plugins/bin/entire-brain' memory notify --event push </dev/null >/dev/null 2>&1 &
+fi
+# Chain: run the pre-existing hook with the original stdin and arguments;
+# its exit code decides the push, exactly as before.
+backup="$0.pre-entire-brain"
+if [ -x "$backup" ]; then exec "$backup" "$@"; fi
+`
+
+// Brain's wrapper runs Entire's pre-push hook from pre-push.pre-entire-brain
+// with git's stdin and arguments, so the set is as current as that copy is.
+func TestCheckGitHookState_BrainPrePushWrapper(t *testing.T) {
+	t.Parallel()
+	current := findHookSpec(t, buildHookSpecs(bareEntireHookCmd), prePushHook).content
+	execCommentedOut := strings.Replace(brainPrePushWrapper, `if [ -x "$backup" ]`, `# if [ -x "$backup" ]`, 1)
+	for _, tc := range []struct {
+		name        string
+		wrapper     string
+		wrapperMode os.FileMode // 0 means 0o755
+		moved       string      // "" leaves pre-push.pre-entire-brain absent
+		movedMode   os.FileMode // 0 means 0o755
+		want        GitHookState
+	}{
+		{name: "chains to Entire's current hook", wrapper: brainPrePushWrapper, moved: current, want: GitHooksCurrent},
+		{name: "chains to Entire's hook from before the ref list", wrapper: brainPrePushWrapper, moved: oldPrePushHeader + oldPrePushBareLine, want: GitHooksOutdated},
+		{name: "chains to a hook that is not Entire's", wrapper: brainPrePushWrapper, moved: "#!/bin/sh\necho lefthook\n", want: GitHooksAbsent},
+		{name: "nothing to chain to", wrapper: brainPrePushWrapper, want: GitHooksAbsent},
+		{name: "another hook beside Entire's moved copy", wrapper: "#!/bin/sh\necho lefthook\n", moved: current, want: GitHooksAbsent},
+		{name: "chain exec commented out", wrapper: execCommentedOut, moved: current, want: GitHooksAbsent},
+		{name: "moved copy not executable", wrapper: brainPrePushWrapper, moved: current, movedMode: 0o644, want: GitHooksAbsent},
+		{name: "wrapper not executable", wrapper: brainPrePushWrapper, wrapperMode: 0o644, moved: current, want: GitHooksAbsent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if (tc.movedMode != 0 || tc.wrapperMode != 0) && runtime.GOOS == goosWindows {
+				t.Skip("Windows has no execute bit")
+			}
+			dir := t.TempDir()
+			writeCurrentManagedHooks(t, dir)
+			wrapperMode := tc.wrapperMode
+			if wrapperMode == 0 {
+				wrapperMode = 0o755
+			}
+			wrapperPath := filepath.Join(dir, prePushHook)
+			require.NoError(t, os.WriteFile(wrapperPath, []byte(tc.wrapper), wrapperMode))
+			require.NoError(t, os.Chmod(wrapperPath, wrapperMode))
+			if tc.moved != "" {
+				mode := tc.movedMode
+				if mode == 0 {
+					mode = 0o755
+				}
+				movedPath := filepath.Join(dir, prePushHook+".pre-entire-brain")
+				require.NoError(t, os.WriteFile(movedPath, []byte(tc.moved), mode))
+				require.NoError(t, os.Chmod(movedPath, mode)) // WriteFile's mode is masked by umask
+			}
+			require.Equal(t, tc.want, gitHookStateInHooksDir(dir))
+		})
+	}
+}
+
+// Behind Brain's wrapper, the copy Brain runs chains to pre-push.pre-entire. If
+// that is another manager's wrapper running an older copy of Entire's hook that
+// chains straight back to pre-push.pre-entire, the older copy is rewritten to
+// the hook that never chains, as on the usual install path, or pushes recurse.
+func TestInstallGitHooks_BrainPrePushWrapperRefreshesOtherMovedCopies(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+	ctx := context.Background()
+	_, err := InstallGitHook(ctx, true, false)
+	require.NoError(t, err)
+	prePush := filepath.Join(hooksDir, prePushHook)
+	require.NoError(t, os.Rename(prePush, prePush+".pre-entire-brain"))
+	require.NoError(t, os.WriteFile(prePush, []byte(brainPrePushWrapper), 0o755))
+	managerWrapper := "#!/bin/sh\n\"$(dirname \"$0\")/pre-push.old\" \"$@\"\n"
+	require.NoError(t, os.WriteFile(prePush+GitHookBackupSuffix, []byte(managerWrapper), 0o755))
+	require.NoError(t, os.WriteFile(prePush+".old", []byte(oldPrePushHeader+oldPrePushUnguardedLine+oldPrePushSimpleChain), 0o755))
+
+	_, err = InstallGitHook(ctx, true, false)
+	require.NoError(t, err)
+
+	read := func(name string) string {
+		t.Helper()
+		data, readErr := os.ReadFile(filepath.Join(hooksDir, name))
+		require.NoError(t, readErr)
+		return string(data)
+	}
+	current := findHookSpec(t, buildHookSpecs(bareEntireHookCmd), prePushHook).content
+	require.Equal(t, brainPrePushWrapper, read(prePushHook), "Brain's wrapper stays in place")
+	require.Equal(t, generateChainedContent(current, prePushHook), read(prePushHook+".pre-entire-brain"))
+	require.Equal(t, managerWrapper, read(prePushHook+GitHookBackupSuffix))
+	require.Equal(t, current, read(prePushHook+".old"), "the older copy no longer chains back")
+}
+
+// Brain only wraps pre-push, so its wrapper in another hook's place is foreign.
+func TestCheckGitHookState_BrainWrapperOnlyCountsForPrePush(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeCurrentManagedHooks(t, dir)
+	moved := findHookSpec(t, buildHookSpecs(bareEntireHookCmd), "post-commit").content
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "post-commit"), []byte(brainPrePushWrapper), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "post-commit.pre-entire-brain"), []byte(moved), 0o755))
+	require.Equal(t, GitHooksAbsent, gitHookStateInHooksDir(dir))
+}
+
+// An agent turn (ReinstallGitHooks) or `entire enable` (InstallGitHook) over
+// Brain's layout brings Entire's moved copy up to date and leaves Brain's
+// wrapper where it is. Backing the wrapper up to pre-push.pre-entire would
+// orphan the copy, since Brain's chain is relative to $0. When Entire had
+// backed up the user's own pre-push hook before Brain arrived, the copy keeps
+// chaining to it.
+func TestInstallGitHooks_KeepsBrainPrePushWrapper(t *testing.T) {
+	const userHook = "#!/bin/sh\necho user pre-push\n"
+	for _, install := range []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{name: "agent turn reinstall", run: func(ctx context.Context) error { _, err := ReinstallGitHooks(ctx); return err }},
+		{name: "enable", run: func(ctx context.Context) error { _, err := InstallGitHook(ctx, true, false); return err }},
+	} {
+		for _, withUserHook := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/user hook %v", install.name, withUserHook), func(t *testing.T) {
+				_, hooksDir := initHooksTestRepo(t)
+				ctx := context.Background()
+				prePush := filepath.Join(hooksDir, prePushHook)
+				userBackup := prePush + GitHookBackupSuffix
+				if withUserHook {
+					require.NoError(t, os.WriteFile(prePush, []byte(userHook), 0o755))
+				}
+				_, err := InstallGitHook(ctx, true, false)
+				require.NoError(t, err)
+				movedPath := prePush + ".pre-entire-brain"
+				require.NoError(t, os.Remove(prePush))
+				require.NoError(t, os.WriteFile(movedPath, []byte(oldPrePushHeader+oldPrePushBareLine), 0o755))
+				require.NoError(t, os.WriteFile(prePush, []byte(brainPrePushWrapper), 0o755))
+				require.Equal(t, GitHooksOutdated, gitHookStateInHooksDir(hooksDir))
+
+				require.NoError(t, install.run(ctx))
+
+				data, err := os.ReadFile(prePush)
+				require.NoError(t, err)
+				require.Equal(t, brainPrePushWrapper, string(data), "Brain's wrapper stays in place")
+				want := findHookSpec(t, buildHookSpecs(bareEntireHookCmd), prePushHook).content
+				if withUserHook {
+					want = generateChainedContent(want, prePushHook)
+					data, err = os.ReadFile(userBackup)
+					require.NoError(t, err)
+					require.Equal(t, userHook, string(data), "the user's hook stays where Entire's chain runs it")
+				} else {
+					require.NoFileExists(t, userBackup)
+				}
+				data, err = os.ReadFile(movedPath)
+				require.NoError(t, err)
+				require.Equal(t, want, string(data), "the copy Brain runs is brought up to date")
+				require.Equal(t, GitHooksCurrent, gitHookStateInHooksDir(hooksDir))
+			})
+		}
+	}
+}
+
+// A line the user added to the copy Brain runs is not drift, as on the usual
+// path (TestCheckGitHookState_UserAdditionsAreNotDrift): the set reads Current,
+// and neither an agent turn nor `entire enable` rewrites the copy and drops the
+// line. A copy that is exactly a hook Entire writes is still brought up to date:
+// one from before the ref list, one Entire's own line runs from a working tree,
+// or today's hook for another prefix or without the chain to the user's hook.
+func TestInstallGitHooks_BrainCopyKeepsUserAdditions(t *testing.T) {
+	const userHook = "#!/bin/sh\necho user pre-push\n"
+	const userLine = "echo custom >> /tmp/custom.log\n"
+	current := findHookSpec(t, buildHookSpecs(bareEntireHookCmd), prePushHook).content
+	chained := generateChainedContent(current, prePushHook)
+	absolute := findHookSpec(t, buildHookSpecs(`'/opt/old/entire'`), prePushHook).content
+	workingTree := strings.Replace(current, bareEntireHookCmd+" hooks git", "go run ./cmd/entire hooks git", 1)
+	type install struct {
+		name string
+		run  func(context.Context) error
+	}
+	turn := install{name: "agent turn reinstall", run: func(ctx context.Context) error { _, err := ReinstallGitHooks(ctx); return err }}
+	enable := install{name: "enable", run: func(ctx context.Context) error { _, err := InstallGitHook(ctx, true, false); return err }}
+	for _, tc := range []struct {
+		name       string
+		installs   []install
+		userBackup bool   // Entire backed up the user's pre-push hook before Brain arrived
+		moved      string // the copy Brain runs
+		state      GitHookState
+		want       string // "" means moved is left as it is
+	}{
+		{name: "current hook with a user line", installs: []install{turn, enable}, moved: current + userLine, state: GitHooksCurrent},
+		{name: "chained current hook with a user line", installs: []install{turn, enable}, userBackup: true, moved: chained + userLine, state: GitHooksCurrent},
+		{name: "hook before the ref list with a user line", installs: []install{turn, enable}, moved: oldPrePushHeader + oldPrePushBareLine + userLine, state: GitHooksCurrent},
+		{name: "current hook missing the chain, with a user line", installs: []install{enable}, userBackup: true, moved: current + userLine, state: GitHooksCurrent},
+		{name: "hook before the ref list", installs: []install{turn, enable}, moved: oldPrePushHeader + oldPrePushBareLine, state: GitHooksOutdated, want: current},
+		{name: "hook run from a working tree", installs: []install{turn, enable}, moved: workingTree, state: GitHooksOutdated, want: current},
+		{name: "current hook for another prefix", installs: []install{enable}, moved: absolute, state: GitHooksCurrent, want: current},
+		{name: "current hook missing the chain", installs: []install{enable}, userBackup: true, moved: current, state: GitHooksCurrent, want: chained},
+	} {
+		for _, in := range tc.installs {
+			t.Run(tc.name+"/"+in.name, func(t *testing.T) {
+				_, hooksDir := initHooksTestRepo(t)
+				ctx := context.Background()
+				prePush := filepath.Join(hooksDir, prePushHook)
+				if tc.userBackup {
+					require.NoError(t, os.WriteFile(prePush, []byte(userHook), 0o755))
+				}
+				_, err := InstallGitHook(ctx, true, false)
+				require.NoError(t, err)
+				movedPath := prePush + ".pre-entire-brain"
+				require.NoError(t, os.Remove(prePush))
+				require.NoError(t, os.WriteFile(movedPath, []byte(tc.moved), 0o755))
+				require.NoError(t, os.WriteFile(prePush, []byte(brainPrePushWrapper), 0o755))
+				require.Equal(t, tc.state, gitHookStateInHooksDir(hooksDir))
+
+				require.NoError(t, in.run(ctx))
+
+				data, err := os.ReadFile(prePush)
+				require.NoError(t, err)
+				require.Equal(t, brainPrePushWrapper, string(data), "Brain's wrapper stays in place")
+				want := tc.want
+				if want == "" {
+					want = tc.moved
+				}
+				data, err = os.ReadFile(movedPath)
+				require.NoError(t, err)
+				require.Equal(t, want, string(data))
+				require.Equal(t, GitHooksCurrent, gitHookStateInHooksDir(hooksDir))
+			})
+		}
+	}
+}
+
+// Keeping the user's lines in the copy Brain runs does not skip the refresh of
+// the other moved copies: an older one behind a manager's wrapper in
+// pre-push.pre-entire would still chain back to it forever.
+func TestInstallGitHooks_BrainCopyWithUserLineStillRefreshesOtherMovedCopies(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+	ctx := context.Background()
+	_, err := InstallGitHook(ctx, true, false)
+	require.NoError(t, err)
+	prePush := filepath.Join(hooksDir, prePushHook)
+	current := findHookSpec(t, buildHookSpecs(bareEntireHookCmd), prePushHook).content
+	edited := generateChainedContent(current, prePushHook) + "echo custom >> /tmp/custom.log\n"
+	require.NoError(t, os.WriteFile(prePush+".pre-entire-brain", []byte(edited), 0o755))
+	require.NoError(t, os.WriteFile(prePush, []byte(brainPrePushWrapper), 0o755))
+	managerWrapper := "#!/bin/sh\n\"$(dirname \"$0\")/pre-push.old\" \"$@\"\n"
+	require.NoError(t, os.WriteFile(prePush+GitHookBackupSuffix, []byte(managerWrapper), 0o755))
+	require.NoError(t, os.WriteFile(prePush+".old", []byte(oldPrePushHeader+oldPrePushUnguardedLine+oldPrePushSimpleChain), 0o755))
+
+	_, err = InstallGitHook(ctx, true, false)
+	require.NoError(t, err)
+
+	read := func(name string) string {
+		t.Helper()
+		data, readErr := os.ReadFile(filepath.Join(hooksDir, name))
+		require.NoError(t, readErr)
+		return string(data)
+	}
+	require.Equal(t, brainPrePushWrapper, read(prePushHook))
+	require.Equal(t, edited, read(prePushHook+".pre-entire-brain"), "the user's line stays")
+	require.Equal(t, current, read(prePushHook+".old"), "the older copy no longer chains back")
+}
+
 func TestGenerateChainedContent_PostRewritePreservesStdinForBackup(t *testing.T) {
 	t.Parallel()
 
