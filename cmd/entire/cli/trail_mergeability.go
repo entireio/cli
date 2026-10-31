@@ -71,10 +71,11 @@ func printTrailGates(w io.Writer, styles statusStyles, label func(string) string
 	fmt.Fprintf(w, "  %s\n", label("Gates:"))
 	var others, evals []api.TrailGate
 	for _, g := range gates {
-		if g.GateType == api.TrailGateTypeEval {
-			evals = append(evals, g)
-		} else {
+		switch {
+		case g.GateType != api.TrailGateTypeEval:
 			others = append(others, g)
+		case g.State != trailGateStateDisabled:
+			evals = append(evals, g)
 		}
 	}
 	keys := make([]string, len(others))

@@ -30,6 +30,7 @@ const (
 	trailMergeOverrideDenied = "merge_gates_bypass_forbidden"
 
 	trailGateStateDisabled = "disabled"
+	trailGateStateStale    = "stale"
 	trailGatePassed        = "passed"
 	trailGateFailed        = "failed"
 	trailGatePending       = "pending"
@@ -844,7 +845,11 @@ func describeGateFailure(g api.TrailGate) string {
 	if g.Rationale != nil {
 		reason = strings.TrimSpace(*g.Rationale)
 	}
-	// An eval gate's rationale is a sentence that already names its agent.
+	// An eval gate's rationale is a sentence that already names its agent,
+	// unless it is about an earlier commit.
+	if g.GateType == api.TrailGateTypeEval && g.State == trailGateStateStale {
+		return tuiutil.SanitizeDisplayText(trailGateName(g) + ": " + trailEvalOutdated)
+	}
 	if g.GateType == api.TrailGateTypeEval && reason != "" {
 		return tuiutil.SanitizeDisplayText(reason)
 	}

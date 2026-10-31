@@ -23,12 +23,15 @@ const (
 
 	trailEvalYes = "yes"
 	trailEvalNo  = "no"
+
+	trailEvalOutdated = "not judged on this commit yet"
 )
 
 // printTrailEvalGates prints one row per eval gate, named by its agent. A
 // gate with a reading shows it against the threshold and whether it passed,
 // blocks the merge, or needs attention; a gate that is not enforced says why;
-// any other gate (pending, error) prints like the other gate rows.
+// a result for an earlier commit says only that it is outdated; any other
+// gate (pending, error) prints like the other gate rows.
 func printTrailEvalGates(w io.Writer, styles statusStyles, gates []api.TrailGate) {
 	rows := make([][]string, len(gates))
 	for i, g := range gates {
@@ -63,6 +66,9 @@ func trailEvalGateCells(g api.TrailGate) []string {
 	name := tuiutil.SanitizeDisplayText(trailGateName(g))
 	if issue := trailEvalNotEnforced(g); issue != "" {
 		return []string{name, "not enforced: " + tuiutil.SanitizeDisplayText(issue)}
+	}
+	if g.State == trailGateStateStale {
+		return []string{name, "outdated", trailEvalOutdated}
 	}
 	if v, ok := trailEvalGateValue(g); ok && (g.Status == trailGatePassed || g.Status == trailGateFailed) {
 		if reading := trailEvalReading(v.ValueType, v.Value); reading != "" {
@@ -105,10 +111,15 @@ func trailGateName(g api.TrailGate) string {
 			return name
 		}
 	}
-	if key := strings.TrimSpace(g.GateKey); key != "" {
+	key := strings.TrimSpace(g.GateKey)
+	switch {
+	case key == "":
+		return strings.TrimSpace(g.GateType)
+	case g.GateType == api.TrailGateTypeEval:
+		return "agent " + key
+	default:
 		return key
 	}
-	return strings.TrimSpace(g.GateType)
 }
 
 // trailEvalReading formats an eval reading or threshold of the given value
@@ -173,7 +184,7 @@ func trailEvalYesNo(b bool) string {
 // issue, without the "Not enforced:" lead-in, or "" when it is enforced.
 func trailEvalNotEnforced(g api.TrailGate) string {
 	v, ok := trailEvalGateValue(g)
-	if !ok || g.Status != trailGateSkipped || v.ConfigurationIssue == nil {
+	if !ok || g.Status != trailGateSkipped || g.State == trailGateStateDisabled || v.ConfigurationIssue == nil {
 		return ""
 	}
 	msg := strings.TrimSpace(v.ConfigurationIssue.Message)

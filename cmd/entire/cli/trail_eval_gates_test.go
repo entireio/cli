@@ -105,9 +105,16 @@ func TestTrailEvalGateFallbacks(t *testing.T) {
 		want string
 	}{
 		{
-			name: "no value names the gate by its key",
+			name: "no value names the gate by its agent id",
 			gate: api.TrailGate{GateKey: "01K8AGENT", GateType: "eval", Blocking: true, Status: "pending"},
-			want: "      … 01K8AGENT  pending",
+			want: "      … agent 01K8AGENT  pending",
+		},
+		{
+			name: "a result for an earlier commit drops its verdict",
+			gate: api.TrailGate{GateKey: "01K8AGENT", GateType: "eval", Blocking: true, Status: "pending", State: "stale",
+				Rationale: new("Tone is 30%, within 40% or lower."),
+				Value:     json.RawMessage(`{"agent_name": "Tone", "value_type": "percent", "polarity": "lower_is_better", "threshold": 40, "value": 30}`)},
+			want: "      … Tone  outdated  not judged on this commit yet",
 		},
 		{
 			name: "unknown polarity leaves out the threshold",
@@ -161,6 +168,36 @@ func TestTrailEvalGateFallbacks(t *testing.T) {
 			require.Equal(t, tt.want+"\n", out.String())
 		})
 	}
+}
+
+// A disabled eval gate keeps its last result, which may be a skip; it is not
+// listed, and a merge doesn't warn that it is not enforced.
+func TestTrailEvalGatesLeaveOutDisabledGates(t *testing.T) {
+	t.Parallel()
+
+	disabled := api.TrailGate{GateKey: "01K8AGENT", GateType: "eval", Blocking: true, Status: "skipped", State: "disabled",
+		Rationale: new("Not enforced: Tone is paused."),
+		Value:     json.RawMessage(`{"agent_name": "Tone", "configuration_issue": {"code": "agent_paused", "message": "Not enforced: Tone is paused."}}`)}
+	var out bytes.Buffer
+	printTrailMergeability(&out, newStatusStyles(&out), func(s string) string { return s }, &api.TrailMergeability{
+		ConflictStatus: "clean", Checks: api.TrailChecks{Availability: "not_applicable"},
+		Gates: []api.TrailGate{{GateKey: "approvals", GateType: "approvals", Status: "passed", Blocking: true}, disabled},
+	})
+	require.NotContains(t, out.String(), "Tone")
+
+	out.Reset()
+	printTrailMergeWarnings(&out, []api.TrailGate{disabled})
+	require.Empty(t, out.String())
+}
+
+// A blocking eval gate whose result is for an earlier commit is named as
+// outdated, not by its old verdict.
+func TestDescribeGateFailureOutdatedEvalGate(t *testing.T) {
+	t.Parallel()
+
+	got := describeGateFailure(api.TrailGate{GateKey: "01K8AGENT", GateType: "eval", Blocking: true, Status: "pending", State: "stale",
+		Rationale: new("Tone is 30%, within 40% or lower."), Value: json.RawMessage(`{"agent_name": "Tone"}`)})
+	require.Equal(t, "Tone: not judged on this commit yet", got)
 }
 
 // `trail show --json` passes an eval gate's value through untouched, so the
