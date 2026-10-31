@@ -816,11 +816,15 @@ Key differences from JSON config agents:
   auto-discovers this same extension, so the child would otherwise forward its own
   lifecycle as the user's session. Two independent guards:
 
-  1. **Extension**: sets `ENTIRE_PI_NESTED` on its process (inherited by any Pi it
-     spawns) and, when it is already set, registers only the `tool_call` bash
-     hardening and skips the lifecycle handlers. The hardening stays on purpose — a
-     nested Pi is non-interactive while inheriting the parent's TTY, and Entire's git
-     hooks fire from `.git/hooks` regardless of this extension. The marker is read
+  1. **Extension**: sets `ENTIRE_PI_NESTED` to its own PID on its process
+     (inherited by any Pi it spawns) and, when it is already set to a different
+     value, registers only the `tool_call` bash hardening and skips the lifecycle
+     handlers. Comparing against the PID keeps a top-level Pi forwarding after
+     `/reload`, `/new` or `/resume`, which build a new extension instance in the
+     same process; a nested Pi never overwrites the marker. The hardening stays on
+     purpose — a nested Pi is non-interactive while inheriting the parent's TTY, and
+     Entire's git hooks fire from `.git/hooks` regardless of this extension. The
+     marker is read
      **only** here: Entire's own hook subprocesses inherit it from the parent, so
      treating it as a skip signal in Go would disable tracking for everyone.
   2. **CLI**: `ParseHookEvent` skips any hook whose payload carries no resolvable

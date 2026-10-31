@@ -41,7 +41,9 @@ const (
 	entireCmdPlaceholder = "__ENTIRE_CMD__"
 
 	// piNestedEnvVar marks a Pi process so any Pi it spawns can tell it is nested
-	// and skip forwarding session lifecycle. Set and read only by the embedded
+	// and skip forwarding session lifecycle. Its value is the PID of the top-level
+	// Pi, so that Pi's own replacement extension instances (/reload, /new,
+	// /resume) are not mistaken for nested ones. Set and read only by the embedded
 	// extension — Entire's hook subprocesses inherit it, so no Go code may treat it
 	// as a skip signal.
 	piNestedEnvVar = "ENTIRE_PI_NESTED"
