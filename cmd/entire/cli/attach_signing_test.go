@@ -97,9 +97,20 @@ func useSSHSigning(t *testing.T) (yours, other string) {
 // for this test, and stops that agent when the test ends.
 func useGnuPGHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
+	// Not t.TempDir(): its path carries the test name, and on macOS the
+	// agent's socket under it passes the 104-byte sun_path limit ("File name
+	// too long"). MkdirTemp also makes the home 0700, as gpg wants.
+	home, err := os.MkdirTemp("", "gpg") //nolint:usetesting // t.TempDir's path is too long for the agent's socket, see above
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(home); err != nil {
+			t.Errorf("remove GNUPGHOME: %v", err)
+		}
+	})
 	t.Setenv("GNUPGHOME", home)
-	// Registered after TempDir and Setenv, so it runs first: the agent is
+	// Registered after the home's removal and Setenv, so it runs first: the agent is
 	// stopped while GNUPGHOME still names its home, before the home is removed.
 	t.Cleanup(func() {
 		if out, err := execx.NonInteractive(context.Background(), "gpgconf", "--kill", "all").CombinedOutput(); err != nil {
