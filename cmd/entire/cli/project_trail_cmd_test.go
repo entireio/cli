@@ -302,6 +302,60 @@ func TestProjectTrailShowOmitsURLWithoutOne(t *testing.T) {
 	}
 }
 
+// projectTrailWireJSON is a project trail as the server sends it: a derived
+// phase next to the lifecycle status, lastActivityAt, and no updatedAt key.
+func projectTrailWireJSON(phase string) string {
+	phaseField := ""
+	if phase != "" {
+		phaseField = fmt.Sprintf(`"phase":%q,`, phase)
+	}
+	return fmt.Sprintf(`{"id":%q,"projectId":%q,"number":42,"title":"Project intent","body":"","status":"open",%s`+
+		`"createdAt":"2026-10-28T09:00:00Z","lastActivityAt":"2026-10-29T17:52:10Z","metadataUpdatedAt":"2026-10-29T15:04:06Z","closedAt":null,`+
+		`"changes":[{"id":%q,"number":7,"branch":"feature/a","repositoryId":"repo-a","status":"merged",`+
+		`"createdAt":"2026-10-28T09:05:00Z","updatedAt":"2026-10-29T17:53:20Z"}]}`,
+		projectTrailTestID, projectTrailTestProject, phaseField, projectTrailTestChange)
+}
+
+func TestProjectTrailShowPhaseAndLastActivity(t *testing.T) {
+	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, projectTrailWireJSON("complete"))
+	})
+	out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme")
+	require.NoError(t, err)
+	require.Regexp(t, `(?m)^  Status:\s+open\n  Phase:\s+complete$`, out, "phase follows the lifecycle status it does not replace")
+	require.Regexp(t, `(?m)^  Last activity:\s+2026-10-29T17:52:10Z$`, out)
+	require.NotContains(t, out, "0001-01-01")
+	require.NotContains(t, out, "Updated:")
+
+	js, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal([]byte(js), &raw))
+	require.Equal(t, "open", raw["status"])
+	require.Equal(t, "complete", raw["phase"])
+	require.Equal(t, "2026-10-29T17:52:10Z", raw["lastActivityAt"])
+	require.NotContains(t, raw, "updatedAt")
+	require.NotContains(t, js, "0001-01-01")
+}
+
+func TestProjectTrailShowWithoutPhaseOrActivity(t *testing.T) {
+	setupProjectTrailTest(t, func(w http.ResponseWriter, _ *http.Request) {
+		item := projectTrailTestResource()
+		assert.NoError(t, json.NewEncoder(w).Encode(item))
+	})
+	out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme")
+	require.NoError(t, err)
+	require.NotContains(t, out, "Phase:")
+	require.NotContains(t, out, "Last activity:")
+
+	js, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal([]byte(js), &raw))
+	require.NotContains(t, raw, "phase")
+	require.NotContains(t, raw, "lastActivityAt", "an unknown activity time is omitted, not printed as the zero time")
+}
+
 func TestProjectTrailUpdateAtomicConditionalPatch(t *testing.T) {
 	setupProjectAssigneeCore(t, map[string]string{"alice": projectAssigneeAliceID, "bob": projectAssigneeBobID})
 	var methods []string

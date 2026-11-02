@@ -215,6 +215,9 @@ func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []proj
 		{"Project:", tuiutil.SanitizeTerminalLabel(project)},
 		{"Status:", status(tuiutil.SanitizeTerminalLabel(item.Status))},
 	}
+	if strings.TrimSpace(item.Phase) != "" {
+		fields = append(fields, field{"Phase:", styles.render(styles.yellow, trailPhaseDisplay(tuiutil.SanitizeTerminalLabel(item.Phase)))})
+	}
 	if trailURL := strings.TrimSpace(item.URL); trailURL != "" {
 		fields = append(fields, field{"URL:", tuiutil.SanitizeTerminalText(trailURL)})
 	}
@@ -231,8 +234,8 @@ func printProjectTrailDetails(w io.Writer, item api.ProjectTrail, changes []proj
 	if !item.CreatedAt.IsZero() {
 		fields = append(fields, field{"Created:", item.CreatedAt.Format(timeLayout)})
 	}
-	if !item.UpdatedAt.IsZero() {
-		fields = append(fields, field{"Updated:", item.UpdatedAt.Format(timeLayout)})
+	if !item.LastActivityAt.IsZero() {
+		fields = append(fields, field{"Last activity:", item.LastActivityAt.Format(timeLayout)})
 	}
 	if item.ClosedAt != nil {
 		fields = append(fields, field{"Closed:", item.ClosedAt.Format(timeLayout)})
@@ -330,8 +333,8 @@ func newProjectTrailListCmd() *cobra.Command {
 				return printJSON(cmd.OutOrStdout(), page)
 			}
 			project := projectTrailProjectFlag(cmd)
-			if err := printTable(cmd.OutOrStdout(), []string{colHeaderProject, "NUMBER", "ID", colHeaderStatus, colHeaderTitle}, items, func(t api.ProjectTrail) []string {
-				return []string{tuiutil.SanitizeTerminalLabel(project), strconv.Itoa(t.Number), t.ID, tuiutil.SanitizeTerminalLabel(t.Status), tuiutil.SanitizeTerminalLabel(t.Title)}
+			if err := printTable(cmd.OutOrStdout(), []string{colHeaderProject, "NUMBER", "ID", colHeaderStatus, "PHASE", colHeaderTitle}, items, func(t api.ProjectTrail) []string {
+				return []string{tuiutil.SanitizeTerminalLabel(project), strconv.Itoa(t.Number), t.ID, tuiutil.SanitizeTerminalLabel(t.Status), trailPhaseDisplay(tuiutil.SanitizeTerminalLabel(t.Phase)), tuiutil.SanitizeTerminalLabel(t.Title)}
 			}); err != nil {
 				return err
 			}
