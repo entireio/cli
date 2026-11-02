@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/go-git/go-git/v6/plumbing"
+
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
@@ -26,16 +28,27 @@ import (
 // List unions both backends (disjoint ID spaces). Fresh creates (Session) are NOT
 // kind-routed: they go to the configured primary (+ mirrors) via writer, since
 // a new checkpoint's ID is already minted to match the primary's format (see
-// checkpoint.GenerateCheckpointID). ReservedSession writes preserve the backend
-// chosen before an interrupted write; when a migrated copy already exists in the
-// read-preferred backend, they update that copy too. Backfills update an existing
-// checkpoint, so they follow the same store order as reads, though only
-// ErrCheckpointNotFound falls through (stricter than reads) — see Write.
+// checkpoint.GenerateCheckpointID). ReservedSession writes keep a ULID in refs
+// under a git-branch primary. Under a git-refs primary, writes to a hex
+// checkpoint that is still only on the v1 branch first copy it into its own ref
+// (see copyLegacyCheckpoint), because git-refs pre-push never sends v1. Backfills
+// update an existing checkpoint, so they follow the same store order as reads,
+// though only ErrCheckpointNotFound falls through (stricter than reads) — see
+// Write.
 type kindRoutingStore struct {
 	writer      PersistentStore // configured primary + mirrors (fanout); handles Write
 	branch      PersistentStore // git-branch store; serves hex reads
 	refs        PersistentStore // git-refs store; serves ULID reads (+ hex under refs primary)
 	primaryType string
+	// legacy copies a hex checkpoint from the v1 branch into its own ref. It is
+	// nil unless both read stores are the built-in git stores, which is always
+	// the case outside tests.
+	legacy *legacyCopier
+}
+
+type legacyCopier struct {
+	branch *GitStore
+	refs   *gitRefsStore
 }
 
 // newKindRoutingStore wraps the write fanout plus the two git read stores. It
@@ -43,6 +56,11 @@ type kindRoutingStore struct {
 // read stores provide it — the built-in git backends always do.
 func newKindRoutingStore(writer, branch, refs PersistentStore, primaryType string) PersistentStore {
 	s := &kindRoutingStore{writer: writer, branch: branch, refs: refs, primaryType: primaryType}
+	if b, ok := branch.(*GitStore); ok {
+		if r, ok := refs.(*gitRefsStore); ok {
+			s.legacy = &legacyCopier{branch: b, refs: r}
+		}
+	}
 	if _, ok := branch.(AuthorReader); ok {
 		if _, ok := refs.(AuthorReader); ok {
 			return &kindRoutingStoreWithAuthor{kindRoutingStore: s}
@@ -235,6 +253,10 @@ func (s *kindRoutingStore) ReadTaskTranscript(ctx context.Context, checkpointID 
 // which — like reads — may live in either git backend (e.g. a pre-migration hex
 // checkpoint still on the v1 branch under a git-refs primary), so they follow
 // the read order, falling through to the next store on ErrCheckpointNotFound.
+// Under a git-refs primary, a hex checkpoint the refs store does not have is
+// first copied from v1 into its own ref and the backfill retried there, so it
+// is pushed; only a checkpoint that cannot be copied (absent from v1, or
+// deleted from this clone) falls through to the branch.
 //
 // The fallthrough is deliberately stricter than read routing's firstResolved
 // (which falls through on absent OR any error): only the not-found sentinel
@@ -256,6 +278,15 @@ func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 	var err error
 	for i, st := range stores {
 		err = st.Write(ctx, req)
+		if i == 0 && errors.Is(err, ErrCheckpointNotFound) && s.isLegacyUnderRefs(checkpointID) {
+			copied, copyErr := s.copyLegacyCheckpoint(ctx, checkpointID)
+			if copyErr != nil {
+				return copyErr
+			}
+			if copied {
+				return st.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
+			}
+		}
 		if !errors.Is(err, ErrCheckpointNotFound) {
 			if err == nil && i > 0 {
 				// The most consequential routing decision here: the data landed
@@ -281,60 +312,113 @@ func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 
 func (s *kindRoutingStore) writeReservedSession(ctx context.Context, req ReservedSession) error {
 	checkpointID := WriteOptions(req).CheckpointID
-	if s.primaryType != BackendTypeGitBranch && s.primaryType != BackendTypeGitRefs {
-		// An unrecognised primary tells us nothing about which backend minted the
-		// ID, and picking one anyway would bypass the configured primary and all of
-		// its mirrors. readOrder's default arm makes the same call for reads.
+	switch {
+	case s.primaryType == BackendTypeGitBranch && checkpointID.Kind() == id.KindULID:
+		// Reads never look for a ULID on the branch.
+		return s.writeReservedToOriginalBackend(ctx, req, s.refs, BackendTypeGitRefs)
+	case s.isLegacyUnderRefs(checkpointID):
+		return s.writeReservedLegacyUnderRefs(ctx, req)
+	default:
+		// The ID matches the primary, or the primary is unrecognised: an unknown
+		// primary tells us nothing about which backend minted the ID, and picking
+		// one anyway would bypass the configured primary and all of its mirrors.
 		return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
 	}
-	target := s.branch
-	targetType := BackendTypeGitBranch
-	if checkpointID.Kind() == id.KindULID {
-		target = s.refs
-		targetType = BackendTypeGitRefs
-	}
-	if targetType == s.primaryType {
-		return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
-	}
+}
 
-	readTarget := s.readOrder(checkpointID)[0]
-	updateReadTarget := false
-	if readTarget != target {
-		existing, err := readTarget.Read(ctx, checkpointID)
-		switch {
-		case err != nil:
-			// Not fatal. readOrder puts this store ahead of target for this ID, and
-			// firstResolved falls through a non-final store that errors, so the
-			// target write below still resolves through normal reads. The cost of
-			// skipping the update is a migrated copy left stale — the same lag the
-			// mirror fan-out contract already permits — whereas failing here would
-			// abandon a condensation over a transient fetch error in the backend the
-			// checkpoint is not even stored in.
-			logging.Warn(ctx, "checkpoint: reserved session could not check the read-preferred backend; writing the ID's backend only",
-				slog.String("checkpoint_id", checkpointID.String()),
-				slog.String("primary_backend", s.primaryType),
-				slog.String("error", err.Error()))
-		default:
-			updateReadTarget = existing != nil
-		}
+// writeReservedLegacyUnderRefs writes a hex checkpoint under a git-refs primary
+// through the primary, after copying it from v1 if only v1 has it. This covers
+// a session that reserved its ID before the switch, whether or not anything was
+// written yet, and attach adding a session to a pre-switch checkpoint.
+func (s *kindRoutingStore) writeReservedLegacyUnderRefs(ctx context.Context, req ReservedSession) error {
+	checkpointID := WriteOptions(req).CheckpointID
+	if s.legacy == nil {
+		return s.writeReservedToOriginalBackend(ctx, req, s.branch, BackendTypeGitBranch)
 	}
+	deleted, err := s.legacy.deleted(checkpointID)
+	if err != nil {
+		return err
+	}
+	if deleted {
+		// A checkpoint deleted from this clone must not come back as a ref.
+		return s.writeReservedToOriginalBackend(ctx, req, s.branch, BackendTypeGitBranch)
+	}
+	if _, err := s.copyLegacyCheckpoint(ctx, checkpointID); err != nil {
+		return err
+	}
+	return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
+}
+
+func (s *kindRoutingStore) writeReservedToOriginalBackend(ctx context.Context, req ReservedSession, target PersistentStore, targetType string) error {
 	if err := target.Write(ctx, req); err != nil {
 		return err //nolint:wrapcheck // target error is the operation's error, surfaced verbatim
 	}
-	if updateReadTarget {
-		// Update the readable copy directly. The original target may itself be a
-		// configured mirror, so re-entering writer fan-out would write it twice;
-		// other best-effort mirrors are allowed to lag by the fan-out contract.
-		if err := readTarget.Write(ctx, req); err != nil {
-			return err //nolint:wrapcheck // read-preferred copy must not remain stale after a successful retry
-		}
-	}
 	logging.Info(ctx, "checkpoint: reserved session written to original backend after primary changed",
-		slog.String("checkpoint_id", checkpointID.String()),
+		slog.String("checkpoint_id", WriteOptions(req).CheckpointID.String()),
 		slog.String("target_backend", targetType),
-		slog.String("primary_backend", s.primaryType),
-		slog.Bool("updated_existing_read_target", updateReadTarget))
+		slog.String("primary_backend", s.primaryType))
 	return nil
+}
+
+// isLegacyUnderRefs reports whether checkpointID is a hex checkpoint in a repo
+// whose primary is git-refs, the case where it may still be only on v1.
+func (s *kindRoutingStore) isLegacyUnderRefs(checkpointID id.CheckpointID) bool {
+	return s.primaryType == BackendTypeGitRefs && checkpointID.Kind() != id.KindULID
+}
+
+// copyLegacyCheckpoint copies checkpointID from the v1 branch into its own ref
+// when the ref does not exist locally yet, as migration would, so later writes
+// advance that ref and pre-push sends it. The write that follows queues the ref.
+// copied reports whether this call wrote the ref; it is false when the ref
+// already exists, the checkpoint is deleted from this clone or absent from v1,
+// or the stores cannot copy. An existing ref is never touched: it may already
+// be ahead of v1.
+//
+// The ref check is local. A clone that copies a checkpoint another clone has
+// already copied and pushed creates an unrelated history for the same ref, and
+// pre-push's recovery replays this clone's commits over the remote's, last
+// writer wins per file. Callers that can reach the remote fetch the ref first.
+func (s *kindRoutingStore) copyLegacyCheckpoint(ctx context.Context, checkpointID id.CheckpointID) (bool, error) {
+	if s.legacy == nil {
+		return false, nil
+	}
+	deleted, err := s.legacy.deleted(checkpointID)
+	if err != nil || deleted {
+		return false, err
+	}
+	refName, err := RefName(checkpointID)
+	if err != nil {
+		return false, err
+	}
+	repo := s.legacy.refs.repo
+	_, err = repo.Reference(refName, true)
+	switch {
+	case err == nil:
+		return false, nil
+	case !errors.Is(err, plumbing.ErrReferenceNotFound):
+		return false, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	}
+	subtree, err := s.legacy.branch.checkpointSubtreeHash(ctx, checkpointID)
+	if errors.Is(err, ErrCheckpointNotFound) || errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read checkpoint %s from %s: %w", checkpointID, s.legacy.branch.refs.Primary, err)
+	}
+	if _, err := importBranchCheckpoint(ctx, repo, s.legacy.refs, checkpointID, subtree, updatePersistentRef); err != nil {
+		return false, err
+	}
+	logging.Info(ctx, "checkpoint: copied legacy checkpoint from the v1 branch into its own ref",
+		slog.String("checkpoint_id", checkpointID.String()))
+	return true, nil
+}
+
+func (c *legacyCopier) deleted(checkpointID id.CheckpointID) (bool, error) {
+	deleted, err := loadDeletedForRepo(c.refs.repo)
+	if err != nil {
+		return false, err
+	}
+	return deleted.Contains(checkpointID), nil
 }
 
 // backfillTarget returns the checkpoint ID a backfill request updates.

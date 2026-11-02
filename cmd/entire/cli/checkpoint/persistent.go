@@ -2176,6 +2176,16 @@ func (s *GitStore) getCheckpointFetchingTree(ctx context.Context, checkpointID i
 	return nil, ErrCheckpointNotFound
 }
 
+// checkpointSubtreeHash returns the hash of checkpointID's subtree on the
+// metadata branch, resolved like reads (see getCheckpointFetchingTree).
+func (s *GitStore) checkpointSubtreeHash(ctx context.Context, checkpointID id.CheckpointID) (plumbing.Hash, error) {
+	tree, err := s.getCheckpointFetchingTree(ctx, checkpointID)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return tree.inner.Hash, nil
+}
+
 // getSessionsBranchTree returns the first available committed metadata tree. See
 // getSessionsBranchTrees for the precedence and recovery it delegates to.
 func (s *GitStore) getSessionsBranchTree(ctx context.Context) (*object.Tree, error) {

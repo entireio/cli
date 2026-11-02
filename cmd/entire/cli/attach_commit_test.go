@@ -3,9 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +18,7 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -400,32 +405,112 @@ func TestAttachCommit_DeliveryUsesThePolicyAttachWarnedAbout(t *testing.T) {
 	}
 }
 
-// A checkpoint made before the switch to git-refs lives on the v1 branch,
-// which 'entire checkpoint push' cannot upload; attach must not point there.
-// Not parallel: sets ENTIRE_CHECKPOINTS_PRIMARY.
-func TestAttachCommit_LegacyCheckpointUnderManualPointsToMigration(t *testing.T) {
+// attachLegacyCheckpoint makes a commit with a legacy hex checkpoint under the
+// git-branch backend, publishes both to a new origin, and switches the primary
+// to git-refs, as a repo looks after the switch. Callers must not use
+// t.Parallel(): it sets ENTIRE_CHECKPOINTS_PRIMARY.
+func attachLegacyCheckpoint(t *testing.T) (target *object.Commit, cpID checkpointid.CheckpointID, remote string) {
+	t.Helper()
 	setupAttachTestRepo(t)
 	if out, err := attachHeadless(t, "attach-legacy-first", attachOptions{}); err != nil {
 		t.Fatalf("first attach: %v\n%s", err, out)
 	}
-	target := headCommitOf(t)
+	target = headCommitOf(t)
 	cpID, ok := trailers.ParseCheckpoint(target.Message)
 	if !ok || cpID.Kind() == checkpointid.KindULID {
 		t.Fatalf("expected a legacy checkpoint trailer, got %q", target.Message)
 	}
-	pushToOrigin(t)
+	remote = pushToOrigin(t)
+	testutil.RunGit(t, mustGetwd(t), "push", "-q", "origin", paths.MetadataBranchName+":"+paths.MetadataBranchName)
 	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+	return target, cpID, remote
+}
+
+// remoteCheckpointRef returns the commit the remote's ref for cpID points at,
+// or "" when the remote has no such ref.
+func remoteCheckpointRef(t *testing.T, remote string, cpID checkpointid.CheckpointID) string {
+	t.Helper()
+	ref, err := cpkg.RefName(cpID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(testutil.RunGit(t, remote, "for-each-ref", "--format=%(objectname)", ref.String()))
+}
+
+// checkpointRefSessionIDs lists the session IDs stored in the checkpoint ref
+// for cpID in the repository at dir, in session-index order.
+func checkpointRefSessionIDs(t *testing.T, dir string, cpID checkpointid.CheckpointID) []string {
+	t.Helper()
+	ref, err := cpkg.RefName(cpID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for i := 0; ; i++ {
+		if strings.TrimSpace(testutil.RunGit(t, dir, "ls-tree", "--name-only", ref.String(), strconv.Itoa(i))) == "" {
+			return ids
+		}
+		var meta struct {
+			SessionID string `json:"session_id"`
+		}
+		raw := testutil.RunGit(t, dir, "show", fmt.Sprintf("%s:%d/metadata.json", ref, i))
+		if err := json.Unmarshal([]byte(raw), &meta); err != nil {
+			t.Fatalf("session %d metadata: %v", i, err)
+		}
+		ids = append(ids, meta.SessionID)
+	}
+}
+
+// After the switch to git-refs, attaching to a pre-switch commit copies its
+// legacy checkpoint into its own ref and pushes that ref; v1 is never pushed
+// under git-refs, so writing the session there would leave it local.
+func TestAttachCommit_LegacyCheckpointIsDeliveredOnGitRefs(t *testing.T) {
+	target, cpID, remote := attachLegacyCheckpoint(t)
+
+	out, err := attachHeadless(t, "attach-legacy-second", attachOptions{Commit: target.Hash.String()})
+	if err != nil {
+		t.Fatalf("second attach: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Pushed checkpoint metadata to origin") {
+		t.Fatalf("expected a confirmed push, got:\n%s", out)
+	}
+	ref, err := cpkg.RefName(cpID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := strings.TrimSpace(testutil.RunGit(t, mustGetwd(t), "rev-parse", ref.String()))
+	if got := remoteCheckpointRef(t, remote, cpID); got != local {
+		t.Fatalf("remote checkpoint ref = %q, want the local %s", got, local)
+	}
+	if got := checkpointRefSessionIDs(t, remote, cpID); !slices.Equal(got, []string{"attach-legacy-first", "attach-legacy-second"}) {
+		t.Fatalf("remote checkpoint sessions = %v, want both", got)
+	}
+}
+
+// Under manual, the copied ref waits for 'entire checkpoint push' like any
+// other checkpoint, and nothing is uploaded.
+func TestAttachCommit_LegacyCheckpointUnderManualWaits(t *testing.T) {
+	target, cpID, remote := attachLegacyCheckpoint(t)
 	setAttachCheckpointPushPolicy(t, "manual")
 
 	out, err := attachHeadless(t, "attach-legacy-second", attachOptions{Commit: target.Hash.String()})
 	if err != nil {
 		t.Fatalf("second attach: %v\n%s", err, out)
 	}
-	if strings.Contains(out, cpID.String()+" is waiting") || !strings.Contains(out, "entire doctor migrate-checkpoints") {
-		t.Fatalf("expected migration guidance instead of a waiting checkpoint, got:\n%s", out)
+	if want := "entire checkpoint push " + cpID.String(); !strings.Contains(out, want) || !strings.Contains(out, cpID.String()+" is waiting") {
+		t.Fatalf("expected the waiting line naming %q, got:\n%s", want, out)
+	}
+	if strings.Contains(out, "migrate-checkpoints") {
+		t.Fatalf("attach must not point to migration, got:\n%s", out)
+	}
+	if refs := remoteCheckpointRefs(t, remote); refs != "" {
+		t.Fatalf("manual attach uploaded checkpoint refs:\n%s", refs)
 	}
 }
 
+// Two clones that each attach a session to the same legacy checkpoint both
+// deliver, and neither session is lost: the second clone builds on the ref the
+// first one pushed instead of copying v1 again.
 // An older pushed commit is linked in the checkpoint, never rewritten.
 func TestAttachCommit_PushedOlderCommitIsLinkedInTheCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)
@@ -1206,7 +1291,7 @@ func TestAttachCommit_RemoteBranchNameCannotWriteLocalRefs(t *testing.T) {
 
 	// Another clone pushes a commit this clone doesn't have.
 	other := t.TempDir()
-	testutil.RunGit(t, other, "clone", "-q", remote, ".")
+	testutil.RunGit(t, other, "clone", "-q", "-b", "main", remote, ".")
 	testutil.WriteFile(t, other, "theirs.txt", "theirs")
 	testutil.GitAdd(t, other, "theirs.txt")
 	testutil.RunGit(t, other, "-c", "user.name=Other", "-c", "user.email=other@example.com", "commit", "-q", "-m", "theirs")

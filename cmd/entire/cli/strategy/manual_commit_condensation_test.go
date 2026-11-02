@@ -982,6 +982,65 @@ func TestCondenseAndMarkFullyCondensed_ReusesReservedAttemptAfterInterruptedWrit
 	assert.True(t, state.FullyCondensed)
 }
 
+// A session that reserves a hex checkpoint ID under git-branch and condenses
+// after the primary switches to git-refs must end up on the checkpoint's own
+// ref, queued for push: git-refs pre-push never sends the v1 branch. In the
+// interrupted case, the first write already reached v1 before the switch.
+// Not parallel: sets ENTIRE_CHECKPOINTS_PRIMARY.
+func TestCondenseAndMarkFullyCondensed_HexReservedBeforeSwitchToRefsLandsOnItsRef(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		name := "reserved only"
+		if interrupted {
+			name = "first write reached v1"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+			t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", checkpoint.BackendTypeGitBranch)
+			ctx := context.Background()
+
+			repo, err := OpenRepository(ctx)
+			require.NoError(t, err)
+			defer repo.Close()
+
+			s := &ManualCommitStrategy{}
+			sessionID := "reserved-across-switch"
+			setupEndedSessionWithoutFiles(t, s, repo, dir, sessionID)
+
+			var reservedID id.CheckpointID
+			require.NoError(t, MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+				var err error
+				reservedID, _, err = ensureCondensationAttemptID(ctx, state)
+				return err
+			}))
+			require.NotEqual(t, id.KindULID, reservedID.Kind(), "a git-branch primary reserves a hex ID")
+			if interrupted {
+				staleState, err := s.loadSessionState(ctx, sessionID)
+				require.NoError(t, err)
+				_, err = s.CondenseSession(ctx, repo, reservedID, staleState, nil)
+				require.NoError(t, err)
+			}
+
+			t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", checkpoint.BackendTypeGitRefs)
+			require.NoError(t, s.CondenseAndMarkFullyCondensed(ctx, sessionID))
+
+			onRef, err := CheckpointRefExists(ctx, reservedID)
+			require.NoError(t, err)
+			require.True(t, onRef, "checkpoint %s must have its own ref after condensing under git-refs", reservedID)
+			waiting, err := CheckpointWaiting(ctx, reservedID)
+			require.NoError(t, err)
+			require.True(t, waiting, "checkpoint %s must be queued for push", reservedID)
+
+			stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
+			require.NoError(t, err)
+			summary, err := stores.Persistent.Read(ctx, reservedID)
+			require.NoError(t, err)
+			require.NotNil(t, summary)
+			require.Len(t, summary.Sessions, 1, "a retried condensation must not duplicate the session")
+		})
+	}
+}
+
 func TestPrepareCommitMsg_ReusesReservedAttemptAfterSessionResume(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)

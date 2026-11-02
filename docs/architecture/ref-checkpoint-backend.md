@@ -180,7 +180,7 @@ repository reached through a second URL spelling, say) the outcome is
 not restored, and a remote-only delete (no local copy) is allowed. The ID is
 also recorded in the git common dir's deleted-checkpoints list
 (`entire-deleted-checkpoints.json`), which `prepare-commit-msg` uses to drop the
-ID's trailer on an amend and which migration skips. Other clones still holding
+ID's trailer on an amend and which migration and the copy on write skip. Other clones still holding
 the ref can push it back; remote tombstones are deferred.
 
 A checkpoint on the `v1` branch is deleted per remote by fetching that
@@ -235,7 +235,8 @@ To close that gap `List` supports **opt-in remote discovery**:
 - The `firstResolved` helper tries stores in priority order; a non-final store that reports absent *or* errors falls through to the next, so a transient git-refs fetch error cannot hide a checkpoint that resolves on the branch. The final store's result (hit, absent, or error) is returned verbatim.
 - The optional `AuthorReader` capability (`explain` relies on it) is preserved and routed by the same rules when both read stores provide it.
 - **Creates (`Session`) are not kind-routed.** They target the configured primary (+ mirrors); the minted ID already matches the primary's format.
-- **Backfills (`SessionSummary`, `SessionTranscript`) are kind-routed.** They update an *existing* checkpoint, which may live in either backend, so they follow the read order above, falling through to the next store only on `ErrCheckpointNotFound` (stricter than reads — a hard error aborts rather than risking a forked write). A backfill landing on the primary still fans out to mirrors; one landing on a fallback store skips mirrors (mirrors follow the primary) and logs the routing decision.
+- **Backfills (`SessionSummary`, `SessionTranscript`, `Tasks`) are kind-routed.** They update an *existing* checkpoint, which may live in either backend, so they follow the read order above, falling through to the next store only on `ErrCheckpointNotFound` (stricter than reads — a hard error aborts rather than risking a forked write). Under a git-refs primary, a hex checkpoint the refs store does not have (after its on-demand fetch, when one is wired) is first copied from `v1` into its own ref (see [Migration and coexistence](#migration-and-coexistence)) and the backfill lands there. Only a checkpoint that cannot be copied, because it is absent from `v1` or deleted from this clone, falls through to the branch. A backfill landing on the primary still fans out to mirrors; one landing on a fallback store skips mirrors (mirrors follow the primary) and logs the routing decision.
+- **Reserved writes (`ReservedSession`) route by ID.** Condensation and attach write an ID that may have been reserved under the other primary. A ULID under a git-branch primary goes to refs, where reads look for it. A hex ID under a git-refs primary goes through the primary, copied from `v1` first when only `v1` has it, so a session reserved before the switch, or attached to a pre-switch commit, is pushed. A hex checkpoint deleted from this clone is written to the branch instead, so it does not come back as a ref.
 
 All general read paths — resume, explain, blame, why, tokens, attach — inherit this routing for free through `checkpoint.Open`; there is no per-command config knob.
 
@@ -283,7 +284,11 @@ A mixed fleet works, with one limitation:
 
 This is why running `git-branch` as a *mirror* of git-refs is **not** part of the migration: it would dual-write every checkpoint into both backends to keep `v1` populated, but no reader needs that — read routing already covers both formats, and an old client not reading the new format is an accepted consequence rather than something to paper over. It is now a **silent** one: the `checkpoint_min_version` policy that used to turn it into an explicit "upgrade" nudge was removed with the checkpoint policy feature, and nothing replaced it. An old CLI in a refs-primary repo sees a partial history and is told nothing.
 
-When checkpoints *are* actively migrated from the branch into refs (a path that is tooling-only today, not an official flow), they are written under `RefName(hexID)` — i.e. **hex-named refs** — which is why a hex ID under a git-refs primary is looked up in refs first and only then falls back to the branch.
+When checkpoints *are* actively migrated from the branch into refs (`entire doctor migrate-checkpoints`, which runs only while git-branch is still primary), they are written under `RefName(hexID)` — i.e. **hex-named refs** — which is why a hex ID under a git-refs primary is looked up in refs first and only then falls back to the branch.
+
+After the switch, a checkpoint that stayed on `v1` is migrated one at a time, the first time something writes to it: an attach to a pre-switch commit, a condensation of a session that reserved its ID before the switch, or a backfill. The write copies the checkpoint's `v1` subtree into its own hex-named ref, normalized exactly as migration writes it (`importBranchCheckpoint`), and then writes through the primary, which queues the ref for push. Without the copy the write would land on `v1`, which git-refs pre-push never sends. The copy skips checkpoints on this clone's deleted list and never touches a ref that already exists locally, since that ref may be ahead of `v1`. A checkpoint nothing writes to stays on `v1` and keeps resolving through the branch fallback.
+
+The copy checks for an existing ref locally, so two clones that both copy the same checkpoint before either pushes produce refs with unrelated histories. Push recovery then replays one clone's commits over the other's, path by path with the last writer winning (`cherryPickOnto`), and a session written to the same index on both sides is lost.
 
 ## Key files
 
@@ -294,7 +299,8 @@ When checkpoints *are* actively migrated from the branch into refs (a path that 
 | `checkpoint/refs_naming.go` | `RefName` / `ParseRef`, `CheckpointRefPrefix` |
 | `checkpoint/refs_store.go` | `gitRefsStore` — per-checkpoint write/read, on-demand fetch |
 | `checkpoint/pushqueue.go` | Flock JSONL push-discovery queue |
-| `checkpoint/routing_store.go` | `kindRoutingStore` — id-kind read + backfill-write routing across both backends |
+| `checkpoint/routing_store.go` | `kindRoutingStore` — id-kind read, backfill and reserved-write routing across both backends; copies a `v1`-only hex checkpoint into its ref on write |
+| `checkpoint/migrate.go` | Branch→refs migration (`MigrateBranchToRefs`) and the per-checkpoint import it shares with the copy on write (`importBranchCheckpoint`) |
 | `checkpoint/id/id.go` | `ShardFor`, `Kind`/`KindOf`, ID generation |
 | `settings/checkpoints.go` | `checkpoints` block parsing + env override |
 | `strategy/manual_commit_push.go` | Pre-push: drain queue, batch push, per-ref recovery |

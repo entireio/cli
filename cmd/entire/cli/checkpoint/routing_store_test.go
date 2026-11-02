@@ -161,10 +161,12 @@ func TestKindRoutingStore_ReservedSessionUsesOriginalBackendAfterConfigChange(t 
 			wantBackend: BackendTypeGitRefs,
 		},
 		{
+			// v1 is never pushed under a git-refs primary, so the checkpoint
+			// gets its own ref instead.
 			name:        "hex reserved under branch after switching to refs",
 			primaryType: BackendTypeGitRefs,
 			checkpoint:  id.MustCheckpointID("a1b2c3d4e5f6"),
-			wantBackend: BackendTypeGitBranch,
+			wantBackend: BackendTypeGitRefs,
 		},
 	}
 
@@ -296,7 +298,7 @@ func TestKindRoutingStore_ListDedupesAcrossBackends(t *testing.T) {
 	assert.Equal(t, 1, count, "a checkpoint present in both backends should appear once")
 }
 
-func TestKindRoutingStore_SummaryBackfillFallsBackToBranch(t *testing.T) {
+func TestKindRoutingStore_SummaryBackfillReachesLegacyCheckpoint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -316,7 +318,7 @@ func TestKindRoutingStore_SummaryBackfillFallsBackToBranch(t *testing.T) {
 		CheckpointID: hexID,
 		Summary:      &Summary{Intent: "test intent", Outcome: "test outcome"},
 	})
-	require.NoError(t, err, "summary backfill for a pre-migration hex checkpoint must fall back to the branch store")
+	require.NoError(t, err, "summary backfill for a pre-migration hex checkpoint must not be discarded")
 
 	meta, err := router.ReadSessionMetadata(ctx, hexID, 0)
 	require.NoError(t, err)
@@ -324,7 +326,7 @@ func TestKindRoutingStore_SummaryBackfillFallsBackToBranch(t *testing.T) {
 	assert.Equal(t, "test intent", meta.Summary.Intent)
 }
 
-func TestKindRoutingStore_TranscriptAndAttributionBackfillsFallBackToBranch(t *testing.T) {
+func TestKindRoutingStore_TranscriptAndAttributionBackfillsReachLegacyCheckpoint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -341,10 +343,10 @@ func TestKindRoutingStore_TranscriptAndAttributionBackfillsFallBackToBranch(t *t
 		SessionID:    "hex-on-branch",
 		Transcript:   redact.AlreadyRedacted([]byte("finalized transcript")),
 	})
-	require.NoError(t, err, "transcript backfill for a hex checkpoint on the branch must fall back to the branch store")
+	require.NoError(t, err, "transcript backfill for a hex checkpoint on the branch must not be discarded")
 }
 
-func TestKindRoutingStore_TasksBackfillFallsBackToBranch(t *testing.T) {
+func TestKindRoutingStore_TasksBackfillReachesLegacyCheckpoint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -364,7 +366,7 @@ func TestKindRoutingStore_TasksBackfillFallsBackToBranch(t *testing.T) {
 			Transcript: redact.AlreadyRedacted([]byte("routed subagent\n")),
 		}},
 	})
-	require.NoError(t, err, "task backfill for a hex checkpoint on the branch must fall back to the branch store")
+	require.NoError(t, err, "task backfill for a hex checkpoint on the branch must not be discarded")
 
 	transcript, err := router.ReadTaskTranscript(ctx, hexID, "toolu_01Routed")
 	require.NoError(t, err)
@@ -480,6 +482,11 @@ func TestKindRoutingStore_BackfillMirrorFanout(t *testing.T) {
 		branch := NewGitStore(repo, DefaultV1Refs())
 		refs := newGitRefsStore(repo)
 		writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
+		// A checkpoint on v1 is copied into its own ref unless it was deleted
+		// from this clone; only then does the backfill fall back to the branch.
+		deleted, err := DeletedCheckpointsForRepo(repo)
+		require.NoError(t, err)
+		require.NoError(t, deleted.Record(hexID))
 
 		mirror := &fakeMirror{}
 		writer := newFanoutStore(refs, []Writer{mirror})
