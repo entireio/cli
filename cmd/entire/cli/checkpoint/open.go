@@ -39,7 +39,7 @@ type OpenOptions struct {
 	RemoteRefLister RemoteRefListFunc
 
 	// Refs overrides the default committed-ref topology. A non-nil value wins,
-	// e.g. attach pins reads to Primary via PrimaryAsRead().
+	// e.g. attach pins reads to Primary via PrimaryAsLocalRead().
 	Refs *PersistentRefs
 
 	// ReadRemotes is the ordered checkpoint read-candidate chain (elected sync
@@ -61,14 +61,14 @@ func PrimaryIsRefs(cfg *settings.CheckpointsConfig) bool {
 	return cfg != nil && cfg.Primary.Type == BackendTypeGitRefs
 }
 
-// Stores is the facade returned by Open: the persistent store plus the git-only
-// ephemeral (shadow-branch) capability and resolved committed-ref topology.
+// Stores is the facade returned by Open: the persistent store plus the
+// resolved committed-ref topology.
 type Stores struct {
 	// Persistent is the committed store that serves permanent reads and writes.
 	Persistent PersistentStore
 
-	ephemeral EphemeralStore
-	refs      PersistentRefs
+	refs          PersistentRefs
+	primaryIsRefs bool
 }
 
 // Open resolves the checkpoint storage topology and constructs the backing
@@ -123,9 +123,9 @@ func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores,
 	}
 
 	return &Stores{
-		Persistent: newKindRoutingStore(writer, branchStore, refsStore, primaryType),
-		ephemeral:  newEphemeralStore(repo, refs),
-		refs:       refs,
+		Persistent:    newKindRoutingStore(writer, branchStore, refsStore, primaryType),
+		refs:          refs,
+		primaryIsRefs: primaryType == BackendTypeGitRefs,
 	}, nil
 }
 
@@ -220,8 +220,11 @@ func resolveOpenRefs(ctx context.Context, opts OpenOptions) PersistentRefs {
 	return ResolveRefs(ctx)
 }
 
-// Ephemeral returns the git-backed shadow-branch (temporary) store.
-func (s *Stores) Ephemeral() EphemeralStore { return s.ephemeral }
-
 // Refs returns the resolved committed-ref topology.
 func (s *Stores) Refs() PersistentRefs { return s.refs }
+
+// PrimaryIsRefs reports whether these stores write new checkpoints to the git-refs
+// primary, i.e. whether a new checkpoint ID must be a ULID (see
+// GenerateCheckpointID). It reflects the config Open resolved, so a caller that
+// derives its own IDs matches the store it writes to.
+func (s *Stores) PrimaryIsRefs() bool { return s.primaryIsRefs }

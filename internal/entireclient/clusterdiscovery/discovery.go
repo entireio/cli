@@ -32,15 +32,6 @@ type DebugFunc func(format string, args ...any)
 // fields may be added by the server; unknown ones are ignored.
 type Response struct {
 	CoreURLs []string `json:"core_urls"`
-	// JurisdictionAudience is the cluster's jurisdiction-token audience (the
-	// exact aud its data plane accepts on jurisdiction access tokens,
-	// e.g. https://au.entire.io). Empty when the cluster does not accept
-	// jurisdiction tokens or predates the field.
-	JurisdictionAudience string `json:"jurisdiction_audience"`
-	// JurisdictionCoreURL is the core (OAuth AS) that mints tokens for
-	// JurisdictionAudience — the endpoint a cross-jurisdiction
-	// token exchange dials. The audience itself is not dialable.
-	JurisdictionCoreURL string `json:"jurisdiction_core_url"`
 	// LoginURL is the cluster's advertised login server — the apex auth
 	// router (e.g. https://auth.entire.io), which fans an authorization
 	// request out to the caller's own regional core. Empty when the cluster
@@ -165,6 +156,12 @@ func Discover(ctx context.Context, clusterHost string, c *http.Client, debugf De
 type loginTargets struct {
 	coreURLs []string
 	loginURL string
+	// autoSelect lets the sole eligible saved login act unasked. Cluster-
+	// addressed operations opt in — git remotes and the control-plane
+	// commands that name a cluster (repo mirror …) — because the cluster
+	// pins the host, so the login follows it. Every other API follows the
+	// selected login instead.
+	autoSelect bool
 }
 
 // renderLoginHint formats a fatal-ready "no auth context for <subject>"

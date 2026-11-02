@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -50,7 +51,6 @@ func TestReftableRepository_EnableAndFirstCheckpoint(t *testing.T) {
 	// git-refs.
 	output := env.RunCLI(
 		"enable",
-		"--no-github",
 		"--agent", "claude-code",
 		"--telemetry=false",
 		"--checkpoint-backend", "branch",
@@ -85,13 +85,10 @@ func TestReftableRepository_EnableAndFirstCheckpoint(t *testing.T) {
 		t.Fatalf("session StepCount after first checkpoint = %#v, want 1", state)
 	}
 
-	// The shadow branch is created and advanced via reftable ref writes.
-	shadowBranch := env.GetShadowBranchNameForCommit(initialHead)
-	if got := gitOutput(t, env.RepoDir, "rev-parse", shadowBranch); got == "" {
-		t.Fatalf("expected shadow branch %s to resolve", shadowBranch)
-	}
+	// The turn end records its work in session state; no ref is written.
+	env.AssertTurnEndRecorded(sess.ID, "main.go")
 
-	env.GitCommitWithShadowHooks("Add reftable main", "main.go")
+	env.GitCommitWithHooks("Add reftable main", "main.go")
 	userHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD")
 	if userHead == initialHead {
 		t.Fatal("expected user commit to advance HEAD")
@@ -152,7 +149,7 @@ func TestReftableRepository_LinkedWorktree(t *testing.T) {
 	// Pin the git-branch backend (see TestReftableRepository_EnableAndFirstCheckpoint):
 	// first-run enable now defaults to git-refs, but this test asserts the
 	// v1-branch metadata flow.
-	runCLIIn(t, env, worktreePath, "enable", "--no-github", "--agent", "claude-code", "--telemetry=false", "--checkpoint-backend", "branch")
+	runCLIIn(t, env, worktreePath, "enable", "--agent", "claude-code", "--telemetry=false", "--checkpoint-backend", "branch")
 
 	if got := gitOutput(t, worktreePath, "rev-parse", "--show-ref-format"); got != refFormatReftable {
 		t.Fatalf("worktree ref format = %q, want reftable", got)
@@ -188,7 +185,7 @@ func TestReftableRepository_GitRefsBackend(t *testing.T) {
 
 	// No --checkpoint-backend flag: exercise the shipped first-run default, which
 	// must write the git-refs primary into settings.json.
-	env.RunCLI("enable", "--no-github", "--agent", "claude-code", "--telemetry=false")
+	env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
 	if s := env.ReadFile(".entire/settings.json"); !strings.Contains(s, `"git-refs"`) {
 		t.Fatalf("first-run enable on a reftable repo should default to the git-refs backend, settings.json:\n%s", s)
 	}
@@ -216,13 +213,10 @@ func TestReftableRepository_GitRefsBackend(t *testing.T) {
 		t.Fatalf("session StepCount after first checkpoint = %#v, want 1", state)
 	}
 
-	// The shadow branch is created and advanced via reftable ref writes.
-	shadowBranch := env.GetShadowBranchNameForCommit(initialHead)
-	if got := gitOutput(t, env.RepoDir, "rev-parse", shadowBranch); got == "" {
-		t.Fatalf("expected shadow branch %s to resolve", shadowBranch)
-	}
+	// The turn end records its work in session state; no ref is written.
+	env.AssertTurnEndRecorded(sess.ID, "main.go")
 
-	env.GitCommitWithShadowHooks("Add reftable main", "main.go")
+	env.GitCommitWithHooks("Add reftable main", "main.go")
 	if userHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD"); userHead == initialHead {
 		t.Fatal("expected user commit to advance HEAD")
 	}
@@ -248,6 +242,13 @@ func TestReftableRepository_GitRefsBackend(t *testing.T) {
 	if listOut := env.RunCLI("checkpoint", "list"); !strings.Contains(listOut, checkpointID) {
 		t.Fatalf("checkpoint list missing checkpoint %s:\n%s", checkpointID, listOut)
 	}
+
+	// The outgoing listing and the status count read the push queue's refs
+	// in-process, so they must also work against reftable storage.
+	env.SetupEmptyNamedBareRemote("origin")
+	if outgoing, _ := listOutgoing(t, env); !slices.Equal(outgoing.ids(), []string{checkpointID}) {
+		t.Fatalf("checkpoint list --outgoing = %v, want [%s]", outgoing.ids(), checkpointID)
+	}
 }
 
 // TestReftableRepository_GitRefsBackend_LinkedWorktree verifies that first-run
@@ -266,7 +267,7 @@ func TestReftableRepository_GitRefsBackend_LinkedWorktree(t *testing.T) {
 	gitOutput(t, env.RepoDir, "worktree", "add", "-b", "feature/wt", worktreePath)
 
 	// Default backend (git-refs): no --checkpoint-backend flag.
-	runCLIIn(t, env, worktreePath, "enable", "--no-github", "--agent", "claude-code", "--telemetry=false")
+	runCLIIn(t, env, worktreePath, "enable", "--agent", "claude-code", "--telemetry=false")
 
 	if s := readWorktreeFile(t, worktreePath, ".entire/settings.json"); !strings.Contains(s, `"git-refs"`) {
 		t.Fatalf("enable in a reftable worktree should default to git-refs, settings.json:\n%s", s)

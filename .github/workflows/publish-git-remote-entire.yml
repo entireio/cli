@@ -32,19 +32,18 @@ jobs:
           go-version-file: go.mod
 
       # GoReleaser refuses to run untagged. The tag is local to the
-      # runner, never pushed, and deliberately not stamped into the
-      # binary (see the ldflags note in .goreleaser.nonprod.yaml).
+      # runner and never pushed.
       - name: Make a throwaway tag
         run: git tag --force v0.0.0
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::128096325110:role/github-actions-public-release-upload
           aws-region: us-east-2
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
         with:
           distribution: goreleaser
           version: "~> v2"

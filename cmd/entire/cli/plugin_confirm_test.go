@@ -46,9 +46,9 @@ func TestPluginAccessibleConfirmationCancellation(t *testing.T) { //nolint:paral
 			original := openPluginPromptTerminal
 			openPluginPromptTerminal = func() (pluginPromptTerminal, error) {
 				if fallback {
-					return pluginPromptTerminal{in: tracked}, nil
+					return pluginPromptTerminal{in: tracked, close: tracked.Close}, nil
 				}
-				return pluginPromptTerminal{in: input}, nil
+				return pluginPromptTerminal{in: input, close: input.Close}, nil
 			}
 			t.Cleanup(func() { openPluginPromptTerminal = original })
 			ctx, cancel := context.WithCancel(t.Context())
@@ -72,8 +72,7 @@ func TestPluginAccessibleConfirmationCancellation(t *testing.T) { //nolint:paral
 				}
 			case <-time.After(5 * time.Second):
 				_ = writer.Close()
-				<-result
-				t.Fatal("accessible prompt did not stop on cancellation")
+				t.Fatalf("accessible prompt did not stop on cancellation; closing its input returned %v", <-result)
 			}
 			if fallback && tracked.closes != 1 {
 				t.Fatalf("input closed %d times, want exactly once", tracked.closes)

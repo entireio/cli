@@ -136,7 +136,7 @@ func (p *Pi) RunPrompt(ctx context.Context, dir string, prompt string, opts ...O
 	args := []string{"-p", prompt, "--no-skills", "--no-prompt-templates", "--no-themes"}
 	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt), "--no-skills", "--no-prompt-templates", "--no-themes"}
 
-	env := append(filterEnv(os.Environ(), "ENTIRE_TEST_TTY", "PI_CODING_AGENT_DIR"),
+	env := append(agentEnv(os.Environ(), "PI_CODING_AGENT_DIR"),
 		"PI_CODING_AGENT_DIR="+home,
 	)
 
@@ -202,5 +202,5 @@ func (p *Pi) startTmuxSession(name, dir, home string, args ...string) (*TmuxSess
 		"HOME=" + os.Getenv("HOME"),
 		"TERM=" + os.Getenv("TERM"),
 	}, args...)
-	return NewTmuxSession(name, dir, []string{"PI_CODING_AGENT_DIR", "ENTIRE_TEST_TTY"}, "env", tmuxArgs...)
+	return NewTmuxSession(name, dir, []string{"PI_CODING_AGENT_DIR"}, "env", tmuxArgs...)
 }

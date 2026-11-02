@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -35,7 +36,7 @@ func NewTmuxSession(name string, dir string, unsetEnv []string, command string, 
 	tmuxArgs := []string{"new-session", "-d", "-s", name, "-c", dir}
 	// Build a shell command string using `env` to:
 	//   1. Propagate PATH from the current process (tmux server may have stale PATH)
-	//   2. Unset variables listed in unsetEnv
+	//   2. Unset harnessOnlyEnv and the variables listed in unsetEnv
 	// All arguments are shell-quoted to prevent injection or splitting.
 	// PATH is always forwarded from the current process so that the freshly-built
 	// "entire" binary (prepended to PATH by main_test.go) is available inside the
@@ -44,7 +45,7 @@ func NewTmuxSession(name string, dir string, unsetEnv []string, command string, 
 	var parts []string
 	parts = append(parts, "env")
 	// Options (-u) must precede variable assignments for BSD env on macOS.
-	for _, v := range unsetEnv {
+	for _, v := range append(slices.Clone(harnessOnlyEnv), unsetEnv...) {
 		parts = append(parts, "-u", shellQuote(v))
 	}
 	parts = append(parts, "PATH="+shellQuote(os.Getenv("PATH")))

@@ -30,6 +30,7 @@ type fakeTransport struct {
 type rpcCall struct {
 	Service string
 	Body    []byte
+	Headers http.Header
 }
 
 func (f *fakeTransport) InfoRefs(_ context.Context, _ string) (io.ReadCloser, error) {
@@ -46,13 +47,22 @@ func (f *fakeTransport) InfoRefsV2(_ context.Context) (io.ReadCloser, error) {
 	return f.infoRefsV2Resp()
 }
 
-func (f *fakeTransport) ServiceRPC(_ context.Context, service string, body io.ReadSeeker, _ ...func(*http.Request)) (io.ReadCloser, error) {
+func (f *fakeTransport) ServiceRPC(ctx context.Context, service string, body io.ReadSeeker, extraHeaders ...func(*http.Request)) (io.ReadCloser, error) {
 	var buf []byte
 	if body != nil {
 		_, _ = body.Seek(0, io.SeekStart) //nolint:errcheck // test
 		buf, _ = io.ReadAll(body)         //nolint:errcheck // test
 	}
-	f.rpcCalls = append(f.rpcCalls, rpcCall{Service: service, Body: buf})
+	// Apply the callbacks to a throwaway request so tests can assert on the
+	// headers a real POST would carry.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://test.invalid/"+service, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, fn := range extraHeaders {
+		fn(req)
+	}
+	f.rpcCalls = append(f.rpcCalls, rpcCall{Service: service, Body: buf, Headers: req.Header})
 	if f.serviceRPCResp == nil {
 		return nil, errors.New("fakeTransport: no service-RPC handler")
 	}

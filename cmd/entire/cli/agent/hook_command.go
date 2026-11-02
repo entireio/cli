@@ -76,6 +76,21 @@ func MissingEntireWarning(format WarningFormat) string {
 	}
 }
 
+// FailedEntireWarning is shown when `entire` is on PATH but cannot run, such as
+// a version-manager shim with no version selected. It is spliced into a
+// single-quoted sh -c string, so it must not contain a single quote, backtick,
+// or dollar sign.
+func FailedEntireWarning(format WarningFormat) string {
+	switch format {
+	case WarningFormatSingleLine:
+		return "Entire CLI is enabled, but the entire command on PATH failed to run, so this session may not be captured. Check that entire --version works in this shell. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
+	case WarningFormatMultiLine:
+		return "\n\nEntire CLI is enabled, but the entire command on PATH failed to run, so this session may not be captured.\nCheck that entire --version works in this shell.\nInstallation guide: https://docs.entire.io/cli/installation#installation-methods"
+	default:
+		return FailedEntireWarning(WarningFormatSingleLine)
+	}
+}
+
 // currentHookCommandPrefix is what every hook command Entire generates begins
 // with today: the entire binary resolved through PATH, then the `hooks`
 // subcommand.
@@ -126,21 +141,45 @@ func WrapProductionSilentHookCommand(command string) string {
 }
 
 // WrapProductionJSONWarningHookCommand emits a JSON hook response with a
-// systemMessage field on stdout when the Entire CLI is missing from PATH.
+// systemMessage field on stdout when the Entire CLI is missing from PATH or
+// fails to run.
 func WrapProductionJSONWarningHookCommand(command string, format WarningFormat) string {
-	payload, err := jsonutil.MarshalWithNoHTMLEscape(struct {
-		SystemMessage string `json:"systemMessage,omitempty"`
-	}{
-		SystemMessage: MissingEntireWarning(format),
-	})
-	if err != nil {
+	missing, missingErr := systemMessageJSON(MissingEntireWarning(format))
+	failed, failedErr := systemMessageJSON(FailedEntireWarning(format))
+	if missingErr != nil || failedErr != nil {
 		// Fallback to plain text on stdout if JSON payload construction somehow fails.
 		return WrapProductionPlainTextWarningHookCommand(command, format)
 	}
+	return warningHookCommand(command, missing, failed)
+}
 
+func systemMessageJSON(message string) (string, error) {
+	payload, err := jsonutil.MarshalWithNoHTMLEscape(struct {
+		SystemMessage string `json:"systemMessage,omitempty"`
+	}{
+		SystemMessage: message,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal hook system message: %w", err)
+	}
+	return string(payload), nil
+}
+
+// warningHookCommand prints missing when `entire` is not on PATH and failed when
+// it is but `entire --version` fails, exiting 0 either way. A version-manager
+// shim with no version selected passes `command -v` and then fails, and agents
+// surface a failing hook's stderr only in verbose views, so without the probe
+// capture stops unnoticed.
+//
+// The probe runs before the hook so the hook can still be exec'd: agents enforce
+// hook timeouts by signalling the process they started, and only exec makes
+// that process entire itself. The probe reads /dev/null so the hook payload on
+// stdin reaches the hook.
+func warningHookCommand(command, missing, failed string) string {
 	return fmt.Sprintf(
-		`sh -c 'if ! command -v entire >/dev/null 2>&1; then printf "%%s\n" %q; exit 0; fi; exec %s'`,
-		string(payload),
+		`sh -c 'if ! command -v entire >/dev/null 2>&1; then printf "%%s\n" %q; exit 0; fi; if ! entire --version </dev/null >/dev/null 2>&1; then printf "%%s\n" %q; exit 0; fi; exec %s'`,
+		missing,
+		failed,
 		command,
 	)
 }
@@ -163,6 +202,24 @@ func WrapProductionJSONWarningHookCommand(command string, format WarningFormat) 
 func WrapWindowsProductionSilentHookCommand(command string) string {
 	return fmt.Sprintf(
 		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (%s)"`,
+		command,
+	)
+}
+
+// WrapWindowsProductionSilentHookCommandDirect is the silent wrapper for a host
+// that already runs every hook command through cmd.exe /C on Windows (agy does;
+// see HookHostIsWindows): the bare `where … & if errorlevel 1 (ver>nul) else
+// (<command>)` line, with no cmd.exe prefix and no quoted block. Handing such a
+// host WrapWindowsProductionSilentHookCommand's nested form fails outright —
+// cmd.exe /C takes the quoted block as one program name ('"where.exe entire
+// >nul 2>nul & …"' is not recognized as an internal or external command) — and
+// the sh wrapper fails too, because cmd.exe reads its `>/dev/null` as a redirect
+// to a nonexistent path. Both were observed on Windows 11 with agy 1.2.7; only
+// this shape produced a tracked session. Same distinction
+// WrapWindowsProductionJSONWarningHookCommand draws for Codex.
+func WrapWindowsProductionSilentHookCommandDirect(command string) string {
+	return fmt.Sprintf(
+		`where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (%s)`,
 		command,
 	)
 }
@@ -200,13 +257,9 @@ func WrapWindowsProductionPlainTextWarningHookCommand(command string, format War
 }
 
 // WrapProductionPlainTextWarningHookCommand emits the warning as plain
-// text to stdout when the Entire CLI is missing from PATH.
+// text to stdout when the Entire CLI is missing from PATH or fails to run.
 func WrapProductionPlainTextWarningHookCommand(command string, format WarningFormat) string {
-	return fmt.Sprintf(
-		`sh -c 'if ! command -v entire >/dev/null 2>&1; then printf "%%s\n" %q; exit 0; fi; exec %s'`,
-		MissingEntireWarning(format),
-		command,
-	)
+	return warningHookCommand(command, MissingEntireWarning(format), FailedEntireWarning(format))
 }
 
 const productionHookWrapperPrefix = `sh -c 'if ! command -v entire >/dev/null 2>&1; then `
@@ -375,6 +428,33 @@ func defaultSHHookWrapperWorks(ctx context.Context, command string) bool {
 	return cmd.Run() == nil
 }
 
+// HookHostIsWindows reports whether hook commands will run on a Windows host,
+// without asking whether a POSIX sh is reachable there.
+//
+// It is the predicate for an agent that hands every hook command to cmd.exe on
+// Windows whatever else is installed. Factory Droid is one: its Windows build
+// runs each hook command as an argument of cmd.exe, while its macOS/Linux
+// build runs the same string under sh. For such an agent
+// UseWindowsProductionHooks answers the wrong question — its probe only
+// establishes that `sh -c 'exit 0'` runs, and that command carries no cmd.exe
+// metacharacters, so a host with Git Bash reports success while the real sh
+// wrapper, which is full of `>` and `&`, is still cut apart by cmd.exe before
+// any sh sees it.
+//
+// Codex and Cursor keep UseWindowsProductionHooks, but do NOT read that as
+// "their runners are different". WrapWindowsProductionSilentHookCommand's own
+// doc, runWindowsWrapper in hook_command_exec_windows_test.go, and cursor's
+// InstallHooks all describe those runners as going through cmd.exe too. What
+// separates them is only evidence: Codex demonstrably passes the Windows
+// nightly with the sh wrapper installed, so whatever its composition does, the
+// wrapper survives it. Cursor has no such evidence — it is excluded from the
+// Windows matrix (no tmux) — so it may well have this same defect. Establish
+// that the way it was established here, by reading the runner, before changing
+// its gate.
+func HookHostIsWindows() bool {
+	return hookCommandOS == hookWrapperOSWindows
+}
+
 // WrapProductionSilentHookCommandForOS picks the sh-based or native Windows
 // silent wrapper based on useWindows (typically from UseWindowsProductionHooks).
 func WrapProductionSilentHookCommandForOS(command string, useWindows bool) string {
@@ -393,8 +473,18 @@ func WrapProductionJSONWarningHookCommandForOS(command string, format WarningFor
 	return WrapProductionJSONWarningHookCommand(command, format)
 }
 
+// WrapProductionPlainTextWarningHookCommandForOS picks the sh-based or native
+// Windows plain-text-warning wrapper based on useWindows.
+func WrapProductionPlainTextWarningHookCommandForOS(command string, format WarningFormat, useWindows bool) string {
+	if useWindows {
+		return WrapWindowsProductionPlainTextWarningHookCommand(command, format)
+	}
+	return WrapProductionPlainTextWarningHookCommand(command, format)
+}
+
 // SetWindowsHookProbeForTesting overrides the OS and sh-wrapper probe used by
-// UseWindowsProductionHooks and returns a restore function. Test-only.
+// UseWindowsProductionHooks and HookHostIsWindows, and returns a restore
+// function. Test-only.
 func SetWindowsHookProbeForTesting(goos string, works func(ctx context.Context, command string) bool) func() {
 	oldOS, oldProbe := hookCommandOS, shHookWrapperWorks
 	hookCommandOS = goos

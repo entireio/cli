@@ -51,7 +51,11 @@ func ComposeReviewPrompt(cfg reviewtypes.RunConfig) string {
 	}
 	if trimmed := strings.TrimRight(cfg.Task, "\n\r "); trimmed != "" {
 		sections = append(sections, "Task: "+trimmed)
-		sections = append(sections, reviewerOutputFormatInstructions)
+		format := reviewerOutputFormatInstructions
+		if cfg.TrailFindingsJSON {
+			format = strings.Replace(format, verdictOnlyWhenClean, verdictAndJSONWhenClean, 1)
+		}
+		sections = append(sections, format)
 	}
 
 	// AlwaysPrompt and PerRunPrompt: each is its own section if non-empty after trim.
@@ -76,13 +80,23 @@ func ComposeReviewPrompt(cfg reviewtypes.RunConfig) string {
 		sections = append(sections, trimmed)
 	}
 
+	// The contract comes last so per-agent and per-run text cannot displace it.
+	if cfg.TrailFindingsJSON {
+		sections = append(sections, trailFindingsJSONInstructions)
+	}
+
 	return strings.Join(sections, "\n\n")
 }
+
+const (
+	verdictOnlyWhenClean    = "If there are no actionable findings, output only the verdict line."
+	verdictAndJSONWhenClean = "If there are no actionable findings, output only the verdict line and the final JSON line."
+)
 
 const reviewerOutputFormatInstructions = `Output format:
 - Start with one verdict line: approve / approve with nits / request changes, plus a short reason.
 - Then list actionable findings only. Each finding MUST be a separate top-level Markdown bullet starting with [high], [medium], or [low].
 - Include an exact file:line pointer in each finding when possible, plus the bug, impact, and fix in one concise paragraph.
 - Do not combine multiple defects in one bullet or paragraph. Do not emit severity-heading paragraphs like "**[HIGH] ...**" without a leading bullet.
-- If there are no actionable findings, output only the verdict line.
+- ` + verdictOnlyWhenClean + `
 - Keep the report compact: quote only the minimal relevant snippet (a few lines) per finding. Never paste whole files, full diffs, or large logs, and skip decorative formatting like tables or ASCII art — it wastes effort and is not rendered.`

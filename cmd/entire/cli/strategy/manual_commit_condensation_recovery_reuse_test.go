@@ -25,9 +25,7 @@ import (
 // which choose the ID themselves and record whatever comes back. It is not fine
 // for PostCommit: its ID comes from the Entire-Checkpoint trailer, which is
 // already written into the commit. If condensation redirects the write, the
-// commit ends up naming a checkpoint that was never stored, and
-// updateCombinedAttributionForCheckpoint writes attribution under that same
-// non-existent ID.
+// commit ends up naming a checkpoint that was never stored.
 //
 // This is reachable without a process kill. CondenseSessionByID persists a
 // recovery-required attempt before condensing; if condensation fails, the

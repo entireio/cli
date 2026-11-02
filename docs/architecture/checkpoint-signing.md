@@ -1,6 +1,6 @@
 # Checkpoint Commit Signing
 
-Entire can sign checkpoint commits (shadow branch, metadata branch) using the same key configured for regular git commits. Signing is **best-effort**: if the signer is unavailable or fails, the commit is created unsigned and a warning is logged to `.entire/logs/`.
+Entire can sign checkpoint commits (metadata branch and per-checkpoint refs) using the same key configured for regular git commits. Signing is **best-effort**: if the signer is unavailable or fails, the commit is created unsigned and a warning is logged to `.entire/logs/`.
 
 ## Requirements
 

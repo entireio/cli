@@ -72,7 +72,7 @@ func TestResume_RepoRenamed_StillLinksCommitTrailer(t *testing.T) {
 	})
 
 	// 5. Commit from the new location.
-	env.GitCommitWithShadowHooks("commit after the repo moved", "resumed.txt")
+	env.GitCommitWithHooks("commit after the repo moved", "resumed.txt")
 
 	// 6. The commit must be linked back to the session.
 	commit := env.GetHeadHash()

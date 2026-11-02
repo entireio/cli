@@ -320,18 +320,6 @@ func (c *CursorAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 		hasEntireHook(hooksFile.Hooks.SubagentStop), nil
 }
 
-// GetSupportedHooks returns the hook types Cursor supports.
-func (c *CursorAgent) GetSupportedHooks() []agent.HookType {
-	return []agent.HookType{
-		agent.HookSessionStart,
-		agent.HookSessionEnd,
-		agent.HookUserPromptSubmit,
-		agent.HookStop,
-		agent.HookPreToolUse,
-		agent.HookPostToolUse,
-	}
-}
-
 // parseCursorHookType parses a specific hook type from rawHooks into the target slice.
 // Silently ignores parse errors (leaves target unchanged).
 func parseCursorHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]CursorHookEntry) {

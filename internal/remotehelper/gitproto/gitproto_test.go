@@ -154,6 +154,81 @@ func TestV2Command(t *testing.T) {
 	})
 }
 
+func TestRemoveV2FetchFeature(t *testing.T) {
+	t.Parallel()
+
+	head := pktLine("version 2\n") + pktLine("agent=git/2.55.0\n") + pktLine("ls-refs=unborn\n")
+	tail := pktLine("server-option\n") + pktLine("object-format=sha1\n") + "0000"
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			"drops_only_that_token",
+			head + pktLine("fetch=shallow sideband-all packfile-uris wait-for-done ref-in-want filter\n") + tail,
+			head + pktLine("fetch=shallow sideband-all packfile-uris wait-for-done filter\n") + tail,
+		},
+		{
+			"absent_is_unchanged",
+			head + pktLine("fetch=shallow filter\n") + tail,
+			head + pktLine("fetch=shallow filter\n") + tail,
+		},
+		{
+			"no_fetch_line_is_unchanged",
+			head + tail,
+			head + tail,
+		},
+		{
+			"sole_feature_leaves_bare_key",
+			head + pktLine("fetch=ref-in-want\n") + tail,
+			head + pktLine("fetch\n") + tail,
+		},
+		{
+			"first_position",
+			head + pktLine("fetch=ref-in-want shallow\n") + tail,
+			head + pktLine("fetch=shallow\n") + tail,
+		},
+		{
+			"prefix_match_is_not_the_token",
+			head + pktLine("fetch=ref-in-want-v3 shallow\n") + tail,
+			head + pktLine("fetch=ref-in-want-v3 shallow\n") + tail,
+		},
+		{
+			"no_trailing_lf",
+			head + pktLine("fetch=ref-in-want shallow") + tail,
+			head + pktLine("fetch=shallow") + tail,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := RemoveV2FetchFeature([]byte(tc.in), "ref-in-want")
+			if err != nil {
+				t.Fatalf("RemoveV2FetchFeature: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("malformed_length_errors", func(t *testing.T) {
+		t.Parallel()
+		if _, err := RemoveV2FetchFeature([]byte(pktLine("version 2\n")+"zzzzfetch=ref-in-want\n"), "ref-in-want"); err == nil {
+			t.Error("expected error on bad pkt-line length")
+		}
+	})
+
+	t.Run("second_fetch_line_errors", func(t *testing.T) {
+		t.Parallel()
+		in := head + pktLine("fetch=shallow\n") + pktLine("fetch=ref-in-want\n") + tail
+		if _, err := RemoveV2FetchFeature([]byte(in), "ref-in-want"); err == nil {
+			t.Error("expected error on a second fetch= line")
+		}
+	})
+}
+
 func TestAppendAgentToV2Request(t *testing.T) {
 	t.Parallel()
 
@@ -236,7 +311,7 @@ func TestReadReceivePackRequest_DeleteOnly(t *testing.T) {
 		t.Fatalf("ReadReceivePackRequest failed: %v", err)
 	}
 
-	got := string(result)
+	got := bodyString(t, result)
 	if !strings.Contains(got, oldSHA) {
 		t.Errorf("result missing old SHA")
 	}
@@ -299,7 +374,7 @@ func TestReadReceivePackRequest_DeleteOnlySHA256(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadReceivePackRequest failed: %v", err)
 	}
-	got := string(result)
+	got := bodyString(t, result)
 	if strings.Contains(got, "PACK") {
 		t.Errorf("delete-only SHA-256 push must not read pack data, got %q", got)
 	}
@@ -326,7 +401,7 @@ func TestReadReceivePackRequest_WithPackDataSHA256(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadReceivePackRequest failed: %v", err)
 	}
-	got := string(result)
+	got := bodyString(t, result)
 	if !strings.Contains(got, packData) {
 		t.Errorf("result missing pack data, got: %q", got)
 	}
@@ -351,7 +426,7 @@ func TestReadReceivePackRequest_WithPackData(t *testing.T) {
 		t.Fatalf("ReadReceivePackRequest failed: %v", err)
 	}
 
-	got := string(result)
+	got := bodyString(t, result)
 	if !strings.Contains(got, newSHA) {
 		t.Errorf("result missing new SHA")
 	}
@@ -397,14 +472,14 @@ func TestReadSendPackRequest_IncludesPackData(t *testing.T) {
 	input.WriteString(trailingStatus)
 
 	reader := bufio.NewReader(&input)
-	var got bytes.Buffer
-	if err := ReadSendPackRequest(reader, &got); err != nil {
+	var body RequestBody
+	if err := ReadSendPackRequest(reader, &body); err != nil {
 		t.Fatalf("ReadSendPackRequest failed: %v", err)
 	}
 
 	want := commandSection + pushOptions + packData
-	if got.String() != want {
-		t.Fatalf("request body = %q, want %q", got.String(), want)
+	if got := bodyString(t, &body); got != want {
+		t.Fatalf("request body = %q, want %q", got, want)
 	}
 	remaining, err := io.ReadAll(reader)
 	if err != nil {
@@ -431,13 +506,13 @@ func TestReadSendPackRequest_DeleteOnly(t *testing.T) {
 	input.WriteString(trailingStatus)
 
 	reader := bufio.NewReader(&input)
-	var got bytes.Buffer
-	if err := ReadSendPackRequest(reader, &got); err != nil {
+	var body RequestBody
+	if err := ReadSendPackRequest(reader, &body); err != nil {
 		t.Fatalf("ReadSendPackRequest failed: %v", err)
 	}
 
-	if got.String() != commandSection {
-		t.Fatalf("request body = %q, want %q", got.String(), commandSection)
+	if got := bodyString(t, &body); got != commandSection {
+		t.Fatalf("request body = %q, want %q", got, commandSection)
 	}
 	remaining, err := io.ReadAll(reader)
 	if err != nil {
@@ -454,7 +529,7 @@ func TestReadSendPackRequest_TruncatedFails(t *testing.T) {
 	t.Run("truncated length prefix", func(t *testing.T) {
 		t.Parallel()
 		r := bufio.NewReader(strings.NewReader("00"))
-		if err := ReadSendPackRequest(r, &bytes.Buffer{}); err == nil {
+		if err := ReadSendPackRequest(r, &RequestBody{}); err == nil {
 			t.Fatal("expected error on truncated length")
 		}
 	})
@@ -464,7 +539,7 @@ func TestReadSendPackRequest_TruncatedFails(t *testing.T) {
 		// One inner payload followed by EOF instead of the outer flush.
 		body := pktLine("0000ok refs/heads/main\n")
 		r := bufio.NewReader(strings.NewReader(body))
-		if err := ReadSendPackRequest(r, &bytes.Buffer{}); err == nil {
+		if err := ReadSendPackRequest(r, &RequestBody{}); err == nil {
 			t.Fatal("expected error on missing trailing flush")
 		}
 	})
@@ -473,7 +548,7 @@ func TestReadSendPackRequest_TruncatedFails(t *testing.T) {
 		t.Parallel()
 		// Length claims 100 bytes of payload but only 10 follow.
 		r := bufio.NewReader(strings.NewReader("0064short"))
-		if err := ReadSendPackRequest(r, &bytes.Buffer{}); err == nil {
+		if err := ReadSendPackRequest(r, &RequestBody{}); err == nil {
 			t.Fatal("expected error on short payload")
 		}
 	})

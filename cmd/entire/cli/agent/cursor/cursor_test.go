@@ -63,14 +63,6 @@ func TestCursorAgent_Description(t *testing.T) {
 	}
 }
 
-func TestCursorAgent_IsPreview(t *testing.T) {
-	t.Parallel()
-	ag := &CursorAgent{}
-	if !ag.IsPreview() {
-		t.Error("IsPreview() = false, want true")
-	}
-}
-
 func TestCursorAgent_ProtectedDirs(t *testing.T) {
 	t.Parallel()
 	ag := &CursorAgent{}
@@ -659,7 +651,7 @@ func TestDetectPresence_WithCursorDir(t *testing.T) {
 	}
 }
 
-// --- sanitizePathForCursor ---
+// --- SanitizePathForCursor ---
 
 func TestSanitizePathForCursor(t *testing.T) {
 	t.Parallel()
@@ -679,9 +671,9 @@ func TestSanitizePathForCursor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
-			result := sanitizePathForCursor(tt.input)
+			result := SanitizePathForCursor(tt.input)
 			if result != tt.expected {
-				t.Errorf("sanitizePathForCursor(%q) = %q, want %q", tt.input, result, tt.expected)
+				t.Errorf("SanitizePathForCursor(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
 	}

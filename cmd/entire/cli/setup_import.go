@@ -81,8 +81,21 @@ func maybeOfferSessionImport(ctx context.Context, w io.Writer, agents []agent.Ag
 		return
 	}
 
-	eligible := sessionImportDiscover(ctx, agents, repoRoot)
+	eligible := sessionImportDiscover(ctx, w, agents, repoRoot)
 	if len(eligible) == 0 {
+		return
+	}
+
+	// Resolve the anchor before asking. Every imported checkpoint needs one
+	// (agentimport.Run refuses without it), so in a repo that cannot produce
+	// one the honest move is to not ask the question rather than to ask it and
+	// discard the answer. Placed after discovery so an anchorless repo with no
+	// importable history stays silent, and before the prompt because that is
+	// the thing being kept honest. It runs ahead of the checkpoint-policy and
+	// redaction gates inside sessionImportRun; those guard writes, which still
+	// happen after them.
+	linkCommitSHA, err := resolveImportAnchorForOnboarding(ctx, w)
+	if err != nil {
 		return
 	}
 
@@ -113,12 +126,40 @@ func maybeOfferSessionImport(ctx context.Context, w io.Writer, agents []agent.Ag
 		return
 	}
 
-	sessionImportRun(ctx, w, repoRoot, selected)
+	sessionImportRun(ctx, w, repoRoot, linkCommitSHA, selected)
+}
+
+// resolveImportAnchorForOnboarding resolves the anchor every imported
+// checkpoint is stamped with, reporting the skip itself so the caller only has
+// to stop. Never fails enable: an unanchorable repo loses the optional import,
+// not the setup.
+func resolveImportAnchorForOnboarding(ctx context.Context, w io.Writer) (string, error) {
+	repo, err := openRepository(ctx)
+	if err != nil {
+		logging.Warn(ctx, "session import skipped: open repository failed", "error", err)
+		fmt.Fprintf(w, "Note: could not import agent history: %v\n", err)
+		return "", err
+	}
+	defer repo.Close()
+
+	linkCommitSHA, err := resolveImportLinkCommitSHA(ctx, repo)
+	if err != nil {
+		logging.Warn(ctx, "session import skipped: no valid anchor", "error", err)
+		// The offer is first-time-setup only, so the standalone command is the
+		// only way back in, as noteImportHistoryNotApplicable says for the same
+		// dead end.
+		fmt.Fprintf(w, "Note: skipping agent history import: %v\n", err)
+		fmt.Fprintln(w, "      Run 'entire import <agent>' once this repo can anchor an import.")
+		return "", err
+	}
+	return linkCommitSHA, nil
 }
 
 // discoverImportableAgents keeps the selected agents that have a registered
-// importer and at least one discoverable session for the repo.
-func discoverImportableAgents(ctx context.Context, agents []agent.Agent, repoRoot string) []eligibleImport {
+// importer and at least one discoverable session for the repo. An agent whose
+// discovery fails is skipped with a note saying why: the error can be a refusal
+// the user can act on (Cursor's names the --path rerun).
+func discoverImportableAgents(ctx context.Context, w io.Writer, agents []agent.Agent, repoRoot string) []eligibleImport {
 	now := time.Now()
 	var out []eligibleImport
 	for _, ag := range agents {
@@ -129,6 +170,7 @@ func discoverImportableAgents(ctx context.Context, agents []agent.Agent, repoRoo
 		sessions, err := imp.Discover(repoRoot, "", now, nil)
 		if err != nil {
 			logging.Warn(ctx, "session import discovery failed", "agent", string(ag.Type()), "error", err)
+			fmt.Fprintf(w, "Note: skipping %s history import: %v\n", ag.Type(), err)
 			continue
 		}
 		if len(sessions) == 0 {
@@ -227,7 +269,7 @@ func promptImportConfirmSingle(ctx context.Context, w io.Writer, e eligibleImpor
 // runSelectedImports imports each chosen agent's history, mirroring the
 // standalone `entire import` command. Per-agent failures are logged and
 // reported but do not stop the remaining imports or fail enable.
-func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selected []eligibleImport) {
+func runSelectedImports(ctx context.Context, w io.Writer, repoRoot, linkCommitSHA string, selected []eligibleImport) {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		logging.Warn(ctx, "session import skipped: open repository failed", "error", err)
@@ -236,20 +278,10 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 	}
 	defer repo.Close()
 
-	// Gate on the checkpoint policy before writing any checkpoint data, matching
-	// the standalone `entire import` command. Best-effort: an unsupported or
-	// unreadable policy skips the import (logged and noted) instead of failing
-	// enable, since the offer must never break enable.
-	if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
-		logging.Warn(ctx, "session import skipped: checkpoint policy not satisfied", "error", err)
-		fmt.Fprintf(w, "Note: skipping agent history import: %v\n", err)
-		return
-	}
-
 	// Load repo/user-configured redaction before any checkpoint write, matching
 	// import_cmd.go; without it only always-on secret scanning would run.
 	// Scanner-config failures skip the import (this offer must never break
-	// enable), mirroring the policy-failure handling above.
+	// enable).
 	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
 		logging.Warn(ctx, "session import skipped: redaction configuration failed", "error", err)
 		fmt.Fprintf(w, "Note: skipping agent history import: %v\n", err)
@@ -260,10 +292,12 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 	for _, e := range selected {
 		progress, stopProgress := newImportProgressReporter(w, e.displayName)
 		res, err := agentimport.Run(ctx, repo, e.imp, agentimport.Options{
-			RepoRoot:    repoRoot,
-			Now:         time.Now(),
-			Progress:    progress,
-			ReadRemotes: strategy.CheckpointReadRemotes(ctx),
+			LinkCommitSHA:   linkCommitSHA,
+			RepoRoot:        repoRoot,
+			Now:             time.Now(),
+			Progress:        progress,
+			ReadRemotes:     strategy.CheckpointReadRemotes(ctx),
+			RemoteRefLister: ListCheckpointRefsOnRemote,
 		})
 		stopProgress(err == nil)
 		if err != nil {

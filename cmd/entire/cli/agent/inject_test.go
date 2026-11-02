@@ -58,6 +58,10 @@ func (injectorStub) RenderContextInjection(ContextInjection) ([]byte, error) {
 	return []byte("x"), nil
 }
 
+type declaredInjectorStub struct{ injectorStub }
+
+func (declaredInjectorStub) DeclaredCapabilities() DeclaredCaps { return DeclaredCaps{} }
+
 func TestAsContextInjector(t *testing.T) {
 	t.Parallel()
 
@@ -71,5 +75,10 @@ func TestAsContextInjector(t *testing.T) {
 	}
 	if got := ci.InjectionEvent(); got != TurnStart {
 		t.Errorf("InjectionEvent = %v, want TurnStart", got)
+	}
+
+	ci, ok = AsContextInjector(declaredInjectorStub{})
+	if !ok || ci == nil {
+		t.Fatalf("AsContextInjector(declarer) = (%v, %v), want non-nil/true", ci, ok)
 	}
 }

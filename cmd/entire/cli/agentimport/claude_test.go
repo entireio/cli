@@ -11,10 +11,13 @@ import (
 func TestClaudeDiscover_LookbackAndFilter(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	repoRoot := t.TempDir()
 	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	// Every file records repoRoot as its cwd (in a Claude transcript line), so only
+	// the lookback and session filters decide what is discovered.
 	writeAged := func(name string, age time.Duration) {
 		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(`{"type":"user","cwd":`+fixtureCwdJSON(t, repoRoot)+`}`+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		mt := now.Add(-age)
@@ -27,7 +30,7 @@ func TestClaudeDiscover_LookbackAndFilter(t *testing.T) {
 	writeAged("skip.txt", 1*time.Hour)
 
 	imp := claudeImporter{}
-	got, err := imp.Discover("", dir, now, nil)
+	got, err := imp.Discover(repoRoot, dir, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +39,7 @@ func TestClaudeDiscover_LookbackAndFilter(t *testing.T) {
 	}
 
 	writeAged("abc123.jsonl", 1*24*time.Hour)
-	got, err = imp.Discover("", dir, now, []string{"abc123"})
+	got, err = imp.Discover(repoRoot, dir, now, []string{"abc123"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,5 +146,42 @@ func TestClaudeSplitTurns_ToolResultIsNotATurn(t *testing.T) {
 	}
 	if len(turns) != 1 {
 		t.Fatalf("tool_result must not start a turn; want 1 turn, got %d", len(turns))
+	}
+}
+
+// TestClaudeSplitTurns_WorkflowAgentTokensLandOnTheLaunchingTurn: a Workflow
+// run's agents are counted from the turn whose transcript launches the run,
+// not from the first turn (#2685).
+func TestClaudeSplitTurns_WorkflowAgentTokensLandOnTheLaunchingTurn(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, "s", "subagents", "workflows", "wf_1")
+	if err := os.MkdirAll(runDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "agent-a6d78754c07df829a.jsonl"),
+		[]byte(`{"type":"assistant","message":{"id":"wm1","usage":{"input_tokens":30,"output_tokens":40}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	full := []byte(strings.Join([]string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"run the workflow"}}`,
+		`{"type":"assistant","uuid":"a2","message":{"id":"m2","content":[{"type":"tool_use","id":"toolu_wf","name":"Workflow","input":{}}],"usage":{"input_tokens":20,"output_tokens":7}}}`,
+		`{"type":"user","uuid":"r2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_wf","content":"Workflow launched in background.\nRun ID: wf_1\n"}]}}`,
+	}, "\n") + "\n")
+
+	turns, err := claudeImporter{}.SplitTurns(SessionFile{Path: filepath.Join(dir, "s.jsonl"), SessionID: "s"}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("want 2 turns, got %d", len(turns))
+	}
+	if turns[0].Tokens != nil && turns[0].Tokens.SubagentTokens != nil {
+		t.Errorf("turn0 must carry no workflow tokens, got %+v", turns[0].Tokens.SubagentTokens)
+	}
+	if turns[1].Tokens == nil || turns[1].Tokens.SubagentTokens == nil || turns[1].Tokens.SubagentTokens.OutputTokens != 40 {
+		t.Errorf("turn1 must carry the workflow agent's tokens, got %+v", turns[1].Tokens)
 	}
 }

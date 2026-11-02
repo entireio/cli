@@ -74,10 +74,9 @@ func hashWorktreeFiles(
 }
 
 func hashWorktreeFileBatch(ctx context.Context, worktreeRoot string, paths []string) ([]plumbing.Hash, error) {
-	args := []string{"-C", worktreeRoot, "hash-object", "--"}
+	args := []string{"hash-object", "--"}
 	args = append(args, paths...)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = EnvWithoutRepoOverrides()
+	cmd := worktreeGitCommand(ctx, worktreeRoot, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -107,6 +106,13 @@ func hashWorktreeFileBatch(ctx context.Context, worktreeRoot string, paths []str
 // including room for fixed arguments and os/exec quoting. Unix limits are much
 // larger. A single repository-relative path can exceed the budget and is sent
 // alone; filesystem path limits still keep that command bounded.
+//
+// The batching is not scaffolding for a missing --stdin-paths: hash-object has
+// no -z, so --stdin-paths is newline-delimited only, and a path containing a
+// newline is a legal Git path that it splits into two nonexistent ones
+// (`printf 'we\nird.txt\n' | git hash-object --stdin-paths` fails, while
+// `git hash-object -- $'we\nird.txt'` succeeds). Argv is the correct form here,
+// not the fussier one. Filters apply either way, so that is not the reason.
 const gitHashObjectPathBudget = 8 * 1024
 
 func chunkPaths(paths []string, budget int) [][]string {

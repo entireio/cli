@@ -16,7 +16,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
-	"github.com/go-git/go-git/v6"
 	"github.com/spf13/cobra"
 )
 
@@ -96,7 +95,7 @@ func TestHookPreRuns_GateSkipsRepo(t *testing.T) {
 			// SetContext, so the command's context is still the one we handed it.
 			for name, hookCmd := range map[string]*cobra.Command{
 				"git hooks":   newHooksGitCmd(),
-				"agent hooks": agentHooksCmd(t, testAgentName),
+				"agent hooks": agentHookVerbCmd(t, testAgentName),
 			} {
 				base := context.Background()
 				hookCmd.SetContext(base)
@@ -159,7 +158,6 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
   "name": "` + string(agentName) + `",
   "type": "Hook Test Agent",
   "description": "Agent for hook discovery test",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {}
@@ -208,114 +206,20 @@ func TestHooksGitCmd_ExposesPostRewriteSubcommand(t *testing.T) {
 	}
 }
 
-func TestHooksGitCommitMsgSkipsWhenPolicyUnsupported(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, "f.txt", "x")
-	testutil.GitAdd(t, repoDir, "f.txt")
-	testutil.GitCommit(t, repoDir, "init")
-	t.Chdir(repoDir)
-	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
-	gitHooksDisabled = false
-
-	enableEntire(t, repoDir)
-
-	repo, err := git.PlainOpen(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = repo.Close() })
-	writeUnsupportedCheckpointPolicyForCLITest(t, repo)
-
-	msgFile := filepath.Join(repoDir, "COMMIT_EDITMSG")
-	message := []byte("Entire-Checkpoint: abc123def456\n")
-	if err := os.WriteFile(msgFile, message, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := newHooksGitCmd()
-	cmd.SetArgs([]string{"commit-msg", msgFile})
-	cmd.SetContext(context.Background())
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("commit-msg should skip checkpoint work when policy is unsupported: %v", err)
-	}
-
-	got, err := os.ReadFile(msgFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(message) {
-		t.Fatalf("commit message changed under unsupported policy:\ngot:\n%s\nwant:\n%s", got, message)
-	}
-}
-
-func TestHooksGitCommitMsgSkipsWhenPolicyUnreadable(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	testutil.WriteFile(t, repoDir, "f.txt", "x")
-	testutil.GitAdd(t, repoDir, "f.txt")
-	testutil.GitCommit(t, repoDir, "init")
-	t.Chdir(repoDir)
-	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
-	gitHooksDisabled = false
-
-	enableEntire(t, repoDir)
-
-	repo, err := git.PlainOpen(repoDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = repo.Close() })
-	writeMalformedCheckpointPolicyForCLITest(t, repo)
-
-	msgFile := filepath.Join(repoDir, "COMMIT_EDITMSG")
-	message := []byte("Entire-Checkpoint: abc123def456\n")
-	if err := os.WriteFile(msgFile, message, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := newHooksGitCmd()
-	cmd.SetArgs([]string{"commit-msg", msgFile})
-	cmd.SetContext(context.Background())
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("commit-msg should skip checkpoint work when policy is unreadable: %v", err)
-	}
-
-	got, err := os.ReadFile(msgFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(message) {
-		t.Fatalf("commit message changed under unreadable policy:\ngot:\n%s\nwant:\n%s", got, message)
-	}
-}
-
-func TestGitHookPolicySkipsWhenRepoCannotOpen(t *testing.T) {
-	t.Chdir(t.TempDir())
-	paths.ClearWorktreeRootCache()
-
-	g := &gitHookContext{
-		hookName: "commit-msg",
-		ctx:      context.Background(),
-	}
-
-	if !g.skipUnsupportedCheckpointPolicy() {
-		t.Fatal("expected git hook to skip when repository cannot be opened")
-	}
-}
-
-// agentHooksCmd returns the hooks subcommand for one agent, whose pre-run is the
-// call site that used to rely on withHookSession's own gate.
-func agentHooksCmd(t *testing.T, agentName string) *cobra.Command {
+// agentHookVerbCmd returns one lifecycle verb of an agent's hooks command.
+// The verb, not the agent command: the hook-session pre-run lives per verb so
+// that non-verb commands attached to the same agent (Antigravity's title-tee)
+// do not inherit it.
+func agentHookVerbCmd(t *testing.T, agentName string) *cobra.Command {
 	t.Helper()
 
 	for _, sub := range newHooksCmd().Commands() {
 		if sub.Use == agentName {
-			return sub
+			verbs := sub.Commands()
+			if len(verbs) == 0 {
+				t.Fatalf("agent %q has no hook verbs", agentName)
+			}
+			return verbs[0]
 		}
 	}
 	t.Fatalf("no hooks subcommand for %q", agentName)

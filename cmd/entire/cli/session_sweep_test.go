@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
-	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -105,6 +104,19 @@ func TestIsSweepableZombie(t *testing.T) {
 			want: false,
 		},
 		{
+			// Condensing it again would reset Phase to IDLE while FullyCondensed
+			// and EndedAt stay set, so PostCommit's FullyCondensed+ENDED skip
+			// would stop matching and re-evaluate the dead session every commit.
+			name: "ended and fully condensed with a completed-unmaterialized task record is not a zombie",
+			state: session.State{
+				Phase:          session.PhaseEnded,
+				FullyCondensed: true,
+				EndedAt:        &old,
+				TaskRecords:    []session.TaskRecord{{ToolUseID: "task-1", CompletedAt: old}},
+			},
+			want: false,
+		},
+		{
 			name: "ended with zero steps is not a zombie (nothing to condense)",
 			state: session.State{
 				Phase:   session.PhaseEnded,
@@ -167,19 +179,11 @@ func TestIsSweepableZombie(t *testing.T) {
 
 // TestRunSessionSweep_CondensesOldEndedZombie_LeavesFreshAlone — the
 // regression this whole feature exists for: an ENDED session with uncondensed
-// checkpoints and a shadow branch used to linger until a human ran
-// `entire doctor --force` (a real one sat for 4 days). The sweep must fix the
-// old one and must NOT touch a freshly-ended one, whose PostCommit
-// carry-forward window is still open. Alongside those two it pins the sweep's
-// other two load-bearing branches: the discard-protection gate (an old zombie
-// WITHOUT a shadow branch is left exactly as-is — discards are doctor's, never
-// the sweep's) and the finalize pass (an ACTIVE session whose owner process is
-// gone is marked ENDED).
-//
-// Each fixture gets its own BaseCommit (and, where condensable, its own shadow
-// ref) so condensing one fixture can't delete a shadow branch another fixture
-// depends on — sharing one branch would make the "untouched" assertions pass
-// coincidentally.
+// checkpoints used to linger until a human ran `entire doctor --force` (a real
+// one sat for 4 days). The sweep must fix the old one and must NOT touch a
+// freshly-ended one, whose PostCommit carry-forward window is still open.
+// Alongside those two it pins the finalize pass (an ACTIVE session whose owner
+// process is gone is marked ENDED).
 func TestRunSessionSweep_CondensesOldEndedZombie_LeavesFreshAlone(t *testing.T) {
 	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
 	dir := setupGitRepoForPhaseTest(t)
@@ -187,19 +191,9 @@ func TestRunSessionSweep_CondensesOldEndedZombie_LeavesFreshAlone(t *testing.T) 
 	ctx := context.Background()
 
 	const (
-		freshBase    = "1111111111111111111111111111111111111111"
-		noShadowBase = "2222222222222222222222222222222222222222"
-		activeBase   = "3333333333333333333333333333333333333333"
+		freshBase  = "1111111111111111111111111111111111111111"
+		activeBase = "3333333333333333333333333333333333333333"
 	)
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-	createShadowBranchRef(t, repo, testBaseCommit, "")
-	createShadowBranchRef(t, repo, freshBase, "")
-	// The dead-owner fixture gets a shadow ref too: once finalized to ENDED it
-	// would otherwise match the pre-existing orphan cleanup (ENDED, no shadow
-	// branch, no LastCheckpointID) and vanish before we can assert its phase.
-	createShadowBranchRef(t, repo, activeBase, "")
 
 	old := time.Now().Add(-48 * time.Hour)
 	fresh := time.Now().Add(-time.Hour)
@@ -224,35 +218,19 @@ func TestRunSessionSweep_CondensesOldEndedZombie_LeavesFreshAlone(t *testing.T) 
 	}
 	require.NoError(t, strategy.SaveSessionState(ctx, recent))
 
-	// Old ENDED zombie with NO shadow branch: uncondensed steps whose data is
-	// already gone. Fixing it means discarding state — doctor's case, which
-	// the sweep must never initiate. Pins the IsCondensableEndedSession gate
-	// in runSessionSweep: without the gate, CondenseSessionByID's engine
-	// clears the state when it finds no shadow branch. LastCheckpointID is set
-	// so the pre-existing orphan cleanup in listAllSessionStates (which runs
-	// as a side effect of condensing the other zombie) keeps the state and the
-	// assertion isolates the SWEEP's behavior.
-	noShadow := &strategy.SessionState{
-		SessionID:        "2026-08-17-sweep-no-shadow",
-		BaseCommit:       noShadowBase,
-		Phase:            session.PhaseEnded,
-		StepCount:        2,
-		StartedAt:        old.Add(-time.Hour),
-		EndedAt:          &old,
-		LastCheckpointID: id.MustCheckpointID("abc123def456"),
-	}
-	require.NoError(t, strategy.SaveSessionState(ctx, noShadow))
-
 	// ACTIVE session whose owner is dead (same dead-owner fixture as
 	// session_finalize_test.go's tests: live PID + mismatched start
 	// fingerprint reads as PID reuse → LivenessDead). Pins that
-	// runSessionSweep actually runs the finalize pass.
+	// runSessionSweep actually runs the finalize pass. LastCheckpointID keeps
+	// the finalized state out of the orphan cleanup (ENDED, never condensed,
+	// nothing pending), so its phase can be asserted.
 	activeDead := &strategy.SessionState{
-		SessionID:  "2026-08-17-sweep-active-dead-owner",
-		BaseCommit: activeBase,
-		Phase:      session.PhaseActive,
-		StartedAt:  old,
-		Owner:      &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+		SessionID:        "2026-08-17-sweep-active-dead-owner",
+		BaseCommit:       activeBase,
+		Phase:            session.PhaseActive,
+		StartedAt:        old,
+		Owner:            &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+		LastCheckpointID: id.MustCheckpointID("abc123def456"),
 	}
 	require.NoError(t, strategy.SaveSessionState(ctx, activeDead))
 
@@ -273,14 +251,6 @@ func TestRunSessionSweep_CondensesOldEndedZombie_LeavesFreshAlone(t *testing.T) 
 	assert.False(t, freshAfter.FullyCondensed)
 	assert.Equal(t, 2, freshAfter.StepCount)
 
-	// The no-shadow zombie must be left exactly as-is: still ENDED, steps
-	// intact, not marked condensed. The sweep never initiates a discard.
-	noShadowAfter, ok := byID["2026-08-17-sweep-no-shadow"]
-	require.True(t, ok, "no-shadow ended session must survive the sweep untouched")
-	assert.Equal(t, session.PhaseEnded, noShadowAfter.Phase)
-	assert.Equal(t, 2, noShadowAfter.StepCount)
-	assert.False(t, noShadowAfter.FullyCondensed)
-
 	// The dead-owner ACTIVE session must have been finalized to ENDED.
 	activeAfter, ok := byID["2026-08-17-sweep-active-dead-owner"]
 	require.True(t, ok, "dead-owner active session must still exist after the sweep")
@@ -289,7 +259,7 @@ func TestRunSessionSweep_CondensesOldEndedZombie_LeavesFreshAlone(t *testing.T) 
 
 	// The old zombie must no longer be flagged as a condensable zombie...
 	if zombieAfter, exists := byID["2026-08-17-sweep-old-zombie"]; exists {
-		assert.False(t, strategy.IsCondensableEndedSession(repo, zombieAfter),
+		assert.False(t, strategy.IsCondensableEndedSession(zombieAfter),
 			"old zombie must not remain condensable after the sweep")
 		// ...and its state must show CondenseSessionByID actually ran, not
 		// that the predicate merely stopped matching: the skip path (no

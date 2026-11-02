@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -29,7 +31,9 @@ const stampConfigTimeout = 10 * time.Second
 // used to authenticate git push/fetch operations for checkpoint branches.
 // The token is injected as an HTTP Basic Authorization header per RFC 7617:
 // the credentials string "x-access-token:<token>" is base64-encoded and sent as
-// "Authorization: Basic <base64>". This matches GitHub's token auth for Git HTTPS.
+// "Authorization: Basic <base64>". GitHub accepts this as a token credential, and
+// GitLab ignores the Basic-auth username for Personal/Project Access Tokens, so
+// one header serves both checkpoint_remote providers.
 // SSH remotes ignore the token (with a warning).
 const CheckpointTokenEnvVar = "ENTIRE_CHECKPOINT_TOKEN"
 
@@ -115,55 +119,8 @@ func hasExplicitBatchMode(sshCmd string) bool {
 	return batchModeOptionRe.MatchString(sshCmd)
 }
 
-// envLookup returns the value of the last occurrence of key in env (matching
-// exec.Cmd's last-wins semantics for duplicate entries) and whether it was
-// found.
-func envLookup(env []string, key string) (string, bool) {
-	prefix := key + "="
-	for i := len(env) - 1; i >= 0; i-- {
-		if v, ok := strings.CutPrefix(env[i], prefix); ok {
-			return v, true
-		}
-	}
-	return "", false
-}
-
-// gitConfigSSHCommand looks up core.sshCommand via `git config`, run with env
-// so the lookup honors any HOME/GIT_CONFIG_* overrides present in env (e.g. in
-// tests). Returns "" if unset or the lookup fails.
-func gitConfigSSHCommand(ctx context.Context, env []string) string {
-	cmd := exec.CommandContext(ctx, "git", "config", "--get", "core.sshCommand")
-	cmd.Env = env
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// effectiveSSHCommand resolves the ssh invocation git itself would use, in
-// git's own precedence order: the GIT_SSH_COMMAND environment variable, then
-// the core.sshCommand git config value, then the GIT_SSH environment
-// variable, falling back to plain "ssh" when none are set.
-func effectiveSSHCommand(ctx context.Context, env []string) string {
-	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	if v := gitConfigSSHCommand(ctx, env); v != "" {
-		return v
-	}
-	if v, ok := envLookup(env, "GIT_SSH"); ok {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return "ssh"
-}
-
 // withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
-// BatchMode=yes. The base ssh invocation is resolved via effectiveSSHCommand
+// BatchMode=yes. The base ssh invocation is resolved via gitremote.EffectiveSSHCommand
 // (env GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > plain "ssh") so a custom
 // ssh command configured via core.sshCommand isn't silently discarded. The
 // flag is only appended when BatchMode isn't already explicitly set — an
@@ -171,7 +128,7 @@ func effectiveSSHCommand(ctx context.Context, env []string) string {
 // so the result is idempotent.
 func withBatchModeSSH(ctx context.Context, env []string) []string {
 	const key = "GIT_SSH_COMMAND="
-	base := effectiveSSHCommand(ctx, env)
+	base := gitremote.EffectiveSSHCommand(ctx, "", env)
 	out := make([]string, 0, len(env)+1)
 	for _, e := range env {
 		if strings.HasPrefix(e, key) {
@@ -227,6 +184,11 @@ type FetchOptions struct {
 	Depth     int
 	Dir       string   // working directory (empty = CWD)
 	ExtraArgs []string // additional flags before remote (e.g., "--no-write-fetch-head")
+	// AbortStalled kills a fetch that goes stallAbortIdle without git printing
+	// anything, for callers whose transfer can legitimately take longer than a
+	// fixed per-fetch deadline. It requests --progress so git reports the
+	// transfer while it runs.
+	AbortStalled bool
 }
 
 // Fetch runs git fetch with checkpoint token injection and optional
@@ -242,6 +204,9 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		args = append(args, "--no-tags")
 	}
 	args = append(args, opts.ExtraArgs...)
+	if opts.AbortStalled {
+		args = append(args, "--progress")
+	}
 	switch {
 	case opts.Shallow:
 		args = append(args, "--depth=1")
@@ -277,19 +242,30 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 		existedBefore = gitRemoteSectionExists(ctx, opts.Dir, stampURL)
 	}
 
-	cmd := newCommand(ctx, args...)
+	cmdCtx, cancelCmd := context.WithCancelCause(ctx)
+	defer cancelCmd(nil)
+	cmd := newCommand(cmdCtx, args...)
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}
 	disableTerminalPrompt(cmd)
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	var err error
+	if opts.AbortStalled {
+		out, err = runAbortingStalls(cmd, cancelCmd)
+	} else {
+		out, err = cmd.CombinedOutput()
+	}
 
 	if stampCandidate && !existedBefore {
 		stampNewlyCreatedRemote(ctx, opts.Dir, stampURL)
 	}
 
 	if err != nil {
-		return out, fmt.Errorf("git fetch: %w", err)
+		if cause := context.Cause(cmdCtx); errors.Is(cause, ErrFetchStalled) {
+			err = cause
+		}
+		return out, errWithGitOutput(fmt.Errorf("git fetch: %w", err), out, opts.Remote)
 	}
 	return out, nil
 }
@@ -443,10 +419,154 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 	disableTerminalPrompt(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return PushResult{Output: string(output)}, fmt.Errorf("git push: %w", err)
+		return PushResult{Output: string(output)}, fmt.Errorf("git push: %w", formatGitPushError(ctx, err, output, pushTarget))
 	}
 	return PushResult{Output: string(output)}, nil
 }
+
+// PushError retains bounded Git diagnostics in two forms: a single-line Error
+// for logging and Output with the original line breaks for terminal display.
+// Both mask the push target's embedded credentials; neither scans remote text
+// for secrets, which would destroy actionable push-protection unblock URLs.
+type PushError struct {
+	cause  error
+	detail string
+	output string
+}
+
+func (e *PushError) Error() string {
+	return fmt.Sprintf("%v (%s)", e.cause, e.detail)
+}
+
+func (e *PushError) Unwrap() error { return e.cause }
+
+// Output returns Git's bounded diagnostics without error wrappers, preserving
+// line breaks and indentation. It is not the unbounded raw PushResult.Output.
+func (e *PushError) Output() string { return e.output }
+
+// formatGitPushError enriches a failed push with git's own output, so a caller
+// that logs only the error still learns why the remote said no.
+//
+// formatGitCommandError cannot do this job: it reads exitErr.Stderr, which the
+// os/exec contract populates only for Output(), and Push uses CombinedOutput().
+// The remote's reason — "push declined due to repository rule violations" from a
+// secret-scanning or ruleset block, "non-fast-forward", "repository not found",
+// an auth failure — therefore lives in the combined output, and dropping it
+// leaves the caller with a bare "git push: exit status 1". That is not enough to
+// act on: a checkpoint ref rejected for its content retries on every push and
+// stays queued forever, and the only way to see the cause was to reproduce the
+// push by hand.
+//
+// Error output is collapsed to one line and capped for log attributes; PushError
+// also retains capped multiline output for the terminal. A URL-shaped target is
+// redacted first in both forms because git echoes the
+// remote back into its messages and a URL may carry credentials (same reasoning
+// as formatGitCommandError and FetchBlobs).
+func formatGitPushError(ctx context.Context, err error, output []byte, remote string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("deadline exceeded: %w", err)
+	}
+	detail := gitOutputDetail(output, remote)
+	if detail == "" {
+		return err
+	}
+	return &PushError{
+		cause:  err,
+		detail: elideMiddle(strings.Join(strings.Fields(detail), " "), maxPushErrorDetail),
+		output: elideMiddle(detail, maxPushErrorDetail),
+	}
+}
+
+// gitOutputDetail trims git's combined output and redacts a URL-shaped target
+// out of it, because git echoes the remote back into its messages and a URL may
+// carry credentials (same reasoning as formatGitCommandError and FetchBlobs).
+// Returns "" when git produced no output — which is what a process killed by a
+// cancelled context or an exhausted budget does.
+func gitOutputDetail(output []byte, remote string) string {
+	detail := strings.TrimSpace(finalProgressText(string(output)))
+	if detail == "" || remote == "" {
+		return detail
+	}
+	return strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
+}
+
+// finalProgressText keeps, for each line, only what a terminal would end up
+// showing: git's progress meters redraw a line in place with \r, so everything
+// before a line's last \r was overwritten. A trailing \r is a CRLF line ending,
+// not a redraw.
+func finalProgressText(output string) string {
+	if !strings.Contains(output, "\r") {
+		return output
+	}
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
+		if j := strings.LastIndexByte(line, '\r'); j >= 0 {
+			line = line[j+1:]
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// errWithGitOutput annotates err with git's own output, or returns err unchanged
+// when git produced none.
+//
+// The output annotates the error, it never replaces it: substituting the output
+// yielded an empty message precisely when git was killed, leaving no cause and
+// nothing for errors.Is to match.
+//
+// Deliberately not a *PushError, though it shares the folding: that type is how
+// checkpointRefRejectionReason recognises a push the remote refused, so handing
+// one back for a failed fetch would let a fetch failure be read as a rejection.
+func errWithGitOutput(err error, output []byte, remote string) error {
+	detail := gitOutputDetail(output, remote)
+	if detail == "" {
+		return err
+	}
+	return fmt.Errorf("%w (%s)", err, elideMiddle(strings.Join(strings.Fields(detail), " "), maxPushErrorDetail))
+}
+
+// elideMiddle shortens s to at most limit runes by dropping the middle, keeping
+// both ends.
+//
+// Truncating the tail would be wrong here, which is the whole reason this is not
+// a plain slice: git prints the remote's banner first and its own verdict last,
+// so the decisive lines — "! <ref> [remote rejected] (<reason>)", "error: failed
+// to push some refs" — are at the END of the output. A head-only cut discards
+// exactly what the caller needs, and does so precisely when the output is long,
+// which is when a remote has the most to say. GitHub's push-protection block is
+// the worked example: several hundred characters of banner and unblock URLs per
+// offending secret, and only then "(push declined due to repository rule
+// violations)".
+//
+// The tail gets the larger share for that reason. The cut is rune-aware because
+// git's own output carries multi-byte characters (em dashes in GitHub banners,
+// its own "…"), and slicing bytes through one would put invalid UTF-8 into a log
+// record.
+func elideMiddle(s string, limit int) string {
+	if limit <= 0 || len([]rune(s)) <= limit {
+		return s
+	}
+	const marker = " […] "
+	budget := limit - len([]rune(marker))
+	if budget < 2 {
+		return string([]rune(s)[:limit])
+	}
+	head := budget / 3
+	tail := budget - head
+	r := []rune(s)
+	return string(r[:head]) + marker + string(r[len(r)-tail:])
+}
+
+// maxPushErrorDetail bounds the git output folded into a push or fetch error, in runes.
+// Push output carries per-secret push-protection banners and progress lines and
+// can run to several KB; this keeps the error usable as a log attribute while
+// leaving room for both ends of a long rejection.
+const maxPushErrorDetail = 2000
 
 // LsRemoteInDir is like LsRemote but runs in a specific directory.
 func LsRemoteInDir(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {
@@ -663,8 +783,10 @@ func extractRemoteFromArgs(args []string) string {
 
 // appendCheckpointTokenEnv appends GIT_CONFIG_COUNT-based env vars to inject
 // an Authorization header into git HTTP requests. The token is sent as a Basic
-// credential with the format "x-access-token:<token>" (base64-encoded), which
-// is compatible with GitHub's token authentication.
+// credential with the format "x-access-token:<token>" (base64-encoded). GitHub
+// accepts this as a token credential; GitLab ignores the Basic-auth username for
+// Personal/Project Access Tokens, so one header serves both checkpoint_remote
+// providers.
 //
 // Existing GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* entries are preserved; the new
 // http.extraHeader entry is appended at the next free index and
@@ -749,4 +871,73 @@ func disableTerminalPrompt(cmd *exec.Cmd) {
 		cmd.Env = os.Environ()
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
+}
+
+// stallAbortIdle is how long an AbortStalled fetch may print nothing before it
+// is killed. A pack that goes through index-pack redraws its receive progress
+// about once a second, but a fetch of fewer than fetch.unpackLimit objects (100
+// by default) is unpacked without progress and prints nothing until it is done.
+// The window must outlast such a fetch on a slow link; callers bound the total
+// time separately.
+var stallAbortIdle = 10 * time.Minute
+
+// ErrFetchStalled is the cause of a fetch AbortStalled killed.
+var ErrFetchStalled = errors.New("fetch stalled")
+
+// runAbortingStalls runs cmd like CombinedOutput, but calls cancel, which must
+// cancel cmd's context, once cmd has printed nothing for stallAbortIdle.
+func runAbortingStalls(cmd *exec.Cmd, cancel context.CancelCauseFunc) ([]byte, error) {
+	w := &activityWriter{last: time.Now()}
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Start(); err != nil {
+		return nil, err //nolint:wrapcheck // Fetch wraps the error
+	}
+	idle := stallAbortIdle
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(idle / 10)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if time.Since(w.lastWrite()) >= idle {
+					cancel(fmt.Errorf("%w: no progress for %s", ErrFetchStalled, idle))
+					return
+				}
+			}
+		}
+	}()
+	err := cmd.Wait()
+	close(done)
+	<-stopped
+	return w.output(), err
+}
+
+// activityWriter collects a command's output and when it last wrote.
+type activityWriter struct {
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	last time.Time
+}
+
+func (w *activityWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.last = time.Now()
+	return w.buf.Write(p) //nolint:wrapcheck // bytes.Buffer never fails
+}
+
+func (w *activityWriter) lastWrite() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.last
+}
+
+func (w *activityWriter) output() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Bytes()
 }

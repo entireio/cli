@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -61,6 +63,9 @@ func (r resumableSession) unresumableReason() string {
 // branch is already checked out in another worktree, points there), restores its
 // checkpoint session log, and offers to start the agent.
 func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error {
+	// Restores and looks up agent transcripts from the user's shell, where a
+	// home an agent reads from its own settings is invisible to the environment.
+	agent.EnableHomeProbes()
 	w := cmd.OutOrStdout()
 
 	// The picker is interactive. Without a usable terminal (CI, piped, agent
@@ -270,7 +275,7 @@ const (
 // This deliberately avoids go-git's MergeBase (which walks full history and,
 // run once per branch, becomes O(branches × history) and hangs on large repos);
 // the precomputed default-commit set is a cheap stand-in for branch-only scoping.
-// Internal entire/ refs (checkpoint metadata + shadow branches) are never
+// Internal entire/ refs (checkpoint metadata, trails, legacy shadow branches) are never
 // indexed — they are not resumable and number in the hundreds.
 func buildCheckpointBranchIndex(repo *git.Repository) map[string]string {
 	index := map[string]string{}
@@ -475,25 +480,11 @@ func branchCheckedOutElsewhere(ctx context.Context, branch string) (string, bool
 
 // parseWorktreeForBranch scans `git worktree list --porcelain` output and returns
 // the path of a worktree (other than currentRoot) that has branch checked out.
-//
-// Each worktree is a block beginning with a `worktree <path>` line and separated
-// by a blank line; a `branch <ref>` line only appears for non-detached worktrees.
-// curPath is reset at each block boundary and a branch line is only considered
-// when a worktree line was seen in the same block, so a detached worktree (no
-// branch line) can never pair a branch with a stale path or return an empty one.
+// See gitrepo.ParseWorktreeBranches for how blocks are paired.
 func parseWorktreeForBranch(porcelain, branch, currentRoot string) (string, bool) {
-	var curPath string
-	for _, line := range strings.Split(porcelain, "\n") {
-		switch {
-		case line == "":
-			curPath = "" // block boundary
-		case strings.HasPrefix(line, "worktree "):
-			curPath = strings.TrimPrefix(line, "worktree ")
-		case strings.HasPrefix(line, "branch ") && curPath != "":
-			name := strings.TrimPrefix(strings.TrimPrefix(line, "branch "), "refs/heads/")
-			if name == branch && normalizeWorktreePath(curPath) != currentRoot {
-				return curPath, true
-			}
+	for _, wt := range gitrepo.ParseWorktreeBranches(porcelain) {
+		if wt.Branch == branch && normalizeWorktreePath(wt.Path) != currentRoot {
+			return wt.Path, true
 		}
 	}
 	return "", false

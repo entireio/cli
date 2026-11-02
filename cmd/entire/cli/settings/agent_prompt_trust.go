@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 )
 
 // AgentPromptRejection reports one agent instruction field Load dropped as
@@ -23,12 +24,30 @@ type AgentPromptRejection struct {
 const (
 	agentPromptRejectionNotLocal   = "it did not come from .entire/settings.local.json or clone-local preferences"
 	agentPromptRejectionUnverified = "the local settings file could not be verified as untracked"
+	// agentConfigRejectionUnsupported marks a reviewer config where none is supported
+	// (the legacy review map, the judge).
+	agentConfigRejectionUnsupported = "agent config is only supported for review profile reviewers"
 )
 
+// AgentConfigRejectionUnverified reports whether rej dropped a reviewer
+// config from a local settings file that could not be verified as untracked.
+// The user expects that reviewer to be isolated, so the review must fail
+// rather than run with the checkout's config.
+func AgentConfigRejectionUnverified(rej AgentPromptRejection) bool {
+	return strings.HasSuffix(rej.Field, ".config") && rej.Reason == agentPromptRejectionUnverified
+}
+
+// RejectionUnverified reports whether rej dropped a field because the local
+// settings file holding it could not be verified as untracked. The field is
+// still in the file, so writing back the loaded view would erase it.
+func RejectionUnverified(rej AgentPromptRejection) bool {
+	return rej.Reason == agentPromptRejectionUnverified
+}
+
 // AgentPromptRejections reports the agent instruction fields Load dropped as
-// untrusted. Consumers that would have applied a dropped field (review,
-// investigate) should surface these on stderr, because it is the only signal
-// that an instruction the user can see in a settings file is not in effect.
+// untrusted. Consumers that would have applied a dropped field (review) should
+// surface these on stderr, because it is the only signal that an instruction
+// the user can see in a settings file is not in effect.
 func (s *EntireSettings) AgentPromptRejections() []AgentPromptRejection {
 	if s == nil {
 		return nil
@@ -41,11 +60,11 @@ func (s *EntireSettings) AgentPromptRejections() []AgentPromptRejection {
 // the git common dir and cannot arrive by cloning), or a local settings file
 // positively verified as untracked.
 //
-// The gated fields are the free-text instruction channels:
-// investigate.always_prompt, every ReviewConfig.Prompt, and every review
-// profile's Task. All of them land verbatim in the prompts of agents that
-// investigate and review spawn with approval checks disabled (claude-code's
-// bypassPermissions, codex's --dangerously-bypass-approvals-and-sandbox), and
+// The gated fields are the free-text instruction channels: every
+// ReviewConfig.Prompt and every review profile's Task. Both land verbatim in
+// the prompts of agents that review spawns with approval checks disabled
+// (claude-code's bypassPermissions, codex's
+// --dangerously-bypass-approvals-and-sandbox), and
 // the prompt is the stated control for those spawns, so whoever writes these
 // strings gets the last word in it. Task and Prompt are adjacent sections of
 // the same composed prompt (see review's BuildReviewerPrompt), which is why
@@ -63,8 +82,8 @@ func (s *EntireSettings) AgentPromptRejections() []AgentPromptRejection {
 // means an attacker steering a permission-bypassed agent rather than losing a
 // preference.
 //
-// Provenance follows the merge order. The local layer replaces investigate
-// wholesale and review profiles per profile name, so a field whose key is
+// Provenance follows the merge order. The local layer replaces review
+// profiles per profile name, so a field whose key is
 // present in the local raw JSON was set by the local file. Otherwise a profile
 // (or the legacy review map) present in clone preferences was set there, and
 // anything left came from the committed project file and is dropped.
@@ -132,14 +151,6 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 		}
 	}
 
-	if s.Investigate != nil {
-		// mergeInvestigate replaces the whole object, so a non-empty effective
-		// value with the key present in the local raw JSON came from there.
-		// Clone preferences carry no investigate block.
-		s.Investigate.AlwaysPrompt = decide("investigate.always_prompt", s.Investigate.AlwaysPrompt,
-			rawHasKey(localRaw, "investigate", "always_prompt"), false)
-	}
-
 	// keepWorkerPresent keeps a worker whose only configuration was a dropped
 	// prompt from reading as unset. ReviewConfig.IsZero would report it empty,
 	// review's placeholder filtering would silently remove it, and a profile
@@ -153,6 +164,31 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 		}
 	}
 
+	// decideConfig gates a reviewer config like decide gates text. The
+	// rejection carries no value: the config can hold secrets.
+	decideConfig := func(field string, cfg *ReviewAgentConfig, setLocally, prefsOwned bool) *ReviewAgentConfig {
+		if cfg == nil {
+			return nil
+		}
+		if decide(field, "set", setLocally, prefsOwned) == "" {
+			for i := range s.agentPromptRejections {
+				if s.agentPromptRejections[i].Field == field {
+					s.agentPromptRejections[i].Value = ""
+				}
+			}
+			return nil
+		}
+		return cfg
+	}
+	// rejectConfig reports a config where none is supported; the caller
+	// clears it.
+	rejectConfig := func(field string, cfg *ReviewAgentConfig) {
+		if cfg != nil {
+			s.agentPromptRejections = append(s.agentPromptRejections,
+				AgentPromptRejection{Field: field, Reason: agentConfigRejectionUnsupported})
+		}
+	}
+
 	// Legacy review map: every layer replaces it wholesale, so its owner is
 	// the last layer that set the key at all.
 	_, localSetsReview := localRaw["review"]
@@ -162,7 +198,10 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 		hadPrompt := cfg.Prompt != ""
 		cfg.Prompt = decide("review."+worker+".prompt", cfg.Prompt,
 			rawHasKey(localRaw, "review", worker, "prompt"), prefsOwnReview)
-		keepWorkerPresent(&cfg, worker, hadPrompt)
+		hadConfig := cfg.Config != nil
+		rejectConfig("review."+worker+".config", cfg.Config)
+		cfg.Config = nil
+		keepWorkerPresent(&cfg, worker, hadPrompt || hadConfig)
 		s.Review[worker] = cfg
 	}
 
@@ -185,7 +224,11 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 			hadPrompt := cfg.Prompt != ""
 			cfg.Prompt = decide("review_profiles."+name+".agents."+worker+".prompt", cfg.Prompt,
 				rawHasKey(localRaw, "review_profiles", name, "agents", worker, "prompt"), prefsOwnProfile)
-			keepWorkerPresent(&cfg, worker, hadPrompt)
+			hadConfig := cfg.Config != nil
+			cfg.Config = decideConfig("review_profiles."+name+".agents."+worker+".config", cfg.Config,
+				rawHasKey(localRaw, "review_profiles", name, "agents", worker, "config"),
+				prefsOwnProfile || (prefs != nil && prefs.ReviewAgentConfigs[name][worker] != nil))
+			keepWorkerPresent(&cfg, worker, hadPrompt || hadConfig)
 			profile.Agents[worker] = cfg
 		}
 		if profile.Judge != nil {
@@ -196,6 +239,8 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 			// auto-select-a-judge fallback, which is the sane degradation.
 			profile.Judge.Prompt = decide("review_profiles."+name+".judge.prompt", profile.Judge.Prompt,
 				rawHasKey(localRaw, "review_profiles", name, "judge", "prompt"), prefsOwnProfile)
+			rejectConfig("review_profiles."+name+".judge.config", profile.Judge.Config)
+			profile.Judge.Config = nil
 		}
 		s.ReviewProfiles[name] = profile
 	}

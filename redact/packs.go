@@ -193,7 +193,18 @@ func validateIdentifier(field, value, sourcePath string) error {
 // and discovery stops after maxPackFiles parsed packs. The trust boundary is
 // "user owns repo," so these are runaway-input guards, not security limits.
 func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
+	packs, _, err := LoadPacksCountingSkipped(fsys, dir, logger)
+	return packs, err
+}
+
+// LoadPacksCountingSkipped is LoadPacks that also reports how many pack files
+// it skipped as unreadable, invalid, or over a cap, so callers whose output
+// leaves the machine can refuse rather than run without a rule the user
+// wrote. Symlinked pack files are not counted: skipping them is policy, not a
+// load failure.
+func LoadPacksCountingSkipped(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, int, error) {
 	logger = loggerOrDefault(logger)
+	skipped := 0
 
 	// fs.WalkDir takes its ROOT's DirEntry from fs.Stat, which follows a
 	// symlink; only entries beneath it come from ReadDir, which does not. So
@@ -209,9 +220,9 @@ func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 		info, err := linkFS.Lstat(dir)
 		switch {
 		case err != nil && !errors.Is(err, fs.ErrNotExist):
-			return nil, fmt.Errorf("read redactors dir %s: %w", dir, err)
+			return nil, 0, fmt.Errorf("read redactors dir %s: %w", dir, err)
 		case err == nil && info.Mode()&fs.ModeSymlink != 0:
-			return nil, fmt.Errorf("redactors path %s is a symlink", dir)
+			return nil, 0, fmt.Errorf("redactors path %s is a symlink", dir)
 		}
 	}
 
@@ -224,6 +235,7 @@ func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 				}
 				return fmt.Errorf("read redactors dir %s: %w", dir, err)
 			}
+			skipped++
 			logger.Warn("skipping unreadable redactor pack path",
 				componentAttr,
 				slog.String("path", path),
@@ -255,6 +267,7 @@ func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 		}
 
 		if len(packs) >= maxPackFiles {
+			skipped++
 			logger.Warn("skipping redactor pack: file cap reached",
 				componentAttr,
 				slog.String("path", path),
@@ -264,6 +277,7 @@ func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 
 		info, statErr := d.Info()
 		if statErr != nil {
+			skipped++
 			logger.Warn("skipping redactor pack: stat failed",
 				componentAttr,
 				slog.String("path", path),
@@ -271,6 +285,7 @@ func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 			return nil
 		}
 		if info.Size() > maxPackFileBytes {
+			skipped++
 			logger.Warn("skipping redactor pack: file exceeds size cap",
 				componentAttr,
 				slog.String("path", path),
@@ -281,6 +296,7 @@ func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 
 		data, err := fs.ReadFile(fsys, path)
 		if err != nil {
+			skipped++
 			logger.Warn("skipping unreadable redactor pack",
 				componentAttr,
 				slog.String("path", path),
@@ -289,6 +305,7 @@ func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 		}
 		pack, err := ParsePack(data, path)
 		if err != nil {
+			skipped++
 			logger.Warn("skipping invalid redactor pack",
 				componentAttr,
 				slog.String("path", path),
@@ -299,7 +316,7 @@ func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 		return nil
 	})
 	if walkErr != nil {
-		return nil, fmt.Errorf("walk redactors dir %s: %w", dir, walkErr)
+		return nil, 0, fmt.Errorf("walk redactors dir %s: %w", dir, walkErr)
 	}
-	return packs, nil
+	return packs, skipped, nil
 }

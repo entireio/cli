@@ -228,7 +228,7 @@ func TestReviewCommandSmoke_IncludesCheckpointContextInPrompt(t *testing.T) {
 	prompt := string(promptBytes)
 	for _, want := range []string{
 		"/review",
-		"Scope: review the commits unique to this branch vs master, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
+		"Scope: review the commits unique to this branch vs refs/heads/master, plus any uncommitted changes in the working tree. Ignore code outside this scope.",
 		"Checkpoint context from commits in scope:",
 		checkpointID,
 		"summary: smoke checkpoint summary; review smoke receives checkpoint summary",
@@ -478,7 +478,7 @@ func writeReviewContextSettings(t *testing.T, repoRoot string) {
 func writeReviewContextClaudeStub(t *testing.T, stubDir string) {
 	t.Helper()
 	script := `#!/bin/sh
-printf '%s' "$2" > "$ENTIRE_SMOKE_PROMPT_FILE"
+cat > "$ENTIRE_SMOKE_PROMPT_FILE"
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":0,"output_tokens":0}}'
 `
 	if err := os.WriteFile(filepath.Join(stubDir, "claude"), []byte(script), 0o700); err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -218,6 +219,40 @@ func TestRunStatus_Enabled(t *testing.T) {
 	}
 }
 
+// A relative agent relocation variable is refused, and several callers fail
+// open on the refusal, so status is where it has to be visible — in the short
+// output, the detailed output and --json alike.
+func TestRunStatus_ReportsRefusedAgentHome(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	for _, envVar := range agent.RelocationEnvVars() {
+		t.Setenv(envVar, "")
+	}
+	t.Setenv("CODEX_HOME", filepath.Join("relative", "codex"))
+
+	for _, detailed := range []bool{false, true} {
+		var stdout bytes.Buffer
+		if err := runStatus(context.Background(), &stdout, detailed, false); err != nil {
+			t.Fatalf("runStatus(detailed=%v) error = %v", detailed, err)
+		}
+		if !strings.Contains(stdout.String(), "ignoring agent home: CODEX_HOME must be an absolute path") {
+			t.Errorf("runStatus(detailed=%v) did not report the refused CODEX_HOME:\n%s", detailed, stdout.String())
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus(json) error = %v", err)
+	}
+	var got statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("status --json is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(got.RefusedAgentHomes) != 1 || !strings.Contains(got.RefusedAgentHomes[0], "CODEX_HOME") {
+		t.Errorf("refused_agent_homes = %q, want the relative CODEX_HOME", got.RefusedAgentHomes)
+	}
+}
+
 // `entire status` surfaces the agent-help pointer for agents on transports
 // without context injection (Cursor / Copilot / Droid), but only once entire is
 // set up — not for not-set-up or not-a-git-repo states.
@@ -393,6 +428,11 @@ func TestTimeAgo(t *testing.T) {
 		{"23 hours", 23 * time.Hour, "23h ago"},
 		{"1 day", 24 * time.Hour, "1d ago"},
 		{"7 days", 7 * 24 * time.Hour, "7d ago"},
+		{"29 days", 29 * 24 * time.Hour, "29d ago"},
+		{"30 days", 30 * 24 * time.Hour, "1mo ago"},
+		{"59 days", 59 * 24 * time.Hour, "1mo ago"},
+		{"60 days", 60 * 24 * time.Hour, "2mo ago"},
+		{"200 days", 200 * 24 * time.Hour, "6mo ago"},
 	}
 
 	for _, tt := range tests {
@@ -400,6 +440,41 @@ func TestTimeAgo(t *testing.T) {
 			got := timeAgo(time.Now().Add(-tt.duration))
 			if got != tt.want {
 				t.Errorf("timeAgo(%v ago) = %q, want %q", tt.duration, got, tt.want)
+			}
+		})
+	}
+}
+
+// formatRelativeDuration is signed: `entire auth status` reports session
+// expiries, which are in the future. The sign test has to precede the
+// near-zero test, or a negative duration satisfies d < time.Minute and a login
+// that expires in a month reports "just now".
+func TestFormatRelativeDuration_FutureAndPast(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"a minute from now", -1 * time.Minute, "in 1m"},
+		{"an hour from now", -1 * time.Hour, "in 1h"},
+		{"a day from now", -24 * time.Hour, "in 1d"},
+		{"29 days from now", -29 * 24 * time.Hour, "in 29d"},
+		// Every unit band starts at 1, so a month-long session expiry reads
+		// "in 1mo" rather than "in 30d".
+		{"30 days from now", -30 * 24 * time.Hour, "in 1mo"},
+		{"60 days from now", -60 * 24 * time.Hour, "in 2mo"},
+		{"just past", 30 * time.Second, "just now"},
+		{"just future (clock skew)", -30 * time.Second, "just now"},
+		{"exactly now", 0, "just now"},
+		{"a day ago", 24 * time.Hour, "1d ago"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatRelativeDuration(tt.d); got != tt.want {
+				t.Errorf("formatRelativeDuration(%v) = %q, want %q", tt.d, got, tt.want)
 			}
 		})
 	}
@@ -425,7 +500,7 @@ func TestWriteActiveSessions(t *testing.T) {
 			StartedAt:           now.Add(-2 * time.Hour),
 			LastInteractionTime: &recentInteraction,
 			LastPrompt:          "Fix auth bug in login flow",
-			AgentType:           types.AgentType("Claude Code"),
+			AgentType:           types.AgentType(testAgentClaude),
 			TokenUsage: &agent.TokenUsage{
 				InputTokens:  800,
 				OutputTokens: 400,
@@ -536,6 +611,85 @@ func TestWriteActiveSessions(t *testing.T) {
 	// Should NOT contain file counts (removed)
 	if strings.Contains(output, "files ") {
 		t.Errorf("Output should not contain file counts, got: %s", output)
+	}
+}
+
+// Status must report every session, and reporting must not change what it
+// reports. Two sessions for the same agent are two sessions — --json collapses
+// them to one entry per agent today — and a stale record must survive being
+// looked at, because List deletes what ListReadOnly only reads. One fixture,
+// because both are the same property: status observes, it does not mutate.
+func TestRunStatusJSON_ListsEverySessionWithoutMutating(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	ctx := context.Background()
+
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	now := time.Now()
+	recent := now.Add(-2 * time.Minute)
+	// Two live sessions for the SAME agent, which --json collapses today.
+	live := []*session.State{
+		{
+			SessionID:           "same-agent-worktree-a",
+			WorktreePath:        "/Users/test/repo",
+			StartedAt:           now.Add(-30 * time.Minute),
+			LastInteractionTime: &recent,
+			AgentType:           types.AgentType("Claude Code"),
+		},
+		{
+			SessionID:    "same-agent-worktree-b",
+			WorktreePath: "/Users/test/repo/.worktrees/other",
+			StartedAt:    now.Add(-10 * time.Minute),
+			AgentType:    types.AgentType(testAgentClaude),
+		},
+	}
+	// A stale record: List deletes it on read, ListReadOnly must not.
+	staleInteraction := now.Add(-2 * session.StaleSessionThreshold)
+	stale := &session.State{
+		SessionID:           "stale-but-must-survive-a-read",
+		WorktreePath:        "/Users/test/repo",
+		StartedAt:           now.Add(-3 * session.StaleSessionThreshold),
+		LastInteractionTime: &staleInteraction,
+		AgentType:           types.AgentType("Codex"),
+	}
+	for _, st := range append(append([]*session.State{}, live...), stale) {
+		if err := store.Save(ctx, st); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+	}
+
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+	statePath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, stale.SessionID+".json")
+
+	var stdout bytes.Buffer
+	if err := runStatus(ctx, &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	claude := 0
+	for _, entry := range result.ActiveSessions {
+		if entry.Agent == testAgentClaude {
+			claude++
+		}
+	}
+	if claude != len(live) {
+		t.Errorf("active_sessions has %d Claude Code entries, want %d — sessions must not be collapsed by agent (got %+v)",
+			claude, len(live), result.ActiveSessions)
+	}
+
+	if _, err := os.Stat(statePath); err != nil {
+		t.Errorf("status deleted the stale session state: %v", err)
 	}
 }
 
@@ -680,11 +834,10 @@ func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testin
 
 	now := time.Now()
 	state := &session.State{
-		SessionID:             "stale-base-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            baseCommit,
-		AttributionBaseCommit: baseCommit,
+		SessionID:    "stale-base-session",
+		WorktreePath: repoDir,
+		StartedAt:    now.Add(-10 * time.Minute),
+		BaseCommit:   baseCommit,
 	}
 	if err := store.Save(context.Background(), state); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -706,9 +859,6 @@ func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testin
 	}
 	if reloaded.BaseCommit != baseCommit {
 		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, baseCommit)
-	}
-	if reloaded.AttributionBaseCommit != baseCommit {
-		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, baseCommit)
 	}
 }
 
@@ -732,11 +882,10 @@ func TestWriteActiveSessions_NoWarningWhenReconciled(t *testing.T) {
 
 	now := time.Now()
 	state := &session.State{
-		SessionID:             "reconciled-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            headCommit,
-		AttributionBaseCommit: headCommit,
+		SessionID:    "reconciled-session",
+		WorktreePath: repoDir,
+		StartedAt:    now.Add(-10 * time.Minute),
+		BaseCommit:   headCommit,
 	}
 	if err := store.Save(context.Background(), state); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -747,64 +896,8 @@ func TestWriteActiveSessions_NoWarningWhenReconciled(t *testing.T) {
 	writeActiveSessions(context.Background(), &buf, sty)
 
 	output := buf.String()
-	if strings.Contains(output, "diverged") || strings.Contains(output, "attribution") {
-		t.Fatalf("expected no divergence or attribution warning when BaseCommit == HEAD and AttributionBaseCommit == BaseCommit, got: %s", output)
-	}
-}
-
-func TestWriteActiveSessions_ShowsSoftWarningWhenAttributionDiverged(t *testing.T) {
-	setupTestRepo(t)
-
-	repoDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd() error = %v", err)
-	}
-
-	testutil.WriteFile(t, repoDir, "tracked.txt", "content")
-	testutil.GitAdd(t, repoDir, "tracked.txt")
-	testutil.GitCommit(t, repoDir, "initial commit")
-	headCommit := testutil.GetHeadHash(t, repoDir)
-
-	// Simulate: hooks already reconciled BaseCommit to HEAD, but
-	// AttributionBaseCommit is still pointing at the old commit (stale).
-	oldBaseCommit := strings.Repeat("a", 40)
-
-	store, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatalf("NewStateStore() error = %v", err)
-	}
-
-	now := time.Now()
-	state := &session.State{
-		SessionID:             "attribution-diverged-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            headCommit,
-		AttributionBaseCommit: oldBaseCommit,
-	}
-	if err := store.Save(context.Background(), state); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	var buf bytes.Buffer
-	sty := newStatusStyles(&buf)
-	writeActiveSessions(context.Background(), &buf, sty)
-
-	output := buf.String()
-	if !strings.Contains(output, "attribution") {
-		t.Fatalf("expected attribution warning when AttributionBaseCommit != BaseCommit, got: %s", output)
-	}
-
-	// Verify session state was NOT mutated (read-only)
-	reloaded, err := store.Load(context.Background(), state.SessionID)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if reloaded.BaseCommit != headCommit {
-		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, headCommit)
-	}
-	if reloaded.AttributionBaseCommit != oldBaseCommit {
-		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, oldBaseCommit)
+	if strings.Contains(output, "diverged") {
+		t.Fatalf("expected no divergence warning when BaseCommit == HEAD, got: %s", output)
 	}
 }
 
@@ -822,10 +915,9 @@ func TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning(t 
 
 	active := []*session.State{
 		{
-			SessionID:             "partially-initialized",
-			WorktreePath:          repoRoot,
-			BaseCommit:            "",
-			AttributionBaseCommit: strings.Repeat("a", 40),
+			SessionID:    "partially-initialized",
+			WorktreePath: repoRoot,
+			BaseCommit:   "",
 		},
 	}
 
@@ -837,11 +929,6 @@ func TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning(t 
 	}
 	if !strings.Contains(msg, "linkage incomplete") {
 		t.Fatalf("expected warning to mention linkage incomplete, got %q", msg)
-	}
-	// Must NOT be the attribution-divergence message — that would be misleading
-	// since the session isn't diverged; it's un-initialized.
-	if strings.Contains(msg, "attribution base diverged") {
-		t.Fatalf("empty-BaseCommit session should not produce attribution-divergence wording, got %q", msg)
 	}
 }
 
@@ -1852,7 +1939,47 @@ func TestRunStatusJSON_SecretScanners(t *testing.T) {
 func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
+	writeOutdatedClaudeHooks(t)
 
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !slices.Contains(result.HooksOutdated, "claude-code") {
+		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
+	}
+}
+
+// TestRunStatus_HooksOutdatedPointsToDoctor: `entire enable --force` rebuilds
+// every Entire hook and drops the timeouts and fields the user set on them, while
+// doctor repairs what it can in place and names the fix for the rest.
+func TestRunStatus_HooksOutdatedPointsToDoctor(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeOutdatedClaudeHooks(t)
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "hooks out of date · run 'entire doctor'") {
+		t.Errorf("status output does not point outdated hooks to doctor:\n%s", out)
+	}
+	if strings.Contains(out, "enable --force") {
+		t.Errorf("status output suggests enable --force:\n%s", out)
+	}
+}
+
+// writeOutdatedClaudeHooks writes Claude Code hooks under the retired
+// Task/TodoWrite matchers.
+func writeOutdatedClaudeHooks(t *testing.T) {
+	t.Helper()
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -1868,19 +1995,6 @@ func TestRunStatusJSON_HooksOutdated(t *testing.T) {
 }`
 	if err := os.WriteFile(".claude/settings.json", []byte(stale), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	var result statusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if !slices.Contains(result.HooksOutdated, "claude-code") {
-		t.Errorf("Expected hooks_outdated to contain 'claude-code', got %v", result.HooksOutdated)
 	}
 }
 
@@ -2133,7 +2247,13 @@ func TestRunStatusJSON_WithActiveSessions(t *testing.T) {
 	}
 }
 
-func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
+// Replaces TestRunStatusJSON_DeduplicatesSessions, which pinned the old
+// one-entry-per-agent shape. That shape could not represent two concurrent
+// sessions for the same agent — a real setup, one per worktree — so the
+// second one was invisible. Each session is now its own entry; consumers that
+// want a per-agent view can group on the agent field, which they could not do
+// in reverse.
+func TestRunStatusJSON_ReportsEachSessionSeparately(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 
@@ -2183,26 +2303,30 @@ func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if len(result.ActiveSessions) != 1 {
-		t.Fatalf("Expected 1 deduplicated session, got %d", len(result.ActiveSessions))
+	if len(result.ActiveSessions) != len(states) {
+		t.Fatalf("Expected %d session entries, got %d: %+v", len(states), len(result.ActiveSessions), result.ActiveSessions)
 	}
-	s := result.ActiveSessions[0]
-	if s.Agent != "Codex" {
-		t.Errorf("Expected agent='Codex', got %q", s.Agent)
+
+	byID := make(map[string]sessionBriefJSON, len(result.ActiveSessions))
+	for _, entry := range result.ActiveSessions {
+		if entry.Agent != "Codex" {
+			t.Errorf("Expected agent='Codex', got %q", entry.Agent)
+		}
+		byID[entry.SessionID] = entry
 	}
-	if s.Status != "active" {
-		t.Errorf("Expected status='active' (active wins over idle), got %q", s.Status)
+	for _, want := range states {
+		if _, ok := byID[want.SessionID]; !ok {
+			t.Errorf("session %s missing from active_sessions", want.SessionID)
+		}
 	}
-	if s.Model != "codex-mini" {
-		t.Errorf("Expected model='codex-mini' from active session, got %q", s.Model)
+	if got := byID["codex-active"]; got.Status != "active" || got.Model != "codex-mini" {
+		t.Errorf("active session entry = %+v, want status=active model=codex-mini", got)
+	}
+	if got := byID["codex-idle-1"]; got.Status != string(session.PhaseIdle) {
+		t.Errorf("idle session status = %q, want %q", got.Status, session.PhaseIdle)
 	}
 }
 
-// writeStatusHeadCheckpoint writes a v1 checkpoint with the requested
-// review/investigation flags, then amends HEAD to carry the
-// Entire-Checkpoint trailer. Mirrors the helper used in
-// head_checkpoint_flags_test.go but inlined to keep status_test.go
-// self-contained for readers comparing to other status tests.
 func writeStatusHeadCheckpoint(t *testing.T, hasReview, hasInvestigation bool) {
 	t.Helper()
 	cwd, err := os.Getwd()
@@ -2469,19 +2593,32 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 				name: "missing_configured_remote", options: `,"checkpoint_push_remote":"gone"`,
 				origin: "https://github.com/org/repo.git", wantFallback: "origin", wantErr: true,
 			},
-			// Push- and fetch-side ownership disagree. Both require EVERY
-			// identity to be owned by the checkpoint repo's owner, but over
-			// different sets: origin plus fork's PUSH urls (all "org", so the
-			// push side certifies the dedicated store) versus origin plus
-			// fork's FETCH url ("other", so the fetch side rejects it). With
-			// pushing disabled the line names a read source, so the fetch
-			// side decides and the elected remote is reported; deciding it
-			// with PushURL named a store reads never use.
+			// The candidate's fetch and push urls have different owners. Both
+			// ownership votes — push side (InheritedCheckpointRemote) and
+			// read side (ReadsDedicatedStore) — require EVERY identity to be
+			// owned by the checkpoint repo's owner over the SAME set: origin
+			// plus the candidate's PUSH urls. Its FETCH url is deliberately
+			// not a vote: reads must land where writes went, and writes are
+			// decided by push urls (#2342). So a candidate fetching from
+			// another owner but pushing to the store's owner is accepted on
+			// both sides, and the dedicated store is the read source ...
 			{
-				name:    "dedicated_rejected_by_fetch_owner",
+				name:    "dedicated_accepted_by_push_owner",
 				options: `,"checkpoint_push_remote":"fork","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
 				origin:  "https://github.com/org/repo.git",
 				fork:    "https://github.com/other/fork.git", forkPush: "https://github.com/org/fork.git",
+				wantRemote: "org/checkpoints", wantSource: checkpointSyncSourceDedicated,
+			},
+			// ... while one fetching from the store's owner but pushing
+			// elsewhere is rejected on both, so the elected remote is the
+			// read source and the configured store is reported as not in use.
+			// Before the votes were aligned this row's mirror image passed on
+			// the push side and failed on the read side.
+			{
+				name:    "dedicated_rejected_by_push_owner",
+				options: `,"checkpoint_push_remote":"fork","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
+				origin:  "https://github.com/org/repo.git",
+				fork:    "https://github.com/org/fork.git", forkPush: "https://github.com/other/fork.git",
 				wantRemote: "fork", wantSource: "config", wantIgnored: true,
 			},
 			// A failed election does not stop reads: they fail open, so the
@@ -2539,7 +2676,9 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 				queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
 				if backend == "git-refs" {
 					for _, ref := range []string{"refs/entire/checkpoints/aa/bb0000000001", "refs/entire/checkpoints/aa/bb0000000002"} {
-						if err := queue.Enqueue(plumbing.ReferenceName(ref)); err != nil {
+						// Only refs that exist locally count: the push drops the rest.
+						testutil.GitUpdateRef(t, ".", ref, head)
+						if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: plumbing.ReferenceName(ref)}); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -2553,14 +2692,12 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 					t.Fatal(err)
 				}
 				info := computeCheckpointSyncInfo(t.Context(), s)
-				// The two "not in use" rows reach that warning by different
-				// routes: the origin-owner row through the push-side verdict,
-				// the fetch-rejected row through the read-side branch that
-				// exists because that verdict ACCEPTS what the fetch side
-				// declines. Without the second, a configured store serving no
-				// reads is reported by nothing. (Not the divergence
-				// documented as accepted on InheritedCheckpointRemote — that
-				// one is the opposite direction.)
+				// Both "not in use" rows reach that warning through the
+				// push-side verdict, which votes on the same identity set as
+				// the read side. The read-side branch behind it covers the
+				// non-ownership reasons reads can decline a store (an origin
+				// URL that will not parse, a protocol with no checkpoint
+				// mapping), none of which this table stages.
 				if (info.Err != "") != tc.wantErr || (info.IgnoredRemote != "") != tc.wantIgnored {
 					t.Errorf("unexpected remote diagnostics: %+v", info)
 				}
@@ -2604,6 +2741,10 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 	}
 }
 
+// inheritedClaimCommand is the fix status must name for the fixture below: a
+// command to run, not a settings file to go and edit.
+const inheritedClaimCommand = "entire enable --local --checkpoint-remote github:org/checkpoints"
+
 // Not parallel: setupTestRepo changes CWD and isolates process environment.
 func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
@@ -2644,6 +2785,16 @@ func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 							if tc.name == "inherited" && !strings.Contains(string(result["checkpoint_remote_ignored_reason"]), "differs from checkpoint owner") {
 								t.Errorf("missing rejection reason: %s", out.String())
 							}
+							// An agent reading --json has to be able to ACT on
+							// the rejection, not only report it, which is the
+							// whole reason the remedy is carried rather than
+							// left for the reader to assemble.
+							if tc.name == "inherited" && string(result["checkpoint_remote_ignored_verdict"]) != `"disproved"` {
+								t.Errorf("an owner mismatch must be reported as disproved: %s", out.String())
+							}
+							if tc.name == "inherited" && !strings.Contains(string(result["checkpoint_remote_ignored_remedy"]), inheritedClaimCommand) {
+								t.Errorf("missing remedy: %s", out.String())
+							}
 							if disabled {
 								var pushDisabled bool
 								if err := json.Unmarshal(result["checkpoint_push_disabled"], &pushDisabled); err != nil || !pushDisabled {
@@ -2652,8 +2803,11 @@ func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 							}
 							return
 						}
-						if !strings.Contains(out.String(), tc.text) || (tc.name == "inherited" && !strings.Contains(out.String(), "is not in use:")) {
+						if !strings.Contains(out.String(), tc.text) || (tc.name == "inherited" && !strings.Contains(out.String(), "not to the configured checkpoint_remote")) {
 							t.Errorf("missing remote diagnostic: %s", out.String())
+						}
+						if tc.name == "inherited" && !strings.Contains(out.String(), inheritedClaimCommand) {
+							t.Errorf("rejection named no command to fix it: %s", out.String())
 						}
 						if disabled && (!strings.Contains(out.String(), "Automatic checkpoint pushing: disabled") || strings.Contains(out.String(), "Checkpoints NOT syncing:")) {
 							t.Errorf("diagnostic must coexist with disabled pushing, not claim a push failure: %s", out.String())
@@ -2828,24 +2982,48 @@ func TestRunStatus_CheckpointSyncDestination_CapturedAnnotated(t *testing.T) {
 
 func TestRunStatus_CheckpointSyncFailClosed(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
-	setupTestRepo(t)
-	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "gone"}}`)
-	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
 
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
+	for _, tt := range []struct {
+		name          string
+		remote        string
+		pushurlOnly   bool
+		emptyFetchURL bool
+		wantReason    string
+	}{
+		{name: "missing remote", remote: "gone"},
+		{name: "pushurl-only remote", remote: "pushonly", pushurlOnly: true, wantReason: "fetch URL"},
+		{name: "empty fetch URL", remote: "empty", emptyFetchURL: true, wantReason: "fetch URL"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, fmt.Sprintf(`{"enabled": true, "strategy_options": {"checkpoint_push_remote": %q}}`, tt.remote))
+			if tt.pushurlOnly {
+				testutil.RunGit(t, ".", "config", "remote."+tt.remote+".pushurl", "https://example.com/pushonly.git")
+			}
+			if tt.emptyFetchURL {
+				testutil.RunGit(t, ".", "config", "remote."+tt.remote+".url", "")
+			}
+			testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
 
-	out := stdout.String()
-	if !strings.Contains(out, "Checkpoints NOT syncing:") {
-		t.Errorf("expected fail-closed warning line, got:\n%s", out)
-	}
-	if !strings.Contains(out, `"gone"`) {
-		t.Errorf("fail-closed line should name the misconfigured remote, got:\n%s", out)
-	}
-	if strings.Contains(out, "Checkpoints sync to:") {
-		t.Errorf("fail-closed status must not also print a destination line, got:\n%s", out)
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			out := stdout.String()
+			if !strings.Contains(out, "Checkpoints NOT syncing:") {
+				t.Errorf("expected fail-closed warning line, got:\n%s", out)
+			}
+			if !strings.Contains(out, fmt.Sprintf("%q", tt.remote)) {
+				t.Errorf("fail-closed line should name remote %q, got:\n%s", tt.remote, out)
+			}
+			if tt.wantReason != "" && !strings.Contains(out, tt.wantReason) {
+				t.Errorf("fail-closed line should contain %q, got:\n%s", tt.wantReason, out)
+			}
+			if strings.Contains(out, "Checkpoints sync to:") {
+				t.Errorf("fail-closed status must not also print a destination line, got:\n%s", out)
+			}
+		})
 	}
 }
 
@@ -2899,6 +3077,9 @@ func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "2 checkpoints not yet on origin — they sync with your next 'git push origin'") {
 		t.Errorf("expected unpushed counter line, got:\n%s", out)
+	}
+	if strings.Contains(out, "checkpoint list --outgoing") {
+		t.Errorf("git-branch: --outgoing is git-refs only, so the counter must not point at it, got:\n%s", out)
 	}
 }
 
@@ -2957,18 +3138,20 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
 	testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
-	checkpointSyncTestCommit(t, "a.txt", "one")
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	testutil.GitUpdateRef(t, ".", "refs/entire/checkpoints/aa/bb0000000001", head)
+	testutil.GitUpdateRef(t, ".", "refs/entire/checkpoints/aa/bb0000000002", head)
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
 	queue := checkpoint.NewPushQueue(filepath.Join(cwd, ".git"))
-	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000001"); err != nil {
-		t.Fatalf("Enqueue: %v", err)
+	if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: "refs/entire/checkpoints/aa/bb0000000001"}); err != nil {
+		t.Fatalf("EnqueueEntry: %v", err)
 	}
-	if err := queue.Enqueue("refs/entire/checkpoints/aa/bb0000000002"); err != nil {
-		t.Fatalf("Enqueue: %v", err)
+	if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: "refs/entire/checkpoints/aa/bb0000000002"}); err != nil {
+		t.Fatalf("EnqueueEntry: %v", err)
 	}
 
 	var stdout bytes.Buffer
@@ -2981,8 +3164,8 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 		t.Errorf("expected dedicated destination line, got:\n%s", out)
 	}
 	// Dedicated mode has no remote name to phrase the counter around.
-	if !strings.Contains(out, "2 checkpoints not yet pushed") {
-		t.Errorf("expected queue-length counter without a remote name, got:\n%s", out)
+	if !strings.Contains(out, "2 checkpoints not yet pushed · see 'entire checkpoint list --outgoing'") {
+		t.Errorf("expected queue counter without a remote name, pointing at the listing, got:\n%s", out)
 	}
 	if strings.Contains(out, "not yet on") {
 		t.Errorf("dedicated counter must not name a git remote, got:\n%s", out)

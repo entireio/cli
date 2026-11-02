@@ -50,3 +50,15 @@ func TestOpenCodePromptEnv_OverridesPWD(t *testing.T) {
 		t.Fatalf("HOME = %q, want preserved", got)
 	}
 }
+
+// envValue returns the last value set for key in env, matching exec's
+// last-wins semantics for duplicate entries.
+func envValue(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return strings.TrimPrefix(env[i], prefix), true
+		}
+	}
+	return "", false
+}

@@ -91,13 +91,6 @@ func OpenAtForRead(worktreeRoot string) (*os.Root, error) {
 	return open(worktreeRoot, false)
 }
 
-// Opener returns a thunk that calls Open when invoked, for consumers that are
-// handed their storage up front but must not touch the disk until they first
-// write (see logging.Config.Root).
-func Opener(ctx context.Context) func() (*os.Root, error) {
-	return func() (*os.Root, error) { return Open(ctx) }
-}
-
 // OpenerAt returns a thunk that calls OpenAt when invoked.
 func OpenerAt(worktreeRoot string) func() (*os.Root, error) {
 	return func() (*os.Root, error) { return OpenAt(worktreeRoot) }

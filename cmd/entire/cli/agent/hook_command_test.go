@@ -195,6 +195,21 @@ func TestIsManagedHookCommand_WrappedPrefix(t *testing.T) {
 	}
 }
 
+// Warning wrappers written before the `entire --version` probe must still read
+// as Entire's, and differ from the current form, so an install replaces them.
+func TestIsManagedHookCommand_UnprobedWarningWrapper(t *testing.T) {
+	t.Parallel()
+
+	unprobed := `sh -c 'if ! command -v entire >/dev/null 2>&1; then printf "%s\n" "{\"systemMessage\":\"\\n\\nEntire CLI is enabled but not installed or not on PATH.\\nInstallation guide: https://docs.entire.io/cli/installation#installation-methods\"}"; exit 0; fi; exec entire hooks claude-code session-start'`
+	if !IsManagedHookCommand(unprobed) {
+		t.Fatal("expected unprobed warning wrapper to remain managed")
+	}
+	current := WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", WarningFormatMultiLine)
+	if current == unprobed {
+		t.Fatal("current wrapper should differ from the unprobed form so installs replace it")
+	}
+}
+
 func TestIsManagedHookCommand_DoesNotMatchSubstring(t *testing.T) {
 	t.Parallel()
 
@@ -317,5 +332,77 @@ func TestIsManagedHookCommand_LeavesUserCommandsAlone(t *testing.T) {
 		if !IsManagedHookCommand(command) {
 			t.Errorf("IsManagedHookCommand(%q) = false; Entire generated this and must recognize it", command)
 		}
+	}
+}
+
+func TestHookHostIsWindows(t *testing.T) {
+	// No t.Parallel(): mutates package-level probe/OS via the test seam.
+
+	// The probe reports a working sh throughout: HookHostIsWindows must ignore
+	// it. That is the whole difference from UseWindowsProductionHooks, and the
+	// reason Factory Droid uses this predicate instead.
+	shWorks := func(context.Context, string) bool { return true }
+
+	for _, tc := range []struct {
+		goos string
+		want bool
+	}{
+		{"linux", false},
+		{"darwin", false},
+		{windowsOS, true},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			restore := SetWindowsHookProbeForTesting(tc.goos, shWorks)
+			defer restore()
+			if got := HookHostIsWindows(); got != tc.want {
+				t.Fatalf("HookHostIsWindows() on %s = %v, want %v", tc.goos, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWrapProductionPlainTextWarningHookCommandForOS(t *testing.T) {
+	t.Parallel()
+
+	const command = "entire hooks factoryai-droid stop"
+
+	if got, want := WrapProductionPlainTextWarningHookCommandForOS(command, WarningFormatSingleLine, false),
+		WrapProductionPlainTextWarningHookCommand(command, WarningFormatSingleLine); got != want {
+		t.Fatalf("useWindows=false = %q, want the sh wrapper %q", got, want)
+	}
+
+	windows := WrapProductionPlainTextWarningHookCommandForOS(command, WarningFormatSingleLine, true)
+	if want := WrapWindowsProductionPlainTextWarningHookCommand(command, WarningFormatSingleLine); windows != want {
+		t.Fatalf("useWindows=true = %q, want the cmd.exe wrapper %q", windows, want)
+	}
+	if strings.Contains(windows, "sh -c") {
+		t.Fatalf("windows wrapper must not invoke sh, got %q", windows)
+	}
+	// The migration path depends on this: an install that switches wrapper form
+	// only replaces the old entry if the new one is still recognised as ours.
+	if !IsManagedHookCommand(windows) {
+		t.Fatalf("windows wrapper not recognised as a managed hook command: %q", windows)
+	}
+}
+
+func TestIsManagedHookCommand_RecognisesDirectWindowsSilentWrapper(t *testing.T) {
+	// No t.Parallel(): sibling tests in this file mutate the package-level OS seam.
+	cmd := WrapWindowsProductionSilentHookCommandDirect("entire hooks antigravity stop")
+	if !strings.HasPrefix(cmd, windowsProductionHookWrapperPrefix) {
+		t.Fatalf("direct wrapper must start with the bare Windows prefix, got %q", cmd)
+	}
+	if strings.HasPrefix(cmd, "cmd.exe") {
+		t.Fatalf("direct wrapper must not nest a cmd.exe invocation, got %q", cmd)
+	}
+	if !IsManagedHookCommand(cmd) {
+		t.Fatalf("IsManagedHookCommand must recognise the direct Windows wrapper: %q", cmd)
+	}
+	kept, dropped := DropStaleManagedHooks([]string{cmd}, func(s string) string { return s }, []string{cmd})
+	if dropped || len(kept) != 1 {
+		t.Fatalf("a wanted direct-wrapper command must survive DropStaleManagedHooks, kept=%v dropped=%v", kept, dropped)
+	}
+	_, dropped = DropStaleManagedHooks([]string{cmd}, func(s string) string { return s }, nil)
+	if !dropped {
+		t.Fatal("an unwanted direct-wrapper command must be dropped as Entire's own")
 	}
 }

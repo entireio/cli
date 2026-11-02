@@ -1,4 +1,4 @@
-// Package httpclient builds *http.Transport instances shared by Entire's
+// Package httpclient builds the HTTP transports shared by Entire's
 // client binaries (git-remote-entire, entiredb, entire-deploy). Centralizing
 // transport construction means one place to honor cross-cutting knobs like
 // ENTIRE_CONNECT_TIMEOUT_SECONDS — without forcing callers through a single
@@ -19,14 +19,15 @@ import (
 // EnvConnectTimeout is the env var that overrides every connect timeout.
 const EnvConnectTimeout = "ENTIRE_CONNECT_TIMEOUT_SECONDS"
 
-// DefaultDialTimeout is the per-host TCP connect timeout. Short by default
+// DefaultDialTimeout is the per-request connection setup budget: DNS, TCP,
+// the proxy CONNECT when a proxy is configured, and TLS. Short by default
 // so failover paths skip dead nodes quickly, but long enough to absorb a
 // slow initial connect (cold DNS, TLS-fronting LB, distant region) that a
 // tighter budget would trip; override via ENTIRE_CONNECT_TIMEOUT_SECONDS on
 // slow links (e.g. satellite) where even this trips before the node answers.
 const DefaultDialTimeout = 4 * time.Second
 
-// DefaultDiscoveryDialTimeout is the per-host TCP connect budget for the
+// DefaultDiscoveryDialTimeout is the connection setup budget for the
 // initial replica-discovery request — the cold info/refs probe to the
 // cluster entry domain that answers "which nodes serve this repo". It is
 // deliberately longer than DefaultDialTimeout: this first contact often pays
@@ -77,27 +78,37 @@ func DiscoveryDialTimeout() time.Duration {
 	return DefaultDiscoveryDialTimeout
 }
 
-// NewTransport builds an *http.Transport with the configured dial timeout
-// and a baseline TLS config. Callers wrap the returned transport with their
-// own RoundTripper as needed (e.g. debug logging) and assemble their own
+// NewTransport builds a transport with the configured connect budget and a
+// baseline TLS config. Callers wrap the returned transport with their own
+// RoundTripper as needed (e.g. debug logging) and assemble their own
 // *http.Client around it.
-func NewTransport(skipTLSVerify bool) *http.Transport {
+func NewTransport(skipTLSVerify bool) http.RoundTripper {
 	return newTransport(skipTLSVerify, DialTimeout())
 }
 
 // NewDiscoveryTransport is NewTransport with the longer discovery connect
 // budget (DiscoveryDialTimeout). Use it for the initial replica-discovery
 // probe; see DefaultDiscoveryDialTimeout for why it is more patient.
-func NewDiscoveryTransport(skipTLSVerify bool) *http.Transport {
+func NewDiscoveryTransport(skipTLSVerify bool) http.RoundTripper {
 	return newTransport(skipTLSVerify, DiscoveryDialTimeout())
 }
 
-func newTransport(skipTLSVerify bool, dialTimeout time.Duration) *http.Transport {
-	return &http.Transport{
+func newTransport(skipTLSVerify bool, dialTimeout time.Duration) http.RoundTripper {
+	return &connectTimeoutTransport{next: &http.Transport{
+		// A composite literal must set Proxy explicitly so HTTP_PROXY, HTTPS_PROXY, and NO_PROXY are honored.
+		Proxy:       http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{Timeout: dialTimeout}).DialContext,
+		// Matches http.DefaultTransport; zero would keep idle pooled
+		// connections open for the life of the process.
+		IdleConnTimeout: 90 * time.Second,
+		// net/http keeps dialing after the connect budget cancels the
+		// request, so this is what ends an abandoned handshake to a stalled
+		// node. Twice the budget so the budget, with its clearer error,
+		// always fires first.
+		TLSHandshakeTimeout: 2 * dialTimeout,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: skipTLSVerify, //nolint:gosec // intentional for local development
 		},
-	}
+	}, timeout: dialTimeout}
 }

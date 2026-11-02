@@ -17,6 +17,7 @@ func withFakeHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "") // hermetic: a dev shell's CLAUDE_CONFIG_DIR must not leak in
 	return home
 }
 
@@ -417,5 +418,34 @@ func TestDiscoverReviewSkills_DedupesSkillAndCommandSameName(t *testing.T) {
 	}
 	if skills[0].Description != "real review skill" {
 		t.Errorf("Description = %q; want skill description", skills[0].Description)
+	}
+}
+
+// TestDiscoverReviewSkills_HonorsClaudeConfigDir pins discovery to the same
+// config-dir resolution as session lookup: Claude Code relocates every ~/.claude
+// path under CLAUDE_CONFIG_DIR, so a skill installed there must be discoverable
+// or saved skills fail spawn-time validation as "not installed" even though
+// Claude itself finds and runs them.
+func TestDiscoverReviewSkills_HonorsClaudeConfigDir(t *testing.T) {
+	// Cannot t.Parallel — uses t.Setenv.
+	withFakeHome(t) // HOME points at an empty dir; the skill lives elsewhere
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	skillDir := filepath.Join(configDir, "skills", "code-review")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: code-review\ndescription: Reviews code.\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &claudecode.ClaudeCodeAgent{}
+	skills, err := a.DiscoverReviewSkills(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(skills) != 1 || skills[0].Name != "/code-review" {
+		t.Fatalf("skill under CLAUDE_CONFIG_DIR not discovered; got %+v", skills)
 	}
 }

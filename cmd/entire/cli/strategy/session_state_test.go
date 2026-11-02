@@ -177,6 +177,38 @@ func TestRecordFilesTouched_MergesIncrementally(t *testing.T) {
 	require.ElementsMatch(t, []string{"existing.txt", "updated.txt", "new.txt", "removed.txt"}, loaded.FilesTouched)
 }
 
+// Per-tool hooks merge paths without hashing them, so a hash recorded for the
+// same path by an earlier turn-end step must be dropped (name matching), never
+// kept to judge the newer content against.
+func TestRecordFilesTouched_DropsStaleTouchedFileHashes(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	state := &SessionState{
+		SessionID:    "ft-stale-hash",
+		BaseCommit:   "deadbeef",
+		StartedAt:    time.Now(),
+		FilesTouched: []string{"kept.txt", "rewritten.txt"},
+		TouchedFileHashes: map[string]string{
+			"kept.txt":      "1111111111111111111111111111111111111111",
+			"rewritten.txt": "2222222222222222222222222222222222222222",
+		},
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	// The path is already in FilesTouched, so only the hash changes; the write
+	// must still happen.
+	require.NoError(t, RecordFilesTouched(context.Background(), "ft-stale-hash",
+		[]string{"rewritten.txt"}, nil, nil))
+
+	loaded, err := LoadSessionState(context.Background(), "ft-stale-hash")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.ElementsMatch(t, []string{"kept.txt", "rewritten.txt"}, loaded.FilesTouched)
+	require.Equal(t, map[string]string{"kept.txt": "1111111111111111111111111111111111111111"}, loaded.TouchedFileHashes)
+}
+
 func TestRecordFilesTouched_NoStateIsNoop(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -1035,4 +1067,14 @@ func TestClearSessionState_PackageLevel_SerializesAgainstConcurrentMutation(t *t
 	close(writerMayFinish)
 	<-writerFinished
 	<-clearReturned
+}
+
+// getSessionStateDir returns the path to the session state directory.
+// This is stored in the git common dir so it's shared across all worktrees.
+func getSessionStateDir(ctx context.Context) (string, error) {
+	commonDir, err := GetGitCommonDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(commonDir, session.SessionStateDirName), nil
 }

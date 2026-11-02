@@ -43,6 +43,22 @@ func FuzzV2Command(f *testing.F) {
 	})
 }
 
+// FuzzRemoveV2FetchFeature fuzzes the fetch-feature stripper.
+// Contract: never panic; malformed input errors instead.
+func FuzzRemoveV2FetchFeature(f *testing.F) {
+	f.Add([]byte(""))
+	f.Add([]byte("000eversion 2\n0000"))
+	f.Add([]byte("000eversion 2\n0016fetch=ref-in-want\n0000"))
+	f.Add([]byte("000eversion 2\n001efetch=shallow ref-in-want\n0000"))
+	f.Add([]byte("0001"))
+	f.Add([]byte("0002"))
+	f.Add([]byte("ffffXXXX"))
+
+	f.Fuzz(func(_ *testing.T, in []byte) {
+		_, _ = RemoveV2FetchFeature(in, "ref-in-want") //nolint:errcheck // fuzz: panics matter, errors don't
+	})
+}
+
 // FuzzReadReceivePackRequest fuzzes the receive-pack request reader.
 // Contract: never panic; if no error, the returned bytes mirror the
 // consumed input shape (length-prefix correctness is the caller's
@@ -76,7 +92,7 @@ func FuzzReadSendPackRequest(f *testing.F) {
 	f.Add([]byte("0003"))
 
 	f.Fuzz(func(_ *testing.T, in []byte) {
-		var out bytes.Buffer
+		var out RequestBody
 		_ = ReadSendPackRequest(bufio.NewReader(bytes.NewReader(in)), &out) //nolint:errcheck // fuzz
 	})
 }

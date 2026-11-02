@@ -82,8 +82,7 @@ Execute these steps in order:
 ```bash
 .claude/skills/test-repo/test-harness.sh verify-commit
 .claude/skills/test-repo/test-harness.sh verify-session-state
-.claude/skills/test-repo/test-harness.sh verify-shadow-branch
-.claude/skills/test-repo/test-harness.sh verify-metadata-branch
+.claude/skills/test-repo/test-harness.sh verify-no-shadow-branch
 .claude/skills/test-repo/test-harness.sh list-pending-checkpoints
 ```
 
@@ -92,10 +91,10 @@ Expected results:
 | Check | Result |
 |-------|--------|
 | Active branch | Optional Entire-Checkpoint: trailer |
-| Session state | ✓ Exists |
-| Shadow branch | ✓ entire/{hash} |
-| Metadata branch | ✓ entire/checkpoints/v1 |
-| Pending checkpoints | ✓ At least 1 |
+| Session state | ✓ Exists, with the turn's files in `files_touched` |
+| Shadow branch | ✓ None (turn ends write nothing to git) |
+| Pending checkpoints | ✓ A next-checkpoint preview (`is_next_checkpoint: true`) |
+| Metadata branch | Written only when you commit (see "Test User Commits") |
 
 #### 4. Check Listing After Further Changes
 
@@ -105,9 +104,9 @@ Expected results:
 ```
 
 **Expected Behavior:**
-- The checkpoint from step 2 is still listed; the new uncommitted changes do not
-  disturb it. There is no restore step: the CLI has no `rewind` command, and
-  nothing writes a checkpoint back over the worktree.
+- The next-checkpoint preview from step 3 is still listed; the new
+  uncommitted changes do not disturb it. There is no restore step: the CLI has
+  no `rewind` command, and nothing writes a checkpoint back over the worktree.
 
 #### 5. Cleanup
 
@@ -131,7 +130,7 @@ go build -o /tmp/entire-bin ./cmd/entire && \
 .claude/skills/test-repo/test-harness.sh create-files && \
 .claude/skills/test-repo/test-harness.sh create-transcript && \
 .claude/skills/test-repo/test-harness.sh stop-session && \
-.claude/skills/test-repo/test-harness.sh verify-metadata-branch && \
+.claude/skills/test-repo/test-harness.sh verify-no-shadow-branch && \
 .claude/skills/test-repo/test-harness.sh list-pending-checkpoints
 ```
 
@@ -139,8 +138,8 @@ go build -o /tmp/entire-bin ./cmd/entire && \
 
 ### Manual-Commit Strategy (default)
 - Active branch commits: **NO modifications** (no commits created by Entire)
-- Shadow branches: `entire/<commit-hash[:7]>` created for checkpoints
-- Metadata: stored on both shadow branches and `entire/checkpoints/v1` branch (condensed on user commits)
+- Turn ends: recorded in session state only (`.git/entire-sessions/`); no shadow branch is written
+- Metadata: written to `entire/checkpoints/v1` (or per-checkpoint refs) when you commit
 - AllowsMainBranch: **true** (safe on main/master)
 
 ## Additional Testing (Optional)
@@ -167,8 +166,8 @@ echo "{\"session_id\": \"$SESSION_ID\", \"transcript_path\": \"$TRANSCRIPT_DIR/t
   ENTIRE_TEST_CLAUDE_PROJECT_DIR="$TRANSCRIPT_DIR" \
   /tmp/entire-bin hooks claude-code post-task
 
-# Verify task checkpoint created
-/tmp/entire-bin checkpoint list --pending --json | jq '.[] | select(.is_task_checkpoint == true)'
+# Verify the task record is pending (listed in this session's next-checkpoint preview)
+/tmp/entire-bin checkpoint list --pending --json | jq '.[] | select(.is_next_checkpoint == true) | .next_checkpoint.task_records'
 ```
 
 ### Test User Commits (Condensation)
@@ -182,9 +181,6 @@ git commit -m "Add greeting function"
 
 # Verify logs condensed to entire/checkpoints/v1
 git show entire/checkpoints/v1 --stat | grep -E "^[0-9a-f]{2}/[0-9a-f]"
-
-# Verify shadow branch still exists
-git branch -a | grep "entire/[0-9a-f]"
 ```
 
 ## Available Claude Code Hooks
@@ -193,10 +189,10 @@ All hooks use the command: `entire hooks claude-code <hook-name>`
 
 - `user-prompt-submit` - Called when user submits a prompt (before session starts)
 - `session-start` - Called when session starts
-- `stop` - Called when session stops (creates checkpoint)
+- `stop` - Called when the agent's turn ends (records the turn in session state; the checkpoint is written at commit)
 - `pre-task` - Called before Task tool execution
 - `post-task` - Called after Task tool execution
-- `post-todo` - Called after TodoWrite tool execution (for incremental checkpoints)
+- `post-todo` - No longer installed; still accepted so configs written by older CLIs keep working, and records nothing
 
 ## Report Format
 

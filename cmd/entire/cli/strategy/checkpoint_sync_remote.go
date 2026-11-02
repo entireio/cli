@@ -9,8 +9,12 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // CheckpointSyncRemoteSource identifies which precedence rule elected the
@@ -42,12 +46,12 @@ type CheckpointSyncRemote struct {
 
 // ResolveCheckpointSyncRemote elects the one configured git remote that
 // checkpoint data syncs to. Pure local lookup — no network. Precedence:
-// checkpoint_push_remote setting (fail-closed if the named remote does not
-// exist), then the captured election (evidence-elected by a past push that
-// agreed with the branch's declared push destination; fail-soft if that
-// remote is gone), then "origin", then the sole remote, then the first remote
-// in .git/config order. It knows nothing about the checkpoint_remote URL
-// feature; callers exempt that case themselves.
+// checkpoint_push_remote setting (fail-closed if the named remote has no
+// fetch URL), then the captured election (evidence-elected by a past push that
+// agreed with the branch's declared push destination; fail-soft if that remote
+// is no longer fetchable), then "origin", then the sole remote, then the first
+// remote in local config traversal order, including included files. It knows
+// nothing about the checkpoint_remote URL feature; callers exempt that case.
 //
 // Deliberately NOT keyed on the branch's tracking config alone
 // (branch.<name>.pushRemote / remote.pushDefault / branch.<name>.remote).
@@ -79,42 +83,48 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 	if err != nil {
 		return CheckpointSyncRemote{}, fmt.Errorf("cannot read settings to resolve the checkpoint sync remote: %w", err)
 	}
+	// Every tier elects from the same fetchable set. `git remote get-url`
+	// accepts a pushurl-only entry even though reads and reconciliation cannot.
+	fetchRemotes, err := configuredRemotesInConfigOrderResult(ctx)
+	if err != nil {
+		return CheckpointSyncRemote{}, fmt.Errorf("cannot read git remotes to resolve the checkpoint sync remote: %w", err)
+	}
 	if name := s.GetCheckpointPushRemote(); name != "" {
-		if !isConfiguredRemote(ctx, name) {
+		if !slices.Contains(fetchRemotes, name) {
 			return CheckpointSyncRemote{}, fmt.Errorf(
-				"checkpoint_push_remote %q is not a configured git remote; checkpoint sync disabled until fixed", name)
+				"checkpoint_push_remote %q has no configured fetch URL; checkpoint sync disabled until fixed", name)
 		}
 		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil
 	}
 
 	// Captured tier: fail-soft, unlike the explicit setting above — capture
-	// is automatic state, so a captured remote that was since renamed or
-	// removed falls through to the default tiers instead of disabling sync.
+	// is automatic state, so a captured remote that is no longer fetchable
+	// falls through to the default tiers instead of disabling sync.
 	for _, name := range loadCapturedSyncRemotes(ctx) {
-		if isConfiguredRemote(ctx, name) {
+		if slices.Contains(fetchRemotes, name) {
 			return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceObserved}, nil
 		}
-		logging.Debug(ctx, "captured checkpoint sync remote is not configured; falling through",
+		logging.Debug(ctx, "captured checkpoint sync remote has no configured fetch URL; falling through",
 			slog.String("remote", name))
 	}
 
-	remotes := configuredRemotesInConfigOrder(ctx)
 	switch {
-	case len(remotes) == 0:
+	case len(fetchRemotes) == 0:
 		return CheckpointSyncRemote{}, nil
-	case slices.Contains(remotes, "origin"):
+	case slices.Contains(fetchRemotes, "origin"):
 		return CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, nil
-	case len(remotes) == 1:
-		return CheckpointSyncRemote{Name: remotes[0], Source: SyncRemoteSourceSole}, nil
+	case len(fetchRemotes) == 1:
+		return CheckpointSyncRemote{Name: fetchRemotes[0], Source: SyncRemoteSourceSole}, nil
 	default:
-		return CheckpointSyncRemote{Name: remotes[0], Source: SyncRemoteSourceFirst}, nil
+		return CheckpointSyncRemote{Name: fetchRemotes[0], Source: SyncRemoteSourceFirst}, nil
 	}
 }
 
 // checkpointSyncAllowedForRemote reports whether a push to pushRemote may
 // carry checkpoint data. False for every remote except the elected
-// checkpoint sync remote — including raw-URL pushes (git passes the URL as
-// the hook arg) and the fail-closed misconfigured case. Callers exempt the
+// checkpoint sync remote and remotes that push to the same forge repository
+// (see pushesToSameForgeRepository) — false for raw-URL pushes (git passes the
+// URL as the hook arg) and the fail-closed misconfigured case. Callers exempt the
 // dedicated checkpoint_remote URL mode before calling.
 // pendingCapture, when non-empty, is the remote this push is about to elect but
 // has not persisted yet — the gate must let the electing push carry the
@@ -132,13 +142,147 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote, pendingCapt
 			slog.String("error", err.Error()))
 		return false
 	}
-	if syncRemote.Name == "" || syncRemote.Name != pushRemote {
-		logging.Debug(ctx, "checkpoint sync skipped: push remote is not the checkpoint sync remote",
+	if syncRemote.Name != "" && syncRemote.Name == pushRemote {
+		return true
+	}
+	if syncRemote.Name != "" && pushesToSameForgeRepository(ctx, pushRemote, syncRemote.Name) {
+		logging.Debug(ctx, "checkpoint sync admitted: push remote reaches the same forge repository as the checkpoint sync remote",
 			slog.String("push_remote", pushRemote),
 			slog.String("checkpoint_sync_remote", syncRemote.Name))
+		return true
+	}
+	logging.Debug(ctx, "checkpoint sync skipped: push remote is not the checkpoint sync remote",
+		slog.String("push_remote", pushRemote),
+		slog.String("checkpoint_sync_remote", syncRemote.Name))
+	return false
+}
+
+// pushesToSameForgeRepository reports whether pushes to pushRemote and the
+// elected remote land in the same forge repository — e.g. `git@github.com:o/r`
+// and its Entire mirror `entire://<cluster>/gh/o/r`. Mirrors push through to
+// the forge and sync every ref back from it, so checkpoints pushed via either
+// remote end up in the same place, and the single-remote gate has no audience
+// to protect.
+//
+// Push-through covering checkpoint refs is a verified external contract, not
+// an assumption: the mirror forwards every pushed ref to the forge, including
+// entire/checkpoints/v1 and the git-refs backend's refs/entire/* (confirmed
+// with the server side, 2026-10-06). CI does not exercise it — no test talks
+// to a real mirror — so a server change that stops forwarding non-branch refs
+// would strand git-refs checkpoints in the mirror silently: the push queue
+// drains on the mirror's acceptance. Revisit this function if that changes.
+//
+// Conservative by construction: both must be configured remotes with a fetch
+// URL (raw-URL pushes never match), and every push URL of both must resolve to
+// one known-forge repository over a direct or entire:// transport
+// (gitremote.ResolveRepository, which also follows SSH host aliases when git
+// runs plain ssh). Unknown hosts, remote-helper schemes, file:// paths,
+// Entire-native repos, and multi-URL remotes that fan out to different
+// repositories all fail the match, leaving the gate as strict as before.
+func pushesToSameForgeRepository(ctx context.Context, pushRemote, elected string) bool {
+	if !isCheckpointSyncRemoteEligible(ctx, pushRemote) || !isCheckpointSyncRemoteEligible(ctx, elected) {
 		return false
 	}
-	return true
+	// The elected remote first, and stop when it resolves to nothing: it is
+	// usually a plain GitHub URL that resolves without a subprocess, while
+	// pushRemote may be any remote the user pushes to. Resolving pushRemote
+	// unconditionally would run `ssh -G` inside every pre-push to a self-hosted
+	// or deploy SSH remote even when no match is possible.
+	electedRepo, ok := remotePushForgeRepository(ctx, elected)
+	if !ok {
+		return false
+	}
+	pushRepo, ok := remotePushForgeRepository(ctx, pushRemote)
+	return ok && pushRepo == electedRepo
+}
+
+// remotePushForgeRepository resolves the single forge repository every push
+// URL of the named remote reaches. ok is false when any URL does not resolve
+// to a known-forge repository or disagrees with another.
+func remotePushForgeRepository(ctx context.Context, name string) (gitremote.Repository, bool) {
+	dir, env := gitHookSafeDirEnv(ctx)
+	urls, err := gitremote.GetPushURLsInDir(ctx, dir, env, name)
+	if err != nil {
+		return gitremote.Repository{}, false
+	}
+	var found gitremote.Repository
+	for i, rawURL := range urls {
+		r, ok := gitremote.ResolveRepository(ctx, dir, env, rawURL)
+		if !ok || (i > 0 && r != found) {
+			return gitremote.Repository{}, false
+		}
+		found = r
+	}
+	return found, true
+}
+
+// gitHookSafeDirEnv returns the worktree root and an environment without git's
+// repo overrides, for a git subprocess that may run inside a hook; "" and nil
+// when no worktree root is known, leaving the ambient repository in charge.
+func gitHookSafeDirEnv(ctx context.Context) (string, []string) {
+	if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
+		return worktreeRoot, gitrepo.EnvWithoutRepoOverrides()
+	}
+	return "", nil
+}
+
+// advanceSyncRemoteTrackingRef records, after pushRemote accepted a branch
+// ref, that the elected sync remote has it too when both push to the same
+// forge repository. Without it the elected remote's tracking ref stays where
+// its last fetch or push left it, so `entire status` and the gated-sync hint
+// count checkpoints as unpushed that are already there, and the next push to
+// the elected remote re-sends a ref the forge already has.
+//
+// Only a fast-forward is recorded. The remote's history only moves forward
+// (checkpoint pushes never force), so pushRemote's fresh tracking ref always
+// descends from any earlier state of the elected one; anything else means the
+// tracking state is not what this reasoning assumes, and it is left alone for
+// the next fetch to correct. Best-effort: every failure logs and returns.
+func advanceSyncRemoteTrackingRef(ctx context.Context, pushRemote string, ref plumbing.ReferenceName) {
+	if !ref.IsBranch() {
+		return
+	}
+	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
+	if err != nil || syncRemote.Name == "" || syncRemote.Name == pushRemote {
+		return
+	}
+	if !pushesToSameForgeRepository(ctx, pushRemote, syncRemote.Name) {
+		return
+	}
+	dir, env := gitHookSafeDirEnv(ctx)
+	git := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir, cmd.Env = dir, env
+		out, err := cmd.Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	pushed := plumbing.NewRemoteReferenceName(pushRemote, ref.Short()).String()
+	target := plumbing.NewRemoteReferenceName(syncRemote.Name, ref.Short()).String()
+	newHash, err := git("rev-parse", "--verify", "--quiet", pushed+"^{commit}")
+	if err != nil {
+		return
+	}
+	// Absent target: "" as update-ref's old value means "must not exist yet".
+	oldHash, _ := git("rev-parse", "--verify", "--quiet", target+"^{commit}") //nolint:errcheck // absent reads as ""
+	if oldHash == newHash {
+		return
+	}
+	if oldHash != "" {
+		if _, err := git("merge-base", "--is-ancestor", oldHash, newHash); err != nil {
+			logging.Debug(ctx, "sync remote tracking ref not advanced: not a fast-forward",
+				slog.String("tracking_ref", target))
+			return
+		}
+	}
+	if _, err := git("update-ref", "-m", "entire: pushed via "+pushRemote, target, newHash, oldHash); err != nil {
+		logging.Debug(ctx, "sync remote tracking ref not advanced",
+			slog.String("tracking_ref", target),
+			slog.String("error", err.Error()))
+		return
+	}
+	logging.Debug(ctx, "sync remote tracking ref advanced: push went to the same forge repository",
+		slog.String("push_remote", pushRemote),
+		slog.String("tracking_ref", target))
 }
 
 // hintGatedCheckpointSync tells the user, on a gated pre-push, that
@@ -147,17 +291,17 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote, pendingCapt
 // until the elected remote happens to be pushed.
 //
 // Stays quiet unless every condition holds: the push target is a configured
-// remote (checkpoint_push_remote takes a remote name, so a raw-URL push has
-// no actionable suggestion), the election succeeded AND was automatic (an
-// explicit checkpoint_push_remote is a decision already made, and the
-// fail-closed misconfigured case logs a warning through the gate itself), and
-// checkpoints are actually waiting. Fully local — no network.
+// remote with a fetch URL (checkpoint_push_remote must name one), the election
+// succeeded AND was automatic (an explicit checkpoint_push_remote is a
+// decision already made, and the fail-closed misconfigured case logs a warning
+// through the gate itself), and checkpoints are actually waiting. Fully local
+// — no network.
 //
 // The hint names .entire/settings.local.json: a remote name is a per-clone
 // fact, and committing it to the tracked settings.json would fail-close
 // checkpoint sync for every teammate whose clone lacks that remote name.
 func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
-	if !isConfiguredRemote(ctx, pushRemote) {
+	if !isCheckpointSyncRemoteEligible(ctx, pushRemote) {
 		return
 	}
 	syncRemote, err := ResolveCheckpointSyncRemote(ctx)
@@ -211,24 +355,34 @@ func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
 		slog.String("push_remote", pushRemote))
 }
 
-// configuredRemotesInConfigOrder lists remote names in .git/config section
-// order (approximates "first remote added"; `git remote` output is
-// alphabetical and unsuitable). Remotes configured with only pushurl are
-// deliberately invisible (spec Unit 1). Errors yield an empty list.
+// configuredRemotesInConfigOrder lists remote names in local config traversal
+// order, including included files (approximates "first remote added"; `git
+// remote` output is alphabetical and unsuitable). Remotes configured with only
+// pushurl are deliberately invisible. Errors yield an empty list.
 func configuredRemotesInConfigOrder(ctx context.Context) []string {
 	return cachedRemotesInConfigOrder(ctx, readRemotesInConfigOrder)
 }
 
-// readRemotesInConfigOrder lists remote names, distinguishing "this repo has no
-// remotes" from "the read failed". Both used to collapse to nil, which was
-// harmless while every caller re-ran the command — but the per-invocation cache
-// would memoize a failure's nil as a legitimately empty list and then skip
+func configuredRemotesInConfigOrderResult(ctx context.Context) ([]string, error) {
+	return cachedRemotesInConfigOrderResult(ctx, readRemotesInConfigOrder)
+}
+
+// isCheckpointSyncRemoteEligible keeps capture and hinting on the same
+// fetch-URL eligibility rule as election.
+func isCheckpointSyncRemoteEligible(ctx context.Context, name string) bool {
+	return slices.Contains(configuredRemotesInConfigOrder(ctx), name)
+}
+
+// readRemotesInConfigOrder lists remote names from local config and its includes,
+// distinguishing "this repo has no remotes" from "the read failed". Both used to
+// collapse to nil, which was harmless while every caller re-ran the command.
+// The per-invocation cache would memoize a failure's nil as an empty list and skip
 // checkpoint sync for the rest of the process. `git config --get-regexp` exits 1
 // for no match, so that exit code alone is the empty answer; anything else (a
 // fork failure under load, a cancelled context, a locked config) is an error the
 // cache must not keep.
 func readRemotesInConfigOrder(ctx context.Context) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get-regexp", `^remote\..*\.url$`)
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--includes", "--get-regexp", `^remote\..*\.url$`)
 	if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
 		cmd.Dir = worktreeRoot
 	}
@@ -245,8 +399,8 @@ func readRemotesInConfigOrder(ctx context.Context) ([]string, error) {
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		// line: "remote.<name>.url <url>"; <name> may contain dots, so trim
 		// the fixed prefix and the ".url <value>" suffix instead of splitting.
-		key, _, ok := strings.Cut(line, " ")
-		if !ok {
+		key, value, ok := strings.Cut(line, " ")
+		if !ok || strings.TrimSpace(value) == "" {
 			continue
 		}
 		name := strings.TrimSuffix(strings.TrimPrefix(key, "remote."), ".url")

@@ -19,7 +19,7 @@ import (
 func TestAttachSessionCreatesCheckpoint(t *testing.T) {
 	testutil.ForEachNamedAgent(t, 2*time.Minute, []string{"vogon"}, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		homeDir := t.TempDir()
-		extraEnv := []string{"HOME=" + homeDir}
+		extraEnv := agents.HomeEnv(homeDir)
 		vogon := requireVogonAgent(t, s)
 
 		mainBranch := testutil.GitOutput(t, s.Dir, "branch", "--show-current")
@@ -57,7 +57,7 @@ func TestAttachSessionCreatesCheckpoint(t *testing.T) {
 func TestAttachSessionAddsToExistingCheckpoint(t *testing.T) {
 	testutil.ForEachNamedAgent(t, 3*time.Minute, []string{"vogon"}, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		homeDir := t.TempDir()
-		extraEnv := []string{"HOME=" + homeDir}
+		extraEnv := agents.HomeEnv(homeDir)
 		vogon := requireVogonAgent(t, s)
 
 		s.Git(t, "add", ".")

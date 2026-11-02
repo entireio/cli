@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
 
@@ -11,18 +12,25 @@ import (
 // experimental visibility flag. Names match cobra's Command.Name() (the first
 // token of Use).
 var experimentalRootCommands = []string{
-	"tokens", "import", "review", "investigate",
-	"blame", "why", "experts", "runner",
+	"tokens", "import", "review",
+	"blame", "why", "experts",
 }
 
-// withVisible sets the experimental visibility flag for the test and restores
-// it afterward. Because it mutates a package global, callers must not run in
+// Version stamps standing in for a developer build and a stable release.
+// Experimental visibility is derived from the resolved version.
+const (
+	devBuildVersion = "dev"
+	releaseVersion  = "0.12.0"
+)
+
+// withBuildVersion stamps versioninfo.Version for the test and restores it
+// afterward. Because it mutates a package global, callers must not run in
 // parallel.
-func withVisible(t *testing.T, v string) {
+func withBuildVersion(t *testing.T, v string) {
 	t.Helper()
-	prev := experimental.Visible
-	experimental.Visible = v
-	t.Cleanup(func() { experimental.Visible = prev })
+	prev := versioninfo.Version
+	versioninfo.Version = v
+	t.Cleanup(func() { versioninfo.Version = prev })
 }
 
 func findCommand(parent *cobra.Command, name string) *cobra.Command {
@@ -34,21 +42,11 @@ func findCommand(parent *cobra.Command, name string) *cobra.Command {
 	return nil
 }
 
-// checkpointPolicy returns the `checkpoint policy` command.
-func checkpointPolicy(t *testing.T, root *cobra.Command) *cobra.Command {
-	t.Helper()
-	cp := findCommand(root, "checkpoint")
-	if cp == nil {
-		t.Fatal("checkpoint command not found on root")
-	}
-	return findCommand(cp, "policy")
-}
-
 // TestExperimental_VisibleInDevBuild verifies that, in a developer build
-// (Visible defaults to "true"), the experimental commands are shown and filed
-// under the experimental group. Cannot use t.Parallel — mutates a global.
+// (version "dev"), the experimental commands are shown and filed under the
+// experimental group. Cannot use t.Parallel — mutates a global.
 func TestExperimental_VisibleInDevBuild(t *testing.T) {
-	withVisible(t, "true")
+	withBuildVersion(t, devBuildVersion)
 
 	root := NewRootCmd()
 
@@ -68,25 +66,14 @@ func TestExperimental_VisibleInDevBuild(t *testing.T) {
 			t.Errorf("%q GroupID = %q, want %q", name, cmd.GroupID, experimental.GroupID)
 		}
 	}
-
-	policy := checkpointPolicy(t, root)
-	if policy == nil {
-		t.Fatal("checkpoint policy not found")
-	}
-	if policy.Hidden {
-		t.Error("checkpoint policy should be visible in a dev build")
-	}
-	if policy.GroupID != experimental.GroupID {
-		t.Errorf("checkpoint policy GroupID = %q, want %q", policy.GroupID, experimental.GroupID)
-	}
 }
 
-// TestExperimental_HiddenInReleaseBuild verifies that, when GoReleaser stamps
-// Visible=false, the experimental commands are hidden, carry no group, and the
-// empty experimental group is never registered (so release help is unchanged).
-// Cannot use t.Parallel — mutates a global.
+// TestExperimental_HiddenInReleaseBuild verifies that, when the build carries
+// a stable release version, the experimental commands are hidden, carry no
+// group, and the empty experimental group is never registered (so release help
+// is unchanged). Cannot use t.Parallel — mutates a global.
 func TestExperimental_HiddenInReleaseBuild(t *testing.T) {
-	withVisible(t, "false")
+	withBuildVersion(t, releaseVersion)
 
 	root := NewRootCmd()
 
@@ -105,13 +92,5 @@ func TestExperimental_HiddenInReleaseBuild(t *testing.T) {
 		if cmd.GroupID != "" {
 			t.Errorf("%q GroupID = %q, want empty in a release build", name, cmd.GroupID)
 		}
-	}
-
-	policy := checkpointPolicy(t, root)
-	if policy == nil {
-		t.Fatal("checkpoint policy not found")
-	}
-	if !policy.Hidden {
-		t.Error("checkpoint policy should be hidden in a release build")
 	}
 }

@@ -809,18 +809,24 @@ func newPluginDoctorCmd() *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			if len(issues) == 0 {
-				fmt.Fprintln(out, "All plugins healthy.")
-				return nil
-			}
+			faults := 0
 			for _, i := range issues {
-				fmt.Fprintf(out, "%s: %s\n", i.Plugin, i.Problem)
+				if i.Note {
+					fmt.Fprintf(out, "%s: note: %s\n", i.Plugin, i.Problem)
+				} else {
+					faults++
+					fmt.Fprintf(out, "%s: %s\n", i.Plugin, i.Problem)
+				}
 				if i.Fix != "" {
 					fmt.Fprintf(out, "    fix: %s\n", i.Fix)
 				}
 			}
+			if faults == 0 {
+				fmt.Fprintln(out, "All plugins healthy.")
+				return nil
+			}
 			cmd.SilenceUsage = true
-			return NewSilentError(fmt.Errorf("%d plugin issue(s) found", len(issues)))
+			return NewSilentError(fmt.Errorf("%d plugin issue(s) found", faults))
 		},
 	}
 }

@@ -2,12 +2,12 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 )
 
 const (
@@ -53,6 +53,17 @@ func ReassembleTranscript(chunks [][]byte, agentType types.AgentType) ([]byte, e
 	}
 
 	// Try to get the agent by type and use its format-aware reassembly
+	// Gemini CLI is no longer a registered agent, but its chunked transcripts
+	// are still in stored checkpoints, and they are JSON documents that JSONL
+	// reassembly would corrupt.
+	if agentType == AgentTypeGemini {
+		result, err := geminilegacy.ReassembleChunks(chunks)
+		if err != nil {
+			return nil, fmt.Errorf("gemini reassembly failed: %w", err)
+		}
+		return result, nil
+	}
+
 	if agentType != "" {
 		ag, err := GetByAgentType(agentType)
 		if err == nil {
@@ -172,33 +183,4 @@ func SortChunkFiles(files []string, baseName string) []string {
 	})
 
 	return sorted
-}
-
-// geminiTranscriptDetect is used for detecting Gemini JSON format.
-type geminiTranscriptDetect struct {
-	Messages []interface{} `json:"messages"`
-}
-
-// DetectAgentTypeFromContent detects the agent type from transcript content.
-// Returns AgentTypeGemini if it appears to be Gemini JSON format, empty AgentType otherwise.
-// This is used when the agent type is unknown but we need to chunk/reassemble correctly.
-func DetectAgentTypeFromContent(content []byte) types.AgentType {
-	// Quick check: Gemini JSON starts with { and has a messages array
-	trimmed := strings.TrimSpace(string(content))
-	if !strings.HasPrefix(trimmed, "{") {
-		return ""
-	}
-
-	// Try to parse as Gemini JSON format (object with messages array)
-	var transcript geminiTranscriptDetect
-	if err := json.Unmarshal(content, &transcript); err != nil {
-		return ""
-	}
-
-	// Must have at least one message to be considered Gemini format
-	if len(transcript.Messages) > 0 {
-		return AgentTypeGemini
-	}
-
-	return ""
 }

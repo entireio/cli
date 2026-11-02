@@ -204,15 +204,15 @@ func FollowedSymlinkedDirs(worktreeRoot string) []string {
 // runs in a binary where every built-in agent IS registered and fails in both
 // directions, so a new agent that forgets this list cannot ship.
 var vouchableDirs = []string{
+	".agents",
 	".claude",
 	".codex",
 	".cursor",
 	".factory",
-	".gemini",
 	".github",
 	".github/hooks",
 	".opencode",
-	".opencode/plugins",
+	".opencode/plugin",
 	".pi",
 	".pi/extensions",
 	// .pi/extensions/entire is deliberately absent, and neverVouchable refuses

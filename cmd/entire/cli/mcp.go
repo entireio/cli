@@ -117,7 +117,7 @@ func runMCPServer(ctx context.Context, rootCmd *cobra.Command, in io.Reader, out
 		// Fresh per-request remote-read cache. This server lives for the whole
 		// agent session, so the process-scoped cache main() installs would pin one
 		// snapshot of "which git remotes exist" for hours and never observe a
-		// remote added meanwhile — and repo mirror use's invalidation runs in a
+		// remote added meanwhile — and repo remote add's invalidation runs in a
 		// different process. One request is the invocation-equivalent window here.
 		reqCtx := strategy.WithFreshGitRemoteCache(ctx)
 		result, rpcErr := dispatchMCP(reqCtx, rootCmd, req.Method, req.Params)

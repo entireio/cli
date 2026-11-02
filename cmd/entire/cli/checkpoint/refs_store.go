@@ -122,8 +122,8 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 		return s.backfillTranscript(ctx, UpdateOptions(r))
 	case SessionSummary:
 		return s.backfillSummary(ctx, r.CheckpointID, r.Summary)
-	case CheckpointAttribution:
-		return s.backfillAttribution(ctx, r.CheckpointID, r.Attribution)
+	case Tasks:
+		return s.backfillTasks(ctx, r)
 	default:
 		return fmt.Errorf("checkpoint: unsupported write request %T", req)
 	}
@@ -215,7 +215,7 @@ func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.Refe
 			slog.String("ref", refName.String()), slog.String("error", err.Error()))
 		return
 	}
-	if err := q.Enqueue(refName); err != nil {
+	if err := q.EnqueueRef(s.repo, refName); err != nil {
 		logging.Warn(ctx, "checkpoint: enqueue checkpoint ref for push failed",
 			slog.String("ref", refName.String()), slog.String("error", err.Error()))
 	}
@@ -321,22 +321,22 @@ func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.Chec
 	)
 }
 
-func (s *gitRefsStore) backfillAttribution(ctx context.Context, checkpointID id.CheckpointID, combinedAttribution *Attribution) error {
+func (s *gitRefsStore) backfillTasks(ctx context.Context, req Tasks) error {
 	if err := ctx.Err(); err != nil {
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
-	return s.updateCheckpointRef(ctx, checkpointID,
+	return s.updateCheckpointRef(ctx, req.CheckpointID,
 		func() (plumbing.Hash, *object.Tree, error) {
-			return s.refBaseForBackfill(ctx, checkpointID)
+			return s.refBaseForBackfill(ctx, req.CheckpointID)
 		},
 		func(parentHash plumbing.Hash, existing *object.Tree) (plumbing.Hash, error) {
-			checkpointSubtree, err := s.applyAttributionBackfill(ctx, existing, "", combinedAttribution)
+			checkpointSubtree, err := s.applyTasksBackfill(ctx, existing, "", req.Tasks)
 			if err != nil {
 				return plumbing.ZeroHash, err
 			}
 			authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-			commitMsg := fmt.Sprintf("Update checkpoint summary for %s", checkpointID)
+			commitMsg := fmt.Sprintf("Add tasks to checkpoint %s", req.CheckpointID)
 			return CreateCommit(ctx, s.repo, checkpointSubtree, parentHash, commitMsg, authorName, authorEmail)
 		},
 	)
@@ -633,6 +633,7 @@ func HydrateListedCheckpointInfo(ctx context.Context, store interface {
 	out.FilesTouched = summary.FilesTouched
 	out.SessionCount = len(summary.Sessions)
 	out.Imported = summary.Imported
+	out.LinkedCommits = summary.LinkedCommits
 	out.SessionIDs = nil
 	lastMetaOK := len(summary.Sessions) == 0
 	for i := range summary.Sessions {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -64,7 +65,6 @@ type stubTextAgent struct {
 func (s *stubTextAgent) Name() types.AgentName                        { return s.name }
 func (s *stubTextAgent) Type() types.AgentType                        { return s.kind }
 func (s *stubTextAgent) Description() string                          { return "stub" }
-func (s *stubTextAgent) IsPreview() bool                              { return false }
 func (s *stubTextAgent) DetectPresence(context.Context) (bool, error) { return true, nil }
 func (s *stubTextAgent) ProtectedDirs() []string                      { return nil }
 func (s *stubTextAgent) ReadTranscript(string) ([]byte, error)        { return nil, nil }
@@ -113,12 +113,12 @@ func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 	originalLoad := loadSummarySettings
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
-	originalDiscover := discoverSummaryProviders
+	originalDiscover := discoverSummaryProvidersAlways
 	t.Cleanup(func() {
 		loadSummarySettings = originalLoad
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
-		discoverSummaryProviders = originalDiscover
+		discoverSummaryProvidersAlways = originalDiscover
 	})
 
 	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
@@ -137,7 +137,7 @@ func TestResolveCheckpointSummaryProvider_UsesConfiguredProvider(t *testing.T) {
 		}, nil
 	}
 	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
-	discoverSummaryProviders = func(context.Context) {
+	discoverSummaryProvidersAlways = func(context.Context) {
 		t.Fatal("configured registered provider should not trigger external discovery")
 	}
 
@@ -221,7 +221,7 @@ func TestResolveDispatchSummaryProvider_ExplicitCodexUsesDefaultModelWithoutPers
 func TestResolveDispatchSummaryProvider_EmptyOverrideUsesConfiguredProviderAndModel(t *testing.T) {
 	// Cannot use t.Parallel(): mutates package-level resolution seams.
 	ctx := context.Background()
-	configured := &stubTextAgent{name: agent.AgentNameGemini, kind: agent.AgentTypeGemini}
+	configured := &stubTextAgent{name: agent.AgentNameCursor, kind: agent.AgentTypeCursor}
 
 	originalLoad := loadSummarySettings
 	originalGet := getSummaryAgent
@@ -236,18 +236,18 @@ func TestResolveDispatchSummaryProvider_EmptyOverrideUsesConfiguredProviderAndMo
 
 	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
 		return &settings.EntireSettings{SummaryGeneration: &settings.SummaryGenerationSettings{
-			Provider: string(agent.AgentNameGemini),
-			Model:    "gemini-saved-model",
+			Provider: string(agent.AgentNameCursor),
+			Model:    "cursor-saved-model",
 		}}, nil
 	}
 	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
-		if name != agent.AgentNameGemini {
-			t.Fatalf("getSummaryAgent(%q), want %q", name, agent.AgentNameGemini)
+		if name != agent.AgentNameCursor {
+			t.Fatalf("getSummaryAgent(%q), want %q", name, agent.AgentNameCursor)
 		}
 		return configured, nil
 	}
 	isSummaryCLIAvailable = func(name types.AgentName) bool {
-		return name == agent.AgentNameGemini
+		return name == agent.AgentNameCursor
 	}
 	discoverSummaryProvidersAlways = func(context.Context) {
 		t.Fatal("configured registered provider should not trigger external discovery")
@@ -257,10 +257,10 @@ func TestResolveDispatchSummaryProvider_EmptyOverrideUsesConfiguredProviderAndMo
 	if err != nil {
 		t.Fatalf("resolveDispatchSummaryProvider() error = %v", err)
 	}
-	if provider.Name != agent.AgentNameGemini {
-		t.Fatalf("provider.Name = %q, want %q", provider.Name, agent.AgentNameGemini)
+	if provider.Name != agent.AgentNameCursor {
+		t.Fatalf("provider.Name = %q, want %q", provider.Name, agent.AgentNameCursor)
 	}
-	if provider.Model != "gemini-saved-model" {
+	if provider.Model != "cursor-saved-model" {
 		t.Fatalf("provider.Model = %q, want configured model", provider.Model)
 	}
 	if provider.TextGenerator != configured {
@@ -734,7 +734,7 @@ func TestResolveCheckpointSummaryProvider_NonInteractiveMultiCandidatePicksFirst
 		return &settings.EntireSettings{Enabled: true}, nil
 	}
 	listRegisteredAgents = func() []types.AgentName {
-		return []types.AgentName{agent.AgentNameCodex, agent.AgentNameGemini}
+		return []types.AgentName{agent.AgentNameCodex, agent.AgentNameCursor}
 	}
 	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
 		return &stubTextAgent{name: name, kind: agent.AgentTypeCodex}, nil
@@ -1294,5 +1294,92 @@ func TestDiscoverSummaryProviderIfMissing_GrantedExternalIsDiscovered(t *testing
 	}
 	if calls != 1 {
 		t.Fatalf("named discovery called %d times, want exactly 1", calls)
+	}
+}
+
+// stubSummaryRegistry points the resolution seams at a fixed set of agents.
+// capable names get a text generator, the rest get one with the capability
+// stripped, which is the opencode/factoryai-droid shape.
+func stubSummaryRegistry(t *testing.T, all []types.AgentName, capable ...types.AgentName) {
+	t.Helper()
+
+	originalList := listRegisteredAgents
+	originalGet := getSummaryAgent
+	t.Cleanup(func() {
+		listRegisteredAgents = originalList
+		getSummaryAgent = originalGet
+	})
+
+	isCapable := make(map[types.AgentName]bool, len(capable))
+	for _, name := range capable {
+		isCapable[name] = true
+	}
+	listRegisteredAgents = func() []types.AgentName { return all }
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		if !slices.Contains(all, name) {
+			return nil, fmt.Errorf("agent %s not registered", name)
+		}
+		base := &stubTextAgent{name: name, kind: types.AgentType(name)}
+		if isCapable[name] {
+			return base, nil
+		}
+		return &stubNonTextAgent{Agent: base}, nil
+	}
+}
+
+// The list is the reason this error exists: the bare sentence told the user the
+// value was wrong without saying what a right one looks like.
+func TestUnsupportedSummaryProviderError_NamesTheCapableProviders(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	stubSummaryRegistry(t,
+		[]types.AgentName{"codex", "cursor", "opencode"},
+		"codex", "cursor")
+
+	err := unsupportedSummaryProviderError("opencode")
+	if err == nil {
+		t.Fatal("expected an error for a non-capable provider")
+	}
+	got := err.Error()
+
+	if !strings.Contains(got, `agent "opencode" does not support summary generation`) {
+		t.Errorf("error does not name the rejected provider: %q", got)
+	}
+	// One assertion covers both halves: the exact list, and that the rejected
+	// provider is absent from it. Counting occurrences in the prose instead
+	// would fail on any rewording that legitimately names the value twice.
+	if !strings.Contains(got, "supported agents: codex, cursor,") {
+		t.Errorf("error does not carry the capable list: %q", got)
+	}
+}
+
+// An empty capable set must not produce a dangling "one of" with nothing after
+// it. Unreachable in the shipped binary, reached by any test that stubs the
+// registry.
+func TestUnsupportedSummaryProviderError_DegradesWithNoCapableProviders(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	stubSummaryRegistry(t, []types.AgentName{"opencode"})
+
+	got := unsupportedSummaryProviderError("opencode").Error()
+	if got != `agent "opencode" does not support summary generation` {
+		t.Errorf("unexpected degraded message: %q", got)
+	}
+}
+
+// Pins the accepted values against the registry. This test runs in the cli
+// package, where every built-in agent is registered, so it is the enforced copy
+// of the set README documents — and it fails in both directions: an agent that
+// gains GenerateText without the docs following, and one listed here that
+// quietly loses the capability.
+func TestSummaryCapableProviderNames_MatchesTheBuiltInAgents(t *testing.T) {
+	t.Parallel()
+
+	// factoryai-droid is deliberately absent: it is a registered agent with no
+	// GenerateText, and naming it is the fault this feature reports.
+	want := []string{"antigravity", "claude-code", "codex", "copilot-cli", "cursor", "opencode", "pi"}
+	got := summaryCapableProviderNames()
+	if !slices.Equal(got, want) {
+		t.Errorf("summary-capable providers = %v, want %v\n"+
+			"If an agent gained or lost GenerateText, update this list and README's\n"+
+			"\"cannot generate summaries\" note together.", got, want)
 	}
 }

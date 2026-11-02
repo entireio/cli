@@ -43,7 +43,7 @@ func TestCheckpointTranscriptStart_IncludesUncondensedTurns(t *testing.T) {
 		t.Fatalf("Turn 1 Stop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Add auth module", "auth.go")
+	env.GitCommitWithHooks("Add auth module", "auth.go")
 
 	state1, err := env.GetSessionState(session.ID)
 	require.NoError(t, err)
@@ -92,7 +92,7 @@ func TestCheckpointTranscriptStart_IncludesUncondensedTurns(t *testing.T) {
 	}
 
 	// User commits the README changes from Turn 2
-	env.GitCommitWithShadowHooks("Update README", "README.md")
+	env.GitCommitWithHooks("Update README", "README.md")
 
 	checkpointID2 := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	require.NotEmpty(t, checkpointID2, "Second commit should have checkpoint trailer")
@@ -157,7 +157,7 @@ func TestCheckpointTranscriptStart_AdvancesPastMidTurnCommit(t *testing.T) {
 	}
 
 	// Agent commits mid-turn (before Stop)
-	env.GitCommitWithShadowHooksAsAgent("Add feature", "feature.go")
+	env.GitCommitWithHooksAsAgent("Add feature", "feature.go")
 
 	// Record CheckpointTranscriptStart set by condensation
 	stateAfterCommit, err := env.GetSessionState(session.ID)

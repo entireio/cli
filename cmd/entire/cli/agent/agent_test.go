@@ -19,7 +19,6 @@ var _ Agent = (*mockAgent)(nil) // Compile-time interface check
 func (m *mockAgent) Name() types.AgentName                          { return mockAgentName }
 func (m *mockAgent) Type() types.AgentType                          { return mockAgentType }
 func (m *mockAgent) Description() string                            { return "Mock agent for testing" }
-func (m *mockAgent) IsPreview() bool                                { return false }
 func (m *mockAgent) DetectPresence(_ context.Context) (bool, error) { return false, nil }
 
 func (m *mockAgent) GetSessionID(_ *HookInput) string { return "" }

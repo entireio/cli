@@ -3,7 +3,11 @@
 //
 // By default it delegates to the OS keyring (macOS Keychain, Linux Secret
 // Service, etc.). Set ENTIRE_TOKEN_STORE=file to use a JSON file instead,
-// which is useful in CI environments that lack a keyring daemon.
+// which is useful in CI environments that lack a keyring daemon. Without
+// the variable, "token_store": "file" in the per-user config.json does the
+// same, e.g. once in /root/.config/entire for root's unattended jobs. A set
+// ENTIRE_TOKEN_STORE, even an empty one, overrides config.json. An unusable
+// config.json is always an error, whatever the environment says.
 //
 // When using the file backend the tokens are stored in
 // $ENTIRE_TOKEN_STORE_PATH (default: tokens.json in the per-user config
@@ -38,7 +42,6 @@ var ErrNotFound = keyring.ErrNotFound
 // at "entire-core:<base-url>" regardless of which CLI wrote it. Two CLIs
 // sharing this prefix on the same machine read each other's writes.
 const (
-	ClusterKeyringPrefix      = "entire:"              // entiredb cluster-issued tokens
 	CoreKeyringPrefix         = "entire-core:"         // entire-core control-plane tokens
 	JurisdictionKeyringPrefix = "entire-jurisdiction:" // jurisdiction (data-plane) access tokens
 )
@@ -103,20 +106,44 @@ const (
 	PathEnvVar    = "ENTIRE_TOKEN_STORE_PATH"
 )
 
-// FileBackendSelected reports whether the environment selects the file
-// backend — the single predicate shared by backend resolution, provenance
-// wording, and login's headless hint, so they can never disagree.
+// FileBackendSelected reports chooseBackend's file choice.
 func FileBackendSelected() bool {
-	return os.Getenv(BackendEnvVar) == "file"
+	return chooseBackend().file
+}
+
+// backendChoice is the backend, or why not.
+type backendChoice struct {
+	file bool
+	err  error
+}
+
+// fileBackend selects the file store.
+const fileBackend = "file"
+
+// chooseBackend is the one backend rule:
+// bad config fails, then the variable wins.
+func chooseBackend() backendChoice {
+	ts, err := configTokenStore()
+	if err != nil {
+		return backendChoice{err: err}
+	}
+	if v, ok := os.LookupEnv(BackendEnvVar); ok {
+		return backendChoice{file: v == fileBackend}
+	}
+	return backendChoice{file: ts == fileBackend}
 }
 
 // BackendDescription names the credential backend the current environment
 // resolves to, for user-facing provenance lines (e.g. `entire auth status`).
-// It mirrors resolveBackendLocked's env semantics — the production resolution
-// — rather than introspecting the live backend, so test-only overrides don't
-// leak into user-facing wording.
+// It uses chooseBackend, like resolveBackendLocked, rather than introspecting
+// the live backend, so test-only overrides don't leak into user-facing
+// wording. A bad config.json returns its error.
 func BackendDescription() string {
-	if FileBackendSelected() {
+	c := chooseBackend()
+	switch {
+	case c.err != nil:
+		return c.err.Error()
+	case c.file:
 		return "file " + FileBackendPath()
 	}
 	return keyringProviderName()
@@ -140,8 +167,8 @@ func FileBackendPath() string {
 //
 // The config-directory case is checked here rather than being left to the root
 // that opens it, because there is no such root: fileStore.dir anchors on
-// filepath.Dir of this path (one of the two places CLAUDE.md permits that, since
-// PathEnvVar names a file the caller chose) and reaches it through
+// filepath.Dir of this path (an exception in docs/development/filesystem-safety.md,
+// since PathEnvVar names a file the caller chose) and reaches it through
 // filepath.Abs. That Abs is exactly the laundering the contexts and discovery
 // roots stopped doing. Without a check here, ENTIRE_CONFIG_DIR=foo silently put
 // bearer tokens at ./foo/tokens.json, which for a CLI run from a repository
@@ -161,7 +188,11 @@ func fileBackendPathChecked() (string, error) {
 }
 
 func resolveBackendLocked() store {
-	if FileBackendSelected() {
+	c := chooseBackend()
+	if c.err != nil {
+		return errStore{c.err}
+	}
+	if c.file {
 		// Entire owns the directory only when it also picked it: an
 		// explicit PathEnvVar names a location the user chose, and its
 		// mode is theirs to set.
@@ -201,6 +232,13 @@ func Delete(service, user string) error {
 	return currentBackend().Delete(service, user)
 }
 
+// errStore fails every call with err.
+type errStore struct{ err error }
+
+func (e errStore) Get(string, string) (string, error) { return "", e.err }
+func (e errStore) Set(string, string, string) error   { return e.err }
+func (e errStore) Delete(string, string) error        { return e.err }
+
 // keyringStore delegates to the OS keyring. Every call is bounded by
 // callKeyringWithTimeout: the underlying provider (Secret Service,
 // Keychain, Credential Manager) can block indefinitely when no daemon
@@ -208,10 +246,12 @@ func Delete(service, user string) error {
 type keyringStore struct{}
 
 func (keyringStore) Get(service, user string) (string, error) {
-	// keyring.ErrNotFound propagates unchanged; only a timeout wraps.
-	return callKeyringWithTimeout("get", func() (string, error) {
+	// keyring.ErrNotFound propagates unchanged unless the keyring could not
+	// be searched at all; only a timeout wraps.
+	val, err := callKeyringWithTimeout("get", func() (string, error) {
 		return keyring.Get(service, user)
 	})
+	return checkNotFound(val, err, keyringReachable)
 }
 
 func (keyringStore) Set(service, user, password string) error {

@@ -1,0 +1,4 @@
+# Repo-wide shellcheck policy; overrides any ~/.shellcheckrc.
+# Keep defaults so local lint matches CI. Opt-in checks such as
+# check-extra-masked-returns (SC2312) are off; enable them here,
+# not per user, and fix every site in the same change.

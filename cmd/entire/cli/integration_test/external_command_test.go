@@ -427,3 +427,85 @@ func TestExternalCommand_AgentProtocolBinarySkipped(t *testing.T) {
 		t.Errorf("expected Cobra unknown-command error, got stderr: %s", stderr.String())
 	}
 }
+
+// `entire agent-help <plugin>` delegates to `entire-<plugin> agent-help`
+// through the real binary: the plugin's stdout is agent-help's stdout, and the
+// child gets the same filtered environment as a dispatched plugin, not ours.
+func TestExternalCommand_AgentHelpDelegatesToPlugin(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("plugin shell-script harness only runs on Unix")
+	}
+	dir := t.TempDir()
+	argFile := filepath.Join(dir, "argv.txt")
+	envFile := filepath.Join(dir, "env.txt")
+	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nenv > %q\necho \"pgr agent help\"\nexit 0\n", argFile, envFile)
+	if err := os.WriteFile(filepath.Join(dir, "entire-pgr"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+
+	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "agent-help", "pgr", "sync", "--json")
+	cmd.Env = append(pathWith(dir), "GITHUB_TOKEN=must-not-leak")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("entire agent-help pgr failed: %v\nstderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "pgr agent help" {
+		t.Errorf("stdout = %q, want the plugin's own output", got)
+	}
+	argv, err := os.ReadFile(argFile)
+	if err != nil {
+		t.Fatalf("read argv file: %v", err)
+	}
+	if got := strings.TrimSpace(string(argv)); got != "agent-help\nsync\n--json" {
+		t.Errorf("plugin argv = %q, want %q", got, "agent-help\nsync\n--json")
+	}
+	envDump, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if _, ok := parseEnvLines(t, string(envDump))["GITHUB_TOKEN"]; ok {
+		t.Error("GITHUB_TOKEN must be filtered out of the delegated plugin's env")
+	}
+}
+
+// main prepends the managed bin dir only around the dispatcher and restores
+// PATH before Cobra runs, so this runs through the real binary: a plugin that
+// exists only in the managed dir must still answer agent-help.
+func TestExternalCommand_AgentHelpDelegatesToManagedPlugin(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("plugin shell-script harness only runs on Unix")
+	}
+	pluginRoot := t.TempDir()
+	binDir := filepath.Join(pluginRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argFile := filepath.Join(t.TempDir(), "argv.txt")
+	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\necho \"managed agent help\"\nexit 0\n", argFile)
+	if err := os.WriteFile(filepath.Join(binDir, "entire-pgr"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+
+	cmd := execx.NonInteractive(context.Background(), getTestBinary(), "agent-help", "pgr")
+	cmd.Env = append(os.Environ(), "ENTIRE_PLUGIN_DIR="+pluginRoot)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("entire agent-help pgr failed: %v\nstderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "managed agent help" {
+		t.Errorf("stdout = %q, want the managed plugin's output", got)
+	}
+	argv, err := os.ReadFile(argFile)
+	if err != nil {
+		t.Fatalf("read argv file: %v", err)
+	}
+	if got := strings.TrimSpace(string(argv)); got != "agent-help" {
+		t.Errorf("plugin argv = %q, want %q", got, "agent-help")
+	}
+}

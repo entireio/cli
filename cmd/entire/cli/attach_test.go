@@ -19,7 +19,6 @@ import (
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"         // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid" // register agent
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"      // register agent
 	piagent "github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -213,40 +212,6 @@ func TestResolveAgentAndTranscript_HidesFailedAutoDetectionAfterFetchFailure(t *
 	}
 }
 
-func TestAttachBlocksWhenPolicyWriteUnsupported(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	repoRoot := mustGetwd(t)
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = repo.Close() })
-	writeUnsupportedCheckpointPolicyForCLITest(t, repo)
-
-	sessionID := "test-attach-policy-unsupported"
-	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"create a file"},"uuid":"uuid-1"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]},"uuid":"uuid-2"}
-`)
-
-	var out bytes.Buffer
-	err = runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
-	if err == nil || !strings.Contains(err.Error(), "checkpoint policy cannot be satisfied by this Entire CLI") {
-		t.Fatalf("runAttach error = %v, want unsupported checkpoint policy", err)
-	}
-	stateStore, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := stateStore.Load(context.Background(), sessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state != nil {
-		t.Fatalf("expected attach not to record checkpoint state, got %+v", state)
-	}
-}
-
 func TestAttach_Success(t *testing.T) {
 	setupAttachTestRepo(t)
 
@@ -303,21 +268,10 @@ func TestAttach_Success(t *testing.T) {
 // recognize the session as active and never wrote Entire-Checkpoint trailers
 // onto subsequent commits in that session.
 //
-// After attach, BaseCommit (and AttributionBaseCommit) must be populated
-// from HEAD so the session is recognized as active.
+// After attach, BaseCommit must be populated from HEAD so the session is
+// recognized as active.
 func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 	setupAttachTestRepo(t)
-
-	repoRoot := mustGetwd(t)
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	headRef, err := repo.Head()
-	if err != nil {
-		t.Fatal(err)
-	}
-	headHash := headRef.Hash().String()
 
 	sessionID := "test-attach-empty-base-commit"
 	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
@@ -335,7 +289,7 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 		SessionID: sessionID,
 		AgentType: agent.AgentTypeClaudeCode,
 		StartedAt: time.Now(),
-		// BaseCommit and AttributionBaseCommit deliberately empty.
+		// BaseCommit deliberately empty.
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -345,6 +299,8 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 		t.Fatalf("runAttach failed: %v", err)
 	}
 
+	// Attach added the trailer to HEAD, so the base is the rewritten HEAD.
+	headHash := headCommitOf(t).Hash.String()
 	state, err := store.Load(context.Background(), sessionID)
 	if err != nil {
 		t.Fatal(err)
@@ -355,10 +311,6 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 	if state.BaseCommit != headHash {
 		t.Errorf("BaseCommit = %q, want %q (HEAD); attach did not populate empty BaseCommit",
 			state.BaseCommit, headHash)
-	}
-	if state.AttributionBaseCommit != headHash {
-		t.Errorf("AttributionBaseCommit = %q, want %q (HEAD); attach did not populate empty AttributionBaseCommit",
-			state.AttributionBaseCommit, headHash)
 	}
 }
 
@@ -808,11 +760,6 @@ func TestCountUserTurns(t *testing.T) {
 		want int
 	}{
 		{
-			name: "gemini format",
-			data: []byte(`{"messages":[{"type":"user","content":"first"},{"type":"gemini","content":"ok"},{"type":"user","content":"second"},{"type":"gemini","content":"done"}]}`),
-			want: 2,
-		},
-		{
 			name: "jsonl with tool_result should not double count",
 			data: []byte(`{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{}}]},"uuid":"a1"}
@@ -856,11 +803,6 @@ func TestExtractModelFromTranscript(t *testing.T) {
 `),
 			want: "",
 		},
-		{
-			name: "gemini format (no model in transcript)",
-			data: []byte(`{"messages":[{"type":"user","content":"hi"},{"type":"gemini","content":"hello"}]}`),
-			want: "",
-		},
 	}
 
 	for _, tt := range tests {
@@ -871,16 +813,6 @@ func TestExtractModelFromTranscript(t *testing.T) {
 				t.Errorf("extractTranscriptMetadata().Model = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestExtractFirstPromptFromTranscript_GeminiFormat(t *testing.T) {
-	t.Parallel()
-
-	data := []byte(`{"messages":[{"type":"user","content":"fix the login bug"},{"type":"gemini","content":"I'll look at that"}]}`)
-	got := extractTranscriptMetadata(data).FirstPrompt
-	if got != "fix the login bug" {
-		t.Errorf("extractTranscriptMetadata(gemini).FirstPrompt = %q, want %q", got, "fix the login bug")
 	}
 }
 
@@ -915,7 +847,7 @@ func TestExtractTranscriptMetadataForAgent_Pi(t *testing.T) {
 		t.Fatalf("generic parser unexpectedly understood native Pi transcript: %+v", generic)
 	}
 
-	got := extractTranscriptMetadataForAgent(piagent.NewPiAgent(), path, data)
+	got := extractTranscriptMetadataForAgent(piagent.NewPiAgent(), path, data, 0)
 	if got.FirstPrompt != "Review this trail" {
 		t.Errorf("FirstPrompt = %q, want %q", got.FirstPrompt, "Review this trail")
 	}
@@ -948,7 +880,7 @@ func TestExtractTranscriptMetadataForAgent_CodexSkipsEnvironmentContext(t *testi
 		t.Fatal(err)
 	}
 
-	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data)
+	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data, 0)
 	if got.FirstPrompt != "Review this trail for correctness" {
 		t.Errorf("FirstPrompt = %q, want the genuine user prompt, not the injected environment context", got.FirstPrompt)
 	}
@@ -975,7 +907,7 @@ func TestExtractTranscriptMetadata_CodexOnlyEnvironmentContext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data)
+	got := extractTranscriptMetadataForAgent(codexagent.NewCodexAgent(), path, data, 0)
 	if got.FirstPrompt != envContext {
 		t.Errorf("FirstPrompt = %q, want the raw environment context as fallback", got.FirstPrompt)
 	}
@@ -1031,110 +963,6 @@ func TestExtractTranscriptMetadata_JSONLOnlyInjectedPreamble(t *testing.T) {
 	got := extractTranscriptMetadata(data)
 	if got.FirstPrompt != preamble {
 		t.Errorf("FirstPrompt = %q, want the raw preamble as fallback", got.FirstPrompt)
-	}
-}
-
-func TestAttach_GeminiSubdirectorySession(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	// Redirect HOME so searchTranscriptInProjectDirs searches our fake Gemini dir
-	fakeHome := t.TempDir()
-	t.Setenv("HOME", fakeHome)
-
-	// Create a Gemini transcript in a *different* project hash directory,
-	// simulating a session started from a subdirectory (different CWD hash).
-	differentProjectDir := filepath.Join(fakeHome, ".gemini", "tmp", "different-hash", "chats")
-	if err := os.MkdirAll(differentProjectDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	sessionID := "abcd1234-gemini-subdir-test"
-	transcriptContent := `{"messages":[{"type":"user","content":"hello"},{"type":"gemini","content":"hi"}]}`
-	// Gemini names files as session-<date>-<shortid>.json where shortid = sessionID[:8]
-	transcriptFile := filepath.Join(differentProjectDir, "session-2026-01-01T10-00-abcd1234.json")
-	if err := os.WriteFile(transcriptFile, []byte(transcriptContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Set the expected project dir to an empty directory so the primary lookup fails
-	// and the fallback search kicks in.
-	emptyProjectDir := t.TempDir()
-	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", emptyProjectDir)
-
-	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameGemini, attachOptions{Force: true})
-	if err != nil {
-		t.Fatalf("runAttach failed: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "Attached session") {
-		t.Errorf("expected 'Attached session' in output, got: %s", output)
-	}
-
-	store, storeErr := session.NewStateStore(context.Background())
-	if storeErr != nil {
-		t.Fatal(storeErr)
-	}
-	state, loadErr := store.Load(context.Background(), sessionID)
-	if loadErr != nil {
-		t.Fatal(loadErr)
-	}
-	if state == nil {
-		t.Fatal("expected session state to be created")
-		return
-	}
-	if state.AgentType != agent.AgentTypeGemini {
-		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeGemini)
-	}
-	if state.LastCheckpointID.IsEmpty() {
-		t.Error("expected LastCheckpointID to be set after attach")
-	}
-}
-
-func TestAttach_GeminiSuccess(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	// Create Gemini transcript in expected project dir
-	geminiDir := t.TempDir()
-	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", geminiDir)
-
-	sessionID := "abcd1234-gemini-success-test"
-	transcriptContent := `{"messages":[{"type":"user","content":"fix the login bug"},{"type":"gemini","content":"I will fix the login bug now."}]}`
-	transcriptFile := filepath.Join(geminiDir, "session-2026-01-01T10-00-abcd1234.json")
-	if err := os.WriteFile(transcriptFile, []byte(transcriptContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameGemini, attachOptions{Force: true})
-	if err != nil {
-		t.Fatalf("runAttach failed: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "Attached session") {
-		t.Errorf("expected 'Attached session' in output, got: %s", output)
-	}
-
-	// Verify session state
-	store, storeErr := session.NewStateStore(context.Background())
-	if storeErr != nil {
-		t.Fatal(storeErr)
-	}
-	state, loadErr := store.Load(context.Background(), sessionID)
-	if loadErr != nil {
-		t.Fatal(loadErr)
-	}
-	if state == nil {
-		t.Fatal("expected session state to be created")
-		return
-	}
-	if state.AgentType != agent.AgentTypeGemini {
-		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeGemini)
-	}
-	if state.SessionTurnCount != 1 {
-		t.Errorf("SessionTurnCount = %d, want 1", state.SessionTurnCount)
 	}
 }
 
@@ -1443,8 +1271,8 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when review-attaching a session that already has a checkpoint")
 	}
-	if !strings.Contains(err.Error(), "already has checkpoint") {
-		t.Errorf("error should mention 'already has checkpoint'; got: %v", err)
+	if !strings.Contains(err.Error(), "already recorded in checkpoint") {
+		t.Errorf("error should mention 'already recorded in checkpoint'; got: %v", err)
 	}
 }
 
@@ -1805,9 +1633,9 @@ func TestAttachCmd_ReviewWithoutSkillsOrConfigSucceeds(t *testing.T) {
 	}
 }
 
-// Regression: `entire attach --review <gemini-session-id>` without
+// Regression: `entire attach --review <cursor-session-id>` without
 // --agent must attach successfully. The plain attach flow already
-// auto-detects Gemini from the transcript; the review path must not
+// auto-detects Cursor from the transcript; the review path must not
 // add a blocking pre-check against the --agent flag's default
 // (claude-code), which would have failed when claude-code had no
 // matching transcript/config.
@@ -1818,18 +1646,21 @@ func TestAttachCmd_ReviewAutoDetectsAgent(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 
-	// Create a valid Gemini transcript in the expected project dir.
-	geminiDir := t.TempDir()
-	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", geminiDir)
-	sessionID := "abcd1234-review-gemini-autodetect"
-	transcriptContent := `{"messages":[{"type":"user","content":"review this"},{"type":"gemini","content":"reviewing"}]}`
-	transcriptFile := filepath.Join(geminiDir, "session-2026-01-01T10-00-abcd1234.json")
+	// Create a valid Cursor transcript in the expected project dir
+	// (flat layout: <dir>/<id>.jsonl).
+	cursorDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CURSOR_PROJECT_DIR", cursorDir)
+	sessionID := "test-review-cursor-autodetect"
+	transcriptContent := `{"type":"user","message":{"role":"user","content":"review this"},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":"reviewing"},"uuid":"a1"}
+`
+	transcriptFile := filepath.Join(cursorDir, sessionID+".jsonl")
 	if err := os.WriteFile(transcriptFile, []byte(transcriptContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// Invoke without --agent (flag falls through to DefaultAgentName =
-	// claude-code). runAttach's auto-detect should find Gemini.
+	// claude-code). runAttach's auto-detect should find Cursor.
 	rootCmd := NewRootCmd()
 	var errBuf, outBuf bytes.Buffer
 	rootCmd.SetErr(&errBuf)
@@ -1850,8 +1681,8 @@ func TestAttachCmd_ReviewAutoDetectsAgent(t *testing.T) {
 	if state == nil || state.Kind != session.KindAgentReview {
 		t.Fatalf("expected session tagged as review; got state=%+v", state)
 	}
-	if state.AgentType != agent.AgentTypeGemini {
-		t.Errorf("AgentType = %q, want %q (auto-detect should have found Gemini)", state.AgentType, agent.AgentTypeGemini)
+	if state.AgentType != agent.AgentTypeCursor {
+		t.Errorf("AgentType = %q, want %q (auto-detect should have found Cursor)", state.AgentType, agent.AgentTypeCursor)
 	}
 }
 
@@ -1994,11 +1825,11 @@ func TestAttachSummaryLine(t *testing.T) {
 	}
 }
 
-// TestAttach_NonInteractivePrintsTrailerForManualPaste: with --force unset and
-// no TTY (the test default), attach cannot prompt to amend, so it prints the
-// Entire-Checkpoint trailer for manual paste instead of failing.
-func TestAttach_NonInteractivePrintsTrailerForManualPaste(t *testing.T) {
+// Without a terminal, attach describes the change and makes none until the
+// caller reruns with --force; with it, the trailer is added to the unpushed HEAD.
+func TestAttach_NonInteractiveNeedsForce(t *testing.T) {
 	setupAttachTestRepo(t)
+	head := headCommitOf(t)
 
 	sessionID := "test-attach-noninteractive"
 	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
@@ -2006,14 +1837,144 @@ func TestAttach_NonInteractivePrintsTrailerForManualPaste(t *testing.T) {
 `)
 
 	var out, errOut bytes.Buffer
-	// Force:false — exercise the non-interactive fallback branch.
-	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{}); err != nil {
-		t.Fatalf("runAttach failed: %v", err)
+	err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil {
+		t.Fatalf("attach without --force and without a terminal succeeded:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "This rewrites git history") || !strings.Contains(errOut.String(), "rerun with --force") {
+		t.Errorf("expected the rewrite warning and the --force instruction, got:\n%s", errOut.String())
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("HEAD changed without confirmation: %s", got.Hash)
+	}
+	if state, err := loadAttachState(t, sessionID); err != nil || state != nil {
+		t.Fatalf("session state written without confirmation: %+v (%v)", state, err)
 	}
 
-	re := regexp.MustCompile(`Entire-Checkpoint: ` + id.CheckpointPattern)
+	out.Reset()
+	errOut.Reset()
+	if err := runAttach(context.Background(), &out, &errOut, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("runAttach --force: %v\n%s", err, errOut.String())
+	}
+	re := regexp.MustCompile(`Added Entire-Checkpoint: ` + id.CheckpointPattern + ` to commit [0-9a-f]+ \(was ` + head.Hash.String()[:12] + `\)`)
 	if !re.MatchString(out.String()) {
-		t.Errorf("expected Entire-Checkpoint trailer for manual paste, got:\n%s", out.String())
+		t.Errorf("expected HEAD to get the trailer, got:\n%s", out.String())
+	}
+}
+
+// A checkpoint ID that appears in the body of a commit message, rather than in
+// its final trailer block, does not link the commit to that checkpoint: attach
+// must not write the attached session into it.
+func TestAttach_BodyCheckpointLineDoesNotSelectCheckpoint(t *testing.T) {
+	assertAttachIgnoresBodyCheckpoint(t, "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nSigned-off-by: Test User <test@example.com>\n")
+}
+
+func TestAttach_IndentedCheckpointLineDoesNotSelectCheckpoint(t *testing.T) {
+	assertAttachIgnoresBodyCheckpoint(t, "Subject\n\n  Entire-Checkpoint: a1b2c3d4e5f6\n")
+}
+
+func TestAttach_CheckpointMentionedInProseDoesNotSelectCheckpoint(t *testing.T) {
+	assertAttachIgnoresBodyCheckpoint(t, "Subject\n\nFollow-up to Entire-Checkpoint: a1b2c3d4e5f6 from last week.\n")
+}
+
+// Git reads "Entire-Checkpoint:<id>" (no space after the colon) as a trailer,
+// so attach joins that checkpoint as it would a canonical trailer.
+func TestAttach_NoSpaceTrailerJoinsCheckpoint(t *testing.T) {
+	assertAttachJoinsNamedCheckpoint(t, "Subject\n\nEntire-Checkpoint:a1b2c3d4e5f6\n")
+}
+
+// commit.cleanup=scissors keeps Entire's explanation below the trailer. Git's
+// trailer grammar skips comment lines, so the trailer still links the commit.
+func TestAttach_TrailerFollowedByCommentLinesJoinsCheckpoint(t *testing.T) {
+	assertAttachJoinsNamedCheckpoint(t, "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n"+
+		"# Remove the Entire-Checkpoint trailer above if you don't want to link this commit to Claude Code session context.\n"+
+		"# The trailer will be added to your next commit based on this branch.\n")
+}
+
+func assertAttachJoinsNamedCheckpoint(t *testing.T, commitMessage string) {
+	t.Helper()
+	setupAttachTestRepo(t)
+	named, state := attachToCommitNamingCheckpoint(t, commitMessage)
+	if state.LastCheckpointID != named {
+		t.Fatalf("attach wrote the session into %s, want the trailer's checkpoint %s", state.LastCheckpointID, named)
+	}
+	if summary := readSummary(t, named.String()); len(summary.Sessions) != 2 {
+		t.Errorf("joined checkpoint sessions: got %d, want 2", len(summary.Sessions))
+	}
+}
+
+// attachToCommitNamingCheckpoint stores a checkpoint for an unrelated session,
+// commits with commitMessage (which names that checkpoint somewhere), and
+// attaches a new session to the commit. Returns the named checkpoint and the
+// attached session's state. Requires setupAttachTestRepo.
+func attachToCommitNamingCheckpoint(t *testing.T, commitMessage string) (id.CheckpointID, *session.State) {
+	t.Helper()
+	ctx := context.Background()
+	repoDir := mustGetwd(t)
+	named := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs()).Write(ctx, cpkg.Session{
+		CheckpointID: named,
+		SessionID:    "unrelated-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":"unrelated"}` + "\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}); err != nil {
+		t.Fatalf("seed unrelated checkpoint: %v", err)
+	}
+
+	testutil.WriteFile(t, repoDir, "change.txt", "change")
+	testutil.GitAdd(t, repoDir, "change.txt")
+	testutil.GitCommit(t, repoDir, commitMessage)
+
+	const sessionID = "attach-body-checkpoint"
+	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+	var out bytes.Buffer
+	if err := runAttach(ctx, &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out.String())
+	}
+
+	state, err := loadAttachState(t, sessionID)
+	if err != nil || state == nil {
+		t.Fatalf("load attached session state: %+v (%v)", state, err)
+	}
+	return named, state
+}
+
+func assertAttachIgnoresBodyCheckpoint(t *testing.T, commitMessage string) {
+	t.Helper()
+	setupAttachTestRepo(t)
+	named, state := attachToCommitNamingCheckpoint(t, commitMessage)
+	if state.LastCheckpointID == named {
+		t.Fatalf("attach wrote the session into checkpoint %s, which the commit only mentions in its body", named)
+	}
+
+	headMessage := headCommitOf(t).Message
+	if linked := trailers.ParseAllCheckpointsFromFinalTrailerBlock(headMessage, trailers.DefaultCommentPrefix); len(linked) == 0 || linked[0] != state.LastCheckpointID {
+		t.Errorf("HEAD's final trailer block should name the attached checkpoint %s, got %v:\n%s",
+			state.LastCheckpointID, linked, headMessage)
+	}
+
+	if summary := readSummary(t, named.String()); len(summary.Sessions) != 1 {
+		t.Errorf("unrelated checkpoint gained sessions: got %d, want 1", len(summary.Sessions))
+	}
+	repo, err := git.PlainOpen(mustGetwd(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs()).ReadSessionContent(context.Background(), named, 0)
+	if err != nil {
+		t.Fatalf("read unrelated checkpoint session: %v", err)
+	}
+	if content.Metadata.SessionID != "unrelated-session" {
+		t.Errorf("unrelated checkpoint session = %q, want unrelated-session", content.Metadata.SessionID)
 	}
 }
 
@@ -2109,7 +2070,6 @@ func TestAttach_DiscoversExternalAgents(t *testing.T) {
   "name": "` + string(agentName) + `",
   "type": "Attach Test Agent",
   "description": "Agent for attach discovery test",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {}
@@ -2228,5 +2188,109 @@ func TestAttach_OpenCodeFetchesTranscriptForUntrackedSession(t *testing.T) {
 	}
 	if !strings.Contains(output, "Created checkpoint") {
 		t.Errorf("expected 'Created checkpoint' in output, got: %s", output)
+	}
+}
+
+// The refuse error names where the checkpoint actually lives: a ULID is always
+// its own ref, even under the git-branch primary, so it must not blame (or
+// suggest fetching) the v1 branch.
+func TestMissingCheckpointError_NamesCheckpointStorage(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	const ulid = "01M3PWG7BKWYH0XJKS810J0XEX"
+	const ref = "refs/entire/checkpoints/EX/" + ulid
+	msg := missingCheckpointError(context.Background(), id.MustCheckpointID(ulid)).Error()
+	if !strings.Contains(msg, "missing from the local checkpoint ref "+ref) {
+		t.Errorf("error should name the checkpoint ref; got: %v", msg)
+	}
+	if !strings.Contains(msg, ref+":"+ref) {
+		t.Errorf("error should suggest fetching the checkpoint ref; got: %v", msg)
+	}
+	if strings.Contains(msg, "entire/checkpoints/v1") {
+		t.Errorf("error must not mention the v1 branch for a ULID checkpoint; got: %v", msg)
+	}
+
+	msg = missingCheckpointError(context.Background(), id.MustCheckpointID("ffffffffeeee")).Error()
+	if !strings.Contains(msg, "missing from the local entire/checkpoints/v1 branch") {
+		t.Errorf("hex checkpoint under the branch primary should name the v1 branch; got: %v", msg)
+	}
+
+	// Under the git-refs primary a hex checkpoint is read from its ref, then
+	// from the pre-migration v1 branch, so both are named and fetchable.
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+	const hexRef = "refs/entire/checkpoints/ee/ffffffffeeee"
+	msg = missingCheckpointError(context.Background(), id.MustCheckpointID("ffffffffeeee")).Error()
+	if !strings.Contains(msg, "missing from the local checkpoint ref "+hexRef+" and entire/checkpoints/v1 branch") {
+		t.Errorf("hex checkpoint under the refs primary should name its ref and the v1 branch; got: %v", msg)
+	}
+	for _, refspec := range []string{hexRef + ":" + hexRef, "entire/checkpoints/v1:entire/checkpoints/v1"} {
+		if !strings.Contains(msg, refspec) {
+			t.Errorf("error should suggest fetching %q; got: %v", refspec, msg)
+		}
+	}
+}
+
+// A ULID checkpoint lives at its own ref even under the git-branch primary (a
+// collaborator on git-refs, or a primary switched back). Attach must find that
+// local ref present and append; gating on the v1 branch existing refused it
+// because this repo has no v1 branch at all.
+func TestAttach_BranchPrimary_AppendsToExistingULIDCheckpoint(t *testing.T) {
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+	setupAttachTestRepo(t)
+
+	firstSessionID := "ulid-first-session-original"
+	setupClaudeTranscript(t, firstSessionID, `{"type":"user","message":{"role":"user","content":"first"},"uuid":"u1"}
+`)
+	var out bytes.Buffer
+	if err := runAttach(context.Background(), &out, &out, firstSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("first attach failed: %v", err)
+	}
+
+	repo, err := git.PlainOpen(mustGetwd(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true); err == nil {
+		t.Fatal("precondition: the v1 branch must not exist")
+	}
+
+	// Switch to the git-branch primary; the ULID checkpoint stays at its ref.
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-branch")
+	secondSessionID := "ulid-second-session-append"
+	setupClaudeTranscript(t, secondSessionID, `{"type":"user","message":{"role":"user","content":"second"},"uuid":"u2"}
+`)
+	out.Reset()
+	if err := runAttach(context.Background(), &out, &out, secondSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
+		t.Fatalf("second attach should append to the local ULID checkpoint; got: %v", err)
+	}
+
+	// The append must land in the ULID's ref: a session written to a fresh v1
+	// branch instead would be invisible (ULID reads go to refs only) and the
+	// orphan branch could clobber the remote on push.
+	if _, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true); err == nil {
+		t.Fatal("appending to a ULID checkpoint must not create the v1 branch")
+	}
+	headRef, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCommit, err := repo.CommitObject(headRef.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := trailers.ParseAllCheckpoints(headCommit.Message)
+	if len(existing) != 1 || existing[0].Kind() != id.KindULID {
+		t.Fatalf("expected one ULID Entire-Checkpoint trailer; got %v", existing)
+	}
+	stores, err := cpkg.Open(context.Background(), repo, cpkg.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open checkpoint stores: %v", err)
+	}
+	summary, err := stores.Persistent.Read(context.Background(), existing[0])
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if summary == nil || len(summary.Sessions) != 2 {
+		t.Fatalf("ULID checkpoint should hold both sessions; got %+v", summary)
 	}
 }

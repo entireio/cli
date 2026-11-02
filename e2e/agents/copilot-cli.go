@@ -100,8 +100,7 @@ func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, o
 	// Unlike StartSession, this leaves the caller's COPILOT_HOME alone: the
 	// session collisions that forced interactive mode onto an isolated home
 	// come from the restore picker, which -p mode never shows.
-	cmd.Env = append(os.Environ(),
-		"ENTIRE_TEST_TTY=0",
+	cmd.Env = append(agentEnv(os.Environ()),
 		"GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS=true",
 	)
 	setupProcessGroup(cmd)
@@ -398,9 +397,7 @@ func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, err
 	args = append(args, bin, "--model", "claude-haiku-4.5", "--allow-all")
 
 	name := fmt.Sprintf("copilot-test-%d", time.Now().UnixNano())
-	// Strip CI env vars that may affect interactive mode.
-	unset := []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}
-	s, err := NewTmuxSession(name, dir, unset, args[0], args[1:]...)
+	s, err := NewTmuxSession(name, dir, nil, args[0], args[1:]...)
 	if err != nil {
 		_ = os.RemoveAll(sessionHome)
 		return nil, err

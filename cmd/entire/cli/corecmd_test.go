@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -207,43 +206,6 @@ func TestPageModeRequested(t *testing.T) {
 	require.True(t, mode("--page-token", ""), "an explicit empty cursor still selects page mode")
 }
 
-// TestStyleTableWith covers the pre-styling that keeps a paged list command's
-// table colored: the render inside flushThroughPager targets a buffer that
-// never looks like a TTY, so color is decided against the real writer up front
-// and applied here. The enabled path must color the header row and route each
-// data cell through its column style (first column primary, rest secondary);
-// the disabled path must be an exact identity so pipes, tests, and NO_COLOR
-// see bare text byte for byte.
-func TestStyleTableWith(t *testing.T) {
-	t.Parallel()
-
-	headers := []string{"ID", "NAME"}
-	row := func(r []string) []string { return r }
-	item := []string{"a", "b"}
-
-	t.Run("enabled path colors headers and routes cells by column", func(t *testing.T) {
-		t.Parallel()
-		st := tableStyles{
-			enabled: true,
-			header:  lipgloss.NewStyle().Bold(true),
-			primary: lipgloss.NewStyle().Underline(true),
-			cell:    lipgloss.NewStyle().Faint(true),
-		}
-		gotHeaders, gotRow := styleTableWith(st, headers, row)
-		require.Equal(t, []string{st.header.Render("ID"), st.header.Render("NAME")}, gotHeaders)
-		// Column 0 is the primary identifier, the rest secondary — the same
-		// split printTable applies when it colors a direct render.
-		require.Equal(t, []string{st.primary.Render("a"), st.cell.Render("b")}, gotRow(item))
-	})
-
-	t.Run("disabled path is an exact identity", func(t *testing.T) {
-		t.Parallel()
-		gotHeaders, gotRow := styleTableWith(tableStyles{}, headers, row)
-		require.Equal(t, headers, gotHeaders)
-		require.Equal(t, item, gotRow(item))
-	})
-}
-
 // printTable/printFields render plain (no color/escape) when the writer
 // isn't a TTY — which a bytes.Buffer never is — so these assert the plain
 // layout directly.
@@ -276,5 +238,49 @@ func TestPrintFields(t *testing.T) {
 		"NAME  widgets\n"
 	if got := buf.String(); got != want {
 		t.Errorf("printFields output:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestResolvedRefLabel pins the delete confirmation line: whenever a lookup
+// happened, the line names what the server resolved rather than what the user
+// typed.
+func TestResolvedRefLabel(t *testing.T) {
+	t.Parallel()
+	const id = "01M3427PK3T21NMN3N7Q1EHBG1"
+	for _, tc := range []struct {
+		name string
+		ref  string
+		r    resolvedRef
+		want string
+	}{
+		{
+			name: "path ref names the resolved repo",
+			ref:  "/et/audit1/victim.git",
+			r:    resolvedRef{ID: id, Name: "/et/audit1/victim.git"},
+			want: "/et/audit1/victim.git (" + id + ")",
+		},
+		{
+			name: "bare name ref names the resolved repo",
+			ref:  "victim.git",
+			r:    resolvedRef{ID: id, Name: "/et/audit1/victim.git"},
+			want: "/et/audit1/victim.git (" + id + ")",
+		},
+		{
+			name: "ulid ref stands alone",
+			ref:  id,
+			r:    resolvedRef{ID: id},
+			want: id,
+		},
+		{
+			name: "no server name falls back to the typed ref",
+			ref:  "acme",
+			r:    resolvedRef{ID: id},
+			want: "acme (" + id + ")",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, resolvedRefLabel(tc.ref, tc.r))
+		})
 	}
 }

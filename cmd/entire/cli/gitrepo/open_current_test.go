@@ -63,18 +63,6 @@ func TestOpenCurrent_RefusesToGuessWhenTheWorktreeRootIsUnresolvable(t *testing.
 	require.Nil(t, repo)
 }
 
-// The one caller that wants the old behaviour still gets it, by name.
-func TestOpenCurrentOrCwd_FallsBackForTheAdvisoryCaller(t *testing.T) {
-	_ = hookLikeRepos(t)
-	t.Setenv("PATH", t.TempDir())
-	paths.ClearWorktreeRootCache()
-
-	repo, err := gitrepo.OpenCurrentOrCwd(context.Background())
-	require.NoError(t, err)
-	require.NotNil(t, repo)
-	require.NoError(t, repo.Close())
-}
-
 func TestOpenCurrent_ResolvesTheRepositoryGitNames(t *testing.T) {
 	hookRepo := hookLikeRepos(t)
 

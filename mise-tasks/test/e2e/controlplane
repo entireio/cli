@@ -1,0 +1,40 @@
+#!/bin/sh
+#MISE description="Run control-plane E2E tests against production (needs E2E_GH_USERNAME, E2E_GH_PASSWORD, E2E_GH_TOTP_SECRET): mise run test:e2e:controlplane [filter]"
+#MISE quiet=true
+#USAGE arg "[filter]" help="Test name filter (regex)" default=""
+
+set -eu
+
+# Build from source with version info unless a pre-built binary is provided.
+# The build also produces git-remote-entire, which the clone step needs.
+if [ -z "${E2E_ENTIRE_BIN:-}" ]; then
+  mise run build
+  export E2E_ENTIRE_BIN="$PWD/entire"
+fi
+
+if [ -z "${E2E_ARTIFACT_DIR:-}" ]; then
+  E2E_ARTIFACT_DIR="$PWD/e2e/artifacts/$(date +%Y-%m-%dT%H-%M-%S)"
+fi
+export E2E_ARTIFACT_DIR
+mkdir -p "$E2E_ARTIFACT_DIR"
+echo "artifacts: $E2E_ARTIFACT_DIR"
+
+# The Playwright driver version is pinned by the Go module; a no-op when it
+# and Chromium are already installed.
+playwright_version="$(go list -m -f '{{.Version}}' github.com/mxschmitt/playwright-go)"
+go run "github.com/mxschmitt/playwright-go/cmd/playwright@$playwright_version" install chromium
+
+filter="${usage_filter:-}"
+
+# No --rerun-fails: a retry would log in again and create a second set of
+# resources on the shared test account.
+gotestsum --format dots --packages=./e2e/controlplane \
+  --jsonfile "$E2E_ARTIFACT_DIR/test-events.json" -- \
+  -tags=e2e -count=1 -timeout=20m \
+  ${filter:+-run "$filter"} || rc=$?
+
+go run ./e2e/cmd/testreport -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json"
+echo ""
+cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
+echo "artifacts: $E2E_ARTIFACT_DIR"
+exit "${rc:-0}"

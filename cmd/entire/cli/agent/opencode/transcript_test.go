@@ -152,7 +152,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	path := writeTestTranscript(t, testExportJSON)
 
 	// From offset 0 — should get both main.go and util.go
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	}
 
 	// From offset 2 — should only get util.go (messages 3 and 4)
-	files, pos, err = ag.ExtractModifiedFilesFromOffset(path, 2)
+	files, pos, err = ag.ExtractModifiedFilesFromOffset(context.Background(), path, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestExtractModifiedFilesFromOffset_ApplyPatch(t *testing.T) {
 	path := writeTestTranscript(t, testApplyPatchExportJSON)
 
 	// From offset 0 — should find layout.py and resize.py (deduplicated)
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestExtractModifiedFilesFromOffset_ApplyPatch(t *testing.T) {
 	}
 
 	// From offset 2 — should find layout.py and resize.py from msg-4
-	files, _, err = ag.ExtractModifiedFilesFromOffset(path, 2)
+	files, _, err = ag.ExtractModifiedFilesFromOffset(context.Background(), path, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestExtractModifiedFilesFromOffset_CamelCaseFilePath(t *testing.T) {
 	ag := &OpenCodeAgent{}
 	path := writeTestTranscript(t, testCamelCaseExportJSON)
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -473,7 +473,7 @@ func TestExtractModifiedFilesFromOffset_CamelCaseFilePath(t *testing.T) {
 	}
 
 	// From offset 2 — should still find the edit in msg-4
-	files, _, err = ag.ExtractModifiedFilesFromOffset(path, 2)
+	files, _, err = ag.ExtractModifiedFilesFromOffset(context.Background(), path, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -913,3 +913,19 @@ func TestStripSystemReminders(t *testing.T) {
 // Compile-time interface checks are in transcript.go.
 // Verify the unused import guard by referencing the agent package.
 var _ = agent.AgentNameOpenCode
+
+// TestExtractAllUserPrompts_SkipsInjectedBackgroundResult: OpenCode delivers a
+// background task's result as a user message made only of synthetic text. It
+// is not a prompt. A real prompt whose attachment text is synthetic stays.
+func TestExtractAllUserPrompts_SkipsInjectedBackgroundResult(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{"info":{"id":"ses_parent"},"messages":[` +
+		`{"info":{"id":"m1","role":"user"},"parts":[{"type":"text","text":"Create red.md in the background"}]},` +
+		`{"info":{"id":"m2","role":"user"},"parts":[{"type":"text","synthetic":true,"text":"<task id=\"ses_child\" state=\"completed\">done</task>"}]},` +
+		`{"info":{"id":"m3","role":"user"},"parts":[{"type":"text","text":"Review @notes.md"},{"type":"text","synthetic":true,"text":"Called the Read tool"}]}]}`)
+
+	prompts, err := ExtractAllUserPrompts(data)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Create red.md in the background", "Review @notes.md\nCalled the Read tool"}, prompts)
+}

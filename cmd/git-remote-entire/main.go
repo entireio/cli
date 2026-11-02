@@ -22,19 +22,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/entireio/auth-go/sts"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -48,6 +45,7 @@ import (
 	"github.com/entireio/cli/internal/remotehelper/httpdebug"
 	"github.com/entireio/cli/internal/remotehelper/replicas"
 	"github.com/entireio/cli/internal/remotehelper/transport"
+	"golang.org/x/net/http/httpguts"
 )
 
 func main() {
@@ -72,22 +70,32 @@ func run(args []string) int {
 	}
 
 	// Build info drives the identifier the helper advertises upstream.
-	// One string covers both surfaces:
+	// One default string covers both surfaces:
 	//   - githelper.Agent rides in the git protocol pkt-line agent=
 	//     capability appended to upload-pack / receive-pack / v2 requests.
 	//   - httpUserAgent rides in the HTTP User-Agent header on every
 	//     outbound request so server access logs can attribute traffic.
-	// Using the same value keeps the two log surfaces correlatable.
+	// They differ only when the user overrides the HTTP header through
+	// git's own GIT_HTTP_USER_AGENT (resolveHTTPUserAgent). The pkt-line
+	// agent is never overridable: the protocol allows one token with no
+	// whitespace, so a free-form user string would corrupt the capability.
 	versioninfo.Load()
 	helperAgent := remotehelper.BinaryName + "/" + versioninfo.Version
 	githelper.Agent = helperAgent
-	httpUserAgent := helperAgent
+	httpUserAgent, err := resolveHTTPUserAgent(helperAgent, os.LookupEnv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		return 128
+	}
+	if httpUserAgent != helperAgent {
+		debuglog.Printf("http user-agent set from %s", httpUserAgentEnvVar)
+	}
 
 	rawURL := args[2]
 	parsedURL, err := url.Parse(rawURL)
 	switch {
 	case err != nil:
-		fmt.Fprintf(os.Stderr, "fatal: invalid URL %q: %v\n", rawURL, err)
+		fmt.Fprint(os.Stderr, invalidURLMessage(err))
 		return 128
 	case parsedURL.Scheme != "entire":
 		fmt.Fprintf(os.Stderr, "fatal: unsupported URL scheme %q (expected 'entire')\n", parsedURL.Scheme)
@@ -106,22 +114,11 @@ func run(args []string) int {
 
 	nodeCfg := replicas.Resolve(parsedURL)
 
-	// This client drives the auth path only: cluster /.well-known discovery
-	// and the token exchange. Both talk to a single control-plane host with no
-	// failover to fall back on, so they get the patient discovery dial budget
-	// (DiscoveryDialTimeout, i.e. DefaultDiscoveryDialTimeout unless
-	// ENTIRE_CONNECT_TIMEOUT_SECONDS overrides it) rather than the short failover
-	// one — a slow cold connect here would otherwise fail the whole clone/fetch.
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &httpclient.UserAgentTransport{
-			Next: &httpdebug.TimingRoundTripper{
-				Next:  httpclient.NewDiscoveryTransport(skipTLS),
-				Label: "auth",
-			},
-			UA: httpUserAgent,
-		},
-	}
+	// One discovery transport serves both the auth client and the proxy's cold
+	// entry probe, so the probe reuses the /.well-known connection to the
+	// entry host.
+	discoveryTransport := httpclient.NewDiscoveryTransport(skipTLS)
+	httpClient := newAuthHTTPClient(discoveryTransport, httpUserAgent)
 
 	creds, onUnauthorized, err := resolveCreds(ctx, parsedURL, skipTLS, httpClient)
 	if err != nil {
@@ -144,18 +141,86 @@ func run(args []string) int {
 		OnUnauthorized: onUnauthorized,
 		OnNodeFailed:   onNodeFailed,
 		UserAgent:      httpUserAgent,
+
+		DiscoveryTransport: discoveryTransport,
 	})
 
-	protocolVersion := resolveProtocolVersion()
+	protocolVersion := resolveProtocolVersion(ctx)
 	debuglog.Printf("git protocol.version=%d (v2 advertises stateless-connect + push; v0/v1 advertises connect)", protocolVersion)
 
 	helperStart := time.Now()
 	if err := githelper.Run(ctx, proxy, protocolVersion, os.Stdin, os.Stdout); err != nil {
-		fmt.Fprint(os.Stderr, fatalMessage(err, parsedURL))
+		debuglog.Printf("helper session failed: %v", err)
+		_, usesEnvToken := os.LookupEnv(auth.EnvTokenVar)
+		fmt.Fprintf(os.Stderr, "fatal: %s\n", userMessage(err, parsedURL, usesEnvToken))
 		return 128
 	}
 	debuglog.Printf("timing: helper-session dur_ms=%d", time.Since(helperStart).Milliseconds())
 	return 0
+}
+
+// userMessage renders a failed helper session as the text after "fatal: ".
+// The wrapped chain names protocol stages (stateless-connect, info/refs,
+// replica failover) that mean nothing to someone running git clone, so known
+// failures are restated in terms of the cluster and repository. The chain
+// itself goes to the ENTIRE_DEBUG trace. The cluster is the URL's host, which
+// never carries userinfo, so credentials typed into the URL are not echoed.
+//
+// The push-size and disk-space errors keep their own text, and so do
+// request-policy rejections such as an HTTPS-to-HTTP redirect. The migrate plugin
+// matches the push-too-large marker on git's stderr. Anything unrecognised
+// also prints verbatim, since the chain is then the only clue to the cause.
+//
+// usesEnvToken reports that ENTIRE_TOKEN was the bearer. A rejected token then
+// has to be replaced in the environment, and `entire login` would not help.
+func userMessage(err error, remote *url.URL, usesEnvToken bool) string {
+	cluster, repo := remote.Host, strings.Trim(remote.Path, "/")
+	var tooLarge *transport.PushTooLargeError
+	var lowDisk *transport.InsufficientStorageError
+	var status *transport.HTTPStatusError
+	switch {
+	case errors.As(err, &tooLarge):
+		return tooLarge.Error()
+	case errors.As(err, &lowDisk):
+		return lowDisk.Error()
+	case errors.Is(err, context.Canceled):
+		return "interrupted"
+	case errors.Is(err, httpclient.ErrRequestPolicy):
+		// A refused unsafe hop is a security diagnostic, not a connectivity
+		// or server problem. It prints in full even when another node also
+		// answered with an HTTP error.
+		return err.Error()
+	case errors.As(err, &status):
+		return statusMessage(status, cluster, repo, usesEnvToken)
+	case errors.Is(err, transport.ErrNoNodeSucceeded), errors.Is(err, transport.ErrUnreachable):
+		return fmt.Sprintf("could not reach any server for %s on %s. Check your connection and try again", repo, cluster)
+	}
+	return err.Error()
+}
+
+func statusMessage(status *transport.HTTPStatusError, cluster, repo string, usesEnvToken bool) string {
+	reason := ""
+	if status.ServerMsg != "" {
+		reason = " (" + status.ServerMsg + ")"
+	}
+	switch code := status.StatusCode; {
+	case code == http.StatusUnauthorized && usesEnvToken:
+		return fmt.Sprintf("%s rejected %s%s", cluster, auth.EnvTokenVar, reason)
+	case code == http.StatusUnauthorized:
+		return fmt.Sprintf("%s rejected your login%s. Run `entire login`, then try again", cluster, reason)
+	case code == http.StatusForbidden:
+		return fmt.Sprintf("you do not have access to %s on %s%s", repo, cluster, reason)
+	case code == http.StatusNotFound:
+		return fmt.Sprintf("repository %s not found on %s%s", repo, cluster, reason)
+	case code >= 500 && status.ServerMsg != "":
+		return fmt.Sprintf("%s could not handle the request (HTTP %d: %s). Try again later", cluster, code, status.ServerMsg)
+	case code >= 500:
+		return fmt.Sprintf("%s could not handle the request (HTTP %d). Try again later", cluster, code)
+	case status.ServerMsg != "":
+		return fmt.Sprintf("%s rejected the request (HTTP %d): %s", cluster, code, status.ServerMsg)
+	default:
+		return fmt.Sprintf("%s rejected the request (HTTP %d)", cluster, code)
+	}
 }
 
 type credentialProvider func(context.Context) (string, error)
@@ -228,41 +293,6 @@ func setAuthWithProvider(provider credentialProvider) transport.SetAuthFunc {
 	}
 }
 
-// wrongClusterRe extracts the host that actually serves the repo from the
-// data plane's `invalid_target` error_description (RFC 8693). The data plane
-// emits this when the audience host doesn't host the repo but a sibling
-// cluster does, naming the correct host so we can point the user at it. The
-// phrasing is "… it lives on \"<host>\" …"; anchoring on "lives on" keeps the
-// match tied to this specific, actionable case rather than other
-// invalid_target variants (e.g. a suspended mirror).
-var wrongClusterRe = regexp.MustCompile(`lives on "([^"]+)"`)
-
-// fatalMessage renders the stderr "fatal: …" line for a transfer error. When
-// the failure is the data plane reporting that the repo lives on a different
-// cluster, it special-cases the raw OAuth chain into an actionable message
-// naming the correct host (and the corrected entire:// URL). Everything else
-// falls back to the verbatim error.
-func fatalMessage(err error, parsedURL *url.URL) string {
-	var oe *sts.ExchangeError
-	if errors.As(err, &oe) && oe.Code == "invalid_target" {
-		if m := wrongClusterRe.FindStringSubmatch(oe.Description); m != nil {
-			host := m[1]
-			// Copy the URL the user typed and swap only the host, so any
-			// escaped path (RawPath) or query stays byte-identical to what
-			// they originally ran.
-			correctedURL := *parsedURL
-			correctedURL.Scheme = "entire"
-			correctedURL.Host = host
-			correctedURL.User = nil
-			corrected := correctedURL.String()
-			return fmt.Sprintf("fatal: this repository is not hosted on %s; it lives on %s.\n"+
-				"Re-run against the correct host, e.g.:\n\n    git clone %s\n",
-				parsedURL.Host, host, corrected)
-		}
-	}
-	return fmt.Sprintf("fatal: %v\n", err)
-}
-
 // missingClusterHostMessage renders the stderr "fatal: …" line for an entire://
 // URL that omits its cluster host. Two shapes reach here: a forge id typed
 // where the host belongs (entire://gh/owner/repo, Host="gh") and an empty host
@@ -275,10 +305,9 @@ func fatalMessage(err error, parsedURL *url.URL) string {
 //
 // The trailing segments are labelled per forge (gitremote.ForgePathLabels), so
 // a native path reads <project>/<repo> rather than a mirror's <owner>/<repo>.
-// The suggestion stays neutral about what `repo clone` will then do — it
-// prompts between clusters for a multi-cluster mirror, and goes straight to the
-// home cluster for a native ref — because naming the mirror picker here was
-// wrong for half the forges.
+// The suggestion stays neutral about what `repo clone` will then do — on
+// either forge it resolves the repo's readable clusters and prompts when there
+// is more than one — because describing that flow here would just drift.
 func missingClusterHostMessage(parsedURL *url.URL, rawURL string) string {
 	// Reconstruct the forge/owner/repo shorthand the user likely intended: a
 	// forge id in the host slot sits in front of the path; an empty host
@@ -292,13 +321,39 @@ func missingClusterHostMessage(parsedURL *url.URL, rawURL string) string {
 	// the failure into a clone command that rejects the ref.
 	seg := strings.Split(strings.Trim(shorthand, "/"), "/")
 	if len(seg) != 3 || seg[0] == "" || seg[1] == "" || seg[2] == "" || !gitremote.IsForgePathToken(seg[0]) {
-		return fmt.Sprintf("fatal: missing host in URL %q\n", rawURL)
+		shown := rawURL
+		if parsedURL.User != nil {
+			// url.Redacted masks only the password. The username can be a
+			// token too, so each part is masked separately. The shape still
+			// shows whether a username, a password, or both were given.
+			// Re-serialising only when userinfo is present keeps every other
+			// URL exactly as typed. String() would turn "entire://" into
+			// "entire:".
+			redacted := *parsedURL
+			redacted.User = url.User("xxxxx")
+			if _, hasPassword := parsedURL.User.Password(); hasPassword {
+				redacted.User = url.UserPassword("xxxxx", "xxxxx")
+			}
+			shown = redacted.String()
+		}
+		return fmt.Sprintf("fatal: missing host in URL %q\n", shown)
 	}
 	return fmt.Sprintf(
 		"fatal: entire:// URL is missing its cluster host (%q is a forge id, not a host).\n"+
 			"The full form is entire://<cluster-host>/%s/%s.\n"+
 			"To clone it, run:\n\n    entire repo clone /%s\n",
 		seg[0], seg[0], gitremote.ForgePathLabels(seg[0]), strings.Join(seg, "/"))
+}
+
+// invalidURLMessage renders the stderr line for a URL url.Parse rejected. It
+// prints only the parser's reason, because the *url.Error text quotes the raw
+// URL and with it any password typed into the userinfo.
+func invalidURLMessage(err error) string {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	return fmt.Sprintf("fatal: invalid URL: %v\n", err)
 }
 
 // loadedVersion populates the build info and returns the resolved version.
@@ -324,16 +379,67 @@ func infoFlagText(flag, version string) (string, bool) {
 	return "", false
 }
 
-// resolveProtocolVersion reads the effective protocol.version from
-// the GIT_PROTOCOL environment variable. The value is a colon-
-// separated list of key=value pairs (e.g. "version=2"). We accept
-// 0, 1, or 2; any other value emits a stderr warning and falls
-// back to 2 — upstream Git's default since 2.26.
-func resolveProtocolVersion() int {
-	return parseProtocolVersion(os.Getenv("GIT_PROTOCOL"), os.Stderr)
+// httpUserAgentEnvVar is git's own override for the HTTP User-Agent
+// header (git-config(1), http.userAgent: "Can be overridden by the
+// GIT_HTTP_USER_AGENT environment variable"). Git passes its environment
+// through to remote helpers, so the same knob reaches us.
+const httpUserAgentEnvVar = "GIT_HTTP_USER_AGENT"
+
+// newAuthHTTPClient builds the client that drives the auth path only:
+// cluster /.well-known discovery and the token exchange. Both talk to a
+// single control-plane host with no failover to fall back on, so they get
+// the patient discovery dial budget (DiscoveryDialTimeout, i.e.
+// DefaultDiscoveryDialTimeout unless ENTIRE_CONNECT_TIMEOUT_SECONDS
+// overrides it) rather than the short failover one — a slow cold connect
+// here would otherwise fail the whole clone/fetch. Split out of run() so
+// tests exercise the same chain the helper ships.
+func newAuthHTTPClient(base http.RoundTripper, ua string) *http.Client {
+	return httpclient.New(httpclient.Options{
+		Timeout: 30 * time.Second,
+		Transport: &httpclient.UserAgentTransport{
+			Next: &httpdebug.TimingRoundTripper{
+				Next:  base,
+				Label: "auth",
+			},
+			UA: ua,
+		},
+	})
 }
 
-func parseProtocolVersion(raw string, warn io.Writer) int {
+// resolveHTTPUserAgent returns the HTTP User-Agent to send, matching
+// git's handling of GIT_HTTP_USER_AGENT: a set value replaces defaultUA
+// verbatim, and a set-but-empty value sends no User-Agent header at all
+// (verified against git 2.55.0: curl drops the header for an empty
+// CURLOPT_USERAGENT; Go's net/http does the same for an empty header
+// value). Unset keeps defaultUA. The http.userAgent config key is not
+// read — the helper never shells out to `git config`, and git only
+// forwards -c values, not .gitconfig, in GIT_CONFIG_PARAMETERS.
+//
+// A value net/http would refuse (CR, LF, NUL, …) fails here, naming the
+// variable; otherwise every request dies later with an error that doesn't.
+//
+// lookup is os.LookupEnv in production; injected so tests stay parallel.
+func resolveHTTPUserAgent(defaultUA string, lookup func(string) (string, bool)) (string, error) {
+	ua, ok := lookup(httpUserAgentEnvVar)
+	if !ok {
+		return defaultUA, nil
+	}
+	if !httpguts.ValidHeaderFieldValue(ua) {
+		return "", fmt.Errorf("%s holds an invalid header character", httpUserAgentEnvVar)
+	}
+	return ua, nil
+}
+
+// resolveProtocolVersion reads protocol.version, then GIT_PROTOCOL.
+func resolveProtocolVersion(ctx context.Context) int {
+	out, err := exec.CommandContext(ctx, "git", "config", "--get", "protocol.version").Output()
+	if err == nil {
+		return parseProtocolVersion("version=" + strings.TrimSpace(string(out)))
+	}
+	return parseProtocolVersion(os.Getenv("GIT_PROTOCOL"))
+}
+
+func parseProtocolVersion(raw string) int {
 	const defaultVersion = 2
 	for kv := range strings.SplitSeq(raw, ":") {
 		k, v, ok := strings.Cut(kv, "=")
@@ -348,7 +454,7 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 		case "2":
 			return 2
 		}
-		fmt.Fprintf(warn, "git-remote-entire: ignoring unrecognised protocol.version=%q; defaulting to %d\n", v, defaultVersion)
+		debuglog.Printf("ignoring unrecognised protocol.version=%q; defaulting to %d", v, defaultVersion)
 		return defaultVersion
 	}
 	return defaultVersion
@@ -362,6 +468,10 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 //   - otherwise: resolve the login context for this cluster from contexts.json
 //     and use its refreshed login JWT.
 func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
+	// Fail before any network call.
+	if err := auth.CheckTokenStoreConfig(); err != nil {
+		return nil, nil, err //nolint:wrapcheck // already names the file
+	}
 	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,
 	// not Getenv, so we can tell set-empty from unset), we commit to the
 	// env-token path and any failure to use it is fatal — never a silent
@@ -384,11 +494,10 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	// by one of them. No other saved login is substituted, so which identity
 	// pushed or fetched is always readable from current_context.
 	cfgDir := userdirs.Config()
-	clusterAuth, err := clusterdiscovery.ResolveClusterAuth(ctx, cfgDir, userdirs.Cache(), parsedURL.Host, httpClient, debuglog.Printf)
+	clusterCtx, err := clusterdiscovery.ResolveContextForCluster(ctx, cfgDir, userdirs.Cache(), parsedURL.Host, httpClient, debuglog.Printf)
 	if err != nil {
-		return nil, nil, err //nolint:wrapcheck // ResolveClusterAuth already returns a user-facing error; preserved verbatim for the "fatal: <msg>" surface
+		return nil, nil, err //nolint:wrapcheck // ResolveContextForCluster already returns a user-facing error; preserved verbatim for the "fatal: <msg>" surface
 	}
-	clusterCtx := clusterAuth.Context
 
 	// The login-JWT provider transparently refreshes an expired login JWT
 	// from the stored refresh token (serialised across processes, rotated
@@ -454,10 +563,9 @@ func coreTrusted(coreURL string, trusted []string) bool {
 }
 
 // gitActionFromRequest classifies a smart-HTTP request as "pull" or "push".
-// The jurisdiction token doesn't vary by action, but the classification
-// still gates which endpoints may carry credentials (and labels the timing
-// logs). Returns "" when the endpoint isn't a recognised git smart-HTTP
-// route.
+// The bearer doesn't vary by action, but the classification still gates
+// which endpoints may carry credentials (and labels the timing logs).
+// Returns "" when the endpoint isn't a recognised git smart-HTTP route.
 func gitActionFromRequest(req *http.Request) string {
 	path := req.URL.Path
 	switch req.Method {

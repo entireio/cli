@@ -31,18 +31,17 @@ const transcriptReadPattern = `os\.(ReadFile|Open)\((sessionRef|transcriptPath)\
 //
 // Do NOT close a finding here by anchoring a root on filepath.Dir(sessionRef).
 // That puts every component the resolver produced above the root, so it contains
-// nothing while looking like it does. See "The Root Anchors" in CLAUDE.md.
+// nothing while looking like it does. See
+// docs/development/filesystem-safety.md#the-root-anchors.
 var unconfinedTranscriptReads = map[string]int{
+	"cmd/entire/cli/agent/antigravity/transcript.go":        1,
 	"cmd/entire/cli/agent/claudecode/lifecycle.go":          1,
 	"cmd/entire/cli/agent/codex/codex.go":                   1,
 	"cmd/entire/cli/agent/codex/transcript.go":              1,
 	"cmd/entire/cli/agent/copilotcli/copilotcli.go":         1,
-	"cmd/entire/cli/agent/copilotcli/transcript.go":         3,
+	"cmd/entire/cli/agent/copilotcli/transcript.go":         2,
 	"cmd/entire/cli/agent/cursor/lifecycle.go":              1,
-	"cmd/entire/cli/agent/cursor/transcript.go":             1,
 	"cmd/entire/cli/agent/factoryaidroid/factoryaidroid.go": 1,
-	"cmd/entire/cli/agent/factoryaidroid/lifecycle.go":      1,
-	"cmd/entire/cli/agent/geminicli/lifecycle.go":           1,
 	"cmd/entire/cli/agent/vogon/vogon.go":                   1,
 
 	// The integration harness reads a transcript it wrote itself, in a temp

@@ -15,7 +15,9 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -154,9 +156,25 @@ type EntireSettings struct {
 	// `entire review`.
 	ReviewFixAgent string `json:"review_fix_agent,omitempty"`
 
-	// Investigate holds configuration for `entire investigate`. Empty means
-	// `entire investigate` triggers the first-run picker.
-	Investigate *InvestigateConfig `json:"investigate,omitempty"`
+	// Deprecated: `entire investigate` moved to the entire-investigate plugin,
+	// which owns its configuration in .entire/investigate.local.json. This
+	// field is no longer read by anything.
+	//
+	// It is kept, and kept as a raw message, so the strict loader
+	// (DisallowUnknownFields) still accepts an "investigate" key left behind in
+	// an existing settings file. Dropping it outright would make settings
+	// unloadable — and so the whole CLI unusable — in every repository that
+	// still has one. Same reasoning as LocalDev above. Do not reintroduce a
+	// typed struct here: the plugin parses its own file.
+	//
+	// Any well-formed JSON value is accepted and none of it is interpreted.
+	// That is the whole contract — the shape of an old investigate block is
+	// not this CLI's business any more, and validating it would re-couple the
+	// two. Well-formed is not a promise this field makes, it is one the
+	// decoder has already kept: a json.RawMessage is only ever populated by a
+	// decoder that scanned the value to find its end, so malformed content
+	// fails the surrounding settings parse long before it reaches here.
+	Investigate json.RawMessage `json:"investigate,omitempty"`
 
 	// CommitLinking controls how commits are linked to agent sessions.
 	// "always" = auto-link without prompting, "prompt" = ask on each commit.
@@ -231,6 +249,11 @@ type ClonePreferences struct {
 	ReviewProfiles       map[string]ReviewProfileConfig `json:"review_profiles,omitempty"`
 	ReviewDefaultProfile string                         `json:"review_default_profile,omitempty"`
 
+	// ReviewAgentConfigs holds reviewer agent configs by profile, then
+	// reviewer. They overlay the effective profile at load, so the profile's
+	// other fields keep coming from whichever layer defines them.
+	ReviewAgentConfigs map[string]map[string]*ReviewAgentConfig `json:"review_agent_configs,omitempty"`
+
 	// Deprecated: legacy pre-profile review settings. Kept so old preference
 	// files parse. New review setup writes ReviewProfiles instead, while
 	// `entire review` may read Review as a fallback when profiles are absent.
@@ -242,6 +265,20 @@ type ClonePreferences struct {
 	// Once true, `entire review` stops prompting on every invocation; the
 	// user can re-enable by editing this file or deleting the key.
 	ReviewMigrationDismissed bool `json:"review_migration_dismissed,omitempty"`
+
+	// CheckpointRemoteClaimDeclined records the `provider:repo` the user
+	// declined when `entire enable` offered to claim a refused
+	// checkpoint_remote, so the confirm prompt is asked once per store
+	// instead of on every run. Only the prompt is one-shot: the line saying
+	// the store is being ignored still prints every time, because that is
+	// the condition the user has to be able to discover.
+	//
+	// The declined value rather than a bool, because a repo that later
+	// configures a DIFFERENT store is a new question. Clone preferences
+	// rather than settings.local.json, so declining once covers every
+	// worktree of the clone and so a committed file can never suppress the
+	// prompt.
+	CheckpointRemoteClaimDeclined string `json:"checkpoint_remote_claim_declined,omitempty"`
 
 	// TrailsEnabled caches whether trails are enabled for this repository on the
 	// API. Pointer shape distinguishes "unknown/not refreshed yet" (nil) from a
@@ -262,13 +299,28 @@ type ClonePreferences struct {
 	TrailsAgentHelpFailureRepoKey  string     `json:"trails_agent_help_failure_repo_key,omitempty"`
 	TrailsAgentHelpFailureAPIBase  string     `json:"trails_agent_help_failure_api_base,omitempty"`
 	TrailsAgentHelpFailureAuthKey  string     `json:"trails_agent_help_failure_auth_key,omitempty"`
+
+	// CheckpointPushQuestionBackoffUntil postpones the first-push policy
+	// question after it went unanswered, as an RFC 3339 time. A string rather
+	// than a time so a malformed value only brings the question back: a decode
+	// error would fail every clone-preferences read and turn Entire's git hooks
+	// off.
+	CheckpointPushQuestionBackoffUntil string `json:"checkpoint_push_question_backoff_until,omitempty"`
+
+	// OPFDeprecationNoticeShown records that pre-push told this clone OPF is
+	// deprecated, in place of the policy question.
+	OPFDeprecationNoticeShown bool `json:"opf_deprecation_notice_shown,omitempty"`
+
+	// unknown holds keys this binary does not model, written back unchanged so
+	// a rewrite by one version does not delete another version's preferences.
+	unknown map[string]json.RawMessage
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand
 // checkpoint summaries generated by explain --generate.
 type SummaryGenerationSettings struct {
 	// Provider is the selected summary provider agent name
-	// (for example "claude-code", "codex", "gemini", or "pi").
+	// (for example "claude-code", "codex", or "pi").
 	Provider string `json:"provider,omitempty"`
 
 	// Model is an optional model hint passed to the selected provider.
@@ -318,12 +370,15 @@ type RedactionSettings struct {
 	// bundled detectors don't know about, project codenames, or any other
 	// string pattern you don't want stored. Each match is replaced with the
 	// bare "REDACTED" token used by the built-in secret layers, not the
-	// "[REDACTED_<LABEL>]" token used by PII. Failed regex compilations are
-	// logged via slog.Warn and the rule is skipped.
+	// "[REDACTED_<LABEL>]" token used by PII. A pattern that fails to compile
+	// or can match the empty string is logged via slog.Warn and skipped.
 	CustomRedactions map[string]string `json:"custom_redactions,omitempty"`
 
 	// OpenAIPrivacyFilter is the optional 8th redaction layer (opt-in).
-	// See docs/security-and-privacy.md.
+	//
+	// Deprecated: the OpenAI Privacy Filter will be removed in a future
+	// release. Existing configurations keep working until then; do not build
+	// new behavior on it.
 	OpenAIPrivacyFilter *OPFSettings `json:"openai_privacy_filter,omitempty"`
 
 	// ExternalizeImages opts into lifting inline base64 images out of transcripts
@@ -348,12 +403,14 @@ type ScannerSettings struct {
 }
 
 // PIISettings configures PII detection categories.
-// When Enabled is true, email and phone default to true; address defaults to false.
+// When Enabled is true, email, phone and ip default to true; address defaults
+// to false.
 type PIISettings struct {
 	Enabled        bool              `json:"enabled"`
 	Email          *bool             `json:"email,omitempty"`
 	Phone          *bool             `json:"phone,omitempty"`
 	Address        *bool             `json:"address,omitempty"`
+	IP             *bool             `json:"ip,omitempty"`
 	CustomPatterns map[string]string `json:"custom_patterns,omitempty"`
 }
 
@@ -512,45 +569,31 @@ type ReviewConfig struct {
 	// settings by any route other than Load() (LoadFromFile, LoadFromBytes)
 	// get the ungated value and must not hand it to an agent.
 	Prompt string `json:"prompt,omitempty"`
+
+	// Config, when set, replaces the reviewed checkout's agent config for this
+	// reviewer: the checkout's hooks, MCP servers and extensions are not
+	// loaded, and these are used instead. Presence (even {}) means isolated.
+	//
+	// It names commands Entire runs, so Load() honors it only from a
+	// developer-owned layer, like Prompt; see enforceAgentPromptTrust.
+	Config *ReviewAgentConfig `json:"config,omitempty"`
+}
+
+// ReviewAgentConfig is a reviewer's own agent config, in each agent's native
+// shape. Which fields an agent accepts is checked when the review runs.
+type ReviewAgentConfig struct {
+	// Settings is a Claude Code settings object (hooks, permissions, env, ...).
+	Settings json.RawMessage `json:"settings,omitempty"`
+	// MCPServers maps a server name to its definition ({command, args, env}
+	// or {url}), for Claude Code and Codex.
+	MCPServers map[string]json.RawMessage `json:"mcp_servers,omitempty"`
+	// Extensions are absolute paths of Pi extension files.
+	Extensions []string `json:"extensions,omitempty"`
 }
 
 // IsZero reports whether the config is effectively unset.
 func (c ReviewConfig) IsZero() bool {
-	return c.Agent == "" && c.Model == "" && len(c.Skills) == 0 && c.Prompt == ""
-}
-
-// InvestigateConfig holds the configuration for `entire investigate`.
-// Unlike ReviewConfig, investigate runs the same shared prompt across
-// all configured agents, so the schema is a flat agent list with global
-// loop knobs rather than per-agent skill lists.
-type InvestigateConfig struct {
-	// Agents is the ordered list of agent names to round-robin during the loop.
-	Agents []string `json:"agents,omitempty"`
-
-	// MaxTurns is the per-agent turn budget. Defaults to 2 when zero
-	// (see investigate.defaultMaxTurns).
-	MaxTurns int `json:"max_turns,omitempty"`
-
-	// Quorum is the count of `approve` stances needed to terminate the loop.
-	// Zero means "all agents must approve" (matches marvin's default).
-	Quorum int `json:"quorum,omitempty"`
-
-	// AlwaysPrompt is appended to every turn's composed prompt, parallel
-	// to ReviewConfig.Prompt.
-	//
-	// Investigate agents run with approval checks disabled, so Load() honors
-	// this field only from an untracked .entire/settings.local.json and resets
-	// it to "" otherwise, the same gate ReviewConfig.Prompt gets. See
-	// enforceAgentPromptTrust.
-	AlwaysPrompt string `json:"always_prompt,omitempty"`
-}
-
-// IsZero reports whether the config is effectively unset.
-func (c *InvestigateConfig) IsZero() bool {
-	if c == nil {
-		return true
-	}
-	return len(c.Agents) == 0 && c.MaxTurns == 0 && c.Quorum == 0 && c.AlwaysPrompt == ""
+	return c.Agent == "" && c.Model == "" && len(c.Skills) == 0 && c.Prompt == "" && c.Config == nil
 }
 
 // LocalLayerRejection reports why .entire/settings.local.json was ignored, or
@@ -586,16 +629,6 @@ func (s *EntireSettings) SymlinkedAgentDirsRejection() (reason string, rejected 
 		return "", false
 	}
 	return s.symlinkedAgentDirsRejection, true
-}
-
-// InvestigateConfig returns the configured investigate config. Returns nil
-// when no configuration is present; callers should check IsZero (or guard
-// for nil) to decide whether configuration is present.
-func (s *EntireSettings) InvestigateConfig() *InvestigateConfig {
-	if s == nil {
-		return nil
-	}
-	return s.Investigate
 }
 
 // BetterleaksEnabled reports whether the betterleaks scanner runs.
@@ -766,12 +799,16 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// openai_privacy_filter.command is executed, so it is honored only from a
 	// local file positively verified as this developer's own. external_agents
 	// grants execution of every entire-agent-* binary on $PATH, so it gets the
-	// same gate. Agent instruction fields (investigate.always_prompt, review
-	// prompts) are appended verbatim to prompts of agents spawned with
-	// approval checks disabled, so they get the same provenance requirement,
-	// with clone-local preferences as an additional trusted layer.
+	// same gate. Agent instruction fields (review prompts and profile tasks)
+	// are appended verbatim to prompts of agents spawned with approval checks
+	// disabled, so they get the same provenance requirement, with clone-local
+	// preferences as an additional trusted layer. `investigate.always_prompt`
+	// was gated here too until investigate moved to the entire-investigate
+	// plugin; the plugin applies the equivalent check to its own config file,
+	// and the deprecated `investigate` key left in settings is not read.
 	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
 	enforceExternalAgentsTrust(ctx, settings, localSettingsFileAbs, localData)
+	applyClonePreferenceAgentConfigs(settings, preferences, localData)
 	enforceAgentPromptTrust(ctx, settings, localSettingsFileAbs, localData, preferences)
 	// allow_symlinked_agent_dirs decides where Entire writes an agent's hook
 	// config, so it gets the same gate, and then installs the surviving set as
@@ -834,26 +871,6 @@ func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMe
 // unrelated keys in the per-developer override file.
 func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
 	return loadRaw(ctx, EntireSettingsLocalFile, "local")
-}
-
-// LoadLocalBytes reads .entire/settings.local.json's raw bytes through the
-// shared .entire root, returning nil when the file does not exist. It exists so
-// callers that decode the local layer themselves (they need LoadFromBytes'
-// no-defaults semantics, not loadFromFile's Enabled: true) still read the file
-// through this package rather than reaching for os.ReadFile on a joined path.
-func LoadLocalBytes(ctx context.Context) ([]byte, error) {
-	filePath, err := entiredir.PathTo(ctx, EntireSettingsLocalFile)
-	if err != nil {
-		return nil, fmt.Errorf("resolve local settings path: %w", err)
-	}
-	data, err := readConfined(filePath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading local settings: %w", err)
-	}
-	return data, nil
 }
 
 // loadRaw reads a settings file as a generic JSON object. label ("project" or
@@ -1183,17 +1200,57 @@ func loadClonePreferencesFromFile(filePath string) (*ClonePreferences, error) {
 	//      typo-silently-ignored downside is theoretical here.
 	// EntireSettings stays strict because it's committed and team-edited,
 	// where unknown keys usually mean typos worth surfacing immediately.
-	if err := json.Unmarshal(data, prefs); err != nil {
+	//
+	// Unknown keys are kept, not dropped, so saving them back is lossless.
+	// Only exact known keys reach the struct: encoding/json matches field
+	// names case-insensitively, so decoding the whole object would let a case
+	// variant set a field and also be kept as unknown.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parsing preferences file: %w", err)
+	}
+	knownKeys := clonePreferencesJSONKeys()
+	known := make(map[string]json.RawMessage, len(raw))
+	for key, value := range raw {
+		if _, ok := knownKeys[key]; ok {
+			known[key] = value
+			continue
+		}
+		if prefs.unknown == nil {
+			prefs.unknown = make(map[string]json.RawMessage)
+		}
+		prefs.unknown[key] = value
+	}
+	knownData, err := json.Marshal(known)
+	if err != nil {
+		return nil, fmt.Errorf("parsing preferences file: %w", err)
+	}
+	if err := json.Unmarshal(knownData, prefs); err != nil {
 		return nil, fmt.Errorf("parsing preferences file: %w", err)
 	}
 	return prefs, nil
 }
 
+// clonePreferencesJSONKeys holds the JSON key of every ClonePreferences
+// field, so a new field is recognized without a second list to update.
+var clonePreferencesJSONKeys = sync.OnceValue(func() map[string]struct{} {
+	t := reflect.TypeFor[ClonePreferences]()
+	keys := make(map[string]struct{}, t.NumField())
+	for field := range t.Fields() {
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if !field.IsExported() || name == "" || name == "-" {
+			continue
+		}
+		keys[name] = struct{}{}
+	}
+	return keys
+})
+
 func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error {
 	if prefs == nil {
 		prefs = &ClonePreferences{}
 	}
-	data, err := jsonutil.MarshalIndentWithNewline(prefs, "", "  ")
+	data, err := marshalClonePreferences(prefs)
 	if err != nil {
 		return fmt.Errorf("marshaling preferences: %w", err)
 	}
@@ -1202,6 +1259,27 @@ func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error 
 		return fmt.Errorf("writing preferences file: %w", err)
 	}
 	return nil
+}
+
+// marshalClonePreferences writes the modeled fields and then the unknown keys
+// loaded with them. Loading never keeps a modeled key as unknown, so the two
+// sets cannot collide.
+func marshalClonePreferences(prefs *ClonePreferences) ([]byte, error) {
+	if len(prefs.unknown) == 0 {
+		return jsonutil.MarshalIndentWithNewline(prefs, "", "  ") //nolint:wrapcheck // caller wraps
+	}
+	modeled, err := json.Marshal(prefs)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // caller wraps
+	}
+	merged := make(map[string]json.RawMessage, len(prefs.unknown))
+	if err := json.Unmarshal(modeled, &merged); err != nil {
+		return nil, err //nolint:wrapcheck // caller wraps
+	}
+	for key, value := range prefs.unknown {
+		merged[key] = value
+	}
+	return jsonutil.MarshalIndentWithNewline(merged, "", "  ") //nolint:wrapcheck // caller wraps
 }
 
 // mergeReviewProfiles overlays src review profiles onto base by name, returning
@@ -1217,7 +1295,7 @@ func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error 
 // result is always a fresh, non-nil map (empty when both inputs are empty), so
 // callers never receive nil from a non-nil input.
 func mergeReviewProfiles(base, src map[string]ReviewProfileConfig) map[string]ReviewProfileConfig {
-	out := make(map[string]ReviewProfileConfig, len(base)+len(src))
+	out := make(map[string]ReviewProfileConfig, len(base))
 	for name, cfg := range base {
 		out[name] = cfg
 	}
@@ -1285,6 +1363,35 @@ func clonePreferencesRoot(filePath string) (*os.Root, string, error) {
 		return nil, "", fmt.Errorf("open git common dir: %w", err)
 	}
 	return root, name, nil
+}
+
+// applyClonePreferenceAgentConfigs overlays clone-local reviewer configs on
+// the effective profiles. It runs after the local file is merged, since that
+// file replaces a profile it defines; a config the local file sets itself
+// wins.
+func applyClonePreferenceAgentConfigs(settings *EntireSettings, prefs *ClonePreferences, localData []byte) {
+	if prefs == nil {
+		return
+	}
+	var localRaw map[string]json.RawMessage
+	if len(localData) > 0 && json.Unmarshal(localData, &localRaw) != nil {
+		localRaw = nil
+	}
+	for name, workers := range prefs.ReviewAgentConfigs {
+		profile, ok := settings.ReviewProfiles[name]
+		if !ok {
+			continue
+		}
+		agents := make(map[string]ReviewConfig, len(profile.Agents))
+		for worker, cfg := range profile.Agents {
+			if agentCfg, ok := workers[worker]; ok && !rawHasKey(localRaw, "review_profiles", name, "agents", worker, "config") {
+				cfg.Config = agentCfg
+			}
+			agents[worker] = cfg
+		}
+		profile.Agents = agents
+		settings.ReviewProfiles[name] = profile
+	}
 }
 
 func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
@@ -1370,19 +1477,16 @@ func mergeJSON(settings *EntireSettings, data []byte) error {
 	return nil
 }
 
-// mergeInvestigate replaces the investigate config from the override (whole-object
-// replacement, parallel to how summary_generation is handled but simpler — the
-// investigate schema is small and lacks per-field merge semantics).
+// mergeInvestigate carries a deprecated "investigate" key across the merge
+// unparsed. Nothing reads the value; the merge exists so an override layer
+// that still carries the key produces the same settings object as before,
+// rather than the key silently reappearing from a lower layer.
 func mergeInvestigate(settings *EntireSettings, raw map[string]json.RawMessage) error {
 	investigateRaw, ok := raw["investigate"]
 	if !ok {
 		return nil
 	}
-	var cfg InvestigateConfig
-	if err := unmarshalField("investigate", investigateRaw, &cfg); err != nil {
-		return err
-	}
-	settings.Investigate = &cfg
+	settings.Investigate = investigateRaw
 	return nil
 }
 
@@ -1729,6 +1833,13 @@ func mergePIISettings(dst *PIISettings, data json.RawMessage) error {
 		}
 		dst.Address = &b
 	}
+	if v, ok := raw["ip"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			return fmt.Errorf("parsing pii.ip: %w", err)
+		}
+		dst.IP = &b
+	}
 	if v, ok := raw["custom_patterns"]; ok {
 		if err := mergeStringMap(&dst.CustomPatterns, v, "pii.custom_patterns"); err != nil {
 			return err
@@ -1865,16 +1976,6 @@ func (s *EntireSettings) IsTelemetryEnabled() bool {
 	return s != nil && s.Telemetry != nil && *s.Telemetry
 }
 
-// IsTelemetryEnabled loads settings and reports the telemetry opt-in. Returns
-// false when settings cannot be loaded — telemetry never fails open.
-func IsTelemetryEnabled(ctx context.Context) bool {
-	s, err := Load(ctx)
-	if err != nil {
-		return false
-	}
-	return s.IsTelemetryEnabled()
-}
-
 // IsSummarizeEnabled checks if auto-summarize is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsSummarizeEnabled(ctx context.Context) bool {
@@ -1981,6 +2082,25 @@ func CheckpointRemoteIsLocalOnly(ctx context.Context) bool {
 	return classifyLocalSettingsDeep(ctx, path) == localOwn
 }
 
+// CheckpointRemoteLocalClaimRejection explains why writing a local declaration
+// cannot establish ownership. Check both index and HEAD, even before the local
+// file exists, so a staged removal cannot turn inherited settings into consent.
+func CheckpointRemoteLocalClaimRejection(ctx context.Context) string {
+	path, _, _, err := LoadLocalRaw(ctx)
+	if err != nil {
+		return "Cannot read .entire/settings.local.json; fix the local settings file before confirming this checkpoint store"
+	}
+	switch classifyLocalSettingsDeep(ctx, path) {
+	case localTracked:
+		return ".entire/settings.local.json is tracked in the index or HEAD, so it is not your own untracked settings file. Untrack it, commit its removal from Git, and keep your local copy ignored before confirming this checkpoint store"
+	case localUnverifiable:
+		return "Cannot verify that .entire/settings.local.json is your own untracked settings file; fix repository access before confirming this checkpoint store"
+	case localOwn:
+		return ""
+	}
+	return ""
+}
+
 // GetCheckpointRemote returns the configured checkpoint remote.
 // Expects a structured object: {"provider": "github", "repo": "org/repo"}.
 // Returns nil if not configured, wrong type, or missing required fields.
@@ -2005,6 +2125,67 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 		return nil
 	}
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
+}
+
+// SetCheckpointPushRemoteLocal records an explicit clone-local checkpoint push
+// remote, preserving unrelated local fields and leaving project settings alone.
+// The caller must validate that name identifies an existing git remote.
+// It returns false without writing when the same local override is effective.
+func SetCheckpointPushRemoteLocal(ctx context.Context, name string) (bool, error) {
+	if name == "" {
+		return false, errors.New("checkpoint push remote name must not be empty")
+	}
+	effective, err := Load(ctx)
+	if err != nil {
+		return false, err
+	}
+	if reason := effective.LocalLayerRejection(); reason != "" {
+		return false, fmt.Errorf("cannot set checkpoint push remote: local settings ignored: %s", reason)
+	}
+	path, raw, _, err := LoadLocalRaw(ctx)
+	if err != nil {
+		return false, err
+	}
+	if raw == nil {
+		return false, errors.New("local settings must be a JSON object")
+	}
+	options := map[string]json.RawMessage{}
+	if data, exists := raw["strategy_options"]; exists {
+		if err := json.Unmarshal(data, &options); err != nil {
+			return false, fmt.Errorf("parsing local strategy_options: %w", err)
+		}
+		if options == nil {
+			return false, errors.New("local strategy_options must be a JSON object")
+		}
+	}
+	if data, exists := options["checkpoint_push_remote"]; exists {
+		var current string
+		if err := json.Unmarshal(data, &current); err != nil {
+			return false, fmt.Errorf("parsing local checkpoint_push_remote: %w", err)
+		}
+		if current == name && effective.GetCheckpointPushRemote() == name {
+			return false, nil
+		}
+	}
+	options["checkpoint_push_remote"], err = json.Marshal(name)
+	if err != nil {
+		return false, fmt.Errorf("encoding checkpoint push remote: %w", err)
+	}
+	raw["strategy_options"], err = json.Marshal(options)
+	if err != nil {
+		return false, fmt.Errorf("encoding local strategy_options: %w", err)
+	}
+	if err := SaveLocalRaw(path, raw); err != nil {
+		return false, err
+	}
+	effective, err = Load(ctx)
+	if err != nil {
+		return true, fmt.Errorf("verifying checkpoint push remote: %w", err)
+	}
+	if effective.GetCheckpointPushRemote() != name || effective.LocalLayerRejection() != "" {
+		return true, errors.New("saved local checkpoint push remote is not effective")
+	}
+	return true, nil
 }
 
 // GetCheckpointPushRemote returns the configured checkpoint push remote name.
@@ -2032,6 +2213,31 @@ func (s *EntireSettings) IsFilteredFetchesEnabled() bool {
 	}
 	val, ok := s.StrategyOptions["filtered_fetches"].(bool)
 	return ok && val
+}
+
+// maxCheckpointRefListTimeout caps
+// strategy_options.checkpoint_ref_list_timeout_seconds. The setting usually
+// comes from a committed settings.json, so a cloned repository must not be able
+// to make a names-only listing wait longer than one full checkpoint read fetch
+// (remote.ReadFetchTimeout).
+const maxCheckpointRefListTimeout = 2 * time.Minute
+
+// CheckpointRefListTimeoutValue returns how long remote checkpoint discovery
+// waits for each remote to list checkpoint refs, from
+// strategy_options.checkpoint_ref_list_timeout_seconds. Zero means unset (the
+// option is absent, not a number, or not positive) and the caller uses its
+// default. Values above maxCheckpointRefListTimeout are capped to it.
+func (s *EntireSettings) CheckpointRefListTimeoutValue() time.Duration {
+	if s.StrategyOptions == nil {
+		return 0
+	}
+	// JSON numbers decode into map[string]any as float64.
+	secs, ok := s.StrategyOptions["checkpoint_ref_list_timeout_seconds"].(float64)
+	if !ok || secs <= 0 {
+		return 0
+	}
+	// Cap in seconds before converting so a huge value cannot overflow Duration.
+	return time.Duration(min(secs, maxCheckpointRefListTimeout.Seconds()) * float64(time.Second))
 }
 
 // IsPushSessionsDisabled checks if push_sessions is disabled in settings.

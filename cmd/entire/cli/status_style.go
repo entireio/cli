@@ -138,8 +138,7 @@ type explainRow struct {
 // identityBullet renders "● <label> <id>\n". Bullet is the brand accent
 // (magenta) when color is enabled; ID is also the accent to mirror the existing
 // checkpoint header. When
-// id is empty (e.g., temporary checkpoints append "[temporary]" to the label
-// instead of using an id slot), the trailing space + id is suppressed.
+// id is empty, the trailing space + id is suppressed.
 func (s statusStyles) identityBullet(label, id string) string {
 	if id == "" {
 		if !s.colorEnabled {

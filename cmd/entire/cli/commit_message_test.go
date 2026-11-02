@@ -236,10 +236,10 @@ func TestGenerateCommitMessage(t *testing.T) {
 			expected:  "Cursor session updates",
 		},
 		{
-			name:      "returns Gemini CLI fallback for empty prompt",
+			name:      "returns Copilot CLI fallback for empty prompt",
 			prompt:    "",
-			agentType: agent.AgentTypeGemini,
-			expected:  "Gemini CLI session updates",
+			agentType: agent.AgentTypeCopilotCLI,
+			expected:  "Copilot CLI session updates",
 		},
 		{
 			name:      "returns OpenCode fallback for empty prompt",

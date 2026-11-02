@@ -21,11 +21,6 @@ var experimentalCommands = []experimentalCommandInfo{
 		Summary:     "Run a multi-agent review against the current branch",
 	},
 	{
-		CommandPath: []string{"investigate"},
-		Invocation:  "entire investigate",
-		Summary:     "Run a multi-agent investigation against a topic, issue, or seed doc",
-	},
-	{
 		CommandPath: []string{"import", "claude-code"},
 		Invocation:  "entire import claude-code",
 		Summary:     "Import existing Claude Code transcripts as local, read-only history",
@@ -101,7 +96,6 @@ Available experimental commands:
 ` + renderExperimentalCommands(experimentalCommands) + `
 Try:
   entire review --help
-  entire investigate --help
   entire tokens --help
   entire tokens profile --help
   entire session tokens --help

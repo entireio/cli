@@ -2,6 +2,7 @@ package redact
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"regexp/syntax"
@@ -11,12 +12,13 @@ import (
 // CustomRulesConfig configures inline custom_redactions and parsed rule packs.
 type CustomRulesConfig struct {
 	// Inline maps a label (used only in logs/diagnostics) to a Go RE2 regex
-	// string. Failed compilations are logged to Logger and dropped.
+	// string. Patterns that fail to compile or can match the empty string are
+	// logged to Logger and dropped.
 	Inline map[string]string
 
-	// Packs are pre-parsed rule packs (see LoadPacks). Per-rule regex
-	// compilation failures are logged and dropped; sample mismatches are
-	// logged but do not drop the rule.
+	// Packs are pre-parsed rule packs (see LoadPacks). Rules rejected the
+	// same way as Inline are logged and dropped individually; sample
+	// mismatches are logged but do not drop the rule.
 	Packs []*Pack
 
 	// Logger receives this package's diagnostics (rule compile errors,
@@ -61,7 +63,13 @@ func loggerOrDefault(l *slog.Logger) *slog.Logger {
 	return slog.Default()
 }
 
-// compileErrorAttr describes a regex compile failure without the pattern
+// errMatchesEmpty rejects a user pattern that can match zero characters.
+// Every zero-length match would insert a REDACTED token, and patterns such as
+// "", `x*`, or `ACME|` produce one at every position they do not otherwise
+// match.
+var errMatchesEmpty = errors.New("pattern can match the empty string")
+
+// compileErrorAttr describes a rejected pattern without the pattern
 // text: regexp error strings quote the full pattern verbatim, and these
 // warnings are persisted to .entire/logs/ and packaged by doctor bundle. A
 // user who pastes a literal secret as a custom_redactions value and gets the
@@ -70,16 +78,72 @@ func loggerOrDefault(l *slog.Logger) *slog.Logger {
 // attrs beside this identify which pattern to fix; the user owns its text.
 func compileErrorAttr(err error) slog.Attr {
 	var serr *syntax.Error
-	if errors.As(err, &serr) {
+	switch {
+	case errors.As(err, &serr):
 		return slog.String("error", string(serr.Code))
+	case errors.Is(err, errMatchesEmpty):
+		return slog.String("error", errMatchesEmpty.Error())
+	default:
+		return slog.String("error", "regex compile failed")
 	}
-	return slog.String("error", "regex compile failed")
+}
+
+// compileUserPattern compiles a user-authored regex (inline rule, pack rule,
+// or PII custom pattern), rejecting one that can match the empty string.
+func compileUserPattern(pattern string) (*regexp.Regexp, error) {
+	parsed, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return nil, fmt.Errorf("parse pattern: %w", err)
+	}
+	if canMatchEmpty(parsed) {
+		return nil, errMatchesEmpty
+	}
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("compile pattern: %w", err)
+	}
+	return compiled, nil
+}
+
+// canMatchEmpty reports whether re can complete a match without consuming a
+// character. Zero-width assertions count as empty, which is what catches `\b`:
+// it never matches the empty input, yet matches zero characters at every word
+// boundary.
+func canMatchEmpty(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpNoMatch, syntax.OpLiteral, syntax.OpCharClass, syntax.OpAnyCharNotNL, syntax.OpAnyChar:
+		return false
+	case syntax.OpEmptyMatch, syntax.OpBeginLine, syntax.OpEndLine, syntax.OpBeginText, syntax.OpEndText,
+		syntax.OpWordBoundary, syntax.OpNoWordBoundary, syntax.OpStar, syntax.OpQuest:
+		return true
+	case syntax.OpCapture, syntax.OpPlus:
+		return canMatchEmpty(re.Sub[0])
+	case syntax.OpRepeat:
+		return re.Min == 0 || canMatchEmpty(re.Sub[0])
+	case syntax.OpConcat:
+		for _, sub := range re.Sub {
+			if !canMatchEmpty(sub) {
+				return false
+			}
+		}
+		return true
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if canMatchEmpty(sub) {
+				return true
+			}
+		}
+		return false
+	}
+	// An operator this switch does not know is treated as able to match
+	// empty, so it is rejected rather than trusted.
+	return true
 }
 
 // ActiveCustomRules reports how many user-defined rules (inline + pack)
 // actually compiled and are live in the detection pipeline — as opposed to
-// how many were configured, which silently diverges when a regex fails to
-// compile.
+// how many were configured, which silently diverges when a rule is rejected:
+// its regex fails to compile or can match the empty string.
 func ActiveCustomRules() int {
 	cfg := getCustomRulesConfig()
 	if cfg == nil {
@@ -133,7 +197,7 @@ func ConfigureCustomRules(cfg CustomRulesConfig) {
 }
 
 func compileCustomRule(logger *slog.Logger, label, pattern, warning string, attrs ...any) (compiledCustomRule, bool) {
-	compiled, err := regexp.Compile(pattern)
+	compiled, err := compileUserPattern(pattern)
 	if err != nil {
 		all := make([]any, 0, len(attrs)+2)
 		all = append(all, componentAttr)

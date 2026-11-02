@@ -6,7 +6,7 @@ package cli
 // back through review:
 //
 //   review → checkpoint → codex → review
-//   review → claudecode/codex/geminicli → review
+//   review → claudecode/codex/pi → review
 //
 // matchingPendingReviewMarker is consumed by `entire session attach --review` (in
 // attach.go) to adopt a pending-review marker. HEAD-checkpoint flag

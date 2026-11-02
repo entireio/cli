@@ -41,8 +41,8 @@ func TestPostCommit_UnclaimedCheckpointTrailer(t *testing.T) {
 		name string
 		// phase the session is in when the trailered commit lands.
 		phase session.Phase
-		// noNewContent pins the transcript baseline to what the shadow branch
-		// already holds, so condensation finds nothing to do — the state that
+		// noNewContent pins the transcript baseline to what the stored turn-end
+		// transcript already holds, so condensation finds nothing to do — the state that
 		// leaves a stamped trailer unfilled.
 		noNewContent bool
 		// ownsTrailer presets LastCheckpointID to the committed trailer, which
@@ -114,7 +114,7 @@ func TestPostCommit_UnclaimedCheckpointTrailer(t *testing.T) {
 			if tt.noNewContent {
 				state.LastInteractionTime = nil
 				state.CheckpointTranscriptStart = 2
-				state.CheckpointTranscriptSize = shadowTranscriptSize(t, repo, state)
+				state.CheckpointTranscriptSize = mustStoredTranscriptSize(t, state.SessionID)
 			}
 			if tt.ownsTrailer {
 				state.LastCheckpointID = id.MustCheckpointID(trailerID)
@@ -178,7 +178,7 @@ func captureStrategyLogs(t *testing.T, fn func(ctx context.Context)) string {
 // TestPostCommit_PartialCommit_TrailerIsClaimed is the regression guard for inferring
 // condensation from session state instead of reading it from
 // postCommitProcessSessionLocked. A partial commit condenses successfully and
-// then carries the uncommitted files forward, and carryForwardToNewShadowBranch
+// then carries the uncommitted files forward, and carryForwardRemainingFiles
 // clears LastCheckpointID on the way out — so the post-loop state of a
 // successful condensation is identical to never having condensed.
 // TestPostCommit_ActiveSession_CarryForward_PartialCommit pins that clearing as
@@ -226,6 +226,7 @@ func TestPostCommit_PartialCommit_TrailerIsClaimed(t *testing.T) {
 	require.NoError(t, err)
 	_, err = wt.Add("B.txt")
 	require.NoError(t, err)
+	recordStampedTrailer(context.Background(), id.MustCheckpointID("cf1cf2cf3cf4"))
 	_, err = wt.Commit(
 		"commit A and B\n\n"+trailers.CheckpointTrailerKey+": cf1cf2cf3cf4\n",
 		&git.CommitOptions{Author: &object.Signature{

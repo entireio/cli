@@ -137,6 +137,10 @@ func pushMigratedRefs(ctx context.Context, out io.Writer, repo *git.Repository, 
 			fmt.Fprintln(out, "OPF cancelled; refs stay queued for the next push.")
 			return nil
 		}
+		if errors.Is(err, strategy.ErrCheckpointPushHeldByPolicy) {
+			fmt.Fprintln(out, "Checkpoint push policy is manual; refs stay queued. Upload them with 'entire checkpoint push --all'.")
+			return nil
+		}
 		return fmt.Errorf("push migrated refs: %w", err)
 	}
 	switch {

@@ -2,8 +2,9 @@
 // keep global state. It is the single implementation of that resolution —
 // don't derive ~/.config/entire or ~/.cache/entire paths anywhere else.
 //
-//   - Config: contexts.json, version_check.json, the file-backed token
-//     store. $ENTIRE_CONFIG_DIR if set, else ~/.config/entire.
+//   - Config: contexts.json, version_check.json, agent_homes.json, the
+//     file-backed token store. $ENTIRE_CONFIG_DIR if set, else
+//     ~/.config/entire.
 //   - Cache: discovery caches (nodes.json, cluster_cores.json,
 //     api_discovery.json). $XDG_CACHE_HOME/entire if set, else
 //     ~/.cache/entire.
@@ -16,6 +17,7 @@ package userdirs
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 
@@ -46,6 +48,12 @@ const (
 // joined unchecked and left for osroot (which refuses a relative root open) and
 // for main.go (which restores $PATH) to notice. Those backstops hold, but each
 // answers a question of its own, two layers from where this one is decided.
+//
+// agent.ResolveHome applies the same check to the agents' own relocation
+// variables (CLAUDE_CONFIG_DIR, CODEX_HOME, and the rest). Nothing of Entire's
+// is protected there; the concern is agreeing with where the agent wrote, and a
+// relative value resolves differently inside a hook than in a user's shell. It
+// calls this helper so the rule keeps one implementation.
 //
 // Rejecting is louder than falling through to the platform default, and that is
 // deliberate: a misconfigured override is a user error worth surfacing, and for
@@ -101,6 +109,37 @@ func CacheDirChecked() (string, error) {
 	return cacheDir()
 }
 
+// geteuid is swapped out by tests.
+var geteuid = os.Geteuid
+
+// Home returns the home directory for Entire's own files: config, cache,
+// and managed plugins.
+//
+// Entire's own files follow Entire's home: passwd for root, like ssh. Files
+// written by other programs (agent transcripts, agent hooks, shell rc files)
+// follow that program's home, because that's where they are. Those programs
+// read $HOME, so their lookups use os.UserHomeDir, not this; see
+// agent.ResolveHome.
+//
+// Why root ignores $HOME: under `sudo -E`, or anything else that keeps the
+// caller's environment, $HOME is chosen by a non-root user. Following it
+// would make root read its config and credentials from, and write
+// root-owned files into, a directory that user controls. The passwd entry
+// is root-owned, so it can't be redirected that way. Without $HOME at all
+// (systemd system units, bare containers) passwd is the only sound answer too.
+//
+// Everyone else keeps $HOME, so HOME-based isolation still works.
+// ENTIRE_CONFIG_DIR and the other explicit overrides beat this. Windows uses
+// os.UserHomeDir unchanged.
+func Home() (string, error) {
+	if runtime.GOOS != "windows" && (geteuid() == 0 || os.Getenv("HOME") == "") {
+		if u, err := user.Current(); err == nil && u.HomeDir != "" {
+			return u.HomeDir, nil
+		}
+	}
+	return os.UserHomeDir() //nolint:wrapcheck // callers wrap or fall back
+}
+
 // configDir is Config with the override check, for the callers that can report.
 func configDir() (string, error) {
 	if dir := os.Getenv(EnvConfigDir); dir != "" {
@@ -109,7 +148,7 @@ func configDir() (string, error) {
 	if dir, ok := testdirs.Dir("config"); ok {
 		return dir, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := Home()
 	if err != nil {
 		// nil error deliberately: a machine with no resolvable home is not a
 		// user error to report, and ownFallbackDir returns something usable.
@@ -133,7 +172,7 @@ func cacheDir() (string, error) {
 	if dir, ok := testdirs.Dir("cache"); ok {
 		return filepath.Join(dir, "entire"), nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := Home()
 	if err != nil {
 		// See configDir: the fallback is usable, so there is nothing to report.
 		return ownFallbackDir(".cache", "entire"), nil //nolint:nilerr // see ownFallbackDir
@@ -142,7 +181,7 @@ func cacheDir() (string, error) {
 }
 
 // ownFallbackDir builds the home-relative default for a machine where
-// os.UserHomeDir fails, resolved to an absolute path.
+// Home fails, resolved to an absolute path.
 //
 // The absolutization is the point, and it belongs HERE rather than at each
 // consumer, because this is the only place that still knows the difference
@@ -214,13 +253,13 @@ func EnsurePrivateDir(dir string) error {
 // creating the directory if it does not exist. ConfigRootForRead is the same
 // without creation.
 //
-// Every read and write of contexts.json, version_check.json, and the
-// file-backed token store goes through this rather than through a path joined
-// onto Config(). The names inside are fixed today, but the point of the root is
-// that they do not have to stay that way: a future context name, cluster slug,
-// or token key that reaches a filename cannot escape the directory, and a
-// symlink swapped in between resolution and open surfaces as an error rather
-// than a redirected write to somewhere in the user's home.
+// Every read and write of contexts.json, version_check.json, agent_homes.json,
+// and the file-backed token store goes through this rather than through a path
+// joined onto Config(). The names inside are fixed today, but the point of the
+// root is that they do not have to stay that way: a future context name,
+// cluster slug, or token key that reaches a filename cannot escape the
+// directory, and a symlink swapped in between resolution and open surfaces as
+// an error rather than a redirected write to somewhere in the user's home.
 //
 // The create/no-create split matters here for the same reason it does for
 // .entire: a command that only looks for a saved login must not leave an
@@ -236,14 +275,9 @@ func ConfigRootForRead() (*os.Root, error) {
 }
 
 // CacheRoot returns the shared *os.Root over the per-user cache directory,
-// creating it. CacheRootForRead is the same without creation.
+// creating it.
 func CacheRoot() (*os.Root, error) {
 	return resolveUserRoot(cacheDir, true)
-}
-
-// CacheRootForRead is CacheRoot without creating the directory.
-func CacheRootForRead() (*os.Root, error) {
-	return resolveUserRoot(cacheDir, false)
 }
 
 // resolveUserRoot fails on a rejected override before any directory is created:

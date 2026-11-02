@@ -25,9 +25,6 @@ func truncatePromptForStorage(prompt string) string {
 // Previously this was a separate struct with manual conversion functions.
 type SessionState = session.State
 
-// PromptAttribution is an alias for session.PromptAttribution.
-type PromptAttribution = session.PromptAttribution
-
 // CheckpointInfo represents checkpoint metadata stored on the sessions branch.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
 type CheckpointInfo struct {
@@ -62,8 +59,9 @@ type CondenseResult struct {
 	// TranscriptSizeBaseline is the byte size to record as
 	// SessionState.CheckpointTranscriptSize. It must be measured on the SANITIZED,
 	// pre-externalization transcript so it lives in the same coordinate as the
-	// shadow-branch blob it is later compared against in sessionHasNewContent. A
-	// raw-transcript size makes `blobSize > baseline` false forever for agents with
+	// stored turn-end transcript it is later compared against in
+	// sessionHasNewContent (storedTranscriptSize). A raw-transcript size makes
+	// `storedSize > baseline` false forever for agents with
 	// a TranscriptSanitizer, so the session silently stops condensing after its
 	// first commit.
 	TranscriptSizeBaseline int64
@@ -77,13 +75,13 @@ type CondenseResult struct {
 	NewSkillEvents []agent.SkillEvent
 }
 
-// ExtractedSessionData contains data extracted from a shadow branch.
+// ExtractedSessionData contains the session data a condensation stores.
 type ExtractedSessionData struct {
 	Transcript          []byte   // Full transcript content for the session
 	FullTranscriptLines int      // Total line count in full transcript
 	Prompts             []string // User prompts from the current checkpoint portion
 	FilesTouched        []string
-	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since the token offset, TokenStart)
 	// SkillEvents are this condensation's extracted events. Transient — the
 	// durable ledger, and the per-hook cost of carrying it, is
 	// session.SessionState.SkillEvents; see its size note.

@@ -139,7 +139,9 @@ func ClearPendingReviewMarker(ctx context.Context) error {
 // worktreePath scopes the marker so sessions in other worktrees don't claim it.
 // out is the destination for user-facing guidance.
 func RunMarkerFallback(ctx context.Context, agentName string, cfg reviewtypes.RunConfig, worktreePath string, out io.Writer) error {
-	prompt := ComposeReviewPrompt(cfg)
+	// These agents are started by hand, so there is no system-prompt channel:
+	// the guardrail leads the prompt instead.
+	prompt := ReviewerGuardrail + "\n\n" + ComposeReviewPrompt(cfg)
 	if err := WritePendingReviewMarker(ctx, PendingReviewMarker{
 		AgentName:    agentName,
 		Skills:       cfg.Skills,
@@ -159,8 +161,6 @@ func RunMarkerFallback(ctx context.Context, agentName string, cfg reviewtypes.Ru
 		}
 		fmt.Fprintln(out)
 	}
-	if prompt != "" {
-		fmt.Fprintf(out, "Use this prompt:\n\n%s\n", prompt)
-	}
+	fmt.Fprintf(out, "Use this prompt:\n\n%s\n", prompt)
 	return nil
 }

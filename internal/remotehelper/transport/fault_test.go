@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/internal/remotehelper/replicas"
 )
 
 // TestServiceRPC_TruncatedResponseBodyError: when the server hangs
@@ -164,5 +166,72 @@ func TestServiceRPC_ResetMidResponseSurfacesError(t *testing.T) {
 	body, err := io.ReadAll(resp)
 	if err == nil && len(body) == 0 {
 		t.Error("expected truncation error or partial body, got clean empty read")
+	}
+}
+
+// TestDoWithFailover_SkipsReplicaStalledAfterAccept: a replica that accepts
+// TCP and then never completes the TLS handshake (the shape a blackholed node
+// takes behind a proxy, where only the proxy hop is dialed) must cost the
+// connect budget, not hang the fetch.
+func TestDoWithFailover_SkipsReplicaStalledAfterAccept(t *testing.T) {
+	t.Setenv("ENTIRE_CONNECT_TIMEOUT_SECONDS", "1")
+
+	var lc net.ListenConfig
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	done := make(chan struct{})
+	defer func() {
+		close(done)
+		_ = l.Close()
+	}()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				<-done
+				_ = c.Close()
+			}()
+		}
+	}()
+	stalled := "https://" + l.Addr().String()
+
+	// TLS: replicas must be HTTPS, and SkipTLS accepts the test certificate.
+	good := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "from good")
+	}))
+	defer good.Close()
+
+	var failed []string
+	p := New(Config{
+		Nodes:        replicas.NodeConfig{InitialNodes: []string{stalled, good.URL}, ClusterHost: "127.0.0.1"},
+		Path:         "/et/alice/repo",
+		SkipTLS:      true,
+		OnNodeFailed: func(node string) { failed = append(failed, node) },
+	})
+	p.stickyNode = stalled // try the stalled replica first
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	resp, err := p.InfoRefs(ctx, "git-upload-pack")
+	if err != nil {
+		t.Fatalf("failover should skip the stalled replica, got: %v", err)
+	}
+	defer resp.Close()
+	body, _ := io.ReadAll(resp) //nolint:errcheck // test
+	if string(body) != "from good" {
+		t.Errorf("body = %q, want %q", body, "from good")
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Errorf("failover took %s, want about the 1s connect budget", elapsed)
+	}
+	if len(failed) != 1 || failed[0] != stalled {
+		t.Errorf("failed nodes = %v, want [%s]", failed, stalled)
 	}
 }

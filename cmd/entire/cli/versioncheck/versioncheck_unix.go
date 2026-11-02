@@ -5,10 +5,6 @@ package versioncheck
 // foldPathCase is the identity on unix: paths compare case-sensitively.
 func foldPathCase(p string) string { return p }
 
-// updateCommandShell is empty on unix: brew, mise, and the curl|bash one-liner
-// all run in any POSIX shell, so no message has to name one.
-const updateCommandShell = ""
-
 func brewUpgradeCommand(_ string, currentVersion string) string {
 	if isNightly(currentVersion) {
 		return "brew upgrade --yes entire@nightly"
@@ -42,7 +38,7 @@ var installProbes = []installProbe{brewProbe, miseProbe}
 // unimplemented there, so the command is only ever printed).
 func fallbackInstallCommand(_, currentVersion string) string {
 	if isNightly(currentVersion) {
-		return "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly"
+		return "curl -fsSL https://entire.com/install.sh | bash -s -- --channel nightly"
 	}
-	return "curl -fsSL https://entire.io/install.sh | bash"
+	return "curl -fsSL https://entire.com/install.sh | bash"
 }

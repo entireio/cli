@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,8 +15,9 @@ import (
 	authtokenstore "github.com/entireio/auth-go/tokenstore"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/netcause"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
-	"github.com/entireio/cli/internal/testdirs"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // defaultSavedTokenTTL is the encoded keychain expiry used when a refreshed
@@ -110,9 +112,8 @@ func (s contextTokenStore) DeleteTokens(string) error {
 // NewRefreshingLoginProvider sits on. Keying Issuer on c.CoreURL is the whole
 // point: store reads and the refresh grant target that context's core, so a
 // multi-core user's credentials never travel to (or get keyed under) a host
-// the context doesn't belong to. No RFC 8693 exchange runs through it any
-// more — data-plane bearers are the login JWT itself (ResolveDataAPIToken) and
-// jurisdiction tokens are minted via sts (exchangeJurisdictionToken).
+// the context doesn't belong to. It only refreshes: data-plane bearers are
+// the login JWT itself (ResolveDataAPIToken).
 //
 // transport carries the caller's TLS configuration; allowInsecureHTTP permits
 // an http:// core/resource for loopback/dev.
@@ -123,6 +124,10 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 	if c.KeychainService == "" || c.Handle == "" {
 		return nil, fmt.Errorf("context %q has no keychain slot", c.Name)
 	}
+	lockDir, err := tokenManagerLockDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve auth lock directory for context %q: %w", c.Name, err)
+	}
 	mgr, err := tokenmanager.New(tokenmanager.Config{
 		Issuer:            strings.TrimRight(c.CoreURL, "/"),
 		ClientID:          oauthClientID,
@@ -131,7 +136,7 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 		Transport:         transport,
 		AllowInsecureHTTP: allowInsecureHTTP,
 		UserAgent:         oauthClientID,
-		LockDir:           tokenManagerLockDir(),
+		LockDir:           lockDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init token manager for context %q: %w", c.Name, err)
@@ -139,26 +144,18 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 	return mgr, nil
 }
 
-// tokenManagerLockDir picks the directory holding auth-go's cross-process
-// advisory lock file. Empty means auth-go's own default,
-// os.UserCacheDir()/auth-go, which is what production wants.
-//
-// Under `go test` that default is the developer's real user cache directory
-// (~/Library/Caches/auth-go on macOS, which os.UserCacheDir resolves without
-// consulting XDG_CACHE_HOME), so every test that builds a per-context manager
-// litters it with lock files keyed on (ClientID, Issuer). Route it to the same
-// throwaway per-process directory the config, cache, and tokenstore surfaces
-// already use under test — internal/testdirs exists precisely so a test that
-// forgets an override cannot reach real user state.
-//
-// The lock file holds no credentials; the harm is writing into a directory that
-// is not ours to write to, and sharing a cross-process lock with whatever else
-// is running.
-func tokenManagerLockDir() string {
-	if dir, ok := testdirs.Dir("authlock"); ok {
-		return dir
+// tokenManagerLockDir puts auth-go's cross-process refresh lock in Entire's
+// per-user cache instead of auth-go's default, os.UserCacheDir()/auth-go.
+// That default ignores XDG_CACHE_HOME on macOS, so spawned test binaries,
+// which the testdirs fallback cannot reach, locked in the developer's real
+// ~/Library/Caches. The lock only serializes refreshes of the rotating refresh
+// token between processes that resolve the same directory.
+func tokenManagerLockDir() (string, error) {
+	cache, err := userdirs.CacheDirChecked()
+	if err != nil {
+		return "", err //nolint:wrapcheck // the caller wraps it with the context name
 	}
-	return ""
+	return filepath.Join(cache, "auth-locks"), nil
 }
 
 // reauthError carries a friendly, context-named re-login message while still
@@ -184,6 +181,12 @@ func (e *reauthError) Unwrap() error { return e.sentinel }
 func contextAuthError(c *contexts.Context, err error) error {
 	coreURL := strings.TrimRight(c.CoreURL, "/")
 	switch {
+	case errors.Is(err, tokenstore.ErrKeyringUnavailable):
+		// The login exists; it just can't be read from here. Name the login
+		// and keep the keyring's explanation, not the store-read chain. First,
+		// because a keyring that could not be read makes any "expired" or
+		// "not logged in" conclusion in the same chain unreliable.
+		return fmt.Errorf("cannot read the saved login for %q (%s): %w", c.Name, coreURL, tokenstore.ErrKeyringUnavailable)
 	case errors.Is(err, tokenmanager.ErrReauthRequired):
 		return &reauthError{
 			msg:      fmt.Sprintf("login session for %q (%s) expired; run `entire login` to re-authenticate", c.Name, coreURL),
@@ -228,6 +231,10 @@ func contextAuthError(c *contexts.Context, err error) error {
 // urlErr.Err is wrapped rather than urlErr itself so the message doesn't repeat
 // the core URL we already name; errors.Is against the syscall/net cause still
 // matches. http.Client always sets it.
+//
+// When the cause can be named (netcause.Hint) it leads the advice. A connection
+// the operating system refused (a sandbox or firewall) never reached the core,
+// so the re-login and switch hints are dropped: they cannot fix it.
 func contextUnreachableError(c *contexts.Context, coreURL string, err error) error {
 	var urlErr *url.Error
 	if !errors.As(err, &urlErr) {
@@ -236,10 +243,23 @@ func contextUnreachableError(c *contexts.Context, coreURL string, err error) err
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil
 	}
-	return fmt.Errorf(
-		"cannot reach the login server for %q (%s): %w; run `entire login` to sign in again, or `entire auth use <context>` to switch to another login",
-		c.Name, coreURL, urlErr.Err,
-	)
+	const switchHint = "run `entire login` to sign in again, or `entire auth switch <context>` to switch to another login"
+	// Denied is decided apart from Hint: Hint is empty when the transport
+	// already explained the cause, and a denial must still drop switchHint.
+	hint := netcause.Hint(err)
+	var advice string
+	switch {
+	case netcause.Denied(err):
+		advice = hint
+	case hint != "":
+		advice = hint + "; if this login server no longer exists, " + switchHint
+	default:
+		advice = switchHint
+	}
+	if advice == "" {
+		return fmt.Errorf("cannot reach the login server for %q (%s): %w", c.Name, coreURL, urlErr.Err)
+	}
+	return fmt.Errorf("cannot reach the login server for %q (%s): %w; %s", c.Name, coreURL, urlErr.Err, advice)
 }
 
 // RefreshingLoginCredential resolves a context's login JWT and can force a

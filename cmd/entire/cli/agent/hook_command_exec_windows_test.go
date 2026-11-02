@@ -17,6 +17,32 @@ import (
 // cmd.exe does not use the standard Windows argv unquoting rules.
 func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string, string, int) {
 	t.Helper()
+	return runWrapperCmdLine(t, func(cmdPath string) string {
+		return `"` + cmdPath + `" /C "` + wrapper + `"`
+	}, entirePresent)
+}
+
+// runDroidWrapper mirrors Factory Droid's Windows command runner, which differs
+// from Codex's in the two ways that decide whether a wrapper survives: `/d /s
+// /c` rather than `/C`, and the hook command appended VERBATIM instead of
+// wrapped in quotes (node's windowsVerbatimArguments). The stored wrapper is
+// itself a `cmd.exe /d /s /c "…"` string, so this nests one cmd.exe inside
+// another and only /s's strip-first-and-last-quote rule makes it work — the
+// property that was verified by hand on a Windows box and is pinned here so it
+// is checked before merge instead.
+//
+// The exe path is quoted where droid leaves it bare; with no space in
+// %SystemRoot% the two command lines are equivalent, and quoting keeps the
+// helper honest on a host where there is one.
+func runDroidWrapper(t *testing.T, wrapper string, entirePresent bool) (string, string, int) {
+	t.Helper()
+	return runWrapperCmdLine(t, func(cmdPath string) string {
+		return `"` + cmdPath + `" /d /s /c ` + wrapper
+	}, entirePresent)
+}
+
+func runWrapperCmdLine(t *testing.T, buildCmdLine func(cmdPath string) string, entirePresent bool) (string, string, int) {
+	t.Helper()
 
 	sysRoot := os.Getenv("SystemRoot")
 	if sysRoot == "" {
@@ -42,7 +68,7 @@ func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string
 
 	cmd := exec.CommandContext(t.Context(), cmdPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CmdLine: `"` + cmdPath + `" /C "` + wrapper + `"`,
+		CmdLine: buildCmdLine(cmdPath),
 	}
 	cmd.Dir = runDir // clean CWD so `where` can't find a stray entire next to us
 	var stdout, stderr bytes.Buffer
@@ -139,6 +165,73 @@ func TestWindowsWrappers_Execution(t *testing.T) {
 		}
 		if code != 7 {
 			t.Fatalf("expected wrapped command exit code 7 to propagate, got %d; stderr=%q", code, stderr)
+		}
+	})
+}
+
+// TestWindowsWrappers_DroidComposition runs the wrappers droid installs through
+// droid's own command runner, not Codex's. Droid nests the stored
+// `cmd.exe /d /s /c "…"` inside a second cmd.exe and adds no quoting of its
+// own, so a wrapper that behaves under runWindowsWrapper can still be cut apart
+// here — which is the failure this whole change exists to fix, one level up.
+func TestWindowsWrappers_DroidComposition(t *testing.T) {
+	// No t.Parallel(): t.Setenv("PATH") forbids it.
+
+	const marker = "ENTIRE_HOOK_RAN"
+
+	t.Run("silent/present runs the command", func(t *testing.T) {
+		out, stderr, code := runDroidWrapper(t, WrapWindowsProductionSilentHookCommand("echo "+marker), true)
+		if !strings.Contains(out, marker) {
+			t.Fatalf("expected wrapped command to run; stdout=%q stderr=%q", out, stderr)
+		}
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d; stderr=%q", code, stderr)
+		}
+	})
+
+	t.Run("silent/present propagates the command exit code", func(t *testing.T) {
+		_, stderr, code := runDroidWrapper(t, WrapWindowsProductionSilentHookCommand("cmd /c exit 7"), true)
+		if code != 7 {
+			t.Fatalf("expected wrapped command exit code 7 to propagate, got %d; stderr=%q", code, stderr)
+		}
+	})
+
+	t.Run("silent/absent skips the command and exits 0", func(t *testing.T) {
+		out, stderr, code := runDroidWrapper(t, WrapWindowsProductionSilentHookCommand("echo "+marker), false)
+		if strings.Contains(out, marker) {
+			t.Fatalf("wrapped command must NOT run when entire absent; stdout=%q stderr=%q", out, stderr)
+		}
+		if code != 0 {
+			t.Fatalf("expected exit 0 when entire absent, got %d; stderr=%q", code, stderr)
+		}
+	})
+
+	// droid's Stop hook is the plain-text warning form, which is bare rather
+	// than nested — the one wrapper shape whose behaviour under this runner
+	// differs from the silent one.
+	t.Run("plaintext/present runs the command without a warning", func(t *testing.T) {
+		out, stderr, code := runDroidWrapper(t, WrapWindowsProductionPlainTextWarningHookCommand("echo "+marker, WarningFormatSingleLine), true)
+		if !strings.Contains(out, marker) {
+			t.Fatalf("expected wrapped command to run; stdout=%q stderr=%q", out, stderr)
+		}
+		if strings.Contains(out, "Entire CLI") {
+			t.Fatalf("warning must NOT be emitted when entire present; stdout=%q stderr=%q", out, stderr)
+		}
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d; stderr=%q", code, stderr)
+		}
+	})
+
+	t.Run("plaintext/absent warns and skips the command", func(t *testing.T) {
+		out, stderr, code := runDroidWrapper(t, WrapWindowsProductionPlainTextWarningHookCommand("echo "+marker, WarningFormatSingleLine), false)
+		if strings.Contains(out, marker) {
+			t.Fatalf("wrapped command must NOT run when entire absent; stdout=%q stderr=%q", out, stderr)
+		}
+		if !strings.Contains(out, "Entire CLI") {
+			t.Fatalf("expected the warning on stdout; stdout=%q stderr=%q", out, stderr)
+		}
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d; stderr=%q", code, stderr)
 		}
 	})
 }

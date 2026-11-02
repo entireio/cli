@@ -14,7 +14,7 @@ import (
 //
 // This is a regression test for the bug where old sessions (IDLE/ENDED) would
 // have their BaseCommit incorrectly updated, causing them to be condensed on
-// future commits because their BaseCommit matched the new shadow branch.
+// future commits because their BaseCommit matched the new HEAD.
 //
 // Scenario:
 // 1. Create an old session (session1), run full workflow, set to IDLE
@@ -118,7 +118,7 @@ func TestOldIdleSession_BaseCommitNotUpdated(t *testing.T) {
 	t.Log("Phase 4: Committing from session2")
 
 	env.GitAdd("file2.txt")
-	env.GitCommitWithShadowHooks("Commit from session2", "file2.txt")
+	env.GitCommitWithHooks("Commit from session2", "file2.txt")
 
 	finalHead := env.GetHeadHash()
 	t.Logf("Final HEAD after session2 commit: %s", finalHead[:7])
@@ -261,7 +261,7 @@ func TestOldEndedSession_BaseCommitNotUpdated(t *testing.T) {
 	t.Log("Phase 4: Committing from session2")
 
 	env.GitAdd("file2.txt")
-	env.GitCommitWithShadowHooks("Commit from session2", "file2.txt")
+	env.GitCommitWithHooks("Commit from session2", "file2.txt")
 
 	finalHead := env.GetHeadHash()
 

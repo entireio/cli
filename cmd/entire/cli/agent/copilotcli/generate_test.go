@@ -39,6 +39,9 @@ func TestGenerateText_PinsMinimalToolSurface(t *testing.T) {
 		"--no-ask-user",
 		"--no-custom-instructions",
 		"--disable-builtin-mcps",
+		"--available-tools=" + noSuchTool,
+		"-s",
+		"--disallow-temp-dir",
 		"--model", "gpt-5",
 	}
 	if !slices.Equal(gotArgs, want) {

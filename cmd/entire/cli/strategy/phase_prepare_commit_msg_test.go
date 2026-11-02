@@ -136,7 +136,7 @@ func TestPrepareCommitMsg_AmendNoTrailerNoLastCheckpointID(t *testing.T) {
 
 // TestPrepareCommitMsg_StaleTaskRecordOnly_NoTrailerButStillCondensable pins the
 // split between "condensable" and "may claim a trailer". An IDLE session whose
-// only content is a task record past idleWithTaskContent's 24h bound used to be
+// only content is a task record past idleWithLiveTaskRecord's 24h bound used to be
 // stamped by the slow path (sessionHasNewContent says yes on HasTaskContent with
 // no bound) and then refused by PostCommit's overlap check, leaving
 // Entire-Checkpoint pointing at a checkpoint nothing ever wrote. The trailer is

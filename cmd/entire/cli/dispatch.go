@@ -46,8 +46,9 @@ Examples:
   entire dispatch
   entire dispatch --local --all-branches
   entire dispatch --local --agent codex
-  entire dispatch --repos entireio/cli
-  entire dispatch --repos entirehq/ferrata --jurisdiction us
+  entire dispatch --repos gh/entireio/cli
+  entire dispatch --repos gh/entireio/cli,et/myproject/service
+  entire dispatch --repos gh/entirehq/ferrata --jurisdiction us
   entire dispatch --voice neutral
 
 A cloud dispatch covers repos placed in exactly one jurisdiction and is
@@ -108,7 +109,7 @@ target the jurisdiction the repo is placed in.`,
 	cmd.Flags().StringVar(&flagSince, "since", "7d", "time window (Go duration, relative time, or ISO date)")
 	cmd.Flags().StringVar(&flagUntil, "until", "", "window end time (defaults to now)")
 	cmd.Flags().BoolVar(&flagAllBranches, "all-branches", false, "include every existing local branch (--local only; renamed or deleted branches are skipped)")
-	cmd.Flags().StringSliceVar(&flagRepos, "repos", nil, fmt.Sprintf("cloud repo slugs, up to %d (for example entireio/cli)", dispatchpkg.CloudRepoLimit))
+	cmd.Flags().StringSliceVar(&flagRepos, "repos", nil, fmt.Sprintf("cloud repo slugs, up to %d, as %s", dispatchpkg.CloudRepoLimit, dispatchpkg.RepoSlugShapes))
 	cmd.Flags().StringVar(&flagVoice, "voice", "", "voice preset name or literal description")
 	cmd.Flags().StringVar(&flagAgent, "agent", "", "local text-generation agent (requires --local)")
 	cmd.Flags().StringVarP(&flagJurisdiction, "jurisdiction", "j", "", "jurisdiction slug (e.g. us, eu) whose cell generates the cloud dispatch; defaults to your home jurisdiction")

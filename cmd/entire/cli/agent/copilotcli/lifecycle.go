@@ -90,9 +90,9 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 	// using the Task tool-use id (e.g. "toolu_…") as the sessionId.
 	// Those must NOT spin up a top-level Entire session: the subagent never gets
 	// a matching stop for that id, so the phantom session would stay "active"
-	// forever and pin its shadow branch open after the user commits. The
-	// subagent's work is still captured via the main session's subagentStop →
-	// task checkpoint path, so we drop only the session-lifecycle hooks here and
+	// forever after the user commits. The subagent's work is still captured via
+	// the main session's subagentStop → task record path, so we drop only the
+	// session-lifecycle hooks here and
 	// leave subagentStop itself to run.
 	if hookName != HookNameSubagentStop && hookName != HookNameSubagentStart && isSubagentSessionID(env.SessionID) {
 		logging.Debug(ctx, "copilot-cli: skipping lifecycle event for subagent session",
@@ -234,6 +234,9 @@ func (c *CopilotCLIAgent) readSubagentEvidence(ctx context.Context, env *hookEnv
 	if env.SessionID == "" || (env.AgentID == "" && env.AgentName == "") || env.TranscriptPath == "" {
 		return subagentEvidence{}, false
 	}
+	// No ValidateSessionID here: store.SessionFile below validates as its first
+	// statement, and a second copy reads as "the store does not" — the belief
+	// TestResolveSessionFileCallersAreSanctioned exists to remove.
 	store, err := agent.OpenSessionStore(c, env.CWD)
 	if err != nil {
 		logging.Warn(ctx, "copilot-cli: cannot open session store for subagent stop", "err", err)
@@ -279,10 +282,20 @@ func (c *CopilotCLIAgent) readHookEnvelope(stdin io.Reader) (*hookEnvelope, erro
 func (c *CopilotCLIAgent) resolveTranscriptRef(ctx context.Context, sessionID string) string {
 	// GetSessionDir ignores the repoPath parameter for Copilot CLI since session
 	// state is always in ~/.copilot/session-state/ (not repo-specific).
-	sessionDir, err := c.GetSessionDir("")
+	//
+	// Through the store, not c.ResolveSessionFile directly: sessionID is the raw
+	// hook payload's, Copilot's resolver puts it in a DIRECTORY position, and
+	// SessionFile is where that ID is validated and the result confirmed to be
+	// inside the store. See the contract on agent.Agent.ResolveSessionFile.
+	store, err := agent.OpenSessionStore(c, "")
 	if err != nil {
 		logging.Warn(ctx, "copilot-cli: failed to resolve transcript path", "sessionID", sessionID, "err", err)
 		return ""
 	}
-	return c.ResolveSessionFile(sessionDir, sessionID)
+	_, absPath, err := store.SessionFile(sessionID)
+	if err != nil {
+		logging.Warn(ctx, "copilot-cli: refusing unsafe transcript path", "sessionID", sessionID, "err", err)
+		return ""
+	}
+	return absPath
 }

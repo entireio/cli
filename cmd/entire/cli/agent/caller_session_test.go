@@ -40,9 +40,8 @@ func TestCallerSessionEnvVar_MatchesTheVendorsName(t *testing.T) {
 }
 
 // The agents deliberately WITHOUT the capability are as load-bearing as the
-// ones with it: Gemini CLI passes its session ID only to its own background
-// bookkeeping, and opencode's shell tool augments no environment at all. If
-// either gains the capability without an entry above, this fails and asks for
+// ones with it: opencode's shell tool augments no environment at all. If it
+// gains the capability without an entry above, this fails and asks for
 // the mapping to be pinned rather than left implicit.
 func TestCallerSessionEnvVar_UnpublishedAgentsStayUnpublished(t *testing.T) {
 	for _, name := range List() {
@@ -191,4 +190,16 @@ func TestCallerSessionCandidates_TrimsSurroundingWhitespace(t *testing.T) {
 	if got[0].SessionID != "01a08012-ce85-7bc0-8e05-fe0047687581" {
 		t.Errorf("SessionID = %q, want it trimmed", got[0].SessionID)
 	}
+}
+
+// callerSessionEnvVarsFromRegistry enumerates the variable names of the agents
+// registered in THIS binary. Only the guard test uses it — production and test
+// isolation want the complete set above, not this binary's subset.
+func callerSessionEnvVarsFromRegistry() []string {
+	agents := callerSessionAgents()
+	names := make([]string, 0, len(agents))
+	for _, a := range agents {
+		names = append(names, a.ident.CallerSessionEnvVar())
+	}
+	return names
 }

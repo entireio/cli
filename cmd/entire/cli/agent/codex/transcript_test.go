@@ -2,6 +2,7 @@ package codex
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -134,7 +135,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	path := writeSampleRollout(t)
 
 	// From beginning — should find all files
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.ElementsMatch(t, []string{"hello.txt", "docs/readme.md"}, files)
@@ -146,7 +147,7 @@ func TestExtractModifiedFilesFromOffset_WithOffset(t *testing.T) {
 	path := writeSampleRollout(t)
 
 	// Skip first 7 lines (past the first apply_patch) — should only find second patch files
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 7)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 7)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.ElementsMatch(t, []string{"docs/readme.md", "hello.txt"}, files)
@@ -157,7 +158,7 @@ func TestExtractModifiedFilesFromOffset_PastEnd(t *testing.T) {
 	ag := &CodexAgent{}
 	path := writeSampleRollout(t)
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 100)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 100)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.Empty(t, files)
@@ -456,6 +457,55 @@ func TestSanitizeRestoredTranscript_StripsEncryptedItemsFromCompactedHistory(t *
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
 	require.NotContains(t, got, `"type":"compaction"`)
 	require.NotContains(t, got, `"type":"compaction_summary"`)
+}
+
+// TestSanitizePortableTranscript_StripsAgentMessageEncryptedContent covers the
+// multi-agent rollout shape: an "agent_message" response item carries a
+// plaintext input_text part plus an "encrypted_content" part holding Fernet
+// ciphertext (gAAAA..., ~700-1000 chars) that only the originating session can
+// decrypt. The ciphertext is not portable and the entropy layer would otherwise
+// replace it with REDACTED; the readable part and the line itself must survive.
+func TestSanitizePortableTranscript_StripsAgentMessageEncryptedContent(t *testing.T) {
+	t.Parallel()
+
+	const ciphertext = "gAAAAABqwRvDZmFrZS1jaXBoZXJ0ZXh0LWZvci10ZXN0cy1vbmx5"
+	input := []byte(`{"type":"session_meta","payload":{"id":"abc"}}` + "\n" +
+		`{"timestamp":"2026-10-01T10:00:00.000Z","type":"response_item","payload":{"type":"agent_message","id":"amsg_01","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK"},{"type":"encrypted_content","encrypted_content":"` + ciphertext + `"}]}}` + "\n" +
+		`{"timestamp":"2026-10-01T10:00:01.000Z","type":"response_item","payload":{"type":"agent_message","id":"amsg_02","author":"/root/worker","recipient":"/root","content":[{"type":"input_text","text":"Message Type: FINAL_ANSWER"}]}}` + "\n")
+
+	got := SanitizePortableTranscript(input)
+
+	require.NotContains(t, string(got), ciphertext, "agent_message ciphertext survived sanitization")
+	require.NotContains(t, string(got), "encrypted_content")
+	require.Contains(t, string(got), `"text":"Message Type: NEW_TASK"`)
+	require.Contains(t, string(got), `"text":"Message Type: FINAL_ANSWER"`)
+	require.Contains(t, string(got), `"recipient":"/root/worker"`)
+	require.Len(t, splitJSONL(got), len(splitJSONL(input)),
+		"sanitization must preserve the line count")
+
+	// A second pass must be a byte-for-byte no-op.
+	require.Equal(t, string(got), string(SanitizePortableTranscript(got)))
+}
+
+// TestSanitizePortableTranscript_StripsAgentMessageEncryptedContentInCompactedHistory
+// covers the same agent_message shape nested in a "compacted" line's
+// replacement_history, which sanitizeHistoryItems handles separately.
+func TestSanitizePortableTranscript_StripsAgentMessageEncryptedContentInCompactedHistory(t *testing.T) {
+	t.Parallel()
+
+	const ciphertext = "gAAAAABqwRn8bmVzdGVkLWNpcGhlcnRleHQtZm9yLXRlc3RzLW9ubHk"
+	input := []byte(`{"type":"session_meta","payload":{"id":"abc"}}` + "\n" +
+		`{"type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"agent_message","id":"amsg_01","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK"},{"type":"encrypted_content","encrypted_content":"` + ciphertext + `"}]}]}}` + "\n")
+
+	got := SanitizePortableTranscript(input)
+
+	require.NotContains(t, string(got), ciphertext, "nested agent_message ciphertext survived sanitization")
+	require.NotContains(t, string(got), "encrypted_content")
+	require.Contains(t, string(got), `"text":"Message Type: NEW_TASK"`)
+	require.Contains(t, string(got), `"type":"agent_message"`)
+	require.Len(t, splitJSONL(got), len(splitJSONL(input)),
+		"sanitization must preserve the line count")
+	require.Equal(t, string(got), string(SanitizePortableTranscript(got)))
 }
 
 // TestSanitizePortableTranscript_UnchangedInputReturnsSameBytes pins the fast path

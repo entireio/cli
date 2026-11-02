@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
@@ -50,6 +52,9 @@ import (
 func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine string, opts *Options, stdin *bufio.Reader, stdout io.Writer) error {
 	refspecs, err := readPushBatch(firstLine, stdin)
 	if err != nil {
+		return err
+	}
+	if err := opts.PushError(); err != nil {
 		return err
 	}
 
@@ -122,7 +127,7 @@ func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine st
 	}()
 
 	spOutReader := bufio.NewReader(spOut)
-	var requestBody bytes.Buffer
+	var requestBody gitproto.RequestBody
 	if err := gitproto.ReadSendPackRequest(spOutReader, &requestBody); err != nil {
 		close(respCh)
 		killAndWaitSendPack(sp, "after reading send-pack request failed")
@@ -142,14 +147,13 @@ func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine st
 	if requestBody.Len() == 0 {
 		close(respCh) // feeder sees closed channel, reports nil, closes spIn
 	} else {
-		amendedBody, err := gitproto.AppendAgentToReceivePackRequest(requestBody.Bytes(), Agent)
-		if err != nil {
+		if err := gitproto.AppendAgentToReceivePackBody(&requestBody, Agent); err != nil {
 			close(respCh)
 			killAndWaitSendPack(sp, "after amending receive-pack agent failed")
 			return fmt.Errorf("amending receive-pack agent: %w", err)
 		}
 
-		resp, err := t.ServiceRPC(ctx, serviceReceivePack, bytes.NewReader(amendedBody))
+		resp, err := t.ServiceRPC(ctx, serviceReceivePack, requestBody.Reader(), receivePackHeaders(&requestBody))
 		if err != nil {
 			close(respCh)
 			killAndWaitSendPack(sp, "after posting receive-pack failed")
@@ -256,5 +260,15 @@ func killAndWaitSendPack(sp *exec.Cmd, reason string) {
 	}
 	if err := sp.Wait(); err != nil {
 		debuglog.Printf("send-pack cleanup %s: wait: %v", reason, err)
+	}
+}
+
+// receivePackHeaders declares body's size on a receive-pack POST. The
+// X-Entire-Push-Size header is the same declaration on both push paths:
+// it lets the server refuse an over-limit push before the body uploads.
+func receivePackHeaders(body *gitproto.RequestBody) func(*http.Request) {
+	return func(req *http.Request) {
+		body.ApplyTo(req)
+		req.Header.Set("X-Entire-Push-Size", strconv.FormatInt(body.Len(), 10))
 	}
 }

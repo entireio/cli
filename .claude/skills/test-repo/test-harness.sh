@@ -123,14 +123,15 @@ verify-session-state)
   fi
   ;;
 
-verify-shadow-branch)
-  echo "==> Verifying shadow branch..."
+verify-no-shadow-branch)
+  echo "==> Verifying no shadow branch was written..."
   cd "$REPO_DIR"
 
-  if git branch -a | grep -E "entire/[0-9a-f]"; then
-    echo "✓ Shadow branch exists"
+  if git branch -a | grep -E "entire/[0-9a-f]{7,}(-[0-9a-f]{6})?$"; then
+    echo "✗ Shadow branch found: turn ends must not write one"
+    exit 1
   else
-    echo "Note: No shadow branch"
+    echo "✓ No shadow branch"
   fi
   ;;
 
@@ -192,7 +193,7 @@ info)
   echo "  stop-session             - Stop session (create checkpoint)"
   echo "  verify-commit            - Verify active branch commit"
   echo "  verify-session-state     - Verify session state files"
-  echo "  verify-shadow-branch     - Verify shadow branch exists"
+  echo "  verify-no-shadow-branch  - Verify no shadow branch was written"
   echo "  verify-metadata-branch   - Verify metadata branch exists"
   echo "  list-pending-checkpoints - List pending (not yet condensed) checkpoints"
   echo "  create-changes           - Create changes on top of the checkpoint"

@@ -23,7 +23,7 @@ const apiBasePath = "/api/v1"
 // The host and bearer come from auth.ResolveControlPlaneTarget. Control-plane
 // commands target a login server directly — unlike `git clone` or the data
 // API, there's no resource host to match a context against — so the active
-// contexts.json login is used as-is, and `entire auth use <ctx>` retargets the
+// contexts.json login is used as-is, and `entire auth switch <ctx>` retargets the
 // control plane onto that login server; with no active context this errors
 // with the `entire login` hint. The Core API is served at <host>/api/v1. The
 // bearer is resolved lazily per request, re-minting silently from the stored
@@ -44,14 +44,14 @@ func New() (*Client, error) {
 }
 
 // NewForCluster returns a *Client for a resource-provider control-plane command
-// whose subject is a mirror on clusterHost (mirror create/remove, mirror
-// collaborators list).
+// whose subject is a mirror on clusterHost (mirror add/remove, `repo grant
+// list` of a mirror ref).
 //
 // Unlike New — which dials the active context — the core is discovered from the
 // cluster's /.well-known/entire-cluster.json and the matching local context
 // supplies the bearer (see auth.ResolveControlPlaneTargetForCluster). This is
 // what lets a command act on a cluster fronted by a federation other than the
-// active login, e.g. running `repo mirror collaborators list … aws-us-east-2.entire.io`
+// active login, e.g. running `repo mirror add /gh/… --cluster aws-us-east-2.entire.io`
 // while the active context is a partial.to login: without it the active
 // context's core 400s with "unknown cluster_host" because it doesn't front the
 // cluster. ENTIRE_TOKEN is honoured identically to New.
@@ -235,4 +235,32 @@ func APIError(err error) string {
 	default:
 		return fmt.Sprintf("control-plane request failed with status %d", statusErr.StatusCode)
 	}
+}
+
+// APIErrorDetail returns the first problem detail an API error carries at the
+// given location (e.g. "body.owner"), so a caller can read a structured value
+// the server attached to a coded failure — the sync-block reason on a 409
+// from resyncMirror — without parsing the human message. ok is false when err
+// is not an API error or carries no detail there.
+func APIErrorDetail(err error, location string) (detail ErrorDetail, ok bool) {
+	var statusErr *ErrorModelStatusCode
+	if !errors.As(err, &statusErr) {
+		return ErrorDetail{}, false
+	}
+	for _, d := range statusErr.Response.Errors {
+		if d.Location.Or("") == location {
+			return d, true
+		}
+	}
+	return ErrorDetail{}, false
+}
+
+// APIErrorStatus returns the HTTP status of an API error, or 0 when err is
+// not one.
+func APIErrorStatus(err error) int {
+	var statusErr *ErrorModelStatusCode
+	if !errors.As(err, &statusErr) {
+		return 0
+	}
+	return statusErr.StatusCode
 }

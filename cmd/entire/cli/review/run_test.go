@@ -355,7 +355,7 @@ func TestRun_StartError(t *testing.T) {
 	t.Parallel()
 	startErr := errors.New("binary not on PATH")
 	reviewer := &stubReviewer{
-		name:     "gemini-cli",
+		name:     "pi",
 		startErr: startErr,
 	}
 	rec := &stubSinkRecorder{}

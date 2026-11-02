@@ -52,6 +52,15 @@ func handleStatelessConnect(ctx context.Context, t Transport, service string, st
 	// with a Bearer token in plain text on disk to make this Just
 	// Work; the security trade-off wasn't worth the convenience.
 
+	// Each fetch POST is proxied to a replica, so a server-side want-ref
+	// lookup could race the ls-refs answer git already relayed. Hide
+	// ref-in-want so git sends explicit want <oid> lines. The server
+	// hides it too, but only for the default User-Agent.
+	advertisement, err = gitproto.RemoveV2FetchFeature(advertisement, "ref-in-want")
+	if err != nil {
+		return fmt.Errorf("stateless-connect: strip ref-in-want: %w", err)
+	}
+
 	fmt.Fprintln(stdout)
 	if _, err := stdout.Write(advertisement); err != nil {
 		return fmt.Errorf("streaming v2 capabilities: %w", err)

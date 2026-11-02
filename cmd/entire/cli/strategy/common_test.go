@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -817,8 +818,8 @@ func TestIsProtectedPath(t *testing.T) {
 		{".entire/metadata/session.json", true},
 		{".claude", true},
 		{".claude/settings.json", true},
-		{".gemini", true},
-		{".gemini/settings.json", true},
+		{".cursor", true},
+		{".cursor/hooks.json", true},
 		{"src/main.go", false},
 		{"README.md", false},
 		{".gitignore", false},
@@ -1622,12 +1623,17 @@ func TestReadAgentTypeFromTree(t *testing.T) {
 		want  types.AgentType
 	}{
 		{"only claude", []string{".claude/settings.json"}, agent.AgentTypeClaudeCode},
-		{"only gemini", []string{".gemini/settings.json"}, agent.AgentTypeGemini},
 		{"only codex", []string{".codex/config.json"}, agent.AgentTypeCodex},
 		{"only cursor", []string{".cursor/settings.json"}, agent.AgentTypeCursor},
 		{"only factory", []string{".factory/settings.json"}, agent.AgentTypeFactoryAIDroid},
 		{"claude and codex is ambiguous", []string{".claude/settings.json", ".codex/config.json"}, agent.AgentTypeUnknown},
-		{"claude and gemini is ambiguous", []string{".claude/settings.json", ".gemini/settings.json"}, agent.AgentTypeUnknown},
+		{"claude and cursor is ambiguous", []string{".claude/settings.json", ".cursor/settings.json"}, agent.AgentTypeUnknown},
+		// A Gemini session in flight when its support was removed still has
+		// pending work, and only this marker says how to read its transcript.
+		{"only gemini is a last-resort marker", []string{".gemini/settings.json"}, agent.AgentTypeGemini},
+		// But never counted with the others: a leftover .gemini must not make a
+		// later session of another agent ambiguous.
+		{"leftover gemini does not shadow another agent", []string{".claude/settings.json", ".gemini/settings.json"}, agent.AgentTypeClaudeCode},
 		{"no agent dirs", []string{"f.txt"}, agent.AgentTypeUnknown},
 	}
 
@@ -1785,5 +1791,41 @@ func TestEnsureRedactionConfigured_NarrowedScanners(t *testing.T) {
 	}
 	if !info2.ModTime().Equal(info.ModTime()) {
 		t.Fatal("marker rewritten on re-run; narrowed-coverage notice re-emitted")
+	}
+}
+
+func TestPIIConfigFromSettings_CategoryDefaults(t *testing.T) {
+	t.Parallel()
+	off := false
+	on := true
+	tests := []struct {
+		name string
+		pii  settings.PIISettings
+		want map[redact.PIICategory]bool
+	}{
+		{
+			name: "unset categories use defaults",
+			pii:  settings.PIISettings{Enabled: true},
+			want: map[redact.PIICategory]bool{redact.PIIEmail: true, redact.PIIPhone: true, redact.PIIAddress: false, redact.PIIIP: true},
+		},
+		{
+			name: "explicit values win",
+			pii:  settings.PIISettings{Enabled: true, Email: &off, Phone: &off, Address: &on, IP: &off},
+			want: map[redact.PIICategory]bool{redact.PIIEmail: false, redact.PIIPhone: false, redact.PIIAddress: true, redact.PIIIP: false},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := piiConfigFromSettings(&tt.pii, nil)
+			if !got.Enabled {
+				t.Error("Enabled = false, want true")
+			}
+			for category, want := range tt.want {
+				if got.Categories[category] != want {
+					t.Errorf("Categories[%s] = %v, want %v", category, got.Categories[category], want)
+				}
+			}
+		})
 	}
 }

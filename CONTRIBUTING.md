@@ -93,7 +93,7 @@ Please answer these questions in your bug report:
 
 ### Prerequisites
 
-- **Go 1.27.1+** - Check with `go version`. `go.mod` pins the minimum, so an older toolchain fails unless it can download the pinned one (`GOTOOLCHAIN=local` cannot).
+- **Go 1.27.3+** - Check with `go version`. `go.mod` pins the minimum, so an older toolchain fails unless it can download the pinned one (`GOTOOLCHAIN=local` cannot).
 - **mise** - Task runner and version manager. Install with `curl https://mise.run | sh`
 
 ### Clone and Install
@@ -119,7 +119,49 @@ mise run build
 mise run test
 ```
 
-> See [CLAUDE.md](CLAUDE.md) for detailed architecture and development reference.
+
+### Dev Container
+
+The repo includes a `.devcontainer/` configuration that installs the system packages used by local development and CI (`git`, `tmux`, `gnome-keyring`, etc) and then bootstraps the repo's `mise` toolchain.
+
+Open the folder in a Dev Container, or start it from the `devcontainer` CLI as follows:
+
+```bash
+devcontainer up --workspace-folder .
+devcontainer exec --workspace-folder . bash -lc '.devcontainer/run-with-keyring.sh'
+```
+
+The container's `postCreateCommand` runs `.devcontainer/post-create.sh`, which does `mise trust --yes && mise install`, so Go, `golangci-lint`, `gotestsum`, `shellcheck`, and the canary E2E helper binaries are ready after creation. Use `.devcontainer/run-with-keyring.sh <command>` for commands that touch the Linux keyring, including `mise run test:ci`.
+
+If `ENTIRE_DEVCONTAINER_KEYRING_PASSWORD` is set in the environment, `.devcontainer/run-with-keyring.sh` uses that value to unlock the keyring non-interactively. If it is unset, the script generates a random password for the session automatically.
+
+### Local Device Auth Testing
+
+If you're working on the CLI login flow against a locally running Entire API, use the smoke script. It defaults to `http://localhost:8787` for both the data API and the login server, and passes the hidden `--insecure-http-auth` flag that a plain-HTTP login server requires:
+
+```bash
+./scripts/local-device-auth-smoke.sh
+```
+
+Override either endpoint with `ENTIRE_API_BASE_URL` and `ENTIRE_LOGIN_SERVER`:
+
+```bash
+ENTIRE_LOGIN_SERVER=http://localhost:8180 ./scripts/local-device-auth-smoke.sh
+```
+
+The script starts a login, opens the approval URL, waits for the CLI to finish, and then verifies a matching context was written to `contexts.json`.
+
+To drive the flow by hand, or to run the focused integration coverage:
+
+```bash
+# Login against a local server (--device forces the device-code flow)
+go run ./cmd/entire login --server http://localhost:8787 --insecure-http-auth --device
+
+# Focused integration coverage for login
+go test -tags=integration ./cmd/entire/cli/integration_test -run TestLogin
+```
+
+> See the [reference map](CLAUDE.md#read-when-relevant) for architecture and development documentation.
 
 ---
 
@@ -143,7 +185,7 @@ mise run test
 
 ## Code Style
 
-Follow standard Go idioms and conventions. For detailed guidance, see the **Go Code Style** section in [CLAUDE.md](CLAUDE.md).
+Follow standard Go idioms and conventions. See the [verification requirements](CLAUDE.md#verification) and [CLI conventions](docs/development/cli-conventions.md) for repository-specific guidance.
 
 ### Key Points
 
@@ -156,7 +198,7 @@ Follow standard Go idioms and conventions. For detailed guidance, see the **Go C
 
 ## Testing
 
-> See [CLAUDE.md](CLAUDE.md) for complete testing documentation.
+> See [Testing and development tools](docs/development/testing.md) for complete testing documentation.
 
 ```bash
 # Unit tests - always run before committing
@@ -213,7 +255,7 @@ These are markdown files that define specialized behaviors for Claude Code (e.g.
 
 ### 2. Coding Agent Integrations (Go)
 
-These are Go implementations that integrate Entire with different AI coding tools (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, etc.) using the Agent abstraction layer.
+These are Go implementations that integrate Entire with different AI coding tools (Claude Code, Codex, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, etc.) using the Agent abstraction layer.
 
 - **Location:** `cmd/entire/cli/agent/`
 - **Steps:**
@@ -221,7 +263,7 @@ These are Go implementations that integrate Entire with different AI coding tool
    2. Register your agent in the agent registry
    3. Add setup and hook configuration as needed
    4. Ensure session and checkpoint tracking is handled per the abstraction
-- **Reference:** See [CLAUDE.md](CLAUDE.md) for architecture and code examples.
+- **Reference:** Use the [reference map](CLAUDE.md#read-when-relevant) to find architecture and code examples.
 
 ---
 
@@ -272,7 +314,7 @@ Addressing Copilot feedback upfront is the fastest path to maintainer review.
 
 Entire exists to help you work with AI coding agents, so it would be odd if you weren't using one to contribute. There's no need to tell us you did. Our general thinking: use whatever agent and methodology you like, but until the robot revolution comes, you are responsible for the final code. Before submitting a PR for review, make sure you have reviewed it yourself. We'll close PRs that obviously skipped this step.
 
-Entire supports Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with.
+Entire supports Claude Code, Codex, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with.
 
 One thing to watch out for is LLM eagerness. Agents like to please and they're in a hurry. A few common failure modes to push back on:
 
@@ -344,8 +386,8 @@ Join the Entire community:
 ## Additional Resources
 
 - [README](README.md) - Setup and usage documentation
-- [CLAUDE.md](CLAUDE.md) - Architecture and development reference (Claude Code)
-- [AGENTS.md](AGENTS.md) - Architecture and development reference (Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI)
+- [CLAUDE.md](CLAUDE.md) - Repository rules and task-specific reference map (Claude Code)
+- [AGENTS.md](AGENTS.md) - Same instructions via symlink (Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI)
 - [Code of Conduct](CODE_OF_CONDUCT.md) - Community guidelines
 - [Security Policy](SECURITY.md) - Reporting security vulnerabilities
 

@@ -11,7 +11,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
-	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,9 +21,7 @@ import (
 // reused — i.e. dead — PID, which is deterministic on both platforms.
 
 func TestClassifySession_IdlePhaseOwnerExited_Stuck(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	// An agent that finished its last turn and then quit without firing a
 	// session-end hook leaves the session IDLE with a dead owner. Reported
@@ -38,7 +35,7 @@ func TestClassifySession_IdlePhaseOwnerExited_Stuck(t *testing.T) {
 		Owner:      &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
 	}
 
-	result := classifySession(state, repo, time.Now())
+	result := classifySession(state, time.Now())
 
 	require.NotNil(t, result, "IDLE session with an exited owner should be stuck")
 	assert.Contains(t, result.Reason, "exited (no longer running)")
@@ -46,9 +43,7 @@ func TestClassifySession_IdlePhaseOwnerExited_Stuck(t *testing.T) {
 }
 
 func TestClassifySession_IdlePhaseOwnerAlive_Healthy(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
+	t.Parallel()
 
 	owner, ok := proclive.ResolveOwner()
 	if !ok {
@@ -65,6 +60,6 @@ func TestClassifySession_IdlePhaseOwnerAlive_Healthy(t *testing.T) {
 		Owner:      &owner,
 	}
 
-	assert.Nil(t, classifySession(state, repo, time.Now()),
+	assert.Nil(t, classifySession(state, time.Now()),
 		"IDLE session with a live owner should be healthy")
 }

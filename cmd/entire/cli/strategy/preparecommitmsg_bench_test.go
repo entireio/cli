@@ -15,7 +15,7 @@ import (
 // BenchmarkPrepareCommitMsg measures the full PrepareCommitMsg hook execution time
 // at various repo sizes and session counts.
 //
-// Setup: N files in a git repo, M active sessions with shadow branch checkpoints,
+// Setup: N files in a git repo, M active sessions with turn-end steps,
 // modified files staged for commit, and a temporary commit message file.
 // PrepareCommitMsg reads session states, checks for new content (getStagedFiles,
 // transcript comparison, content overlap), extracts the last prompt, and writes
@@ -89,7 +89,7 @@ func BenchmarkGetStagedFiles(b *testing.B) {
 }
 
 // benchSetupPrepareCommitMsgRepo creates a git repo with N files, M sessions
-// with shadow branch checkpoints, and staged modifications ready for PrepareCommitMsg.
+// with an uncondensed turn-end step, and staged modifications ready for PrepareCommitMsg.
 // Returns the repo directory path and the path to the temporary commit message file.
 func benchSetupPrepareCommitMsgRepo(b *testing.B, fileCount, sessionCount int) (string, string) {
 	b.Helper()
@@ -102,7 +102,7 @@ func benchSetupPrepareCommitMsgRepo(b *testing.B, fileCount, sessionCount int) (
 		modifiedFiles = append(modifiedFiles, fmt.Sprintf("src/file_%03d.go", i))
 	}
 
-	// Create sessions with shadow branch checkpoints
+	// Create sessions with an uncondensed turn-end step
 	for i := range sessionCount {
 		sessionID := fmt.Sprintf("bench-pcm-session-%d", i)
 
@@ -115,8 +115,8 @@ func benchSetupPrepareCommitMsgRepo(b *testing.B, fileCount, sessionCount int) (
 		})
 		transcriptPath := br.WriteTranscriptFile(b, sessionID, transcript)
 
-		// Seed shadow branch with checkpoint
-		br.SeedShadowBranch(b, sessionID, 1, min(5, fileCount))
+		// Seed the turn-end files and stored transcript
+		br.SeedTurnEnd(b, sessionID, min(5, fileCount))
 
 		// Create session state
 		br.CreateSessionState(b, benchutil.SessionOpts{
@@ -128,8 +128,8 @@ func benchSetupPrepareCommitMsgRepo(b *testing.B, fileCount, sessionCount int) (
 		})
 	}
 
-	// Now stage modifications (after shadow branch seeding, since SeedShadowBranch
-	// writes files that overlap with what we stage)
+	// Now stage modifications (after seeding, since SeedTurnEnd writes files
+	// that overlap with what we stage)
 	b.Chdir(br.Dir)
 	paths.ClearWorktreeRootCache()
 

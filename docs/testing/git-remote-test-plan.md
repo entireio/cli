@@ -12,7 +12,7 @@ Scope: e2e (`e2e/tests/`) + integration (`cmd/entire/cli/integration_test/`) cov
 | Layer | Coverage |
 |---|---|
 | Integration | `remote_operations_test.go` (12 tests: pre-push to bare file remote, checkpoint_remote routing, clone+resume, concurrent push rebase-retry, graceful degradation, filtered-fetch resume), `http_remote_test.go` (4 tests: in-process smart-HTTPS server, `ENTIRE_CHECKPOINT_TOKEN` injection, URL derivation, non-FF rebase, 401 degradation), `explain_test.go` (fetch-on-miss ×3 incl. treeless), `diverged_replay_test.go` |
-| Strategy/checkpoint unit | `push_common_test.go`, `checkpoint_remote_test.go`, `refs_push_test.go` (FF-only, fetch+replay recovery), `manual_commit_opf_rewrite_test.go`, `safely_advance_local_ref_test.go`, `replay_disconnected_test.go`, `pushqueue_test.go`, `checkpoint/remote/util_test.go` |
+| Strategy/checkpoint unit | `push_common_test.go`, `checkpoint_remote_test.go`, `refs_push_test.go` (FF-only, fetch+replay recovery), `safely_advance_local_ref_test.go`, `replay_disconnected_test.go`, `pushqueue_test.go`, `checkpoint/remote/util_test.go` |
 | E2E | `SetupBareRemote` helper (opt-in; default harness repo has **no remote**); 4 remote-flavored tests: `resume_remote_test.go` (clone+auto-fetch ×2), `explain_test.go` (explain from clone), `doctor_test.go`, `alternates_test.go` (the only pre-push-hook e2e — **skipped under git-refs**) |
 | Backend matrix | e2e only: `E2E_CHECKPOINT_STORE` → `ENTIRE_CHECKPOINTS_PRIMARY` (`e2e/testutil/backend.go`); CI canary runs both. **Integration tests have zero git-refs parameterization.** |
 
@@ -22,9 +22,8 @@ Scope: e2e (`e2e/tests/`) + integration (`cmd/entire/cli/integration_test/`) cov
 2. **The read/fetch side hardcodes `origin` everywhere** (`checkpoint/remote/util.go:18`, `git_operations.go:363-443`, `strategy/common.go`, `resume.go`, `api_cmd.go:216`, …) while the push side follows the hook's `$1`. No test has a repo whose only remote is `upstream`, a multi-remote fork triangle, or a push to a non-origin remote followed by reads.
 3. **Upstream tracking config is never consulted** (`branch.<name>.remote`, `remote.pushDefault`, separate `pushurl`) — and never pinned by a test, so we don't even document the current behavior.
 4. **git-refs remote behavior is unit-tested only**: batch FF-only push, fetch+replay recovery, queue drain/compaction/stale-pruning, on-demand `RefFetcher` — nothing at integration level, and the one hook-driven e2e skips under git-refs.
-5. **OPF pre-push rewrite has zero integration/e2e coverage** (divergence abort, CAS `V1RefMovedError`, bootstrap cap — all unit-only).
-6. **No worktree+remote coverage at all** (the git-refs push queue lives in the git *common* dir, shared across worktrees — never exercised with >1 worktree).
-7. **No SSH remotes anywhere; no shallow user clones; detached HEAD only as setup plumbing.**
+5. **No worktree+remote coverage at all** (the git-refs push queue lives in the git *common* dir, shared across worktrees — never exercised with >1 worktree).
+6. **No SSH remotes anywhere; no shallow user clones; detached HEAD only as setup plumbing.**
 
 ### History says these regress (mined from PRs/commits)
 
@@ -40,7 +39,7 @@ Scope: e2e (`e2e/tests/`) + integration (`cmd/entire/cli/integration_test/`) cov
 
 ## 2. Infrastructure work (enablers, do first)
 
-**I-1. Integration backend matrix.** Add a `CheckpointStore` option to `TestEnv` (sets `ENTIRE_CHECKPOINTS_PRIMARY`, inherited by spawned binaries/hooks like the e2e TestMain does) plus a `ForEachBackend(t, func(t, env))` helper. Run the whole remote-touching integration surface (`remote_operations_test.go`, `http_remote_test.go`, explain fetch-on-miss, diverged replay) under both backends; use targeted skips where behavior legitimately differs (e.g. OPF is git-branch-only).
+**I-1. Integration backend matrix.** Add a `CheckpointStore` option to `TestEnv` (sets `ENTIRE_CHECKPOINTS_PRIMARY`, inherited by spawned binaries/hooks like the e2e TestMain does) plus a `ForEachBackend(t, func(t, env))` helper. Run the whole remote-touching integration surface (`remote_operations_test.go`, `http_remote_test.go`, explain fetch-on-miss, diverged replay) under both backends; use targeted skips where behavior legitimately differs.
 
 **I-2. Real-hook push in tests.**
 - Integration: `GitPushWithHooks` (no `--no-verify`) so the installed pre-push script runs exactly as git runs it (stdin refspec lines, remote name + URL argv). Keep `GitPush` for setup plumbing.
@@ -83,7 +82,7 @@ These mostly **pin current behavior first**; several will surface product decisi
 | B6 | `ENTIRE_CHECKPOINT_TOKEN` with SSH-shaped origin URL (`git@host:o/r.git` pointing at the HTTPS test server via insteadOf or URL rewrite): fetch **and** push both coerce to HTTPS (regression `7afdaa33e`) | integration (HTTPS) | both |
 | B7 | Local-path origin (bare dir added as `origin`): `ParseURL` fails → raw-origin fallback still pushes/fetches correctly; no crash in URL derivation (pin; latent gap `isLocalPath`) | integration | both |
 
-### C. Cross-machine: clone → fetch → resume/explain/attribution — P0
+### C. Cross-machine: clone → fetch → resume/explain/blame — P0
 
 | # | Test | Layer | Backend |
 |---|---|---|---|
@@ -92,7 +91,7 @@ These mostly **pin current behavior first**; several will surface product decisi
 | C3 | git-refs offline read: unreachable remote + locally-missing ref → real error, **not** "checkpoint not found" (regression `7bbdad09c`) | integration | gr |
 | C4 | Clone over HTTPS with token: resume auto-fetch works with auth (e2e today is file-path only) | integration (HTTPS) | both |
 | C5 | Shallow user clone (`git clone --depth=1`): enable, session, commit, push, resume — no `.git/shallow` self-infliction (regressions #1443, #1276), replay refuses at shallow boundary rather than corrupting | integration | both |
-| C6 | Partial clone (`--filter=blob:none`): explain/attribution lazily fetch blobs via `fetch-pack`, no promisor config stamped onto `[remote "origin"]` (regressions #1069, #934 — extend the existing config-guard) | integration | both |
+| C6 | Partial clone (`--filter=blob:none`): explain/blame lazily fetch blobs via `fetch-pack`, no promisor config stamped onto `[remote "origin"]` (regressions #1069, #934 — extend the existing config-guard) | integration | both |
 
 ### D. Divergence & recovery matrix — P0 (the most re-broken area)
 
@@ -108,16 +107,6 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 | D6 | Multi-worktree git-refs queue: two worktrees enqueue checkpoints; `git push` from worktree A drains the shared common-dir queue — worktree B's refs also pushed, queue compacted; stale refs pruned | integration | gr |
 | D7 | Pin the known two-remote queue bug: push to remote A drains the queue, so remote B never receives those refs (decision D-2 — pin now, flip assertion when fixed) | integration | gr |
 
-### E. OPF pre-push rewrite (git-branch only) — P1
-
-| # | Test | Layer |
-|---|---|---|
-| E1 | OPF enabled, happy path over a real bare remote via real hook: unpushed v1 commits rewritten with `Entire-OPF-Applied: true`, pushed; remote content is the redacted version | integration |
-| E2 | Diverged v1 during rewrite → `V1DivergedError` aborts the **user** push with the actionable message | integration |
-| E3 | CAS conflict: concurrent checkpoint write between rewrite and ref-update → `V1RefMovedError`, re-run push succeeds | integration |
-| E4 | Bootstrap cap: remote has no v1 + local history over cap → typed abort, nothing pushed | integration |
-| E5 | Non-TTY push with OPF (regression `626a0344e`): no /dev/tty writes, hook completes | integration |
-
 ### F. Degraded remotes & protocol edges — P1
 
 | # | Test | Layer | Backend |
@@ -125,14 +114,13 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 | F1 | Protected v1 branch (GH013 emulation via bare-remote `pre-receive` hook): loud banner, no retry loop, user push unaffected (regression #1033 — currently unit-only on output classification) | integration | gb |
 | F2 | Hook time bounds: unreachable/hanging remote (HTTPS server that accepts then stalls) → pre-push respects the shared push budget, no per-attempt timeout stacking (regressions #1282, `2e2c1b73a`) | integration (HTTPS) | both |
 | F3 | 401→token-retry over HTTPS for git-refs batch push (v1 version exists: `TestHTTPS_PushFailsWithoutToken`) | integration (HTTPS) | gr |
-| F4 | Checkpoint policy sync in the git-refs pre-push path (regression `7bbdad09c` — policy check was skipped): blocked policy skips checkpoint refs but not the user push | integration | gr |
-| F5 | Detached HEAD: session + checkpoint while detached; `git push origin HEAD:branch`; resume from detached clone (today detach is only setup plumbing) | integration | both |
-| F6 | `entire://` origin with checkpoint_remote configured → checkpoints follow the mirror on the same cluster when the forge matches the provider; provider-host routing only for forge-mismatched mirrors and `file://` (supersedes the #1279 behavior) — currently unit-only; needs a fake provider mapping or injectable host table | integration | gb |
+| F4 | Detached HEAD: session + checkpoint while detached; `git push origin HEAD:branch`; resume from detached clone (today detach is only setup plumbing) | integration | both |
+| F5 | `entire://` origin with checkpoint_remote configured → checkpoints follow the mirror on the same cluster when the forge matches the provider; provider-host routing only for forge-mismatched mirrors and `file://` (supersedes the #1279 behavior) — currently unit-only; needs a fake provider mapping or injectable host table | integration | gb |
 
 ### G. E2E additions (real agents optional, vogon default) — P1
 
 - G1: extend `resume_remote_test.go` + `explain_test.go` clone tests to rely on the real hook (drop `PushCheckpointRefs`, see A5) and run under both `E2E_CHECKPOINT_STORE` values in the CI canary matrix.
-- G2: one e2e worktree scenario: session in a linked worktree, commit, push from the worktree, clone elsewhere, resume (covers worktree shadow-branch namespace + shared queue end-to-end).
+- G2: one e2e worktree scenario: session in a linked worktree, commit, push from the worktree, clone elsewhere, resume (covers per-worktree session state + shared queue end-to-end).
 - G3: doctor e2e on a repo with unreachable remote (today `TestDoctorNoIssues` only covers healthy).
 
 ### H. Explicit non-goals (for now)
@@ -147,14 +135,14 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 
 - **D-1 non-origin reads**: pushing checkpoints to `upstream` (hook `$1`) while every read path fetches from `origin` is incoherent. Decide: teach reads to use the checkpoint-bearing remote (e.g. remember last push remote, or consult `branch.<name>.remote`), or document origin-only support and warn on non-origin pushes. B1/B2/B4 pin whichever is chosen.
 - **D-2 multi-remote queue clearing** (git-refs): queue entries are deleted after a successful push to *any* remote — second remote permanently misses refs. Probably needs per-remote tracking or "delete only when pushed to the fetch-resolution target". D7 pins current behavior until then.
-- **D-3 forge map / provider table**: only `github.com`→`gh` and github/gitlab provider hosts exist; GHE/self-hosted silently degrade (`{repo_id}`, trails). Decide config story before writing tests beyond pinning.
+- **D-3 forge map / provider table**: `checkpoint_remote` accepts github and gitlab (per-feature gates in `docs/development/checkpoint-implementation.md`). Still open: `gitremote.hostToForge` only maps `github.com`→`gh`, so the `entire://` push-through mirror and trails remain github-only; `--issue-link` hard-codes github.com; repo protection keys off the control-plane `provider` enum; and GHE/self-hosted gitlab silently degrade (`{repo_id}`, trails). Decide config story before writing tests beyond pinning.
 
 ## 5. Suggested sequencing
 
-1. **PR 1 — infrastructure**: I-1 (backend matrix for integration), I-2 (real-hook push helpers + RunPrePush stdin), I-4 (hermeticity tripwire). Immediately re-run the existing remote suites under git-refs; expect it to surface real bugs the same way the e2e matrix did (`refs-v1` policy, explain-clone fetch).
+1. **PR 1 — infrastructure**: I-1 (backend matrix for integration), I-2 (real-hook push helpers + RunPrePush stdin), I-4 (hermeticity tripwire). Immediately re-run the existing remote suites under git-refs; expect it to surface real bugs the same way the e2e matrix did (explain-clone fetch).
 2. **PR 2 — P0 hook & cross-machine**: A1–A6, C1–C4, plus e2e G1.
 3. **PR 3 — divergence matrix**: D1–D7 (D4/D5 fill known untested regressions).
 4. **PR 4 — remote-name/upstream pinning**: B1–B7 after a decision on D-1 (or with explicit "pins current behavior" markers).
-5. **PR 5 — OPF + degraded**: E1–E5, F1–F6, G2–G3, C5–C6.
+5. **PR 5 — degraded**: F1–F5, G2–G3, C5–C6.
 
 Rough sizing: PRs 1–3 are the high-value core (~2/3 of the risk reduction, all P0); 4–5 can trail.

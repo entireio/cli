@@ -366,14 +366,14 @@ func TestFollowedSymlinkedDirs_OnlyReportsActualLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	// .cursor: vouched but absent -> not followed.
-	// .gemini: vouched but dangling -> not followed (and nothing is written there).
-	if err := os.Symlink(filepath.Join(t.TempDir(), "nowhere"), filepath.Join(worktree, ".gemini")); err != nil {
+	// .pi: vouched but dangling -> not followed (and nothing is written there).
+	if err := os.Symlink(filepath.Join(t.TempDir(), "nowhere"), filepath.Join(worktree, ".pi")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
-	agent.SetVouchedSymlinkedDirs(worktree, []string{".claude", ".codex", ".cursor", ".gemini"})
+	agent.SetVouchedSymlinkedDirs(worktree, []string{".claude", ".codex", ".cursor", ".pi"})
 
-	if got := agent.FollowedSymlinkedDirs(worktree); !slices.Equal(got, []string{".claude", ".gemini"}) {
+	if got := agent.FollowedSymlinkedDirs(worktree); !slices.Equal(got, []string{".claude", ".pi"}) {
 		t.Errorf("FollowedSymlinkedDirs() = %v, want only the paths that are symlinks on disk", got)
 	}
 	// The configuration is unchanged; the two answers are different questions.

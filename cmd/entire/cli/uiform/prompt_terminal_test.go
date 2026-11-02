@@ -30,7 +30,8 @@ func TestConfirmationClearsPromptAfterAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = terminal.Close() })
-	t.Cleanup(func() { _ = input.Close() })
+	// input stays open: bubbletea's unjoined checkResize goroutine
+	// (tea.go:861) reads its Fd after Run returns, so Close races with it.
 	if err := pty.Setsize(terminal, &pty.Winsize{Rows: 24, Cols: 100}); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +52,7 @@ func TestConfirmationClearsPromptAfterAnswer(t *testing.T) {
 					cancel()
 				}
 			}
-			if readErr != nil {
+			if readErr != nil || (answered && clearedFromFirstRow.MatchString(transcript.String())) {
 				output <- transcript.String()
 				return
 			}
@@ -61,12 +62,19 @@ func TestConfirmationClearsPromptAfterAnswer(t *testing.T) {
 	form := New(huh.NewGroup(huh.NewConfirm().Title(question).Value(&answer))).
 		WithProgramOptions(tea.WithEnvironment([]string{"TERM=xterm-256color"})).
 		WithAccessible(false).WithInput(input).WithOutput(input)
-	err = form.RunWithContext(ctx)
-	_ = input.Close() // End the reader after the final render has been flushed.
-	if err != nil {
-		t.Fatal(err)
+	drain := func() string {
+		_ = terminal.Close()
+		return <-output
 	}
-	transcript := <-output
+	if err := form.RunWithContext(ctx); err != nil {
+		t.Fatalf("form: %v\ntranscript: %q", err, drain())
+	}
+	var transcript string
+	select {
+	case transcript = <-output:
+	case <-ctx.Done():
+		transcript = drain()
+	}
 	// The form ends with the cursor on its help row, so erasing from there
 	// alone leaves the question and choices visible: the renderer has to move
 	// back up over the form first, then erase to the end of the display.

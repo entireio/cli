@@ -14,6 +14,35 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// writeExecutableScript writes a script that a test is about to execute, with
+// no window in which a concurrent fork can make it unexecutable.
+//
+// A plain os.WriteFile here is an ETXTBSY trap (golang/go#22315). Between its
+// open-for-write and its close, any of this package's parallel tests can
+// fork; the child inherits the write descriptor, and until that child reaches
+// execve the kernel refuses to exec the file — "text file busy". O_CLOEXEC
+// does not help: it closes the descriptor AT exec, and the fork-to-exec gap is
+// exactly the window. Nothing retries, either — os/exec surfaces ETXTBSY as a
+// plain start error — so the flake reaches the test as whatever the failed
+// launch looked like. For TestRunPlugin_ReportsTheChildsOwnSignal that was
+// "exit code=1, want ExitPluginSignalled", which reads like a signal that went
+// missing and points nowhere near the cause.
+//
+// Holding off forks for the duration of the write closes the window rather
+// than narrowing it: a descriptor that never exists across a fork can never be
+// inherited. Where a stand-in can be a link to a real binary instead, prefer
+// that — a link is not a write target at all (see strategy's linkExecutable) —
+// but these scripts have behaviour no installed binary has.
+func writeExecutableScript(t *testing.T, path, content string) {
+	t.Helper()
+	resume := pauseForks()
+	err := os.WriteFile(path, []byte(content), 0o755)
+	resume()
+	if err != nil {
+		t.Fatalf("write executable %s: %v", path, err)
+	}
+}
+
 // writePluginBinary writes a shell script that records argv to argFile.
 // Skips the calling test on Windows.
 func writePluginBinary(t *testing.T, dir, name, argFile string, exitCode int) string {
@@ -22,10 +51,7 @@ func writePluginBinary(t *testing.T, dir, name, argFile string, exitCode int) st
 		t.Skip("plugin shell-script harness only runs on Unix")
 	}
 	path := filepath.Join(dir, name)
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nexit %d\n", argFile, exitCode)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write plugin %s: %v", path, err)
-	}
+	writeExecutableScript(t, path, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nexit %d\n", argFile, exitCode))
 	return path
 }
 
@@ -242,62 +268,77 @@ func TestRunPlugin_ExitCodePropagation(t *testing.T) {
 	}
 }
 
-// interceptVersionCheck swaps the post-plugin version-check seam for a
-// counter and restores it on cleanup.
-func interceptVersionCheck(t *testing.T) *int {
+// interceptPluginNotices swaps both post-plugin notice seams — the CLI
+// version check and the plugin update check — for counters and restores
+// them on cleanup.
+func interceptPluginNotices(t *testing.T) (versionCalls, updateCalls *int) {
 	t.Helper()
-	calls := 0
-	orig := postPluginVersionCheck
-	postPluginVersionCheck = func(context.Context, io.Writer, string) { calls++ }
-	t.Cleanup(func() { postPluginVersionCheck = orig })
-	return &calls
+	v, u := 0, 0
+	origVersion, origUpdate := postPluginVersionCheck, postPluginUpdateCheck
+	postPluginVersionCheck = func(context.Context, io.Writer, string) { v++ }
+	postPluginUpdateCheck = func(context.Context, io.Writer, string) { u++ }
+	t.Cleanup(func() {
+		postPluginVersionCheck, postPluginUpdateCheck = origVersion, origUpdate
+	})
+	return &v, &u
 }
 
-func TestMaybeRunPlugin_VersionCheckAfterSuccess(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+func TestMaybeRunPlugin_NoticesAfterSuccess(t *testing.T) { //nolint:paralleltest // mutates PATH and the notice seams
 	dir := t.TempDir()
 	writePluginBinary(t, dir, "entire-pgr", filepath.Join(dir, "args.txt"), 0)
 	withPathDir(t, dir)
-	calls := interceptVersionCheck(t)
+	versionCalls, updateCalls := interceptPluginNotices(t)
 
 	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
 	if !handled || code != 0 {
 		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
 	}
-	if *calls != 1 {
-		t.Errorf("version check calls: got %d, want 1", *calls)
+	if *versionCalls != 1 {
+		t.Errorf("version check calls: got %d, want 1", *versionCalls)
+	}
+	if *updateCalls != 1 {
+		t.Errorf("update check calls: got %d, want 1", *updateCalls)
 	}
 }
 
 // After `entire upgrade` replaces the binary on disk, this process still
 // carries the pre-upgrade compiled-in version — a post-run version check
 // would see itself as outdated and prompt to redo the finished upgrade.
-func TestMaybeRunPlugin_NoVersionCheckAfterSelfUpdate(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+// The plugin update check is exempt from that guard: it reads the upgrade
+// plugin's manifest fresh from disk, which the self-update cannot stale.
+func TestMaybeRunPlugin_NoVersionCheckAfterSelfUpdate(t *testing.T) { //nolint:paralleltest // mutates PATH and the notice seams
 	dir := t.TempDir()
 	writePluginBinary(t, dir, "entire-upgrade", filepath.Join(dir, "args.txt"), 0)
 	withPathDir(t, dir)
-	calls := interceptVersionCheck(t)
+	versionCalls, updateCalls := interceptPluginNotices(t)
 
 	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"upgrade", "--nightly"})
 	if !handled || code != 0 {
 		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
 	}
-	if *calls != 0 {
-		t.Errorf("version check calls: got %d, want 0", *calls)
+	if *versionCalls != 0 {
+		t.Errorf("version check calls: got %d, want 0", *versionCalls)
+	}
+	if *updateCalls != 1 {
+		t.Errorf("update check calls: got %d, want 1", *updateCalls)
 	}
 }
 
-func TestMaybeRunPlugin_NoVersionCheckAfterFailure(t *testing.T) { //nolint:paralleltest // mutates PATH and the version-check seam
+func TestMaybeRunPlugin_NoNoticesAfterFailure(t *testing.T) { //nolint:paralleltest // mutates PATH and the notice seams
 	dir := t.TempDir()
 	writePluginBinary(t, dir, "entire-pgr", filepath.Join(dir, "args.txt"), 3)
 	withPathDir(t, dir)
-	calls := interceptVersionCheck(t)
+	versionCalls, updateCalls := interceptPluginNotices(t)
 
 	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
 	if !handled || code != 3 {
 		t.Fatalf("handled=%v code=%d, want handled=true code=3", handled, code)
 	}
-	if *calls != 0 {
-		t.Errorf("version check calls: got %d, want 0", *calls)
+	if *versionCalls != 0 {
+		t.Errorf("version check calls: got %d, want 0", *versionCalls)
+	}
+	if *updateCalls != 0 {
+		t.Errorf("update check calls: got %d, want 0", *updateCalls)
 	}
 }
 
@@ -356,10 +397,7 @@ func TestRunPlugin_ReportsTheChildsOwnSignal(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			binPath := filepath.Join(dir, "entire-signaller")
-			script := "#!/bin/sh\ntrap - TERM INT PIPE\n" + tc.script + "\n"
-			if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			writeExecutableScript(t, binPath, "#!/bin/sh\ntrap - TERM INT PIPE\n"+tc.script+"\n")
 			code, killedBy := runPlugin(t.Context(), "signaller", binPath, nil)
 			if code != ExitPluginSignalled {
 				t.Fatalf("exit code=%d, want ExitPluginSignalled", code)
@@ -379,11 +417,9 @@ func TestMaybeRunPlugin_PropagatesTheChildsSignal(t *testing.T) { //nolint:paral
 	}
 	dir := t.TempDir()
 	binPath := filepath.Join(dir, "entire-signaller")
-	if err := os.WriteFile(binPath, []byte("#!/bin/sh\ntrap - TERM\nkill -TERM $$\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeExecutableScript(t, binPath, "#!/bin/sh\ntrap - TERM\nkill -TERM $$\n")
 	t.Setenv("PATH", dir)
-	interceptVersionCheck(t)
+	interceptPluginNotices(t)
 
 	handled, code, killedBy := MaybeRunPlugin(t.Context(), newTestRoot(), []string{"signaller"})
 	if !handled || code != ExitPluginSignalled {

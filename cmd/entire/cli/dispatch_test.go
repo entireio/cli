@@ -25,7 +25,7 @@ func TestParseDispatchFlags_ServerReposAreAllowed(t *testing.T) {
 		"7d",
 		"",
 		false,
-		[]string{"entireio/cli", "entireio/entire.io"},
+		[]string{"gh/entireio/cli", "gh/entireio/entire.io"},
 		"",
 		"",
 		false,
@@ -56,7 +56,7 @@ func TestParseDispatchFlags_NormalizesRepoScopeValues(t *testing.T) {
 		"7d",
 		"",
 		false,
-		[]string{" entireio/cli ", "", "entireio/cli", " otherco/service ", "   "},
+		[]string{" gh/entireio/cli ", "", "gh/entireio/cli", " gh/otherco/service ", "   "},
 		"",
 		"",
 		false,
@@ -64,7 +64,7 @@ func TestParseDispatchFlags_NormalizesRepoScopeValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(opts.RepoPaths, ","); got != "entireio/cli,otherco/service" {
+	if got := strings.Join(opts.RepoPaths, ","); got != "gh/entireio/cli,gh/otherco/service" {
 		t.Fatalf("expected normalized repo scope, got %q", got)
 	}
 	if opts.Branches != nil {
@@ -81,7 +81,7 @@ func TestParseDispatchFlags_LocalRejectsRepos(t *testing.T) {
 		"7d",
 		"",
 		false,
-		[]string{"entireio/cli"},
+		[]string{"gh/entireio/cli"},
 		"",
 		"",
 		false,
@@ -103,7 +103,7 @@ func TestParseDispatchFlags_CloudRejectsAllBranches(t *testing.T) {
 		"7d",
 		"",
 		true,
-		[]string{"entireio/cli"},
+		[]string{"gh/entireio/cli"},
 		"",
 		"",
 		false,
@@ -119,7 +119,7 @@ func TestParseDispatchFlags_CloudRejectsAllBranches(t *testing.T) {
 func TestParseDispatchFlags_CloudCapsReposAtFive(t *testing.T) {
 	t.Parallel()
 
-	repos := []string{"a/b", "c/d", "e/f", "g/h", "i/j", "k/l"}
+	repos := []string{"gh/a/b", "gh/c/d", "gh/e/f", "gh/g/h", "gh/i/j", "gh/k/l"}
 	_, err := parseDispatchFlags(
 		&cobra.Command{},
 		false,
@@ -173,7 +173,7 @@ func TestParseDispatchFlags_InsecureHTTPAuthFlag(t *testing.T) {
 		"7d",
 		"",
 		false,
-		[]string{"entireio/cli"},
+		[]string{"gh/entireio/cli"},
 		"",
 		"",
 		true,
@@ -377,7 +377,7 @@ func TestDispatchPreflight_CloudSkipsLocalPreparationAndProvider(t *testing.T) {
 	})
 
 	cmd := newDispatchCmd()
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -638,12 +638,12 @@ func TestDispatchWizard_LocalWithoutConfiguredAgentPromptsAndPersistsSelection(t
 	}
 	discoverSummaryProvidersAlways = func(context.Context) {}
 	listRegisteredAgents = func() []types.AgentName {
-		return []types.AgentName{agent.AgentNameCodex, agent.AgentNameGemini}
+		return []types.AgentName{agent.AgentNameCodex, agent.AgentNameCursor}
 	}
 	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
 		kind := agent.AgentTypeCodex
-		if name == agent.AgentNameGemini {
-			kind = agent.AgentTypeGemini
+		if name == agent.AgentNameCursor {
+			kind = agent.AgentTypeCursor
 		}
 		return &stubTextAgent{name: name, kind: kind}, nil
 	}
@@ -651,10 +651,10 @@ func TestDispatchWizard_LocalWithoutConfiguredAgentPromptsAndPersistsSelection(t
 	canPromptForSummaryProvider = func() bool { return true }
 	promptSummaryProvider = func(providers []checkpointSummaryProvider) (types.AgentName, error) {
 		calls = append(calls, "picker")
-		if len(providers) != 2 || providers[0].Name != agent.AgentNameCodex || providers[1].Name != agent.AgentNameGemini {
-			t.Fatalf("picker providers = %+v, want enabled codex and gemini", providers)
+		if len(providers) != 2 || providers[0].Name != agent.AgentNameCodex || providers[1].Name != agent.AgentNameCursor {
+			t.Fatalf("picker providers = %+v, want enabled codex and cursor", providers)
 		}
-		return agent.AgentNameGemini, nil
+		return agent.AgentNameCursor, nil
 	}
 	var persistedProvider string
 	saveLocalSummarySettings = func(_ context.Context, s *settings.EntireSettings) error {
@@ -666,8 +666,8 @@ func TestDispatchWizard_LocalWithoutConfiguredAgentPromptsAndPersistsSelection(t
 	runDispatch = func(_ context.Context, opts dispatchpkg.Options) (*dispatchpkg.Dispatch, error) {
 		calls = append(calls, "dispatch")
 		selected, ok := opts.TextGenerator.(*stubTextAgent)
-		if !ok || selected.name != agent.AgentNameGemini {
-			t.Fatalf("dispatch generator = %#v, want selected gemini agent", opts.TextGenerator)
+		if !ok || selected.name != agent.AgentNameCursor {
+			t.Fatalf("dispatch generator = %#v, want selected cursor agent", opts.TextGenerator)
 		}
 		return &dispatchpkg.Dispatch{}, nil
 	}
@@ -681,8 +681,8 @@ func TestDispatchWizard_LocalWithoutConfiguredAgentPromptsAndPersistsSelection(t
 	if got := strings.Join(calls, ","); got != "wizard,picker,dispatch" {
 		t.Fatalf("call order = %q, want wizard,picker,dispatch", got)
 	}
-	if persistedProvider != string(agent.AgentNameGemini) {
-		t.Fatalf("persisted provider = %q, want %q", persistedProvider, agent.AgentNameGemini)
+	if persistedProvider != string(agent.AgentNameCursor) {
+		t.Fatalf("persisted provider = %q, want %q", persistedProvider, agent.AgentNameCursor)
 	}
 }
 
@@ -709,7 +709,7 @@ func TestNewDispatchCmd_CloudDispatchDoesNotResolveLocalProvider(t *testing.T) {
 	})
 
 	cmd := newDispatchCmd()
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -802,7 +802,7 @@ func TestNewDispatchCmd_NonTerminalPrintsPlainMarkdown(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	cmd.SetContext(context.Background())
 
 	if err := cmd.Execute(); err != nil {
@@ -841,7 +841,7 @@ func TestNewDispatchCmd_TerminalUsesInteractiveRenderer(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	cmd.SetContext(context.Background())
 
 	if err := cmd.Execute(); err != nil {
@@ -894,7 +894,7 @@ func TestNewDispatchCmd_AccessibleModeSkipsInteractiveRenderer(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	cmd.SetContext(context.Background())
 
 	if err := cmd.Execute(); err != nil {

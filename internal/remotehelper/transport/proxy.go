@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -26,6 +27,20 @@ import (
 	"github.com/entireio/cli/internal/remotehelper/httpdebug"
 	"github.com/entireio/cli/internal/remotehelper/replicas"
 )
+
+// ErrInsecureReplica identifies an ordinary request or replica URL that uses
+// an insecure scheme. It matches httpclient.ErrRequestPolicy, not a redirect.
+var ErrInsecureReplica = fmt.Errorf("%w: insecure replica URL (HTTPS required)", httpclient.ErrRequestPolicy)
+
+// ErrNoNodeSucceeded marks a request that every attempted replica failed,
+// whether by connection error, 5xx, or redirect-policy rejection. The last
+// node's error stays wrapped alongside it.
+var ErrNoNodeSucceeded = errors.New("no replica succeeded")
+
+// ErrUnreachable marks a request that never got an HTTP answer: the entry
+// domain could not be dialed, or no cached replica was eligible to try.
+// Failures to build the request, such as a credential error, are not tagged.
+var ErrUnreachable = errors.New("server unreachable")
 
 // SetAuthFunc attaches authentication headers to an outbound request.
 // Errors are surfaced verbatim — they short-circuit failover because
@@ -52,10 +67,15 @@ type Config struct {
 	OnUnauthorized func()
 	// UserAgent is stamped on every outbound HTTP request so the
 	// server can attribute git smart-HTTP traffic to the remote
-	// helper. Empty disables the wrapper, in which case the request
-	// carries Go's default ("Go-http-client/1.1") — useful for tests
-	// that don't care about identity. Production callers set it.
+	// helper. Empty sends no User-Agent header at all, which is what
+	// git does for GIT_HTTP_USER_AGENT="" — never Go's default.
 	UserAgent string
+	// DiscoveryTransport is the base RoundTripper for the cold info/refs
+	// probe to the entry domain. Pass the transport the auth client uses
+	// for /.well-known discovery so the probe reuses that pooled connection
+	// to the same host instead of paying a second TCP and TLS handshake.
+	// Nil builds a fresh discovery transport.
+	DiscoveryTransport http.RoundTripper
 }
 
 // Proxy is the HTTP transport the helper protocol uses to talk to the
@@ -90,6 +110,14 @@ type Proxy struct {
 	discoveryTransport http.RoundTripper
 	setAuth            SetAuthFunc
 	onNodeFailed       func(failedNode string)
+	// requireHTTPS is set once this proxy has sent any HTTPS request; from
+	// then on even loopback-HTTP test replicas are refused, so neither a
+	// redirect nor manual replica failover can resume plaintext. Sticky for
+	// the proxy's lifetime.
+	requireHTTPS bool
+	// Only direct test configurations use HTTP loopback entries. Production
+	// replicas.Resolve always supplies an HTTPS entry.
+	allowLoopbackHTTP bool
 
 	// stickyNode is the URL (matching one of nodes) of the replica
 	// that served the most recent successful request, post-redirects.
@@ -114,6 +142,8 @@ func New(cfg Config) *Proxy {
 		setAuth:      cfg.SetAuth,
 		onNodeFailed: cfg.OnNodeFailed,
 	}
+	entry, err := url.Parse(cfg.Nodes.EntryURL)
+	p.allowLoopbackHTTP = err == nil && loopbackHTTP(entry)
 	// The cached node set (nodes.json) is attacker-influenceable: anything
 	// running as the user can amend it. Scope it to the cluster trust domain
 	// before any of these become credential-bearing dial targets.
@@ -135,16 +165,18 @@ func New(cfg Config) *Proxy {
 		if cfg.OnUnauthorized != nil {
 			rt = &unauthorizedObserver{next: rt, fn: cfg.OnUnauthorized}
 		}
-		if cfg.UserAgent != "" {
-			rt = &httpclient.UserAgentTransport{Next: rt, UA: cfg.UserAgent}
-		}
+		rt = &httpclient.UserAgentTransport{Next: rt, UA: cfg.UserAgent}
 		return rt
 	}
-	p.client = &http.Client{
+	p.client = httpclient.New(httpclient.Options{
 		Transport:     wrap(httpclient.NewTransport(cfg.SkipTLS)),
 		CheckRedirect: p.checkRedirect,
+	})
+	discovery := cfg.DiscoveryTransport
+	if discovery == nil {
+		discovery = httpclient.NewDiscoveryTransport(cfg.SkipTLS)
 	}
-	p.discoveryTransport = wrap(httpclient.NewDiscoveryTransport(cfg.SkipTLS))
+	p.discoveryTransport = wrap(discovery)
 	return p
 }
 
@@ -186,9 +218,12 @@ func (p *Proxy) ErrorBaseURL() string {
 // local test servers, and possible with a misconfigured LB) would
 // otherwise carry Authorization through. We'd rather drop the header
 // than leak it.
+//
+// The shared HTTPS floor and hop cap are applied around this callback by
+// httpclient.New; this hook only adds the replica scheme and cluster rules.
 func (p *Proxy) checkRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return errors.New("stopped after 10 redirects")
+	if err := p.validateAndRecordReplicaScheme(req.URL); err != nil {
+		return err
 	}
 	if len(via) == 0 {
 		return nil
@@ -218,10 +253,10 @@ func (p *Proxy) hostInCluster(host string) bool {
 
 // replicaInCluster reports whether a replica base URL is safe to dial with
 // the repo-scoped token attached: it must parse and resolve to a host
-// inside the cluster trust domain. Replica sets arrive from
-// attacker-influenceable sources — the X-Entire-Replicas response header, a
-// redirect Location, and the on-disk node cache — so a malicious or poisoned
-// entry pointing off-cluster would otherwise receive a core-minted bearer
+// inside the cluster trust domain and use a safe transport scheme. Replica
+// sets arrive from attacker-influenceable sources: the X-Entire-Replicas
+// header, a redirect Location, and the on-disk node cache. An unsafe entry
+// pointing off-cluster would otherwise receive a core-minted bearer
 // token. Dropping it here keeps credentials scoped to the cluster the user
 // actually addressed.
 func (p *Proxy) replicaInCluster(rawURL string) bool {
@@ -229,23 +264,41 @@ func (p *Proxy) replicaInCluster(rawURL string) bool {
 	if err != nil || u.Host == "" {
 		return false
 	}
-	return p.hostInCluster(u.Hostname())
+	return p.safeReplicaScheme(u) && p.hostInCluster(u.Hostname())
 }
 
-// filterReplicas drops replica URLs that fall outside the cluster trust
-// domain, logging each rejection. A no-op when clusterHost is unset. See
-// replicaInCluster.
-func (p *Proxy) filterReplicas(urls []string) []string {
-	if p.clusterHost == "" {
-		return urls
+// safeReplicaScheme requires HTTPS except for explicitly configured HTTP
+// loopback test entries. SkipTLS does not authorize plaintext transport.
+func (p *Proxy) safeReplicaScheme(u *url.URL) bool {
+	return u.Scheme == httpclient.SchemeHTTPS || (!p.requireHTTPS && p.allowLoopbackHTTP && loopbackHTTP(u))
+}
+
+// validateAndRecordReplicaScheme rejects unsafe schemes and remembers HTTPS
+// so later manual failover cannot resume HTTP, even in loopback fixtures.
+func (p *Proxy) validateAndRecordReplicaScheme(u *url.URL) error {
+	if !p.safeReplicaScheme(u) {
+		return ErrInsecureReplica
 	}
+	if u.Scheme == httpclient.SchemeHTTPS {
+		p.requireHTTPS = true
+	}
+	return nil
+}
+
+func loopbackHTTP(u *url.URL) bool {
+	return u.Scheme == httpclient.SchemeHTTP && (strings.EqualFold(u.Hostname(), "localhost") || net.ParseIP(u.Hostname()).IsLoopback())
+}
+
+// filterReplicas drops insecure or off-cluster URLs at every ingress, including
+// the node cache, response headers, and response-URL fallback.
+func (p *Proxy) filterReplicas(urls []string) []string {
 	kept := make([]string, 0, len(urls))
 	for _, u := range urls {
 		if p.replicaInCluster(u) {
 			kept = append(kept, u)
 			continue
 		}
-		debuglog.Printf("dropping out-of-cluster replica %q (cluster=%s): refusing to carry credentials off-cluster", u, p.clusterHost)
+		debuglog.Printf("dropping insecure or out-of-cluster replica %q (cluster=%s)", u, p.clusterHost)
 	}
 	return kept
 }
@@ -277,9 +330,12 @@ func (p *Proxy) markNodeFailed(node string) {
 }
 
 // setAuthOrError applies the configured SetAuthFunc (if any) to the
-// request. Errors come from the auth provider (core), not the data
-// plane, so they short-circuit failover.
+// request. Errors here stop request construction without invalidating a node.
+// Redirect-policy failures are handled separately by doWithFailover.
 func (p *Proxy) setAuthOrError(req *http.Request) error {
+	if err := p.validateAndRecordReplicaScheme(req.URL); err != nil {
+		return err
+	}
 	if p.setAuth == nil {
 		return nil
 	}
@@ -319,7 +375,7 @@ func (p *Proxy) doGet(ctx context.Context, urlStr string, client *http.Client, s
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("doing request: %w", err)
+		return nil, fmt.Errorf("%w: doing request: %w", ErrUnreachable, err)
 	}
 	resp, err = p.retryOn401(client, resp, build)
 	if err != nil {
@@ -367,11 +423,15 @@ func (p *Proxy) retryOn401(client *http.Client, resp *http.Response, build func(
 // from a random offset (or the stickyNode if one is set and still in
 // the replica list). Connection errors and 5xx responses trigger
 // failover to the next node. The failed node is removed from the list
-// and OnNodeFailed is called.
+// and OnNodeFailed is called. A redirect-policy rejection is a node failure
+// too: keeping the node would leave it as the only POST target after the
+// entry URL answers info/refs itself, pinning the failure until the replica
+// cache expires. The error still matches httpclient.ErrRequestPolicy, which
+// stops the cold path from following the server's Location.
 func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method string, body io.ReadSeeker, setHeaders func(*http.Request)) (*http.Response, error) {
 	nodes := slices.Clone(p.nodes)
 	if len(nodes) == 0 {
-		return nil, errors.New("no healthy nodes available")
+		return nil, fmt.Errorf("%w: no healthy nodes available", ErrUnreachable)
 	}
 	start := rand.IntN(len(nodes)) //nolint:gosec // load-spreading, not security
 	if p.stickyNode != "" {
@@ -379,7 +439,8 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 			start = idx
 		}
 	}
-	var lastErr error
+	var lastErr, policyErr error
+	attempted := 0
 	// One auth retry per logical operation, not per replica: a 401 doesn't
 	// trigger failover, so the loop returns the first 401 to the retry — this
 	// flag stops a second node (or a re-entry) from re-minting again.
@@ -387,6 +448,14 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 
 	for i := range nodes {
 		node := nodes[(start+i)%len(nodes)]
+		// Once an HTTPS request has been attempted, HTTP loopback replicas in
+		// the snapshot are ineligible. Skip such a node before auth stamping,
+		// without treating it as unhealthy or abandoning later HTTPS nodes.
+		if !p.replicaInCluster(node) {
+			debuglog.Printf("skipping insecure or out-of-cluster replica %q", node)
+			continue
+		}
+		attempted++
 		reqURL := p.nodeURL(node, makeSuffix)
 
 		// build (re)constructs the request: rewind the body, mint/attach the
@@ -421,6 +490,14 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 
 		resp, err := p.client.Do(req)
 		if err != nil {
+			if errors.Is(err, httpclient.ErrRequestPolicy) {
+				// The node proposes an unsafe hop. Nothing was sent to it;
+				// drop it like an unreachable node and try the rest.
+				debuglog.Printf("node %s rejected by redirect policy: %v", node, err)
+				policyErr = err
+				p.markNodeFailed(node)
+				continue
+			}
 			debuglog.Printf("node %s unreachable: %v", node, err)
 			lastErr = err
 			p.markNodeFailed(node)
@@ -441,12 +518,20 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 			}
 		}
 
+		// A node refusing for lack of disk is up: try the next replica, but
+		// do not mark it failed, which would purge the persisted replica set
+		// on every push while the node stays full.
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			msg := readErrorMessage(resp)
+			debuglog.Printf("node %s returned HTTP 507: %s", node, msg)
+			lastErr = newHTTPStatusError(resp.StatusCode, msg, p.ErrorBaseURL())
+			continue
+		}
+
 		if shouldFailover(resp.StatusCode) {
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024)) //nolint:errcheck // best-effort body read for error message
-			_ = resp.Body.Close()
-			msg := strings.TrimSpace(string(respBody))
+			msg := readErrorMessage(resp)
 			debuglog.Printf("node %s returned HTTP %d: %s", node, resp.StatusCode, msg)
-			lastErr = fmt.Errorf("node %s: HTTP %d: %s", node, resp.StatusCode, msg)
+			lastErr = fmt.Errorf("node %s: %w", node, newHTTPStatusError(resp.StatusCode, msg, p.ErrorBaseURL()))
 			p.markNodeFailed(node)
 			continue
 		}
@@ -464,7 +549,22 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 		return resp, nil
 	}
 
-	return nil, fmt.Errorf("all %d nodes failed, last error: %w", len(nodes), lastErr)
+	var storage *InsufficientStorageError
+	if errors.As(lastErr, &storage) {
+		return nil, lastErr
+	}
+	if policyErr != nil {
+		if lastErr == nil {
+			return nil, fmt.Errorf("%w: %w", ErrNoNodeSucceeded, policyErr)
+		}
+		// fmt rather than errors.Join: Join's newline would split git's
+		// one-line error output.
+		return nil, fmt.Errorf("%w: %w; %w", ErrNoNodeSucceeded, policyErr, lastErr)
+	}
+	if attempted == 0 {
+		return nil, fmt.Errorf("%w: no eligible replicas available", ErrUnreachable)
+	}
+	return nil, fmt.Errorf("%w: all %d attempted nodes failed, last error: %w", ErrNoNodeSucceeded, attempted, lastErr)
 }
 
 // noRedirectClient returns a one-shot client for the cold info/refs probe
@@ -478,12 +578,12 @@ func (p *Proxy) noRedirectClient() *http.Client {
 	if transport == nil && p.client != nil {
 		transport = p.client.Transport
 	}
-	return &http.Client{
+	return httpclient.New(httpclient.Options{
 		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
-	}
+	})
 }
 
 func isRedirect(statusCode int) bool { return statusCode >= 300 && statusCode < 400 }
@@ -532,9 +632,9 @@ func (p *Proxy) refreshReplicas(resp *http.Response) {
 	}
 	// Cold start with no header: adopt the host that answered as a single
 	// in-memory entry so the subsequent POST has a target — but only if it's
-	// in-cluster, so a stripped-auth redirect to an off-cluster host can't
+	// secure and in-cluster, so an unsafe or stripped-auth redirect can't
 	// pin an attacker URL as the node set.
-	if resp.Request != nil && resp.Request.URL != nil && p.hostInCluster(resp.Request.URL.Hostname()) {
+	if resp.Request != nil && resp.Request.URL != nil && p.replicaInCluster(resp.Request.URL.String()) {
 		u := &url.URL{Scheme: resp.Request.URL.Scheme, Host: resp.Request.URL.Host}
 		p.nodes = []string{u.String()}
 	}

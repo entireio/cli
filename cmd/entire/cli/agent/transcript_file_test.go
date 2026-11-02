@@ -3,6 +3,7 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -38,4 +39,24 @@ func TestReadTranscriptFile_AllowsExternalAgentFile(t *testing.T) {
 	got, err := agent.ReadTranscriptFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "external", string(got))
+}
+
+func TestCheckTranscriptReadable_ExternalPaths(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	readable := filepath.Join(dir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(readable, []byte("external"), 0o600))
+	require.NoError(t, agent.CheckTranscriptReadable(readable))
+
+	require.ErrorIs(t, agent.CheckTranscriptReadable(filepath.Join(dir, "missing.jsonl")), os.ErrNotExist)
+	require.Error(t, agent.CheckTranscriptReadable(dir), "a directory is not a readable transcript")
+
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		return // root ignores, and Windows lacks, the permission bits removed below
+	}
+	unreadable := filepath.Join(dir, "unreadable.jsonl")
+	require.NoError(t, os.WriteFile(unreadable, []byte("external"), 0o600))
+	require.NoError(t, os.Chmod(unreadable, 0o000))
+	require.ErrorIs(t, agent.CheckTranscriptReadable(unreadable), os.ErrPermission)
 }

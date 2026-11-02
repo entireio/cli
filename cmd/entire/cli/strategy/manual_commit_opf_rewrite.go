@@ -446,7 +446,7 @@ func resolveRemoteV1Tip(ctx context.Context, repo *git.Repository, target string
 	if wt, wtErr := repo.Worktree(); wtErr == nil {
 		worktreeRoot = wt.Filesystem().Root()
 	}
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, target, srcRef, opfRewriteFetchTmpRef, "v1 for OPF rewrite", true, checkpointRemoteFetchTimeout); err != nil {
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, target, srcRef, opfRewriteFetchTmpRef, "v1 for OPF rewrite", true, hotPathFetch); err != nil {
 		if !remote.IsURL(target) {
 			logging.Warn(ctx, "OPF rewrite: failed to fetch remote v1; using local remote-tracking ref",
 				slog.String("remote", target),
@@ -519,7 +519,7 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 
 	var unpushed []*object.Commit
 	if walkErr := iter.ForEach(func(c *object.Commit) error {
-		if !remoteTip.IsZero() && c.Hash == remoteTip {
+		if !remoteTip.IsZero() && c.Hash.Equal(remoteTip) {
 			return errStop
 		}
 		unpushed = append(unpushed, c)
@@ -814,7 +814,7 @@ func atomicSetV1Ref(ctx context.Context, repo *git.Repository, expectedOld, newH
 		return nil
 	}
 	if errors.Is(err, gitrepo.ErrRefCASConflict) {
-		if cur, refErr := repo.Reference(refName, true); refErr == nil && cur.Hash() != expectedOld {
+		if cur, refErr := repo.Reference(refName, true); refErr == nil && !cur.Hash().Equal(expectedOld) {
 			return &V1RefMovedError{Expected: expectedOld, Actual: cur.Hash()}
 		}
 	}

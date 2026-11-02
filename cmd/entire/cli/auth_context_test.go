@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,6 +105,29 @@ func TestResolveStatusTarget_FallsBackToStoredWhenRefreshFails(t *testing.T) {
 	}
 	if got.coreURL != testCoreURL || got.activeContext == "" {
 		t.Errorf("want the active context preserved on fallback, got coreURL=%q activeContext=%q", got.coreURL, got.activeContext)
+	}
+}
+
+// A saved login whose keyring cannot be searched is an error, not the
+// zero-token target that `auth status`, `auth token`, `api` and the mirror
+// wizard all render as "Not logged in. Run 'entire login'".
+func TestResolveStatusTarget_UnreachableKeyringErrors(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	stored := makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp))
+	if _, err := auth.RecordLoginContext(stored, "", true); err != nil {
+		t.Fatalf("record context: %v", err)
+	}
+	// The login is saved, but the keyring now cannot be searched.
+	t.Cleanup(tokenstore.UseUnreachableKeyringForTesting(filepath.Join(t.TempDir(), "empty.json")))
+
+	_, err := resolveStatusTarget(t.Context(), auth.Contexts, auth.RefreshedLoginToken)
+	if !errors.Is(err, tokenstore.ErrKeyringUnavailable) {
+		t.Fatalf("resolveStatusTarget error = %v, want ErrKeyringUnavailable", err)
 	}
 }
 
@@ -260,48 +284,6 @@ func TestCompleteContextNames_NoContexts(t *testing.T) {
 	}
 }
 
-func TestPromoteNextLogin(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	// No contexts: silent.
-	var empty bytes.Buffer
-	promoteNextLogin(&empty, &empty)
-	if empty.Len() != 0 {
-		t.Fatalf("no contexts should be silent, got %q", empty.String())
-	}
-
-	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
-		t.Fatalf("record a: %v", err)
-	}
-	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"bob","exp":%d}`, exp)), "", true); err != nil {
-		t.Fatalf("record b: %v", err)
-	}
-
-	// A current context is set: promotion is a no-op (nothing to promote into).
-	var noop bytes.Buffer
-	promoteNextLogin(&noop, &noop)
-	if noop.Len() != 0 {
-		t.Fatalf("with a current context set, promote should be silent, got %q", noop.String())
-	}
-
-	// Clear the active context (as logout does): the remaining login is promoted.
-	if err := auth.RemoveCurrentContext(); err != nil {
-		t.Fatalf("remove current: %v", err)
-	}
-	var buf bytes.Buffer
-	promoteNextLogin(&buf, &buf)
-	if !strings.Contains(buf.String(), "Now using") {
-		t.Fatalf("expected promotion message, got %q", buf.String())
-	}
-	if _, current, err := auth.Contexts(); err != nil || current == "" {
-		t.Fatalf("expected a context to be promoted to current (current=%q, err=%v)", current, err)
-	}
-}
-
 // setupContextsForUse records one login context per host into an isolated config
 // dir and returns their names in on-disk order. Only the first stays active, so
 // a test can tell the picker's default from whatever was recorded last.
@@ -324,7 +306,7 @@ func setupContextsForUse(t *testing.T, hosts ...string) []string {
 	return names
 }
 
-// TestSelectContextToUse_NoContexts pins that a bare `entire auth use` with
+// TestSelectContextToUse_NoContexts pins that a bare `entire auth switch` with
 // nothing saved points at login instead of erroring or opening an empty picker.
 func TestSelectContextToUse_NoContexts(t *testing.T) {
 	setupContextsForUse(t)
@@ -348,7 +330,7 @@ func TestSelectContextToUse_NoContexts(t *testing.T) {
 
 // TestSelectContextToUse_SingleContextNeedsNoPicker pins that one saved login
 // resolves directly — a one-row picker asks a question with one answer, and this
-// is the branch that keeps a bare `auth use` working with no terminal.
+// is the branch that keeps a bare `auth switch` working with no terminal.
 func TestSelectContextToUse_SingleContextNeedsNoPicker(t *testing.T) {
 	names := setupContextsForUse(t, "core-a.example.com")
 
@@ -385,8 +367,8 @@ func TestSelectContextToUse_NoTerminalNamesThePositional(t *testing.T) {
 		t.Fatalf("selected %q, want an error when the picker can't render", got)
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "entire auth use") {
-		t.Fatalf("error = %q, want it to name `entire auth use`", msg)
+	if !strings.Contains(msg, "entire auth switch") {
+		t.Fatalf("error = %q, want it to name `entire auth switch`", msg)
 	}
 	for _, name := range names {
 		if !strings.Contains(msg, name) {
@@ -490,7 +472,7 @@ func TestContextPickerTable_ColumnsAlign(t *testing.T) {
 }
 
 // TestContextTableMatchesPicker pins what one builder buys: `entire auth
-// contexts` and the `entire auth use` picker print the same table, down to the
+// contexts` and the `entire auth switch` picker print the same table, down to the
 // column widths and the trailing "(active)". A column added to one cannot go
 // missing from the other, and the marker cannot drift back to two spellings.
 // The picker's rows are indented by huh's cursor gutter; nothing else differs.
@@ -542,13 +524,13 @@ func columnOffsets(line string) []int {
 	return offsets
 }
 
-// TestAuthUseCmd_ArgsAndSwitch pins the command surface: a name still switches
-// without asking, and the argument is now optional so a bare `entire auth use`
+// TestAuthSwitchCmd_ArgsAndSwitch pins the command surface: a name switches
+// without asking, and the argument is optional so a bare `entire auth switch`
 // reaches the picker instead of failing argument validation.
-func TestAuthUseCmd_ArgsAndSwitch(t *testing.T) {
+func TestAuthSwitchCmd_ArgsAndSwitch(t *testing.T) {
 	names := setupContextsForUse(t, "core-a.example.com", "core-b.example.com")
 
-	cmd := newAuthUseCmd()
+	cmd := newAuthSwitchCmd()
 	if err := cmd.Args(cmd, nil); err != nil {
 		t.Fatalf("Args(no args) = %v, want the picker form to be accepted", err)
 	}
@@ -561,7 +543,7 @@ func TestAuthUseCmd_ArgsAndSwitch(t *testing.T) {
 	cmd.SetErr(&out)
 	cmd.SetArgs([]string{names[1]})
 	if err := cmd.ExecuteContext(t.Context()); err != nil {
-		t.Fatalf("auth use %s: %v", names[1], err)
+		t.Fatalf("auth switch %s: %v", names[1], err)
 	}
 	if !strings.Contains(out.String(), names[1]) {
 		t.Fatalf("output = %q, want confirmation naming %q", out.String(), names[1])

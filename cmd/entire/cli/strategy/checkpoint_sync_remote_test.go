@@ -5,14 +5,17 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,24 +54,43 @@ func TestResolveCheckpointSyncRemote_ConfigSetting(t *testing.T) {
 }
 
 // Not parallel: uses t.Chdir()
-func TestResolveCheckpointSyncRemote_ConfigSettingMissingRemote_FailsClosed(t *testing.T) {
+func TestResolveCheckpointSyncRemote_ConfigSettingInvalidRemote_FailsClosed(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "f.txt", "init")
-	testutil.GitAdd(t, tmpDir, "f.txt")
-	testutil.GitCommit(t, tmpDir, "init")
 
-	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "gone")
+	for _, tt := range []struct {
+		name          string
+		remote        string
+		pushURL       string
+		emptyFetchURL bool
+	}{
+		{name: "missing remote", remote: "gone"},
+		{name: "pushurl-only remote", remote: "pushonly", pushURL: "https://example.com/pushonly.git"},
+		{name: "empty fetch URL", remote: "empty", emptyFetchURL: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			testutil.InitRepo(t, tmpDir)
+			testutil.WriteFile(t, tmpDir, "f.txt", "init")
+			testutil.GitAdd(t, tmpDir, "f.txt")
+			testutil.GitCommit(t, tmpDir, "init")
+			if tt.pushURL != "" {
+				testutil.RunGit(t, tmpDir, "config", "remote."+tt.remote+".pushurl", tt.pushURL)
+			}
+			if tt.emptyFetchURL {
+				testutil.RunGit(t, tmpDir, "config", "remote."+tt.remote+".url", "")
+			}
+			testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+			testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, tt.remote)
+			t.Chdir(tmpDir)
 
-	t.Chdir(tmpDir)
-
-	got, err := ResolveCheckpointSyncRemote(ctx)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gone")
-	assert.Empty(t, got.Name)
+			got, err := ResolveCheckpointSyncRemote(ctx)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.remote)
+			assert.Contains(t, err.Error(), "fetch URL")
+			assert.Empty(t, got.Name)
+		})
+	}
 }
 
 // Not parallel: uses t.Chdir()
@@ -160,6 +182,33 @@ func TestResolveCheckpointSyncRemote_SettingsLoadErrorFailsClosed(t *testing.T) 
 }
 
 // Not parallel: uses t.Chdir()
+func TestResolveCheckpointSyncRemote_GitConfigReadErrorFailsClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "f.txt", "init")
+	testutil.GitAdd(t, tmpDir, "f.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	t.Chdir(tmpDir)
+
+	ctx := settings.WithWorktreeRoot(context.Background(), tmpDir)
+	t.Setenv("PATH", t.TempDir())
+
+	got, err := ResolveCheckpointSyncRemote(ctx)
+	require.ErrorContains(t, err, "executable file not found")
+	assert.Empty(t, got.Name)
+}
+
+func TestReadRemotesInConfigOrder_CanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(settings.WithWorktreeRoot(context.Background(), t.TempDir()))
+	cancel()
+
+	_, err := readRemotesInConfigOrder(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// Not parallel: uses t.Chdir()
 func TestResolveCheckpointSyncRemote_NoRemotes(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
@@ -202,6 +251,34 @@ func TestResolveCheckpointSyncRemote_PushurlOnlyRemoteIsInvisible(t *testing.T) 
 	got, err := ResolveCheckpointSyncRemote(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, CheckpointSyncRemote{Name: "first-real", Source: SyncRemoteSourceFirst}, got)
+}
+
+// Not parallel: uses t.Chdir().
+func TestCheckpointSyncRemote_IncludedRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+	dir := newCaptureTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "remove", "fork")
+	testutil.WriteFile(t, dir, "remotes.cfg", "[remote \"fork\"]\n\turl = https://example.com/fork.git\n")
+	setGitConfig(t, dir, "include.path", filepath.Join(dir, "remotes.cfg"))
+	setGitConfig(t, dir, "remote.pushDefault", "fork")
+	require.Equal(t, "https://example.com/fork.git", strings.TrimSpace(testutil.RunGit(t, dir, "remote", "get-url", "fork")))
+	t.Chdir(dir)
+
+	got, err := ResolveCheckpointSyncRemote(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
+	require.True(t, pendingCaptureCheckpointSyncRemote(ctx, "fork"), "the included remote is a valid capture target")
+	captureOnSuccessfulPush(ctx, "fork")
+	assert.Equal(t, []string{"fork"}, loadCapturedSyncRemotes(ctx))
+	got, err = ResolveCheckpointSyncRemote(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, CheckpointSyncRemote{Name: "fork", Source: SyncRemoteSourceObserved}, got)
+
+	testutil.WriteCheckpointPushRemoteSetting(t, dir, "fork")
+	got, err = ResolveCheckpointSyncRemote(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, CheckpointSyncRemote{Name: "fork", Source: SyncRemoteSourceConfig}, got)
 }
 
 // Not parallel: uses t.Chdir()
@@ -370,6 +447,260 @@ func TestCheckpointSyncAllowedForRemote(t *testing.T) {
 	})
 }
 
+// Regression: a clone with a GitHub remote and an Entire mirror of the same
+// repository captured the GitHub remote as the sync remote, so every push to
+// the mirror held checkpoints back and printed "N checkpoint(s) are waiting to
+// sync". The mirror pushes through to GitHub and syncs every ref back, so a
+// push to either remote reaches the same repository and must carry checkpoints.
+//
+// Not parallel: uses t.Chdir()
+func TestCheckpointSyncAllowedForRemote_SameForgeRepository(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+
+	const mirrorURL = "entire://aws-eu-central-1.entire.io/gh/acme/widgets"
+
+	// initRepo elects "github" (git@github.com:acme/widgets.git) explicitly and
+	// adds pushRemote with pushRemoteURL.
+	initRepo := func(t *testing.T, pushRemoteURL string) string {
+		t.Helper()
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		testutil.WriteFile(t, dir, "f.txt", "init")
+		testutil.GitAdd(t, dir, "f.txt")
+		testutil.GitCommit(t, dir, "init")
+		testutil.AddRemote(t, dir, "github", "git@github.com:acme/widgets.git")
+		testutil.AddRemote(t, dir, "origin", pushRemoteURL)
+		testutil.WriteCheckpointPushRemoteSetting(t, dir, "github")
+		return dir
+	}
+
+	admitted := []struct {
+		name, url string
+	}{
+		{"entire mirror of the elected repository", mirrorURL},
+		{"mirror with .git suffix", mirrorURL + ".git"},
+		{"owner and repo differ only in case", "entire://aws-us-east-2.entire.io/gh/Acme/Widgets"},
+		{"https URL of the elected repository", "https://github.com/acme/widgets.git"},
+	}
+	for _, tc := range admitted {
+		t.Run("admitted: "+tc.name, func(t *testing.T) {
+			t.Chdir(initRepo(t, tc.url))
+			assert.True(t, checkpointSyncAllowedForRemote(ctx, "origin", ""))
+		})
+	}
+
+	rejected := []struct {
+		name, url string
+	}{
+		{"mirror of a different owner", "entire://aws-eu-central-1.entire.io/gh/other/widgets"},
+		{"mirror of a different repo", "entire://aws-eu-central-1.entire.io/gh/acme/gadgets"},
+		{"Entire-native repository", "entire://aws-eu-central-1.entire.io/et/acme/widgets"},
+		{"unknown host with the same path", "https://git.example.com/acme/widgets.git"},
+		{"remote helper scheme naming github.com", "bogus+ssh://github.com/acme/widgets"},
+	}
+	for _, tc := range rejected {
+		t.Run("rejected: "+tc.name, func(t *testing.T) {
+			t.Chdir(initRepo(t, tc.url))
+			assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin", ""))
+		})
+	}
+
+	// Both sides on the same unrecognized forge: owner/repo agree, but nothing
+	// says the two URLs are one repository (no mirror relationship, unknown
+	// case rules), so the match must come from a known forge, not path equality.
+	sameUnknownForge := []struct {
+		name, elected, push string
+	}{
+		{"self-hosted host", "https://git.example.com/acme/widgets.git", "git@git.example.com:acme/widgets.git"},
+		{"Entire-native repository in two cells", "entire://aws-us-east-2.entire.io/et/acme/widgets", "entire://aws-eu-central-1.entire.io/et/acme/widgets"},
+	}
+	for _, tc := range sameUnknownForge {
+		t.Run("rejected: same path on "+tc.name, func(t *testing.T) {
+			dir := initRepo(t, tc.push)
+			testutil.RunGit(t, dir, "remote", "set-url", "github", tc.elected)
+			t.Chdir(dir)
+			assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin", ""))
+		})
+	}
+
+	t.Run("rejected: pushurl redirects the push elsewhere", func(t *testing.T) {
+		dir := initRepo(t, mirrorURL)
+		setGitConfig(t, dir, "remote.origin.pushurl", "git@github.com:other/widgets.git")
+		t.Chdir(dir)
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin", ""),
+			"the push goes to pushurl, not the fetch URL; it must name the elected repository")
+	})
+
+	t.Run("rejected: one of several push URLs names another repository", func(t *testing.T) {
+		dir := initRepo(t, mirrorURL)
+		// The mismatched URL comes first so a check that only looks at one URL
+		// (first or last) cannot pass by accident.
+		testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "origin", "git@github.com:other/widgets.git")
+		testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "origin", mirrorURL)
+		t.Chdir(dir)
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin", ""))
+	})
+
+	t.Run("rejected: raw URL push of the elected repository", func(t *testing.T) {
+		t.Chdir(initRepo(t, mirrorURL))
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, mirrorURL, ""),
+			"a raw URL is not a configured remote; it stays gated")
+	})
+
+	t.Run("rejected: elected remote's push URL names another repository", func(t *testing.T) {
+		dir := initRepo(t, mirrorURL)
+		setGitConfig(t, dir, "remote.github.pushurl", "git@github.com:other/widgets.git")
+		t.Chdir(dir)
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin", ""))
+	})
+}
+
+// An SSH host alias (`Host github-work` / `HostName github.com`) reaches the
+// same repository as the plain GitHub URL, so it must match like one; an alias
+// for another host must not. ssh -G is faked so the developer's real
+// ~/.ssh/config cannot decide the outcome.
+//
+// Not parallel: uses t.Chdir() and InstallFakeSSH.
+func TestCheckpointSyncAllowedForRemote_SSHHostAlias(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	sshCalls := testutil.InstallFakeSSH(t, map[string]string{
+		"github-work": "github.com",
+		"gitlab-work": "gitlab.example.com",
+	})
+	ctx := context.Background()
+
+	// The elected remote is resolved first: when it names no known-forge
+	// repository, no match is possible and the push remote's alias must not
+	// cost an `ssh -G` inside the user's pre-push.
+	t.Run("unmatchable elected remote skips alias resolution", func(t *testing.T) {
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		testutil.AddRemote(t, dir, "github", "https://git.example.com/acme/widgets.git")
+		testutil.AddRemote(t, dir, "origin", "git@gitlab-work:acme/widgets.git")
+		testutil.WriteCheckpointPushRemoteSetting(t, dir, "github")
+		t.Chdir(dir)
+		before := len(sshCalls())
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin", ""))
+		assert.Len(t, sshCalls(), before, "ssh -G ran although the elected remote cannot match")
+	})
+
+	tests := []struct {
+		name, elected, push string
+		want                bool
+	}{
+		{"alias push to the elected GitHub repository", "git@github.com:acme/widgets.git", "git@github-work:acme/widgets.git", true},
+		{"elected alias, mirror push", "git@github-work:acme/widgets.git", "entire://aws-eu-central-1.entire.io/gh/acme/widgets", true},
+		{"alias to another host", "git@github.com:acme/widgets.git", "git@gitlab-work:acme/widgets.git", false},
+		{"alias to GitHub, different repository", "git@github.com:acme/widgets.git", "git@github-work:acme/gadgets.git", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			testutil.WriteFile(t, dir, "f.txt", "init")
+			testutil.GitAdd(t, dir, "f.txt")
+			testutil.GitCommit(t, dir, "init")
+			testutil.AddRemote(t, dir, "github", tc.elected)
+			testutil.AddRemote(t, dir, "origin", tc.push)
+			testutil.WriteCheckpointPushRemoteSetting(t, dir, "github")
+			t.Chdir(dir)
+			assert.Equal(t, tc.want, checkpointSyncAllowedForRemote(ctx, "origin", ""))
+		})
+	}
+}
+
+// A push through the mirror lands in the elected repository, so the elected
+// remote's tracking ref must follow; otherwise `entire status` keeps counting
+// those checkpoints as unpushed and the next push to the elected remote
+// re-sends them.
+//
+// Not parallel: uses t.Chdir()
+func TestAdvanceSyncRemoteTrackingRef(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+	v1 := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	pushedRef := "refs/remotes/origin/" + paths.MetadataBranchName
+	electedRef := "refs/remotes/github/" + paths.MetadataBranchName
+
+	// initRepo returns a repo whose elected "github" remote and "origin" push
+	// remote use originURL, plus two commits: older is an ancestor of newer.
+	initRepo := func(t *testing.T, originURL string) (dir, older, newer string) {
+		t.Helper()
+		dir = t.TempDir()
+		testutil.InitRepo(t, dir)
+		testutil.WriteFile(t, dir, "f.txt", "one")
+		testutil.GitAdd(t, dir, "f.txt")
+		testutil.GitCommit(t, dir, "one")
+		older = testutil.GetHeadHash(t, dir)
+		testutil.WriteFile(t, dir, "f.txt", "two")
+		testutil.GitAdd(t, dir, "f.txt")
+		testutil.GitCommit(t, dir, "two")
+		newer = testutil.GetHeadHash(t, dir)
+		testutil.AddRemote(t, dir, "github", "git@github.com:acme/widgets.git")
+		testutil.AddRemote(t, dir, "origin", originURL)
+		testutil.WriteCheckpointPushRemoteSetting(t, dir, "github")
+		testutil.RunGit(t, dir, "update-ref", pushedRef, newer)
+		return dir, older, newer
+	}
+	resolve := func(t *testing.T, dir, ref string) string {
+		t.Helper()
+		out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	const mirrorURL = "entire://aws-eu-central-1.entire.io/gh/acme/widgets"
+
+	t.Run("fast-forwards a stale elected tracking ref", func(t *testing.T) {
+		dir, older, newer := initRepo(t, mirrorURL)
+		testutil.RunGit(t, dir, "update-ref", electedRef, older)
+		t.Chdir(dir)
+		advanceSyncRemoteTrackingRef(ctx, "origin", v1)
+		assert.Equal(t, newer, resolve(t, dir, electedRef))
+	})
+
+	t.Run("creates an absent elected tracking ref", func(t *testing.T) {
+		dir, _, newer := initRepo(t, mirrorURL)
+		t.Chdir(dir)
+		advanceSyncRemoteTrackingRef(ctx, "origin", v1)
+		assert.Equal(t, newer, resolve(t, dir, electedRef))
+	})
+
+	t.Run("leaves a non-fast-forward alone", func(t *testing.T) {
+		dir, older, newer := initRepo(t, mirrorURL)
+		// The elected ref is ahead of what the push recorded.
+		testutil.RunGit(t, dir, "update-ref", electedRef, newer)
+		testutil.RunGit(t, dir, "update-ref", pushedRef, older)
+		t.Chdir(dir)
+		advanceSyncRemoteTrackingRef(ctx, "origin", v1)
+		assert.Equal(t, newer, resolve(t, dir, electedRef))
+	})
+
+	t.Run("leaves another repository's tracking ref alone", func(t *testing.T) {
+		dir, older, _ := initRepo(t, "entire://aws-eu-central-1.entire.io/gh/acme/gadgets")
+		testutil.RunGit(t, dir, "update-ref", electedRef, older)
+		t.Chdir(dir)
+		advanceSyncRemoteTrackingRef(ctx, "origin", v1)
+		assert.Equal(t, older, resolve(t, dir, electedRef))
+	})
+
+	t.Run("status count drops to zero after the advance", func(t *testing.T) {
+		dir, older, newer := initRepo(t, mirrorURL)
+		testutil.RunGit(t, dir, "update-ref", v1.String(), newer)
+		testutil.RunGit(t, dir, "update-ref", electedRef, older)
+		t.Chdir(dir)
+		before, err := CountUnpushedCheckpoints(ctx, "github")
+		require.NoError(t, err)
+		require.Equal(t, 1, before)
+		advanceSyncRemoteTrackingRef(ctx, "origin", v1)
+		after, err := CountUnpushedCheckpoints(ctx, "github")
+		require.NoError(t, err)
+		assert.Zero(t, after)
+	})
+}
+
 // newCaptureTestRepo builds a repo with one commit and an origin+fork remote
 // pair — the fork topology: origin wins the default election, fork is where
 // the user's branches actually push.
@@ -512,6 +843,18 @@ func TestHintGatedCheckpointSync(t *testing.T) {
 		assert.Empty(t, buf.String(), "checkpoint_push_remote takes a remote name; a URL push has no actionable hint")
 	})
 
+	t.Run("pushurl-only remote stays silent", func(t *testing.T) {
+		dir := initHintRepo(t, false)
+		testutil.RunGit(t, dir, "config", "remote.pushonly.pushurl", "https://example.com/pushonly.git")
+		setGitConfig(t, dir, "remote.pushDefault", "pushonly")
+		t.Chdir(dir)
+		buf := captureStderrWriter(t)
+
+		hintGatedCheckpointSync(ctx, "pushonly")
+
+		assert.Empty(t, buf.String(), "the hint must not recommend a remote that checkpoint sync cannot read from")
+	})
+
 	t.Run("failed election stays silent", func(t *testing.T) {
 		dir := initHintRepo(t, true)
 		testutil.WriteCheckpointPushRemoteSetting(t, dir, "gone")
@@ -563,6 +906,17 @@ func TestResolveCheckpointSyncRemote_CapturedTier(t *testing.T) {
 		dir := newCaptureTestRepo(t)
 		t.Chdir(dir)
 		require.NoError(t, saveCapturedSyncRemote(ctx, "gone"))
+
+		got, err := ResolveCheckpointSyncRemote(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
+	})
+
+	t.Run("captured pushurl-only remote falls through to origin", func(t *testing.T) {
+		dir := newCaptureTestRepo(t)
+		testutil.RunGit(t, dir, "config", "remote.pushonly.pushurl", "https://example.com/pushonly.git")
+		t.Chdir(dir)
+		require.NoError(t, saveCapturedSyncRemote(ctx, "pushonly"))
 
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
@@ -712,6 +1066,17 @@ func TestCaptureCheckpointSyncRemote(t *testing.T) {
 		assert.Equal(t, []string{"fork"}, loadCapturedSyncRemotes(ctx))
 	})
 
+	t.Run("pushurl-only remote cannot capture", func(t *testing.T) {
+		dir := newCaptureTestRepo(t)
+		testutil.RunGit(t, dir, "config", "remote.pushonly.pushurl", "https://example.com/pushonly.git")
+		setGitConfig(t, dir, "remote.pushDefault", "pushonly")
+		t.Chdir(dir)
+
+		assert.False(t, pendingCaptureCheckpointSyncRemote(ctx, "pushonly"),
+			"capture must use the same fetch-URL eligibility rule as election")
+		assert.Empty(t, loadCapturedSyncRemotes(ctx))
+	})
+
 	t.Run("raw URL push never captures", func(t *testing.T) {
 		dir := newCaptureTestRepo(t)
 		setGitConfig(t, dir, "branch."+currentBranchName(t, dir)+".remote", "fork")
@@ -728,10 +1093,10 @@ func TestCaptureCheckpointSyncRemote(t *testing.T) {
 // The election is permanent and one-shot ("first capture sticks"), so it must
 // follow evidence that checkpoints ARRIVED, not evidence that a push was about
 // to be attempted. Everything between the gate and the network can still stop
-// delivery — a diverged checkpoint policy, an OPF rewrite failure, the
-// empty-remote defer, a rejected transfer — and capturing on intent both
-// announced a move that carried nothing and left the queued checkpoints able to
-// drain only to the remote that had just failed to take them.
+// delivery — an OPF rewrite failure, the empty-remote defer, a rejected
+// transfer — and capturing on intent both announced a move that carried
+// nothing and left the queued checkpoints able to drain only to the remote
+// that had just failed to take them.
 //
 // Not parallel: uses t.Chdir()
 func TestCaptureCheckpointSyncRemote_OnlyOnDelivery(t *testing.T) {

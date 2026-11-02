@@ -74,6 +74,14 @@ linters:
     - whitespace
     - wrapcheck
   settings:
+    importas:
+      # The CLI still has its own cmd/entire/cli/transcript package, and many
+      # files import both; one fixed alias for the library keeps the bare
+      # name meaning the CLI package everywhere.
+      no-unaliased: true
+      alias:
+        - pkg: github.com/entireio/cli/transcript
+          alias: transcriptlib
     goconst:
       # golangci-lint 2.13's goconst upgrade began scanning composite literals,
       # which turned ~2.3k previously-unreported strings into findings. The two
@@ -118,14 +126,8 @@ linters:
       # RFC 7807 problem detail via errors.As. Per-call-site wrapping would
       # only be unwrapped again, so the command closures return coreapi
       # errors verbatim.
-      #
-      # checkpointpolicy.EnsureCanReadVersion already returns a clean,
-      # user-facing message (including the checkpoint ID and version), and
-      # callers classify it via IsUnsupportedVersion. Wrapping would obscure
-      # that purpose-built message, so call sites return it verbatim.
       ignore-package-globs:
         - github.com/entireio/cli/internal/coreapi
-        - github.com/entireio/cli/cmd/entire/cli/checkpointpolicy
     forbidigo:
       analyze-types: true
       forbid:

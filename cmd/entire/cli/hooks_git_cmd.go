@@ -8,14 +8,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
-	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/entireio/cli/cmd/entire/cli/telemetry"
-	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
 
 	"github.com/spf13/cobra"
@@ -63,60 +58,6 @@ func (g *gitHookContext) logInvoked(extraAttrs ...any) {
 // logCompleted records the error on the perf span.
 func (g *gitHookContext) logCompleted(err error) {
 	g.span.RecordError(err)
-}
-
-func (g *gitHookContext) skipUnsupportedCheckpointPolicy() bool {
-	// Callers return success when this is true because policy failures should
-	// disable Entire checkpoint work, not make Git reject the user's operation.
-	repo, err := gitrepo.OpenCurrent(g.ctx)
-	if err != nil {
-		return g.skipUnreadableCheckpointPolicy(err)
-	}
-	defer repo.Close()
-
-	state, err := checkpointpolicy.ReadLocal(g.ctx, repo)
-	if err != nil {
-		return g.skipUnreadableCheckpointPolicy(err)
-	}
-
-	policy := state.Policy
-	if checkpointpolicy.CanSatisfyPolicy(policy) {
-		return false
-	}
-
-	logging.Warn(g.ctx, "checkpoint policy unsupported; skipping git hook",
-		slog.String("checkpoint_version", policy.CheckpointVersion),
-		slog.String("checkpoint_min_version", policy.CheckpointMinVersion))
-	if interactive.CanPromptInteractively() {
-		fmt.Fprint(os.Stderr, unsupportedCheckpointPolicyMessage(policy, versioninfo.Version))
-	}
-	emitCheckpointPolicyBlocked(g.ctx, telemetry.CheckpointPolicyBlockedEvent{
-		Hook:                 g.hookName,
-		HookType:             telemetry.PolicyBlockedHookTypeGit,
-		Reason:               telemetry.PolicyBlockedReasonUnsupported,
-		Outcome:              telemetry.PolicyBlockedOutcomeSkipped,
-		CheckpointVersion:    policy.CheckpointVersion,
-		CheckpointMinVersion: policy.CheckpointMinVersion,
-	})
-	return true
-}
-
-// skipUnreadableCheckpointPolicy warns, notifies the user, and reports the
-// policy-blocked telemetry event for a hook whose checkpoint policy could not be
-// read. It always returns true so callers skip Entire checkpoint work.
-func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
-	logging.Warn(g.ctx, "checkpoint policy read failed; skipping git hook",
-		slog.String("error", err.Error()))
-	if interactive.CanPromptInteractively() {
-		fmt.Fprintf(os.Stderr, "[entire] Could not read checkpoint policy; skipping Entire checkpoint work: %v\n", err)
-	}
-	emitCheckpointPolicyBlocked(g.ctx, telemetry.CheckpointPolicyBlockedEvent{
-		Hook:     g.hookName,
-		HookType: telemetry.PolicyBlockedHookTypeGit,
-		Reason:   telemetry.PolicyBlockedReasonUnreadable,
-		Outcome:  telemetry.PolicyBlockedOutcomeSkipped,
-	})
-	return true
 }
 
 // withHookSession adds the session the root pre-run cannot know without
@@ -211,9 +152,6 @@ func newHooksGitPrepareCommitMsgCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked(slog.String("source", source))
 
-			if g.skipUnsupportedCheckpointPolicy() {
-				return nil
-			}
 			hookErr := g.strategy.PrepareCommitMsg(g.ctx, commitMsgFile, source)
 			g.logCompleted(hookErr)
 
@@ -238,9 +176,6 @@ func newHooksGitCommitMsgCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked()
 
-			if g.skipUnsupportedCheckpointPolicy() {
-				return nil
-			}
 			hookErr := g.strategy.CommitMsg(g.ctx, commitMsgFile)
 			g.logCompleted(hookErr)
 			return hookErr //nolint:wrapcheck // Thin delegation layer - wrapping adds no value
@@ -262,9 +197,7 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked()
 
-			if g.skipUnsupportedCheckpointPolicy() {
-				return nil
-			}
+			strategy.SetBeforeCondense(refreshCodexInventoriesBeforeCondense)
 			hookErr := g.strategy.PostCommit(g.ctx)
 			g.logCompleted(hookErr)
 
@@ -287,9 +220,6 @@ func newHooksGitPostRewriteCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked(slog.String("rewrite_type", args[0]))
 
-			if g.skipUnsupportedCheckpointPolicy() {
-				return nil
-			}
 			hookErr := g.strategy.PostRewrite(g.ctx, args[0], cmd.InOrStdin())
 			g.logCompleted(hookErr)
 
@@ -298,8 +228,34 @@ func newHooksGitPostRewriteCmd() *cobra.Command {
 	}
 }
 
+// refuseOuterCheckpointPushWithHooksOff is the one pre-push check that runs
+// with Entire's hooks off for this branch: no .entire, Entire disabled (which
+// committed settings can do), or settings that do not load. The clone's policy
+// may still hold checkpoints back, and the user's own push must not send them.
+func refuseOuterCheckpointPushWithHooksOff(cmd *cobra.Command) error {
+	if err := strategy.CheckOuterPushHeldCheckpoints(withPrePushRefsFromHook(cmd)); err != nil {
+		return fmt.Errorf("pre-push: %w", err)
+	}
+	return nil
+}
+
+// withPrePushRefsFromHook records what the hook line passed about git's ref
+// list (see strategy.PrePushStdinRefsEnv).
+func withPrePushRefsFromHook(cmd *cobra.Command) context.Context {
+	ctx := cmd.Context()
+	switch os.Getenv(strategy.PrePushStdinRefsEnv) {
+	case "1":
+		// The ref list git passes on stdin is what the user's own push sends,
+		// which Entire's own push cannot see otherwise.
+		return strategy.WithPrePushRefsFrom(ctx, cmd.InOrStdin())
+	case "0":
+		return strategy.WithPrePushRefsUnsaved(ctx)
+	}
+	return ctx
+}
+
 func newHooksGitPrePushCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "pre-push <remote>",
 		Short: "Handle pre-push git hook",
 		Args:  cobra.ExactArgs(1),
@@ -312,7 +268,7 @@ func newHooksGitPrePushCmd() *cobra.Command {
 		SilenceErrors: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if gitHooksDisabled {
-				return nil
+				return refuseOuterCheckpointPushWithHooksOff(cmd)
 			}
 
 			remote := args[0]
@@ -321,7 +277,10 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked(slog.String("remote", remote))
 
-			hookErr := g.strategy.PrePushFromGitHook(g.ctx, remote)
+			cmd.SetContext(g.ctx)
+			ctx := withPrePushRefsFromHook(cmd)
+
+			hookErr := g.strategy.PrePushFromGitHook(ctx, remote)
 			g.logCompleted(hookErr)
 
 			// Propagate the error so the hook script exits non-zero and
@@ -329,7 +288,8 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			// returns errors for privacy-critical failures (OPF rewrite —
 			// e.g., V1DivergedError, BootstrapTooLargeError,
 			// V1RefMovedError, OPFRuntimeFailedError,
-			// OPFNoCategoriesError); transient
+			// OPFNoCategoriesError, or a push carrying checkpoint refs
+			// under the manual push policy); transient
 			// checkpoint-push failures are logged and swallowed before
 			// reaching this point. See strategy/manual_commit_push.go
 			// for the contract. We wrap with a short "pre-push:" prefix
@@ -341,4 +301,5 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			return fmt.Errorf("pre-push: %w", hookErr)
 		},
 	}
+	return cmd
 }

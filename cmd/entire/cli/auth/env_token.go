@@ -3,18 +3,19 @@ package auth
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/entireio/auth-go/tokens"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
 // EnvTokenVar is the environment variable that, when set, bypasses
 // contexts.json and the keyring entirely: its value is used verbatim as the
 // bearer for control-plane and git data-plane requests. This is the CI /
 // workload-identity path — a runner injects a short-lived login or sa-session
-// JWT and clones without an interactive `entire login`. The explicit
-// `entire auth token --jurisdiction` command remains a separate path and uses
-// the value as the subject of its requested jurisdiction-token exchange.
+// JWT and clones without an interactive `entire login`. `entire auth token`
+// prints the value verbatim.
 const EnvTokenVar = "ENTIRE_TOKEN"
 
 // ParseEnvToken is the single owner of the ENTIRE_TOKEN validation sequence
@@ -36,6 +37,15 @@ func ParseEnvToken(raw string) (coreURL, token string, err error) {
 	return coreURL, token, nil
 }
 
+// CheckTokenStoreConfig reports an unusable config.json.
+// A set ENTIRE_TOKEN skips the store.
+func CheckTokenStoreConfig() error {
+	if _, ok := os.LookupEnv(EnvTokenVar); ok {
+		return nil
+	}
+	return tokenstore.CheckConfig() //nolint:wrapcheck // already names the file
+}
+
 // CoreURLFromEnvToken derives the home-region core URL from an ENTIRE_TOKEN
 // JWT's audience claim. Login and sa-session JWTs carry aud=<home-region URL>,
 // so we read aud, not iss (iss may be a different regional core).
@@ -45,9 +55,8 @@ func ParseEnvToken(raw string) (coreURL, token string, err error) {
 // enforces the *shape* of a safe core origin (https, bare origin). The git
 // helper uses the result only after checking it against the target cluster's
 // advertised CoreURLs, then sends the env token directly to the data plane.
-// Control-plane clients use the result as their bearer target, while the
-// explicit `entire auth token --jurisdiction` path uses it as the STS host for
-// that command's requested exchange.
+// Control-plane clients use the result as their bearer target; cell routing
+// lists clusters at it when no data host is configured.
 //
 // Structural rules, all required:
 //   - the aud is a well-formed absolute URL,

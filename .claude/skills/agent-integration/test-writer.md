@@ -20,7 +20,7 @@ Read these files to understand the existing test patterns.
 3. `e2e/agents/agent.go` — `Agent` interface (`Name`, `Binary`, `EntireAgent`, `PromptPattern`, `TimeoutMultiplier`, `RunPrompt`, `StartSession`, `Bootstrap`, `IsTransientError`), `Register()` for agent self-registration in `init()`, `RegisterGate()` for concurrency limits, `AcquireSlot`/`ReleaseSlot` for gating
 4. `e2e/agents/tmux.go` — `TmuxSession` for interactive PTY-based tests: `NewTmuxSession`, `Send`, `SendKeys`, `WaitFor` (with settle-time logic), `Capture`, `Close`
 5. `e2e/testutil/assertions.go` — Rich assertion helpers: `AssertFileExists`, `WaitForFileExists`, `AssertNewCommits`, `WaitForCheckpoint`, `AssertCheckpointAdvanced`, `AssertHasCheckpointTrailer`, `AssertCheckpointExists`, `AssertCommitLinkedToCheckpoint`, `AssertCheckpointMetadataComplete`, `ValidateCheckpointDeep`, and many more
-6. `e2e/testutil/metadata.go` — `CheckpointMetadata`, `SessionMetadata`, `TokenUsage`, `Attribution`, `SessionRef` types; `CheckpointPath()` helper for sharded directory layout
+6. `e2e/testutil/metadata.go` — `CheckpointMetadata`, `SessionMetadata`, `TokenUsage`, `SessionRef` types; `CheckpointPath()` helper for sharded directory layout
 7. `e2e/entire/entire.go` — CLI wrapper: `BinPath()` (builds from source or uses `E2E_ENTIRE_BIN`), `Enable`, `Disable`, `Doctor`, `CleanDryRun`, `CleanForce`, `Explain`, `AttachWithEnv`, `Resume` / `ResumeWithEnv`
 8. `e2e/testutil/artifacts.go` — Automatic artifact capture via `t.Cleanup`: `CaptureArtifacts` saves git-log, git-tree, checkpoint metadata, entire logs, and tmux pane content
 
@@ -49,7 +49,7 @@ Read `cmd/entire/cli/agent/$AGENT_PACKAGE/AGENT.md` (the one-pager from the rese
 
 Add a new `Agent` implementation in `e2e/agents/${agent_slug}.go`:
 
-**Pattern to follow** (based on existing implementations like `claude.go`, `gemini.go`, `opencode.go`):
+**Pattern to follow** (based on existing implementations like `claude.go`, `codex.go`, `opencode.go`):
 
 ```go
 package agents
@@ -153,7 +153,7 @@ func (a *${AgentName}) StartSession(ctx context.Context, dir string) (Session, e
 
 Key implementation details:
 - Self-register in `init()` with `Register()`, gated by `E2E_AGENT` env var
-- Use `RegisterGate("name", N)` if the agent's API has strict rate limits (e.g., Gemini uses gate of 1)
+- Use `RegisterGate("name", N)` if the agent's API has strict rate limits (e.g., Factory AI Droid uses gate of 1)
 - `Bootstrap()` handles CI-specific one-time setup (auth config, API key injection)
 - `IsTransientError()` identifies retryable API failures — `RepoState.RunPrompt` retries once on transient errors
 - `RunPrompt()` uses `exec.CommandContext` with `Setpgid: true` and process-group kill for clean cancellation
@@ -199,7 +199,7 @@ Use `/commit` to commit all files.
 - **Interactive tests**: Use `s.StartSession`, `s.Send`, `s.WaitFor` — tmux pane is auto-captured in artifacts
 - **Run commands**: `mise run test:e2e --agent ${slug} TestName` — see `e2e/README.md` for all options
 - **E2E tests are run during the implement phase**: This phase only creates the runner. The implement phase runs E2E tests at each tier to drive development.
-- **Debugging failures**: If tests fail during the implement phase, use `/e2e:debug` with the artifact directory to diagnose CLI-level issues (hooks, checkpoints, session phases, attribution)
+- **Debugging failures**: If tests fail during the implement phase, use `/e2e:debug` with the artifact directory to diagnose CLI-level issues (hooks, checkpoints, session phases, file tracking)
 
 ## Output
 

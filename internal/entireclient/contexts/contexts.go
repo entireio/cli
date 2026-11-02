@@ -34,8 +34,8 @@ import (
 // Context is a single kubectl-style entry: which core to talk to, as
 // whom, and where the credentials are stored.
 type Context struct {
-	// Name is the user-facing identifier. Defaults to the issuer host on
-	// auto-creation; overridable via login --name.
+	// Name is the user-facing identifier: the issuer host, qualified
+	// with the handle when another identity already holds that host.
 	Name string `json:"name"`
 	// CoreURL is the JWT issuer URL — what STS exchanges hit. Set from
 	// the access token's signed iss claim, not the typed login URL.
@@ -47,7 +47,9 @@ type Context struct {
 	KeychainService string `json:"keychain_service"`
 	// JurisdictionAudiences lists the audiences this context has a jurisdiction
 	// (data-plane) access token filed for, trailing-slash-trimmed; each lives at
-	// tokenstore.JurisdictionService(audience), also keyed by Handle.
+	// tokenstore.JurisdictionService(audience), also keyed by Handle. Only
+	// releases that minted jurisdiction tokens wrote it (cell auth now presents
+	// the login JWT directly); logout still reads it to delete those leftovers.
 	JurisdictionAudiences []string `json:"jurisdiction_audiences,omitempty"`
 }
 
@@ -165,7 +167,7 @@ func (f *File) Upsert(c *Context) {
 		return
 	}
 	for i, existing := range f.Contexts {
-		if existing.Name == c.Name {
+		if existing != nil && existing.Name == c.Name {
 			f.Contexts[i] = c
 			if f.CurrentContext == "" {
 				f.CurrentContext = c.Name
@@ -187,7 +189,7 @@ func (f *File) Delete(name string) {
 	if f == nil || name == "" {
 		return
 	}
-	idx := slices.IndexFunc(f.Contexts, func(c *Context) bool { return c.Name == name })
+	idx := slices.IndexFunc(f.Contexts, func(c *Context) bool { return c != nil && c.Name == name })
 	if idx >= 0 {
 		f.Contexts = slices.Delete(f.Contexts, idx, idx+1)
 	}
@@ -293,7 +295,22 @@ func readNoLock(configDir string) (*File, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse contexts file: %w", err)
 	}
+	f.dropUnaddressable()
 	return &f, nil
+}
+
+// dropUnaddressable removes nil and nameless entries.
+//
+// Entire never writes either (Upsert refuses an empty name), so they come
+// from a hand edit or a truncated file. Every operation addresses a context
+// by name, so such an entry can never be selected, removed, or logged out
+// of: it would sit in the file forever, counted as a login. Dropping it on
+// load means the next write persists the clean list. current_context is
+// left alone: Active already treats a name with no entry as unset.
+func (f *File) dropUnaddressable() {
+	f.Contexts = slices.DeleteFunc(f.Contexts, func(c *Context) bool {
+		return c == nil || c.Name == ""
+	})
 }
 
 func writeNoLock(configDir string, f *File) error {

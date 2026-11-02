@@ -15,17 +15,20 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	transcriptlib "github.com/entireio/cli/transcript"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// ListPendingCheckpoints returns the session's pending (not yet condensed) checkpoints.
-// Uses checkpoint.EphemeralStore for reading from shadow branches.
+// ListPendingCheckpoints returns the pending rows for `checkpoint list
+// --pending`: subagent task records of sessions based on HEAD (live and
+// completed-unmaterialized records are both pending until condensed), plus
+// logs-only resume points from commit history (see
+// ListLogsOnlyPendingCheckpoints). Turn-end steps are tracked in session state
+// only, so they have no row of their own.
 func (s *ManualCommitStrategy) ListPendingCheckpoints(ctx context.Context, limit int) ([]PendingCheckpoint, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -33,12 +36,7 @@ func (s *ManualCommitStrategy) ListPendingCheckpoints(ctx context.Context, limit
 	}
 	defer repo.Close()
 
-	store, err := s.getEphemeralStore(ctx, repo)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get current HEAD to find matching shadow branch
+	// Get current HEAD to find the sessions based on it
 	head, err := repo.Head()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get HEAD: %w", err)
@@ -53,39 +51,9 @@ func (s *ManualCommitStrategy) ListPendingCheckpoints(ctx context.Context, limit
 
 	var allPoints []PendingCheckpoint
 
-	// Collect checkpoint points from active sessions using temporary storage.
-	// Cache session prompts by session ID to avoid re-reading the same prompt file
-	sessionPrompts := make(map[string]string)
-
 	for _, state := range sessions {
-		checkpoints, err := store.ListCheckpoints(ctx, state.BaseCommit, state.WorktreeID, state.SessionID, limit)
-		if err != nil {
-			continue // Error reading checkpoints, skip this session
-		}
-
-		for _, cp := range checkpoints {
-			// Get session prompt (cached by session ID)
-			sessionPrompt, ok := sessionPrompts[cp.SessionID]
-			if !ok {
-				sessionPrompt = readSessionPrompt(repo, cp.CommitHash, cp.MetadataDir)
-				sessionPrompts[cp.SessionID] = sessionPrompt
-			}
-
-			allPoints = append(allPoints, PendingCheckpoint{
-				ID:               cp.CommitHash.String(),
-				Message:          cp.Message,
-				MetadataDir:      cp.MetadataDir,
-				Date:             cp.Timestamp,
-				IsTaskCheckpoint: cp.IsTaskCheckpoint,
-				ToolUseID:        cp.ToolUseID,
-				SessionID:        cp.SessionID,
-				SessionPrompt:    sessionPrompt,
-				Agent:            state.AgentType,
-			})
-		}
-
 		// [Task] rows come from task records (#2058) — live and completed-unmaterialized
-		// entries are both pending until condensed; no shadow commit exists, so no ID.
+		// entries are both pending until condensed; nothing is committed, so no ID.
 		for _, rec := range state.TaskRecords {
 			date := rec.CompletedAt
 			if date.IsZero() {
@@ -152,7 +120,7 @@ func (s *ManualCommitStrategy) ListPendingCheckpoints(ctx context.Context, limit
 
 // ListLogsOnlyPendingCheckpoints finds commits in the current branch's history that have
 // condensed session logs in committed checkpoint storage. These are commits that
-// were created with session data but the shadow branch has been condensed.
+// were created with session data that has since been condensed.
 //
 // The function works by:
 // 1. Getting all checkpoints from committed checkpoint storage
@@ -391,14 +359,16 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 			continue
 		}
 
-		// Resolve per-session agent from metadata — skip if agent is unknown
-		if content.Metadata.Agent == "" {
+		// Per-session metadata only — point.Agent is deliberately not a fallback
+		// here; see classifySessionsForRestore for why.
+		sessionAgentName := content.Metadata.Agent
+		if sessionAgentName == "" {
 			fmt.Fprintf(errW, "  Warning: session %d (%s) has no agent metadata, skipping (cannot determine target directory)\n", i, sessionID)
 			continue
 		}
-		sessionAgent, agErr := ResolveAgentForResume(content.Metadata.Agent)
+		sessionAgent, agErr := ResolveAgentForResume(sessionAgentName)
 		if agErr != nil {
-			fmt.Fprintf(errW, "  Warning: session %d (%s) has unknown agent %q, skipping\n", i, sessionID, content.Metadata.Agent)
+			fmt.Fprintf(errW, "  Warning: session %d (%s) has unknown agent %q, skipping\n", i, sessionID, sessionAgentName)
 			continue
 		}
 
@@ -418,12 +388,9 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 			fmt.Fprintf(errW, "  Warning: session %d (%s) resolves outside its session directory, skipping\n", i, sessionID)
 			continue
 		}
-		if resolver, ok := sessionAgent.(agent.RestoredSessionPathResolver); ok {
-			resolvedFile, resolveErr := resolver.ResolveRestoredSessionFile(sessionAgentDir, sessionID, content.Transcript)
-			if resolveErr != nil {
-				fmt.Fprintf(errW, "  Warning: failed to resolve restored session path for session %d (%s): %v (using fallback path)\n", i, sessionID, resolveErr)
-			} else {
-				sessionFile = resolvedFile
+		if resolver, ok := agent.AsRestoredSessionPathResolver(sessionAgent); ok {
+			if resolved, ok := restoredSessionFile(errW, resolver, restoreStore, sessionAgentDir, sessionID, content.Transcript, i); ok {
+				sessionFile = resolved
 			}
 		}
 
@@ -503,7 +470,7 @@ func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, trans
 	if prompt := strings.TrimSpace(reviewPrompt); prompt != "" {
 		return prompt
 	}
-	extractor, ok := sessionAgent.(agent.PromptExtractor)
+	extractor, ok := agent.AsPromptExtractor(sessionAgent)
 	if !ok || len(transcript) == 0 {
 		return ""
 	}
@@ -520,7 +487,7 @@ func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, trans
 // FirstDisplayPrompt returns the first prompt in the list worth showing as a
 // title/preview: the first entry that is non-empty, not separator-only, and not
 // agent-injected (runtime preambles, AGENTS.md dumps — see
-// textutil.IsInjectedPrompt). Returns "" if none qualifies, which callers that
+// transcriptlib.IsInjectedPrompt). Returns "" if none qualifies, which callers that
 // must show something should treat as "fall back to the raw first prompt".
 //
 // The returned text is not truncated; callers that render it into a fixed-width
@@ -528,7 +495,7 @@ func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, trans
 func FirstDisplayPrompt(prompts []string) string {
 	for _, prompt := range prompts {
 		cleaned := strings.TrimSpace(prompt)
-		if cleaned == "" || isOnlySeparators(cleaned) || textutil.IsInjectedPrompt(cleaned) {
+		if cleaned == "" || isOnlySeparators(cleaned) || transcriptlib.IsInjectedPrompt(cleaned) {
 			continue
 		}
 		return cleaned
@@ -567,35 +534,6 @@ func ResolveAgentForResume(agentType types.AgentType) (agent.Agent, error) {
 	return ag, nil
 }
 
-// readSessionPrompt reads the first prompt from the session's prompt.txt file stored in git.
-// Returns an empty string if the prompt cannot be read.
-func readSessionPrompt(repo *git.Repository, commitHash plumbing.Hash, metadataDir string) string {
-	// Get the commit and its tree
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		return ""
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return ""
-	}
-
-	// Look for prompt.txt in the metadata directory
-	promptPath := metadataDir + "/" + paths.PromptFileName
-	promptEntry, err := tree.File(promptPath)
-	if err != nil {
-		return ""
-	}
-
-	content, err := promptEntry.Contents()
-	if err != nil {
-		return ""
-	}
-
-	return ExtractFirstPrompt(content)
-}
-
 // SessionRestoreStatus represents the status of a session being restored.
 type SessionRestoreStatus int
 
@@ -615,10 +553,51 @@ type SessionRestoreInfo struct {
 	CheckpointTime time.Time
 }
 
+// restoredSessionFile applies an agent's RestoredSessionPathResolver, reporting
+// false when the caller should keep the path SessionFile already produced.
+//
+// The result goes back through SessionStore.Name before it is accepted. It
+// replaces a path the store has already validated with one the agent derived
+// from the checkpoint's own transcript bytes — the same sink shape as
+// ResolveSessionFile — so it earns the same containment check rather than
+// inheriting the confidence of the value it overwrites.
+func restoredSessionFile(
+	errW io.Writer,
+	resolver agent.RestoredSessionPathResolver,
+	store *agent.SessionStore,
+	sessionAgentDir, sessionID string,
+	transcript []byte,
+	index int,
+) (string, bool) {
+	resolved, err := resolver.ResolveRestoredSessionFile(sessionAgentDir, sessionID, transcript)
+	if err != nil {
+		fmt.Fprintf(errW, "  Warning: failed to resolve restored session path for session %d (%s): %v (using fallback path)\n", index, sessionID, err)
+		return "", false
+	}
+	if _, err := store.Name(resolved); err != nil {
+		fmt.Fprintf(errW, "  Warning: session %d (%s) restored path resolves outside its session directory, using fallback path: %v\n", index, sessionID, err)
+		return "", false
+	}
+	return resolved, true
+}
+
 // classifySessionsForRestore checks all sessions in a checkpoint and returns info
 // about each session, including whether local logs have newer timestamps.
 // repoRoot is used to compute per-session agent directories.
 // Sessions without agent metadata are skipped (cannot determine target directory).
+//
+// That skip is why RestoreLogsOnly must skip the same sessions rather than fall
+// back to point.Agent, which looks like the obvious fix and was briefly made.
+// This function is what populates skipExisting, so a session it skipped and
+// RestoreLogsOnly restored would be written without --force over a newer local
+// transcript holding uncheckpointed work: existence checking and writing have to
+// resolve the same destination, and a fallback applied to one of them guarantees
+// they do not. Independently, the checkpoint-level agent is one session's rather
+// than checkpoint-wide provenance — both stores set it as `info.Agent =
+// sessionMetadata.Agent` from the last session read — so on a multi-agent
+// checkpoint that fallback writes an untyped session into another agent's store.
+// The symptom it was reaching for, a restore that did nothing and said nothing,
+// is fixed in restoreResumeSessions instead.
 func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.SessionReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
 	var sessions []SessionRestoreInfo
 

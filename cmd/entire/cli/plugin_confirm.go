@@ -7,7 +7,6 @@ import (
 	"io"
 	"sync"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"github.com/muesli/cancelreader"
 
@@ -19,29 +18,26 @@ import (
 // in is the terminal rather than os.Stdin, so a confirmation never consumes
 // bytes the plugin was piped. out is the terminal's own output handle, used
 // only when the writer the caller supplied is not itself a terminal — see
-// runPluginConfirm. It is nil when there is nothing to fall back to, which is
-// the case in tests that replace the opener.
+// runPluginConfirm. close releases both handles. Both are nil when there is
+// nothing behind them, which is the case in tests that replace the opener.
 type pluginPromptTerminal struct {
-	in  io.ReadCloser
-	out io.Writer
-	// closeOut releases out when it is a handle of its own. Unix hands back
-	// one file for both directions, so closing in covers it there; Windows
-	// opens CONIN$ and CONOUT$ separately, and writing to CONIN$ renders
-	// nothing — which is why the pair cannot be collapsed to one handle.
-	closeOut func()
+	in    io.Reader
+	out   io.Writer
+	close func() error
 }
 
 // Tests replace the opener rather than redirecting the command's data stream.
+//
+// interactive.OpenPromptTTY rather than tea.OpenTTY: its Close releases the
+// read Bubble Tea leaves pending on a separately opened console handle, which
+// otherwise made the user press a key a second time on Windows before the
+// confirmed action started.
 var openPluginPromptTerminal = func() (pluginPromptTerminal, error) {
-	in, out, err := tea.OpenTTY()
+	tty, err := interactive.OpenPromptTTY()
 	if err != nil {
 		return pluginPromptTerminal{}, fmt.Errorf("open confirmation terminal: %w", err)
 	}
-	t := pluginPromptTerminal{in: in, out: out}
-	if out != in {
-		t.closeOut = func() { _ = out.Close() }
-	}
-	return t, nil
+	return pluginPromptTerminal{in: tty.Input(), out: tty.Output(), close: tty.Close}, nil
 }
 
 func runPluginConfirm(ctx context.Context, out io.Writer, prompt string, defaultYes bool) (bool, error) {
@@ -53,11 +49,12 @@ func runPluginConfirm(ctx context.Context, out io.Writer, prompt string, default
 		return false, err
 	}
 	input := term.in
-	closeInput := sync.OnceFunc(func() { _ = input.Close() })
-	defer closeInput()
-	if term.closeOut != nil {
-		defer term.closeOut()
-	}
+	closeTerminal := sync.OnceFunc(func() {
+		if term.close != nil {
+			_ = term.close() //nolint:errcheck // best-effort cleanup after terminal interaction, as login.go does
+		}
+	})
+	defer closeTerminal()
 	// The answer is read from the terminal, so the question has to be visible
 	// there. A supplied writer that is not a terminal — `entire graph 2>log`,
 	// or any wrapper capturing stderr — left the prompt invisible while the
@@ -83,9 +80,9 @@ func runPluginConfirm(ctx context.Context, out io.Writer, prompt string, default
 		stop := context.AfterFunc(ctx, func() {
 			if !reader.Cancel() {
 				// Some platforms cannot cancel reads on a separately opened
-				// terminal. This descriptor belongs to the prompt, so closing
+				// terminal. The terminal belongs to the prompt, so closing
 				// it is safe and also releases a blocked read.
-				closeInput()
+				closeTerminal()
 			}
 			close(cancelled)
 		})

@@ -146,13 +146,7 @@ func TestSubdirectory_SaveStepFromSubdir(t *testing.T) {
 		t.Errorf(".entire directory should NOT exist in subdirectory %s", subdirName)
 	}
 
-	// Verify the checkpoint was saved on the shadow branch, including the
-	// subdirectory file (paths must be repo-root-relative, not cwd-relative)
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after save", shadowBranch)
-	}
-	if !env.FileExistsInBranch(shadowBranch, subdirName+"/app.js") {
-		t.Errorf("%s/app.js should be captured on shadow branch %s", subdirName, shadowBranch)
-	}
+	// Verify the turn end recorded the subdirectory file (paths must be
+	// repo-root-relative, not cwd-relative)
+	env.AssertTurnEndRecorded(session.ID, subdirName+"/app.js")
 }

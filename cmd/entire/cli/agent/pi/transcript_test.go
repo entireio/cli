@@ -96,7 +96,7 @@ func writeBranchingSession(t *testing.T) string {
 func TestExtractModifiedFiles(t *testing.T) {
 	t.Parallel()
 	path := writeTestSession(t)
-	files, pos, err := (&PiAgent{}).ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := (&PiAgent{}).ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestExtractModifiedFiles(t *testing.T) {
 func TestExtractModifiedFiles_OffsetPastEnd(t *testing.T) {
 	t.Parallel()
 	path := writeTestSession(t)
-	files, _, err := (&PiAgent{}).ExtractModifiedFilesFromOffset(path, 100)
+	files, _, err := (&PiAgent{}).ExtractModifiedFilesFromOffset(context.Background(), path, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestExtractModifiedFiles_OffsetPastEnd(t *testing.T) {
 func TestExtractModifiedFiles_Branching(t *testing.T) {
 	t.Parallel()
 	path := writeBranchingSession(t)
-	files, _, err := (&PiAgent{}).ExtractModifiedFilesFromOffset(path, 0)
+	files, _, err := (&PiAgent{}).ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

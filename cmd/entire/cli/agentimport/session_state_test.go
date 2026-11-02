@@ -97,7 +97,7 @@ func TestRun_WritesSessionStateExceptDryRun(t *testing.T) {
 				files: []SessionFile{{Path: transcript, SessionID: sid}},
 				turns: []Turn{{UUID: "a", Prompt: "hello", CreatedAt: time.Now().Add(-time.Hour)}},
 			}
-			if _, err := Run(ctx, repo, imp, Options{RepoRoot: dir, Now: time.Now(), DryRun: tc.dryRun}); err != nil {
+			if _, err := Run(ctx, repo, imp, Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: dir, Now: time.Now(), DryRun: tc.dryRun}); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 
@@ -123,7 +123,7 @@ func TestWriteSessionState_CreatesListableImportedState(t *testing.T) {
 		{UUID: "b", Prompt: "latest prompt", Model: "claude-x", CreatedAt: ended, Tokens: &types.TokenUsage{InputTokens: 3, OutputTokens: 2}},
 	}
 
-	if err := writeSessionState(ctx, fakeImporter{}, sf, turns, dir); err != nil {
+	if err := writeSessionState(ctx, fakeImporter{}, sf, turns, DeriveCheckpointID(sf.SessionID, "b"), dir); err != nil {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 
@@ -160,7 +160,7 @@ func TestWriteSessionState_CollapsesAndTruncatesLastPrompt(t *testing.T) {
 
 	longPrompt := "please   fix\n\n\tthe   login   bug " + strings.Repeat("x", 300)
 	sf := SessionFile{Path: "session.jsonl", SessionID: "claude-long-prompt-session"}
-	if err := writeSessionState(ctx, fakeImporter{}, sf, []Turn{{UUID: "a", Prompt: longPrompt, CreatedAt: time.Now()}}, dir); err != nil {
+	if err := writeSessionState(ctx, fakeImporter{}, sf, []Turn{{UUID: "a", Prompt: longPrompt, CreatedAt: time.Now()}}, DeriveCheckpointID(sf.SessionID, "a"), dir); err != nil {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 
@@ -190,7 +190,7 @@ func TestWriteSessionState_DoesNotClobberLiveSession(t *testing.T) {
 	}
 
 	sf := SessionFile{Path: "session.jsonl", SessionID: sid}
-	if err := writeSessionState(ctx, fakeImporter{}, sf, []Turn{{UUID: "a", Prompt: "p", CreatedAt: time.Now()}}, dir); err != nil {
+	if err := writeSessionState(ctx, fakeImporter{}, sf, []Turn{{UUID: "a", Prompt: "p", CreatedAt: time.Now()}}, DeriveCheckpointID(sf.SessionID, "a"), dir); err != nil {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 
@@ -206,7 +206,7 @@ func TestWriteSessionState_SurvivesListingWhenOld(t *testing.T) {
 
 	old := time.Now().Add(-30 * 24 * time.Hour) // 30 days > 7-day stale threshold
 	sf := SessionFile{Path: "session.jsonl", SessionID: "claude-old-session"}
-	if err := writeSessionState(ctx, fakeImporter{}, sf, []Turn{{UUID: "a", Prompt: "p", CreatedAt: old}}, dir); err != nil {
+	if err := writeSessionState(ctx, fakeImporter{}, sf, []Turn{{UUID: "a", Prompt: "p", CreatedAt: old}}, DeriveCheckpointID(sf.SessionID, "a"), dir); err != nil {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 

@@ -13,6 +13,10 @@ const schemeHTTP = "http"
 // the cli package can errors.Is against it without an extra import.
 var ErrNotLoggedIn = tokenmanager.ErrNotLoggedIn
 
+// ErrReauthRequired re-exports tokenmanager.ErrReauthRequired: the login
+// server rejected the stored refresh token, so that session is dead.
+var ErrReauthRequired = tokenmanager.ErrReauthRequired
+
 // insecureHTTPOverride records the --insecure-http-auth opt-in. Read by
 // every per-context token manager as it is built; call EnableInsecureHTTP
 // before resolving tokens in the same process or the override has no

@@ -60,10 +60,6 @@ func TestCacheRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 
 	cache := make(ClusterCache)
-	cache.SetClusterNodes("rc.partial.to", []string{
-		"https://node1.rc.partial.to",
-		"https://node2.rc.partial.to",
-	}, 24*time.Hour)
 	cache.SetRepoNodes("rc.partial.to", "alice/repo", []string{
 		"https://node1.rc.partial.to",
 	}, 24*time.Hour)
@@ -80,14 +76,6 @@ func TestCacheRoundTrip(t *testing.T) {
 		t.Fatalf("LoadCache: %v", err)
 	}
 
-	nodes, fresh := loaded.GetClusterNodes("rc.partial.to")
-	if !fresh {
-		t.Fatal("expected cluster nodes to be fresh")
-	}
-	if len(nodes) != 2 {
-		t.Fatalf("got %d cluster nodes, want 2", len(nodes))
-	}
-
 	repoNodes, fresh := loaded.GetRepoNodes("rc.partial.to", "alice/repo")
 	if !fresh {
 		t.Fatal("expected repo nodes to be fresh")
@@ -99,15 +87,9 @@ func TestCacheRoundTrip(t *testing.T) {
 
 func TestCacheExpiry(t *testing.T) {
 	cache := make(ClusterCache)
-	cache.SetClusterNodes("x.com", []string{"https://n1.x.com"}, -1*time.Second)
 	cache.SetRepoNodes("x.com", "a/b", []string{"https://n1.x.com"}, -1*time.Second)
 
-	_, fresh := cache.GetClusterNodes("x.com")
-	if fresh {
-		t.Error("expected expired cluster nodes")
-	}
-
-	_, fresh = cache.GetRepoNodes("x.com", "a/b")
+	_, fresh := cache.GetRepoNodes("x.com", "a/b")
 	if fresh {
 		t.Error("expected expired repo nodes")
 	}
@@ -116,12 +98,7 @@ func TestCacheExpiry(t *testing.T) {
 func TestCacheMiss(t *testing.T) {
 	cache := make(ClusterCache)
 
-	nodes, fresh := cache.GetClusterNodes("nope.com")
-	if fresh || nodes != nil {
-		t.Error("expected miss for unknown cluster")
-	}
-
-	nodes, fresh = cache.GetRepoNodes("nope.com", "a/b")
+	nodes, fresh := cache.GetRepoNodes("nope.com", "a/b")
 	if fresh || nodes != nil {
 		t.Error("expected miss for unknown repo")
 	}
@@ -129,8 +106,8 @@ func TestCacheMiss(t *testing.T) {
 
 func TestCacheInvalidation(t *testing.T) {
 	cache := make(ClusterCache)
-	cache.SetClusterNodes("x.com", []string{"https://n1.x.com"}, 24*time.Hour)
 	cache.SetRepoNodes("x.com", "a/b", []string{"https://n1.x.com"}, 24*time.Hour)
+	cache.SetRepoNodes("x.com", "c/d", []string{"https://n1.x.com"}, 24*time.Hour)
 
 	cache.InvalidateRepo("x.com", "a/b")
 	_, fresh := cache.GetRepoNodes("x.com", "a/b")
@@ -138,15 +115,9 @@ func TestCacheInvalidation(t *testing.T) {
 		t.Error("repo should be invalidated")
 	}
 
-	_, fresh = cache.GetClusterNodes("x.com")
+	_, fresh = cache.GetRepoNodes("x.com", "c/d")
 	if !fresh {
-		t.Error("cluster nodes should still be fresh")
-	}
-
-	cache.InvalidateCluster("x.com")
-	_, fresh = cache.GetClusterNodes("x.com")
-	if fresh {
-		t.Error("cluster should be invalidated")
+		t.Error("sibling repo should still be fresh")
 	}
 }
 
@@ -236,5 +207,64 @@ func TestModifyCache_AcceptsTheResolversOwnFallback(t *testing.T) {
 	dir := filepath.Join(cwd, ".cache", "entire")
 	if err := ModifyCache(dir, func(ClusterCache) error { return nil }); err != nil {
 		t.Fatalf("ModifyCache(%q) = %v, want the resolver's own fallback honored", dir, err)
+	}
+}
+
+// Without pruning, nodes.json keeps every repository the helper has ever
+// seen, and every write rewrites all of it under the shared lock.
+func TestModifyCache_PrunesExpiredEntries(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	if err := ModifyCache(dir, func(c ClusterCache) error {
+		c.SetRepoNodes("old.example", "a/b", []string{"https://n1.old.example"}, -time.Second)
+		c.SetRepoNodes("x.example", "stale/repo", []string{"https://n1.x.example"}, -time.Second)
+		c.SetRepoNodes("x.example", "live/repo", []string{"https://n1.x.example"}, time.Hour)
+		return nil
+	}); err != nil {
+		t.Fatalf("ModifyCache: %v", err)
+	}
+
+	cache, err := LoadCache(dir)
+	if err != nil {
+		t.Fatalf("LoadCache: %v", err)
+	}
+	if _, ok := cache["old.example"]; ok {
+		t.Error("cluster with only expired repos was kept")
+	}
+	if _, ok := cache["x.example"].Repos["stale/repo"]; ok {
+		t.Error("expired repo entry was kept")
+	}
+	if _, fresh := cache.GetRepoNodes("x.example", "live/repo"); !fresh {
+		t.Error("live repo entry was dropped")
+	}
+}
+
+func TestHasRepoNodes(t *testing.T) {
+	t.Parallel()
+	cache := make(ClusterCache)
+	cache.SetRepoNodes("x.example", "a/b", []string{"https://n1", "https://n2"}, 24*time.Hour)
+
+	tests := []struct {
+		name         string
+		repo         string
+		nodes        []string
+		minRemaining time.Duration
+		want         bool
+	}{
+		{"same set", "a/b", []string{"https://n1", "https://n2"}, 12 * time.Hour, true},
+		{"same set, other order", "a/b", []string{"https://n2", "https://n1"}, 12 * time.Hour, true},
+		{"different set", "a/b", []string{"https://n1", "https://n3"}, 12 * time.Hour, false},
+		{"subset", "a/b", []string{"https://n1"}, 12 * time.Hour, false},
+		{"too close to expiry", "a/b", []string{"https://n1", "https://n2"}, 25 * time.Hour, false},
+		{"unknown repo", "c/d", []string{"https://n1", "https://n2"}, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := cache.HasRepoNodes("x.example", tt.repo, tt.nodes, tt.minRemaining); got != tt.want {
+				t.Errorf("HasRepoNodes = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

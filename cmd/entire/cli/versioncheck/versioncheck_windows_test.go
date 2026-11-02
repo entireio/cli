@@ -67,7 +67,7 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "non-scoop path in a cli directory uses install.ps1",
 			currentVersion: "1.0.0",
 			execPath:       `C:\tools\cli\entire.exe`,
-			want:           `iex "& {$(irm https://entire.io/install.ps1)} -InstallDir 'C:\tools\cli' -NoPathUpdate"`,
+			want:           `iex "& {$(irm https://entire.com/install.ps1)} -InstallDir 'C:\tools\cli' -NoPathUpdate"`,
 		},
 		{
 			name:           "mise default layout uses mise upgrade",
@@ -79,19 +79,19 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "windows unknown path stable uses install.ps1",
 			currentVersion: "1.0.0",
 			execPath:       windowsLocalBinPath,
-			want:           `iex "& {$(irm https://entire.io/install.ps1)} -InstallDir 'C:\Users\test\.local\bin' -NoPathUpdate"`,
+			want:           `iex "& {$(irm https://entire.com/install.ps1)} -InstallDir 'C:\Users\test\.local\bin' -NoPathUpdate"`,
 		},
 		{
 			name:           "install dir with $ and a quote is passed literally",
 			currentVersion: "1.0.0",
 			execPath:       `C:\Users\$victor's\bin\entire.exe`,
-			want:           "iex \"& {$(irm https://entire.io/install.ps1)} -InstallDir 'C:\\Users\\`$victor''s\\bin' -NoPathUpdate\"",
+			want:           "iex \"& {$(irm https://entire.com/install.ps1)} -InstallDir 'C:\\Users\\`$victor''s\\bin' -NoPathUpdate\"",
 		},
 		{
 			name:           "windows unknown path nightly uses install.ps1 -Channel nightly",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
 			execPath:       windowsLocalBinPath,
-			want:           `iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly -InstallDir 'C:\Users\test\.local\bin' -NoPathUpdate"`,
+			want:           `iex "& {$(irm https://entire.com/install.ps1)} -Channel nightly -InstallDir 'C:\Users\test\.local\bin' -NoPathUpdate"`,
 		},
 	}
 
@@ -215,17 +215,6 @@ func assertNoPOSIXInstallerNames(t *testing.T, cmd string) {
 		if strings.Contains(cmd, needle) {
 			t.Errorf("windows command %q contains %q", cmd, needle)
 		}
-	}
-}
-
-// The Windows commands are printed for the user to paste, and the install.ps1
-// one-liners only work in PowerShell, so every message that prints one has a
-// shell to name.
-func TestWindowsUpdateCommandShell(t *testing.T) {
-	t.Parallel()
-
-	if got := UpdateCommandShell(); got != "PowerShell" {
-		t.Errorf("UpdateCommandShell() = %q, want %q", got, "PowerShell")
 	}
 }
 

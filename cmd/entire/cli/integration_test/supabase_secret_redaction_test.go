@@ -69,7 +69,7 @@ func TestSupabaseSecretRedaction_FullHookFlow(t *testing.T) {
 
 	// Mid-turn commit -> post-commit condensation runs redaction (redact.JSONLBytes).
 	env.WriteFile("feature.go", "package main\n")
-	env.GitCommitWithShadowHooks("add feature", "feature.go")
+	env.GitCommitWithHooks("add feature", "feature.go")
 
 	// Stop -> finalize rewrites the turn checkpoint with the full transcript.
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
@@ -160,7 +160,7 @@ func runScannerSelectionSession(t *testing.T, env *TestEnv) (blob string, marker
 	}
 
 	env.WriteFile("feature.go", "package main\n")
-	env.GitCommitWithShadowHooks("add feature", "feature.go")
+	env.GitCommitWithHooks("add feature", "feature.go")
 
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("Stop: %v", err)

@@ -21,6 +21,8 @@ const originRemote = "origin"
 const (
 	ProtocolSSH    = gitremote.ProtocolSSH
 	ProtocolHTTPS  = gitremote.ProtocolHTTPS
+	ProtocolHTTP   = gitremote.ProtocolHTTP
+	ProtocolGit    = gitremote.ProtocolGit
 	ProtocolEntire = gitremote.ProtocolEntire
 )
 
@@ -95,6 +97,25 @@ func ReadsDedicatedStore(ctx context.Context, leadReadRemote string) (bool, erro
 // remote" (FetchCheckpointRef's ls-remote probe) must not treat emptiness on
 // a non-authoritative target as absence.
 func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string, bool, error) {
+	url, authoritative, _, err := fetchURLResolved(ctx, opts...)
+	return url, authoritative, err
+}
+
+// fetchURLResolved is fetchURLAuthoritative plus whether a CONFIGURED
+// checkpoint_remote was rejected by the ownership vote, as distinct from being
+// absent or unresolvable.
+//
+// The distinction exists for absence classification and nothing else. A VETOED
+// store serves no reads, so the URL returned beside it is where writes went and
+// where reads go, and emptiness there means the ref does not exist. An
+// UNRESOLVABLE store leaves genuine uncertainty and the URL may be a remote
+// that never hosts checkpoint refs, so emptiness there proves nothing.
+//
+// authoritative answers a third question — "is the dedicated store what serves
+// reads" — and is false for both, which is why callers wanting the store's own
+// verdict (FetchURL, ReadsDedicatedStore) use fetchURLAuthoritative and see no
+// change.
+func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, bool, bool, error) {
 	var opt FetchURLOptions
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -104,7 +125,7 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 	if opt.WorktreeRoot != "" {
 		ctx = settings.WithWorktreeRoot(ctx, opt.WorktreeRoot)
 		getRemoteURL = func(ctx context.Context, remoteName string) (string, error) {
-			return GetRemoteURLInDir(ctx, opt.WorktreeRoot, remoteName)
+			return getRemoteURLInDirForVote(ctx, opt, remoteName)
 		}
 	}
 
@@ -127,14 +148,15 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 			logFallback(ctx, "fetch", originURL, "load settings", err)
 			// Settings unreadable → checkpoint_remote unknown; conservative:
 			// do not certify origin as authoritative for checkpoint refs.
-			return originURL, false, nil
+			return originURL, false, false, nil
 		}
-		return "", false, fmt.Errorf("load settings: %w", err)
+		return "", false, false, fmt.Errorf("load settings: %w", err)
 	}
 
 	config := s.GetCheckpointRemote()
 	if config == nil {
-		return fetchURLFromReadCandidates(ctx, getRemoteURL, opt, originURL, originErr, withToken)
+		url, authoritative, err := fetchURLFromReadCandidates(ctx, getRemoteURL, opt, originURL, originErr, withToken)
+		return url, authoritative, false, err
 	}
 
 	// The push side confirms a configured checkpoint_remote is ours before
@@ -149,13 +171,14 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 	// owner cannot be determined, and omitting it would fail OPEN, trusting a
 	// checkpoint_remote that a healthy read of the same candidate might have
 	// vetoed.
-	ownershipURLs, ownershipErr := fetchOwnershipURLs(ctx, getRemoteURL, opt)
+	ownershipURLs, ownershipErr := fetchOwnershipURLs(ctx, opt)
 	var inherited bool
 	var reason string
 	if ownershipErr != nil {
 		inherited, reason = true, ownershipErr.Error()
 	} else {
-		inherited, reason = checkpointRemoteIsInherited(ctx, config, originURL, ownershipURLs)
+		verdict, r := checkpointRemoteIsInherited(ctx, config, originURL, ownershipURLs)
+		inherited, reason = verdict.Refused(), r
 	}
 	if inherited {
 		logging.Warn(ctx, "checkpoint-remote: ignoring checkpoint_remote whose ownership could not be confirmed; reading checkpoints from the fallback remote instead",
@@ -163,14 +186,54 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 			slog.String("reason", reason),
 			slog.String("hint", "if this checkpoint repo is yours, configure checkpoint_remote in .entire/settings.local.json"),
 		)
-		fallbackURL, _, fallbackErr := fetchURLFromReadCandidates(ctx, getRemoteURL, opt, originURL, originErr, withToken)
+		fallbackURL, servedByCandidate, fallbackErr := fetchURLFromReadCandidates(ctx, getRemoteURL, opt, originURL, originErr, withToken)
 		if fallbackErr != nil {
-			return "", false, fallbackErr
+			return "", false, true, fallbackErr
 		}
-		// Never authoritative: a checkpoint_remote IS configured, and the
-		// fallback by construction does not host its refs, so emptiness there
-		// must not be classified as absence.
-		return fallbackURL, false, nil
+		// The refs are wherever the writes went, and writes go to the
+		// candidate's PUSH destination — which remote.<name>.pushurl can point
+		// at a different repository than its fetch url names. Reading the
+		// fetch url queried the wrong repository, so a stale ref or a false
+		// absence. The FIRST push url, matching the push side's own transport
+		// derivation and the single destination checkpoint refs are sent to.
+		if servedByCandidate && opt.LeadReadRemote != "" && len(ownershipURLs) == 0 {
+			// A candidate was named and the vote could not resolve its push
+			// destinations, so there is no identity to read from. Falling
+			// through would use its FETCH url — the misroute this branch
+			// exists to prevent — and the vote already treats an unresolvable
+			// identity as inherited rather than dropping it, because dropping
+			// it fails OPEN. Same reasoning, same answer.
+			//
+			// Named is the operative word: with no candidate the vote has no
+			// URLs to produce and origin is the target by default, which is
+			// the ordinary no-lead path rather than a failure.
+			return "", false, true, fmt.Errorf("resolve push destination for read candidate %q: %w", opt.LeadReadRemote, ownershipErr)
+		}
+		if servedByCandidate && len(ownershipURLs) > 0 {
+			// The very push destinations the vote just resolved, so the target
+			// IS the identity the veto was decided on rather than a second
+			// read of the same config that could in principle disagree with
+			// it. The length is checked rather than inferred from the branch
+			// above: the no-candidate path reaches here with none, and origin
+			// is already the target there.
+			fallbackURL = ownershipURLs[0]
+			if withToken {
+				if tokenURL, ok := deriveTokenOriginURL(fallbackURL); ok {
+					fallbackURL = tokenURL
+				}
+			}
+		}
+		// Never authoritative: a checkpoint_remote IS configured, so this URL
+		// is not the dedicated store.
+		//
+		// vetoed carries whether the CANDIDATE is serving, not merely that a
+		// veto happened. It is what makes a caller treat emptiness as
+		// absence, and that reasoning holds only where writes were routed:
+		// when the candidate could not be resolved this falls back to origin,
+		// which is reached BECAUSE the candidate was unusable, so writes never
+		// went there and its emptiness proves nothing. fetchURLFromReadCandidates
+		// already draws exactly that line.
+		return fallbackURL, false, servedByCandidate, nil
 	}
 
 	if withToken {
@@ -181,25 +244,25 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 				Host:     host,
 			}, config)
 			if err == nil {
-				return checkpointURL, true, nil
+				return checkpointURL, true, false, nil
 			}
 		}
 
 		// In token-based execution path, short-circuit to avoid additional
 		// change in protocol.
 		if originURL != "" {
-			return originURL, false, nil
+			return originURL, false, false, nil
 		}
 	}
 
 	if originURL == "" {
-		return "", false, fmt.Errorf("no fetch URL found: %w", originErr)
+		return "", false, false, fmt.Errorf("no fetch URL found: %w", originErr)
 	}
 
 	info, err := ParseURL(originURL)
 	if err != nil {
 		logFallback(ctx, "fetch", originURL, "parse origin remote URL", err)
-		return originURL, false, nil
+		return originURL, false, false, nil
 	}
 
 	checkpointURL, err := deriveCheckpointURLFromInfo(info, config)
@@ -209,13 +272,13 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 		// provider). Honor the configured checkpoint_remote by targeting the
 		// provider's canonical host over HTTPS rather than falling back to origin.
 		if providerURL, ok := resolveProviderCheckpointURL(ctx, config, opt.WorktreeRoot); ok {
-			return providerURL, true, nil
+			return providerURL, true, false, nil
 		}
 		logFallback(ctx, "fetch", originURL, "derive checkpoint remote URL", err)
-		return originURL, false, nil
+		return originURL, false, false, nil
 	}
 
-	return checkpointURL, true, nil
+	return checkpointURL, true, false, nil
 }
 
 // fetchURLFromReadCandidates resolves the fetch URL when no configured
@@ -263,19 +326,46 @@ func fetchURLFromReadCandidates(ctx context.Context, getRemoteURL func(context.C
 // identity that might have vetoed the checkpoint_remote. The caller treats
 // the error as "ownership could not be confirmed" and falls back, the same
 // verdict the predicate gives an identity whose owner cannot be determined.
-func fetchOwnershipURLs(ctx context.Context, getRemoteURL func(context.Context, string) (string, error), opt FetchURLOptions) ([]string, error) {
+func fetchOwnershipURLs(ctx context.Context, opt FetchURLOptions) ([]string, error) {
 	lead := opt.LeadReadRemote
-	if lead == "" || lead == originRemote {
+	if lead == "" {
 		return nil, nil
 	}
-	leadURL, err := getRemoteURL(ctx, lead)
+	// Exactly the push side's identity set: origin, which the caller supplies,
+	// plus the candidate's PUSH destinations. Its FETCH url is deliberately
+	// NOT here.
+	//
+	// The point of consulting the candidate at all is that reads must land
+	// where writes went, and writes are decided by origin plus push urls
+	// (PushURL -> checkpointRemoteIsInherited). Voting on the fetch url as
+	// well was stricter than that, which is not safer — merely asymmetric in
+	// the other direction: a remote fetching from another owner but pushing to
+	// the checkpoint owner had writes use the store while reads vetoed it and
+	// fell back to the fetch repo.
+	//
+	// origin is included for the same reason as every other case: its own
+	// pushurl can name another owner, and the push side counts it.
+	return pushOwnershipURLs(ctx, opt, lead)
+}
+
+// pushOwnershipURLs returns the push destinations of a read candidate, for the
+// ownership vote.
+//
+// A failure is an error rather than a skip, matching the fetch URL beside it:
+// an identity whose owner cannot be determined counts as inherited, because
+// dropping it fails OPEN.
+//
+// Both halves of a vote must resolve in the same worktree, or they describe
+// different repositories — so both reach git the same way: filtered when a
+// directory is named, so cmd.Dir decides rather than agreeing by accident
+// with what would override it, and ambient when none is, where the
+// environment is the only thing naming a repository at all.
+func pushOwnershipURLs(ctx context.Context, opt FetchURLOptions, lead string) ([]string, error) {
+	pushURLs, err := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, voteEnv(opt), lead)
 	if err != nil {
-		return nil, fmt.Errorf("resolve read candidate remote %q: %w", lead, err)
+		return nil, fmt.Errorf("resolve read candidate push URLs for remote %q: %w", lead, err)
 	}
-	if leadURL == "" {
-		return nil, fmt.Errorf("read candidate remote %q has an empty URL", lead)
-	}
-	return []string{leadURL}, nil
+	return pushURLs, nil
 }
 
 // PushURL returns the effective checkpoint push URL for the current repository.
@@ -344,7 +434,7 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 	// destinations say which repos we are writing to. Any one of them owned by
 	// somebody other than the checkpoint repo's owner means inherited. See
 	// checkpointRemoteIsInherited.
-	if inherited, reason := checkpointRemoteIsInherited(ctx, config, originURL, pushRemoteURLs); inherited {
+	if verdict, reason := checkpointRemoteIsInherited(ctx, config, originURL, pushRemoteURLs); verdict.Refused() {
 		fallbackURL, fallbackErr := resolvePushFallbackURL(ctx, pushRemoteName, originURL)
 		if fallbackErr != nil {
 			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
@@ -512,15 +602,43 @@ func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
 // both directions. settings.local.json is the escape hatch whenever the
 // checkpoint repo is genuinely ours: owned by a different account or org, or
 // behind an origin whose owner cannot be read at all.
-func checkpointRemoteIsInherited(ctx context.Context, config *settings.CheckpointRemoteConfig, originURL string, pushRemoteURLs []string) (bool, string) {
+// OwnershipVerdict separates the two ways a configured checkpoint_remote can be
+// refused, because they deserve different treatment and the difference is not
+// recoverable from the reason string.
+//
+// OwnershipDisproved means a remote named an owner and it was somebody else:
+// positive evidence the store is not this developer's. Nothing should offer to
+// adopt it.
+//
+// OwnershipUnprovable means no remote could establish an owner at all — a repo
+// with no remotes, or a URL with no readable owner segment, which is ordinary
+// on self-hosted git (git@host:repo.git, https://host/repo.git, a filesystem
+// path). Refusing is still right non-interactively, since absence of evidence
+// is not proof the store is ours. But a human at `entire enable` can settle in
+// one answer what local git config cannot.
+type OwnershipVerdict int
+
+const (
+	// OwnershipOurs: the store is not refused.
+	OwnershipOurs OwnershipVerdict = iota
+	// OwnershipUnprovable: ownership could not be established either way.
+	OwnershipUnprovable
+	// OwnershipDisproved: a remote's owner is demonstrably someone else.
+	OwnershipDisproved
+)
+
+// Refused reports whether this verdict withholds the configured store.
+func (v OwnershipVerdict) Refused() bool { return v != OwnershipOurs }
+
+func checkpointRemoteIsInherited(ctx context.Context, config *settings.CheckpointRemoteConfig, originURL string, pushRemoteURLs []string) (OwnershipVerdict, string) {
 	checkpointOwner := config.Owner()
 	if checkpointOwner == "" {
 		// No owner to compare (malformed repo field). Matches the predecessor,
 		// which skipped the check rather than blocking on it.
-		return false, ""
+		return OwnershipOurs, ""
 	}
 	if settings.CheckpointRemoteIsLocalOnly(ctx) {
-		return false, ""
+		return OwnershipOurs, ""
 	}
 
 	// Both identities when both exist. A repo with no origin has exactly one
@@ -536,19 +654,44 @@ func checkpointRemoteIsInherited(ctx context.Context, config *settings.Checkpoin
 		}
 	}
 	if len(identities) == 0 {
-		return true, "no remote to establish ownership"
+		return OwnershipUnprovable, "no remote to establish ownership"
 	}
 
+	// Every identity votes before deciding: an unreadable owner must not hide a
+	// later remote that disproves ownership, because only Unprovable is offered
+	// for adoption.
+	unprovable := ""
 	for _, id := range identities {
 		info, err := ParseURL(id.url)
 		if err != nil || info.Owner == "" {
-			return true, id.source + " URL owner could not be determined"
+			if unprovable == "" {
+				unprovable = id.source + " URL owner could not be determined"
+			}
+			continue
+		}
+		// An owner name means nothing across forges: "alice" on github.com and
+		// "alice" on gitlab.com are unrelated accounts, and since the checkpoint
+		// URL is built on the CONFIGURED provider's host, a matching name here
+		// would vouch for a namespace this identity says nothing about. Only
+		// public forges are known to belong to one provider; an enterprise or
+		// self-managed host is the user's own installation and is trusted to
+		// serve whatever provider they configured.
+		if forge, ok := checkpointPublicForgeProviders[strings.ToLower(info.Host)]; ok &&
+			!strings.EqualFold(forge, strings.TrimSpace(config.Provider)) {
+			if unprovable == "" {
+				unprovable = fmt.Sprintf("%s is on %s, which cannot establish ownership of a %q store",
+					id.source, info.Host, config.Provider)
+			}
+			continue
 		}
 		if !strings.EqualFold(info.Owner, checkpointOwner) {
-			return true, fmt.Sprintf("%s owner %q differs from checkpoint owner %q", id.source, info.Owner, checkpointOwner)
+			return OwnershipDisproved, fmt.Sprintf("%s owner %q differs from checkpoint owner %q", id.source, info.Owner, checkpointOwner)
 		}
 	}
-	return false, ""
+	if unprovable != "" {
+		return OwnershipUnprovable, unprovable
+	}
+	return OwnershipOurs, ""
 }
 
 // InheritedCheckpointRemote reports whether the configured checkpoint_remote
@@ -575,6 +718,24 @@ func InheritedCheckpointRemote(ctx context.Context, s *settings.EntireSettings, 
 	if config == nil {
 		return "", "", false
 	}
+	verdict, reason := InheritedCheckpointRemoteVerdict(ctx, s, pushRemoteName)
+	return config.Repo, reason, verdict.Refused()
+}
+
+// InheritedCheckpointRemoteVerdict is InheritedCheckpointRemote with the reason
+// KIND as well as its text, for the one caller that must tell the two apart:
+// `entire enable` offers to adopt a store whose ownership is merely unprovable,
+// and must never offer one a remote has demonstrably disowned. Reads local git
+// config only, no network. Returns OwnershipOurs when no checkpoint_remote is
+// configured.
+func InheritedCheckpointRemoteVerdict(ctx context.Context, s *settings.EntireSettings, pushRemoteName string) (OwnershipVerdict, string) {
+	if s == nil {
+		return OwnershipOurs, ""
+	}
+	config := s.GetCheckpointRemote()
+	if config == nil {
+		return OwnershipOurs, ""
+	}
 	originURL := ""
 	if url, urlErr := GetRemoteURL(ctx, originRemote); urlErr == nil {
 		originURL = url
@@ -585,13 +746,32 @@ func InheritedCheckpointRemote(ctx context.Context, s *settings.EntireSettings, 
 			pushURLs = urls
 		}
 	}
-	inherited, reason = checkpointRemoteIsInherited(ctx, config, originURL, pushURLs)
-	return config.Repo, reason, inherited
+	return checkpointRemoteIsInherited(ctx, config, originURL, pushURLs)
 }
 
-// GetRemoteURLInDir returns the URL configured for the named git remote in dir.
-func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
-	url, err := gitremote.GetRemoteURLInDir(ctx, dir, remoteName)
+// voteEnv is the child environment BOTH halves of an ownership vote must use,
+// in one place because they have diverged twice.
+//
+// Filtered when opt names a directory: cmd.Dir must decide there, and git's
+// repo-selector variables would outrank it. Ambient when it does not: nothing
+// else names a repository then, so stripping GIT_DIR would silently retarget
+// the child at the process working directory — inside a hook, a different
+// repository than the other half resolves in. Filtering unconditionally fixes
+// the first case and breaks the second, which is how the halves diverged the
+// second time.
+func voteEnv(opt FetchURLOptions) []string {
+	if opt.WorktreeRoot == "" {
+		return nil
+	}
+	return gitrepo.EnvWithoutRepoOverrides()
+}
+
+// getRemoteURLInDirForVote is gitremote.GetRemoteURLInDir under voteEnv, the
+// origin half. Plain gitremote.GetRemoteURLInDir is left alone: its callers are
+// user-invoked commands acting on the current directory, where a GIT_DIR the
+// user exported is an instruction rather than contamination.
+func getRemoteURLInDirForVote(ctx context.Context, opt FetchURLOptions, remoteName string) (string, error) {
+	url, err := gitremote.GetRemoteURLInDirEnv(ctx, opt.WorktreeRoot, voteEnv(opt), remoteName)
 	if err != nil {
 		return "", fmt.Errorf("get remote URL: %w", err)
 	}
@@ -615,7 +795,38 @@ func isDirectGitTransport(protocol string) bool {
 	return protocol == ProtocolSSH || protocol == ProtocolHTTPS
 }
 
+// isTokenRewritableTransport reports whether an origin on this protocol may be
+// rewritten into a token-bearing HTTPS URL. It is an allow-list because the
+// returned URL is one a checkpoint token gets attached to: an unrecognized
+// scheme must fail closed rather than inherit the rewrite.
+//
+// Every admitted scheme names the git host itself, so "https://<same host>" is
+// the same repository reached over a transport the token can authenticate —
+// the upgrade this function exists to perform. It is wider than
+// isDirectGitTransport, which answers whether a remote is usable as configured
+// and so excludes the two schemes that have to be upgraded first: http:// and
+// git:// carry no credential of their own, and rewriting them moves the token
+// onto HTTPS instead of that host's cleartext port.
+//
+// These are transports, not spellings. git's git+ssh:// and ssh+git:// arrive
+// as ProtocolSSH (gitremote.normalizeProtocol) and so need no case of their
+// own; a case here would admit them while every call site that switches on
+// ProtocolSSH stayed blind to them.
+//
+// entire:// and file:// are the exclusions that matter. An entire:// host is an
+// Entire cluster rather than a git endpoint, so the rewrite invents an HTTPS
+// git URL on a host that serves none and sends the token there; file:// names
+// no host at all.
+func isTokenRewritableTransport(protocol string) bool {
+	return gitremote.NamesGitHost(protocol)
+}
+
 func deriveCheckpointURLFromInfo(info *Info, config *settings.CheckpointRemoteConfig) (string, error) {
+	if info.Protocol == ProtocolSSH || info.Protocol == ProtocolHTTPS {
+		if err := checkPublicForgeMatchesProvider(info.Host, config.Provider); err != nil {
+			return "", err
+		}
+	}
 	switch info.Protocol {
 	case ProtocolSSH:
 		// SCP-style (git@host:repo) doesn't support ports. When a non-default
@@ -639,6 +850,35 @@ func deriveCheckpointURLFromInfo(info *Info, config *settings.CheckpointRemoteCo
 	default:
 		return "", fmt.Errorf("unsupported protocol %q in remote URL", info.Protocol)
 	}
+}
+
+// checkpointPublicForgeProviders maps the public forge hosts providerHost knows
+// back to their provider. Only these hosts are known to belong to one provider;
+// any other host (GitHub Enterprise, self-managed GitLab) is the user's own
+// installation and is trusted to serve the configured provider.
+var checkpointPublicForgeProviders = map[string]string{
+	"github.com": ProviderGitHub,
+	"gitlab.com": ProviderGitLab,
+}
+
+// checkPublicForgeMatchesProvider refuses to derive a checkpoint URL on a
+// public forge that belongs to a different provider than the configured one.
+// SSH/HTTPS derivation keeps the remote's host so enterprise installations stay
+// on their own host, but on a public forge that host is a statement about the
+// provider: a gitlab checkpoint_remote derived from a github.com origin would
+// send checkpoints, and with ENTIRE_CHECKPOINT_TOKEN set a GitLab token, to
+// github.com. The error sends every caller to resolveProviderCheckpointURL,
+// which builds the URL on the configured provider's own host — the same
+// fallback the entire:// branch takes for a forge mismatch.
+func checkPublicForgeMatchesProvider(host, provider string) error {
+	forgeProvider, public := checkpointPublicForgeProviders[strings.ToLower(host)]
+	if !public {
+		return nil
+	}
+	if configured := strings.ToLower(strings.TrimSpace(provider)); configured != forgeProvider {
+		return fmt.Errorf("remote host %q is %s, not checkpoint provider %q", host, forgeProvider, configured)
+	}
+	return nil
 }
 
 // resolveProviderCheckpointURL builds the checkpoint URL for the configured
@@ -754,6 +994,13 @@ func deriveTokenOriginURL(originURL string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	// The guard lives here rather than at the call sites because most callers
+	// gate only on the token being set. resolveTargetForTokenAuth checks the
+	// protocol before calling and stays correct with the check duplicated.
+	// See COR-1892 for the analysis.
+	if !isTokenRewritableTransport(info.Protocol) {
+		return "", false
+	}
 	if info.Host == "" || info.Owner == "" || info.Repo == "" {
 		return "", false
 	}
@@ -766,11 +1013,18 @@ func deriveTokenOriginURL(originURL string) (string, bool) {
 	return fmt.Sprintf("https://%s/%s/%s.git", hostPort, info.Owner, info.Repo), true
 }
 
+// ProviderGitHub and ProviderGitLab are the checkpoint_remote provider values
+// this package resolves (providerHost) and offers claim commands for.
+const (
+	ProviderGitHub = "github"
+	ProviderGitLab = "gitlab"
+)
+
 func providerHost(provider string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "github":
+	case ProviderGitHub:
 		return "github.com", true
-	case "gitlab":
+	case ProviderGitLab:
 		return "gitlab.com", true
 	default:
 		return "", false

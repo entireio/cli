@@ -102,7 +102,7 @@ func saveCapturedSyncRemote(ctx context.Context, name string) error {
 // the write idempotent — "first capture sticks" is decided when the state lands,
 // not when it was proposed.
 func pendingCaptureCheckpointSyncRemote(ctx context.Context, pushRemote string) bool {
-	if !isConfiguredRemote(ctx, pushRemote) {
+	if !isCheckpointSyncRemoteEligible(ctx, pushRemote) {
 		return false
 	}
 	root, err := capturedSyncRemotesRoot(ctx)

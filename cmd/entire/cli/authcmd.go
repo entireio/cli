@@ -7,22 +7,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
-
-// runAuthenticatedDataAPI centralizes the auth gate for commands that must
-// call the Entire data API as the current user. Keep intentionally anonymous
-// flows (for example recap's server-rendered 401 path) out of this helper.
-func runAuthenticatedDataAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, fn func(context.Context, *api.Client) error) error {
-	client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
-	if err != nil {
-		// No repo to name: this gate builds the generic data-API client, which
-		// resolves no repo and so can never produce errRepoNotOnboarded.
-		return renderDataAPIAuthError(ctx, errW, "", err)
-	}
-	return fn(ctx, client)
-}
 
 // renderDataAPIAuthError decides whether err should print or stay silent.
 // Silence is reserved for the caller's own context actually firing (checked
@@ -64,7 +50,7 @@ func renderDataAPIAuthError(ctx context.Context, errW io.Writer, ownerRepo strin
 // The wording deliberately stops short of asserting a missing mirror.
 // errRepoNotOnboarded covers three shapes and only one is really "not
 // onboarded": zero rows in the repos index also means the caller cannot SEE
-// the repo (where 'entire repo mirror create' would fail too), and a row whose
+// the repo (where 'entire repo mirror add' would fail too), and a row whose
 // primaries name no processing placement can be a repo mid-onboarding.
 func renderRepoNotOnboarded(errW io.Writer, ownerRepo string, err error) error {
 	if !errors.Is(err, errRepoNotOnboarded) {
@@ -74,6 +60,6 @@ func renderRepoNotOnboarded(errW io.Writer, ownerRepo string, err error) error {
 	if subject == "" {
 		subject = "This repository"
 	}
-	fmt.Fprintf(errW, "%s is not onboarded to Entire, or is not visible to your login. If it should be onboarded, run 'entire repo mirror create'.\n", subject)
+	fmt.Fprintf(errW, "%s is not onboarded to Entire, or is not visible to your login. If it should be onboarded, run 'entire repo mirror add'.\n", subject)
 	return NewSilentError(err)
 }
