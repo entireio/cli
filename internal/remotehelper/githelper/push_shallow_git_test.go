@@ -19,9 +19,13 @@ import (
 // clone with the real git send-pack, pinning the protocol shape the agent
 // amend relies on: the client's shallow lines come ahead of the first
 // command, and the helper agent belongs on that command's capabilities.
-// Enough shallow lines to push the command across send-pack's first
-// 65515-byte payload are covered in gitproto, where the framing is built
-// directly instead of from a repository with over a thousand grafts.
+//
+// It is not the regression test for the first-chunk amend: on this path a
+// single shallow line leaves the command inside send-pack's first payload,
+// so the old code passes it too. The failing cases (a command split across
+// payloads, and shallow lines first on the connect path) are in gitproto's
+// body_test.go, where the framing is built directly instead of from a
+// repository with over a thousand grafts.
 func TestHandlePush_RealSendPack_ShallowRepoAmendsAgent(t *testing.T) {
 	// No t.Parallel(): t.Chdir, because send-pack runs in the process cwd.
 	if _, err := exec.LookPath("git"); err != nil {

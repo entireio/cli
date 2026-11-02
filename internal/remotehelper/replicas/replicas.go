@@ -99,6 +99,11 @@ const minRemainingTTL = discovery.DefaultTTL / 2
 // it already cached. Those skip the write, and with it the exclusive
 // lock every other git operation on this machine needs, unless the
 // entry is in the second half of its TTL.
+//
+// The skip check reads the cache without the lock. An Invalidate that
+// lands between that read and the return leaves the entry deleted, so
+// the next operation rediscovers the replicas; it never caches a wrong
+// set. One extra discovery is the price of not locking on every call.
 func Persist(host, repoPath string, nodes []string) {
 	if host == "" || repoPath == "" || len(nodes) == 0 {
 		return
