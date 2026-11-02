@@ -428,6 +428,47 @@ func TestEnableCheckpointPushRemote_Report(t *testing.T) {
 	}
 }
 
+// TestEnableCheckpointRemote_PushDisabledStillNamesABrokenSelection covers
+// trail finding 01M6E80ZCE95. printSetupCheckpointDestinationNote defers every
+// failed election to report, so a branch of report that returns without naming
+// one leaves enable silent about a broken checkpoint_push_remote — and the
+// push_sessions=false branch returned before it ever looked at the election.
+func TestEnableCheckpointRemote_PushDisabledStillNamesABrokenSelection(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"push_sessions":false,"checkpoint_push_remote":"missing"}}`)
+
+	var output bytes.Buffer
+	(&enableCheckpointRemoteChoice{}).report(t.Context(), &output, nil)
+
+	require.Contains(t, output.String(), "push_sessions: false",
+		"pushing being off is still the first fact")
+	require.Contains(t, output.String(), `checkpoint_push_remote "missing" has no configured fetch URL`,
+		"the broken selection outlives push_sessions and must be named:\n%s", output.String())
+	require.Contains(t, output.String(), "entire enable --checkpoint-push-remote",
+		"naming the fault without its remedy leaves the user nowhere")
+}
+
+// TestEnableCheckpointRemote_PartialSyncNamesTheRemotesCarryingNothing: with a
+// dedicated store pinning some remotes, "dedicated checkpoint uploads can still
+// proceed" is true only of those. Any remote left unpinned goes through the
+// election that just failed, so its pushes carry nothing — the state doctor
+// reports as PARTIAL, which read here as business as usual.
+func TestEnableCheckpointRemote_PartialSyncNamesTheRemotesCarryingNothing(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+	testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_push_remote":"missing","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`)
+
+	var output bytes.Buffer
+	(&enableCheckpointRemoteChoice{}).report(t.Context(), &output, nil)
+
+	require.Contains(t, output.String(), "Dedicated checkpoint uploads can still proceed",
+		"the pinned half does still sync:\n%s", output.String())
+	require.Contains(t, output.String(), "Pushes to fork carry no checkpoints",
+		"the unpinned remote carries nothing and must be named:\n%s", output.String())
+}
+
 // A configured repo never opens the picker on a bare re-enable, even on a
 // terminal: "Keep current destination" writes nothing, so it would come back
 // every run. Under ENTIRE_TEST_TTY=1 a picker would fail opening the TTY, so
