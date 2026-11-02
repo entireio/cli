@@ -455,10 +455,32 @@ func (c *enableCheckpointRemoteChoice) reportPushDisabled(ctx context.Context, w
 		fmt.Fprintln(w, "Checkpoint uploads are off (push_sessions: false). Checkpoints stay in this clone.")
 	}
 	if electErr != nil {
-		fmt.Fprintf(w, "The checkpoint destination is also misconfigured: %v\n", electErr)
-		fmt.Fprintf(w, "Re-enabling pushing would run into that; choose a configured remote with `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
+		reportDisabledElectionFailure(w, electErr, inspectRemoteTopology(ctx).syncAffected())
 	}
 	fmt.Fprintln(w, checkpointRedactionNotice)
+}
+
+// reportDisabledElectionFailure states a fail-closed election to a clone whose
+// pushing is off. Both gates are describeSyncDisabled's, for its reasons.
+//
+// affected (its syncAffected()) because a repo whose every remote is pinned to a
+// dedicated checkpoint_remote bypasses the election, so a broken selection costs
+// it nothing and "re-enabling pushing would run into that" would be false.
+//
+// The remedy is gated on errors.As because the resolver also fails closed on
+// settings or git remotes it could not read, and advice about naming a remote
+// answers neither. An unrecognized cause gets the fact and no remedy — the same
+// rule the .entire directory errors follow.
+func reportDisabledElectionFailure(w io.Writer, electErr error, affected bool) {
+	if electErr == nil || !affected {
+		return
+	}
+	fmt.Fprintf(w, "The checkpoint destination is also misconfigured: %v\n", electErr)
+	fmt.Fprintln(w, "Re-enabling pushing would run into that.")
+	var misconfigured *strategy.CheckpointPushRemoteNotFetchableError
+	if errors.As(electErr, &misconfigured) {
+		fmt.Fprintf(w, "Choose a configured remote with `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
+	}
 }
 
 // enableCheckpointPushPolicy is the clone's checkpoint push policy where it

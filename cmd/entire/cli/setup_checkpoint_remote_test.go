@@ -13,6 +13,7 @@ import (
 	"charm.land/huh/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -447,6 +448,43 @@ func TestEnableCheckpointRemote_PushDisabledStillNamesABrokenSelection(t *testin
 		"the broken selection outlives push_sessions and must be named:\n%s", output.String())
 	require.Contains(t, output.String(), "entire enable --checkpoint-push-remote",
 		"naming the fault without its remedy leaves the user nowhere")
+}
+
+// TestReportDisabledElectionFailure_Gates covers trail finding 01M6E98RBJH1.
+// The push-disabled arm reported every failed election with the
+// `--checkpoint-push-remote` remedy attached, although describeSyncDisabled
+// gates both halves — and for reasons that apply here unchanged.
+func TestReportDisabledElectionFailure_Gates(t *testing.T) {
+	t.Parallel()
+
+	const remedy = "entire enable --checkpoint-push-remote"
+	unfetchable := &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"}
+	unreadable := errors.New("read git remotes: permission denied")
+
+	for _, tc := range []struct {
+		name              string
+		err               error
+		affected          bool
+		wantFact, wantFix bool
+	}{
+		{name: "unfetchable selection gets the fact and the fix", err: unfetchable, affected: true, wantFact: true, wantFix: true},
+		// Naming a remote cannot fix remotes we could not read in the first place.
+		{name: "unrecognized cause gets the fact alone", err: unreadable, affected: true, wantFact: true},
+		// Every remote pinned: the election is bypassed, so nothing is lost and
+		// re-enabling pushing would not run into this.
+		{name: "pinned repo is told nothing", err: unfetchable, affected: false},
+		{name: "a successful election says nothing", err: nil, affected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var output bytes.Buffer
+			reportDisabledElectionFailure(&output, tc.err, tc.affected)
+			require.Equal(t, tc.wantFact, strings.Contains(output.String(), "also misconfigured"),
+				"fact; got:\n%s", output.String())
+			require.Equal(t, tc.wantFix, strings.Contains(output.String(), remedy),
+				"remedy; got:\n%s", output.String())
+		})
+	}
 }
 
 // TestEnableCheckpointRemote_PartialSyncNamesTheRemotesCarryingNothing: with a
