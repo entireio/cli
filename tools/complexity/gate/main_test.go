@@ -83,6 +83,28 @@ func TestFindOffenders(t *testing.T) {
 			want:  []string{"a.go:U.F=40/5"},
 		},
 		{
+			// Several func init() (or func _()) in one file share a key; a
+			// new over-limit one must not hide behind a heavier legacy twin.
+			name:  "second init behind a heavier twin fails as new",
+			base:  []FuncMetric{fn("a.go", "init", 10, 80)},
+			head:  []FuncMetric{fn("a.go", "init", 10, 80), fn("a.go", "init", 60, 35)},
+			limit: 30,
+			want:  []string{"a.go:init=35/new"},
+		},
+		{
+			name:  "duplicate-name occurrences pair worst with worst",
+			base:  []FuncMetric{fn("a.go", "init", 10, 80), fn("a.go", "init", 60, 20)},
+			head:  []FuncMetric{fn("a.go", "init", 10, 80), fn("a.go", "init", 60, 35)},
+			limit: 30,
+			want:  []string{"a.go:init=35/20"},
+		},
+		{
+			name:  "unchanged duplicate inits pass",
+			base:  []FuncMetric{fn("a.go", "init", 10, 80), fn("a.go", "init", 60, 35)},
+			head:  []FuncMetric{fn("a.go", "init", 10, 80), fn("a.go", "init", 60, 35)},
+			limit: 30,
+		},
+		{
 			name:  "a raised limit forgives what a lower one would catch",
 			base:  []FuncMetric{fn("a.go", "F", 10, 30)},
 			head:  []FuncMetric{fn("a.go", "F", 10, 45)},

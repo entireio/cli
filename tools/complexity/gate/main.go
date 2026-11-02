@@ -113,7 +113,8 @@ type FuncMetric struct {
 // identity available in the CSVs: there are no stable symbol IDs, and line
 // numbers move for reasons that have nothing to do with complexity. The cost
 // is that renaming a file re-reports every over-threshold function in it as
-// new, which is the safe direction for a gate to be wrong in.
+// new, which is the safe direction for a gate to be wrong in. A key is not
+// necessarily unique within one tree; findOffenders pairs the occurrences.
 func (f FuncMetric) key() string { return f.File + "\x00" + f.Name }
 
 // Offender is a function the diff gate refuses.
@@ -127,31 +128,53 @@ type Offender struct {
 // findOffenders returns the functions in head that are over the limit and
 // either absent from base, within the limit at base, or worse than at base.
 //
+// A key is not unique: a file may declare several func init() and any number
+// of func _(), and the CSVs name them all alike. Occurrences sharing a key
+// are therefore paired worst-with-worst, so an over-limit occurrence added
+// next to a heavier pre-existing twin has no counterpart and fails as new
+// instead of hiding behind the twin's exemption. The pairing cannot tell an
+// addition-plus-shrink apart from plain growth, so such a head occurrence is
+// judged against the base value it pairs with — the lenient reading of an
+// ambiguity the CSVs cannot resolve.
+//
 // Sorted worst-first, then by file and line, so the annotation order is
 // stable across runs and platforms.
 func findOffenders(base, head []FuncMetric, limit int) []Offender {
-	prev := make(map[string]int, len(base))
+	prev := make(map[string][]int, len(base))
 	for _, f := range base {
-		// Duplicate keys cannot arise from a compiling package, but if one
-		// ever does, keeping the highest complexity makes the gate lenient
-		// rather than firing on an ambiguity we cannot resolve.
-		if old, ok := prev[f.key()]; !ok || f.Cognit > old {
-			prev[f.key()] = f.Cognit
-		}
+		prev[f.key()] = append(prev[f.key()], f.Cognit)
+	}
+	for _, c := range prev {
+		sort.Sort(sort.Reverse(sort.IntSlice(c)))
+	}
+	byKey := make(map[string][]FuncMetric, len(head))
+	for _, f := range head {
+		byKey[f.key()] = append(byKey[f.key()], f)
 	}
 	var out []Offender
-	for _, f := range head {
-		if f.Cognit <= limit {
-			continue
-		}
-		was, existed := prev[f.key()]
-		switch {
-		case !existed:
-			out = append(out, Offender{FuncMetric: f, IsNew: true, Comment: "new function"})
-		case was <= limit:
-			out = append(out, Offender{FuncMetric: f, Base: was, Comment: fmt.Sprintf("was %d, within the limit", was)})
-		case f.Cognit > was:
-			out = append(out, Offender{FuncMetric: f, Base: was, Comment: fmt.Sprintf("grew from %d", was)})
+	for k, fs := range byKey {
+		sort.Slice(fs, func(i, j int) bool {
+			if fs[i].Cognit != fs[j].Cognit {
+				return fs[i].Cognit > fs[j].Cognit
+			}
+			return fs[i].Start < fs[j].Start
+		})
+		was := prev[k]
+		for i, f := range fs {
+			if f.Cognit <= limit {
+				// Descending order: every later occurrence is within the
+				// limit too, and an under-limit occurrence never outranks an
+				// over-limit one for a base slot.
+				break
+			}
+			switch {
+			case i >= len(was):
+				out = append(out, Offender{FuncMetric: f, IsNew: true, Comment: "new function"})
+			case was[i] <= limit:
+				out = append(out, Offender{FuncMetric: f, Base: was[i], Comment: fmt.Sprintf("was %d, within the limit", was[i])})
+			case f.Cognit > was[i]:
+				out = append(out, Offender{FuncMetric: f, Base: was[i], Comment: fmt.Sprintf("grew from %d", was[i])})
+			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
