@@ -1367,13 +1367,13 @@ func runSingleAgentPath(
 
 	summary, waitErr := Run(runCtx, reviewer, runCfg, sinks)
 	printBlockedTools(cmd.ErrOrStderr(), profileName, summary)
-	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, "", runCfg.TrailFindingsJSON)
+	manifestErr := writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, "", runCfg.TrailFindingsJSON)
 	maybePostReviewToTrail(ctx, out, deps, outputMode, profileName, findingScope, summary, "")
 	if waitErr != nil && runCtx.Err() == nil && ctx.Err() == nil {
 		// Non-cancellation error: surface to caller.
 		return fmt.Errorf("review run: %w", waitErr)
 	}
-	return nil
+	return manifestErr
 }
 
 // detectScope computes the scope base ref for the current repo and prints
@@ -1561,7 +1561,7 @@ func runMultiAgentPath(
 		cmd.SilenceUsage = true
 		return multiReviewFailureError(waitErr)
 	}
-	writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput, outputMode == ReviewOutputTrail)
+	manifestErr := writePostReviewManifest(ctx, out, worktreeRoot, headSHA, summary, aggregateOutput, outputMode == ReviewOutputTrail)
 	maybePostReviewToTrail(ctx, out, deps, outputMode, profileName, findingScope, summary, aggregateOutput)
 	// The judge produces the review's primary deliverable — the consolidated
 	// verdict. If it was attempted but failed (provider error or timeout), the
@@ -1573,7 +1573,7 @@ func runMultiAgentPath(
 		cmd.SilenceUsage = true
 		return judgeFailureError(masterLabel, synthErr)
 	}
-	return nil
+	return manifestErr
 }
 
 // judgeFailureError reports a judge (synthesis) failure as the command's error
@@ -1844,9 +1844,9 @@ func writePostReviewManifest(
 	summary reviewtypes.RunSummary,
 	aggregateOutput string,
 	trailFindingsJSON bool,
-) {
+) error {
 	if summary.Cancelled || len(summary.AgentRuns) == 0 {
-		return
+		return nil
 	}
 
 	// Detach from the run context: a Ctrl+C during a slow finalize cancels ctx
@@ -1854,38 +1854,20 @@ func writePostReviewManifest(
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 
-	manifest, states, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
+	manifest, _, err := localReviewManifestFromCurrentState(ctx, worktreeRoot, headSHA, summary, aggregateOutput)
 	if err != nil {
-		logging.Debug(ctx, "review manifest not written", slog.String("error", err.Error()))
-		warnManifestNotWritten(out, "could not load session state: "+err.Error())
-		return
+		logging.Debug(ctx, "review manifest session attribution skipped", slog.String("error", err.Error()))
+		manifest = buildLocalReviewManifestFromSummary(worktreeRoot, headSHA, summary, nil, aggregateOutput)
 	}
 	manifest.WorktreePath = reviewManifestWorktreePath(worktreeRoot)
 	manifest.TrailFindingsJSON = trailFindingsJSON
-	if len(manifest.Sources) == 0 {
-		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
-		if sentinel {
-			// Matcher and explainer have drifted — the matcher rejected
-			// every tagged session for a reason none of the explainer's
-			// filters cover. Surface at Warn so this gets noticed without
-			// requiring debug logging.
-			logging.Warn(ctx, "review manifest matcher/explainer drift detected",
-				slog.String("reason", reason),
-				slog.Int("tagged_state_count", len(states)),
-				slog.Int("agent_run_count", len(summary.AgentRuns)))
-		} else {
-			logging.Debug(ctx, "review manifest not written: no matching review sessions",
-				slog.String("reason", reason))
-		}
-		warnManifestNotWritten(out, reason)
-		return
-	}
 	if err := writeLocalReviewManifest(ctx, manifest); err != nil {
 		logging.Debug(ctx, "review manifest write failed", slog.String("error", err.Error()))
 		warnManifestNotWritten(out, "write to disk failed: "+err.Error())
-		return
+		return fmt.Errorf("persist review findings: %w", err)
 	}
 	writeReviewCompletionFooter(out, manifest)
+	return nil
 }
 
 func reviewManifestWorktreePath(actualWorktree string) string {
