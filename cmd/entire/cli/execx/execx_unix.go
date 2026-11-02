@@ -17,6 +17,8 @@ func detachFromTTY(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setsid = true
 }
 
+// detachBackgroundWorker is detachFromTTY: a new session already leaves the
+// worker and its descendants without a terminal, so there is nothing to hide.
 func detachBackgroundWorker(cmd *exec.Cmd) {
 	detachFromTTY(cmd)
 }

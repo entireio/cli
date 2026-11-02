@@ -338,11 +338,6 @@ Two rules about *where* the check goes, both learned by getting them wrong:
 
 #### Invoking Commands on Windows - Never Put a Dynamic Value on a cmd.exe Line
 
-Background workers started by `execx.SpawnDetached` use `CREATE_NO_WINDOW` on
-Windows so their ordinary subprocesses inherit a headless console instead of
-opening visible windows. `execx.NonInteractive` still uses `DETACHED_PROCESS`:
-its callers need console input probes to fail. Unix workers start a new session.
-
 **When Entire performs the exec itself, do not go through `cmd.exe`.** Pass the
 program and its arguments as separate argv elements (`exec.Command(prog, arg)`),
 or call the Win32 API directly.
@@ -389,3 +384,22 @@ Windows is deliberately outside that invariant rather than an exception to it:
 `-InstallDir`, and it is safe to because Windows never *runs* the command —
 `realRunInstaller` is unimplemented there, so the string is only ever printed
 for the user to paste.
+
+#### Background Workers on Windows - A Headless Console, Not No Console
+
+`execx.SpawnDetached` starts its workers with `CREATE_NO_WINDOW`
+(`detachBackgroundWorker`). A worker started with `DETACHED_PROCESS` has no
+console at all, so every console program it runs (git, for one) allocates a
+fresh console with a visible window on the user's desktop. `CREATE_NO_WINDOW`
+gives the worker a console without a window, and its subprocesses inherit it.
+The trade is that `CONIN$` still opens on that console, so a subprocess that
+prompts hangs instead of flashing; workers run only local git commands, and
+Entire's own prompts go through `interactive.CanPromptInteractively`, which
+reports no window.
+
+`execx.NonInteractive` keeps `DETACHED_PROCESS`: its callers need console input
+probes to fail. Never route one helper through the other. Windows ignores
+`CREATE_NO_WINDOW` when `DETACHED_PROCESS` is also set, and
+`TestWindowsDetachHelpersSetDistinctConsoleFlags` pins each helper's flags.
+Unix workers start a new session, which already leaves their descendants
+without a terminal.
