@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 
@@ -596,6 +597,29 @@ func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, 
 	return results
 }
 
+// placementWaitFailure classifies an add that ended with no placement to
+// report. A deadline can run out before there is any placement — the whole
+// placement wait sits on this side of it — so it renders as timed-out rather
+// than error; otherwise the batch table would show the same condition two ways
+// depending on which side of the placement/clone boundary --timeout expired on.
+//
+// When the request was accepted and the wait then ended WITHOUT the server
+// reaching a verdict — a timeout, or an exhausted poll budget — the error names
+// the request: the placement may still be progressing server-side, and the id
+// is the only thing that identifies it. A terminal placement failure is the
+// opposite case and is left alone: the server is done and nothing is in
+// flight, so "may still be progressing" would send the user in circles.
+func placementWaitFailure(requestID uuid.UUID, err error) (string, error) {
+	status, rendered := mirrorStatusError, renderCoreError(err)
+	if errors.Is(err, context.DeadlineExceeded) {
+		status, rendered = mirrorStatusTimedOut, err
+	}
+	if requestID != uuid.Nil && !errors.Is(err, errMirrorPlacementFailed) {
+		rendered = fmt.Errorf("%w (mirror request %s was accepted and may still be progressing)", rendered, requestID)
+	}
+	return status, rendered
+}
+
 // createOneMirror registers a single (repo, region) mirror and, unless noWait,
 // waits for its initial clone. It never returns an
 // error: every outcome is folded into the mirrorResult so a single failure
@@ -618,8 +642,8 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	opts.onPhase = func(phase mirrorAddPhase) { report(string(phase), false, false) }
 	outcome, err := addAndAwaitMirror(ctx, c, t.owner, t.repo, t.region.host, opts)
 	if outcome.created == nil {
-		res.status, res.err = mirrorStatusError, renderCoreError(err)
-		report(mirrorStatusError, true, false)
+		res.status, res.err = placementWaitFailure(outcome.requestID, err)
+		report(res.status, true, false)
 		return res
 	}
 	res.cloneURL = outcome.created.MirrorUrl

@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
@@ -303,4 +306,39 @@ func TestClustersToRegions(t *testing.T) {
 		{slug: "us-east", jurisdiction: "us", host: "aws-us-east-2.entire.io", isDefault: true},
 		{slug: "eu-west", jurisdiction: "eu", host: "eu-west-1.entire.io"},
 	}, got)
+}
+
+func TestPlacementWaitFailure(t *testing.T) {
+	t.Parallel()
+
+	timeout := classifyWaitContextErr(context.DeadlineExceeded, "waiting for mirror placement")
+	pollBudget := fmt.Errorf("poll mirror request: %w", errors.New("connection reset"))
+	terminal := fmt.Errorf("%w (repo_inaccessible): no access", errMirrorPlacementFailed)
+
+	tests := []struct {
+		name       string
+		requestID  uuid.UUID
+		err        error
+		wantStatus string
+		wantID     bool
+	}{
+		{"placement timeout names the request", testMirrorRequestID, timeout, mirrorStatusTimedOut, true},
+		{"exhausted poll budget names the request", testMirrorRequestID, pollBudget, mirrorStatusError, true},
+		{"terminal failure is not called in flight", testMirrorRequestID, terminal, mirrorStatusError, false},
+		{"submission never accepted has no id", uuid.Nil, timeout, mirrorStatusTimedOut, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			status, err := placementWaitFailure(tt.requestID, tt.err)
+			require.Equal(t, tt.wantStatus, status)
+			require.ErrorIs(t, err, tt.err)
+			if tt.wantID {
+				require.ErrorContains(t, err, tt.requestID.String())
+				require.ErrorContains(t, err, "may still be progressing")
+			} else {
+				require.NotContains(t, err.Error(), "may still be progressing")
+			}
+		})
+	}
 }

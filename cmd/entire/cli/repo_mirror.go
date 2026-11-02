@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -834,10 +835,16 @@ func chooseMirrorAddRegions(cmd *cobra.Command, ref mirrorRepoRef, nativeRepo *c
 
 // mirrorAddOutcome bundles the create response with the clone status
 // observed while waiting. polled is false for --no-wait, where status is unset.
+//
+// requestID is set as soon as the mirror request is accepted, and stays set
+// even when the placement wait then fails: it is the caller's only handle on a
+// placement that may still be progressing server-side, so a timeout must
+// report it rather than discard it.
 type mirrorAddOutcome struct {
-	created *coreapi.MirrorRequestResult
-	status  coreapi.MirrorStatus
-	polled  bool
+	created   *coreapi.MirrorRequestResult
+	requestID uuid.UUID
+	status    coreapi.MirrorStatus
+	polled    bool
 }
 
 type mirrorAddPhase string
@@ -854,6 +861,20 @@ type mirrorAddOptions struct {
 	onPhase func(mirrorAddPhase)
 }
 
+// addAndAwaitMirror submits a GitHub mirror request for clusterHost, waits for
+// the placement it produces, and, unless opts.noWait, polls the control plane
+// until the initial clone reaches a terminal status. The returned error is the
+// submission or placement error (when outcome.created is nil) or the clone
+// wait error — a status sentinel (errMirrorCloneFailed / errMirrorSuspended)
+// or a timeout; callers read outcome.status for the state.
+//
+// opts.onPhase (may be nil) fires as the add moves between phases, so callers
+// can render "queued"/"placing"/"cloning" as distinct steps. It is called only
+// on a change, and never re-reports the phase it is already in.
+//
+// opts.timeout covers the whole operation — submission, placement, and the
+// initial clone. --no-wait skips only the clone: the placement is always
+// awaited, because the request's 202 carries no mirror id to return.
 func addAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, clusterHost string, opts mirrorAddOptions) (mirrorAddOutcome, error) {
 	var currentPhase mirrorAddPhase
 	reportPhase := func(phase mirrorAddPhase) {
@@ -885,8 +906,10 @@ func addAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, clus
 		}
 		return mirrorAddOutcome{}, err
 	}
-	location, _ := accepted.Location.Get()
-	created, err := awaitMirrorPlacement(waitCtx, c, accepted.Response, location, func(status coreapi.MirrorRequestStatus) {
+	// Recorded before the wait, so a placement that times out or exhausts its
+	// poll-error budget still hands the id back to the caller.
+	outcome := mirrorAddOutcome{requestID: accepted.Response.RequestId}
+	created, err := awaitMirrorPlacement(waitCtx, c, accepted.Response, func(status coreapi.MirrorRequestStatus) {
 		switch status {
 		case coreapi.MirrorRequestStatusPending:
 			reportPhase(mirrorAddPhaseQueued)
@@ -896,9 +919,9 @@ func addAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, clus
 		}
 	})
 	if err != nil {
-		return mirrorAddOutcome{}, err
+		return outcome, err
 	}
-	outcome := mirrorAddOutcome{created: created}
+	outcome.created = created
 	if opts.noWait {
 		return outcome, nil
 	}
