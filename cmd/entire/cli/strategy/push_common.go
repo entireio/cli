@@ -75,6 +75,28 @@ func resolveQueuedCheckpointRef(repo *git.Repository, ref plumbing.ReferenceName
 	return ref
 }
 
+// canonicalCheckpointRefKey returns the name a checkpoint ref is MATCHED by,
+// as opposed to the one it is stored under. The two differ: on a
+// case-insensitive filesystem the same checkpoint can be queued as
+// .../6B/<id> and stored as .../6b/<id>, so the queued spelling, the spelling
+// the user names and the spelling a push reports back are not reliably equal.
+// Keying every comparison by the checkpoint's canonical ref name makes them
+// agree without a repository lookup, and without deciding anything about which
+// spelling git I/O should use — that stays with resolveQueuedCheckpointRef.
+//
+// A ref that does not name a checkpoint is its own key.
+func canonicalCheckpointRefKey(ref plumbing.ReferenceName) plumbing.ReferenceName {
+	cid, ok := checkpoint.ParseRef(ref)
+	if !ok {
+		return ref
+	}
+	canonical, err := checkpoint.RefName(cid)
+	if err != nil {
+		return ref
+	}
+	return canonical
+}
+
 // partitionLocalRefs splits refs into those that exist locally (pushable) and
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
 // cleanup). Stale refs can never push, so callers drop them from the queue
