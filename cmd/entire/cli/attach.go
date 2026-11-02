@@ -1076,10 +1076,9 @@ func pushAttachedCheckpoint(ctx context.Context, w io.Writer, plan attachLinkPla
 
 // reportHeldAttachedCheckpoint tells the user how to upload a checkpoint that
 // manual held back. A checkpoint on its own ref that is not queued (its
-// enqueue failed) would not be sent, so that is an error. A checkpoint from
-// before the switch to git-refs that was never migrated lives on the v1
-// branch: attach adds the session there, and 'entire checkpoint push' only
-// uploads checkpoint refs.
+// enqueue failed) would not be sent, so that is an error. Manual needs the
+// git-refs backend, which writes every checkpoint, including one from before
+// the switch, to its own ref.
 func reportHeldAttachedCheckpoint(ctx context.Context, w io.Writer, checkpointID id.CheckpointID) error {
 	waiting, err := strategy.CheckpointWaiting(ctx, checkpointID)
 	if err != nil {
@@ -1093,11 +1092,7 @@ func reportHeldAttachedCheckpoint(ctx context.Context, w io.Writer, checkpointID
 		if onRef {
 			return fmt.Errorf("checkpoint %s was written locally but not queued for upload, so 'entire checkpoint push' can't send it yet; run 'entire session attach' again to queue it", checkpointID)
 		}
-		if checkpointID.Kind() == id.KindULID {
-			return fmt.Errorf("checkpoint %s was not found after it was written; run 'entire session attach' again", checkpointID)
-		}
-		fmt.Fprintf(w, "  Checkpoint %s is on the old checkpoint branch, which 'entire checkpoint push' can't upload; run 'entire doctor migrate-checkpoints' to move it to checkpoint refs, then upload it with: entire checkpoint push %s\n", checkpointID, checkpointID)
-		return nil
+		return fmt.Errorf("checkpoint %s was not found after it was written; run 'entire session attach' again", checkpointID)
 	}
 	fmt.Fprintf(w, "  Checkpoint %s is waiting; upload it with: entire checkpoint push %s\n", checkpointID, checkpointID)
 	return nil
@@ -1265,12 +1260,31 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	if !isExistingCheckpoint {
 		return repo, nil
 	}
+	// A deleted checkpoint can still be visible here (a remote the delete could
+	// not reach, or a copy another clone pushed back). Writing to it would bring
+	// it back, and on git-branch the next push would undo the delete.
+	deleted, err := cpkg.DeletedCheckpointsForRepo(repo)
+	if err != nil {
+		return repo, fmt.Errorf("read deleted checkpoints: %w", err)
+	}
+	deletedSet, err := deleted.Load()
+	if err != nil {
+		return repo, fmt.Errorf("read deleted checkpoints: %w", err)
+	}
+	if deletedSet.Contains(checkpointID) {
+		return repo, fmt.Errorf("checkpoint %s was deleted from this clone, so attach won't add a session to it; nothing was changed", checkpointID)
+	}
 
 	cfg, err := settings.LoadCheckpointsConfig(ctx)
 	if err != nil {
 		return repo, fmt.Errorf("resolve checkpoints config: %w", err)
 	}
 	storedInRef := isCheckpointRef(checkpointStorageRefsFor(cfg, checkpointID)[0])
+	if storedInRef && checkpointID.Kind() != id.KindULID {
+		if repo, err = fetchLegacyCheckpointRef(ctx, repo, checkpointID); err != nil {
+			return repo, err
+		}
+	}
 
 	present, readErr := checkpointPresentLocally(ctx, repo, refs, checkpointID, storedInRef)
 	if readErr != nil {
@@ -1297,6 +1311,33 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	}
 
 	return repo, missingCheckpointError(logCtx, checkpointID)
+}
+
+// fetchLegacyCheckpointRef fetches the ref of a pre-switch hex checkpoint
+// before attach writes to it. Without a local ref, the write copies the
+// checkpoint from v1 into a new ref; if another clone already did that and
+// pushed, the two refs share no history and the push recovery replays this
+// clone's copy over the remote's, losing that clone's sessions. A local v1 copy
+// counts as present, so the fetch in ensureCheckpointAvailable would not run.
+// A remote without the ref is fine; failing to ask is not, since attach would
+// then copy blind.
+func fetchLegacyCheckpointRef(ctx context.Context, repo *git.Repository, checkpointID id.CheckpointID) (*git.Repository, error) {
+	refName, err := cpkg.RefName(checkpointID)
+	if err != nil {
+		return repo, fmt.Errorf("resolve checkpoint ref for %s: %w", checkpointID, err)
+	}
+	if _, err := repo.Reference(refName, true); err == nil {
+		return repo, nil
+	}
+	freshRepo, err := refreshCheckpoint(ctx, checkpointID, true)
+	switch {
+	case err == nil:
+		return freshRepo, nil
+	case errors.Is(err, plumbing.ErrReferenceNotFound):
+		return repo, nil
+	default:
+		return repo, fmt.Errorf("couldn't check whether checkpoint %s already has its own ref on the remote, so attach won't copy it from the %s branch; nothing was changed: %w", checkpointID, paths.MetadataBranchName, err)
+	}
 }
 
 // refreshCheckpoint fetches the checkpoint referenced by the target commit from the remote and

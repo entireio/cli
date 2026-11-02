@@ -511,6 +511,73 @@ func TestAttachCommit_LegacyCheckpointUnderManualWaits(t *testing.T) {
 // Two clones that each attach a session to the same legacy checkpoint both
 // deliver, and neither session is lost: the second clone builds on the ref the
 // first one pushed instead of copying v1 again.
+// A checkpoint on this clone's deleted list can still be visible, through a
+// remote the delete could not reach or a copy another clone pushed back.
+// Attaching to it would write it again: to v1, which the next push sends on
+// git-branch, undoing the delete. So attach refuses before writing anything.
+func TestAttachCommit_RefusesACheckpointDeletedFromThisClone(t *testing.T) {
+	for _, backend := range []string{"git-branch", "git-refs"} {
+		t.Run(backend, func(t *testing.T) {
+			target, cpID, remote := attachLegacyCheckpoint(t)
+			t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", backend)
+			dir := mustGetwd(t)
+			repo, err := git.PlainOpen(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deleted, err := cpkg.DeletedCheckpointsForRepo(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := deleted.Record(cpID); err != nil {
+				t.Fatal(err)
+			}
+			checkpointRefs := func(repoDir string) string {
+				return testutil.RunGit(t, repoDir, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/entire", "refs/entire")
+			}
+			localBefore, remoteBefore := checkpointRefs(dir), checkpointRefs(remote)
+
+			out, err := attachHeadless(t, "attach-deleted", attachOptions{Commit: target.Hash.String()})
+			if err == nil || !strings.Contains(err.Error(), "was deleted from this clone") {
+				t.Fatalf("expected attach to refuse the deleted checkpoint, got %v\n%s", err, out)
+			}
+			if got := checkpointRefs(dir); got != localBefore {
+				t.Errorf("local checkpoint refs changed:\nbefore:\n%s\nafter:\n%s", localBefore, got)
+			}
+			if got := checkpointRefs(remote); got != remoteBefore {
+				t.Errorf("remote checkpoint refs changed:\nbefore:\n%s\nafter:\n%s", remoteBefore, got)
+			}
+		})
+	}
+}
+
+func TestAttachCommit_LegacyCheckpointFromTwoClonesKeepsBothSessions(t *testing.T) {
+	target, cpID, remote := attachLegacyCheckpoint(t)
+
+	other := t.TempDir()
+	testutil.RunGit(t, other, "clone", "-q", "-b", "main", remote, ".")
+	testutil.RunGit(t, other, "fetch", "-q", "origin", paths.MetadataBranchName+":"+paths.MetadataBranchName)
+
+	out, err := attachHeadless(t, "attach-legacy-clone-a", attachOptions{Commit: target.Hash.String()})
+	if err != nil {
+		t.Fatalf("attach from the first clone: %v\n%s", err, out)
+	}
+
+	t.Chdir(other)
+	enableEntire(t, other)
+	out, err = attachHeadless(t, "attach-legacy-clone-b", attachOptions{Commit: target.Hash.String()})
+	if err != nil {
+		t.Fatalf("attach from the second clone: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Pushed checkpoint metadata to origin") {
+		t.Fatalf("expected a confirmed push from the second clone, got:\n%s", out)
+	}
+	want := []string{"attach-legacy-first", "attach-legacy-clone-a", "attach-legacy-clone-b"}
+	if got := checkpointRefSessionIDs(t, remote, cpID); !slices.Equal(got, want) {
+		t.Fatalf("remote checkpoint sessions = %v, want %v", got, want)
+	}
+}
+
 // An older pushed commit is linked in the checkpoint, never rewritten.
 func TestAttachCommit_PushedOlderCommitIsLinkedInTheCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)
