@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -1627,7 +1628,7 @@ func TestCheckAgentDirSymlinks_ReportsIntermediateHookConfigDirs(t *testing.T) {
 		link   string
 	}{
 		{parent: ".pi", link: ".pi/extensions"},
-		{parent: ".opencode", link: ".opencode/plugins"},
+		{parent: ".opencode", link: ".opencode/plugin"},
 	} {
 		t.Run(tc.link, func(t *testing.T) {
 			dir := setupGitRepoForPhaseTest(t)
@@ -2076,14 +2077,14 @@ func TestCheckAntigravityHooksLoaded_ProbeIsOptIn(t *testing.T) {
 }
 
 // The zero-cost check that replaces the probe by default: an installed entry
-// that is not what this host needs (here a bare command with no wrapper at all)
-// is reported with the reinstall remedy, and a freshly installed one is not.
+// carrying the other host family's wrapper is reported with the reinstall
+// remedy, and a freshly installed one is not.
 func TestCheckAntigravityHooksLoaded_ReportsAnEntryStaleForThisHost(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", t.TempDir())
 	stubAgyOnPath(t)
-	writeAntigravityHooksForDoctor(t, dir)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, !agent.HookHostIsWindows())
 
 	cmd, stdout := newTestCmd(t)
 	checkAntigravityHooksLoaded(cmd)
@@ -2096,6 +2097,37 @@ func TestCheckAntigravityHooksLoaded_ReportsAnEntryStaleForThisHost(t *testing.T
 	cmd, stdout = newTestCmd(t)
 	checkAntigravityHooksLoaded(cmd)
 	require.NotContains(t, stdout.String(), "STALE FOR THIS HOST")
+}
+
+// An entry written for this host by an older release (no session-start) still
+// tracks here, so it must not be reported as stale for this host.
+func TestCheckAntigravityHooksLoaded_OutdatedEntryIsNotStaleForThisHost(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", t.TempDir())
+	stubAgyOnPath(t)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, agent.HookHostIsWindows())
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.NotContains(t, stdout.String(), "STALE FOR THIS HOST")
+}
+
+// writeAntigravityPreInvocationEntryForDoctor writes an "entire" entry holding
+// only the pre-invocation hook, wrapped as InstallHooks wraps it for a Windows
+// or POSIX host.
+func writeAntigravityPreInvocationEntryForDoctor(t *testing.T, dir string, windowsHost bool) {
+	t.Helper()
+	command := agent.WrapProductionSilentHookCommand("entire hooks antigravity pre-invocation")
+	if windowsHost {
+		command = agent.WrapWindowsProductionSilentHookCommandDirect("entire hooks antigravity pre-invocation")
+	}
+	entry, err := json.Marshal(map[string]any{"entire": map[string]any{
+		"PreInvocation": []map[string]string{{"type": "command", "command": command}},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".agents"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".agents", "hooks.json"), entry, 0o600))
 }
 
 // A version string semver cannot parse is not "too old": the agy may be newer
@@ -2112,4 +2144,52 @@ func TestCheckAntigravityHooksLoaded_UnparseableVersionSkipsProbeWithoutUpgradeA
 	require.Contains(t, stdout.String(), "could not determine the agy version")
 	require.NotContains(t, stdout.String(), "agy update")
 	require.NotContains(t, stdout.String(), "LOADED by agy")
+}
+
+// An agy entry from before the SessionStart hook leaves sessions idle until
+// they are purged; doctor reports it and names the reinstall that fixes it.
+func TestCheckHookDrift_AntigravityWarnsWithoutSessionStart(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	writeAntigravityPreInvocationEntryForDoctor(t, dir, agent.HookHostIsWindows())
+
+	cmd, stdout := newTestCmd(t)
+	checkHookDrift(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "hooks: OUT OF DATE")
+	require.Contains(t, out, "Run `entire agent add antigravity` to update it.")
+}
+
+// oldEntirePrePushHook is the pre-push hook Entire wrote before it passed git's
+// ref list, exactly as the release generated it.
+const oldEntirePrePushHook = "#!/bin/sh\n# Entire CLI hooks\n# Pre-push hook: push session logs alongside user's push\n" +
+	"# $1 is the remote name (e.g., \"origin\")\n" +
+	"if command -v entire >/dev/null 2>&1; then entire hooks git pre-push \"$1\"; else :; fi\n"
+
+// Entire's old pre-push hook is out of date for a reason of its own, so doctor
+// must not describe it as the working-tree launcher that used to be the only
+// cause. A hook the user edited is not out of date at all: --force leaves it,
+// and the lines the user added, alone.
+func TestCheckGitHooks_PrePushBeforeRefList(t *testing.T) {
+	dir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	_, err := strategy.InstallGitHook(context.Background(), true, false)
+	require.NoError(t, err)
+	prePush := filepath.Join(dir, ".git", "hooks", "pre-push")
+
+	require.NoError(t, os.WriteFile(prePush, []byte(oldEntirePrePushHook), 0o755))
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, false))
+	require.Contains(t, stdout.String(), "Git hooks: OUT OF DATE")
+	require.Contains(t, stdout.String(), "pre-push hook from before Entire read the refs `git push` sends")
+
+	edited := oldEntirePrePushHook + "git lfs pre-push \"$@\"\n"
+	require.NoError(t, os.WriteFile(prePush, []byte(edited), 0o755))
+	cmd, stdout = newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, true))
+	require.Contains(t, stdout.String(), "✓ Git hooks: OK")
+	data, err := os.ReadFile(prePush)
+	require.NoError(t, err)
+	require.Equal(t, edited, string(data), "doctor --force must keep the user's own lines")
 }

@@ -2,8 +2,10 @@ package strategy
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -315,4 +317,121 @@ func TestStoredSessionRoot_InWorktreeViewReadsTheHomesCopy(t *testing.T) {
 	assert.Equal(t, []string{"prompt from home-copy"}, readPromptsIn(root, sessionID), "the view read the committing worktree's copy")
 	leave()
 	assert.Empty(t, state.ViewHomePath)
+}
+
+// linkingIDs returns the IDs findSessionsForCommitLinking links to a commit
+// made in root.
+func linkingIDs(t *testing.T, root string) []string {
+	t.Helper()
+	sessions := linkingSessions(t, root)
+	ids := make([]string, 0, len(sessions))
+	for id := range sessions {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// linkingSessions is linkingIDs keyed to the linked states.
+func linkingSessions(t *testing.T, root string) map[string]*SessionState {
+	t.Helper()
+	t.Chdir(root)
+	clearSessionMatchCaches()
+	sessions, err := (&ManualCommitStrategy{}).findSessionsForCommitLinking(context.Background(), root)
+	require.NoError(t, err)
+	byID := make(map[string]*SessionState, len(sessions))
+	for _, st := range sessions {
+		byID[st.SessionID] = st
+	}
+	return byID
+}
+
+// ENT-2463: an agent started in the main checkout moved into a linked
+// worktree (Claude Code's EnterWorktree) and committed there. No session is
+// homed in that worktree, so the fallback matched every session of the main
+// checkout, and each one mid-turn was condensed into the commit. Once process
+// ancestry identifies the committer, a session from another worktree joins
+// only through its record of this worktree.
+func TestCommitLinking_IdentifiedCommitterKeepsOtherWorktreesSessionsOut(t *testing.T) {
+	for _, layout := range []struct{ name, linked string }{
+		{"sibling worktree", ""},
+		{"worktree nested under the main checkout", ".worktrees/nested"},
+	} {
+		t.Run(layout.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := &ManualCommitStrategy{}
+			var mainDir, linkedDir string
+			if layout.linked == "" {
+				mainDir, linkedDir = twoWorktrees(t)
+			} else {
+				testutil.IsolateGitConfigEnv(t)
+				mainDir = setupSessionMatchRepo(t)
+				linkedDir = filepath.Join(mainDir, layout.linked)
+				createSessionMatchWorktree(t, mainDir, linkedDir, "nested")
+				t.Cleanup(func() { removeSessionMatchWorktree(mainDir, linkedDir) })
+			}
+			saveSessionMatchState(ctx, t, s, mainDir, &SessionState{SessionID: "committer", WorktreePath: mainDir, Owner: selfAncestorOwner(t)})
+			saveSessionMatchState(ctx, t, s, mainDir, &SessionState{SessionID: "unrelated", WorktreePath: mainDir})
+			testutil.WriteFile(t, linkedDir, "a.go", "package a\n")
+			saveSessionMatchState(ctx, t, s, mainDir, &SessionState{
+				SessionID:    "edited-here",
+				WorktreePath: mainDir,
+				StepCount:    1,
+				OtherWorktrees: map[string]*session.WorktreeWork{
+					linkedKey(t, linkedDir): {Path: linkedDir, FilesTouched: []string{"a.go"}, TouchedFileHashes: hashTouchedFiles(ctx, linkedDir, []string{"a.go"}), Incarnation: mark(t, linkedDir)},
+				},
+			})
+
+			linked := linkingSessions(t, linkedDir)
+			assert.ElementsMatch(t, []string{"committer", "edited-here"}, slices.Collect(maps.Keys(linked)),
+				"an identified committer keeps the main checkout's other sessions off its commit unless they recorded edits here")
+			if st := linked["edited-here"]; assert.NotNil(t, st) {
+				assert.True(t, st.LinkedByWorktreeEntry, "a session that joins through its record of this worktree is held to it")
+			}
+		})
+	}
+}
+
+// Without an identified committer (no recorded agent process, or one that is
+// not an ancestor of the commit) the fallback still links the main checkout's
+// sessions: nothing else names the commit's session.
+func TestCommitLinking_FallbackWithoutIdentityKeepsMainCheckoutSessions(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{SessionID: "first", WorktreePath: mainDir})
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{SessionID: "second", WorktreePath: mainDir})
+
+	assert.ElementsMatch(t, []string{"first", "second"}, linkingIDs(t, linkedDir))
+}
+
+// A session homed in the committing worktree stays linked alongside an
+// identified committer from elsewhere: the identity match adds to the
+// worktree's own sessions, never replaces them.
+func TestCommitLinking_IdentifiedCommitterKeepsTheWorktreesOwnSessions(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{SessionID: "committer", WorktreePath: mainDir, Owner: selfAncestorOwner(t)})
+	saveSessionMatchState(ctx, t, s, linkedDir, &SessionState{SessionID: "homed-here", WorktreePath: linkedDir})
+
+	assert.ElementsMatch(t, []string{"committer", "homed-here"}, linkingIDs(t, linkedDir))
+}
+
+// The committer is homed in a third worktree, so the fallback sees sessions of
+// two worktrees and keeps the recently interacting one: the main checkout's,
+// while the committer sat in a long tool call. Identity names the committer,
+// and the main checkout's session stays off its commit.
+func TestCommitLinking_IdentifiedCommitterFromThirdWorktree(t *testing.T) {
+	mainDir, linkedDir := twoWorktrees(t)
+	thirdDir := filepath.Join(resolvedTempDir(t), "third")
+	createSessionMatchWorktree(t, mainDir, thirdDir, "third")
+	t.Cleanup(func() { removeSessionMatchWorktree(mainDir, thirdDir) })
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	now := time.Now()
+	earlier := now.Add(-2 * recentSessionWindow)
+	saveSessionMatchState(ctx, t, s, thirdDir, &SessionState{SessionID: "committer", WorktreePath: thirdDir, Owner: selfAncestorOwner(t), LastInteractionTime: &earlier})
+	saveSessionMatchState(ctx, t, s, mainDir, &SessionState{SessionID: "main-session", WorktreePath: mainDir, LastInteractionTime: &now})
+
+	assert.ElementsMatch(t, []string{"committer"}, linkingIDs(t, linkedDir))
 }

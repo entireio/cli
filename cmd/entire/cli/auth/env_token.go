@@ -3,9 +3,11 @@ package auth
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/entireio/auth-go/tokens"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
 // EnvTokenVar is the environment variable that, when set, bypasses
@@ -33,6 +35,15 @@ func ParseEnvToken(raw string) (coreURL, token string, err error) {
 		return "", "", err
 	}
 	return coreURL, token, nil
+}
+
+// CheckTokenStoreConfig reports an unusable config.json.
+// A set ENTIRE_TOKEN skips the store.
+func CheckTokenStoreConfig() error {
+	if _, ok := os.LookupEnv(EnvTokenVar); ok {
+		return nil
+	}
+	return tokenstore.CheckConfig() //nolint:wrapcheck // already names the file
 }
 
 // CoreURLFromEnvToken derives the home-region core URL from an ENTIRE_TOKEN

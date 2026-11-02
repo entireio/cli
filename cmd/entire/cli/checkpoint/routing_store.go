@@ -351,6 +351,8 @@ func backfillTarget(req WriteRequest) (id.CheckpointID, bool) {
 		return r.CheckpointID, true
 	case SessionSummary:
 		return r.CheckpointID, true
+	case Tasks:
+		return r.CheckpointID, true
 	default:
 		return id.EmptyCheckpointID, false
 	}

@@ -392,6 +392,32 @@ func TestCheckpointNote_PushDisabledDoesNotBlameTheElection(t *testing.T) {
 	}
 }
 
+// TestCheckpointNote_ManualPolicyNamesTheUploadItCosts covers the state main's
+// `entire checkpoint push` added: under a manual policy a git push was never
+// carrying checkpoints, so "pushes carry no session history" blames the policy
+// rather than the broken election. The failure is still real — PushCheckpoints
+// elects the same remote — so the note must still print, naming that upload.
+func TestCheckpointNote_ManualPolicyNamesTheUploadItCosts(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{{name: "origin", pushURLs: []string{"https://example.com/a.git"}}},
+		electionErr:  &strategy.CheckpointPushRemoteNotFetchableError{Remote: "gone"},
+		manualPush:   true,
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "entire checkpoint push") {
+		t.Errorf("the note should name the upload this costs, got:\n%s", out)
+	}
+	if strings.Contains(out, "carry your code but no session history") {
+		t.Errorf("a git push never carried checkpoints here, so that sentence blames the policy:\n%s", out)
+	}
+	if !strings.Contains(out, "checkpoint_push_remote names") {
+		t.Errorf("the broken setting is still the cause and must still be reported:\n%s", out)
+	}
+}
+
 // TestCheckpointNote_UnfetchableWordingCoversBothShapes covers trail finding
 // 01M51C5N89PT: after the fetch-URL narrowing, "is not one of this repo's
 // remotes" was false for a pushurl-only remote, which `git remote` does list.

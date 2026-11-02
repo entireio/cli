@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
@@ -21,6 +23,25 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
+
+// checkpointRefPush binds delivery to one immutable source hash while retaining
+// the queue generation token that successful delivery may remove.
+type checkpointRefPush struct {
+	token checkpoint.PushQueueEntry
+	name  plumbing.ReferenceName
+	hash  plumbing.Hash
+}
+
+var checkpointRefRecoveryCAS = checkpoint.CASPersistentRef //nolint:gochecknoglobals // deterministic recovery-race test seam
+
+// errCheckpointRefSuperseded marks a recovery that lost its compare-and-swap to
+// a concurrent checkpoint write. The newer generation stays local and queued, so
+// the flush treats the ref as superseded rather than as a failed push.
+var errCheckpointRefSuperseded = errors.New("checkpoint ref superseded by a newer local generation")
+
+func (p checkpointRefPush) refSpec() string {
+	return p.hash.String() + ":" + p.name.String()
+}
 
 // partitionLocalRefs splits refs into those that exist locally (pushable) and
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
@@ -44,24 +65,24 @@ func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (ex
 	return existing, stale
 }
 
-// batchPushRefs pushes all of refs to target in a single git push,
-// fast-forward-only (NOT a force push). Batching keeps a backfill of many refs to
-// one network round-trip. Per-checkpoint refs normally advance by fast-forward
-// (each write parents on the prior tip), so the common case succeeds; a
-// non-fast-forward update — genuine divergence, e.g. the same checkpoint written
-// differently on another machine — is REJECTED rather than silently overwriting
-// the remote. We deliberately do not force: there is no server-side ref
-// protection, so a force push would make a buggy or racing client clobber good
-// remote history with no signal. On rejection the whole push errors; the caller
-// retries the rejected refs individually with fetch+replay recovery
+// batchPushCheckpointRefs pushes each ref at its pinned hash to target in a
+// single git push, fast-forward-only (NOT a force push). Batching keeps a backfill
+// of many refs to one network round-trip. Per-checkpoint refs normally advance by
+// fast-forward (each write parents on the prior tip), so the common case
+// succeeds; a non-fast-forward update — genuine divergence, e.g. the same
+// checkpoint written differently on another machine — is REJECTED rather than
+// silently overwriting the remote. We deliberately do not force: there is no
+// server-side ref protection, so a force push would make a buggy or racing client
+// clobber good remote history with no signal. On rejection the whole push errors;
+// the caller retries the rejected refs individually with fetch+replay recovery
 // (pushCheckpointRefWithRecovery).
-func batchPushRefs(ctx context.Context, target string, refs []plumbing.ReferenceName) error {
+func batchPushCheckpointRefs(ctx context.Context, target string, refs []checkpointRefPush) error {
 	if len(refs) == 0 {
 		return nil
 	}
 	refSpecs := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		refSpecs = append(refSpecs, ref.String()+":"+ref.String())
+		refSpecs = append(refSpecs, ref.refSpec())
 	}
 	if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
 		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
@@ -73,35 +94,177 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 // confirmed remote policy/hook rejections return immediately. Other failures —
 // typically the ref diverged on the remote (the same checkpoint re-written
 // elsewhere) — fetch the remote ref and replay the local-only commits on top via
-// fetchAndRebaseRefCommon, then retry. The retry is still
+// recoverCheckpointRef, then retry. The retry is still
 // non-force: after the replay the local ref is a fast-forward over the remote, so
 // the remote commit is preserved as an ancestor rather than overwritten. The
 // cherry-pick is delta-based, so non-overlapping changes merge; a genuine overlap
 // (e.g. both sides rewrote the root metadata.json) surfaces as a rebase error and
 // the ref is left for a later pre-push. Returns nil only if the ref reached the
 // remote.
-func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumbing.ReferenceName) error {
+func pushCheckpointRefWithRecovery(
+	ctx context.Context,
+	repo *git.Repository,
+	target string,
+	candidate checkpointRefPush,
+) (checkpointRefPush, error) {
 	// One shared budget across the initial push, fetch+replay, and retry, matching
 	// doPushRef (fetchAndRebaseRefCommon relies on the caller's deadline).
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
 
-	pushErr := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+	pushErr := batchPushCheckpointRefs(ctx, target, []checkpointRefPush{candidate})
 	if pushErr == nil {
-		return nil
+		return candidate, nil
 	}
 	if checkpointRefRejectionReason(pushErr) != "" {
 		// Fetch+replay cannot fix a remote policy/hook rejection. If the ref
 		// already exists remotely, replay would needlessly rewrite local
 		// commits (including their committer timestamps) on every push.
-		return pushErr
+		return checkpointRefPush{}, pushErr
 	}
-	if err := fetchAndRebaseRefCommon(ctx, target, ref); err != nil {
+	recovered, err := recoverCheckpointRef(ctx, repo, target, candidate)
+	if err != nil {
 		// Recovery is speculative: a missing remote ref may mean the push was
 		// blocked, not that it diverged. Keep the push failure primary.
-		return &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
+		return checkpointRefPush{}, &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
 	}
-	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+	if err := batchPushCheckpointRefs(ctx, target, []checkpointRefPush{recovered}); err != nil {
+		return checkpointRefPush{}, err
+	}
+	return recovered, nil
+}
+
+// recoverCheckpointRef replays exactly candidate.hash onto the fetched remote
+// tip and installs the result only if the local ref still names that same
+// generation. A concurrent checkpoint write therefore wins the CAS and remains
+// both locally reachable and queued for a later delivery attempt.
+func recoverCheckpointRef(
+	ctx context.Context,
+	repo *git.Repository,
+	target string,
+	candidate checkpointRefPush,
+) (checkpointRefPush, error) {
+	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
+	if err != nil {
+		return checkpointRefPush{}, fmt.Errorf("resolve fetch target: %w", err)
+	}
+	fetchedRefName := plumbing.ReferenceName(
+		"refs/entire-fetch-tmp/" + strings.TrimPrefix(candidate.name.String(), "refs/"),
+	)
+	refSpec := fmt.Sprintf("+%s:%s", candidate.name, fetchedRefName)
+	_, fetchSpan := perf.Start(ctx, "git_fetch")
+	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+		Remote:   fetchTarget,
+		RefSpecs: []string{refSpec},
+		NoTags:   true,
+	})
+	fetchSpan.RecordError(fetchErr)
+	fetchSpan.End()
+	if fetchErr != nil {
+		return checkpointRefPush{}, fmt.Errorf("fetch failed: %w", fetchErr)
+	}
+	defer func() {
+		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
+	}()
+
+	// go-git loads a handle's pack index once and never reloads it, so objects
+	// the fetch wrote into a new pack are invisible to a handle that has already
+	// read objects. Replay from a freshly opened repository.
+	repoPath, err := getRepoPath(repo)
+	if err != nil {
+		return checkpointRefPush{}, fmt.Errorf("get repository path: %w", err)
+	}
+	fetched, err := gitrepo.OpenPath(repoPath)
+	if err != nil {
+		return checkpointRefPush{}, fmt.Errorf("reopen repository after fetch: %w", err)
+	}
+	defer fetched.Close()
+
+	remoteRef, err := fetched.Reference(fetchedRefName, true)
+	if err != nil {
+		return checkpointRefPush{}, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
+	}
+	newTip, err := replayCheckpointCandidate(ctx, fetched, candidate.hash, remoteRef.Hash())
+	if err != nil {
+		return checkpointRefPush{}, err
+	}
+	if err := checkpointRefRecoveryCAS(ctx, fetched, candidate.name, newTip, candidate.hash); err != nil {
+		// newTip has no unique writer data: it is derived entirely from the
+		// immutable candidate plus the fetched remote. On a CAS conflict the
+		// writer's winning generation remains the live ref and its queue entry
+		// remains untouched. A later delivery recomputes the replay from that
+		// winner; retaining this losing intermediate under another ref would
+		// create a second source of truth for the checkpoint.
+		if errors.Is(err, gitrepo.ErrRefCASConflict) {
+			err = fmt.Errorf("%w: %w", errCheckpointRefSuperseded, err)
+		}
+		return checkpointRefPush{}, fmt.Errorf("install recovered checkpoint ref %s: %w", candidate.name, err)
+	}
+	candidate.hash = newTip
+	return candidate, nil
+}
+
+func replayCheckpointCandidate(
+	ctx context.Context,
+	repo *git.Repository,
+	localHash, remoteHash plumbing.Hash,
+) (plumbing.Hash, error) {
+	if localHash.Equal(remoteHash) {
+		return remoteHash, nil
+	}
+	repoPath, err := getRepoPath(repo)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("get repository path: %w", err)
+	}
+	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), remoteHash.String())
+	if err == nil && mergeBase.Equal(localHash) {
+		return remoteHash, nil
+	}
+
+	shallow, shallowErr := loadShallowHashes(ctx, repoPath)
+	if shallowErr != nil {
+		return plumbing.ZeroHash, fmt.Errorf("load shallow boundaries: %w", shallowErr)
+	}
+	if errors.Is(err, errNoMergeBase) {
+		commits, collectErr := collectCommitChain(repo, localHash, shallow)
+		if collectErr != nil {
+			return plumbing.ZeroHash, fmt.Errorf("collect disconnected checkpoint commits: %w", collectErr)
+		}
+		dataCommits := make([]*object.Commit, 0, len(commits))
+		for _, commit := range commits {
+			tree, treeErr := commit.Tree()
+			if treeErr != nil {
+				return plumbing.ZeroHash, fmt.Errorf("read tree for commit %s: %w", commit.Hash.String()[:7], treeErr)
+			}
+			if len(tree.Entries) > 0 {
+				dataCommits = append(dataCommits, commit)
+			}
+		}
+		if len(dataCommits) == 0 {
+			return remoteHash, nil
+		}
+		newTip, pickErr := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow)
+		if pickErr != nil {
+			return plumbing.ZeroHash, fmt.Errorf("replay disconnected checkpoint commits: %w", pickErr)
+		}
+		return newTip, nil
+	}
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("find checkpoint merge base: %w", err)
+	}
+
+	commits, err := collectCommitsSince(ctx, repo, repoPath, localHash, remoteHash)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("collect local checkpoint commits: %w", err)
+	}
+	if len(commits) == 0 {
+		return remoteHash, nil
+	}
+	newTip, err := cherryPickOnto(ctx, repo, remoteHash, commits, shallow)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("replay checkpoint commits: %w", err)
+	}
+	return newTip, nil
 }
 
 // checkpointRefRecoveryError keeps both failures inspectable, while allowing the

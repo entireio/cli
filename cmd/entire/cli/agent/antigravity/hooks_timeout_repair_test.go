@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -190,9 +191,11 @@ func TestRepairHookTimeouts_PreservesNullHandler(t *testing.T) {
 
 // `entire status` learns about an old install only through CheckHookConfig, and
 // points the user to `entire doctor`, so it must report outdated exactly when
-// RepairHookTimeouts has something to add.
+// doctor has something to fix: a Stop timeout it adds, or a missing
+// SessionStart hook it tells the user to reinstall for.
 func TestCheckHookConfig_ReportsMissingStopTimeout(t *testing.T) {
 	stopCmd := buildEntireHookConfig().Stop[0].Command
+	sessionStart := fmt.Sprintf(`"SessionStart": [{"type": "command", "command": %q}], `, buildEntireHookConfig().SessionStart[0].Command)
 	current, err := json.Marshal(map[string]HookConfig{"entire": buildEntireHookConfig()})
 	if err != nil {
 		t.Fatal(err)
@@ -205,12 +208,14 @@ func TestCheckHookConfig_ReportsMissingStopTimeout(t *testing.T) {
 		{name: "no_file", want: agent.HooksAbsent},
 		{name: "no_entire_entry", content: `{"mine": {"Stop": [{"type": "command", "command": "my-hook"}]}}`, want: agent.HooksAbsent},
 		{name: "current_install", content: string(current), want: agent.HooksCurrent},
-		{name: "missing_stop_timeout", content: fmt.Sprintf(`{"entire": {"Stop": [{"type": "command", "command": %q}]}}`, stopCmd), want: agent.HooksOutdated},
-		{name: "own_timeout_kept", content: fmt.Sprintf(`{"entire": {"Stop": [{"type": "command", "command": %q, "timeout": 45}]}}`, stopCmd), want: agent.HooksCurrent},
-		{name: "own_timeout_other_case_kept", content: fmt.Sprintf(`{"entire": {"Stop": [{"type": "command", "command": %q, "Timeout": 600}]}}`, stopCmd), want: agent.HooksCurrent},
+		{name: "missing_stop_timeout", content: fmt.Sprintf(`{"entire": {%s"Stop": [{"type": "command", "command": %q}]}}`, sessionStart, stopCmd), want: agent.HooksOutdated},
+		{name: "own_timeout_kept", content: fmt.Sprintf(`{"entire": {%s"Stop": [{"type": "command", "command": %q, "timeout": 45}]}}`, sessionStart, stopCmd), want: agent.HooksCurrent},
+		{name: "own_timeout_other_case_kept", content: fmt.Sprintf(`{"entire": {%s"Stop": [{"type": "command", "command": %q, "Timeout": 600}]}}`, sessionStart, stopCmd), want: agent.HooksCurrent},
 		// Doctor leaves the user's handlers and a disabled entry alone, so
 		// pointing the user there for them would never clear the warning.
-		{name: "foreign_handler_without_timeout", content: fmt.Sprintf(`{"entire": {"Stop": [{"type": "command", "command": "my-hook"}, {"type": "command", "command": %q, "timeout": 300}]}}`, stopCmd), want: agent.HooksCurrent},
+		{name: "foreign_handler_without_timeout", content: fmt.Sprintf(`{"entire": {%s"Stop": [{"type": "command", "command": "my-hook"}, {"type": "command", "command": %q, "timeout": 300}]}}`, sessionStart, stopCmd), want: agent.HooksCurrent},
+		// Installs from before SessionStart was added: a reinstall fixes them.
+		{name: "missing_session_start", content: fmt.Sprintf(`{"entire": {"Stop": [{"type": "command", "command": %q, "timeout": 300}]}}`, stopCmd), want: agent.HooksOutdated},
 		{name: "user_disabled_entry", content: fmt.Sprintf(`{"entire": {"enabled": false, "Stop": [{"type": "command", "command": %q}]}}`, stopCmd), want: agent.HooksCurrent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,5 +229,41 @@ func TestCheckHookConfig_ReportsMissingStopTimeout(t *testing.T) {
 				t.Errorf("CheckHookConfig = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// An install from before SessionStart is reported outdated, and the reinstall
+// doctor points to (`entire agent add antigravity`) brings it current without
+// touching the user's own entries.
+func TestCheckHookConfig_ReinstallAddsSessionStart(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	cfg := buildEntireHookConfig()
+	cfg.SessionStart = nil
+	old, err := json.Marshal(map[string]any{"entire": cfg, "mine": map[string]any{"Stop": []any{map[string]any{"type": "command", "command": "my-hook"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := writeHooksJSON(t, tmpDir, string(old))
+	ag := &AntigravityAgent{}
+	if got := ag.CheckHookConfig(context.Background()); got != agent.HooksOutdated {
+		t.Fatalf("before reinstall: CheckHookConfig = %v, want outdated", got)
+	}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	if got := ag.CheckHookConfig(context.Background()); got != agent.HooksCurrent {
+		t.Fatalf("after reinstall: CheckHookConfig = %v, want current", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file map[string]json.RawMessage
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(file["mine"]), "my-hook") {
+		t.Errorf("the user's own entry was lost: %s", data)
 	}
 }

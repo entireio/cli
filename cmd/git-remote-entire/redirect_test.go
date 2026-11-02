@@ -14,7 +14,7 @@ func TestAuthHTTPClientRejectsDowngrade(t *testing.T) {
 	t.Parallel()
 	httpclienttest.CheckRejectsDowngrade(t, func(t *testing.T, origin string, rt http.RoundTripper) error {
 		t.Helper()
-		c := newAuthHTTPClient(false, "test")
+		c := newAuthHTTPClient(httpclient.NewDiscoveryTransport(false), "test")
 		c.Transport = rt
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, origin, nil)
 		require.NoError(t, err)

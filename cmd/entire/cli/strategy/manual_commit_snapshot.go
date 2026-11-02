@@ -35,10 +35,10 @@ var ErrPendingFileChanges = errors.New("session has uncommitted file changes")
 // other — but it is not linked to a commit. A redaction failure is an error here
 // rather than a dropped transcript (see condenseOpts.failOnRedactionError).
 //
-// It runs under the session's state lock, like every other condensation: the
-// per-session redaction prefix cache is written in two steps, and an unlocked
-// writer racing a commit's condensation can leave its entry pointing at the
-// other writer's payload, corrupting every later checkpoint of the session.
+// It runs under the session's state lock, like every other condensation: an
+// unlocked writer racing a commit's condensation over the per-session redaction
+// prefix cache could delete the payload the other writer's entry names, costing
+// the next checkpoint a full redaction.
 // It is still a snapshot: the locked state is condensed in memory and never
 // saved back (ErrMutationSkip), so the session's checkpoint window is
 // untouched and repeated snapshots each cover the session from the same start.

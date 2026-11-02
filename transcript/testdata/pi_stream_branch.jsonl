@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"0199a000-0000-7000-8000-000000000002","timestamp":"2026-10-16T10:00:00.000Z","cwd":"/repo"}
+{"type":"message","id":"u1","parentId":null,"timestamp":"t","message":{"role":"user","content":"one","timestamp":1}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"t","message":{"role":"assistant","content":[{"type":"text","text":"1"}],"stopReason":"stop","timestamp":2}}
+{"type":"message","id":"u2","parentId":"a1","timestamp":"t","message":{"role":"user","content":"two","timestamp":3}}
+{"type":"message","id":"a2","parentId":"u2","timestamp":"t","message":{"role":"assistant","content":[{"type":"text","text":"2"}],"stopReason":"stop","timestamp":4}}
+{"type":"label","id":"l1","parentId":"a2","timestamp":"t","targetId":"a2","label":"x"}
+{"type":"message","id":"u3","parentId":"a1","timestamp":"t","message":{"role":"user","content":"three","timestamp":5}}

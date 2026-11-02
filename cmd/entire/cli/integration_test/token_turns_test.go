@@ -113,9 +113,8 @@ func (r *tokenTurnRun) stop() {
 	require.NoError(r.t, r.env.SimulateStop(r.s.ID, r.s.TranscriptPath))
 }
 
-// checkTotal asserts the session total counts every turn once. A turn with no
-// file changes skips SaveStep and adds nothing, so call it only after turns
-// that changed files.
+// checkTotal asserts the session total counts every turn once, including
+// turns that changed no files.
 func (r *tokenTurnRun) checkTotal() {
 	r.t.Helper()
 	state, err := r.env.GetSessionState(r.s.ID)

@@ -85,7 +85,7 @@ jobs:
             done
           }
 
-          retry 'curl -fsSL --compressed https://entire.io/install.sh | bash -s -- --channel nightly'
+          retry 'curl -fsSL --compressed https://entire.com/install.sh | bash -s -- --channel nightly'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install nightly CLI (macOS)
@@ -147,7 +147,7 @@ jobs:
             }
           }
 
-          Invoke-WithRetry { iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly" }
+          Invoke-WithRetry { iex "& {$(irm https://entire.com/install.ps1)} -Channel nightly" }
           "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # Pin the checkout to the tag that produced the installed binary, so the
@@ -272,6 +272,12 @@ jobs:
           # unauthenticated api.github.com call it gives no way to authenticate,
           # so it is rate-limited at random.
           retry 'npm install -g opencode-ai'
+          # OpenCode 2 ships as @opencode/cli and installs an `opencode` too, so
+          # it goes into its own prefix; its smoke step puts that first on PATH.
+          # Unpinned on purpose, unlike e2e.yml's PR leg: the plugin relies on
+          # OpenCode 2's young plugin API, so the nightly should catch an
+          # upstream release that breaks it.
+          retry 'npm install -g --prefix "$HOME/opencode-2" @opencode/cli'
           retry 'curl -fsSL --compressed https://chatgpt.com/codex/install.sh | sh'
           retry 'curl -fsSL --compressed https://gh.io/copilot-install | bash'
           # agy's official installer: it resolves OS and architecture itself,
@@ -279,7 +285,7 @@ jobs:
           # into ~/.local/bin, which the line below puts on PATH.
           retry 'curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "AGENTS=claude-code opencode codex cursor-cli factoryai-droid copilot-cli antigravity" >> "$GITHUB_ENV"
+          echo "AGENTS=claude-code opencode opencode-2 codex cursor-cli factoryai-droid copilot-cli antigravity" >> "$GITHUB_ENV"
 
       # cursor-cli is the only absence here: its E2E driver sends every prompt
       # through tmux (e2e/agents/cursor_cli.go), because Cursor's headless -p
@@ -371,6 +377,8 @@ jobs:
       #
       # The seven bodies are byte-identical; only AGENT, the key and (for
       # antigravity, whose TimeoutMultiplier is 2.5x) the step cap differ.
+      # opencode-2 is the exception: it adds OpenCode 2 to PATH and reports
+      # under its own name.
       - name: Smoke test claude-code
         if: ${{ !cancelled() && contains(format(' {0} ', env.AGENTS), ' claude-code ') }}
         timeout-minutes: 20
@@ -407,6 +415,33 @@ jobs:
           rc=$?
           grep -q '^Total: 0 ' "$ARTIFACT_ROOT/$AGENT/report.txt" 2>/dev/null && rc=1
           echo "$AGENT $rc" >> e2e/artifacts/results.txt
+          exit "$rc"
+
+      # The opencode runner against OpenCode 2 (installed to its own prefix
+      # above). Reported as opencode-2.
+      - name: Smoke test opencode-2
+        if: ${{ !cancelled() && contains(format(' {0} ', env.AGENTS), ' opencode-2 ') }}
+        timeout-minutes: 20
+        shell: bash
+        env:
+          AGENT: opencode
+          LEG: opencode-2
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p e2e/artifacts
+          export PATH="$HOME/opencode-2/bin:$PATH"
+          case "$(opencode --version)" in
+            "opencode v2."*) ;;
+            *) echo "::error::opencode-2 leg is not running OpenCode 2: $(opencode --version)"; echo "$LEG 1" >> e2e/artifacts/results.txt; exit 1 ;;
+          esac
+          go run ./e2e/bootstrap "$AGENT" &&
+            E2E_ARTIFACT_DIR="$ARTIFACT_ROOT/$LEG" \
+              mise run test:e2e --agent "$AGENT" "$TEST_FILTER"
+          rc=$?
+          grep -q '^Total: 0 ' "$ARTIFACT_ROOT/$LEG/report.txt" 2>/dev/null && rc=1
+          echo "$LEG $rc" >> e2e/artifacts/results.txt
           exit "$rc"
 
       - name: Smoke test codex

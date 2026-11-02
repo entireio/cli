@@ -367,7 +367,7 @@ func TestCalculateTokenUsageSince_DeltaFromBaseline(t *testing.T) {
 	}
 
 	a := &AntigravityAgent{}
-	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", baseline)
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", "", baseline)
 	if err != nil {
 		t.Fatalf("CalculateTokenUsageSince: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestCalculateTokenUsageSince_NilBaselineCountsFromZero(t *testing.T) {
 	writeSnapshotFixture(t, "c2", snaps)
 
 	a := &AntigravityAgent{}
-	usage, err := a.CalculateTokenUsageSince(context.Background(), "c2", nil)
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c2", "", nil)
 	if err != nil {
 		t.Fatalf("CalculateTokenUsageSince: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestCalculateTokenUsageSince_NoDataReturnsNilNil(t *testing.T) {
 	t.Setenv(statusDirEnv, dir)
 
 	a := &AntigravityAgent{}
-	usage, err := a.CalculateTokenUsageSince(context.Background(), "missing-conv", nil)
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "missing-conv", "", nil)
 	if err != nil {
 		t.Fatalf("CalculateTokenUsageSince: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestSnapshotTokenBaseline_ReturnsLatestSnapshot(t *testing.T) {
 	writeSnapshotFixture(t, "c3", snaps)
 
 	a := &AntigravityAgent{}
-	baseline, err := a.SnapshotTokenBaseline(context.Background(), "c3")
+	baseline, err := a.SnapshotTokenBaseline(context.Background(), "c3", "")
 	if err != nil {
 		t.Fatalf("SnapshotTokenBaseline: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestSnapshotTokenBaseline_EmptyStoreReturnsNil(t *testing.T) {
 	t.Setenv(statusDirEnv, dir)
 
 	a := &AntigravityAgent{}
-	baseline, err := a.SnapshotTokenBaseline(context.Background(), "no-such-conv")
+	baseline, err := a.SnapshotTokenBaseline(context.Background(), "no-such-conv", "")
 	if err != nil {
 		t.Fatalf("SnapshotTokenBaseline: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestCalculateTokenUsageSince_ClampsWhenTotalsGoBackwards(t *testing.T) {
 	}
 
 	a := &AntigravityAgent{}
-	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", baseline)
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", "", baseline)
 	if err != nil {
 		t.Fatalf("CalculateTokenUsageSince: %v", err)
 	}
@@ -558,7 +558,7 @@ func TestCalculateTokenUsageSince_UnparseableBaselineCountsAllLines(t *testing.T
 	baseline := json.RawMessage(`{"ts":"not-a-timestamp","context_window":{"total_input_tokens":1000,"total_output_tokens":100}}`)
 
 	a := &AntigravityAgent{}
-	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", baseline)
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", "", baseline)
 	if err != nil {
 		t.Fatalf("CalculateTokenUsageSince: %v", err)
 	}
@@ -643,7 +643,7 @@ func TestCalculateTokenUsageSince_NoDoubleCountWhenBaselineIsLatest(t *testing.T
 	a := &AntigravityAgent{}
 
 	// Turn N: full usage from nil baseline.
-	full, err := a.CalculateTokenUsageSince(context.Background(), "c1", nil)
+	full, err := a.CalculateTokenUsageSince(context.Background(), "c1", "", nil)
 	if err != nil {
 		t.Fatalf("CalculateTokenUsageSince (full): %v", err)
 	}
@@ -652,7 +652,7 @@ func TestCalculateTokenUsageSince_NoDoubleCountWhenBaselineIsLatest(t *testing.T
 	}
 
 	// Capture the latest snapshot (T2 line) exactly as the lifecycle does.
-	baseline, err := a.SnapshotTokenBaseline(context.Background(), "c1")
+	baseline, err := a.SnapshotTokenBaseline(context.Background(), "c1", "")
 	if err != nil {
 		t.Fatalf("SnapshotTokenBaseline: %v", err)
 	}
@@ -661,7 +661,7 @@ func TestCalculateTokenUsageSince_NoDoubleCountWhenBaselineIsLatest(t *testing.T
 	}
 
 	// Turn N+1: nothing new appended. Delta from the latest baseline is zero.
-	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", baseline)
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "c1", "", baseline)
 	if err != nil {
 		t.Fatalf("CalculateTokenUsageSince (delta): %v", err)
 	}
@@ -762,7 +762,7 @@ func TestReaders_TakeTheConversationLock(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		a := &AntigravityAgent{}
-		baseline, err := a.SnapshotTokenBaseline(context.Background(), "c-lock")
+		baseline, err := a.SnapshotTokenBaseline(context.Background(), "c-lock", "")
 		if err != nil {
 			done <- err
 			return
@@ -771,13 +771,13 @@ func TestReaders_TakeTheConversationLock(t *testing.T) {
 			done <- errors.New("SnapshotTokenBaseline returned no baseline for a conversation with a snapshot")
 			return
 		}
-		_, err = a.CalculateTokenUsageSince(context.Background(), "c-lock", nil)
+		_, err = a.CalculateTokenUsageSince(context.Background(), "c-lock", "", nil)
 		done <- err
 	}()
 
 	select {
-	case <-done:
-		t.Fatal("readers completed while another process held the conversation lock")
+	case err := <-done:
+		t.Fatalf("readers completed while another process held the conversation lock (err=%v)", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 	release()
@@ -820,7 +820,7 @@ func TestReaders_DegradeWhenTheLockIsStuck(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		baseline, err := (&AntigravityAgent{}).SnapshotTokenBaseline(context.Background(), "c-stuck")
+		baseline, err := (&AntigravityAgent{}).SnapshotTokenBaseline(context.Background(), "c-stuck", "")
 		if err != nil {
 			done <- err
 			return
@@ -873,11 +873,11 @@ func TestStatusReaders_LeaveNoLockFileForAnUnknownConversation(t *testing.T) {
 	t.Setenv(statusDirEnv, dir)
 	a := &AntigravityAgent{}
 
-	raw, err := a.SnapshotTokenBaseline(context.Background(), "conv-never")
+	raw, err := a.SnapshotTokenBaseline(context.Background(), "conv-never", "")
 	if err != nil || raw != nil {
 		t.Fatalf("SnapshotTokenBaseline = %q, %v; want nil, nil", raw, err)
 	}
-	usage, err := a.CalculateTokenUsageSince(context.Background(), "conv-never", nil)
+	usage, err := a.CalculateTokenUsageSince(context.Background(), "conv-never", "", nil)
 	if err != nil || usage != nil {
 		t.Fatalf("CalculateTokenUsageSince = %v, %v; want nil, nil", usage, err)
 	}

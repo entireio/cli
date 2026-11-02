@@ -290,6 +290,29 @@ func TestCheckpointListCmd_SessionWithPendingErrors(t *testing.T) {
 	require.Contains(t, err.Error(), "--session cannot be combined with --pending")
 }
 
+// TestCheckpointListCmd_OutgoingRejectsOtherDatasets: --outgoing is its own
+// dataset, so the flags that select or filter the other datasets are refused
+// rather than silently ignored. Uses t.Chdir — do NOT add t.Parallel.
+func TestCheckpointListCmd_OutgoingRejectsOtherDatasets(t *testing.T) {
+	setupCheckpointListRepo(t)
+
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"--outgoing", "--pending"}, want: "--outgoing cannot be combined with --pending"},
+		{args: []string{"--outgoing", "--session", "abc"}, want: "--session cannot be combined with --outgoing"},
+	} {
+		cmd := newCheckpointListCmd()
+		cmd.SetArgs(tc.args)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		err := cmd.Execute()
+		require.Error(t, err, "checkpoint list %v", tc.args)
+		require.Contains(t, err.Error(), tc.want)
+	}
+}
+
 // runListCmd executes `checkpoint list <args>` via the real cobra command and
 // returns stdout. Entire must already be enabled in CWD (setup helpers do this).
 func runListCmd(t *testing.T, args ...string) string {
@@ -374,5 +397,19 @@ func TestRenderPendingPoints_LogsOnlyRowsHaveHeading(t *testing.T) {
 	}
 	if !strings.HasPrefix(text, "Resume points") {
 		t.Fatalf("heading must come before the rows:\n%s", text)
+	}
+}
+
+// TestRenderOutgoingListing_EmptyQueueClaimsNothingAboutTheRemote: an empty
+// queue means nothing is waiting to be sent. It does not mean the remote holds
+// every local checkpoint: a newly elected remote, or one pushing has never
+// reached, can be missing all of them.
+func TestRenderOutgoingListing_EmptyQueueClaimsNothingAboutTheRemote(t *testing.T) {
+	t.Parallel()
+	for _, pushDisabled := range []bool{false, true} {
+		var out bytes.Buffer
+		renderOutgoingListing(&out, outgoingListing{sync: checkpointSyncInfo{Remote: "origin", PushDisabled: pushDisabled}})
+		require.Contains(t, out.String(), "No checkpoints are queued for origin.", "push disabled: %v", pushDisabled)
+		require.NotContains(t, out.String(), "has every", "push disabled: %v", pushDisabled)
 	}
 }

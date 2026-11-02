@@ -73,7 +73,7 @@ func newActivityCmd() *cobra.Command {
 		Use:   "activity",
 		Short: "Show your activity overview",
 		Long: "Display your activity overview, repository breakdown, and recent sessions from entire.io.\n\n" +
-			"The recent list shows your sessions by default, matching the entire.io Overview page. " +
+			"The recent list shows your sessions by default, matching the Overview page on entire.com. " +
 			"Pass --commits to show recent commits instead.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runActivity(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), showCommits)

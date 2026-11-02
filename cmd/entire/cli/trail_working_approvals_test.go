@@ -15,7 +15,7 @@ import (
 func TestSubmitTrailApprovalUsesHTTPStatusNotResponseBody(t *testing.T) {
 	// Serial: replaces global clients.
 	for _, project := range []bool{false, true} {
-		for _, verb := range []string{"approve", "request-changes"} {
+		for _, verb := range []string{"approve"} {
 			for _, response := range []struct {
 				name   string
 				status int
@@ -45,11 +45,7 @@ func TestSubmitTrailApprovalUsesHTTPStatusNotResponseBody(t *testing.T) {
 							posts++
 							var request api.TrailApprovalRequest
 							assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
-							event := "approve"
-							if verb == "request-changes" {
-								event = "request_changes"
-							}
-							assert.Equal(t, event, request.Event)
+							assert.Equal(t, "approve", request.Event)
 							w.WriteHeader(response.status)
 							_, err := fmt.Fprint(w, response.body)
 							assert.NoError(t, err)

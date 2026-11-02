@@ -22,4 +22,4 @@ if [ -f mise.toml ]; then
 fi
 
 # Install Entire CLI (yes to skip prompts in non-interactive sessions)
-yes | curl -fsSL https://entire.io/install.sh | bash
+yes | curl -fsSL https://entire.com/install.sh | bash

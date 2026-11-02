@@ -70,6 +70,12 @@ type remoteTopology struct {
 	// it — the ambiguity is still what re-enabling pushing would run into,
 	// and still what a user pins with checkpoint_remote.
 	pushDisabled bool
+	// manualPush reports that this clone uploads checkpoints only when asked
+	// (`entire checkpoint push`), so a plain git push was never going to carry
+	// them. Like pushDisabled it changes which delivery the note may blame, not
+	// whether the note prints: strategy.PushCheckpoints elects the same remote
+	// before uploading, so the same failure stops the manual push too.
+	manualPush bool
 	// explicitRemote is the remote a valid checkpoint_push_remote settles on.
 	// Named for its provenance rather than for the election: every resolver
 	// tier elects a remote, but only this one is an explicit checkpoint
@@ -130,6 +136,13 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 	// as "pushing enabled", which is the note this code has always printed.
 	if s, err := settings.Load(ctx); err == nil {
 		t.pushDisabled = s.IsPushSessionsDisabled()
+	}
+	// Only git-refs delivery reads the push policy, so on git-branch it says
+	// nothing and the note keeps describing a plain git push.
+	if t.primaryIsRefs {
+		if policy, err := settings.LoadCheckpointPushPolicy(ctx); err == nil {
+			t.manualPush = policy == settings.CheckpointPushPolicyManual
+		}
 	}
 	// One election, read two ways: its failure is what this note reports as a
 	// disabled sync, and an explicit checkpoint_push_remote is what suppresses
@@ -243,13 +256,20 @@ func (t remoteTopology) describeSyncDisabled(w io.Writer, header string) {
 	// mid-sentence moves the wrap by however long the names happen to be.
 	if names := t.unpinnedNames(); len(names) > 0 {
 		fmt.Fprintf(w, "  Affected remotes: %s\n", strings.Join(names, ", "))
-		// With push_sessions off, nothing is pushed anywhere regardless, so a
-		// failed election is not what is stopping delivery and saying "pushes
-		// carry no session history" would blame the wrong setting.
-		if t.pushDisabled {
+		// Name the delivery this failure actually costs. With push_sessions off
+		// nothing is pushed anywhere regardless, so the election is not what
+		// stops delivery; under a manual policy a git push was never carrying
+		// checkpoints either. Saying "pushes carry no session history" in
+		// either state blames the wrong setting.
+		switch {
+		case t.pushDisabled:
 			fmt.Fprintln(w, "  Automatic checkpoint pushing is also disabled (push_sessions=false), so")
 			fmt.Fprintln(w, "  this is what a push would run into once you re-enable it.")
-		} else {
+		case t.manualPush:
+			fmt.Fprintln(w, "  This clone uploads checkpoints only on `entire checkpoint push`, which")
+			fmt.Fprintln(w, "  elects the same remote and fails the same way, so that upload is what")
+			fmt.Fprintln(w, "  this costs you.")
+		default:
 			fmt.Fprintln(w, "  Pushes to them carry your code but no session history, which stays in")
 			fmt.Fprintln(w, "  this clone.")
 		}

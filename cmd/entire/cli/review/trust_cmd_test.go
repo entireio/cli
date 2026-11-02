@@ -3,8 +3,10 @@ package review_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -57,8 +59,8 @@ func setupForeignBranchRepo(t *testing.T) (reviewer *captureRunConfigReviewer, d
 			}
 			return nil
 		},
-		InspectTrust: func(_ context.Context, source review.TrustSource, agents []string) (review.TrustInventory, error) {
-			if source.WorktreeRoot == "" || len(agents) != 1 || agents[0] != "claude-code" {
+		InspectTrust: func(_ context.Context, source review.TrustSource, agents []review.TrustAgent) (review.TrustInventory, error) {
+			if source.WorktreeRoot == "" || len(agents) != 1 || agents[0].Name != "claude-code" {
 				t.Errorf("InspectTrust(%+v, %v): want the current worktree and the profile's agent", source, agents)
 			}
 			return review.TrustInventory{Entries: []review.TrustEntry{
@@ -141,6 +143,93 @@ func TestRunReview_GateFlagsValidatedForEveryMode(t *testing.T) {
 		if err := cmd.Execute(); err == nil {
 			t.Errorf("review %v succeeded; want a flag error", args)
 		}
+	}
+}
+
+// --set-config validates the file and saves to clone-local preferences,
+// never the committed settings file.
+func TestConfigure_SetConfigSavesToClonePreferences(t *testing.T) {
+	_, deps, _ := setupForeignBranchRepo(t)
+	cfgFile := filepath.Join(t.TempDir(), "review-config.json")
+	if err := os.WriteFile(cfgFile, []byte(`{"settings":{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/usr/bin/true"}]}]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) error {
+		cmd := review.NewCommand(deps)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(args)
+		return cmd.Execute()
+	}
+	if err := run("--configure", "general", "--set-config", "claude-code="+cfgFile); err != nil {
+		t.Fatalf("--set-config: %v", err)
+	}
+	s, err := settings.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := s.ReviewProfiles["general"].Agents["claude-code"].Config
+	if cfg == nil || !strings.Contains(string(cfg.Settings), "/usr/bin/true") {
+		t.Fatalf("config not applied: %+v", cfg)
+	}
+	if data, err := os.ReadFile(filepath.Join(".entire", "settings.json")); err == nil && strings.Contains(string(data), `"config"`) {
+		t.Fatalf("config written to the committed settings file:\n%s", data)
+	}
+	// Only the config is stored clone-locally, so a later change to the
+	// profile in its own layer still takes effect.
+	if err := settings.ModifyClonePreferences(context.Background(), func(p *settings.ClonePreferences) error {
+		worker := p.ReviewProfiles["general"].Agents["claude-code"]
+		if worker.Config != nil {
+			t.Error("the config was copied into the stored profile")
+		}
+		worker.Model = "sonnet"
+		p.ReviewProfiles["general"].Agents["claude-code"] = worker
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err = settings.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ReviewProfiles["general"].Agents["claude-code"]; got.Model != "sonnet" || got.Config == nil {
+		t.Fatalf("after editing the profile: model %q, config %v; want sonnet with the config kept", got.Model, got.Config)
+	}
+
+	// A command naming a file in this checkout is saved with a warning.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inCheckout := filepath.Join(t.TempDir(), "in-checkout.json")
+	hook, err := json.Marshal(filepath.Join(wd, "hook.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inCheckout, []byte(`{"settings":{"hooks":{"Stop":[{"hooks":[{"type":"command","command":`+string(hook)+`}]}]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd := review.NewCommand(deps)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--configure", "general", "--set-config", "claude-code=" + inCheckout})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("--set-config with a checkout path: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "inside the checkout") {
+		t.Errorf("no warning for a checkout path; stderr:\n%s", stderr.String())
+	}
+
+	// none removes the reviewer's config, so it uses the checkout's again.
+	if err := run("--configure", "general", "--set-config", "claude-code=none"); err != nil {
+		t.Fatalf("--set-config none: %v", err)
+	}
+	if s, err = settings.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := s.ReviewProfiles["general"].Agents["claude-code"].Config; cfg != nil {
+		t.Fatalf("config still set after none: %+v", cfg)
 	}
 }
 

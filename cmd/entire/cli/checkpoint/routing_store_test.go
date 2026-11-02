@@ -344,6 +344,62 @@ func TestKindRoutingStore_TranscriptAndAttributionBackfillsFallBackToBranch(t *t
 	require.NoError(t, err, "transcript backfill for a hex checkpoint on the branch must fall back to the branch store")
 }
 
+func TestKindRoutingStore_TasksBackfillFallsBackToBranch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	hexID := id.MustCheckpointID("a1b2c3d4e5f6")
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+	writeRoutingCheckpoint(t, branch, hexID, "hex-on-branch")
+
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	err := router.Write(ctx, Tasks{
+		CheckpointID: hexID,
+		Tasks: []TaskPayload{{
+			ToolUseID:  "toolu_01Routed",
+			AgentID:    "a0123456789abcdef",
+			Transcript: redact.AlreadyRedacted([]byte("routed subagent\n")),
+		}},
+	})
+	require.NoError(t, err, "task backfill for a hex checkpoint on the branch must fall back to the branch store")
+
+	transcript, err := router.ReadTaskTranscript(ctx, hexID, "toolu_01Routed")
+	require.NoError(t, err)
+	assert.Equal(t, "routed subagent\n", string(transcript))
+}
+
+func TestKindRoutingStore_TasksBackfillULIDLandsInRefs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	ulidID := id.MustCheckpointID(routingSampleULID)
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := newGitRefsStore(repo)
+	writeRoutingCheckpoint(t, refs, ulidID, "ulid-in-refs")
+
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	require.NoError(t, router.Write(ctx, Tasks{
+		CheckpointID: ulidID,
+		Tasks: []TaskPayload{{
+			ToolUseID:  "toolu_01InRefs",
+			AgentID:    "a0123456789abcdef",
+			Transcript: redact.AlreadyRedacted([]byte("refs subagent\n")),
+		}},
+	}))
+
+	transcript, err := refs.ReadTaskTranscript(ctx, ulidID, "toolu_01InRefs")
+	require.NoError(t, err)
+	assert.Equal(t, "refs subagent\n", string(transcript))
+	content, err := refs.ReadSessionContent(ctx, ulidID, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "transcript for ulid-in-refs", string(content.Transcript), "adding a task must not touch the session")
+}
+
 func TestKindRoutingStore_BackfillULIDRoutesToRefs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -385,6 +441,15 @@ func TestKindRoutingStore_BackfillMissingEverywhereReturnsNotFound(t *testing.T)
 		Summary:      &Summary{Intent: "orphan"},
 	})
 	require.ErrorIs(t, err, ErrCheckpointNotFound, "a backfill for a checkpoint absent from every backend still reports not-found")
+
+	err = router.Write(ctx, Tasks{
+		CheckpointID: id.MustCheckpointID(routingSampleULID),
+		Tasks:        []TaskPayload{{ToolUseID: "toolu_01Orphan", AgentID: "a0123456789abcdef"}},
+	})
+	require.ErrorIs(t, err, ErrCheckpointNotFound, "a task backfill for an absent checkpoint reports not-found instead of creating it")
+	summary, err := refs.Read(ctx, id.MustCheckpointID(routingSampleULID))
+	require.NoError(t, err)
+	require.Nil(t, summary, "a task backfill must not create the checkpoint ref")
 }
 
 func TestKindRoutingStore_BackfillMirrorFanout(t *testing.T) {

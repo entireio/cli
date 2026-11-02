@@ -33,7 +33,12 @@ hook payloads); tool args can arrive double-encoded.
   `GOOGLE_GEMINI_BASE_URL`. agy prefers `GOOGLE_API_KEY` when both keys are set.
   The default (`cloudcode-pa.googleapis.com`) backend remains entitlement-gated;
   see `e2e/README.md`.
-- Version notes (1.1.1 → 1.2.7): hook surface unchanged (5 hook types);
+- `SessionStart` exists from agy 1.1.1; earlier releases have no such hook,
+  and how they treat the unknown `SessionStart` key in hooks.json is
+  unverified.
+- Version notes (1.1.1 → 1.3.4): hook surface unchanged (6 hook types,
+  `SessionStart` among them; by 1.3.4 the common payload also carries
+  `modelName`);
   1.1.25 started executing hooks in Gemini API-key mode (see Known
   limitations); 1.2.x dropped the Gemini 3.5 models from `agy models`;
   1.1.10 fixed hook ordering so `Stop`/`PostInvocation` fire reliably;
@@ -50,13 +55,13 @@ hook payloads); tool args can arrive double-encoded.
 
 Hooks live in the workspace at `.agents/hooks.json` under a named key (ours is
 `"entire"`). Tool events (`PreToolUse`/`PostToolUse`) use `matcher` + `hooks`
-lists; `PreInvocation`/`PostInvocation`/`Stop` use flat handler lists. Install
-replaces the whole `"entire"` entry (idempotent by compact-JSON comparison), so
-stale installs self-heal on the next `entire enable`.
+lists; `SessionStart`/`PreInvocation`/`PostInvocation`/`Stop` use flat handler
+lists. Install replaces the whole `"entire"` entry (idempotent by compact-JSON
+comparison), so stale installs self-heal on the next `entire enable`.
 
 ### Hook Names and Event Mapping
 
-Only the three hooks with lifecycle meaning are installed. agy's
+Only the four hooks with lifecycle meaning are installed. agy's
 `PostToolUse`/`PostInvocation` are deliberately **not** installed — no
 lifecycle mapping, and each would spawn a no-op `entire` subprocess per tool
 call / model invocation. Unknown verbs parse to a nil event, so a stale
@@ -64,20 +69,28 @@ hooks.json can never fail an agy turn.
 
 | agy hook | Fires | Entire event |
 |----------|-------|--------------|
+| `SessionStart` | once per **new** conversation, before its first model invocation (at the first prompt in the TUI); **not** on `agy --conversation` resumes | `SessionStart` — agent-type and model hints, state transition for existing state, and the detached zombie-session sweep; creates no state |
 | `PreInvocation` | before **every model invocation** (`invocationNum` is **0-indexed**) | `TurnStart` when `invocationNum == 0`; for `> 0`, a `TurnStart` with `Event.SuppressIfSessionActive` — the dispatcher drops it only when a turn is genuinely mid-flight (`Phase == ACTIVE` and not stuck), so resumes (`agy --conversation`) are tracked while follow-up invocations don't clobber the pre-prompt baseline |
 | `PreToolUse` (matcher `*`) | before each tool call | `ToolUse` for mutating tools (`write_to_file`, `replace_file_content`, `multi_replace_file_content`) → `FilesTouched` |
 | `Stop` | at agent stop; payload carries `fullyIdle` | `TurnEnd` when `fullyIdle == true`; nil otherwise (background tasks still running) |
 
-There is **no SessionStart surface** — no way to print a "tracked by entire"
-banner inside agy (silent tracking, same as Cursor/OpenCode/Copilot/Pi).
+`session-start` writes nothing to stdout: `AntigravityAgent` is not a
+`HookResponseWriter`, so there is no "tracked by entire" banner and no
+`injectSteps` (silent tracking, same as Cursor/OpenCode/Copilot/Pi). agy ignores
+SessionStart's result: on non-JSON stdout or a nonzero exit it logs an error
+and the run continues (verified on 1.3.4). That also covers an older `entire`
+that predates the verb and prints cobra help instead.
 
 ### Hook Input Payloads (Captured)
 
 Common fields consumed: `conversationId`, `transcriptPath`. agy also sends
-`workspacePaths`, `artifactDirectoryPath`, `stepIdx`, `initialNumSteps`,
-`executionNum`, `terminationReason`, `error` — tolerated but not decoded (add
-fields only when something reads them). Captured fixtures in `testdata/`.
+`workspacePaths`, `artifactDirectoryPath`, `modelName` (seen on 1.3.4),
+`stepIdx`, `initialNumSteps`, `executionNum`, `terminationReason`, `error` —
+tolerated but not decoded outside SessionStart (add fields only when something
+reads them). Captured fixtures in `testdata/`.
 
+- `SessionStart` (captured on 1.3.4): only the common fields; `modelName`
+  becomes `Event.Model` and the session's model hint.
 - `PreInvocation`: `invocationNum` (0-indexed; the docs now state this
   explicitly). `initialNumSteps` is unusable as a "first?" signal — agy inserts
   the user prompt as step 0, so it is already 1 on the first invocation.
@@ -179,14 +192,16 @@ agy or touching the developer's keychain.
 
 ## Gaps & Limitations (Preview)
 
-- **Silent tracking** in the agy UI (no SessionStart surface); `entire status`
-  is the visibility surface.
+- **Silent tracking** in the agy UI by choice (SessionStart is installed but
+  writes no banner); `entire status` is the visibility surface.
 - **Headless subagent runs leave a ghost parent session**: agy runs subagents
   as separate conversations with their own hooks; in `-p` mode the parent
   conversation only receives `fullyIdle=false` Stops before the process exits,
   so its session stays ACTIVE (visible in `entire status` until the stale
-  threshold). The subagent's work condenses normally, and ghost sessions with
-  no tracked files no longer pin shadow branches.
+  threshold, or until the sweep that the next conversation's `session-start`
+  spawns finalizes it once the agy process has exited). The subagent's work
+  condenses normally, and ghost sessions with no tracked files no longer pin
+  shadow branches.
 - **Mid-turn commit token scoping is coarse**: such checkpoints record zero
   tokens; the turn's delta lands on the next condensation (session totals stay
   correct).
@@ -249,4 +264,6 @@ agy or touching the developer's keychain.
 `testdata/hook_stdin_pre_invocation.json`, `testdata/hook_stdin_pre_tool_use.json`,
 `testdata/hook_stdin_stop.json` — real agy 1.0.x stdin captures (fixtures carry
 the full documented payloads to pin unknown-field tolerance);
+`testdata/hook_stdin_session_start.json` — synthetic paths, field set as
+captured from agy 1.3.4 SessionStart stdin;
 `testdata/transcript_sample.jsonl` — captured transcript fixture.

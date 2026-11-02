@@ -23,6 +23,7 @@ type TrailParentReference struct {
 	Path                  string `json:"path"`
 	Jurisdiction          string `json:"jurisdiction"`
 	PrimaryProcessingCell string `json:"primary_processing_cell"`
+	URL                   string `json:"url,omitempty"`
 }
 
 // ProjectTrail is project intent, separate from branch-backed TrailResource.
@@ -34,6 +35,7 @@ type ProjectTrail struct {
 	ID                 string          `json:"id"`
 	ProjectID          string          `json:"projectId"`
 	Number             int             `json:"number"`
+	URL                string          `json:"url,omitempty"`
 	Title              string          `json:"title"`
 	Body               string          `json:"body"`
 	Status             string          `json:"status"`
@@ -116,17 +118,15 @@ type ProjectTrailCreateRequest struct {
 	Changes       []ChangeCreateRequest `json:"changes,omitempty"`
 }
 
+// ChangeCreateRequest places a branch: its title is the branch name, and the
+// description, type, priority, and assignees belong to the project trail.
 type ChangeCreateRequest struct {
-	RepositoryID string   `json:"repositoryId"`
-	Title        string   `json:"title"`
-	Body         string   `json:"body,omitempty"`
-	BranchName   string   `json:"branchName,omitempty"`
-	BranchAction string   `json:"branchAction,omitempty"`
-	Base         string   `json:"base,omitempty"`
-	Status       string   `json:"status,omitempty"`
-	Assignees    []string `json:"assignees,omitempty"`
-	Priority     string   `json:"priority,omitempty"`
-	Type         string   `json:"type,omitempty"`
+	RepositoryID string `json:"repositoryId"`
+	Title        string `json:"title"`
+	BranchName   string `json:"branchName,omitempty"`
+	BranchAction string `json:"branchAction,omitempty"`
+	Base         string `json:"base,omitempty"`
+	Status       string `json:"status,omitempty"`
 }
 
 type ChangeCreateResponse struct {

@@ -40,6 +40,7 @@ at session start. Follow its related links when the task crosses those boundarie
 | External commands or agents | [External commands](docs/architecture/external-commands.md), [agent protocol](docs/architecture/external-agent-protocol.md) |
 | Security, privacy, scanners | [Security and privacy](docs/security-and-privacy.md), [implementation contracts](docs/development/checkpoint-implementation.md) |
 | Review command | [Review architecture](docs/architecture/review-command.md) |
+| Release artifacts, install scripts, version-check origins | [Release origins](docs/architecture/release-origins.md) |
 | E2E tests | [E2E guide](e2e/README.md) |
 
 ## Verification
@@ -53,7 +54,7 @@ at session start. Follow its related links when the task crosses those boundarie
 | Format and lint | `mise run fmt && mise run lint` |
 | Before every commit | **`mise run check`** (format, lint, all CI tests) |
 | Before any push or remote code update | **`mise run lint` on the current tree**, after the latest formatting pass |
-| After every push to an open PR | **check the trail's findings** (`entire trail finding list cli/<n> --freshness any` with `ENTIRE_PROJECT_TRAILS=1`, else `entire trail finding list <n> --freshness any`; `<n>` is the PR branch's cli trail number, not the PR number); fix real ones, resolve with `-m`, and re-check after the fix lands. Not done until findings are clear |
+| After every push to an open PR | **check the trail's findings** (`entire trail finding list cli/<n> --freshness any`; `<n>` is the PR branch's cli trail number, not the PR number); fix real ones, resolve with `-m`, and re-check after the fix lands. Not done until findings are clear |
 | Duplication checks | `mise run dup` or `mise run dup:staged`; normal lint also checks duplication |
 | Windows installer | `mise run test:ps1`; see testing reference for prerequisites |
 

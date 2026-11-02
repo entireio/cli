@@ -15,7 +15,7 @@ import (
 )
 
 // agentHelpAnnotation marks an otherwise-hidden command as worth advertising to
-// coding agents through `entire agent-help`. Hidden commands (e.g. trail) opt in
+// coding agents through `entire agent-help`. Hidden commands (e.g. why) opt in
 // by setting Annotations[agentHelpAnnotation] = "true".
 const agentHelpAnnotation = "entire_agent_help"
 
@@ -106,6 +106,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"checkpoint delete":  {agentHelpAudienceUserOwned, false},  // destructive, irreversible on remotes
 	"checkpoint explain": {agentHelpAudienceTaskDriven, false}, // --generate writes a summary
 	"checkpoint list":    {agentHelpAudienceReadOnly, false},
+	"checkpoint push":    {agentHelpAudienceUserOwned, false}, // uploads checkpoints the user may be holding back
 	"checkpoint search":  {agentHelpAudienceReadOnly, false},
 	"checkpoint tokens":  {agentHelpAudienceReadOnly, false},
 
@@ -121,23 +122,22 @@ var agentHelpClassification = map[string]agentHelpFacts{
 
 	// trail is the highest-traffic family by a wide margin, so its read-only
 	// subcommands must not disappear behind the group's write-capable label.
-	"trail":                 {agentHelpAudienceTaskDriven, true},
-	"trail list":            {agentHelpAudienceReadOnly, false},
-	"trail show":            {agentHelpAudienceReadOnly, false},
-	"trail create":          {agentHelpAudienceTaskDriven, false},
-	"trail delete":          {agentHelpAudienceTaskDriven, false},
-	"trail update":          {agentHelpAudienceTaskDriven, false},
-	"trail approvals":       {agentHelpAudienceReadOnly, false},
-	"trail watch":           {agentHelpAudienceReadOnly, false},
-	"trail approve":         {agentHelpAudienceTaskDriven, false},
-	"trail checkout":        {agentHelpAudienceTaskDriven, false},
-	"trail comment":         {agentHelpAudienceTaskDriven, false},
-	"trail finding":         {agentHelpAudienceTaskDriven, false},
-	"trail merge":           {agentHelpAudienceUserOwned, false},
-	"trail request-changes": {agentHelpAudienceTaskDriven, false},
-	"trail resume":          {agentHelpAudienceTaskDriven, false},
-	"trail link":            {agentHelpAudienceUserOwned, false},
-	"trail unlink":          {agentHelpAudienceUserOwned, false},
+	"trail":           {agentHelpAudienceTaskDriven, true},
+	"trail list":      {agentHelpAudienceReadOnly, false},
+	"trail show":      {agentHelpAudienceReadOnly, false},
+	"trail create":    {agentHelpAudienceTaskDriven, false},
+	"trail delete":    {agentHelpAudienceTaskDriven, false},
+	"trail update":    {agentHelpAudienceTaskDriven, false},
+	"trail approvals": {agentHelpAudienceReadOnly, false},
+	"trail watch":     {agentHelpAudienceReadOnly, false},
+	"trail approve":   {agentHelpAudienceTaskDriven, false},
+	"trail checkout":  {agentHelpAudienceTaskDriven, false},
+	"trail comment":   {agentHelpAudienceTaskDriven, false},
+	"trail finding":   {agentHelpAudienceTaskDriven, false},
+	"trail merge":     {agentHelpAudienceUserOwned, false},
+	"trail resume":    {agentHelpAudienceTaskDriven, false},
+	"trail link":      {agentHelpAudienceUserOwned, false},
+	"trail unlink":    {agentHelpAudienceUserOwned, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
@@ -162,7 +162,6 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"dispatch": {agentHelpAudienceTaskDriven, false},
 	"doctor":   {agentHelpAudienceTaskDriven, false},
 	"import":   {agentHelpAudienceTaskDriven, false},
-	"runner":   {agentHelpAudienceTaskDriven, false},
 
 	// The user's to start. review is not destructive but spawns a paid
 	// multi-agent run, so an uninvited one spends the user's money.
@@ -236,18 +235,79 @@ var agentHelpGuidance = map[string]string{
 		"did, read \"tasks\" in --json, then stream one subagent's transcript with\n" +
 		"--transcript --task <tool_use_id>.",
 
-	// Agent sandboxes commonly block both, and the failure reads like an auth
-	// wall to an agent that does not know what the command needs.
-	"trail": "Trail commands talk to entire.io and read the saved login from the OS\n" +
-		"keyring (the Keychain on macOS), so they need network and keyring access.\n" +
-		"If you run commands in a sandbox, request unsandboxed execution for\n" +
-		"`entire trail` up front. An error saying the Keychain is not accessible or\n" +
-		"the network is not allowed means the sandbox blocked it, not that the user\n" +
-		"is logged out: ask to re-run it unsandboxed, and do not run `entire login`.",
+	"trail": agentHelpTrailSandboxGuidance,
+
+	// Shared by both trail models: comments are human conversation, findings
+	// are the agent's channel. The write verbs refuse in agent sessions
+	// (guardTrailCommentWrites); this is the copy an agent reads first.
+	"trail comment": "Trail discussions are for people: read them for context, but do not start,\n" +
+		"reply to, edit, delete, or resolve one. Use `entire trail finding` for agent\n" +
+		"review findings, questions, and follow-ups, including when asked to\n" +
+		"\"comment\" on a trail. Comment writes refuse in agent sessions.",
 
 	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
+
+	"checkpoint push": "Uploads checkpoints the user may be keeping on this machine on purpose.\n" +
+		"Never run this unless the user explicitly asks to upload those checkpoints.\n" +
+		"Without a terminal it accepts only <checkpoint-id>@<commit>; get the commit\n" +
+		"from `checkpoints[].commit` in `entire checkpoint list --outgoing --json`.\n" +
+		"A result with status `changed` means the checkpoint moved since that read:\n" +
+		"read the listing again and ask the user before uploading the new version.",
 }
+
+// agentHelpProjectTrailGuidance replaces agentHelpGuidance for commands in the
+// project trail tree, whose selectors (and the web URLs users paste) differ
+// from the legacy repository-scoped tree built under the same path.
+var agentHelpProjectTrailGuidance = map[string]string{
+	// On the group so every subcommand an agent looks up (show, checkout,
+	// finding, approve, …) inherits the selector model and URL mapping. No
+	// command parses web URLs, and the project and change URLs put "-" where a
+	// repository name would be, so an agent passing one through gets a
+	// misleading repository-mismatch error.
+	"trail": agentHelpTrailSandboxGuidance + "\n\n" +
+		"A project trail spans repositories; each change is its branch in one\n" +
+		"repository. Project trails and changes are numbered separately: never\n" +
+		"pass <P> where a change is expected, or <n> where a project trail is.\n" +
+		"Pass <repo>/<n> to checkout, resume, finding, watch, approvals or\n" +
+		"approve; given to show, it shows the parent project trail.\n" +
+		"Users paste Entire trail URLs. Do not pass a URL to any command; map\n" +
+		"the path after the host to a selector:\n" +
+		"  <forge>/<project>/-/trails/<P>/changes/<repo>/<n>  change <repo>/<n>\n" +
+		"  <forge>/<project>/<repo>/-/trails/<P>/changes/<n>  change <repo>/<n>\n" +
+		"  <forge>/<project>/<repo>/trails/<n>                change <repo>/<n>\n" +
+		"  <forge>/<project>/-/trails/<P>                     project trail <P>\n" +
+		"Add --project <forge>/<project> unless <project> is origin's owner.\n" +
+		"To link a trail or change, use the url `entire trail show` prints.",
+	// Inherits the group's URL mapping above, so an agent that goes straight
+	// to `agent-help trail show` still gets it.
+	"trail show": "To list a project trail's changes, run `entire trail show <P>\n" +
+		"--project <forge>/<project> --json`; each changes[] entry is the change\n" +
+		"<repository>/<number> with its own url. When show reaches the trail\n" +
+		"through a change (the current branch, --branch, or <repo>/<n>), that\n" +
+		"entry has current: true; link its url, the change's page, in preference\n" +
+		"to the top-level url, the whole trail's page. When asked to act on\n" +
+		"(e.g. review) a whole project trail, cover every change. Checkout and\n" +
+		"review need a clone of that repository: do the ones in this clone and\n" +
+		"tell the user which changes need another clone instead of skipping\n" +
+		"them silently. A change's merge state is changes[].mergeability: its\n" +
+		"gates (approvals, checks, findings, up_to_date) are under .gates and\n" +
+		"its CI runs, with details_url links, under .checks.runs. mergeability\n" +
+		"is null for merged or closed changes other than the current one, when\n" +
+		"the server has no snapshot yet, and when it could not be read; only a\n" +
+		"failed read prints a warning on stderr. Null is unknown, never\n" +
+		"mergeable.",
+}
+
+// agentHelpTrailSandboxGuidance is shared by both trail models. Agent sandboxes
+// commonly block network and keyring access, and the failure reads like an auth
+// wall to an agent that does not know what the command needs.
+const agentHelpTrailSandboxGuidance = "Trail commands talk to entire.io and read the saved login from the OS\n" +
+	"keyring (the Keychain on macOS), so they need network and keyring access.\n" +
+	"If you run commands in a sandbox, request unsandboxed execution for\n" +
+	"`entire trail` up front. An error saying the Keychain is not accessible or\n" +
+	"the network is not allowed means the sandbox blocked it, not that the user\n" +
+	"is logged out: ask to re-run it unsandboxed, and do not run `entire login`."
 
 // agentHelpFactsFor classifies one command path, defaulting the unclassified
 // case to user-owned and unlisted so an unclassified addition is under- rather
@@ -274,7 +334,11 @@ func agentHelpClassified(path string) (agentHelpFacts, bool) {
 func agentHelpGuidanceFor(cmd *cobra.Command) string {
 	var parts []string
 	for c := cmd; c != nil && c != c.Root(); c = c.Parent() {
-		if g := agentHelpGuidance[agentHelpPath(c)]; g != "" {
+		g := agentHelpGuidance[agentHelpPath(c)]
+		if project, ok := agentHelpProjectTrailGuidance[agentHelpPath(c)]; ok && usesProjectTrails(c) {
+			g = project
+		}
+		if g != "" {
 			parts = append([]string{g}, parts...)
 		}
 	}
@@ -584,7 +648,7 @@ func maybeDelegateAgentHelpToPlugin(ctx context.Context, rootCmd *cobra.Command,
 }
 
 // agentHelpFindChild finds a direct child of parent by name or alias. It
-// includes hidden commands so an annotated one like trail resolves; the caller
+// includes hidden commands so an annotated one like why resolves; the caller
 // (runAgentHelp) then enforces isAgentHelpAdvertised, so the drillable surface
 // matches the advertised one.
 func agentHelpFindChild(parent *cobra.Command, name string) *cobra.Command {
@@ -788,7 +852,7 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 	var b strings.Builder
 	b.WriteString(agentHelpOverview)
 	if trailCmd, _, err := rootCmd.Find([]string{"trail"}); err == nil && usesProjectTrails(trailCmd) {
-		b.WriteString("\nProject trails are enabled by ENTIRE_PROJECT_TRAILS=1. Trail listing requires an explicit --project; --repo only filters within it.")
+		b.WriteString("\nTrails are project-scoped. Trail listing requires an explicit --project; --repo only filters within it.")
 	}
 	b.WriteString("\n\n")
 	b.WriteString(agentHelpRepoBlock(repoLine))

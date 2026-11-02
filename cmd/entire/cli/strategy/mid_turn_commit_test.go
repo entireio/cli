@@ -375,11 +375,11 @@ func TestSessionHasNewContentFromLiveTranscript_IgnoresCheckpointedEdits(t *test
 	state.SetTokenStart(2) // old.go is in an earlier checkpoint
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
-	hasNew, err := s.sessionHasNewContentFromLiveTranscript(context.Background(), state, []string{"old.go"})
+	hasNew, err := s.sessionHasNewContentFromLiveTranscript(context.Background(), state, fileSet([]string{"old.go"}))
 	require.NoError(t, err)
 	assert.False(t, hasNew, "an edit already in a checkpoint claimed a later commit")
 
-	hasNew, err = s.sessionHasNewContentFromLiveTranscript(context.Background(), state, []string{"new.go"})
+	hasNew, err = s.sessionHasNewContentFromLiveTranscript(context.Background(), state, fileSet([]string{"new.go"}))
 	require.NoError(t, err)
 	assert.True(t, hasNew, "the edit since the last checkpoint should still count")
 }

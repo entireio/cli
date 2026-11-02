@@ -68,7 +68,7 @@ disabled the removal is not pushed, but re-enabling it later pushes it.
 
 Other checkpoints of the same sessions are listed but not deleted. Each one
 carries the session's full transcript, so the session stays visible on
-entire.io while any of them remain.
+entire.com while any of them remain.
 
 Without --force the command asks for confirmation, and refuses when it cannot
 prompt. --dry-run prints what would be deleted and changes nothing.
@@ -328,7 +328,7 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 	}
 	if len(plan.OtherLocalCheckpoints) > 0 {
 		fmt.Fprintln(w, "\nOther local checkpoints of these sessions (not deleted; this list is local only,")
-		fmt.Fprintln(w, "and the sessions stay visible on entire.io while these remain):")
+		fmt.Fprintln(w, "and the sessions stay visible on entire.com while these remain):")
 		for _, o := range plan.OtherLocalCheckpoints {
 			fmt.Fprintf(w, "  %s  %s\n", o.CheckpointID, strings.Join(o.SessionIDs, ", "))
 		}

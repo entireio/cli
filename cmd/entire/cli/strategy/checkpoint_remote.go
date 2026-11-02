@@ -3,15 +3,22 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -21,16 +28,49 @@ import (
 // push hot path, where the user's own `git push` is blocked for the duration.
 const checkpointRemoteFetchTimeout = 30 * time.Second
 
-// checkpointRemoteForegroundFetchTimeout bounds checkpoint-remote fetches made
-// by user-initiated foreground commands (enable, resume, explain). It matches
-// the origin-side metadata fetch budget in the cli package.
-//
-// Splitting the two fixes a backwards asymmetry: origin-side fetches already had
-// two minutes while the checkpoint remote — which by definition holds strictly
-// more checkpoint history than origin does — was held to the push hot path's 30
-// seconds. A checkpoint archive too large to transfer in 30s was therefore
-// unreadable, and each attempt failed the same way with nothing to show for it.
-const checkpointRemoteForegroundFetchTimeout = 2 * time.Minute
+// checkpointFetchMode selects how a checkpoint-remote fetch is bounded.
+type checkpointFetchMode int
+
+const (
+	// hotPathFetch bounds the fetch by checkpointRemoteFetchTimeout.
+	hotPathFetch checkpointFetchMode = iota
+	// foregroundFetch is for user-initiated commands (enable, resume, explain,
+	// delete), which fetch the whole transcript archive. No fixed deadline
+	// suits that: one the archive outgrows discards the partial transfer, the
+	// ref never lands, and every later command restarts the same fetch from
+	// zero. So these abort a stalled transfer, run under a per-repository lock
+	// so concurrent commands transfer the archive once, and are bounded only by
+	// the overall budget (see startForegroundFetch).
+	foregroundFetch
+)
+
+// checkpointRemoteFetchLockName is the lock file, in the git common dir, that
+// serializes foreground checkpoint-remote fetches across processes.
+const checkpointRemoteFetchLockName = "entire-checkpoint-remote-fetch.lock"
+
+// checkpointRemoteFetchFailureName is the file, next to the fetch lock, that
+// records the last foreground fetch that stalled or ran out of budget.
+const checkpointRemoteFetchFailureName = "entire-checkpoint-remote-fetch-failure.json"
+
+// recentSlowFetchFailureWindow is how long after a slow failure foreground
+// fetches from the same remote fail fast. A stalled remote costs every fetch a
+// full stall window, so without it commands queued on the fetch lock each pay
+// that window in turn, and so does every new process started meanwhile.
+const recentSlowFetchFailureWindow = 2 * time.Minute
+
+var errRecentSlowFetchFailure = errors.New("checkpoint remote failed recently")
+
+// defaultForegroundFetchBudget bounds a foreground fetch, lock wait included.
+// It is well above the ~11 minutes a multi-gigabyte archive took to transfer,
+// so a working fetch finishes, while a caller still gets an answer eventually.
+const defaultForegroundFetchBudget = 30 * time.Minute
+
+// foregroundFetchBudgetEnvVar overrides defaultForegroundFetchBudget with a Go
+// duration such as "45m". It is read from the environment so programs that run
+// entire as a subprocess can set it for every command they start.
+const foregroundFetchBudgetEnvVar = "ENTIRE_CHECKPOINT_FETCH_TIMEOUT"
+
+var errForegroundFetchBudget = errors.New("checkpoint fetch budget exhausted")
 
 // pushSettings holds the resolved push configuration from a single settings load.
 type pushSettings struct {
@@ -139,23 +179,38 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 // where the local branch may be stale).
 //
 // The fetch is unfiltered (NoFilter: true) because resume needs blob content
-// (transcripts, metadata JSON) — not just tree objects, and it runs on the
-// foreground budget for the same reason: it is the call that actually moves the
+// (transcripts, metadata JSON) — not just tree objects, and it runs as a
+// foregroundFetch for the same reason: it is the call that actually moves the
 // transcript archive.
 func FetchMetadataBranch(ctx context.Context, remoteURL string) error {
-	return fetchMetadataBranchWithin(ctx, remoteURL, checkpointRemoteForegroundFetchTimeout)
+	return fetchMetadataBranchWithin(ctx, remoteURL, foregroundFetch)
 }
 
-func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, timeout time.Duration) error {
+func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, mode checkpointFetchMode) error {
 	refs := checkpoint.ResolveRefs(ctx)
 	if !refs.Primary.IsBranch() {
 		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
 	}
 	branchName := refs.Primary.Short()
 	tmpRef := FetchTmpRefPrefix + branchName
+	if mode == hotPathFetch {
+		// The hot path skips the fetch lock rather than stall a push behind a
+		// long foreground fetch, so it must not share that fetch's tmp ref.
+		tmpRef = FetchTmpRefPrefix + "push/" + branchName
+	}
 	srcRef := refs.Primary.String()
 
-	if err := fetchURLIntoTmpRef(ctx, "", remoteURL, srcRef, tmpRef, "metadata branch", true, timeout); err != nil {
+	fetchCtx := ctx
+	if mode == foregroundFetch {
+		var release func()
+		var err error
+		fetchCtx, release, err = startForegroundFetch(ctx, "")
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+	if err := fetchURLIntoTmpRef(fetchCtx, "", remoteURL, srcRef, tmpRef, "metadata branch", true, mode); err != nil {
 		return err
 	}
 	if err := PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), refs.Primary, branchName); err != nil {
@@ -188,28 +243,256 @@ func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, timeout ti
 //
 // The parameter is kept rather than inlined so the contract stays explicit at
 // each call site.
-// timeout bounds the fetch: pass checkpointRemoteFetchTimeout on the push hot
-// path and checkpointRemoteForegroundFetchTimeout from user-initiated commands.
-func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool, timeout time.Duration) error { //nolint:unparam // every caller needs blob content today; see the doc above for why the filtered variant is unsafe here
-	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	refSpec := fmt.Sprintf("+%s:%s", srcRef, tmpRef)
-	_, fetchErr := remote.Fetch(fetchCtx, remote.FetchOptions{
+// mode bounds the fetch: hotPathFetch on the push hot path, foregroundFetch from
+// user-initiated commands.
+func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, label string, noFilter bool, mode checkpointFetchMode) error { //nolint:unparam // every caller needs blob content today; see the doc above for why the filtered variant is unsafe here
+	opts := remote.FetchOptions{
 		Remote:   remoteURL,
-		RefSpecs: []string{refSpec},
+		RefSpecs: []string{fmt.Sprintf("+%s:%s", srcRef, tmpRef)},
 		NoTags:   true,
 		NoFilter: noFilter,
 		Dir:      dir,
-	})
-	if fetchErr == nil {
-		return nil
+	}
+	fetchCtx, cancel := boundFetch(ctx, mode, &opts)
+	defer cancel()
+	redactedURL := remote.RedactURL(remoteURL)
+	if mode == foregroundFetch {
+		if err := recentSlowFetchFailure(ctx, dir, remoteURL, srcRef); err != nil {
+			return fmt.Errorf("fetch %s from %s skipped: %w", label, redactedURL, err)
+		}
+		printFetchStatus("Fetching checkpoints from " + remote.RedactURLOrPath(remoteURL))
 	}
 
+	_, fetchErr := remote.Fetch(fetchCtx, opts)
 	// remote.Fetch already folds git's output into fetchErr, redacted and
 	// capped; splicing it again printed the same text twice.
-	redactedURL := remote.RedactURL(remoteURL)
-	return fmt.Errorf("fetch %s from %s failed: %w", label, redactedURL, fetchErr)
+	var err error
+	switch cause := context.Cause(fetchCtx); {
+	case fetchErr == nil:
+	case errors.Is(cause, errForegroundFetchBudget):
+		err = fmt.Errorf("fetch %s from %s failed: %w: %w", label, redactedURL, cause, fetchErr)
+	default:
+		err = fmt.Errorf("fetch %s from %s failed: %w", label, redactedURL, fetchErr)
+	}
+	if mode == foregroundFetch {
+		recordForegroundFetchOutcome(ctx, dir, remoteURL, srcRef, err)
+	}
+	return err
+}
+
+// slowFetchFailure is the record checkpointRemoteFetchFailureName holds.
+type slowFetchFailure struct {
+	Remote string    `json:"remote"` // redacted
+	Ref    string    `json:"ref"`
+	Reason string    `json:"reason"`
+	At     time.Time `json:"at"`
+}
+
+// recentSlowFetchFailure returns an errRecentSlowFetchFailure error when a
+// foreground fetch of srcRef from remoteURL stalled or ran out of budget within
+// recentSlowFetchFailureWindow. Commands waiting on the fetch lock check it once
+// they hold the lock, so they fail together with the fetch they waited for.
+func recentSlowFetchFailure(ctx context.Context, dir, remoteURL, srcRef string) error {
+	f, ok := readSlowFetchFailure(ctx, dir, remoteURL, srcRef)
+	if !ok {
+		return nil
+	}
+	age := time.Since(f.At)
+	if age < 0 || age >= recentSlowFetchFailureWindow {
+		return nil
+	}
+	return fmt.Errorf("%w: a fetch %s ago failed (%s); retry after %s",
+		errRecentSlowFetchFailure, age.Round(time.Second), f.Reason, (recentSlowFetchFailureWindow - age).Round(time.Second))
+}
+
+// recordForegroundFetchOutcome records a fetch that stalled or ran out of
+// budget for recentSlowFetchFailure, and clears the record when a fetch of the
+// same ref from the same remote succeeds. Other failures are not recorded: they
+// end quickly, so a retry costs little, and refusing it would hide a fix such
+// as new credentials. Best-effort: a failed write only logs.
+func recordForegroundFetchOutcome(ctx context.Context, dir, remoteURL, srcRef string, fetchErr error) {
+	var reason string
+	switch {
+	case fetchErr == nil:
+	case errors.Is(fetchErr, remote.ErrFetchStalled):
+		reason = remote.ErrFetchStalled.Error()
+	case errors.Is(fetchErr, errForegroundFetchBudget):
+		reason = errForegroundFetchBudget.Error()
+	default:
+		return
+	}
+	root, err := openFetchLockRoot(ctx, dir)
+	if err == nil {
+		if reason == "" {
+			if _, ok := readSlowFetchFailure(ctx, dir, remoteURL, srcRef); ok {
+				err = root.Remove(checkpointRemoteFetchFailureName)
+			}
+		} else {
+			err = writeSlowFetchFailure(root, slowFetchFailure{
+				Remote: remote.RedactURL(remoteURL),
+				Ref:    srcRef,
+				Reason: reason,
+				At:     time.Now(),
+			})
+		}
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		logging.Warn(ctx, "checkpoint-remote: could not record fetch outcome",
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// readSlowFetchFailure returns the recorded failure when it is for srcRef from
+// remoteURL. An unreadable record reads as none.
+func readSlowFetchFailure(ctx context.Context, dir, remoteURL, srcRef string) (slowFetchFailure, bool) {
+	root, err := openFetchLockRoot(ctx, dir)
+	if err != nil {
+		return slowFetchFailure{}, false
+	}
+	var f slowFetchFailure
+	data, err := osroot.ReadFileNoFollow(root, checkpointRemoteFetchFailureName)
+	if err != nil || json.Unmarshal(data, &f) != nil {
+		return slowFetchFailure{}, false
+	}
+	return f, f.Remote == remote.RedactURL(remoteURL) && f.Ref == srcRef
+}
+
+func writeSlowFetchFailure(root *os.Root, f slowFetchFailure) error {
+	data, err := json.Marshal(f)
+	if err != nil {
+		return fmt.Errorf("marshal fetch failure: %w", err)
+	}
+	return jsonutil.WriteFileAtomicIn(root, checkpointRemoteFetchFailureName, data, 0o600) //nolint:wrapcheck // already names the file
+}
+
+// printFetchStatus tells a terminal user why a foreground command is paused.
+// These fetches run under spinners owned by the calling command, so on a
+// terminal that renders ANSI the line is cleared first: the message takes the
+// spinner's row and the spinner redraws below it.
+func printFetchStatus(msg string) {
+	switch {
+	case interactive.ShouldStyle(os.Stderr):
+		fmt.Fprintf(os.Stderr, "\r\033[K[entire] %s\n", msg)
+	case interactive.IsTerminalWriter(os.Stderr):
+		fmt.Fprintf(os.Stderr, "[entire] %s\n", msg)
+	}
+}
+
+// boundFetch applies mode to a fetch, returning the context it runs under.
+func boundFetch(ctx context.Context, mode checkpointFetchMode, opts *remote.FetchOptions) (context.Context, context.CancelFunc) {
+	if mode == foregroundFetch {
+		opts.AbortStalled = true
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, checkpointRemoteFetchTimeout)
+}
+
+// startForegroundFetch starts a foreground fetch's budget, then waits for any
+// other foreground checkpoint-remote fetch in this repository to finish. The
+// waiter's own fetch then negotiates against the objects the first one landed
+// and transfers only what is new. Run the fetch under the returned context,
+// which carries the budget, and call release when done with the fetched ref.
+//
+// Callers that fetch into the shared metadata tmp ref (FetchTmpRefPrefix plus
+// the primary branch) hold the lock until that ref is promoted and removed:
+// released after the fetch alone, a finishing caller's cleanup can delete the
+// ref out from under the next caller's fetch. The push hot path does not take
+// the lock and uses its own tmp ref instead.
+//
+// The wait says why the command is paused and stops when ctx is cancelled or
+// the budget runs out, returning that cause; a waiter never falls back to its
+// own transfer, which would move the archive once per waiter. Failing to take
+// the lock at all logs and lets the caller fetch unserialized. dir is the
+// worktree to resolve the git common dir from; empty means the current
+// repository.
+func startForegroundFetch(ctx context.Context, dir string) (context.Context, func(), error) {
+	budget, parseErr := parseForegroundFetchBudget(os.Getenv(foregroundFetchBudgetEnvVar))
+	if parseErr != nil {
+		logging.Warn(ctx, "checkpoint-remote: ignoring invalid fetch budget",
+			slog.String("env", foregroundFetchBudgetEnvVar),
+			slog.String("error", parseErr.Error()),
+		)
+	}
+	fetchCtx, cancel := context.WithTimeoutCause(ctx, budget,
+		fmt.Errorf("%w after %s (set %s to allow longer)", errForegroundFetchBudget, budget, foregroundFetchBudgetEnvVar))
+	unlock, err := acquireCheckpointRemoteFetchLock(fetchCtx, dir)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return fetchCtx, func() {
+		unlock()
+		cancel()
+	}, nil
+}
+
+// parseForegroundFetchBudget returns the budget a foregroundFetchBudgetEnvVar
+// value sets: the default when it is empty, and the default with an error when
+// it is not a positive duration.
+func parseForegroundFetchBudget(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultForegroundFetchBudget, nil
+	}
+	budget, err := time.ParseDuration(value)
+	if err != nil {
+		return defaultForegroundFetchBudget, fmt.Errorf("parse %s: %w", foregroundFetchBudgetEnvVar, err)
+	}
+	if budget <= 0 {
+		return defaultForegroundFetchBudget, fmt.Errorf("%s must be positive, got %q", foregroundFetchBudgetEnvVar, value)
+	}
+	return budget, nil
+}
+
+// acquireCheckpointRemoteFetchLock takes the fetch lock for startForegroundFetch,
+// whose budget gives ctx the deadline the wait needs. Only ctx's own cause is
+// returned as an error.
+func acquireCheckpointRemoteFetchLock(ctx context.Context, dir string) (release func(), err error) {
+	root, err := openFetchLockRoot(ctx, dir)
+	if err == nil {
+		release, err = acquireFetchLockIn(ctx, root)
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("wait for checkpoint fetch lock: %w", context.Cause(ctx))
+		}
+		logging.Warn(ctx, "checkpoint-remote: fetch lock unavailable; fetching unserialized",
+			slog.String("error", err.Error()),
+		)
+		return func() {}, nil
+	}
+	return release, nil
+}
+
+// openFetchLockRoot opens the git common dir that holds the fetch lock. dir is
+// the worktree to resolve it from; empty means the current repository.
+func openFetchLockRoot(ctx context.Context, dir string) (*os.Root, error) {
+	if dir == "" {
+		return gitdir.Open(ctx) //nolint:wrapcheck // gitdir errors name the path
+	}
+	commonDir, err := gitdir.CommonDirForWorktree(ctx, dir)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // gitdir errors name the path
+	}
+	return gitdir.OpenAt(commonDir) //nolint:wrapcheck // gitdir errors name the path
+}
+
+// acquireFetchLockIn takes the fetch lock in root, announcing the wait when
+// another process holds it. flock only polls, and so only honors cancellation,
+// under a deadline: ctx must carry one, and an already-expired one makes the
+// first attempt a non-blocking probe.
+func acquireFetchLockIn(ctx context.Context, root *os.Root) (func(), error) {
+	probeCtx, cancelProbe := context.WithDeadline(ctx, time.Now())
+	release, err := flock.AcquireContextIn(probeCtx, root, checkpointRemoteFetchLockName)
+	cancelProbe()
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		return release, err //nolint:wrapcheck // flock errors are already wrapped
+	}
+
+	printFetchStatus("Waiting for another entire command to finish fetching checkpoints...")
+	logging.Info(ctx, "checkpoint-remote: waiting for another fetch to release the fetch lock")
+	return flock.AcquireContextIn(ctx, root, checkpointRemoteFetchLockName) //nolint:wrapcheck // flock errors are already wrapped
 }
 
 // fetchMetadataBranchIfMissing fetches the primary metadata ref from a URL only if it doesn't exist locally.
@@ -262,7 +545,7 @@ func fetchMetadataBranchIfMissing(ctx context.Context, remoteURL string) error {
 		return nil
 	}
 
-	if err := fetchMetadataBranchWithin(ctx, remoteURL, checkpointRemoteFetchTimeout); err != nil {
+	if err := fetchMetadataBranchWithin(ctx, remoteURL, hotPathFetch); err != nil {
 		return err
 	}
 

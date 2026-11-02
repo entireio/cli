@@ -25,6 +25,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -483,15 +484,19 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 	return FilterAndNormalizePaths(resolved, repoRoot)
 }
 
-// entireTrailContextInjection is the one-time, model-facing pointer Entire
-// injects on the first turn of a session. It points at `entire agent-help` for
-// the full flag/subcommand surface — fetched on demand so that surface never goes
-// stale here as it grows — and adds only what an agent must know even if it never
+// entireContextInjection is the one-time, model-facing pointer Entire injects
+// on the first turn of a session. It points at `entire agent-help` for the full
+// flag/subcommand surface — fetched on demand so that surface never goes stale
+// here as it grows — and adds only what an agent must know even if it never
 // drills in: commits auto-capture checkpoints, and setup/destructive commands
-// belong to the user. It also names the auto-detected repo (from the
-// already-loaded session scope, no IO) and the standing rule that the agent is
-// inside the repo and must never ask the user for the repo name. Kept terse: it
-// costs context-window tokens on the first turn of every session.
+// need the user's go-ahead. It also names the auto-detected repo (from the
+// already-loaded session scope, no IO). Kept terse: it costs context-window
+// tokens on the first turn of every session.
+//
+// The base text goes out in every session; the trails paragraph only where
+// trails are enabled for the repo. Either part can be omitted: trails
+// enablement may be decided on a later turn than the base injection (see
+// emitContextInjection), and then only the trails paragraph is sent.
 //
 // Deliberately NOT here: per-task command recommendations. An earlier revision
 // urged `entire why <file>:<line>` and `entire checkpoint search` "before large
@@ -501,19 +506,33 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 // sometimes-appropriate query as an always-do step. Which commands suit a given
 // task is agent-help's job, where it is pulled on demand and grouped by who
 // should initiate the command (see agentHelpAudience); this string carries only
-// invariants that hold on every turn of every session. The one model-dependent
-// invariant is what a trail is: under project trails (ENTIRE_PROJECT_TRAILS=1)
-// a trail number names project intent, not one branch, so say so once.
-func entireTrailContextInjection(scope trailEnablementScope, projectTrails bool) string {
+// invariants that hold on every turn of every session.
+func entireContextInjection(scope trailEnablementScope, base, trails bool) string {
+	var b strings.Builder
+	if base {
+		b.WriteString(contextInjectionEnabledLine(scope))
+		b.WriteString(" Run `entire agent-help` to see what entire does and which subcommand fits, then `entire agent-help <command>` for its exact, current flags. ")
+	}
+	if trails {
+		b.WriteString("A Trail is a project-level work item that can contain multiple changes from different repositories and branches. ")
+		b.WriteString("Inside a checkout, `entire trail` infers the repository. Outside one, pass `--project <forge>/<owner>`, plus `--repo` and `--branch` when needed. ")
+		b.WriteString("If it's unclear whether work belongs on an existing trail or a new one, ask the user. Keep a trail's description current with `entire trail update`. ")
+		b.WriteString("When referencing a trail or change, include its full URL. ")
+		b.WriteString("Post feedback on a trail as findings (`entire trail finding`), never as trail comments; comments are for people. ")
+	}
+	if base {
+		b.WriteString("Commits capture the AI session as a checkpoint automatically; only create checkpoints manually when the user asks. ")
+		b.WriteString("If a setup or destructive command (enable, disable, clean, auth) is needed, always ask the user before running it.")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// contextInjectionEnabledLine opens the base text and names the auto-detected
+// repo, or omits it when the scope is missing or unsafe to embed.
+func contextInjectionEnabledLine(scope trailEnablementScope) string {
 	repo := ""
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
 		repo = trailEnablementRepoKey(scope.Forge, scope.Owner, scope.Repo)
-	}
-	var b strings.Builder
-	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
-	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Leave setup and destructive commands (enable, disable, clean, auth) to the user. ")
-	if projectTrails {
-		b.WriteString("Trails here are project-scoped: one trail spans repositories and branches, and its number is project-wide; see `entire agent-help trail`. ")
 	}
 	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
 	// into the agent's model context (no escaping), so a repo key carrying control
@@ -521,19 +540,17 @@ func entireTrailContextInjection(scope trailEnablementScope, projectTrails bool)
 	// binary, or tampered) degrades to the generic message rather than reaching
 	// that sink.
 	if repo != "" && strings.IndexFunc(repo, unicode.IsControl) < 0 {
-		b.WriteString("This repo is auto-detected from the git origin remote as ")
-		b.WriteString(repo)
-		b.WriteString("; you are already inside it, so never ask the user for the repo name.")
-	} else {
-		b.WriteString("Entire auto-detects the repo from the git origin remote, so never ask the user for the repo name.")
+		return "Entire is enabled for this repo (`" + repo + "`, auto-detected from the git origin remote)."
 	}
-	return b.String()
+	return "Entire is enabled for this repo."
 }
 
 // emitContextInjection writes ag's native context-injection payload to stdout
-// when ag injects at event.Type, trails are enabled for the repo on the API,
-// and this session has not been injected yet. Best-effort: an injection failure
-// never fails the hook.
+// when ag injects at event.Type. The base text goes out on the first normal
+// turn of every session; the trails paragraph joins it once the clone-local
+// cache says trails are enabled for the repo, which may be a later turn (the
+// SessionStart refresh is detached). Best-effort: an injection failure never
+// fails the hook.
 func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) {
 	injector, ok := agent.AsContextInjector(ag)
 	if !ok || injector.InjectionEvent() != event.Type || event.SessionID == "" {
@@ -541,50 +558,50 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 
-	// Unknown cache leaves the session retryable.
+	// A missing hint (no usable origin) still gets the base text; it just never
+	// decides trails. Unknown cache leaves the trails decision retryable.
 	scope, scopeOK, scopeErr := loadTrailEnablementScopeHint(ctx, event.SessionID)
 	if scopeErr != nil {
 		logging.Warn(logCtx, "failed to load trails scope hint",
 			slog.String("error", scopeErr.Error()))
 		return
 	}
-	decision := trailEnablementCacheUnknown
-	mutated := false
+	var injectBase, injectTrails bool
 	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
-		if state.ContextInjectionDecided {
-			return strategy.ErrMutationSkip
-		}
-		// Review/investigate sessions are task-specific and don't need the branch
-		// trail pointer; skip without marking decided so normal sessions keep the
+		// Review/investigate sessions are task-specific and don't need the
+		// pointer; skip without marking anything so normal sessions keep the
 		// usual first-turn behavior.
 		if state.Kind != "" {
 			return strategy.ErrMutationSkip
 		}
-		if !scopeOK {
+		// A session that decided trails before the base text existed already
+		// got its one injection.
+		injectBase = !state.ContextInjectionBaseDone && !state.ContextInjectionDecided
+		trailsDecided := state.ContextInjectionDecided
+		if !trailsDecided && scopeOK {
+			if decision := cachedTrailsEnablementForScope(ctx, scope, time.Now()); decision != trailEnablementCacheUnknown {
+				trailsDecided = true
+				injectTrails = decision == trailEnablementCacheEnabled
+			}
+		}
+		if !injectBase && trailsDecided == state.ContextInjectionDecided {
 			return strategy.ErrMutationSkip
 		}
-		decision = cachedTrailsEnablementForScope(ctx, scope, time.Now())
-		if decision == trailEnablementCacheUnknown {
-			return strategy.ErrMutationSkip
-		}
-		state.ContextInjectionDecided = true
-		mutated = true
+		state.ContextInjectionBaseDone = true
+		state.ContextInjectionDecided = trailsDecided
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to record context injection decision",
 			slog.String("error", mutErr.Error()))
-		return
 	}
-	// Only proceed after the state mutation was persisted. If saving the updated
-	// state failed, mutErr was non-nil above and we returned without injecting,
-	// leaving a later turn free to retry safely.
-	won := mutErr == nil && mutated
-	if !won || decision != trailEnablementCacheEnabled {
+	// Only inject after the state mutation was persisted. A skipped mutation
+	// leaves both flags false; a failed save leaves a later turn free to retry.
+	if mutErr != nil || (!injectBase && !injectTrails) {
 		return
 	}
 
-	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection(scope, projectTrailsEnabled())})
+	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireContextInjection(scope, injectBase, injectTrails)})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection",
 			slog.String("error", err.Error()))
@@ -1059,8 +1076,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// runs before the no-changes gate: a read-only Worker turn is still the
 	// parent's task, and a zero-file completed record is itself a condensation
 	// trigger (State.HasTaskContent), so its transcript and tokens reach the
-	// parent's next checkpoint. Its usage goes on that record only, never on
-	// the Worker's own session total, so it is counted once.
+	// parent's next checkpoint. Its usage goes on that record and the parent's
+	// subagent total, never on the Worker's own session total, so it is
+	// counted once.
 	if link, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
 		return saveSubagentSessionTaskStep(ctx, subagentSessionStep{
 			link:          link,
@@ -1204,9 +1222,11 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 }
 
 // workerTurnTokenUsage returns a detached subagent session's usage for the
-// turn ending now: the hook-reported counts, or its transcript from the turn's
-// start offset. Its own subagents are not counted, since a task record holds
-// only the subagent's own usage.
+// turn ending now: the hook-reported counts, its transcript from the turn's
+// start offset, or else its own out-of-band total since the turn started
+// (Factory AI Droid, whose Worker keeps a token total of its own that the
+// parent's excludes). Its own subagents are not counted, since a task record
+// holds only the subagent's own usage.
 func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, preState *PrePromptState, transcriptData []byte) *agent.TokenUsage {
 	if event.TokenUsage != nil {
 		return event.TokenUsage
@@ -1215,7 +1235,10 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 	if preState != nil {
 		turnStart = preState.TranscriptOffset
 	}
-	return agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, "")
+	if usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, ""); strategy.HasTokenUsageData(usage) {
+		return usage
+	}
+	return computeOutOfBandTokenUsage(ctx, ag, event.SessionID, event.SessionRef, preState)
 }
 
 // resolveTurnTokenUsage returns the token usage of the turn ending now.
@@ -1227,8 +1250,10 @@ func workerTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Even
 // out-of-band source: Antigravity exposes token usage only via its
 // title/statusline pipe (captured by the title-tee shim), never in the
 // transcript, so its delta is the current cumulative totals minus the
-// TurnStart baseline stored in PrePromptState. Only one source is used, so a
-// turn is never counted twice.
+// TurnStart baseline stored in PrePromptState. Factory AI Droid is the same
+// shape: its transcript carries no usage, and its running total lives in the
+// session's .settings.json. Only one source is used, so a turn is never
+// counted twice.
 func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, sessionID string, preState *PrePromptState, transcriptData []byte, subagentsDir string, codexInventoryUsage *agent.TokenUsage) *agent.TokenUsage {
 	if event.TokenUsage != nil {
 		return event.TokenUsage
@@ -1240,10 +1265,16 @@ func resolveTurnTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Eve
 	if preState != nil {
 		turnStart = preState.TranscriptOffset
 	}
-	if usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, subagentsDir); usage != nil {
+	usage := agent.CalculateTokenUsage(ctx, ag, transcriptData, turnStart, subagentsDir)
+	if strategy.HasTokenUsageData(usage) {
 		return usage
 	}
-	return computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
+	// A transcript without usage reports zeros rather than nil, so an empty
+	// result also falls through to the out-of-band source.
+	if oob := computeOutOfBandTokenUsage(ctx, ag, sessionID, event.SessionRef, preState); oob != nil {
+		return oob
+	}
+	return usage
 }
 
 // handleLifecycleCompaction handles context compaction: saves current progress
@@ -1674,7 +1705,7 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 		}); err != nil {
 			return fmt.Errorf("register codex subagent: %w", err)
 		}
-		if err := CapturePreTaskState(ctx, event.ToolUseID); err != nil {
+		if err := CapturePreTaskState(ctx, event.SessionID, event.ToolUseID); err != nil {
 			logging.Warn(logCtx, "best-effort codex pre-task capture failed", slog.String("error", err.Error()))
 		}
 		return nil
@@ -1685,7 +1716,7 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 	}
 
 	// Capture pre-task state
-	if err := CapturePreTaskState(ctx, event.ToolUseID); err != nil {
+	if err := CapturePreTaskState(ctx, event.SessionID, event.ToolUseID); err != nil {
 		return fmt.Errorf("failed to capture pre-task state: %w", err)
 	}
 
@@ -2229,8 +2260,15 @@ func subagentTranscriptAndFiles(
 // reported, nor for Codex: a Codex child's usage comes from its rollout
 // inventory, which leaves it nil on purpose for a forked child whose rollout
 // carries the parent's history, and recounting that rollout from its start
-// would add the parent's tokens.
+// would add the parent's tokens. Nor for a child session
+// (agent.ChildSessionSubagents): its usage is credited to the parent's total at
+// completion, and the task entry must show the same figure. A child that stops
+// only at true completion has its full usage by then; one whose export failed
+// keeps no usage in either place.
 func taskUsageRecountable(ag agent.Agent, event *agent.Event) bool {
+	if _, childSession := agent.AsChildSessionSubagents(ag); childSession {
+		return false
+	}
 	return event.TokenUsage == nil && ag.Type() != agent.AgentTypeCodex
 }
 
@@ -2301,13 +2339,13 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// failures: over-capture steals attribution from someone else's work,
 	// which is worse and harder to notice. claimUnrecordedNewFiles narrows the
 	// shell side-effect gap for new files; see unrecordedNewFilesSinceLaunch.
+	preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
+	if preErr != nil {
+		logging.Warn(logCtx, "failed to load pre-task state",
+			slog.String("error", preErr.Error()))
+	}
 	var changes *FileChanges
 	if !opts.analyzerFilesOnly {
-		preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
-		if preErr != nil {
-			logging.Warn(logCtx, "failed to load pre-task state",
-				slog.String("error", preErr.Error()))
-		}
 		var preUntrackedFiles []string
 		if preState != nil {
 			preUntrackedFiles = preState.PreUntrackedFiles()
@@ -2341,7 +2379,9 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// filterToUncommittedFiles is the same guard the turn-end path already applies
 	// for this exact reason; it fails open, so a git error keeps the list as-is
 	// rather than silently dropping a real checkpoint.
-	relModifiedFiles := filterToUncommittedFiles(logCtx, FilterAndNormalizePaths(modifiedFiles, repoRoot), repoRoot)
+	subagentFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	uncommittedSubagentFiles := filterToUncommittedFiles(logCtx, subagentFiles, repoRoot)
+	relModifiedFiles := uncommittedSubagentFiles
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		// changes come from git status, so they are uncommitted by construction.
@@ -2354,6 +2394,16 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	}
 	relModifiedFiles, relNewFiles, relDeletedFiles = strategy.FilterTrackableChanges(logCtx, repoRoot, relModifiedFiles, relNewFiles, relDeletedFiles)
 
+	// A foreground subagent that committed some of its own work gets its record
+	// in that commit's checkpoint (attachTaskToCommitCheckpoint). Whatever it
+	// left uncommitted still completes a record below, for the commit that
+	// later carries it.
+	attachedToCommit := false
+	if !opts.bypassNoChangesSkip {
+		committedFiles := withoutFiles(subagentFiles, uncommittedSubagentFiles)
+		attachedToCommit = attachTaskToCommitCheckpoint(logCtx, ag, event, opts, preState, subagentTranscriptPath, committedFiles)
+	}
+
 	// If no changes, skip — unless this is a Final (SubagentStop) capture: a
 	// read-only background subagent (e.g. a reviewer) still produced a
 	// transcript worth materializing, and SubagentStop is the only chance to
@@ -2361,7 +2411,9 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// launch-time path, which keeps its original skip-on-no-changes behavior).
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
 		if !opts.bypassNoChangesSkip {
-			logging.Info(logCtx, "no file changes detected, skipping task record")
+			if !attachedToCommit {
+				logging.Info(logCtx, "no file changes detected, skipping task record")
+			}
 			_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 			return nil
 		}
@@ -2375,24 +2427,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	}
 
 	files := mergeUnique(mergeUnique(relModifiedFiles, relNewFiles), relDeletedFiles)
-	tokenUsage := event.TokenUsage
-	if tokenUsage == nil {
-		tokenUsage = subagentTokenUsage(logCtx, ag, event, subagentTranscriptPath)
-	}
-	usageFromTranscript := taskUsageRecountable(ag, event)
-	rec := session.TaskRecord{
-		ToolUseID:                event.ToolUseID,
-		AgentID:                  event.SubagentID,
-		StartedAt:                taskStartedAt(event),
-		Background:               opts.background,
-		SubagentType:             event.SubagentType,
-		TaskDescription:          event.TaskDescription,
-		DeclaredTranscriptPath:   subagentTranscriptPath,
-		TranscriptUnavailable:    event.SubagentTranscriptUnavailable,
-		Files:                    files,
-		TokenUsage:               tokenUsage,
-		TokenUsageFromTranscript: usageFromTranscript,
-	}
+	rec := subagentTaskRecord(logCtx, ag, event, opts.background, subagentTranscriptPath, files)
 	// Exactly-once needs an identity to be "once" about. Copilot CLI's
 	// SubagentEnd carries no correlation ID at all, so every one of its
 	// subagents keys on "" — the claim would match the first one's completed
@@ -2405,7 +2440,16 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 		return nil
 	}
-	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
+	var completed bool
+	if _, ok := agent.AsChildSessionSubagents(ag); ok {
+		callStartedAt := event.SubagentStartedAt
+		if event.SessionEndSweep {
+			callStartedAt = time.Time{}
+		}
+		completed, err = strategy.CompleteChildSessionTaskRecord(logCtx, event.SessionID, rec, callStartedAt)
+	} else {
+		completed, err = strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to complete task record: %w", err)
 	}
@@ -2419,6 +2463,121 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 
 	_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 	return nil
+}
+
+// subagentTaskRecord builds the task record a subagent capture completes.
+func subagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, background bool, transcriptPath string, files []string) session.TaskRecord {
+	tokenUsage := event.TokenUsage
+	if tokenUsage == nil {
+		tokenUsage = subagentTokenUsage(logCtx, ag, event, transcriptPath)
+	}
+	return session.TaskRecord{
+		ToolUseID:                event.ToolUseID,
+		AgentID:                  event.SubagentID,
+		StartedAt:                taskStartedAt(event),
+		Background:               background,
+		SubagentType:             event.SubagentType,
+		TaskDescription:          event.TaskDescription,
+		DeclaredTranscriptPath:   transcriptPath,
+		TranscriptUnavailable:    event.SubagentTranscriptUnavailable,
+		Files:                    files,
+		TokenUsage:               tokenUsage,
+		TokenUsageFromTranscript: taskUsageRecountable(ag, event),
+	}
+}
+
+// attachTaskToCommitCheckpoint stores a foreground subagent's record in the
+// checkpoint of its own commit made while it ran, and reports whether it took
+// the record. That commit condensed the session before the record existed, so
+// no later commit would carry the transcript for the files it holds.
+//
+// committedFiles are the files the subagent wrote that HEAD now has. A
+// subagent with none, such as a read-only one running alongside the committer,
+// is not attributed to any commit. Among the checkpoints condensed during the
+// run, the record goes to the newest whose commit carries one of those files.
+// When the write fails, the record waits in session state for turn end to
+// retry it.
+func attachTaskToCommitCheckpoint(
+	logCtx context.Context,
+	ag agent.Agent,
+	event *agent.Event,
+	opts subagentCaptureOptions,
+	preState *PreTaskState,
+	transcriptPath string,
+	committedFiles []string,
+) bool {
+	if len(committedFiles) == 0 || preState == nil || preState.TurnCheckpointIDs == nil {
+		return false
+	}
+	state, err := strategy.LoadSessionState(logCtx, event.SessionID)
+	if err != nil || state == nil {
+		return false
+	}
+	candidates := checkpointsCondensedSince(preState.TurnCheckpointIDs, state.TurnCheckpointIDs)
+	strat := GetStrategy(logCtx)
+	checkpointID := strat.TaskCheckpointForFiles(logCtx, candidates, committedFiles)
+	if checkpointID.IsEmpty() {
+		return false
+	}
+	rec := subagentTaskRecord(logCtx, ag, event, opts.background, transcriptPath, committedFiles)
+	rec.CompletedAt = time.Now()
+	attrs := []any{
+		slog.String("session_id", event.SessionID),
+		slog.String("tool_use_id", event.ToolUseID),
+		slog.String("checkpoint_id", checkpointID.String()),
+	}
+	err = strat.AttachTaskToCheckpoint(logCtx, ag, state, rec, checkpointID)
+	if err == nil {
+		logging.Info(logCtx, "subagent committed its own work; added task record to that commit's checkpoint", attrs...)
+		return true
+	}
+	if errors.Is(err, strategy.ErrTaskNotStorable) {
+		return false
+	}
+	logging.Warn(logCtx, "failed to add task record to the checkpoint of the subagent's commit; will retry at turn end",
+		append(attrs, slog.String("error", err.Error()))...)
+	if mutErr := strategy.MutateSessionState(logCtx, event.SessionID, func(st *strategy.SessionState) error {
+		st.PendingTaskAttachments = append(st.PendingTaskAttachments, session.TaskAttachment{
+			CheckpointID: checkpointID.String(),
+			Record:       rec,
+		})
+		return nil
+	}); mutErr != nil {
+		logging.Warn(logCtx, "failed to keep task record for retry", append(attrs, slog.String("error", mutErr.Error()))...)
+		return false
+	}
+	return true
+}
+
+// checkpointsCondensedSince returns the checkpoints condensed after atStart was
+// captured, newest first. The turn's list only grows while a foreground task
+// runs, so they are its entries past atStart. An amend condenses into its
+// commit's existing checkpoint and appends that ID again, so a repeated ID
+// counts. A list that no longer extends atStart was reset, and yields none.
+func checkpointsCondensedSince(atStart, current []string) []id.CheckpointID {
+	if len(current) <= len(atStart) || !slices.Equal(current[:len(atStart)], atStart) {
+		return nil
+	}
+	var condensed []id.CheckpointID
+	for i := len(current) - 1; i >= len(atStart); i-- {
+		checkpointID, err := id.NewCheckpointID(current[i])
+		if err != nil || slices.Contains(condensed, checkpointID) {
+			continue
+		}
+		condensed = append(condensed, checkpointID)
+	}
+	return condensed
+}
+
+// withoutFiles returns the files in all that are not in remove.
+func withoutFiles(all, remove []string) []string {
+	var kept []string
+	for _, f := range all {
+		if !slices.Contains(remove, f) {
+			kept = append(kept, f)
+		}
+	}
+	return kept
 }
 
 // unrecordedNewFilesSinceLaunch returns the untracked files created since a
@@ -2530,6 +2689,7 @@ func captureInFlightTaskFinal(logCtx context.Context, ag agent.Agent, sessionID,
 		// The record's start scopes a re-export to this call (OpenCode).
 		SubagentStartedAt: task.StartedAt,
 		Final:             true,
+		SessionEndSweep:   true,
 		Timestamp:         time.Now(),
 	}
 	if err := handleSubagentStopFinal(logCtx, ag, event); err != nil {
@@ -2617,8 +2777,9 @@ type subagentSessionStep struct {
 // The record also carries the Worker's token usage. Each turn adds its own
 // usage, scoped to the turn's transcript slice, and only the Stop that ends
 // the Worker's active turn adds it, so a turn condensed into one checkpoint is
-// never counted again by a later one, and none of it lands on the Worker's
-// own session total.
+// never counted again by a later one. The same usage is credited to the
+// parent's subagent total, and none of it lands on the Worker's own session
+// total.
 func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) error {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	logging.Info(logCtx, "recording subagent session as task record",
@@ -2902,10 +3063,11 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 
 // computeOutOfBandTokenUsage returns the turn's token delta for
 // OutOfBandTokenSource agents (e.g. Antigravity, whose only token surface is
-// the title/statusline pipe captured by the title-tee shim): current
+// the title/statusline pipe captured by the title-tee shim, and Factory AI
+// Droid, which keeps a running total beside its transcript): current
 // cumulative totals minus the TurnStart baseline stored in PrePromptState.
 // Returns nil for other agents, on error (logged), or when no data exists.
-func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID string, preState *PrePromptState) *agent.TokenUsage {
+func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID, sessionRef string, preState *PrePromptState) *agent.TokenUsage {
 	src, ok := agent.AsOutOfBandTokenSource(ag)
 	if !ok {
 		return nil
@@ -2929,7 +3091,7 @@ func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID s
 			return nil
 		}
 	}
-	oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, baseline)
+	oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, sessionRef, baseline)
 	if oobErr != nil {
 		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to compute out-of-band token usage",
 			slog.String("error", oobErr.Error()))

@@ -797,6 +797,27 @@ func TestPrepareTrailReviewCommentInputsForCreateDowngradesUnselectableLine(t *t
 	}
 }
 
+// selected_text is shown as the code the finding quotes, so it must be the
+// worktree's text at the anchored lines, never a caller-supplied string.
+func TestPrepareTrailReviewCommentInputsForCreateReplacesSuppliedSelectedText(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	testutil.WriteFile(t, tmp, "src/app.go", "package main\nfunc main() {}\n")
+
+	filePath := "src/app.go"
+	line := 2
+	supplied := "os.Setenv(\"TOKEN\", leaked)"
+	got := prepareTrailReviewCommentInputsForCreate(tmp, []api.TrailReviewCommentInput{{
+		ClientID: "c1",
+		Body:     trailReviewStrPtr("body"),
+		Location: api.TrailReviewLocationCreateRequest{Granularity: reviewTrailGranularityLine, FilePath: &filePath, StartLine: &line, SelectedText: &supplied},
+	}})
+	loc := got[0].Location
+	if loc.Granularity != reviewTrailGranularityLine || loc.SelectedText == nil || *loc.SelectedText != "func main() {}" {
+		t.Fatalf("location = %+v, want the worktree text at line 2", loc)
+	}
+}
+
 func TestCreateTrailReviewFindingSurfacesBatchError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

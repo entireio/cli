@@ -32,6 +32,16 @@ import (
 // an insecure scheme. It matches httpclient.ErrRequestPolicy, not a redirect.
 var ErrInsecureReplica = fmt.Errorf("%w: insecure replica URL (HTTPS required)", httpclient.ErrRequestPolicy)
 
+// ErrNoNodeSucceeded marks a request that every attempted replica failed,
+// whether by connection error, 5xx, or redirect-policy rejection. The last
+// node's error stays wrapped alongside it.
+var ErrNoNodeSucceeded = errors.New("no replica succeeded")
+
+// ErrUnreachable marks a request that never got an HTTP answer: the entry
+// domain could not be dialed, or no cached replica was eligible to try.
+// Failures to build the request, such as a credential error, are not tagged.
+var ErrUnreachable = errors.New("server unreachable")
+
 // SetAuthFunc attaches authentication headers to an outbound request.
 // Errors are surfaced verbatim — they short-circuit failover because
 // they originate at the auth provider, not the data-plane node.
@@ -60,6 +70,12 @@ type Config struct {
 	// helper. Empty sends no User-Agent header at all, which is what
 	// git does for GIT_HTTP_USER_AGENT="" — never Go's default.
 	UserAgent string
+	// DiscoveryTransport is the base RoundTripper for the cold info/refs
+	// probe to the entry domain. Pass the transport the auth client uses
+	// for /.well-known discovery so the probe reuses that pooled connection
+	// to the same host instead of paying a second TCP and TLS handshake.
+	// Nil builds a fresh discovery transport.
+	DiscoveryTransport http.RoundTripper
 }
 
 // Proxy is the HTTP transport the helper protocol uses to talk to the
@@ -156,7 +172,11 @@ func New(cfg Config) *Proxy {
 		Transport:     wrap(httpclient.NewTransport(cfg.SkipTLS)),
 		CheckRedirect: p.checkRedirect,
 	})
-	p.discoveryTransport = wrap(httpclient.NewDiscoveryTransport(cfg.SkipTLS))
+	discovery := cfg.DiscoveryTransport
+	if discovery == nil {
+		discovery = httpclient.NewDiscoveryTransport(cfg.SkipTLS)
+	}
+	p.discoveryTransport = wrap(discovery)
 	return p
 }
 
@@ -355,7 +375,7 @@ func (p *Proxy) doGet(ctx context.Context, urlStr string, client *http.Client, s
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("doing request: %w", err)
+		return nil, fmt.Errorf("%w: doing request: %w", ErrUnreachable, err)
 	}
 	resp, err = p.retryOn401(client, resp, build)
 	if err != nil {
@@ -411,7 +431,7 @@ func (p *Proxy) retryOn401(client *http.Client, resp *http.Response, build func(
 func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method string, body io.ReadSeeker, setHeaders func(*http.Request)) (*http.Response, error) {
 	nodes := slices.Clone(p.nodes)
 	if len(nodes) == 0 {
-		return nil, errors.New("no healthy nodes available")
+		return nil, fmt.Errorf("%w: no healthy nodes available", ErrUnreachable)
 	}
 	start := rand.IntN(len(nodes)) //nolint:gosec // load-spreading, not security
 	if p.stickyNode != "" {
@@ -504,16 +524,14 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 		if resp.StatusCode == http.StatusInsufficientStorage {
 			msg := readErrorMessage(resp)
 			debuglog.Printf("node %s returned HTTP 507: %s", node, msg)
-			lastErr = HTTPErrorMessage(resp.StatusCode, msg, p.ErrorBaseURL())
+			lastErr = newHTTPStatusError(resp.StatusCode, msg, p.ErrorBaseURL())
 			continue
 		}
 
 		if shouldFailover(resp.StatusCode) {
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024)) //nolint:errcheck // best-effort body read for error message
-			_ = resp.Body.Close()
-			msg := strings.TrimSpace(string(respBody))
+			msg := readErrorMessage(resp)
 			debuglog.Printf("node %s returned HTTP %d: %s", node, resp.StatusCode, msg)
-			lastErr = fmt.Errorf("node %s: HTTP %d: %s", node, resp.StatusCode, msg)
+			lastErr = fmt.Errorf("node %s: %w", node, newHTTPStatusError(resp.StatusCode, msg, p.ErrorBaseURL()))
 			p.markNodeFailed(node)
 			continue
 		}
@@ -537,16 +555,16 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 	}
 	if policyErr != nil {
 		if lastErr == nil {
-			return nil, fmt.Errorf("no replica succeeded: %w", policyErr)
+			return nil, fmt.Errorf("%w: %w", ErrNoNodeSucceeded, policyErr)
 		}
 		// fmt rather than errors.Join: Join's newline would split git's
 		// one-line error output.
-		return nil, fmt.Errorf("no replica succeeded: %w; %w", policyErr, lastErr)
+		return nil, fmt.Errorf("%w: %w; %w", ErrNoNodeSucceeded, policyErr, lastErr)
 	}
 	if attempted == 0 {
-		return nil, errors.New("no eligible replicas available")
+		return nil, fmt.Errorf("%w: no eligible replicas available", ErrUnreachable)
 	}
-	return nil, fmt.Errorf("all %d attempted nodes failed, last error: %w", attempted, lastErr)
+	return nil, fmt.Errorf("%w: all %d attempted nodes failed, last error: %w", ErrNoNodeSucceeded, attempted, lastErr)
 }
 
 // noRedirectClient returns a one-shot client for the cold info/refs probe

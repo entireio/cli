@@ -236,3 +236,31 @@ func APIError(err error) string {
 		return fmt.Sprintf("control-plane request failed with status %d", statusErr.StatusCode)
 	}
 }
+
+// APIErrorDetail returns the first problem detail an API error carries at the
+// given location (e.g. "body.owner"), so a caller can read a structured value
+// the server attached to a coded failure — the sync-block reason on a 409
+// from resyncMirror — without parsing the human message. ok is false when err
+// is not an API error or carries no detail there.
+func APIErrorDetail(err error, location string) (detail ErrorDetail, ok bool) {
+	var statusErr *ErrorModelStatusCode
+	if !errors.As(err, &statusErr) {
+		return ErrorDetail{}, false
+	}
+	for _, d := range statusErr.Response.Errors {
+		if d.Location.Or("") == location {
+			return d, true
+		}
+	}
+	return ErrorDetail{}, false
+}
+
+// APIErrorStatus returns the HTTP status of an API error, or 0 when err is
+// not one.
+func APIErrorStatus(err error) int {
+	var statusErr *ErrorModelStatusCode
+	if !errors.As(err, &statusErr) {
+		return 0
+	}
+	return statusErr.StatusCode
+}

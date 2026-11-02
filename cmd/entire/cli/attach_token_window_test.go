@@ -2,12 +2,15 @@ package cli
 
 import (
 	"context"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
@@ -38,15 +41,29 @@ func TestSaveAttachSessionState_KeepsTokenOffsetMovedMeanwhile(t *testing.T) {
 		pendingOnDisk int
 		// checkpointOnDisk is LastCheckpointID on disk; attach read none.
 		checkpointOnDisk id.CheckpointID
-		wantStart        int
-		wantPendingOK    bool
-		wantTotal        int
+		// phaseOnDisk is the session's phase on disk; empty means running.
+		phaseOnDisk session.Phase
+		// quietFor is how long the session has had no interaction.
+		quietFor time.Duration
+		// owner is the session's recorded agent process; "" records none,
+		// "alive" this test process and "dead" this process
+		// with a different start time, which reads as an exited one.
+		owner         string
+		wantStart     int
+		wantPendingOK bool
+		wantTotal     int
 	}{
 		// The session is running: its Stop adds the turn, so attach keeps the hooks' total.
 		{name: "unchanged", hookMovedTo: 2, pendingOnDisk: 3, wantStart: 4, wantTotal: 12},
 		{name: "moved by a hook", hookMovedTo: 6, pendingOnDisk: 3, wantStart: 6, wantPendingOK: true, wantTotal: 12},
 		{name: "turn added by a stop", hookMovedTo: 2, pendingOnDisk: 5, wantStart: 2, wantPendingOK: true, wantTotal: 12},
 		{name: "condensed in place", hookMovedTo: 2, pendingOnDisk: 3, checkpointOnDisk: id.MustCheckpointID("b1b2c3d4e5f6"), wantStart: 2, wantPendingOK: true, wantTotal: 12},
+		// No Stop will come for these, so attach takes the whole-transcript total.
+		{name: "stuck running session", hookMovedTo: 2, pendingOnDisk: 3, quietFor: 2 * session.StuckActiveThreshold, wantStart: 4, wantTotal: 9},
+		{name: "exited agent", hookMovedTo: 2, pendingOnDisk: 3, owner: "dead", wantStart: 4, wantTotal: 9},
+		// A live agent's long turn still ends in a Stop, however quiet.
+		{name: "quiet live agent", hookMovedTo: 2, pendingOnDisk: 3, quietFor: 2 * session.StuckActiveThreshold, owner: "alive", wantStart: 4, wantTotal: 12},
+		{name: "idle session", hookMovedTo: 2, pendingOnDisk: 3, phaseOnDisk: session.PhaseIdle, wantStart: 4, wantTotal: 9},
 		{name: "no earlier state", hookMovedTo: -1, wantStart: 4, wantTotal: 9},
 	} {
 		sessionID := "attach-window-" + strings.ReplaceAll(tc.name, " ", "-")
@@ -59,16 +76,33 @@ func TestSaveAttachSessionState_KeepsTokenOffsetMovedMeanwhile(t *testing.T) {
 			}
 			loaded.SetTokenStart(2)
 
-			now := time.Now()
+			phase := tc.phaseOnDisk
+			if phase == "" {
+				phase = session.PhaseActive
+			}
+			lastInteraction := time.Now().Add(-tc.quietFor)
 			onDisk := &session.State{
 				SessionID:            sessionID,
 				AgentType:            agent.AgentTypeClaudeCode,
-				Phase:                session.PhaseActive,
-				StartedAt:            now,
-				LastInteractionTime:  &now,
-				TokenUsage:           &agent.TokenUsage{OutputTokens: 12},
+				Phase:                phase,
+				StartedAt:            lastInteraction,
+				LastInteractionTime:  &lastInteraction,
+				TokenUsage:           &agent.TokenUsage{OutputTokens: 12, SubagentTokens: &agent.TokenUsage{OutputTokens: 1}},
 				CheckpointTokenUsage: &agent.TokenUsage{OutputTokens: tc.pendingOnDisk},
 				LastCheckpointID:     tc.checkpointOnDisk,
+			}
+			if tc.owner != "" {
+				owner, ok := proclive.IdentityOf(os.Getpid())
+				if !ok {
+					if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+						t.Fatalf("%s: cannot fingerprint the test process", tc.name)
+					}
+					continue // process liveness is unknown on this platform
+				}
+				if tc.owner == "dead" {
+					owner.Start = "not-" + owner.Start
+				}
+				onDisk.Owner = &owner
 			}
 			onDisk.SetTokenStart(tc.hookMovedTo)
 			require.NoError(t, store.Save(ctx, onDisk))
@@ -85,5 +119,9 @@ func TestSaveAttachSessionState_KeepsTokenOffsetMovedMeanwhile(t *testing.T) {
 		require.Equal(t, tc.wantPendingOK, got.CheckpointTokenUsage != nil, tc.name)
 		require.NotNil(t, got.TokenUsage, tc.name)
 		require.Equal(t, tc.wantTotal, got.TokenUsage.OutputTokens, tc.name)
+		if tc.hookMovedTo >= 0 {
+			// The transcript reports no subagents, so the hooks' total is kept.
+			require.NotNil(t, got.TokenUsage.SubagentTokens, tc.name)
+		}
 	}
 }

@@ -223,7 +223,7 @@ func AppendStatusSnapshot(payload []byte) error {
 // genuinely fresh conversation; a resumed conversation whose title-tee shim
 // hasn't written a snapshot before the first TurnStart will over-count the
 // prior cumulative total on that first tracked turn.
-func (a *AntigravityAgent) SnapshotTokenBaseline(ctx context.Context, sessionID string) (json.RawMessage, error) {
+func (a *AntigravityAgent) SnapshotTokenBaseline(ctx context.Context, sessionID, _ string) (json.RawMessage, error) {
 	st, err := openStatusStore()
 	if err != nil {
 		return nil, nil //nolint:nilerr // ditto: an unusable status dir means no baseline
@@ -246,7 +246,7 @@ func (a *AntigravityAgent) SnapshotTokenBaseline(ctx context.Context, sessionID 
 // Best-effort: cache fields and APICallCount, derived from the snapshot lines
 // appended after the baseline timestamp (the dedup writer appends ~one line
 // per API response, but lines can be missed between agent state changes).
-func (a *AntigravityAgent) CalculateTokenUsageSince(ctx context.Context, sessionID string, baseline json.RawMessage) (*agent.TokenUsage, error) {
+func (a *AntigravityAgent) CalculateTokenUsageSince(ctx context.Context, sessionID, _ string, baseline json.RawMessage) (*agent.TokenUsage, error) {
 	snaps, err := readStatusSnapshots(ctx, sessionID)
 	if err != nil || len(snaps) == 0 {
 		return nil, nil //nolint:nilerr,nilnil // no data -> no token counts, never an error
