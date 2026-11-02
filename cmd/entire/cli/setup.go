@@ -3402,9 +3402,11 @@ func checkCheckpointPushPolicy(ctx context.Context, value, backend string) (sett
 			return "", err
 		}
 		if !refs {
+			// migrate-checkpoints refuses once git-refs is primary, so it has to
+			// come before the switch.
 			return "", errors.New("checkpoint push policy manual needs the git-refs checkpoint backend; " +
-				"switch with 'entire configure --checkpoint-backend git-refs --checkpoint-push-policy manual' " +
-				"and convert existing checkpoints with 'entire doctor migrate-checkpoints'")
+				"convert existing checkpoints with 'entire doctor migrate-checkpoints', " +
+				"then switch with 'entire configure --checkpoint-backend git-refs --checkpoint-push-policy manual'")
 		}
 	}
 	return policy, nil
