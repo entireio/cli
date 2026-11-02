@@ -512,6 +512,11 @@ type Metadata struct {
 	// checkpoints this version creates. Without them, decoding and re-encoding
 	// an old checkpoint (a summary backfill, a transcript finalize, an attached
 	// session) would strip data entire.io still reads.
+	//
+	// prompt_attributions is the one exception to "byte for byte": a store
+	// drops it past checkpoint.MaxLegacyPromptAttributionsBytes. Its
+	// carry-forward has no exit, and the values pre-v0.10.1 CLIs recorded
+	// reached sizes that made the metadata branch unpushable.
 	LegacyInitialAttribution json.RawMessage `json:"initial_attribution,omitempty"`
 	LegacyPromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
 

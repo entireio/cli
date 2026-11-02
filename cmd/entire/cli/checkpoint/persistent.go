@@ -280,11 +280,7 @@ func (s *treeWriter) applySummaryBackfill(ctx context.Context, existing *object.
 
 	existingMetadata.Summary = RedactSummary(summary)
 
-	metadataJSON, err := jsonutil.MarshalIndentWithNewline(existingMetadata, "", "  ")
-	if err != nil {
-		return plumbing.ZeroHash, "", fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
+	metadataHash, err := s.writeSessionMetadataBlob(ctx, existingMetadata)
 	if err != nil {
 		return plumbing.ZeroHash, "", fmt.Errorf("failed to create metadata blob: %w", err)
 	}
@@ -406,7 +402,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 		// The counts follow the stored transcript. Identical bytes keep the
 		// counts already recorded when this write does not know its own.
 		if counts := opts.Transcript.Counts(); rewrote || counts != nil {
-			if err := s.updateSessionMetadata(sessionDir, entries, func(metadata *Metadata) {
+			if err := s.updateSessionMetadata(ctx, sessionDir, entries, func(metadata *Metadata) {
 				metadata.Redaction = counts
 			}); err != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to update redaction counts: %w", err)
@@ -456,7 +452,7 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 	}
 
 	if len(opts.SkillEvents) > 0 {
-		if err := s.replaceSkillEvents(opts.SkillEvents, sessionDir, entries); err != nil {
+		if err := s.replaceSkillEvents(ctx, opts.SkillEvents, sessionDir, entries); err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to replace skill events: %w", err)
 		}
 	}
@@ -667,7 +663,9 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 
 	// An overwrite of an existing session slot keeps the line attribution an
 	// older CLI recorded for it (opaque, never recomputed); see
-	// Metadata.LegacyInitialAttribution.
+	// Metadata.LegacyInitialAttribution. The size cap on prompt_attributions
+	// is applied by writeSessionMetadataBlob, which every path that re-emits
+	// this file goes through.
 	var legacyInitialAttribution, legacyPromptAttributions json.RawMessage
 	if entry, ok := entries[checkpointSubtreePath(sessionDir, paths.MetadataFileName)]; ok {
 		if existing, readErr := s.readMetadataFromBlob(entry.Hash); readErr == nil {
@@ -773,11 +771,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		LegacyPromptAttributions:    legacyPromptAttributions,
 	}
 
-	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")
-	if err != nil {
-		return filePaths, fmt.Errorf("failed to marshal session metadata: %w", err)
-	}
-	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
+	metadataHash, err := s.writeSessionMetadataBlob(ctx, &sessionMetadata)
 	if err != nil {
 		return filePaths, err
 	}
@@ -1759,11 +1753,27 @@ func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) e
 	})
 }
 
+// writeSessionMetadataBlob marshals a session's metadata.json and stores it as
+// a blob. Every path that emits or re-emits that file goes through here — the
+// session write, the summary backfill, and updateSessionMetadata's mutators —
+// so the legacy prompt_attributions cap holds for all of them rather than for
+// whichever call site last remembered it. Each of those paths decodes the whole
+// Metadata and re-encodes it, so an oversized field rides along into a fresh
+// blob even when the path has nothing to do with attribution.
+func (s *treeWriter) writeSessionMetadataBlob(ctx context.Context, metadata *Metadata) (plumbing.Hash, error) {
+	metadata.LegacyPromptAttributions = CapLegacyPromptAttributions(ctx, metadata.LegacyPromptAttributions, metadata.SessionID)
+	metadataJSON, err := jsonutil.MarshalIndentWithNewline(metadata, "", "  ")
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("marshal session metadata: %w", err)
+	}
+	return CreateBlobFromContent(s.repo, metadataJSON)
+}
+
 // updateSessionMetadata reads the session metadata blob from entries, applies
 // mutate, and rewrites the blob. Reading from the blob (rather than an in-memory
 // copy) keeps it correct when several finalize-path steps mutate the same
 // metadata in sequence — each sees the prior step's changes.
-func (s *treeWriter) updateSessionMetadata(sessionDir string, entries map[string]object.TreeEntry, mutate func(*Metadata)) error {
+func (s *treeWriter) updateSessionMetadata(ctx context.Context, sessionDir string, entries map[string]object.TreeEntry, mutate func(*Metadata)) error {
 	metadataPath := checkpointSubtreePath(sessionDir, paths.MetadataFileName)
 	entry, exists := entries[metadataPath]
 	if !exists {
@@ -1776,11 +1786,7 @@ func (s *treeWriter) updateSessionMetadata(sessionDir string, entries map[string
 	}
 	mutate(metadata)
 
-	metadataJSON, err := jsonutil.MarshalIndentWithNewline(metadata, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal session metadata: %w", err)
-	}
-	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
+	metadataHash, err := s.writeSessionMetadataBlob(ctx, metadata)
 	if err != nil {
 		return err
 	}
@@ -1792,8 +1798,8 @@ func (s *treeWriter) updateSessionMetadata(sessionDir string, entries map[string
 	return nil
 }
 
-func (s *treeWriter) replaceSkillEvents(skillEvents []agent.SkillEvent, sessionPath string, entries map[string]object.TreeEntry) error {
-	return s.updateSessionMetadata(sessionPath, entries, func(metadata *Metadata) {
+func (s *treeWriter) replaceSkillEvents(ctx context.Context, skillEvents []agent.SkillEvent, sessionPath string, entries map[string]object.TreeEntry) error {
+	return s.updateSessionMetadata(ctx, sessionPath, entries, func(metadata *Metadata) {
 		metadata.SkillEventsVersion = skillEventsVersion(skillEvents)
 		metadata.SkillEvents = skillEvents
 	})
@@ -1803,8 +1809,8 @@ func (s *treeWriter) replaceSkillEvents(skillEvents []agent.SkillEvent, sessionP
 // metadata, or clears it when start is nil (no compact transcript present).
 // Used by the OPF rewrite path so the finalized session metadata reflects the
 // regenerated compact transcript.
-func (s *treeWriter) setCompactTranscriptStart(sessionPath string, start *int, entries map[string]object.TreeEntry) error {
-	return s.updateSessionMetadata(sessionPath, entries, func(metadata *Metadata) {
+func (s *treeWriter) setCompactTranscriptStart(ctx context.Context, sessionPath string, start *int, entries map[string]object.TreeEntry) error {
+	return s.updateSessionMetadata(ctx, sessionPath, entries, func(metadata *Metadata) {
 		metadata.CompactTranscriptStart = start
 	})
 }
@@ -2041,7 +2047,7 @@ func (s *treeWriter) replaceTranscript(ctx context.Context, transcript redact.Re
 	// Keep the session metadata's marker consistent with the regenerated
 	// transcript.jsonl: record the new boundary when one was produced, or clear
 	// it (nil) when the compact transcript was dropped above.
-	if err := s.setCompactTranscriptStart(sessionDir, compactStart, entries); err != nil {
+	if err := s.setCompactTranscriptStart(ctx, sessionDir, compactStart, entries); err != nil {
 		return false, fmt.Errorf("failed to update compact transcript start: %w", err)
 	}
 
