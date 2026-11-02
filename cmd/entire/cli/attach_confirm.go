@@ -158,22 +158,23 @@ func rewriteWarning(ctx context.Context, chain []*object.Commit, checkedRemotes 
 	}
 	yourEmail := yourGitEmail(ctx)
 	yoursSigned := false
-	var theirsSigned []string
+	var losing []string
 	for _, c := range chain {
-		switch {
-		case c.Signature == "":
-		case committedBy(c, yourEmail):
+		if c.Signature == "" {
+			continue
+		}
+		if _, lost := checkSignature(ctx, c, yourEmail); lost != "" {
+			losing = append(losing, "  "+describeCommit(c)+": "+lost)
+		} else {
 			yoursSigned = true
-		default:
-			theirsSigned = append(theirsSigned, "  "+describeCommit(c))
 		}
 	}
 	if yoursSigned {
-		lines = append(lines, "Commits you signed are signed again with your signing key; one signed with another key loses its signature.")
+		lines = append(lines, "Commits you signed are signed again if your signing key made their signature; otherwise they lose it.")
 	}
-	if len(theirsSigned) > 0 {
-		lines = append(lines, "These signed commits were committed by someone else and lose their signatures:")
-		lines = append(lines, theirsSigned...)
+	if len(losing) > 0 {
+		lines = append(lines, "These signed commits lose their signatures:")
+		lines = append(lines, losing...)
 	}
 	return lines
 }
@@ -227,7 +228,7 @@ func otherRefsContaining(ctx context.Context, target *object.Commit) []string {
 func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit, checkpointID id.CheckpointID) error {
 	oldHead := chain[len(chain)-1].Hash.String()
 	yourEmail := yourGitEmail(ctx)
-	keys := signingProbe{}
+	var keys signingProbe
 	var pairs strings.Builder
 	var unsigned []string
 	newSHA, targetSHA := "", ""
@@ -243,7 +244,7 @@ func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit
 				parents = append(parents, p.String())
 			}
 		}
-		sha, lost, err := replayCommit(ctx, c, message, parents, yourEmail, keys)
+		sha, lost, err := replayCommit(ctx, c, message, parents, yourEmail, &keys)
 		if err != nil {
 			return fmt.Errorf("rewrite commit %s: %w", c.Hash.String()[:12], err)
 		}
@@ -289,26 +290,55 @@ func rewriteWithTrailer(ctx context.Context, w io.Writer, chain []*object.Commit
 // it was made by the key the user signs with now. Anything else is replayed
 // unsigned, rather than with the user's signature on someone else's commit or
 // on content their key never signed, and lost says why.
-func replayCommit(ctx context.Context, c *object.Commit, message string, parents []string, yourEmail string, keys signingProbe) (sha, lost string, err error) {
-	if c.Signature == "" {
-		sha, err = commitTree(ctx, c, message, parents, false)
-		return sha, "", err
+func replayCommit(ctx context.Context, c *object.Commit, message string, parents []string, yourEmail string, keys *signingProbe) (string, string, error) {
+	lost := ""
+	if c.Signature != "" {
+		key, why := checkSignature(ctx, c, yourEmail)
+		if why == "" {
+			signed, whyNot := signAgain(ctx, c, message, parents, key, keys)
+			if whyNot == "" {
+				return signed, "", nil
+			}
+			why = whyNot
+		}
+		lost = why
+	}
+	sha, err := commitTree(ctx, c, message, parents, false)
+	return sha, lost, err
+}
+
+// checkSignature runs the checks on signed commit c that need no signing: the
+// user committed it and its signature is good. It returns the signing key, or
+// why c can't keep a signature. The confirmation runs them too, so it can name
+// the commits that lose theirs before anything is signed.
+func checkSignature(ctx context.Context, c *object.Commit, yourEmail string) (key, lost string) {
+	if yourEmail == "" {
+		return "", "git has no email for you to compare its committer with"
 	}
 	if !committedBy(c, yourEmail) {
-		lost = "it was committed by " + c.Committer.Email + ", not you"
-	} else if key, good := signingKey(ctx, c.Hash.String()); !good {
-		lost = "its signature can't be verified"
-	} else if yours, err := keys.key(ctx, c.Committer); err != nil {
-		lost = "signing failed: " + strings.Join(strings.Fields(err.Error()), " ")
-	} else if key != yours {
-		lost = "it was signed with a key other than your signing key"
-	} else if signed, err := commitTree(ctx, c, message, parents, true); err != nil {
-		lost = "signing failed: " + strings.Join(strings.Fields(err.Error()), " ")
-	} else {
-		return signed, "", nil
+		return "", fmt.Sprintf("it was committed by %q, not you", c.Committer.Email)
 	}
-	sha, err = commitTree(ctx, c, message, parents, false)
-	return sha, lost, err
+	key, good := signingKey(ctx, c.Hash.String())
+	if !good {
+		return "", "its signature can't be verified"
+	}
+	return key, ""
+}
+
+// signAgain replays c signed when the key the user signs with is key, the one
+// that signed c, and otherwise says why not.
+func signAgain(ctx context.Context, c *object.Commit, message string, parents []string, key string, keys *signingProbe) (sha, lost string) {
+	yours, err := keys.key(ctx, c.Committer)
+	if err == nil && yours != key {
+		return "", "it was signed with a key other than your signing key"
+	}
+	if err == nil {
+		sha, err = commitTree(ctx, c, message, parents, true)
+	}
+	if err != nil {
+		return "", "signing failed: " + strings.Join(strings.Fields(err.Error()), " ")
+	}
+	return sha, ""
 }
 
 // commitTree runs git commit-tree for c's tree on parents with message and c's
@@ -345,20 +375,25 @@ func commitTree(ctx context.Context, c *object.Commit, message string, parents [
 // signing a commit of the empty tree, so that a commit is signed only once its
 // own key is known to match. Without user.signingkey, OpenPGP picks the key by
 // the committer, so the key is found once per committer.
-type signingProbe map[string]probedKey
+type signingProbe struct {
+	byCommitter map[string]probedKey
+}
 
 type probedKey struct {
 	key string
 	err error
 }
 
-func (p signingProbe) key(ctx context.Context, committer object.Signature) (string, error) {
+func (p *signingProbe) key(ctx context.Context, committer object.Signature) (string, error) {
 	who := committer.Name + " <" + committer.Email + ">"
-	if k, ok := p[who]; ok {
+	if k, ok := p.byCommitter[who]; ok {
 		return k.key, k.err
 	}
 	key, err := probeSigningKey(ctx, committer)
-	p[who] = probedKey{key, err}
+	if p.byCommitter == nil {
+		p.byCommitter = map[string]probedKey{}
+	}
+	p.byCommitter[who] = probedKey{key, err}
 	return key, err
 }
 
@@ -376,10 +411,12 @@ func probeSigningKey(ctx context.Context, committer object.Signature) (string, e
 	return key, nil
 }
 
-// signingKey is the key git reports for commit sha's signature (%GK): a key ID
-// for OpenPGP and X.509, a fingerprint for SSH. Empty when the commit is
-// unsigned or the signature can't be read. good is false unless the signature
-// checks out: git reports the key of a bad signature too. git reports an SSH
+// signingKey is the fingerprint of the key that made commit sha's signature:
+// for OpenPGP the primary key's (%GP), so that a signature by a newer subkey of
+// the same key still matches, and otherwise the signing key's own (%GF). Empty
+// when the commit is unsigned or the signature can't be read. good is false
+// unless the signature checks out: git reports a bad signature's key ID
+// (%GK), though not these fingerprints. git reports an SSH
 // signature's key only with an allowed-signers file configured, so it is given
 // an empty one and reports the key as untrusted (U), which is all comparing
 // two signatures needs. The literal /dev/null, not os.DevNull: ssh-keygen
@@ -387,12 +424,19 @@ func probeSigningKey(ctx context.Context, committer object.Signature) (string, e
 // that path. --no-show-signature keeps log.showSignature's verification text
 // out of the output.
 func signingKey(ctx context.Context, sha string) (key string, good bool) {
-	out, err := exec.CommandContext(ctx, "git", "-c", "gpg.ssh.allowedSignersFile=/dev/null", "show", "-s", "--no-show-signature", "--format=%G?%n%GK", sha).Output()
+	out, err := exec.CommandContext(ctx, "git", "-c", "gpg.ssh.allowedSignersFile=/dev/null", "show", "-s", "--no-show-signature", "--format=%G?%x00%GF%x00%GP", sha).Output()
 	if err != nil {
 		return "", false
 	}
-	status, key, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	return key, key != "" && (status == "G" || status == "U")
+	fields := strings.Split(strings.TrimRight(string(out), "\n"), "\x00")
+	if len(fields) != 3 {
+		return "", false
+	}
+	key = fields[2]
+	if key == "" {
+		key = fields[1]
+	}
+	return key, key != "" && (fields[0] == "G" || fields[0] == "U")
 }
 
 // withoutIdentityEnv drops GIT_AUTHOR_* and GIT_COMMITTER_* from env, so the
