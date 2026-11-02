@@ -129,6 +129,13 @@ type ResolvedSession struct {
 	// Deliberately not folded into IsCaller: the resolution is still the best
 	// available answer and still worth displaying, labelled. Only mutation has
 	// to be conservative here.
+	//
+	// Saying that here is not enough to make it happen — `checkpoint create`
+	// was added as an IsCaller consumer and checked Found, IsCaller and
+	// Tracked but not this — so the rule has a ledger with teeth:
+	// TestCallerResolutionConsumersHandleIncompleteness enumerates every file
+	// that obtains a resolution and fails the build on one that does not
+	// account for this field.
 	Incomplete error
 }
 

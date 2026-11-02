@@ -138,6 +138,8 @@ The display side says so rather than refusing, since nothing is being mutated. `
 
 The one consumer that deliberately ignores it is `withHookSession` (`hooks_git_cmd.go`), which uses the resolved ID to stamp a log field. Nothing is selected or acted on there, and the store's own per-skip `Warn` already lands in the same log, so the condition is recorded where a reader of that log would look for it.
 
+**The contract is a ledger, not a paragraph.** `TestCallerResolutionConsumersHandleIncompleteness` enumerates every file that obtains a caller resolution and what it does about `Incomplete`, and fails the build on a consumer that is not listed, a listing that outlived its call, or a listed file that never names the field — including the one that ignores it, which has to say so in a comment. The guard exists because this rule was already written down when `checkpoint create` became the second `IsCaller()` consumer and gated on `Found`, `IsCaller` and `Tracked` but not on completeness: with one unreadable state file an uncontested environment claim won, and the checkpoint landed on whichever session that was. Prose cannot fail when someone adds a consumer.
+
 
 `--allow-foreign-session` is the escape hatch, and deliberately **not** folded into `--force`/`--yes`: those already carry two meanings (replace local state, confirm same-store adoption), and `--force` is the flag an agent reaches for on any refusal. Waiving a safety check on someone else's running session gets a name that says so.
 
