@@ -305,8 +305,7 @@ func appendStepSummary(md string) error {
 		return fmt.Errorf("step summary: %w", err)
 	}
 	if _, err := io.WriteString(f, "\n"+md); err != nil {
-		f.Close()
-		return fmt.Errorf("step summary: %w", err)
+		return errors.Join(fmt.Errorf("step summary: %w", err), f.Close())
 	}
 	return f.Close()
 }
