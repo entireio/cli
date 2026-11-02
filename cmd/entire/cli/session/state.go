@@ -1658,6 +1658,22 @@ func (s *StateStore) ListWithSkipped(ctx context.Context) ([]*State, []SkippedSt
 	return s.list(ctx, true)
 }
 
+// ListReadOnlyWithSkipped reports completeness like ListWithSkipped and leaves
+// the store alone like ListReadOnly.
+//
+// `session adopt`'s ownership guard is the caller this exists for, and it is
+// the one caller that lists a store belonging to ANOTHER repository. Reaping
+// is a store's own housekeeping — every command reaps its own, including this
+// one through the resolver — but doing it to the worktree named by --from, as
+// a side effect of a check whose answer may well be "no", writes to a store
+// this command was only ever reading. Retaining stale records cannot widen
+// what the guard authorizes: a stale candidate can only outrank the session
+// being adopted, never become it, and the adopted session is never stale
+// because Load reaped it before the guard ran.
+func (s *StateStore) ListReadOnlyWithSkipped(ctx context.Context) ([]*State, []SkippedState, error) {
+	return s.list(ctx, false)
+}
+
 func (s *StateStore) list(ctx context.Context, deleteStale bool) ([]*State, []SkippedState, error) {
 	root, err := s.dirRoot()
 	if err != nil {

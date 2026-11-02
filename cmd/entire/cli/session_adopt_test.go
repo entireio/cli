@@ -1954,6 +1954,56 @@ func TestSessionAdopt_RefusesASessionThatIsNotTheCallers(t *testing.T) {
 	}
 }
 
+// A refusal must not have written to the source store on its way to saying
+// no. The guard lists --from's store, which for a cross-repo adoption belongs
+// to another repository; taking the reaping listing there made a check whose
+// whole job is to decline garbage-collect a store this command was only
+// reading.
+func TestSessionAdopt_RefusalDoesNotReapTheSourceStore(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "someone-elses-session")
+
+	// Stale by StaleSessionThreshold, so the reaping listing deletes it and
+	// the read-only one does not. No transcript: this record is what the
+	// listing does to the store, not a session under test.
+	staleInteraction := time.Now().Add(-session.StaleSessionThreshold - time.Hour)
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	if err := sourceStore.Save(context.Background(), &session.State{
+		SessionID:           "stale-bystander-session",
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           staleInteraction.Add(-5 * time.Minute),
+		LastInteractionTime: &staleInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stalePath := filepath.Join(sourceRepo, ".git", session.SessionStateDirName, "stale-bystander-session.json")
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Fatalf("fixture not written: %v", err)
+	}
+
+	t.Chdir(targetRepo)
+	adoptAsCaller(t, "my-own-session")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "someone-elses-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("runAdopt succeeded on a session belonging to another caller")
+	}
+
+	// Checked on disk rather than through Load, which reaps stale records
+	// itself and would destroy the evidence it is asked about.
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Fatalf("refused adoption reaped the source store: %v", err)
+	}
+}
+
 // --force must not grant this. It already means two other things (replace
 // local state; confirm same-store adoption), and it is the flag an agent
 // reaches for on any refusal — so waiving a check on someone else's running

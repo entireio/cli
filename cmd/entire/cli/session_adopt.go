@@ -209,10 +209,16 @@ func ensureAdoptSourceIsCaller(ctx context.Context, w io.Writer, sourceStore *se
 	return true, nil
 }
 
-// adoptSourceIsOwned is the ownership decision with no interaction and no side
-// effects, so it can be taken twice: once to decide whether to ask, and again
-// under the state lock to confirm the answer still holds. Returns the reason
-// when it does not, for whichever of those two callers needs to say why.
+// adoptSourceIsOwned is the ownership decision with no interaction, so it can
+// be taken twice: once to decide whether to ask, and again under the state
+// lock to confirm the answer still holds. Returns the reason when it does not,
+// for whichever of those two callers needs to say why.
+//
+// It does not write to the source store. The listing it takes there is the
+// read-only one for that reason — see ListReadOnlyWithSkipped — because the
+// source store may be another repository's and a refusal must not have reaped
+// it. This repository's own store is listed by the resolver, where stale
+// reaping is the same housekeeping every other command performs on it.
 //
 // The source repository's sessions are weighed as FIRST-CLASS candidates, not
 // as a fallback, and adopt applies no ownership rule of its own — the shared
@@ -254,8 +260,12 @@ func ensureAdoptSourceIsCaller(ctx context.Context, w io.Writer, sourceStore *se
 // terminal, and --allow-foreign-session covers the rest.
 func adoptSourceIsOwned(ctx context.Context, sourceStore *session.StateStore, source *session.State) (bool, string) {
 	// Listed fresh on every call, so the re-check under the state lock sees
-	// sessions created since the first decision.
-	sourceStates, sourceSkipped, err := sourceStore.ListWithSkipped(ctx)
+	// sessions created since the first decision, and READ-ONLY because the
+	// source store may belong to another repository: a guard that refuses
+	// must not have reaped --from's store on the way to saying no. This
+	// repository's own store is still listed by the resolver below, which
+	// reaps like every other command's listing does.
+	sourceStates, sourceSkipped, err := sourceStore.ListReadOnlyWithSkipped(ctx)
 	switch {
 	case err != nil:
 		return false, fmt.Sprintf("the source repository's session store could not be read, so %s cannot be confirmed as yours",
