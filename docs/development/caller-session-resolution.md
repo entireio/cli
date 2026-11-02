@@ -139,6 +139,8 @@ The one consumer that deliberately ignores it is `withHookSession` (`hooks_git_c
 
 `--allow-foreign-session` is the escape hatch, and deliberately **not** folded into `--force`/`--yes`: those already carry two meanings (replace local state, confirm same-store adoption), and `--force` is the flag an agent reaches for on any refusal. Waiving a safety check on someone else's running session gets a name that says so.
 
+**The gate runs after the preconditions no state can satisfy.** Same-store adoption requires `--force` whatever either store holds, so `runAdopt` settles that before asking who the caller is. Behind the gate, a call that could never succeed drew the ownership question anyway: non-interactively it named `--allow-foreign-session` while `--force` was the flag actually missing, and interactively it asked a human to approve moving someone else's running session — the most consequential prompt this command has — for a no-op. The external path's `--force` check stays under the lock, because that one depends on what the target store turns out to hold.
+
 **Tier 1 is per-agent and declarative.** An agent implements
 `agent.CallerSessionIdentifier` by naming the variable it publishes
 (`CallerSessionEnvVar`), and the `agent` package does the reading and

@@ -110,6 +110,18 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	if _, err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
 		return err
 	}
+	// Same-store adoption requires --force unconditionally, so this reads a
+	// flag and no state and belongs ahead of the ownership gate rather than
+	// inside the mutation. Behind the gate it turned a call that cannot
+	// succeed into a question: non-interactively one that names
+	// --allow-foreign-session while --force is the flag actually missing, and
+	// interactively a human confirmation to move someone else's running
+	// session — the most consequential prompt this command has, asked for a
+	// no-op. The external path's --force check stays under the lock, because
+	// that one depends on the target store's contents.
+	if sameSessionStore && !opts.Force {
+		return errAdoptAlreadyTracked(sourceState.SessionID)
+	}
 	overridden, err := ensureAdoptSourceIsCaller(ctx, w, sourceStore, sourceState, opts)
 	if err != nil {
 		return err
@@ -118,7 +130,7 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	var adopted *session.State
 	var changes adoptChanges
 	if sameSessionStore {
-		adopted, changes, err = adoptFromSameSessionStore(ctx, sourceStore, sourceWorktree, sourceState, opts, overridden)
+		adopted, changes, err = adoptFromSameSessionStore(ctx, sourceStore, sourceWorktree, sourceState, overridden)
 	} else {
 		adopted, changes, err = adoptFromExternalSessionStore(
 			ctx,
@@ -149,6 +161,14 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	fmt.Fprintf(w, "Tracking %d file(s): %s\n", len(filesTouched), strings.Join(filesTouched, ", "))
 	fmt.Fprintln(w, "Review tracked files before committing; adoption attributes current changes in this repo to the adopted session.")
 	return nil
+}
+
+// errAdoptAlreadyTracked is the one wording for the --force precondition,
+// which both adoption paths refuse on but at different moments: same-store
+// before the ownership gate, external only once the target store is locked
+// and read.
+func errAdoptAlreadyTracked(sessionID string) error {
+	return fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", sessionID)
 }
 
 // ensureAdoptSourceIsCaller refuses to move a session that is not this
@@ -416,7 +436,7 @@ func adoptFromExternalSessionStore(
 			return fmt.Errorf("load current session state: %w", err)
 		}
 		if existing != nil && !opts.Force {
-			return fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", next.SessionID)
+			return errAdoptAlreadyTracked(next.SessionID)
 		}
 		if err := targetStore.Save(ctx, next); err != nil {
 			return fmt.Errorf("save adopted session state: %w", err)
@@ -469,11 +489,11 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	return retired
 }
 
-func adoptFromSameSessionStore(ctx context.Context, sourceStore *session.StateStore, sourceWorktree string, sourceState *session.State, opts adoptOptions, overridden bool) (*session.State, adoptChanges, error) {
-	if !opts.Force {
-		return nil, adoptChanges{}, fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", sourceState.SessionID)
-	}
-
+// adoptFromSameSessionStore takes no options: its only flag-dependent
+// precondition is --force, which runAdopt settles ahead of the ownership gate
+// because no state can satisfy it. Everything this function still checks it
+// re-reads under the state lock.
+func adoptFromSameSessionStore(ctx context.Context, sourceStore *session.StateStore, sourceWorktree string, sourceState *session.State, overridden bool) (*session.State, adoptChanges, error) {
 	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
 	if worktreeIDErr != nil {
 		sourceWorktreeID = ""

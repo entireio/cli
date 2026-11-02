@@ -1656,9 +1656,8 @@ func TestSessionAdopt_SameStoreReloadsSourceStateUnderLock(t *testing.T) {
 	testutil.GitAdd(t, targetWorktree, "feature.txt")
 	t.Chdir(targetWorktree)
 
-	adopted, _, err := adoptFromSameSessionStore(context.Background(), sourceStore, sourceRepo, staleSelected, adoptOptions{
-		Force: true,
-	}, true) // ownership already authorized; this test covers the locked reload
+	adopted, _, err := adoptFromSameSessionStore(context.Background(), sourceStore, sourceRepo, staleSelected,
+		true) // ownership already authorized; this test covers the locked reload
 	if err != nil {
 		t.Fatalf("adoptFromSameSessionStore failed: %v", err)
 	}
@@ -1827,6 +1826,60 @@ func runAdoptGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
 	testutil.RunGit(t, dir, args...)
+}
+
+// Same-store adoption needs --force unconditionally, so a call without it can
+// never succeed. Checking ownership first turned that dead call into a
+// question for a human — and interactively it is a question about adopting
+// someone else's running session, the most consequential prompt this command
+// has. Asking it for a call that is going to fail anyway both misnames the
+// missing flag (--allow-foreign-session, when --force is what is absent) and
+// trains an operator to approve foreign adoption on a no-op.
+func TestSessionAdopt_SameStoreMissingForceIsReportedBeforeTheOwnershipGate(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetWorktree := filepath.Join(t.TempDir(), "target-worktree")
+	runAdoptGit(t, sourceRepo, "worktree", "add", targetWorktree, "-b", "force-before-ownership")
+	resolvedTargetWorktree, err := filepath.EvalSymlinks(targetWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetWorktree = resolvedTargetWorktree
+	t.Cleanup(func() {
+		runAdoptGit(t, sourceRepo, "worktree", "remove", targetWorktree, "--force")
+	})
+
+	saveAdoptableSession(t, sourceRepo, "someone-elses-session")
+
+	t.Chdir(targetWorktree)
+	adoptAsCaller(t, "my-own-session")
+
+	var out bytes.Buffer
+	err = runAdopt(context.Background(), &out, "someone-elses-session", adoptOptions{
+		FromWorktree: sourceRepo,
+	})
+	if err == nil {
+		t.Fatal("runAdopt succeeded without --force on a same-store adoption")
+	}
+	if !strings.Contains(err.Error(), "already tracked in this repo") {
+		t.Fatalf("error should name the missing --force precondition, got: %v", err)
+	}
+	// The ownership gate speaks before it refuses, so its output is the
+	// evidence that it ran at all. Nothing it prints may appear here.
+	if strings.Contains(out.String(), "--allow-foreign-session") {
+		t.Fatalf("ownership gate ran for a call that cannot succeed, got: %q", out.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("refusal should print nothing before the --force error, got: %q", out.String())
+	}
+
+	store := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	state, err := store.Load(context.Background(), "someone-elses-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.WorktreePath != sourceRepo || state.Phase != session.PhaseActive {
+		t.Fatalf("refused adoption still mutated the source session: %+v", state)
+	}
 }
 
 // saveAdoptableSession writes a live, adoptable session into a worktree's
@@ -2398,8 +2451,7 @@ func TestSessionAdopt_RevalidatesOwnershipAgainstTheLockedState(t *testing.T) {
 	t.Chdir(targetWorktree)
 	clearCallerSessionEnv(t)
 
-	_, _, err = adoptFromSameSessionStore(context.Background(), sourceStore, sourceRepo, authorized,
-		adoptOptions{Force: true}, false)
+	_, _, err = adoptFromSameSessionStore(context.Background(), sourceStore, sourceRepo, authorized, false)
 	if err == nil {
 		t.Fatal("adopted on ownership evidence that no longer held under the lock")
 	}
@@ -2451,8 +2503,7 @@ func TestSessionAdopt_OverriddenOwnershipIsNotRevalidated(t *testing.T) {
 	t.Chdir(targetWorktree)
 	clearCallerSessionEnv(t)
 
-	if _, _, err := adoptFromSameSessionStore(context.Background(), sourceStore, sourceRepo, authorized,
-		adoptOptions{Force: true}, true); err != nil {
+	if _, _, err := adoptFromSameSessionStore(context.Background(), sourceStore, sourceRepo, authorized, true); err != nil {
 		t.Fatalf("an overridden adoption was re-checked and refused: %v", err)
 	}
 }
