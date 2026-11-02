@@ -180,7 +180,8 @@ func checkOuterPushOfHeldCommits(ctx context.Context, lines []PrePushRef, why st
 	}
 	tips := make(map[plumbing.Hash]plumbing.ReferenceName, len(waiting))
 	for ref := range waiting {
-		if r, err := repo.Reference(ref, true); err == nil {
+		// waiting is keyed canonically; read the spelling the ref is stored under.
+		if r, err := repo.Reference(resolveQueuedCheckpointRef(repo, ref), true); err == nil {
 			tips[r.Hash()] = ref
 		}
 	}
@@ -284,6 +285,9 @@ func CheckpointRefExists(ctx context.Context, checkpointID id.CheckpointID) (boo
 		return false, fmt.Errorf("open repository: %w", err)
 	}
 	defer repo.Close()
+	// The ref may be stored under its case-folded shard, which the canonical
+	// name stops resolving to once git packs it.
+	ref = resolveQueuedCheckpointRef(repo, ref)
 	if _, err := repo.Reference(ref, true); err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			return false, nil
@@ -453,7 +457,9 @@ func PushCheckpoints(ctx context.Context, targets []CheckpointPushRequest) (Chec
 	return report, nil
 }
 
-// waitingCheckpointRefs is the set of queued refs present locally.
+// waitingCheckpointRefs is the set of queued refs present locally, keyed by
+// canonicalCheckpointRefKey: partitionLocalRefs reports the spelling each ref
+// is stored under, which is not necessarily the one the caller will look up.
 func waitingCheckpointRefs(ctx context.Context, repo *git.Repository) (map[plumbing.ReferenceName]struct{}, error) {
 	queued, err := peekCheckpointQueue(ctx, repo)
 	if err != nil {
@@ -462,7 +468,7 @@ func waitingCheckpointRefs(ctx context.Context, repo *git.Repository) (map[plumb
 	existing, _ := partitionLocalRefs(repo, queued)
 	set := make(map[plumbing.ReferenceName]struct{}, len(existing))
 	for _, ref := range existing {
-		set[ref] = struct{}{}
+		set[canonicalCheckpointRefKey(ref)] = struct{}{}
 	}
 	return set, nil
 }
@@ -473,10 +479,11 @@ func waitingCheckpointRefs(ctx context.Context, repo *git.Repository) (map[plumb
 func waitingTargetSelection(targets []CheckpointPushRequest, waiting map[plumbing.ReferenceName]struct{}) (checkpointRefSelection, error) {
 	named := make(map[plumbing.ReferenceName]plumbing.Hash, len(targets))
 	for _, target := range targets {
-		if pinned, ok := named[target.Ref]; ok && pinned != target.Commit {
+		key := canonicalCheckpointRefKey(target.Ref)
+		if pinned, ok := named[key]; ok && pinned != target.Commit {
 			return checkpointRefSelection{}, fmt.Errorf("%s is named with two different commits; name each checkpoint once", target.Ref)
 		}
-		named[target.Ref] = target.Commit
+		named[key] = target.Commit
 	}
 	selection := checkpointRefSelection{refs: make(map[plumbing.ReferenceName]plumbing.Hash, len(named))}
 	for ref, commit := range named {
@@ -495,11 +502,12 @@ func waitingTargetSelection(targets []CheckpointPushRequest, waiting map[plumbin
 func missingCheckpointRefs(repo *git.Repository, targets []CheckpointPushRequest, waiting map[plumbing.ReferenceName]struct{}) map[plumbing.ReferenceName]struct{} {
 	missing := make(map[plumbing.ReferenceName]struct{})
 	for _, target := range targets {
-		if _, ok := waiting[target.Ref]; ok {
+		key := canonicalCheckpointRefKey(target.Ref)
+		if _, ok := waiting[key]; ok {
 			continue
 		}
-		if _, err := repo.Reference(target.Ref, true); errors.Is(err, plumbing.ErrReferenceNotFound) {
-			missing[target.Ref] = struct{}{}
+		if _, err := repo.Reference(resolveQueuedCheckpointRef(repo, target.Ref), true); errors.Is(err, plumbing.ErrReferenceNotFound) {
+			missing[key] = struct{}{}
 		}
 	}
 	return missing
@@ -514,28 +522,35 @@ func checkpointPushOutcomes(
 ) []CheckpointPushOutcome {
 	pushed := make(map[plumbing.ReferenceName]plumbing.Hash, len(result.pushed))
 	for _, ref := range result.pushed {
-		pushed[ref.name] = ref.hash
+		pushed[canonicalCheckpointRefKey(ref.name)] = ref.hash
 	}
 	changed := make(map[plumbing.ReferenceName]plumbing.Hash, len(result.changed))
 	for _, ref := range result.changed {
-		changed[ref.name] = ref.hash
+		changed[canonicalCheckpointRefKey(ref.name)] = ref.hash
+	}
+	// The flush reports a failure under the spelling it acted on: the stored
+	// one for a push attempt, the queued one for a read error. Key both back.
+	failed := make(map[plumbing.ReferenceName]error, len(result.failed))
+	for ref, err := range result.failed {
+		failed[canonicalCheckpointRefKey(ref)] = err
 	}
 
 	outcomes := make([]CheckpointPushOutcome, 0, len(targets))
 	for _, target := range targets {
+		key := canonicalCheckpointRefKey(target.Ref)
 		outcome := CheckpointPushOutcome{Target: target}
-		if hash, ok := pushed[target.Ref]; ok {
+		if hash, ok := pushed[key]; ok {
 			outcome.Status, outcome.Commit = CheckpointPushUploaded, hash
-		} else if hash, ok := changed[target.Ref]; ok {
+		} else if hash, ok := changed[key]; ok {
 			outcome.Status, outcome.Commit = CheckpointPushChanged, hash
-		} else if err, ok := result.failed[target.Ref]; ok {
+		} else if err, ok := failed[key]; ok {
 			outcome.Status, outcome.Err = CheckpointPushFailed, err
 			if errors.Is(err, errCheckpointRefSuperseded) {
 				outcome.Status = CheckpointPushChanged
 			}
-		} else if _, queued := waiting[target.Ref]; queued && flushErr != nil {
+		} else if _, queued := waiting[key]; queued && flushErr != nil {
 			outcome.Status, outcome.Err = CheckpointPushFailed, flushErr
-		} else if _, absent := missing[target.Ref]; absent {
+		} else if _, absent := missing[key]; absent {
 			outcome.Status = CheckpointPushNotFound
 		} else {
 			// Not queued, or it left the queue while this command ran.

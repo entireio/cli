@@ -821,3 +821,40 @@ func TestFlushCheckpointRefsQueue_UnreadableRefStaysQueuedAndIsReported(t *testi
 	require.NoError(t, err)
 	assert.Empty(t, remaining)
 }
+
+// TestCheckpointWaitingAndRefExists_FoldedShardRef pins the two reads that
+// drive `entire session attach`'s report. A checkpoint ref stored under its
+// case-folded shard and then packed does not answer to its canonical name, so
+// both reads said the checkpoint did not exist and attach told the user to run
+// a command that could never find it.
+func TestCheckpointWaitingAndRefExists_FoldedShardRef(t *testing.T) {
+	workDir, _, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	cid := id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B")
+	canonical := mustRefName(t, cid)
+	folded, ok := checkpoint.FoldedRefName(cid)
+	require.True(t, ok)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(folded, head.Hash())))
+	// Packing removes the filesystem's case-insensitive rescue, so the canonical
+	// name stops resolving on a case-insensitive platform too.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	repo, err = git.PlainOpen(workDir)
+	require.NoError(t, err)
+	_ = enqueueRefs(t, repo, []plumbing.ReferenceName{canonical})
+
+	ctx := context.Background()
+	exists, err := CheckpointRefExists(ctx, cid)
+	require.NoError(t, err)
+	assert.True(t, exists, "a checkpoint stored under its folded shard still exists")
+
+	waiting, err := CheckpointWaiting(ctx, cid)
+	require.NoError(t, err)
+	assert.True(t, waiting, "its queue entry is still waiting to be pushed")
+}

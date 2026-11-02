@@ -559,7 +559,9 @@ func partitionCheckpointRefPushes(
 	for _, entry := range entries {
 		// A ref the selection leaves out waits untouched: a push of named refs
 		// does not read, prune or report the others.
-		pin, selected := selection.pin(entry.Ref)
+		// Keyed canonically: the selection was built from the names the caller
+		// asked for, which need not be the spelling this entry was queued under.
+		pin, selected := selection.pin(canonicalCheckpointRefKey(entry.Ref))
 		if !selected {
 			part.waiting = append(part.waiting, entry)
 			continue
