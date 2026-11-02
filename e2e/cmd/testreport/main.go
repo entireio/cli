@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 
@@ -46,10 +45,44 @@ func completedParent(p *parentTest) bool {
 	}
 }
 
+type counts struct {
+	total, passed, failed, skipped, incomplete int
+}
+
+// countParents classifies every parent test once, so the report body and the
+// exit status cannot disagree about what completed.
+func countParents(parents []*parentTest) counts {
+	var c counts
+	for _, p := range parents {
+		c.total++
+		switch p.action {
+		case "pass":
+			c.passed++
+		case "fail":
+			c.failed++
+		case "skip":
+			c.skipped++
+		}
+		if !completedParent(p) {
+			c.incomplete++
+		}
+	}
+	return c
+}
+
+// inputName describes the event source for an error message. flag.Arg(0) is
+// empty when events arrive on stdin, which would otherwise render as "".
+func inputName(path string) string {
+	if path == "" {
+		return "standard input"
+	}
+	return fmt.Sprintf("%q", path)
+}
+
 func main() {
 	colorFlag := flag.Bool("color", false, "Force color output (default: auto-detect TTY)")
 	outputFile := flag.String("o", "", "Write output to file (ANSI + .nocolor.txt)")
-	failOnEmpty := flag.Bool("fail-on-empty", false, "Fail after writing the report if no parent tests completed")
+	failOnIncomplete := flag.Bool("fail-on-incomplete", false, "Fail after writing the report unless every test that started reached a terminal pass, fail, or skip event")
 	flag.Parse()
 
 	useColor := *colorFlag || interactive.IsTerminalWriter(os.Stdout)
@@ -61,12 +94,13 @@ func main() {
 	}
 
 	parents := parseEvents(r)
-	report := renderReport(parents, useColor)
+	c := countParents(parents)
+	report := renderReport(parents, c, useColor)
 
 	fmt.Print(report)
 
 	if *outputFile != "" {
-		colorReport := renderReport(parents, true)
+		colorReport := renderReport(parents, c, true)
 		if err := os.WriteFile(*outputFile, []byte(colorReport), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", *outputFile, err)
 			os.Exit(1)
@@ -78,10 +112,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	// Require a terminal parent event; skipped parents still count as completed.
-	if *failOnEmpty && !slices.ContainsFunc(parents, completedParent) {
-		fmt.Fprintf(os.Stderr, "no tests completed in %q: check the test filter and the test output for build, regex, preflight errors, or an interrupted run\n", flag.Arg(0))
-		os.Exit(1)
+	// Every parent test must reach a terminal event; skipped parents count as
+	// completed. A partially completed run fails too, not just an empty one:
+	// gotestsum's exit code reflects the tests that reported a result, so a
+	// test that never reported one is invisible to it.
+	if *failOnIncomplete {
+		switch {
+		case c.total == 0:
+			fmt.Fprintf(os.Stderr, "no tests ran in %s: check the test filter and the test output for build, regex, or preflight errors\n", inputName(flag.Arg(0)))
+			os.Exit(1)
+		case c.incomplete > 0:
+			fmt.Fprintf(os.Stderr, "%d of %d tests did not complete in %s: check the test output for a panic, a timeout, or an interrupted run\n", c.incomplete, c.total, inputName(flag.Arg(0)))
+			os.Exit(1)
+		}
 	}
 }
 
@@ -184,24 +227,10 @@ func splitTestName(name string) (parent, child string) {
 	return parent, child
 }
 
-func renderReport(parents []*parentTest, color bool) string {
+func renderReport(parents []*parentTest, c counts, color bool) string {
 	var b strings.Builder
 
-	// Count totals
-	var total, passed, failed, skipped, incomplete int
-	for _, p := range parents {
-		total++
-		switch p.action {
-		case "pass":
-			passed++
-		case "fail":
-			failed++
-		case "skip":
-			skipped++
-		default:
-			incomplete++
-		}
-	}
+	total, passed, failed, skipped, incomplete := c.total, c.passed, c.failed, c.skipped, c.incomplete
 
 	// Header
 	b.WriteString("E2E Test Report\n")
@@ -268,19 +297,24 @@ func renderReport(parents []*parentTest, color bool) string {
 		b.WriteString("\n")
 	}
 
-	// Footer banner
+	// Footer banner. A failure outranks an incomplete test: a run that both
+	// failed and was cut off is a failing run, and the FAILED banner is what
+	// CI logs and humans scan for.
 	switch {
-	case incomplete > 0:
-		fmt.Fprintf(&b, "INCOMPLETE (%d/%d tests completed)\n", total-incomplete, total)
 	case total == 0:
 		b.WriteString("NO TESTS RAN\n")
 	case failed > 0:
 		banner := fmt.Sprintf("💥 FAILED (%d/%d passed) 💥", passed, total)
+		if incomplete > 0 {
+			banner = fmt.Sprintf("💥 FAILED (%d/%d passed, %d incomplete) 💥", passed, total, incomplete)
+		}
 		if color {
 			fmt.Fprintf(&b, "%s%s%s\n", colorRed, banner, colorReset)
 		} else {
 			b.WriteString(banner + "\n")
 		}
+	case incomplete > 0:
+		fmt.Fprintf(&b, "INCOMPLETE (%d/%d tests completed)\n", total-incomplete, total)
 	default:
 		banner := fmt.Sprintf("🎉 ALL %d TESTS PASSED 🎉", total)
 		if color {

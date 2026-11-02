@@ -40,7 +40,7 @@ gotestsum --format dots --jsonfile "$E2E_ARTIFACT_DIR/test-events.json" -- \
   ./e2e/tests/... || rc=$?
 
 report_rc=0
-go run ./e2e/cmd/testreport -fail-on-empty -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json" || report_rc=$?
+go run ./e2e/cmd/testreport -fail-on-incomplete -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json" || report_rc=$?
 echo ""
 cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null || true
 echo "artifacts: $E2E_ARTIFACT_DIR"

@@ -54,7 +54,7 @@ PATH="$E2E_PATH" E2E_AGENT=vogon gotestsum --format dots \
   ${filter:+-run "$filter"} \
   ./e2e/tests/... || vogon_rc=$?
 
-go run ./e2e/cmd/testreport -fail-on-empty -color \
+go run ./e2e/cmd/testreport -fail-on-incomplete -color \
   -o "$E2E_ARTIFACT_DIR/report-vogon.txt" \
   "$E2E_ARTIFACT_DIR/test-events-vogon.json" || vogon_rc=1
 
@@ -87,7 +87,7 @@ E2E_AGENT=roger-roger gotestsum --format dots \
   -run "$rr_filter" \
   ./e2e/tests/... || rr_rc=$?
 
-go run ./e2e/cmd/testreport -fail-on-empty -color \
+go run ./e2e/cmd/testreport -fail-on-incomplete -color \
   -o "$E2E_ARTIFACT_DIR/report-roger-roger.txt" \
   "$E2E_ARTIFACT_DIR/test-events-roger-roger.json" || rr_rc=1
 

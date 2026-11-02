@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +31,7 @@ func TestReportCommand(t *testing.T) {
 		{"output only", "{\"Action\":\"output\",\"Test\":\"TestFoo\",\"Output\":\"hello\"}\n", true, 1, "INCOMPLETE"},
 		{"child only", "{\"Action\":\"pass\",\"Test\":\"TestFoo/agent\"}\n", true, 1, "INCOMPLETE"},
 		{"diagnostic incomplete", "{\"Action\":\"run\",\"Test\":\"TestFoo\"}\n", false, 0, "INCOMPLETE"},
-		{"mixed complete and incomplete", "{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n{\"Action\":\"run\",\"Test\":\"TestBar\"}\n", true, 0, "INCOMPLETE"},
+		{"mixed complete and incomplete", "{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n{\"Action\":\"run\",\"Test\":\"TestBar\"}\n", true, 1, "INCOMPLETE (1/2 tests completed)"},
 		{"incomplete retry", "{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n{\"Action\":\"run\",\"Test\":\"TestFoo\"}\n", true, 1, "INCOMPLETE"},
 		{"empty", "", true, 1, "NO TESTS RAN"},
 		{"package only", "{\"Action\":\"pass\",\"Package\":\"tests\"}\n", true, 1, "NO TESTS RAN"},
@@ -39,7 +40,10 @@ func TestReportCommand(t *testing.T) {
 		{"pass", "{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n", true, 0, "ALL 1 TESTS PASSED"},
 		{"skip", "{\"Action\":\"skip\",\"Test\":\"TestFoo\"}\n", true, 0, "Skipped: 1"},
 		{"children skip", "{\"Action\":\"skip\",\"Test\":\"TestFoo/agent\"}\n{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n", true, 0, "Total: 1"},
-		{"rerun", "{\"Action\":\"fail\",\"Test\":\"TestFoo\"}\n{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n", true, 0, "ALL 1 TESTS PASSED"},
+		{"last terminal event wins", "{\"Action\":\"fail\",\"Test\":\"TestFoo\"}\n{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n", true, 0, "ALL 1 TESTS PASSED"},
+		{"rerun", "{\"Action\":\"fail\",\"Test\":\"TestFoo\"}\n{\"Action\":\"run\",\"Test\":\"TestFoo\"}\n{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n", true, 0, "ALL 1 TESTS PASSED"},
+		{"failed", "{\"Action\":\"fail\",\"Test\":\"TestFoo\"}\n", true, 0, "FAILED (0/1 passed)"},
+		{"failed and incomplete", "{\"Action\":\"fail\",\"Test\":\"TestFoo\"}\n{\"Action\":\"run\",\"Test\":\"TestBar\"}\n", true, 1, "FAILED (0/2 passed, 1 incomplete)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -50,7 +54,7 @@ func TestReportCommand(t *testing.T) {
 			}
 			args := []string{"-o", filepath.Join(dir, "report.txt")}
 			if tc.strict {
-				args = append(args, "-fail-on-empty")
+				args = append(args, "-fail-on-incomplete")
 			}
 			cmd := exec.CommandContext(t.Context(), binary, append(args, events)...)
 			out, err := cmd.CombinedOutput()
@@ -60,7 +64,7 @@ func TestReportCommand(t *testing.T) {
 			if code := cmd.ProcessState.ExitCode(); code != tc.code {
 				t.Fatalf("exit = %d, want %d: %s", code, tc.code, out)
 			}
-			if tc.code != 0 && !strings.Contains(string(out), events) {
+			if tc.code != 0 && !strings.Contains(string(out), fmt.Sprintf("%q", events)) {
 				t.Errorf("failure does not name the input: %s", out)
 			}
 			for _, name := range []string{"report.txt", "report.nocolor.txt"} {
@@ -68,7 +72,7 @@ func TestReportCommand(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if tc.banner == "INCOMPLETE" && strings.Contains(string(data), "TESTS PASSED") {
+				if strings.HasPrefix(tc.banner, "INCOMPLETE") && strings.Contains(string(data), "TESTS PASSED") {
 					t.Errorf("%s reports incomplete tests as passing: %s", name, data)
 				}
 				if !strings.Contains(string(data), tc.banner) {
