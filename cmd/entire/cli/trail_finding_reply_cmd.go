@@ -32,10 +32,35 @@ func trailFindingMessagePath(trailID, discussionID, messageID string) string {
 }
 
 func trailFindingDiscussionID(comment api.TrailReviewComment) (string, error) {
-	if id := strings.TrimSpace(stringPtrValue(comment.DiscussionID)); id != "" {
-		return id, nil
+	id := strings.TrimSpace(stringPtrValue(comment.DiscussionID))
+	if id == "" {
+		return "", fmt.Errorf("finding %s has no reply thread", tuiutil.SanitizeTerminalLabel(comment.ID))
 	}
-	return "", fmt.Errorf("finding %s has no reply thread", comment.ID)
+	if err := checkTrailPathSegment("reply thread ID", id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// checkTrailPathSegment refuses an ID that cannot stand as one URL path
+// segment. Escaping leaves "." and ".." alone and resolving the URL drops
+// them, so an empty or dot ID would address the thread or the message list
+// instead of one message.
+func checkTrailPathSegment(what, id string) error {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\") {
+		return fmt.Errorf("invalid %s %q", what, tuiutil.SanitizeTerminalLabel(id))
+	}
+	return nil
+}
+
+// trailFindingReplyArgs splits [<trail>] <finding-id> <message-id> and checks
+// the message ID before any request.
+func trailFindingReplyArgs(args []string) ([]string, string, error) {
+	messageID := strings.TrimSpace(args[len(args)-1])
+	if err := checkTrailPathSegment("message ID", messageID); err != nil {
+		return nil, "", err
+	}
+	return args[:len(args)-1], messageID, nil
 }
 
 // resolveTrailFindingThread resolves the finding and its discussion for the
@@ -79,7 +104,7 @@ func newTrailFindingReplyCmd(targetOpts *trailReviewTargetOptions) *cobra.Comman
 			if err != nil {
 				return fmt.Errorf("reply to finding: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Added reply %s to finding %s\n", message.ID, comment.ID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Added reply %s to finding %s\n", tuiutil.SanitizeTerminalLabel(message.ID), tuiutil.SanitizeTerminalLabel(comment.ID))
 			return nil
 		},
 	}
@@ -92,13 +117,17 @@ func newTrailFindingEditReplyCmd(targetOpts *trailReviewTargetOptions) *cobra.Co
 	cmd := &cobra.Command{
 		Use:   "edit-reply [<trail>] <finding-id> <message-id> -m <body>",
 		Short: "Edit your reply to a finding",
+		Long:  "Edit a reply you wrote on a finding. 'entire trail finding show <finding-id>' prints the replies and their message IDs.",
 		Args:  cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.TrimSpace(body) == "" {
 				return errors.New("--body is required")
 			}
-			messageID := args[len(args)-1]
-			client, trailID, _, discussionID, err := resolveTrailFindingThread(cmd, targetOpts, args[:len(args)-1])
+			findingArgs, messageID, err := trailFindingReplyArgs(args)
+			if err != nil {
+				return err
+			}
+			client, trailID, _, discussionID, err := resolveTrailFindingThread(cmd, targetOpts, findingArgs)
 			if err != nil {
 				return err
 			}
@@ -106,7 +135,7 @@ func newTrailFindingEditReplyCmd(targetOpts *trailReviewTargetOptions) *cobra.Co
 			if err != nil {
 				return fmt.Errorf("edit finding reply: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Edited reply %s\n", message.ID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Edited reply %s\n", tuiutil.SanitizeTerminalLabel(message.ID))
 			return nil
 		},
 	}
@@ -115,13 +144,22 @@ func newTrailFindingEditReplyCmd(targetOpts *trailReviewTargetOptions) *cobra.Co
 }
 
 func newTrailFindingDeleteReplyCmd(targetOpts *trailReviewTargetOptions) *cobra.Command {
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "delete-reply [<trail>] <finding-id> <message-id>",
 		Short: "Delete your reply to a finding",
-		Args:  cobra.RangeArgs(2, 3),
+		Long: "Delete a reply you wrote on a finding. 'entire trail finding show <finding-id>' prints the replies and their message IDs.\n\n" +
+			"A terminal asks for confirmation; without one, pass --force.",
+		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			messageID := args[len(args)-1]
-			client, trailID, _, discussionID, err := resolveTrailFindingThread(cmd, targetOpts, args[:len(args)-1])
+			findingArgs, messageID, err := trailFindingReplyArgs(args)
+			if err != nil {
+				return err
+			}
+			if proceed, err := confirmTrailMessageDelete(cmd, messageID, force); !proceed {
+				return err
+			}
+			client, trailID, _, discussionID, err := resolveTrailFindingThread(cmd, targetOpts, findingArgs)
 			if err != nil {
 				return err
 			}
@@ -133,10 +171,11 @@ func newTrailFindingDeleteReplyCmd(targetOpts *trailReviewTargetOptions) *cobra.
 			if err := checkTrailResponse(resp); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Deleted reply %s\n", messageID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Deleted reply %s\n", tuiutil.SanitizeTerminalLabel(messageID))
 			return nil
 		},
 	}
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Delete without asking for confirmation")
 	return cmd
 }
 
@@ -187,10 +226,10 @@ func printTrailFindingReplies(w io.Writer, messages []api.TrailDiscussionMessage
 	}
 	fmt.Fprintf(w, "\nReplies:\n")
 	for _, m := range messages {
-		fmt.Fprintf(w, "  %s  %s  %s\n", m.ID, tuiutil.SanitizeTerminalLabel(m.Author), m.CreatedAt.Format(time.RFC3339))
+		fmt.Fprintf(w, "  %s  %s  %s\n", tuiutil.SanitizeTerminalLabel(m.ID), tuiutil.SanitizeTerminalLabel(m.Author), m.CreatedAt.Format(time.RFC3339))
 		fmt.Fprintf(w, "  %s\n", indentTrailFindingReply(m.Body, "  "))
 		for _, r := range m.Replies {
-			fmt.Fprintf(w, "    ↳ %s  %s  %s\n", r.ID, tuiutil.SanitizeTerminalLabel(r.Author), r.CreatedAt.Format(time.RFC3339))
+			fmt.Fprintf(w, "    ↳ %s  %s  %s\n", tuiutil.SanitizeTerminalLabel(r.ID), tuiutil.SanitizeTerminalLabel(r.Author), r.CreatedAt.Format(time.RFC3339))
 			fmt.Fprintf(w, "    %s\n", indentTrailFindingReply(r.Body, "    "))
 		}
 	}

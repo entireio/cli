@@ -83,10 +83,51 @@ func TestTrailFindingDeleteReply_DeletesTheMessage(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	out, _, err := executeProjectTrailTest(t, "finding", "delete-reply", "widget/7", findingReplyTestFinding, "message-one", "--project", "gh/acme")
+	out, _, err := executeProjectTrailTest(t, "finding", "delete-reply", "widget/7", findingReplyTestFinding, "message-one", "--project", "gh/acme", "--force")
 	require.NoError(t, err)
 	require.Equal(t, []string{"DELETE " + findingReplyTestThreadPath + "/messages/message-one"}, sent)
 	assert.Contains(t, out, "Deleted reply message-one")
+}
+
+func TestTrailFindingDeleteReply_RefusesWithoutConfirmation(t *testing.T) {
+	// Not parallel: replaces client constructors. Tests have no terminal to
+	// prompt on, so without --force the delete is refused.
+	setupFindingReplyTest(t, findingReplyTestDiscussion, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("must not delete without confirmation: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	})
+
+	_, _, err := executeProjectTrailTest(t, "finding", "delete-reply", "widget/7", findingReplyTestFinding, "message-one", "--project", "gh/acme")
+	require.ErrorContains(t, err, "refusing to delete message message-one without confirmation; pass --force")
+}
+
+func TestTrailFindingReply_RefusesMessageIDsThatAreNotOnePathSegment(t *testing.T) {
+	// Not parallel: replaces client constructors. Resolving the URL would turn
+	// these into the thread or the message list.
+	setupFindingReplyTest(t, findingReplyTestDiscussion, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected thread request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	})
+	for _, id := range []string{"", " ", ".", "..", "../message-one", `a\b`} {
+		for _, args := range [][]string{
+			{"finding", "edit-reply", "widget/7", findingReplyTestFinding, id, "-m", "x", "--project", "gh/acme"},
+			{"finding", "delete-reply", "widget/7", findingReplyTestFinding, id, "--project", "gh/acme", "--force"},
+		} {
+			_, _, err := executeProjectTrailTest(t, args...)
+			require.ErrorContains(t, err, "invalid message ID", "args %q", args)
+		}
+	}
+}
+
+func TestTrailFindingReply_RefusesAThreadIDThatIsNotOnePathSegment(t *testing.T) {
+	// Not parallel: replaces client constructors. The finding names its thread,
+	// so a server-sent ID is checked like a typed one.
+	setupFindingReplyTest(t, "..", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected thread request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	})
+	_, _, err := executeProjectTrailTest(t, "finding", "reply", "widget/7", findingReplyTestFinding, "-m", "x", "--project", "gh/acme")
+	require.ErrorContains(t, err, "invalid reply thread ID")
 }
 
 func TestTrailFindingReply_RefusesAFindingWithoutAThread(t *testing.T) {
