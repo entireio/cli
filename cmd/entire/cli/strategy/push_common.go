@@ -184,7 +184,7 @@ func recoverCheckpointRef(
 	if err != nil {
 		return checkpointRefPush{}, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
 	}
-	newTip, err := replayCheckpointCandidate(ctx, fetched, candidate.hash, remoteRef.Hash())
+	newTip, replayed, err := replayOntoRemote(ctx, fetched, candidate.hash, remoteRef.Hash())
 	if err != nil {
 		return checkpointRefPush{}, err
 	}
@@ -200,71 +200,64 @@ func recoverCheckpointRef(
 		}
 		return checkpointRefPush{}, fmt.Errorf("install recovered checkpoint ref %s: %w", candidate.name, err)
 	}
+	if replayed > 0 {
+		// Recovery prints nothing on success, so the rewrite of local commits
+		// must still leave a trace in the log. Metadata only.
+		logging.Info(ctx, "replayed checkpoint ref onto fetched remote tip; local ref rewritten",
+			slog.String("ref", candidate.name.String()),
+			slog.String("local_tip", candidate.hash.String()),
+			slog.String("remote_tip", remoteRef.Hash().String()),
+			slog.Int("commits_replayed", replayed))
+	}
 	candidate.hash = newTip
 	return candidate, nil
 }
 
-func replayCheckpointCandidate(
+// replayOntoRemote returns the tip that results from replaying the commits
+// only localHash reaches onto remoteHash. It never writes a ref; each caller
+// installs the tip under its own update rule. Disconnected history (no merge
+// base) is replayed with replayDisconnectedOnto. replayed counts the local
+// commits handed to the cherry-pick, zero when the remote tip is returned as is.
+func replayOntoRemote(
 	ctx context.Context,
 	repo *git.Repository,
 	localHash, remoteHash plumbing.Hash,
-) (plumbing.Hash, error) {
+) (tip plumbing.Hash, replayed int, err error) {
 	if localHash.Equal(remoteHash) {
-		return remoteHash, nil
+		return remoteHash, 0, nil
 	}
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("get repository path: %w", err)
+		return plumbing.ZeroHash, 0, fmt.Errorf("get repository path: %w", err)
 	}
 	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), remoteHash.String())
 	if err == nil && mergeBase.Equal(localHash) {
-		return remoteHash, nil
+		return remoteHash, 0, nil
 	}
 
 	shallow, shallowErr := loadShallowHashes(ctx, repoPath)
 	if shallowErr != nil {
-		return plumbing.ZeroHash, fmt.Errorf("load shallow boundaries: %w", shallowErr)
+		return plumbing.ZeroHash, 0, fmt.Errorf("load shallow boundaries: %w", shallowErr)
 	}
 	if errors.Is(err, errNoMergeBase) {
-		commits, collectErr := collectCommitChain(repo, localHash, shallow)
-		if collectErr != nil {
-			return plumbing.ZeroHash, fmt.Errorf("collect disconnected checkpoint commits: %w", collectErr)
-		}
-		dataCommits := make([]*object.Commit, 0, len(commits))
-		for _, commit := range commits {
-			tree, treeErr := commit.Tree()
-			if treeErr != nil {
-				return plumbing.ZeroHash, fmt.Errorf("read tree for commit %s: %w", commit.Hash.String()[:7], treeErr)
-			}
-			if len(tree.Entries) > 0 {
-				dataCommits = append(dataCommits, commit)
-			}
-		}
-		if len(dataCommits) == 0 {
-			return remoteHash, nil
-		}
-		newTip, pickErr := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow)
-		if pickErr != nil {
-			return plumbing.ZeroHash, fmt.Errorf("replay disconnected checkpoint commits: %w", pickErr)
-		}
-		return newTip, nil
+		return replayDisconnectedOnto(ctx, repo, localHash, remoteHash, shallow, io.Discard)
 	}
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("find checkpoint merge base: %w", err)
+		return plumbing.ZeroHash, 0, fmt.Errorf("find checkpoint merge base: %w", err)
 	}
 
 	commits, err := collectCommitsSince(ctx, repo, repoPath, localHash, remoteHash)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("collect local checkpoint commits: %w", err)
+		return plumbing.ZeroHash, 0, fmt.Errorf("collect local checkpoint commits: %w", err)
 	}
 	if len(commits) == 0 {
-		return remoteHash, nil
+		return remoteHash, 0, nil
 	}
 	newTip, err := cherryPickOnto(ctx, repo, remoteHash, commits, shallow)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("replay checkpoint commits: %w", err)
+		return plumbing.ZeroHash, 0, fmt.Errorf("replay checkpoint commits: %w", err)
 	}
-	return newTip, nil
+	return newTip, len(commits), nil
 }
 
 // checkpointRefRecoveryError keeps both failures inspectable, while allowing the
@@ -802,53 +795,10 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 		return nil
 	}
 
-	// If local is already at or behind remote, fast-forward
-	if localRef.Hash().Equal(remoteRef.Hash()) {
-		return advance(remoteRef.Hash())
-	}
-
-	// Find merge base
-	repoPath, err := getRepoPath(repo)
-	if err != nil {
-		return fmt.Errorf("failed to get repo path: %w", err)
-	}
-	mergeBase, err := getMergeBase(ctx, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
-	if err != nil {
-		return fmt.Errorf("failed to find merge base: %w", err)
-	}
-
-	// If local is ancestor of remote (merge base == local), fast-forward to remote
-	if mergeBase.Equal(localRef.Hash()) {
-		if err := advance(remoteRef.Hash()); err != nil {
-			return fmt.Errorf("failed to fast-forward ref: %w", err)
-		}
-		return nil
-	}
-
-	// Collect commits reachable from local but not from remote and cherry-pick
-	// them onto the remote tip. This preserves local-only commits even when the
-	// local metadata branch already contains old merge commits, while avoiding
-	// replaying shared ancestors older than the true merge-base.
-	localCommits, err := collectCommitsSince(ctx, repo, repoPath, localRef.Hash(), remoteRef.Hash())
-	if err != nil {
-		return fmt.Errorf("failed to collect local commits: %w", err)
-	}
-
-	if len(localCommits) == 0 {
-		// No local-only commits — just point to remote
-		return advance(remoteRef.Hash())
-	}
-
-	shallow, err := loadShallowHashes(ctx, repoPath)
-	if err != nil {
-		return fmt.Errorf("failed to load shallow boundaries: %w", err)
-	}
-
-	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits, shallow)
+	newTip, _, err := replayOntoRemote(ctx, repo, localRef.Hash(), remoteRef.Hash())
 	if err != nil {
 		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
 	}
-
 	return advance(newTip)
 }
 
