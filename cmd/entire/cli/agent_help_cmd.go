@@ -251,7 +251,10 @@ var agentHelpGuidance = map[string]string{
 		"`entire trail attachment add <file>` and put the printed\n" +
 		"`![image](attachment:<id>)` line on a line of its own in the body. Edit the\n" +
 		"body read from `entire trail show --json`: existing images appear there as\n" +
-		"the same lines and must be kept when writing it back with `trail update --body`.",
+		"the same lines and must be kept when writing it back with `trail update --body`.\n" +
+		"Never run `trail attachment remove` unless the user asks for that attachment\n" +
+		"to be deleted: it cannot be undone, and the image disappears from every\n" +
+		"description that shows it. Do not pass --force on your own.",
 
 	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
 		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
