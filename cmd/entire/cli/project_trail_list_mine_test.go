@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -241,9 +243,9 @@ func TestTrailListMine_AnUnreadableItemMakesItsRegionPartial(t *testing.T) {
 	require.NoError(t, err)
 	var got myProjectTrailsJSON
 	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
-	require.Len(t, got.Items, 1, "the readable item stays; an item without an id is left out")
+	require.Len(t, got.Items, 1, "the readable item stays")
 	assert.Equal(t, "good", got.Items[0].ID)
-	assert.Equal(t, []string{"region us: 2 trail(s) could not be read"}, got.Partial)
+	assert.Equal(t, []string{"region us: 3 trail(s) could not be read"}, got.Partial, "an item without an id counts too")
 }
 
 func TestTrailListMine_ARejectedLoginFailsTheList(t *testing.T) {
@@ -292,4 +294,14 @@ func TestTrailListMine_EmptyCatalogAndEmptyList(t *testing.T) {
 	out, _, err := runTrailListMine(t)
 	require.NoError(t, err)
 	assert.Contains(t, out, "No trails authored by or assigned to you.")
+}
+
+func TestMergeMyProjectTrails_ALoginFailureForOneRegionFailsTheList(t *testing.T) {
+	t.Parallel()
+	ok := cellCallResult[myProjectTrailsRegion]{group: cellGroup{jurisdiction: "eu"}}
+	for _, authErr := range []error{auth.ErrNotLoggedIn, fmt.Errorf("cell client: %w", auth.ErrReauthRequired)} {
+		failed := cellCallResult[myProjectTrailsRegion]{group: cellGroup{jurisdiction: "us"}, err: authErr}
+		_, err := mergeMyProjectTrails(t.Context(), []cellCallResult[myProjectTrailsRegion]{ok, failed}, 10)
+		require.ErrorIs(t, err, authErr)
+	}
 }

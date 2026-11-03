@@ -181,8 +181,9 @@ func listMyProjectTrails(cmd *cobra.Command, status string, limit int) (myProjec
 	return mergeMyProjectTrails(ctx, results, limit)
 }
 
-// readMyProjectTrailsRegion reads one region's page. An item it cannot read is
-// left out and reported as partial rather than failing the region or the list.
+// readMyProjectTrailsRegion reads one region's page. An item it cannot read,
+// or one without an ID, is left out and reported as partial rather than
+// failing the region or the list.
 func readMyProjectTrailsRegion(ctx context.Context, g cellGroup, client *api.Client, path string) (myProjectTrailsRegion, error) {
 	var region myProjectTrailsRegion
 	resp, err := client.Get(ctx, path)
@@ -206,12 +207,9 @@ func readMyProjectTrailsRegion(ctx context.Context, g cellGroup, client *api.Cli
 	unreadable := 0
 	for _, raw := range page.Items {
 		var item myProjectTrailCellItem
-		if err := json.Unmarshal(raw, &item); err != nil || item.LastActivityAt.IsZero() {
+		if err := json.Unmarshal(raw, &item); err != nil || item.ID == "" || item.LastActivityAt.IsZero() {
 			unreadable++
 			logging.Debug(ctx, "trail list --mine: unreadable item", "region", g.label(), "error", fmt.Sprint(err))
-			continue
-		}
-		if item.ID == "" {
 			continue
 		}
 		region.items = append(region.items, item.toMyProjectTrail())
@@ -243,8 +241,11 @@ func myProjectTrailsRegionFailure(err error) string {
 	return "could not be reached"
 }
 
+// isAuthFailure is a region rejecting the caller's login, or the login itself
+// failing for that region's client.
 func isAuthFailure(err error) bool {
-	return api.IsHTTPErrorStatus(err, http.StatusUnauthorized) || api.IsHTTPErrorStatus(err, http.StatusForbidden)
+	return api.IsHTTPErrorStatus(err, http.StatusUnauthorized) || api.IsHTTPErrorStatus(err, http.StatusForbidden) ||
+		errors.Is(err, auth.ErrNotLoggedIn) || errors.Is(err, auth.ErrReauthRequired)
 }
 
 // mergeMyProjectTrails keeps the newest copy of each trail, orders them by
@@ -260,6 +261,9 @@ func mergeMyProjectTrails(ctx context.Context, results []cellCallResult[myProjec
 		if r.err != nil {
 			logging.Debug(ctx, "trail list --mine: region failed", "region", r.group.label(), "error", r.err.Error())
 			if isAuthFailure(r.err) {
+				if errors.Is(r.err, auth.ErrNotLoggedIn) {
+					return myProjectTrailsJSON{}, loginHintErr(r.err)
+				}
 				return myProjectTrailsJSON{}, fmt.Errorf("list your trails: %s rejected your login (%s): %w", label, myProjectTrailsRegionFailure(r.err), r.err)
 			}
 			failed++
