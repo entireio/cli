@@ -200,7 +200,6 @@ func TestTrailAttachmentAdd_RemovesTheRegisteredAttachmentWhenTheUploadFails(t *
 	path := writeTestPNG(t, "shot.png", 3, 2)
 	for name, setup := range map[string]func(*trailAttachmentTestServer){
 		"storage refuses": func(s *trailAttachmentTestServer) { s.storageStatus = http.StatusForbidden },
-		"URL expired":     func(s *trailAttachmentTestServer) { s.expiresAt = "2020-01-01T00:00:00Z" },
 	} {
 		s := serveTrailAttachments(t, nil)
 		setup(s)
@@ -209,4 +208,14 @@ func TestTrailAttachmentAdd_RemovesTheRegisteredAttachmentWhenTheUploadFails(t *
 		assert.Equal(t, "DELETE /attachments/"+trailAttachmentTestID, s.requests[len(s.requests)-1], "%s: the unfinished attachment is removed", name)
 		assert.NotContains(t, s.requests, "POST /attachments/"+trailAttachmentTestID+"/complete", name)
 	}
+}
+
+func TestTrailAttachmentAdd_LeavesTheUploadURLExpiryToStorage(t *testing.T) {
+	// Serial: replaces global clients. An expiry already past by the local
+	// clock is still tried: the clock may run ahead of the server's.
+	s := serveTrailAttachments(t, nil)
+	s.expiresAt = "2020-01-01T00:00:00Z"
+	_, _, err := executeProjectTrailTest(t, trailAttachmentArgs("add", writeTestPNG(t, "shot.png", 3, 2))...)
+	require.NoError(t, err)
+	assert.Contains(t, s.requests, "storage PUT")
 }

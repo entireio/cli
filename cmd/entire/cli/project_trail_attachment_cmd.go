@@ -178,9 +178,8 @@ func uploadTrailAttachment(ctx context.Context, target *projectTrailTarget, file
 	if intent.Upload.MaxBytes > 0 && int64(len(file.data)) > intent.Upload.MaxBytes {
 		return fail(fmt.Errorf("%s is larger than the server's %d-byte limit", file.name, intent.Upload.MaxBytes))
 	}
-	if !intent.Upload.ExpiresAt.IsZero() && !time.Now().Before(intent.Upload.ExpiresAt) {
-		return fail(errors.New("upload attachment: the upload URL had already expired"))
-	}
+	// The upload URL's expiry is left to storage: comparing it with the local
+	// clock would refuse a valid URL whenever that clock runs ahead.
 	if err := putTrailAttachmentBytes(ctx, intent.Upload.URL, file); err != nil {
 		return fail(err)
 	}
