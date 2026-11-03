@@ -20,17 +20,16 @@ type TrailListResponse struct {
 // snake_case and nullable branch fields. Branch is empty when the trail is
 // currently unlinked; OriginalBranch separately preserves its last link.
 type TrailResource struct {
-	ID             string `json:"id,omitempty"`
-	Number         int    `json:"number,omitempty"`
-	URL            string `json:"url,omitempty"`
-	Branch         string `json:"branch"`
-	OriginalBranch string `json:"original_branch,omitempty"`
-	Base           string `json:"base"`
-	Title          string `json:"title"`
-	Body           string `json:"body,omitempty"`
-	Status         string `json:"status"`
-	// ReadyForReview is nil when the server omits it.
-	ReadyForReview     *bool                 `json:"ready_for_review,omitempty"`
+	ID                 string                `json:"id,omitempty"`
+	Number             int                   `json:"number,omitempty"`
+	URL                string                `json:"url,omitempty"`
+	Branch             string                `json:"branch"`
+	OriginalBranch     string                `json:"original_branch,omitempty"`
+	Base               string                `json:"base"`
+	Title              string                `json:"title"`
+	Body               string                `json:"body,omitempty"`
+	Status             string                `json:"status"`
+	ReadyForReview     *bool                 `json:"ready_for_review,omitempty"` // nil when the server omits it
 	Phase              string                `json:"phase,omitempty"`
 	Author             *trail.Author         `json:"author"`
 	Assignees          []string              `json:"assignees"`

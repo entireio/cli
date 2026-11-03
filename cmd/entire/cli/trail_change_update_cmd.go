@@ -112,17 +112,9 @@ func patchWorkingTrailChange(cmd *cobra.Command, mode *trailMode, selector, bran
 	if status := strings.ToLower(strings.TrimSpace(selected.Work.Status)); status == "merged" || status == "closed" {
 		return nil, nil, fmt.Errorf("%s is %s; only open trail work can be changed", selected.description(), status)
 	}
-	resp, err := selected.Client.Patch(cmd.Context(), trailNumberPathForBase(selected.BasePath, selected.Work.Number), request)
+	updated, err := sendTrailPatch(cmd.Context(), selected.Client, trailNumberPathForBase(selected.BasePath, selected.Work.Number), request)
 	if err != nil {
-		return nil, nil, fmt.Errorf("update trail: %w", err)
-	}
-	defer resp.Body.Close()
-	if err := checkTrailResponse(resp); err != nil {
 		return nil, nil, err
 	}
-	var out api.TrailUpdateResponse
-	if err := api.DecodeJSON(resp, &out); err != nil {
-		return nil, nil, fmt.Errorf("decode trail update: %w", err)
-	}
-	return selected, &out.Trail, nil
+	return selected, updated, nil
 }
