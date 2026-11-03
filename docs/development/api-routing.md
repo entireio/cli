@@ -111,8 +111,9 @@ uses the following routing shapes, mirroring the entire.io BFF:
   cursors cannot continue a merged order). Unlike the sidebar, which fails
   the whole request when any region fails, the CLI lists what the other
   regions returned and reports the failed region as partial (status, code,
-  and request ID only). A 401/403 from any region still fails the command,
-  since every region is sent the same credentials.
+  and request ID only). A 401 from any region still fails the command, since
+  every region is sent the same credentials; a 403 can mean only that the
+  caller has no access in that region, so it leaves that region partial.
 - **Cloud dispatch → one jurisdiction's cell**: `entire dispatch` builds one
   `CellClientFactory` (`newDispatchCellClient` in `dispatch/mode_cloud.go`)
   and dials the `--jurisdiction` cell, else the home cell. It posts to

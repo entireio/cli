@@ -251,16 +251,29 @@ func TestTrailListMine_AnUnreadableItemMakesItsRegionPartial(t *testing.T) {
 
 func TestTrailListMine_ARejectedLoginFailsTheList(t *testing.T) {
 	// Serial: replaces the core client and cell builder seams.
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
-		var euQueries, usQueries []string
-		eu := serveMyTrailsRegion(t, http.StatusOK, &euQueries, myTrailTestItem("eu-1", 1, "2026-10-29T12:00:00Z"))
-		us := serveMyTrailsRegion(t, status, &usQueries)
-		withMyTrailsClusters(t, myTrailsCluster("eu", "eu", eu, true), myTrailsCluster("us", "us", us, true))
+	var euQueries, usQueries []string
+	eu := serveMyTrailsRegion(t, http.StatusOK, &euQueries, myTrailTestItem("eu-1", 1, "2026-10-29T12:00:00Z"))
+	us := serveMyTrailsRegion(t, http.StatusUnauthorized, &usQueries)
+	withMyTrailsClusters(t, myTrailsCluster("eu", "eu", eu, true), myTrailsCluster("us", "us", us, true))
 
-		out, _, err := runTrailListMine(t, "--json")
-		require.ErrorContains(t, err, "region us rejected your login", "status %d", status)
-		assert.Empty(t, out)
-	}
+	out, _, err := runTrailListMine(t, "--json")
+	require.ErrorContains(t, err, "region us rejected your login")
+	assert.Empty(t, out)
+}
+
+func TestTrailListMine_AForbiddenRegionIsPartial(t *testing.T) {
+	// Serial: replaces the core client and cell builder seams.
+	var euQueries, usQueries []string
+	eu := serveMyTrailsRegion(t, http.StatusOK, &euQueries, myTrailTestItem("eu-1", 1, "2026-10-29T12:00:00Z"))
+	us := serveMyTrailsRegion(t, http.StatusForbidden, &usQueries)
+	withMyTrailsClusters(t, myTrailsCluster("eu", "eu", eu, true), myTrailsCluster("us", "us", us, true))
+
+	out, _, err := runTrailListMine(t, "--json")
+	require.NoError(t, err, "a 403 is no access in that region, not a rejected login")
+	var got myProjectTrailsJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.Len(t, got.Items, 1)
+	assert.Equal(t, []string{"region us: status 403"}, got.Partial)
 }
 
 func TestTrailListMine_RegionFailuresCarryNoResponseBody(t *testing.T) {
@@ -311,7 +324,7 @@ func TestTrailListMine_ARejectedLoginPrintsNoResponseBody(t *testing.T) {
 	// Serial: replaces the core client and cell builder seams.
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusUnauthorized)
 		_, err := w.Write([]byte("<html>\x1b]0;pwned\a" + strings.Repeat("cloudflare ", 300) + "</html>"))
 		assert.NoError(t, err)
 	}))
@@ -319,12 +332,12 @@ func TestTrailListMine_ARejectedLoginPrintsNoResponseBody(t *testing.T) {
 	withMyTrailsClusters(t, myTrailsCluster("us", "us", page.URL, true))
 
 	_, _, err := runTrailListMine(t)
-	require.ErrorContains(t, err, "region us rejected your login (status 403)")
+	require.ErrorContains(t, err, "region us rejected your login (status 401)")
 	assert.NotContains(t, err.Error(), "cloudflare")
 	assert.NotContains(t, err.Error(), "\x1b")
 	var he *api.HTTPError
 	require.ErrorAs(t, err, &he, "the HTTP error stays reachable for callers")
-	assert.Equal(t, http.StatusForbidden, he.StatusCode)
+	assert.Equal(t, http.StatusUnauthorized, he.StatusCode)
 }
 
 func TestTrailListMine_LeavesOutItemsOutsideTheRequestedStatus(t *testing.T) {

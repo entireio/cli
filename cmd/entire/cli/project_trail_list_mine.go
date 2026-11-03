@@ -259,8 +259,11 @@ func myProjectTrailsRegionFailure(err error) string {
 
 // isAuthFailure is a region rejecting the caller's login, or the login itself
 // failing for that region's client.
+// isAuthFailure is a region rejecting the login itself: a 401 or a client
+// that cannot authenticate. A 403 is not one: it can mean only that the
+// caller has no access in that region, so it leaves that region partial.
 func isAuthFailure(err error) bool {
-	return api.IsHTTPErrorStatus(err, http.StatusUnauthorized) || api.IsHTTPErrorStatus(err, http.StatusForbidden) ||
+	return api.IsHTTPErrorStatus(err, http.StatusUnauthorized) ||
 		errors.Is(err, auth.ErrNotLoggedIn) || errors.Is(err, auth.ErrReauthRequired)
 }
 
@@ -281,8 +284,9 @@ func (e *myProjectTrailsLoginError) Unwrap() error { return e.err }
 
 // mergeMyProjectTrails keeps the newest copy of each trail, orders them by
 // latest activity, and caps the page. A failed region is reported in Partial;
-// a rejected login (401/403) from any region fails the list, since every
-// region is sent the same credentials, and so does every region failing.
+// a rejected login (401) from any region fails the list, since every region
+// is sent the same credentials, and so does every region failing. A 403 only
+// leaves its region partial.
 func mergeMyProjectTrails(ctx context.Context, results []cellCallResult[myProjectTrailsRegion], limit int) (myProjectTrailsJSON, error) {
 	out := myProjectTrailsJSON{Items: []myProjectTrail{}, Partial: []string{}}
 	byID := map[string]myProjectTrail{}
