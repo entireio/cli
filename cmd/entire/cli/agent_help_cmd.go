@@ -139,7 +139,10 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail link":      {agentHelpAudienceUserOwned, false},
 	"trail unlink":    {agentHelpAudienceUserOwned, false},
 	// Attachments are images for the description, which trail update edits.
-	"trail attachment": {agentHelpAudienceTaskDriven, false},
+	"trail attachment":        {agentHelpAudienceTaskDriven, false},
+	"trail attachment list":   {agentHelpAudienceReadOnly, false},
+	"trail attachment add":    {agentHelpAudienceTaskDriven, false},
+	"trail attachment remove": {agentHelpAudienceTaskDriven, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
