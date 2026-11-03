@@ -400,12 +400,14 @@ func (s *kindRoutingStore) copyLegacyUnlessDeleted(ctx context.Context, checkpoi
 // be ahead of v1, and a ref another clone pushed holds that clone's sessions:
 // copying anyway would start an unrelated history for it, and pre-push's
 // recovery would replay this clone's copy over theirs, last writer wins per
-// file. When the remote cannot be asked, copy returns that error and writes
-// nothing, so the write fails and is retried later.
+// file. A ref that appears locally while the remote is asked is left alone for
+// the same reason (see importOnlyIntoAbsentRef). When the remote cannot be
+// asked, copyToRef returns that error and writes nothing, so the write fails
+// and is retried later.
 //
 // onRef reports whether this call gave the checkpoint its own ref, by copying
-// it (or finding a concurrent copy) or by fetching it, so the caller should
-// retry its write there. It is false when v1 lacks the checkpoint or the ref
+// it (or finding a ref that appeared meanwhile) or by fetching it, so the
+// caller should retry its write there. It is false when v1 lacks the checkpoint or the ref
 // already existed locally.
 func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.CheckpointID) (onRef bool, err error) {
 	refName, err := RefName(checkpointID)
@@ -433,7 +435,7 @@ func (c *legacyCopier) copyToRef(ctx context.Context, checkpointID id.Checkpoint
 	if fetched {
 		return true, nil
 	}
-	if _, err := importBranchCheckpoint(ctx, c.refs.repo, c.refs, checkpointID, subtree, updatePersistentRef); err != nil {
+	if _, err := importBranchCheckpoint(ctx, c.refs.repo, c.refs, checkpointID, subtree, updatePersistentRef, importOnlyIntoAbsentRef); err != nil {
 		return false, err
 	}
 	logging.Info(ctx, "checkpoint: copied legacy checkpoint from the v1 branch into its own ref",

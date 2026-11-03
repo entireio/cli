@@ -68,7 +68,7 @@ func (f legacyCopyFixture) remoteCopy(t *testing.T) plumbing.Hash {
 	ctx := context.Background()
 	subtree, err := f.branch.checkpointSubtreeHash(ctx, f.cid)
 	require.NoError(t, err)
-	_, err = importBranchCheckpoint(ctx, f.repo, f.refs, f.cid, subtree, updatePersistentRef)
+	_, err = importBranchCheckpoint(ctx, f.repo, f.refs, f.cid, subtree, updatePersistentRef, importOnlyIntoAbsentRef)
 	require.NoError(t, err)
 	tip := f.refTip(t)
 	refName, err := RefName(f.cid)
@@ -212,6 +212,42 @@ func TestKindRoutingStore_ReservedSessionDoesNotResurrectDeletedCheckpoint(t *te
 	require.NoError(t, f.router.Write(ctx, afterSwitchSession(f.cid)))
 
 	f.requireNoRef(t)
+	summary, err := f.branch.Read(ctx, f.cid)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Len(t, summary.Sessions, 2, "the session must still be written, to v1")
+	added, err := f.branch.ReadSessionMetadata(ctx, f.cid, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "after-switch", added.SessionID)
+}
+
+// A ref that appears while the copy asks the remote, such as a teammate's copy
+// another process here fetched, holds sessions this clone's v1 lacks. The copy
+// must build on it, not lay v1's tree over it: that would drop those sessions
+// from the tip, and the push is a fast-forward the remote accepts.
+func TestKindRoutingStore_CopyBuildsOnARefThatAppearsDuringTheRemoteCheck(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newLegacyCopyFixture(t)
+	f = f.withLegacyRefFetcher(func(_ context.Context, ref plumbing.ReferenceName) error {
+		writeRoutingCheckpoint(t, newGitRefsStore(f.repo), f.cid, "fetched-meanwhile")
+		return fmt.Errorf("remote had no %s when asked: %w", ref, plumbing.ErrReferenceNotFound)
+	})
+
+	require.NoError(t, f.router.Write(ctx, afterSwitchSession(f.cid)))
+
+	summary, err := f.refs.Read(ctx, f.cid)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Len(t, summary.Sessions, 2)
+	first, err := f.refs.ReadSessionMetadata(ctx, f.cid, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "fetched-meanwhile", first.SessionID, "the ref that appeared must keep its session")
+	second, err := f.refs.ReadSessionMetadata(ctx, f.cid, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "after-switch", second.SessionID)
+	assert.False(t, treeInRefHistory(f.repo, f.refTip(t), f.v1Tree),
+		"v1 must not be imported over a ref that already exists")
 }
 
 func TestKindRoutingStore_BackfillCopiesLegacyCheckpointIntoItsRef(t *testing.T) {

@@ -114,7 +114,7 @@ func migrateBranchToRefs(
 			return nil
 		}
 
-		migrated, err := importBranchCheckpoint(ctx, repo, refsStore, cid, cpTreeHash, updateRef)
+		migrated, err := importBranchCheckpoint(ctx, repo, refsStore, cid, cpTreeHash, updateRef, importAdvancingRef)
 		if err != nil {
 			return err
 		}
@@ -137,11 +137,27 @@ func migrateBranchToRefs(
 	return result, nil
 }
 
+// importMode says what importBranchCheckpoint does with a ref that already
+// exists when it commits.
+type importMode int
+
+const (
+	// importAdvancingRef commits v1's tree on top of an existing ref. Migration
+	// runs while git-branch is primary, so v1 is the checkpoint's current state.
+	importAdvancingRef importMode = iota
+	// importOnlyIntoAbsentRef leaves an existing ref alone. After the switch the
+	// ref is the checkpoint's current state: one that appears while a copy
+	// runs (another process fetched a teammate's copy, say) can hold sessions
+	// v1 lacks, and laying v1's tree over it would drop them from the tip.
+	importOnlyIntoAbsentRef
+)
+
 // importBranchCheckpoint writes the checkpoint subtree cpTreeHash, taken from
 // the v1 branch, into cid's own ref in the refs layout (see
-// migratedCheckpointTree). An existing ref is advanced, never replaced, and a
-// ref whose history already holds that tree is left alone, so migrated is false
-// for an already-imported checkpoint. It does not enqueue the ref for push.
+// migratedCheckpointTree). An existing ref is never replaced: mode says whether
+// it is advanced or left alone. A ref whose history already holds that tree is
+// left alone too. migrated reports whether an import commit was written. It
+// does not enqueue the ref for push.
 func importBranchCheckpoint(
 	ctx context.Context,
 	repo *git.Repository,
@@ -149,7 +165,8 @@ func importBranchCheckpoint(
 	cid id.CheckpointID,
 	cpTreeHash plumbing.Hash,
 	updateRef persistentRefUpdater,
-) (bool, error) {
+	mode importMode,
+) (migrated bool, err error) {
 	migratedTree, imported, err := importedTree(ctx, repo, refsStore, cid, cpTreeHash, true)
 	if err != nil {
 		return false, err
@@ -163,13 +180,16 @@ func importBranchCheckpoint(
 	}
 
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	migrated := false
 	if err := updateRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
 		// Re-read the parent and idempotency state on every CAS retry so an
 		// import commit never overwrites a concurrently advanced ref.
 		parent, expected, err := importBase(repo, refsStore, cid)
 		if err != nil {
 			return plumbing.ZeroHash, plumbing.ZeroHash, err
+		}
+		if mode == importOnlyIntoAbsentRef && !expected.IsZero() {
+			migrated = false
+			return expected, expected, nil
 		}
 		if treeInRefHistory(repo, parent, migratedTree) {
 			migrated = false
