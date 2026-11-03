@@ -199,9 +199,12 @@ func sendTrailFindingMessage(ctx context.Context, send func(context.Context, str
 
 // fetchTrailFindingReplies reads a finding's reply thread; nil without one.
 func fetchTrailFindingReplies(ctx context.Context, client *api.Client, trailID string, comment api.TrailReviewComment) ([]api.TrailDiscussionMessage, error) {
-	discussionID := strings.TrimSpace(stringPtrValue(comment.DiscussionID))
-	if discussionID == "" {
+	if strings.TrimSpace(stringPtrValue(comment.DiscussionID)) == "" {
 		return nil, nil
+	}
+	discussionID, err := trailFindingDiscussionID(comment)
+	if err != nil {
+		return nil, err
 	}
 	resp, err := client.Get(ctx, trailFindingDiscussionPath(trailID, discussionID))
 	if err != nil {

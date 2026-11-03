@@ -186,3 +186,18 @@ func TestTrailFindingShow_WarnsButSucceedsWhenRepliesFail(t *testing.T) {
 	assert.NotContains(t, out, "Replies:")
 	assert.Contains(t, errOut, "could not load replies")
 }
+
+func TestTrailFindingShow_DoesNotReadAThreadIDThatIsNotOnePathSegment(t *testing.T) {
+	// Not parallel: replaces client constructors. A ".." thread ID would
+	// otherwise read the change or its discussions list as the thread.
+	for _, id := range []string{".", ".."} {
+		setupFindingReplyTest(t, id, func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("unexpected thread request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		})
+		out, errOut, err := executeProjectTrailTest(t, "finding", "show", "widget/7", findingReplyTestFinding, "--project", "gh/acme")
+		require.NoError(t, err, "thread %q", id)
+		assert.Contains(t, out, "Finding body")
+		assert.Contains(t, errOut, "invalid reply thread ID", "thread %q", id)
+	}
+}
