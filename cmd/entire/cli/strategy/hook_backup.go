@@ -723,11 +723,127 @@ func restoreLegacy(root *os.Root, hook string) error {
 	return nil
 }
 
+// entire-brain's pre-push wrapper, as its v0.4.0 install writes it: it moves
+// the hook it finds to pre-push.pre-entire-brain and ends by running that file
+// relative to its own path. The chain never names the file, so runsByName does
+// not see it.
+const (
+	brainWrapperMarker = "# entire-brain push hook"
+	brainMovedSuffix   = ".pre-entire-brain"
+	brainChainAssign   = `backup="$0` + brainMovedSuffix + `"`
+	brainChainExec     = `if [ -x "$backup" ]; then exec "$backup" "$@"; fi`
+)
+
+// isBrainChain: name is a regular file holding exactly the wrapper
+// entire-brain v0.4.0 writes for hook (byte for byte, whatever plugin path it
+// baked in), which ends by running <name>.pre-entire-brain if it is
+// executable. That wrapper exits 0 when the file is gone, so uninstall can
+// remove a copy of Entire's hook there instead of leaving a placeholder. Any
+// other wrapper, including an edited one, is left as before.
+func isBrainChain(root *os.Root, name, hook string) bool {
+	if hook != prePushHook {
+		return false
+	}
+	data, err := osroot.ReadFileNoFollow(root, name)
+	if err != nil {
+		return false
+	}
+	text := string(data)
+	const head = "#!/bin/sh\n" + brainWrapperMarker + "\n" +
+		"# Tells the local entire-brain plugin that a push is transferring this\n" +
+		"# repo's commits, so it uploads its fact store (detached, best-effort).\n" +
+		"if [ -x "
+	rest, ok := strings.CutPrefix(text, head)
+	if !ok {
+		return false
+	}
+	self := singleQuotedPrefix(rest)
+	if self == "" {
+		return false
+	}
+	return text == head+self+" ]; then\n"+
+		"  "+self+" memory notify --event push </dev/null >/dev/null 2>&1 &\n"+
+		"fi\n"+
+		"# Chain: run the pre-existing hook with the original stdin and arguments;\n"+
+		"# its exit code decides the push, exactly as before.\n"+
+		brainChainAssign+"\n"+
+		brainChainExec+"\n"
+}
+
+// singleQuotedPrefix returns the word at the start of s quoted the way
+// entire-brain quotes its plugin path ('...' runs joined by \'), or "" if s
+// does not start with one.
+func singleQuotedPrefix(s string) string {
+	n := 0
+	for strings.HasPrefix(s[n:], "'") {
+		end := strings.IndexByte(s[n+1:], '\'')
+		if end < 0 {
+			return ""
+		}
+		n += end + 2
+		if !strings.HasPrefix(s[n:], `\''`) {
+			return s[:n]
+		}
+		n += 2
+	}
+	return ""
+}
+
+// ownPathRefs are the usual ways a hook finds its own path: sh's $0, bash's
+// BASH_SOURCE, and the script-path and argv names of Python, Ruby, Perl and
+// Node. Best effort: a hook that finds its path some other way is moved like
+// any other, as Entire's and Brain's installs move it.
+var ownPathRefs = [][]byte{
+	[]byte("$0"), []byte("${0"), []byte("BASH_SOURCE"),
+	[]byte("__file__"), []byte("sys.argv"), []byte("__FILE__"),
+	[]byte("__filename"), []byte("__dirname"), []byte("process.argv"),
+}
+
+// mentionsOwnPath: name refers to its own path, so renaming it could change
+// what it runs. Any mention counts.
+func mentionsOwnPath(root *os.Root, name string) bool {
+	data, err := osroot.ReadFileNoFollow(root, name)
+	return err != nil || slices.ContainsFunc(ownPathRefs, func(ref []byte) bool { return bytes.Contains(data, ref) })
+}
+
+// restoreBrainChain is restoreWrapped for entire-brain's wrapper. With the
+// wrapper at hook (Brain installed over Entire), the user's hook in
+// .pre-entire goes into the copy, where the wrapper runs it, as Brain's own
+// install would have left it; with none, the copy goes. A hook there that
+// refers to its own path or names the copy could change if moved, so that
+// layout is left as on main. With
+// Entire's hook at hook and the wrapper backed up (Entire re-wrapped Brain),
+// the copy was dormant, and the caller is about to put the wrapper back
+// where it would run it, so the copy goes. A keep copy beside m is left to
+// restoreWrapped's usual path. Reports whether it handled m.
+func restoreBrainChain(root *os.Root, hook, m string) (bool, error) {
+	if m != hook+brainMovedSuffix || !carriesEntireMarker(root, m) || hookFileExists(root, m+backupSuffix) {
+		return false, nil // a keep copy holds the user's hook: restore it as for any wrapper
+	}
+	backup := hook + backupSuffix
+	userBackup := hookFileExists(root, backup) && !carriesEntireMarker(root, backup) && !isBrainChain(root, backup, hook)
+	switch {
+	case isBrainChain(root, hook, hook) && userBackup && (mentionsOwnPath(root, backup) || runsByName(root, backup, m)):
+		// Moving it could change what it runs (or make it run itself), and
+		// removing the copy would stop Entire's copy running it from
+		// .pre-entire: leave all as is.
+		return false, nil
+	case isBrainChain(root, hook, hook) && userBackup:
+		return true, root.Rename(backup, m) //nolint:wrapcheck // caller adds the file name
+	case isBrainChain(root, hook, hook):
+		return true, root.Remove(m) //nolint:wrapcheck // caller adds the file name
+	case carriesEntireMarker(root, hook) && isBrainChain(root, backup, hook):
+		return true, root.Remove(m) //nolint:wrapcheck // caller adds the file name
+	}
+	return false, nil
+}
+
 // restoreWrapped undoes reclaimFromWrappers on uninstall: each file a hook
 // manager's wrapper runs by name gets the user's hook back if the manager
 // moved Entire's onto it, and the keep copy goes. A moved copy of Entire's
 // hook that no install has reclaimed yet becomes noopMovedHook, so the wrapper
-// the caller restores does not go on running Entire's hook.
+// the caller restores does not go on running Entire's hook. entire-brain's
+// wrapper, which never names its copy, is handled by restoreBrainChain.
 func restoreWrapped(root *os.Root, hook string) error {
 	moved, err := movedHookCopies(root, hook)
 	if err != nil {
@@ -738,6 +854,12 @@ func restoreWrapped(root *os.Root, hook string) error {
 		keep := m + backupSuffix
 		if err := removeEntireKeepCopy(root, keep); err != nil {
 			return err
+		}
+		if done, err := restoreBrainChain(root, hook, m); done || err != nil {
+			if err != nil {
+				return fmt.Errorf("restore %s: %w", m, err)
+			}
+			continue
 		}
 		keepExists := hookFileExists(root, keep)
 		switch {
