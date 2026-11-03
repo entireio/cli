@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// trailRepoIDNumberPath is a change on the repository-ID route, the only route
-// the cell serves merges, review re-runs, native branch updates, and CI pull
-// requests on.
+// trailRepoIDNumberPath is a change on the repository-ID route
+// (/repos/{repo_id}/trails/{number}). Some change actions and reads are served
+// only there, not on the forge/owner/repo route.
 func trailRepoIDNumberPath(repoID string, number int) (string, error) {
 	repoID = strings.TrimSpace(repoID)
 	if repoID == "" {
